@@ -74,7 +74,6 @@ def report_document(
             "kb_write_back": encode(exports.kb_write_back),
             "knowledge": exports.knowledge_document(),
             "breakdown": str(exports.breakdown),
-            "dashboard": {"json": str(exports.dashboard.json), "html": str(exports.dashboard.html)},
             "agentx_checkpoint": None if exports.checkpoint is None else exports.checkpoint.to_document(),
         },
         "stop": {
@@ -183,7 +182,6 @@ def _export_lines(exports: CloseExports | None) -> list[str]:
         f"Recipe KB write-back: {kb.status} {kb.reason}".rstrip(),
         *step_lines(exports.knowledge_steps()),
         f"Breakdown: {exports.breakdown}",
-        f"Dashboard: {exports.dashboard.html}",
     ]
 
 
@@ -230,7 +228,7 @@ class Closer:
         exports = None
         try:
             exports = await self._clock.wait_for(
-                self._exports.export(final, stop.queue), hard_stop_at - self._clock.now()
+                self._exports.export(final), hard_stop_at - self._clock.now()
             )
         except EXPORT_FAILURES:
             logger.exception("the CLOSE exports did not finish")

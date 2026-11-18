@@ -42,7 +42,6 @@ RUNNER_SOURCE_DIR = "MB-runner-source"
 TOOLBOX_DIR = "MB-toolbox"
 INTEGRATION_DIR = "MB-integration"
 FINAL_DIR = "MB-final"
-DASHBOARD_DIR = "MB-dashboard"
 REPORTS_DIR = "MB-reports"
 LOGS_DIR = "MB-logs"
 PIDS_FILE = "MB-pids.jsonl"
@@ -69,7 +68,6 @@ SESSION_SUBDIRS: tuple[str, ...] = (
     TOOLBOX_DIR,
     INTEGRATION_DIR,
     FINAL_DIR,
-    DASHBOARD_DIR,
     REPORTS_DIR,
     LOGS_DIR,
 )
@@ -156,10 +154,6 @@ class SessionLayout:
     @property
     def final(self) -> Path:
         return self.root / FINAL_DIR
-
-    @property
-    def dashboard(self) -> Path:
-        return self.root / DASHBOARD_DIR
 
     @property
     def reports(self) -> Path:

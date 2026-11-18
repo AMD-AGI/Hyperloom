@@ -13,7 +13,7 @@ hands the toolbox the quota again, which takes a stopped branch
 out once the tests it was left to finish have ended, stops the repair branches that used up their time and the branches
 whose specialist gave up, once no candidate of theirs waits for its confirm, moves the forks and repairs queued on the
 fork desk onto the free slots, has the rule gate land each admitted fork and starts the admitted forks and repairs, and
-every judge interval asks the judge, applies what it decided and rebuilds the dashboard. A slot the judge's stops free
+every judge interval asks the judge and applies what it decided. A slot the judge's stops free
 goes to the queued requests first and only then to the branches the judge opens. The judge is asked at once, not at its
 next interval, when the scheduler itself frees a slot: a repair branch stopped at its time limit, a branch whose
 specialist gave up, a fork the gate did not land, or an admitted fork or repair that failed to start; and when an event
@@ -64,7 +64,6 @@ from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR
 from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, BatchStart, BranchControl, BranchFocus
 from hyperloom_multibranch.scheduling.build_waits import waiting_builds
 from hyperloom_multibranch.scheduling.context import SchedulerContext
-from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.events import SessionEvents, behind_integration_pct
 from hyperloom_multibranch.scheduling.integrator import Integrator
@@ -164,8 +163,8 @@ class ExploreWindow:
 @dataclass(frozen=True)
 class Steering:
     """How the judge steers EXPLORE: the judge, how often it is asked, the frontier-scored progress it reads, against
-    the archived sessions that progress holds, the dashboard rebuilt once the opening batch is open and after every
-    later judge call, the signals of whether a branch opened now would still pay off, which running branches made
+    the archived sessions that progress holds, the signals of whether a branch opened now would still pay off, which
+    running branches made
     much the same change, the events that have the judge asked at once, the specialist lifecycle, which reports
     each running branch's specialist, the toolbox the native builds each branch's tests wait for are read from, the
     session's dev sandboxes, whose line holds a waiting branch (``None`` when it lends none), and the scheduling
@@ -175,7 +174,6 @@ class Steering:
     judge: Judge
     interval_seconds: float
     progress: FrontierScoring
-    dashboard: SessionDashboard
     widening: Widening
     similarity: BranchSimilarity
     events: SessionEvents
@@ -218,7 +216,6 @@ class Explorer:
         self._progress = steering.progress
         self._metric = steering.progress.policy.metric
         self._blackboard = context.blackboard
-        self._dashboard = steering.dashboard
         self._decisions = context.decisions
         self._interval = steering.interval_seconds
         self._clock = context.clock
@@ -265,7 +262,6 @@ class Explorer:
             return SessionStopReason.JUDGE_STOPPED
         if self._clock.now() >= window.explore_end:
             return SessionStopReason.TIME_EXHAUSTED
-        await self._dashboard.refresh()
         merging = asyncio.ensure_future(self._merge_forever())
         try:
             return await self._steer(window, merging)
@@ -307,7 +303,6 @@ class Explorer:
                 decision = await self._ask(window, opening=False)
                 if decision is not None and await self._apply(decision, await self._refill(window)):
                     return SessionStopReason.JUDGE_STOPPED
-                await self._dashboard.refresh()
             await self._clock.sleep(min(EXPLORE_TICK_SECONDS, window.explore_end - now))
         return SessionStopReason.TIME_EXHAUSTED
 

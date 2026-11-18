@@ -22,7 +22,7 @@ closing the toolbox within its own short bound and killing every registered proc
 A session that ended before FINAL, killed with its machine before CLOSE included, is read back by :func:`persisted_run`
 and taken up again by :meth:`Session.finish`, which runs FINAL and CLOSE alone on a budget that is already spent,
 carrying the stop reason that session ended with: the roster and the branches are the ones that session persisted,
-and only its report, dashboard and breakdown are written again. One that ended before PRELUDE recorded its baseline
+and only its report and breakdown are written again. One that ended before PRELUDE recorded its baseline
 (:func:`recorded_baseline`) has no candidate: the finish withdraws its unfinished tests and CLOSE reports why nothing was
 chosen. One whose PRELUDE recorded its baseline can be continued instead, without PRELUDE, by :meth:`Session.resume`
 (:mod:`~hyperloom_multibranch.scheduling.resumption`).
@@ -95,7 +95,6 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.checkpoint_tally import CheckpointScope
 from hyperloom_multibranch.scheduling.close import CloseReport, Closer, ended_before_final
 from hyperloom_multibranch.scheduling.context import SchedulerContext
-from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog, downtime_until
 from hyperloom_multibranch.scheduling.events import IntegrationProfiler, SessionEvents
 from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering
@@ -445,7 +444,7 @@ class Session:
     async def finish(self, ended: SessionStopReason, *, restart: bool = False) -> SessionOutcome:
         """Run FINAL and CLOSE over the directory a session that ended for ``ended`` before FINAL left behind, and
         report as that session would have; the manifest and the blackboard that session wrote are this one's input, so
-        this opens no session of its own and only its report, dashboard and breakdown are written again. It ends for
+        this opens no session of its own and only its report and breakdown are written again. It ends for
         ``ended`` however FINAL goes: the session did not run its course, and a FINAL run after the fact does not
         make it so; except that for the ``restart`` of a hosted run, which its host starts again after a preemption, a
         FINAL that chose ends it for ``finished_after_restart`` when ``ended`` is not in :data:`COMPLETED_REASONS`.
@@ -976,16 +975,12 @@ class Session:
         rule = self._play.stop_rule if self._play is not None else None
         return FrontierScoring(self._blackboard, self._policy, self._history, log, rule)
 
-    def _dashboard(self, scoring: FrontierScoring) -> SessionDashboard:
-        return SessionDashboard(self._blackboard, scoring, self._toolbox, self._metric, self._layout.dashboard)
-
     def _explorer(self) -> Explorer:
         scoring = self._scoring()
         steering = Steering(
             self._judge,
             self._settings.judge_interval_seconds,
             scoring,
-            self._dashboard(scoring),
             Widening(self._toolbox, self._roster, scoring.policy, self._settings.workload.tp),
             self._similarity,
             self._events,
@@ -998,12 +993,10 @@ class Session:
         return Explorer(self._context, self._branches, self._integrator, steering)
 
     def _closer(self) -> Closer:
-        dashboard = self._dashboard(self._scoring())
         sources = ExportSources(
             self._blackboard,
             self._repo,
             self._blobs,
-            dashboard,
             self._image_check,
             self._briefs.warm,
             _checkpoint_scope(self._settings),

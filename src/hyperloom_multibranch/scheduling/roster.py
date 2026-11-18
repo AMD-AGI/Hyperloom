@@ -184,7 +184,7 @@ class BranchStopped(RuntimeError):
 
 
 class Roster:
-    """The live roster, written to ``snapshot_file`` after every change so the dashboard and a post-mortem see it.
+    """The live roster, written to ``snapshot_file`` after every change so a post-mortem sees it.
 
     A roster built over a ``snapshot_file`` an earlier run of the same session directory left takes up its branches,
     the ids it handed out and whether it closed, so that run's record is carried rather than written over.
