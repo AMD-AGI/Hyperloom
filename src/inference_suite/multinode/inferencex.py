@@ -367,7 +367,13 @@ def master_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
         if not _pd_boards_interchangeable(query.board, board):
             misses.append(f"{arm}: it runs on {board}, not {query.board}")
             continue
-        candidate = _row_candidate(query, checkout, master_row)
+        try:
+            candidate = _row_candidate(query, checkout, master_row)
+        except RecipeSourceError:
+            raise
+        except (KeyError, IndexError, TypeError, ValueError) as error:
+            misses.append(f"{arm}: malformed row: {error!r}")
+            continue
         if isinstance(candidate, str):
             misses.append(f"{arm}: {candidate}")
             continue

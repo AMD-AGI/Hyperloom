@@ -72,7 +72,7 @@ def _default_mn_backend() -> str:
 def _resolve_mn_backend(args: argparse.Namespace) -> str:
     """Multi-node backend selector: --mn-backend > $TOPOLOGY_HANDOFF_FILE backend > $INFERENCE_OPTIMIZER_MN_BACKEND >
     the node list's frontend > rayjob."""
-    from ..multi_node.pd_session import PD_BACKENDS
+    from ..multi_node.pd_session import SSH_BACKENDS
 
     from_file = (_topology_file_overlay() or {}).get("INFERENCE_OPTIMIZER_MN_BACKEND", "")
     backend = (
@@ -82,7 +82,7 @@ def _resolve_mn_backend(args: argparse.Namespace) -> str:
         or os.environ.get("MN_BACKEND", "").strip()
         or _default_mn_backend()
     ).lower()
-    choices = ("rayjob", "infera", *PD_BACKENDS)
+    choices = ("rayjob", *SSH_BACKENDS)
     if backend not in choices:
         print(
             f"ERROR: --mn-backend must be one of {', '.join(choices)}, got {backend!r}",

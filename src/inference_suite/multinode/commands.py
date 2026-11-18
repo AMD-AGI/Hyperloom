@@ -244,10 +244,14 @@ def router_command(launch: PdLaunch, nodes: NodeList) -> HostCommand:
     and decode workers, else over the aggregated workers' URLs.
 
     Raises:
-        CommandError: the launch's frontend is the platform's, which no host here runs.
+        CommandError: the launch's frontend is the platform's, which no host here runs, or the router host also
+            serves an engine on the router's port.
     """
     if launch.frontend.type is FrontendType.INFERA:
         raise CommandError("the Infera frontend is the platform's; the launch runs no router")
+    for role in launch.served_roles:
+        if nodes.router in launch.role(role).hosts and engine_port(nodes, role) == ROUTER_PORT:
+            raise CommandError(f"router host {nodes.router} also serves a {role.value} engine on port {ROUTER_PORT}")
     disaggregated = launch.mode is PdMode.DISAGGREGATED
     if launch.frontend.type is FrontendType.SGLANG_ROUTER:
         argv = [_PYTHON, "-m", "sglang_router.launch_router"]

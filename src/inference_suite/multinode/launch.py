@@ -9,7 +9,8 @@ router and is up once the service URL answers. An engine process that dies on th
 its log tail. Each engine waits for the GPUs to be released by the previous one and closes the device handles it
 inherited. SGLang's ``--help`` is probed once per launch: flags from a non-operator source that the engine does not
 list are dropped, and ``--cuda-graph-bs`` / ``--cuda-graph-max-bs`` move to their decode spelling on an engine that
-only has the per-role ones. What was dropped is named in the role's ``stripped``.
+only has the per-role ones. What was dropped is named in the role's ``stripped``. A restart whose overrides set a flag
+that would be dropped is refused instead.
 
 Hosts of an ``in_place`` node list run the platform's container: the launch takes over the process the container
 launcher waits on and runs in the container's environment. Hosts of a ``direct`` one run what the launch spawns, in
@@ -240,6 +241,11 @@ def probe_engine_flags(launch: PdLaunch, cluster: Cluster, timeout: int) -> froz
     return frozenset(group_flag([line.strip()]) for line in result.stdout.splitlines() if line.startswith("--"))
 
 
+def _engine_takes(name: str, flags: frozenset[str]) -> bool:
+    """Whether an engine listing ``flags`` takes flag ``name``, as itself or in its decode spelling."""
+    return name in flags or (name in SPLIT_ROLE_FLAGS and f"{name}-decode" in flags)
+
+
 def _fit_role(role: Role, launched: RoleLaunch, flags: frozenset[str], source: PdSourceKind) -> RoleLaunch:
     """``launched`` on an engine listing ``flags``: unlisted flags of a non-operator source dropped, split flags
     in their decode spelling (taken out of prefill)."""
@@ -251,7 +257,7 @@ def _fit_role(role: Role, launched: RoleLaunch, flags: frozenset[str], source: P
         split = name in SPLIT_ROLE_FLAGS and name not in flags and f"{name}-decode" in flags
         if split and role is Role.DECODE:
             kept += [f"--{name}-decode{sign}{value}", *group[1:]]
-        elif split or (name and name not in flags and source is not PdSourceKind.OPERATOR):
+        elif split or (name and not _engine_takes(name, flags) and source is not PdSourceKind.OPERATOR):
             dropped.append(f"unsupported {spelled}")
         else:
             kept += group
@@ -264,6 +270,24 @@ def fit_to_engine(launch: PdLaunch, flags: frozenset[str]) -> PdLaunch:
         return launch
     kind = launch.source.kind
     return launch.with_roles({role: _fit_role(role, launch.role(role), flags, kind) for role in launch.served_roles})
+
+
+def _refuse_untaken_overrides(launch: PdLaunch, overrides: Mapping[str, Sequence[str]], flags: frozenset[str]) -> None:
+    """Refuse engine overrides that :func:`fit_to_engine` would drop from ``launch`` on an engine listing ``flags``.
+
+    Raises:
+        LaunchError: an override of a non-operator launch sets a flag the engine does not list.
+    """
+    if not flags or launch.source.kind is PdSourceKind.OPERATOR:
+        return
+    untaken = [
+        f"{role.value} --{name}"
+        for role in launch.served_roles
+        for name in dict.fromkeys(group_flag(group) for group in flag_groups(overrides.get(role.value, ())))
+        if name and not _engine_takes(name, flags)
+    ]
+    if untaken:
+        raise LaunchError(f"the engine does not list the round's flags {untaken}")
 
 
 def replace_flags(args: Sequence[str], overrides: Sequence[str]) -> tuple[str, ...]:
@@ -365,8 +389,13 @@ def start(launch: PdLaunch, cluster: Cluster, options: LaunchOptions) -> PdLaunc
         LaunchError: a host refused, an engine died, or the cluster did not come up in time.
         SshError: a host key cannot be learned.
     """
+    flags = probe_engine_flags(launch, cluster, options.ssh_timeout_s)
+    return _run_fitted(fit_to_engine(launch, flags), cluster, options)
+
+
+def _run_fitted(fitted: PdLaunch, cluster: Cluster, options: LaunchOptions) -> PdLaunch:
+    """Run ``fitted``, already fitted to the engine, on the cluster; returns it."""
     env = check_env(options.extra_env)
-    fitted = fit_to_engine(launch, probe_engine_flags(launch, cluster, options.ssh_timeout_s))
     for command in _engine_commands(fitted, cluster.nodes):
         role_env = {**fitted.role(Role(command.role)).env, **env, **check_env(options.role_env.get(command.role, {}))}
         script = launch_script(command, role_env, fitted.framework, options.log_dir)
@@ -385,8 +414,17 @@ def start(launch: PdLaunch, cluster: Cluster, options: LaunchOptions) -> PdLaunc
 def restart(
     launch: PdLaunch, overrides: Mapping[str, Sequence[str]], cluster: Cluster, options: LaunchOptions
 ) -> PdLaunch:
-    """Run ``launch`` with per-role flag overrides; returns the launch as it was run."""
-    return start(with_overrides(launch, overrides), cluster, options)
+    """Run ``launch`` with per-role flag overrides; returns the launch as it was run.
+
+    Raises:
+        LaunchError: an override is refused (see :func:`with_overrides`), sets a flag the engine does not list, or
+            the cluster did not come up.
+        SshError: a host key cannot be learned.
+    """
+    overridden = with_overrides(launch, overrides)
+    flags = probe_engine_flags(launch, cluster, options.ssh_timeout_s)
+    _refuse_untaken_overrides(launch, overrides, flags)
+    return _run_fitted(fit_to_engine(overridden, flags), cluster, options)
 
 
 def stop(launch: PdLaunch, cluster: Cluster, options: LaunchOptions) -> None:

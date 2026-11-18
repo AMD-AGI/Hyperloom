@@ -223,6 +223,16 @@ def test_restart_replaces_same_named_flags(tmp_path):
     assert ran.prefill.args == ("--mem-fraction-static=0.7",)
 
 
+def test_restart_refuses_a_round_flag_the_engine_does_not_list(tmp_path):
+    hosts = FakeHosts()
+    with pytest.raises(LaunchError, match="--foo"):
+        restart(_launch(), {"decode": ["--foo", "1"]}, _cluster(tmp_path, hosts), _OPTIONS)
+    assert hosts.driven("restart") == []
+    ran = restart(_launch(), {"decode": ["--cuda-graph-bs", "4"]}, _cluster(tmp_path, hosts), _OPTIONS)
+    assert ran.decode.args == ("--cuda-graph-bs-decode", "4")
+    assert ran.decode.stripped == ("unsupported --retired-flag",)
+
+
 def test_overrides_cannot_set_launcher_flags():
     with pytest.raises(LaunchError, match="the launcher sets"):
         with_overrides(_launch(), {"decode": ["--port", "1"]})

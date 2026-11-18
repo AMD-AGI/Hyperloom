@@ -75,6 +75,7 @@ def test_a_multi_node_profile_point_measures_the_external_server_while_the_engin
     executor = profile.ProfileExecutor()
     monkeypatch.setattr(executor, "_inject_host_probe", lambda path, out: "")
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
+    monkeypatch.setattr(_multi_node_env, "_read_state", lambda: {"backend": "sglangrouter", "node_list": True})
 
     executor._prepare_point(point, tmp_path)
     settings = replace(_settings(LifecycleMode.BOOT), server_url="http://router:8000")

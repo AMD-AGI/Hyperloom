@@ -33,6 +33,8 @@ log = logging.getLogger(__name__)
 
 #: ``error_class`` of a multi-node profile skipped because its trace dir is not shared with the engine pods.
 PROFILE_TRACE_NOT_SHARED = "profile_trace_not_shared"
+#: ``error_class`` of a multi-node profile refused in an aggregated node-list session, which profiles PD roles only.
+PROFILE_AGGREGATED_NODE_LIST = "profile_aggregated_node_list"
 
 # Leading bytes of a trace to sample for sentinel substrings.
 _TRACE_INSPECT_BYTES = 2_000_000
@@ -714,6 +716,25 @@ def _unshared_trace_dir_refusal(round_trace_root: str) -> dict[str, Any] | None:
     }
 
 
+def _aggregated_node_list_refusal(round_trace_root: str) -> dict[str, Any] | None:
+    """The refusal result in an aggregated node-list session, whose engines are profiled per PD role only; else
+    ``None``."""
+    from hyperloom.inference_optimizer.multi_node.pd_session import is_pd_state
+    from inference_suite.multinode import PdMode
+
+    from ._multi_node_env import _read_state
+
+    state = _read_state() or {}
+    if not (is_pd_state(state) and state.get("pd_mode") == PdMode.AGGREGATED.value):
+        return None
+    return {
+        "status": "failed",
+        "error_class": PROFILE_AGGREGATED_NODE_LIST,
+        "error": "multi-node profile rounds are not supported in an aggregated node-list session",
+        "trace_dir": round_trace_root,
+    }
+
+
 # Restarts the multi-node server for this profiling round with graph-capture profiling on; returns the refusal
 # result when it failed.
 async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -> dict[str, Any] | None:
@@ -747,11 +768,12 @@ async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -
 
 
 def _leave_capture_to_engines(config_path: Path) -> None:
-    """Turn the client-side profiler off in a multi-node point: the round loads a server it does not hold, whose
-    engines the executor starts and stops profiling on itself."""
-    from ._multi_node_env import is_multi_node
+    """Turn the client-side profiler off in a multi-node point whose engines the executor starts and stops
+    profiling on itself: the round loads a server it does not hold."""
+    from ._multi_node_env import _read_state, is_multi_node
+    from ._multi_node_server_lifecycle import executor_drives_engine_profile
 
-    if not is_multi_node():
+    if not is_multi_node() or not executor_drives_engine_profile(_read_state() or {}):
         return
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     bench = cfg.get("benchmark") if isinstance(cfg, dict) else None
@@ -814,8 +836,9 @@ async def _infera_profile_window(round_trace_root: str):
             await _trigger_engine_profiles("stop")
 
 
-# Attaches this round's multi-node trace files. A PD cluster's prefill and decode traces land in per-role subdirs and
-# are recorded as ``role_traces``, decode's being the main trace; otherwise the heaviest file is the main trace.
+# Attaches this round's multi-node trace files. A PD cluster's prefill and decode traces land in per-worker subdirs of
+# each role and are recorded as ``role_traces``, decode's being the main trace; otherwise the heaviest file is the main
+# trace.
 def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_started_unix: float) -> None:
     from ._multi_node_server_lifecycle import select_pd_node_traces
 
@@ -1192,9 +1215,9 @@ class ProfileExecutor(BenchmarkRunExecutor):
         round_trace_root = _mn_round_trace_root()
         log_mn_banner("profile_executor", log, trace_dir=round_trace_root)
         if round_trace_root:
-            unshared = _unshared_trace_dir_refusal(round_trace_root)
-            if unshared is not None:
-                return unshared
+            refusal = _unshared_trace_dir_refusal(round_trace_root) or _aggregated_node_list_refusal(round_trace_root)
+            if refusal is not None:
+                return refusal
             task_started_unix = _trace_fs_round_start(round_trace_root, task_started_unix)
             refusal = await _restart_round_server(params, round_trace_root)
             if refusal is not None:

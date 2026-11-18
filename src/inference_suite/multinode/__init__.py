@@ -6,7 +6,7 @@ SSH."""
 
 from __future__ import annotations
 
-from inference_suite.multinode.commands import cluster_commands, engine_port, engine_urls
+from inference_suite.multinode.commands import cluster_commands, engine_port, engine_urls, worker_hosts
 from inference_suite.multinode.launch import (
     Cluster,
     LaunchError,
@@ -21,6 +21,7 @@ from inference_suite.multinode.launch import (
 from inference_suite.multinode.nodes import NODE_LIST_ENV, NodeList, NodeListError, parse_node_list, read_node_list
 from inference_suite.multinode.recipe import OperatorArgs, PdResolveError, ResolveInputs, resolve
 from inference_suite.multinode.record import (
+    RAN_RECORD_NAME,
     RECORD_NAME,
     PdLaunch,
     PdMode,
@@ -42,6 +43,7 @@ __all__ = [
     "client_base",
     "cluster_of",
     "NODE_LIST_ENV",
+    "RAN_RECORD_NAME",
     "RECORD_NAME",
     "Cluster",
     "LaunchError",
@@ -66,5 +68,6 @@ __all__ = [
     "split_launcher_flags",
     "start",
     "stop",
+    "worker_hosts",
     "write_record",
 ]

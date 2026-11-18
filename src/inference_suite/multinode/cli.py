@@ -7,8 +7,9 @@ Every command reads the cluster from the node list in ``HYPERLOOM_MN_NODE_LIST``
 [--replay <pd_launch.json>] [--inferencex-commit <sha>] [--out <path>]`` writes the launch the sources give and prints
 its digest. ``start``, ``restart [--prefill-args ARGS] [--decode-args ARGS] [--worker-args ARGS] [--router-args
 ARGS]`` and ``stop`` act on the launch at ``--record`` on the node list's hosts; ``start`` and ``restart`` write the
-launch as it ran back to the record and print its digest. The record defaults to ``pd_launch.json`` in
-``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR``. Exit 1 is a cluster that did not come up, exit 2 a refused input.
+launch as it ran to ``pd_launch.ran.json`` beside the record and print its digest. The record defaults to
+``pd_launch.json`` in ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR``. Exit 1 is a cluster that did not come up, exit 2 a
+refused input.
 """
 
 from __future__ import annotations
@@ -27,7 +28,14 @@ from inference_suite.multinode.commands import CommandError
 from inference_suite.multinode.launch import LaunchError, LaunchOptions, restart, start, stop
 from inference_suite.multinode.nodes import NodeListError, read_node_list
 from inference_suite.multinode.recipe import PdResolveError
-from inference_suite.multinode.record import RECORD_NAME, PdRecordError, Role, read_record, write_record
+from inference_suite.multinode.record import (
+    RAN_RECORD_NAME,
+    RECORD_NAME,
+    PdRecordError,
+    Role,
+    read_record,
+    write_record,
+)
 from inference_suite.multinode.session import cluster_of, placed_launch, resolve_session
 from inference_suite.multinode.ssh import SshError
 from inference_suite.recipe.sources import SourceFetchError
@@ -86,7 +94,7 @@ def _run(args: argparse.Namespace) -> int:
             ran = restart(launch, _overrides(args), cluster, _options(args))
         else:
             ran = start(launch, cluster, _options(args))
-        write_record(ran, args.record)
+        write_record(ran, args.record.with_name(RAN_RECORD_NAME))
     except _REFUSED as error:
         return _refused(error)
     except (LaunchError, SshError) as error:

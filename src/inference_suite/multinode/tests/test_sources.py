@@ -219,6 +219,48 @@ def test_the_table_launch_names_why_each_inferencex_source_passed(checkout):
     assert "no recipe directory of Qwen/Qwen3.5-397B-A17B-FP8 for sglang on mi300x" in warnings
 
 
+_MALFORMED_MASTER = """
+q-fp8-mi355x-sglang-disagg:
+  model: Qwen/Qwen3.5-397B-A17B-FP8
+  model-prefix: q
+  runner: cluster:mi355x-amds
+  framework: sglang-disagg
+  multinode: true
+  disagg: true
+  srt-recipe-dir: q/sglang/mi355x-fp8
+  scenarios:
+    fixed-seq-len:
+    - isl: 1024
+      osl: 1024
+      search-space:
+      - prefill: {num-worker: 1, tp: 8}
+        decode: {num-worker: 1, tp: 8}
+        conc-list: [64]
+      - srt-recipe: 1k1k/base.yaml
+        prefill: {num-worker: 1, tp: 8}
+        decode: {num-worker: 1, tp: 8}
+        conc-list: [64]
+"""
+
+
+def test_malformed_master_rows_miss_and_resolve_falls_to_the_table(tmp_path):
+    files = {
+        MASTER: _MALFORMED_MASTER,
+        RUNNERS: _RUNNERS,
+        f"{MULTI_NODE_RECIPES}/q/sglang/mi355x-fp8/1k1k/base.yaml": "base: {engine: sglang}\n",
+    }
+    for path, text in files.items():
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(textwrap.dedent(text))
+    malformed = Checkout("https://example/InferenceX", "c0ffee", tmp_path)
+    query = _query(model_id="Qwen/Qwen3.5-397B-A17B-FP8", model_path="/m/Qwen3.5-397B-A17B-FP8")
+
+    found = master_candidates(query, malformed)
+    assert found.found == ()
+    assert sum("malformed row" in miss for miss in found.misses) == 2
+    assert resolve(query, ResolveInputs(inferencex=lambda: malformed)).source.kind is PdSourceKind.PD_TABLE
+
+
 def test_a_lookup_without_the_board_directory_names_the_directory_it_looked_for(checkout):
     misses = lookup_candidates(_query(board="mi300x"), checkout).misses
     assert f"no recipe directory of org/M for sglang on mi300x: {MULTI_NODE_RECIPES}/m/sglang/mi300x-fp8" in misses

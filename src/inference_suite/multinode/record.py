@@ -26,6 +26,8 @@ SCHEMA = "inference-suite-pd-launch/2"
 #: The schema before the serving mode was recorded; its documents are disaggregated.
 SCHEMA_V1 = "inference-suite-pd-launch/1"
 RECORD_NAME = "pd_launch.json"
+#: The launch as the last start or restart ran it, beside the frozen ``pd_launch.json``.
+RAN_RECORD_NAME = "pd_launch.ran.json"
 _UTF8 = "utf-8"
 
 
@@ -377,6 +379,7 @@ def _enum(kind: type[Enum], value: Any, what: str) -> Any:
 __all__ = [
     "MODE_ROLES",
     "PD_ROLES",
+    "RAN_RECORD_NAME",
     "RECORD_NAME",
     "SCHEMA",
     "SCHEMA_V1",

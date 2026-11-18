@@ -19,6 +19,7 @@ from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.multinode import (
     Cluster,
     NODE_LIST_ENV,
+    RAN_RECORD_NAME,
     RECORD_NAME,
     LaunchError,
     LaunchOptions,
@@ -42,6 +43,7 @@ from inference_suite.multinode import (
     restart,
     split_launcher_flags,
     stop,
+    worker_hosts,
     write_record,
 )
 
@@ -50,6 +52,7 @@ from ._internal.pd_handoff import (
     LAUNCH_POD_KEYS,
     PD_BACKENDS,
     PODS_KEY,
+    SSH_BACKENDS,
     handed_node_list,
     is_pd_state,
     node_list_backend,
@@ -63,8 +66,6 @@ PD_DIGEST_KEY = "pd_launch_digest"
 ROUTER_ROLE = "router"
 #: ``managed_by`` of the router pod: the frontend in front of the platform's service URL.
 PLATFORM_MANAGED = "platform"
-#: The launch as the last round ran it, beside the frozen ``pd_launch.json``.
-RAN_RECORD_NAME = "pd_launch.ran.json"
 PREFILL_EXTRA_ENV = "PD_PREFILL_EXTRA_ARGS"
 DECODE_EXTRA_ENV = "PD_DECODE_EXTRA_ARGS"
 SERVER_LOG_DIR_ENV = "HYPERLOOM_MN_SERVER_LOG_DIR"
@@ -78,7 +79,7 @@ _DECODE = "decode"
 _WORKER = "worker"
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _RESERVED_ENV_PREFIX = "HL_"
-_SUITE_ERRORS = (LaunchError, NodeListError, PdRecordError, PdResolveError, SshError, OSError)
+_SUITE_ERRORS = (LaunchError, NodeListError, PdRecordError, PdResolveError, SshError, OSError, ValueError)
 
 
 class PdSessionError(RuntimeError):
@@ -94,7 +95,7 @@ def freeze_launch(session_dir: Path, session: LaunchQuery, nodes: NodeList, infe
     try:
         launch = resolve_session(session, nodes, None, inferencex_commit)
         write_record(launch, session_dir / RECORD_NAME)
-    except (*_SUITE_ERRORS, ValueError) as exc:
+    except _SUITE_ERRORS as exc:
         raise PdSessionError(f"the PD launch could not be resolved: {exc}") from exc
     return launch
 
@@ -223,7 +224,21 @@ def session_engine_urls(state: dict[str, Any]) -> dict[str, list[str]]:
     try:
         session = _session_cluster(state)
         return engine_urls(session.launch, session.cluster.nodes)
-    except (*_SUITE_ERRORS, ValueError) as exc:
+    except _SUITE_ERRORS as exc:
+        raise PdSessionError(f"the PD engines cannot be placed: {exc}") from exc
+
+
+def session_worker_hosts(state: dict[str, Any]) -> dict[str, list[tuple[str, ...]]]:
+    """The hosts of every engine worker per role, each its first host first, in the order of
+    :func:`session_engine_urls`.
+
+    Raises:
+        PdSessionError: no node list is handed over, or the frozen launch cannot be verified or placed.
+    """
+    try:
+        launch = _session_cluster(state).launch
+        return {role.value: worker_hosts(launch.role(role)) for role in launch.served_roles}
+    except _SUITE_ERRORS as exc:
         raise PdSessionError(f"the PD engines cannot be placed: {exc}") from exc
 
 
@@ -239,7 +254,7 @@ def stamp_launch_pods(state: dict[str, Any], launch: PdLaunch | None = None) -> 
         session = _session_cluster(state)
         nodes = session.cluster.nodes
         commands = cluster_commands(launch or session.launch, nodes)
-    except (*_SUITE_ERRORS, ValueError) as exc:
+    except _SUITE_ERRORS as exc:
         raise PdSessionError(f"the PD launch cannot be placed: {exc}") from exc
     indices: dict[str, int] = {}
     pods: list[dict[str, Any]] = []
@@ -330,6 +345,7 @@ __all__ = [
     "PREFILL_EXTRA_ENV",
     "PROFILER_DIR_ENV",
     "RAN_RECORD_NAME",
+    "SSH_BACKENDS",
     "TRACE_SHARED_KEY",
     "TRACE_SHARE_ERROR_KEY",
     "PdSessionError",
@@ -345,6 +361,7 @@ __all__ = [
     "restart_round",
     "round_overrides",
     "session_engine_urls",
+    "session_worker_hosts",
     "stamp_launch_pods",
     "stop_cluster",
     "verified_launch",

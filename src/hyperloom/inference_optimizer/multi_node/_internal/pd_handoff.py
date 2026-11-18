@@ -12,12 +12,15 @@ from typing import Any
 from inference_suite.multinode import NODE_LIST_ENV, NodeList, NodeListError, Role, read_node_list
 
 from ...session.paths import workspace_root
+from .ssh_client import SSH_USER
 from .topology_file import TopologyHandoffError
 
 ATOMESH = "atomesh"
 SGLANGROUTER = "sglangrouter"
 INFERA = "infera"
 PD_BACKENDS = (ATOMESH, SGLANGROUTER)
+#: The backends whose GPU hosts Hyperloom reaches over SSH.
+SSH_BACKENDS = (INFERA, *PD_BACKENDS)
 #: The multi-node state key that marks a node-list cluster.
 NODE_LIST_KEY = "node_list"
 #: Every host of a node-list cluster's launch with the command it serves.
@@ -33,14 +36,19 @@ def handed_node_list() -> NodeList | None:
     """The node list ``$HYPERLOOM_MN_NODE_LIST`` hands over, or ``None`` when it is unset.
 
     Raises:
-        TopologyHandoffError: the node list is malformed.
+        TopologyHandoffError: the node list is malformed, or names an SSH user other than root.
     """
     if not os.environ.get(NODE_LIST_ENV, "").strip():
         return None
     try:
-        return read_node_list(os.environ)
+        nodes = read_node_list(os.environ)
     except NodeListError as exc:
         raise TopologyHandoffError(f"{NODE_LIST_ENV}: {exc}") from exc
+    if nodes.ssh is not None and nodes.ssh.user != SSH_USER:
+        raise TopologyHandoffError(
+            f"{NODE_LIST_ENV}: ssh.user is {nodes.ssh.user!r}, but Hyperloom sessions connect as {SSH_USER}"
+        )
+    return nodes
 
 
 def node_list_backend(nodes: NodeList) -> str:
@@ -109,6 +117,7 @@ __all__ = [
     "NODE_LIST_KEY",
     "PODS_KEY",
     "PD_BACKENDS",
+    "SSH_BACKENDS",
     "handed_node_list",
     "is_pd_state",
     "node_list_backend",

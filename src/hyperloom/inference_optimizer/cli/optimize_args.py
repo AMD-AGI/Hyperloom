@@ -122,6 +122,8 @@ def add_framework_arguments(opt: argparse.ArgumentParser) -> None:
 
 def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
     """Add the node-count and multi-node backend flags of ``optimize``."""
+    from ..multi_node.pd_session import SSH_BACKENDS
+
     opt.add_argument(
         "--nodes",
         type=int,
@@ -136,7 +138,7 @@ def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
     )
     opt.add_argument(
         "--mn-backend",
-        choices=("rayjob", "infera", "atomesh", "sglangrouter"),
+        choices=("rayjob", *SSH_BACKENDS),
         default=None,
         help="Multi-node backend when --nodes>=2: 'rayjob' (default, Ray "
         "head+workers), 'infera' (idle InferaDeployment + SSH control "

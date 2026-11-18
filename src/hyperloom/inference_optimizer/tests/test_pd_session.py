@@ -18,9 +18,11 @@ import pytest
 
 from inference_suite.contracts.base_launch import LaunchQuery, Workload
 from inference_suite.multinode import RECORD_NAME, Cluster, PdMode, Role, SshClient, read_record, write_record
+from inference_suite.multinode.commands import CommandError
 from inference_suite.multinode.ssh import SshResult
 from hyperloom.inference_optimizer.cli import bootstrap
 from hyperloom.inference_optimizer.cli import multi_node as cli_mn
+from hyperloom.inference_optimizer.multi_node import TopologyHandoffError
 from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 from hyperloom.inference_optimizer.multi_node import pd_session
 from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
@@ -94,6 +96,19 @@ def test_the_node_list_is_the_hand_off(session: Path) -> None:
     assert (state["router_pod_ip"], state["prefill_pod_ips"], state["decode_pod_ips"]) == ("r0", ["p0"], ["d0"])
     assert state["nodes"] == 2
     assert cli_mn._resolve_mn_backend(_args()) == "sglangrouter"
+
+
+@pytest.mark.parametrize("user", ["root", None, "ubuntu"])
+def test_a_node_list_must_hand_over_root_ssh(session: Path, monkeypatch, user) -> None:
+    ssh = {key: value for key, value in _NODES["ssh"].items() if key != "user"}
+    if user is not None:
+        ssh["user"] = user
+    monkeypatch.setenv(pd_session.NODE_LIST_ENV, json.dumps({**_NODES, "ssh": ssh}))
+    if user == "ubuntu":
+        with pytest.raises(TopologyHandoffError, match="ubuntu.*root"):
+            pd_session.handed_node_list()
+    else:
+        assert pd_session.handed_node_list().ssh.user == "root"
 
 
 def test_a_pd_session_freezes_its_launch_and_no_single_node_base(session: Path, monkeypatch) -> None:
@@ -223,6 +238,23 @@ def test_a_failed_restart_is_a_failed_round(session: Path, monkeypatch) -> None:
     monkeypatch.setattr(pd_session, "restart", refuse)
     with pytest.raises(lifecycle.ServerRestartFailed, match="d0 exited"):
         asyncio.run(lifecycle.restart_server_for_round(lifecycle.RoundServer("")))
+
+
+def test_a_malformed_round_or_command_is_a_session_error(session: Path, monkeypatch) -> None:
+    state = _adopt(session)
+
+    def refuse(*_args, **_kwargs):
+        raise CommandError("router r0 serves on 8000")
+
+    monkeypatch.setattr(pd_session, "restart", refuse)
+    monkeypatch.setattr(pd_session, "stop", refuse)
+    with pytest.raises(pd_session.PdSessionError, match="r0"):
+        pd_session.restart_round(state, "", pd_session.LaunchOptions())
+    with pytest.raises(pd_session.PdSessionError, match="r0"):
+        pd_session.stop_cluster(state)
+    monkeypatch.setenv(pd_session.PREFILL_EXTRA_ENV, "--x 'unbalanced")
+    with pytest.raises(pd_session.PdSessionError):
+        pd_session.restart_round(state, "", pd_session.LaunchOptions())
 
 
 def test_kill_inference_stops_the_cluster(session: Path, monkeypatch) -> None:
@@ -376,12 +408,13 @@ def test_pd_engine_profile_reaches_every_engine_of_the_frozen_launch(
     asyncio.run(lifecycle.trigger_pd_engine_profile("stop"))
 
     assert seen == [
-        ("http://p0:8010/start_profile", {"output_dir": str(out / "prefill"), "with_stack": False}),
-        ("http://d0:8020/start_profile", {"output_dir": str(out / "decode"), "with_stack": False}),
+        ("http://p0:8010/start_profile", {"output_dir": str(out / "prefill" / "0"), "with_stack": False}),
+        ("http://d0:8020/start_profile", {"output_dir": str(out / "decode" / "0"), "with_stack": False}),
         ("http://p0:8010/stop_profile", {}),
         ("http://d0:8020/stop_profile", {}),
     ]
-    assert (out / "prefill").is_dir() and (out / "decode").is_dir()
+    assert (out / "prefill" / "0").is_dir() and (out / "decode" / "0").is_dir()
+    assert pd_session.session_worker_hosts(ext.load_multi_node_state()) == {"prefill": [("p0",)], "decode": [("d0",)]}
 
 
 def test_pd_engine_profile_with_stack_follows_env(session: Path, monkeypatch: pytest.MonkeyPatch) -> None:

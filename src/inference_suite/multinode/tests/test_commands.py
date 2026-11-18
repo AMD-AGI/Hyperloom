@@ -161,6 +161,31 @@ def _aggregated(framework=Framework.SGLANG, frontend=FrontendType.SGLANG_ROUTER,
     )
 
 
+@pytest.mark.parametrize(
+    ("launch", "nodes", "clash"),
+    [
+        (_launch(), _nodes(router={"host": "d0"}), "d0"),
+        (
+            replace(_aggregated(), frontend=Frontend(FrontendType.SGLANG_ROUTER, "w0", ())),
+            _aggregated_nodes(router={"host": "w0"}),
+            "w0",
+        ),
+        (
+            _launch(Framework.ATOM, FrontendType.ATOMESH, decode_tp=8),
+            _nodes(framework="atom", router={"host": "d0"}),
+            "",
+        ),
+    ],
+    ids=["sglang-decode", "aggregated-worker", "atom-co-located"],
+)
+def test_the_router_host_cannot_serve_an_engine_on_the_router_port(launch, nodes, clash):
+    if clash:
+        with pytest.raises(CommandError, match=f"{clash}.*8000"):
+            cluster_commands(launch, nodes)
+    else:
+        assert cluster_commands(launch, nodes)[-1].host == "d0"
+
+
 def test_aggregated_sglang_worker_spans_hosts_without_disaggregation():
     commands = cluster_commands(_aggregated(), _aggregated_nodes())
     assert [(c.role, c.host, c.rank) for c in commands] == [

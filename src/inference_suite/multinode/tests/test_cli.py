@@ -13,6 +13,7 @@ from inference_suite.multinode import cli
 from inference_suite.multinode.launch import LaunchError
 from inference_suite.multinode.nodes import NODE_LIST_ENV
 from inference_suite.multinode.record import (
+    RAN_RECORD_NAME,
     Frontend,
     FrontendType,
     PdLaunch,
@@ -83,8 +84,9 @@ def test_start_runs_on_the_node_list_hosts_and_records_what_ran(record, monkeypa
     assert main(["multinode", "start", "--record", str(record), "--env", "A=b=c"]) == 0
     assert seen["launch"].prefill.hosts == ("p0",) and seen["launch"].frontend.host == "r0"
     assert seen["known"] == record.parent / "known_hosts" and seen["env"] == {"A": "b=c"}
-    assert read_record(record).prefill.stripped == ("unsupported --x",)
-    assert capsys.readouterr().out.strip() == read_record(record).digest()
+    ran = read_record(record.with_name(RAN_RECORD_NAME))
+    assert ran.prefill.stripped == ("unsupported --x",)
+    assert capsys.readouterr().out.strip() == ran.digest()
 
 
 def test_restart_passes_role_overrides(record, monkeypatch):
@@ -92,6 +94,18 @@ def test_restart_passes_role_overrides(record, monkeypatch):
     monkeypatch.setattr(cli, "restart", lambda launch, overrides, cluster, options: seen.update(o=overrides) or launch)
     assert main(["multinode", "restart", "--record", str(record), "--decode-args", "--b '2 3'"]) == 0
     assert seen["o"] == {"decode": ["--b", "2 3"]}
+
+
+def test_restart_keeps_the_frozen_record_and_writes_what_ran_beside_it(record, monkeypatch):
+    frozen = record.read_bytes()
+
+    def fake_restart(launch, overrides, cluster, options):
+        return launch.with_roles({Role.DECODE: replace(launch.decode, args=("--b", "2"))})
+
+    monkeypatch.setattr(cli, "restart", fake_restart)
+    assert main(["multinode", "restart", "--record", str(record), "--decode-args", "--b 2"]) == 0
+    assert record.read_bytes() == frozen
+    assert read_record(record.with_name(RAN_RECORD_NAME)).decode.args == ("--b", "2")
 
 
 def test_a_cluster_that_does_not_come_up_exits_1(record, monkeypatch):

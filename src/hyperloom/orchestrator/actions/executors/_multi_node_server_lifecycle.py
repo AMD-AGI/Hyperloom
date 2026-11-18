@@ -624,6 +624,15 @@ async def _restart_with_reclaim_retry(restart_and_wait: Callable[..., Awaitable[
 # Infera frontend profiling API (infera.server --enable-profiling).
 
 
+def executor_drives_engine_profile(state: dict[str, Any]) -> bool:
+    """Whether the executor starts and stops torch profiling on the session's engines itself: a node-list session's
+    engines directly (:func:`trigger_pd_engine_profile`), any other Infera session's through its frontend
+    (:func:`trigger_infera_engine_profile`)."""
+    from hyperloom.inference_optimizer.multi_node.pd_session import INFERA, is_pd_state
+
+    return is_pd_state(state) or str(state.get("backend") or "").strip().lower() == INFERA
+
+
 async def trigger_infera_engine_profile(
     action: str,
     body: dict | None = None,
@@ -635,7 +644,7 @@ async def trigger_infera_engine_profile(
     from hyperloom.inference_optimizer.multi_node.pd_session import is_pd_state
 
     state = _read_state() or {}
-    if str(state.get("backend") or "").strip().lower() != "infera" or is_pd_state(state):
+    if not executor_drives_engine_profile(state) or is_pd_state(state):
         return
     service_url = str(state.get("service_url") or "").strip().rstrip("/")
     if not service_url:
@@ -675,25 +684,19 @@ _PD_STOP_PROFILE_TIMEOUT_ENV = "HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S"
 _PD_STOP_PROFILE_TIMEOUT_DEFAULT = "600"
 
 
-def pd_role_trace_dir(root: str, role: str) -> str:
-    """Return the per-role torch trace dir under a profiling round's trace root."""
-    return str(Path(root) / role)
+def pd_worker_trace_dir(root: str, role: str, worker: int) -> str:
+    """Return the torch trace dir of one engine worker of ``role`` under a profiling round's trace root."""
+    return str(Path(root) / role / str(worker))
 
 
 _RANK_TRACE_RE = re.compile(r"\A(?P<batch>.+)-TP-(?P<rank>\d+)(?:-(?P<stage>[A-Z]+))?\.trace\.json\.gz\Z")
 _ROLE_STAGE = {"prefill": "EXTEND", "decode": "DECODE"}
 
 
-def _role_node_count(state: Mapping[str, Any], role: str) -> int:
-    """Number of nodes serving ``role``; one when the state lists none."""
-    pods = [pod for pod in (state.get(f"{role}_pods") or []) if isinstance(pod, dict)]
-    return max(1, len(pods))
-
-
 def _first_gpu_traces(paths: list[Path], role: str, nodes: int) -> list[str]:
     """The first GPU's trace of each node from the newest batch in ``paths``; the heaviest file when none is per-rank.
 
-    SGLang numbers TP ranks across a role's nodes, so node ``n`` starts at rank ``n * ranks_per_node``. A stage-split
+    SGLang numbers TP ranks across a worker's nodes, so node ``n`` starts at rank ``n * ranks_per_node``. A stage-split
     trace prefers the role's own stage.
     """
     batches: dict[str, dict[int, dict[str, Path]]] = {}
@@ -717,17 +720,33 @@ def _first_gpu_traces(paths: list[Path], role: str, nodes: int) -> list[str]:
     return picks
 
 
+def _pd_worker_hosts(state: dict[str, Any]) -> dict[str, list[tuple[str, ...]]]:
+    """The hosts of every engine worker per role of a PD session's frozen launch; empty when it cannot be placed."""
+    from hyperloom.inference_optimizer.multi_node.pd_session import PdSessionError, is_pd_state, session_worker_hosts
+
+    if not is_pd_state(state):
+        return {}
+    try:
+        return session_worker_hosts(state)
+    except PdSessionError as exc:
+        log.warning("pd profile: cannot place the engines of the frozen launch: %s", exc)
+        return {}
+
+
 def select_pd_node_traces(root: str, since_unix: float) -> dict[str, list[str]]:
-    """Return, per PD role, the first GPU's trace of each node written since ``since_unix`` under ``<root>/<role>``."""
-    state = _read_state() or {}
+    """Return, per PD role, the first GPU's trace of each node written since ``since_unix``, worker by worker under
+    ``<root>/<role>/<worker>``; nodes are numbered across the role's workers in order."""
+    workers = _pd_worker_hosts(_read_state() or {})
     selected: dict[str, list[str]] = {}
     for role in PD_PROFILE_ROLES:
-        fresh = [
-            path
-            for path in Path(pd_role_trace_dir(root, role)).glob("*.trace.json.gz")
-            if path.is_file() and safe_mtime(path) >= since_unix
-        ]
-        picks = _first_gpu_traces(fresh, role, _role_node_count(state, role))
+        picks: list[str] = []
+        for worker, hosts in enumerate(workers.get(role, [])):
+            fresh = [
+                path
+                for path in Path(pd_worker_trace_dir(root, role, worker)).glob("*.trace.json.gz")
+                if path.is_file() and safe_mtime(path) >= since_unix
+            ]
+            picks += _first_gpu_traces(fresh, role, len(hosts))
         if picks:
             selected[role] = picks
     return selected
@@ -738,8 +757,8 @@ def select_pd_role_traces(root: str, since_unix: float) -> dict[str, str]:
     return {role: paths[0] for role, paths in select_pd_node_traces(root, since_unix).items()}
 
 
-def _pd_profile_targets(state: dict[str, Any]) -> list[tuple[str, str]]:
-    """``(role, base_url)`` of every engine worker of a PD session; empty when the launch cannot be placed."""
+def _pd_profile_targets(state: dict[str, Any]) -> list[tuple[str, int, str]]:
+    """``(role, worker, base_url)`` of every engine worker of a PD session; empty when the launch cannot be placed."""
     from hyperloom.inference_optimizer.multi_node.pd_session import PdSessionError, session_engine_urls
 
     try:
@@ -747,15 +766,16 @@ def _pd_profile_targets(state: dict[str, Any]) -> list[tuple[str, str]]:
     except PdSessionError as exc:
         log.warning("pd profile: cannot place the engines of the frozen launch: %s", exc)
         return []
-    return [(role, url) for role in PD_PROFILE_ROLES for url in urls.get(role, [])]
+    return [(role, worker, url) for role in PD_PROFILE_ROLES for worker, url in enumerate(urls.get(role, []))]
 
 
 async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> None:
     """POST /start_profile or /stop_profile to every prefill and decode engine of a PD session.
 
     Each engine worker is reached at its first host on its role's engine port, as the frozen launch is placed on the
-    node list; the router writes no GPU traces. A start sends ``output_dir`` narrowed to ``<output_dir>/<role>`` and
-    ``with_stack`` (``HYPERLOOM_MN_PROFILE_WITH_STACK``, default off); step-window fields crash disaggregated SGLang.
+    node list; the router writes no GPU traces. A start sends ``output_dir`` narrowed to
+    ``<output_dir>/<role>/<worker>`` and ``with_stack`` (``HYPERLOOM_MN_PROFILE_WITH_STACK``, default off); step-window
+    fields crash disaggregated SGLang.
     """
     if not is_multi_node():
         return
@@ -780,17 +800,17 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> No
     stop_timeout = os.environ.get(_PD_STOP_PROFILE_TIMEOUT_ENV, "") or _PD_STOP_PROFILE_TIMEOUT_DEFAULT
     client_timeout = _PD_PROFILE_START_TIMEOUT_S if starting else float(stop_timeout)
 
-    async def _post(client: Any, role: str, base_url: str) -> None:
+    async def _post(client: Any, role: str, worker: int, base_url: str) -> None:
         """Send ``route`` to one engine; a transport error is logged, not raised."""
         url = f"{base_url}/{route}"
         payload: dict = {}
         if output_dir:
-            role_dir = pd_role_trace_dir(output_dir, role)
+            worker_dir = pd_worker_trace_dir(output_dir, role, worker)
             try:
-                Path(role_dir).mkdir(parents=True, exist_ok=True)
+                Path(worker_dir).mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                log.debug("pd profile: cannot mkdir %s: %s", role_dir, exc)
-            payload["output_dir"] = role_dir
+                log.debug("pd profile: cannot mkdir %s: %s", worker_dir, exc)
+            payload["output_dir"] = worker_dir
         if starting:
             payload["with_stack"] = with_stack
         try:
@@ -801,7 +821,7 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> No
 
     # stop_profile returns after the trace export; engines start and stop together so each records the same window.
     async with _httpx.AsyncClient(timeout=client_timeout) as client:
-        await asyncio.gather(*(_post(client, role, base_url) for role, base_url in targets))
+        await asyncio.gather(*(_post(client, role, worker, base_url) for role, worker, base_url in targets))
 
 
 async def _probe_health(client: Any, health_url: str) -> tuple[bool, str]:
