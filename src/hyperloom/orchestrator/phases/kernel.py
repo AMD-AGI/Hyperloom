@@ -793,8 +793,8 @@ class KernelPhase(
             session_dir=self.session_dir,
         )
         log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
-        await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
-        await self._validate_subthreshold_bundle()
+        if await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines):
+            await self._validate_subthreshold_bundle()
 
     async def _controller_attempt_result(self, handoff_dir: Path, output_dir: Path) -> dict[str, Any]:
         from ..kernel.controller_submit import run_controller_subprocess
@@ -833,8 +833,8 @@ class KernelPhase(
 
     async def _run_kernel_rewrite_controller(
         self, handoff_dir: Path, output_dir: Path, baselines: dict[str, object]
-    ) -> None:
-        """Run one Controller attempt without preselecting operators."""
+    ) -> bool:
+        """Run one Controller attempt without preselecting operators; whether its round settled."""
         from ..kernel.controller_submit import record_controller_llm_usage
 
         result = await self._controller_attempt_result(handoff_dir, output_dir)
@@ -857,7 +857,7 @@ class KernelPhase(
         if result["status"] == "cancelled":
             # Unsettled: the resumed entry runs a fresh Controller.
             log.warning("KERNEL entry: Controller attempt %s was cancelled; leaving it to the resume", output_dir.name)
-            return
+            return False
         await self._integrate_controller_output(result, output_dir)
         self._record_kernel_rewrite_controller_timeline(result)
         self.shared_state.kernel_rewrite_controller_result = result
@@ -878,6 +878,7 @@ class KernelPhase(
                 },
             )
         )
+        return True
 
     def _fusion_required_before_kernel_opt(self) -> bool:
         """Gate the forge-fusion step in KERNEL entry."""

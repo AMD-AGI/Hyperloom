@@ -1388,8 +1388,9 @@ async def test_controller_entry_uses_session_writeback_for_every_mode(tmp_path, 
         return integration.ControllerIntegrationSummary("completed", (), 0, 0, 0, "")
 
     monkeypatch.setattr(integration, "integrate_controller_patches", capture_callback)
-    await phase._run_kernel_rewrite_controller(tmp_path / "handoff", tmp_path / "output", {})
+    settled = await phase._run_kernel_rewrite_controller(tmp_path / "handoff", tmp_path / "output", {})
 
+    assert settled is True
     assert len(callbacks) == 1
     assert callbacks[0].__func__ is WritebackCollaborator.record_integrate_keep
     assert callbacks[0].__self__.shared_state is coordinator.shared_state
@@ -1431,12 +1432,13 @@ async def test_a_controller_the_orchestrator_cancelled_is_not_this_cycles_result
         return integration.ControllerIntegrationSummary("completed", (), 0, 0, 0, "")
 
     monkeypatch.setattr(integration, "integrate_controller_patches", _integrate)
-    await phase._run_kernel_rewrite_controller(tmp_path / "handoff", output, {})
+    settled = await phase._run_kernel_rewrite_controller(tmp_path / "handoff", output, {})
 
     read = controller_submit.read_controller_result(
         output_dir=output, returncode=ORCHESTRATOR_CANCELLED_RETURNCODE, timed_out=False
     )
     assert (read["status"], read["patch_count"]) == ("cancelled", 1)
+    assert settled is False
     assert integrated == []
     assert coordinator.shared_state.kernel_rewrite_controller_result == {}
     assert kernel_controller_settled(coordinator.shared_state) is False

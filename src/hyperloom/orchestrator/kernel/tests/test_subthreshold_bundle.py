@@ -451,6 +451,28 @@ async def test_a_bundle_of_env_members_only_is_measured_env_only(tmp_path, monke
     assert not (session_dir / "runs" / "kernel_bundle").exists()
 
 
+@pytest.mark.asyncio
+async def test_a_cancelled_controller_leaves_the_pending_bundle_to_the_resumed_entry(tmp_path, monkeypatch) -> None:
+    repo, _base = _repo(tmp_path, ("mqa.py",))
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    coordinator = _coordinator(session_dir, repo)
+    pending = [
+        _env_entry("fmoe_ck", _FMOE_ENVS, "--moe-runner-backend aiter"),
+        _env_entry("a8w8_blockscale_bpreshuffle", _A8W8_ENVS, ""),
+    ]
+    coordinator.shared_state.kernel_bundle_pending = list(pending)
+    coordinator.shared_state.save(session_dir)
+    calls = _stub_integrate(monkeypatch, {})
+    _stub_kernel_entry(monkeypatch, controller_settled=False)
+
+    await coordinator.phase_kernel._finish_kernel_entry()
+
+    assert calls == []
+    assert coordinator.shared_state.kernel_bundle_pending == pending
+    assert SharedState.load_or_init(session_dir).kernel_bundle_pending == pending
+
+
 def test_versions_of_one_kernel_keep_only_the_best_bundle_member(tmp_path) -> None:
     from types import SimpleNamespace
 
