@@ -11,10 +11,10 @@ import pytest
 
 from kernelforge.workflows.forge_loop.roles import orchestration as orchestration_module
 from kernelforge.agent_backends import AgentRunResult
-from kernelforge.workflows.forge_loop.roles.orchestration import (
+from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationService
+from kernelforge.workflows.forge_loop.roles.orchestration_agent import (
     OrchestrationAgent,
     OrchestrationInfrastructureError,
-    OrchestrationService,
 )
 from kernelforge.workflows.forge_loop.roles.specialists import SpecialistAgent, SpecialistPool
 from kernelforge.workflows.forge_loop.roles.plan_critic import PlanCriticAgent
