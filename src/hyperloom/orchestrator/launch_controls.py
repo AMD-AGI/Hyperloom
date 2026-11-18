@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Which launch controls ``current_best`` carries after a KEEP."""
+"""Which launch controls a KEEP carries into the launches built on it."""
 
 from __future__ import annotations
 
