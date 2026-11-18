@@ -126,6 +126,8 @@ class SourceSnapshot:
     source reading stopped at, when one could not be read; what it and every later source hold is missing.
     ``inferencex_pin`` is the full sha InferenceX was read at when the operator pinned it, ``""`` for its ``main``.
     ``model_revision`` is the commit of the Hugging Face model ``base_model`` was read from, when its card was read.
+    ``model_id`` is the Hugging Face id every source was read by when the query named a checkpoint by its directory
+    alone and InferenceX names it by an ``org/repo``; ``""`` when the query's own id was used.
     """
 
     inferencex: InferencexSnapshot | None
@@ -140,6 +142,7 @@ class SourceSnapshot:
     unread: UnreadSource | None = None
     inferencex_pin: str = ""
     model_revision: UpstreamRevision | None = None
+    model_id: str = ""
 
     def __post_init__(self) -> None:
         _FIELDS.integer(self.fetched_unix, "the snapshot's fetch time", minimum=0)
@@ -416,13 +419,16 @@ def _recipe_base(
 
 def _rebound(query: LaunchQuery, frozen: BaseLaunch, location: str) -> str | None:
     """Why the base frozen in ``location`` cannot serve ``query``: it was resolved for another model, workload,
-    framework or a board not interchangeable with the query's."""
+    framework or a board not interchangeable with the query's. A base resolved for a checkpoint named by its directory
+    names the model by the id its sources were read by, and serves that directory, which its query keeps."""
     for what, was, asked in (
         ("model", frozen.model.id, query.model_id),
         ("workload", frozen.query.workload.value, query.workload.value),
         ("framework", frozen.framework, query.framework),
         ("board", frozen.query.board, query.board),
     ):
+        if what == "model" and asked == frozen.query.model_id:
+            continue
         if was != asked and not (what == "board" and boards_interchangeable(asked, was)):
             return f"{location} was resolved for {what} {was!r}, but the session asks for {asked!r}"
     return None
@@ -540,8 +546,18 @@ def resolve_base(query: LaunchQuery, snapshot: SourceSnapshot, *, gpus: int) -> 
     A :class:`Miss` names why each source holds no launch: always for an AgentX query no recipe serves or whose
     snapshot could not read a source, for a fixed one the default table has no row for either or InferenceX is pinned,
     and for a user file or default row that needs more than ``gpus`` GPUs.
+
+    When ``snapshot`` read its sources by the id InferenceX names a checkpoint by (``model_id``), the base is resolved
+    for that id and names the model by it, and keeps ``query`` as asked.
     """
     _FIELDS.integer(gpus, "the visible GPU count", minimum=1)
+    if not snapshot.model_id:
+        return _resolve(query, snapshot, gpus)
+    found = _resolve(dataclasses.replace(query, model_id=snapshot.model_id), snapshot, gpus)
+    return dataclasses.replace(found, query=query) if isinstance(found, BaseLaunch) else found
+
+
+def _resolve(query: LaunchQuery, snapshot: SourceSnapshot, gpus: int) -> BaseLaunch | Miss:
     if snapshot.unread is not None and query.workload is Workload.AGENTX:
         return Miss((), snapshot.unread)
     if snapshot.user_file is not None:

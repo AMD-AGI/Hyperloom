@@ -257,6 +257,30 @@ def test_a_frozen_base_resolved_for_another_session_is_a_miss_naming_both_values
     assert miss.reasons() == (f"user_file: base_launch.json was resolved for {named}",)
 
 
+def _directory_base() -> tuple[LaunchQuery, BaseLaunch]:
+    query = _agentx("DeepSeek-V4.1-Flash", framework="vllm", board="mi300x", concurrencies=(1,))
+    return query, _base(query, dataclasses.replace(_snapshot(), model_id="deepseek-ai/DeepSeek-V4.1-Flash"))
+
+
+def test_a_frozen_base_resolved_for_a_checkpoint_directory_serves_that_directory():
+    query, frozen = _directory_base()
+    user_file = parse_user_file("base_launch.json", json.dumps(frozen.to_document()).encode(), framework="vllm")
+
+    base = _base(query, dataclasses.replace(_snapshot(), user_file=user_file))
+
+    assert base.digest() == frozen.digest()
+    assert base.model.id == "deepseek-ai/DeepSeek-V4.1-Flash"
+
+
+def test_a_frozen_base_resolved_for_an_org_repo_id_does_not_serve_a_directory_of_that_name():
+    miss = _miss(_fixed("DeepSeek-R1-0528"), _frozen_user_file(_base(_fixed())))
+
+    assert miss.reasons() == (
+        "user_file: base_launch.json was resolved for model 'deepseek-ai/DeepSeek-R1-0528', "
+        "but the session asks for 'DeepSeek-R1-0528'",
+    )
+
+
 def test_a_frozen_base_serves_a_board_interchangeable_with_its_own():
     frozen = _base(_fixed())
 
@@ -402,6 +426,18 @@ def test_a_vllm_golden_layer_takes_the_whole_speculative_config():
     assert json.loads(golden.args[1])["synthetic_acceptance_length"] == 3.51
     assert (golden.method, golden.spec_method, golden.draft_length) == ("synthetic", "dspark", 5)
     assert not _drafts(base)
+
+
+def test_a_checkpoint_named_by_its_directory_resolves_under_the_id_its_sources_were_read_by():
+    query = _agentx("DeepSeek-V4.1-Flash", framework="vllm", board="mi300x", concurrencies=(1,))
+    snapshot = dataclasses.replace(_snapshot(), model_id="deepseek-ai/DeepSeek-V4.1-Flash")
+
+    base = _base(query, snapshot)
+
+    assert base.model.id == "deepseek-ai/DeepSeek-V4.1-Flash"
+    assert base.query == query
+    assert base.source.kind is SourceKind.INFERENCEX
+    assert base.golden_al is not None
 
 
 def _glm53_snapshot(answer: GoldenLength) -> SourceSnapshot:
