@@ -417,24 +417,17 @@ def _recipe_base(
     )
 
 
-def _same_model(frozen: str, asked: str) -> bool:
-    """Whether a base frozen for model ``frozen`` serves a session asking for ``asked``: the same id, or ``asked``
-    naming the checkpoint by its directory alone, which a source named by an ``org/repo`` with that ``repo``."""
-    if frozen == asked:
-        return True
-    return "/" not in asked and "/" in frozen and frozen.rpartition("/")[2].casefold() == asked.casefold()
-
-
 def _rebound(query: LaunchQuery, frozen: BaseLaunch, location: str) -> str | None:
     """Why the base frozen in ``location`` cannot serve ``query``: it was resolved for another model, workload,
-    framework or a board not interchangeable with the query's."""
+    framework or a board not interchangeable with the query's. A base resolved for a checkpoint named by its directory
+    names the model by the id its sources were read by, and serves that directory, which its query keeps."""
     for what, was, asked in (
         ("model", frozen.model.id, query.model_id),
         ("workload", frozen.query.workload.value, query.workload.value),
         ("framework", frozen.framework, query.framework),
         ("board", frozen.query.board, query.board),
     ):
-        if what == "model" and _same_model(was, asked):
+        if what == "model" and asked == frozen.query.model_id:
             continue
         if was != asked and not (what == "board" and boards_interchangeable(asked, was)):
             return f"{location} was resolved for {what} {was!r}, but the session asks for {asked!r}"
@@ -553,10 +546,18 @@ def resolve_base(query: LaunchQuery, snapshot: SourceSnapshot, *, gpus: int) -> 
     A :class:`Miss` names why each source holds no launch: always for an AgentX query no recipe serves or whose
     snapshot could not read a source, for a fixed one the default table has no row for either or InferenceX is pinned,
     and for a user file or default row that needs more than ``gpus`` GPUs.
+
+    When ``snapshot`` read its sources by the id InferenceX names a checkpoint by (``model_id``), the base is resolved
+    for that id and names the model by it, and keeps ``query`` as asked.
     """
     _FIELDS.integer(gpus, "the visible GPU count", minimum=1)
-    if snapshot.model_id:
-        query = dataclasses.replace(query, model_id=snapshot.model_id)
+    if not snapshot.model_id:
+        return _resolve(query, snapshot, gpus)
+    found = _resolve(dataclasses.replace(query, model_id=snapshot.model_id), snapshot, gpus)
+    return dataclasses.replace(found, query=query) if isinstance(found, BaseLaunch) else found
+
+
+def _resolve(query: LaunchQuery, snapshot: SourceSnapshot, gpus: int) -> BaseLaunch | Miss:
     if snapshot.unread is not None and query.workload is Workload.AGENTX:
         return Miss((), snapshot.unread)
     if snapshot.user_file is not None:
