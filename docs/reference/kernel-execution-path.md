@@ -113,12 +113,20 @@ alone.
 The controller runs last and unconditionally — no trace, candidate count or
 source-resolution verdict gates it, because choosing operators is its job rather
 than Hyperloom's. Hyperloom writes it a Markdown handoff (`workload.md`,
-`serving-context.md`, `trace-evidence.md`), runs
+`serving-context.md`, `trace-evidence.md`) and `repositories.json`, runs
 `python -m kernelforge.cli kernel-rewrite-controller` as a bounded subprocess,
 and integrates whatever patches it publishes through
-`integrate_controller_patches`. Communication operators ride this path like any
-other operator; a task declares its rank count and the controller passes
-`--nproc-per-node` down to forge-loop.
+`integrate_controller_patches`.
+
+The repositories are the trees the server imports (`served_source_trees`),
+each sealed at a base commit before the controller starts
+(`seal_campaign_baseline`). A served checkout is rewritten in place; an
+installed package is rewritten in a worktree of the session's snapshot of it,
+the history its specialists branch off. Integration refuses a publication
+naming any other repository and deploys a validated patch onto the served tree,
+so the E2E measurement runs the patched code. Communication operators ride
+this path like any other operator; a task declares its rank count and the
+controller passes `--nproc-per-node` down to forge-loop.
 
 Results are synthesized as `kernel_agent → orchestration` response messages with
 `source="kernel_entry_auto"` so orchestration's inbox looks the same as if the

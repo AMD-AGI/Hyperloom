@@ -107,13 +107,15 @@ def stop_at_rebaseline(monkeypatch):
     )
 
 
-def _controller_payload(applied: Path, patch_file: Path) -> dict:
+def _controller_payload(applied: Path, patch_file: Path, deploy_root: Path | None = None) -> dict:
     """Exactly what ``_default_validator`` sends for a controller publication."""
+    deployed = deploy_root or applied
     return {
         "kernel_id": "kernel:forge-loop:fwd_grouped_kernel_stage1:sglang:0.5.17:triton:mi355x",
         "patch_path": str(patch_file),
-        "target_file": str(applied / KERNEL_REL),
+        "target_file": str(deployed / KERNEL_REL),
         "repo": str(applied),
+        "kernel_repo": str(deployed),
         "patch_write_paths": [KERNEL_REL],
     }
 
@@ -188,6 +190,25 @@ async def test_the_patched_file_survives_the_apply(session_dir, applied, patch_f
         )
 
     assert (applied / KERNEL_REL).read_text(encoding="utf-8") == PATCHED_SRC
+
+
+async def test_a_patch_written_in_a_snapshot_worktree_lands_in_the_tree_the_server_imports(
+    session_dir, applied, patch_file, stop_at_rebaseline, through_apply, tmp_path
+):
+    served = tmp_path / "site-packages" / "sglang"
+    (served / KERNEL_REL).parent.mkdir(parents=True)
+    (served / KERNEL_REL).write_text(BASE_SRC, encoding="utf-8")
+
+    with pytest.raises(ReachedRebaseline):
+        await krh.integrate_handler(
+            _controller_payload(applied, patch_file, deploy_root=served),
+            session_dir=session_dir,
+            preapplied_git_patch=True,
+        )
+
+    assert (served / KERNEL_REL).read_text(encoding="utf-8") == PATCHED_SRC
+    _payload, result = through_apply[0]
+    assert result["status"] == "ok", result
 
 
 async def test_a_diff_without_the_flag_reads_the_committed_base(session_dir, smuggled, patch_file, stop_at_rebaseline):

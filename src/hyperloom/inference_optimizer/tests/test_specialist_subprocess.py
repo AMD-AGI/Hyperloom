@@ -2224,7 +2224,7 @@ def test_a_snapshot_refreshed_between_two_demoted_tasks_stays_readable_to_git(re
     import shutil
     import tempfile
 
-    from hyperloom.orchestrator.specialists.tree_snapshot import snapshot_tree
+    from hyperloom.inference_optimizer.tree_snapshot import snapshot_tree
 
     base = Path(tempfile.mkdtemp(prefix="d16s."))
     try:

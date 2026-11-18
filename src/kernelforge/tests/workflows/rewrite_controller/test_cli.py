@@ -15,6 +15,7 @@ from kernelforge import cli
 from kernelforge.workflows.rewrite_controller import ControllerRunError, run_controller
 from kernelforge.workflows.rewrite_controller import controller
 from kernelforge.workflows.rewrite_controller.contracts import (
+    REPOSITORIES_FILENAME,
     SERVING_CONTEXT_FILENAME,
     TRACE_EVIDENCE_FILENAME,
     WORKLOAD_FILENAME,
@@ -42,6 +43,7 @@ def _handoff(tmp_path: Path, *, omit: str = "") -> Path:
     for filename in (WORKLOAD_FILENAME, SERVING_CONTEXT_FILENAME, TRACE_EVIDENCE_FILENAME):
         if filename != omit:
             (root / filename).write_text(f"# {filename}\n", encoding="utf-8")
+    (root / REPOSITORIES_FILENAME).write_text(json.dumps({"repositories": [str(root)]}), encoding="utf-8")
     return root
 
 
@@ -94,10 +96,7 @@ def test_cli_initializes_a_fresh_no_opportunity_result(tmp_path: Path) -> None:
 def test_handoff_may_live_inside_the_cycle_output_directory(tmp_path: Path) -> None:
     cycle = tmp_path / "cycle-2"
     cycle.mkdir()
-    handoff = cycle / "handoff"
-    handoff.mkdir()
-    for filename in (WORKLOAD_FILENAME, SERVING_CONTEXT_FILENAME, TRACE_EVIDENCE_FILENAME):
-        (handoff / filename).write_text(f"# {filename}\n", encoding="utf-8")
+    handoff = _handoff(cycle)
 
     state = run_controller(
         handoff_dir=handoff,
