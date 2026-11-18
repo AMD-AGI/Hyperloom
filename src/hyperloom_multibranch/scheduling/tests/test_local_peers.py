@@ -119,6 +119,7 @@ from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox
 from hyperloom_multibranch.tests.fakes import RefusingCritic
 from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
 from hyperloom.inference_optimizer.cli import base_launch as cli_base_launch
+from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR, ENV_USER_DATA_PATH
 from hyperloom.measure.runner import suite_publish
 from hyperloom.measure.runner.suite_publish import SuitePublishError
 from hyperloom.measure.tests.bundle_factory import base_launch
@@ -321,6 +322,37 @@ def test_the_specialists_run_the_agent_cli_found_on_path(tmp_path: Path) -> None
 def test_without_the_agent_cli_the_peers_are_refused(tmp_path: Path) -> None:
     with pytest.raises(PeersUnavailable, match="claude CLI the specialists run is not on PATH"):
         specialist_command({"PATH": str(tmp_path), "ANTHROPIC_API_KEY": "dummy"})
+
+
+def test_the_claude_cli_install_sh_installed_off_path_is_run_from_where_it_installed_it(tmp_path: Path) -> None:
+    # install.sh puts the CLI in ~/.local/bin, on PATH only in a shell that sourced the kernel-agent env file
+    installed = tmp_path / "home" / ".local" / "bin"
+    installed.mkdir(parents=True)
+    cli = installed / "claude"
+    cli.write_text("#!/bin/sh\nexit 0\n")
+    cli.chmod(0o755)
+    env = {"PATH": str(tmp_path / "empty-bin"), "HOME": str(tmp_path / "home"), "ANTHROPIC_API_KEY": "dummy"}
+
+    assert specialist_command(env).executable == str(cli)
+
+
+def test_a_claude_cli_on_path_wins_over_the_installed_one(tmp_path: Path) -> None:
+    for directory in (tmp_path / "bin", tmp_path / "home" / ".local" / "bin"):
+        directory.mkdir(parents=True)
+        (directory / "claude").write_text("#!/bin/sh\nexit 0\n")
+        (directory / "claude").chmod(0o755)
+    env = {"PATH": str(tmp_path / "bin"), "HOME": str(tmp_path / "home"), "ANTHROPIC_API_KEY": "dummy"}
+
+    assert specialist_command(env).executable == str(tmp_path / "bin" / "claude")
+
+
+def test_without_the_claude_cli_on_path_or_where_install_sh_puts_it_the_peers_are_refused_naming_both(
+    tmp_path: Path,
+) -> None:
+    env = {"PATH": str(tmp_path / "empty-bin"), "HOME": str(tmp_path / "home"), "ANTHROPIC_API_KEY": "dummy"}
+
+    with pytest.raises(PeersUnavailable, match=r"not on PATH nor in .*/home/\.local/bin"):
+        specialist_command(env)
 
 
 def test_a_specialist_model_the_price_sheet_lacks_runs_on_its_tokens_and_says_so(
@@ -818,6 +850,46 @@ async def test_the_specialists_are_wired_the_frozen_base_launch_s_server_half(bu
 
     assert frozen is not None and built.wiring.base == server_base(frozen.launch)
     assert built.wiring.base.args
+
+
+def _workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A workspace root this process runs in outside any Hyperloom session, as a leg dispatched into an agent's
+    shell does: the root ``USER_DATA_PATH`` names, and no session directory pinned."""
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    monkeypatch.setenv(ENV_USER_DATA_PATH, str(root))
+    monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    return root
+
+
+async def test_a_session_renders_its_canonical_over_a_state_another_run_left_unreadable_at_the_workspace_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = _workspace_root(tmp_path, monkeypatch) / "state.json"
+    state.write_text("{", encoding="utf-8")
+    state.chmod(0)  # what an earlier run as another account leaves; root reads it anyway, and finds no JSON
+
+    async with _peers(tmp_path / "run", monkeypatch, WORKLOAD) as built:
+        canonical = yaml.safe_load((built.layout.toolbox / "canonical" / "canonical.yaml").read_text())["benchmark"]
+
+    assert canonical["model"] == WORKLOAD.model
+
+
+async def test_a_sessions_canonical_carries_no_base_another_run_froze_at_the_workspace_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    foreign = base_launch()
+    freeze_base(
+        _workspace_root(tmp_path, monkeypatch), replace(foreign, args=(*foreign.args, "--max-running-requests", "4321"))
+    )
+
+    async with _peers(tmp_path / "run", monkeypatch, WORKLOAD) as built:
+        canonical = yaml.safe_load((built.layout.toolbox / "canonical" / "canonical.yaml").read_text())["benchmark"]
+
+    assert "4321" not in str(canonical["envs"].get("EXTRA_SGLANG_ARGS", ""))
+    assert len(str(canonical["envs"]["ROCR_VISIBLE_DEVICES"]).split(",")) == WORKLOAD.tp
 
 
 async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -> None:

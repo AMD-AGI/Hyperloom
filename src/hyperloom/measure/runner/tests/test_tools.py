@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 from dataclasses import replace
 
@@ -104,6 +106,82 @@ def test_an_unknown_commit_is_refused(upstream, tmp_path, monkeypatch):
 
     with pytest.raises(ToolError, match="git fetch failed"):
         ensure_inferencex("a" * 40, tmp_path / "cache")
+
+
+#: A git that refuses a fetch from a repository on this machine unless its global configuration (or the system's, which
+#: the test leaves alone) trusts it, as git before 2.38 does with one another account owns: ``-c`` and
+#: ``GIT_CONFIG_COUNT`` do not count there. Like git, it judges the repository where it resolves to, so a link
+#: trusted as itself is refused.
+_OWNERSHIP_CHECKING_GIT = """#!/bin/sh
+if [ "$1" = fetch ]; then
+  for arg; do case "$arg" in /*|file://*) repo="${arg#file://}";; esac; done
+  if [ -n "$repo" ]; then
+    real=$(cd "$repo" && pwd -P) || exit 128
+  fi
+  if [ -n "$repo" ] && ! "%(git)s" config --global --get-all safe.directory | grep -qxF "$real"; then
+    echo "fatal: detected dubious ownership in repository at '$real'" >&2
+    exit 128
+  fi
+fi
+exec "%(git)s" "$@"
+"""
+
+
+@pytest.fixture
+def ownership_checking_git(tmp_path, monkeypatch):
+    real = shutil.which("git")
+    assert real is not None
+    bin_dir = tmp_path / "ownership-bin"
+    bin_dir.mkdir()
+    (bin_dir / "git").write_text(_OWNERSHIP_CHECKING_GIT % {"git": real})
+    (bin_dir / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+
+
+@pytest.mark.parametrize("prefix", ["", "file://"])
+@pytest.mark.usefixtures("ownership_checking_git")
+def test_a_local_repository_is_trusted_for_its_fetch_alone(upstream, tmp_path, monkeypatch, prefix):
+    repo, commit = upstream
+    monkeypatch.setenv("INFERENCEX_REPO", f"{prefix}{repo}")
+
+    tree = ensure_inferencex(commit, tmp_path / "cache")
+
+    assert _git(tree, "rev-parse", "HEAD") == commit
+    # nothing that runs after the fetch trusts it: no trust left in the checkout, none in the runner's home
+    assert not (tree / ".git" / tools._TRUST_CONFIG).exists()
+    assert not (tmp_path / "home").exists()
+
+
+@pytest.mark.usefixtures("ownership_checking_git")
+def test_a_local_repository_reached_through_a_link_is_fetched_from_and_trusted_where_it_resolves_to(
+    upstream, tmp_path, monkeypatch
+):
+    repo, commit = upstream
+    link = tmp_path / "mirror"
+    link.symlink_to(repo)
+    monkeypatch.setenv("INFERENCEX_REPO", str(link))
+
+    assert _git(ensure_inferencex(commit, tmp_path / "cache"), "rev-parse", "HEAD") == commit
+
+
+def test_a_repository_another_account_owns_is_fetched_by_a_git_that_checks_its_owner(upstream, tmp_path, monkeypatch):
+    if os.geteuid() != 0:
+        pytest.skip("making a repository another account's needs root")
+    repo, commit = upstream
+    for path in (repo, *repo.rglob("*")):
+        os.lchown(path, 65534, 65534)
+    probe = tmp_path / "probe"
+    _git(tmp_path, "init", "-q", str(probe))
+    plain = subprocess.run(["git", "-C", str(probe), "fetch", "-q", "--depth", "1", str(repo), commit], check=False)
+    if plain.returncode == 0:
+        pytest.skip("this git fetches from a repository another account owns without asking safe.directory")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+
+    assert _git(ensure_inferencex(commit, tmp_path / "cache"), "rev-parse", "HEAD") == commit
 
 
 @pytest.fixture
