@@ -41,6 +41,9 @@ _BOARD_POLICIES: dict[str, BoardPolicy] = {
     "w7900": BoardPolicy(validated_frameworks=_VLLM_ONLY, targeted_build_validated=False),
     "w7900d": BoardPolicy(validated_frameworks=_VLLM_ONLY, targeted_build_validated=False),
     "radeon8060s": BoardPolicy(),
+    # NVIDIA GB10 (RTX Spark / DGX Spark class). vLLM is the only framework validated here;
+    # the targeted-build (AITER) path is ROCm-only, and GEAK cannot pin an AMD identity.
+    "gb10": BoardPolicy(validated_frameworks=_VLLM_ONLY, targeted_build_validated=False),
 }
 
 #: A bare arch resolves only to a board marked ``names_its_arch`` (gfx942 to mi300x, gfx950 to mi355x); gfx1100,

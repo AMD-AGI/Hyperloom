@@ -46,6 +46,16 @@ def clock(monkeypatch) -> _Clock:
     return fake
 
 
+@pytest.fixture(autouse=True)
+def amd_host(monkeypatch) -> None:
+    """Every case here describes an AMD host: the platform's own SMI reads its cards.
+
+    The check picks its tool by what is on ``PATH``, so without this a developer's NVIDIA box would take the
+    ``nvidia-smi`` path and fail each case for a reason that has nothing to do with the case.
+    """
+    monkeypatch.setattr(gpus, "_smi_tool", lambda: "amd-smi")
+
+
 def _gate(cancel=lambda: "") -> RoundGate:
     return RoundGate(Deadlines(boot_sec=600, round_sec=3600, eval_sec=600, silence_sec=600), cancel, 0.0)
 

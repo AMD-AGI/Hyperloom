@@ -148,6 +148,19 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
             vendor_peak_tflops={"bf16": 60.0, "fp16": 60.0},
             aliases=("Radeon 8060S",),
         ),
+        # NVIDIA GB10 Grace Blackwell Superchip. Not an AMD board: carried so a session on this class
+        # of machine resolves an ISA and has roofline peaks instead of failing preflight. The figures
+        # below are the vendor's published dense rates, converted from its sparse FP4 headline; the
+        # capacity is what the driver reports on the part. None of it is measured by us.
+        GpuBoard(
+            "gb10",
+            "sm_121",
+            48,
+            32.0,
+            273.0,
+            _matrix_peaks(bf16=125.0, fp8=250.0, fp4=500.0, fp32=31.0),
+            aliases=("RTX Spark N1X", "NVIDIA GB10", "GB10 Grace Blackwell", "DGX Spark"),
+        ),
     )
 }
 
