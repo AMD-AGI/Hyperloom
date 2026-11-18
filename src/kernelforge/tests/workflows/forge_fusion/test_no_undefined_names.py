@@ -12,6 +12,7 @@ from pathlib import Path
 
 import kernelforge.workflows.forge_fusion.agent_selection
 import kernelforge.workflows.forge_fusion.author
+import kernelforge.workflows.forge_fusion.author_guard
 import kernelforge.workflows.forge_fusion.pipeline
 import kernelforge.workflows.forge_fusion.compile_pass_claim
 import kernelforge.workflows.forge_fusion.discover
@@ -28,6 +29,7 @@ import kernelforge.workflows.forge_fusion.validate
 MODULES = (
     kernelforge.workflows.forge_fusion.agent_selection,
     kernelforge.workflows.forge_fusion.author,
+    kernelforge.workflows.forge_fusion.author_guard,
     kernelforge.workflows.forge_fusion.pipeline,
     kernelforge.workflows.forge_fusion.compile_pass_claim,
     kernelforge.workflows.forge_fusion.discover,
