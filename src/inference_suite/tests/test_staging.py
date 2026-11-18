@@ -60,7 +60,7 @@ _SUITE_INSTALL_SH = _SRC / "inference_suite" / "install.sh"
 _SHA = "a" * 64
 _SITE = "agentx-python/lib/python3.12/site-packages"
 _RECORDS = {f"{_SITE}/{name.replace('-', '_')}-{version}.dist-info/RECORD" for name, version in WHEELS.items()}
-_PATCHED = (f"{_SITE}/{aiperf_source.PARSER_FILE}", f"{_SITE}/{aiperf_source.METRIC_FILE}")
+_PATCHED = tuple(f"{_SITE}/{relative}" for relative, _ in aiperf_source.SOURCES)
 _REQUIREMENTS_TEXT = "agentx-harness==1.0.13\n"
 
 
@@ -230,7 +230,7 @@ def test_staging_patches_the_harness_to_export_error_osl_and_the_manifest_names_
     for relative in _PATCHED:
         assert files[relative] == hashlib.sha256((root / relative).read_bytes()).hexdigest()
     record = (root / _SITE / "agentx_harness-1.0.13.dist-info" / "RECORD").read_bytes().decode()
-    for relative in (aiperf_source.PARSER_FILE, aiperf_source.METRIC_FILE):
+    for relative, _ in aiperf_source.SOURCES:
         line = aiperf_source.record_line(relative, (root / _SITE / relative).read_bytes())
         assert line in record, "the RECORD the manifest hashes lists the patched bytes"
 

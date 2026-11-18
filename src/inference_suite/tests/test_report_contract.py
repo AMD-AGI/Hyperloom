@@ -14,8 +14,10 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors._gpu_metrics import gpu_metrics_from_report
 from inference_suite.contracts import (
+    AGENTX_CONTEXT_OVERFLOW,
     FIXED_METRIC_KEYS,
     GPU_METRIC_KEYS,
+    READABLE_REPORT_SCHEMAS,
     REPORT_KEYS,
     REPORT_SCHEMA,
     AgentxResult,
@@ -257,6 +259,38 @@ def test_agentx_section_round_trips_with_its_error_rate_definition() -> None:
     document["agentx"]["error_rate_definition"] = "elsewhere/1"
     with pytest.raises(ReportError, match="error rate definition"):
         Report.from_document(document)
+
+
+def _agentx_document(**counts: int | None) -> dict[str, object]:
+    agentx = AgentxResult(
+        counts={**dict.fromkeys(AGENTX_COUNT_KEYS, 1), **counts},
+        throughput=dict.fromkeys(AGENTX_THROUGHPUT_KEYS),
+        latency_seconds=dict.fromkeys(AGENTX_LATENCY_KEYS, 0.5),
+        e2e_norm_intvty={"p50": 30.0, "p90": None},
+        stopped_by_threshold=False,
+        fast_mode=False,
+    )
+    return _document(_report(workload_kind=WorkloadKind.AGENTX, fixed=None, agentx=agentx))
+
+
+def test_a_report_of_the_first_schema_reads_with_its_overflow_count_unknown() -> None:
+    document = _agentx_document()
+    del document["agentx"]["counts"][AGENTX_CONTEXT_OVERFLOW]
+    document["schema"] = "inference-suite-report/1"
+
+    assert Report.from_document(document).agentx.counts[AGENTX_CONTEXT_OVERFLOW] is None
+    assert Report.from_document({**_document(_report()), "schema": "inference-suite-report/1"}) == _report()
+    assert "inference-suite-report/1" in READABLE_REPORT_SCHEMAS
+
+
+def test_a_report_of_the_current_schema_states_its_overflow_count() -> None:
+    document = _agentx_document(context_overflow=3)
+    assert Report.from_document(document).agentx.counts[AGENTX_CONTEXT_OVERFLOW] == 3
+    del document["agentx"]["counts"][AGENTX_CONTEXT_OVERFLOW]
+    with pytest.raises(ReportError, match=f"missing {AGENTX_CONTEXT_OVERFLOW}"):
+        Report.from_document(document)
+    with pytest.raises(ReportError, match="always counted"):
+        _agentx_document(successful=None)
 
 
 _POWER_JSON = {
