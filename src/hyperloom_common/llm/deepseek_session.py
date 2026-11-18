@@ -69,6 +69,7 @@ _USAGE_WIRE_NAMES: dict[str, str] = {
     "inputTokens": "input_tokens",
     "outputTokens": "output_tokens",
     "cacheReadTokens": "cache_read_input_tokens",
+    "cacheWriteTokens": "cache_creation_input_tokens",
     "reasoningTokens": "reasoning_output_tokens",
 }
 
@@ -262,9 +263,15 @@ def usage_from_events(events: list[dict[str, Any]]) -> dict[str, int]:
         seen = True
         for name, count in step.items():
             totals[name] = totals.get(name, 0) + count
-        # ``inputTokens`` excludes the cached prefix, and every step resends the whole context, so one step's
-        # uncached plus cached input is that request's context size; the largest of them is the turn's peak.
-        peak = max(peak, step.get("input_tokens", 0) + step.get("cache_read_input_tokens", 0))
+        # ``inputTokens`` excludes the cached prefix and the prefix being cached, and every step resends the whole
+        # context, so one step's uncached, cache-read and cache-written input is that request's context size; the
+        # largest of them is the turn's peak.
+        peak = max(
+            peak,
+            step.get("input_tokens", 0)
+            + step.get("cache_read_input_tokens", 0)
+            + step.get("cache_creation_input_tokens", 0),
+        )
     if not seen:
         return {}
     totals["context_tokens_peak"] = peak
