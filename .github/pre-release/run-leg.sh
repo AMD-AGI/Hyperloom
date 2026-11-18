@@ -62,7 +62,10 @@
 #
 # Secrets: the LLM key is written only into the leg's 0600 .env (Hyperloom's setup
 # treats that file as authoritative and drops ambient ANTHROPIC_* values), and the
-# EXIT trap scrubs it. Nothing here prints a secret value.
+# EXIT trap scrubs it. Nothing here prints a secret value. Setup reads credentials
+# from that .env only when no other account can write the directory it sits in, so
+# the runner makes the leg workspace writable by its own account alone, whatever
+# group write a shared LEG_WORK_DIR (setgid, a group umask, a default ACL) hands down.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -393,6 +396,10 @@ main() {
 
   ROOT="${LEG_WORK_DIR%/}/${CI_VERSION}/${LEG}"
   mkdir -p "$ROOT" "$USER_DATA_PATH"
+  # The workspace holds the leg's credential .env, which setup refuses to read
+  # from a directory its group or others can write (see Secrets above).
+  chmod go-w "$ROOT" 2>/dev/null \
+    || die_usage "cannot make the leg workspace $ROOT writable by this account alone (is it another account's?)"
   # One runner per workspace: a second start would drive the same session twice.
   if command -v flock >/dev/null 2>&1; then
     exec 9>"$ROOT/.run-leg.lock"
