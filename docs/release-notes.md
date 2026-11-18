@@ -30,8 +30,11 @@ it.
   its engine flags alone, so the `--host` and `--server-port` every round
   passes, and recipe flags such as `--tool-call-parser`, were refused as
   `flag_unknown` (ATOM 0.1.8 and 0.1.10): no ATOM round could start. It now
-  judges with the parser ATOM's server builds. The runner also names the served
-  model with ATOM's `--served-model-name`, as it does for SGLang and vLLM.
+  judges with the parser ATOM's OpenAI server builds. The runner also names the
+  served model with ATOM's `--served-model-name`, as it does for SGLang and
+  vLLM, so ATOM needs v0.1.6 or later, and a frozen ATOM base whose own args
+  carry `--served-model-name` is refused on resume as setting a runner-owned
+  flag: start a new session.
 - **An ATOM AgentX baseline with its prefix cache on is kept.** The check that
   refuses a cacheless AgentX baseline took ATOM's cache as off unless the launch
   passed `--enable_prefix_caching`; ATOM caches by default. It now refuses only

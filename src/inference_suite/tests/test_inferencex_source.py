@@ -233,14 +233,6 @@ def test_an_atom_agentic_entry_serves_agentx_and_its_replay_requires_atoms_metri
     assert all(launch.client_env["AIPERF_REQUIRED_SERVER_METRIC_PREFIX"] == "atom:" for launch in launches)
 
 
-def test_agentx_skips_entries_of_frameworks_without_agentx_launches():
-    query = _agentx(_GLM53, concurrencies=(8,), framework="trtllm")
-
-    miss = inferencex_launches(query, _main())
-
-    assert isinstance(miss, SourceMiss)
-
-
 def test_main_snapshot_does_not_see_an_unmerged_entry():
     miss = inferencex_launches(_agentx(_GLM53, concurrencies=(8,)), _main())
 

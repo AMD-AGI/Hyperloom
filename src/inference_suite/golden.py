@@ -40,7 +40,9 @@ GOLDEN_OWNED_FLAGS = frozenset(
         "draft-model",
     }
 )
-GOLDEN_OWNED_FLAG_PREFIXES = ("spec-decode-acceptance", "speculative-acceptance")
+#: ATOM's forced acceptance, ``--spec-decode-acceptance-length`` or ``--spec-decode-acceptance-rate``.
+SIMULATED_FLAG_PREFIXES = ("spec-decode-acceptance",)
+GOLDEN_OWNED_FLAG_PREFIXES = (*SIMULATED_FLAG_PREFIXES, "speculative-acceptance")
 # InferenceX does not simulate acceptance once vLLM's adaptive verification is on, so turning it on
 # silently drops the golden acceptance length.
 _REJECTION_SAMPLER = "rejection_sample_method"
@@ -57,8 +59,6 @@ GOLDEN_OWNED_SPEC_CONFIG_KEYS = frozenset(
     }
 )
 GOLDEN_OWNED_ENV_PREFIXES = ("SGLANG_SIMULATE_ACC_",)
-#: ATOM's forced acceptance, ``--spec-decode-acceptance-length`` or ``--spec-decode-acceptance-rate``.
-SIMULATED_FLAG_PREFIXES = ("spec-decode-acceptance",)
 #: vLLM's ``--speculative-config`` keys that simulate acceptance: the synthetic sampler and the length it forces.
 #: ``rejection_sample_method`` simulates only when it names the synthetic sampler.
 SIMULATED_SPEC_CONFIG_KEYS = (_REJECTION_SAMPLER, _SYNTHETIC_LENGTH)

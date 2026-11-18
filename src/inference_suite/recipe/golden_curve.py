@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 
@@ -162,14 +163,14 @@ def _sglang_draft(occurrences: list[tuple[str, str]]) -> tuple[dict[str, Any], s
     return {"method": algorithm, "num_speculative_tokens": tokens, "model": model}, verify
 
 
-def _atom_draft(occurrences: list[tuple[str, str]]) -> dict[str, Any]:
+def _atom_draft(occurrences: list[tuple[str, str]]) -> tuple[dict[str, Any], str | None]:
     values = dict(occurrences)
     method = values.get("method", "")
     if not method:
-        return {}
-    # ATOM drafts one token when the launch names no count.
+        return {}, None
+    # ATOM drafts one token when the launch names no count. InferenceX keys no ATOM curve by its verifier.
     tokens = _count(values.get("num-speculative-tokens")) or 1
-    return {"method": method, "num_speculative_tokens": tokens, "model": values.get("draft-model", "")}
+    return {"method": method, "num_speculative_tokens": tokens, "model": values.get("draft-model", "")}, None
 
 
 def _vllm_draft(occurrences: list[tuple[str, str]]) -> tuple[dict[str, Any], str]:
@@ -178,17 +179,19 @@ def _vllm_draft(occurrences: list[tuple[str, str]]) -> tuple[dict[str, Any], str
     return spec, "block" if method == _SYNTHETIC else str(method or "standard")
 
 
+#: How each framework's launch names its draft: the draft config InferenceX keys a curve by, and its verifier.
+DRAFTS: Mapping[str, Callable[[list[tuple[str, str]]], tuple[dict[str, Any], str | None]]] = MappingProxyType(
+    {"sglang": _sglang_draft, "vllm": _vllm_draft, "atom": _atom_draft}
+)
+
+
 def _golden_plan(
     launch: SourceLaunch, query: LaunchQuery, bundle: RepoBundle, base_model: str | None
 ) -> GoldenRequest | SourceGolden | None:
     """What ``golden_length`` is asked for ``launch``; ``None`` when it drafts nothing, else why it is not asked."""
-    occurrences = argv_flag_occurrences(launch.args)
-    if launch.framework == "sglang":
-        spec, verify = _sglang_draft(occurrences)
-    elif launch.framework == "vllm":
-        spec, verify = _vllm_draft(occurrences)
-    else:
-        raise RecipeSourceError(f"a {launch.framework} launch serves no AgentX workload")
+    if launch.framework not in _FORCES:
+        raise RecipeSourceError(f"no golden acceptance is forced on a {launch.framework} cookbook launch")
+    spec, verify = DRAFTS[launch.framework](argv_flag_occurrences(launch.args))
     if not spec:
         return None
     adaptive = adaptive_verification_reason(spec)
@@ -212,14 +215,27 @@ def golden_requests(
     return tuple(requests.values())
 
 
-def _simulated(launch: SourceLaunch, request: GoldenRequest, value: float) -> SourceLaunch:
-    """``launch`` forcing ``value`` as its acceptance length, as InferenceX's ``build_overrides`` forces it."""
-    if launch.framework == "sglang":
-        settings = (f"{value:g}", _SIMULATION_METHOD, _SIMULATION_TOKEN_MODE)
-        return dataclasses.replace(launch, env={**launch.env, **dict(zip(_SGLANG_SIMULATION, settings, strict=True))})
+def _force_sglang(launch: SourceLaunch, request: GoldenRequest, value: float) -> SourceLaunch:
+    settings = (f"{value:g}", _SIMULATION_METHOD, _SIMULATION_TOKEN_MODE)
+    return dataclasses.replace(launch, env={**launch.env, **dict(zip(_SGLANG_SIMULATION, settings, strict=True))})
+
+
+def _force_vllm(launch: SourceLaunch, request: GoldenRequest, value: float) -> SourceLaunch:
     spec = {**request.spec, "rejection_sample_method": _SYNTHETIC, "synthetic_acceptance_length": value}
     args = (*without_speculative_config(launch.args), f"--{SPECULATIVE_CONFIG_FLAG}", json.dumps(spec))
     return dataclasses.replace(launch, args=args)
+
+
+#: How a cookbook launch is made to force its golden acceptance length, as InferenceX's ``build_overrides`` forces it.
+#: Only the cookbooks that serve AgentX are here: ATOM's catalog serves fixed workloads only.
+_FORCES: Mapping[str, Callable[[SourceLaunch, GoldenRequest, float], SourceLaunch]] = MappingProxyType(
+    {"sglang": _force_sglang, "vllm": _force_vllm}
+)
+
+
+def _simulated(launch: SourceLaunch, request: GoldenRequest, value: float) -> SourceLaunch:
+    """``launch`` forcing ``value`` as its acceptance length."""
+    return _FORCES[launch.framework](launch, request, value)
 
 
 def with_golden(launch: SourceLaunch, query: LaunchQuery, table: GoldenTable, base_model: str | None) -> SourceLaunch:
