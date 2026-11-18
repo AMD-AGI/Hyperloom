@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -34,6 +35,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
 )
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus, Conclusion, DedupStatus, InboxKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.local.blackboard import CLAIMS_DIR
 from hyperloom_multibranch.blackboard.local.claims import LeaseStore, LeaseTaken
 from hyperloom_multibranch.blackboard.local.segments import EntryKind
 from hyperloom_multibranch.blackboard.tests.factories import TTL, FakeClock, delta, intent, judgement, request, result
@@ -381,6 +383,69 @@ async def test_a_change_measured_on_the_state_is_refused_at_submit_but_not_a_pro
     assert (refused[-1]["found"], refused[-1]["matched"], refused[-1]["holders"]) == ("tested", ["r1"], [])
 
 
+async def _carried(open_as: Open, request_id: str) -> ClaimKey:
+    """s1's claim on its intent on c0, carried by its test ``request_id``."""
+
+    target = intent("s1", "c0")
+    claim = await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(target, ACTION, ttl_seconds=TTL)
+    toolbox = open_as(Role.TOOLBOX)
+    await toolbox.write_request(request(request_id, target))
+    await toolbox.attach_request(claim.key, request_id, ttl_seconds=TTL)
+    return claim.key
+
+
+async def _status(open_as: Open, key: ClaimKey) -> ClaimStatus:
+    (claim,) = [claim for claim in (await open_as(Role.OBSERVER).snapshot()).claims if claim.key == key]
+    return claim.status
+
+
+async def test_a_claim_a_test_carries_stays_held_with_no_renewal_until_its_result_completes_it(
+    open_as: Open, clock: FakeClock
+) -> None:
+    key = await _carried(open_as, "r1")
+    s2 = open_as(Role.SPECIALIST_RUNTIME, "s2")
+    clock.advance(10 * TTL)
+
+    with pytest.raises(ClaimHeld) as held:
+        await s2.acquire(intent("s2", "c0"), ACTION, ttl_seconds=TTL)
+    in_flight = await _status(open_as, key)
+    await open_as(Role.TOOLBOX).write_result(result("r1"))
+    with pytest.raises(AlreadyTested):
+        await s2.acquire(intent("s2", "c0"), ACTION, ttl_seconds=TTL)
+
+    assert held.value.answer.status is DedupStatus.IN_PROGRESS
+    assert (in_flight, await _status(open_as, key)) == (ClaimStatus.HELD, ClaimStatus.COMPLETED)
+
+
+@pytest.mark.parametrize("ending", ["withdrawn", "measurement failed"])
+async def test_a_claim_whose_test_measured_nothing_reads_released_and_is_free_to_claim(
+    open_as: Open, ending: str
+) -> None:
+    key = await _carried(open_as, "r1")
+    toolbox = open_as(Role.TOOLBOX)
+    if ending == "withdrawn":
+        await toolbox.write_withdrawal(Withdrawal("r1", "cancelled"))
+    else:
+        await toolbox.write_result(result("r1", validity=Validity.MEASUREMENT_FAILED))
+
+    status = await _status(open_as, key)
+    taken = await open_as(Role.SPECIALIST_RUNTIME, "s2").acquire(intent("s2", "c0"), ACTION, ttl_seconds=TTL)
+
+    assert status is ClaimStatus.RELEASED
+    assert taken.holder == "s2"
+
+
+async def test_a_carried_claim_follows_its_test_whatever_status_its_file_stores(open_as: Open, root: Path) -> None:
+    """A claim file written before an attached claim's status was derived may say released, or completed, early."""
+    key = await _carried(open_as, "r1")
+    LeaseStore(root / CLAIMS_DIR).change(key, lambda claim: replace(claim, status=ClaimStatus.RELEASED))
+
+    in_flight = await _status(open_as, key)
+    await open_as(Role.TOOLBOX).write_result(result("r1"))
+
+    assert (in_flight, await _status(open_as, key)) == (ClaimStatus.HELD, ClaimStatus.COMPLETED)
+
+
 async def test_an_expired_claim_can_be_taken_over_and_its_old_holder_loses_it(open_as: Open, clock: FakeClock) -> None:
     s1 = open_as(Role.SPECIALIST_RUNTIME, "s1")
     first = await s1.acquire(intent("s1", "c0"), ACTION, ttl_seconds=TTL)
@@ -483,7 +548,7 @@ async def test_losing_the_race_for_a_free_claim_is_refused_as_held_and_logged(
     s1, s2 = open_as(Role.SPECIALIST_RUNTIME, "s1"), open_as(Role.SPECIALIST_RUNTIME, "s2")
     winner = await s1.acquire(intent("s1", "c0"), ACTION, ttl_seconds=TTL)
 
-    def lose(claim: object, now: float) -> None:
+    def lose(claim: object, now: float, tests: object) -> None:
         raise LeaseTaken(winner)
 
     monkeypatch.setattr(s2._leases, "acquire", lose)

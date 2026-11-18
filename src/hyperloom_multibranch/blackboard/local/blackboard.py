@@ -122,7 +122,7 @@ from hyperloom_multibranch.blackboard import codec
 from hyperloom_multibranch.blackboard.local import feeds, views
 from hyperloom_multibranch.blackboard.local.agent_manifest import SOURCE_FIELD, sanitized_manifest
 from hyperloom_multibranch.blackboard.local.feeds import BriefTriggers
-from hyperloom_multibranch.blackboard.local.claims import LeaseStore, LeaseTaken, effective, is_live
+from hyperloom_multibranch.blackboard.local.claims import LeaseStore, LeaseTaken, effective
 from hyperloom_multibranch.blackboard.local.segments import (
     Entry,
     EntryKind,
@@ -524,6 +524,11 @@ class LocalBlackboard(
         with self._lock:
             return self._segment.append(build)
 
+    def _claims(self, state: BlackboardState, now: float) -> list[Claim]:
+        """The claims in force as their holders see them at ``now``, the tests they carry read from ``state``."""
+
+        return [effective(claim, now, state) for claim in self._leases.all_current()]
+
     def _check_holds(self, claim: Claim) -> None:
         """Whether the caller may renew or release ``claim``: its branch's runtime, or the toolbox carrying its test."""
 
@@ -759,7 +764,7 @@ class LocalBlackboard(
         elsewhere = found.elsewhere
         if found.exact:
             return DedupAnswer(key, action_fingerprint, DedupStatus.TESTED, records=found.exact, elsewhere=elsewhere)
-        live = [claim for claim in self._leases.all_current() if is_live(claim, now)]
+        live = [claim for claim in self._claims(state, now) if claim.status is ClaimStatus.HELD]
         here = _claims_here(key, action_fingerprint, live)
         if here:
             return DedupAnswer(key, action_fingerprint, DedupStatus.IN_PROGRESS, claim=here[0], elsewhere=elsewhere)
@@ -796,7 +801,7 @@ class LocalBlackboard(
                 ClaimStatus.HELD,
             )
             try:
-                claim = self._leases.acquire(wanted, now)
+                claim = self._leases.acquire(wanted, now, state)
             except LeaseTaken as taken:
                 answer = replace(answer, status=DedupStatus.IN_PROGRESS, claim=taken.claim)
                 refusal = ClaimHeld(answer)
@@ -826,7 +831,7 @@ class LocalBlackboard(
             self._check_holds(claim)
             return replace(claim, heartbeat_at=now, expires_at=now + ttl_seconds)
 
-        return effective(self._leases.change(key, renewed), now)
+        return effective(self._leases.change(key, renewed), now, self._state())
 
     async def attach_request(self, key: ClaimKey, request_id: str, *, ttl_seconds: float) -> Claim:
         self._require(Role.TOOLBOX)
@@ -845,7 +850,7 @@ class LocalBlackboard(
                 raise ClaimLost(f"the claim on {key.parent_commit} is not the one {request_id} measures")
             return replace(claim, request_id=request_id, heartbeat_at=now, expires_at=now + ttl_seconds)
 
-        return effective(self._leases.change(key, attached), now)
+        return effective(self._leases.change(key, attached), now, state)
 
     def _refuse_a_change_tested_first(self, state: BlackboardState, key: ClaimKey, request: TestRequest) -> None:
         """Raise ``ClaimLost`` for an explore of a change another branch asked first to explore on the same commit, while
@@ -967,9 +972,13 @@ class LocalBlackboard(
     async def poll(self, branch: str, cursor: str = "") -> InboxPage:
         if self._briefs is None:
             return feeds.poll(self._state(), branch, cursor)
-        now = self._clock()
-        held = [claim for claim in self._leases.all_current() if claim.holder == branch and is_live(claim, now)]
-        return feeds.poll(self._state(), branch, cursor, self._briefs, held)
+        state = self._state()
+        held = [
+            claim
+            for claim in self._claims(state, self._clock())
+            if claim.holder == branch and claim.status is ClaimStatus.HELD
+        ]
+        return feeds.poll(state, branch, cursor, self._briefs, held)
 
     async def record_llm_usage(self, usage: LlmUsage) -> LlmUsageRecord:
         self._require(Role.SPECIALIST_RUNTIME, Role.SCHEDULER)
@@ -1021,9 +1030,8 @@ class LocalBlackboard(
     async def startup_brief(self, start_commit: str) -> StartupBrief:
         state = self._state()
         view = views.lineage_view(state)
-        now = self._clock()
-        claims = self._leases.all_current()
-        held = {claim.key.intent_fingerprint for claim in claims if is_live(claim, now)}
+        claims = self._claims(state, self._clock())
+        held = {claim.key.intent_fingerprint for claim in claims if claim.status is ClaimStatus.HELD}
         refused = refused_replays(claims, view, start_commit)
         unfinished = unfinished_leads(state, held, refused)
         return replace(views.startup_brief(state, view, start_commit), unfinished=unfinished)
@@ -1075,8 +1083,8 @@ class LocalBlackboard(
 
     async def snapshot(self) -> BlackboardSnapshot:
         now = self._clock()
-        claims = tuple(effective(claim, now) for claim in self._leases.all_current())
-        return views.snapshot(self._state(), claims, now)
+        state = self._state()
+        return views.snapshot(state, tuple(self._claims(state, now)), now)
 
 
 __all__ = [
