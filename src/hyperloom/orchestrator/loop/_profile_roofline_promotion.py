@@ -6,20 +6,15 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping
+from typing import Any
 
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
 from ._promote_outcome import _PromoteOutcome
+from ..actions.executors.profile import profile_trace_path
 from ..state.task_registry import Task
 
 log = logging.getLogger(__name__)
-
-
-def _profile_trace_path(result: Mapping[str, Any]) -> Any:
-    if result.get("trace_input_ready") is False:
-        return None
-    return result.get("main_trace_path") or (result.get("trace_files") or [None])[0]
 
 
 class ProfileRooflineMixin:
@@ -36,7 +31,7 @@ class ProfileRooflineMixin:
         # PRELUDE initial roofline was deferred while replay ran.
         await self._coord.phase_prelude.maybe_enqueue_prelude_initial_analysis_after_baseline()
 
-    def _record_failed_profile(self, trace_path: Any) -> None:
+    def _record_failed_profile(self, trace_path: str) -> None:
         self.shared_state.last_profile_status = "failed"
         self.shared_state.last_profile_workload = {}
         if not trace_path:
@@ -45,8 +40,8 @@ class ProfileRooflineMixin:
         self.shared_state.last_profile_args = ""
         self.shared_state.last_profile_workload_action = ""
 
-    def _adopt_profile_trace(self, result: dict, task: "Task | None", trace_path: Any) -> str:
-        self.shared_state.last_profile_trace = str(trace_path)
+    def _adopt_profile_trace(self, result: dict, task: "Task | None", trace_path: str) -> str:
+        self.shared_state.last_profile_trace = trace_path
         self.shared_state.last_profile_launch_evidence_path = str(result.get("launch_evidence_path") or "")
         self.shared_state.last_profile_status = "succeeded"
         profile_args = ""
@@ -92,17 +87,15 @@ class ProfileRooflineMixin:
                 "profile_args": None,
                 "output_throughput": result.get("output_throughput"),
             }
-        trace_path = _profile_trace_path(result)
+        trace_path = profile_trace_path(result)
         profile_status = str(result.get("status") or "")
         measurement_status = str(result.get("measurement_status") or profile_status)
         audit_extras["measurement_status"] = measurement_status
-        audit_extras["trace_capture_status"] = result.get("trace_capture_status")
-        audit_extras["trace_capture_reason"] = (result.get("trace_capture") or {}).get("reason")
         if profile_status == "failed" or result.get("error_class") == "no_trace_files":
             outcome.verdict = Verdict.FAILED
             self._record_failed_profile(trace_path)
         elif trace_path:
-            audit_extras["trace_path"] = str(trace_path)
+            audit_extras["trace_path"] = trace_path
             audit_extras["profile_args"] = self._adopt_profile_trace(result, task, trace_path)
         # Host-side rewrite evidence is independent of the trace: it answers
         # "which host-side work is redundant", which no kernel timeline can, and

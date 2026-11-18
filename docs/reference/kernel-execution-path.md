@@ -264,7 +264,7 @@ Collective candidate extraction:
 ## Artifact layout
 
 All kernel tool output lands under
-`$USER_DATA_PATH/kernel-agent/runs/<session_id>/`:
+`$SESSION_DIR/kernel-agent/runs/<session_id>/`:
 
 ```
 runs/<session_id>/

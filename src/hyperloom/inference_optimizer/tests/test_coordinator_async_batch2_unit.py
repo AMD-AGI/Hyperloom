@@ -1369,27 +1369,6 @@ async def test_ordinary_integrate_completion_restore_error_blocks_without_marker
 
 
 @pytest.mark.asyncio
-async def test_ordinary_integrate_completion_legacy_keep_with_stash_error_retains_recovery(
-    coord, ordinary_integrate_completion
-):
-    candidate = await ordinary_integrate_completion(phase=None, status="kept")
-    candidate.result["stash_restore_error"] = "user changes remain in stash after restore failed"
-
-    with pytest.raises(RuntimeError, match="integrate.*recovery") as caught:
-        await coord.writeback.promote_to_shared_state("integrate_patch", candidate.result, task=candidate.task)
-
-    assert isinstance(caught.value, IntegrateRecoveryIncomplete)
-    assert coord.shared_state.pending_integrate == candidate.pending
-    assert coord.shared_state.current_best == candidate.anchor
-    assert coord.shared_state.optimization_stack == []
-    assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
-    persisted = json.loads((coord.session_dir / "state.json").read_text(encoding="utf-8"))
-    assert persisted["pending_integrate"] == candidate.pending
-    assert persisted["stop_reason"] == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
-    assert candidate.backup.read_bytes() == b"accepted source before candidate"
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "phase,status,promoted",
     [

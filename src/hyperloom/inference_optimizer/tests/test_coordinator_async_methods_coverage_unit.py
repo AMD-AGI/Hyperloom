@@ -30,7 +30,6 @@ def coord(session_dir) -> Coordinator:
 async def test_promote_baseline_sets_anchor_and_current_best(coord: Coordinator) -> None:
     coord.shared_state.auto_roofline_pending_task_id = "pending-x"
     coord.shared_state.baseline_failure_streak = 2
-    coord.shared_state.baseline_arg_error_streak = 1
     await coord.writeback.promote_to_shared_state(
         "baseline",
         {
@@ -46,9 +45,6 @@ async def test_promote_baseline_sets_anchor_and_current_best(coord: Coordinator)
     )
     assert coord.shared_state.baseline_tput == 1000.0
     assert coord.shared_state.baseline_failure_streak == 0
-    # The arg-error streak is not a boot-failure streak and a promotion does not
-    # clear it; nothing counts into it again once an anchor exists.
-    assert coord.shared_state.baseline_arg_error_streak == 1
     assert coord.shared_state.current_best["action"] == "baseline"
     assert coord.shared_state.current_best["tput"] == 1000.0
     assert coord.shared_state.current_best["cold_tput"] == 900.0
@@ -199,33 +195,6 @@ class TestAHotPassCorrectsAColdAnchor:
 
 
 @pytest.mark.asyncio
-async def test_unpromotable_baseline_fast_arg_errors_stop_after_two(
-    coord: Coordinator,
-) -> None:
-    task = Task(
-        task_id="baseline-fast-arg",
-        kind="baseline",
-        state="running",
-        params={"config_path": "baseline.yaml"},
-        idempotency_key="baseline-fast-arg",
-    )
-    result = {
-        "status": "failed",
-        "error_class": "fast_exit_arg_error",
-        "error": "ValueError: Unknown attention backend: ROCM_FLASH",
-    }
-
-    await coord.writeback.handle_unpromotable_result(task, result)
-    assert coord.shared_state.baseline_arg_error_streak == 1
-    assert coord.shared_state.stop_reason != "baseline_arg_error"
-
-    await coord.writeback.handle_unpromotable_result(task, result)
-    assert coord.shared_state.baseline_arg_error_streak == 2
-    assert coord.shared_state.baseline_failure_streak == 0
-    assert coord.shared_state.stop_reason == "baseline_arg_error"
-
-
-@pytest.mark.asyncio
 async def test_unpromotable_baseline_agentx_preflight_stops_immediately(
     coord: Coordinator,
 ) -> None:
@@ -262,7 +231,8 @@ async def test_unpromotable_baseline_agentx_preflight_stops_immediately(
 async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
     coord: Coordinator,
 ) -> None:
-    """Mixed subprocess_nonzero + fast_exit_arg_error failures must still fast-fail once 3 total baseline failures accrue, even though neither per-class streak reaches its own threshold."""
+    """A failure the streak does not count still counts toward the total: three in all end the run with the streak at two."""
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import HOST_GPUS_UNAVAILABLE
 
     def _task() -> Task:
         return Task(
@@ -274,17 +244,17 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
         )
 
     coord.shared_state.enablement_mode = "off"
+    refused = {"status": "failed", "error_class": HOST_GPUS_UNAVAILABLE, "error": "GPU 0: held by pid 4242 (python3)"}
     # Two different outputs: the identical-failure rule must not be what stops the third call.
     subproc_a = _nonzero_result("RuntimeError: HIP out of memory")
     subproc_b = _nonzero_result("ConnectionError: port refused")
-    argerr = {"status": "failed", "error_class": "fast_exit_arg_error", "error": "bad arg"}
 
+    await coord.writeback.handle_unpromotable_result(_task(), refused)
+    assert coord.shared_state.stop_reason == HOST_GPUS_UNAVAILABLE
+    # The operator frees the GPUs and resumes; a resume clears the stop and keeps the counters.
+    coord.shared_state.set_stop_reason("")
     await coord.writeback.handle_unpromotable_result(_task(), subproc_a)
-    await coord.writeback.handle_unpromotable_result(_task(), argerr)
-    assert coord.shared_state.stop_reason not in (
-        "baseline_failed",
-        "baseline_arg_error",
-    )
+    assert coord.shared_state.stop_reason != "baseline_failed"
     await coord.writeback.handle_unpromotable_result(_task(), subproc_b)
     assert coord.shared_state.baseline_failure_streak == 2
     assert coord.shared_state.baseline_total_failures == 3

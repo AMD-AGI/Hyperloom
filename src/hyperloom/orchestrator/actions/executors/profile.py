@@ -837,6 +837,13 @@ def _record_workspace_traces(result: dict[str, Any], workspace_str: str, framewo
         log.debug("profile_executor: trace structure validator failed: %s", exc)
 
 
+def profile_trace_path(result: Any) -> str:
+    """The trace a profile result offers for analysis; ``""`` when it has none or marks it not ready."""
+    if not isinstance(result, dict) or result.get("trace_input_ready") is False:
+        return ""
+    return str(result.get("main_trace_path") or "")
+
+
 PROFILE_DEFAULT_TIMEOUT_SEC = 14400  # 4 h wall cap
 
 
@@ -1117,4 +1124,5 @@ __all__ = [
     "PROFILE_DEFAULT_TIMEOUT_SEC",
     "ProfileExecutor",
     "profile_executor",
+    "profile_trace_path",
 ]
