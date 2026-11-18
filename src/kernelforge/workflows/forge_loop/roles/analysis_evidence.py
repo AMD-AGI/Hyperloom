@@ -266,13 +266,13 @@ class AnalysisEvidenceMixin:
 
     def _published_analysis_bundle_root(self, commit: str) -> Path | None:
         """Return the published analysis generation directory for one commit."""
-        from kernelforge.workflows.forge_loop.roles.analysis import AnalysisAgentService
+        from kernelforge.workflows.forge_loop.roles.analysis_bundle import _published_generation_root
 
         if not self._looks_like_git_commit(commit):
             return None
         workspace = Path(self.ic.workspace_dir).resolve()
         commit_root = workspace / "forge_experiments" / "analysis" / commit
-        return AnalysisAgentService._published_generation_root(commit_root)
+        return _published_generation_root(commit_root)
 
     def _nearest_published_analysis_commit(self, start_commit: str) -> str:
         """Walk Git ancestors until a published analysis bundle is found."""
