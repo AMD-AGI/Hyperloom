@@ -705,10 +705,13 @@ class ConversationCollaborator(CoordinatorCollaborator):
     async def admit_turn(self, agent_name: str, now_unix: float) -> bool:
         """Whether ``agent_name`` takes a turn this tick.
 
+        Critic runs only while a proposal awaits its verdict.
         Orchestration sits out custom-only FRAMEWORK_AGENT, where all it may emit is denied. Elsewhere it takes a turn
         when the phase or the queued and running tasks differ from what its last settled turn left, when its inbox holds
         a message that asks something of it, or once the heartbeat elapses.
         """
+        if agent_name == "critic":
+            return bool(self.state.pending_proposals)
         if agent_name != "orchestration":
             return True
         if custom_only_framework(self.shared_state):
