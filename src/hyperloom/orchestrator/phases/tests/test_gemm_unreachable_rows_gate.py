@@ -41,7 +41,7 @@ def _phase(tmp_path: Path, monkeypatch, serving_log: str) -> KernelPhase:
 def integrate_spy(monkeypatch):
     calls: list[dict] = []
 
-    async def _fake(payload, *, session_dir):
+    async def _fake(payload, *, session_dir, **_kwargs):
         calls.append(payload)
         return {"status": "ok", "decision": "KEEP", "new_tput": 130.0, "gain_pct": 30.0}
 

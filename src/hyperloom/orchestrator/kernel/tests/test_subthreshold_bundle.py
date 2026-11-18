@@ -225,9 +225,25 @@ def _jit_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict]]:
     return calls
 
 
+def _stub_kernel_entry(monkeypatch: pytest.MonkeyPatch, *, controller_settled: bool) -> None:
+    from hyperloom.orchestrator.kernel import campaign_baseline, forge_handoff
+
+    async def _nothing(*_args, **_kwargs):
+        return None
+
+    async def _controller(*_args, **_kwargs):
+        return controller_settled
+
+    monkeypatch.setattr(KernelPhase, "_maybe_reprofile_for_kernel", _nothing)
+    monkeypatch.setattr(KernelPhase, "_maybe_run_forge_fusion_before_kernel_opt", _nothing)
+    monkeypatch.setattr(KernelPhase, "_run_kernel_rewrite_controller", _controller)
+    monkeypatch.setattr(campaign_baseline, "seal_campaign_baseline", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(forge_handoff, "write_forge_handoff", lambda *_args, handoff_dir, **_kwargs: handoff_dir)
+
+
 @pytest.mark.asyncio
 async def test_kernel_entry_measures_the_bundle_once_and_reverts_every_member(tmp_path, monkeypatch) -> None:
-    from hyperloom.orchestrator.kernel import campaign_baseline, forge_handoff
+    from hyperloom.orchestrator.kernel._integrate_payload import _preapplied_snapshot_payload
     from hyperloom.orchestrator.phases import machine_state
 
     monkeypatch.setattr(machine_state, "phase_budget_remaining_seconds", lambda _state, **_kw: 3600.0)
@@ -245,10 +261,17 @@ async def test_kernel_entry_measures_the_bundle_once_and_reverts_every_member(tm
         _patch_entry(patch_dir, repo, "mqa"),
     ]
     seen_on_disk: list[str] = []
+    live_diffs: list[str] = []
+    preapplied: list[bool] = []
+    snapshots: list[dict[str, str]] = []
 
-    async def _integrate(payload, *, session_dir, **_kwargs):
+    async def _integrate(payload, *, session_dir, preapplied_git_patch=False, **_kwargs):
         calls.append(payload)
+        preapplied.append(preapplied_git_patch)
         seen_on_disk.append((repo / "mqa.py").read_text(encoding="utf-8"))
+        live_diffs.append(git(repo, "diff", "--binary", "HEAD") + "\n")
+        snapshot = Path(_preapplied_snapshot_payload(payload)["snapshot_dir"])
+        snapshots.append({path.name: path.read_text(encoding="utf-8") for path in snapshot.iterdir()})
         return _revert(2.2, "p90_regressed")
 
     calls: list[dict] = []
@@ -256,34 +279,29 @@ async def test_kernel_entry_measures_the_bundle_once_and_reverts_every_member(tm
     jit = _jit_calls(monkeypatch)
     phase = coordinator.phase_kernel
 
-    async def _nothing(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(KernelPhase, "_maybe_reprofile_for_kernel", _nothing)
-    monkeypatch.setattr(KernelPhase, "_maybe_run_forge_fusion_before_kernel_opt", _nothing)
-    monkeypatch.setattr(KernelPhase, "_run_kernel_rewrite_controller", _nothing)
-    monkeypatch.setattr(campaign_baseline, "seal_campaign_baseline", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(forge_handoff, "write_forge_handoff", lambda *_args, handoff_dir, **_kwargs: handoff_dir)
+    _stub_kernel_entry(monkeypatch, controller_settled=True)
 
     await phase._finish_kernel_entry()
 
     union = {**_FMOE_ENVS, **_A8W8_ENVS}
-    assert [
-        {
-            key: payload[key]
-            for key in ("kernel_id", "mode", "extra_envs", "extra_server_args", "base_tput", "preapplied_patches")
-        }
-        for payload in calls
-    ] == [
+    bundle_patch = session_dir / "runs" / "kernel_bundle" / "kernel_bundle_c2" / "bundle.patch"
+    keys = ("kernel_id", "mode", "extra_envs", "extra_server_args", "base_tput", "patch_path", "repo", "target_file")
+    assert [{key: payload.get(key) for key in (*keys, "patch_write_paths")} for payload in calls] == [
         {
             "kernel_id": "kernel_bundle_c2",
-            "mode": "env_only",
+            "mode": None,
             "extra_envs": union,
             "extra_server_args": "--moe-runner-backend aiter",
             "base_tput": 104.0,
-            "preapplied_patches": [str(patch_dir / "change.patch")],
+            "patch_path": str(bundle_patch),
+            "repo": str(repo),
+            "target_file": str(repo / "mqa.py"),
+            "patch_write_paths": ["mqa.py"],
         }
     ]
+    assert preapplied == [True]
+    assert [bundle_patch.read_text(encoding="utf-8")] == live_diffs
+    assert snapshots == [{"mqa.py": "VALUE = 2\n"}]
     assert seen_on_disk == ["VALUE = 2\n"]
     assert jit == [("prepare", union), ("drop", union)]
     assert (repo / "mqa.py").read_text(encoding="utf-8") == "VALUE = 1\n"
@@ -310,7 +328,7 @@ async def test_a_kept_bundle_lands_as_one_stack_entry_with_its_envs_args_and_sou
     state.kernel_bundle_pending = [_env_entry("fmoe_ck", _FMOE_ENVS, "--moe-runner-backend aiter"), patch_member]
     jit = _jit_calls(monkeypatch)
 
-    async def _measure(_payload):
+    async def _measure(_payload, _preapplied):
         return {
             "status": "ok",
             "decision": "KEEP",
@@ -387,7 +405,7 @@ async def test_a_bundle_that_cannot_be_measured_is_cleared_without_a_round(tmp_p
     jit = _jit_calls(monkeypatch)
     calls: list[dict] = []
 
-    async def _measure(payload):
+    async def _measure(payload, _preapplied):
         calls.append(payload)
         return {}
 
@@ -403,24 +421,34 @@ async def test_a_bundle_that_cannot_be_measured_is_cleared_without_a_round(tmp_p
     assert (repo / "mqa.py").read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
-def test_an_env_only_round_over_preapplied_patches_is_not_refused_for_carrying_no_envs() -> None:
-    from hyperloom.orchestrator.kernel._integrate_outcomes import _integrate_request_refusal
+@pytest.mark.asyncio
+async def test_a_bundle_of_env_members_only_is_measured_env_only(tmp_path, monkeypatch) -> None:
+    from hyperloom.orchestrator.kernel.controller_patch_integration import KeepSession
+    from hyperloom.orchestrator.kernel.subthreshold_bundle import validate_subthreshold_bundle
 
-    bare = {"base_tput": 100.0, "mode": "env_only", "extra_envs": {}, "extra_server_args": ""}
-
-    assert [
-        _integrate_request_refusal(bare, requested_controls=False),
-        _integrate_request_refusal(
-            {**bare, "preapplied_patches": ["/attempt/mqa/change.patch"]}, requested_controls=False
-        ),
-    ] == [
-        {
-            "status": "failed",
-            "error_class": "env_only_missing_envs",
-            "error": "env_only integrate requires runtime configuration or an explicit paired reference",
-        },
-        None,
+    repo, _base = _repo(tmp_path, ("mqa.py",))
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = _coordinator(session_dir, repo).shared_state
+    state.kernel_bundle_pending = [
+        _env_entry("fmoe_ck", _FMOE_ENVS, "--moe-runner-backend aiter"),
+        _env_entry("a8w8_blockscale_bpreshuffle", _A8W8_ENVS, ""),
     ]
+    _jit_calls(monkeypatch)
+    calls: list[tuple[dict, bool]] = []
+
+    async def _measure(payload, preapplied):
+        calls.append((payload, preapplied))
+        return _revert(1.5, _P50)
+
+    await validate_subthreshold_bundle(
+        KeepSession(session_dir, state, lambda _result: None), measure=_measure, round_stop=lambda: None
+    )
+
+    assert [(payload.get("mode"), payload.get("patch_path"), preapplied) for payload, preapplied in calls] == [
+        ("env_only", None, False)
+    ]
+    assert not (session_dir / "runs" / "kernel_bundle").exists()
 
 
 def test_versions_of_one_kernel_keep_only_the_best_bundle_member(tmp_path) -> None:

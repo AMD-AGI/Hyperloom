@@ -93,8 +93,8 @@ class _ControllerIntegrationMixin:
 
         await validate_subthreshold_bundle(
             KeepSession(self.session_dir, self.shared_state, self._coord.writeback.record_integrate_keep),
-            measure=lambda payload: integrate_within_phase(
-                payload, state=self.shared_state, session_dir=self.session_dir
+            measure=lambda payload, preapplied: integrate_within_phase(
+                payload, state=self.shared_state, session_dir=self.session_dir, preapplied_git_patch=preapplied
             ),
             round_stop=lambda: round_stop(self.shared_state),
         )

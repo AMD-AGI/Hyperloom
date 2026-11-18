@@ -67,11 +67,13 @@ def controller_round_stop(state: Any, rounds_run: int) -> StoppedByTheRun | None
     return round_stop(state, rounds=2 if bundle_due(state) else 1)
 
 
-async def integrate_within_phase(payload: dict[str, Any], *, state: Any, session_dir: Path) -> dict[str, Any]:
+async def integrate_within_phase(
+    payload: dict[str, Any], *, state: Any, session_dir: Path, preapplied_git_patch: bool = False
+) -> dict[str, Any]:
     """Run one integrate round, or report it never started when the KERNEL budget cannot fit another round."""
     from ..kernel.request_handlers import integrate_handler
 
     stop = round_stop(state)
     if stop is not None:
         return {"status": "skipped", "error_class": stop.error_class, "error": stop.never_started}
-    return await integrate_handler(payload, session_dir=session_dir)
+    return await integrate_handler(payload, session_dir=session_dir, preapplied_git_patch=preapplied_git_patch)

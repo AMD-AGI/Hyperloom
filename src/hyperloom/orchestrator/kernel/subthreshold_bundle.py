@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Mapping
@@ -105,8 +106,27 @@ def _bundle_envs(bundle: list[dict[str, Any]]) -> dict[str, str]:
     return {key: value for member in bundle if member["kind"] == _ENV_KIND for key, value in member["envs"].items()}
 
 
-def _bundle_payload(state: Any, kernel_id: str, bundle: list[dict[str, Any]]) -> dict[str, Any]:
+def _bundle_patch(session_dir: Path, kernel_id: str, patches: list[dict[str, Any]]) -> dict[str, Any]:
+    """Write the applied patch members as one diff, with the integrate fields that land it as a pre-applied patch."""
+    repo = Path(patches[0]["repo_root"])
+    touched = _patch_touched_paths(repo, [Path(member["patch_path"]) for member in patches])
+    bundle_dir = session_dir / "runs" / "kernel_bundle" / kernel_id
+    shutil.rmtree(bundle_dir, ignore_errors=True)
+    bundle_dir.mkdir(parents=True)
+    patch_path = bundle_dir / "bundle.patch"
+    patch_path.write_text(_git_output(repo, "diff", "--binary", "HEAD", "--", *touched) + "\n", encoding="utf-8")
+    return {
+        "patch_path": str(patch_path),
+        "repo": str(repo),
+        "target_file": str(repo / patches[0]["kernel_path"]),
+        "patch_write_paths": touched,
+    }
+
+
+def _bundle_payload(session: KeepSession, kernel_id: str, bundle: list[dict[str, Any]]) -> dict[str, Any]:
+    state = session.shared_state
     server_args = " ".join(member["server_args"] for member in bundle if member["kind"] == _ENV_KIND)
+    patches = [member for member in bundle if member["kind"] == _PATCH_KIND]
     return {
         "task_id": kernel_id,
         "kernel_id": kernel_id,
@@ -116,9 +136,7 @@ def _bundle_payload(state: Any, kernel_id: str, bundle: list[dict[str, Any]]) ->
         "extra_server_args": dedupe_extra_server_args(server_args),
         "extra_envs": _bundle_envs(bundle),
         "keep_threshold_pct": 1.0,
-        "mode": "env_only",
-        # The trees already carry these, so the round measures them even with no envs of its own.
-        "preapplied_patches": [member["patch_path"] for member in bundle if member["kind"] == _PATCH_KIND],
+        **(_bundle_patch(session.session_dir, kernel_id, patches) if patches else {"mode": "env_only"}),
     }
 
 
@@ -210,14 +228,14 @@ async def _revert_bundle(bundle: list[dict[str, Any]], envs: dict[str, str], jit
 async def validate_subthreshold_bundle(
     session: KeepSession,
     *,
-    measure: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+    measure: Callable[[dict[str, Any], bool], Awaitable[dict[str, Any]]],
     round_stop: Callable[[], StoppedByTheRun | None],
 ) -> None:
     """Measure this macro cycle's sub-threshold wins together in one E2E round.
 
     Args:
         session: The session the KEEP is recorded into; its pending bundle is consumed either way.
-        measure: Runs one in-phase integrate round for a payload.
+        measure: Runs one in-phase integrate round for a payload; the flag marks its patch as already applied.
         round_stop: Why the phase cannot fit another measured round, or ``None`` when it can.
     """
     from ..actions.executors._aiter_jit import prepare_serving_so_for_csvs
@@ -238,7 +256,8 @@ async def validate_subthreshold_bundle(
         if len(bundle) >= _MIN_MEMBERS:
             if envs:
                 await asyncio.to_thread(prepare_serving_so_for_csvs, envs, backup_dir=jit_backup_dir)
-            verdict = await measure(_bundle_payload(state, kernel_id, bundle))
+            payload = _bundle_payload(session, kernel_id, bundle)
+            verdict = await measure(payload, "patch_path" in payload)
     except Exception as error:  # isolation boundary: the bundle's apply and E2E round, settled as a REVERT
         log.warning("%s: bundle validation raised: %s", kernel_id, error, exc_info=True)
     kept = str(verdict.get("status") or "").lower() == "ok" and str(verdict.get("decision")).upper() == "KEEP"

@@ -152,7 +152,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
                 ],
             }
 
-        async def fake_integrate(payload, *, session_dir):
+        async def fake_integrate(payload, *, session_dir, **_kwargs):
             return {"decision": "KEEP", "new_tput": 900.0, "gain_pct": 12.5}
 
         monkeypatch.setattr(
