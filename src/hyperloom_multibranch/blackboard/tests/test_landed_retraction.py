@@ -13,6 +13,7 @@ import pytest
 from hyperloom_multibranch.contracts.blackboard import Role
 from hyperloom_multibranch.contracts.blackboard.peers import TestRequest, Verdict
 from hyperloom_multibranch.contracts.blackboard.records import (
+    JudgementWrite,
     BaselineRecord,
     BlackboardSnapshot,
     LineageEvent,
@@ -41,7 +42,7 @@ async def _judged(open_as: Open, tried: TestRequest, gain: float, verdict: Verdi
     await open_as(Role.TOOLBOX).write_request(tried)
     await open_as(Role.TOOLBOX).write_result(result(tried.request_id))
     decided = judgement(gain, (tried.request_id,), recorded={METRIC: 1000.0 * (1 + gain / 100)}, verdict=verdict)
-    await open_as(Role.GATE).write_judgement(tried.request_id, decided, conclusion, **made)
+    await open_as(Role.GATE).write_judgement(JudgementWrite(tried.request_id, decided, conclusion, **made))
 
 
 @pytest.fixture(params=[True, False], ids=["retraction", "ordinary-commit"])
@@ -132,4 +133,6 @@ async def test_only_a_committed_judgement_names_what_it_retracts(open_as: Open) 
     decided = judgement(-3.0, ("r1",), verdict=Verdict.REGRESSED)
 
     with pytest.raises(ValueError, match="only a committed retraction"):
-        await open_as(Role.GATE).write_judgement("r1", decided, Conclusion.RECORDED_ONLY, retracts=RETRACTS)
+        await open_as(Role.GATE).write_judgement(
+            JudgementWrite("r1", decided, Conclusion.RECORDED_ONLY, retracts=RETRACTS)
+        )

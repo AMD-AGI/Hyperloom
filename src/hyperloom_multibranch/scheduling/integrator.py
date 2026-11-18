@@ -75,7 +75,7 @@ from hyperloom.measure.compile import BlobError
 from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Blackboard
-from hyperloom_multibranch.contracts.blackboard.records import CommittedCommit, MergeAttempt, WarmReplay
+from hyperloom_multibranch.contracts.blackboard.records import CommittedCommit, JudgementWrite, MergeAttempt, WarmReplay
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, MergeOutcome
 from hyperloom_multibranch.contracts.repo import (
     ExperimentRepo,
@@ -744,7 +744,9 @@ class Integrator:
         report, judgement = tested.report, tested.judgement
         reason = not_stackable_reason(judgement, foundation_fix=report.foundation_fix)
         if reason:
-            await self._blackboard.write_judgement(str(report.request_id), judgement, Conclusion.NOT_STACKABLE)
+            await self._blackboard.write_judgement(
+                JudgementWrite(str(report.request_id), judgement, Conclusion.NOT_STACKABLE)
+            )
             reason += await self._no_longer_offered(report.sources)
             return self._logged_failure(replace(report, outcome=MergeOutcome.NOT_STACKABLE, reason=reason))
         if superseded:
@@ -781,7 +783,9 @@ class Integrator:
         written = False
         try:
             digest = (await self._repo.read_recipe(merged)).digest()
-            await self._blackboard.write_judgement(str(tested.request_id), judgement, Conclusion.MERGED, merged, digest)
+            await self._blackboard.write_judgement(
+                JudgementWrite(str(tested.request_id), judgement, Conclusion.MERGED, merged, digest)
+            )
             written = True
         finally:
             if not written:
@@ -853,11 +857,13 @@ class Integrator:
             )
         reason = not_stackable_reason(judgement, foundation_fix=False)
         if reason:
-            await self._blackboard.write_judgement(request_id, judgement, Conclusion.NOT_STACKABLE)
+            await self._blackboard.write_judgement(JudgementWrite(request_id, judgement, Conclusion.NOT_STACKABLE))
             return ChampionOutcome(self._record_champion(root, name, reason, request_id=request_id), False, reason)
         recipe = apply(await self._repo.read_recipe(root), replay.delta)
         landed = await self._repo.commit(INTEGRATION_BRANCH, root, recipe, f"replay the Recipe KB champion {name}")
-        await self._blackboard.write_judgement(request_id, judgement, Conclusion.MERGED, landed, recipe.digest())
+        await self._blackboard.write_judgement(
+            JudgementWrite(request_id, judgement, Conclusion.MERGED, landed, recipe.digest())
+        )
         verdict = _verdict_on_head(judgement)
         return ChampionOutcome(
             self._record_champion(root, name, verdict, request_id=request_id, landed=landed), True, verdict

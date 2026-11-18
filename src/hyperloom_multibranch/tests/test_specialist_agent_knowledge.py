@@ -5,7 +5,7 @@ from pathlib import Path
 
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, PatchRef, Recipe
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.blackboard.records import LineageEvent, MergeAttempt
+from hyperloom_multibranch.contracts.blackboard.records import JudgementWrite, LineageEvent, MergeAttempt
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LineageKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.tests.factories import TTL, delta, intent, judgement, request, result
@@ -58,12 +58,14 @@ async def _merged(root: Path) -> LocalBlackboard:
         await toolbox.write_request(request(request_id, of, change))
         await toolbox.attach_request(claim.key, request_id, ttl_seconds=TTL)
         await toolbox.write_result(result(request_id))
-        await gate.write_judgement(request_id, judgement(3.3, (request_id,)), Conclusion.COMMITTED, commit)
+        await gate.write_judgement(
+            JudgementWrite(request_id, judgement(3.3, (request_id,)), Conclusion.COMMITTED, commit)
+        )
     merge = intent(INTEGRATION_BRANCH, "c0", "merge", "c1")
     await toolbox.write_request(request("m1", merge))
     await integrator.record_merge_attempt(MergeAttempt(("c1",), "c0", request_id="m1"))
     await toolbox.write_result(result("m1"))
-    await integrator.write_judgement("m1", judgement(3.2, ("m1",)), Conclusion.MERGED, "i1")
+    await integrator.write_judgement(JudgementWrite("m1", judgement(3.2, ("m1",)), Conclusion.MERGED, "i1"))
     return open_as(Role.SPECIALIST_RUNTIME, "b01")
 
 

@@ -20,7 +20,12 @@ from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta, apply
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
-from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, LineageEvent, RegressionCase
+from hyperloom_multibranch.contracts.blackboard.records import (
+    BaselineRecord,
+    LineageEvent,
+    RegressionCase,
+    JudgementWrite,
+)
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -227,7 +232,9 @@ class _Session(_Rig):
         await self.toolbox.blackboard.write_result(result(measured.request_id))
         commit = await self.repo.commit(branch, ROOT, apply(BASELINE, change), "a correctness fix")
         flat = judgement(0.1, (measured.request_id,), verdict=Verdict.FLAT, fixes_correctness=True)
-        await self.blackboard.write_judgement(measured.request_id, flat, Conclusion.COMMITTED_WITH_REPRO, commit)
+        await self.blackboard.write_judgement(
+            JudgementWrite(measured.request_id, flat, Conclusion.COMMITTED_WITH_REPRO, commit)
+        )
         repro = TestRequest(TestKind.REPRO, Purpose.REPRO, branch, ROOT, change, attachments=case)
         case_request = await self.toolbox.submit_test(repro)
         await self.blackboard.add_regression_case(RegressionCase(case[0].id, commit, case_request))

@@ -53,13 +53,13 @@ from hyperloom_multibranch.contracts.blackboard.peers import (
     BranchLogEntry,
     BranchLogType,
     Intent,
-    Judgement,
     Purpose,
     TestRequest,
     TestResult,
     Validity,
 )
 from hyperloom_multibranch.contracts.blackboard.records import (
+    JudgementWrite,
     LESSON_ID,
     REPLAY_TARGET,
     AgentManifestRecord,
@@ -89,7 +89,6 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     QuarantineEvent,
     RecordedValue,
     RegressionCase,
-    RetractionRef,
     SearchHit,
     SessionProfile,
     StartupBrief,
@@ -132,7 +131,7 @@ from hyperloom_multibranch.blackboard.local.segments import (
     make_writer_id,
     require_token,
 )
-from hyperloom_multibranch.blackboard.local.state import AgentMapWrite, ClaimDecision, JudgementWrite, BlackboardState
+from hyperloom_multibranch.blackboard.local.state import AgentMapWrite, ClaimDecision, BlackboardState
 from hyperloom_multibranch.blackboard.local.unfinished import refused_replays, unfinished_leads
 
 SEGMENTS_DIR = "segments"
@@ -670,16 +669,9 @@ class LocalBlackboard(
 
     # --- judgements and gate records -------------------------------------------------------------------------------
 
-    async def write_judgement(
-        self,
-        request_id: str,
-        judgement: Judgement,
-        conclusion: Conclusion,
-        commit_id: str | None = None,
-        recipe_digest: str | None = None,
-        retracts: RetractionRef | None = None,
-    ) -> TestRecord:
+    async def write_judgement(self, write: JudgementWrite) -> TestRecord:
         state = self._state()
+        request_id, conclusion, judgement = write.request_id, write.conclusion, write.judgement
         request = state.record(request_id).request
         integration = request.branch == INTEGRATION_BRANCH
         self._require(Role.INTEGRATOR if integration else Role.GATE)
@@ -689,13 +681,12 @@ class LocalBlackboard(
             raise NotRecorded(f"request {request_id} has no result to judge")
         if state.results[request_id].validity is Validity.MEASUREMENT_FAILED:
             raise NotRecorded(f"the measurement of {request_id} failed; there is nothing to judge")
-        if (conclusion in COMMITTING or conclusion is Conclusion.MERGED) != (commit_id is not None):
+        if (conclusion in COMMITTING or conclusion is Conclusion.MERGED) != (write.commit_id is not None):
             raise ValueError(f"a {conclusion.value} judgement names a commit exactly when it makes one")
-        if retracts is not None and conclusion is not Conclusion.COMMITTED:
+        if write.retracts is not None and conclusion is not Conclusion.COMMITTED:
             raise ValueError(f"only a committed retraction names what it retracts, not a {conclusion.value} judgement")
-        _check_recipe_digest(state, commit_id, recipe_digest)
+        _check_recipe_digest(state, write.commit_id, write.recipe_digest)
         summary = f"{conclusion.value}: {judgement.verdict.value} {judgement.gain_pct:+.2f}% on {request_id}"
-        write = JudgementWrite(request_id, judgement, conclusion, commit_id, recipe_digest, retracts)
         self._append(EntryKind.JUDGEMENT, write, branch=request.branch, parent=request.parent_commit, summary=summary)
         return self._state().record(request_id)
 
