@@ -194,7 +194,7 @@ class _RowSink:
 
 def test_discovered_kernel_rows_carry_call_count_and_duration(tmp_path: Path) -> None:
     """Candidate call_count / duration_us survive the cache into discovered_kernels rows."""
-    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import _write_discovered_kernels
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_rows import _write_discovered_kernels
 
     state = SharedState.load_or_init(tmp_path)
     state.record_trace_analyze(

@@ -278,10 +278,8 @@ def test_a_geak_adoption_reaches_the_kernel_events_integrate_ledger(tmp_path: Pa
     gate ever ruled on, and the basis its gain was measured on would exist
     nowhere but in ``state.json``.
     """
-    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
-        ROUTE_GEAK,
-        make_kernel_recorder,
-    )
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_GEAK
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_recorder import make_kernel_recorder
     from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
     from hyperloom.inference_optimizer.session.session_binding import session_scope
 
@@ -313,10 +311,8 @@ def test_a_geak_adoption_reaches_the_kernel_events_integrate_ledger(tmp_path: Pa
 
 def test_an_unattributable_geak_adoption_says_so_on_the_timeline(tmp_path: Path) -> None:
     """Two kernels on one rebench measured a real gain that is nobody's alone."""
-    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
-        ROUTE_GEAK,
-        make_kernel_recorder,
-    )
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_GEAK
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_recorder import make_kernel_recorder
     from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
     from hyperloom.inference_optimizer.session.session_binding import session_scope
 

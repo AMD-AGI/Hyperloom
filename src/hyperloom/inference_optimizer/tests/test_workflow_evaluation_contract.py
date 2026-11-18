@@ -24,7 +24,8 @@ from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
     record_close_settled,
     record_close_step,
 )
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_FORGE, make_kernel_recorder
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_FORGE
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_recorder import make_kernel_recorder
 from hyperloom.inference_optimizer.breakdown.recorder.phase_records import (
     ActionDispatch,
     ActionSettlement,

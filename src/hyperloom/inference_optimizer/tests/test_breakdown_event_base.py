@@ -22,7 +22,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import (
 from hyperloom.inference_optimizer.breakdown.recorder import recorder as recorder_module
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts, event_parts
 from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EventHeader
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import make_kernel_recorder
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_recorder import make_kernel_recorder
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelExit
 from hyperloom.inference_optimizer.breakdown.recorder.sections import KERNEL_EVENT_SECTIONS
 from hyperloom.inference_optimizer.session.session_binding import (
