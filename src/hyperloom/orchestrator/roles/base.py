@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -13,7 +14,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
 
-from hyperloom.inference_optimizer.protocol.intent import Intent
+from hyperloom.inference_optimizer.protocol.intent import Intent, NoIntentEmitted
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +52,27 @@ def build_chat_messages(system_prompt: str | None, user_content: str) -> list[di
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": user_content})
     return messages
+
+
+def decoded_intents(items: list[Any], backend: str) -> list[dict[str, Any]]:
+    """An envelope's ``intents`` as :func:`validate_envelope` input, a payload sent as a JSON string decoded."""
+    decoded: list[dict[str, Any]] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise NoIntentEmitted(f"{backend} intents[{index}] is not an object")
+        if "payload" not in item:
+            keys = ", ".join(sorted(str(key) for key in item))
+            raise NoIntentEmitted(f"{backend} intents[{index}] has no 'payload' key (keys: {keys})")
+        payload = item["payload"]
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError as exc:
+                raise NoIntentEmitted(f"{backend} intents[{index}] payload is not decodable JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise NoIntentEmitted(f"{backend} intents[{index}] payload did not decode to an object")
+        decoded.append({"intent_type": item.get("intent_type"), "payload": payload})
+    return decoded
 
 
 class BackendError(RuntimeError):
@@ -172,6 +194,7 @@ __all__ = [
     "LLMCallFailed",
     "RetryPolicy",
     "build_chat_messages",
+    "decoded_intents",
     "parse_call_timeout_env",
     "retry_with_backoff",
 ]

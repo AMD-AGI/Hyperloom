@@ -19,7 +19,6 @@ from hyperloom_multibranch.blackboard.local.agent_manifest import (
     is_credential,
     redacted_command,
     sanitized_manifest,
-    without_userinfo,
 )
 from hyperloom_multibranch.blackboard.tests.factories import FakeClock
 from hyperloom_multibranch.blackboard.tests.sessions import Writers, scripted_session
@@ -63,8 +62,9 @@ def test_the_manifest_keeps_the_campaign_and_drops_every_credential() -> None:
     )
     assert {name: kept[name] for name in AS_GIVEN} == {name: MANIFEST[name] for name in AS_GIVEN}
     assert redacted_command("--api-key=sk-4 --port 1") == f"--api-key={REDACTED} --port 1"
-    assert without_userinfo("git@github.com:org/agent.git") == "git@github.com:org/agent.git"
-    assert without_userinfo("https://bot@[::1") == "https://bot@[::1"
+    assert sanitized_manifest({"source": "git@github.com:org/agent.git"})["source"] == "git@github.com:org/agent.git"
+    assert sanitized_manifest({"source": "https://bot:pw@[::1]:8080/a.git"})["source"] == "https://[::1]:8080/a.git"
+    assert sanitized_manifest({"source": "https://bot:p@ss@host:abc/a.git"})["source"] == "https://host:abc/a.git"
 
 
 def test_the_manifest_drops_the_credentials_the_records_of_every_process_drop() -> None:

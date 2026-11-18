@@ -34,6 +34,7 @@ from .base import (
     BackendTurnResult,
     LLMCallFailed,
     RetryPolicy,
+    decoded_intents,
     parse_call_timeout_env,
     retry_with_backoff,
 )
@@ -170,23 +171,7 @@ def decode_intent_envelope(text: str) -> dict[str, Any]:
     # recorded as a success that did nothing and the error streak is reset.
     if not envelope["intents"]:
         raise NoIntentEmitted("deepseek reply carried an empty 'intents' list")
-    decoded: list[Any] = []
-    for index, item in enumerate(envelope["intents"]):
-        if not isinstance(item, dict):
-            raise NoIntentEmitted(f"deepseek intents[{index}] is not an object")
-        if "payload" not in item:
-            keys = ", ".join(sorted(str(key) for key in item))
-            raise NoIntentEmitted(f"deepseek intents[{index}] has no 'payload' key (keys: {keys})")
-        payload = item.get("payload")
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except ValueError as exc:
-                raise NoIntentEmitted(f"deepseek intents[{index}] payload is not decodable JSON: {exc}") from exc
-        if not isinstance(payload, dict):
-            raise NoIntentEmitted(f"deepseek intents[{index}] payload did not decode to an object")
-        decoded.append({"intent_type": item.get("intent_type"), "payload": payload})
-    return {"intents": decoded}
+    return {"intents": decoded_intents(envelope["intents"], "deepseek")}
 
 
 @dataclass

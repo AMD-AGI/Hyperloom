@@ -20,9 +20,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from urllib.parse import urlsplit, urlunsplit
 
 from hyperloom.common.env_safety import redact_secret_env_values, redact_secret_values
+from hyperloom.common.url_userinfo import strip_url_userinfo
 
 CREDENTIAL_WORDS = frozenset({"key", "apikey", "token", "secret", "password", "passwd", "credential"})
 #: The mask :mod:`~hyperloom.common.env_safety` writes, so a value it masked and one masked here read alike.
@@ -72,21 +72,6 @@ def redacted_command(command: str) -> str:
     return _FLAG.sub(replaced, _ASSIGNED.sub(replaced, _masked(command)))
 
 
-def without_userinfo(source: str) -> str:
-    """``source`` without the user and password of a URL; a source that names none, or is no URL Python can split, is
-    returned as it is."""
-
-    try:
-        parts = urlsplit(source)
-        if parts.username is None and parts.password is None:
-            return source
-        host = parts.hostname or ""
-        netloc = host if parts.port is None else f"{host}:{parts.port}"
-    except ValueError:
-        return source
-    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
-
-
 def sanitized_manifest(document: Mapping[str, object]) -> dict[str, object]:
     """``document`` with every credential dropped, as the blackboard keeps an agent's manifest."""
 
@@ -99,7 +84,7 @@ def sanitized_manifest(document: Mapping[str, object]) -> dict[str, object]:
             kept[name] = [redacted_command(item) if isinstance(item, str) else _redacted(item) for item in value]
     source = document.get(SOURCE_FIELD)
     if isinstance(source, str):
-        kept[SOURCE_FIELD] = _masked(without_userinfo(source))
+        kept[SOURCE_FIELD] = _masked(strip_url_userinfo(source))
     return kept
 
 
@@ -111,5 +96,4 @@ __all__ = [
     "is_credential",
     "redacted_command",
     "sanitized_manifest",
-    "without_userinfo",
 ]

@@ -35,6 +35,7 @@ from .base import (
     BackendTurnResult,
     LLMCallFailed,
     RetryPolicy,
+    decoded_intents,
     parse_call_timeout_env,
     retry_with_backoff,
 )
@@ -86,20 +87,7 @@ def decode_intent_envelope(text: str) -> dict[str, Any]:
         ) from exc
     if not isinstance(envelope, dict) or not isinstance(envelope.get("intents"), list):
         raise NoIntentEmitted("codex reply is valid JSON but carries no 'intents' list")
-    decoded: list[Any] = []
-    for index, item in enumerate(envelope["intents"]):
-        if not isinstance(item, dict):
-            raise NoIntentEmitted(f"codex intents[{index}] is not an object")
-        payload = item.get("payload")
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except ValueError as exc:
-                raise NoIntentEmitted(f"codex intents[{index}] payload is not decodable JSON: {exc}") from exc
-        if not isinstance(payload, dict):
-            raise NoIntentEmitted(f"codex intents[{index}] payload did not decode to an object")
-        decoded.append({"intent_type": item.get("intent_type"), "payload": payload})
-    return {"intents": decoded}
+    return {"intents": decoded_intents(envelope["intents"], "codex")}
 
 
 @dataclass
