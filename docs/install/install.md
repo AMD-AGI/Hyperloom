@@ -91,6 +91,23 @@ If you are performing the Hyperloom setup inside of a Docker container, select
 the "baremetal" option as the run mode during setup.
 ```
 
+### Use the DeepSeek Harness
+
+The DeepSeek Harness (`dsh`) is a third agent backend beside Claude and Codex.
+Hyperloom never picks it automatically, and the setup skill does not configure
+it. To run on it:
+
+1. Install the `deepseek` extra: `pip install 'hyperloom-inference_optimizer[deepseek]'`.
+2. Set `OPENAI_BASE_URL` and `OPENAI_API_KEY` to an OpenAI-protocol gateway that
+   serves the model.
+3. Set `INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`, and `DSH_MODEL` to the model
+   id the gateway serves.
+
+The backend then runs orchestration, specialists, Forge, TraceLens and
+quantization. Specialists run on the `dsh` CLI without a sandbox of their own.
+See [environment variables](../reference/environment-variables.md) for
+`INFERENCE_OPTIMIZER_AGENT_BACKEND`, `DSH_MODEL` and `HYPERLOOM_DSH_MAX_TOKENS`.
+
 ## Setup scenarios
 
 Hyperloom supports two local setup scenarios. Pick the one that matches where your
