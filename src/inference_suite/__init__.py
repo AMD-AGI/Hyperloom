@@ -14,7 +14,8 @@ The operator's own launch file enters both as the :class:`UserFile` :func:`parse
 :func:`fetch_response` reads one at a URL. A scriptable session's base is its script, which :func:`scriptable_base`
 freezes with its content.
 
-A runner runs one round with :func:`run_round`, and reaps a server a round left running with :func:`stop`. The round
+A runner runs one round with :func:`run_round`, and reaps a server a round left running with :func:`stop`, which
+raises :class:`PidfileError` on a ``server.pid`` this package did not write. The round
 names the staged tools it runs by :func:`manifest_sha256`, the digest of the tool cache's manifest;
 :func:`verified_manifest_sha256` gives it only for a cache that verifies against the pins. Two hosts compare their
 stagings by :func:`normalised_manifest`, a :class:`NormalisedManifest` that leaves every path out, and a host that
@@ -54,6 +55,7 @@ from inference_suite.recipe.sources import (
 from inference_suite.recipe.user_file import UserFile, UserFileError, parse_user_file
 from inference_suite.load.scriptable import scriptable_base
 from inference_suite.run import RoundResult, run_round
+from inference_suite.runtime.process import PidfileError
 from inference_suite.runtime.server import stop
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT
 from inference_suite.contracts.normalised import NormalisedManifest
@@ -84,6 +86,7 @@ __all__ = [
     "LaunchQuery",
     "Miss",
     "NormalisedManifest",
+    "PidfileError",
     "RoundResult",
     "RunDirError",
     "SourceFetchError",

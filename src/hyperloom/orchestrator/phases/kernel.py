@@ -276,7 +276,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         reprofile_task = _covered_step(task_kind, params, idempotency_key=f"internal-analysis-{idempotency_reason}")
         try:
             await self.sub.execute_covered(reprofile_task)
-        except (OSError, RuntimeError):  # the kernel-entry reprofile step, recorded as dispatch_failed
+        except (OSError, RuntimeError, ValueError):  # the kernel-entry reprofile step, recorded as dispatch_failed
             log.exception("kernel-entry reprofile failed; the phase proceeds on the existing snapshot")
             _note_reprofile(replace(attempt, ran=True, skipped_reason="dispatch_failed"))
             return
