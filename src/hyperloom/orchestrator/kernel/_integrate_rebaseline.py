@@ -304,6 +304,7 @@ def _integrate_rebaseline(
             "output_dir": str(workspace),
             "extra_server_args": extra_args,
             "extra_envs": dict(payload.get("extra_envs") or {}),
+            "runtime_override": payload.get("runtime_override", {}),
             "remove_args": to_str_list(payload.get("remove_args")),
             "unset_envs": to_str_list(payload.get("unset_envs")),
             "args_mode": str(payload.get("args_mode") or "append"),
@@ -362,18 +363,22 @@ async def _multi_node_restart_failure(
     # uses the separate AITER_ROOT_DIR/build tree and can carry a stale baton
     # from a timed-out Forge driver.
     _sweep_integrate_aiter_locks(reason="integrate server startup")
+    from ..actions.executors._multi_node_env import round_server_env
     from ..actions.executors._multi_node_server_lifecycle import (
         RoundServer,
         ServerRestartFailed,
         restart_server_for_round,
     )
 
+    params = rebaseline.ctx.task.params
     try:
         await restart_server_for_round(
             RoundServer.from_env(
                 rebaseline.server_args,
                 (str(payload.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None),
             ),
+            extra_env=round_server_env(params["extra_envs"], params["unset_envs"]) or None,
+            unset_env=params["unset_envs"] or None,
             force_full_restart=True,
         )
     except ServerRestartFailed as exc:

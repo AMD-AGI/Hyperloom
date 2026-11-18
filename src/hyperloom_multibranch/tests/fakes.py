@@ -129,7 +129,8 @@ class ReproToolbox:
     ``blackboard`` and ends it as ``answer`` says.
 
     ``busy`` answers that many submissions with :class:`Backpressure` first, ``refuse`` rejects the requests it
-    accepts, and ``hold`` keeps every accepted test in flight until :meth:`finish`.
+    accepts, ``hold`` keeps every accepted test in flight until :meth:`finish`, and a test with a verdict ran for the
+    seconds ``seconds`` gives it.
     """
 
     def __init__(self, blackboard: TestRecordSink, answer: Callable[[TestRequest], ReproAnswer]) -> None:
@@ -138,6 +139,7 @@ class ReproToolbox:
         self.busy = 0
         self.refuse: Callable[[TestRequest], bool] = lambda request: False
         self.hold = False
+        self.seconds: Callable[[TestRequest], float] = lambda request: 0.0
         self.submitted: list[TestRequest] = []
         self.cancelled: list[str] = []
         self._in_flight: list[TestRequest] = []
@@ -172,8 +174,9 @@ class ReproToolbox:
             failure = FailureClass.CANDIDATE if answer is Validity.CANDIDATE_FAILED else FailureClass.INFRA
             await self.blackboard.write_result(TestResult(request_id, answer, failure, "the server did not start"))
         else:
+            ran = {"started_at": 0.0, "finished_at": self.seconds(request)}
             await self.blackboard.write_result(
-                TestResult(request_id, Validity.SUCCEEDED, manifest_sha256="a" * 64, repro_verdict=answer)
+                TestResult(request_id, Validity.SUCCEEDED, manifest_sha256="a" * 64, repro_verdict=answer, **ran)
             )
 
     async def cancel(self, request_id: str) -> CancelOutcome:

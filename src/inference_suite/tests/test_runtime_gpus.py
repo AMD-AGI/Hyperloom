@@ -5,8 +5,8 @@
 resident on them beyond the 1 GiB a process that merely opened the card may keep there (an entry that reports no
 memory is a holder), and a refusal names each GPU and why.
 
-A round's GPUs are ``HIP_VISIBLE_DEVICES`` numbers, which ROCm assigns in KFD node order while ``amd-smi`` indexes cards
-in PCI order, so the check must translate one into the other.
+A round's GPUs are ``ROCR_VISIBLE_DEVICES`` numbers, which ROCm assigns in KFD node order while ``amd-smi`` indexes
+cards in PCI order, so the check must translate one into the other.
 """
 
 from __future__ import annotations

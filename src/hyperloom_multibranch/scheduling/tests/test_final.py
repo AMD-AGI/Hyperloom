@@ -26,7 +26,7 @@ from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.blackboard.records import BranchProgress, LineageEvent
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, BranchProgress, LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import LineageKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
@@ -94,11 +94,12 @@ async def test_the_best_single_branch_is_chosen_over_every_branch_whatever_stopp
     )
 
     candidates = await choose_candidates(
-        progress, _row(INTEGRATION_BRANCH, bench.root, 1040.0), METRIC, bench.repo, bench.root
+        progress, _row(INTEGRATION_BRANCH, bench.root, 1040.0), METRIC, bench.repo, await bench.baseline()
     )
 
     assert candidates.integration == FinalCandidate("integration", INTEGRATION_BRANCH, bench.root, 1040.0, root=True)
     assert candidates.best_branch == FinalCandidate("best_branch", "b01", bench.commits["i1"], 1100.0)
+    assert candidates.baseline_value == BASELINE_VALUE
 
 
 async def test_the_branch_whose_recipe_the_integration_head_already_carries_is_no_candidate(tmp_path: Path) -> None:
@@ -107,7 +108,7 @@ async def test_the_branch_whose_recipe_the_integration_head_already_carries_is_n
     progress = (_row("b02", bench.commits["c7"], 1060.0), _row("b03", twin, 1200.0))
 
     candidates = await choose_candidates(
-        progress, _row(INTEGRATION_BRANCH, bench.commits["i1"], 1040.0), METRIC, bench.repo, bench.root
+        progress, _row(INTEGRATION_BRANCH, bench.commits["i1"], 1040.0), METRIC, bench.repo, await bench.baseline()
     )
 
     assert twin != bench.commits["i1"]
@@ -119,7 +120,7 @@ async def test_without_a_committed_branch_only_the_integration_head_is_a_candida
     rows = (_row(INTEGRATION_BRANCH, bench.root, 1040.0), _row("b01", "c0", None, commits=0))
 
     candidates = await choose_candidates(
-        rows, _row(INTEGRATION_BRANCH, bench.root, None), METRIC, bench.repo, bench.root
+        rows, _row(INTEGRATION_BRANCH, bench.root, None), METRIC, bench.repo, await bench.baseline()
     )
 
     assert candidates.best_branch is None
@@ -277,10 +278,15 @@ class Bench:
 
     def candidates(self, both: bool = True) -> FinalCandidates:
         integration = replace(INTEGRATION, commit=self.commits["i1"])
-        return FinalCandidates(integration, replace(BRANCH, commit=self.commits["c7"]) if both else None)
+        return FinalCandidates(
+            integration, replace(BRANCH, commit=self.commits["c7"]) if both else None, BASELINE_VALUE
+        )
+
+    async def baseline(self) -> BaselineRecord:
+        return await self.handle(Role.OBSERVER).baseline()
 
     def selector(self, workload: Workload = WORKLOAD) -> FinalSelector:
-        return FinalSelector(SessionChecks(self.tests, self.gate, self.regression), workload)
+        return FinalSelector(SessionChecks(self.tests, self.gate, self.regression), workload, 1)
 
     def fail(self, tag: str, fate: Fate, kind: TestKind | None = None) -> None:
         """Every FINAL test of ``tag``'s commit (of ``kind`` when given) ends in ``fate``."""
@@ -451,7 +457,8 @@ async def test_a_cold_start_below_the_reproduction_tolerance_is_refused_and_the_
     choice = await bench.selector().select(bench.candidates(both=False))
 
     [check] = choice.checks
-    assert not check.reproduced and check.gain_pct == pytest.approx(-10.0)
+    assert not check.reproduced and check.reproduction_pct == pytest.approx(-10.0)
+    assert check.gain_pct == pytest.approx((936.0 / BASELINE_VALUE - 1.0) * 100.0)
     assert check.refused_by == (BELOW_REPRODUCTION_TOLERANCE,)
     assert choice.chosen is None
     assert choice.reason.startswith(
@@ -464,7 +471,7 @@ async def _root_candidates(bench: Bench) -> FinalCandidates:
     """The candidates of a session whose integration merged nothing: its head is the root."""
 
     integration = _row(INTEGRATION_BRANCH, bench.root, BASELINE_VALUE, commits=0)
-    return await choose_candidates((integration,), integration, METRIC, bench.repo, bench.root)
+    return await choose_candidates((integration,), integration, METRIC, bench.repo, await bench.baseline())
 
 
 async def test_a_remeasured_root_is_reproduced_whatever_its_speed_against_its_record(tmp_path: Path) -> None:
@@ -479,7 +486,7 @@ async def test_a_remeasured_root_is_reproduced_whatever_its_speed_against_its_re
     assert choice.chosen == candidates.integration and candidates.integration.root
     assert check.reproduced and check.refused_by == ()
     assert check.waived == (BELOW_REPRODUCTION_TOLERANCE, GAIN_BELOW_THRESHOLD)
-    assert check.gain_pct == pytest.approx(-10.0)
+    assert check.gain_pct == pytest.approx(-10.0) and check.reproduction_pct == pytest.approx(-10.0)
     assert dict(check.curve) == {
         32: pytest.approx(BASELINE_VALUE * 0.9),
         CONC: pytest.approx(BASELINE_VALUE * 0.9),

@@ -22,7 +22,7 @@ from hyperloom.contracts.long_context import (
 )
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.measure.long_context.plan import LONG_CONTEXT_DIR, OUTPUTS_FILE
-from hyperloom.measure.long_context.rounds import run_long_context
+from hyperloom.measure.long_context.rounds import CheckServer, run_long_context
 from hyperloom.measure.long_context.prompts import PER_TASK
 from hyperloom.measure.long_context.tests.support import LENGTH, PROMPTS, FakeServer, prompt_set, staged_plan
 from hyperloom.measure.points import AcceptedMeasurement
@@ -66,7 +66,7 @@ def _landed(tmp_path: Path, *, served: int | None = 4096, **server: object) -> t
     """The output directory a runner leaves after a check whose server behaves as ``server`` says."""
     plan = staged_plan(tmp_path / "cache")
     with FakeServer(**server) as fake:  # type: ignore[arg-type]
-        asyncio.run(run_long_context(plan, prompt_set(), _Host(fake), tmp_path / "out", served_context=served))
+        asyncio.run(run_long_context(plan, prompt_set(), _Host(fake), tmp_path / "out", server=CheckServer(served)))
     return tmp_path / "out", plan
 
 

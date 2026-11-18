@@ -131,8 +131,8 @@ class BenchmarkPoint:
     def holds_accuracy_checks(self) -> bool:
         """Whether a test of this point keeps its server up after its rounds for the short-prompt and long-context checks.
 
-        An AgentX test runs neither: they were never run on one, and on a launch that serves a 1M-token context the
-        long-context check alone sends 64 prompts of ~1M tokens. Its planned checks are recorded as not held.
+        An AgentX test holds none for them: its short-prompt check is recorded as not held, and a long-context check it
+        plans runs apart, bounded, after its measured round (``measure.local``), on that server or on a check server.
         """
         return not self.agentx
 

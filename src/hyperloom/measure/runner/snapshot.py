@@ -5,27 +5,17 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 from pathlib import Path
 
 from hyperloom.measure.hosted_spec import dir_manifest_sha256
+from hyperloom_common.fs_utils import file_sha256
 
 __all__ = ["SnapshotError", "check_snapshot"]
-
-_CHUNK = 1 << 20
 
 
 class SnapshotError(Exception):
     """The snapshot cannot be read, holds a symbolic link, or is not the one the sheet names."""
-
-
-def _sha256_of(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(_CHUNK), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _entries(root: Path) -> list[tuple[str, int, str]]:
@@ -37,7 +27,7 @@ def _entries(root: Path) -> list[tuple[str, int, str]]:
                 raise SnapshotError(f"the runtime snapshot holds a symbolic link: {Path(directory) / name}")
         for name in names:
             path = Path(directory) / name
-            entries.append((path.relative_to(root).as_posix(), path.stat().st_size, _sha256_of(path)))
+            entries.append((path.relative_to(root).as_posix(), path.stat().st_size, file_sha256(path)))
     return entries
 
 

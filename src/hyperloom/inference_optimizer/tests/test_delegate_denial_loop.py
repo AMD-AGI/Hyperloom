@@ -11,6 +11,8 @@ import pytest
 
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.state.task_registry import TaskSpec
+from hyperloom.inference_optimizer.protocol.action_surfaces import FULL_ENABLED_ACTIONS
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
@@ -283,82 +285,19 @@ async def test_successful_delegate_resets_policy_denial_streak(session_dir):
         await c.stop()
 
 
-# PolicyGate denial paths (analysis actions are never LLM-proposable)
-
-import pytest
-
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
-from hyperloom.inference_optimizer.protocol.intent import (
-    Intent,
-    IntentType,
-)
-from hyperloom.orchestrator.phases.machine_state import (
-    PHASE_ALLOWED_ACTIONS,
-    PHASE_FRAMEWORK_AGENT,
-)
-from hyperloom.orchestrator.policy.gate import (
-    PolicyGate,
-)
-from hyperloom.inference_optimizer.protocol.action_surfaces import FULL_ENABLED_ACTIONS
-from hyperloom.orchestrator.state.task_registry import TaskSpec
-
-
-@pytest.fixture
-def gate() -> PolicyGate:
-    """Plain gate without an action catalogue / shared_state."""
-    return PolicyGate(role_registry=default_role_registry())
-
-
-# ``roofline`` and ``profile`` are Coordinator-enqueued; PolicyGate denies any propose/delegate/request that names
-# either action.
-_INTERNAL_ANALYSIS_ACTIONS = ("roofline", "profile")
-
-
-# Supporting infrastructure parity
-def test_phase_explore_allowlist_drops_legacy_actions():
-    """The EXPLORE allowlist contains only the canonical action set."""
-    assert PHASE_ALLOWED_ACTIONS[PHASE_FRAMEWORK_AGENT] == frozenset(
-        {
-            "explore",
-            "specialist",
-            "integrate_patch",
-            "roofline",
-            "profile",
-        }
-    )
-
-
-def test_full_enabled_actions_still_contains_explore():
-    """Sanity: ``explore`` / ``baseline`` stay enabled; ``recover`` is intentionally NOT enabled."""
-    assert "explore" in FULL_ENABLED_ACTIONS
-    assert "sweep" not in FULL_ENABLED_ACTIONS
-    assert "recover" not in FULL_ENABLED_ACTIONS
-    assert "baseline" in FULL_ENABLED_ACTIONS
-
-
-def test_cli_real_executors_still_contains_explore():
-    """Sanity: the canonical EXPLORE-phase executors stay registered."""
-    from hyperloom.inference_optimizer.cli.executors import _REAL_EXECUTORS_FULL
-
-    assert "explore" in _REAL_EXECUTORS_FULL
-    assert "conc_sweep" in _REAL_EXECUTORS_FULL
-    assert "sweep" not in _REAL_EXECUTORS_FULL
-    assert "baseline" in _REAL_EXECUTORS_FULL
-
-
-# Mission-summary + robustness prompt point at explore, not retired names
-def test_dead_c_mission_summary_tag_points_at_explore():
-    """The ``stack changed`` warning points at ``explore``, not the retired ``validate_stack``."""
+# Mission summary: the stack-changed warning
+def test_the_stack_changed_hint_names_an_action_orchestration_is_offered():
+    """Orchestration echoes the named action back as ``action_name``; a retired name would only earn a policy denial."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     s = SharedState(
         baseline_tput=100.0,
         optimization_stack=[{"action": "integrate", "kernel_id": "k1"}],
     )
-    text = s.to_mission_summary()
-    assert "stack changed" in text
-    assert "RUN `explore`" in text
-    assert "validate_stack" not in text
+    hint = s.to_mission_summary().split("stack changed", 1)[1].splitlines()[0]
+    named = re.findall(r"`(\w+)`", hint)
+    assert named
+    assert set(named) <= set(FULL_ENABLED_ACTIONS)
 
 
 def test_mission_summary_flags_a_stack_that_outgrew_its_validation():
@@ -371,10 +310,6 @@ def test_mission_summary_flags_a_stack_that_outgrew_its_validation():
     )
     text = s.to_mission_summary()
     assert "stack changed since last validation" in text
-
-
-# The Robustness prune_branch family list used to live in robustness.md, which was loaded every tick and discarded by
-# the backend.
 
 
 def _explore(key: str, *variants: tuple[str, str]) -> Intent:

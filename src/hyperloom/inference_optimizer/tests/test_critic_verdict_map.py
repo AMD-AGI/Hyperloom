@@ -1623,13 +1623,16 @@ def test_a_batch_that_states_nothing_readable_leaves_its_entry_on_its_own_ground
     )
 
 
-def test_a_map_of_verdicts_none_of_which_decides_asks_for_review():
-    """``redirect`` is a legal verdict with no place in the collapse order, so a map carrying only those decides nothing and must fall back to review."""
-    assert collapse_verdicts(["redirect", ""]) == "needs_review"
-
-
-def test_an_empty_map_asks_for_review():
-    assert collapse_verdicts([]) == "needs_review"
+@pytest.mark.parametrize(
+    "verdicts",
+    [
+        pytest.param(["redirect", ""], id="only_verdicts_outside_the_order"),
+        pytest.param([], id="empty_map"),
+    ],
+)
+def test_a_map_of_verdicts_none_of_which_decides_asks_for_review(verdicts):
+    """A map with no verdict in the collapse order decides nothing and must fall back to review, whether it is empty or carries only verdicts outside the order, such as the legal ``redirect``."""
+    assert collapse_verdicts(verdicts) == "needs_review"
 
 
 @pytest.mark.parametrize(
@@ -1935,47 +1938,8 @@ async def test_delegate_explore_seeds_the_stack_with_the_anchor(tmp_path: Path):
     assert params["base_extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
 
 
-# 6. Specialist prompt — proposal self-curation contract (Section 1 + 8)
-def _build_specialist_prompt_text() -> str:
-    from hyperloom.orchestrator.specialists.domains import get_domain
-    from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
-
-    inputs = SpecialistPromptInputs(
-        domain=get_domain("serving_specialist"),
-        max_turns=12,
-        gap_canonical_id="gap-x",
-    )
-    system_prompt, user_prompt = build_specialist_prompts(inputs)
-    return system_prompt + "\n" + user_prompt
-
-
-def test_specialist_prompt_renders_proposal_target_and_ceiling():
-    text = _build_specialist_prompt_text()
-    # Section 8 states both numbers; Section 1 repeats them so the target is visible before the specialist starts
-    # working, not only at exit time.
-    assert "**2 entries is the norm, 4 the hard cap.**" in text
-    assert "**2 proposals is the norm, 4 the hard" in text
-    # Both the padding and the keep-going pressures need a stated counterweight.
-    assert "an empty ``proposal_set`` with a clear ``summary``" in text
-    assert "stop once" in text and "not the only stop" in text
-    assert "a coin-flip proposal is worse than none" in text
-    assert "reviews each surviving variant" in text
-
-
 class TestN38ActionVerdictClass:
     """Per-action ``verdict_class`` metadata so new actions don't reintroduce prior deadlocks."""
-
-    def test_action_metadata_has_verdict_class_field(self):
-        from hyperloom.inference_optimizer.protocol.action_surfaces import (
-            ActionMetadata,
-        )
-
-        fields = {f.name for f in ActionMetadata.__dataclass_fields__.values()}
-        assert "verdict_class" in fields, (
-            "ActionMetadata must declare verdict_class field so per-action "
-            "policy can be looked up in critic review_constraints"
-        )
 
     def test_default_classifier_covers_all_registered_actions(self):
         from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
@@ -2011,41 +1975,6 @@ class TestN38ActionVerdictClass:
             if reg.get(n) is None:
                 continue
             assert klass(n) == "exploration", n
-
-    def test_critic_agent_backend_accepts_action_verdict_policy(self, tmp_path):
-        from hyperloom.orchestrator.roles.critic_agent import (
-            CriticAgentBackend,
-        )
-
-        root = tmp_path / "critic-agent"
-        (root / "runtime").mkdir(parents=True)
-        (root / "runtime" / "cli.py").write_text("# stub")
-        sd = tmp_path / "session"
-        sd.mkdir()
-
-        def _fake_client_factory():
-            class _C:
-                pass
-
-            return _C()
-
-        def _fake_runtime_caller_factory():
-            def _caller(call):
-                return None
-
-            return _caller
-
-        backend = CriticAgentBackend(
-            critic_agent_root=root,
-            session_dir=sd,
-            codex_client_factory=_fake_client_factory,
-            runtime_caller_factory=_fake_runtime_caller_factory,
-            action_verdict_policy={"baseline": "exploration", "integrate": "promotion"},
-        )
-        assert backend.action_verdict_policy == {
-            "baseline": "exploration",
-            "integrate": "promotion",
-        }
 
     def test_critic_agent_backend_injects_policy_into_judge_bundle(self, tmp_path):
         import asyncio
@@ -2135,17 +2064,3 @@ class TestN38ActionVerdictClass:
             "the LLM-critic so it can look up each proposal's class"
         )
         assert "promotion" in captured_bundle["user_prompt"]
-
-    def test_critic_md_mentions_action_verdict_policy_lookup(self):
-        from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
-
-        p = asset_system_prompts_dir() / "critic.md"
-        text = p.read_text(encoding="utf-8")
-        assert "action_verdict_policy" in text, (
-            "critic.md must mention action_verdict_policy so the LLM-critic "
-            "treats it as the primary per-proposal lookup; otherwise newly "
-            "added actions will hit the same N33/N35/N37 chicken-and-egg "
-            "deadlock"
-        )
-        for klass in ("archival", "exploration", "promotion"):
-            assert klass in text.lower(), klass

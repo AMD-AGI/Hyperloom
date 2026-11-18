@@ -19,6 +19,8 @@ _BOARDS = [
     ("mi355x", True, "vendor"),
     ("r9700", False, "vendor"),
     ("r9600d", False, "vendor"),
+    ("w7900", False, "vendor"),
+    ("w7900d", False, "vendor"),
 ]
 
 
@@ -67,6 +69,8 @@ def test_only_the_gfx1201_radeon_boards_pin_their_geak_identity():
         ("Card Series: AMD Radeon AI PRO R9700", "r9700"),
         ("card series: amd radeon ai pro r9700", "r9700"),
         ("Card Series: AMD Radeon AI PRO R9600D", "r9600d"),
+        ("Card Series: AMD Radeon PRO W7900", "w7900"),
+        ("Card Series: AMD Radeon PRO W7900D", "w7900d"),
         ("Card Series: AMD Instinct MI300XL", None),
         ("Card Series: AMD Radeon AI PRO R9700S", None),
         ("Card Series: AMD Radeon AI PRO XR9700", None),

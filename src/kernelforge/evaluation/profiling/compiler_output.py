@@ -8,6 +8,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from kernelforge.utils.gpu_arch import CDNA_OCCUPANCY, OccupancyRule
+
 
 @dataclass
 class RegisterInfo:
@@ -19,6 +21,8 @@ class RegisterInfo:
     lds_bytes: int = 0
     spill_bytes: int = 0
     occupancy: int = 0
+    #: The target's occupancy steps; the Instinct ones unless the caller names the target.
+    occupancy_rule: OccupancyRule = CDNA_OCCUPANCY
 
     @property
     def has_spill(self) -> bool:
@@ -26,23 +30,24 @@ class RegisterInfo:
 
     @property
     def occupancy_analysis(self) -> str:
-        """Occupancy heuristic for CDNA3/CDNA4 (gfx942/gfx950): 256-VGPR and ~80KB-LDS dual-occupancy thresholds hold for both."""
+        """Where the counts sit against the occupancy steps of ``occupancy_rule``."""
+        rule = self.occupancy_rule
         parts = []
         if self.vgpr > 0:
-            if self.vgpr <= 256:
-                parts.append(f"VGPR={self.vgpr} (≤256: occupancy≥2 possible)")
+            if self.vgpr <= rule.vgpr_limit:
+                parts.append(f"VGPR={self.vgpr} (≤{rule.vgpr_limit}: {rule.vgpr_within})")
             else:
-                parts.append(f"VGPR={self.vgpr} (>256: occupancy=1 ONLY)")
+                parts.append(f"VGPR={self.vgpr} (>{rule.vgpr_limit}: {rule.vgpr_beyond})")
         if self.agpr > 0:
             parts.append(f"AGPR={self.agpr}")
         if self.sgpr > 0:
             parts.append(f"SGPR={self.sgpr}")
         if self.lds_bytes > 0:
             lds_kb = self.lds_bytes / 1024
-            if lds_kb <= 80:
-                parts.append(f"LDS={lds_kb:.1f}KB (≤80KB: dual-occupancy OK)")
+            if lds_kb <= rule.lds_limit_kib:
+                parts.append(f"LDS={lds_kb:.1f}KB (≤{rule.lds_limit_kib}KB: {rule.lds_within})")
             else:
-                parts.append(f"LDS={lds_kb:.1f}KB (>80KB: single-occupancy)")
+                parts.append(f"LDS={lds_kb:.1f}KB (>{rule.lds_limit_kib}KB: {rule.lds_beyond})")
         if self.has_spill:
             parts.append(f"SPILL={self.spill_bytes}B ⚠️")
         return "; ".join(parts) if parts else "unknown"

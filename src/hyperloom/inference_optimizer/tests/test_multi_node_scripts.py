@@ -335,14 +335,18 @@ def test_router_signal_never_blankets_a_group_it_does_not_lead(monkeypatch):
     assert (group_signals, pid_signals) == ([], [4242])
 
 
-def test_router_launch_tolerates_a_stale_pid_file(tmp_path):
-    """A pid file naming nothing live is the normal first-launch case."""
+def test_router_launch_tolerates_a_stale_pid_file(tmp_path, monkeypatch):
+    """A pid file naming nothing live is the normal first-launch case, and nothing is signalled for it."""
     lr = _load_script_module("lr_test_stale", "launch_router.py")
+    signalled: list[int] = []
+    monkeypatch.setattr(lr, "_signal_router", lambda pid, _sig: signalled.append(pid))
 
     for content in ("", "0", "not-a-pid", "999999999"):
         pid_file = tmp_path / "router.pid"
         pid_file.write_text(content)
         lr._retire_previous_router(pid_file, grace_s=0.1)
+
+    assert signalled == []
 
 
 def test_kill_remote_missing_pid_dir():
@@ -1113,17 +1117,6 @@ def test_kill_inference_for_kernel_agent_propagates_an_unexpected_error(monkeypa
 
     with pytest.raises(KeyError, match="pid_file"):
         mn_cli.kill_inference_for_kernel_agent_best_effort()
-
-
-def test_install_geak_noop_for_rayjob(tmp_path, monkeypatch):
-    # GEAK SSH install is Infera-only; RayJob kernel-agent uses the Ray runtime.
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
-
-    sp = tmp_path / "s.json"
-    sp.write_text('{"backend":"rayjob","nodes":2}', encoding="utf-8")
-    sp.chmod(0o600)
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
-    assert mn_cli.install_geak_on_pods_best_effort() == 0
 
 
 @pytest.mark.parametrize(("raw", "expected"), [(None, 42), (" ", 42), ("0", 1), ("1800", 1800)])

@@ -32,7 +32,7 @@ from hyperloom_common.gpu_telemetry import (
     fast_interval,
 )
 from hyperloom.common.gpu_power_settings import gpu_power_sampling_unavailable
-from inference_suite.contracts import REPORT_SCHEMA, GpuTelemetry, PowerSummary
+from inference_suite.contracts import READABLE_REPORT_SCHEMAS, GpuTelemetry, PowerSummary
 from inference_suite.contracts.layout import POWER
 
 log = logging.getLogger(__name__)
@@ -114,8 +114,6 @@ class ServerLogPhaseDriver:
                 self._recorder.note_phase(GpuPhase.WARMUP, now)
             if scan.saw_measured_begin:
                 self._recorder.note_phase(GpuPhase.MEASURED, now)
-            if scan.saw_eval_start:
-                self._recorder.note_phase(GpuPhase.EVAL, now)
 
     def _poll_logs(self) -> None:
         """:meth:`poll`, with a replay log that cannot be listed or read reported once at warning, then at debug."""
@@ -217,7 +215,7 @@ def round_power_summary(
 ) -> PowerSummary | None:
     """The round's power: an inference_suite report's ``power`` section, else the ``power.json`` a GEAK replay left
     in ``workspace``; ``None`` when no recorder ran for the round."""
-    if report and report.get("schema") == REPORT_SCHEMA:
+    if report and report.get("schema") in READABLE_REPORT_SCHEMAS:
         section = report.get("power")
         return None if section is None else PowerSummary.from_document(section)
     if workspace is None:

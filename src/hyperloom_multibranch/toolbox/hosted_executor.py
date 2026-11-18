@@ -92,6 +92,7 @@ from hyperloom_multibranch.toolbox.reverify import (
     first_warning_difference,
 )
 from hyperloom_multibranch.toolbox import long_context
+from hyperloom_multibranch.toolbox.merge_smoke import MERGE_SMOKE, SMOKE_NOT_RUN, MergeSmoke, SmokeNotRun
 from hyperloom_multibranch.toolbox.short_prompts import consistency_of, rederive
 from hyperloom_multibranch.toolbox.table_hits import read_table_hits, runtime_findings
 
@@ -150,7 +151,14 @@ class HostedExecutor:
         timeout_sec: The timeout of one attempt.
         workload_kind: The campaign's workload; an AgentX baseline served with the prefix cache off does not end
             ``succeeded``.
+
+    Attributes:
+        smoke: The merge smoke every test with patches passes before its first sandbox is asked for
+            (:mod:`~hyperloom_multibranch.toolbox.merge_smoke`), which the toolbox's builder sets from the host's
+            environment; ``None``, the default, for none.
     """
+
+    smoke: MergeSmoke | None = None
 
     def __init__(
         self,
@@ -165,6 +173,8 @@ class HostedExecutor:
         self._timeout = timeout_sec
         self._clock: Callable[[], float] = time.time
         self._workload = workload_kind
+        #: The requests whose smoke passed: a retry in a fresh sandbox does not ask again.
+        self._smoked: set[str] = set()
 
     async def run(self, job: TestJob) -> TestResult:
         request = job.request
@@ -174,6 +184,9 @@ class HostedExecutor:
             raise MeasurementRefused(
                 f"the hosted executor needs the accepted measurement, got {type(accepted).__name__}"
             )
+        smoked = await self._merge_smoke(request_id, accepted)
+        if smoked is not None:
+            return smoked
         call = self._call(job, accepted, self._output_dir(request_id))
         started = self._clock()
         try:
@@ -186,6 +199,41 @@ class HostedExecutor:
         result = await self._with_short_prompts(result, accepted, call)
         result = await self._with_long_context(result, accepted, call)
         return await self._with_request_classes(result, request, outcome, call)
+
+    async def _merge_smoke(self, request_id: str, accepted: AcceptedMeasurement) -> TestResult | None:
+        """The attempt's result when the merge smoke ends it before a sandbox is asked for, else ``None``.
+
+        A candidate whose patched Python does not compile or import fails as the candidate's (``merge_smoke``); a smoke
+        that could not run is an infrastructure failure (``smoke_not_run``), never held against the candidate.
+        """
+        smoke = self.smoke
+        if smoke is None or request_id in self._smoked:
+            return None
+        started = self._clock()
+        try:
+            error = await asyncio.to_thread(smoke.check, accepted.environment, accepted.points)
+        except SmokeNotRun as exc:
+            log.warning("test %s: the merge smoke could not run: %s", request_id, exc)
+            return TestResult(
+                request_id=request_id,
+                validity=Validity.MEASUREMENT_FAILED,
+                failure_class=FailureClass.INFRA,
+                failure_reason=f"{SMOKE_NOT_RUN}: {exc}",
+                started_at=started,
+                finished_at=self._clock(),
+            )
+        if error is not None:
+            log.info("test %s: the merge smoke failed, no sandbox is asked for: %s", request_id, error)
+            return TestResult(
+                request_id=request_id,
+                validity=Validity.CANDIDATE_FAILED,
+                failure_class=FailureClass.CANDIDATE,
+                failure_reason=f"{MERGE_SMOKE}: {error}",
+                started_at=started,
+                finished_at=self._clock(),
+            )
+        self._smoked.add(request_id)
+        return None
 
     @functools.cached_property
     def _session_facts(self) -> SessionFacts:

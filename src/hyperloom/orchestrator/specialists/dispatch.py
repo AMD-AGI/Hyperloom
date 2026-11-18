@@ -252,6 +252,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "roofline_snapshot_id": last_ta.get("roofline_snapshot_id"),
                 "executive_summary": executive_summary,
                 "hot_kernels_top15": hot_kernels,
+                "fusion_findings": list(last_ta.get("fusion_findings") or [])[:8],
             }
 
         measurement = getattr(state, "current_best_measurement", None)
@@ -650,10 +651,11 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         A real scheduling event (a domain delegate routed through PolicyGate +
         warmup + the GPU specialist pool). Idempotent per
         ``(anchor, round, macro_cycle)``; a domain with a specialist already
-        queued or running is skipped. The dispatcher zeroes the anchor's
-        dispatch counter when the forced specialist spawns; its keep counter
-        clears only on a KEEP from that domain's specialist. At most one forced
-        dispatch per tick.
+        queued or running is skipped, and while the dispatcher's admission
+        gates would refuse a specialist the force is held for the tick without
+        reaching the router. The dispatcher zeroes the anchor's dispatch counter
+        when the forced specialist spawns; its keep counter clears only on a
+        KEEP from that domain's specialist. At most one forced dispatch per tick.
 
         Note:
             Side-effecting: may dispatch a domain specialist via
@@ -695,29 +697,36 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             await self.warm_specialist_params(params)
             if self.refuse_patch_without_source(params, task_id=idempotency_key):
                 continue
-            intent = Intent(
-                type=IntentType.DELEGATE,
-                payload={
-                    "action_name": "specialist",
-                    "params": params,
-                    "idempotency_key": idempotency_key,
-                },
-            )
-            await self._coord.router.handle_intent("orchestration", intent)
-            try:
-                state.save(self.session_dir)
-            except OSError:
-                log.exception("stalled-domain force: state save failed")
-            log.info(
-                "stalled-domain force: dispatched domain=%s anchor=%s gap=%s round=%d",
-                dom.key,
-                anchor,
-                gap_cid,
-                round_id,
-            )
+            # The gates the router applies (the session's time, the untested backlog) refuse every stalled domain
+            # alike, so a refused force waits for a later tick instead of reaching the router as a denial.
+            denied = self._coord.dispatcher.admission_denial_for_action("specialist", params=params)
+            if denied is not None:
+                log.debug("stalled-domain force: held this tick by %s: %s", denied.rule, denied)
+                return
+            await self._send_forced_specialist(params, idempotency_key, round_id)
             # One forced dispatch per tick.
             return
         return
+
+    async def _send_forced_specialist(self, params: dict[str, Any], idempotency_key: str, round_id: int) -> None:
+        """Send the forced delegate through the router, and log it as dispatched only if its task exists."""
+        intent = Intent(
+            type=IntentType.DELEGATE,
+            payload={"action_name": "specialist", "params": params, "idempotency_key": idempotency_key},
+        )
+        await self._coord.router.handle_intent("orchestration", intent)
+        try:
+            self.shared_state.save(self.session_dir)
+        except OSError:
+            log.exception("stalled-domain force: state save failed")
+        if await self.tasks.find_by_idempotency_key(idempotency_key) is not None:
+            log.info(
+                "stalled-domain force: dispatched domain=%s anchor=%s gap=%s round=%d",
+                params["domain"],
+                params["tags"][0],
+                params["gap_canonical_id"],
+                round_id,
+            )
 
     async def ensure_custom_specialist(self) -> None:
         """Dispatch the operator-defined specialist once per macro cycle in FRAMEWORK_AGENT.

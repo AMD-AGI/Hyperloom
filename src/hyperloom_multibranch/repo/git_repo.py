@@ -42,7 +42,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, BundleMerge, RepoMerge
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, source_roots
 from hyperloom_common.git_safety import check_session_repository, git_dir_umask, share_objects_and_refs
-from hyperloom_multibranch.repo.isolated_git import INIT, blank_driver_programs, git_argv, git_env
+from hyperloom_multibranch.repo.isolated_git import INIT, SESSION_IDENTITY, blank_driver_programs, git_argv, git_env
 from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot
 from hyperloom_multibranch.repo.rebase import Files
 from hyperloom_multibranch.repo.stack import ScratchBlobs, stack_files
@@ -60,13 +60,6 @@ _COMMIT_ID = re.compile(r"[0-9a-f]{40}")
 _STORED_PATCH = re.compile(rf"{re.escape(PATCH_ROOT)}/[^/]+/(?P<sha256>[0-9a-f]{{64}})\.patch")
 # Plumbing on a local bare repository takes milliseconds; this only bounds a wedged filesystem.
 GIT_TIMEOUT_S = 60.0
-# Session commits carry this identity whoever runs the session, so the operator's git config never decides it.
-_IDENTITY = {
-    "GIT_AUTHOR_NAME": "hyperloom-multibranch",
-    "GIT_AUTHOR_EMAIL": "multibranch@hyperloom.invalid",
-    "GIT_COMMITTER_NAME": "hyperloom-multibranch",
-    "GIT_COMMITTER_EMAIL": "multibranch@hyperloom.invalid",
-}
 
 
 class GitError(RuntimeError):
@@ -110,7 +103,7 @@ class GitExperimentRepo:
         self._locator = locator
         self._aiter_configs = aiter_configs
         self._native = dict(native or {})
-        self._env = git_env(**_IDENTITY, GIT_DIR=str(self._path))
+        self._env = git_env(**SESSION_IDENTITY, GIT_DIR=str(self._path))
 
     async def init_root(self, recipe: Recipe) -> str:
         # Judged before anything is made: below shared storage the run's next leg may be another account of the group,

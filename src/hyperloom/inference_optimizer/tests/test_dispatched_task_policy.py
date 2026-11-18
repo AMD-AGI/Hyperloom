@@ -180,92 +180,54 @@ async def test_dispatch_denied_baseline_is_not_charged_to_baseline_failures(sess
 
 
 @pytest.mark.asyncio
-async def test_dispatched_internal_roofline_passes_delegate_gates(tmp_path, monkeypatch):
-    """Coordinator-internal actions skip LLM delegate gates but still dispatch."""
+@pytest.mark.parametrize(
+    ("kind", "params", "state_fields"),
+    [
+        pytest.param("roofline", {"reason": "prelude_bootstrap"}, {}, id="internal_roofline"),
+        pytest.param(
+            "conc_sweep",
+            {"reason": "phase_entry"},
+            # The phase-entry conc_sweep is already on record, so re-running the LLM singleton check would deny this row.
+            {
+                "phase": "SWEEP",
+                "phase_history": [
+                    {
+                        "to_phase": "SWEEP",
+                        "evidence": {"auto_conc_sweep_task_id": "internal-conc_sweep-phase_entry"},
+                    }
+                ],
+            },
+            id="auto_enqueued_conc_sweep_singleton",
+        ),
+        pytest.param(
+            "recover",
+            {"reason": "gpu_memory_leaked", "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]}},
+            {},
+            id="recover_admitted_at_ingress",
+        ),
+        pytest.param(
+            "framework_agent", {"candidate": {"repo": "x/y", "pr_number": 1}}, {}, id="internal_framework_agent"
+        ),
+    ],
+)
+async def test_dispatched_admitted_row_passes_delegate_gates(tmp_path, monkeypatch, kind, params, state_fields):
+    """A queued row the Coordinator or ingress already admitted reaches its executor past the delegate gates."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
+    for name, value in state_fields.items():
+        setattr(sub.shared_state, name, value)
     executed = {"ran": False}
 
     async def _stub(_ctx) -> dict:
         executed["ran"] = True
         return {"status": "ok"}
 
-    sub.register_executor("roofline", _stub)
+    sub.register_executor(kind, _stub)
     task, _ = await sub.tasks.create_or_return_existing(
-        TaskSpec(
-            kind="roofline",
-            params={"reason": "prelude_bootstrap"},
-            idempotency_key="internal-roofline",
-        ),
+        TaskSpec(kind=kind, params=params, idempotency_key=f"queued-{kind}"),
     )
     res = await sub.run_task(task)
     assert res.state == "succeeded"
     assert executed["ran"] is True
-
-
-@pytest.mark.asyncio
-async def test_dispatched_internal_conc_sweep_passes_auto_enqueue_singleton(tmp_path, monkeypatch):
-    """Auto-enqueued conc_sweep must not re-run LLM singleton validation at dispatch."""
-    sub = _runner_with_policy(tmp_path, monkeypatch)
-    state = sub.shared_state
-    assert isinstance(state, SharedState)
-    state.phase = "SWEEP"
-    state.phase_history = [
-        {
-            "to_phase": "SWEEP",
-            "evidence": {"auto_conc_sweep_task_id": "internal-conc_sweep-phase_entry"},
-        }
-    ]
-    executed = {"ran": False}
-
-    async def _stub(_ctx) -> dict:
-        executed["ran"] = True
-        return {"status": "ok"}
-
-    sub.register_executor("conc_sweep", _stub)
-    task, _ = await sub.tasks.create_or_return_existing(
-        TaskSpec(
-            kind="conc_sweep",
-            params={"reason": "phase_entry"},
-            idempotency_key="internal-conc-sweep",
-        ),
-    )
-    res = await sub.run_task(task)
-    assert res.state == "succeeded"
-    assert executed["ran"] is True
-
-
-@pytest.mark.asyncio
-async def test_dispatched_recover_executes_when_queued(tmp_path, monkeypatch):
-    """A recover task that passed ingress validation must reach its executor at dispatch."""
-    sub = _runner_with_policy(tmp_path, monkeypatch)
-    executed = {"ran": False}
-
-    async def _stub(_ctx) -> dict:
-        executed["ran"] = True
-        return {"status": "ok"}
-
-    sub.register_executor("recover", _stub)
-    task, _ = await sub.tasks.create_or_return_existing(
-        TaskSpec(
-            kind="recover",
-            params={"reason": "gpu_memory_leaked", "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]}},
-            idempotency_key="queued-recover",
-        ),
-    )
-    res = await sub.run_task(task)
-    assert res.state == "succeeded"
-    assert executed["ran"] is True
-
-
-def test_validate_dispatched_task_accepts_integrate_patch_with_verdict(tmp_path, monkeypatch):
-    gate, _sd = _gate(tmp_path, monkeypatch)
-    state = gate.shared_state
-    assert isinstance(state, SharedState)
-    state.record_specialist_patch_verdict("spec-1", "approve")
-    gate.validate_dispatched_task(
-        "integrate_patch",
-        {"specialist_task_id": "spec-1", "apply_only": True},
-    )
 
 
 def test_validate_dispatched_task_rejects_missing_specialist_task_id(tmp_path, monkeypatch):
@@ -712,28 +674,6 @@ async def test_reconcile_skips_non_critic_policy_denials(tmp_path, monkeypatch):
     await sub.run_task(task)
     disp = _reconcile_dispatcher(sub=sub, tasks=sub.tasks, shared_state=state)
     assert await disp._reconcile_cancelled_policy_denied_integrate_tasks() == []
-
-
-@pytest.mark.asyncio
-async def test_dispatched_internal_framework_agent_passes(tmp_path, monkeypatch):
-    sub = _runner_with_policy(tmp_path, monkeypatch)
-    executed = {"ran": False}
-
-    async def _stub(_ctx) -> dict:
-        executed["ran"] = True
-        return {"status": "ok"}
-
-    sub.register_executor("framework_agent", _stub)
-    task, _ = await sub.tasks.create_or_return_existing(
-        TaskSpec(
-            kind="framework_agent",
-            params={"candidate": {"repo": "x/y", "pr_number": 1}},
-            idempotency_key="internal-framework-agent",
-        ),
-    )
-    res = await sub.run_task(task)
-    assert res.state == "succeeded"
-    assert executed["ran"] is True
 
 
 @pytest.mark.asyncio

@@ -588,7 +588,9 @@ class TreeArchive:
         return cls.from_env(env)
 
     def put(self, tree: SearchTree) -> None:
-        """Archive ``tree`` once; archiving it again is a no-op, another tree under its session id is an error.
+        """Archive ``tree`` once; archiving it again is a no-op, another tree under its session id is an error. Every
+        session of the deployment reads it, so it is the group's to read wherever the archive's folder is setgid,
+        set up to be shared or not (``publish_once``'s ``group_read``).
 
         The start time does not tell two trees apart: a tree archived before it was kept is the same session's tree.
         """
@@ -596,7 +598,7 @@ class TreeArchive:
         if not _FILE_NAME.fullmatch(tree.session_id):
             raise ValueError(f"session id {tree.session_id!r} cannot name an archived tree")
         path = self.root / f"{tree.session_id}.json"
-        if publish_once(path, encode_json(tree_document(tree))):
+        if publish_once(path, encode_json(tree_document(tree)), group_read=True):
             return
         held = tree_from_document(json.loads(path.read_text(encoding="utf-8")))
         if replace(held, started_at=tree.started_at) != tree:

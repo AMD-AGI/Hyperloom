@@ -29,7 +29,8 @@ and a line in its log naming the cause; :meth:`RemoteProcess.output` probes for 
 :attr:`RemoteAgentSandbox.probe_seconds`.
 
 A command runs on the sandbox's own environment with only what :func:`forwarded_env` takes from this host's (the LLM
-gateway, its credentials and models, the CA bundle the hosting layer puts at the same path in both containers) and the
+gateway, its credentials and models, the CA variables naming the hosting layer's bundle, which the dev template must build
+at the same path the app container's ``start.sh`` does) and the
 sandbox's own home, Claude config, caches and a temporary directory on the sandbox's local disk, where HIP unbundles
 its code objects. Commands run as root there, as the Claude CLI accepts only in a sandbox it is told of. The platform
 sets the device mask; a mask the caller passes is dropped.
@@ -51,6 +52,7 @@ from pathlib import Path
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom_common.shared_storage import child_umask, create_shared_file, make_shared_dirs, write_shared_text
 from hyperloom.sandbox import RunSettings, Sandbox, SandboxGone, SandboxUnavailable
+from hyperloom_multibranch.repo.isolated_git import AGENT_IDENTITY
 from hyperloom_multibranch.specialist.agent_onboarding import ENCODING, CommandResult
 from hyperloom_multibranch.specialist.agent_sandbox import TIMED_OUT, read_tail
 from hyperloom_multibranch.specialist.agent_watch import GRACE_SECONDS, MARKER, PROCESS_MARKER
@@ -299,6 +301,8 @@ class RemoteAgentSandbox:
             "GIT_CONFIG_COUNT": "1",
             "GIT_CONFIG_KEY_0": "safe.directory",
             "GIT_CONFIG_VALUE_0": "*",
+            # The home has no git config, and an agent commits its own changes in its checkout.
+            **AGENT_IDENTITY,
         }
         merged.update({name: value for name, value in env.items() if name != "PATH"})
         merged = {name: value for name, value in merged.items() if name not in GPU_MASK_ENV_NAMES}

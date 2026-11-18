@@ -33,16 +33,16 @@ from hyperloom.common.agent_isolation import (
     IsolationRefused,
     HOST_LAYER_ENV,
     NoIsolation,
-    layer_bwrap,
-    require_agent_isolation,
 )
 from hyperloom.common.env_safety import SPECIALIST_USER_ENV, RunAs, RunAsError
+from hyperloom.hosted.campaign import parse_campaign
 from hyperloom.measure.local_templates import local_runner_template
 from hyperloom.orchestrator.specialists import agent_runner
 from hyperloom.orchestrator.specialists.launch_env import LaunchPlace, prepare_launch, resolve_launch_isolation
 from hyperloom.sandbox.card_occupancy import CardGuard
 from hyperloom_multibranch.contracts.toolbox import BranchLease
 from hyperloom_multibranch.scheduling import launch_isolation as launch_isolation_module
+from hyperloom_multibranch.scheduling.hosted_run import require_hosted_isolation
 from hyperloom_multibranch.scheduling.launch_isolation import (
     HOSTED,
     LaunchIsolation,
@@ -50,6 +50,7 @@ from hyperloom_multibranch.scheduling.launch_isolation import (
     launch_isolation,
 )
 from hyperloom_multibranch.scheduling.local_peers import LocalCards, branch_sandboxes
+from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.specialist import agent_watch, dev_sandbox
 from hyperloom_multibranch.specialist.agent_sandbox import FrameworkProtection
 from hyperloom_multibranch.toolbox import local_hosted
@@ -61,9 +62,9 @@ LAYER_PROBE = BwrapProbe("/opt/layer/bin/bwrap", (0, 13, 1), ())
 SPECIALIST_WHY = (f"running them as an account: {SPECIALIST_USER_ENV} is not set", "no bwrap")
 #: A shell line that prints whether it can read this test process's environment, as an unconfined command can.
 REACHES = "if cat /proc/{pid}/environ >/dev/null 2>&1; then echo reached; else echo fenced; fi"
-#: Why an agent or dev sandbox on this host runs unconfined, as the sandbox chooser says it.
+#: Why a sandbox on this host runs unconfined, as the choosers say it.
 SANDBOX_WHY = ("running them as an account: an agent sandbox runs its commands as the app's own account", "no bwrap")
-#: Why a test on this host runs unconfined, as the test chooser says it.
+#: Why a test on this host runs unconfined, as the choosers say it.
 TEST_WHY = ("running them as an account: a test sandbox runs as the app's own account", "no bwrap")
 
 
@@ -330,11 +331,26 @@ FOUR_CASES = {
 }
 
 
-def _enter_case(case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> IsolationRefused | None:
+def _spec(measurement: str) -> Any:
+    return parse_campaign(
+        {
+            "schema": "hyperloom.campaign-spec/v1",
+            "flow": "multibranch",
+            "model": {"path": "/models/Llama-3-8B"},
+            "framework": {"name": "vllm", "image": f"registry.example/vllm@sha256:{'2' * 64}"},
+            "hardware": {"gpu_type": "mi355x", "tp": 1},
+            "workload": {"conc": 16, "isl": 1024, "osl": 512, "precision": "fp8"},
+            "budget": {"max_hours": 1},
+            "placement": {"profile": "hosted-gpu", "measurement": measurement},
+            "multibranch": {"workload": "inferencex"},
+        }
+    )
+
+
+def _enter_case(case: str, local: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PeersUnavailable | None:
     """Make this process ``case`` with no specialist account: a local run with the real bubblewrap on ``PATH`` or with
-    none there, or a hosted run started as its entry starts it (:func:`require_agent_isolation` with the layer's
-    bubblewrap, :func:`layer_bwrap`) with its layer holding the real bubblewrap or no layer named, ``PATH`` then holding
-    no usable one. Returns the hosted start's refusal, if any."""
+    none there, or a hosted run started (:func:`require_hosted_isolation`) with its layer holding the real bubblewrap
+    or no layer named, ``PATH`` then holding no usable one. Returns the hosted start's refusal, if any."""
 
     no_bwrap = tmp_path / "no-bwrap-bin"
     no_bwrap.mkdir()
@@ -353,8 +369,8 @@ def _enter_case(case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> I
     if case == "local-no-bwrap":
         return None
     try:
-        require_agent_isolation(bwrap=layer_bwrap(environ))
-    except IsolationRefused as refused:
+        require_hosted_isolation(_spec("local" if local else "hosted"), environ)
+    except PeersUnavailable as refused:
         return refused
     return None
 
@@ -365,7 +381,7 @@ def _enter_case(case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> I
 def test_the_record_in_each_case_is_what_each_path_chooses_and_the_hosted_start_refuses_only_a_real_gap(
     case: str, local: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    refused = _enter_case(case, tmp_path, monkeypatch)
+    refused = _enter_case(case, local, tmp_path, monkeypatch)
 
     isolation = launch_isolation(local=local)
 
@@ -375,7 +391,7 @@ def test_the_record_in_each_case_is_what_each_path_chooses_and_the_hosted_start_
     assert bool(isolation.reasons) == (NONE in expected or REFUSED in expected), isolation.reasons
     assert (isolation.problems() == "") == (expected.count(BWRAP) + expected.count(HOSTED) == 3)
     if case == "hosted-layer-bwrap":
-        assert refused is None, "with the layer's bubblewrap a specialist runs confined, so the run starts"
+        assert refused is None, "with the layer's bubblewrap nothing here runs unconfined, so the run starts"
     elif case == "hosted-no-layer-bwrap":
         assert refused is not None and agent_isolation.NO_LAYER_BWRAP in str(refused)
 
@@ -389,7 +405,7 @@ def test_the_record_of_the_specialists_is_what_a_specialist_the_runner_launches_
     reads this process's environment, and the record must say so; under bubblewrap it cannot, and the record must
     not; where it must be isolated and cannot be, it is not launched at all, and the record says refused."""
 
-    _enter_case(case, tmp_path, monkeypatch)
+    _enter_case(case, True, tmp_path, monkeypatch)
     recorded = launch_isolation(local=True).specialists
     workspace = tmp_path / "workspace"
     workspace.mkdir()

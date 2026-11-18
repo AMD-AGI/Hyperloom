@@ -7,7 +7,9 @@ The participants may be different accounts of one group: each leg of a hosted ru
 RSI archive is read by every session of a deployment. So below shared storage a published file is readable by them
 (``644``, set by ``fchmod`` whatever the umask) and written by none once it is there, and the directories it goes in
 are the group's (``2775``, :func:`~hyperloom_common.shared_storage.make_shared_dirs`). Anywhere else every participant
-runs as the session's user, so a published file stays owner-only (``600``) and the directories follow the umask. No
+runs as the session's user, so a published file stays owner-only (``600``) and the directories follow the umask; one
+other sessions read whoever wrote it (an archived search tree) is the group's to read in a setgid directory, whatever
+the umask. No
 link a member of the group could have put on the way is followed
 (:func:`~hyperloom_common.shared_storage.publish_shared_bytes`). Segments (:mod:`.segments`) are created ``664`` below
 shared storage, as each is appended to by whichever leg runs, and owner-only anywhere else.
@@ -20,7 +22,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hyperloom_common.shared_storage import parent_is_shared, publish_shared_bytes
+from hyperloom_common.io import group_read_mode
+from hyperloom_common.shared_storage import make_shared_dirs, parent_is_shared, publish_shared_bytes
 
 #: A published file below shared storage: read by every account of the group, written by none once it is in place.
 PUBLISHED_MODE = 0o644
@@ -41,15 +44,25 @@ def encode_json(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":")) + "\n").encode()
 
 
-def publish_once(path: Path, data: bytes) -> bool:
+def publish_once(path: Path, data: bytes, *, group_read: bool = False) -> bool:
     """Create ``path`` holding ``data`` unless it exists; ``False`` when another writer created it first.
 
     The file is linked into place complete, so its existence and its content arrive together. ``link`` is atomic on
-    NFSv3 and later, where ``O_EXCL`` alone would expose the file before its bytes are written.
+    NFSv3 and later, where ``O_EXCL`` alone would expose the file before its bytes are written. With ``group_read``,
+    for a file other sessions read whoever wrote it, one that would be owner-only outside shared storage is made
+    owner read-write plus the group's read where the directory it lands in is setgid and its group may read it
+    (:func:`~hyperloom_common.io.group_read_mode`), never others', set whatever the process's umask, as
+    ``WriteOptions.group_read`` makes a session file. Without ``group_read`` the mode outside shared storage is
+    ``600`` as the umask leaves it.
     """
 
     path = Path(path)
-    return publish_shared_bytes(path, data, mode=session_file_mode(path, PUBLISHED_MODE), make_parents=True)
+    mode = session_file_mode(path, PUBLISHED_MODE)
+    if group_read and mode == OWNER_ONLY_MODE:
+        make_shared_dirs(path.parent)
+        mode = group_read_mode(path.parent.stat().st_mode)
+        return publish_shared_bytes(path, data, mode=mode, make_parents=True, exact_mode=True)
+    return publish_shared_bytes(path, data, mode=mode, make_parents=True)
 
 
 __all__ = ["OWNER_ONLY_MODE", "PUBLISHED_MODE", "encode_json", "publish_once", "session_file_mode"]

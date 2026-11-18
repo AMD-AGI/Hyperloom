@@ -125,7 +125,12 @@ that set each flag and environment variable and what it overrode:
 2. the operator's layer: removals, then additions;
 3. the candidate's layer: removals, then additions;
 4. the golden layer, when the round applies it;
-5. the guard: the model path, address and GPU mask of the round;
+5. the guard: the model path, address and GPU masks of the round
+   (`ROCR_VISIBLE_DEVICES` the round's cards, `HIP_VISIBLE_DEVICES` `0..n-1`),
+   and the framework's own ready timeout (`VLLM_ENGINE_READY_TIMEOUT_S`,
+   `SGLANG_WARMUP_TIMEOUT`) at 10800 s, the largest value an InferenceX recipe
+   sets and above Hyperloom's default boot limit, so a slow start ends at the
+   round's `boot_sec` as `server_boot_timeout`, not at the framework's 600 s;
 6. the runner's layer: the environment and floors a host needs, and the
    framework's metrics switch (`--enable-metrics` for SGLang; vLLM needs none)
    when the round samples KV telemetry;
@@ -133,7 +138,10 @@ that set each flag and environment variable and what it overrode:
 
 Neither the operator's nor the candidate's layer may set what the guard or the
 runner owns, nor, under a golden layer, what golden owns
-(`golden_owned_touched`); such a layer is refused, not overridden.
+(`golden_owned_touched`); such a layer is refused, not overridden. The ready
+timeout is the exception: recipes raise it for a slow start and a round's
+operator layer re-states its base's environment, so whatever a layer sets, the
+guard's value replaces it and `launch.json` records whose value it replaced.
 
 The golden layer carries a base's golden acceptance length (speculative decoding
 draft and simulation settings) as its own record. An AgentX session runs a GSM8K
@@ -162,8 +170,9 @@ A round holds its server in one of four modes:
 Before `own` or `boot` starts a server, the round refuses a port something already
 listens on (`port_in_use`) and GPUs that `amd-smi` does not list or that another
 process holds (`gpus_unavailable`, naming each GPU, its amd-smi card and its holder; a
-round's GPU numbers are `HIP_VISIBLE_DEVICES` numbers, matched to amd-smi cards through
-their KFD node). A process holds a card when `amd-smi process` reports more than 1 GiB
+round's GPU numbers are the machine's card numbers the server gets as
+`ROCR_VISIBLE_DEVICES`, matched to amd-smi cards through their KFD node; the server's
+`HIP_VISIBLE_DEVICES` numbers those cards from 0). A process holds a card when `amd-smi process` reports more than 1 GiB
 of VRAM for it there, or reports none at all: every ROCm process opens all cards and
 keeps up to a few MiB of page tables and runtime context on each, which does not count.
 Hyperloom stops
@@ -184,7 +193,8 @@ CPython 3.12 build `pins.py` pins, are staged ahead of time into a tool cache wi
 one `staging_manifest.json`. InferenceX's files are read from the pinned commit's tree (`git archive`),
 never from a checkout's working tree: a `--source` checkout's local edits, untracked files and later commits are
 not staged, and a checkout that lacks the pinned commit is refused. Staging patches the harness's aiperf so a reply it found no content in exports the
-server's output token count as `error_osl`; a harness the patch does not apply to fails the staging, and a cache
+server's output token count as `error_osl`, and so the warmup abort it logs carries the failed request's error; a
+harness the patch does not apply to fails the staging, and a cache
 staged before the patch is staged again. Two hosts compare stagings by their normalised
 manifest: each installed package's name, version and wheel sha256, the
 interpreter's version and build sha256, the InferenceX pin and lm-eval, with no
@@ -239,14 +249,14 @@ One round writes one run directory and leaves it unchanged once the round ends.
 |---|---|
 | `config.yaml` | The round's config (`inference-suite-config/1`), stored verbatim. |
 | `launch.json` | The exact launch (`inference-suite-launch/1`), with the base it was composed on. |
-| `report.json` | What the round measured, or the step it failed at (`inference-suite-report/1`). Written last. |
+| `report.json` | What the round measured, or the step it failed at (`inference-suite-report/2`). Written last. |
 | `server.log` | The server's log. A `boot` or `reuse` round copies the bytes logged during the round and records their range. |
 | `server_ready_at` | `<ready unix time> <boot seconds>`; `0` boot seconds for a reused server. |
 | `server.pid` | An `own` round's pidfile while its server runs; `boot` and `reuse` keep theirs in `pid_dir`. |
 | `phase_marks.json` | The instants the round passed from one phase to the next. |
 | `kv_metrics.json`, `agentx_timeline.jsonl` | KV-cache samples and the AgentX request timeline. |
 | `power.json` | Every power reading the node gave over the whole round; see [Power](#power). |
-| `client/` | `stdout.log`, `stderr.log`, `agentx_client.log`, `inferencex_result.json`, `aiperf_artifacts/` (`profile_export.jsonl`, `logs/aiperf.log`) and, on an MLPerf round, `mlperf_artifacts/` (the harness's `result_summary.json` and `scores.json`). |
+| `client/` | `stdout.log`, `stderr.log`, `agentx_client.log`, `inferencex_result.json`, `aiperf_artifacts/` (`profile_export.jsonl`, `profile_export_aiperf.json`, `logs/aiperf.log`) and, on an MLPerf round, `mlperf_artifacts/` (the harness's `result_summary.json` and `scores.json`). |
 | `eval/` | `stdout.log`, `stderr.log`, lm-eval's `results_<time>.json`, `hyperloom_eval_probe.json` and `definition.json`. |
 | `profile/` | `torch_trace/`, `capture_traces/`, `graph_capture_profile/` and `capture.json`. |
 
@@ -318,7 +328,7 @@ the same span (`accumulator_check`); beyond 5% it is the warning
 `power_throttle_fraction_max`, `power_valid`, `reasons` and `warnings`.
 `gpu_monitor` is derived from the same samples. `power.json`, the `power` section
 and `gpu_monitor` number cards by amd-smi index, not by the round's
-`HIP_VISIBLE_DEVICES` numbers.
+`ROCR_VISIBLE_DEVICES` numbers.
 
 ## report.json
 
@@ -343,4 +353,11 @@ A round that did not complete names one `failed_step`:
 
 Every metric key is fixed: a metric nobody measured is `null`, never `0`. An eval
 records its definition digest, and two scores compare only under one definition.
+
+An AgentX round's counts are recounted from `profile_export.jsonl`, except
+`context_overflow`: the profiling requests aiperf skipped because the server
+refused them as longer than the context it serves. aiperf keeps those out of the
+export and every metric, so the count is read from its summary,
+`profile_export_aiperf.json`. A report of the previous schema,
+`inference-suite-report/1`, still reads, with `context_overflow` `null`.
 

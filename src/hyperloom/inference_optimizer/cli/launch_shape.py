@@ -27,6 +27,7 @@ from .model_gate import (
 )
 from .multi_node import _resolve_gpus_per_node, _resolve_mn_backend
 from .parser import _positive_int_arg
+from .preflight import _resumed_session_state
 
 
 def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
@@ -220,6 +221,22 @@ def _enforce_topology_gates(*, nodes: int, gpus_per_node: int, tp: int, ep: int)
         sys.exit(2)
 
 
+def _recorded_launch_pins(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
+    """The ``--server-args`` and ``--extra-env`` pins in the ``state.json`` that ``--resume-from`` names, else none."""
+    recorded = _resumed_session_state(args) or {}
+    env = recorded.get("operator_extra_env")
+    pins = {str(k).strip(): str(v) for k, v in env.items() if str(k).strip()} if isinstance(env, dict) else {}
+    return str(recorded.get("operator_server_args") or ""), pins
+
+
+def _launch_pins(
+    args: argparse.Namespace, recorded_server_args: str, recorded_extra_env: dict[str, str]
+) -> tuple[str, dict[str, str]]:
+    """The operator's ``--server-args`` and ``--extra-env`` pins: this command line's, else the session's recorded ones."""
+    server_args = str(getattr(args, "server_args", "") or "").strip() or recorded_server_args
+    return server_args, parse_operator_extra_env(args) or dict(recorded_extra_env)
+
+
 def _export_operator_launch_shape(
     *,
     server_args: str,
@@ -280,11 +297,10 @@ def _resolve_run_topology(args: argparse.Namespace) -> int:
     """
     # Surface --nodes (CLI flag wins) before _preflight runs.
     nodes_resolved = max(1, int(args.nodes))
-    # The operator's pins have to be in the environment before the ladder below reads them.
-    _export_operator_launch_shape(
-        server_args=str(getattr(args, "server_args", "") or "").strip(),
-        extra_env=parse_operator_extra_env(args),
-    )
+    # The operator's pins have to be in the environment before the ladder below reads them. A resume without pins of
+    # its own takes the recorded ones here, so the gates that run before ``_resume_session`` read the same environment.
+    server_args, extra_env = _launch_pins(args, *_recorded_launch_pins(args))
+    _export_operator_launch_shape(server_args=server_args, extra_env=extra_env)
     # Settle the knobs before the gates, the projection and ``_preflight`` derive from them. A resume runs its own
     # ladder once the state is loaded.
     _is_resume = bool(getattr(args, "resume_from", None))

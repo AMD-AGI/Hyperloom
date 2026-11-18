@@ -193,6 +193,8 @@ _HARNESS = textwrap.dedent(
     with open(os.path.join(artifacts, "profile_export.jsonl"), "w") as export:
         for phase in ("warmup", "warmup", "profiling", "profiling"):
             export.write(json.dumps({"metadata": {"benchmark_phase": phase}, "metrics": {}}) + "\\n")
+    with open(os.path.join(artifacts, "profile_export_aiperf.json"), "w") as summary:
+        summary.write("{}")
     """
 )
 _FIXED = FixedWorkload(

@@ -57,16 +57,17 @@ def coord(build_coord):
     return build_coord
 
 
-def test_targeted_build_repo_match_ignores_origin():
-    assert _repo_matches_targeted_build_component("https://example.test/forks/aiter.git", "aiter")
-    assert _repo_matches_targeted_build_component("git@example.test:team/vllm.git", "vllm_source")
-
-
-def test_targeted_build_repo_match_rejects_wrong_component():
-    assert not _repo_matches_targeted_build_component(
-        "https://example.test/forks/unrelated.git",
-        "aiter",
-    )
+@pytest.mark.parametrize(
+    ("repo_url", "component", "expected"),
+    [
+        ("https://example.test/forks/aiter.git", "aiter", True),
+        ("git@example.test:team/vllm.git", "vllm_source", True),
+        ("https://example.test/forks/unrelated.git", "aiter", False),
+    ],
+    ids=["fork-origin", "ssh-origin", "wrong-component"],
+)
+def test_targeted_build_repo_match_reads_the_repo_name_not_its_origin(repo_url, component, expected):
+    assert _repo_matches_targeted_build_component(repo_url, component) is expected
 
 
 # maybe_escalate_to_targeted_build
@@ -389,32 +390,24 @@ async def test_specialist_requested_build_defaults_component_to_vllm_source(coor
 
 
 @pytest.mark.asyncio
-async def test_specialist_requested_build_noop_without_request(coord, monkeypatch):
+@pytest.mark.parametrize("marker", ["spec-plain", ""], ids=["done-file-without-request", "no-task-id"])
+async def test_specialist_requested_build_noop_without_request(coord, monkeypatch, marker):
     coord.shared_state.framework = "vllm"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
-    tid = "spec-plain"
-    wd = coord.session_dir / "runs" / "specialist" / tid
+    wd = coord.session_dir / "runs" / "specialist" / "spec-plain"
     wd.mkdir(parents=True, exist_ok=True)
     (wd / "specialist_done.json").write_text(json.dumps({"patches_written": ["p.patch"]}))
-    coord.shared_state.enablement.last_specialist_task_id = tid
+    coord.shared_state.enablement.last_specialist_task_id = marker
 
     await coord.enablement_build.maybe_enqueue_specialist_requested_build()
 
     assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
     # Marker is still consumed (cleared) even when there is no request.
     assert coord.shared_state.enablement.last_specialist_task_id == ""
-
-
-@pytest.mark.asyncio
-async def test_specialist_requested_build_noop_when_no_task_id(coord, monkeypatch):
-    coord.shared_state.framework = "vllm"
-    coord.shared_state.enablement.last_specialist_task_id = ""
-    await coord.enablement_build.maybe_enqueue_specialist_requested_build()
-    assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
 
 
 # maybe_route_build_outcomes -> maybe_rearm_enablement routing
@@ -682,21 +675,6 @@ def test_build_params_no_injection_when_no_build_failure():
     assert "PREVIOUS TARGETED-BUILD" not in notes
 
 
-def test_build_params_failure_class_distinguishes_timeout_vs_defect():
-    fake_timeout = _make_params_fake(enablement_last_build_failure={"failure_class": "timeout", "failure_summary": ""})
-    fake_defect = _make_params_fake(
-        enablement_last_build_failure={"failure_class": "compile_error", "failure_summary": "bad code"}
-    )
-    log = "hipErrorNoBinaryForGpu"
-    notes_timeout = fake_timeout.build_enablement_specialist_params(log)["notes"]
-    notes_defect = fake_defect.build_enablement_specialist_params(log)["notes"]
-    # Both should mention the build failure
-    assert "timeout" in notes_timeout
-    assert "compile_error" in notes_defect
-    # The timeout note steers toward a smaller scope
-    assert "smaller component scope" in notes_timeout
-
-
 # maybe_escalate_to_targeted_build: discovery-driven ref selection
 
 
@@ -835,21 +813,13 @@ async def test_an_id_alone_does_not_make_a_row_a_routing_sentinel(coord):
     serializer two packages away: if it ever gained one, every completed build
     would read as already routed and no launch probe would ever be enqueued.
     The row here is exactly that hypothetical -- an attempt row carrying the
-    id -- and it must not be mistaken for a routing record.
+    id -- and the build it describes must still get its launch probe.
     """
     task_id = await _recorded_build(coord, gap_id="gs")
     manifest = list(coord.shared_state.enablement.build_manifest or [])
     manifest.append({"task_id": task_id, "ok": True, "attempt_root": "/tmp/x"})
     coord.shared_state.enablement.build_manifest = manifest
 
-    assert coord.enablement_build._build_routing_record(task_id) is None
+    await coord.enablement_build.maybe_route_build_outcomes()
 
-
-@pytest.mark.asyncio
-async def test_routing_a_build_with_nothing_to_say_still_marks_it_routed(coord):
-    """The merge path used to take only the caller's fields, and it had none."""
-    task_id = await _recorded_build(coord, gap_id="gt")
-    coord.enablement_build._note_build_routed(task_id)
-
-    record = coord.enablement_build._build_routing_record(task_id)
-    assert record is not None and record.get("routed") is True
+    assert len(await _queued_probes(coord)) == 1

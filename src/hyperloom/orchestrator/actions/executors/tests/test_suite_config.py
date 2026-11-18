@@ -5,7 +5,7 @@
 
 The launch the translation must produce is spelled out per framework: the base's defaults with the point's
 ``EXTRA_<FW>_ARGS`` on top, its knobs as config fields rather than server environment, and the GPUs masked by
-``HIP_VISIBLE_DEVICES``.
+``ROCR_VISIBLE_DEVICES`` (with ``HIP_VISIBLE_DEVICES`` numbering them from 0).
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
 from inference_suite import LaunchQuery, SourceSnapshot, resolve_base
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv
-from inference_suite.compose import RoundFacts, compose
+from inference_suite.compose import READY_TIMEOUT_SEC, RoundFacts, compose
 from inference_suite.contracts import (
     BaseLaunch,
     ConfigError,
@@ -40,7 +40,7 @@ from inference_suite.contracts import (
     Workload,
     WorkloadKind,
 )
-from inference_suite.contracts.launch import Launch, VersionCheck
+from inference_suite.contracts.launch import Launch, LayerSource, VersionCheck
 from inference_suite.recipe.resolve import UnreadSource
 
 _MODEL = "/models/Qwen3-8B"
@@ -69,14 +69,26 @@ _ATOM_ARGV = (
     *("-tp", "2", "--max-model-len", "8192", "--trust-remote-code", "--model", _MODEL, "--host", "127.0.0.1"),
     *("--server-port", "8888"),
 )
-#: The server environment every framework gets from ``_point``: its non-knob variables and the round's GPU mask.
-_POINT_ENV = {"PATH": "/opt/venv/bin:/usr/bin", "AITER_LOG_TUNED_CONFIG": "1", "HIP_VISIBLE_DEVICES": "4,5"}
+#: The server environment every framework gets from ``_point``: its non-knob variables and the round's GPU masks.
+_POINT_ENV = {
+    "PATH": "/opt/venv/bin:/usr/bin",
+    "AITER_LOG_TUNED_CONFIG": "1",
+    "ROCR_VISIBLE_DEVICES": "4,5",
+    "HIP_VISIBLE_DEVICES": "0,1",
+}
+#: The guard's hold on each framework's own ready timeout; ATOM has none.
+_SGLANG_READY = {"SGLANG_WARMUP_TIMEOUT": str(READY_TIMEOUT_SEC)}
+_VLLM_READY = {"VLLM_ENGINE_READY_TIMEOUT_S": str(READY_TIMEOUT_SEC)}
 #: (server command under the framework python, argv after it, server environment) per framework and board.
 _LAUNCH = {
-    ("sglang", "mi300x"): (_SGLANG_ENTRY, _SGLANG_ARGV, {"SGLANG_USE_AITER": "1", "SGLANG_AITER_MLA_PERSIST": "1"}),
-    ("sglang", "mi355x"): (_SGLANG_ENTRY, _SGLANG_ARGV, {"SGLANG_USE_AITER": "1"}),
-    ("vllm", "mi300x"): (_VLLM_ENTRY, _VLLM_ARGV, {"VLLM_ROCM_USE_AITER": "1"}),
-    ("vllm", "mi355x"): (_VLLM_ENTRY, _VLLM_ARGV, {"VLLM_ROCM_USE_AITER": "1"}),
+    ("sglang", "mi300x"): (
+        _SGLANG_ENTRY,
+        _SGLANG_ARGV,
+        {"SGLANG_USE_AITER": "1", "SGLANG_AITER_MLA_PERSIST": "1", **_SGLANG_READY},
+    ),
+    ("sglang", "mi355x"): (_SGLANG_ENTRY, _SGLANG_ARGV, {"SGLANG_USE_AITER": "1", **_SGLANG_READY}),
+    ("vllm", "mi300x"): (_VLLM_ENTRY, _VLLM_ARGV, {"VLLM_ROCM_USE_AITER": "1", **_VLLM_READY}),
+    ("vllm", "mi355x"): (_VLLM_ENTRY, _VLLM_ARGV, {"VLLM_ROCM_USE_AITER": "1", **_VLLM_READY}),
     ("atom", "mi300x"): (_ATOM_ENTRY, _ATOM_ARGV, {}),
     ("atom", "mi355x"): (_ATOM_ENTRY, _ATOM_ARGV, {}),
 }
@@ -159,6 +171,20 @@ def test_the_translated_launch_is_the_base_under_the_points_server_layer(framewo
     assert launch.entrypoint == entry
     assert _flags(launch.argv[len(entry) :]) == _flags(argv)
     assert dict(launch.env) == {**env, **_POINT_ENV}
+
+
+@pytest.mark.parametrize(
+    ("framework", "name"), [("vllm", "VLLM_ENGINE_READY_TIMEOUT_S"), ("sglang", "SGLANG_WARMUP_TIMEOUT")]
+)
+def test_a_base_that_raises_the_ready_timeout_still_composes_a_fixed_round(framework: str, name: str) -> None:
+    """Recipes raise the framework's own ready timeout for a slow start; the point seeded from such a base re-states it
+    in the round's user layer, and the guard's value replaces it there as it does the base's."""
+    base = _base(framework)
+    base = replace(base, env={**base.env, name: "7200"})
+    launch = _launch(suite_config(_seeded(_point(framework), base), base, _settings()), base)
+
+    entry = {entry.name: entry for entry in launch.env_sources}[name]
+    assert (entry.value, entry.source) == (str(READY_TIMEOUT_SEC), LayerSource.GUARD)
 
 
 def test_the_point_knobs_become_the_config_fields() -> None:
@@ -509,6 +535,27 @@ def test_a_point_that_unsets_a_base_variable_launches_without_it(tmp_path, monke
     launch = _materialized_launch(tmp_path, monkeypatch, LaunchLayer(unset_envs=["SGLANG_USE_AITER"]))
 
     assert "SGLANG_USE_AITER" not in dict(launch.env)
+
+
+def test_a_point_of_a_session_whose_base_occupies_more_cards_than_its_tp_is_pinned_on_the_base_s_cards(
+    tmp_path, monkeypatch
+) -> None:
+    session = tmp_path / "session"
+    base = _base("sglang")
+    freeze_base(session, replace(base, args=(*base.args, "--dp-size", "2")))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session))
+    for name in ("INFERENCE_OPTIMIZER_SERVER_ARGS", "ROCR_VISIBLE_DEVICES"):
+        monkeypatch.delenv(name, raising=False)
+    recipe = _point("sglang")
+    del recipe["benchmark"]["envs"]["ROCR_VISIBLE_DEVICES"]
+    source = tmp_path / "recipe.yaml"
+    source.write_text(yaml.safe_dump(recipe), encoding="utf-8")
+
+    point = materialize_config_with_envs(source, tmp_path / "point", target=BenchmarkTarget(model_path=_MODEL))
+    envs = yaml.safe_load(point.read_text(encoding="utf-8"))["benchmark"]["envs"]
+
+    assert (envs["TP"], envs["ROCR_VISIBLE_DEVICES"]) == (2, "0,1,2,3")
+    assert "--dp-size 2" in envs["EXTRA_SGLANG_ARGS"]
 
 
 def _materialized_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layer: LaunchLayer) -> Launch:

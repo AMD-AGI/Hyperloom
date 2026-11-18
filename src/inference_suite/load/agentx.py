@@ -16,7 +16,9 @@ The phase clock follows aiperf's progress API: warmup and measured begin at each
 profiling phase's ``requests_end_ns`` or the client's exit. The round's listeners (the profile window) hear every poll
 after the clock is marked, and once more after the client exits, so they act on the finished mark before the export is
 aggregated. After the replay InferenceX's ``process_agentic_result`` aggregates the export; the counts are recounted from
-``profile_export.jsonl`` and a disagreement with the aggregate's accounting fails the round's output.
+``profile_export.jsonl`` and a disagreement with the aggregate's accounting fails the round's output. The requests aiperf
+skipped as longer than the context the server serves are in neither, only in aiperf's summary, so their count is read
+from there.
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ from inference_suite.aiperf_patch import ERROR_OSL_METRIC
 from inference_suite.contracts.config import AGENTX_FAST_MODE_ENV, AgentxWorkload, ServerConfig, SuiteConfig
 from inference_suite.contracts.launch import ClientInvocation
 from inference_suite.contracts.layout import RunLayout
-from inference_suite.contracts.report import AgentxResult, FailedStep, ReportError
+from inference_suite.contracts.report import AGENTX_CONTEXT_OVERFLOW, AgentxResult, FailedStep, ReportError
 from inference_suite.load import exit_stop, inherited_env, read_result, server_tp
 from inference_suite.load.fixed import OutputActivity
 from inference_suite.runtime.phases import Phase, PhaseClock
@@ -51,6 +53,11 @@ PROGRESS_API_PORT_OFFSET = 1000
 PROGRESS_API_HOST = "127.0.0.1"
 #: What the aggregator names its result, under the client dir: the run_dir's ``client/inferencex_result.json``.
 AGGREGATE_NAME = "inferencex_result"
+#: aiperf's summary export, beside the per-request one.
+_AIPERF_SUMMARY = "profile_export_aiperf.json"
+#: The summary's count of the profiling requests aiperf skipped as a context overflow, ``{"unit": ..., "avg": n}``; it
+#: writes the key only when it skipped one (agentx-harness 1.0.13, ``exporters/metrics_json_exporter.py``).
+_SKIPPED_OVERFLOW = "skipped_context_overflow_count"
 #: The line the harness logs when the failed-request threshold stops the replay.
 THRESHOLD_STOP_MARKER = "--failed-request-threshold exceeded"
 WARMUP_PHASE = "warmup"
@@ -58,6 +65,7 @@ PROFILING_PHASE = "profiling"
 #: The agentx scenario's ``min_benchmark_duration_seconds`` (agentx-harness 1.0.13); a shorter replay needs
 #: ``--unsafe-override``, which InferenceX's ``replay.py`` adds the same way.
 _SCENARIO_MIN_DURATION_SEC = 900
+_UTF8 = "utf-8"
 _WHAT = "the AgentX client"
 _AGGREGATOR = "the AgentX aggregator"
 _NS_PER_SEC = 1e9
@@ -219,7 +227,7 @@ class ProgressFollower:
 
 
 def _export_lines(path: Path) -> Iterator[Mapping[str, Any]]:
-    with path.open(encoding="utf-8") as export:
+    with path.open(encoding=_UTF8) as export:
         for number, line in enumerate(export, start=1):
             if not line.strip():
                 continue
@@ -256,6 +264,25 @@ def export_counts(path: Path) -> dict[str, int | None]:
             _add_tokens(tokens, metrics)
     counts["dropped_total"] = counts["records_total"] - counts["successful"]
     return {**counts, **{key: None if total is None else int(total) for key, total in tokens.items()}}
+
+
+def skipped_context_overflow(path: Path) -> int:
+    """The profiling requests the replay skipped because the server refused them as longer than the context it serves,
+    from aiperf's summary export at ``path``.
+
+    Raises:
+        OSError, ValueError: The summary cannot be read, is not a JSON object, or gives a count that is not one.
+    """
+    summary = json.loads(path.read_text(encoding=_UTF8))
+    if not isinstance(summary, Mapping):
+        raise ValueError(f"{path} is not a JSON object")
+    metric = summary.get(_SKIPPED_OVERFLOW)
+    if metric is None:
+        return 0
+    count = metric.get("avg") if isinstance(metric, Mapping) else None
+    if isinstance(count, bool) or not isinstance(count, (int, float)) or count < 0 or count != int(count):
+        raise ValueError(f"{path} gives {_SKIPPED_OVERFLOW} {metric!r}, not a count")
+    return int(count)
 
 
 def _add_tokens(tokens: dict[str, float | None], metrics: object) -> None:
@@ -318,7 +345,7 @@ def agentx_result(aggregate: Mapping[str, Any], facts: ReplayFacts) -> AgentxRes
 
 def _stopped_by_threshold(layout: RunLayout) -> bool:
     for log in (layout.agentx_client_log, layout.aiperf_log):
-        if log.is_file() and THRESHOLD_STOP_MARKER in log.read_text(encoding="utf-8", errors="replace"):
+        if log.is_file() and THRESHOLD_STOP_MARKER in log.read_text(encoding=_UTF8, errors="replace"):
             return True
     return False
 
@@ -381,7 +408,8 @@ def _replay(
         follower.check()
         # The follower's read can mark FINISHED after ``now``; a window closed at ``now`` would end before it.
         hear(time.monotonic())
-        return activity.check(now)
+        # A listener can block for minutes (/stop_profile answers once the trace is written): date output after it.
+        return activity.check(time.monotonic())
 
     child = spawn(invocation.argv, env, layout.agentx_client_log)
     ended = wait_child(child, agentx_round.gate, live)
@@ -414,6 +442,10 @@ def _result(agentx_round: AgentxRound, layout: RunLayout) -> AgentxResult | Stop
     disagreement = _disagreement(counts, aggregate)
     if disagreement is not None:
         return Stop(FailedStep.CLIENT_OUTPUT_MISSING, f"the AgentX counts disagree with the aggregate: {disagreement}")
+    try:
+        counts[AGENTX_CONTEXT_OVERFLOW] = skipped_context_overflow(layout.aiperf_artifacts / _AIPERF_SUMMARY)
+    except (OSError, ValueError) as exc:
+        return Stop(FailedStep.CLIENT_OUTPUT_MISSING, f"the AgentX summary cannot be read: {exc}")
     facts = ReplayFacts(
         counts=counts,
         stopped_by_threshold=_stopped_by_threshold(layout),

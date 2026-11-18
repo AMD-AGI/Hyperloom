@@ -11,9 +11,9 @@ its environment (a Claude CLI runs each of its shell commands in a session of it
 servers through one), and so does the session's watch (:mod:`agent_watch`) once the session's process is gone.
 :meth:`LocalProcess.kill` ends one command's alone, selected by
 :data:`~hyperloom_multibranch.specialist.agent_watch.PROCESS_MARKER` and its launcher's tree. The pod
-forbids a PID namespace, so an agent's ``pkill``, ``pgrep`` and ``killall`` would otherwise reach the whole host; Arbor
-stops its server with ``docker exec C pkill -TERM -f sglang.launch_server``, which through the docker shim would stop
-MB's measurement servers too. The sandbox puts wrappers for them first on ``PATH`` that match only the processes
+forbids a PID namespace, so an agent's ``pkill``, ``pgrep`` and ``killall`` would otherwise reach the whole host; an
+agent that stops its server with ``docker exec C pkill -TERM -f sglang.launch_server`` would, through the docker shim,
+stop MB's measurement servers too. The sandbox puts wrappers for them first on ``PATH`` that match only the processes
 carrying the caller's marker and never the caller or its ancestors, as a ``docker exec`` from outside a container would
 not: a shell that waits with ``until ! pgrep -f X`` carries ``X`` in its own command line. Nor do they match a launcher,
 which would leave what it holds to init. ``killall NAME`` is ``pkill -x`` on the name's first 15 characters, all the
@@ -89,6 +89,7 @@ from hyperloom.measure.local_templates import image_env
 from hyperloom.sandbox.launcher import LAUNCHER_SOURCE, StatusPipe, launcher_argv
 from hyperloom_common.bwrap import BwrapPolicy, BwrapPolicyError, Holder, Scratch
 from hyperloom_common.shared_storage import make_shared_dirs
+from hyperloom_multibranch.repo.isolated_git import AGENT_IDENTITY
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult
 from hyperloom_multibranch.specialist.agent_session import Processes
 from hyperloom_multibranch.specialist.agent_watch import (
@@ -155,7 +156,8 @@ CLAUDE_DIR = ".claude"
 USER_BASE = ".local"
 #: Where in a confined home pip installs (``PIP_TARGET``), with every dependency an install brings: on no import path,
 #: so no inference server a command starts imports those ahead of the image's and runs other packages than the
-#: baseline it is measured against.
+#: baseline it is measured against. An agent's adapter may put it on the path of the agent's own commands alone
+#: (:mod:`~hyperloom_multibranch.specialist.component_agent`).
 SITE_DIR = "site-packages"
 #: The programs a confined command may run besides those of its toolchain's trees: its shell and the agent CLIs.
 AGENT_PROGRAMS = ("bash", "claude", "codex")
@@ -955,7 +957,8 @@ def confined_env(environ: Mapping[str, str], home: Path, forwarded: Mapping[str,
     image's own settings (:func:`~hyperloom.measure.local_templates.image_env`), and ``forwarded`` (the LLM gateway,
     its credentials and models, proxies and CA bundle); with ``home`` as the home, Claude config, cache, Python's user
     base, pip's install target (:data:`SITE_DIR`) and Triton's cache, which the image's settings may name in the app's
-    home. aiter's JIT directory and FlyDSL's cache are left to aiter: its own tree, which a confined command writes,
+    home; and the agent's git identity (:data:`~hyperloom_multibranch.repo.isolated_git.AGENT_IDENTITY`), which
+    a commit of the agent's own needs in a home with no git config. aiter's JIT directory and FlyDSL's cache are left to aiter: its own tree, which a confined command writes,
     where the image's prebuilt modules and FlyDSL kernels are, which a directory of the home would hide. No other
     variable of the app's: not its other credentials, nor its home or tools' configuration. Without a Hugging Face
     location of its own, the hub cache is the app's, which a model id resolves in."""
@@ -975,6 +978,7 @@ def confined_env(environ: Mapping[str, str], home: Path, forwarded: Mapping[str,
             "TRITON_CACHE_DIR": str(home / ".triton" / CACHE_DIR),
             # The inner user is the app's, root in a container, which the Claude CLI accepts only in a sandbox.
             "IS_SANDBOX": "1",
+            **AGENT_IDENTITY,
         }
     )
     return kept

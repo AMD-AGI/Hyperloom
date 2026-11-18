@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: MIT
 
 """A local agent sandbox under real bubblewrap: what its commands reach, a server one command starts and a later one
-reads and stops (by ``pkill``, and by its PID file as Arbor does), the kills and the stop that still reach every
-process of it, and where pip installs in it, in a venv laid out as the image's: a target of its own, on no server's
-import path. The trees live outside ``/tmp``: before bubblewrap 0.12 nothing may be bound below the sandbox's
+reads and stops (by ``pkill``, and by its PID file), the kills and the stop that still reach every
+process of it, and where pip may install in it, in a venv laid out as the image's.
+The trees live outside ``/tmp``: before bubblewrap 0.12 nothing may be bound below the sandbox's
 own ``/tmp``, which every command shares."""
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ CLIENT = r"""
 import socket
 print(socket.create_connection(("127.0.0.1", int(open("/tmp/server.port").read())), 5).recv(16).decode())
 """
-#: Arbor's stop: the PID its file names is still its server (the start time ``/proc`` gives, after the boot time),
+#: A stop by PID file: the PID it names is still the server (the start time ``/proc`` gives, after the boot time),
 #: then that process group is signalled.
 PID_FILE_SERVER = r"""
 import os, sys, time
@@ -131,13 +131,13 @@ print("after " + json.dumps({name: outcome(path) for name, path in paths.items()
 """
 
 
-#: Arbor's end of a turn (its ``arbor/execute/turns.py``, F9): SIGTERM every process of its own uid, itself aside,
-#: whose environment carries ``ARBOR_TURN=<tag>``, then wait for them; print the pids found, whether each also carries
+#: An agent's end of a turn: SIGTERM every process of its own uid, itself aside,
+#: whose environment carries ``AGENT_TURN=<tag>``, then wait for them; print the pids found, whether each also carries
 #: the variable its command was given, and those still running.
 TURN_END = r"""
 import json, os, signal, sys, time
 from pathlib import Path
-want = ("ARBOR_TURN=" + sys.argv[1]).encode()
+want = ("AGENT_TURN=" + sys.argv[1]).encode()
 uid, me = os.getuid(), os.getpid()
 def running(pid):
     try:
@@ -316,14 +316,14 @@ async def test_a_server_is_stopped_by_its_pid_file_in_the_sandbox_s_own_pid_name
 async def test_what_a_turn_left_running_is_found_by_its_tag_and_stopped_by_a_later_command_of_its_sandbox_alone(
     area: Path, probe: BwrapProbe
 ) -> None:
-    """Arbor's F9: a process an agent turn left running, detached, carries the tag a process inside set for its
-    children, and the variables its command was given; a later command of the sandbox (Arbor, at the turn's end)
-    finds it among the processes of its own uid by its environment, and stops it. Another sandbox's Arbor, whose own
+    """A process an agent turn left running, detached, carries the tag a process inside set for its
+    children, and the variables its command was given; a later command of the sandbox (the agent, at the turn's end)
+    finds it among the processes of its own uid by its environment, and stops it. Another sandbox's agent, whose own
     leftover carries the same tag, finds and stops its own alone."""
     (area / "other").mkdir()
     ours, theirs = _sandbox(area, probe), _sandbox(area / "other", probe)
     name = f"hl-test-{os.getpid()}-{time.monotonic_ns()}"
-    leave = "(ARBOR_TURN=t1 setsid bash -c 'exec -a {} sleep 600' </dev/null >/dev/null 2>&1 &); echo left"
+    leave = "(AGENT_TURN=t1 setsid bash -c 'exec -a {} sleep 600' </dev/null >/dev/null 2>&1 &); echo left"
     for sandbox in (ours, theirs):
         (sandbox.paths.writable[0] / "turn_end.py").write_text(TURN_END)
     try:
@@ -332,7 +332,7 @@ async def test_what_a_turn_left_running_is_found_by_its_tag_and_stopped_by_a_lat
             for sandbox, part in ((ours, "ours"), (theirs, "theirs"))
         ]
         await _until(lambda: _named(f"{name}-ours") and _named(f"{name}-theirs"))
-        tagged = b"ARBOR_TURN=t1" in _environ(_named(f"{name}-ours")[0]).split(b"\0")
+        tagged = b"AGENT_TURN=t1" in _environ(_named(f"{name}-ours")[0]).split(b"\0")
         end = f"{PYTHON} -I -S turn_end.py t1"
         their_end = await theirs.run(end, theirs.paths.writable[0], {}, 60)
         after_theirs = (_named(f"{name}-ours"), _named(f"{name}-theirs"))
@@ -347,7 +347,7 @@ async def test_what_a_turn_left_running_is_found_by_its_tag_and_stopped_by_a_lat
     assert their_end.returncode == 0 and our_end.returncode == 0, (their_end.output, our_end.output)
     theirs_seen, ours_seen = (json.loads(done.output.strip().splitlines()[-1]) for done in (their_end, our_end))
     assert len(theirs_seen["found"]) == 1 and theirs_seen["given"] == [True] and theirs_seen["running"] == []
-    assert after_theirs[0] and not after_theirs[1], "the other sandbox's Arbor stopped a process of this one"
+    assert after_theirs[0] and not after_theirs[1], "the other sandbox's agent stopped a process of this one"
     assert len(ours_seen["found"]) == 1 and ours_seen["given"] == [True] and ours_seen["running"] == []
     assert not after_ours, "the turn's leftover outlived the turn's end"
 
@@ -439,7 +439,7 @@ async def test_a_confined_command_reaches_its_trees_and_frameworks_and_nothing_o
     assert (env["HOME"], env["CLAUDE_CONFIG_DIR"], env["TMPDIR"]) == (str(home), str(home / ".claude"), "/tmp")
     assert "AITER_JIT_DIR" not in env and "FLYDSL_RUNTIME_CACHE_DIR" not in env, "aiter's own, in its writable tree"
     assert env["TRITON_CACHE_DIR"].startswith(f"{home}/") and env["PIP_TARGET"] == str(home / "site-packages")
-    assert "PIP_USER" not in env and "ARBOR_SITE" not in env and str(home) not in env.get("PYTHONPATH", "")
+    assert "PIP_USER" not in env and str(home) not in env.get("PYTHONPATH", "")
     assert env["PATH"].split(os.pathsep)[0] == str(sandbox.root / "bin")
     assert not [entry for entry in env["PATH"].split(os.pathsep) if entry.startswith(f"{home}/")], "a home's bin"
     assert env[MARKER] == str(sandbox.root) and env[PROCESS_MARKER].startswith(f"{sandbox.root}/")

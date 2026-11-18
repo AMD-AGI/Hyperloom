@@ -5,13 +5,20 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .anchor import AnchorReport, AnchorResolutionError, KernelAnchor, discover_anchored_recipes, resolve_anchor
-from .discover import DiscoverySession, DiscoveryTarget, discover_recipes, registered_agent_llm_fn
+from .discover import (
+    DiscoveryPrompting,
+    DiscoverySession,
+    DiscoveryTarget,
+    discover_recipes,
+    registered_agent_llm_fn,
+)
 from .errors import FuseUsageError
 from .llm_failure import LlmUnavailableError
 from .locate import FrameworkInstall, _framework_repo_root, build_recipes, resolve_framework_source_file
@@ -39,6 +46,21 @@ def _resolve_discover_mode(fuse_kernel: str, discover_mode: str) -> str:
     return discover_mode
 
 
+def _load_fusion_hints(path: str, discover_mode: str) -> tuple[dict[str, Any], ...]:
+    """The advisory profiler hints ``--fusion-hints`` names; only ``llm`` discovery reads them."""
+    if not path:
+        return ()
+    if discover_mode != "llm":
+        raise FuseUsageError("--fusion-hints requires --discover llm")
+    try:
+        hints = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise FuseUsageError(f"--fusion-hints {path} is not a readable JSON file: {exc}") from exc
+    if not isinstance(hints, list) or not all(isinstance(hint, dict) for hint in hints):
+        raise FuseUsageError(f"--fusion-hints {path} must hold a JSON list of objects")
+    return tuple(hints)
+
+
 @dataclass
 class _Discovery:
     """What the discovery stage located, and why it located nothing when it did not."""
@@ -64,6 +86,7 @@ class _DiscoveryInputs:
     agent_factory: Any
     usage: Any = None
     gpu_arch: str = ""
+    fusion_hints: tuple[dict[str, Any], ...] = ()
 
     def resolve_source(self) -> tuple[dict[str, Any], str]:
         """The decode shapes and the framework source file the model resolves to."""
@@ -177,6 +200,7 @@ def _discover_by_llm(inputs: _DiscoveryInputs) -> _Discovery:
                     usage=inputs.usage,
                 ),
             ),
+            prompting=DiscoveryPrompting(fusion_hints=inputs.fusion_hints),
         )
     except LlmUnavailableError as exc:
         # The model was never reached, so this run knows nothing about the kernel.

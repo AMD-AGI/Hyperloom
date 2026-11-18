@@ -58,8 +58,8 @@ from typing import TYPE_CHECKING, Any
 from hyperloom.common.outside_facts import ENV_CONC, ENV_ISL, ENV_OSL, ENV_RANDOM_RANGE_RATIO
 from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.measure.profile_traces import PROFILE_DIR
-from hyperloom.measure.ruppell import CHECK_FILE, MODULE_SHARES_FILE, UNATTRIBUTED
-from hyperloom.measure.ruppell import OUTPUT_DIR as RUPPELL_DIR
+from hyperloom.measure.second_tracer import CHECK_FILE, MODULE_SHARES_FILE, UNATTRIBUTED
+from hyperloom.measure.second_tracer import OUTPUT_DIR as TRACER_DIR
 from hyperloom.orchestrator.actions.executors import RoundWatch, run_with_session_kill
 from hyperloom.orchestrator.trace_analysis import count_gpu_kernel_events, discover_trace_inputs, is_capture_fragment
 from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import resolve_arch_json_path
@@ -81,6 +81,7 @@ from hyperloom_multibranch.toolbox.tools.op_shares import (
     OWN_DEGRADED_KEY,
 )
 from hyperloom_multibranch.toolbox.tools.phase_mix import (
+    MEASURED_LENGTH_KEYS,
     PHASE_MODES,
     PhaseWindow,
     Workload,
@@ -258,6 +259,12 @@ def _split_hints(payload: Mapping[str, Any]) -> dict[str, str]:
     return hints
 
 
+def _measured_lengths(payload: Mapping[str, Any]) -> dict[str, str]:
+    """The lengths measured on the session's baseline the request carries, with their source, by request key; the
+    weights read them (:class:`~.phase_mix.Workload`), the splitter never does."""
+    return {key: text for key in MEASURED_LENGTH_KEYS if (text := _text(payload, key))}
+
+
 def _split_command(trace: Path, split_dir: Path, hints: Mapping[str, str]) -> list[str]:
     cmd = [sys.executable, "-m", _SPLITTER, str(trace), "-o", str(split_dir), "--find-steady-state"]
     cmd += ["--num-steps", str(_SPLIT_NUM_STEPS), "--llm-inference"]
@@ -412,6 +419,7 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
     run.out_dir.mkdir(parents=True, exist_ok=True)
 
     hints = _split_hints(payload)
+    measured = _measured_lengths(payload)
     trace = _analysed_trace(trace_input)
     _sh(run, "split", _split_command(trace, run.split_dir, hints))
     chunk = _steady_state_chunk(run.split_dir, mode)
@@ -425,7 +433,7 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
     if coverage.graph_under_recorded:
         _write_degraded_report(run, coverage)
     windows = _phase_windows(run.split_dir, trace, capture)
-    mix = graded_mix(windows, Workload.from_hints(hints))
+    mix = graded_mix(windows, Workload.from_hints({**hints, **measured}))
     table = run.out_dir / KERNEL_SHARES_FILE
     if not mix.degraded_reason:
         write_mix_table(mix, table)
@@ -442,28 +450,30 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
         "analysed_trace": trace.name,
         "steady_state_mode": mode,
         "split_hints": hints,
+        "measured_lengths": measured,
         "steady_state_chunk": chunk.name,
         "capture_folder": str(capture or ""),
         "graph_replay_fraction": round(coverage.graph_replay_fraction, 4),
         "graph_under_recorded": coverage.graph_under_recorded,
         **mix_fields(windows, mix, table),
         "trace_health_warnings": warnings,
-        **ruppell_fields(trace_input),
+        **tracer_fields(trace_input),
         "duration_sec": round(time.monotonic() - started, _TIME_DIGITS),
     }
 
 
-def ruppell_fields(trace_input: Path) -> dict[str, Any]:
-    """What ruppell kept of the profile whose traces are at ``trace_input`` (``<output>/profile`` or a file below it):
-    its module table, whether its own check passed, and the share of decode GPU time it attributed to a module.
+def tracer_fields(trace_input: Path) -> dict[str, Any]:
+    """What a second tracer kept of the profile whose traces are at ``trace_input`` (``<output>/profile`` or a file
+    below it): its module table, whether its own check passed, and the share of decode GPU time it attributed to a
+    module (:mod:`hyperloom.measure.second_tracer`).
 
-    Empty when ruppell did not trace the profile. ``ruppell_status`` is ``ok``, ``check_failed`` or ``unchecked`` (no
+    Empty when no tracer traced the profile. ``tracer_status`` is ``ok``, ``check_failed`` or ``unchecked`` (no
     readable check), and the decode share is ``None`` when the table has no decode step.
     """
     profile = next(
         (path for path in (trace_input, *trace_input.parents[:_PROFILE_DEPTH]) if path.name == PROFILE_DIR), None
     )
-    kept = profile.parent / RUPPELL_DIR if profile is not None else None
+    kept = profile.parent / TRACER_DIR if profile is not None else None
     if kept is None or not (kept / MODULE_SHARES_FILE).is_file():
         return {}
     try:
@@ -477,12 +487,12 @@ def ruppell_fields(trace_input: Path) -> dict[str, Any]:
         total = sum(float(row.get("gpu_ms") or 0.0) for row in decode)
         unattributed = sum(float(row.get("gpu_ms") or 0.0) for row in decode if row.get("module") == UNATTRIBUTED)
     except (OSError, ValueError, csv.Error):
-        return {MODULE_SHARES_KEY: "", "ruppell_status": "unreadable", "ruppell_check_ok": verdict is True}
+        return {MODULE_SHARES_KEY: "", "tracer_status": "unreadable", "tracer_check_ok": verdict is True}
     return {
         MODULE_SHARES_KEY: str(kept / MODULE_SHARES_FILE),
-        "ruppell_status": status,
-        "ruppell_check_ok": verdict is True,
-        "ruppell_decode_attributed_share": round(1.0 - unattributed / total, 6) if total > 0 else None,
+        "tracer_status": status,
+        "tracer_check_ok": verdict is True,
+        "tracer_decode_attributed_share": round(1.0 - unattributed / total, 6) if total > 0 else None,
     }
 
 
@@ -509,7 +519,7 @@ __all__ = [
     "REPORT_ROUTE",
     "WORKLOAD_HINTS",
     "report_handler",
-    "ruppell_fields",
+    "tracer_fields",
     "split_hint",
     "unusable_trace",
     "with_window_shares",

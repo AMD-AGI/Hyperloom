@@ -41,7 +41,14 @@ from .campaign import (
 )
 from .anchor import AnchorReport
 from .diagnose import diagnose_trace
-from .discovery_stage import _Discovery, _DiscoveryInputs, _discover, _log_located_recipes, _resolve_discover_mode
+from .discovery_stage import (
+    _Discovery,
+    _DiscoveryInputs,
+    _discover,
+    _load_fusion_hints,
+    _log_located_recipes,
+    _resolve_discover_mode,
+)
 from .errors import FuseError, FuseUsageError
 from .emit import FusionFiles, export_artifacts, restore_exported_changes
 from .llm_failure import LlmUnavailableError
@@ -457,6 +464,7 @@ def fuse(request: FuseRequest) -> FuseResult:
     _require_run_options(trace_path, model_path, framework, request.output_dir)
     fuse_kernel = request.discovery.fuse_kernel.strip()
     discover_mode = _resolve_discover_mode(fuse_kernel, request.discovery.discover_mode)
+    fusion_hints = _load_fusion_hints(request.discovery.fusion_hints, discover_mode)
 
     out = Path(request.output_dir)
     _setup_logging(out, request.verbose)
@@ -481,6 +489,7 @@ def fuse(request: FuseRequest) -> FuseResult:
         agent_factory=backend,
         usage=usage,
         gpu_arch=request.gpu_arch,
+        fusion_hints=fusion_hints,
     )
     discovery = _discover(inputs, discover_mode, fuse_kernel, stages.dry_run)
     _log_located_recipes(discovery, dry_run=stages.dry_run)

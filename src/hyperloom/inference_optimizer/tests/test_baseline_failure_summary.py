@@ -175,6 +175,25 @@ def test_failure_summary_unexplained_exit_keeps_the_excerpt():
     assert "power validation failed" in summary["root_cause"]
 
 
+def test_classify_root_cause_type_engine_capacity():
+    cause = "ValueError: max_num_seqs (256) exceeds available Mamba cache blocks (237)."
+    assert classify_root_cause_type("engine_capacity", cause) == "engine_capacity"
+    # The class is recovered from the text when only a generic class was recorded.
+    assert classify_root_cause_type("server_init_dead", f"EngineCore failed to start\n{cause}") == "engine_capacity"
+
+
+def test_failure_summary_headline_is_the_capacity_line():
+    cause = "ValueError: max_num_seqs (256) exceeds available Mamba cache blocks (237). Lower max_num_seqs."
+    state = _failed_state(
+        error_class="engine_capacity",
+        error=f"(EngineCore pid=7) EngineCore failed to start.\n{cause}",
+    )
+    fs = _build_failure_summary(state)
+    assert fs is not None
+    assert fs["root_cause_type"] == "engine_capacity"
+    assert fs["root_cause"] == cause
+
+
 def test_failure_summary_from_server_init_dead_attempt():
     state = _failed_state(error_class="server_init_dead", error=_SERVER_LOG_OOM)
     fs = _build_failure_summary(state)

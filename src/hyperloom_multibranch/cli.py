@@ -33,16 +33,16 @@ envelope or probation.
 Each ``--autonomous-agent SOURCE`` opens one branch where EXPLORE starts, after the user's directions and within
 ``--max-branches``, whose specialist runs that third-party agent end to end in a sandbox of its own; a source that
 carries credentials in its URL is a usage error. ``--agent-directions FILE`` names a directions map that is split, after
-PRELUDE, into disjoint shares, one per Arbor agent among them, each its ``component.plan``; a map with no directions, or
-one given with no agent, is a usage error. Without one, two or more Arbors split the map of a dossier pass, the first
-Arbor run once on a mapping branch EXPLORE opens beside the others, for at most ``--agent-dossier-minutes`` (default
-90), or, when it gives none or the minutes are 0, a map Arbor generates from the root's profile (its op shares, else its
-kernel shares); each share then opens as a branch of its own, when it still has ``--agent-share-minutes`` (default 63,
-0 for always) to its cutoff, the least in which Arbor runs an iteration. A negative or non-finite value of either,
-as of any other limit, is a usage error.
-``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's serving template; a name that is not one
-directory, or one given with no agent, is a usage error, and a pack the Arbor checkout lacks is refused when the branch
-starts. Those Arbors are served the session's frozen base launch, resolved from the recipe sources or
+PRELUDE, into disjoint shares, one per component agent (an agent an installed adapter recognises), each its
+``component.plan``; a map with no directions, or one given with no agent, is a usage error. Without one, two or more
+component agents split the map of a dossier pass, one run of the first on a mapping branch EXPLORE opens beside the
+others, for at most ``--agent-dossier-minutes`` (default 90), or, when it gives none or the minutes are 0, a map the
+adapter generates from the root's profile (its op shares, else its kernel shares); each share then opens as a branch of
+its own, when it still has ``--agent-share-minutes`` (default 63, 0 for always) to its cutoff, the least in which a
+component agent runs one iteration. A negative or non-finite value of either, as of any other limit, is a usage error.
+``--agent-pack NAME`` names the pack those component agents run instead of the adapter's default; a name that is not
+one directory, or one given with no agent, is a usage error, and a pack the agent's checkout lacks is refused when the
+branch starts. The component agents are served the session's frozen base launch, resolved from the recipe sources or
 ``--reference-script``, and check their launch against it. ``--agent-launch FILE`` serves them that launch file
 instead; a file the adapter cannot use, an unfilled template among them, a base launch record, or one given with no
 agent or with ``--reference-script``, is a usage error. ``--reference-script FILE`` is the session's base launch, as for
@@ -89,14 +89,13 @@ need the ``dev`` key (``HYPERLOOM_SANDBOX_KEY_DEV``) and ``USER_DATA_PATH``, the
 the same path; a usage error names what is missing.
 ``hosted run`` takes no arguments: it runs the session of the campaign spec a host injected, as
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
-sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`). Started again over a
-run whose ``session.json`` names a session, it finishes that session as ``final-only`` does once its PRELUDE recorded
-the baseline (a FINAL that chooses a commit ends it for ``finished_after_restart``, exit code 0), and otherwise closes
-it, ending its tests, and starts the spec's session again
-(:func:`~hyperloom_multibranch.scheduling.hosted_run.take_over_earlier_session`). It tells the host the run is over --
-``final: true`` in ``exit.json`` -- once CLOSE ran, or when the spec, the environment, agents it cannot isolate, a
-missing ``hosted`` package, the runner cache or an unreadable file keeps a session from running (exit code 2 for a
-refused spec or session, else 1); a crash leaves no ``exit.json``, and the host starts the run again.
+sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`) or on this container's
+cards, as the spec says. Started again over a run whose ``session.json`` names a session, it takes it over
+(``hosted_restart_leg``): resumed to its first deadline while its baseline holds, else finished as ``final-only`` does
+(a FINAL that chooses ends it ``finished_after_restart``, exit 0), or, before its baseline, closed and started again.
+It tells the host the run is over -- ``final: true`` in ``exit.json`` -- once CLOSE ran, or when the spec, the
+environment, agents it cannot isolate, a missing ``hosted`` package, the runner cache or an unreadable file keeps a
+session from running (exit 2 for a refused spec or session, else 1); a crash leaves no ``exit.json`` and is restarted.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
 manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard and breakdown. It
@@ -107,10 +106,9 @@ search tree the session's own CLOSE archived is left as it was. It is refused wi
 nothing, when the directory is no session that ran, ran on another build than this one, committed no root, is still
 running -- any process ``MB-pids.jsonl`` records, the scheduler included, still alive in this environment -- already
 chose in FINAL, or has another ``final-only`` running over it.
-``run --resume SESSION_DIR`` continues such a session in its directory on its manifest's settings, taking no other
-option but ``-v``: no PRELUDE, new branches on the integration head, and the deadline moved by the time it was down
-(:meth:`~hyperloom_multibranch.scheduling.lifecycle.Session.resume`). It is refused, holds the lock and archives as
-``final-only`` does, and is refused too for a session with no baseline or run with ``--stop-after-map``.
+``run --resume SESSION_DIR`` continues such a session on its manifest's settings and no option but ``-v``: no PRELUDE,
+new branches on the integration head, the deadline moved by the time it was down. It is refused, holds the lock and
+archives as ``final-only`` does, and is refused too as :func:`resumable_run` says.
 """
 
 from __future__ import annotations
@@ -134,6 +132,7 @@ from hyperloom_common.shared_storage import open_shared_append
 from hyperloom.common.outside_facts.image_check import ImageCheckFailed
 from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.workload_defaults import DEFAULT_EP
+from hyperloom.hosted.campaign import MEASUREMENT_LOCAL, CampaignSpec
 from hyperloom.hosted.host_info import HostGroup, HostInfo, take_host_info
 from hyperloom.hosted.toolbox_inputs import ToolboxInputsError
 from hyperloom.inference_optimizer.session.paths import workspace_root
@@ -143,20 +142,24 @@ from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
-from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
+from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, ExploreCap
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers
+from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers, local_grant_peers
 from hyperloom_multibranch.scheduling.hosted_run import (
     GrantDeadline,
     HostedExit,
     campaign_spec,
     close_then_start,
     grant_deadline,
+    grant_explore_cap,
     grant_tests_that_fit,
+    hosted_restart_leg,
+    hosted_storage,
     recorded_session,
     refuse_unhosted_branches,
     reported_stop_reason,
     require_hosted_isolation,
+    require_local_image,
     run_argv,
     share_with_the_group,
     spec_make_before_break,
@@ -174,7 +177,6 @@ from hyperloom_multibranch.scheduling.lifecycle import (
     SessionOutcome,
     SessionServices,
     persisted_run,
-    resumable_run,
 )
 from hyperloom_multibranch.scheduling.llm import (
     MB_RESOLVER_MAX_TOKENS,
@@ -189,13 +191,14 @@ from hyperloom_multibranch.scheduling.local_peers import (
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting_orphans
 from hyperloom_multibranch.scheduling.reference import ReferenceSource, reference_source
+from hyperloom_multibranch.scheduling.resumption import deadline_after_downtime, resumable_run
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.session_environment import (
     EnvironmentIncomplete,
     hosted_runner_cache,
     recipe_kb_from_env,
-    require_rsi_archive,
     require_session_environment,
+    require_writable_storage,
 )
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.scheduling.settings import (
@@ -210,7 +213,7 @@ from hyperloom_multibranch.scheduling.settings import (
     Workload,
     session_early_stop,
 )
-from hyperloom_multibranch.specialist.arbor_adapter import DOSSIER_INDEX, ArborRefused, read_launch
+from hyperloom_multibranch.specialist.component_agent import AgentRefused, dossier_lacks, read_launch
 from inference_suite import UserFileError, parse_inferencex_commit, parse_user_file
 from inference_suite.contracts import BaseLaunchError
 
@@ -226,7 +229,7 @@ ENCODING = "utf-8"
 FILE_METAVAR = "FILE"
 log = logging.getLogger(__name__)
 #: The GPU types a session runs on; the toolbox's environment exports the board itself as ``GPU_TYPE``.
-SESSION_GPU_TYPES = ("mi300x", "mi350x", "mi355x")
+SESSION_GPU_TYPES = ("mi300x", "mi325x", "mi350x", "mi355x")
 #: The options ``run`` requires unless it is given ``--resume``, by their argparse names.
 RUN_REQUIRED = ("model", "framework", "gpu_type", "workload", "tp", "conc", "precision")
 #: The options an inferencex workload requires and an agentx one refuses.
@@ -266,10 +269,7 @@ def build_parser() -> argparse.ArgumentParser:
     hosted_commands = hosted.add_subparsers(dest="hosted_command", required=True)
     hosted_commands.add_parser(
         "run",
-        help=(
-            "Run the session of the injected campaign spec, or finish the one an earlier start of the run began, and"
-            " tell the host in exit.json when the run is over."
-        ),
+        help="Run the injected spec's session, or resume or finish an earlier start's; exit.json says when it is over.",
     )
     return parser
 
@@ -338,8 +338,8 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
         help=(
             "The session's base launch, as for hyperloom optimize: a shell launch script, or a base launch record"
             " (hyperloom-base-launch/1) frozen by another session, which is frozen without reading any recipe source"
-            " (examples/multibranch-arbor-launch). It wins over every recipe source; omitted, the base comes from"
-            " InferenceX, then the framework's cookbook, then the default table. Every Arbor --autonomous-agent is"
+            " (examples/multibranch-agent-launch). It wins over every recipe source; omitted, the base comes from"
+            " InferenceX, then the framework's cookbook, then the default table. Every component agent is"
             " served the frozen base. Not the --reference directories the specialists read."
         ),
     )
@@ -395,7 +395,7 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         default=None,
         help="Tests running at once; default as many as the machine's cards, or the grant, run at TP.",
     )
-    run.add_argument("--max-k-per-branch", type=int, default=DEFAULT_MAX_K_PER_BRANCH, help="Highest K of a branch.")
+    run.add_argument("--max-k-per-branch", type=int, default=DEFAULT_MAX_K_PER_BRANCH, help="Highest specialist K.")
     run.add_argument(
         "--dev-leases",
         type=int,
@@ -468,7 +468,7 @@ def _add_specialist_input_options(run: argparse.ArgumentParser) -> None:
 
 
 def _add_agent_options(run: argparse.ArgumentParser) -> None:
-    """The third-party agents some branches run, and what the Arbors among them are given."""
+    """The third-party agents some branches run, and what the component agents among them are given."""
 
     run.add_argument(
         "--autonomous-agent",
@@ -477,9 +477,8 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
         default=None,
         metavar="SOURCE",
         help=(
-            "A third-party agent to run end to end on one branch, a git URL (URL@ref for a ref), a local path, or"
-            f" {ARBOR_KEYWORD} for the Arbor vendored with Hyperloom (src/hyperloom_arbor); repeatable, each"
-            " opens one branch where EXPLORE starts, within --max-branches."
+            "A third-party agent to run end to end on one branch, a git URL (URL@ref for a ref) or a local path;"
+            " repeatable, each opens one branch where EXPLORE starts, within --max-branches."
         ),
     )
     run.add_argument(
@@ -489,20 +488,20 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
         default=None,
         metavar=FILE_METAVAR,
         help=(
-            'A directions map, a JSON list of directions or {"directions": [...]} as Arbor\'s component.plan reads it;'
-            " split into disjoint shares, one per Arbor --autonomous-agent, before EXPLORE opens their branches."
-            " Default: for two or more Arbors, the map of a dossier pass a mapping branch runs in EXPLORE"
-            " (--agent-dossier-minutes), else one Arbor generates from the root's profile; each share then opens as a"
-            " branch of its own."
+            'A directions map, a JSON list of directions or {"directions": [...]} as a component agent\'s'
+            " component.plan reads it; split into disjoint shares, one per component agent (an --autonomous-agent an"
+            " installed adapter recognises), before EXPLORE opens their branches. Default: for two or more of them,"
+            " the map of a dossier pass a mapping branch runs in EXPLORE (--agent-dossier-minutes), else one the"
+            " adapter generates from the root's profile; each share then opens as a branch of its own."
         ),
     )
     _add_agent_minutes_options(run)
-    _add_arbor_start_options(run)
+    _add_agent_start_options(run)
     _add_agent_review_options(run)
 
 
 def _add_agent_minutes_options(run: argparse.ArgumentParser) -> None:
-    """How long the dossier pass may map the Arbors' directions, and how long their shares must have left to open."""
+    """How long the dossier pass may take to make the agent map, and how long its shares must have left to open."""
 
     run.add_argument(
         "--agent-dossier-minutes",
@@ -511,9 +510,9 @@ def _add_agent_minutes_options(run: argparse.ArgumentParser) -> None:
         default=DOSSIER_MINUTES,
         metavar="MINUTES",
         help=(
-            "Without --agent-directions, how long the dossier pass that maps two or more Arbor agents' directions may"
-            " run on its mapping branch before their share branches open, out of EXPLORE's time, while the other"
-            " branches work; it ends once its map is set. Arbor starts no"
+            "Without --agent-directions, how long the dossier pass that maps two or more component agents' directions"
+            " may run on its mapping branch before their share branches open, out of EXPLORE's time, while the other"
+            " branches work; it ends once its map is set. A component agent starts no"
             f" iteration with under 63 minutes left, so less runs none; 0 skips it (default {DOSSIER_MINUTES:g})."
         ),
     )
@@ -525,22 +524,22 @@ def _add_agent_minutes_options(run: argparse.ArgumentParser) -> None:
         metavar="MINUTES",
         help=(
             "The least time to their cutoff the share branches of a split map must still have, after the dossier pass"
-            " and the review, to open: Arbor starts no iteration with less. Below it none opens, and the session says"
+            " and the review, to open: one iteration of a component agent. Below it none opens, and the session says"
             " why. It is also the least an agent branch whose lease finds no free cards must still have to run to"
             f" keep waiting for them; 0 always opens them and waits while any time is left (default {SHARE_MINUTES:g})."
         ),
     )
 
 
-def _add_arbor_start_options(run: argparse.ArgumentParser) -> None:
-    """How an Arbor --autonomous-agent is started: its pack, the launch its recipe adds to, and its servers' ports."""
+def _add_agent_start_options(run: argparse.ArgumentParser) -> None:
+    """How a component agent is started: its pack, the launch its recipe adds to, and its servers' ports."""
 
     run.add_argument(
         "--agent-pack",
         dest="agent_pack",
         default=None,
         metavar="NAME",
-        help="The pack an Arbor --autonomous-agent runs, a directory under the Arbor checkout's packs/; default serving.",
+        help="The pack a component agent runs, the name of one pack directory in its checkout; default: the adapter's.",
     )
     run.add_argument(
         "--agent-launch",
@@ -549,9 +548,9 @@ def _add_arbor_start_options(run: argparse.ArgumentParser) -> None:
         default=None,
         metavar=FILE_METAVAR,
         help=(
-            "For an Arbor --autonomous-agent: the launch an AgentX recipe's adds to (server_flags, server_env,"
-            " model_name, client; examples/multibranch-arbor-launch), served instead of the session's frozen base,"
-            " which the Arbors are served without it. A base launch record is given as --reference-script."
+            "For a component agent: the launch an AgentX recipe's adds to (server_flags, server_env,"
+            " model_name; examples/multibranch-agent-launch), served instead of the session's frozen base,"
+            " which the component agents are served without it. A base launch record is given as --reference-script."
         ),
     )
     run.add_argument(
@@ -568,15 +567,15 @@ def _add_arbor_start_options(run: argparse.ArgumentParser) -> None:
 
 
 def _add_agent_review_options(run: argparse.ArgumentParser) -> None:
-    """The stages of a person's review of the Arbor agents' map: stop once it is made, run on a reviewed one, or skip
-    the review."""
+    """The stages of a person's review of the agent map: stop once it is made, run on a reviewed one, or skip the
+    review."""
 
     run.add_argument(
         "--stop-after-map",
         dest="stop_after_map",
         action=SWITCH,
         help=(
-            "End the session before EXPLORE once the Arbor --autonomous-agent directions are mapped, one Arbor's"
+            "End the session before EXPLORE once the component agents' directions are mapped, those of a single one"
             " too: PRELUDE, the dossier pass (--agent-dossier-minutes; with 0, a map generated from the root's"
             " profile), then CLOSE. The map and its dossier are kept in the session's MB-agent-map/ for review."
         ),
@@ -588,8 +587,8 @@ def _add_agent_review_options(run: argparse.ArgumentParser) -> None:
         default=None,
         metavar="DIR",
         help=(
-            "The dossier the reviewed --agent-directions map was made with, a directory with Arbor's dossier index:"
-            " every Arbor --autonomous-agent branch gets it in its checkout, as it would a dossier pass's"
+            "The dossier the reviewed --agent-directions map was made with, a directory with the component agent's"
+            " dossier index: every component agent's branch gets it in its checkout, as it would a dossier pass's"
             " (a --stop-after-map session keeps it under MB-agent-map/dossier/)."
         ),
     )
@@ -598,11 +597,11 @@ def _add_agent_review_options(run: argparse.ArgumentParser) -> None:
         dest="review_gate",
         action="store_false",
         help=(
-            "Open the Arbor --autonomous-agent branches without a person's review: by default they wait once their map"
+            "Open the component agents' branches without a person's review: by default they wait once their map"
             " is made, holding no cards, until `hyperloom-multibranch review --session DIR approve` (or reject); the"
             " other branches go on, and a --agent-directions map is reviewed before EXPLORE. With this flag nothing"
-            " waits, and its Arbors are started with their own review gate off. For unattended runs, and for the"
-            " second stage of a reviewed run."
+            " waits, and the component agents are started with their own review gate off. For unattended runs, and for"
+            " the second stage of a reviewed run."
         ),
     )
 
@@ -644,15 +643,11 @@ def _workload_model(args: argparse.Namespace) -> str:
 
 #: Schemes whose URL user is a login name rather than a credential; any other scheme's user, or a password, is one.
 SSH_SCHEMES = frozenset({"ssh", "git+ssh", "svn+ssh"})
-#: The --autonomous-agent source that names the Arbor vendored beside this package, in a checkout or a wheel install.
-ARBOR_KEYWORD = "arbor"
-VENDORED_ARBOR = Path(__file__).resolve().parent.parent / "hyperloom_arbor"
 
 
 def _agents(sources: list[str], free: int) -> tuple[str, ...]:
-    """The agent sources, :data:`ARBOR_KEYWORD` as :data:`VENDORED_ARBOR`'s absolute path; refused when one carries
-    credentials, which come from the sandbox's environment only, when there are more than the ``free`` branches the
-    user's directions leave, or when :data:`ARBOR_KEYWORD` is given and this install has no vendored Arbor."""
+    """The agent sources; refused when one carries credentials, which come from the sandbox's environment only, or
+    when there are more than the ``free`` branches the user's directions leave."""
 
     if len(sources) > free:
         raise ValueError(f"--autonomous-agent is given {len(sources)} times, more than the {free} branches left")
@@ -663,17 +658,12 @@ def _agents(sources: list[str], free: int) -> tuple[str, ...]:
         scheme = credentialed["scheme"].removesuffix("://")
         if ":" in credentialed["userinfo"] or scheme.lower() not in SSH_SCHEMES:
             raise ValueError(f"--autonomous-agent {scheme}://... carries credentials; give them in the environment")
-    if ARBOR_KEYWORD in sources and not VENDORED_ARBOR.is_dir():
-        raise ValueError(
-            f"--autonomous-agent {ARBOR_KEYWORD} names the Arbor vendored at {VENDORED_ARBOR}, which this install does"
-            " not have; reinstall Hyperloom, or give an Arbor checkout's path or URL instead"
-        )
-    return tuple(str(VENDORED_ARBOR) if source == ARBOR_KEYWORD else source for source in sources)
+    return tuple(sources)
 
 
 def _agent_directions(path: Path | None, agents: list[str]) -> str:
-    """The absolute path of the directions map the Arbor agents split, ``""`` without one; refused with no agent to
-    split it for, or when it holds no directions as Arbor's ``component.plan`` reads them."""
+    """The absolute path of the directions map the component agents split, ``""`` without one; refused with no agent
+    to split it for, or when it holds no directions as a component agent's ``component.plan`` reads them."""
 
     if path is None:
         return ""
@@ -690,8 +680,8 @@ def _agent_directions(path: Path | None, agents: list[str]) -> str:
 
 
 def _agent_pack(name: str | None, agents: list[str]) -> str:
-    """The pack the Arbor agents run, ``""`` for the adapter's default; refused with no agent to run it, or when it
-    is not one directory name under an Arbor checkout's ``packs/``."""
+    """The pack the component agents run, ``""`` for the adapter's default; refused with no agent to run it, or when
+    it is not the name of one pack directory."""
 
     if name is None:
         return ""
@@ -703,8 +693,8 @@ def _agent_pack(name: str | None, agents: list[str]) -> str:
 
 
 def _agent_launch(path: Path | None, agents: list[str], reference_script: Path | None) -> str:
-    """The absolute path of the launch file the Arbor agents are served, ``""`` without one; refused with no agent to
-    serve, beside a ``reference_script``, whose frozen base they are served, when it is a base launch record, which
+    """The absolute path of the launch file the component agents are served, ``""`` without one; refused with no agent
+    to serve, beside a ``reference_script``, whose frozen base they are served, when it is a base launch record, which
     is given as ``reference_script``, or with every reason the adapter could not use it."""
 
     if path is None:
@@ -712,15 +702,15 @@ def _agent_launch(path: Path | None, agents: list[str], reference_script: Path |
     if not agents:
         raise ValueError("--agent-launch needs an --autonomous-agent to serve it")
     if reference_script is not None:
-        raise ValueError("--agent-launch is not taken with --reference-script: the Arbors are served the frozen base")
+        raise ValueError("--agent-launch is not taken with --reference-script: the agents are served the frozen base")
     try:
         launch = read_launch(path)
-    except ArborRefused as exc:
+    except AgentRefused as exc:
         raise ValueError(f"--agent-launch: {exc}") from exc
     if launch.record:
         raise ValueError(
             f"--agent-launch {path} is a base launch record; give it as --reference-script, which freezes it as the"
-            " session's base and serves it to the Arbors"
+            " session's base and serves it to the agents"
         )
     return str(path.absolute())
 
@@ -750,15 +740,15 @@ def _stop_after_map(stop: bool, agents: list[str], directions: Path | None) -> b
 
 
 def _agent_dossier(path: Path | None, directions: Path | None) -> str:
-    """The absolute path of the dossier every Arbor branch is given, ``""`` without one; refused without the reviewed
-    map it was made with, or when it is no dossier: a directory with Arbor's dossier index."""
+    """The absolute path of the dossier every agent branch is given, ``""`` without one; refused without the reviewed
+    map it was made with, or when it is no dossier: a directory with the component agent's dossier index."""
 
     if path is None:
         return ""
     if directions is None:
         raise ValueError("--agent-dossier is given with the --agent-directions map it was made with")
-    if not (path / DOSSIER_INDEX).is_file():
-        raise ValueError(f"--agent-dossier {path} is no dossier: it has no {DOSSIER_INDEX}")
+    if lacks := dossier_lacks(path):
+        raise ValueError(f"--agent-dossier {path} is no dossier: it has no {lacks}")
     return str(path.absolute())
 
 
@@ -922,20 +912,25 @@ def run_session(
     peer_factory: PeerFactory,
     services: SessionServices,
     report_root: Callable[[Path], None] = _print_root,
+    explore_cap: ExploreCap | None = None,
 ) -> int:
     """Create the session directory, hand it to ``report_root`` -- by default printed on one stdout line -- before
-    anything else is built in it, run the session and return its exit code.
+    anything else is built in it, run the session (:meth:`Session.run`, given ``explore_cap``) and return its exit code.
 
     The session and its peers are built on the event loop they run on, which the specialist tools of the MCP service
     hand every toolbox call to. Whatever the session's processes orphan is reparented to this process, so the session
     stop kills it and reports it while it runs."""
 
     with adopting_orphans():
-        return asyncio.run(_run_session(settings, peer_factory, services, report_root))
+        return asyncio.run(_run_session(settings, peer_factory, services, report_root, explore_cap))
 
 
 async def _run_session(
-    settings: RunSettings, peer_factory: PeerFactory, services: SessionServices, report_root: Callable[[Path], None]
+    settings: RunSettings,
+    peer_factory: PeerFactory,
+    services: SessionServices,
+    report_root: Callable[[Path], None],
+    explore_cap: ExploreCap | None = None,
 ) -> int:
     clock = Clock()
     layout = create_session(workspace_root(), settings.workload.model_basename, clock)
@@ -943,7 +938,7 @@ async def _run_session(
     logging.getLogger().addHandler(_file_handler(layout.scheduler_log))
     host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
     session = Session(settings, peer_factory, host, services)
-    return (await session.run()).exit_code
+    return (await session.run(explore_cap)).exit_code
 
 
 def final_only(
@@ -956,11 +951,12 @@ def final_only(
     return _over_session(persisted, peer_factory, services, partial(Session.finish, restart=restart))
 
 
-def resume(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices) -> int:
-    """Continue the session in the directory ``persisted`` was read from (:meth:`Session.resume`), print it on one
-    stdout line and return the session's exit code."""
+def resume(
+    persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, until: float, cap: ExploreCap | None
+) -> int:
+    """:func:`final_only` running :meth:`Session.resume` up to the deadline ``until`` with EXPLORE capped by ``cap``."""
 
-    return _over_session(persisted, peer_factory, services, Session.resume)
+    return _over_session(persisted, peer_factory, services, lambda session, ended: session.resume(ended, until, cap))
 
 
 #: What a run over a session directory runs on the session it builds there, given how that session ended.
@@ -1020,34 +1016,34 @@ class ReadySession:
     services: SessionServices
 
 
-def hosted_ready_session(host: HostInfo, workload: Workload) -> ReadySession:
-    """:func:`ready_session` measured in the sandboxes of ``host``'s grant: the one builder of the peers of
-    ``hosted run`` and ``run --measurement hosted``."""
+def hosted_ready_session(host: HostInfo, workload: Workload, *, local: bool = False) -> ReadySession:
+    """:func:`ready_session` measured in the sandboxes of ``host``'s grant, or this container's cards with ``local``:
+    the one builder of the peers of ``hosted run`` and ``run --measurement hosted``. Either way the tests end by the
+    stop of the grant (:func:`local_grant_peers`)."""
 
-    inputs = PinnedToolboxInputs(host, hosted_runner_cache(os.environ))
-    return ready_session(workload, partial(load_hosted_peers, inputs=inputs))
+    cache = hosted_runner_cache(os.environ)
+    load = local_grant_peers(host) if local else partial(load_hosted_peers, inputs=PinnedToolboxInputs(host, cache))
+    return ready_session(workload, load, **hosted_storage(cache))
 
 
-def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory]) -> ReadySession:
-    """The peers ``load`` has for ``workload`` and the services, the Recipe KB and the RSI archive checked first;
-    raises :class:`EnvironmentIncomplete` or :class:`PeersUnavailable` naming what is missing. Creates nothing."""
+def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory], **storage: Path) -> ReadySession:
+    """The peers ``load`` has for ``workload`` and the services, the Recipe KB, the RSI archive and the directories of
+    ``storage`` checked first; raises :class:`EnvironmentIncomplete` or :class:`PeersUnavailable` naming the problem."""
 
     recipe_kb = recipe_kb_from_env()
-    require_rsi_archive(os.environ)
-    peer_factory = load(workload)
-    return ReadySession(peer_factory, session_services(recipe_kb))
+    require_writable_storage(os.environ, storage)
+    return ReadySession(load(workload), session_services(recipe_kb))
 
 
 @dataclass(frozen=True)
 class HostedStart:
-    """What ``hosted run`` runs, and the deadline of the grant it runs in."""
+    """What ``hosted run`` runs."""
 
     run: Callable[[], int]
-    deadline: GrantDeadline
 
 
 def hosted_run() -> int:
-    """``hosted run``: the session of the campaign spec the host injected, or the finish of the one an earlier start
+    """``hosted run``: the session of the injected campaign spec, or the resume or finish of the one an earlier start
     of the run began; writes ``exit.json`` with ``final: true`` once CLOSE ran or when the run cannot be served."""
 
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
@@ -1061,7 +1057,7 @@ def hosted_run() -> int:
     except ImportError as exc:
         log.exception("hosted run: a module the session needs is not installed")
         return _not_run(host.state_dir, EXIT_FAILED, exc)
-    stop_before_grant_ends(start.deadline)
+    _stop_before_grant_ends(host)
     try:
         returncode = start.run()
     except (PeersUnavailable, ImageCheckFailed, CacheBuildError, ToolboxInputsError, PermissionError) as exc:
@@ -1073,34 +1069,47 @@ def hosted_run() -> int:
 
 
 def _hosted_start(host: HostInfo) -> HostedStart:
-    """A new session of the spec, or the close or finish of the one ``session.json`` names, which the restart takes
-    over (:func:`take_over_earlier_session`); raises ValueError on a refused spec or session, ImportError when a
-    ``hosted`` package is missing, and what :func:`ready_session` raises."""
+    """A new session of the spec, or the close, resume or finish of the one ``session.json`` names, which the restart
+    takes over (:func:`take_over_earlier_session`), measured where the spec says; raises ValueError on a refused spec or
+    session, ImportError when a ``hosted`` package is missing, and what :func:`require_hosted_isolation` and
+    :func:`ready_session` raise."""
 
-    require_hosted_isolation(os.environ)
     deadline = grant_deadline(host, datetime.now(timezone.utc))
+    spec = campaign_spec(host)
+    require_hosted_isolation(spec, os.environ)
+    require_local_image(spec, os.environ)
     earlier = take_over_earlier_session(host.state_dir)
     if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json
-        return HostedStart(lambda: EXIT_FAILED, deadline)
+        return HostedStart(lambda: EXIT_FAILED)
     persisted = earlier.finish
     if (taken := persisted or earlier.left) is not None:
         share_with_the_group(taken.layout.root)
-    settings = _hosted_settings(host, deadline.session_hours) if persisted is None else persisted.settings
+    settings = _hosted_settings(host, spec, deadline.session_hours) if persisted is None else persisted.settings
     require_session_environment(settings, os.environ)
-    ready = hosted_ready_session(host, settings.workload)
-    close = partial(final_only, peer_factory=ready.peer_factory, services=ready.services)
+    ready = hosted_ready_session(host, settings.workload, local=spec.measurement == MEASUREMENT_LOCAL)
     if persisted is not None:
-        return HostedStart(partial(close, persisted, restart=True), deadline)
-    start = partial(run_session, settings, ready.peer_factory, ready.services, partial(started_session, host.state_dir))
-    return HostedStart(partial(close_then_start, earlier.left, close, start), deadline)
+        leg = hosted_restart_leg(persisted, partial(final_only, restart=True), resume, grant_explore_cap(host))
+        return HostedStart(partial(leg, persisted, ready.peer_factory, ready.services))
+    close = partial(final_only, peer_factory=ready.peer_factory, services=ready.services)
+    record = partial(started_session, host.state_dir)
+    start = partial(run_session, settings, ready.peer_factory, ready.services, record, grant_explore_cap(host))
+    return HostedStart(partial(close_then_start, earlier.left, close, start))
 
 
-def _hosted_settings(host: HostInfo, session_hours: Callable[[float], float]) -> RunSettings:
-    spec = campaign_spec(host)
-    tests_that_fit = grant_tests_that_fit(host, spec_make_before_break(spec))
+def _stop_before_grant_ends(host: HostInfo) -> None:
+    """Arm this process's stop one CLOSE grace before ``host``'s grant ends (at once if passed; never untimed). What is
+    left of the grant is read now, as the timer starts, not when the start was prepared: that took time of its own."""
+
+    stop_before_grant_ends(grant_deadline(host, datetime.now(timezone.utc)))
+
+
+def _hosted_settings(host: HostInfo, spec: CampaignSpec, session_hours: Callable[[float], float]) -> RunSettings:
+    local = spec.measurement == MEASUREMENT_LOCAL
+    tests_that_fit = machine_parallel_tests if local else grant_tests_that_fit(host, spec_make_before_break(spec))
     argv = run_argv(spec, session_hours(spec.max_hours), tests_that_fit(spec.tp))
     settings = settings_from(_parsed_run(argv), tests_that_fit)
-    refuse_unhosted_branches(settings, host, os.environ)
+    if not local:
+        refuse_unhosted_branches(settings, host, os.environ)
     return settings
 
 
@@ -1158,8 +1167,9 @@ def _start(settings: RunSettings, grant: HandedGrant | None) -> int:
         ready = ready_session(settings.workload, load_peers)
     else:
         ready = hosted_ready_session(grant.host, settings.workload)
-        stop_before_grant_ends(grant.deadline)
-    return run_session(settings, ready.peer_factory, ready.services)
+        _stop_before_grant_ends(grant.host)
+    cap = None if grant is None else grant_explore_cap(grant.host)
+    return run_session(settings, ready.peer_factory, ready.services, explore_cap=cap)
 
 
 def _refuse_options_beside_resume(args: argparse.Namespace) -> None:
@@ -1202,8 +1212,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if persisted is not None:
             ready = ready_session(settings.workload, load_peers)
-            leg = final_only if args.command == FINAL_ONLY_COMMAND else resume
-            return leg(persisted, ready.peer_factory, ready.services)
+            if args.command == FINAL_ONLY_COMMAND:
+                return final_only(persisted, ready.peer_factory, ready.services)
+            deadline = deadline_after_downtime(persisted.layout, Clock().now())
+            return resume(persisted, ready.peer_factory, ready.services, deadline, None)
         return _start(settings, grant)
     except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed, CacheBuildError, ToolboxInputsError) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)

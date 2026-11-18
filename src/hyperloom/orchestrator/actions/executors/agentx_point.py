@@ -17,6 +17,8 @@ import yaml
 
 from hyperloom.common.benchmark_config import BenchmarkPoint, is_agentx, read_benchmark_point
 from hyperloom.common.outside_facts import AITER_LOG_TUNED_CONFIG_ENV
+from hyperloom.common.session_files import shared_options
+from hyperloom_common.io import atomic_write_text
 from hyperloom_common.unified_diff import touched_paths
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 from hyperloom.orchestrator.state.base_launch import ServerBase
@@ -220,8 +222,7 @@ def materialize_agentx(
     bench.pop("server_lifecycle", None)
     bench.pop("benchmark_script", None)
     bench.pop("workload_spec", None)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
+    atomic_write_text(output, yaml.safe_dump(config, sort_keys=False), options=shared_options(config))
     return output
 
 

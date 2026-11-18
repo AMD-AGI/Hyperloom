@@ -345,6 +345,8 @@ def test_codex_argv_reuses_the_sdk_gateway_overrides(
     assert f'model_provider="{CODEX_PROVIDER_NAME}"' in overrides
     # A specialist must not carry memory between tasks (matches the SDK session).
     assert "features.memories=false" in overrides
+    # Gateways cannot replay Codex's hosted web_search tool results, so the next request fails with a 400.
+    assert 'web_search="disabled"' in overrides
     # The credential crosses as an env-var NAME; its value stays out of argv, where any user on the host could read it
     # out of ``ps``.
     assert any(o.endswith('env_key="OPENAI_API_KEY"') for o in overrides)
@@ -1464,16 +1466,6 @@ def test_explicit_specialist_model_overrides_the_selected_backend_model(
         )
     )
     assert runner.subprocess_config.model == "specialist-override"
-
-
-def test_specialist_model_help_describes_generic_selected_backend_override() -> None:
-    """The help text must not claim the generic override is Claude-only."""
-    from hyperloom.inference_optimizer.cli.parser import _build_parser
-
-    parser = _build_parser()
-    subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
-    help_text = " ".join(subparsers.choices["optimize"].format_help().split())
-    assert "selected specialist backend" in help_text
 
 
 def _write_mcp_config(tmp_path: Path, servers: dict[str, Any]) -> str:

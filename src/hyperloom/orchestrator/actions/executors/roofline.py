@@ -28,6 +28,7 @@ from ...state.analysis_failures import remember_roofline_failure, remember_trace
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
 from ._pd_role_trace import ROLE_STEADY_STATE_MODE, node_trace_summaries
+from .profile import profile_trace_path
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
@@ -182,25 +183,6 @@ def _extract_steady_state_retry_mode(
     return None
 
 
-def _extract_trace_path(profile_result: dict[str, Any]) -> str:
-    """Pick the trace path like Coordinator's ``promote_to_shared_state``: prefer ``main_trace_path``, else
-    ``trace_files[0]`` for legacy results.
-    """
-    if not isinstance(profile_result, dict):
-        return ""
-    if profile_result.get("trace_input_ready") is False:
-        return ""
-    direct = profile_result.get("main_trace_path")
-    if direct:
-        return str(direct)
-    files = profile_result.get("trace_files")
-    if isinstance(files, (list, tuple)) and files:
-        first = files[0]
-        if first:
-            return str(first)
-    return ""
-
-
 def _fail(
     recorder: Any,
     phase: str,
@@ -262,7 +244,7 @@ def _profile_server_log_tail(profile_result: Any, max_bytes: int = 16384) -> str
         if not logs:
             return ""
         return logs[0].read_bytes()[-max_bytes:].decode("utf-8", "replace")
-    except (OSError, ImportError):
+    except OSError:
         return ""
 
 
@@ -443,7 +425,7 @@ class _ProfileOutcome:
         """The outcome of adopting ``result``; a non-succeeded status that still produced a trace is recovered."""
         recovered = result.get("status") != "succeeded"
         warning = {key: result.get(key) for key in ("status", "error_class", "error")} if recovered else None
-        return cls(result=result, trace_path=_extract_trace_path(result), warning=warning, params=params)
+        return cls(result=result, trace_path=profile_trace_path(result), warning=warning, params=params)
 
 
 @dataclass(frozen=True)
@@ -529,7 +511,7 @@ _UNUSABLE_TRACES: tuple[tuple[Callable[[dict[str, Any], str], bool], str, str, s
         lambda result, trace: not trace,
         "profile_no_trace",
         "no_trace",
-        "profile succeeded but no trace_path in result (missing both main_trace_path and trace_files[0])",
+        "profile succeeded but no trace_path in result (no main_trace_path, or trace_input_ready is False)",
     ),
     (
         lambda result, trace: result.get("profile_trace_selection_reason") == "capture_only_fallback",
@@ -559,7 +541,7 @@ def _classify_profile(result: Any) -> _Unusable | None:
     if not isinstance(result, dict):
         message = f"profile_executor returned non-dict: {type(result).__name__}"
         return _Unusable("profile", "bad_return", message)
-    trace_path = _extract_trace_path(result)
+    trace_path = profile_trace_path(result)
     if result.get("status") != "succeeded":
         error = str(result.get("error") or "profile sub-step failed")
         capture_reason = str((result.get("trace_capture") or {}).get("reason") or "")
@@ -706,7 +688,7 @@ async def _compute_bound_profile(
         await _end_profile_run(recorder, run_index, session_dir, arm, _RunEnd("failed", failure=failure))
         raise
     result = cb_profile if isinstance(cb_profile, dict) else None
-    if _extract_trace_path(cb_profile):
+    if profile_trace_path(cb_profile):
         await _end_profile_run(recorder, run_index, session_dir, arm, _RunEnd("succeeded", result))
     else:
         message = "compute-bound re-profile produced no trace path"
@@ -1179,7 +1161,7 @@ class RooflineExecutor:
         session_dir = Path(ctx.extra["session_dir"])
         cb_ctx = self._wrap_profile_ctx(ctx, disable_cuda_graph=arm.disable_cuda_graph, framework=arm.framework)
         profile_run, cb_profile = await _compute_bound_profile(recorder, session_dir, arm, cb_ctx)
-        cb_trace = _extract_trace_path(cb_profile)
+        cb_trace = profile_trace_path(cb_profile)
         if not cb_trace:
             return None, "re-profile produced no usable trace"
         cb_payload = {

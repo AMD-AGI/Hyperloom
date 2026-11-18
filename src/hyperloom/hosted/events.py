@@ -211,11 +211,6 @@ class HostedProgressEvents:
         last_segment, self._last_id = _resume_point(self._dir)
         self._fd, self._segment = self._new_segment(last_segment)
 
-    @property
-    def last_id(self) -> int:
-        """The id of the last event written, ``0`` before the first."""
-        return self._last_id
-
     def _new_segment(self, after: int) -> tuple[int, int]:
         """Create the first free segment after ``after``, new; its descriptor and number.  Changes no state, so a
         failure leaves the writer as it was.

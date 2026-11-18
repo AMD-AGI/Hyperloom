@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 import os
@@ -16,12 +17,6 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Iterator, Mapping, Protocol
 
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import KernelRecipeIdentity
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - exercised only on non-POSIX hosts
-    fcntl = None  # type: ignore[assignment]
-
 from kernelforge.knowledge.kb_store.remote_client import KBStoreClient, KBStoreError
 from hyperloom_common.io import DURABLE, atomic_write_bytes, fsync_directory, fsync_tree_directories
 
@@ -303,8 +298,6 @@ def _process_lock(path: Path) -> threading.RLock:
 @contextmanager
 def _identity_file_lock(path: Path, *, exclusive: bool) -> Iterator[None]:
     """Hold one POSIX advisory lock for an identity."""
-    if fcntl is None:
-        raise RewriteRecordError("local rewrite records require POSIX fcntl file locking")
     flags = os.O_RDWR | os.O_CREAT
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)

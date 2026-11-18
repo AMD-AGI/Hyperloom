@@ -302,6 +302,41 @@ class TestDiscoveryPrompt:
         for leak in ("residual_add_rmsnorm", "swiglu", "silu", " residualscaling", "cca qk", "grouped-mean"):
             assert leak not in low, f"answer-encoding leaked into prompt: {leak}"
 
+    def _toy_prompt(self, fusion_hints=()):
+        return build_discovery_prompt(
+            DiscoveryTarget(model_type="toy", install=FrameworkInstall(framework="sglang"), source_file="", shapes={}),
+            "def forward(x): return x\n",
+            DiscoveryEvidence(diagnosis=_candidate_diag(), hot_kernels=[], fusion_hints=fusion_hints),
+        )
+
+    def test_prompt_cites_profiler_hints_as_advisory_leads(self):
+        hint = {
+            "kind": "add_norm",
+            "operation": "Unfused Add + RMSNorm in `DecoderLayer`",
+            "projected_e2e_pct": 2.4,
+            "members": [
+                {
+                    "kernel_names": ["vectorized_elementwise_kernel add..."],
+                    "kernel_launcher_path": "toy.py(88): forward",
+                },
+                {"kernel_names": ["rmsnorm_kernel"], "kernel_launcher_path": ""},
+            ],
+        }
+
+        prompt = self._toy_prompt([hint])
+
+        assert "## External profiler hints (advisory)" in prompt
+        assert "  - add_norm: Unfused Add + RMSNorm in `DecoderLayer`, projected E2E saving 2.4%" in prompt
+        assert "    kernels: vectorized_elementwise_kernel add... | rmsnorm_kernel" in prompt
+        assert "    launchers: toy.py(88): forward" in prompt
+        assert prompt.index("External profiler hints") < prompt.index("## Your task")
+
+    def test_prompt_without_profiler_hints_has_no_hint_section(self):
+        prompt = self._toy_prompt()
+
+        assert "External profiler hints" not in prompt
+        assert "\n\n## Your task" in prompt
+
     def test_prompt_includes_ordered_boundaries_and_existing_operator_evidence(self):
         d = _candidate_diag()
         prompt = build_discovery_prompt(

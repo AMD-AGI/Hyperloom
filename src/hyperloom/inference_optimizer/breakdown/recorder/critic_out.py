@@ -72,8 +72,8 @@ def _spoken_message(emit: Mapping[str, Any]) -> tuple[str, str]:
     """The ``(topic, body)`` of the first message the iteration spoke.
 
     The critic's prose does not sit on the emit itself; it travels as a
-    ``send_message`` intent inside the envelope, which is also the only thing a
-    turn with nothing to rule on produces.
+    ``send_message`` intent inside the envelope. A review turn that produced
+    no ruling can still emit a message.
     """
     intents = dict_rows(_dict(emit.get("intent_envelope")).get("intents"))
     for intent in intents:

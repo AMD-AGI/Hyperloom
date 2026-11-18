@@ -183,12 +183,13 @@ def _terminal_task_statuses() -> frozenset[str]:
 class _InFlight:
     """Whether the run is waiting on work that emits no SDK message until it ends.
 
-    That is a foreground tool call, or a background task (an async sub-agent)
-    whose launching tool call already returned. A background task is tracked by
-    id from ``TaskStartedMessage`` until a ``TaskNotificationMessage`` or a
-    ``TaskUpdatedMessage`` with a terminal status, which is how the SDK says
-    active task ids must be cleared. A ``ResultMessage`` ends a turn, not the
-    tasks: the session stays open until each one reports.
+    That is a foreground tool call, or a background task (an async sub-agent, or
+    a shell the CLI moved to the background) whose launching tool call already
+    returned. A background task is tracked by id from ``TaskStartedMessage``
+    until a ``TaskNotificationMessage`` or a ``TaskUpdatedMessage`` with a
+    terminal status, which is how the SDK says active task ids must be cleared.
+    A ``ResultMessage`` does not clear it: the CLI ends the turn while the task
+    still runs, and starts the next turn from the task's notification.
     """
 
     def __init__(self) -> None:

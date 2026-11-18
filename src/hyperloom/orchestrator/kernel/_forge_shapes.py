@@ -5,55 +5,21 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
-from .gemm_shape_coverage import canonical_dtype, traced_gemm_shapes
+from .gemm_shape_coverage import traced_gemm_shapes
 
 log = logging.getLogger(__name__)
 
 
-def _is_forge_compatible_shapes_json(path: Path) -> bool:
-    """Validate that a shapes JSON file matches forge's expected format.
-
-    Forge expects: [{"M": int, "N": int, "K": int}, ...]
-    or {"shapes": [{"M": int, "N": int, "K": int}, ...]}
-    """
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            data = data.get("shapes", [])
-        if not isinstance(data, list) or not data:
-            return False
-        sample = data[0]
-        if not isinstance(sample, dict):
-            return False
-        # Must have M/N/K keys (case-insensitive).
-        keys = {k.upper() for k in sample}
-        return {"M", "N", "K"}.issubset(keys)
-    except (json.JSONDecodeError, OSError, TypeError):
-        return False
-
-
 def _resolve_forge_shapes(state, *, precision: str = "") -> str:
-    """Find TraceLens shapes JSON if available and in forge-compatible format.
-
-    Forge dense tuners expect: [{"M": int, "N": int, "K": int}, ...]
-    Only passes files that match this schema; incompatible formats are
-    silently skipped so forge falls back to config.json shape derivation.
+    """The forge shapes JSON extracted from the latest TraceLens candidates; ``""`` when they yield none.
 
     ``precision`` scopes the traced shapes to the dtype the tuner will actually
     tune (a trace carries every GEMM dtype the model runs, e.g. FP8 projections
-    alongside BF16 router heads). Empty means "no dtype scoping".
-
-    When scoping is requested the candidate extraction runs first, because it is
-    the only source whose dtype can be checked: a pre-rendered shapes artifact is
-    a bare ``[{M,N,K}]`` list carrying no dtype or provenance, so an artifact
-    recorded for another dtype would otherwise be handed to the tuner ahead of
-    correctly-scoped shapes. Artifacts stay the fallback for the unscoped case
-    and for when the trace yields nothing for this precision. A profile that does
-    not match the active workload/config contributes nothing.
+    alongside BF16 router heads). Empty means "no dtype scoping". A profile that
+    does not match the active workload/config contributes nothing.
     """
     if not state.profile_trace_matches_workload():
         log.info(
@@ -62,45 +28,7 @@ def _resolve_forge_shapes(state, *, precision: str = "") -> str:
         )
         return ""
     last_trace = getattr(state, "last_trace_analyze", None) or {}
-    if not isinstance(last_trace, dict):
-        return ""
-
-    candidates: list[str] = []
-
-    # Prefer explicit artifact fields when TraceLens exposes them.
-    artifact_paths = last_trace.get("artifact_paths")
-    for source, keys in (
-        (last_trace, ("shapes_json", "shapes_path")),
-        (artifact_paths if isinstance(artifact_paths, dict) else {}, ("shapes_json", "shapes", "gemm_shapes_json")),
-    ):
-        for key in keys:
-            raw = str(source.get(key) or "").strip()
-            if raw:
-                candidates.append(raw)
-    # Fallback: check beside candidates_path.
-    candidates_path_str = last_trace.get("candidates_path") or ""
-    if candidates_path_str:
-        cand_file = Path(candidates_path_str)
-        if cand_file.is_file():
-            shapes_file = cand_file.parent / "shapes.json"
-            candidates.append(str(shapes_file))
-
-    # Extract the GEMM shapes observed by the latest TraceLens analysis. Older
-    # traces can describe a backend that is no longer active.
-    def _extracted() -> str:
-        return _extract_gemm_shapes_from_candidates(str(last_trace.get("candidates_path") or ""), precision=precision)
-
-    if canonical_dtype(precision):
-        scoped = _extracted()
-        if scoped:
-            return scoped
-
-    for candidate in candidates:
-        p = Path(candidate)
-        if p.is_file() and _is_forge_compatible_shapes_json(p):
-            return str(p)
-
-    return _extracted()
+    return _extract_gemm_shapes_from_candidates(str(last_trace.get("candidates_path") or ""), precision=precision)
 
 
 def _extract_gemm_shapes_from_candidates(candidates_path_str: str, *, precision: str = "") -> str:

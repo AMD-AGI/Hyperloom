@@ -32,7 +32,7 @@ from hyperloom.measure.jit.modules import (
     touched_entries,
 )
 from hyperloom.measure.jit.prewarmed import unlike_prewarmed
-from hyperloom.measure.jit.session import JitCacheSession, link_prebuilt
+from hyperloom.measure.jit.session import link_prebuilt
 from hyperloom.measure.jit_kinds import AITER_JIT
 from hyperloom.measure.socket import TestCall
 
@@ -49,22 +49,21 @@ _UTF8 = "utf-8"
 def own_aiter_jit(
     call: TestCall,
     farm: Farm | None,
-    session: JitCacheSession | None,
     environ: Mapping[str, str],
     directory: Path,
     gfx_arch: str | None = None,
 ) -> dict[str, str]:
     """``{AITER_JIT_DIR: directory}`` with the image's prebuilt modules linked into ``directory``, for a server that
-    would otherwise build into the image; empty when the cache's session gives aiter its directory, the farm rebuilds
-    aiter (its ``jit`` is the farm's own: the links to the image's modules its tuned tables or build variables make stale
-    are taken out of it, so the server builds them from the farm's tables and under its own variables), something already
-    sets the variable, or the server's interpreter has no aiter.
+    would otherwise build into the image; empty when the cache's session (``call.jit``) gives aiter its directory, the
+    farm rebuilds aiter (its ``jit`` is the farm's own: the links to the image's modules its tuned tables or build
+    variables make stale are taken out of it, so the server builds them from the farm's tables and under its own
+    variables), something already sets the variable, or the server's interpreter has no aiter.
 
     ``environ`` is what the server inherits, before the sheet's ``call.env_overrides`` and ``call.unset_envs``;
     ``gfx_arch`` the card's architecture, when known (``GPU_ARCHS`` naming it makes nothing stale).
     """
     variable = AITER_JIT.env_var
-    if session is not None and variable in session.environment():
+    if call.jit is not None and variable in call.jit.environment():
         return {}
     configs = point_configs(call)
     servers = server_environments(call, configs, environ)

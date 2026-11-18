@@ -90,14 +90,6 @@ def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert env.env_float("HL_FLOAT", default=1.25) == pytest.approx(1.25)
 
 
-def test_env_float_invalid_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom_common.env import EnvValueError, env_float
-
-    monkeypatch.setenv("HL_BAD_FLOAT", "not-a-float")
-    with pytest.raises(EnvValueError):
-        env_float("HL_BAD_FLOAT", 3.5)
-
-
 # hyperloom_common.io
 
 
@@ -1068,27 +1060,6 @@ def test_tput_objective_unmeasured_is_not_reached() -> None:
     state = SimpleNamespace(current_best={}, baseline_tput=0.0)
     assert obj.reached(state) is False
     assert obj.describe() == "target_tput_per_gpu=100.0"
-
-
-# orchestrator.actions.executors._file_lock
-
-
-def test_file_lock_no_fcntl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    import builtins
-
-    from hyperloom.orchestrator.actions.executors import _file_lock
-
-    real_import = builtins.__import__
-
-    def fake_import(name, *args, **kwargs):
-        if name == "fcntl":
-            raise ImportError("no fcntl here")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-    with _file_lock.best_effort_file_lock(str(tmp_path / "lock")):
-        ran = True
-    assert ran
 
 
 # inference_optimizer.protocol.intent

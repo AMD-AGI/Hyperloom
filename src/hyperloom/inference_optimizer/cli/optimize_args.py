@@ -153,11 +153,17 @@ def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
         help="GPUs per node: sizes each multi-node pod (Infera worker/prefill/decode or RayJob "
         "head+workers) and, with --nodes, the GPUs the base launch is chosen for. Defaults to 8 when omitted.",
     )
+    opt.add_argument(
+        "--extra-env",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Pinned into every round's benchmark environment; repeatable.",
+    )
     # Platform-owned, inert here.
     opt.add_argument("--mn-image", default=None, help=argparse.SUPPRESS)
     opt.add_argument("--cpus-per-node", type=int, default=None, help=argparse.SUPPRESS)
     opt.add_argument("--mem-per-node", type=int, default=None, help=argparse.SUPPRESS)
-    opt.add_argument("--extra-env", action="append", default=[], help=argparse.SUPPRESS)
 
 
 def add_pd_topology_arguments(opt: argparse.ArgumentParser) -> None:

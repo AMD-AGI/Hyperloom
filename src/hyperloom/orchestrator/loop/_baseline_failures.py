@@ -85,7 +85,7 @@ def _authorable_launch_log(result_payload: dict[str, Any] | None, *, err_class: 
     if not isinstance(result_payload, dict) or _is_ray_cluster_infeasible(result_payload):
         return ""
     if (
-        err_class in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS, PREFIX_CACHE_OFF_ERROR_CLASS)
+        err_class in (AGENTX_PREFLIGHT_ERROR_CLASS, PREFIX_CACHE_OFF_ERROR_CLASS)
         or err_class in _REFUSED_BEFORE_SPAWN_CLASSES
         or stopped_by_the_run_class(err_class)
     ):
@@ -427,8 +427,8 @@ class BaselineFailureMixin:
         if eval_failed:
             self._persist_eval_failure(result_payload)
         self._stop_the_run_on_baseline_failure(task, result_payload, err_class, retries_suppressed=retries_suppressed)
-        # Combined backstop: count ALL baseline failures so mixed error_classes
-        # that split the per-class streaks still fast-fail.
+        # Combined backstop: count ALL baseline failures, the classes the streak
+        # does not count included, so a mix of classes still fast-fails.
         if not stopped_by_the_run:
             self.shared_state.baseline_total_failures += 1
         if (
@@ -474,10 +474,6 @@ class BaselineFailureMixin:
                 result_payload.get("error") or err_class,
             )
             self.shared_state.set_stop_reason(_STOPS_ON_FIRST_OCCURRENCE[err_class])
-        elif err_class == "fast_exit_arg_error":
-            self.shared_state.baseline_arg_error_streak += 1
-            if self.shared_state.baseline_arg_error_streak >= 2:
-                self.shared_state.set_stop_reason("baseline_arg_error")
         elif err_class == AGENTX_PREFLIGHT_ERROR_CLASS:
             # The delegated client must pass its environment preflight before framework optimization.
             log.error(
@@ -488,9 +484,6 @@ class BaselineFailureMixin:
                 result_payload.get("error") or err_class,
             )
             self.shared_state.set_stop_reason(AGENTX_PREFLIGHT_STOP_REASON)
-        # ``baseline_arg_error_streak`` is deliberately left alone on every other
-        # class: a boot that failed some other way is no evidence the arguments
-        # were fixed.
         elif self._generic_baseline_failure_stops(
             task, err_class, result_payload, retries_suppressed=retries_suppressed
         ):

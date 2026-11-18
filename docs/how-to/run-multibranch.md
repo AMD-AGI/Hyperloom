@@ -10,7 +10,8 @@ myst:
 session: PRELUDE, EXPLORE, FINAL and CLOSE; `run --resume SESSION_DIR` continues one that stopped before FINAL (see
 [Resuming a stopped session](#resuming-a-stopped-session)). The other subcommands are `review` (see
 [Review the agent map](multibranch-review-gate.md)), `final-only SESSION_DIR` (emergency FINAL and CLOSE over a
-session that ended before FINAL) and `hosted run` (a session a host injects; see
+session that ended before FINAL) and `hosted run` (a session a host injects, measured in the grant's sandboxes or, when
+its spec says `placement.measurement: local`, on the app container's own cards; see
 [Run hosted multi-branch on a new cluster](hosted-multibranch-new-cluster.md)).
 
 ```bash
@@ -58,8 +59,19 @@ FINAL and baseline tests, correctness fixes and retractions are never judged, no
 throughput verdict.
 
 `HYPERLOOM_ACTIVE_IMAGE_REF` and `HYPERLOOM_ACTIVE_IMAGE_DIGEST` must name the image the session runs on, and the
-agent CLI the specialists run must be installed. `--measurement hosted` also needs the grant variables its help lists
+agent CLI the specialists run must be installed: on `PATH`, or, for `claude`, in `~/.local/bin`, where `install.sh`
+puts it (only a shell that sourced the kernel-agent env file has that on `PATH`). `--measurement hosted` also needs the grant variables its help lists
 (see [Hosted run inputs](../reference/environment-variables.md#hosted-run-inputs)).
+
+Before a test that carries patches is given a sandbox or cards, its toolbox byte-compiles every Python file the patch
+stack changes and imports each patched component on CPU, with no GPU visible (the merge smoke). A file that does not
+compile, or an import that fails on a name or attribute a patched module lacks (one patch removing a name another
+patched file imports), fails the test as the candidate's (`merge_smoke`), whatever the reason the name is missing: a
+patched module that defines a name only under a device check is judged too, since such a stack fails on any other
+device as well. Every other import failure (a device probe that finds no GPU, a name an unpatched module defines only
+where a GPU is seen, a missing module, a `NameError`) is logged and not judged, and the test is measured. A smoke that cannot run is an infrastructure failure
+(`smoke_not_run`), retried once. `HYPERLOOM_MERGE_SMOKE=off` in the session's environment turns it off; any
+value but `on`, `off` or empty is refused when the toolbox is built.
 
 ## Options of `run`
 
@@ -83,15 +95,15 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
   moves it (the same stack on GLM-5.3 TP4/EP4 gained +1.8% total per GPU at conc 4 and +7–14% at conc 8–16). The
   bar and guards are read from the code, so a resumed session judges by the current rule. The manifest records the
   objective, so a resumed session keeps it; the frontier, FINAL, the dashboard and `MB-report.md` all read that metric. A
-  `total_token_throughput` session writes no Recipe KB record: the KB partitions by workload, not objective. Each Arbor
-  is given the objective with its bar and guards (`opt_objective`), which needs Arbor `29c72f9` or later.
+  `total_token_throughput` session writes no Recipe KB record: the KB partitions by workload, not objective.
 - **Base launch:** `--reference-script FILE`, a shell launch script or a base launch record frozen elsewhere, as for
   `hyperloom optimize`; the session freezes it as its base, a record without reading any recipe source. Without it
-  the base comes from the recipe sources. Every Arbor is served the frozen base unless `--agent-launch` gives a launch
-  file.
+  the base comes from the recipe sources. Every component agent is served the frozen base unless `--agent-launch`
+  gives a launch file.
 - **Limits:** `--max-hours` (default 2, 0 for none), `--max-gpu-hours` and `--max-llm-usd` (0 for none),
   `--max-branches` (default 4). A negative or non-finite limit is a usage error.
-- **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default 2),
+- **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default 2; a
+  specialist's branch only, the integration branch's K is bounded by `--max-parallel-tests`),
   `--dev-leases`, `--judge-interval-sec` (default 600, must be positive), `--measurement local|hosted`,
   `--[no-]make-before-break` (hosted only, default on: where the grant fits at least three tests at TP, a finished
   test's sandbox is kept until the next test's runs, so that the cluster does not give its node to another job, and one
@@ -101,7 +113,11 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
   `--agent-directions`, `--agent-dossier-minutes`, `--agent-share-minutes`, `--agent-pack`, `--agent-launch`,
   `--agent-port`, `--stop-after-map`, `--agent-dossier`, `--no-review-gate`.
   Each agent measures with the gate's own client: on `agentx`, the gate's replay run by
-  `python -m inference_suite run` against the agent's server, so an Arbor needs no bench variables in its launch.
+  `python -m inference_suite run` against the agent's server, so an agent needs no bench variables in its launch.
+  A component agent is a source whose checkout an adapter recognises. An adapter is a package of its own, installed
+  beside Hyperloom and declared under the entry-point group `hyperloom_multibranch.component_agents`; Hyperloom ships
+  none. With none installed, every source is onboarded by a model, and the map, pack, launch and dossier options have
+  no agent to act on.
 - **Scheduling playbook:** `--playbook auto|champion|challenger` (default `auto`).
 
 ## Resuming a stopped session
@@ -112,18 +128,31 @@ the profile and the root commit are the ones the first PRELUDE recorded.
 
 - **What it continues:** the earlier run's unfinished tests are withdrawn and the branches it left open are stopped.
   The roster and the integration branch open again (a `reopen` lineage event), and EXPLORE opens new branches, new
-  ids and worktrees, on the integration head. Specialist and Arbor branches alike start fresh.
+  ids and worktrees, on the integration head. Specialist and agent branches alike start fresh.
 - **Deadline:** the session's deadline moves by its downtime, the time between the last decision the earlier run
   recorded and the resume. The new deadline is written to the manifest and recorded as a `resume` phase in
-  `MB-decisions.jsonl` with `ended`, `downtime_seconds` and `deadline`.
+  `MB-decisions.jsonl` with `ended`, `downtime_seconds` and `deadline`. GPU hours are not given back: the session
+  reads what it spent, before the stop included, from its blackboard.
+- **Hosted:** a session measured in a grant's sandboxes is resumed by a restart of its hosted run, not by
+  `run --resume`. Its budget counts from the original start, for `--max-hours` as for `--max-gpu-hours`: the deadline
+  stays the one the first start set and the `resume` phase records it with the downtime. Such a resume is refused when
+  the session recorded no baseline, was to stop once its map was made, already spent the GPU hours EXPLORE has under
+  `--max-gpu-hours`, or is past that deadline; the restart then finishes it with `final-only`. It is refused too,
+  with one warning naming the field, when the baseline was measured on another build, `MEASUREMENT_EPOCH`, image,
+  base launch or runner template card count than the restart would measure on, as recorded in
+  `MB-toolbox/baseline-environment.json` when the first baseline test was accepted. The application's node and account
+  are not compared: a reschedule changes them by design, and the tests run in the grant. The restart ends the
+  measurement sandboxes the earlier start left running in the grant before it measures anything, and EXPLORE ends by
+  the grant's cap as in a started session. A session file this account may not read finishes the session too.
 - **Knowledge steps:** a CLOSE of a session whose search tree the RSI archive already holds runs none of the knowledge
   steps: no RSI archive, playbook proposal or lesson curation. Each is reported `skipped` with the reason
   `an earlier CLOSE of this session archived its search tree`. This holds for every later CLOSE of that session, a
   second `--resume` or a `final-only` included, and also when the earlier CLOSE's exports failed after it archived.
 - **Refusals (exit 2, nothing changed):** `SESSION_DIR` is not a directory or holds no session that ran; the session
   ran on another build, is still running, already chose in FINAL, failed in PRELUDE or recorded no baseline, was
-  measured in a grant's sandboxes (`--measurement hosted`), or was to stop once its map was made; or any other `run`
-  option is given beside `--resume`.
+  measured in a grant's sandboxes (`--measurement hosted`), was to stop once its map was made, or already spent the GPU
+  hours EXPLORE has under `--max-gpu-hours` (all of it less FINAL's share), which would send it straight to FINAL; or
+  any other `run` option is given beside `--resume`.
 
 A session that cannot be resumed but stopped before FINAL can still be finished with `final-only SESSION_DIR`.
 

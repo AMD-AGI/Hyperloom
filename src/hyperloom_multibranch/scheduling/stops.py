@@ -41,8 +41,10 @@ STOP_SIGNALS: tuple[signal.Signals, ...] = (signal.SIGINT, signal.SIGTERM, signa
 STOP_OVERRAN = "the stop overran the hard stop"
 TOOLBOX_CLOSE_OVERRAN = "the toolbox did not close in time"
 #: Clock seconds the toolbox gets to close; its close cancels its own work and releases its backend and sandboxes, so
-#: it is quick even while a specialist hangs.
-TOOLBOX_CLOSE_SECONDS = 10.0
+#: it is quick even while a specialist hangs. Ending a local sandbox reaps its processes, which takes up to 27 s when one
+#: of them outlives SIGKILL (``hyperloom.sandbox.reaper.ONE_REAP_SEC``); a local toolbox reaps its sandboxes all at once,
+#: so the close fits one reap and a margin.
+TOOLBOX_CLOSE_SECONDS = 30.0
 
 
 class SessionStopReason(str, Enum):
@@ -59,8 +61,8 @@ class SessionStopReason(str, Enum):
     PRELUDE_FAILED = "prelude_baseline_failed"
     #: The toolbox has fewer usable cards than one test needs; FINAL is skipped and the session failed.
     NO_MEASUREMENT_CARDS = "no_measurement_cards"
-    #: The run asked to stop once its Arbor agents' directions were mapped (``--stop-after-map``): PRELUDE and the map
-    #: ran, EXPLORE and FINAL did not, and the map and dossier were left for a person to review.
+    #: The run asked to stop once its component agents' directions were mapped (``--stop-after-map``): PRELUDE and the
+    #: map ran, EXPLORE and FINAL did not, and the map and dossier were left for a person to review.
     MAPPED = "mapped"
     #: A person rejected the session's agent map at its review (:mod:`.review`): PRELUDE and the map ran, no agent
     #: branch opened, and EXPLORE and FINAL did not run.

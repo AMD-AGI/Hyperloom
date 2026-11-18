@@ -42,6 +42,7 @@ provider-side combinations and what each one enables.
 | `CODEX_MODEL`          | No       | Derived from `OPENAI_BASE_URL`    | Model id on the OpenAI side, used by the Codex backend, including Forge running on it. Model settings are never borrowed across providers.                                                                    |
 | `INFERENCE_OPTIMIZER`<br>`_AGENT_BACKEND` | No | Ranked by credentials | Names the agent CLI for the agentic roles: `claude`, `codex` or `deepseek`. An explicit `claude` or `codex` pins the role to that CLI instead of the credential-ranked choice. The choice applies to orchestration, specialists, Forge and TraceLens; quantization honours only `deepseek`. `deepseek` (the DeepSeek Harness) is never picked by the credential ranking: Hyperloom's roles reach it only through this variable, and Forge also takes `--agent-backend deepseek` / `FORGE_AGENT_BACKEND=deepseek`. It needs the `deepseek` extra, and uses the `OPENAI_BASE_URL` / `OPENAI_API_KEY` gateway. With `deepseek`, specialists run on the `dsh` CLI with `DSH_PERMISSION_MODE=danger-full-access`, so dsh applies no sandbox of its own, and a run with specialists enabled (`--research-lane-capacity` above 0) refuses to boot when no `dsh` is found. |
 | `DSH_MODEL`            | No       | `deepseek-v4-flash`               | Model id the DeepSeek Harness runs, for every role that selects it. |
+| `HYPERLOOM_DSH_MAX_TOKENS` | No   | Unset (harness default)           | Positive integer capping the output tokens of each model request the DeepSeek Harness makes, for every role that runs on it: orchestration, specialists, Forge, TraceLens and quantization. Unset leaves the harness default, which exceeds the output limit of some routed models, so such a request fails. A value that is not a positive integer refuses the launch. |
 | `GEAK_API_KEY`         | No       | —    | Internal alias, never derived from either side. GEAK runs on the Anthropic side (`ANTHROPIC_*` + `GEAK_CLAUDE_MODEL`); set this only to point GEAK elsewhere.                                                                                                                              |
 | `GEAK_BASE_URL`        | No       | —    | Internal alias, never derived from either side. Set it only to point GEAK at a different endpoint than the Anthropic side.                                                                                                                          |
 | `GEAK_CLAUDE_MODEL`   | No       | Inherits `CLAUDE_MODEL` | GEAKv4 Claude Code workflow model id.                                                                                                                                                           |
@@ -270,9 +271,23 @@ does, so under `HYPERLOOM_RSI_WRITE_ONLY=1` it finds none and `HYPERLOOM_RSI_AS_
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPERLOOM_RSI_ARCHIVE` | None; required | The archive directory sessions read and write. A session refuses to start when it is unset or does not name a writable directory. Operator configuration. |
+| `HYPERLOOM_RSI_ARCHIVE` | None; required | The archive directory sessions read and write. A session refuses to start when it is unset or this account cannot create and remove a file in it (a real write, named with its errno, owner and mode). An archived search tree is made readable by the archive folder's group (`640`) wherever that folder is setgid and its group may read it, whatever the writing account's umask, also where others can write it; never by others. Operator configuration. |
 | `HYPERLOOM_RSI_AS_OF` | Unset (everything) | An ISO time the archive is read as of, for sessions run as repeats or as pairs: lessons and playbooks by when they were written, a search tree by its session's start plus budget, not by when CLOSE wrote it. A tree that ended by then but is written after it is read by a session that loads the archive after the write and missed by one that loads it before. For experiments. |
 | `HYPERLOOM_RSI_WRITE_ONLY` | Unset (read and write) | `1` reads nothing of the archive, for a run beside the archive runs, while CLOSE still writes the session's outcomes into it. For experiments. |
+
+---
+
+## Multi-branch prompt-cache TTL
+
+A multi-branch session sets the prompt-cache TTL of every branch's Claude CLI. On an InferenceX workload a branch
+waits for its test in the same conversation for longer than the CLI's default 5-minute TTL, so the session
+defaults to `1h` there; on an AgentX workload, whose test outlasts even an hour, it keeps the CLI's default. A
+variable set in the session's environment wins on either workload, and reaches a single-lineage specialist too.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLAUDE_CODE_PROMPT_CACHE_TTL` | `1h` on InferenceX; unset (the CLI's `5m`) on AgentX | The TTL of a branch CLI's own prompt cache, `5m` or `1h`. |
+| `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` | As `CLAUDE_CODE_PROMPT_CACHE_TTL` | The TTL of its subagents' prompt cache. |
 
 ---
 
@@ -928,7 +943,10 @@ repository records for the worktree, never the one the worktree's `.git` file na
 and runs as the app's own uid, so no ownership check tells a directory it made from the app's), the framework source
 roots, the task's model when it is a local path, the programs of the stdio MCP servers they start (each named in one
 WARNING: nothing else such a server reads is bound unless the confinement shows it), and, for an agent runner launch,
-`AgentLaunchSpec.readable`; a GPU task gets `/dev/kfd` and `/dev/dri`. The paths `HYPERLOOM_STATE_DIR`,
+`AgentLaunchSpec.readable` (a multi-branch specialist's: the session's `MB-reference/<name>` directories, the
+directory its workload's model is served from, the files its worktree links and its branch's own dev lease area,
+`branch-sandboxes/<branch>` of a local toolbox or the branch's `dev` directory of a hosted one, so it applies a Forge
+patch from its lease's root and sees no other branch's lease); a GPU task gets `/dev/kfd` and `/dev/dri`. The paths `HYPERLOOM_STATE_DIR`,
 `HYPERLOOM_BUILD_STORE` and `HYPERLOOM_BUILD_TRUST` name are masked wherever a bind would show them (a hosted run's
 entry, which takes `HYPERLOOM_STATE_DIR` out of its environment, registers its state directory so it stays masked). The `claude` CLI
 runs there only with a login in its environment: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or
@@ -1007,16 +1025,43 @@ with `HOME`, `CLAUDE_CONFIG_DIR` and `TRITON_CACHE_DIR` of the sandbox's own (an
 branch's session directory, where its Claude CLI's transcripts are read from). A Claude CLI there logs in only through
 those variables, never the app's `~/.claude`. pip installs to `PIP_TARGET`, `site-packages` in that home, which is on
 no interpreter's import path, so no server a command starts imports what was installed, nor the dependencies an install
-brought, ahead of the image's (the image's venv takes no user install and is read-only). `AITER_JIT_DIR` and
-`FLYDSL_RUNTIME_CACHE_DIR` are aiter's defaults, its own writable tree, where the image's prebuilt JIT modules and
-FlyDSL kernels are. A sandbox whose paths bubblewrap cannot bind safely (before 0.12, nothing may be bound below the
-shared `/tmp`, so a session directory under `/tmp` cannot be) runs unconfined, as before, with a WARNING; a hosted run
-refuses it.
+brought, ahead of the image's (the image's venv takes no user install and is read-only); an agent's adapter may put
+it on the path of the agent's own commands only. `AITER_JIT_DIR` and `FLYDSL_RUNTIME_CACHE_DIR` are aiter's
+defaults, its own writable tree, where the image's prebuilt JIT modules and FlyDSL kernels are. A sandbox whose paths
+bubblewrap cannot bind safely (before 0.12, nothing may be bound below the shared `/tmp`, so a session directory under
+`/tmp` cannot be) runs unconfined, as before, with a WARNING; a hosted run refuses it.
+
+A multi-branch session measured on this host's cards runs each test's runner, and the server it starts with the
+branch's patches, in a local sandbox (`hyperloom.sandbox.confined`) under the same rule: where its provider names no
+account for it (`ProcessUsers`), bubblewrap where `choose_test_isolation()` gives it, else as before with one WARNING
+(`tests run unconfined on this host, as before: they can read this account's files and credentials (<reasons>)`); a
+hosted run refuses to build the toolbox instead. Each sandbox writes its own `fs/` (`/in`, `/out`, `/work`), a private
+`/tmp` and a full-size `/dev/shm`, and a sealed one its own `private/`, where the runner reads its signing key and
+removes it; it reads its toolchain, its interpreter, the model and what its entries link to (each link's target
+itself, never the directory it is in; a hub snapshot's repository `blobs`), the Hugging Face hub cache, and the trees
+its template names (the framework snapshot, the staged rule pack, the compiled-code store, the runner cache, the native
+build store and trust file, a local InferenceX repository); the app's credential locations those show are
+masked, and a sandbox one of whose read paths is itself a credential location (a home, a login file) runs as before
+with a WARNING, refused in a hosted run. So does one whose model links to or below a credential location, or into a
+hidden entry of a home (`~/.ssh`, `~/.claude`, `~/.config`, `~/.aws`, `~/.netrc`), where no mask could hide the logins;
+a link to anything else in the home (`~/tokdir`, `~/config.json`), outside it, or into the hub cache binds as before,
+except into a credential location the hub cache holds (one set to the home's parent), whose mask the link would open.
+Nothing else of the host is there: not the session's other files, another sandbox's directory or key, the app's state,
+nor any process of the app's (its own pid namespace; a sandbox that runs several commands shares one holder's, as an
+agent sandbox does). A sandbox with cards gets `/dev/kfd` and `/dev/dri`, `/sys`
+is read-only, the network is the app's (its server listens on loopback for the benchmark client). The sandbox's id
+(`E2B_SANDBOX_ID`) is set inside only, so the reap, the card guard and the tag sweep find its processes and never
+bubblewrap's own, and a reap's SIGTERM reaches them with their grace. Before bubblewrap 0.12 a sealed runner whose
+session directory is below `/tmp` gets a fresh `/tmp` of its own instead of the bound one. A probe that gives no answer
+in time leaves only that launch's test unconfined: the next sandbox is chosen for again. The app opens a sandbox's files
+(the runner's output and logs) by one walk below its `fs/` that follows no link out of it, so a process of the sandbox
+cannot swap a link to the app's files in between a check and the open.
 
 A hosted run uses only its hosting layer's bubblewrap, by the path its entry names, never one found on `PATH` (the
-framework image may carry its own); a local run uses the `bwrap` on `PATH`. `hyperloom hosted run` names `bin/bwrap` in
-the directory `HYPERLOOM_HOST_LAYER` names (whitespace around it ignored), which the layer's `start.sh` sets to its
-own; with the variable unset, blank or relative, no launch of the run uses bubblewrap. It checks before its installer or `optimize` runs: where neither tier
+framework image may carry its own); a local run uses the `bwrap` on `PATH`. `hyperloom hosted run` and
+`hyperloom-multibranch hosted run` name `bin/bwrap` in the directory `HYPERLOOM_HOST_LAYER` names (whitespace around it
+ignored), which the layer's `start.sh` sets to its own; with the variable unset, blank or relative, no launch of the run
+uses bubblewrap. `hyperloom hosted run` checks before its installer or `optimize` runs: where neither tier
 works, the run ends with a final `exit.json` (return code 2) whose `error` names both reasons; a probe that gave no
 answer in time ends the leg without one, so the host starts it again. Where the account is chosen, it probes the layer's
 bubblewrap too: the Ray GPU actor path never starts a specialist as an account, so where that bubblewrap cannot confine
@@ -1052,6 +1097,18 @@ is only `PATH`, `HOME`, `TMPDIR` and `LC_ALL`. The build record's `isolation` en
 `bwrap+netns`. Where neither tier works, the toolbox refuses at start (`build_preflight`) and each build fails as the
 machine's, naming both reasons as its choice found them; a bubblewrap whose probe gives no answer in time is not
 refused but logged, and each build asks again.
+
+A multi-branch session records in its manifest and `MB-report.json` (`agent_isolation`) how the paths that launch its
+agents and tests start them (`hyperloom_multibranch.scheduling.launch_isolation`): its specialists as the agent runner's
+chooser gives them now (`account`, `bwrap`, else `none` with the reasons, or `refused` where they must be isolated and
+no tier can); its agent and dev sandboxes and its tests on this host as their choosers give them now (`bwrap`, else
+`none` with the reasons, or `refused` in a hosted run whose layer bubblewrap cannot sandbox them), or `hosted` when the
+grant's sandboxes run them. A sandbox whose own paths bubblewrap cannot bind safely runs as before even where the record
+says `bwrap`, which its own WARNING says. `MB-report.md` has the same as one line (`agent isolation: specialists <...>,
+sandboxes <...>, tests <...>: <reasons>`), and the session logs one WARNING at its start naming what runs unconfined. A
+multi-branch `hosted run` starts only when nothing it launches in the app container would run unconfined or be refused:
+with the layer's bubblewrap its specialists, and with `placement.measurement: local` its sandboxes and tests too, run
+under it; a spec measured there ends before anything starts while one of them would not.
 
 The tests that launch real sandboxes (marker `agent_isolation`) skip on a host without bubblewrap or a user namespace
 for it; with `HYPERLOOM_REQUIRE_ISOLATION_TESTS=1`, which CI sets after allowing unprivileged user namespaces, they
@@ -1396,7 +1453,10 @@ and input variables are always required except for a session started by hand on 
 (`hyperloom-multibranch run --measurement hosted`), which needs the sandbox URLs and templates, `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`,
 `HYPERLOOM_GRANT_LIMITS` (all four totals: a multi-branch session refuses a grant that states only some of them),
 `HYPERLOOM_RUN_CREATED_AT` and the source pair. A variable that is set is checked even when it is not
-required.
+required. A multi-branch `hosted run` whose spec says `placement.measurement: local` measures on the app container's own cards:
+it needs no sandbox variable, key or source pair, and `HYPERLOOM_GRANT_LIMITS` is optional (its `max_runtime_sec`, when given,
+bounds the session together with the spec's `budget.max_hours`; see
+[Run hosted multi-branch on a new cluster](../how-to/hosted-multibranch-new-cluster.md)).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
@@ -1503,6 +1563,22 @@ the same value to every measurement runner it starts.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HYPERLOOM_CARD_GUARD` | `enforce` | `enforce`: a card some process holds is not handed out (the test waits for a free one; the log names the card, the process and the memory it holds, once per holder), and a test whose card a process outside it holds is ended at the first look that finds it (about once a second) and refused as the infrastructure failure `foreign_process_on_card`, which is retried on other cards. `observe`: cards are handed out and tests run to their end; the signed result says `foreign` with the process, the card and when, and carries a warning. Any other value is refused at start-up. Where the cards cannot be read, both modes go on and the result says `unknown` and why. |
+
+## Merge smoke
+
+Before a test that carries patches is given a sandbox or cards, the multi-branch toolbox (hosted and local) byte-compiles
+every Python file the test's patch stack changes and imports each patched component on CPU, with every GPU hidden and the
+point's server variables set. A file that does not compile, or, while the image's own copy imports, an `ImportError`
+(not `ModuleNotFoundError`) for a name a patched module lacks or an `AttributeError` raised on a patched module, fails
+the test as the candidate's (`merge_smoke`), whatever the reason the name is missing (a patched module that defines a
+name only under a device check is judged too, since such a stack fails on any other device as well); any other import
+failure (a `NameError`, a missing module, a name or attribute an unpatched module or value lacks) is logged and the test
+is measured as usual. A smoke that cannot run is the
+infrastructure failure `smoke_not_run`, retried once.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYPERLOOM_MERGE_SMOKE` | Unset (on) | Read from the toolbox host's environment when the toolbox is built. Unset, empty or `on` (any case, surrounding spaces ignored) keeps the merge smoke on; `off` turns it off, so every test goes straight to its sandbox. Any other value is refused: building the toolbox fails with a `ValueError`. Operator configuration. |
 
 ## Variables intentionally not exposed
 

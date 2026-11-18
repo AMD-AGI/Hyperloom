@@ -162,22 +162,6 @@ def test_rayjob_probe_parses_logs_despite_a_failed_job(monkeypatch):
     assert gpu_probe.remote_autodetect_gpu_type(timeout_s=1) == "mi325x"
 
 
-def test_probe_failure_falls_back_to_none(monkeypatch):
-    # Any transport error is swallowed so the caller can fall back to --gpu-type.
-    monkeypatch.setattr(
-        gpu_probe,
-        "build_external_state_from_env",
-        lambda: {"backend": "rayjob", "head_pod_ip": "10.0.0.1"},
-    )
-
-    def _boom(*_a, **_k):
-        raise RuntimeError("dashboard unreachable")
-
-    monkeypatch.setattr(gpu_probe.ray_dashboard, "RayDashboardClient", _boom)
-
-    assert gpu_probe.remote_autodetect_gpu_type(timeout_s=1) is None
-
-
 _BACKENDS = [_infera_state(), {"backend": "rayjob", "head_pod_ip": "10.0.0.1"}]
 
 
@@ -196,7 +180,13 @@ def _probe_failing_with(monkeypatch, tmp_path, failure, state):
 @pytest.mark.parametrize("state", _BACKENDS)
 @pytest.mark.parametrize(
     "failure",
-    [httpx.ConnectError("dashboard unreachable"), OSError("no route to host"), subprocess.TimeoutExpired(["ssh"], 1)],
+    [
+        httpx.ConnectError("dashboard unreachable"),
+        OSError("no route to host"),
+        RuntimeError("dashboard error"),
+        subprocess.TimeoutExpired(["ssh"], 1),
+    ],
+    ids=["http-error", "os-error", "runtime-error", "timeout"],
 )
 def test_expected_probe_failures_fall_back_to_none(monkeypatch, tmp_path, failure, state):
     assert _probe_failing_with(monkeypatch, tmp_path, failure, state) is None

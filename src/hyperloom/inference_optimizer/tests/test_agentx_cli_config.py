@@ -286,7 +286,6 @@ def test_generated_snapshot_records_the_base_topology_and_precedes_manifest(tmp_
     ):
         monkeypatch.setattr(cli, name, lambda *a, **kw: None)
     monkeypatch.setattr(cli, "_autodetect_gpu_type", lambda: "mi355x")
-    monkeypatch.setattr(cli, "_should_remote_probe_gpu", lambda args: False)
     monkeypatch.setattr(cli, "resolve_framework_version", lambda args: "test-version")
     monkeypatch.setattr(cli, "make_session_dir", lambda **kw: tmp_path)
     monkeypatch.setattr(cli, "_acquire_session_lock_or_exit", lambda path: None)

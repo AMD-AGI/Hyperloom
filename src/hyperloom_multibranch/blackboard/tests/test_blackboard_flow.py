@@ -12,8 +12,9 @@ import pytest
 
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, ClaimKey, Role
 from hyperloom.contracts.measurement import AttachmentRef
-from hyperloom_multibranch.contracts.blackboard.peers import Purpose, TestKind, Verdict
+from hyperloom_multibranch.contracts.blackboard.peers import Purpose, TestKind, Validity, Verdict
 from hyperloom_multibranch.contracts.blackboard.records import (
+    JudgementWrite,
     BaselineRecord,
     LineageEvent,
     MergeAttempt,
@@ -30,6 +31,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import (
     MergeOutcome,
 )
 from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.local.views import MERGE_TEST_FAILED
 from hyperloom_multibranch.blackboard.tests.factories import TTL, delta, intent, judgement, request, result
 
 BASELINE = {"output_tps": 1000.0}
@@ -71,19 +73,19 @@ async def session(open_as: Callable[..., LocalBlackboard]) -> Session:
 
     await _measure(s, s.s1, "r1", intent("s1", "c0"), delta("--max-num-seqs 256"))
     await s.gate.write_judgement(
-        "r1", judgement(4.0, ("r1",), recorded={"output_tps": 1040.0}), Conclusion.COMMITTED, "c1"
+        JudgementWrite("r1", judgement(4.0, ("r1",), recorded={"output_tps": 1040.0}), Conclusion.COMMITTED, "c1")
     )
 
     await _measure(s, s.s2, "r2", intent("s2", "c0", "attention", "split kv"), delta("--block-size 32"))
     flat = judgement(0.2, ("r2",), verdict=Verdict.FLAT)
-    await s.gate.write_judgement("r2", flat, Conclusion.RECORDED_ONLY)
+    await s.gate.write_judgement(JudgementWrite("r2", flat, Conclusion.RECORDED_ONLY))
 
     merge = intent(INTEGRATION_BRANCH, "c0", "merge", "c1")
     await s.toolbox.write_request(request("m1", merge, delta("--max-num-seqs 256")))
     await s.integrator.record_merge_attempt(MergeAttempt(("c1",), "c0", request_id="m1"))
     await s.toolbox.write_result(result("m1"))
     merged = judgement(4.1, ("m1",), recorded={"output_tps": 1041.0})
-    await s.integrator.write_judgement("m1", merged, Conclusion.MERGED, "i1")
+    await s.integrator.write_judgement(JudgementWrite("m1", merged, Conclusion.MERGED, "i1"))
     return s
 
 
@@ -186,9 +188,48 @@ async def test_a_branch_inbox_gets_its_results_judgements_and_lineage_once(sessi
     assert [(item.kind, item.pointer) for item in first.items if item.kind is not InboxKind.LINEAGE] == [
         (InboxKind.RESULT, "r1"),
         (InboxKind.JUDGEMENT, "r1"),
+        (InboxKind.MERGE, "m1"),
     ]
     assert [item.kind for item in first.items].count(InboxKind.LINEAGE) == 1
     assert again.items == ()
+
+
+async def test_a_merge_the_integrator_settles_reaches_the_branches_whose_commits_it_carried_once(
+    session: Session,
+) -> None:
+    (merged,) = [item for item in (await session.s1.poll("s1")).items if item.kind is InboxKind.MERGE]
+    cursor = (await session.s2.poll("s2")).cursor
+    await _measure(session, session.s1, "r3", intent("s1", "c1", "attention", "fused rope"), delta("--rope fused"))
+    await session.gate.write_judgement(JudgementWrite("r3", judgement(1.0, ("r3",)), Conclusion.COMMITTED, "c3"))
+    seen = (await session.s1.poll("s1")).cursor
+
+    stacking = intent(INTEGRATION_BRANCH, "i1", "merge", "c3")
+    await session.toolbox.write_request(request("m2", stacking, delta("--rope fused")))
+    await session.integrator.record_merge_attempt(MergeAttempt(("c3",), "i1", request_id="m2"))
+    await session.toolbox.write_result(result("m2"))
+    await session.integrator.write_judgement(JudgementWrite("m2", judgement(0.1, ("m2",)), Conclusion.NOT_STACKABLE))
+    skipped = MergeAttempt(("c3",), "i1", skipped_reason="the merge does not combine")
+    await session.integrator.record_merge_attempt(skipped)
+    failed = intent(INTEGRATION_BRANCH, "i1", "merge", "c3 again")
+    await session.toolbox.write_request(request("m3", failed, delta("--rope fused")))
+    await session.integrator.record_merge_attempt(MergeAttempt(("c3",), "i1", request_id="m3"))
+    await session.toolbox.write_result(
+        result("m3", validity=Validity.CANDIDATE_FAILED, failure_reason="server crashed")
+    )
+
+    page = await session.s1.poll("s1", seen)
+    others = await session.s2.poll("s2", cursor)
+
+    merges = [item for item in page.items if item.kind is InboxKind.MERGE]
+    assert merged.summary == "the merge of your c1 onto c0: merged as i1"
+    assert [item.summary for item in merges] == [
+        "the merge of your c3 onto i1: not_stackable (+0.10% on the integration head)",
+        "the merge of your c3 onto i1: conflict_skipped (the merge does not combine)",
+        f"the merge of your c3 onto i1: not_stackable ({MERGE_TEST_FAILED}: server crashed)",
+    ]
+    assert (merges[0].pointer, merges[2].pointer) == ("m2", "m3")
+    assert not [item for item in others.items if item.kind is InboxKind.MERGE]
+    assert (await session.s1.poll("s1", page.cursor)).items == ()
 
 
 async def test_a_stopped_branch_reads_as_stopped_and_gives_up_its_claims(session: Session) -> None:
@@ -210,7 +251,7 @@ async def test_the_split_branch_is_the_same_whichever_the_gate_writes_first(sess
     fix = intent("s1", "c1", "fp8 overflow", "clamp scales")
     await _measure(session, session.s1, "r3", fix, delta("--kv-cache-dtype fp8"))
     slower = judgement(-2.0, ("r3",), verdict=Verdict.REGRESSED, fixes_correctness=True)
-    await session.gate.write_judgement("r3", slower, Conclusion.SPLIT_COMMITTED, "c2")
+    await session.gate.write_judgement(JudgementWrite("r3", slower, Conclusion.SPLIT_COMMITTED, "c2"))
     split = LineageEvent(LineageKind.SPLIT, "s1-fix", commit_id="c2", from_commit="c1", from_branch="s1", reason="fix")
     await session.gate.record_lineage(split)
 
@@ -238,10 +279,10 @@ async def test_a_correctness_fix_that_costs_performance_splits_and_its_case_guar
     )
     await session.toolbox.write_request(repro)
     slower = judgement(-2.0, ("r3",), verdict=Verdict.REGRESSED, fixes_correctness=True, foundation_fix=True)
-    await session.gate.write_judgement("r3", slower, waiting)
+    await session.gate.write_judgement(JudgementWrite("r3", slower, waiting))
     split = LineageEvent(LineageKind.SPLIT, "s1-fix", commit_id="c2", from_commit="c1", from_branch="s1", reason="fix")
     await session.gate.record_lineage(split)
-    await session.gate.write_judgement("r3", slower, Conclusion.SPLIT_COMMITTED, "c2")
+    await session.gate.write_judgement(JudgementWrite("r3", slower, Conclusion.SPLIT_COMMITTED, "c2"))
     await session.gate.add_regression_case(RegressionCase("repro/fp8_overflow.py", "c2", "r4"))
 
     view = await session.scheduler.lineage()

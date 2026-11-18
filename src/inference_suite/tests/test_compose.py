@@ -11,7 +11,7 @@ from dataclasses import replace
 
 import pytest
 
-from inference_suite.compose import GPU_MASK_ENV, Refusal, RoundFacts, compose, runner_owned
+from inference_suite.compose import GPU_MASK_ENV, READY_TIMEOUT_SEC, Refusal, RoundFacts, compose, runner_owned
 from inference_suite.contracts import FailedStep, GoldenUse, LaunchDelta, RunnerLayer
 from inference_suite.contracts.launch import (
     LAUNCH_SCHEMA,
@@ -359,3 +359,72 @@ def test_a_launch_that_held_an_assumed_version_before_it_was_exempt_still_reads(
 def _assumed_config():
     server = _config().server
     return _config(server=replace(server, base=replace(server.base, digest=_ASSUMED_BASE.digest())))
+
+
+def test_the_guard_masks_the_servers_cards_for_rocr_and_numbers_them_from_zero_for_hip():
+    """ROCr opens every GPU it enumerates, whatever HIP's mask, and keeps memory on each: a server under a HIP mask
+    alone would hold every card of the machine, a parallel test's included. So the guard selects the cards for ROCr,
+    by their machine numbers, and HIP takes all of what ROCr then numbers from 0."""
+    launch = _launch(gpus=(4, 5, 6, 7))
+
+    assert launch.env["ROCR_VISIBLE_DEVICES"] == "4,5,6,7"
+    assert launch.env["HIP_VISIBLE_DEVICES"] == "0,1,2,3"
+    assert "CUDA_VISIBLE_DEVICES" not in launch.env
+    assert launch.env[GPU_MASK_ENV] == "4,5,6,7"
+    guard = {entry.name for entry in launch.env_sources if entry.source is LayerSource.GUARD}
+    assert {"ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"} <= guard
+
+
+@pytest.mark.parametrize("name", ["ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"])
+@pytest.mark.parametrize("layer", ["user", "candidate"])
+def test_no_layer_may_set_a_device_mask_beside_the_guards(name, layer):
+    refusal = _refusal(**{layer: LaunchDelta(env_set={name: "0"})})
+
+    assert (refusal.step, refusal.source) == (FailedStep.CONFIG_INVALID, LayerSource(layer))
+    assert name in refusal.detail
+    assert name in runner_owned(_base()).env
+
+
+_VLLM_BASE = _base(framework="vllm", entrypoint=("vllm", "serve"), args=("--tensor-parallel-size", "8"))
+
+
+@pytest.mark.parametrize(
+    "base, name",
+    [(_base(), "SGLANG_WARMUP_TIMEOUT"), (_VLLM_BASE, "VLLM_ENGINE_READY_TIMEOUT_S")],
+)
+def test_the_guard_holds_the_frameworks_own_ready_timeout_past_any_round(base, name):
+    """A framework that gives up on its own start after a timeout of its own (600 s unset) would exit before the round's
+    boot deadline, which leaves aiter builds out and names the step; the guard puts that timeout past any round."""
+    launch = _launch(base)
+
+    entry = {entry.name: entry for entry in launch.env_sources}[name]
+    assert (entry.value, entry.source) == (str(READY_TIMEOUT_SEC), LayerSource.GUARD)
+
+
+def test_a_base_that_raises_the_ready_timeout_is_kept_and_the_guard_replaces_its_value():
+    """Recipes raise it for a slow start (InferenceX's vLLM ones to 3600 s or 7200 s); a base frozen with it still
+    composes, so a session holding one resumes."""
+    base = replace(_VLLM_BASE, env={**_VLLM_BASE.env, "VLLM_ENGINE_READY_TIMEOUT_S": "7200"})
+    launch = _launch(base)
+
+    entry = {entry.name: entry for entry in launch.env_sources}["VLLM_ENGINE_READY_TIMEOUT_S"]
+    assert (entry.value, entry.source, entry.overrode) == (
+        str(READY_TIMEOUT_SEC),
+        LayerSource.GUARD,
+        (LayerSource.BASE,),
+    )
+
+
+@pytest.mark.parametrize("layer", ["user", "candidate"])
+def test_the_guard_replaces_a_ready_timeout_any_layer_sets(layer):
+    """A round's user layer re-states its base's environment, so a layer that sets the ready timeout is not refused:
+    the guard's value replaces it, and the launch records whose value it replaced."""
+    launch = _launch(_VLLM_BASE, **{layer: LaunchDelta(env_set={"VLLM_ENGINE_READY_TIMEOUT_S": "600"})})
+
+    entry = {entry.name: entry for entry in launch.env_sources}["VLLM_ENGINE_READY_TIMEOUT_S"]
+    assert (entry.value, entry.source, entry.overrode) == (
+        str(READY_TIMEOUT_SEC),
+        LayerSource.GUARD,
+        (LayerSource(layer),),
+    )
+    assert "VLLM_ENGINE_READY_TIMEOUT_S" not in runner_owned(_VLLM_BASE).env

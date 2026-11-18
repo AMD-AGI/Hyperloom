@@ -18,10 +18,23 @@ from hyperloom_common import proctree
 from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
 from hyperloom.sandbox.launcher import runs_launcher
 
-__all__ = ["Leftovers", "kill_launchers", "reap_sandbox_processes", "sweep_tagged", "tag_in_use", "wait_exited"]
+__all__ = [
+    "ONE_REAP_SEC",
+    "Leftovers",
+    "kill_launchers",
+    "reap_sandbox_processes",
+    "sweep_tagged",
+    "tag_in_use",
+    "wait_exited",
+]
 
 _WINDOW_SEC = 5.0
+_GRACE_SEC = 2.0
 _POLL_SEC = 0.05
+#: The longest one sandbox's reap takes (:func:`reap_sandbox_processes`) when one of its launchers outlives its wait: the
+#: SIGTERM grace, the SIGKILL passes with their one more window for processes not yet signalled, the launcher's wait, and
+#: the tag sweep with its own one more window. What closes sandboxes reaps them all at once and gives itself this long.
+ONE_REAP_SEC = _GRACE_SEC + 2 * _WINDOW_SEC + _WINDOW_SEC + 2 * _WINDOW_SEC
 #: How many processes a description of leftovers names.
 _NAMED = 5
 
@@ -142,7 +155,7 @@ def _drain(root_pids: list[int], sig: int, window_sec: float, held: Collection[i
     return _signal_until_gone(lambda: _live_descendants(root_pids, held), sig, window_sec)
 
 
-def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = 2.0) -> Leftovers:
+def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = _GRACE_SEC) -> Leftovers:
     """Reap everything that runs under the given launchers, then the launchers.
 
     Order: freeze the launchers, SIGTERM the descendants and give them ``grace_sec``, SIGKILL what is

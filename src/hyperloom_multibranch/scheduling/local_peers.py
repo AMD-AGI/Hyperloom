@@ -49,7 +49,12 @@ from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from inference_suite.contracts import AGENTX_DEFAULT_DURATION_SEC
-from hyperloom_common.llm.llm_config import preferred_agent_backend, provider_model_defaults, resolve_forge_llm_model
+from hyperloom_common.llm.llm_config import (
+    AGENT_BACKEND_CLAUDE,
+    preferred_agent_backend,
+    provider_model_defaults,
+    resolve_forge_llm_model,
+)
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
@@ -109,6 +114,8 @@ POINTS_DIR = "points"
 BENCHMARK_FILE = "benchmark.yaml"
 #: A claim's lease on the specialist tools: the runtime renews it every 10 minutes.
 CLAIM_TTL_SECONDS = 1800.0
+#: Where a machine's render nodes are, one ``renderD*`` for every card a process there can open.
+RENDER_NODE_DIR = "/dev/dri"
 #: The switch the main flow and the measurement renderer read an AgentX workload from
 #: (``hyperloom.common.perf_metric.agentx_enabled``).
 AGENTX_ENV = "HYPERLOOM_AGENTX"
@@ -195,9 +202,12 @@ class ToolboxBackend(Protocol):
 class LocalCards:
     """Tests run in local sandboxes on these cards of this machine, their sandboxes, archive and submit log under
     ``MB-toolbox``. The runners read the inference_suite staging from this host's runner cache, where it is published
-    before the toolbox is built; one already published is verified and kept."""
+    before the toolbox is built; one already published is verified and kept. ``tests_end_by`` is when every test must
+    have ended, Unix seconds, in a hosted run measured on these cards (the grant's
+    :attr:`~hyperloom_multibranch.scheduling.hosted_run.GrantEnd.tests_end_by`), ``None`` without a grant end."""
 
     cards: tuple[int, ...]
+    tests_end_by: float | None = None
     on_this_machine: ClassVar[bool] = True
 
     def toolbox(
@@ -220,7 +230,11 @@ class LocalCards:
         session = LocalSession(layout.toolbox, layout.session_id, self.cards, setup.workload.tp)
         # The tests read private copies of the tables of the aiter this machine's servers import (a vLLM image's
         # site-packages, not an SGLang image's workspace), or a keep that adds rows to a default table is refused.
-        options = LocalOptions(timeout_sec=attempt_timeout_sec(setup.workload), framework_configs=str(image_configs()))
+        options = LocalOptions(
+            timeout_sec=attempt_timeout_sec(setup.workload),
+            framework_configs=str(image_configs()),
+            tests_end_by=self.tests_end_by,
+        )
         return build_local_toolbox(session, blackboard, acceptance, spec, options=options)
 
 
@@ -338,7 +352,7 @@ def specialist_recall(reports: Path) -> LessonRecall:
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
     """The session's peers on this machine; exports the workload into this process (:func:`_export_workload`) and
     freezes the base launch every test runs on in ``MB-toolbox`` unless the session froze one
-    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`), which its Arbor agents are served
+    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`), which its component agents are served
     unless the operator gave them a launch file. Raises :class:`PeersUnavailable`
     when no base launch can be frozen or the session's canonical measurement cannot be taken.
 
@@ -504,9 +518,24 @@ def _lend_dev_sandboxes(
     return leases
 
 
+def render_nodes() -> int:
+    """How many render nodes, ``renderD*`` in :data:`RENDER_NODE_DIR`, this machine holds: one for every card a
+    process here can open, so a container a device plugin gave some of a node's cards holds theirs alone."""
+
+    from pathlib import Path
+
+    try:
+        return sum(1 for node in Path(RENDER_NODE_DIR).iterdir() if node.name.startswith("renderD"))
+    except OSError:
+        return 0
+
+
 def machine_cards() -> tuple[int, ...]:
     """The cards of this machine the session may use: the absolute ids the first visible-device mask set names, or,
-    when none is set, as many as ``rocm-smi`` shows from card 0; none when neither shows any.
+    when none is set, as many as ``rocm-smi`` shows from card 0; none when neither shows any. Raises
+    :class:`PeersUnavailable` when ``rocm-smi`` shows more cards than this machine holds render nodes
+    (:func:`render_nodes`): in a container given some of a node's cards it shows them all, and a test leased one it
+    was not given could not open it.
 
     The ids are absolute because every sandbox's ``ROCR_VISIBLE_DEVICES`` is set to its leased cards in place of the
     mask this process runs under; a mask of device UUIDs names no id, so it leaves no card. The main flow resolves its
@@ -519,7 +548,13 @@ def machine_cards() -> tuple[int, ...]:
         mask = os.environ.get(name)
         if mask is not None:
             return tuple(parse_device_list(mask))
-    return tuple(range(detect_gpu_count()))
+    shown, nodes = detect_gpu_count(), render_nodes()
+    if shown > nodes:
+        raise PeersUnavailable(
+            f"rocm-smi shows {shown} cards, more than the {nodes} this machine can open (its render nodes,"
+            f" {RENDER_NODE_DIR}/renderD*): name the cards it was given in ROCR_VISIBLE_DEVICES"
+        )
+    return tuple(range(shown))
 
 
 def measurement_host(env: Mapping[str, str], backend: ToolboxBackend) -> MeasurementHost:
@@ -554,11 +589,15 @@ def staged_client() -> InferenceXCheckout:
 
 def machine_parallel_tests(tp: int) -> int:
     """How many tests of ``tp`` cards the local toolbox runs at once on this machine's cards; raises ``ValueError``
-    when a test of ``tp`` cards does not fit on them."""
+    when a test of ``tp`` cards does not fit on them, or its cards cannot be told (:func:`machine_cards`)."""
 
     from hyperloom_multibranch.toolbox.local_hosted import max_parallel_tests
 
-    return max_parallel_tests(len(machine_cards()), tp)
+    try:
+        cards = machine_cards()
+    except PeersUnavailable as exc:
+        raise ValueError(str(exc)) from exc
+    return max_parallel_tests(len(cards), tp)
 
 
 def specialist_model(env: Mapping[str, str]) -> str:
@@ -568,18 +607,37 @@ def specialist_model(env: Mapping[str, str]) -> str:
     return resolve_forge_llm_model(preferred_agent_backend(env), env={**env, **provider_model_defaults(env)})
 
 
+#: Where install.sh installs the Claude CLI, below the home (``ensure_claude_cli``). Only a shell that sourced the
+#: kernel-agent env file has it on ``PATH``; a command line started from any other shell does not.
+INSTALLED_CLI_DIR = os.path.join(".local", "bin")
+
+
+def _installed_cli_dir(backend: str, env: Mapping[str, str]) -> str | None:
+    """The directory install.sh installs ``backend``'s CLI in under ``env``'s home (:data:`INSTALLED_CLI_DIR`); ``None``
+    for a backend it does not install there, or without an absolute ``HOME``."""
+
+    home = env.get("HOME", "")
+    if backend != AGENT_BACKEND_CLAUDE or not os.path.isabs(home):
+        return None
+    return os.path.join(home, INSTALLED_CLI_DIR)
+
+
 def specialist_command(env: Mapping[str, str]) -> AgentCommand:
     """The agent CLI every specialist of a session runs: the backend ``env`` is credentialed for, found on its
-    ``PATH``, on :func:`specialist_model`; raises :class:`PeersUnavailable` when that CLI is not installed. A model the
-    price sheet does not list records its tokens only, which the command line accepts only without a dollar cap, and
-    says so here."""
+    ``PATH``, else where install.sh installs it (:func:`_installed_cli_dir`), on :func:`specialist_model`; raises
+    :class:`PeersUnavailable` when that CLI is not installed. A model the price sheet does not list records its tokens
+    only, which the command line accepts only without a dollar cap, and says so here."""
 
     from hyperloom_multibranch.specialist.agent_session import AgentCommand
 
     backend = preferred_agent_backend(env)
+    installed = _installed_cli_dir(backend, env)
     executable = shutil.which(backend, path=env.get("PATH"))
+    if executable is None and installed is not None:
+        executable = shutil.which(backend, path=installed)
     if executable is None:
-        raise PeersUnavailable(f"the {backend} CLI the specialists run is not on PATH")
+        where = f" nor in {installed}" if installed else ""
+        raise PeersUnavailable(f"the {backend} CLI the specialists run is not on PATH{where}")
     model = specialist_model(env)
     if price_of(model) is None:
         logger.warning("the specialists run on %s, which the price sheet does not list: they record tokens only", model)
@@ -620,19 +678,40 @@ def _specialist_role(workload: Workload) -> str:
 AITER = "aiter"
 
 
+#: The variables that set a Claude CLI's prompt-cache TTL: its own, and its subagents'.
+PROMPT_CACHE_TTL_ENV = ("CLAUDE_CODE_PROMPT_CACHE_TTL", "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL")
+#: The TTL a specialist caches its prompt at on an InferenceX workload, where it waits for a test in the same
+#: conversation past the CLI's default of 5 minutes and would write the whole conversation to the cache again.
+INFERENCEX_PROMPT_CACHE_TTL = "1h"
+
+
+def specialist_env(workload: Workload) -> dict[str, str]:
+    """The environment a branch's specialist runs with: the main flow's allowlisted one, which carries the prompt-cache
+    TTL an operator sets, with :data:`INFERENCEX_PROMPT_CACHE_TTL` for each TTL it lacks on an InferenceX workload; on
+    an AgentX one, whose test outlasts even an hour's cache, the CLI keeps its own default."""
+
+    from hyperloom.orchestrator.specialists.agent_runner import build_specialist_env
+
+    env = dict(build_specialist_env())
+    if workload.inferencex is not None:
+        for name in PROMPT_CACHE_TTL_ENV:
+            env.setdefault(name, INFERENCEX_PROMPT_CACHE_TTL)
+    return env
+
+
 def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
     """Sessions that run ``command`` for every branch's specialist, in a worktree of the workload's framework, and
     each branch's third-party agent in a sandbox leased from the session's toolbox (``wiring.agent_sandboxes``), given
     the gate's benchmark client of the session's canonical configuration; a session that runs no agent reads no
     canonical.
 
-    The CLI runs on the main flow's allowlisted specialist environment, through a local AI work socket whose resource
-    log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
+    The CLI runs on :func:`specialist_env`, the main flow's allowlisted specialist environment with an InferenceX
+    workload's prompt-cache TTL, through a local AI work socket whose resource log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
     branch's brief at the head it starts from.
     """
 
     def build(wiring: SessionWiring) -> ModelSessions:
-        from hyperloom.orchestrator.specialists.agent_runner import Liveness, LocalAgentRunner, build_specialist_env
+        from hyperloom.orchestrator.specialists.agent_runner import Liveness, LocalAgentRunner
         from hyperloom_multibranch.specialist.agent_session import SPECIALIST_LOST_AFTER_S, AgentSetup
         from hyperloom_multibranch.specialist.agent_sessions import AgentSessions, with_agents
         from hyperloom_multibranch.specialist.model_sessions import model_sessions
@@ -651,7 +730,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
                 dev_leases=wiring.dev_leases.limits.cap if wiring.dev_leases else 0,
                 native=wiring.native,
             ),
-            env=build_specialist_env(),
+            env=specialist_env(workload),
             runner=LocalAgentRunner(
                 session_dir=layout.logs, liveness=Liveness(lost_after_seconds=SPECIALIST_LOST_AFTER_S)
             ),
@@ -660,6 +739,8 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             repo=wiring.repo,
             briefs=wiring.briefs.text,
             dev_leases=wiring.dev_leases,
+            readable=specialist_readable(wiring.setup.references, workload),
+            lease_area=_lease_area(wiring),
         )
         open_sessions = partial(
             model_sessions,
@@ -701,6 +782,35 @@ def _gate_client(wiring: SessionWiring) -> GateClient:
         )
     except SuiteRoundRefused as exc:
         raise PeersUnavailable(f"the gate's client cannot be given to the session's agents: {exc}") from exc
+
+
+def specialist_readable(references: Mapping[str, Path], workload: Workload) -> tuple[Path, ...]:
+    """What every specialist of a session reads besides its own trees: the reference directories the session copied
+    in, and the directory its workload's model is served from when that is one here."""
+
+    from pathlib import Path
+
+    model = resolve_serving_model_path(workload.model)
+    served = (Path(os.path.abspath(model)),) if model and os.path.isdir(model) else ()
+    return (*references.values(), *served)
+
+
+def _lease_area(wiring: SessionWiring) -> Callable[[str], Path] | None:
+    """Where the roots of a branch's dev leases are made, for its specialist to read: its holder's area of this
+    machine's leases, or its directory's ``dev`` on the shared storage a hosted lease's sandbox roots in; ``None``
+    when the session lends none."""
+
+    from hyperloom_common.shared_storage import make_shared_dirs
+    from hyperloom_multibranch.specialist.dev_sandbox import DEV_DIR
+    from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
+
+    if wiring.dev_leases is None:
+        return None
+    toolbox = wiring.toolbox
+    if isinstance(toolbox, LocalHostedToolbox):
+        return toolbox.leases.holder_area
+    branch_dir = wiring.setup.layout.branch_dir
+    return lambda branch: make_shared_dirs(branch_dir(branch) / DEV_DIR)
 
 
 def _sessions_over_source(
@@ -761,10 +871,10 @@ def native_trees(environ: Mapping[str, str]) -> dict[str, NativeTree]:
 def _agent_spec(
     workload: Workload, pack: str = "", launch: str = "", port: int = AGENT_PORT, review: str = ""
 ) -> AgentSpec:
-    """What every agent of a session of ``workload`` is asked to optimize, an Arbor on ``pack`` when one is named,
-    served the launch in the file ``launch`` with the root's added when one is given, its own review gate handed over
-    as ``review`` says; the root's launch, the workspace, the cards and a port block from ``port`` on are each
-    branch's own."""
+    """What every agent of a session of ``workload`` is asked to optimize, a component agent on ``pack`` when one is
+    named, served the launch in the file ``launch`` with the root's added when one is given, its own review gate
+    handed over as ``review`` says; the root's launch, the workspace, the cards and a port block from ``port`` on are
+    each branch's own."""
 
     from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec
 
@@ -793,15 +903,15 @@ def _agent_spec(
     )
 
 
-def load_peers(workload: Workload) -> PeerFactory:
-    """The factory of the real peers of a session of ``workload`` whose tests run on this machine's cards; raises
-    :class:`PeersUnavailable` when this machine cannot run them.
+def load_peers(workload: Workload, *, tests_end_by: float | None = None) -> PeerFactory:
+    """The factory of the real peers of a session of ``workload`` whose tests run on this machine's cards, ending by
+    ``tests_end_by`` (:class:`LocalCards`); raises :class:`PeersUnavailable` when this machine cannot run them.
 
     It creates nothing, so the command line calls it before the session directory exists.
     """
 
     require_local_model(workload)
-    return peers_on(measurement_host(os.environ, LocalCards(machine_cards())), workload)
+    return peers_on(measurement_host(os.environ, LocalCards(machine_cards(), tests_end_by)), workload)
 
 
 def require_local_model(workload: Workload) -> None:
@@ -834,9 +944,12 @@ __all__ = [
     "AGENTX_ENV",
     "CLAIM_TTL_SECONDS",
     "GATE_WRITER",
+    "INFERENCEX_PROMPT_CACHE_TTL",
     "InferenceXCheckout",
     "LocalCards",
     "MeasurementHost",
+    "PROMPT_CACHE_TTL_ENV",
+    "RENDER_NODE_DIR",
     "SessionWiring",
     "SpecialistSessions",
     "ToolboxBackend",
@@ -848,8 +961,10 @@ __all__ = [
     "measurement_host",
     "model_backed_sessions",
     "peers_on",
+    "render_nodes",
     "require_framework_package",
     "specialist_command",
+    "specialist_env",
     "specialist_model",
     "specialist_recall",
     "workload_environment",

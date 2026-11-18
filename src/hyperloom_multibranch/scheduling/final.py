@@ -17,10 +17,10 @@ sweep over the concs its request names and the primary one alone when it names n
 The session's root, the integration head of a session that merged nothing, is the reference every recorded value was
 measured against, so a cold start of it is not held to the tolerance or the rule's speed gates: one that measures
 slower than its baseline is noise in the reference, not a defect of the commit. Every other refusal still holds it
-back, as dropped or failed requests do. Every check records what its reproduction measured against the commit's
-record, what refused it and, for the root, the speed refusals it was not held to; a FINAL that chooses nothing names
-each candidate's reason. FINAL waits for every validation test it started, past its reserve and the
-session's deadline if need be.
+back, as dropped or failed requests do. Every check records its reproduction's gain over the root's PRELUDE baseline,
+what that reproduction measured against the commit's record, what refused it and, for the root, the speed refusals it
+was not held to; a FINAL that chooses nothing names each candidate's reason. FINAL waits for every validation test it
+started, past its reserve and the session's deadline if need be.
 The primary operating point (the workload's conc) decides; a candidate
 whose other sweep points fall more than :data:`MB_SWEEP_DEGRADATION_PCT` below the other candidate's at the same conc
 is passed over while the other one does not degrade in turn. An AgentX workload defines no other operating point, so
@@ -36,13 +36,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 
+from hyperloom.common.gain_math import gain_pct
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
 from hyperloom_multibranch.contracts.gate import NotMeasured
-from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.blackboard.records import BranchProgress
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Blackboard
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, BranchProgress
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, TestWithdrawn
 from hyperloom_multibranch.blackboard.changes import same_recipe
+from hyperloom_multibranch.scheduling.budget import FinalWork
+from hyperloom_multibranch.scheduling.explore import integration_row
 from hyperloom_multibranch.scheduling.integrator import defects_beyond_gain
 from hyperloom_multibranch.scheduling.requests import SessionChecks, integration_test_request, together
 from hyperloom_multibranch.scheduling.settings import Workload
@@ -94,8 +97,12 @@ class FinalCandidate:
 
 @dataclass(frozen=True)
 class FinalCandidates:
+    """The candidates and ``baseline_value``, the root's PRELUDE baseline of the primary metric, which each gain is
+    over."""
+
     integration: FinalCandidate
     best_branch: FinalCandidate | None
+    baseline_value: float
 
     @property
     def each(self) -> tuple[FinalCandidate, ...]:
@@ -112,10 +119,15 @@ def _branch_candidate(row: BranchProgress, integration_head: str, metric: str) -
 
 
 async def choose_candidates(
-    progress: Sequence[BranchProgress], integration: BranchProgress, metric: str, repo: ExperimentRepo, root: str
+    progress: Sequence[BranchProgress],
+    integration: BranchProgress,
+    metric: str,
+    repo: ExperimentRepo,
+    baseline: BaselineRecord,
 ) -> FinalCandidates:
     """The head of ``integration`` and the specialist head with the highest recorded ``metric`` over every branch the
-    blackboard knows; ``root`` is the session's root commit, which the integration head still is when nothing merged.
+    blackboard knows, against the session's PRELUDE ``baseline``; its root commit is the integration head still when
+    nothing merged.
 
     A branch with no commit offers no single-branch candidate, and neither does one whose head carries the recipe the
     integration head already carries: a merge writes the branch's work as a new commit, so the two differ by commit
@@ -123,13 +135,24 @@ async def choose_candidates(
     single-branch work instead.
     """
 
-    head = integration.head_commit
+    head, root = integration.head_commit, baseline.root_commit
     offered = [_branch_candidate(row, head, metric) for row in progress]
     ranked = sorted((row for row in offered if row is not None), key=lambda candidate: -candidate.recorded_value)
     candidate = FinalCandidate(
         INTEGRATION_LABEL, INTEGRATION_BRANCH, head, integration.head_value.get(metric), head == root
     )
-    return FinalCandidates(candidate, await _best_of_its_own(ranked, head, repo))
+    best = await _best_of_its_own(ranked, head, repo)
+    return FinalCandidates(candidate, best, baseline.values[metric])
+
+
+async def session_candidates(blackboard: Blackboard, repo: ExperimentRepo, metric: str) -> FinalCandidates:
+    """:func:`choose_candidates` over every branch ``blackboard`` holds progress of, against the session's root."""
+
+    progress = await blackboard.progress()
+    integration = integration_row(progress)
+    if integration is None:
+        raise RuntimeError("the blackboard has no integration branch after PRELUDE recorded its root")
+    return await choose_candidates(progress, integration, metric, repo, await blackboard.baseline())
 
 
 async def _best_of_its_own(
@@ -155,9 +178,9 @@ class CandidateCheck:
     on the commit, none when the session registered none, and ``carried`` names those that reproduced on it and on the
     root alike, the root's defects it still carries. ``note`` says what the choice's reason should carry
     about how this candidate was measured, for a candidate that was still ranked on something short of a whole sweep.
-    ``gain_pct`` is how far its reproduction measured from the commit's record, ``None`` when none was judged,
-    ``refused_by`` what kept the reproduction from holding, and ``waived`` the speed refusals a root's reproduction
-    was not held to.
+    ``gain_pct`` is its reproduction's gain over the root's PRELUDE baseline and ``reproduction_pct`` how far that
+    reproduction measured from the commit's record, each ``None`` when none was judged; ``refused_by`` is what kept the
+    reproduction from holding, and ``waived`` the speed refusals a root's reproduction was not held to.
     """
 
     candidate: FinalCandidate
@@ -171,6 +194,7 @@ class CandidateCheck:
     error: str = ""
     note: str = ""
     gain_pct: float | None = None
+    reproduction_pct: float | None = None
     refused_by: tuple[str, ...] = ()
     waived: tuple[str, ...] = ()
 
@@ -187,7 +211,7 @@ class CandidateCheck:
             return self.error
         reasons = []
         if not self.reproduced:
-            gain = "not judged" if self.gain_pct is None else f"{self.gain_pct:.1f}% against its record"
+            gain = "not judged" if self.reproduction_pct is None else f"{self.reproduction_pct:.1f}% against its record"
             refused = f", refused by {', '.join(self.refused_by)}" if self.refused_by else ""
             reasons.append(f"not reproduced ({gain}{refused})")
         if not self.accuracy_passed:
@@ -283,7 +307,7 @@ class _Reproduction:
     commit's own recorded value and nothing but the missing gain refused it (not dropped requests, a broken guard, a
     pair that did not measure the same work), and ``accuracy_passed`` when it clears the accuracy gate. The root's
     reproduction is not held to the tolerance or the rule's speed gates; ``waived`` names those that refused it.
-    ``refused_by`` is what kept it from holding and ``gain_pct`` how far it measured from the record.
+    ``refused_by`` is what kept it from holding and ``reproduction_pct`` how far it measured from the record.
 
     ``value`` is what it measured of the primary metric at the operating point that decides, which is the sweep's
     primary point: the candidate is ranked on it when the sweep gave nothing there.
@@ -292,34 +316,50 @@ class _Reproduction:
     reproduced: bool
     accuracy_passed: bool
     value: float | None
-    gain_pct: float
+    reproduction_pct: float
     refused_by: tuple[str, ...]
     waived: tuple[str, ...]
 
 
 class FinalSelector:
-    """Validates the candidates through the toolbox, the rule gate and the regression set."""
+    """Validates the candidates through the toolbox, the rule gate and the regression set, ``parallel`` tests at
+    once."""
 
-    def __init__(self, checks: SessionChecks, workload: Workload) -> None:
+    def __init__(self, checks: SessionChecks, workload: Workload, parallel: int) -> None:
         self._tests = checks.tests
         self._gate = checks.gate
         self._regression = checks.regression
         self._workload = workload
         self._metric = workload.metric
+        self._parallel = parallel
 
     async def select(self, candidates: FinalCandidates) -> FinalChoice:
         """Validate every candidate concurrently and pick one, however long the validation runs: no clock bounds it,
         the toolbox's per-test timeout bounds a test that hangs, and only a cancel cuts it short."""
 
-        checks = await asyncio.gather(*(self._validated(candidate) for candidate in candidates.each))
+        baseline = candidates.baseline_value
+        checks = await asyncio.gather(*(self._validated(candidate, baseline) for candidate in candidates.each))
         choice = pick_final(tuple(checks), self._metric, self._workload.conc)
         if self._workload.final_concs == (self._workload.conc,):
             return replace(choice, reason=f"{choice.reason}; {PRIMARY_POINT_ONLY}")
         return choice
 
-    async def _validated(self, candidate: FinalCandidate) -> CandidateCheck:
+    async def planned_work(self, candidates: FinalCandidates, test_seconds: float) -> FinalWork:
+        """What :meth:`select` would run to validate ``candidates``, ``parallel`` tests at once, one attempt of
+        each, given ``test_seconds``, one test at the primary conc: for each candidate its sweep, a test per conc of
+        :attr:`~hyperloom_multibranch.scheduling.settings.Workload.final_concs`, and its reproduction, and the
+        regression runs still to make (:meth:`~hyperloom_multibranch.contracts.gate.RegressionCheck.final_case_seconds`),
+        a run of another session's case as long as one test."""
+
+        sweep = len(self._workload.final_concs) * test_seconds
+        tests = [sweep, test_seconds] * len(candidates.each)
+        commits = tuple(each.commit for each in candidates.each)
+        tests.extend(await self._regression.final_case_seconds(commits, test_seconds))
+        return FinalWork(sum(tests), max(tests), test_seconds, self._parallel)
+
+    async def _validated(self, candidate: FinalCandidate, baseline: float) -> CandidateCheck:
         try:
-            return await self._check(candidate)
+            return await self._check(candidate, baseline)
         except TestWithdrawn as exc:
             return CandidateCheck(candidate, error=f"a validation test was withdrawn: {exc}")
         except RequestRejected as exc:
@@ -327,7 +367,7 @@ class FinalSelector:
         except NotMeasured as exc:
             return CandidateCheck(candidate, error=f"the gate had nothing to judge: {exc}")
 
-    async def _check(self, candidate: FinalCandidate) -> CandidateCheck:
+    async def _check(self, candidate: FinalCandidate, baseline: float) -> CandidateCheck:
         sweep = asyncio.ensure_future(self._sweep(candidate.commit))
         repro = asyncio.ensure_future(self._reproduction(candidate))
         regression = asyncio.ensure_future(self._regression.check_every_case(candidate.commit))
@@ -341,7 +381,8 @@ class FinalSelector:
             regressed.passed,
             regression_cases=regressed.cases,
             carried=regressed.carried,
-            gain_pct=reproduction.gain_pct,
+            gain_pct=gain_pct(reproduction.value, baseline),
+            reproduction_pct=reproduction.reproduction_pct,
             refused_by=reproduction.refused_by,
             waived=reproduction.waived,
         )
@@ -401,5 +442,6 @@ __all__ = [
     "FinalSelector",
     "choose_candidates",
     "pick_final",
+    "session_candidates",
     "sweep_curve",
 ]

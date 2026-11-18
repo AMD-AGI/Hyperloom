@@ -70,7 +70,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | touches persisted or shared state: `SCHEMA_VERSION`, `from_dict`, `CREATE TABLE`, a `record_*`/`read_*`/`seal_*` pair, `.save()`, a spec, manifest or recipe, a context manager, recovery or resume | X6 R4 P4 P5 |
 | touches a prompt, `SKILL.md`, `docs/**`, `*.md` or `*.rst` | X3 X5 |
 | adds error handling or a default: `except`, `contextlib.suppress`, `ignore_errors=True`, `.get(k, 0)`, `or {}`, an early `isinstance` guard, a noop or degraded implementation | S1 S2 S3 S4 S5 S7 S8 |
-| touches tests, or adds a large `src/` module with no matching test file | T1 T2 T3 |
+| touches tests, or adds a large `src/` module with no matching test file | T1 T2 T3 T6 |
 | touches async code, a lock, a subprocess, a poll or retry loop, a per-candidate step, a timeout or a budget | P1 P2 P3 P6 |
 | touches a metric, score, speedup or gain denominator, or a threshold compared against a number this repo did not produce | M1 M2 M3 |
 | matches or selects by name: substring, `startswith`, `fnmatch`, a first-wins loop, a dedup/grouping/sort key, or an LLM backend, model or credential choice | D5 D6 D7 |
@@ -477,6 +477,34 @@ order itself or merely replays it; `$WORK/base.txt` for the run that must fail.
 **Report as:** `T5 <file>:<line> -- the ordering fix is covered by a test that calls <a> and
 <b> in its own order; it passes on <base sha> with the defect live`
 
+### T6 -- A test must fail when the behaviour it names breaks, not when its source text changes
+
+**Severity:** blocking (`AGENTS.md` *Test the contract, not the plumbing*: "tests that assert the
+current implementation and break on the next refactor").
+**Fires when:** an added or changed test reads source, prompt or doc text (`inspect.getsource`,
+`read_text` on a `.py` or `.md`, a regex over code) and asserts on its wording; or its only
+assertions are `isinstance`, `is not None`, `hasattr`, a constant the test set itself, or that
+nothing raised.
+**The rule:** such a test passes while the behaviour breaks and fails on an edit that preserves
+it. Drive the entry point and assert the observable result; for a decision, assert the outcome on
+inputs that take each branch.
+**Seen in:** PR #2072 -- at the reviewed commit `f0e98df6`,
+`src/kernelforge/tests/gemm_tune/test_tier3_runner.py:323-341` asserted that
+`inspect.getsource(cli._route)` held `demand_json` within 90 characters of `has_shapes_json=`.
+Three regressions injected into `cli.py` there -- the serving log parsed but its demand
+discarded, `has_untuned_csv` hard-coded `False`, the request's bench settings replaced by
+constants in `tune_context` -- left the gemm_tune suite exactly as green as the base.
+**Not a finding when:** the property cannot be observed at runtime and the test's docstring says
+it is a source-level rule -- T5's AST ordering check, an import boundary import-linter cannot
+express, a repo-wide banned shape such as
+`src/hyperloom/orchestrator/rehearsal/tests/test_no_falsy_budget_tests.py`; or the text is itself
+the contract: documented CLI output, a persisted field, a prompt key a parser reads.
+**Evidence:** over the changed tests at the head, then break the behaviour a hit names locally and
+confirm the test still passes:
+`H=$(sed -n 's/^head: //p' "$WORK/meta.txt"); git fetch -q origin "$H" && git grep -nE 'getsource|__doc__|__file__|\.(py|md)\b.*read_text' "$H" -- $(cat "$WORK/testfiles.txt")`
+**Report as:** `T6 <file>:<line> -- <test> asserts on <source text | isinstance>; breaking
+<behaviour> leaves it green`
+
 ---
 
 ## R -- Resource safety and destructive operations
@@ -536,7 +564,7 @@ order itself or merely replays it; `$WORK/base.txt` for the run that must fail.
 **Severity:** blocking only in the shape *The rule* keeps, by owner decision 2026-11-11; every other security shape is never a finding.
 **Fires when:** a security finding is drafted against a diff that shares storage, sets modes or a umask, follows or copies links, or lets git read files in a directory the group writes.
 **The rule:** security on this repository means what X9 and the static gates (gitleaks, bandit, CodeQL) cover -- no credential, sensitive term or internal host, path or reference in what the repository ships or prints -- and what a correct, non-malicious run hits in its ordinary course, e.g. a race between two honest legs or a write an honest second leg is refused. Nothing else is a security finding. A trigger that needs someone to act against the run is the environment's, not the diff's: an account of the run's group or an agent it launched planting a link, forging or rewriting a record or git file, racing a write or renaming a file the run trusts; an account outside the group; hostile outside input. So is a window reached only when the run is killed between two adjacent steps. File modes cannot stop an account that may write, and hardening against it does not converge.
-**Seen in:** PR #2604 -- four rounds, the last with three findings that each needed a group member to act: plant a link in the dossier the Arbor copy followed, forge the linked-paths record or `alternates` a bubblewrap launch reads, or race or rename the source base's git `config`. PR #2598 at fc8eeede4 -- a `commondir` another account of the group wrote in the repository top redirected the app's git to its own clone.
+**Seen in:** PR #2604 -- four rounds, the last with three findings that each needed a group member to act: plant a link in the dossier a copy followed, forge the linked-paths record or `alternates` a bubblewrap launch reads, or race or rename the source base's git `config`. PR #2598 at fc8eeede4 -- a `commondir` another account of the group wrote in the repository top redirected the app's git to its own clone.
 **Not a finding when:** the reproduction needs any actor other than the run itself, or a kill between two adjacent steps.
 **Evidence:** the finding's reproduction -- which actor acted, and whether a correct run performs that act.
 **Report as:** `R6 <file>:<line> -- <correct-run sequence> reaches <effect>`

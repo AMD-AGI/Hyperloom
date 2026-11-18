@@ -499,15 +499,25 @@ class SandboxPool:
             log.exception("sandbox %s could not be closed", sandbox_id)
 
     def close(self) -> None:
-        """Close every ``measurement`` sandbox still running and refuse new tests."""
+        """Close every ``measurement`` sandbox still running, all at once, and refuse new tests."""
         with self._cond:
             self._closed = True
             parked, self._parked = self._parked, None
             self._cond.notify_all()
         if parked is not None and parked.timer is not None:
             parked.timer.cancel()
-        for info in self._provider.find(self._scope(), role=MEASUREMENT_ROLE):
-            self.discard(info.sandbox_id)
+        # All at once: a local sandbox's reap can take tens of seconds, so one after another the close would take that
+        # many times over.
+        closes = [
+            threading.Thread(
+                target=self.discard, args=(info.sandbox_id,), name=f"hl-close-{info.sandbox_id}", daemon=True
+            )
+            for info in self._provider.find(self._scope(), role=MEASUREMENT_ROLE)
+        ]
+        for close in closes:
+            close.start()
+        for close in closes:
+            close.join()
         with self._cond:
             self._held.clear()
             self._claims = 0
@@ -550,7 +560,9 @@ class SandboxPool:
         about a node and is no failure of the test: the sandbox kept for the next test, if any, is closed (the service
         charges a sandbox the pool cannot count, so the grant can be full beside it), then the create waits for a sandbox
         to end and is repeated, until ``wait`` runs out (:class:`AcquireTimedOut`). The create's own wait for the sandbox to run is the lesser of the pool's
-        ``request_timeout_sec`` and what is left of ``wait``.
+        ``request_timeout_sec`` and what is left of ``wait``. A sandbox the service deleted at its pending limit is asked
+        for again by the provider itself, under ``<key>:p1``, ``<key>:p2`` and so on within that wait; the sandbox
+        carries this run's and this request's metadata whatever its key, which is how a sweep or a restart finds it.
         """
         base = metadata[IDEMPOTENCY_KEY]
         spent = 0

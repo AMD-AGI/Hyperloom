@@ -4,10 +4,14 @@
 """The ``roofline`` tool (the kernel roofline of the trace a profile test left) and the ``tracelens`` tool (analysis of a
 given trace).
 
-Both read a trace that already exists and need no card: ``roofline`` runs the orchestrator's ``non-llm`` analysis, which reads
-the trace in memory and writes ``kernel_roofline.json`` (every hot kernel with its category, share of the GPU time and bound),
-with no model session; ``tracelens`` runs TraceLens' report. The roofline of the orchestrator's own flow profiles first, on a
-card, in the process that runs it; a toolbox does not offer that.
+Both read a trace that already exists: ``roofline`` runs the orchestrator's ``non-llm`` analysis, which reads the trace in
+memory and writes ``kernel_roofline.json`` (every hot kernel with its category, share of the GPU time and bound), with no
+model session; ``tracelens`` runs TraceLens' report. The roofline of the orchestrator's own flow profiles first, on a card,
+in the process that runs it; a toolbox does not offer that.
+
+The analysis itself needs no card. Its roofline needs the board's achievable peaks, though, and when TraceLens has no arch
+spec for the board it measures them with a microbenchmark on a GPU. That card is leased from the pool the measurement tests
+run on (:class:`_ArchCard`), so no test is placed on it while the microbenchmark runs.
 """
 
 from __future__ import annotations
@@ -15,16 +19,24 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.framework_registry import is_scriptable
-from hyperloom.orchestrator.actions.executors.trace_analyze import trace_analyze_handler
+from hyperloom.orchestrator.actions.executors.trace_analyze import ARCH_GPUS_PARAM, trace_analyze_handler
 from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
 from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import (
+    INTERNAL_ROOT_ENV,
     build_hyperloom_arch_spec,
+    internal_extension_root,
+    measures_arch_spec,
     resolve_arch_json_path,
 )
+from hyperloom.sandbox.socket import SandboxUnavailable
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
+from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, RequestRejected
+from hyperloom_multibranch.toolbox.branch_leases import BranchLeases
 from hyperloom_multibranch.toolbox.tools.base import ToolOutput, ToolRequest
 from hyperloom_multibranch.toolbox.tools.executor_tool import ScratchHandlerTool
 from hyperloom_multibranch.toolbox.tools.op_shares import with_op_shares
@@ -46,6 +58,9 @@ HOT_KERNELS_KEY = "hot_kernels"
 FAILED = "failed"
 #: The error class of a roofline asked for a GPU neither TraceLens nor Hyperloom has peaks for.
 UNKNOWN_GPU_ARCH = "unknown_gpu_arch"
+#: The holder prefix of a tool job's lease, as ``kernel_tune``'s.
+_HOLDER_PREFIX = "tool:"
+_ARCH_CARDS = 1
 
 
 class _SharesOps:
@@ -55,8 +70,67 @@ class _SharesOps:
         return with_op_shares(super().output(result, request), request)  # type: ignore[misc]
 
 
-class _TracelensTool(_SharesOps, ScratchHandlerTool):
-    pass
+class _ArchCard:
+    """Mixin: an analysis that would measure the board's arch spec does so on one card leased for it, and on no other.
+
+    The card is leased from ``leases``, the pool the measurement tests run on, held by ``tool:<job id>`` and charged to the
+    requesting branch, and released once the analysis returns. The lease is pausing (``lease_pausing``): it waits for a
+    card however long the running tests take, and when the tests need every card no new test starts until it is
+    released. The analysis is
+    told the card in ``arch_gpus``, which the caller cannot set. With no pool (a toolbox whose cards it does not own), or
+    a lease refused as the toolbox closes, it is given none, and its roofline reads vendor peaks. An analysis that will
+    not measure (:func:`measures_arch_spec`: the internal extension is set, or TraceLens has a spec for the board), or a
+    route that never measures, takes no card.
+    """
+
+    name: str
+    _leases: BranchLeases | None
+
+    def _measures(self, params: Mapping[str, Any]) -> bool:
+        internal_root = internal_extension_root(os.environ.get(INTERNAL_ROOT_ENV, ""))
+        return measures_arch_spec(_platform(params), internal_root)
+
+    async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
+        params = {key: value for key, value in request.params.items() if key != ARCH_GPUS_PARAM}
+        if not self._measures(params):
+            return await super().run(replace(request, params=params), workdir)  # type: ignore[misc]
+        lease = await self._arch_lease(request.branch, workdir)
+        try:
+            params[ARCH_GPUS_PARAM] = list(lease.gpu_ids) if lease is not None else []
+            return await super().run(replace(request, params=params), workdir)  # type: ignore[misc]
+        finally:
+            if lease is not None and self._leases is not None:
+                self._leases.release(lease.lease_id)
+
+    async def _arch_lease(self, branch: str, workdir: Path) -> BranchLease | None:
+        if self._leases is None:
+            return None
+        charge = LeaseCharge(LeaseKind.TOOL_JOB, branch, self.name)
+        try:
+            return await self._leases.lease_pausing(
+                f"{_HOLDER_PREFIX}{workdir.name}", _ARCH_CARDS, workdir, charge=charge
+            )
+        except (RequestRejected, SandboxUnavailable):
+            return None
+
+
+class _RooflineTool(_ArchCard, ScratchHandlerTool):
+    def __init__(self, leases: BranchLeases | None, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._leases = leases
+
+
+class _TracelensTool(_ArchCard, _SharesOps, ScratchHandlerTool):
+    def __init__(self, leases: BranchLeases | None, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._leases = leases
+
+    def _measures(self, params: Mapping[str, Any]) -> bool:
+        return _tracelens_route(params).lower() != REPORT_ROUTE and super()._measures(params)
+
+
+def _platform(params: Mapping[str, Any]) -> str:
+    return str(params.get("target_platform") or "").strip() or DEFAULT_PLATFORM
 
 
 async def roofline_handler(payload: dict, *, session_dir: Path) -> dict:
@@ -75,7 +149,7 @@ async def roofline_handler(payload: dict, *, session_dir: Path) -> dict:
     unusable = await asyncio.to_thread(unusable_trace, str(payload["trace_input"]))
     if unusable is not None:
         return unusable
-    platform = str(payload.get("target_platform") or "").strip() or DEFAULT_PLATFORM
+    platform = _platform(payload)
     unknown = _unknown_arch(platform)
     if unknown is not None:
         return unknown
@@ -87,8 +161,9 @@ async def roofline_handler(payload: dict, *, session_dir: Path) -> dict:
 
 def _unknown_arch(platform: str) -> dict[str, str] | None:
     """The failed result of a GPU TraceLens' perf report has no peaks for; ``None`` when it has some. The analysis gives
-    TraceLens the arch TraceLens bundles, else Hyperloom's (built from ``hyperloom_common.gpu_identity.AMD_GPU_BOARDS``):
-    with neither, it would run an arch microbenchmark on the host's GPU or fail inside the report."""
+    TraceLens the arch TraceLens bundles, else the one its microbenchmark measures on the leased card, else Hyperloom's
+    vendor peaks (built from ``hyperloom_common.gpu_identity.AMD_GPU_BOARDS``): with no bundled spec and no vendor peaks,
+    a failed measurement leaves the report nothing to read."""
     if resolve_arch_json_path(platform) is not None or build_hyperloom_arch_spec(platform) is not None:
         return None
     return {
@@ -115,11 +190,13 @@ def _without_kernels(result: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def roofline_tool() -> ScratchHandlerTool:
+def roofline_tool(leases: BranchLeases | None = None) -> ScratchHandlerTool:
     """Analyse the roofline of a torch trace that already exists. Params: ``trace_input`` (a trace directory or file),
     ``framework``, ``model_name`` and ``target_platform`` (a GPU name such as MI355X, the default). Its pointer carries no op
-    shares (they come from the TraceLens report of ``tracelens``); the kernels are in the result."""
-    return ScratchHandlerTool(
+    shares (they come from the TraceLens report of ``tracelens``); the kernels are in the result. ``leases`` is the pool a
+    card to measure the board's arch spec on is leased from (:class:`_ArchCard`)."""
+    return _RooflineTool(
+        leases,
         ROOFLINE_TOOL,
         roofline_handler,
         ok_text="roofline analysed",
@@ -131,22 +208,29 @@ async def tracelens_handler(payload: dict, *, session_dir: Path) -> dict:
     """``analysis_route`` (else ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``) picks the analysis: ``report`` is TraceLens' deterministic
     report with no agent, ``agent`` and ``non-llm`` are the orchestrator's own routes. Unnamed, a serving framework gets
     ``report`` and a scriptable one (xDiT, custom: no steady-state window to split) the orchestrator's default."""
-    raw = payload.get("analysis_route")
-    route = ("" if raw is None else str(raw).strip()) or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "").strip()
-    if not route and not is_scriptable(payload.get("framework")):
-        route = REPORT_ROUTE
-    if route.lower() == REPORT_ROUTE:
+    if _tracelens_route(payload).lower() == REPORT_ROUTE:
         return await report_handler(payload, session_dir=session_dir)
     result = await trace_analyze_handler(payload, session_dir=session_dir)
     return await asyncio.to_thread(with_window_shares, result, str(payload.get("trace_input") or ""), session_dir)
 
 
-def tracelens_tool() -> ScratchHandlerTool:
+def _tracelens_route(payload: Mapping[str, Any]) -> str:
+    """The route :func:`tracelens_handler` takes for ``payload``; empty is the orchestrator's default."""
+    raw = payload.get("analysis_route")
+    route = ("" if raw is None else str(raw).strip()) or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "").strip()
+    if not route and not is_scriptable(payload.get("framework")):
+        return REPORT_ROUTE
+    return route
+
+
+def tracelens_tool(leases: BranchLeases | None = None) -> ScratchHandlerTool:
     """Analyse a torch trace that already exists. Params: ``trace_input`` (a trace directory or file), optional
     ``analysis_route`` (``report`` by default, ``agent``, ``non-llm``), ``framework`` and ``model_name`` (the orchestrator's
     routes); ``commit_id`` (the commit the trace was profiled on) and, when the trace came from a PROFILE test,
-    ``profile_request_id``, which the pointer carries with the op shares."""
+    ``profile_request_id``, which the pointer carries with the op shares. ``leases`` is the pool a card to measure the
+    board's arch spec on is leased from, for the orchestrator's routes (:class:`_ArchCard`)."""
     return _TracelensTool(
+        leases,
         TRACELENS_TOOL,
         tracelens_handler,
         ok_text="trace analysed",

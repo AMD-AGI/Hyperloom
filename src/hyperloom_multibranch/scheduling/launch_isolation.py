@@ -3,8 +3,9 @@
 
 """How a session's launches on this host are isolated, as the path that makes each one makes it.
 
-A session's manifest and report say how its agents ran, so each kind is read from the path that launches it, never
-from a chooser that path does not call:
+A session's manifest and report say how its agents ran, and a hosted run refuses to start one unconfined beside its
+credentials (:func:`~hyperloom_multibranch.scheduling.hosted_run.require_hosted_isolation`), so each kind is read from
+the path that launches it, never from a chooser that path does not call:
 
 - a specialist is started by the agent runner as
   :func:`~hyperloom.orchestrator.specialists.launch_env.resolve_launch_isolation` chooses, the function the runner

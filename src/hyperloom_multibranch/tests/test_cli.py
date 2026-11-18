@@ -9,9 +9,12 @@ support FINAL -- a session another build ran, and one still running, included --
 second recovery while it works.
 
 ``hosted run`` maps the campaign spec a host injected onto the options of ``run`` and builds the session's settings as
-``run`` does, measuring on the grant's cards and ending a CLOSE grace before the grant does; it tells the host in
-``exit.json`` that the run is over once CLOSE ran or when nothing a restart changes keeps a session from running, and
-leaves the host to start a crashed run again, which then finishes the session the first start began.
+``run`` does, measuring on the grant's cards and ending a CLOSE grace before the grant does, or, when the spec says
+``local``, on this container's cards with no grant, sandbox or source, on the image the measurement pins name; its
+agents are isolated with the hosting layer's bubblewrap or not run at all; it tells the host in ``exit.json`` that the
+run is over once CLOSE ran or when nothing a restart changes keeps a session from running, and leaves the host to start
+a crashed run again, which then takes over the session the first start began: it resumes it up to its first deadline
+while its baseline holds, else finishes it as ``final-only`` does.
 
 ``run --measurement hosted`` measures in the sandboxes of a grant handed to it in the environment, without a campaign
 spec, a run id or a state directory, refuses a missing grant variable by name and what would run on this machine, and
@@ -25,6 +28,7 @@ import errno
 import json
 import logging
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -32,13 +36,15 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom_common import bwrap as bwrap_module
 from hyperloom_common.bwrap import BwrapProbe
-from hyperloom.common import agent_isolation
+from hyperloom_common.shared_storage import current_umask
+from hyperloom.common import agent_isolation, visible_devices
 from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
@@ -62,6 +68,8 @@ from hyperloom.measure import points
 from hyperloom.measure.compile import PackageBase
 from hyperloom.measure.points import PointError
 from hyperloom.measure.runner.cache_build import CacheBuildError
+from hyperloom.orchestrator.state.base_launch import frozen_base
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom_multibranch import cli
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
@@ -70,9 +78,20 @@ from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
-from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_DEFAULT_MAX_HOURS
-from hyperloom_multibranch.scheduling import hosted_run
-from hyperloom_multibranch.scheduling.hosted_run import GRANT_MARGIN_SECONDS
+from hyperloom_multibranch.scheduling.budget import (
+    MB_CLOSE_GRACE_CAP_SECONDS,
+    MB_DEFAULT_MAX_HOURS,
+    ExploreCap,
+    FinalWork,
+)
+from hyperloom_multibranch.scheduling import hosted_peers
+from hyperloom_multibranch.scheduling import hosted_run as hosted_run_module
+from hyperloom_multibranch.scheduling.hosted_run import (
+    GRANT_MARGIN_SECONDS,
+    final_reserve_seconds,
+    hosted_resume_deadline,
+    take_over_earlier_session,
+)
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.prelude import BASELINE_ESTABLISHED
@@ -80,10 +99,12 @@ from hyperloom_multibranch.scheduling import review
 from hyperloom_multibranch.scheduling.layout import REVIEW_DIR, SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, SessionOutcome, persisted_run
+from hyperloom_multibranch.scheduling.resumption import ResumeRefused, resumable_run
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version, read_manifest
 from hyperloom_multibranch.scheduling import local_peers
 from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV
+from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation, launch_isolation
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH, ProcessRecord
@@ -100,10 +121,13 @@ from hyperloom_multibranch.scheduling.settings import (
     RunSettings,
     Workload,
 )
-from hyperloom_multibranch.scheduling.session_environment import hosted_runner_cache
+from hyperloom_multibranch.scheduling.session_base import freeze_session_base
+from hyperloom_multibranch.scheduling.session_environment import hosted_runner_cache, require_writable_storage
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
+from hyperloom_multibranch.tests.agent_rig import install_stand_in
 from hyperloom_multibranch.tests.base_records import write_record
 from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
+from inference_suite.recipe import sources
 
 #: What the session's launcher sets to name the image the session runs on.
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
@@ -203,15 +227,19 @@ def test_a_gpu_type_names_the_same_board_in_any_case() -> None:
     assert _settings("--gpu-type", "MI355X").workload.gpu_type == "mi355x"
 
 
+def test_a_session_runs_on_mi325x() -> None:
+    assert _settings("--gpu-type", "MI325X").workload.gpu_type == "mi325x"
+
+
 def test_an_unknown_gpu_type_is_refused_naming_the_types_a_session_runs_on(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
-        cli.main(["run", *WORKLOAD_ARGS, "--gpu-type", "MI325X"])
+        cli.main(["run", *WORKLOAD_ARGS, "--gpu-type", "MI308X"])
 
     assert exc.value.code == cli.EXIT_USAGE
     err = capsys.readouterr().err
-    assert "invalid choice: 'mi325x'" in err
+    assert "invalid choice: 'mi308x'" in err
     # argparse quotes the choices before Python 3.12.8 and lists them bare from it on.
-    assert "(choose from mi300x, mi350x, mi355x)" in err.replace("'", "")
+    assert "(choose from mi300x, mi325x, mi350x, mi355x)" in err.replace("'", "")
 
 
 def test_an_agentx_run_has_no_sequence_lengths_and_is_graded_on_p50_interactivity_at_its_conc_alone() -> None:
@@ -336,7 +364,6 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *WORKLOAD_ARGS, "--conc", "many"],
         ["run", *WORKLOAD_ARGS[:-2]],
         ["run", *WORKLOAD_ARGS, "--gpu-type", "h100"],
-        ["run", *WORKLOAD_ARGS, "--gpu-type", "mi325x"],
         ["run", *WORKLOAD_ARGS, "--gpu-type", "mi308x"],
         ["run", *WORKLOAD_ARGS, "--kernel-optimizer", "triton"],
         ["run", *_without(WORKLOAD_ARGS, "--workload")],
@@ -401,21 +428,6 @@ def test_an_agent_source_whose_user_is_an_ssh_login_is_accepted(source: str) -> 
     assert _settings("--autonomous-agent", source).agents == (source,)
 
 
-def test_the_arbor_keyword_is_the_vendored_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "VENDORED_ARBOR", tmp_path)
-
-    assert _settings("--autonomous-agent", "arbor", "--autonomous-agent", "/a").agents == (str(tmp_path), "/a")
-
-
-def test_the_arbor_keyword_without_a_vendored_tree_is_a_usage_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(cli, "VENDORED_ARBOR", tmp_path / "missing")
-
-    with pytest.raises(ValueError, match="--autonomous-agent arbor"):
-        _settings("--autonomous-agent", "arbor")
-
-
 def test_an_ssh_source_with_a_password_carries_credentials() -> None:
     with pytest.raises(ValueError, match="credentials"):
         _settings("--autonomous-agent", "ssh://git:secret@github.com/acme/agent.git")
@@ -425,40 +437,40 @@ def test_the_agent_directions_map_is_kept_by_its_absolute_path(tmp_path: Path, m
     monkeypatch.chdir(tmp_path)
     (tmp_path / "map.json").write_text(json.dumps({"directions": [{"id": "m-attn", "title": "attention"}]}))
 
-    settings = _settings("--autonomous-agent", "/agents/arbor", "--agent-directions", "map.json")
+    settings = _settings("--autonomous-agent", "/agents/component", "--agent-directions", "map.json")
 
     assert settings.agent_directions == str(tmp_path / "map.json")
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_directions == ""
+    assert _settings("--autonomous-agent", "/agents/component").agent_directions == ""
 
 
 def test_the_dossier_pass_has_ninety_minutes_unless_the_run_gives_it_others_and_none_below_zero() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_dossier_minutes == DOSSIER_MINUTES == 90.0
+    assert _settings("--autonomous-agent", "/agents/component").agent_dossier_minutes == DOSSIER_MINUTES == 90.0
     assert _settings("--agent-dossier-minutes", "0").agent_dossier_minutes == 0.0
     with pytest.raises(ValueError, match=r"--agent-dossier-minutes must be 0 \(runs no dossier pass\) or positive"):
         _settings("--agent-dossier-minutes", "-5")
 
 
-def test_the_shares_need_an_arbor_iteration_s_63_minutes_unless_the_run_says_otherwise_and_none_below_zero() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_share_minutes == SHARE_MINUTES == 63.0
+def test_the_shares_need_a_component_agent_iteration_s_63_minutes_by_default_and_none_below_zero() -> None:
+    assert _settings("--autonomous-agent", "/agents/component").agent_share_minutes == SHARE_MINUTES == 63.0
     assert _settings("--agent-share-minutes", "0").agent_share_minutes == 0.0
     with pytest.raises(ValueError, match=r"--agent-share-minutes must be 0 \(always opens the shares\) or positive"):
         _settings("--agent-share-minutes", "-1")
 
 
 def test_the_agent_pack_is_kept_by_name_and_empty_without_one() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor", "--agent-pack", "agentx-qwen38-1").agent_pack == (
-        "agentx-qwen38-1"
+    assert _settings("--autonomous-agent", "/agents/component", "--agent-pack", "agentx-pack").agent_pack == (
+        "agentx-pack"
     )
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_pack == ""
+    assert _settings("--autonomous-agent", "/agents/component").agent_pack == ""
 
 
 @pytest.mark.parametrize(
     ("extra", "match"),
     [
-        (["--agent-pack", "agentx-qwen38-1"], "needs an --autonomous-agent"),
-        (["--autonomous-agent", "/agents/arbor", "--agent-pack", "packs/agentx"], "not the name of one pack"),
-        (["--autonomous-agent", "/agents/arbor", "--agent-pack", ".."], "not the name of one pack"),
-        (["--autonomous-agent", "/agents/arbor", "--agent-pack", ""], "not the name of one pack"),
+        (["--agent-pack", "agentx-pack"], "needs an --autonomous-agent"),
+        (["--autonomous-agent", "/agents/component", "--agent-pack", "packs/agentx"], "not the name of one pack"),
+        (["--autonomous-agent", "/agents/component", "--agent-pack", ".."], "not the name of one pack"),
+        (["--autonomous-agent", "/agents/component", "--agent-pack", ""], "not the name of one pack"),
     ],
 )
 def test_an_agent_pack_without_an_agent_or_not_one_directory_is_a_usage_error(extra: list[str], match: str) -> None:
@@ -480,27 +492,29 @@ def test_the_agent_launch_file_is_kept_by_its_absolute_path(tmp_path: Path, monk
     monkeypatch.chdir(tmp_path)
     (tmp_path / "launch.json").write_text(json.dumps({"server_flags": "--tp 1", "server_env": {}}))
 
-    settings = _settings("--autonomous-agent", "/agents/arbor", "--agent-launch", "launch.json")
+    settings = _settings("--autonomous-agent", "/agents/component", "--agent-launch", "launch.json")
 
     assert settings.agent_launch == str(tmp_path / "launch.json")
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_launch == ""
+    assert _settings("--autonomous-agent", "/agents/component").agent_launch == ""
 
 
 def test_a_base_launch_record_given_as_an_agent_launch_is_refused_for_the_reference_script(tmp_path: Path) -> None:
     record = write_record(tmp_path / "base_launch.json")
 
     with pytest.raises(ValueError, match="--agent-launch .* is a base launch record; give it as --reference-script"):
-        _settings("--autonomous-agent", "/agents/arbor", "--agent-launch", str(record))
+        _settings("--autonomous-agent", "/agents/component", "--agent-launch", str(record))
 
 
 def test_an_unfilled_template_is_a_usage_error(tmp_path: Path) -> None:
-    template = Path(__file__).parents[3] / "examples" / "multibranch-arbor-launch" / "launch.template.json"
+    template = Path(__file__).parents[3] / "examples" / "multibranch-agent-launch" / "launch.template.json"
 
     with pytest.raises(ValueError, match="--agent-launch: .*still hold the template's placeholders"):
-        _settings("--autonomous-agent", "/agents/arbor", "--agent-launch", str(template))
+        _settings("--autonomous-agent", "/agents/component", "--agent-launch", str(template))
 
 
-@pytest.mark.parametrize("agent", [[], ["--autonomous-agent", "/agents/arbor"]], ids=["specialists-only", "arbor"])
+@pytest.mark.parametrize(
+    "agent", [[], ["--autonomous-agent", "/agents/component"]], ids=["specialists-only", "component-agent"]
+)
 @pytest.mark.parametrize(
     "launch",
     [
@@ -551,10 +565,10 @@ def test_an_agent_launch_beside_a_reference_script_is_a_usage_error(tmp_path: Pa
     launch.write_text(json.dumps({"server_flags": "--tp 1", "server_env": {}}))
 
     with pytest.raises(
-        ValueError, match="--agent-launch is not taken with --reference-script: the Arbors are served the frozen base"
+        ValueError, match="--agent-launch is not taken with --reference-script: the agents are served the frozen base"
     ):
         _settings(
-            "--autonomous-agent", "/agents/arbor", "--reference-script", str(record), "--agent-launch", str(launch)
+            "--autonomous-agent", "/agents/component", "--reference-script", str(record), "--agent-launch", str(launch)
         )
 
 
@@ -573,23 +587,23 @@ def test_an_agent_launch_without_an_agent_or_unusable_is_a_usage_error(
     path = tmp_path / "launch.json"
     if document is not None:
         path.write_text(json.dumps(document))
-    extra = ["--autonomous-agent", "/agents/arbor"] if agent else []
+    extra = ["--autonomous-agent", "/agents/component"] if agent else []
 
     with pytest.raises(ValueError, match=match):
         _settings(*extra, "--agent-launch", str(path))
 
 
 def test_the_agent_port_is_the_run_s_own_or_the_shared_default() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor", "--agent-port", "32100").agent_port == 32100
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_port == AGENT_PORT
+    assert _settings("--autonomous-agent", "/agents/component", "--agent-port", "32100").agent_port == 32100
+    assert _settings("--autonomous-agent", "/agents/component").agent_port == AGENT_PORT
 
 
 @pytest.mark.parametrize(
     ("extra", "match"),
     [
         (["--agent-port", "32100"], "needs an --autonomous-agent"),
-        (["--autonomous-agent", "/agents/arbor", "--agent-port", "0"], "is not a port"),
-        (["--autonomous-agent", "/agents/arbor", "--agent-port", "65536"], "is not a port"),
+        (["--autonomous-agent", "/agents/component", "--agent-port", "0"], "is not a port"),
+        (["--autonomous-agent", "/agents/component", "--agent-port", "65536"], "is not a port"),
     ],
     ids=["no-agent", "zero", "past-the-last-port"],
 )
@@ -599,13 +613,13 @@ def test_an_agent_port_without_an_agent_or_that_is_no_port_is_a_usage_error(extr
 
 
 def test_a_run_stops_after_its_map_only_when_asked() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor", "--stop-after-map").stop_after_map
-    assert not _settings("--autonomous-agent", "/agents/arbor").stop_after_map
+    assert _settings("--autonomous-agent", "/agents/component", "--stop-after-map").stop_after_map
+    assert not _settings("--autonomous-agent", "/agents/component").stop_after_map
 
 
 def test_the_review_gate_is_on_unless_the_run_turns_it_off() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor").review_gate
-    assert not _settings("--autonomous-agent", "/agents/arbor", "--no-review-gate").review_gate
+    assert _settings("--autonomous-agent", "/agents/component").review_gate
+    assert not _settings("--autonomous-agent", "/agents/component", "--no-review-gate").review_gate
 
 
 def test_a_person_shows_and_approves_a_session_s_review_and_a_second_decision_is_refused(
@@ -636,7 +650,7 @@ def test_stopping_after_the_map_without_an_agent_or_with_a_map_given_is_a_usage_
     with pytest.raises(ValueError, match="needs an --autonomous-agent"):
         _settings("--stop-after-map")
     with pytest.raises(ValueError, match="already gives them"):
-        _settings("--autonomous-agent", "/agents/arbor", "--agent-directions", str(given), "--stop-after-map")
+        _settings("--autonomous-agent", "/agents/component", "--agent-directions", str(given), "--stop-after-map")
 
 
 def _reviewed(tmp_path: Path) -> tuple[Path, Path]:
@@ -653,8 +667,9 @@ def test_the_reviewed_dossier_is_kept_by_its_absolute_path_beside_its_map(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    install_stand_in(monkeypatch)
     given, _ = _reviewed(tmp_path)
-    agent = ["--autonomous-agent", "/agents/arbor", "--agent-directions", str(given)]
+    agent = ["--autonomous-agent", "/agents/component", "--agent-directions", str(given)]
 
     assert _settings(*agent, "--agent-dossier", "dossier/qwen3-8b").agent_dossier == str(
         tmp_path / "dossier" / "qwen3-8b"
@@ -666,10 +681,15 @@ def test_a_dossier_without_its_map_or_that_is_no_dossier_is_a_usage_error(tmp_pa
     given, dossier = _reviewed(tmp_path)
 
     with pytest.raises(ValueError, match="with the --agent-directions map"):
-        _settings("--autonomous-agent", "/agents/arbor", "--agent-dossier", str(dossier))
+        _settings("--autonomous-agent", "/agents/component", "--agent-dossier", str(dossier))
     with pytest.raises(ValueError, match="is no dossier"):
         _settings(
-            "--autonomous-agent", "/agents/arbor", "--agent-directions", str(given), "--agent-dossier", str(tmp_path)
+            "--autonomous-agent",
+            "/agents/component",
+            "--agent-directions",
+            str(given),
+            "--agent-dossier",
+            str(tmp_path),
         )
 
 
@@ -687,7 +707,7 @@ def test_an_agent_directions_map_without_an_agent_or_directions_is_a_usage_error
 ) -> None:
     path = tmp_path / "map.json"
     path.write_text("{not json" if document is None else json.dumps(document))
-    agents = ["--autonomous-agent", "/agents/arbor"] if agent else []
+    agents = ["--autonomous-agent", "/agents/component"] if agent else []
 
     with pytest.raises(ValueError, match=match):
         _settings(*agents, "--agent-directions", str(path))
@@ -773,6 +793,30 @@ def test_a_bad_specialist_prompt_exits_two_before_creating_anything(
     assert exc.value.code == cli.EXIT_USAGE
     assert error in capsys.readouterr().err
     assert not any(workspace.iterdir())
+
+
+#: The launch paths of a hosted run as they record once every launch they make on this host is isolated.
+ISOLATED = {
+    True: LaunchIsolation(agent_isolation.ACCOUNT, agent_isolation.BWRAP, agent_isolation.BWRAP, True, ()),
+    False: LaunchIsolation(agent_isolation.ACCOUNT, "hosted", "hosted", True, ()),
+}
+#: How a hosted run's start was told it launches on this host: ``local`` for each start.
+LaunchesAsked = list[bool]
+
+
+@pytest.fixture(autouse=True)
+def isolated_launches(monkeypatch: pytest.MonkeyPatch) -> LaunchesAsked:
+    """A hosted run's every launch on this host is isolated (:data:`ISOLATED`), so its start's check passes; the
+    tests of that check put the real record back."""
+
+    asked: LaunchesAsked = []
+
+    def isolation(*, local: bool) -> LaunchIsolation:
+        asked.append(local)
+        return ISOLATED[local]
+
+    monkeypatch.setattr(hosted_run_module, "launch_isolation", isolation)
+    return asked
 
 
 @pytest.fixture(autouse=True)
@@ -862,8 +906,15 @@ def agent_cli(agent_binaries: None, monkeypatch: pytest.MonkeyPatch) -> list[Run
 
     runs: list[RunSettings] = []
 
-    def run_session(settings: RunSettings, peer_factory: PeerFactory, services: object, *report_root: object) -> int:
+    def run_session(
+        settings: RunSettings,
+        peer_factory: PeerFactory,
+        services: object,
+        report_root: object = None,
+        explore_cap: ExploreCap | None = None,
+    ) -> int:
         runs.append(settings)
+        EXPLORE_CAPS.append(explore_cap)
         return 0
 
     def final_only(
@@ -873,15 +924,33 @@ def agent_cli(agent_binaries: None, monkeypatch: pytest.MonkeyPatch) -> list[Run
         FINISHED_AS_RESTART.append(restart)
         return 0
 
+    def resume(
+        persisted: PersistedRun,
+        peer_factory: PeerFactory,
+        services: object,
+        until: float,
+        cap: ExploreCap | None,
+    ) -> int:
+        runs.append(persisted.settings)
+        RESUMED_TO.append(until)
+        EXPLORE_CAPS.append(cap)
+        return 0
+
+    EXPLORE_CAPS.clear()
     FINISHED_AS_RESTART.clear()
+    RESUMED_TO.clear()
     monkeypatch.setattr(cli, "run_session", run_session)
     monkeypatch.setattr(cli, "final_only", final_only)
-    monkeypatch.setattr(cli, "resume", final_only)
+    monkeypatch.setattr(cli, "resume", resume)
     return runs
 
 
+#: The EXPLORE cap each session :func:`agent_cli` noted was given.
+EXPLORE_CAPS: list[ExploreCap | None] = []
 #: Whether each finish :func:`agent_cli` noted was a restart's.
 FINISHED_AS_RESTART: list[bool] = []
+#: The deadline of each resume :func:`agent_cli` noted.
+RESUMED_TO: list[float] = []
 
 
 @pytest.mark.usefixtures("ready_environment")
@@ -919,6 +988,7 @@ def test_run_without_the_agent_cli_fails_loudly_before_creating_anything(
 ) -> None:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
     monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
     assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
 
@@ -926,6 +996,27 @@ def test_run_without_the_agent_cli_fails_loudly_before_creating_anything(
     assert "CLI the specialists run is not on PATH" in captured.err
     assert captured.out == ""
     assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_run_finds_the_claude_cli_where_install_sh_installed_it_off_path(
+    agent_cli: list[RunSettings],
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path_factory.mktemp("home")
+    installed = home / ".local" / "bin"
+    installed.mkdir(parents=True)
+    (installed / AGENT_BACKEND_CLAUDE).write_text("#!/bin/sh\nexit 0\n")
+    (installed / AGENT_BACKEND_CLAUDE).chmod(0o755)
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path_factory.mktemp("empty-bin")))
+    monkeypatch.setenv("HOME", str(home))
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == 0
+
+    assert agent_cli == [_settings()]
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_binaries")
@@ -958,7 +1049,7 @@ def test_a_strict_image_check_that_fails_is_refused_like_the_other_start_up_refu
     failing = FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone")
     report = ImageCheckReport(ImageCheckMode.STRICT, rule_pack_identity(), "", {}, (failing,))
 
-    def session_refused(settings: RunSettings, peer_factory: PeerFactory, services: object) -> int:
+    def session_refused(settings: RunSettings, peer_factory: PeerFactory, services: object, **_: object) -> int:
         raise ImageCheckFailed(report)
 
     monkeypatch.setattr(cli, "run_session", session_refused)
@@ -1335,7 +1426,7 @@ def test_a_final_only_holds_the_session_against_a_second_one_and_releases_it(
     async def while_it_runs(run: PersistedRun, peer_factory: object, services: object, leg: object) -> int:
         assert layout.final_only_lock.read_text(encoding="utf-8") == f"{os.getpid()}\n"
         assert cli.final_only(run, peer_factory, services) == cli.EXIT_USAGE
-        assert cli.resume(run, peer_factory, services) == cli.EXIT_USAGE
+        assert cli.resume(run, peer_factory, services, 3600.0, None) == cli.EXIT_USAGE
         return 0
 
     monkeypatch.setattr(cli, "_run_leg", while_it_runs)
@@ -1451,10 +1542,65 @@ def test_a_resume_continues_the_session_on_the_settings_its_manifest_holds(
     layout = _ended_before_final(tmp_path / "session")
     _killed(layout, ANOTHER_POD)
 
+    before = time.time()
     assert cli.main(["run", "--resume", str(layout.root), "-v"]) == 0
 
     assert agent_cli == [_settings()]
     assert not any(workspace.iterdir())
+    [deadline] = RESUMED_TO
+    assert 3600.0 + before <= deadline <= 3600.0 + time.time(), "the first deadline, moved by the time it was down"
+
+
+def _hosted_ended_before_final(root: Path, **manifest: object) -> PersistedRun:
+    """A session measured in a grant's sandboxes, killed with the container it ran in, as a restart of the run in
+    another container reads it back: its last decision at 0, its deadline at 3600 and ``manifest`` written over its
+    manifest."""
+
+    layout = _ended_before_final(root)
+    layout.runner_source.mkdir()
+    if manifest:
+        _manifest(layout, **manifest)
+    _killed(layout, ANOTHER_POD)
+    state_dir = root.parent / "state"
+    state_dir.mkdir()
+    (state_dir / "session.json").write_text(json.dumps({"session_dir": str(root)}), encoding="utf-8")
+    persisted = take_over_earlier_session(state_dir).finish
+    assert persisted is not None
+    return persisted
+
+
+def test_a_hosted_restart_resumes_up_to_the_first_starts_deadline_giving_no_downtime_back(tmp_path: Path) -> None:
+    persisted = _hosted_ended_before_final(tmp_path / "session")
+    before = _tree(persisted.layout.root)
+
+    assert hosted_resume_deadline(persisted, 1800.0) == 3600.0
+    assert _tree(persisted.layout.root) == before
+    with pytest.raises(ResumeRefused, match="a grant's sandboxes"):
+        resumable_run(persisted.layout.root)
+
+
+@pytest.mark.parametrize(
+    ("stop_after_map", "baseline_decision", "now", "error"),
+    [
+        (False, False, 0.0, "recorded no baseline to resume from"),
+        (True, True, 0.0, "its map"),
+        (False, True, 3600.0, "used its budget, which ended 0 s ago"),
+    ],
+    ids=["no baseline decision", "stop after map", "budget used"],
+)
+def test_a_hosted_restart_refuses_a_resume_it_should_finish_instead(
+    stop_after_map: bool, baseline_decision: bool, now: float, error: str, tmp_path: Path
+) -> None:
+    settings = encode(replace(_settings(), stop_after_map=stop_after_map))
+    persisted = _hosted_ended_before_final(tmp_path / "session", settings=settings)
+    if not baseline_decision:
+        persisted.layout.decisions.write_text("", encoding="utf-8")
+    before = _tree(persisted.layout.root)
+
+    with pytest.raises(ResumeRefused, match=error):
+        hosted_resume_deadline(persisted, now)
+
+    assert _tree(persisted.layout.root) == before
 
 
 #: A grant of four GPUs that has a day left.
@@ -1559,7 +1705,7 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Host:
     for name in ("HYPERLOOM_MCP_PORT", "HYPERLOOM_MCP_TOKEN", "HYPERLOOM_EVENTS_DIR"):
         monkeypatch.delenv(name, raising=False)
     given.started(seconds_ago=600)
-    monkeypatch.setattr(hosted_run, "arm_grant_stop", given.stops.append)
+    monkeypatch.setattr(hosted_run_module, "arm_grant_stop", given.stops.append)
     return given
 
 
@@ -1567,7 +1713,9 @@ def _session_ending(stop_reason: str | None, returncode: int) -> Callable[..., i
     """A session that creates its directory in the workspace, reports it, and ends with ``returncode`` after a CLOSE
     that reported ``stop_reason``, or without a CLOSE when it is ``None``."""
 
-    def run_session(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+    def run_session(
+        settings: RunSettings, peer_factory: object, services: object, report_root: Callable, *_: object
+    ) -> int:
         layout = create_session(Path(os.environ["USER_DATA_PATH"]), settings.workload.model_basename, Clock())
         report_root(layout.root)
         if stop_reason is not None:
@@ -1580,7 +1728,7 @@ def _session_ending(stop_reason: str | None, returncode: int) -> Callable[..., i
 
 @pytest.mark.usefixtures("ready_environment")
 def test_a_hosted_spec_runs_the_session_the_same_options_of_run_would(
-    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+    host: Host, agent_cli: list[RunSettings], isolated_launches: LaunchesAsked, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     on_the_command_line = _settings(*SPEC_RUN_ARGS)
     monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
@@ -1588,6 +1736,7 @@ def test_a_hosted_spec_runs_the_session_the_same_options_of_run_would(
     assert cli.main(["hosted", "run"]) == 0
 
     assert agent_cli == [on_the_command_line]
+    assert isolated_launches == [False], "its start checks the launches on this host of a run measured elsewhere"
     assert "HYPERLOOM_SANDBOX_KEY_MEASUREMENT" not in os.environ, "no child process inherits a host credential"
 
 
@@ -1619,47 +1768,6 @@ def test_a_hosted_inferencex_spec_runs_its_session_at_the_hardware_ep_it_names(
 
 
 @pytest.mark.usefixtures("ready_environment")
-def test_a_hosted_run_whose_agents_cannot_be_isolated_ends_for_good_before_anything_starts(
-    host: Host, agent_cli: list[RunSettings], bubblewrap: Bubblewrap
-) -> None:
-    bubblewrap.problems = (DENIED,)
-
-    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
-
-    document = host.exit_document()
-    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
-    assert str(document["error"]).startswith("agents cannot be isolated on this host: ")
-    assert f"bubblewrap ({LAYER_BWRAP}, 0.13.1): {DENIED}" in str(document["error"])
-    assert set(bubblewrap.asked or ()) == {LAYER_BWRAP}, "only the hosting layer's bubblewrap is probed"
-    assert agent_cli == [] and not any(host.workspace.iterdir())
-
-
-@pytest.mark.usefixtures("ready_environment")
-def test_a_hosted_run_whose_host_names_no_layer_ends_for_good_and_probes_no_bubblewrap(
-    host: Host, agent_cli: list[RunSettings], bubblewrap: Bubblewrap, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("HYPERLOOM_HOST_LAYER")
-
-    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
-
-    assert agent_isolation.NO_LAYER_BWRAP in str(host.exit_document()["error"])
-    assert bubblewrap.asked is None and agent_cli == []
-
-
-@pytest.mark.usefixtures("ready_environment")
-def test_a_hosted_run_whose_bubblewrap_gave_no_answer_in_time_leaves_the_host_to_start_it_again(
-    host: Host, agent_cli: list[RunSettings], bubblewrap: Bubblewrap
-) -> None:
-    bubblewrap.problems, bubblewrap.transient = (f"bubblewrap at {LAYER_BWRAP}: no answer in 10 s",), True
-
-    with pytest.raises(TimeoutError, match="no answer in 10 s"):
-        cli.main(["hosted", "run"])
-
-    assert not (host.state_dir / "exit.json").exists()
-    assert agent_cli == [] and not any(host.workspace.iterdir())
-
-
-@pytest.mark.usefixtures("ready_environment")
 def test_a_restarted_hosted_run_checks_its_agents_isolation_before_it_finishes_the_earlier_session(
     host: Host, agent_cli: list[RunSettings], bubblewrap: Bubblewrap, tmp_path: Path
 ) -> None:
@@ -1671,20 +1779,6 @@ def test_a_restarted_hosted_run_checks_its_agents_isolation_before_it_finishes_t
 
     assert str(host.exit_document()["error"]).startswith("agents cannot be isolated on this host: ")
     assert agent_cli == [], "the earlier session is left as it was"
-
-
-@pytest.mark.usefixtures("ready_environment")
-def test_a_hosted_spec_with_a_launch_section_ends_for_good_naming_the_field(
-    host: Host, agent_cli: list[RunSettings]
-) -> None:
-    host.spec(launch={"extra_env": {"AITER_BF16_FP8_MOE_BOUND": "0"}})
-
-    assert cli.main(["hosted", "run"]) == cli.EXIT_USAGE
-
-    document = host.exit_document()
-    assert (document["final"], document["returncode"]) == (True, cli.EXIT_USAGE)
-    assert "a multibranch run does not read launch.extra_env" in str(document["error"])
-    assert agent_cli == [] and not any(host.workspace.iterdir())
 
 
 @pytest.mark.parametrize(
@@ -1742,6 +1836,47 @@ def test_a_hosted_spec_resolves_its_base_from_inferencex_at_the_commit_it_names(
     assert on_the_command_line.inferencex_commit == "8a76a78e41"
 
 
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_freezes_the_reference_script_it_names_with_its_environment_as_the_base(
+    host: Host, agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = tmp_path / "launch.sh"
+    script.write_text(
+        "export AITER_BF16_FP8_MOE_BOUND=0\nvllm serve /models/Llama-3-8B --tensor-parallel-size 2 --enforce-eager\n",
+        encoding="utf-8",
+    )
+    host.spec(multibranch={**SPEC["multibranch"], "reference_script": str(script)})
+    on_the_command_line = _settings(*SPEC_RUN_ARGS, "--reference-script", str(script))
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+    monkeypatch.setattr(sources, "_inferencex", _no_recipe_source)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    [settings] = agent_cli
+    assert settings == on_the_command_line
+    frozen = freeze_session_base(tmp_path / "toolbox", settings.workload, settings.reference_script)
+    assert frozen.launch.env["AITER_BF16_FP8_MOE_BOUND"] == "0" and "--enforce-eager" in frozen.launch.args
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_with_a_launch_section_ends_for_good_pointing_at_the_reference_script(
+    host: Host, agent_cli: list[RunSettings]
+) -> None:
+    host.spec(launch={"extra_env": {"AITER_BF16_FP8_MOE_BOUND": "0"}})
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_USAGE
+
+    document = host.exit_document()
+    assert "does not read launch.extra_env: give the base launch as multibranch.reference_script" in str(
+        document["error"]
+    )
+    assert agent_cli == [] and not any(host.workspace.iterdir())
+
+
+def _no_recipe_source(*_: object) -> NoReturn:
+    raise AssertionError("a recipe source was read beside the reference script")
+
+
 @pytest.mark.parametrize(
     ("agents", "named"),
     [(["/agents/a"], "need HYPERLOOM_SANDBOX_KEY_DEV"), ("/agents/a", "must be a list of agent sources")],
@@ -1761,6 +1896,23 @@ def test_a_hosted_spec_whose_agents_cannot_run_ends_for_good_naming_why(
 
 def test_the_hosted_runner_cache_is_the_directory_the_variable_names() -> None:
     assert hosted_runner_cache({"HYPERLOOM_RUNNER_CACHE": " /data/hl/runner-cache "}) == Path("/data/hl/runner-cache")
+
+
+def test_only_a_hosted_session_is_warned_that_its_rsi_archive_is_not_setgid(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    archive.chmod(0o755)
+    env = {ARCHIVE_ENV: str(archive)}
+
+    with caplog.at_level(logging.WARNING):
+        require_writable_storage(env, {})
+    assert "not setgid" not in caplog.text, "a local session's archive is one account's"
+
+    with caplog.at_level(logging.WARNING):
+        require_writable_storage(env, {"HYPERLOOM_RUNNER_CACHE": tmp_path})
+    assert f"{ARCHIVE_ENV} {archive} is not setgid" in caplog.text
 
 
 def _no_local_cards() -> tuple[int, ...]:
@@ -1831,6 +1983,63 @@ def test_a_hosted_session_ends_a_close_grace_and_a_margin_before_the_grant_and_i
     grace = MB_CLOSE_GRACE_CAP_SECONDS
     assert settings.max_hours == pytest.approx((3600 - grace - GRANT_MARGIN_SECONDS) / 3600, abs=0.01)
     assert host.stops == [pytest.approx(3600 - grace, abs=30)]
+
+
+class _LaterBy(datetime):
+    """``datetime`` whose ``now`` runs ``ahead`` seconds past the real one, which a test moves forward."""
+
+    ahead = 0.0
+
+    @classmethod
+    def now(cls, tz: object = None) -> datetime:  # type: ignore[override]
+        return datetime.now(tz) + timedelta(seconds=cls.ahead)  # type: ignore[arg-type]
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_the_grant_stop_counts_what_preparing_the_start_took(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.started(seconds_ago=GRANT["max_runtime_sec"] - 3600)
+    prepare = cli.hosted_ready_session
+
+    def slow_to_prepare(*args: object, **kwargs: object) -> object:
+        _LaterBy.ahead = 900.0
+        return prepare(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(_LaterBy, "ahead", 0.0)
+    monkeypatch.setattr(cli, "datetime", _LaterBy)
+    monkeypatch.setattr(cli, "hosted_ready_session", slow_to_prepare)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert host.stops == [pytest.approx(3600 - 900 - MB_CLOSE_GRACE_CAP_SECONDS, abs=30)]
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_session_ends_explore_a_final_reserve_before_the_grant_s_stop(
+    host: Host, agent_cli: list[RunSettings]
+) -> None:
+    created = datetime.fromisoformat(os.environ["HYPERLOOM_RUN_CREATED_AT"]).timestamp()
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    stop = created + GRANT["max_runtime_sec"] - MB_CLOSE_GRACE_CAP_SECONDS
+    [cap] = EXPLORE_CAPS
+    assert cap is not None
+    for longest in (0.0, 1500.0):
+        work = FinalWork(4 * longest, 3 * longest, longest, 1)
+        assert cap(work) == pytest.approx(stop - GRANT_MARGIN_SECONDS - final_reserve_seconds(work), abs=1.0)
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_session_run_with_no_grant_has_no_explore_cap(
+    agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == 0
+
+    assert agent_cli == [_settings()] and EXPLORE_CAPS == [None]
 
 
 @pytest.mark.parametrize(
@@ -1907,7 +2116,9 @@ def test_a_leg_that_cannot_open_a_file_of_the_run_ends_it_for_good_naming_the_fi
 def test_a_hosted_session_whose_base_launch_is_refused_ends_the_run_for_good_naming_why(
     host: Host, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def base_refused(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+    def base_refused(
+        settings: RunSettings, peer_factory: object, services: object, report_root: Callable, *_: object
+    ) -> int:
         report_root(create_session(host.workspace, settings.workload.model_basename, Clock()).root)
         raise PeersUnavailable("the base launch could not be resolved: InferenceX has no commit 8a76a78e41")
 
@@ -1947,7 +2158,9 @@ def test_a_strict_image_check_that_fails_ends_the_hosted_run_for_good_naming_it(
     failing = FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone")
     report = ImageCheckReport(ImageCheckMode.STRICT, rule_pack_identity(), "", {}, (failing,))
 
-    def session_refused(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+    def session_refused(
+        settings: RunSettings, peer_factory: object, services: object, report_root: Callable, *_: object
+    ) -> int:
         report_root(create_session(host.workspace, settings.workload.model_basename, Clock()).root)
         raise ImageCheckFailed(report)
 
@@ -2059,7 +2272,9 @@ def restart(agent_binaries: None, host: Host, monkeypatch: pytest.MonkeyPatch) -
         _report(persisted.layout, stop_reason=persisted.ended.value, error=lifecycle.NO_BASELINE)
         return 1
 
-    def run_session(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+    def run_session(
+        settings: RunSettings, peer_factory: object, services: object, report_root: Callable, *_: object
+    ) -> int:
         done.calls.append(("run", settings))
         layout = create_session(host.workspace, settings.workload.model_basename, Clock())
         report_root(layout.root)
@@ -2099,7 +2314,7 @@ def test_a_hosted_run_shares_with_the_group_each_session_it_closes_or_starts_bef
         restart.calls.append(("share", root))
 
     monkeypatch.setattr(cli, "share_with_the_group", shared)
-    monkeypatch.setattr(hosted_run, "share_with_the_group", shared)
+    monkeypatch.setattr(hosted_run_module, "share_with_the_group", shared)
     layout = _killed_in_prelude(tmp_path / "MB-earlier-session")
     (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
 
@@ -2119,7 +2334,7 @@ def test_a_restart_that_finishes_a_session_shares_it_with_the_group_first(
 ) -> None:
     shared: list[Path] = []
     monkeypatch.setattr(cli, "share_with_the_group", shared.append)
-    monkeypatch.setattr(hosted_run, "share_with_the_group", shared.append)
+    monkeypatch.setattr(hosted_run_module, "share_with_the_group", shared.append)
     layout = _ended_before_final(tmp_path / "MB-20300102T030405Z-0123abcd")
     (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
     host.spec(multibranch=None)
@@ -2203,6 +2418,92 @@ def test_a_restart_onto_another_build_closes_the_session_before_its_baseline_and
     assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
 
 
+#: The ``final-only`` a restart closes a session with, before a test puts a stand-in in its place.
+CLOSING = cli.final_only
+
+
+@pytest.mark.usefixtures("ready_environment")
+@pytest.mark.parametrize("damage", ["another-accounts", "not-json"])
+def test_a_restart_that_cannot_read_the_session_before_its_baseline_leaves_it_and_starts_a_new_one(
+    host: Host,
+    restart: Restart,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    damage: str,
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "session")
+    state = SharedState.state_path(layout.toolbox)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text("{" if damage == "not-json" else "{}", encoding="utf-8")
+    if (
+        damage == "another-accounts"
+    ):  # the owner-only state.json another account of the group left, as the OS refuses it
+        reads = Path.read_text
+
+        def refused(path: Path, *args: object, **kwargs: object) -> str:
+            if path == state:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return reads(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", refused)
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+    left = {path: path.read_bytes() for path in layout.root.rglob("*") if path.is_file() and path != state}
+
+    async def closing(persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object) -> int:
+        frozen_base(persisted.layout.toolbox)  # what building the close's peers reads first
+        raise AssertionError("the session could be read")
+
+    starts = cli.run_session
+
+    def run_session(*args: object) -> int:
+        assert not (host.state_dir / "exit.json").exists(), "the run is not over when the new session starts"
+        return starts(*args)
+
+    monkeypatch.setattr(cli, "final_only", CLOSING)
+    monkeypatch.setattr(cli, "_run_leg", closing)
+    monkeypatch.setattr(cli, "run_session", run_session)
+
+    with caplog.at_level(logging.WARNING):
+        assert cli.main(["hosted", "run"]) == 0
+
+    assert [kind for kind, _ in restart.calls] == ["run"], "the run goes on with a new session"
+    session = Path(json.loads((host.state_dir / "session.json").read_text(encoding="utf-8"))["session_dir"])
+    assert session != layout.root and session.parent.parent == host.workspace
+    assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
+    after = {path: path.read_bytes() for path in layout.root.rglob("*") if path.is_file() and path != state}
+    assert after == left and not layout.report.exists(), "the session that could not be read is left as it was"
+    [warning] = [record.getMessage() for record in caplog.records if "cannot read" in record.getMessage()]
+    assert str(layout.root) in warning
+    assert (
+        (f"{state}" in warning and "Permission denied" in warning)
+        if damage == "another-accounts"
+        else ("JSONDecodeError" in warning)
+    )
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restart_refused_a_file_outside_the_session_it_closes_ends_the_run(
+    host: Host, restart: Restart, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "session")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+    outside = tmp_path / "workspace-cache" / "index.json"
+
+    async def closing(persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object) -> int:
+        raise PermissionError(errno.EACCES, "Permission denied", str(outside))
+
+    monkeypatch.setattr(cli, "final_only", CLOSING)
+    monkeypatch.setattr(cli, "_run_leg", closing)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    assert restart.calls == [], "no new session starts over a file that is not the earlier session's"
+    document = host.exit_document()
+    assert document["final"] is True and document["returncode"] == cli.EXIT_FAILED
+    assert str(outside) in document["error"]
+
+
 @pytest.mark.usefixtures("ready_environment")
 @pytest.mark.parametrize("ended", [SessionStopReason.SIGNAL, SessionStopReason.PRELUDE_FAILED])
 def test_a_restart_over_a_session_that_closed_before_its_baseline_ends_the_run_with_its_report(
@@ -2273,6 +2574,237 @@ def test_a_restart_over_a_session_that_already_chose_ends_the_run_for_good(
     assert agent_cli == []
 
 
+# -- hosted run measured on this container's cards -------------------------------------------------------------------
+#: The sections of :data:`SPEC` that measure it on the application container's own cards, the image the pins name.
+LOCAL = {
+    "framework": {"name": "vllm", "image": f"registry.example/vllm@{IMAGE[1]}"},
+    "placement": {"profile": "hosted-gpu", "measurement": "local", "max_parallel_tests": 1},
+}
+#: What only a run measured in the grant's sandboxes is given: the sandbox service, its keys and templates, the source.
+SANDBOX_INPUTS = (
+    "E2B_API_URL",
+    "E2B_SANDBOX_URL",
+    "HYPERLOOM_SANDBOX_KEY_MEASUREMENT",
+    "HYPERLOOM_SANDBOX_TEMPLATES",
+    "HYPERLOOM_SOURCE_REPO",
+    "HYPERLOOM_SOURCE_SHA",
+)
+
+
+def _grant_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail the test if anything of a measurement in the grant's sandboxes is built: its peers, the runner cache
+    pinned from the run's source, or the grant's count of tests."""
+
+    def built(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a run measured on this container's cards builds nothing of the grant's")
+
+    for name in ("load_hosted_peers", "PinnedToolboxInputs", "grant_tests_that_fit"):
+        monkeypatch.setattr(cli, name, built)
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_spec_measured_locally_runs_on_this_containers_cards_with_no_grant_sandbox_or_source(
+    host: Host, agent_cli: list[RunSettings], isolated_launches: LaunchesAsked, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _grant_untouched(monkeypatch)
+    for name in ("HYPERLOOM_GRANT_LIMITS", *SANDBOX_INPUTS):
+        monkeypatch.delenv(name)
+    host.spec(**LOCAL, multibranch={**SPEC["multibranch"], "dev_leases": 2, "autonomous_agents": ["/agents/a"]})
+    on_the_command_line = _settings(*SPEC_RUN_ARGS, "--dev-leases", "2", "--autonomous-agent", "/agents/a")
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert agent_cli == [on_the_command_line], "dev sandboxes and agents run here: no dev key is needed"
+    assert host.stops == [], "without a grant the spec's hours alone bound the session"
+    assert isolated_launches == [True], "its start checks the sandboxes and tests it runs on this host"
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_spec_measured_locally_starts_with_no_account_once_the_layers_bubblewrap_confines_every_launch_here(
+    host: Host, agent_cli: list[RunSettings], bubblewrap: Bubblewrap, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _grant_untouched(monkeypatch)
+    monkeypatch.setattr(hosted_run_module, "launch_isolation", launch_isolation)
+    host.spec(**LOCAL)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert len(agent_cli) == 1, "the specialists, sandboxes and tests it launches here all run under bubblewrap"
+    assert set(bubblewrap.asked or ()) == {LAYER_BWRAP}, "only the hosting layer's bubblewrap is probed"
+    assert launch_isolation(local=True) == LaunchIsolation(
+        agent_isolation.BWRAP, agent_isolation.BWRAP, agent_isolation.BWRAP, True, ()
+    )
+
+
+@pytest.mark.parametrize(("left", "hours"), [(3600, None), (86400, 2.0)], ids=["grant-first", "spec-first"])
+@pytest.mark.usefixtures("ready_environment")
+def test_a_spec_measured_locally_ends_by_the_earlier_of_its_hours_and_a_grants_runtime(
+    left: int, hours: float | None, host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _grant_untouched(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_GRANT_LIMITS", json.dumps({"max_runtime_sec": GRANT["max_runtime_sec"]}))
+    host.started(seconds_ago=GRANT["max_runtime_sec"] - left)
+    host.spec(**LOCAL)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    [settings] = agent_cli
+    grace = MB_CLOSE_GRACE_CAP_SECONDS
+    expected = (left - grace - GRANT_MARGIN_SECONDS) / 3600 if hours is None else hours
+    assert settings.max_hours == pytest.approx(expected, abs=0.01)
+    assert host.stops == [pytest.approx(left - grace, abs=30)]
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_spec_measured_locally_runs_as_many_tests_at_once_as_this_containers_cards_hold(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _grant_untouched(monkeypatch)
+    host.spec(**{**LOCAL, "placement": {"profile": "hosted-gpu", "measurement": "local"}})
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    [settings] = agent_cli
+    assert settings.caps.max_parallel_tests == 4, "TP=2 on the eight cards this container shows"
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_spec_measured_locally_whose_tp_this_container_cannot_hold_ends_the_run_for_good(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0")
+    host.spec(**LOCAL)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_USAGE
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_USAGE)
+    assert agent_cli == [] and not any(host.workspace.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_spec_measured_locally_on_a_container_given_fewer_cards_than_rocm_smi_shows_ends_the_run_for_good(
+    host: Host, agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in visible_devices.COUNTING_VISIBLE_DEVICE_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(visible_devices, "rocm_smi_gpu_count", lambda: 8)
+    (tmp_path / "dri").mkdir()
+    (tmp_path / "dri" / "renderD128").touch()
+    monkeypatch.setattr(local_peers, "RENDER_NODE_DIR", str(tmp_path / "dri"))
+    host.spec(**LOCAL)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_USAGE
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_USAGE)
+    assert "rocm-smi shows 8 cards, more than the 1 this machine can open" in str(document["error"])
+    assert agent_cli == [] and not any(host.workspace.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("image", "unset", "returncode", "named"),
+    [
+        ("registry.example/vllm:v1", None, cli.EXIT_USAGE, f"this container runs, {IMAGE[0]} at {IMAGE[1]}"),
+        (f"registry.example/vllm@sha256:{'3' * 64}", None, cli.EXIT_USAGE, "must name it by that digest"),
+        (f"registry.example/vllm@{IMAGE[1]}", IMAGE_VARS[1], cli.EXIT_FAILED, f"{IMAGE_VARS[1]} not set"),
+    ],
+    ids=["by-tag", "another-digest", "no-pin"],
+)
+@pytest.mark.usefixtures("ready_environment")
+def test_a_spec_measured_locally_on_an_image_this_container_does_not_run_ends_the_run_for_good(
+    image: str,
+    unset: str | None,
+    returncode: int,
+    named: str,
+    host: Host,
+    agent_cli: list[RunSettings],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if unset is not None:
+        monkeypatch.delenv(unset)
+    host.spec(**{**LOCAL, "framework": {"name": "vllm", "image": image}})
+
+    assert cli.main(["hosted", "run"]) == returncode
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, returncode)
+    assert named in str(document["error"])
+    assert agent_cli == [] and not any(host.workspace.iterdir())
+
+
+@pytest.mark.parametrize("sections", [{}, LOCAL], ids=["hosted", "local"])
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_whose_agents_cannot_be_isolated_ends_for_good_before_anything_starts(
+    sections: dict[str, object], host: Host, agent_cli: list[RunSettings], bubblewrap: Bubblewrap
+) -> None:
+    bubblewrap.problems = (DENIED,)
+    host.spec(**sections)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
+    assert str(document["error"]).startswith("agents cannot be isolated on this host: ")
+    assert f"bubblewrap ({LAYER_BWRAP}, 0.13.1): {DENIED}" in str(document["error"])
+    assert set(bubblewrap.asked or ()) == {LAYER_BWRAP}, "only the hosting layer's bubblewrap is probed"
+    assert agent_cli == [] and not any(host.workspace.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_whose_host_names_no_layer_ends_for_good_and_probes_no_bubblewrap(
+    host: Host, agent_cli: list[RunSettings], bubblewrap: Bubblewrap, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HYPERLOOM_HOST_LAYER")
+    host.spec(**LOCAL)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    assert agent_isolation.NO_LAYER_BWRAP in str(host.exit_document()["error"])
+    assert bubblewrap.asked is None and agent_cli == []
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_whose_bubblewrap_gave_no_answer_in_time_leaves_the_host_to_start_it_again(
+    host: Host, agent_cli: list[RunSettings], bubblewrap: Bubblewrap
+) -> None:
+    bubblewrap.problems, bubblewrap.transient = (f"bubblewrap at {LAYER_BWRAP}: no answer in 10 s",), True
+    host.spec(**LOCAL)
+
+    with pytest.raises(TimeoutError, match="no answer in 10 s"):
+        cli.main(["hosted", "run"])
+
+    assert not (host.state_dir / "exit.json").exists()
+    assert agent_cli == [] and not any(host.workspace.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restart_of_a_spec_measured_locally_finishes_the_session_on_this_containers_cards(
+    host: Host, agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _grant_untouched(monkeypatch)
+    loaded: list[tuple[Workload, float | None]] = []
+    real = cli.load_peers
+
+    def load(workload: Workload, *, tests_end_by: float | None) -> PeerFactory:
+        loaded.append((workload, tests_end_by))
+        return real(workload, tests_end_by=tests_end_by)
+
+    monkeypatch.setattr(hosted_peers, "load_peers", load)
+    layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+    host.spec(**LOCAL)
+    created = datetime.fromisoformat(os.environ["HYPERLOOM_RUN_CREATED_AT"]).timestamp()
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    stop = created + GRANT["max_runtime_sec"] - MB_CLOSE_GRACE_CAP_SECONDS
+    assert agent_cli == [_settings()] and loaded == [(_settings().workload, pytest.approx(stop, abs=1.0))], (
+        "FINAL's tests on this container's cards end by the grant's stop, as in the grant's sandboxes"
+    )
+    assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
+
+
 # -- run --measurement hosted -----------------------------------------------------------------------------------------
 #: A grant handed to a session started by hand: the sandbox group, the measurement key, the limits and the source.
 HANDED = {
@@ -2316,12 +2848,12 @@ def handed(agent_binaries: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(tmp_path / "runner-cache"))
     started = Started([], [])
 
-    def run_session(settings: RunSettings, peer_factory: PeerFactory, services: object) -> int:
+    def run_session(settings: RunSettings, peer_factory: PeerFactory, services: object, **_: object) -> int:
         started.sessions.append((settings, peer_factory))
         return 0
 
     monkeypatch.setattr(cli, "run_session", run_session)
-    monkeypatch.setattr(hosted_run, "arm_grant_stop", started.stops.append)
+    monkeypatch.setattr(hosted_run_module, "arm_grant_stop", started.stops.append)
     monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
     return started
 
@@ -2363,6 +2895,64 @@ def test_a_hosted_run_without_make_before_break_runs_every_test_the_handed_grant
     [(settings, _)] = handed.sessions
     assert settings.make_before_break is False
     assert settings.caps.max_parallel_tests == 3, "TP=2 on 8 GPUs and 3 sandboxes, no room kept"
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_names_every_shared_directory_it_cannot_write_in_one_message_before_a_session_starts(
+    handed: Started, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    blocker = tmp_path / "a-file"
+    blocker.write_text("")
+    monkeypatch.setenv("HYPERLOOM_EVENTS_DIR", str(blocker / "events"))
+    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(blocker / "runner-cache"))
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "no-such-archive"))
+
+    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == cli.EXIT_FAILED
+
+    [line] = [line for line in capsys.readouterr().err.splitlines() if "cannot write the shared storage" in line]
+    assert "HYPERLOOM_EVENTS_DIR" not in line, "a multi-branch session never writes the events directory"
+    assert f"HYPERLOOM_RUNNER_CACHE {blocker / 'runner-cache'}: ENOTDIR" in line
+    assert f"{ARCHIVE_ENV} {tmp_path / 'no-such-archive'}: ENOENT" in line
+    assert not handed.sessions
+
+
+@pytest.mark.usefixtures("ready_environment")
+@pytest.mark.parametrize("shared", [True, False], ids=["below-shared-storage", "elsewhere"])
+def test_a_hosted_run_makes_the_shared_directories_it_writes_2775_when_they_are_missing(
+    handed: Started, shared: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(0o2775 if shared else 0o755)  # set up to be shared, or a plain directory
+    made = {"HYPERLOOM_RUNNER_CACHE": parent / "runner-cache"}
+    for name, directory in made.items():
+        monkeypatch.setenv(name, str(directory))
+    events = parent / "run" / "events"
+    monkeypatch.setenv("HYPERLOOM_EVENTS_DIR", str(events))
+
+    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == 0
+
+    assert handed.sessions
+    for name, directory in made.items():
+        mode = stat.S_IMODE(directory.stat().st_mode)
+        assert mode == (0o2775 if shared else 0o2775 & ~current_umask() & 0o777), (name, oct(mode))
+    assert not events.parent.exists(), "a multi-branch session never writes the events directory"
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_warns_of_a_shared_directory_that_is_not_setgid_and_starts(
+    handed: Started, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    cache = tmp_path / "runner-cache"
+    cache.mkdir()
+    cache.chmod(0o775)
+    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(cache))
+
+    with caplog.at_level(logging.WARNING):
+        assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == 0
+
+    assert handed.sessions
+    assert f"HYPERLOOM_RUNNER_CACHE {cache} is not setgid" in caplog.text
 
 
 @pytest.mark.usefixtures("ready_environment")

@@ -14,7 +14,8 @@ The operator's own launch file enters both as the :class:`UserFile` :func:`parse
 :func:`fetch_response` reads one at a URL. A scriptable session's base is its script, which :func:`scriptable_base`
 freezes with its content.
 
-A runner runs one round with :func:`run_round`, and reaps a server a round left running with :func:`stop`. The round
+A runner runs one round with :func:`run_round`, and reaps a server a round left running with :func:`stop`, which
+raises :class:`PidfileError` on a ``server.pid`` this package did not write. The round
 names the staged tools it runs by :func:`manifest_sha256`, the digest of the tool cache's manifest;
 :func:`verified_manifest_sha256` gives it only for a cache that verifies against the pins. Two hosts compare their
 stagings by :func:`normalised_manifest`, a :class:`NormalisedManifest` that leaves every path out, and a host that
@@ -29,7 +30,8 @@ the config before the round starts. :func:`inferencex_root` is the staged Infere
 :data:`CLIENT_SCRIPT` with :data:`CLIENT_ROOT_ENV` naming that root. A round's ``launch.json`` names the GPUs its server ran
 on under :data:`GPU_MASK_ENV`; :func:`runner_owned` names the flags and environment a round sets itself, which no
 layer a host hands it may set. The AgentX client staging installs is patched to export the output token count of a
-reply it found nothing in under :data:`ERROR_OSL_METRIC` on that request's export line.
+reply it found nothing in under :data:`ERROR_OSL_METRIC` on that request's export line, and to log the error of a
+warmup request that aborts the replay after :data:`WARMUP_ERROR_PREFIX` on the line of its warmup abort.
 
 A caller measuring a server outside a round as a fixed round does builds each pass with :func:`client_argv` under
 :func:`fixed_client_env`, the discarded :func:`warmup_pass` before the measured one.
@@ -37,7 +39,7 @@ A caller measuring a server outside a round as a fixed round does builds each pa
 
 from __future__ import annotations
 
-from inference_suite.aiperf_patch import ERROR_OSL_METRIC
+from inference_suite.aiperf_patch import ERROR_OSL_METRIC, WARMUP_ERROR_PREFIX
 from inference_suite.cli import EXIT_REFUSED
 from inference_suite.compose import GPU_MASK_ENV, runner_owned
 from inference_suite.contracts.base_launch import LaunchQuery
@@ -54,6 +56,7 @@ from inference_suite.recipe.sources import (
 from inference_suite.recipe.user_file import UserFile, UserFileError, parse_user_file
 from inference_suite.load.scriptable import scriptable_base
 from inference_suite.run import RoundResult, run_round
+from inference_suite.runtime.process import PidfileError
 from inference_suite.runtime.server import stop
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT
 from inference_suite.contracts.normalised import NormalisedManifest
@@ -84,6 +87,7 @@ __all__ = [
     "LaunchQuery",
     "Miss",
     "NormalisedManifest",
+    "PidfileError",
     "RoundResult",
     "RunDirError",
     "SourceFetchError",
@@ -91,6 +95,7 @@ __all__ = [
     "StagingError",
     "UserFile",
     "UserFileError",
+    "WARMUP_ERROR_PREFIX",
     "client_argv",
     "fixed_client_env",
     "fetch_response",
