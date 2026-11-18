@@ -10,6 +10,13 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors.tests.test_suite_config import (
+    _base,
+    _launch,
+    _point,
+    _settings,
+)
+from hyperloom.orchestrator.actions.executors._suite.config import suite_config
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.kernel import KernelPhase
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -23,7 +30,18 @@ _MISSES = "\n".join(
 )
 
 
-def _phase(tmp_path: Path, server_env: dict[str, str]) -> tuple[KernelPhase, dict[str, str]]:
+def _write_launch(run_dir: Path, server_env: dict[str, str]) -> None:
+    """The ``launch.json`` inference_suite leaves beside the round's ``server.log``."""
+    base = _base("sglang")
+    point = _point("sglang")
+    envs = point["benchmark"]["envs"]
+    envs.pop("AITER_LOG_TUNED_CONFIG")
+    envs.update(server_env)
+    launch = _launch(suite_config(point, base, _settings()), base)
+    (run_dir / "launch.json").write_text(json.dumps(launch.to_document()), encoding="utf-8")
+
+
+def _phase(tmp_path: Path, server_env: dict[str, str] | None) -> tuple[KernelPhase, dict[str, str]]:
     table = tmp_path / "merged_tuned_dense_bf16.csv"
     table.write_text(
         "cu_num,M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,libtype,solidx,splitK,us,kernelName\n"
@@ -33,16 +51,17 @@ def _phase(tmp_path: Path, server_env: dict[str, str]) -> tuple[KernelPhase, dic
     bench = tmp_path / "runs" / "integrate" / f"integrate-gemm_tune_{_TUNER}" / "benchmark_sglang_1"
     bench.mkdir(parents=True)
     (bench / "server.log").write_text(_MISSES + "\n", encoding="utf-8")
-    launch = {"effective_argv": ["python3"], "runtime_environment": {}, "effective_env": {**env, **server_env}}
-    (bench / "agentx_server_launch.json").write_text(json.dumps(launch), encoding="utf-8")
+    if server_env is not None:
+        _write_launch(bench, {**env, **server_env})
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = SharedState(model_path=str(tmp_path / "absent"), tp=4, framework="sglang", baseline_tput=100.0)
     return coord.phase_kernel, env
 
 
-def test_an_unread_record_from_a_server_that_logged_no_hits_is_inconclusive(tmp_path):
-    phase, env = _phase(tmp_path, server_env={})
+@pytest.mark.parametrize("server_env", [{}, {"AITER_LOG_TUNED_CONFIG": "0"}, None], ids=["unset", "off", "no-record"])
+def test_an_unread_record_from_a_server_that_logged_no_hits_is_inconclusive(tmp_path, server_env):
+    phase, env = _phase(tmp_path, server_env=server_env)
 
     applied = phase._gemm_apply_verdict(_TUNER, env)
     coverage = phase._gemm_tuned_config_coverage(_TUNER, env)
