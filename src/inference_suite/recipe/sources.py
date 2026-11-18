@@ -48,6 +48,7 @@ from inference_suite.recipe.inferencex import (
     PROJECT,
     RUNNERS,
     InferencexPoint,
+    inferencex_model_id,
     served_points,
 )
 from inference_suite.recipe.model import ApiResponse, InferencexSelection, InferencexSnapshot, RepoBundle, SourceMiss
@@ -650,7 +651,12 @@ def fetch_sources(
             return SourceSnapshot(None, fetched_unix, unread=UnreadSource(_INFERENCEX_SOURCE, str(error)))
         if commit:
             _require_resolver_api(checkout)
-        snapshot = SourceSnapshot(inferencex, fetched_unix, inferencex_pin=checkout.commit if commit else "")
+        named = inferencex_model_id(query.model_id, inferencex.bundle)
+        if named:
+            query = dataclasses.replace(query, model_id=named)
+        snapshot = SourceSnapshot(
+            inferencex, fetched_unix, inferencex_pin=checkout.commit if commit else "", model_id=named or ""
+        )
         for source, read in _recipe_reads(query, checkout, inferencex, scratch):
             try:
                 snapshot = read(snapshot)
