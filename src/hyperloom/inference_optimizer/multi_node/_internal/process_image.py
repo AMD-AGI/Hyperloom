@@ -13,10 +13,11 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import os
+import signal
 import struct
 
 _PTRACE_POKEDATA = 5
-_PTRACE_CONT = 7
+_PTRACE_SINGLESTEP = 9
 _PTRACE_GETREGS = 12
 _PTRACE_SETREGS = 13
 _PTRACE_ATTACH = 16
@@ -115,7 +116,8 @@ def _stack_slot(pid: int, rsp: int, nbytes: int) -> int:
             start, end = int(start_s, 16), int(end_s, 16)
             if not start <= rsp < end:
                 continue
-            addr = (rsp - nbytes - 64) & ~0xF
+            # Stay clear of the 128-byte red zone below rsp: a failed exec resumes the original image.
+            addr = (rsp - nbytes - 256) & ~0xF
             if addr < start:
                 raise OSError(f"pid {pid} stack cannot hold {nbytes} bytes")
             return addr
@@ -208,6 +210,23 @@ def descendant_pids(pid: int) -> list[int]:
     return found
 
 
+def _check_exec(pid: int, status: int, gadget: int, saved: _Regs) -> None:
+    """Raise ``OSError`` unless the single-stepped ``execve`` replaced the image; a failed one restores ``saved``."""
+    if not os.WIFSTOPPED(status) or os.WSTOPSIG(status) != signal.SIGTRAP:
+        raise OSError(f"process {pid} stopped with status {status} during exec")
+    after = _Regs()
+    if _libc.ptrace(_PTRACE_GETREGS, ctypes.c_int(pid), None, ctypes.byref(after)) < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+    ret = ctypes.c_longlong(after.rax).value
+    if after.rip != gadget + 2 or not -4096 < ret < 0:
+        return
+    if _libc.ptrace(_PTRACE_SETREGS, ctypes.c_int(pid), None, ctypes.byref(saved)) < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+    raise OSError(-ret, f"execve in pid {pid} failed: {os.strerror(-ret)}")
+
+
 def replace_process_image(
     pid: int,
     argv: list[str],
@@ -220,7 +239,9 @@ def replace_process_image(
     With ``env_snapshot`` the new image starts from the environment ``pid`` had
     before its first replacement, not from the one the current image inherited.
     Descendants are killed while the target is stopped so a waiting parent
-    (the container launcher) keeps waiting on the same pid.
+    (the container launcher) keeps waiting on the same pid. The injected
+    ``syscall`` is single-stepped: when ``execve`` fails, the original registers
+    are restored, the process resumes its own image, and ``OSError`` carries the errno.
     """
     if not argv or any("\0" in part for part in argv):
         raise ValueError("argv must be non-empty and contain no NULs")
@@ -236,6 +257,7 @@ def replace_process_image(
         if _libc.ptrace(_PTRACE_GETREGS, ctypes.c_int(pid), None, ctypes.byref(regs)) < 0:
             err = ctypes.get_errno()
             raise OSError(err, os.strerror(err))
+        saved = _Regs.from_buffer_copy(regs)
         gadget = _syscall_gadget(pid)
         env_items = merged_environ(pid, env_overrides, snapshot_path=env_snapshot)
         # Strings, two pointer arrays, and alignment slack.
@@ -251,10 +273,11 @@ def replace_process_image(
         if _libc.ptrace(_PTRACE_SETREGS, ctypes.c_int(pid), None, ctypes.byref(regs)) < 0:
             err = ctypes.get_errno()
             raise OSError(err, os.strerror(err))
-        _ptrace(_PTRACE_CONT, pid)
+        _ptrace(_PTRACE_SINGLESTEP, pid)
         _pid, status = os.waitpid(pid, 0)
         if os.WIFEXITED(status) or os.WIFSIGNALED(status):
             raise OSError(f"process {pid} died during exec (status={status})")
+        _check_exec(pid, status, gadget, saved)
     except Exception:
         try:
             _ptrace(_PTRACE_DETACH, pid)

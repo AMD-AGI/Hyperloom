@@ -758,7 +758,7 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> li
     if not is_multi_node():
         return []
     state = _read_state() or {}
-    if str(state.get("backend") or "").strip().lower() not in ("atomesh", "sglangrouter"):
+    if str(state.get("backend") or "").strip().lower() not in multi_node.PD_ROUTER_BACKENDS:
         return []
     port = str(os.environ.get("HYPERLOOM_MN_WORKER_PORT", "8000") or "8000").strip() or "8000"
     targets: list[tuple[str, str]] = []
@@ -946,7 +946,7 @@ def _worker_health_targets(state: dict, default_port: int) -> list[tuple[str, st
 
 def _pd_engines_not_running(state: dict) -> list[str]:
     """Atom/sglangrouter engine pods whose launched server is gone; empty for other backends."""
-    if str(state.get("backend") or "").strip().lower() not in ("atomesh", "sglangrouter"):
+    if str(state.get("backend") or "").strip().lower() not in multi_node.PD_ROUTER_BACKENDS:
         return []
     from hyperloom.inference_optimizer.multi_node.commands.pd_cluster import engines_not_running
 
@@ -1017,7 +1017,7 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
     if not targets:
         return
     started = _t.monotonic()
-    ready: set[str] = set()
+    ready: set[tuple[str, int]] = set()
     launch_checked = False
     # Detokenizer-wedge fast-fail: bail early on a wedged worker instead of burning the full timeout.
     wedge_grace = settings.worker_wedge_grace_s
@@ -1030,16 +1030,24 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
         while True:
             elapsed = int(_t.monotonic() - started)
             for role, ip, worker_port in targets:
-                if ip in ready:
+                if (ip, worker_port) in ready:
                     continue
                 try:
                     resp = await client.get("http://" + ip + ":" + str(worker_port) + "/health")
                 except _httpx.HTTPError:
                     continue
                 if resp.status_code == 200:
-                    ready.add(ip)
-                    log.info("worker /health OK (%s %s) after %ds [%d/%d]", role, ip, elapsed, len(ready), len(targets))
-            pending = [ip for _r, ip, _p in targets if ip not in ready]
+                    ready.add((ip, worker_port))
+                    log.info(
+                        "worker /health OK (%s %s:%d) after %ds [%d/%d]",
+                        role,
+                        ip,
+                        worker_port,
+                        elapsed,
+                        len(ready),
+                        len(targets),
+                    )
+            pending = list(dict.fromkeys(ip for _r, ip, p in targets if (ip, p) not in ready))
             # A pod that restarted its container serves its platform entrypoint: check once past the crash grace
             # and again before declaring the workers ready.
             if not pending or (not launch_checked and elapsed > crash_grace):
@@ -1294,7 +1302,7 @@ async def _wait_for_server_health_async(settings: RestartSettings, timeout_s: in
     # actually serve traffic (Infera registers models in /v1/models before the worker is ready to accept requests;
     # this causes the first benchmark to get 503 "Model temporarily unavailable" for every request, surfacing as
     # `completed=0` -> `baseline_failed`).
-    wait_model_ready = str(state.get("backend") or "").strip().lower() in ("infera", "atomesh", "sglangrouter")
+    wait_model_ready = str(state.get("backend") or "").strip().lower() in ("infera", *multi_node.PD_ROUTER_BACKENDS)
     wait = _ServingWait(settings, base, timeout_s)
     async with _httpx.AsyncClient(timeout=15.0) as client:
         while True:

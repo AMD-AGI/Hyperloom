@@ -57,12 +57,23 @@ def _manual(env: Mapping[str, str]) -> BaselineArgs | None:
     return BaselineArgs(SOURCE_MANUAL, prefill, decode, detail="operator-supplied server args")
 
 
-def _previous(previous: Mapping[str, Any] | None) -> BaselineArgs | None:
-    """Args a prior launch of this session recorded, so a resume keeps its baseline."""
+def _identity(env: Mapping[str, str]) -> dict[str, Any]:
+    """The launch inputs the baseline args depend on: the model and each role's expert parallelism."""
+    return {
+        "model": env.get("MODEL_PATH", "").strip(),
+        "prefill_ep": _role_ep(env, "prefill"),
+        "decode_ep": _role_ep(env, "decode"),
+    }
+
+
+def _previous(previous: Mapping[str, Any] | None, env: Mapping[str, str]) -> BaselineArgs | None:
+    """Args a prior launch of this session recorded for the same model and EP, so a resume keeps its baseline."""
     if not previous:
         return None
     source = str(previous.get("baseline_args_source") or "")
     if source not in (SOURCE_MANUAL, SOURCE_MAGPIE, SOURCE_INFERENCEX):
+        return None
+    if previous.get("baseline_identity") != _identity(env):
         return None
     return BaselineArgs(
         source,
@@ -243,7 +254,7 @@ def resolve_baseline_args(
 ) -> BaselineArgs:
     """Pick the baseline args source; raise ``BaselineArgsMissing`` when none applies."""
     lookup = env if env is not None else os.environ
-    for choice in (_manual(lookup), _previous(previous), _magpie(), _inferencex(lookup)):
+    for choice in (_manual(lookup), _previous(previous, lookup), _magpie(), _inferencex(lookup)):
         if choice is not None:
             return choice
     model = lookup.get("MODEL_PATH", "").strip() or "<unset MODEL_PATH>"
@@ -265,8 +276,11 @@ def export_baseline_args(choice: BaselineArgs) -> None:
         os.environ["PD_TRANSFER_BACKEND"] = choice.transfer_backend
 
 
-def record_baseline_args(state: dict[str, Any], choice: BaselineArgs) -> None:
-    """Write the chosen source and per-role args into the multi-node state."""
+def record_baseline_args(
+    state: dict[str, Any], choice: BaselineArgs, env: Mapping[str, str] | None = None
+) -> None:
+    """Write the chosen source, per-role args, and the model/EP they were resolved for into the multi-node state."""
+    state["baseline_identity"] = _identity(env if env is not None else os.environ)
     state["baseline_args_source"] = choice.source
     state["baseline_prefill_args"] = choice.prefill
     state["baseline_decode_args"] = choice.decode

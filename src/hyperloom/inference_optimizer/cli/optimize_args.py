@@ -12,7 +12,7 @@ from hyperloom.common.workload_defaults import DEFAULT_PRECISION
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 
 from .. import framework_registry
-from ..multi_node import normalize_mn_backend
+from ..multi_node import MN_BACKENDS, normalize_mn_backend
 from .backends import CRITIC_PROTOCOL_CHOICES
 from .benchmark_config import add_benchmark_argument
 
@@ -138,7 +138,7 @@ def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
     opt.add_argument(
         "--mn-backend",
         type=normalize_mn_backend,
-        choices=("rayjob", "infera", "atomesh", "sglangrouter"),
+        choices=MN_BACKENDS,
         default=None,
         help="Multi-node backend when --nodes>=2: 'rayjob' (default, Ray "
         "head+workers), 'infera' (idle InferaDeployment + SSH), 'atomesh' "

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import socket
@@ -124,6 +125,35 @@ def test_pods_record_the_engine_port_of_their_role() -> None:
     assert ports == {"router": None, "prefill": 8010, "decode": 8020}
 
 
+def test_previous_baseline_args_are_reused_only_for_the_same_model_and_ep(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer.multi_node._internal import baseline_args as ba
+
+    recorded: dict[str, object] = {}
+    monkeypatch.setattr(ba, "_inferencex_root", lambda _env: None)
+    monkeypatch.setenv("MODEL_PATH", "/models/DeepSeek-R1")
+    monkeypatch.delenv("EP", raising=False)
+    ba.record_baseline_args(recorded, ba.BaselineArgs(ba.SOURCE_INFERENCEX, "--context-length 8192", "--x"))
+    same = {"MODEL_PATH": "/models/DeepSeek-R1"}
+    assert ba.resolve_baseline_args(env=same, previous=recorded).prefill == "--context-length 8192"
+    for env in ({"MODEL_PATH": "/models/Qwen3"}, {"MODEL_PATH": "/models/DeepSeek-R1", "EP": "8"}):
+        with pytest.raises(ba.BaselineArgsMissing):
+            ba.resolve_baseline_args(env=env, previous=recorded)
+    legacy = {k: v for k, v in recorded.items() if k != "baseline_identity"}
+    with pytest.raises(ba.BaselineArgsMissing):
+        ba.resolve_baseline_args(env=same, previous=legacy)
+
+
+def test_router_listens_on_the_service_url_port_when_the_url_names_its_pod() -> None:
+    spec = _spec(backend="sglangrouter")
+    direct = pods_for(["10.0.0.9"], ["10.0.0.1"], ["10.0.0.2"], 29000, spec, service_url="http://10.0.0.9:30000")
+    assert "--port 30000" in direct[0]["launch_command"]
+    assert direct[0]["routerPort"] == 30000
+    service = pods_for(["10.0.0.9"], ["10.0.0.1"], ["10.0.0.2"], 29000, spec, service_url="http://router-svc:30000")
+    assert "--port 8000" in service[0]["launch_command"]
+    assert service[0]["routerPort"] == 8000
+    assert "export ATOM_SERVER_PORT=30000\n" in pd_internal.launch_script("router", "true", {}, server_port=30000)
+
+
 def test_platform_router_is_recorded_from_the_service_url(monkeypatch: pytest.MonkeyPatch) -> None:
     def _resolve(host: str) -> str:
         if host != "router-svc.ns":
@@ -165,6 +195,34 @@ def test_platform_router_ip_is_listed_and_stays_platform_managed(monkeypatch: py
     assert state["router_pod_ips"] == ["192.168.0.5"]
     assert [pod.get("managed_by") for pod in state["router_pods"]] == ["platform"]
     assert [pod["role"] for pod in pd_cmds._ordered_pods(state)] == ["prefill", "decode"]
+
+
+def test_stamp_keeps_the_pinned_profile_dir_and_restores_recorded_traces(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The pinned dir is where this session's engines write; a recorded dir from disk must not replace it."""
+    pinned = tmp_path / "new" / "torch_trace"
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", str(pinned))
+    path = bind_state_file_to_session(tmp_path / "session")
+    path.write_text(
+        json.dumps(
+            {
+                "backend": "sglangrouter",
+                "service_url": "http://router-svc.ns:8000",
+                "prefill_pod_ips": ["10.0.0.1"],
+                "profile_trace": str(tmp_path / "old" / "torch_trace"),
+                "decode_trace": "/old/decode/rank0.trace.json.gz",
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    monkeypatch.setattr(pd_internal.socket, "gethostbyname", lambda host: "192.168.0.5")
+    env = {"HYPERLOOM_MN_EXT_PREFILL_IPS": "10.0.0.1", "HYPERLOOM_MN_EXT_DECODE_IPS": "10.0.0.2"}
+    state = {"backend": "sglangrouter", "service_url": "http://router-svc.ns:8000"}
+    pd_internal.stamp_pd_cluster(state, lambda name: env.get(name, ""))
+    assert state["profile_trace"] == str(pinned)
+    assert state["decode_trace"] == "/old/decode/rank0.trace.json.gz"
 
 
 def test_state_records_the_user_data_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -365,6 +423,26 @@ def test_replace_process_image_drops_env_exported_by_the_previous_image(tmp_path
     assert marker.read_text(encoding="utf-8") == "orig|"
 
 
+def test_replace_process_image_reports_a_failed_exec_and_leaves_the_process_running() -> None:
+    pid = os.fork()
+    if pid == 0:
+        os.execv("/bin/sleep", ["/bin/sleep", "30"])
+    try:
+        _wait_for_cmdline(pid, b"/bin/sleep\x0030")
+        with pytest.raises(OSError) as raised:
+            replace_process_image(pid, ["/nonexistent/hl-no-such-binary"])
+        assert raised.value.errno == errno.ENOENT
+        time.sleep(0.3)
+        assert os.waitpid(pid, os.WNOHANG) == (0, 0)
+        assert Path(f"/proc/{pid}/cmdline").read_bytes().startswith(b"/bin/sleep\x0030")
+    finally:
+        try:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+
+
 class _FakeCli:
     """Records SSH scripts per IP and answers with a scripted stdout."""
 
@@ -528,6 +606,39 @@ def test_engines_not_running_names_pods_whose_launch_is_gone(monkeypatch: pytest
     assert "/tmp/hyperloom-mn-decode.pid" in dict(fake.calls)["10.0.0.2"]
 
 
+class _LocalCli:
+    """Runs the SSH script on this host instead of a pod."""
+
+    def _infera_ssh_bash_with_env(self, state, ip, script, *, timeout, port=None):
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=timeout)
+
+
+def test_engines_not_running_counts_an_engine_waiting_in_its_launch_script(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The launch script holds the pid while it waits for the GPU; that engine is starting, not gone."""
+    launch = tmp_path / "hyperloom-mn-decode.sh"
+    launch.write_text("#!/bin/bash\nsleep 30\n", encoding="utf-8")
+    launch.chmod(0o755)
+    pidfile = tmp_path / "decode.pid"
+    monkeypatch.setattr(pd_cmds, "_cli", lambda: _LocalCli())
+    monkeypatch.setattr(pd_cmds, "_pidfile", lambda role: str(pidfile))
+    monkeypatch.setattr(pd_cmds, "_launch_path", lambda role: str(launch))
+    state = dict(_PD_STATE, prefill_pods=[])
+    waiting = subprocess.Popen([str(launch)])
+    other = subprocess.Popen(["sleep", "30"])
+    try:
+        time.sleep(0.2)
+        pidfile.write_text(str(waiting.pid), encoding="utf-8")
+        assert pd_cmds.engines_not_running(state) == []
+        pidfile.write_text(str(other.pid), encoding="utf-8")
+        assert pd_cmds.engines_not_running(state) == ["decode 10.0.0.2"]
+    finally:
+        for proc in (waiting, other):
+            proc.kill()
+            proc.wait()
+
+
 def test_sglangrouter_router_needle_matches_the_renamed_process() -> None:
     needle = pd_internal.cmdline_needle("router", "sglangrouter")
     assert "sglang::router" in needle.split("|")
@@ -607,6 +718,29 @@ def test_remote_driver_execs_in_place_only_for_the_launcher_waited_pid(
         if action == "restart":
             assert calls.index(("env", 4242, str(tmp_path / "role.pid") + ".environ")) < calls.index(("kill", 4242, 9))
             assert [c[2] for c in calls if c[0] == "spawn"] == [("FROM=4242",)]
+
+
+def test_stop_parks_the_launcher_pid_without_its_inherited_sockets() -> None:
+    """A parked server must not keep the old server's listening socket or GPU handle open."""
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen()
+    sock.set_inheritable(True)
+    parked = subprocess.Popen(["/bin/bash", "-c", pd_cmds._park_script()], pass_fds=(sock.fileno(),))
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            cmd = open(f"/proc/{parked.pid}/cmdline", "rb").read().split(b"\0")
+            if os.path.basename(cmd[0].decode()) == "sleep":
+                break
+            time.sleep(0.05)
+        assert [part.decode() for part in cmd if part] == ["/bin/sleep", "infinity"]
+        links = [os.readlink(f"/proc/{parked.pid}/fd/{fd}") for fd in os.listdir(f"/proc/{parked.pid}/fd")]
+        assert not [link for link in links if link.startswith("socket:")]
+    finally:
+        parked.kill()
+        parked.wait()
+        sock.close()
 
 
 def test_spawn_without_a_server_takes_the_container_environment(

@@ -10,7 +10,13 @@ import os
 import sys
 from typing import Any
 
-from ..multi_node import TopologyHandoffError, normalize_mn_backend, topology_file_overlay
+from ..multi_node import (
+    MN_BACKENDS,
+    PD_ROUTER_BACKENDS,
+    TopologyHandoffError,
+    normalize_mn_backend,
+    topology_file_overlay,
+)
 
 
 def _topology_file_overlay() -> dict[str, str] | None:
@@ -57,7 +63,7 @@ def _resolve_mn_backend(args: argparse.Namespace) -> str:
         or os.environ.get("MN_BACKEND", "").strip()
         or "rayjob"
     )
-    if backend not in ("rayjob", "infera", "atomesh", "sglangrouter"):
+    if backend not in MN_BACKENDS:
         print(
             f"ERROR: --mn-backend must be 'rayjob', 'infera', 'atomesh', or 'sglangrouter', got {backend!r}",
             file=sys.stderr,
@@ -94,7 +100,7 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
 
     ext_state = build_external_state_from_env()
     ext_state["backend"] = _resolve_mn_backend(args)
-    if ext_state["backend"] in ("atomesh", "sglangrouter"):
+    if ext_state["backend"] in PD_ROUTER_BACKENDS:
         from ..multi_node._internal.pd_cluster import stamp_pd_cluster
 
         if (os.environ.get("PD_MODE", "") or "").strip().lower() != "disaggregated":

@@ -220,6 +220,31 @@ def test_pd_worker_health_dials_the_engine_port_of_each_role(serve, monkeypatch:
     assert seen == ["10.0.0.1:8010", "10.0.0.2:8020"]
 
 
+def test_pd_worker_wait_holds_until_every_engine_on_a_shared_ip_answers(
+    serve, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two engines on one IP are two targets: prefill answering must not mark decode ready."""
+    seen: list[int] = []
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.port)
+        if request.url.port == 8020 and seen.count(8020) < 3:
+            raise httpx.ConnectError("decode still loading")
+        return _OK
+
+    shared = {
+        "backend": "sglangrouter",
+        "prefill_pods": [{"podIP": "10.0.0.5", "podId": "p0", "enginePort": 8010}],
+        "decode_pods": [{"podIP": "10.0.0.5", "podId": "d0", "enginePort": 8020}],
+    }
+    serve({"health": [_OK]}, shared)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(life, "_pd_engines_not_running", lambda _state: [])
+    _workers()
+    assert seen == [8010, 8020, 8020, 8020]
+
+
 def test_pd_worker_wait_fails_when_the_launched_engine_was_replaced(serve, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(life, "_pd_engines_not_running", lambda _state: ["decode 10.0.0.2"])
     serve({"health": [_OK]}, _PD_WORKERS)
@@ -408,10 +433,9 @@ def test_pd_role_traces_are_kept_when_the_trace_filesystem_clock_lags(
     import os
     import time
 
-    from hyperloom.inference_optimizer.multi_node._internal import pd_cluster
     from hyperloom.orchestrator.actions.executors import profile
 
-    monkeypatch.setattr(pd_cluster, "record_profile_paths", lambda **_kwargs: None)
+    monkeypatch.setattr(multi_node, "record_profile_paths", lambda **_kwargs: None)
     root = tmp_path / "torch_trace"
     client_now = time.time() + 1260
     round_start = profile._trace_fs_round_start(str(root), client_now)

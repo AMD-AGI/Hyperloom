@@ -1242,7 +1242,7 @@ class RooflineExecutor:
         )
         steady = str(cached.get("steady_state_trace") or "")
         try:
-            from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import record_profile_paths
+            from hyperloom.inference_optimizer.multi_node import record_profile_paths
 
             profile_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip() or str(Path(trace_path).parent)
             record_profile_paths(

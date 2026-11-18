@@ -15,14 +15,13 @@ import json
 import os
 import shlex
 import socket
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from ..state_paths import resolve_state_file, state_file_safe_to_read
-from .topology_file import normalize_mn_backend
+from .topology_file import PD_ROUTER_BACKENDS, normalize_mn_backend
 
-PD_ROUTER_BACKENDS = ("atomesh", "sglangrouter")
 ENGINE_PORT = 8000
 PREFILL_BOOTSTRAP_PORT = 8998
 DECODE_BOOTSTRAP_PORT = 9098
@@ -57,6 +56,7 @@ class LaunchSpec:
     decode_url: str
     # Option strings the pod's ``sglang.launch_server --help`` lists; empty when not probed.
     engine_flags: frozenset[str] = field(default_factory=frozenset)
+    router_port: int = ENGINE_PORT
 
 
 def _words(raw: str) -> list[str]:
@@ -78,6 +78,19 @@ def engine_port(role: str, spec: LaunchSpec) -> int:
     except ValueError:
         port = None
     return port or ENGINE_PORT
+
+
+def router_port(ip: str, service_url: str) -> int:
+    """Listen port of the router on ``ip``: the ``service_url`` port when the URL names that pod, else ENGINE_PORT.
+
+    A service name in the URL maps its own port onto the pod, so only a URL naming the pod's IP fixes the port.
+    """
+    try:
+        parts = urlsplit((service_url or "").strip())
+        port = parts.port
+    except ValueError:
+        return ENGINE_PORT
+    return port if port and parts.hostname == ip else ENGINE_PORT
 
 
 def _flag_end(words: list[str], i: int) -> int:
@@ -199,7 +212,7 @@ def router_command(spec: LaunchSpec) -> str:
             "--host",
             "0.0.0.0",
             "--port",
-            str(ENGINE_PORT),
+            str(spec.router_port),
         ]
     else:
         argv = [
@@ -208,7 +221,7 @@ def router_command(spec: LaunchSpec) -> str:
             "--host",
             "0.0.0.0",
             "--port",
-            str(ENGINE_PORT),
+            str(spec.router_port),
             "--pd-disaggregation",
             "--prefill",
             spec.prefill_url,
@@ -351,7 +364,11 @@ def spec_from_restart(args: Any, state: dict[str, Any]) -> LaunchSpec:
     )
 
 
-def _pod(role: str, index: int, ip: str, port: int | None, spec: LaunchSpec) -> dict[str, Any]:
+def _pod(
+    role: str, index: int, ip: str, port: int | None, spec: LaunchSpec, *, service_url: str = ""
+) -> dict[str, Any]:
+    if role == "router":
+        spec = replace(spec, router_port=router_port(ip, service_url))
     pod: dict[str, Any] = {
         "role": role,
         "podIP": ip,
@@ -359,7 +376,9 @@ def _pod(role: str, index: int, ip: str, port: int | None, spec: LaunchSpec) -> 
         "sshPort": port,
         "launch_command": command_for(role, spec),
     }
-    if role != "router":
+    if role == "router":
+        pod["routerPort"] = spec.router_port
+    else:
         pod["enginePort"] = engine_port(role, spec)
     return pod
 
@@ -391,10 +410,12 @@ def pods_for(
     """
     pods: list[dict[str, Any]] = []
     for index, ip in enumerate(router):
-        pods.append(_pod("router", index, ip, port, spec))
+        pods.append(_pod("router", index, ip, port, spec, service_url=service_url))
     service_ip = "" if router else _service_ip(service_url)
     if service_ip:
-        pods.append({**_pod("router", 0, service_ip, port, spec), "managed_by": PLATFORM_MANAGED})
+        pods.append(
+            {**_pod("router", 0, service_ip, port, spec, service_url=service_url), "managed_by": PLATFORM_MANAGED}
+        )
     for index, ip in enumerate(prefill):
         pods.append(_pod("prefill", index, ip, port, spec))
     for index, ip in enumerate(decode):
@@ -443,7 +464,7 @@ def previous_cluster_state(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _keep_profile_bookkeeping(state: dict[str, Any]) -> None:
-    """Keep already-recorded TraceLens inputs when this is the same cluster."""
+    """Keep already-recorded TraceLens inputs when this is the same cluster; the pinned ``profile_trace`` stays."""
     disk = _disk_state()
     if not disk:
         return
@@ -452,10 +473,7 @@ def _keep_profile_bookkeeping(state: dict[str, Any]) -> None:
     )
     if not same:
         return
-    # ``_pin_profile_dir`` always fills ``profile_trace``; prefer the last recorded capture.
-    if disk.get("profile_trace"):
-        state["profile_trace"] = disk["profile_trace"]
-    for key in ("steady_state_trace", "decode_trace", "prefill_trace"):
+    for key in ("profile_trace", "steady_state_trace", "decode_trace", "prefill_trace"):
         if not state.get(key) and disk.get(key):
             state[key] = disk[key]
 
@@ -571,13 +589,16 @@ def _gpu_release_wait_lines() -> list[str]:
     ]
 
 
-def launch_script(role: str, command: str, extra_env: dict[str, str], *, log_ip: str = "") -> str:
+def launch_script(
+    role: str, command: str, extra_env: dict[str, str], *, log_ip: str = "", server_port: int = ENGINE_PORT
+) -> str:
     """Bash script that execs ``command`` with the profile and tuning environment.
 
-    Engine roles tee their output to the shared server-log dir when one is set and
-    ``log_ip`` names the pod, and start only after the previous engine released the GPU.
+    ``server_port`` is exported as ``ATOM_SERVER_PORT``. Engine roles tee their output to the shared
+    server-log dir when one is set and ``log_ip`` names the pod, and start only after the previous
+    engine released the GPU.
     """
-    lines = ["#!/bin/bash", "set -euo pipefail", f"export ATOM_SERVER_PORT={ENGINE_PORT}"]
+    lines = ["#!/bin/bash", "set -euo pipefail", f"export ATOM_SERVER_PORT={int(server_port)}"]
     if role != "router":
         lines.append("export SGLANG_HOST_IP=\"${SGLANG_HOST_IP:-$(hostname -i | awk '{print $1}')}\"")
     for key, value in extra_env.items():

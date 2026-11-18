@@ -29,7 +29,9 @@ TOPOLOGY_FILE_ENV = "TOPOLOGY_HANDOFF_FILE"
 
 _SCHEMA_RE = re.compile(r"^topology-handoff/v(\d+)(?:\.\d+)*$")
 _SUPPORTED_MAJOR = 1
-_BACKENDS = ("rayjob", "infera", "atomesh", "sglangrouter")
+MN_BACKENDS = ("rayjob", "infera", "atomesh", "sglangrouter")
+# Backends that run a router in front of sglang prefill/decode engines started over SSH.
+PD_ROUTER_BACKENDS = ("atomesh", "sglangrouter")
 _BACKEND_ALIASES = {"atom": "atomesh"}
 
 
@@ -231,8 +233,8 @@ def _parse(path: str) -> dict[str, str]:
     _check_schema(path, doc)
 
     backend = normalize_mn_backend(doc.get("backend"))
-    if backend not in _BACKENDS:
-        raise _fail(path, f"backend {doc.get('backend')!r} must be one of {', '.join(_BACKENDS)}")
+    if backend not in MN_BACKENDS:
+        raise _fail(path, f"backend {doc.get('backend')!r} must be one of {', '.join(MN_BACKENDS)}")
     for key in ("nodes", "gpus_per_node"):
         if not _is_int(doc.get(key), 1):
             raise _fail(path, f"{key} must be an integer >= 1")
@@ -249,7 +251,7 @@ def _parse(path: str) -> dict[str, str]:
             "HYPERLOOM_MN_EXT_SERVICE_URL": url.strip(),
         }
     )
-    if backend in ("atomesh", "sglangrouter"):
+    if backend in PD_ROUTER_BACKENDS:
         if doc.get("ray") is not None or doc.get("infera") is not None:
             raise _fail(path, f"backend {backend} must not include a ray or infera block")
         filled = _pd_cluster_overlay(path, doc)

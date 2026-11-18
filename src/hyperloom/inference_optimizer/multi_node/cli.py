@@ -37,6 +37,7 @@ from .state_paths import _ensure_runtime_dir, resolve_state_file
 from ._internal.env_safety import filter_forward_env
 from ._internal.external_state import external_service_url, load_multi_node_state
 from ._internal.serving_probe import cluster_is_serving
+from ._internal.topology_file import PD_ROUTER_BACKENDS
 
 # Default poll budget sized under the sandbox 120s ceiling.
 _DEFAULT_POLL_INTERVAL_S = 6
@@ -952,7 +953,7 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
     backend = _load_state().get("backend")
     if backend == "infera":
         return _infera_apply_tracelens_patch(args)
-    if backend in ("atomesh", "sglangrouter"):
+    if backend in PD_ROUTER_BACKENDS:
         from .commands.pd_cluster import apply_tracelens_patch
 
         return apply_tracelens_patch(args)
@@ -1304,7 +1305,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
     backend = _load_state().get("backend")
     if backend == "infera":
         return _infera_restart_server(args)
-    if backend in ("atomesh", "sglangrouter"):
+    if backend in PD_ROUTER_BACKENDS:
         from .commands.pd_cluster import restart_pd_cluster
 
         return restart_pd_cluster(args)
@@ -1329,7 +1330,7 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
     backend = _load_state().get("backend")
     if backend == "infera":
         return _infera_kill_inference(args)
-    if backend in ("atomesh", "sglangrouter"):
+    if backend in PD_ROUTER_BACKENDS:
         from .commands.pd_cluster import kill_pd_cluster
 
         return kill_pd_cluster(args)

@@ -25,8 +25,10 @@ from .._internal import process_image
 from .._internal.log import err, info, warn
 from .._internal.pd_cluster import (
     ENGINE_PORT,
+    PD_ROUTER_BACKENDS,
     PLATFORM_MANAGED,
     LaunchSpec,
+    _close_inherited_handle_lines,
     cmdline_needle,
     drop_unsupported_baseline_flags,
     launch_script,
@@ -145,7 +147,8 @@ def restart_remote_main():
             print(json.dumps({"status": "ok", "action": "stop", "pid": 0}))
             return
         if _held_by_launcher(pid):
-            replace_process_image(pid, ["/bin/sleep", "infinity"], env_snapshot=pidfile + ".environ")
+            park = os.environ.get("HL_PARK_SH") or "exec /bin/sleep infinity"
+            replace_process_image(pid, ["/bin/bash", "-c", park], env_snapshot=pidfile + ".environ")
             open(pidfile, "w", encoding="utf-8").write(str(pid))
             print(json.dumps({"status": "ok", "action": "stop-exec", "pid": pid}))
             return
@@ -203,6 +206,16 @@ def _pidfile(role: str) -> str:
     return f"/tmp/hyperloom-mn-{role}.pid"
 
 
+def _launch_path(role: str) -> str:
+    """Pod-local launch script the restart writes and execs for ``role``."""
+    return f"/tmp/hyperloom-mn-{role}.sh"
+
+
+def _park_script() -> str:
+    """Bash a stopped launcher-held pid execs: close inherited GPU handles and sockets, then sleep."""
+    return "\n".join([*_close_inherited_handle_lines(), "exec /bin/sleep infinity"])
+
+
 def _bash_payload(role: str, script_body: str, needle: str, action: str) -> str:
     """Bash that writes the launch script and runs the in-place restart helper."""
     marker = uuid.uuid4().hex
@@ -210,7 +223,7 @@ def _bash_payload(role: str, script_body: str, needle: str, action: str) -> str:
     py_end = f"HL_PY_{marker}"
     return "\n".join(
         [
-            f"launch=/tmp/hyperloom-mn-{role}.sh",
+            f"launch={_launch_path(role)}",
             f"cat > \"$launch\" << '{launch_end}'",
             script_body.rstrip("\n"),
             launch_end,
@@ -219,6 +232,7 @@ def _bash_payload(role: str, script_body: str, needle: str, action: str) -> str:
             f"export HL_NEEDLE={shlex.quote(needle)}",
             f"export HL_PIDFILE={_pidfile(role)}",
             f"export HL_ACTION={shlex.quote(action)}",
+            f"export HL_PARK_SH={shlex.quote(_park_script())}",
             f"python3 - << '{py_end}'",
             _remote_program().rstrip("\n"),
             py_end,
@@ -234,7 +248,7 @@ def ensure_payload(role: str, command: str, needle: str) -> str:
 def _require_state() -> dict[str, Any]:
     state = _cli()._load_state()
     backend = str(state.get("backend") or "")
-    if backend not in ("atomesh", "sglangrouter"):
+    if backend not in PD_ROUTER_BACKENDS:
         raise _cli().ConfigurationError(f"state backend is {backend!r}, not atomesh or sglangrouter")
     if not state.get("ssh_key_path"):
         raise _cli().ConfigurationError("no ssh_key_path in state; set HYPERLOOM_MN_EXT_SSH_KEY")
@@ -296,7 +310,13 @@ def _ssh_pod(
     role = str(pod.get("role") or "")
     ip = str(pod.get("podIP") or "")
     port = int(pod.get("sshPort") or state.get("ssh_port") or 0)
-    body = launch_script(role, str(pod.get("launch_command") or "true"), _role_env(extra_env, role), log_ip=ip)
+    body = launch_script(
+        role,
+        str(pod.get("launch_command") or "true"),
+        _role_env(extra_env, role),
+        log_ip=ip,
+        server_port=int(pod.get("routerPort") or ENGINE_PORT),
+    )
     needle = cmdline_needle(role, str(state.get("backend") or "atomesh"))
     payload = _bash_payload(role, body, needle, action)
     info(f"{state.get('backend')} {action}: ssh -> {ip}:{port} role={role}")
@@ -410,7 +430,9 @@ def engines_not_running(state: dict[str, Any], *, timeout: int = 30) -> list[str
     """``"<role> <ip>"`` of each engine pod whose launched server is no longer running.
 
     A pod whose container restarted has lost the pidfile and runs its platform
-    entrypoint instead of the launched command. Unreachable pods are not listed.
+    entrypoint instead of the launched command. A pid still running the launch
+    script (waiting for the GPU before it execs the server) counts as running.
+    Unreachable pods are not listed.
     """
     gone: list[str] = []
     for pod in _engine_pods(state):
@@ -420,8 +442,11 @@ def engines_not_running(state: dict[str, Any], *, timeout: int = 30) -> list[str
         needle = cmdline_needle(role, str(state.get("backend") or "atomesh"))
         patterns = " ".join(f"-e {shlex.quote(part)}" for part in needle.split("|"))
         script = (
-            f'pid=$(cat {_pidfile(role)} 2>/dev/null) && kill -0 "$pid" 2>/dev/null '
-            f"&& tr '\\0' ' ' < /proc/\"$pid\"/cmdline | grep -qF {patterns} && echo HL_ALIVE || echo HL_GONE"
+            f'cmd=""; pid=$(cat {shlex.quote(_pidfile(role))} 2>/dev/null) && kill -0 "$pid" 2>/dev/null '
+            f"&& cmd=$(tr '\\0' ' ' < /proc/\"$pid\"/cmdline 2>/dev/null); "
+            f'if printf "%s" "$cmd" | grep -qF {patterns}; then echo HL_ALIVE; '
+            f'elif printf "%s" "$cmd" | grep -qF -e {shlex.quote(_launch_path(role))}; then echo HL_STARTING; '
+            "else echo HL_GONE; fi"
         )
         try:
             completed = _cli()._infera_ssh_bash_with_env(state, ip, script, timeout=timeout, port=port)

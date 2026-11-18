@@ -885,7 +885,7 @@ def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_
             "profile_executor: multi-node trace dir %s exists but no .trace.json.gz files found yet (server pods may still be flushing)",
             trace_dir,
         )
-    from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import record_profile_paths
+    from hyperloom.inference_optimizer.multi_node import record_profile_paths
 
     record_profile_paths(
         profile_trace=str(trace_dir),
