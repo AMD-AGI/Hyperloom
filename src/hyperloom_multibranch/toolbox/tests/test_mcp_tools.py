@@ -310,7 +310,7 @@ async def waiting(seeded: tuple[Path, FakeClock]) -> Writers:
     claim = await w.as_role(Role.SPECIALIST_RUNTIME, "s1").acquire(PAGED_KV, change.fingerprint(), ttl_seconds=TTL)
     toolbox = w.as_role(Role.TOOLBOX)
     await toolbox.write_request(request("r9", PAGED_KV, change))
-    await toolbox.attach_request(claim.key, "r9", ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, "r9")
     return w
 
 

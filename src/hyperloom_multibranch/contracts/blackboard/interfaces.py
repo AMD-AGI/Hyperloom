@@ -237,11 +237,14 @@ class ClaimService(Protocol):
 
     async def renew(self, key: ClaimKey, *, ttl_seconds: float) -> Claim: ...
 
-    async def attach_request(self, key: ClaimKey, request_id: str, *, ttl_seconds: float) -> Claim:
-        """Hand the claim to the toolbox's test; the toolbox renews it from then on.
+    async def attach_request(self, key: ClaimKey, request_id: str) -> Claim:
+        """Hand the claim to the test ``request_id``; from then on the claim follows that test's record, held while the
+        test is in flight, completed by its result, released by its withdrawal or a failed measurement, and nobody
+        renews, releases or changes it. Attaching it to the same test again changes nothing.
 
         ``ClaimLost`` refuses an explore whose change another branch asked first to explore on the same commit, while
-        that test is in flight or once it is measured; the toolbox then withdraws the request, which releases the claim.
+        that test is in flight or once it is measured; the claim stays with the request, and the toolbox then withdraws
+        the request, which releases the claim.
         """
 
     async def release(self, key: ClaimKey) -> Claim: ...

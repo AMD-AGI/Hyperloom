@@ -56,7 +56,7 @@ async def _merged(root: Path) -> LocalBlackboard:
         of, change = intent(branch, "c0", target, mechanism), delta(args)
         claim = await open_as(Role.SPECIALIST_RUNTIME, branch).acquire(of, change.fingerprint(), ttl_seconds=TTL)
         await toolbox.write_request(request(request_id, of, change))
-        await toolbox.attach_request(claim.key, request_id, ttl_seconds=TTL)
+        await toolbox.attach_request(claim.key, request_id)
         await toolbox.write_result(result(request_id))
         await gate.write_judgement(request_id, judgement(3.3, (request_id,)), Conclusion.COMMITTED, commit)
     merge = intent(INTEGRATION_BRANCH, "c0", "merge", "c1")

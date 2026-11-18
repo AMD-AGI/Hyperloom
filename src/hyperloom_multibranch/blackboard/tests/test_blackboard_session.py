@@ -146,7 +146,7 @@ async def test_a_snapshot_holds_every_view_with_the_times_the_facts_arrived(open
     target = intent("s1", "c0")
     claim = await s1.acquire(target, delta().fingerprint(), ttl_seconds=TTL)
     await toolbox.write_request(request("r1", target))
-    await toolbox.attach_request(claim.key, "r1", ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, "r1")
     await toolbox.write_result(result("r1"))
     await gate.write_judgement(
         "r1", judgement(4.0, ("r1",), recorded={"output_tps": 1040.0}), Conclusion.COMMITTED, "c1"

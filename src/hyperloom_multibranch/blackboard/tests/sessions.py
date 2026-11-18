@@ -76,7 +76,7 @@ class Writers:
         claim = await self.as_role(Role.SPECIALIST_RUNTIME, branch).acquire(of, change.fingerprint(), ttl_seconds=TTL)
         toolbox = self.as_role(Role.TOOLBOX)
         await toolbox.write_request(request(request_id, of, change))
-        await toolbox.attach_request(claim.key, request_id, ttl_seconds=TTL)
+        await toolbox.attach_request(claim.key, request_id)
         await toolbox.write_result(outcome or result(request_id))
 
 

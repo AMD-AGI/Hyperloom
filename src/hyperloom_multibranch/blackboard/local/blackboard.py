@@ -348,9 +348,23 @@ def _ceiling_refusal(state: BlackboardState, intent: Intent, bar_pct: float | No
     return CeilingTooLow(intent, ceiling, bar_pct, state.shares_of(intent.parent_commit))
 
 
-def _released(claim: Claim, now: float) -> Claim:
-    if claim.status is not ClaimStatus.HELD:
+def _own_lease(claim: Claim) -> bool:
+    """Whether ``claim`` is still its holder's own lease, to renew or release: held, and carried by no test yet."""
+
+    return claim.status is ClaimStatus.HELD and claim.request_id is None
+
+
+def _check_own_lease(claim: Claim) -> None:
+    if claim.request_id is not None:
+        raise ClaimLost(
+            f"test {claim.request_id} carries the claim on {claim.key.parent_commit}; it ends with that test"
+        )
+    if not _own_lease(claim):
         raise ClaimLost(f"the claim on {claim.key.parent_commit} is {claim.status.value}")
+
+
+def _released(claim: Claim, now: float) -> Claim:
+    _check_own_lease(claim)
     return replace(claim, status=ClaimStatus.RELEASED, heartbeat_at=now)
 
 
@@ -530,16 +544,13 @@ class LocalBlackboard(
         return [effective(claim, now, state) for claim in self._leases.all_current()]
 
     def _check_holds(self, claim: Claim) -> None:
-        """Whether the caller may renew or release ``claim``: its branch's runtime, or the toolbox carrying its test."""
+        """Raise ``ClaimLost`` unless the caller may renew or release ``claim``: the scheduler, or its branch's runtime,
+        and only while it is its holder's own lease."""
 
         role = self.writer.role
-        ours = (
-            role is Role.SCHEDULER
-            or (role is Role.SPECIALIST_RUNTIME and claim.holder == self.writer.branch)
-            or (role is Role.TOOLBOX and claim.request_id is not None)
-        )
-        if claim.status is not ClaimStatus.HELD or not ours:
+        if not (role is Role.SCHEDULER or (role is Role.SPECIALIST_RUNTIME and claim.holder == self.writer.branch)):
             raise ClaimLost(f"the claim on {claim.key.parent_commit} is not {self.writer.name}'s to change")
+        _check_own_lease(claim)
 
     # --- test records ---------------------------------------------------------------------------------------------
 
@@ -569,8 +580,6 @@ class LocalBlackboard(
             failure = f": {result.failure.value} {result.failure_reason or ''}" if result.failure is not None else ""
             summary = f"{result.validity.value} {result.request_id} on {request.branch}{failure}"
             self._append(EntryKind.RESULT, result, branch=request.branch, parent=request.parent_commit, summary=summary)
-            failed = result.validity is Validity.MEASUREMENT_FAILED
-            self._settle_claim(request, ClaimStatus.RELEASED if failed else ClaimStatus.COMPLETED)
         elif existing != result:
             raise ConflictingWrite(f"the result of {result.request_id} was written with other content")
         return self._state().record(result.request_id)
@@ -587,26 +596,9 @@ class LocalBlackboard(
             self._append(
                 EntryKind.WITHDRAWAL, withdrawal, branch=request.branch, parent=request.parent_commit, summary=summary
             )
-            self._settle_claim(request, ClaimStatus.RELEASED)
         elif existing != withdrawal:
             raise ConflictingWrite(f"request {withdrawal.request_id} was withdrawn for another reason")
         return self._state().record(withdrawal.request_id)
-
-    def _settle_claim(self, request: TestRequest, status: ClaimStatus) -> None:
-        """End the claim ``request`` measures: completed by its result, released when nothing was measured."""
-
-        if request.intent_fingerprint is None:
-            return
-        now = self._clock()
-
-        def settle(claim: Claim) -> Claim:
-            ours = claim.holder == request.branch and claim.request_id in (None, request.request_id)
-            if claim.status is not ClaimStatus.HELD or not ours:
-                raise ClaimLost(f"the claim on {claim.key.parent_commit} is not the claim of {request.request_id}")
-            return replace(claim, status=status, request_id=request.request_id, heartbeat_at=now)
-
-        with suppress(ClaimLost):
-            self._leases.change(ClaimKey(request.parent_commit, request.intent_fingerprint), settle)
 
     async def notify_tool_result(self, pointer: ToolResultPointer) -> None:
         self._require(Role.TOOLBOX)
@@ -824,7 +816,7 @@ class LocalBlackboard(
         return claim
 
     async def renew(self, key: ClaimKey, *, ttl_seconds: float) -> Claim:
-        self._require(Role.SPECIALIST_RUNTIME, Role.TOOLBOX)
+        self._require(Role.SPECIALIST_RUNTIME)
         now = self._clock()
 
         def renewed(claim: Claim) -> Claim:
@@ -833,7 +825,7 @@ class LocalBlackboard(
 
         return effective(self._leases.change(key, renewed), now, self._state())
 
-    async def attach_request(self, key: ClaimKey, request_id: str, *, ttl_seconds: float) -> Claim:
+    async def attach_request(self, key: ClaimKey, request_id: str) -> Claim:
         self._require(Role.TOOLBOX)
         state = self._state()
         request = state.record(request_id).request
@@ -841,16 +833,18 @@ class LocalBlackboard(
             raise ConflictingWrite(f"request {request_id} names no intent, so it carries no claim")
         if ClaimKey(request.parent_commit, request.intent_fingerprint) != key:
             raise ConflictingWrite(f"request {request_id} measures another claim")
-        self._refuse_a_change_tested_first(state, key, request)
         now = self._clock()
 
         def attached(claim: Claim) -> Claim:
-            ours = claim.holder == request.branch and claim.request_id in (None, request_id)
-            if claim.status is not ClaimStatus.HELD or not ours:
+            if claim.status is not ClaimStatus.HELD or claim.holder != request.branch or claim.request_id is not None:
                 raise ClaimLost(f"the claim on {key.parent_commit} is not the one {request_id} measures")
-            return replace(claim, request_id=request_id, heartbeat_at=now, expires_at=now + ttl_seconds)
+            return replace(claim, request_id=request_id, heartbeat_at=now)
 
-        return effective(self._leases.change(key, attached), now, state)
+        claim = self._leases.current(key)
+        if claim is None or claim.request_id != request_id:
+            claim = self._leases.change(key, attached)
+        self._refuse_a_change_tested_first(state, key, request)
+        return effective(claim, now, state)
 
     def _refuse_a_change_tested_first(self, state: BlackboardState, key: ClaimKey, request: TestRequest) -> None:
         """Raise ``ClaimLost`` for an explore of a change another branch asked first to explore on the same commit, while
@@ -904,7 +898,7 @@ class LocalBlackboard(
         self._append(EntryKind.CLAIM, decision, branch=request.branch, parent=request.parent_commit, summary=summary)
 
     async def release(self, key: ClaimKey) -> Claim:
-        self._require(Role.SPECIALIST_RUNTIME, Role.TOOLBOX, Role.SCHEDULER)
+        self._require(Role.SPECIALIST_RUNTIME, Role.SCHEDULER)
         now = self._clock()
 
         def released(claim: Claim) -> Claim:
@@ -918,7 +912,7 @@ class LocalBlackboard(
         now = self._clock()
         released = []
         for claim in self._leases.all_current():
-            if claim.holder == branch and claim.status is ClaimStatus.HELD:
+            if claim.holder == branch and _own_lease(claim):
                 with suppress(ClaimLost):
                     released.append(self._leases.change(claim.key, lambda current: _released(current, now)))
         return tuple(released)

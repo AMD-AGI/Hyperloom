@@ -52,7 +52,7 @@ async def _measured(open_as: Open, branch: str, parent: str, request_id: str, ch
     change = delta(change_args)
     claim = await specialist.acquire(target, change.fingerprint(), ttl_seconds=TTL)
     await toolbox.write_request(request(request_id, target, change))
-    await toolbox.attach_request(claim.key, request_id, ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, request_id)
     await toolbox.write_result(result(request_id))
 
 
@@ -110,7 +110,7 @@ async def test_a_test_measured_without_a_change_answers_only_for_its_own_intent(
     claim = await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(tried, no_change, ttl_seconds=TTL)
     toolbox = open_as(Role.TOOLBOX)
     await toolbox.write_request(request("r1", tried, RecipeDelta()))
-    await toolbox.attach_request(claim.key, "r1", ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, "r1")
     await toolbox.write_result(result("r1"))
     s2 = open_as(Role.SPECIALIST_RUNTIME, "s2")
 
@@ -169,7 +169,7 @@ async def _in_flight(open_as: Open, branch: str, parent: str, request_id: str) -
     claim = await open_as(Role.SPECIALIST_RUNTIME, branch).acquire(tried, ACTION, ttl_seconds=TTL)
     toolbox = open_as(Role.TOOLBOX)
     await toolbox.write_request(request(request_id, tried, delta("--max-num-seqs 256")))
-    await toolbox.attach_request(claim.key, request_id, ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, request_id)
 
 
 def _decisions(handle: LocalBlackboard) -> list[dict[str, object]]:
@@ -281,7 +281,7 @@ async def test_a_branch_refused_before_the_holder_wrote_its_test_hears_how_that_
         await s2.acquire(intent("s2", "c2"), OTHER_ACTION, ttl_seconds=TTL)
     toolbox = open_as(Role.TOOLBOX)
     await toolbox.write_request(request("r1", intent("s1", "c1"), delta("--max-num-seqs 256")))
-    await toolbox.attach_request(held.key, "r1", ttl_seconds=TTL)
+    await toolbox.attach_request(held.key, "r1")
 
     await _end(open_as, "r1", "judged")
 
@@ -305,7 +305,7 @@ async def test_a_change_another_branch_is_testing_on_the_same_state_is_refused_w
     open_as: Open,
 ) -> None:
     key = await _claimed_then_written(open_as, intent("s1", "c0"), "r1")
-    await open_as(Role.TOOLBOX).attach_request(key, "r1", ttl_seconds=TTL)
+    await open_as(Role.TOOLBOX).attach_request(key, "r1")
     s2 = open_as(Role.SPECIALIST_RUNTIME, "s2")
 
     with pytest.raises(ClaimHeld) as held:
@@ -322,12 +322,12 @@ async def test_a_change_written_after_the_claim_is_refused_at_submit_and_hears_h
 ) -> None:
     first = await _claimed_then_written(open_as, intent("s1", "c0"), "r1")
     toolbox = open_as(Role.TOOLBOX)
-    await toolbox.attach_request(first, "r1", ttl_seconds=TTL)
+    await toolbox.attach_request(first, "r1")
     second = await _claimed_then_written(open_as, MORE_SEQUENCES, "r2")
     s2 = open_as(Role.SPECIALIST_RUNTIME, "s2")
 
     with pytest.raises(ClaimLost, match="s1 is testing the same change on c0 as r1; its outcome comes to your inbox"):
-        await toolbox.attach_request(second, "r2", ttl_seconds=TTL)
+        await toolbox.attach_request(second, "r2")
     await toolbox.write_withdrawal(Withdrawal("r2", "claim lost"))
     again = await s2.acquire(MORE_SEQUENCES, NO_ACTION, ttl_seconds=TTL)
     await _end(open_as, "r1", "judged")
@@ -351,8 +351,8 @@ async def test_of_two_branches_submitting_one_change_on_one_state_only_the_later
     toolbox = open_as(Role.TOOLBOX)
 
     with pytest.raises(ClaimLost):
-        await toolbox.attach_request(second, "r2", ttl_seconds=TTL)
-    attached = await toolbox.attach_request(first, "r1", ttl_seconds=TTL)
+        await toolbox.attach_request(second, "r2")
+    attached = await toolbox.attach_request(first, "r1")
 
     assert attached.request_id == "r1"
 
@@ -362,7 +362,7 @@ async def test_a_change_measured_on_the_state_is_refused_at_submit_but_not_a_pro
 ) -> None:
     first = await _claimed_then_written(open_as, intent("s1", "c0"), "r1")
     toolbox = open_as(Role.TOOLBOX)
-    await toolbox.attach_request(first, "r1", ttl_seconds=TTL)
+    await toolbox.attach_request(first, "r1")
     await toolbox.write_result(result("r1"))
     second = await _claimed_then_written(open_as, MORE_SEQUENCES, "r2")
     own = await _claimed_then_written(open_as, intent("s1", "c0", "scheduler", "chunked prefill"), "r3")
@@ -372,11 +372,11 @@ async def test_a_change_measured_on_the_state_is_refused_at_submit_but_not_a_pro
     await toolbox.write_request(profiled)
 
     with pytest.raises(ClaimLost, match="s1 already measured the same change on c0 as r1"):
-        await toolbox.attach_request(second, "r2", ttl_seconds=TTL)
+        await toolbox.attach_request(second, "r2")
     await toolbox.write_withdrawal(Withdrawal("r2", "claim lost"))
     again = await open_as(Role.SPECIALIST_RUNTIME, "s2").acquire(MORE_SEQUENCES, NO_ACTION, ttl_seconds=TTL)
-    kept = await toolbox.attach_request(own, "r3", ttl_seconds=TTL)
-    profile = await toolbox.attach_request(again.key, "p2", ttl_seconds=TTL)
+    kept = await toolbox.attach_request(own, "r3")
+    profile = await toolbox.attach_request(again.key, "p2")
 
     assert (kept.request_id, profile.request_id) == ("r3", "p2")
     refused = [row for row in _decisions(toolbox) if not row["acquired"]]
@@ -386,12 +386,15 @@ async def test_a_change_measured_on_the_state_is_refused_at_submit_but_not_a_pro
 async def _carried(open_as: Open, request_id: str) -> ClaimKey:
     """s1's claim on its intent on c0, carried by its test ``request_id``."""
 
-    target = intent("s1", "c0")
-    claim = await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(target, ACTION, ttl_seconds=TTL)
+    claim = await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(intent("s1", "c0"), ACTION, ttl_seconds=TTL)
+    return await _carried_after(open_as, claim.key, request_id)
+
+
+async def _carried_after(open_as: Open, key: ClaimKey, request_id: str) -> ClaimKey:
     toolbox = open_as(Role.TOOLBOX)
-    await toolbox.write_request(request(request_id, target))
-    await toolbox.attach_request(claim.key, request_id, ttl_seconds=TTL)
-    return claim.key
+    await toolbox.write_request(request(request_id, intent("s1", "c0")))
+    await toolbox.attach_request(key, request_id)
+    return key
 
 
 async def _status(open_as: Open, key: ClaimKey) -> ClaimStatus:
@@ -470,22 +473,29 @@ async def test_a_held_claim_nobody_renewed_reads_as_expired_until_renewed(open_a
     assert renewed.status is ClaimStatus.HELD and renewed.expires_at > clock.now
 
 
-async def test_a_restarted_runtime_keeps_its_claims_and_the_toolbox_carries_an_attached_one(open_as: Open) -> None:
-    target = intent("s1", "c0")
-    claim = await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(target, ACTION, ttl_seconds=TTL)
-    toolbox = open_as(Role.TOOLBOX)
+async def test_a_restarted_runtime_keeps_its_claims_until_a_test_carries_one(open_as: Open) -> None:
+    claim = await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(intent("s1", "c0"), ACTION, ttl_seconds=TTL)
+    restarted = open_as(Role.SPECIALIST_RUNTIME, "s1")
 
-    with pytest.raises(ClaimLost):
-        await toolbox.renew(claim.key, ttl_seconds=TTL)
-    restarted = await open_as(Role.SPECIALIST_RUNTIME, "s1").renew(claim.key, ttl_seconds=TTL)
-    await toolbox.write_request(request("r1", target))
-    long_ttl = 10 * TTL
-    attached = await toolbox.attach_request(claim.key, "r1", ttl_seconds=long_ttl)
-    carried = await toolbox.renew(claim.key, ttl_seconds=long_ttl)
+    renewed = await restarted.renew(claim.key, ttl_seconds=TTL)
+    key = await _carried_after(open_as, claim.key, "r1")
 
-    assert restarted.holder == "s1"
-    assert (attached.request_id, carried.request_id) == ("r1", "r1")
-    assert carried.expires_at > attached.expires_at
+    assert (renewed.holder, renewed.status) == ("s1", ClaimStatus.HELD)
+    with pytest.raises(ClaimLost, match="test r1 carries the claim on c0; it ends with that test"):
+        await restarted.renew(key, ttl_seconds=TTL)
+    with pytest.raises(ClaimLost, match="test r1 carries the claim"):
+        await restarted.release(key)
+    assert await _status(open_as, key) is ClaimStatus.HELD
+
+
+async def test_a_branch_stop_leaves_the_claim_its_test_carries_to_that_test(open_as: Open) -> None:
+    key = await _carried(open_as, "r1")
+
+    released = await open_as(Role.SCHEDULER).release_branch("s1")
+    stopped = await _status(open_as, key)
+    await open_as(Role.TOOLBOX).write_result(result("r1"))
+
+    assert (released, stopped, await _status(open_as, key)) == ((), ClaimStatus.HELD, ClaimStatus.COMPLETED)
 
 
 async def test_release_frees_the_key_and_stopping_a_branch_releases_all_it_holds(open_as: Open) -> None:
@@ -522,9 +532,9 @@ async def test_attaching_a_request_checks_it_measures_that_claim(open_as: Open) 
     await toolbox.write_request(request("r-other", intent("s1", "c0", "attention", "split kv")))
 
     with pytest.raises(ConflictingWrite):
-        await toolbox.attach_request(claim.key, "r-other", ttl_seconds=TTL)
+        await toolbox.attach_request(claim.key, "r-other")
     with pytest.raises(UnknownRequest):
-        await toolbox.attach_request(claim.key, "r-missing", ttl_seconds=TTL)
+        await toolbox.attach_request(claim.key, "r-missing")
 
 
 async def test_a_finished_or_released_claim_cannot_be_released_or_attached_again(open_as: Open) -> None:
@@ -539,7 +549,7 @@ async def test_a_finished_or_released_claim_cannot_be_released_or_attached_again
     with pytest.raises(ClaimLost):
         await open_as(Role.SCHEDULER).release(done)
     with pytest.raises(ClaimLost):
-        await toolbox.attach_request(released.key, "r2", ttl_seconds=TTL)
+        await toolbox.attach_request(released.key, "r2")
 
 
 async def test_losing_the_race_for_a_free_claim_is_refused_as_held_and_logged(
@@ -610,20 +620,3 @@ async def test_op_shares_are_the_latest_a_tool_reported_on_the_commit(open_as: O
     assert latest is not None and (latest.job_id, dict(latest.shares)) == ("job-2", {"gemm": 41.5})
     assert await toolbox.op_shares("c0") is None
     assert (await toolbox.snapshot()).op_shares == {"c1": latest}
-
-
-async def test_a_late_result_does_not_complete_the_claim_another_branch_took_over(
-    open_as: Open, clock: FakeClock
-) -> None:
-    target = intent("s1", "c0")
-    await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(target, ACTION, ttl_seconds=TTL)
-    toolbox = open_as(Role.TOOLBOX)
-    await toolbox.write_request(request("r1", target))
-    clock.advance(2 * TTL)
-    taken = await open_as(Role.SPECIALIST_RUNTIME, "s2").acquire(intent("s2", "c0"), OTHER_ACTION, ttl_seconds=TTL)
-
-    await toolbox.write_result(result("r1"))
-
-    current = toolbox._leases.current(taken.key)
-    assert current is not None
-    assert (current.holder, current.status, current.request_id) == ("s2", ClaimStatus.HELD, None)

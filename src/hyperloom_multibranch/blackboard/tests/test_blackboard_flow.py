@@ -49,7 +49,7 @@ class Session:
 async def _measure(session: Session, specialist: LocalBlackboard, request_id: str, of_intent, change) -> None:
     claim = await specialist.acquire(of_intent, change.fingerprint(), ttl_seconds=TTL)
     await session.toolbox.write_request(request(request_id, of_intent, change))
-    await session.toolbox.attach_request(claim.key, request_id, ttl_seconds=TTL)
+    await session.toolbox.attach_request(claim.key, request_id)
     await session.toolbox.write_result(result(request_id))
 
 
@@ -140,9 +140,8 @@ async def test_a_result_completes_the_claim_and_the_same_action_on_that_state_is
     key = ClaimKey("c0", s1_intent.fingerprint)
 
     answer = await session.s2.lookup(key, delta("--max-num-seqs 256").fingerprint())
-    claim = session.s1._leases.current(key)
+    (claim,) = [claim for claim in (await session.s1.snapshot()).claims if claim.key == key]
 
-    assert claim is not None
     assert (claim.status, claim.request_id) == (ClaimStatus.COMPLETED, "r1")
     assert answer.status is DedupStatus.TESTED
     # The merge test of c1 onto the root applied the same change to the same state, so it counts too.

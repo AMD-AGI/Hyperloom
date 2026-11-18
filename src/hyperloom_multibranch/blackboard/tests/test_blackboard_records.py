@@ -400,7 +400,7 @@ async def test_a_withdrawn_test_is_settled_unmeasured_and_frees_its_claim(open_a
     wanted = intent("s1", "c0")
     claim = await runtime.acquire(wanted, delta().fingerprint(), ttl_seconds=TTL)
     await toolbox.write_request(request("r1", wanted))
-    await toolbox.attach_request(claim.key, "r1", ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, "r1")
 
     record = await toolbox.write_withdrawal(Withdrawal("r1", "branch s1 stopped"))
 
@@ -467,7 +467,7 @@ async def test_a_failed_measurement_keeps_its_cost_frees_its_claim_and_takes_no_
     wanted = intent("s1", "c0")
     claim = await runtime.acquire(wanted, delta().fingerprint(), ttl_seconds=TTL)
     await toolbox.write_request(request("r1", wanted))
-    await toolbox.attach_request(claim.key, "r1", ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, "r1")
     failed = result("r1", validity=Validity.MEASUREMENT_FAILED, failure_reason="no healthy node", gpu_seconds=90.0)
 
     record = await toolbox.write_result(failed)
@@ -502,7 +502,7 @@ async def test_a_result_the_gate_could_not_re_verify_is_no_test_of_its_change_an
     wanted = intent("s1", "c0")
     claim = await runtime.acquire(wanted, delta().fingerprint(), ttl_seconds=TTL)
     await toolbox.write_request(request("r1", wanted))
-    await toolbox.attach_request(claim.key, "r1", ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, "r1")
     await toolbox.write_result(result("r1", gpu_seconds=90.0))
 
     record = await open_as(Role.GATE).write_judgement("r1", judgement(4.0, ("r1",)), Conclusion.UNVERIFIED)
@@ -523,7 +523,7 @@ async def test_a_request_without_an_intent_carries_no_claim_and_matches_no_looku
     key = ClaimKey("c0", intent("s1", "c0").fingerprint)
 
     with pytest.raises(ConflictingWrite, match="no intent"):
-        await toolbox.attach_request(key, "r0", ttl_seconds=TTL)
+        await toolbox.attach_request(key, "r0")
     with pytest.raises(ValueError, match="accepted"):
         await toolbox.write_request(replace(baseline, request_id=None))
     answer = await runtime.lookup(key, RecipeDelta().fingerprint())

@@ -74,7 +74,7 @@ async def _leftovers(root: Path, clock: FakeClock) -> LocalBlackboard:
     dropped = delta("--chunked-prefill-size 8192")
     claim = await w.as_role(Role.SPECIALIST_RUNTIME, "s3").acquire(DROPPED, dropped.fingerprint(), ttl_seconds=TTL)
     await toolbox.write_request(request("x1", DROPPED, dropped))
-    await toolbox.attach_request(claim.key, "x1", ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, "x1")
     await toolbox.write_withdrawal(Withdrawal("x1", "branch stopped"))
     await scheduler.record_lineage(LineageEvent(LineageKind.STOP, "s3", reason="no progress"))
     await scheduler.release_branch("s3")
@@ -139,14 +139,14 @@ async def test_a_lead_another_branch_replayed_drops_out_and_a_withdrawn_replay_o
         replaying, delta("--fp8-gemm").fingerprint(), ttl_seconds=TTL
     )
     await toolbox.write_request(request("p2", replaying, delta("--fp8-gemm")))
-    await toolbox.attach_request(claim.key, "p2", ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, "p2")
     await toolbox.write_withdrawal(Withdrawal("p2", "branch stopped"))
     measured_before = intent("s4", "c0", "rope", "replay n1 on my head")
     claim = await w.as_role(Role.SPECIALIST_RUNTIME, "s4").acquire(
         measured_before, delta("--n1").fingerprint(), ttl_seconds=TTL
     )
     await toolbox.write_request(request("p3", measured_before, delta("--n1")))
-    await toolbox.attach_request(claim.key, "p3", ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, "p3")
     await toolbox.write_withdrawal(Withdrawal("p3", "branch stopped"))
 
     brief = await observer.startup_brief("i1")

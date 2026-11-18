@@ -197,13 +197,13 @@ async def test_a_failure_to_record_leaked_cards_that_is_not_the_blackboards_is_r
         await toolbox.close()
 
 
-async def test_the_renewal_loop_logs_an_unexpected_failure_to_record_leaked_cards_and_records_them_next_round(
+async def test_the_tick_loop_logs_an_unexpected_failure_to_record_leaked_cards_and_records_them_next_round(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The renewal loop's round also records leaked cards: an error there must not end the loop that renews claims."""
+    """A tick records leaked cards: an error there must not end the loop that ticks."""
     blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     toolbox = _local_toolbox(tmp_path, blackboard)
-    monkeypatch.setattr(toolbox, "_ttl", 0.03)  # the loop runs a round every third of the claim TTL: every 10 ms
+    monkeypatch.setattr(toolbox, "_tick_seconds", 0.01)
     real, calls = toolbox._quarantine.add_cards, []
 
     async def broken_once(*args: Any, **kwargs: Any) -> Any:

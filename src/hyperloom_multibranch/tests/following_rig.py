@@ -39,7 +39,7 @@ async def _measure(root: Path, branch: str, request_id: str, parent: str, change
     claim = await _as(root, Role.SPECIALIST_RUNTIME, branch).acquire(of, change.fingerprint(), ttl_seconds=TTL)
     toolbox = _as(root, Role.TOOLBOX)
     await toolbox.write_request(request(request_id, of, change))
-    await toolbox.attach_request(claim.key, request_id, ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, request_id)
     await toolbox.write_result(result(request_id))
 
 
