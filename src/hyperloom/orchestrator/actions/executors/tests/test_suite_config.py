@@ -516,6 +516,27 @@ def test_a_point_that_unsets_a_base_variable_launches_without_it(tmp_path, monke
     assert "SGLANG_USE_AITER" not in dict(launch.env)
 
 
+def test_a_point_of_a_session_whose_base_occupies_more_cards_than_its_tp_is_pinned_on_the_base_s_cards(
+    tmp_path, monkeypatch
+) -> None:
+    session = tmp_path / "session"
+    base = _base("sglang")
+    freeze_base(session, replace(base, args=(*base.args, "--dp-size", "2")))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session))
+    for name in ("INFERENCE_OPTIMIZER_SERVER_ARGS", "ROCR_VISIBLE_DEVICES"):
+        monkeypatch.delenv(name, raising=False)
+    recipe = _point("sglang")
+    del recipe["benchmark"]["envs"]["ROCR_VISIBLE_DEVICES"]
+    source = tmp_path / "recipe.yaml"
+    source.write_text(yaml.safe_dump(recipe), encoding="utf-8")
+
+    point = materialize_config_with_envs(source, tmp_path / "point", target=BenchmarkTarget(model_path=_MODEL))
+    envs = yaml.safe_load(point.read_text(encoding="utf-8"))["benchmark"]["envs"]
+
+    assert (envs["TP"], envs["ROCR_VISIBLE_DEVICES"]) == (2, "0,1,2,3")
+    assert "--dp-size 2" in envs["EXTRA_SGLANG_ARGS"]
+
+
 def _materialized_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layer: LaunchLayer) -> Launch:
     """The launch a round composes from a point the main flow materialized on the session's frozen base."""
     session = tmp_path / "session"

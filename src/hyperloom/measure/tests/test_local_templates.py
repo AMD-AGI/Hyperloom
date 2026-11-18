@@ -126,6 +126,7 @@ def test_the_host_hugging_face_settings_that_are_set_are_taken() -> None:
     environ = {
         "HF_HOME": "/data/hf",
         "HF_HUB_CACHE": "/data/hub",
+        "HF_DATASETS_CACHE": "/scratch/datasets",
         "HF_HUB_OFFLINE": "1",
         "HF_DATASETS_OFFLINE": "1",
         "HF_ENDPOINT": "https://mirror.example",
@@ -133,6 +134,16 @@ def test_the_host_hugging_face_settings_that_are_set_are_taken() -> None:
         "HF_XET_CACHE": "/elsewhere",
     }
     assert host_hf_env(environ) == {k: v for k, v in environ.items() if k not in {"HF_TOKEN", "HF_XET_CACHE"}}
+
+
+def test_a_runner_whose_host_holds_hf_home_read_only_prepares_datasets_where_the_host_says(monkeypatch) -> None:
+    # datasets takes its locks below HF_DATASETS_CACHE, else below HF_HOME, which this host mounts read-only
+    monkeypatch.setenv("HF_HOME", "/shared/hf_cache")
+    monkeypatch.setenv("HF_DATASETS_CACHE", "/scratch/hf_datasets")
+
+    envs = local_runner_template().envs
+
+    assert (envs["HF_HOME"], envs["HF_DATASETS_CACHE"]) == ("/shared/hf_cache", "/scratch/hf_datasets")
 
 
 def test_without_hf_home_the_host_default_location_is_named(tmp_path) -> None:
