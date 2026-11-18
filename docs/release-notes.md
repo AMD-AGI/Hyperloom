@@ -42,9 +42,10 @@ it.
   `--no-enable_prefix_caching`.
 - **An ATOM profile round** sets `ATOM_PROFILER_TIMEOUT` to the 600 s the round
   waits on `/stop_profile`, so a long capture is not cut off at ATOM's 300 s
-  default, and an annotated AgentX capture turns on ATOM's own trace knobs
-  (`--mark-trace`, `ATOM_ENABLE_DETAILED_ANNOTATION`, `ATOM_PROFILER_MORE`)
-  instead of SGLang's.
+  default. An annotated ATOM AgentX capture turns on ATOM's own light knobs
+  (`ATOM_ENABLE_DETAILED_ANNOTATION`, `ATOM_PROFILER_RECORD_SHAPES`) instead of
+  SGLang's, and records at most 30 s: ATOM's profiler takes no step bound,
+  and a longer capture stalls the replay past what the AgentX client accepts.
 - **A multi-branch session runs on MI325X.** `hyperloom-multibranch run`
   accepts `--gpu-type mi325x`. Before, it refused MI325X, a limit left from
   Magpie, which had no benchmark script of MI325X's own; InferenceSuite

@@ -254,32 +254,18 @@ def prepare_profile(
     return _apply_framework_profile(bench, envs, plan, vllm_checkout=vllm_checkout)
 
 
-def atom_profile_knobs(caps: _AtomTracelensCaps) -> tuple[tuple[str, ...], dict[str, str]]:
-    """The server flags and environment that turn on the ATOM TraceLens knobs the installed package accepts."""
-    args = ("--mark-trace",) if caps.mark_trace else ()
-    env = {
-        name: "1"
-        for name, accepted in (
-            ("ATOM_ENABLE_DETAILED_ANNOTATION", caps.detailed_annotation),
-            ("ATOM_PROFILER_MORE", caps.profiler_more),
-        )
-        if accepted
-    }
-    return args, env
-
-
 def apply_atom_profile_caps(envs: dict[str, Any], caps: _AtomTracelensCaps | None) -> None:
     """Write the ATOM TraceLens knobs the installed package accepts."""
     if caps is None:
         return
-    args, env = atom_profile_knobs(caps)
-    envs.update(env)
-    extra = str(envs.get("EXTRA_ATOM_ARGS", "")).strip()
-    for flag in args:
-        if flag not in extra:
-            extra = f"{extra} {flag}".strip()
-    if args:
-        envs["EXTRA_ATOM_ARGS"] = extra
+    if caps.detailed_annotation:
+        envs["ATOM_ENABLE_DETAILED_ANNOTATION"] = "1"
+    if caps.profiler_more:
+        envs["ATOM_PROFILER_MORE"] = "1"
+    if caps.mark_trace:
+        extra = str(envs.get("EXTRA_ATOM_ARGS", "")).strip()
+        if "--mark-trace" not in extra:
+            envs["EXTRA_ATOM_ARGS"] = f"{extra} --mark-trace".strip()
 
 
 class CapturePlan(NamedTuple):
@@ -647,6 +633,9 @@ _AGENTX_PROFILE_KEYS = frozenset(
 )
 _AGENTX_CAPTURE_STEPS = 20
 _AGENTX_CAPTURE_SEC = 300.0
+#: ATOM's profiler takes no step bound, so its window is the whole capture, and the replay slows while it records.
+#: 30 s keeps that well inside the 5% of a 900 s replay the AgentX client lets go uncovered.
+_ATOM_AGENTX_CAPTURE_SEC = 30.0
 #: What an annotated SGLang AgentX capture sets: shapes and stacks
 #: in the trace, and the CUDA-graph replays profiled unless the server runs eager.
 _SGLANG_ANNOTATION_ENV = MappingProxyType(
@@ -675,13 +664,16 @@ def agentx_profile(bench: Mapping[str, Any], framework: Framework) -> ProfileCon
     if settings.get("num_profiles", 1) != 1:
         raise ConfigError(f"the AgentX point asks for {settings['num_profiles']} captures; a round opens one")
     annotated = framework is Framework.SGLANG and settings.get("detailed_annotations") is True
+    duration = settings.get("capture_timeout_seconds", _AGENTX_CAPTURE_SEC)
+    if framework is Framework.ATOM:
+        duration = min(duration, _ATOM_AGENTX_CAPTURE_SEC)
     return ProfileConfig(
         enabled=True,
         start_body={"detailed_annotations": True} if annotated else None,
         delay_iters=0,
         max_iters=settings.get("num_steps", _AGENTX_CAPTURE_STEPS),
         agentx_open_after_sec=settings.get("start_seconds", 0.0),
-        agentx_duration_sec=settings.get("capture_timeout_seconds", _AGENTX_CAPTURE_SEC),
+        agentx_duration_sec=duration,
     )
 
 
@@ -707,10 +699,14 @@ def _vllm_agentx_profile(annotated: bool, user: LaunchDelta, base: BaseLaunch) -
 
 
 def _atom_agentx_profile(annotated: bool, user: LaunchDelta, base: BaseLaunch) -> LaunchDelta:
+    # Only the light knobs: --mark-trace writes a capture trace for every captured batch size at boot (two hours on
+    # DeepSeek-V4.1-Flash), and ATOM_PROFILER_MORE's stacks and memory stall a replay that runs on through the window.
     if not annotated:
         return LaunchDelta()
-    args, env = atom_profile_knobs(_atom_tracelens_caps())
-    return LaunchDelta(args_add=args, env_set=env)
+    env = {"ATOM_PROFILER_RECORD_SHAPES": "1"}
+    if _atom_tracelens_caps().detailed_annotation:
+        env["ATOM_ENABLE_DETAILED_ANNOTATION"] = "1"
+    return LaunchDelta(env_set=env)
 
 
 #: What each framework's server adds to an AgentX profile round for the annotations it asks for.

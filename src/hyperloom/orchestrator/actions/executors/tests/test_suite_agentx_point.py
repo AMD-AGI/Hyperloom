@@ -297,23 +297,33 @@ def _atom_profiled(monkeypatch, **settings):
     base = replace(base, framework="atom", query=replace(base.query, framework="atom"), entrypoint=entrypoint)
     point = _profiled("atom", **settings)
     point["benchmark"]["agentx"]["launch_overrides"].update(append_args=list(base.args), env={})
-    return suite_config(point, base, _settings()).server.user
+    return suite_config(point, base, _settings())
 
 
-def test_an_annotated_atom_agentx_profile_turns_on_atoms_own_trace_knobs_and_none_of_sglangs(monkeypatch) -> None:
-    user = _atom_profiled(monkeypatch)
+def test_an_annotated_atom_agentx_profile_annotates_kernels_and_records_shapes_and_nothing_heavier(
+    monkeypatch,
+) -> None:
+    user = _atom_profiled(monkeypatch).server.user
 
-    assert "--mark-trace" in user.args_add
-    assert {"ATOM_ENABLE_DETAILED_ANNOTATION": "1", "ATOM_PROFILER_MORE": "1"}.items() <= user.env_set.items()
+    assert {"ATOM_ENABLE_DETAILED_ANNOTATION": "1", "ATOM_PROFILER_RECORD_SHAPES": "1"}.items() <= user.env_set.items()
+    # Graph-capture traces for every captured batch size took the server two hours to boot, and stacks and memory
+    # stalled its replay for the whole window.
+    assert "--mark-trace" not in user.args_add
+    assert "ATOM_PROFILER_MORE" not in user.env_set
     assert "--enable-profile-cuda-graph" not in user.args_add
     assert not _SGLANG_ANNOTATION_ENV.keys() & user.env_set.keys()
 
 
 def test_an_unannotated_atom_agentx_profile_adds_no_trace_knobs(monkeypatch) -> None:
-    user = _atom_profiled(monkeypatch, detailed_annotations=False)
+    user = _atom_profiled(monkeypatch, detailed_annotations=False).server.user
 
-    assert "--mark-trace" not in user.args_add
-    assert not {"ATOM_ENABLE_DETAILED_ANNOTATION", "ATOM_PROFILER_MORE"} & user.env_set.keys()
+    assert not {"ATOM_ENABLE_DETAILED_ANNOTATION", "ATOM_PROFILER_RECORD_SHAPES"} & user.env_set.keys()
+
+
+def test_an_atom_agentx_capture_is_bounded_in_time_since_atom_bounds_no_steps(monkeypatch) -> None:
+    profile = _atom_profiled(monkeypatch, capture_timeout_seconds=600).profile
+
+    assert profile.agentx_duration_sec == 30.0
 
 
 def test_a_vllm_agentx_profile_passes_the_profiler_fields_its_annotations_need() -> None:
