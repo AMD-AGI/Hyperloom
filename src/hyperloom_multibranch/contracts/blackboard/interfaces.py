@@ -299,7 +299,7 @@ class Inbox(Protocol):
 
 
 class ProgressQuery(Protocol):
-    """What the scheduler and the dashboard read."""
+    """What the scheduler reads."""
 
     async def progress(self) -> tuple[BranchProgress, ...]: ...
 
@@ -351,7 +351,7 @@ class SessionRecords(Protocol):
 
 
 class SnapshotQuery(Protocol):
-    """Everything at once, for the blackboard owner's own consumers: the RSI, the dashboard and the exports."""
+    """Everything at once, for the blackboard owner's own consumers: the RSI and the exports."""
 
     async def snapshot(self) -> BlackboardSnapshot: ...
 

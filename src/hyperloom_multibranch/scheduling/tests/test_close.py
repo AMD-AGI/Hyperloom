@@ -45,7 +45,6 @@ from hyperloom_multibranch.blackboard.knowledge.tests.test_recipe_writeback impo
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, ARCHIVED, SKIPPED
 from hyperloom_multibranch.blackboard.rsi.authoring import PLAYBOOK_SYSTEM_PROMPT
 from hyperloom_multibranch.blackboard.rsi.lesson_curation import NO_LESSONS
-from hyperloom_multibranch.blackboard.rsi.frontier import FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.blackboard.knowledge.warm_start import PreparedReplay, WarmLead
 from hyperloom_multibranch.blackboard.rsi.session import DISABLED, WRITTEN, CloseStep, KnowledgeClose, close_knowledge
 from hyperloom_multibranch.scheduling import mb_fakes
@@ -59,7 +58,6 @@ from hyperloom_multibranch.scheduling.close import (
     report_markdown,
 )
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.exports import (
     IMAGE_CHECK_FILE,
@@ -184,13 +182,6 @@ class ChosenRepo:
         return self.final.recipe
 
 
-class AfterStopToolbox:
-    """A toolbox already closed by the stop; CLOSE must not ask it for its queue. A failure double."""
-
-    async def queue_state(self) -> QueueState:
-        raise AssertionError("CLOSE rebuilds the dashboard with the queue the stop reported")
-
-
 class UnreachableStore(FakeRecipeStore):
     """A Recipe KB store that cannot be reached; a failure double, not a placeholder."""
 
@@ -257,15 +248,13 @@ def _closer(
 
     author = author or ScriptedCompletion()
     curator = curator or ScriptedCompletion()
-    progress = FrontierScoring(blackboard, FrontierPolicy(metric=METRIC))  # type: ignore[arg-type]
     blobs = LocalBlobStore(layout.blobs)
     for path in (
         *(patch.path for component in recipe.recipe.components for patch in component.patches),
         *(kernel.ref for kernel in recipe.recipe.kernels),
     ):
         blobs.put((recipe.files_root / path).read_bytes())
-    dashboard = SessionDashboard(blackboard, progress, AfterStopToolbox(), METRIC, layout.dashboard)  # type: ignore[arg-type]
-    sources = ExportSources(blackboard, ChosenRepo(recipe), blobs, dashboard, image_check, warm_leads)
+    sources = ExportSources(blackboard, ChosenRepo(recipe), blobs, image_check, warm_leads)
     services = ExportServices(kb_client, CloseAuthoring(author, AUTHOR_MODEL), CloseAuthoring(curator, AUTHOR_MODEL))
     exports = SessionExports(layout, sources, METRIC, BUDGET_SECONDS, services)  # type: ignore[arg-type]
     return Closer(layout, stopper, exports, CLOCK, ISOLATION)  # type: ignore[arg-type]
@@ -302,6 +291,7 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     assert sorted(store.uploads.values()) == recipe_files and not any(layout.final.iterdir())
     assert (stopper.reasons, stopper.events) == ([SessionStopReason.TIME_EXHAUSTED], [f"stop by {HARD_STOP}"])
     assert report.exports.breakdown == layout.reports / "session_breakdown.json"
+    assert "dashboard" not in json.loads(layout.report.read_text())["exports"]
     assert json.loads((layout.reports / IMAGE_CHECK_FILE).read_text()) == IMAGE_CHECK.to_json()
     breakdown = json.loads(report.exports.breakdown.read_text())
     assert breakdown["close"]["kb_write_back"]["status"] == "written"
@@ -319,11 +309,6 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     assert breakdown["close"]["final"]["commit_id"] == CHOSEN
     assert breakdown["close"]["selection"]["chosen"]["commit"] == CHOSEN
     assert (breakdown["close"]["selection"]["metric"], breakdown["close"]["selection"]["primary_conc"]) == (METRIC, 64)
-    files = report.exports.dashboard
-    assert (files.json.parent, files.html.parent) == (layout.dashboard, layout.dashboard)
-    dashboard = json.loads(files.json.read_text())
-    assert dashboard["queue"]["running_by_branch"] == {} and dashboard["queue"]["queued_by_branch"] == {}
-    assert any(row.get("frontier") for row in dashboard["branches"])
     written = json.loads(layout.report.read_text())
     assert (written["stop_reason"], written["stop"]["clean"]) == ("time_exhausted", True)
     assert written["final"]["chosen"]["commit"] == CHOSEN and written["exports"]["knowledge"] == knowledge

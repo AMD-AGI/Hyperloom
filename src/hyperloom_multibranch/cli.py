@@ -98,7 +98,7 @@ environment, agents it cannot isolate, a missing ``hosted`` package, the runner 
 session from running (exit 2 for a refused spec or session, else 1); a crash leaves no ``exit.json`` and is restarted.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
-manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard and breakdown. It
+manifest holds, the branches its roster and blackboard hold -- and rewrites its report and breakdown. It
 creates no session directory, so it cannot start one. It carries the stop reason that session ended with, which is
 also what its exit code says: a session that did not run its course stays a failed session however FINAL goes. A
 session that was killed with its machine wrote no report at all; it ends for ``killed``, and so fails too. The
@@ -258,7 +258,7 @@ def build_parser() -> argparse.ArgumentParser:
         FINAL_ONLY_COMMAND,
         help=(
             "Emergency recovery: run FINAL and CLOSE over a session directory that ended before FINAL, a session"
-            " killed with its machine included. It rewrites that session's report, dashboard and breakdown, and"
+            " killed with its machine included. It rewrites that session's report and breakdown, and"
             " exits as that session did, so a session that did not run its course still fails. Refused if the"
             " session is still running, already chose in FINAL, or ran on another build than this one."
         ),

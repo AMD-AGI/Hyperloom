@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The CLOSE exports: the Recipe KB write-back of the final choice, the session's knowledge, the session breakdown
-and the dashboard.
+"""The CLOSE exports: the Recipe KB write-back of the final choice, the session's knowledge and the session breakdown.
 
 They read a blackboard that no longer changes. The write-back goes first, reading the patch and kernel files of the
 chosen commit's recipe from the session's blob store, then the blackboard's knowledge steps (the search tree to the
@@ -15,8 +14,7 @@ curates the RSI lesson pool the knowledge steps published the session's learning
 that never stop CLOSE; a CLOSE whose knowledge steps archived no tree asks neither. A later CLOSE of a session whose
 earlier CLOSE archived its tree (:func:`archived_before`), a resumed session's or a ``final-only``'s, runs none of these steps and reports each as :data:`ARCHIVED_BEFORE`; ``session_breakdown.json``, which also counts how the merges went and how each met a
 conflicting patch from the integrator's merge log, the knowledge steps' receipts and :data:`IMAGE_CHECK_FILE`, the
-whole image check the session ran before its first phase, land in ``MB-reports/``, and the dashboard is rebuilt a last
-time with the queue the stop left.
+whole image check the session ran before its first phase, land in ``MB-reports/``.
 """
 
 from __future__ import annotations
@@ -39,9 +37,7 @@ from hyperloom_multibranch.contracts.blackboard.interfaces import Blackboard
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.contracts.blackboard.vocab import MergeOutcome
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.blackboard.codec import encode
-from hyperloom_multibranch.blackboard.dashboard import DashboardFiles
 from hyperloom_multibranch.blackboard.knowledge.breakdown import (
     CloseOutcome,
     SessionPlace,
@@ -55,7 +51,6 @@ from hyperloom_multibranch.blackboard.rsi.lesson_curation import curate_lessons
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVED, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.archive import SKIPPED as STEP_SKIPPED
 from hyperloom_multibranch.blackboard.rsi.session import CloseStep, KnowledgeClose
-from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.final import FinalChoice
 from hyperloom_multibranch.scheduling.integrator import ConflictLoss
 from hyperloom_multibranch.scheduling.layout import SessionLayout
@@ -148,14 +143,13 @@ def _merge_statistics(merge_log: Sequence[Mapping[str, Any]]) -> dict[str, objec
 @dataclass(frozen=True)
 class CloseExports:
     """What CLOSE handed on: the Recipe KB write-back, the knowledge steps, the proposed change to the scheduling
-    playbook, the breakdown file, the dashboard files, the curation of the RSI lesson pool, and what the AgentX
+    playbook, the breakdown file, the curation of the RSI lesson pool, and what the AgentX
     checkpoint did (``None`` in an InferenceX session)."""
 
     kb_write_back: RemoteWriteResult
     knowledge: KnowledgeClose
     playbook: CloseStep
     breakdown: Path
-    dashboard: DashboardFiles
     curation: CloseStep
     checkpoint: CheckpointTally | None = None
 
@@ -183,7 +177,7 @@ class CloseAuthoring:
 @dataclass(frozen=True)
 class ExportSources:
     """What CLOSE exports from: the scheduler's blackboard handle, the repository and the blob store that hold the
-    chosen commit's recipe and its files, the session's dashboard, the image check it ran before its first phase,
+    chosen commit's recipe and its files, the image check it ran before its first phase,
     ``None`` for a FINAL and CLOSE over a session that ended before FINAL, which run none, PRELUDE's warm-start
     leads, none for a session that stopped before them, and an AgentX session's checkpoint (``None`` in an InferenceX
     session)."""
@@ -191,7 +185,6 @@ class ExportSources:
     blackboard: Blackboard
     repo: ExperimentRepo
     blobs: BlobStore
-    dashboard: SessionDashboard
     image_check: ImageCheckReport | None
     warm_leads: tuple[WarmLead, ...]
     checkpoint: CheckpointScope | None = None
@@ -230,15 +223,14 @@ class SessionExports:
         self._blackboard = sources.blackboard
         self._repo = sources.repo
         self._blobs = sources.blobs
-        self._dashboard = sources.dashboard
         self._image_check = sources.image_check
         self._warm_leads = sources.warm_leads
         self._checkpoint = sources.checkpoint
         self._metric = metric
         self._budget_seconds = budget_seconds
 
-    async def export(self, final: FinalChoice | None, queue: QueueState | None) -> CloseExports:
-        """Write the exports; ``queue`` is what the toolbox reported after the stop."""
+    async def export(self, final: FinalChoice | None) -> CloseExports:
+        """Write the exports."""
 
         if self._image_check is not None:
             await asyncio.to_thread(self._image_check.write, self._layout.reports / IMAGE_CHECK_FILE)
@@ -287,9 +279,8 @@ class SessionExports:
             ),
         )
         breakdown = write_breakdown(self._layout.reports, document)
-        dashboard = await self._dashboard.write(queue)
         checkpoint = None if self._checkpoint is None else checkpoint_tally(snapshot, self._checkpoint)
-        return CloseExports(kb_write_back, knowledge, playbook, breakdown, dashboard, curation, checkpoint)
+        return CloseExports(kb_write_back, knowledge, playbook, breakdown, curation, checkpoint)
 
     async def _ask_author(self, system: str, user: str) -> str:
         return (await self._author.completion(system, user)).text

@@ -146,7 +146,7 @@ class BuildStatus:
 
 @dataclass(frozen=True)
 class QueueState:
-    """What the scheduler and the dashboard read: queue lengths by priority, running tests by branch, cold start time.
+    """What the scheduler reads: queue lengths by priority, running tests by branch, cold start time.
 
     ``queued_by_priority`` has a key for every priority of 0 to 4, ``running_by_branch`` only for branches with a test
     running. ``queued_by_branch`` counts what each branch has waiting, the number the backpressure limit applies to.

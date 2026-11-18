@@ -101,9 +101,8 @@ class Workload:
 
     @property
     def metric(self) -> str:
-        """The metric the session's values are read in: the frontier policy, final selection, the dashboard and the
-        final recipe's metric. AgentX is graded on its objective's metric, the key its rule gate's baseline is written
-        under."""
+        """The metric the session's values are read in: the frontier policy, final selection and the final recipe's
+        metric. AgentX is graded on its objective's metric, the key its rule gate's baseline is written under."""
 
         return self.agentx_objective.metric if self.inferencex is None else GRADED_OUTPUT
 

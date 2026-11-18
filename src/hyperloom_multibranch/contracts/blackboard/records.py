@@ -941,7 +941,7 @@ def _environment_changes(records: Iterable[TestRecord]) -> tuple[EnvironmentChan
 
 @dataclass(frozen=True)
 class BlackboardSnapshot:
-    """Everything the blackboard held at ``taken_at``, read at once: what the RSI, the dashboard and the exports use.
+    """Everything the blackboard held at ``taken_at``, read at once: what the RSI and the exports use.
     ``resolved_patches`` are the model-written patches of every merge recorded, in the order the merges were.
     ``op_shares`` holds, by commit, the op shares :meth:`RecordSearch.op_shares` gives it: a commit no tool profiled
     has those of the last profiled commit of the same recipe. ``agent_map`` holds the directions of the agent map the

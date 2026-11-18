@@ -20,6 +20,12 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A multi-branch session no longer writes a dashboard.** EXPLORE no longer
+  rebuilds `MB-dashboard/dashboard.html` after each judge call, and CLOSE no
+  longer writes that page or records it in `MB-report.json`. The judge, the
+  open areas and the playbook read the blackboard. The same record stays in
+  `MB-scheduling/MB-decisions.jsonl`, `MB-reports/session_breakdown.json` and
+  `MB-reports/MB-report.md`.
 - **A multi-branch session runs on MI325X.** `hyperloom-multibranch run`
   accepts `--gpu-type mi325x`. Before, it refused MI325X, a limit left from
   Magpie, which had no benchmark script of MI325X's own; InferenceSuite
@@ -184,8 +190,8 @@ it.
   `total_token_throughput` instead of `e2e_norm_intvty_p50`; the default,
   `p50_interactivity`, leaves existing sessions as they were. The retest and
   the error-rate threshold are the same under either objective. The objective
-  is recorded in the manifest and kept on resume; FINAL, the dashboard and
-  `MB-report.md` name it, and the bar's refusal reads
+  is recorded in the manifest and kept on resume; FINAL and `MB-report.md`
+  name it, and the bar's refusal reads
   `total_throughput_gain_below_threshold`. It writes no Recipe KB record
   (`objective_not_partitioned`): the KB files AgentX records by workload, not
   objective, so its record would sit beside the interactivity champions of the

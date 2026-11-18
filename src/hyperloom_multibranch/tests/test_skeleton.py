@@ -819,9 +819,9 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert all(spend["explore_gpu_hours"] is None for spend in spends)
     [rooted] = [row for row in _decisions(stage) if row["reason"] == "root committed"]
     assert rooted["detail"] == {"root_commit": root}
-    # Each judge call's view reads the queue twice, for its widening signals and the builds a branch waits for, and the
-    # dashboard rebuild after it once; so do the stop and every quota push.
-    assert judge_calls >= 2 and stage.toolbox.queue_reads == 3 * judge_calls + 1 + len(stage.toolbox.policies)
+    # Each judge call's view reads the queue twice, for its widening signals and the builds a branch waits for; so do
+    # the stop and every quota push.
+    assert judge_calls >= 2 and stage.toolbox.queue_reads == 2 * judge_calls + 1 + len(stage.toolbox.policies)
     assert await stage.processes.leftovers() == ()
     for path in (
         stage.layout.manifest,
@@ -831,7 +831,6 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
         stage.layout.report,
         stage.layout.reports / "session_breakdown.json",
         stage.layout.merges,
-        outcome.close.exports.dashboard.html,
     ):
         assert path.is_file(), path
     assert all(entry.name.startswith("MB-") for entry in stage.layout.root.iterdir())

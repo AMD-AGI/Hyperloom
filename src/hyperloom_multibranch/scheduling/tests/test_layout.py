@@ -27,7 +27,6 @@ _DIRS = (
     "MB-toolbox",
     "MB-integration",
     "MB-final",
-    "MB-dashboard",
     "MB-reports",
     "MB-logs",
 )
@@ -81,7 +80,6 @@ def test_layout_paths() -> None:
         layout.blobs: "MB-blobs",
         layout.toolbox: "MB-toolbox",
         layout.integration: "MB-integration",
-        layout.dashboard: "MB-dashboard",
     }
 
     assert {path: str(path.relative_to(layout.root)) for path in expected} == expected
