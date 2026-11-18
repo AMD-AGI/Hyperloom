@@ -197,20 +197,16 @@ def test_dense_fallback_no_moe_fields() -> None:
 
 
 # Safe degrade
-def test_returns_none_when_meta_unavailable() -> None:
-    state = _make_state()
-    with patch(_LOAD_META_PATH, return_value=None):
+@pytest.mark.parametrize(
+    ("meta", "state_overrides"),
+    [
+        pytest.param(None, {}, id="meta_unavailable"),
+        pytest.param(_qwen3_30b_a3b_meta(), {"gpu_type": ""}, id="gpu_type_missing"),
+        pytest.param(_qwen3_30b_a3b_meta(), {"tp": 0}, id="tp_zero"),
+    ],
+)
+def test_returns_none_when_an_input_is_unavailable(meta: ModelMeta | None, state_overrides: dict[str, Any]) -> None:
+    state = _make_state(**state_overrides)
+    with patch(_LOAD_META_PATH, return_value=meta):
         block = _build_roofline_ceiling(state, _ArmCurves(baseline=[], optimized=[]), concs=[1, 8], isl=1024, osl=1024)
-    assert block is None
-
-
-def test_returns_none_when_gpu_type_missing(stub_meta: ModelMeta) -> None:
-    state = _make_state(gpu_type="")
-    block = _build_roofline_ceiling(state, _ArmCurves(baseline=[], optimized=[]), concs=[1], isl=1024, osl=1024)
-    assert block is None
-
-
-def test_returns_none_when_tp_zero(stub_meta: ModelMeta) -> None:
-    state = _make_state(tp=0)
-    block = _build_roofline_ceiling(state, _ArmCurves(baseline=[], optimized=[]), concs=[1], isl=1024, osl=1024)
     assert block is None

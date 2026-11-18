@@ -297,6 +297,9 @@ def _restart_env_scope(extra_env: dict[str, str] | None, unset_env, torch_profil
 async def _apply_tracelens_patch_fanout(patch_set: str, torch_profiler_dir: str, poll_timeout_s: int) -> None:
     from ._profile_setup import _tracelens_patch_enabled
 
+    if patch_set == "none":
+        log.info("restart_server_for_round: this SGLang needs no TraceLens patch set; skipping fan-out")
+        return
     if patch_set == "graph-capture" and not torch_profiler_dir:
         log.info("restart_server_for_round: not a profiling round; skipping sglang_gc_patch fan-out")
         return
@@ -321,7 +324,7 @@ async def _apply_tracelens_patch_fanout(patch_set: str, torch_profiler_dir: str,
                 "restart_server_for_round: TraceLens SGLang patch fan-out "
                 "returned rc=%d; proceeding with restart (trace may be "
                 "unannotated, or CUDA-graph capture may IndexError on "
-                ">= 0.5.18, until patches succeed)",
+                "0.5.18 to 0.5.21, until patches succeed)",
                 patch_rc,
             )
     except (RuntimeError, ValueError, OSError, KeyError, httpx.HTTPError, httpx.InvalidURL) as exc:
@@ -1070,11 +1073,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
 
     from hyperloom.inference_optimizer.multi_node import INFERA_POD_LOG_FILE
 
-    sess = (
-        os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR")
-        or os.environ.get("INFERENCE_OPTIMIZER_SESSION_DIR")
-        or ""
-    )
+    sess = os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "")
     if not sess:
         return
     out_dir = os.path.join(sess, "server_logs")

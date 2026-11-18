@@ -6,13 +6,10 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
-
-from hyperloom.inference_optimizer.session.paths import workspace_root
 
 from ._io_utils import append_log
 from ._trace_gates import _check_chunk_quality

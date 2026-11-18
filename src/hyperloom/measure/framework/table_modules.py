@@ -247,18 +247,21 @@ def _shares_a_key(files: list[str], keys: Collection[tuple[str, ...]]) -> bool:
                 rows = [row for row in csv.reader(handle) if row]
         except (OSError, UnicodeDecodeError, csv.Error):
             return True
-        tables.append((rows[0], rows[1:]) if rows else ([], []))
-    for key in keys:
-        columns = [column for column in key if all(column in header for header, rows in tables if rows)]
-        first: dict[tuple[object, ...], int] = {}
-        for index, (header, rows) in enumerate(tables):
-            if not rows:
-                continue
-            places = [header.index(column) for column in columns]
-            for row in rows:
-                cells = tuple(_cell(row[place]) if place < len(row) else "" for place in places)
-                if first.setdefault(cells, index) != index:
-                    return True
+        if len(rows) > 1:
+            tables.append((rows[0], rows[1:]))
+    return any(_key_repeats(tables, key) for key in keys)
+
+
+def _key_repeats(tables: list[tuple[list[str], list[list[str]]]], key: tuple[str, ...]) -> bool:
+    """Whether two of ``tables`` (header, rows) hold a row with the same cells under the columns of ``key`` they all have."""
+    columns = [column for column in key if all(column in header for header, _ in tables)]
+    first: dict[tuple[object, ...], int] = {}
+    for index, (header, rows) in enumerate(tables):
+        places = [header.index(column) for column in columns]
+        for row in rows:
+            cells = tuple(_cell(row[place]) if place < len(row) else "" for place in places)
+            if first.setdefault(cells, index) != index:
+                return True
     return False
 
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for langfuse_emitter SDK-version-tolerant helpers: ns conversion, observation start/end shims, OTEL
+"""Coverage for langfuse_emitter SDK-version-tolerant helpers: ns conversion, the observation end shim, OTEL
 attribute coercion, trace-attr fallback, and JSON/JSONL loaders.
 """
 
@@ -18,40 +18,6 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import load_shard
 def test_to_ns_none_and_non_datetime() -> None:
     assert lfe._to_ns(None) is None
     assert lfe._to_ns("not-a-datetime") is None
-
-
-def test_to_ns_datetime() -> None:
-    dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    ns = lfe._to_ns(dt)
-    assert ns == int(dt.timestamp() * 1_000_000_000)
-
-
-class _ParentRejectsStartTime:
-    """start_observation that rejects start_time once (v4 behaviour)."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    def start_observation(self, **kwargs: Any) -> str:
-        self.calls.append(dict(kwargs))
-        if "start_time" in kwargs:
-            raise TypeError("v4 does not accept start_time")
-        return "obs"
-
-
-def test_start_obs_retries_without_start_time() -> None:
-    parent = _ParentRejectsStartTime()
-    out = lfe._start_obs(parent, name="x", start_time=datetime.now(timezone.utc))
-    assert out == "obs"
-    assert "start_time" not in parent.calls[-1]
-
-
-def test_start_obs_passthrough_when_accepted() -> None:
-    class _Parent:
-        def start_observation(self, **kwargs: Any) -> str:
-            return "ok"
-
-    assert lfe._start_obs(_Parent(), name="x") == "ok"
 
 
 class _ObsIntEnd:
@@ -86,16 +52,6 @@ def test_end_time_wants_int_unreadable_signature_defaults_false() -> None:
     assert lfe._end_time_wants_int(_Weird()) is False
 
 
-def test_end_obs_none_observation_is_noop() -> None:
-    lfe._end_obs(None, datetime.now(timezone.utc))  # must not raise
-
-
-def test_end_obs_none_end_dt_calls_bare_end() -> None:
-    obs = _ObsIntEnd()
-    lfe._end_obs(obs, None)
-    assert obs.end_args == [None]
-
-
 def test_end_obs_int_path_converts_to_ns() -> None:
     obs = _ObsIntEnd()
     dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -123,19 +79,6 @@ def test_end_obs_typed_call_rejected_falls_back_to_bare() -> None:
     obs = _Rejects()
     lfe._end_obs(obs, datetime.now(timezone.utc))
     assert obs.bare == 1
-
-
-def test_otel_attr_value_scalars_and_none() -> None:
-    assert lfe._otel_attr_value(None) is None
-    assert lfe._otel_attr_value("s") == "s"
-    assert lfe._otel_attr_value(True) is True
-    assert lfe._otel_attr_value(3) == 3
-    assert lfe._otel_attr_value(2.5) == 2.5
-
-
-def test_otel_attr_value_json_serialises_complex() -> None:
-    out = lfe._otel_attr_value({"a": 1, "b": [2, 3]})
-    assert out == '{"a": 1, "b": [2, 3]}'
 
 
 def test_otel_attr_value_falls_back_to_str_on_unserialisable() -> None:
@@ -187,24 +130,20 @@ def test_set_trace_attrs_v4_falls_back_to_otel_attributes() -> None:
         span,
         name="n",
         session_id="s",
-        metadata={"good": "v", "skip_none": None, "obj": {"x": 1}},
+        metadata={"good": "v", "flag": True, "count": 3, "ratio": 2.5, "skip_none": None, "obj": {"x": 1}},
     )
     attrs = span._otel_span.attrs
     assert attrs["langfuse.trace.name"] == "n"
     assert attrs["session.id"] == "s"
     assert attrs["langfuse.trace.metadata.good"] == "v"
+    # Scalars keep their OTEL type rather than turning into strings.
+    assert attrs["langfuse.trace.metadata.flag"] is True
+    assert attrs["langfuse.trace.metadata.count"] == 3
+    assert attrs["langfuse.trace.metadata.ratio"] == 2.5
     # None metadata values are dropped (OTEL rejects them).
     assert "langfuse.trace.metadata.skip_none" not in attrs
     # complex values are JSON-stringified.
     assert attrs["langfuse.trace.metadata.obj"] == '{"x": 1}'
-
-
-def test_set_trace_attrs_v4_no_otel_span_is_noop() -> None:
-    class _SpanNoOtel:
-        def update_trace(self, **kwargs: Any) -> None:
-            raise AttributeError("v4")
-
-    lfe._set_trace_attrs(_SpanNoOtel(), name="n")  # must not raise
 
 
 def test_load_shard_missing_file(tmp_path: Path) -> None:

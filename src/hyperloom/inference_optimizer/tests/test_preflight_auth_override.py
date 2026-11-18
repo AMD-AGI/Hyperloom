@@ -1404,35 +1404,24 @@ def test_validate_claude_model_custom_optout_rejects_empty(monkeypatch, capsys):
     assert "is empty" in capsys.readouterr().err
 
 
-def test_validate_claude_model_custom_allowed_by_default(monkeypatch, capsys):
-    """Default (env unset): custom orchestration models pass when the catalog contains them."""
+@pytest.mark.parametrize(
+    ("probe_url", "model", "catalog"),
+    [
+        pytest.param("https://gw.example/v1", "my-org/custom-claude", {"my-org/custom-claude", "gpt-5.4"}, id="custom"),
+        pytest.param("https://api.deepseek.com/anthropic", "deepseek-v4-pro", {"deepseek-v4-pro"}, id="deepseek"),
+    ],
+)
+def test_validate_claude_model_custom_allowed_by_default(monkeypatch, capsys, probe_url, model, catalog):
+    """Default (env unset): custom orchestration models, DeepSeek-style ones included, pass when the configured
+    gateway's catalog contains them.
+    """
     monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", raising=False)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
-    monkeypatch.setattr(
-        model_catalog,
-        "_probe_llm_catalog",
-        lambda **kw: {"my-org/custom-claude", "gpt-5.4"},
-    )
-    args = _make_args(claude_model="my-org/custom-claude")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", probe_url)
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: catalog)
+    args = _make_args(claude_model=model)
     model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
-    assert args.claude_model == "my-org/custom-claude"
-    assert "confirmed in gateway catalog" in capsys.readouterr().out
-
-
-def test_validate_claude_model_deepseek_allowed_by_default(monkeypatch, capsys):
-    """DeepSeek-style orchestration models are valid when the configured gateway serves them."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", raising=False)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://api.deepseek.com/anthropic")
-    monkeypatch.setattr(
-        model_catalog,
-        "_probe_llm_catalog",
-        lambda **kw: {"deepseek-v4-pro"},
-    )
-    args = _make_args(claude_model="deepseek-v4-pro")
-    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
-
-    assert args.claude_model == "deepseek-v4-pro"
+    assert args.claude_model == model
     assert "confirmed in gateway catalog" in capsys.readouterr().out
 
 
@@ -1466,34 +1455,19 @@ def test_validate_claude_model_custom_explicitly_disabled_still_hard_gates(monke
     assert "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1" in err
 
 
-def test_validate_claude_model_opus_5_in_catalog_keeps_choice(monkeypatch, capsys):
-    """The new default passes the gateway gate; the gateway spelling also resolves."""
-    # The AMD gateway lists it as "Claude-Opus-5"; the probe folds that form.
-    assert model_catalog._catalog_compare_model_id("Claude-Opus-5") == "claude-opus-5"
+@pytest.mark.parametrize("model", ["claude-opus-5", "claude-opus-4-7"])
+def test_validate_claude_model_in_catalog_keeps_choice(monkeypatch, capsys, model):
+    """An allowlisted model the gateway lists is kept, not swapped for a lower rung it also lists."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
         model_catalog,
         "_probe_llm_catalog",
-        lambda **kw: {"claude-opus-5", "claude-opus-4-6", "gpt-5.4"},
+        lambda **kw: {model, "claude-opus-4-6", "gpt-5.4"},
     )
-    args = _make_args(claude_model="claude-opus-5")
+    args = _make_args(claude_model=model)
     model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
 
-    assert args.claude_model == "claude-opus-5"
-    assert "confirmed in gateway catalog" in capsys.readouterr().out
-
-
-def test_validate_claude_model_4_7_in_catalog_keeps_choice(monkeypatch, capsys):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
-    monkeypatch.setattr(
-        model_catalog,
-        "_probe_llm_catalog",
-        lambda **kw: {"claude-opus-4-7", "claude-opus-4-6", "gpt-5.4"},
-    )
-    args = _make_args(claude_model="claude-opus-4-7")
-    model_catalog._validate_and_resolve_claude_model(args, ("", ""), claude_follows_codex=False)
-
-    assert args.claude_model == "claude-opus-4-7"
+    assert args.claude_model == model
     assert "confirmed in gateway catalog" in capsys.readouterr().out
 
 
@@ -2026,14 +2000,6 @@ def test_probe_llm_catalog_returns_none_on_401(monkeypatch):
     assert result is None
 
 
-def test_smoke_test_codex_model_warns_when_missing(monkeypatch, capsys):
-    args = _make_args(codex_model="gpt-99.9", critic_mock=False)
-    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"claude-opus-4-7", "gpt-5.4", "gpt-4.1"})
-    model_catalog._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
-    out = capsys.readouterr().out
-    assert "WARNING" in out
-
-
 def test_smoke_test_codex_model_probes_openai_side(monkeypatch, capsys):
     """Dual entry: Codex smoke probes the OpenAI URL, not the Anthropic one."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
@@ -2051,9 +2017,12 @@ def test_smoke_test_codex_model_probes_openai_side(monkeypatch, capsys):
 
 
 def test_smoke_test_codex_model_confirms_when_present(monkeypatch, capsys):
-    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"claude-opus-4-7", "gpt-5.4"})
+    """A listed model is kept without a warning even when the catalog also lists a higher rung."""
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"gpt-5.6-sol", "gpt-5.4"})
     args = _make_args(codex_model="gpt-5.4", critic_mock=False)
     model_catalog._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+
+    assert args.codex_model == "gpt-5.4"
     out = capsys.readouterr().out
     assert "confirmed in gateway catalog" in out
     assert "WARNING" not in out
@@ -2151,6 +2120,8 @@ def test_smoke_test_codex_model_warns_on_probe_failure(monkeypatch, capsys):
     monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: None)
     args = _make_args(codex_model="gpt-5.4", critic_mock=False)
     model_catalog._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+
+    assert args.codex_model == "gpt-5.4"
     out = capsys.readouterr().out
     assert "WARNING" in out
     assert "unreachable" in out
@@ -2783,6 +2754,7 @@ def test_model_preflight_runs_off_the_event_loop_so_a_subscription_token_can_ans
     monkeypatch.setattr(cli.llm_config, "is_openai_only", lambda: False)
     monkeypatch.setattr(cli.llm_config, "is_anthropic_only", lambda: False)
     monkeypatch.setattr(cli, "_preflight", Mock(return_value={}))
+    monkeypatch.setattr(cli, "_check_codex_sandbox", Mock())
     monkeypatch.setattr(cli, "_resolve_models_for_run", _resolve)
     args = cli._build_parser().parse_args(["optimize", "--model", "/models/m"])
 

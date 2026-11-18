@@ -183,6 +183,17 @@ def theirs(link: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return link
 
 
+def copy_common_modules(lib: Path) -> Path:
+    """Copy the ``hyperloom_common`` modules the shared-storage code is made of to ``lib``, as that package; its
+    directory."""
+    package = lib / "hyperloom_common"
+    package.mkdir(parents=True)
+    common = Path(hyperloom_common.__file__).parent
+    for name in _COMMON_MODULES:
+        shutil.copyfile(common / name, package / name)
+    return package
+
+
 @contextmanager
 def other_accounts() -> Iterator[Accounts]:
     """:class:`Accounts` for one test, skipping it where they cannot be had; their directory is removed after it."""
@@ -197,11 +208,7 @@ def other_accounts() -> Iterator[Accounts]:
     root = Path(tempfile.mkdtemp(prefix="hl-shared-accounts-"))
     try:
         root.chmod(0o755)
-        lib = root / "lib" / "hyperloom_common"
-        lib.mkdir(parents=True)
-        common = Path(hyperloom_common.__file__).parent
-        for name in _COMMON_MODULES:
-            shutil.copyfile(common / name, lib / name)
+        copy_common_modules(root / "lib")
         yield Accounts(root, python, group, first, second, outsider)
     finally:
         shutil.rmtree(root)

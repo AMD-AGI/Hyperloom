@@ -139,8 +139,8 @@ class ExploreWindow:
     """The commit every gain is measured against, the commit the first branches start from, the clock times EXPLORE and the budget end at, the GPU seconds the session's tests and
     leases may use before EXPLORE ends and the dollars the session's recorded LLM calls may cost (``math.inf`` for no
     limit, for either), the directions the user wrote, one user branch each, the agents the user named, one agent branch each, and in the same
-    order each agent's share of the session's directions (:func:`~.agent_plans.agent_plans`; ``""`` for none), and
-    the Arbor agents whose directions one mapping branch maps in EXPLORE before each runs its share (empty for none).
+    order each agent's share of the session's directions (:func:`~.agent_plans.agent_plans`; ``""`` for none), and the
+    component agents whose directions one mapping branch maps in EXPLORE before each runs its share (empty for none).
 
     ``root_commit`` is the session's measurement anchor and nothing moves it. ``start_commit`` is where EXPLORE opens:
     the root, or the Recipe KB champion PRELUDE replayed onto it. ``final_cap`` says, asked every tick, the

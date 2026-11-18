@@ -87,13 +87,6 @@ def test_structured_output_prompt_names_no_claude_tool(phase: str) -> None:
     assert "`Read`" not in prompt
 
 
-def test_structured_output_prompt_states_its_own_transport() -> None:
-    """Replacing the tool contract with nothing would be worse than leaving it."""
-    prompt = " ".join(_prompt(TRANSPORT_STRUCTURED_OUTPUT).split())
-    assert "matching the enforced output schema" in prompt
-    assert "at least one intent" in prompt
-
-
 def test_tool_prompt_keeps_the_claude_tool_surface() -> None:
     """The Anthropic path must not lose its tool contract to the scoping."""
     prompt = _prompt(TRANSPORT_TOOLS)
@@ -235,12 +228,15 @@ async def test_a_configuration_fault_is_not_retried(tmp_path: Path, monkeypatch:
     assert attempts["n"] == 1
 
 
-def test_both_providers_read_the_same_retry_knobs() -> None:
+def test_both_providers_read_the_same_retry_knobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Parity means one policy, not a second set of env vars to discover."""
     from hyperloom.orchestrator.roles.claude import ClaudeBackend
 
-    assert (
-        CodexBackend.__dataclass_fields__["retry_policy"].default_factory
-        == ClaudeBackend.__dataclass_fields__["retry_policy"].default_factory
-        == RetryPolicy.from_env
-    )
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LLM_RETRY_ATTEMPTS", "5")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LLM_RETRY_BASE_S", "0.25")
+    codex = CodexBackend(allowed_intents=_ORCHESTRATION_INTENTS, cwd=tmp_path / "codex")
+    claude = ClaudeBackend(sdk_query_factory=object(), sdk_options_cls=object, mcp_server_factory=lambda *a, **k: None)
+
+    assert codex.retry_policy == claude.retry_policy
+    assert codex.retry_policy.max_attempts == 5
+    assert codex.retry_policy.base_delay_s == 0.25

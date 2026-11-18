@@ -13,7 +13,6 @@ from hyperloom_multibranch.contracts.blackboard.interfaces import UnknownRequest
 from hyperloom_multibranch.contracts.blackboard.peers import (
     BranchLogEntry,
     Intent,
-    Judgement,
     TestRequest,
     TestResult,
 )
@@ -22,6 +21,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     BaselineRecord,
     BranchLogRecord,
     BuildNotice,
+    JudgementWrite,
     Learning,
     LearningRecord,
     LeaseEnd,
@@ -35,29 +35,16 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     OpShares,
     QuarantineEvent,
     RegressionCase,
-    RetractionRef,
     SessionProfile,
     TestRecord,
     ToolResultPointer,
     Withdrawal,
 )
-from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, DedupStatus, LineageKind, Role
+from hyperloom_multibranch.contracts.blackboard.vocab import DedupStatus, LineageKind, Role
 from hyperloom_multibranch.blackboard import codec
 from hyperloom_multibranch.blackboard.local.segments import Entry, EntryKind
 
 log = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class JudgementWrite:
-    """A judgement as stored: the rule gate's or the integrator's, on one request."""
-
-    request_id: str
-    judgement: Judgement
-    conclusion: Conclusion
-    commit_id: str | None = None
-    recipe_digest: str | None = None
-    retracts: RetractionRef | None = None
 
 
 @dataclass(frozen=True)
@@ -84,7 +71,7 @@ class ClaimDecision:
 
 @dataclass(frozen=True)
 class AgentMapWrite:
-    """Arbor's map as the scheduler wrote it: its directions, in the map's order."""
+    """The agent map as the scheduler wrote it: its directions, in the map's order."""
 
     directions: tuple[MapDirection, ...] = ()
 
@@ -312,4 +299,4 @@ class BlackboardState:
         return attempt.source_commits if attempt is not None else ()
 
 
-__all__ = ["PAYLOADS", "AgentMapWrite", "ClaimDecision", "JudgementWrite", "BlackboardState"]
+__all__ = ["PAYLOADS", "AgentMapWrite", "ClaimDecision", "BlackboardState"]

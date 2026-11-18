@@ -16,10 +16,19 @@ from hyperloom.orchestrator.specialists.domains import (
     get_domain,
 )
 from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    _section_roofline_evidence,
-    build_specialist_prompts,
-)
+from hyperloom.orchestrator.prompts.roofline_evidence_section import roofline_evidence_section
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
+
+
+_ADD_NORM_FINDING = {
+    "kind": "add_norm",
+    "operation": "Unfused Add + RMSNorm in `DecoderLayer`",
+    "projected_e2e_pct": 2.4,
+    "members": [
+        {"kernel_names": ["add_kernel"], "kernel_launcher_path": "modeling.py(88): forward"},
+        {"kernel_names": ["rmsnorm_kernel"], "kernel_launcher_path": ""},
+    ],
+}
 
 
 def _make_coord(tmp_path: Path, *, state: SharedState) -> Coordinator:
@@ -69,6 +78,7 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
                     for i in range(2, 11)
                 ],
             ],
+            "fusion_findings": [_ADD_NORM_FINDING],
         },
     )
 
@@ -82,6 +92,7 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
     assert ev["roofline_snapshot_id"] == 3
     assert len(ev["hot_kernels_top15"]) == 8
     assert ev["hot_kernels_top15"][0]["kernel_id"] == "k1"
+    assert ev["fusion_findings"] == [_ADD_NORM_FINDING]
     assert ev["executive_summary"]["compute_pct"] == pytest.approx(32.1, rel=0.01)
     assert ev["executive_summary"]["idle_pct"] == pytest.approx(17.5, rel=0.01)
     assert ev["executive_summary"]["comm_pct"] == pytest.approx(41.8, rel=0.01)
@@ -195,7 +206,7 @@ def test_section_renders_executive_summary_and_hot_kernels():
             ],
         }
     )
-    section = _section_roofline_evidence(inp)
+    section = roofline_evidence_section(inp)
     text = "\n".join(section)
     assert "## 4a. ROOFLINE EVIDENCE" in text
     assert "snapshot #7" in text
@@ -206,9 +217,17 @@ def test_section_renders_executive_summary_and_hot_kernels():
     assert "/sd/.../analysis.md" in text
 
 
+def test_section_renders_fusion_findings_only_when_tracelens_reported_some():
+    section = roofline_evidence_section(_make_inp({"fusion_findings": [_ADD_NORM_FINDING]}))
+    assert "| add_norm | Unfused Add + RMSNorm in `DecoderLayer` | 2.40% | modeling.py(88): forward |" in section
+
+    section = roofline_evidence_section(_make_inp({"fusion_findings": [], "roofline_snapshot_id": 1}))
+    assert not any("Kernel fusion opportunities" in row for row in section)
+
+
 def test_section_renders_none_when_evidence_empty():
     inp = _make_inp({})
-    section = _section_roofline_evidence(inp)
+    section = roofline_evidence_section(inp)
     text = "\n".join(section)
     assert "## 4a. ROOFLINE EVIDENCE" in text
     assert "(none" in text
@@ -219,7 +238,7 @@ def test_section_renders_none_when_evidence_empty():
     [("/sd/analysis.md", "Full analysis.md path"), ("/sd/analysis.json", "Full TraceLens report path")],
 )
 def test_section_labels_the_report_by_its_format(report, label):
-    section = _section_roofline_evidence(_make_inp({"analysis_md_path": report}))
+    section = roofline_evidence_section(_make_inp({"analysis_md_path": report}))
     assert f"**{label}:** `{report}`" in section
 
 

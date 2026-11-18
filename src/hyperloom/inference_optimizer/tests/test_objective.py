@@ -155,14 +155,18 @@ def test_target_baseline_falls_back_to_a_warmup_only_reference(tmp_path):
     """A budget-dropped measure round leaves the warmup as the only report."""
     workspace = tmp_path / "warmup-only"
     _write_round(workspace, "f6b7/warmup_round", 800.0)
-    assert TargetBaselineObjective(baseline_dir=str(workspace))._ref_tput == pytest.approx(800.0)
+    obj = TargetBaselineObjective(baseline_dir=str(workspace))
+    assert not obj.reached(SharedState(current_best={"tput": 799.0}))
+    assert obj.reached(SharedState(current_best={"tput": 800.0}))
 
 
 def test_target_baseline_prefers_the_measured_round_over_the_warmup(tmp_path):
     workspace = tmp_path / "both"
-    _write_round(workspace, "f6b7/warmup_round", 800.0)
     _write_round(workspace, "f6b7/measure_round", 1200.0)
-    assert TargetBaselineObjective(baseline_dir=str(workspace))._ref_tput == pytest.approx(1200.0)
+    _write_round(workspace, "f6b7/warmup_round", 800.0)
+    obj = TargetBaselineObjective(baseline_dir=str(workspace))
+    assert not obj.reached(SharedState(current_best={"tput": 1199.0}))
+    assert obj.reached(SharedState(current_best={"tput": 1200.0}))
 
 
 # TimeOnlyObjective
@@ -186,9 +190,17 @@ def test_build_objective_target_tput():
     assert isinstance(obj, TargetTputObjective)
 
 
-def test_build_objective_time_only_when_no_target():
-    obj = build_objective({"MAX_HOURS": "0.5"})
-    assert isinstance(obj, TimeOnlyObjective)
+@pytest.mark.parametrize(
+    "env",
+    [
+        pytest.param({"MAX_HOURS": "0.5"}, id="absent"),
+        pytest.param(
+            {"MAX_HOURS": "1", "TARGET_GAIN_PCT": "", "TARGET_TPUT_PER_GPU": None, "TARGET_DIR": ""}, id="empty"
+        ),
+    ],
+)
+def test_build_objective_is_time_only_without_a_target(env):
+    assert isinstance(build_objective(env), TimeOnlyObjective)
 
 
 def test_build_objective_rejects_multiple_targets():
@@ -210,18 +222,6 @@ def test_build_objective_rejects_missing_max_hours():
 def test_build_objective_rejects_zero_max_hours():
     with pytest.raises(ObjectiveError, match="must be > 0"):
         build_objective({"MAX_HOURS": "0"})
-
-
-def test_build_objective_treats_empty_target_as_unset():
-    obj = build_objective(
-        {
-            "MAX_HOURS": "1",
-            "TARGET_GAIN_PCT": "",
-            "TARGET_TPUT_PER_GPU": None,
-            "TARGET_DIR": "",
-        }
-    )
-    assert isinstance(obj, TimeOnlyObjective)
 
 
 # Coordinator.run() long loop

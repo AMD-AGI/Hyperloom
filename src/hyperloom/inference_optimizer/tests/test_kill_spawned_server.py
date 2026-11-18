@@ -36,8 +36,6 @@ from inference_suite.server_log import death_excerpt
 class _FakeCapture:
     """A capture whose child wrote ``out`` and ``err`` and nothing the watchdog could see arrive."""
 
-    last_activity_at = None
-
     def __init__(self, out: str = "", err: str = "") -> None:
         self._captured = (out, err)
 
@@ -73,13 +71,11 @@ def test_capture_partial_utf8_records_bytes_before_newline():
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    capture = sk._StreamCapture(proc)
+    activity = threading.Event()
+    capture = sk._StreamCapture(proc, on_output=activity.set)
     capture.start()
     try:
-        deadline = time.monotonic() + 0.35
-        while capture.last_activity_at is None and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert capture.last_activity_at is not None
+        assert activity.wait(0.35)
         assert proc.poll() is None
         proc.wait(timeout=5)
         stdout, stderr = capture.finish()
@@ -815,3 +811,28 @@ def test_a_legacy_marker_that_contains_a_fatal_one_keeps_legacy_handling(tmp_pat
         assert excerpt is not None, legacy
         assert "out of memory" in excerpt.lower(), f"{legacy} must keep the cause above it"
         assert classify_failure(excerpt).kind == "resource_constraint", legacy
+
+
+def test_death_excerpt_keeps_the_exception_below_the_marker(tmp_path):
+    """``EngineCore failed to start`` precedes its traceback; on Python 3.14 the cause sits 62 lines below it."""
+    from hyperloom.common.failure_signature import is_engine_capacity_error
+
+    err = "(EngineCore pid=14353) ERROR 11-09 16:41:10 [core.py:1349]"
+    marker = f"{err} EngineCore failed to start."
+    cause = f"{err} ValueError: max_num_seqs (256) exceeds available Mamba cache blocks (237)."
+    lines = [f"(EngineCore pid=14353) INFO 11-09 16:41:10 [kv_cache_utils.py:2235] line {i}" for i in range(56)]
+    lines += [marker, f"{err} Traceback (most recent call last):"]
+    lines += [f"{err}     frame {i}" if i % 2 else f"{err}     ~~~^^^ {i}" for i in range(60)]
+    lines += [
+        cause,
+        "(EngineCore pid=14353) Process EngineCore:",
+        "(EngineCore pid=14353) Traceback (most recent call last):",
+    ]
+    lines += ["(APIServer pid=13758) RuntimeError: Engine core initialization failed. See root cause above."]
+    assert lines.index(cause) - lines.index(marker) == 62
+    log_path = tmp_path / "server.log"
+    log_path.write_text("\n".join(lines) + "\n")
+    excerpt = death_excerpt(str(log_path))
+    assert excerpt is not None
+    assert "EngineCore failed to start" in excerpt
+    assert is_engine_capacity_error(excerpt)

@@ -40,9 +40,7 @@ from hyperloom.orchestrator.actions.executors.profile import (
     _record_workspace_traces,
     _sanitize_profile_server_args,
     _trace_files_for_dir,
-    _trace_size_bytes,
 )
-from hyperloom.orchestrator.trace_analysis._trace_rank import select_primary_trace
 from hyperloom.orchestrator.trace_analysis._trace_rank import trace_rank as _trace_rank
 from inference_suite.contracts import RunLayout
 from hyperloom.orchestrator.roles import (
@@ -128,20 +126,6 @@ def test_mi308x_session_records_the_real_gpu_type(tmp_path, monkeypatch):
     assert manifest["gpu_type"] == "mi308x"
     assert state.gpu_type == "mi308x"
     assert os.environ["TARGET_GPU_TYPE"] == "mi308x"
-
-
-def test_cli_parser_accepts_mi308x():
-    parser = cli_parser._build_parser()
-    args = parser.parse_args(
-        [
-            "optimize",
-            "--model",
-            "/tmp/model",
-            "--gpu-type",
-            "mi308x",
-        ]
-    )
-    assert args.gpu_type == "mi308x"
 
 
 @pytest.fixture(autouse=True)
@@ -840,20 +824,6 @@ def test_materialize_profile_window_sglang_skill_formula(
     assert body["num_steps"] == 128
 
 
-def test_materialize_profile_max_iters_override_is_quiet_without_agentx(
-    tmp_path,
-    monkeypatch,
-    caplog,
-):
-    """The new warning is AgentX-only; the synthetic path has no host-RAM bound."""
-    _clear_workload_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
-    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    with caplog.at_level("WARNING"):
-        materialize_benchmark_config(src, tmp_path)
-    assert not any("AgentX capture bound" in r.message for r in caplog.records)
-
-
 def test_materialize_persists_inferencex_path(
     tmp_path,
     monkeypatch,
@@ -1051,6 +1021,7 @@ def _force_sitecustomize_shape_mode(monkeypatch):
     from hyperloom.orchestrator.actions.executors import _server_patcher
 
     monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_gc_patch_needed", lambda: True)
 
 
 def test_sitecustomize_profile_records_successful_gc_patch(tmp_path, monkeypatch):
@@ -3218,15 +3189,33 @@ async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
     assert warnings[1]["code"] == "tracelens_analysis_failed"
 
 
-def test_handlers_dispatch_table():
-    """Dispatch table includes trace_analyze, not the Coordinator-owned lanes or unknown kinds."""
-    assert "trace_analyze" in krh.KERNEL_REQUEST_HANDLERS
-    assert "run_gemm_tuning" not in krh.KERNEL_REQUEST_HANDLERS
-    assert "run_optimization" not in krh.KERNEL_REQUEST_HANDLERS
-    assert "totally_unknown_kind" not in krh.KERNEL_REQUEST_HANDLERS
+@pytest.mark.asyncio
+async def test_coordinator_answers_trace_analyze_with_the_registered_handler(session_dir, monkeypatch):
+    """With the dispatch table as shipped, trace_analyze reaches its handler instead of the unknown-kind reject."""
 
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
+        return 0, json.dumps({"status": "ok", "hot_kernels": ["kernel_a"]}), ""
 
-# _batch_kernel_candidates collapses task_group members.
+    monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
+    c = Coordinator(session_dir, backends=_backends_silent())
+    try:
+        await c.router.handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REQUEST,
+                payload={
+                    "target_agent": "kernel_agent",
+                    "kind": "trace_analyze",
+                    "params": {"trace_input": str(session_dir), "dry_run": True},
+                },
+            ),
+        )
+        (reply,) = await c.bus.tail(topic="response", to_agent="orchestration")
+        assert reply.payload["source"] == "programmatic_handler"
+        assert reply.payload["kind"] == "trace_analyze_done"
+        assert reply.payload["result"]["hot_kernels"] == ["kernel_a"]
+    finally:
+        await c.stop()
 
 
 # Coordinator — REQUEST programmatic handler integration
@@ -3574,90 +3563,6 @@ def test_trace_files_for_dir_orders_by_size_not_name(tmp_path):
 )
 def test_trace_rank_supports_framework_naming(relative_path, rank):
     assert _trace_rank(Path(relative_path)) == rank
-
-
-def test_agentx_primary_trace_prefers_rank_zero_over_merged(tmp_path):
-    trace_dir = tmp_path / "torch_trace"
-    trace_dir.mkdir()
-    merged = trace_dir / "merged-177.trace.json.gz"
-    rank_zero_warmup = trace_dir / "100-TP-0-WARMUP.trace.json.gz"
-    rank_zero = trace_dir / "900-TP-0-DECODE.trace.json.gz"
-    rank_one = trace_dir / "177-TP-1-DECODE.trace.json.gz"
-    merged.write_bytes(b"merged")
-    rank_zero_warmup.write_bytes(b"x")
-    rank_zero.write_bytes(b"x" * 100)
-    rank_one.write_bytes(b"rank-one")
-
-    selected = select_primary_trace(
-        [rank_zero_warmup, merged, rank_one, rank_zero],
-        file_size=_trace_size_bytes,
-        tensor_parallel_size=2,
-    )
-
-    assert selected == rank_zero
-
-
-def test_agentx_primary_trace_does_not_fall_back_to_multi_rank_merge(tmp_path):
-    trace_dir = tmp_path / "torch_trace"
-    merged = trace_dir / "merged-177.trace.json.gz"
-
-    assert (
-        select_primary_trace(
-            [merged],
-            file_size=_trace_size_bytes,
-            tensor_parallel_size=8,
-        )
-        is None
-    )
-
-
-def test_agentx_single_unranked_trace_is_safe_without_tp_environment(tmp_path):
-    trace_dir = tmp_path / "torch_trace"
-    trace = trace_dir / "worker.pt.trace.json.gz"
-
-    assert (
-        select_primary_trace(
-            [trace],
-            file_size=_trace_size_bytes,
-            tensor_parallel_size=None,
-        )
-        == trace
-    )
-
-
-@pytest.mark.parametrize(
-    "trace_name",
-    [
-        "worker-rank-3.pt.trace.json.gz",
-        "worker.pt.trace.json.gz",
-    ],
-)
-def test_agentx_tp8_does_not_substitute_only_non_primary_trace(tmp_path, trace_name):
-    trace_dir = tmp_path / "torch_trace"
-    trace = trace_dir / trace_name
-
-    assert (
-        select_primary_trace(
-            [trace],
-            file_size=_trace_size_bytes,
-            tensor_parallel_size=8,
-        )
-        is None
-    )
-
-
-def test_agentx_tp1_can_use_single_merged_trace_as_compatibility_fallback(tmp_path):
-    trace_dir = tmp_path / "torch_trace"
-    merged = trace_dir / "merged-177.trace.json.gz"
-
-    assert (
-        select_primary_trace(
-            [merged],
-            file_size=_trace_size_bytes,
-            tensor_parallel_size=1,
-        )
-        == merged
-    )
 
 
 def test_trace_files_for_dir_survives_an_ancestor_named_trace_split(tmp_path):

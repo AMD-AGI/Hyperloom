@@ -9,6 +9,8 @@ import argparse
 import json
 import os
 
+import pytest
+
 from hyperloom.inference_optimizer.cli.launch_shape import _export_operator_launch_shape
 from hyperloom.inference_optimizer.cli.bootstrap import parse_operator_extra_env
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -32,11 +34,12 @@ def _pin(monkeypatch, **pins):
     _export_operator_launch_shape(server_args="", extra_env=dict(pins))
 
 
-def test_pin_fills_a_workload_knob_the_flags_left_unset(monkeypatch):
+@pytest.mark.parametrize("isl_pin", ["4096", "  4096  "], ids=["plain", "padded"])
+def test_pin_fills_a_workload_knob_the_flags_left_unset(monkeypatch, isl_pin):
     """A pin reaches the ladder through the environment, and ``args`` is what every later projection writes."""
     from hyperloom.inference_optimizer.cli.launch_shape import _resolve_workload_knobs
 
-    _pin(monkeypatch, ISL="4096", OSL="512")
+    _pin(monkeypatch, ISL=isl_pin, OSL="512")
     args = _knob_args()
 
     _resolve_workload_knobs(args)
@@ -167,23 +170,15 @@ def test_the_fresh_launch_anchors_stay_in_order():
         )
 
 
-def test_the_environment_rung_is_positive_ints_only(monkeypatch):
-    """The rung every ladder shares: a value that is not a positive integer falls through rather than raising."""
-    from hyperloom.inference_optimizer.cli.launch_shape import _positive_env_int
-
-    for raw, expected in (("65536", 65536), ("", 0), ("nope", 0), ("0", 0), ("-4", 0), ("  8  ", 8)):
-        monkeypatch.setenv("MAX_MODEL_LEN", raw)
-        assert _positive_env_int("MAX_MODEL_LEN") == expected
-
-
-def test_a_malformed_pinned_knob_does_not_take_the_run_down(monkeypatch):
+@pytest.mark.parametrize("pin", ["not-a-number", "0", "-4", ""], ids=["not-a-number", "zero", "negative", "blank"])
+def test_a_malformed_pinned_knob_does_not_take_the_run_down(monkeypatch, pin):
     """A pin that is not a positive integer falls through to the rest of the ladder rather than raising."""
     from hyperloom.inference_optimizer.cli.launch_shape import _resolve_workload_knobs
     from hyperloom.common.workload_defaults import DEFAULT_ISL
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
     monkeypatch.setenv("ISL", "")
-    _export_operator_launch_shape(server_args="", extra_env={"ISL": "not-a-number"})
+    _export_operator_launch_shape(server_args="", extra_env={"ISL": pin})
     args = _knob_args()
 
     _resolve_workload_knobs(args)
@@ -293,6 +288,7 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
         lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
     )
     monkeypatch.setattr(f"{cli_mod}._preflight", lambda args: ("", ""))
+    monkeypatch.setattr(f"{cli_mod}._check_codex_sandbox", lambda backend: None)
 
     def past_the_guard(*a, **kw):
         raise RuntimeError("resume cleared the staleness guard")
@@ -306,6 +302,168 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
         asyncio.run(_run_optimize(args))
 
     assert os.environ["HYPERLOOM_AGENTIC_BACKEND"] == "mlperf"
+
+
+class _PastTheSandboxGate(Exception):
+    pass
+
+
+def _resume_through_the_sandbox_gate(tmp_path, monkeypatch, request, *, env, persisted_pins, flags=()):
+    """Run ``--resume-from`` through the real Codex sandbox gate on a host whose bubblewrap probe fails.
+
+    The gate admits the run when model resolution is reached (``_PastTheSandboxGate``) and refuses it with ``SystemExit``.
+    """
+    import asyncio
+
+    from hyperloom.common.codex_session import CODEX_SANDBOX_MODE_ENV
+    from hyperloom.inference_optimizer.cli import _build_parser, _run_optimize, session_gates
+    from hyperloom.inference_optimizer.cli.bootstrap import MEASUREMENT_EPOCH
+    from hyperloom_common.llm.llm_config import AGENT_BACKEND_ENV, ANTHROPIC_CREDENTIAL_ENV_ORDER
+
+    cli_mod = "hyperloom.inference_optimizer.cli"
+    saved_environ = dict(os.environ)
+    request.addfinalizer(lambda: (os.environ.clear(), os.environ.update(saved_environ)))
+
+    workspace = tmp_path / "sessions"
+    resume_dir = workspace / "Qwen-Test" / "pinned-sandbox"
+    model = tmp_path / "Qwen-Test"
+    (resume_dir / "reports").mkdir(parents=True, exist_ok=True)
+    SharedState(
+        session_id="resume-pinned-sandbox",
+        model_name=model.name,
+        model_path=str(model),
+        measurement_epoch=MEASUREMENT_EPOCH,
+        operator_extra_env=persisted_pins,
+    ).save(resume_dir)
+    (resume_dir / "manifest.json").write_text(
+        json.dumps({"schema_version": 4, "session_id": "resume-pinned-sandbox"}), encoding="utf-8"
+    )
+
+    for name in (
+        AGENT_BACKEND_ENV,
+        CODEX_SANDBOX_MODE_ENV,
+        "ANTHROPIC_BASE_URL",
+        *ANTHROPIC_CREDENTIAL_ENV_ORDER,
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "MODEL_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(resume_dir))
+    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
+    monkeypatch.setattr(
+        f"{cli_mod}.clean_stale_aiter_locks",
+        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
+    )
+    monkeypatch.setattr(f"{cli_mod}._preflight", lambda args: ("", ""))
+    monkeypatch.setattr(session_gates, "probe_codex_sandbox_capability", lambda: False)
+
+    def past_the_gate(*a, **kw):
+        raise _PastTheSandboxGate
+
+    monkeypatch.setattr(f"{cli_mod}._resolve_models_for_run", past_the_gate)
+    args = _build_parser().parse_args(["optimize", "--resume-from", str(resume_dir), "--critic-mock", *flags])
+    asyncio.run(_run_optimize(args))
+
+
+def test_a_resumed_bypass_pin_reaches_the_sandbox_gate(tmp_path, monkeypatch, request):
+    """The session was launched with the sandbox bypassed; a resume must not read the unpinned default and refuse."""
+    from hyperloom.common.codex_session import CODEX_SANDBOX_MODE_ENV
+
+    with pytest.raises(_PastTheSandboxGate):
+        _resume_through_the_sandbox_gate(
+            tmp_path,
+            monkeypatch,
+            request,
+            env={"OPENAI_API_KEY": "k"},
+            persisted_pins={CODEX_SANDBOX_MODE_ENV: "bypass"},
+        )
+
+
+def test_a_resumed_codex_backend_pin_is_gated(tmp_path, monkeypatch, request):
+    """Only the persisted pin makes the orchestration role Codex; without it the gate would be skipped."""
+    from hyperloom_common.llm.llm_config import AGENT_BACKEND_CODEX, AGENT_BACKEND_ENV
+
+    with pytest.raises(SystemExit) as exc:
+        _resume_through_the_sandbox_gate(
+            tmp_path,
+            monkeypatch,
+            request,
+            env={"ANTHROPIC_API_KEY": "k"},
+            persisted_pins={AGENT_BACKEND_ENV: AGENT_BACKEND_CODEX},
+        )
+
+    assert exc.value.code == 2
+
+
+def test_a_pin_passed_on_the_resume_outranks_the_persisted_one(tmp_path, monkeypatch, request):
+    from hyperloom.common.codex_session import CODEX_SANDBOX_MODE_ENV
+
+    with pytest.raises(SystemExit) as exc:
+        _resume_through_the_sandbox_gate(
+            tmp_path,
+            monkeypatch,
+            request,
+            env={"OPENAI_API_KEY": "k"},
+            persisted_pins={CODEX_SANDBOX_MODE_ENV: "bypass"},
+            flags=["--extra-env", f"{CODEX_SANDBOX_MODE_ENV}=workspace-write"],
+        )
+
+    assert exc.value.code == 2
+
+
+def test_the_resume_exports_its_pins_again_after_the_topology_step_rewrote_them(tmp_path, monkeypatch, request):
+    """The topology step sets SKIP_VARIANTS from its flag after the early pin export; the resume must put the pin back."""
+    import asyncio
+
+    from hyperloom.inference_optimizer.cli import _build_parser, _run_optimize
+    from hyperloom.inference_optimizer.cli.bootstrap import MEASUREMENT_EPOCH
+
+    cli_mod = "hyperloom.inference_optimizer.cli"
+    saved_environ = dict(os.environ)
+    request.addfinalizer(lambda: (os.environ.clear(), os.environ.update(saved_environ)))
+
+    workspace = tmp_path / "sessions"
+    resume_dir = workspace / "Qwen-Test" / "pinned-skip"
+    model = tmp_path / "Qwen-Test"
+    (resume_dir / "reports").mkdir(parents=True, exist_ok=True)
+    SharedState(
+        session_id="resume-pinned-skip",
+        model_name=model.name,
+        model_path=str(model),
+        measurement_epoch=MEASUREMENT_EPOCH,
+        operator_extra_env={"SKIP_VARIANTS": "pinned"},
+    ).save(resume_dir)
+    (resume_dir / "manifest.json").write_text(
+        json.dumps({"schema_version": 4, "session_id": "resume-pinned-skip"}), encoding="utf-8"
+    )
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(resume_dir))
+    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
+    monkeypatch.delenv("SKIP_VARIANTS", raising=False)
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+    monkeypatch.setattr(
+        f"{cli_mod}.clean_stale_aiter_locks",
+        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
+    )
+    monkeypatch.setattr(f"{cli_mod}._preflight", lambda args: ("", ""))
+    monkeypatch.setattr(f"{cli_mod}._check_codex_sandbox", lambda backend: None)
+
+    def past_the_export(*a, **kw):
+        raise RuntimeError("resume passed its pin export")
+
+    # The first call after the export in ``_resume_session``.
+    monkeypatch.setattr(f"{cli_mod}.latency_budget_scope_error", past_the_export)
+    args = _build_parser().parse_args(["optimize", "--resume-from", str(resume_dir), "--critic-mock"])
+
+    with pytest.raises(RuntimeError, match="resume passed its pin export"):
+        asyncio.run(_run_optimize(args))
+
+    assert os.environ["SKIP_VARIANTS"] == "pinned"
 
 
 def test_parse_operator_extra_env_keeps_pairs_and_drops_junk():

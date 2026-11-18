@@ -860,6 +860,19 @@ def make_mock_critic_coordinator(session_dir: Path):
     return Coordinator(session_dir, backends=backends)
 
 
+async def seed_pending_critic_proposal(coordinator):
+    """Give a test a real proposal that keeps the Critic eligible to run."""
+    from hyperloom.orchestrator.loop.proposals import record_proposal
+
+    return await record_proposal(
+        coordinator,
+        from_agent="orchestration",
+        action_name="baseline",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "baseline", "params": {}},
+    )
+
+
 def silent_backends() -> dict[str, object]:
     """Orchestration and critic mock backends sharing one plan that only sends heartbeats."""
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType

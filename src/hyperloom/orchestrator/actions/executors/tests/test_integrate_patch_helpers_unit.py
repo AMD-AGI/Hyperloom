@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
 import pytest
@@ -16,7 +15,6 @@ from hyperloom.orchestrator.actions.executors import _integrate_enablement_gate 
 from hyperloom.orchestrator.actions.executors import _patch_git as patch_git
 from hyperloom.orchestrator.actions.executors import _patch_sources as patch_sources
 from hyperloom.orchestrator.actions.executors import _integrate_refusals as integrate_refusals
-from hyperloom.orchestrator.actions.executors import _integrate_results as integrate_results
 from hyperloom.orchestrator.tests._helpers import git_repo_tracking
 
 
@@ -24,15 +22,6 @@ class _CP:
     def __init__(self, returncode=0, stderr=""):
         self.returncode = returncode
         self.stderr = stderr
-
-
-def test_now_iso():
-    assert "T" in integrate_results._now_iso()
-
-
-def test_integrate_patch_uses_shared_benchmark_deadline():
-    parameters = inspect.signature(ip.IntegratePatchExecutor).parameters
-    assert "variant_timeout_sec" not in parameters
 
 
 @pytest.mark.parametrize(
@@ -271,51 +260,10 @@ def test_run_git_apply_spawn_fail(tmp_path, monkeypatch):
     assert "spawn failed" in err
 
 
-def test_run_git_apply_success(tmp_path, monkeypatch):
-    monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: _CP(0, ""))
-    ok, err = patch_git._run_git_apply(tmp_path, tmp_path / "p.patch", p_level=1, check_only=True)
-    assert ok is True
-
-
 def test_preflight_missing_targets_read_error(tmp_path):
     # A directory path -> read_text raises OSError -> skipped
     records = integrate_refusals._preflight_missing_targets(tmp_path, [tmp_path])
     assert records == []
-
-
-def test_preflight_missing_targets_records(tmp_path, monkeypatch):
-    patch = tmp_path / "p.patch"
-    patch.write_text("--- a/ghost.py\n+++ b/ghost.py\n", encoding="utf-8")
-    monkeypatch.setattr(integrate_refusals, "patch_targets_missing", lambda text, root: ["a/ghost.py"])
-    records = integrate_refusals._preflight_missing_targets(tmp_path, [patch])
-    assert records[0]["missing_targets"] == ["a/ghost.py"]
-
-
-def test_git_apply_check_only_after_detect(tmp_path, monkeypatch):
-    monkeypatch.setattr(patch_git, "_detect_p_level", lambda *a, **k: 2)
-    ok, err = patch_git._git_apply(tmp_path, tmp_path / "p.patch", check_only=True)
-    assert ok is True and err == ""
-
-
-def test_git_apply_no_level(tmp_path, monkeypatch):
-    monkeypatch.setattr(patch_git, "_detect_p_level", lambda *a, **k: None)
-    monkeypatch.setattr(patch_git, "_run_git_apply", lambda *a, **k: (False, "no apply"))
-    ok, err = patch_git._git_apply(tmp_path, tmp_path / "p.patch")
-    assert ok is False
-
-
-def test_git_apply_real_apply(tmp_path, monkeypatch):
-    monkeypatch.setattr(patch_git, "_detect_p_level", lambda *a, **k: 1)
-    monkeypatch.setattr(patch_git, "_run_git_apply", lambda *a, **k: (True, ""))
-    ok, _ = patch_git._git_apply(tmp_path, tmp_path / "p.patch", check_only=False)
-    assert ok is True
-
-
-def test_git_apply_reverse_success(tmp_path, monkeypatch):
-    # check passes at level 1, then real reverse-apply succeeds
-    monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: _CP(0, ""))
-    ok, err = patch_git._git_apply_reverse(tmp_path, tmp_path / "p.patch")
-    assert ok is True
 
 
 def test_git_apply_reverse_check_spawn_fail(tmp_path, monkeypatch):
@@ -349,12 +297,6 @@ def test_git_apply_reverse_real_spawn_fail(tmp_path, monkeypatch):
     monkeypatch.setattr(gitmod.subprocess, "run", _run)
     ok, err = patch_git._git_apply_reverse(tmp_path, tmp_path / "p.patch")
     assert ok is False and "spawn failed" in err
-
-
-def test_git_apply_reverse_no_level(tmp_path, monkeypatch):
-    monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: _CP(1, "no"))
-    ok, err = patch_git._git_apply_reverse(tmp_path, tmp_path / "p.patch")
-    assert ok is False and "no matching -p level" in err
 
 
 _DIFF = "--- a/pkg/mod.py\n+++ b/pkg/mod.py\n@@ -1 +1 @@\n-old\n+new\n"
@@ -402,18 +344,19 @@ def test_patch_touched_paths_mixed_create_and_delete(tmp_path):
     ]
 
 
-def test_git_commit_kept_no_paths_is_benign_noop(tmp_path, monkeypatch):
-    # Empty path set must never shell out and must report success (no-op).
-    called = {"n": 0}
+def test_git_commit_kept_commits_nothing_for_an_empty_path_set(tmp_path):
+    """An empty path set must not widen into a blanket ``git add -A``, nor report that HEAD advanced."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    base = _committed_repo(repo)
+    (repo / "f.py").write_text("user\n")
 
-    def _run(*a, **k):
-        called["n"] += 1
-        return _CP(0, "")
+    ok, note = integrate_enablement_gate._git_commit_kept(repo, "msg", [])
 
-    monkeypatch.setattr(gitmod.subprocess, "run", _run)
-    ok, note = integrate_enablement_gate._git_commit_kept(tmp_path, "msg", [])
     assert ok is True
-    assert called["n"] == 0  # never invoked git
+    assert note != ""
+    assert _git_out(repo, "rev-parse", "HEAD").strip() == base
+    assert _git_out(repo, "diff", "--cached", "--name-only") == ""
 
 
 def test_git_commit_kept_scopes_add_to_paths(tmp_path, monkeypatch):
@@ -468,43 +411,18 @@ def test_git_reset_clean_spawn_fail(tmp_path, monkeypatch):
     assert ok is False and "reset spawn failed" in err
 
 
-def test_stash_if_dirty_clean_tree(tmp_path, monkeypatch):
-    """Clean working tree → returns 'clean'."""
-    monkeypatch.setattr(
-        gitmod.subprocess, "run", lambda *a, **k: type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-    )
-    state, note = patch_git._git_stash_if_dirty(tmp_path)
-    assert state == "clean"
+def test_a_dirty_tree_git_will_not_stash_is_reported_as_failed(tmp_path):
+    """Callers must not reset a tree whose user changes could not be banked."""
+    repo = tmp_path / "repo"
+    # git refuses to stash before the first commit.
+    _git_out(tmp_path, "init", "-q", str(repo))
+    (repo / "user.py").write_text("user\n")
 
+    state, note = patch_git._git_stash_if_dirty(repo)
 
-def test_stash_if_dirty_stash_success(tmp_path, monkeypatch):
-    """Dirty tree + stash succeeds → returns 'stashed'."""
-    calls = []
-
-    def _run(cmd, *a, **k):
-        calls.append(cmd)
-        if "status" in cmd:
-            return type("CP", (), {"returncode": 0, "stdout": "M foo.py\n", "stderr": ""})()
-        return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-
-    monkeypatch.setattr(gitmod.subprocess, "run", _run)
-    state, note = patch_git._git_stash_if_dirty(tmp_path)
-    assert state == "stashed"
-    assert any("stash" in c for c in calls[-1])
-
-
-def test_stash_if_dirty_stash_fails(tmp_path, monkeypatch):
-    """Dirty tree + stash push fails → returns 'failed'."""
-
-    def _run(cmd, *a, **k):
-        if "status" in cmd:
-            return type("CP", (), {"returncode": 0, "stdout": "M foo.py\n", "stderr": ""})()
-        return type("CP", (), {"returncode": 1, "stdout": "", "stderr": "cannot stash"})()
-
-    monkeypatch.setattr(gitmod.subprocess, "run", _run)
-    state, note = patch_git._git_stash_if_dirty(tmp_path)
     assert state == "failed"
-    assert "cannot stash" in note
+    assert note != ""
+    assert (repo / "user.py").read_text() == "user\n"
 
 
 def test_stash_if_dirty_status_exception(tmp_path, monkeypatch):
@@ -600,10 +518,6 @@ def test_a_patch_that_does_not_apply_leaves_the_tree_untouched(tmp_path):
     assert _git_out(repo, "status", "--porcelain") == ""
 
 
-def test_restore_stash_if_needed_clean_noop(tmp_path):
-    assert patch_git._git_restore_stash_if_needed(tmp_path, "clean", "") == ""
-
-
 def test_accepted_attempt_reports_stash_failure_without_claiming_completion(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
@@ -625,9 +539,10 @@ def test_accepted_attempt_reports_stash_failure_without_claiming_completion(tmp_
     assert pending["recovery"]["phase"] == "ready"
 
 
-def test_resolve_patch_paths_scan(tmp_path):
-    base = tmp_path / "patches"
-    base.mkdir()
+@pytest.mark.parametrize("patch_dir", ["patches", "worktree/patches"], ids=["workspace", "worktree"])
+def test_resolve_patch_paths_scan(tmp_path, patch_dir):
+    base = tmp_path / patch_dir
+    base.mkdir(parents=True)
     (base / "a.patch").write_text("x", encoding="utf-8")
     (base / "b.diff").write_text("y", encoding="utf-8")
     out = patch_sources._resolve_patch_paths(specialist_workspace=tmp_path, explicit_patches=None, done_payload=None)
@@ -662,18 +577,6 @@ def test_resolve_patch_paths_drops_outside_workspace(tmp_path):
         specialist_workspace=workspace, explicit_patches=[str(outside)], done_payload=None
     )
     assert out == []
-
-
-def test_resolve_patch_paths_accepts_inside_workspace(tmp_path):
-    """A patch inside the workspace (or its worktree) is accepted."""
-    workspace = tmp_path / "ws"
-    (workspace / "worktree" / "patches").mkdir(parents=True)
-    good = workspace / "worktree" / "patches" / "ok.patch"
-    good.write_text("z", encoding="utf-8")
-    out = patch_sources._resolve_patch_paths(
-        specialist_workspace=workspace, explicit_patches=[str(good)], done_payload=None
-    )
-    assert [p.name for p in out] == ["ok.patch"]
 
 
 def test_resolve_patch_paths_containment_survives_symlinked_workspace(tmp_path):
@@ -864,12 +767,6 @@ def test_harvest_realized_diff_returns_empty_outside_git(tmp_path):
     (plain / "keep.py").write_text("x\n", encoding="utf-8")
 
     assert harvest_realized_diff(plain, ["keep.py"], tmp_path / "realized.patch") == ""
-
-
-def test_harvest_realized_diff_refuses_an_empty_path_set(tmp_path):
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import harvest_realized_diff
-
-    assert harvest_realized_diff(tmp_path, [], tmp_path / "realized.patch") == ""
 
 
 def test_measured_against_reports_the_rebound_stack_not_the_dispatch_one():

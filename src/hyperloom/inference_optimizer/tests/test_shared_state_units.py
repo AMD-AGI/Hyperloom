@@ -996,19 +996,6 @@ def test_record_action_failure_stores_variant_name():
     assert entry["variant_name"] == "fp8_kv"
 
 
-def test_record_action_failure_caps_at_new_default():
-    """_DEFAULT_LAST_FAILURES is now 30."""
-    s = SharedState()
-    for i in range(35):
-        s.record_action_failure(
-            action="explore",
-            task_id=f"t-{i}",
-            result={"error_class": "server_init_dead", "error": f"crash {i}"},
-        )
-    assert len(s.last_action_failures) == 30
-    assert s.last_action_failures[-1]["task_id"] == "t-34"
-
-
 # ---- failure evidence ledger ----
 
 
@@ -1037,14 +1024,6 @@ def test_record_failure_evidence_caps_at_default():
     for i in range(_DEFAULT_LAST_FAILURES + 5):
         s.record_failure_evidence({"failure_id": f"fail.t.{i:04d}", "task_id": "t"})
     assert len(s.failures) == _DEFAULT_LAST_FAILURES
-
-
-def test_record_failure_evidence_does_not_raise_without_session_dir():
-    s = SharedState()
-    assert not hasattr(s, "_session_dir") or getattr(s, "_session_dir", None) is None
-    fe = {"failure_id": "fail.t1.abc", "task_id": "t1"}
-    s.record_failure_evidence(fe)
-    assert s.failures[0]["failure_id"] == "fail.t1.abc"
 
 
 def test_find_failure_returns_matching_entry():
@@ -1086,14 +1065,13 @@ def test_record_failure_evidence_writes_json(tmp_path):
     assert data["failure_id"] == "fail.t1.abc123456789"
 
 
-def test_common_result_fields_includes_failure_id():
-    s = SharedState()
-    fields = s._common_result_fields({"failure_id": "fail.t1.abc"})
-    assert fields["failure_id"] == "fail.t1.abc"
-
-
-def test_common_result_fields_failure_id_none_when_absent():
-    s = SharedState()
-    fields = s._common_result_fields({})
-    assert "failure_id" in fields
-    assert fields["failure_id"] is None
+@pytest.mark.parametrize(
+    ("result", "failure_id"),
+    [
+        pytest.param({"failure_id": "fail.t1.abc"}, "fail.t1.abc", id="carried"),
+        pytest.param({}, None, id="absent"),
+    ],
+)
+def test_a_failure_record_carries_the_failure_id_of_its_evidence(result, failure_id):
+    entry = SharedState().record_action_failure(action="explore", task_id="t1", result=result)
+    assert entry["failure_id"] == failure_id

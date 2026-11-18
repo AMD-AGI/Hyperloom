@@ -27,23 +27,19 @@ from hyperloom_common.coerce import (
 
 
 class TestToStrList:
-    def test_none_is_empty(self):
-        assert to_str_list(None) == []
+    @pytest.mark.parametrize("value", [None, "   "], ids=["none", "blank_string"])
+    def test_none_or_blank_is_empty(self, value):
+        assert to_str_list(value) == []
 
     def test_string_stripped(self):
         assert to_str_list("  a  ") == ["a"]
 
-    def test_blank_string_dropped(self):
-        assert to_str_list("   ") == []
-
     def test_iterable_stripped_and_filtered(self):
         assert to_str_list(["a ", " ", "b"]) == ["a", "b"]
 
-    def test_scalar_coerced(self):
-        assert to_str_list(42) == ["42"]
-
-    def test_scalar_blank_dropped(self):
-        assert to_str_list(False) == ["False"]
+    @pytest.mark.parametrize("value,expected", [(42, ["42"]), (False, ["False"])], ids=["int", "falsy_bool"])
+    def test_scalar_coerced(self, value, expected):
+        assert to_str_list(value) == expected
 
 
 class TestToFloat:
@@ -185,13 +181,9 @@ class TestToUnix:
         assert to_unix(1_700_000_000) == 1_700_000_000.0
         assert to_unix(1_700_000_000.5) == 1_700_000_000.5
 
-    def test_iso_z_suffix(self):
-        ts = to_unix("2021-01-01T00:00:00Z")
-        assert ts is not None
-        assert math.isclose(ts, 1_609_459_200.0)
-
-    def test_iso_offset(self):
-        ts = to_unix("2021-01-01T00:00:00+00:00")
+    @pytest.mark.parametrize("text", ["2021-01-01T00:00:00Z", "2021-01-01T00:00:00+00:00"], ids=["z_suffix", "offset"])
+    def test_iso_z_suffix_or_offset(self, text):
+        ts = to_unix(text)
         assert ts is not None
         assert math.isclose(ts, 1_609_459_200.0)
 
@@ -225,11 +217,9 @@ class TestFirstStr:
     def test_coerces_a_non_string(self):
         assert first_str(None, 42) == "42"
 
-    def test_all_falsy_is_empty(self):
-        assert first_str(None, "", 0, False, []) == ""
-
-    def test_no_values_is_empty(self):
-        assert first_str() == ""
+    @pytest.mark.parametrize("values", [(None, "", 0, False, []), ()], ids=["all_falsy", "no_values"])
+    def test_nothing_truthy_is_empty(self, values):
+        assert first_str(*values) == ""
 
     def test_zero_is_skipped_not_returned(self):
         """0 is falsy, so a numeric id of 0 never wins; callers pass ids as strings."""
@@ -268,11 +258,9 @@ class TestToList:
 
 
 class TestTextOrNone:
-    def test_none_stays_none(self):
-        assert text_or_none(None) is None
-
-    def test_blank_reads_as_none(self):
-        assert text_or_none("   ") is None
+    @pytest.mark.parametrize("value", [None, "   "], ids=["none", "blank"])
+    def test_none_or_blank_reads_as_none(self, value):
+        assert text_or_none(value) is None
 
     def test_stripped(self):
         assert text_or_none("  hi  ") == "hi"

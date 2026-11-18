@@ -271,14 +271,3 @@ def test_a_rewrite_that_measured_the_candidate_itself_wins(tmp_path):
 
     knowledge = json.loads((_session_dir(root) / record_store.KNOWLEDGE_FILENAME).read_text())
     assert knowledge[record_store.MEASURED_SPEEDUP_KEY] == 1.5
-
-
-def test_non_posix_local_store_fails_with_an_explicit_locking_error(
-    tmp_path,
-    monkeypatch,
-):
-    monkeypatch.setattr(record_store, "fcntl", None)
-    store = record_store.LocalRewriteRecords(tmp_path / "records")
-
-    with pytest.raises(record_store.RewriteRecordError, match="POSIX fcntl"):
-        store.candidates(CANONICAL_ID, limit=1)

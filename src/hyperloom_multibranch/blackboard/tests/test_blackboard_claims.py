@@ -25,6 +25,7 @@ from hyperloom_multibranch.contracts.blackboard import (
 )
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, IntentLayer, Purpose, TestKind, Validity
 from hyperloom_multibranch.contracts.blackboard.records import (
+    JudgementWrite,
     REPLAY_TARGET,
     BaselineRecord,
     Claim,
@@ -237,7 +238,9 @@ async def _end(open_as: Open, request_id: str, ending: str) -> None:
         await toolbox.write_result(result(request_id, validity=Validity.MEASUREMENT_FAILED, failure_reason="node lost"))
     else:
         await toolbox.write_result(result(request_id))
-        await open_as(Role.GATE).write_judgement(request_id, judgement(4.0, (request_id,)), Conclusion.RECORDED_ONLY)
+        await open_as(Role.GATE).write_judgement(
+            JudgementWrite(request_id, judgement(4.0, (request_id,)), Conclusion.RECORDED_ONLY)
+        )
 
 
 def _heard(items: tuple[InboxItem, ...]) -> list[InboxItem]:

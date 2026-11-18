@@ -29,6 +29,10 @@ from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
 
 log = logging.getLogger(__name__)
 
+#: Payload key: the physical cards the caller holds for the arch microbenchmark (``--arch-gpus``); an empty list lets it
+#: run on none. Absent, the analysis picks among the visible GPUs.
+ARCH_GPUS_PARAM = "arch_gpus"
+
 _CANDIDATE_ENV_KEYS = {
     "CONC",
     "ISL",
@@ -421,6 +425,9 @@ def _build_trace_analyze_cmd(
         ("--framework", run.framework),
         ("--target-platform", run.target_platform),
     )
+    arch_gpus = payload.get(ARCH_GPUS_PARAM)
+    if arch_gpus is not None:
+        cmd += ["--arch-gpus", ",".join(str(int(gpu)) for gpu in arch_gpus)]
 
     capture_folder = (
         payload.get("capture_folder") or payload.get("graph_capture_path") or payload.get("capture_folder_path")

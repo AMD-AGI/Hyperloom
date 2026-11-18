@@ -50,6 +50,7 @@ from hyperloom.measure.jit.modules import module_build_limit_sec
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 from inference_suite.contracts import DEFAULT_PRE_READY_SILENCE_SEC
 from inference_suite.contracts.layout import READY_STAMP, SERVER_LOG
+from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 
 __all__ = [
     "BOOT_CANCEL_REASON",
@@ -73,7 +74,7 @@ BOOT_CANCEL_REASON = "server_boot_timeout"
 #: run inside one cap, so a boot that has used half of it leaves the rest less than the boot took.
 BOOT_SHARE = 0.5
 #: The frameworks whose server prints a ready banner a round detects; another framework has no stamp to wait for.
-_SERVER_FRAMEWORKS = ("sglang", "vllm", "atom")
+_SERVER_FRAMEWORKS = frozenset(item.value for item in Framework if framework_facts(item).kind is FrameworkKind.SERVING)
 _MAX_POLL_SEC = 2.0
 #: How much of the end of a server log is read for its last line.
 _TAIL_BYTES = 8192

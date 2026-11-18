@@ -14,6 +14,7 @@ from hyperloom.common.codex_session import (
     CodexSession,
     CodexSessionConfig,
     CodexSessionError,
+    CodexSessionTimeoutError,
     CodexSessionUnavailableError,
     CodexTurnRequest,
 )
@@ -157,9 +158,12 @@ class CodexBackend:
         async def _one_attempt() -> Any:
             """Acquire the session and run one turn under the retry policy."""
             session = await self._session_for(system_prompt)
-            return await session.turn(
-                CodexTurnRequest(prompt, timeout_sec=self.call_timeout_s, output_schema=output_schema)
-            )
+            try:
+                return await session.turn(
+                    CodexTurnRequest(prompt, timeout_sec=self.call_timeout_s, output_schema=output_schema)
+                )
+            except CodexSessionTimeoutError as exc:
+                raise LLMCallFailed(f"Codex Agent SDK turn failed: {redact_secret_values(str(exc))}") from exc
 
         try:
             sdk_result = await retry_with_backoff(
@@ -223,6 +227,7 @@ class CodexBackend:
                     cwd=self.cwd,
                     model=self.model,
                     writable_roots=(self.cwd,),
+                    shell_tool=False,
                 ),
                 developer_instructions=instructions,
                 component="orchestration",

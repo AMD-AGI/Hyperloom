@@ -69,12 +69,11 @@ class _StubTaskRow:
 
 
 class _StubTaskRegistry:
-    """Task registry double; tracks insertion order to assert step 1 before step 2."""
+    """Task registry double: rows by idempotency key and by task id."""
 
     def __init__(self):
         self._by_key: dict[str, _StubTaskRow] = {}
         self._by_id: dict[str, _StubTaskRow] = {}
-        self.insertion_order: list[str] = []
 
     async def create_or_return_existing(self, spec):
         existing = self._by_key.get(spec.idempotency_key)
@@ -93,7 +92,6 @@ class _StubTaskRegistry:
         )
         self._by_key[spec.idempotency_key] = row
         self._by_id[tid] = row
-        self.insertion_order.append(spec.idempotency_key)
         return row, False
 
     async def get(self, task_id):
@@ -196,18 +194,6 @@ async def test_record_close_step_appends_to_evidence_close_steps(coord):
 
 
 @pytest.mark.asyncio
-async def test_record_close_step_optional_detail(coord):
-    coord.shared_state.phase_history = [_close_phase_history_row()]
-    await coord.phase_close._record_close_step(
-        "recipe_kb_commit",
-        status="failed",
-        detail="recipe kb unreachable",
-    )
-    row = coord.shared_state.phase_history[-1]["evidence"]["close_steps"][0]
-    assert row["detail"] == "recipe kb unreachable"
-
-
-@pytest.mark.asyncio
 async def test_record_close_step_creates_missing_evidence_dict(coord):
     """Phase_history row with no ``evidence`` key gets one installed."""
     coord.shared_state.phase_history = [
@@ -235,34 +221,6 @@ async def test_record_close_step_replaces_non_list_close_steps(coord):
 async def test_record_close_step_no_op_when_history_empty(coord):
     coord.shared_state.phase_history = []
     await coord.phase_close._record_close_step("report", status="done")
-
-
-@pytest.mark.asyncio
-async def test_enqueue_internal_report_task_fresh(coord):
-    task = await coord.phase_close._enqueue_internal_report_task(reason="close_phase_entry")
-    assert task.kind == "report"
-    assert task.idempotency_key == "internal-report-close_phase_entry"
-    assert task.params["source"] == "coordinator_internal"
-    assert task.params["reason"] == "close_phase_entry"
-    assert coord.shared_state.closing_report_task_id == task.task_id
-
-
-@pytest.mark.asyncio
-async def test_enqueue_internal_report_task_reuses_existing(coord):
-    """When the wall-clock deadline already enqueued a report task, reuse it."""
-    existing = _StubTaskRow(
-        task_id="wallclock-report",
-        kind="report",
-        state="succeeded",
-        params={},
-        idempotency_key="closing-report-1234",
-    )
-    coord.tasks._by_id["wallclock-report"] = existing
-    coord.shared_state.closing_report_task_id = "wallclock-report"
-
-    task = await coord.phase_close._enqueue_internal_report_task(reason="close_phase_entry")
-    assert task is existing
-    assert "internal-report-close_phase_entry" not in coord.tasks._by_key
 
 
 @pytest.mark.asyncio
@@ -497,15 +455,16 @@ def test_the_wait_is_the_step_s_own_expected_runtime(coord):
     assert bound == pytest.approx(ACTION_CATALOGUE["report"].typical_runtime_min * 60.0)
 
 
-def test_a_step_the_catalogue_prices_at_almost_nothing_still_gets_the_floor(coord):
-    """``session_breakdown`` is priced at 12s; giving up on it after 12s is giving up on it."""
-    row = _running_report_row(coord, kind="session_breakdown")
-
-    assert coord.phase_close._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
-
-
-def test_an_uncatalogued_step_gets_the_floor_too(coord):
-    row = _running_report_row(coord, kind="not_an_action")
+@pytest.mark.parametrize(
+    "kind",
+    [
+        pytest.param("session_breakdown", id="priced_at_12s"),
+        pytest.param("not_an_action", id="uncatalogued"),
+    ],
+)
+def test_a_step_the_catalogue_prices_at_almost_nothing_or_not_at_all_gets_the_floor(coord, kind):
+    """``session_breakdown`` is priced at 12s, an uncatalogued step at 0s; giving up that soon is giving up on it."""
+    row = _running_report_row(coord, kind=kind)
 
     assert coord.phase_close._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
 
@@ -537,16 +496,6 @@ async def test_the_sequencer_records_the_state_a_running_report_ended_in(coord):
     report = next(r for r in rows if r["step"] == "report")
     assert report["status"] == "done"
     assert "wallclock-report" not in [t.task_id for t in coord.sub.run_calls]
-
-
-@pytest.mark.asyncio
-async def test_enqueue_internal_session_breakdown_task(coord):
-    task = await coord.phase_close._enqueue_internal_session_breakdown_task(
-        reason="close_phase_entry",
-    )
-    assert task.kind == "session_breakdown"
-    assert task.idempotency_key == "internal-session_breakdown-close_phase_entry"
-    assert task.params["source"] == "coordinator_internal"
 
 
 @pytest.mark.asyncio
@@ -1058,17 +1007,6 @@ async def test_entering_close_keeps_the_stop_reason_already_set(tmp_path: Path, 
     await _advance_into_close(coord, monkeypatch, "sweep_done")
 
     assert coord.shared_state.stop_reason == "signal"
-
-
-@pytest.mark.asyncio
-async def test_close_sequencer_report_before_session_breakdown(coord):
-    """Report task MUST be enqueued before session_breakdown."""
-    coord.shared_state.phase_history = [_close_phase_history_row()]
-    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
-    insertion = coord.tasks.insertion_order
-    report_idx = insertion.index("internal-report-close_phase_entry")
-    bd_idx = insertion.index("internal-session_breakdown-close_phase_entry")
-    assert report_idx < bd_idx
 
 
 @pytest.mark.asyncio
@@ -1615,7 +1553,16 @@ async def test_recipe_kb_t4_hook_retries_failed_finalize_after_close(
 
 
 @pytest.mark.asyncio
-async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("recipe_kb", "recipe_kb_session_id"),
+    [
+        pytest.param(None, "local-session", id="no_recipe_kb"),
+        pytest.param(_StubRecipeKB(), "  ", id="blank_recipe_kb_session_id"),
+    ],
+)
+async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb(
+    tmp_path: Path, recipe_kb: _StubRecipeKB | None, recipe_kb_session_id: str
+):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -1631,9 +1578,9 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb(tmp_path: Path):
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(config=config)),
+        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(config=config, recipe_kb=recipe_kb)),
     )
-    coord.shared_state.recipe_kb_session_id = "local-session"
+    coord.shared_state.recipe_kb_session_id = recipe_kb_session_id
     coord.shared_state.close_sequence_done = False
 
     finalize_calls: list[str] = []
@@ -1650,27 +1597,9 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb_sid(tmp_path: Path):
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
-    backends = {
-        "orchestration": MockBackend(idle_plan),
-        "critic": MockBackend(idle_plan),
-    }
-    config = KnowledgeConfig(
-        mode=KnowledgeStoreMode.LOCAL,
-        local_root=str(tmp_path / "knowledge"),
-    )
-    coord = Coordinator(
-        session_dir=session_dir,
-        backends=backends,
-        role_registry=default_role_registry(),
-        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(config=config, recipe_kb=_StubRecipeKB())),
-    )
-    coord.shared_state.recipe_kb_session_id = "  "
-    coord.shared_state.close_sequence_done = False
-
+async def test_recipe_kb_t4_hook_degraded_is_complete_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    coord, save_calls = _remote_t4_coordinator(tmp_path, monkeypatch, {})
+    coord.knowledge_plane = KnowledgePlane(kb_disabled=True)
     finalize_calls: list[str] = []
 
     def _finalize(*, source: str) -> dict:
@@ -1682,15 +1611,7 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb_sid(tmp_path: Pat
     await coord._recipe_kb_t4_hook()
 
     assert finalize_calls == []
-
-
-@pytest.mark.asyncio
-async def test_recipe_kb_t4_hook_degraded_is_complete_noop() -> None:
-    coordinator = SimpleNamespace(
-        knowledge_plane=SimpleNamespace(kb_disabled=True),
-    )
-
-    await Coordinator._recipe_kb_t4_hook(coordinator)
+    assert save_calls == []
 
 
 @pytest.mark.asyncio

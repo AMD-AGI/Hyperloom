@@ -110,6 +110,15 @@ These are no longer read and are silently ignored, so drop them:
 * `KERNEL_AGENT_USE_LLM_ORCHESTRATOR`; the agent route always runs unless
   `--route non-llm` is given.
 
+### Required: pass `--workspace-path` to `tracelens_analysis`
+
+`python -m hyperloom.orchestrator.trace_analysis.tracelens_analysis` now
+requires `--workspace-path` and exits 2 without it; it no longer falls back to
+`$USER_DATA_PATH`, `$WORKSPACE_PATH` or the workspace root. Scripts that run
+the tool directly must pass the root its output lands under
+(`<workspace_path>/kernel-agent/runs/<session_id>/`); the optimizer's
+`trace_analyze` step already passes the session directory.
+
 ### Required: sessions created before this release do not resume
 
 Every session's `storage/coordinator.db` now records schema version 8, and

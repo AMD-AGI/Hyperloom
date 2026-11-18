@@ -72,6 +72,7 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "framework", "--framework", required=True)
     _add_opt(cmd, args, "output_dir", "--output-dir", required=True)
     _add_opt(cmd, args, "discover_mode", "--discover")
+    _add_opt(cmd, args, "fusion_hints", "--fusion-hints")
     _add_opt(cmd, args, "agent_backend", "--agent-backend", required=True)
     _add_opt(cmd, args, "llm_model", "--model", required=True)
     _add_opt(cmd, args, "agent_sandbox_mode", "--agent-sandbox-mode", required=True)

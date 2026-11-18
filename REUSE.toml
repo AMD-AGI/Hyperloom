@@ -38,51 +38,6 @@ precedence = "override"
 SPDX-FileCopyrightText = "SGLang Team and contributors"
 SPDX-License-Identifier = "Apache-2.0"
 
-# Arbor, vendored at a release tag (src/hyperloom_arbor/VENDOR.md). It is AMD's, under its own
-# Apache-2.0 licence (src/hyperloom_arbor/LICENSE), not this repository's MIT; the entries after
-# this one name what it carries from elsewhere.
-[[annotations]]
-path = "src/hyperloom_arbor/**"
-precedence = "override"
-SPDX-FileCopyrightText = "2026 Advanced Micro Devices, Inc."
-SPDX-License-Identifier = "Apache-2.0"
-
-# KernelForge's pages that Arbor's kernels and hardware skills carry: MIT, as src/kernelforge.
-[[annotations]]
-path = [
-    "src/hyperloom_arbor/.claude/skills/kernels/reference/**",
-    "src/hyperloom_arbor/.claude/skills/hardware/reference/**",
-]
-precedence = "override"
-SPDX-FileCopyrightText = "2026 Advanced Micro Devices, Inc."
-SPDX-License-Identifier = "MIT"
-
-# The FlyDSL reference kernel among those pages, as src/kernelforge annotates its own copy.
-[[annotations]]
-path = "src/hyperloom_arbor/.claude/skills/kernels/reference/examples/flydsl-softmax-forge-loop/softmax_kernel.py"
-precedence = "override"
-SPDX-FileCopyrightText = "FlyDSL Project Contributors"
-SPDX-License-Identifier = "Apache-2.0"
-
-# The SGLang kernel among those pages, the Triton oracle of the mxfp8 grouped-GEMM example: SGLang's, as
-# src/kernelforge annotates its own copy of it.
-[[annotations]]
-path = "src/hyperloom_arbor/.claude/skills/kernels/reference/examples/triton2flydsl-mxfp8-grouped-gemm/mxfp8_grouped_gemm.py"
-precedence = "override"
-SPDX-FileCopyrightText = "SGLang Team and contributors"
-SPDX-License-Identifier = "Apache-2.0"
-
-# Arbor's own pages among them, not KernelForge's: the index of what was copied, and Arbor's errata for the copied
-# files. Arbor's Apache-2.0, as the tree.
-[[annotations]]
-path = [
-    "src/hyperloom_arbor/.claude/skills/kernels/reference/README.md",
-    "src/hyperloom_arbor/.claude/skills/kernels/reference/STALE.md",
-]
-precedence = "override"
-SPDX-FileCopyrightText = "2026 Advanced Micro Devices, Inc."
-SPDX-License-Identifier = "Apache-2.0"
-
 # Snapshots recorded from InferenceX (configs, recipes and golden curves, and what its code answered for them), which
 # the InferenceX recipe source is tested against.
 [[annotations]]
@@ -111,15 +66,4 @@ SPDX-License-Identifier = "Apache-2.0"
 path = "src/inference_suite/tests/fixtures/atom/**"
 precedence = "override"
 SPDX-FileCopyrightText = "Advanced Micro Devices, Inc."
-SPDX-License-Identifier = "MIT"
-
-# This repository's weight-precision check, which Arbor carries as a copy (src/hyperloom_arbor/VENDOR.md): the toolbox's
-# module, and the shim of what it imports from Hyperloom. MIT, as this repository, and as their own headers say.
-[[annotations]]
-path = [
-    "src/hyperloom_arbor/arbor/measure/weight_precision.py",
-    "src/hyperloom_arbor/arbor/measure/_hyperloom_shim.py",
-]
-precedence = "override"
-SPDX-FileCopyrightText = "2026 Advanced Micro Devices, Inc."
 SPDX-License-Identifier = "MIT"

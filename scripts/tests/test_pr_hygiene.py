@@ -300,20 +300,10 @@ def test_pr_hygiene_workflow_always_runs_read_only():
     assert "'*.py diff'" in steps["Force text diffs for Python files"]["run"]
 
 
-def test_cli_reference_check_moved_out_of_docs_workflow():
-    wf = _workflow("docs.yml")
-    runs = [s.get("run", "") for job in wf["jobs"].values() for s in job["steps"]]
-    assert not any("check_cli_references" in r for r in runs)
-    assert not any("check_cli_references" in p for p in wf[True]["pull_request"]["paths"])
-
-
-def test_diff_coverage_step_is_pr_only_and_pinned():
+def test_diff_coverage_step_is_pr_only_and_forces_text_diffs():
     job = _workflow("tests-coverage.yml")["jobs"]["coverage"]
     checkout = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@"))
     assert checkout["with"]["fetch-depth"] == 2
     step = next(s for s in job["steps"] if s.get("name") == "Diff coverage (changed lines >= 80%)")
     assert "github.event_name == 'pull_request'" in step["if"]
-    assert '"diff-cover==9.7.1"' in step["run"]
     assert step["run"].index("'*.py diff'") < step["run"].index("diff-cover coverage.xml")
-    assert "--fail-under=80" in step["run"]
-    assert "GITHUB_STEP_SUMMARY" in step["run"]

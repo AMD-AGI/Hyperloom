@@ -11,7 +11,7 @@ from pathlib import Path
 from hyperloom.contracts.long_context import PROMPT_ERROR, PROMPT_NOT_RUN, PROMPT_OK
 from hyperloom.measure.long_context.outputs import read_outputs
 from hyperloom.measure.long_context.plan import LONG_CONTEXT_DIR, OUTPUTS_FILE
-from hyperloom.measure.long_context.rounds import run_long_context
+from hyperloom.measure.long_context.rounds import CheckServer, run_long_context
 from hyperloom.measure.long_context.prompts import PER_TASK
 from hyperloom.measure.long_context.tests.support import MODEL, PROMPTS, FakeServer, prompt_set, staged_plan
 from hyperloom.measure.short_prompts.rounds import PassFailed, Serving
@@ -40,7 +40,7 @@ class _Host:
 
 def _run(tmp_path: Path, host: _Host, *, served: int | None = None, **plan: object):
     planned = staged_plan(tmp_path / "cache", **plan)
-    return asyncio.run(run_long_context(planned, prompt_set(), host, tmp_path / "out", served_context=served))
+    return asyncio.run(run_long_context(planned, prompt_set(), host, tmp_path / "out", server=CheckServer(served)))
 
 
 def test_every_prompt_is_asked_greedily_as_text_and_its_answer_is_recorded(tmp_path: Path) -> None:

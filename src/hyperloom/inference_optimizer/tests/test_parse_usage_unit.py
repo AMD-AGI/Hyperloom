@@ -44,14 +44,13 @@ def test_reasoning_output_tokens_absent_is_none():
 # ---- normalize_usage ----
 
 
-def test_normalize_usage_none_and_empty():
-    assert pu.normalize_usage(None) is None
-    assert pu.normalize_usage({}) is None
-    assert pu.normalize_usage("nope") is None
-
-
-def test_normalize_usage_all_none():
-    assert pu.normalize_usage({"unrelated": 1}) is None
+@pytest.mark.parametrize(
+    "usage",
+    [None, {}, "nope", {"unrelated": 1}],
+    ids=["none", "empty", "not_a_dict", "no_token_keys"],
+)
+def test_normalize_usage_none_and_empty(usage):
+    assert pu.normalize_usage(usage) is None
 
 
 def test_normalize_usage_valid():

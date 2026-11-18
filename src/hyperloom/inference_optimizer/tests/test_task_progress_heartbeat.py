@@ -22,7 +22,6 @@ from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.sub_agent_runner import (
     ExecutionCleanupUnconfirmed,
     SubAgentRunner,
-    _format_progress,
 )
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.inference_optimizer.trace import task_progress
@@ -278,12 +277,6 @@ async def test_a_sink_that_raises_is_swallowed_not_propagated(tmp_path, monkeypa
 
     with progress_scope(_broken):
         await report_progress(unit="variant")
-
-
-@pytest.mark.asyncio
-async def test_progress_reported_outside_a_task_is_a_no_op() -> None:
-    """Executors call the reporter unconditionally, including from unit tests."""
-    await report_progress(unit="variant", label="unscoped")
 
 
 @pytest.mark.asyncio
@@ -658,10 +651,32 @@ def test_the_tally_is_safe_to_advance_from_reader_threads() -> None:
     assert activity.count() == 800
 
 
-def test_a_counter_reads_as_one_field_in_the_log_line() -> None:
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("note", "counter"),
+    [
+        pytest.param(
+            {"unit": "variant", "label": "v3", "index": 3, "total": 12, "status": None},
+            "progress=3/12",
+            id="index-of-total",
+        ),
+        pytest.param({"index": 2}, "progress=2", id="index-only"),
+    ],
+)
+async def test_a_counter_reads_as_one_field_in_the_log_line(tmp_path, monkeypatch, caplog, note, counter) -> None:
     """``3/12`` is what an operator scans for; two separate keys are not."""
-    line = _format_progress({"unit": "variant", "label": "v3", "index": 3, "total": 12, "status": None})
-    assert "progress=3/12" in line
-    assert "status" not in line
+    sub = _runner(tmp_path, monkeypatch)
 
-    assert "progress=2" in _format_progress({"index": 2})
+    async def _unit(_ctx) -> dict:
+        await report_progress(**note)
+        return {"status": "ok"}
+
+    sub.register_executor("explore", _unit)
+    task, _ = await sub.tasks.create_or_return_existing(TaskSpec(kind="explore", params={}, idempotency_key="grid-log"))
+    with caplog.at_level(logging.INFO, logger=SubAgentRunner.__module__):
+        await sub.run_task(task)
+
+    [line] = [r.getMessage() for r in caplog.records if r.getMessage().startswith("task_progress:")]
+    assert line.endswith(counter)
+    assert "total=" not in line
+    assert "status" not in line

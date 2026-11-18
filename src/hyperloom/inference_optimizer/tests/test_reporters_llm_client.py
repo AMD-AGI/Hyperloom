@@ -126,8 +126,14 @@ def test_provider_transport_errors_propagate_to_the_caller(monkeypatch: pytest.M
         OpenAIHttpClient(client="openai-client").complete(system="s", user="u")
 
 
-@pytest.mark.parametrize("backend", ["", "none", "off", "disabled", "NONE"])
-def test_build_client_returns_none_when_backend_is_off(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+@pytest.mark.parametrize(
+    "backend",
+    ["", "none", "off", "disabled", "NONE", "bedrock"],
+    ids=["empty", "none", "off", "disabled", "upper_case", "unknown"],
+)
+def test_build_client_returns_none_when_backend_is_off_or_unknown(
+    monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
     _install_factories(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_REPORT_LLM_BACKEND", backend)
     assert build_client_from_env() is None
@@ -135,12 +141,6 @@ def test_build_client_returns_none_when_backend_is_off(monkeypatch: pytest.Monke
 
 def test_build_client_returns_none_when_backend_is_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_factories(monkeypatch)
-    assert build_client_from_env() is None
-
-
-def test_build_client_returns_none_for_an_unknown_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_factories(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_REPORT_LLM_BACKEND", "bedrock")
     assert build_client_from_env() is None
 
 

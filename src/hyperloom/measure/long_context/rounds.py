@@ -16,10 +16,11 @@ import logging
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
-from hyperloom.contracts.long_context import PROMPT_ERROR, PROMPT_NOT_RUN, PROMPT_OK
+from hyperloom.contracts.long_context import LONG_CONTEXT_HELD, PROMPT_ERROR, PROMPT_NOT_RUN, PROMPT_OK
 from hyperloom.measure.long_context.client import complete_text
 from hyperloom.measure.long_context.outputs import OutputsFile, PromptEntry, RunFacts, read_outputs, write_outputs
 from hyperloom.measure.long_context.plan import LongContextPlan
@@ -27,7 +28,7 @@ from hyperloom.measure.long_context.prompts import Prompt
 from hyperloom.measure.short_prompts.client import CompletionError, request_timeout
 from hyperloom.measure.short_prompts.rounds import PassFailed, PassHost, Serving, model_of
 
-__all__ = ["run_long_context"]
+__all__ = ["CheckServer", "run_long_context"]
 
 log = logging.getLogger(__name__)
 
@@ -104,14 +105,24 @@ async def _answered(plan: LongContextPlan, prompts: Sequence[Prompt], host: Pass
     return _Answered(entries, _PHASE_CAP if unsent else "", booted)
 
 
+@dataclass(frozen=True)
+class CheckServer:
+    """The server a check asks, as its outputs file records it: the context its launch serves (``None`` when it states
+    none) and which server it is (``LONG_CONTEXT_SERVERS``: the test's held one unless said otherwise)."""
+
+    served_context: int | None
+    kind: str = LONG_CONTEXT_HELD
+
+
 async def run_long_context(
-    plan: LongContextPlan, prompts: Sequence[Prompt], host: PassHost, output_dir: Path, *, served_context: int | None
+    plan: LongContextPlan, prompts: Sequence[Prompt], host: PassHost, output_dir: Path, *, server: CheckServer
 ) -> OutputsFile:
     """Start one server, ask it every prompt, write ``outputs.json`` below ``output_dir`` and return what was written.
 
-    ``served_context`` is the context the point's launch serves, when it states one: a launch that serves less than
-    ``plan.needed_context`` starts no server.
+    ``server`` is the server ``host`` gives: a launch that serves less context than ``plan.needed_context`` starts no
+    server.
     """
+    served_context = server.served_context
     started = time.monotonic()
     stopped = _too_short(plan, served_context)
     if not stopped and host.should_stop():
@@ -121,6 +132,6 @@ async def run_long_context(
         answered = await _answered(plan, prompts, host, started + plan.phase_cap_sec)
     entries = answered.entries or [_unanswered(prompt, PROMPT_NOT_RUN, answered.stopped) for prompt in prompts]
     spent = max(0.0, time.monotonic() - started - answered.boot_seconds)
-    facts = RunFacts(served_context, answered.stopped, answered.boot_seconds, spent)
+    facts = RunFacts(served_context, answered.stopped, answered.boot_seconds, spent, server.kind)
     write_outputs(output_dir, plan, entries, facts)
     return read_outputs(output_dir)

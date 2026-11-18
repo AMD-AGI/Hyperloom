@@ -24,7 +24,7 @@ from hyperloom.measure.failures import (
     classify_test_failure,
     decides_test,
 )
-from inference_suite import framework_version
+from inference_suite import WARMUP_ERROR_PREFIX, framework_version
 from inference_suite.contracts import FailedStep
 from inference_suite.framework_probe import FrameworkProbeError, probe_install, run_probe
 from inference_suite.frameworks import Framework
@@ -166,6 +166,56 @@ def test_a_client_log_is_not_read_for_a_candidates_signature_nor_a_retried_429()
         classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(tokenizer,))).failure_class
         is FailureClass.CANDIDATE
     ), "the same line, from the server"
+
+
+#: The staged client's warmup abort, as it logs a request the server refused for its length; the line that follows is
+#: the abort the client always logs.
+WARMUP_OVERFLOW_LINE = (
+    "04:15:03.501 WARNING  Terminal warmup failure for trace 03e110ac; aborting run early (broadcasting "
+    f'ProfileCancelCommand); {WARMUP_ERROR_PREFIX}code=400 type=\'Bad Request\' message=\'{{"error":{{"message":'
+    "\"This model's maximum context length is 262144 tokens. However, your prompt contains 757918 tokens.\"}}' "
+    "(callback_handler.py:310)"
+)
+WARMUP_ABORTED = "04:15:03.502 WARNING  Run aborted (warmup_failure): A root AgentX warmup request failed.\n"
+
+
+def _client_failed(client_log: str) -> FailureClassification:
+    return classify_test_failure(
+        returncode=1,
+        evidence=FailureEvidence(
+            logs=("AgentX benchmark client failed with exit code 1",),
+            client_logs=(client_log,),
+            step_failure=StepFailure(FailedStep.CLIENT_FAILED, "the AgentX client exited with code 1"),
+        ),
+    )
+
+
+def test_a_warmup_request_refused_for_its_length_is_the_candidates_and_decides_the_test() -> None:
+    verdict = _client_failed(f"{WARMUP_OVERFLOW_LINE}\n{WARMUP_ABORTED}")
+
+    assert verdict.failure_class is FailureClass.CANDIDATE
+    assert verdict.failure_reason.startswith(f"{failures.AGENTX_CONTEXT_OVERFLOW}: ")
+    assert "maximum context length is 262144" in verdict.failure_reason
+    assert decides_test(verdict)
+
+
+@pytest.mark.parametrize(
+    "client_log",
+    [
+        pytest.param(
+            WARMUP_OVERFLOW_LINE.replace("maximum context length", "upstream connect error"), id="another-refusal"
+        ),
+        pytest.param(
+            "Terminal warmup failure for trace 03e110ac; aborting run early (broadcasting ProfileCancelCommand).\n"
+            "--max-model-len 262144 caps the context length\n",
+            id="client-as-released",
+        ),
+    ],
+)
+def test_a_warmup_abort_the_server_did_not_refuse_for_its_length_stays_unclear(client_log: str) -> None:
+    verdict = _client_failed(f"{client_log}\n{WARMUP_ABORTED}")
+
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.UNCLEAR, failures.NO_KNOWN_SIGNATURE_REASON)
 
 
 def test_a_timeout_of_any_other_command_stays_unclear() -> None:
@@ -379,28 +429,36 @@ def test_the_step_a_round_failed_at_names_a_cause_its_log_does_not(step, failure
 
 
 @pytest.mark.parametrize(
-    "detail",
+    ("step", "detail"),
     [
-        "the user layer: unrecognized arguments: --foo-bar 1",
-        "the user layer: argument --attention-backend: invalid choice: 'nonexistent' (choose from 'fa3', 'triton')",
+        (FailedStep.FLAG_UNKNOWN, "the user layer: unrecognized arguments: --foo-bar 1"),
+        (
+            FailedStep.FLAG_UNKNOWN,
+            "the user layer: argument --attention-backend: invalid choice: 'nonexistent' (choose from 'fa3', 'triton')",
+        ),
+        (
+            FailedStep.GOLDEN_OWNED_TOUCHED,
+            "the user layer sets golden-owned --speculative-config.method, --speculative-config.num_speculative_tokens",
+        ),
     ],
-    ids=["bad_flag", "bad_choice"],
+    ids=["bad_flag", "bad_choice", "golden_owned"],
 )
 @pytest.mark.parametrize("logs", [[], [TRACEBACK_LOG]])
-def test_a_flag_the_suite_refused_before_boot_is_a_candidate_serve_flag_quoting_the_refusal(detail, logs) -> None:
-    """The suite parses the argv before the server starts, so no server log states the refusal; its report does."""
+def test_a_command_line_the_suite_refused_before_boot_is_a_candidate_serve_flag_quoting_the_refusal(
+    step, detail, logs
+) -> None:
+    """The suite checks the argv before the server starts, so no server log states the refusal; its report does."""
     verdict = classify_test_failure(
         returncode=1,
-        evidence=FailureEvidence(logs=tuple(logs), step_failure=StepFailure(FailedStep.FLAG_UNKNOWN, detail)),
+        evidence=FailureEvidence(logs=tuple(logs), step_failure=StepFailure(step, detail)),
     )
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, f"serve_flag: {detail}")
     assert decides_test(verdict)
 
 
-def test_a_flag_refusal_without_a_detail_is_still_a_candidate_serve_flag() -> None:
-    verdict = classify_test_failure(
-        returncode=1, evidence=FailureEvidence(step_failure=StepFailure(FailedStep.FLAG_UNKNOWN))
-    )
+@pytest.mark.parametrize("step", [FailedStep.FLAG_UNKNOWN, FailedStep.GOLDEN_OWNED_TOUCHED])
+def test_a_command_line_refusal_without_a_detail_is_still_a_candidate_serve_flag(step) -> None:
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(step_failure=StepFailure(step)))
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, "serve_flag")
 
 
@@ -485,6 +543,33 @@ def test_a_stalled_server_is_unclear_and_does_not_settle_the_test_whatever_its_l
     )
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.UNCLEAR, "server_stalled")
     assert not decides_test(verdict)
+
+
+@pytest.mark.parametrize(
+    ("last_line", "reason"),
+    [
+        ("Async signal handler still waiting", "profiler_hung: Async signal handler still waiting"),
+        ("", "profiler_hung"),
+    ],
+    ids=["quotes_the_log", "empty_log"],
+)
+def test_a_server_that_stalled_with_its_profile_window_open_is_an_infrastructure_failure_whatever_its_log_says(
+    last_line: str, reason: str
+) -> None:
+    stall = StepFailure(FailedStep.SERVER_STALLED, profile_stall=last_line)
+
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(TRACEBACK_LOG,), step_failure=stall))
+
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, reason)
+    assert not decides_test(verdict)
+
+
+def test_a_profile_stall_named_beside_another_step_does_not_turn_it_into_the_profilers_failure() -> None:
+    stall = StepFailure(FailedStep.PORT_IN_USE, profile_stall="handler still waiting")
+
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(step_failure=stall))
+
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, "port_in_use")
 
 
 def test_a_boot_timeout_step_yields_to_a_cause_its_log_names_as_its_return_code_does() -> None:

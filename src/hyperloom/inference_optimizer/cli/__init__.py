@@ -32,7 +32,9 @@ from .backends import (
     _build_backends,
     _build_proposal_scorer,
     _orchestration_banner,
+    _resolve_orchestration_backend,
 )
+from .session_gates import _check_codex_sandbox, _preflight_agentx_backend
 from .model_gate import (
     _finish_model_gate,
     _preflight_context_window,
@@ -72,7 +74,6 @@ from .bootstrap import (
     measurement_state_is_stale,
     resume_gpu_power_settings,
     latency_budget_scope_error,
-    parse_operator_extra_env,
     resolve_framework_version,
     resolve_model_display_name,
 )
@@ -86,6 +87,7 @@ from .credentials import (
 )
 from .multi_node import (
     _prepare_multi_node_state as _prepare_multi_node_state,
+    _resolve_mn_backend,
 )
 from .model_catalog import (
     _resolve_critic_choice,
@@ -94,6 +96,7 @@ from .model_catalog import (
 from .launch_shape import (
     _refuse_multinode_partition_shape,
     _export_operator_launch_shape,
+    _launch_pins,
     _positive_env_int,
     _resolve_precision,
     _resolve_run_max_model_len,
@@ -378,14 +381,6 @@ def _load_critic_prompt() -> str:
     return (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
 
 
-def _should_remote_probe_gpu(args: argparse.Namespace) -> bool:
-    """Return whether the GPU type should be probed on the remote cluster."""
-    if int(getattr(args, "nodes", 1) or 1) < 2:
-        return False
-    backend = (getattr(args, "mn_backend", None) or "rayjob").strip().lower()
-    return backend in ("rayjob", "infera", "atomesh", "sglangrouter")
-
-
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> None:
     """Validate atom-specific CLI knobs: the ``--nodes>=2`` fail-fast guard (IR-8)."""
     if int(getattr(args, "nodes", 1) or 1) >= 2:
@@ -445,24 +440,6 @@ def _reset_state_file(session_dir: Path, state: SharedState) -> None:
         backup_path.name,
         state.framework,
     )
-
-
-def _preflight_agentx_backend(args: argparse.Namespace) -> None:
-    """Reject the combinations where AgentX labels work it did not do."""
-    if not _agentx_enabled():
-        return
-    from hyperloom.inference_optimizer import framework_registry
-
-    framework = str(getattr(args, "framework", "") or "").strip().lower()
-    if framework and framework_registry.is_scriptable(framework):
-        print(
-            f"ERROR: HYPERLOOM_AGENTX=1 with --framework {framework!r}, which is "
-            "scriptable. The AgentX switch only replaces the benchmark client of a "
-            "serving framework, so no trace would be replayed -- but the session "
-            "would still be labelled AgentX and run on AgentX budgets. Pick one.",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
 
 
 def _apply_default_budget(args: argparse.Namespace) -> None:
@@ -1155,8 +1132,7 @@ async def _resume_session(args: argparse.Namespace) -> _SessionStart:
     # Restored before the staleness guard below, which resolves the AgentX backend from the environment: a
     # session whose backend came from a pin would otherwise be refused as a workload mismatch. An explicit flag
     # on this resume wins, else the persisted value.
-    _resume_server_args = str(getattr(args, "server_args", "") or "").strip() or state.operator_server_args
-    _resume_extra_env = parse_operator_extra_env(args) or dict(state.operator_extra_env)
+    _resume_server_args, _resume_extra_env = _launch_pins(args, state.operator_server_args, state.operator_extra_env)
     _export_operator_launch_shape(server_args=_resume_server_args, extra_env=_resume_extra_env)
     _stale = measurement_state_is_stale(state)
     if _stale:
@@ -1201,12 +1177,12 @@ def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
     """Settle ``args.gpu_type``, then refuse a board this session cannot serve."""
     # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
     user_specified = _resolve_amd_gpu_type(args.gpu_type) or ""
-    if _should_remote_probe_gpu(args):
+    if int(args.nodes) >= 2:
         from ..multi_node._internal.gpu_probe import remote_autodetect_gpu_type
 
         probed = remote_autodetect_gpu_type() or ""
         if probed:
-            print(f"GPU probe       : {probed} (remote {(args.mn_backend or 'rayjob').lower()})")
+            print(f"GPU probe       : {probed} (remote {_resolve_mn_backend(args)})")
     else:
         probed = _autodetect_gpu_type() or ""
     gpu_type, gpu_warnings = _resolve_gpu_type(user_specified=user_specified, probed=probed)
@@ -1547,6 +1523,12 @@ async def _prepare_run(args: argparse.Namespace) -> _ProviderIntent:
             log.warning("failed to preserve SBD V6 preflight failure", exc_info=True)
         raise
 
+    # The orchestration role's session refuses without a sandbox; reject before model resolution makes LLM calls.
+    _check_codex_sandbox(
+        _resolve_orchestration_backend(
+            codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
+        )
+    )
     # Model resolution makes blocking LLM calls; the subscription-token client refuses to run inside this loop.
     await asyncio.to_thread(
         _resolve_models_for_run,

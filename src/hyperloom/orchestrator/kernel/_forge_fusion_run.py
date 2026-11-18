@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-import importlib.util
+import json
 import os
 from pathlib import Path
 from typing import Any, Mapping
@@ -25,20 +25,6 @@ from .lane_budget import LANE_FUSION
 
 
 # forge-fusion (autonomous kernel fusion)
-def _forge_fusion_available() -> bool:
-    """Check that KernelForge's fusion pipeline is importable.
-
-    Probes the subpackage rather than ``kernelforge``: an installation
-    predating the fusion absorption would satisfy the parent import and only
-    fail once the subprocess rejected ``forge-fuse``. PATH is not consulted
-    because the tool is invoked through ``sys.executable -m``.
-    """
-    try:
-        return importlib.util.find_spec("kernelforge.workflows.forge_fusion") is not None
-    except (ModuleNotFoundError, ValueError):
-        return False
-
-
 def _resolve_fusion_decode_trace(state) -> str:
     """Reuse this run's PRELUDE/roofline decode trace for fusion discovery.
 
@@ -72,6 +58,17 @@ def _resolve_fusion_decode_trace(state) -> str:
         reverse=True,
     )
     return str(captures[0]) if captures else ""
+
+
+def _write_fusion_hints(state: Any, workspace: Path) -> str:
+    """Write TraceLens' fusion findings as forge-fuse's advisory ``--fusion-hints``; ``""`` when there are none."""
+    last_trace_analyze = getattr(state, "last_trace_analyze", None)
+    findings = last_trace_analyze.get("fusion_findings") if isinstance(last_trace_analyze, dict) else None
+    if not findings:
+        return ""
+    path = workspace / "fusion_hints.json"
+    path.write_text(json.dumps(findings, indent=2), encoding="utf-8")
+    return str(path)
 
 
 def _active_forge_fusion_env_flags(state: Any) -> dict[str, str]:
@@ -159,11 +156,6 @@ def _fusion_precondition_refusal(state: Any, *, model_path: str, trace_path: str
             ),
             "source": "forge_fusion",
         }
-    if not _forge_fusion_available():
-        return _fusion_failure(
-            "forge_fusion_not_found",
-            "KernelForge fusion pipeline not found. Install via 'pip install <KernelForge>[claude,codex]'.",
-        )
     if not model_path:
         return _fusion_failure("model_path_missing", "model_path is required")
     if not trace_path:
@@ -185,7 +177,8 @@ async def run_fusion_handler(payload: dict, *, session_dir: Path) -> HandlerResu
     which returns the fusion contract result. A KEPT fusion carries a source patch + env flags
     and ``requires_e2e_validation`` so the integrate gate confirms the
     end-to-end gain. Reuses the PRELUDE decode trace (no re-profiling); only
-    ``payload['task_id']`` is read, to name the workspace.
+    ``payload['task_id']`` is read, to name the workspace. TraceLens' fusion findings
+    reach discovery as advisory hints; the LLM still chooses the chains.
     """
     from ..state.shared_state import SharedState
 
@@ -211,6 +204,7 @@ async def run_fusion_handler(payload: dict, *, session_dir: Path) -> HandlerResu
 
     workspace = session_dir / "runs" / "fusion" / str(payload.get("task_id") or "kernel_entry_fusion")
     workspace.mkdir(parents=True, exist_ok=True)
+    fusion_hints = _write_fusion_hints(state, workspace)
     result = await forge_fusion.run_forge_fusion(
         {
             "trace_path": trace_path,
@@ -218,6 +212,7 @@ async def run_fusion_handler(payload: dict, *, session_dir: Path) -> HandlerResu
             "framework": framework,
             "output_dir": str(workspace),
             "discover_mode": "llm",
+            "fusion_hints": fusion_hints,
             "agent_backend": agent_backend,
             "llm_model": llm_model,
             "agent_sandbox_mode": agent_sandbox_mode,
@@ -239,6 +234,7 @@ async def run_fusion_handler(payload: dict, *, session_dir: Path) -> HandlerResu
         "agent_backend": agent_backend,
         "llm_model": llm_model,
         "agent_sandbox_mode": agent_sandbox_mode,
+        "fusion_hints": fusion_hints,
         "source": "forge_fusion",
         **result,
     }

@@ -251,15 +251,15 @@ def test_the_prompt_shows_the_open_areas_and_the_playbook_before_the_reply_forma
     assert (system_prompt(played), system_prompt(_view())) == (PLAYBOOK_JUDGE_PROMPT, JUDGE_SYSTEM_PROMPT)
 
 
-def test_the_prompt_shows_arbor_s_map_after_the_open_areas_only_when_the_session_has_one() -> None:
+def test_the_prompt_shows_the_agent_map_after_the_open_areas_only_when_the_session_has_one() -> None:
     areas = "Open areas for a new branch, from the profile of c1:\n- gemm_a8w8 (gemm): 10.0% of GPU time"
-    held = "Arbor's map: the directions ...\n- m-gemm (held by b02): Dense GEMMs"
+    held = "The agent map: the directions ...\n- m-gemm (held by b02): Dense GEMMs"
     prompt = render_prompt(replace(_view(), open_areas=areas, agent_map=held, playbook=H0.render()))
 
     assert (
         prompt.index(areas) < prompt.index(held) < prompt.index("Scheduling playbook h0:") < prompt.index("Reply with")
     )
-    assert "Arbor's map" not in render_prompt(replace(_view(), open_areas=areas))
+    assert "The agent map" not in render_prompt(replace(_view(), open_areas=areas))
 
 
 def test_a_playbook_session_s_prompt_makes_its_stall_evidence_the_one_stop_rule_for_a_stall() -> None:
@@ -367,15 +367,39 @@ def test_the_prompt_says_unfocused_branches_spread_over_the_largest_ops_in_turn(
     assert "briefed on the largest ops of the integration head's latest profile in turn" in prose
 
 
-def test_a_playbook_session_s_prompt_leaves_a_free_slot_free_while_no_open_area_is_left() -> None:
+def test_a_playbook_session_s_prompt_leaves_a_free_slot_free_only_while_every_op_is_worked_on_or_spent() -> None:
     prose = " ".join(PLAYBOOK_JUDGE_PROMPT.split())
 
     assert "needs a reason; opening into it does not" not in prose
-    assert "When the open areas list no op, leave a free slot free" in prose
+    assert (
+        "When the open areas list no op because every op of the profile is worked on or spent, leave a free slot free"
+        in prose
+    )
     assert "the scheduler then opens only the branches you name a focus for" in prose
     assert "only for an angle its history has not tried" in prose
     assert "briefed on the open areas' ops in turn" in prose
     assert "so refill the free slots" not in prose
+
+
+def test_a_playbook_session_s_prompt_refills_unfocused_and_does_not_stop_while_no_op_is_known() -> None:
+    prose = " ".join(PLAYBOOK_JUDGE_PROMPT.split())
+
+    assert (
+        "or on none when no op shares of the integration head or a commit it builds on are known: it was not "
+        "profiled, or its trace was not analysed" in prose
+    )
+    assert (
+        "When they list no op because none is known, not profiled or its trace not analysed, no op is spent either: "
+        "fill the free slots with branches left to the default focus while time is left for them." in prose
+    )
+    assert "its slot refilled while an open area is left or no op is known, rather than stop the session" in prose
+
+
+def test_the_prompt_says_raising_k_starts_no_profile_and_a_profile_is_not_tried_again() -> None:
+    for system in (JUDGE_SYSTEM_PROMPT, PLAYBOOK_JUDGE_PROMPT):
+        prose = " ".join(system.split())
+        assert "A profile of the integration head starts only after a merge moved it as integration_moved says" in prose
+        assert "raising the integration branch's K starts none" in prose
 
 
 def test_every_specialist_row_shows_its_focus_a_stopped_one_included() -> None:
@@ -677,7 +701,7 @@ def test_cap_drops_unknown_stopped_and_integration_orders_and_clamps_k() -> None
         open_count=3,
         k=(
             KOrder("b01", 9),
-            KOrder(INTEGRATION_BRANCH, 0),
+            KOrder(INTEGRATION_BRANCH, 5),
             KOrder("b03", 2),
             KOrder("b99", 2),
             KOrder("b02", 2),
@@ -693,7 +717,7 @@ def test_cap_drops_unknown_stopped_and_integration_orders_and_clamps_k() -> None
 
     assert cap_decision(decision, _view()) == JudgeDecision(
         open_count=3,
-        k=(KOrder("b01", 2), KOrder(INTEGRATION_BRANCH, 1)),
+        k=(KOrder("b01", 2), KOrder(INTEGRATION_BRANCH, 5)),
         stop=(StopOrder("b02", "flat"),),
         session_stop="done",
     )

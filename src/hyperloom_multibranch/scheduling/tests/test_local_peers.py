@@ -45,7 +45,7 @@ from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV
 from hyperloom_kb import ReadStatus
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
+from hyperloom_multibranch.contracts.blackboard.records import JudgementWrite, LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, InboxKind, LearningKind, LeaseKind, LineageKind
 from hyperloom_multibranch.blackboard import STALL_TESTS, LocalBlackboard
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, TreeArchive
@@ -85,6 +85,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     machine_cards,
     machine_parallel_tests,
     measurement_host,
+    PROMPT_CACHE_TTL_ENV,
     model_backed_sessions,
     native_trees,
     render_nodes,
@@ -118,6 +119,7 @@ from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox
 from hyperloom_multibranch.tests.fakes import RefusingCritic
 from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
 from hyperloom.inference_optimizer.cli import base_launch as cli_base_launch
+from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR, ENV_USER_DATA_PATH
 from hyperloom.measure.runner import suite_publish
 from hyperloom.measure.runner.suite_publish import SuitePublishError
 from hyperloom.measure.tests.bundle_factory import base_launch
@@ -254,12 +256,12 @@ def test_the_specialists_are_told_an_agentx_workload_and_no_sequence_lengths() -
     assert "graded on total token throughput (total_token_throughput)," in _specialist_role(TOTAL_AGENTX)
 
 
-def test_the_agents_spec_names_the_pack_the_session_gives_its_arbors_and_none_by_default() -> None:
-    assert _agent_spec(WORKLOAD, "agentx-qwen38-1").pack == "agentx-qwen38-1"
+def test_the_agents_spec_names_the_pack_the_session_gives_its_component_agents_and_none_by_default() -> None:
+    assert _agent_spec(WORKLOAD, "agentx-pack").pack == "agentx-pack"
     assert _agent_spec(WORKLOAD).pack is None
 
 
-def test_the_agents_spec_names_the_launch_file_the_session_gives_its_arbors_and_none_by_default() -> None:
+def test_the_agents_spec_names_the_launch_file_the_session_gives_its_component_agents_and_none_by_default() -> None:
     assert _agent_spec(WORKLOAD, "", "/runs/launch.json").launch == "/runs/launch.json"
     assert _agent_spec(WORKLOAD).launch is None
 
@@ -320,6 +322,37 @@ def test_the_specialists_run_the_agent_cli_found_on_path(tmp_path: Path) -> None
 def test_without_the_agent_cli_the_peers_are_refused(tmp_path: Path) -> None:
     with pytest.raises(PeersUnavailable, match="claude CLI the specialists run is not on PATH"):
         specialist_command({"PATH": str(tmp_path), "ANTHROPIC_API_KEY": "dummy"})
+
+
+def test_the_claude_cli_install_sh_installed_off_path_is_run_from_where_it_installed_it(tmp_path: Path) -> None:
+    # install.sh puts the CLI in ~/.local/bin, on PATH only in a shell that sourced the kernel-agent env file
+    installed = tmp_path / "home" / ".local" / "bin"
+    installed.mkdir(parents=True)
+    cli = installed / "claude"
+    cli.write_text("#!/bin/sh\nexit 0\n")
+    cli.chmod(0o755)
+    env = {"PATH": str(tmp_path / "empty-bin"), "HOME": str(tmp_path / "home"), "ANTHROPIC_API_KEY": "dummy"}
+
+    assert specialist_command(env).executable == str(cli)
+
+
+def test_a_claude_cli_on_path_wins_over_the_installed_one(tmp_path: Path) -> None:
+    for directory in (tmp_path / "bin", tmp_path / "home" / ".local" / "bin"):
+        directory.mkdir(parents=True)
+        (directory / "claude").write_text("#!/bin/sh\nexit 0\n")
+        (directory / "claude").chmod(0o755)
+    env = {"PATH": str(tmp_path / "bin"), "HOME": str(tmp_path / "home"), "ANTHROPIC_API_KEY": "dummy"}
+
+    assert specialist_command(env).executable == str(tmp_path / "bin" / "claude")
+
+
+def test_without_the_claude_cli_on_path_or_where_install_sh_puts_it_the_peers_are_refused_naming_both(
+    tmp_path: Path,
+) -> None:
+    env = {"PATH": str(tmp_path / "empty-bin"), "HOME": str(tmp_path / "home"), "ANTHROPIC_API_KEY": "dummy"}
+
+    with pytest.raises(PeersUnavailable, match=r"not on PATH nor in .*/home/\.local/bin"):
+        specialist_command(env)
 
 
 def test_a_specialist_model_the_price_sheet_lacks_runs_on_its_tokens_and_says_so(
@@ -495,7 +528,7 @@ async def _peers(
     inferencex_commit: str = "",
     reference_script: str = "",
     base: BaseLaunch | None = None,
-    agent_launch: str = "/launches/arbor.json",
+    agent_launch: str = "/launches/agent.json",
 ) -> AsyncIterator[_Built]:
     """The real peers of a session of ``workload`` on ``host`` in ``tmp_path`` lending ``dev_leases`` dev sandboxes,
     with the wiring their specialist sessions were built on; a branch's worktree, holding no component, is served
@@ -783,7 +816,7 @@ async def test_a_fresh_session_reads_inferencex_at_the_commit_its_setup_names(
         assert commits == ["8a76a78e41"]
 
 
-async def test_a_reference_script_is_frozen_as_the_base_and_served_to_the_arbors(
+async def test_a_reference_script_is_frozen_as_the_base_and_served_to_the_component_agents(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("HL_MODEL_BASE", raising=False)
@@ -800,7 +833,7 @@ async def test_a_reference_script_is_frozen_as_the_base_and_served_to_the_arbors
         assert built.wiring.setup.agent_launch == str(frozen.path)
 
 
-async def test_without_a_launch_file_the_arbors_are_served_the_session_s_frozen_base(
+async def test_without_a_launch_file_the_component_agents_are_served_the_session_s_frozen_base(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async with _peers(tmp_path, monkeypatch, WORKLOAD, agent_launch="") as built:
@@ -808,8 +841,8 @@ async def test_without_a_launch_file_the_arbors_are_served_the_session_s_frozen_
         assert frozen is not None and built.wiring.setup.agent_launch == str(frozen.path)
 
 
-async def test_an_arbor_launch_file_is_served_in_place_of_the_frozen_base(built: _Built) -> None:
-    assert built.wiring.setup.agent_launch == "/launches/arbor.json"
+async def test_a_component_agent_launch_file_is_served_in_place_of_the_frozen_base(built: _Built) -> None:
+    assert built.wiring.setup.agent_launch == "/launches/agent.json"
 
 
 async def test_the_specialists_are_wired_the_frozen_base_launch_s_server_half(built: _Built) -> None:
@@ -817,6 +850,46 @@ async def test_the_specialists_are_wired_the_frozen_base_launch_s_server_half(bu
 
     assert frozen is not None and built.wiring.base == server_base(frozen.launch)
     assert built.wiring.base.args
+
+
+def _workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A workspace root this process runs in outside any Hyperloom session, as a leg dispatched into an agent's
+    shell does: the root ``USER_DATA_PATH`` names, and no session directory pinned."""
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    monkeypatch.setenv(ENV_USER_DATA_PATH, str(root))
+    monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    return root
+
+
+async def test_a_session_renders_its_canonical_over_a_state_another_run_left_unreadable_at_the_workspace_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = _workspace_root(tmp_path, monkeypatch) / "state.json"
+    state.write_text("{", encoding="utf-8")
+    state.chmod(0)  # what an earlier run as another account leaves; root reads it anyway, and finds no JSON
+
+    async with _peers(tmp_path / "run", monkeypatch, WORKLOAD) as built:
+        canonical = yaml.safe_load((built.layout.toolbox / "canonical" / "canonical.yaml").read_text())["benchmark"]
+
+    assert canonical["model"] == WORKLOAD.model
+
+
+async def test_a_sessions_canonical_carries_no_base_another_run_froze_at_the_workspace_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    foreign = base_launch()
+    freeze_base(
+        _workspace_root(tmp_path, monkeypatch), replace(foreign, args=(*foreign.args, "--max-running-requests", "4321"))
+    )
+
+    async with _peers(tmp_path / "run", monkeypatch, WORKLOAD) as built:
+        canonical = yaml.safe_load((built.layout.toolbox / "canonical" / "canonical.yaml").read_text())["benchmark"]
+
+    assert "4321" not in str(canonical["envs"].get("EXTRA_SGLANG_ARGS", ""))
+    assert len(str(canonical["envs"]["ROCR_VISIBLE_DEVICES"]).split(",")) == WORKLOAD.tp
 
 
 async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -> None:
@@ -1169,9 +1242,8 @@ async def test_a_session_without_agents_reads_no_canonical(built: _Built, monkey
     assert clients == [None]
 
 
-async def test_an_agentx_session_s_specialists_are_told_its_objective(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _specialist_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload: Workload) -> AgentSetup:
+    """The setup ``model_backed_sessions`` builds every branch's specialist from, on ``workload``."""
     built: list[AgentSetup] = []
 
     def sessions(setup: AgentSetup, **_: object) -> ModelSessions:
@@ -1182,7 +1254,7 @@ async def test_an_agentx_session_s_specialists_are_told_its_objective(
     layout = SimpleNamespace(logs=tmp_path, source=tmp_path, branch_dir=lambda branch: tmp_path)
     setup = SimpleNamespace(
         layout=layout,
-        workload=TOTAL_AGENTX,
+        workload=workload,
         references={},
         processes=None,
         agents=(),
@@ -1207,12 +1279,42 @@ async def test_an_agentx_session_s_specialists_are_told_its_objective(
         base=BASE,
     )
     model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
+    [setup] = built
+    return setup
+
+
+async def test_an_agentx_session_s_specialists_are_told_its_objective(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup = _specialist_setup(tmp_path, monkeypatch, TOTAL_AGENTX)
 
     objective = AgentXObjective.TOTAL_TOKEN_THROUGHPUT
-    assert built[0].role == role_prompt(
-        RoleWorkload(_specialist_role(TOTAL_AGENTX), objective), references={}, base=BASE
-    )
-    assert objective.description in " ".join(built[0].role.split())
+    assert setup.role == role_prompt(RoleWorkload(_specialist_role(TOTAL_AGENTX), objective), references={}, base=BASE)
+    assert objective.description in " ".join(setup.role.split())
+
+
+@pytest.mark.parametrize(("workload", "ttl"), [(WORKLOAD, "1h"), (AGENTX, None)])
+def test_a_specialist_caches_its_prompt_for_an_hour_on_inferencex_and_at_the_cli_s_default_on_agentx(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload: Workload, ttl: str | None
+) -> None:
+    for name in PROMPT_CACHE_TTL_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+    env = _specialist_setup(tmp_path, monkeypatch, workload).env
+
+    assert [env.get(name) for name in PROMPT_CACHE_TTL_ENV] == [ttl, ttl]
+
+
+@pytest.mark.parametrize("workload", [WORKLOAD, AGENTX])
+def test_the_operator_s_prompt_cache_ttl_reaches_the_specialist_on_either_workload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload: Workload
+) -> None:
+    monkeypatch.setenv("CLAUDE_CODE_PROMPT_CACHE_TTL", "5m")
+    monkeypatch.setenv("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL", "1h")
+
+    env = _specialist_setup(tmp_path, monkeypatch, workload).env
+
+    assert (env.get("CLAUDE_CODE_PROMPT_CACHE_TTL"), env.get("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL")) == ("5m", "1h")
 
 
 async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_session_lends(
@@ -1419,7 +1521,9 @@ async def test_the_specialist_blackboard_handle_briefs_a_branch_after_stall_test
             request_id = f"r{n}-{count}"
             await toolbox.write_request(request(request_id, intent("b01", "c0", target=request_id)))
             await toolbox.write_result(result(request_id))
-            await gate.write_judgement(request_id, judgement(0.1, (request_id,)), Conclusion.RECORDED_ONLY, None)
+            await gate.write_judgement(
+                JudgementWrite(request_id, judgement(0.1, (request_id,)), Conclusion.RECORDED_ONLY, None)
+            )
         return [item.summary for item in (await handle.poll("b01")).items if item.kind is InboxKind.BRIEF]
 
     assert await judged(STALL_TESTS - 1) == []

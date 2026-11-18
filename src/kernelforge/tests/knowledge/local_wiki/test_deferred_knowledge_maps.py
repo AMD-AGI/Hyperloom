@@ -135,3 +135,51 @@ def test_the_kernel_backend_prompt_carries_the_choice(monkeypatch: pytest.Monkey
     assert deferred.count("Map not inlined") == 4
     assert "crosses into" not in deferred
     assert len(deferred) < len(inlined)
+
+
+@pytest.fixture
+def kb_with_rdna3(kb: Path) -> Path:
+    folder = kb / "hardware" / "rdna3"
+    folder.mkdir()
+    (folder / "INDEX.md").write_text("# RDNA 3 hardware — knowledge map\n\n- card.md — a card\n", encoding="utf-8")
+    folder = kb / "hardware" / "rdna4"
+    folder.mkdir()
+    (folder / "INDEX.md").write_text("# RDNA 4 hardware — knowledge map\n", encoding="utf-8")
+    return kb
+
+
+def test_a_gfx1100_task_reads_the_rdna3_hardware_pillar_under_the_architecture_note(kb_with_rdna3: Path) -> None:
+    text = build_forge_knowledge(kb_with_rdna3, gpu_target="gfx1100", language="triton")
+
+    assert text.startswith("## Target architecture: gfx1100 (RDNA 3")
+    assert "RDNA 3 hardware" in text
+    assert "## hardware/rdna3/" in text
+    assert "## hardware/  " not in text
+
+
+def test_the_architecture_note_survives_deferring_every_map(kb_with_rdna3: Path) -> None:
+    """The note corrects the backend prompt's Instinct vocabulary, so a pointer to it would arrive too late."""
+    text = build_forge_knowledge(kb_with_rdna3, gpu_target="gfx1100:xnack-", language="triton", defer_all=True)
+
+    assert "Matrix instructions are **WMMA**" in text
+    assert str(kb_with_rdna3 / "hardware" / "rdna3" / "INDEX.md") in text
+
+
+@pytest.mark.parametrize("gpu_target", ["gfx950", "gfx942:sramecc+:xnack-", ""])
+def test_every_other_target_keeps_the_instinct_hardware_pillar_and_no_note(kb_with_rdna3: Path, gpu_target) -> None:
+    assert build_forge_knowledge(kb_with_rdna3, gpu_target=gpu_target, language="triton") == build_forge_knowledge(
+        kb_with_rdna3, language="triton"
+    )
+    assert "## hardware/  " in build_forge_knowledge(kb_with_rdna3, gpu_target=gpu_target)
+
+
+@pytest.mark.parametrize("defer_all", [False, True])
+def test_gfx1201_reads_its_hardware_map_and_keeps_the_architecture_note(kb_with_rdna3: Path, defer_all) -> None:
+    text = build_forge_knowledge(kb_with_rdna3, gpu_target="gfx1201", language="triton", defer_all=defer_all)
+
+    assert text.startswith("## Target architecture: gfx1201 (RDNA 4")
+    assert "Use wave32 and WMMA" in text
+    assert "## hardware/rdna4/" in text
+    assert "## hardware/  " not in text
+    if defer_all:
+        assert str(kb_with_rdna3 / "hardware" / "rdna4" / "INDEX.md") in text

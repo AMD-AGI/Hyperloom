@@ -14,7 +14,13 @@ from typing import Any
 import pytest
 
 from hyperloom.common import codex_session
-from hyperloom.common.codex_session import CodexSession, CodexSessionError, CodexSessionResult, CodexTurnRequest
+from hyperloom.common.codex_session import (
+    CodexSession,
+    CodexSessionError,
+    CodexSessionResult,
+    CodexSessionTimeoutError,
+    CodexTurnRequest,
+)
 from hyperloom.inference_optimizer.protocol.intent import IntentType, NoIntentEmitted
 from hyperloom.orchestrator.roles import codex as codex_module
 from hyperloom.orchestrator.roles.agent_role import (
@@ -22,7 +28,7 @@ from hyperloom.orchestrator.roles.agent_role import (
     _ORCHESTRATION_INTENTS,
     default_role_registry,
 )
-from hyperloom.orchestrator.roles.base import LLMCallFailed
+from hyperloom.orchestrator.roles.base import LLMCallFailed, RetryPolicy
 from hyperloom.orchestrator.roles.codex import CodexBackend
 from hyperloom.orchestrator.roles.mcp_emit_intent import build_intent_envelope_schema
 
@@ -288,6 +294,87 @@ async def test_in_band_turn_error_is_reported_as_an_llm_call_failure(
     _stub_turn(monkeypatch, CodexSessionResult(text="", error="model overloaded"))
     with pytest.raises(LLMCallFailed, match="model overloaded"):
         await _backend(tmp_path).run("p")
+
+
+async def test_orchestration_session_is_opened_without_the_shell_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The orchestration role is documented as tool-less, so its session must not carry a shell."""
+    seen: dict[str, Any] = {}
+
+    async def _start(session: CodexSession) -> None:
+        seen["shell_tool"] = session.config.shell_tool
+
+    async def _turn(session: CodexSession, request: CodexTurnRequest) -> CodexSessionResult:
+        return CodexSessionResult(text=_schema_enforced_reply("send_message", {"topic": "heartbeat"}))
+
+    monkeypatch.setattr(CodexSession, "start", _start)
+    monkeypatch.setattr(CodexSession, "turn", _turn)
+
+    await _backend(tmp_path).run("tick 1")
+
+    assert seen["shell_tool"] is False
+
+
+async def test_a_timed_out_turn_is_not_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry replays the same prompt on the same thread, so it stalls the loop again."""
+    turns = 0
+
+    async def _start(session: CodexSession) -> None:
+        return None
+
+    async def _turn(session: CodexSession, request: CodexTurnRequest) -> CodexSessionResult:
+        nonlocal turns
+        turns += 1
+        raise CodexSessionTimeoutError("Codex turn timed out after 300s")
+
+    monkeypatch.setattr(CodexSession, "start", _start)
+    monkeypatch.setattr(CodexSession, "turn", _turn)
+    backend = CodexBackend(
+        allowed_intents=_ORCHESTRATION_INTENTS,
+        model="gpt-5.6-sol",
+        cwd=tmp_path / "orchestration",
+        retry_policy=RetryPolicy(max_attempts=3, base_delay_s=0.0, jitter_s=0.0),
+    )
+
+    with pytest.raises(LLMCallFailed, match="timed out"):
+        await backend.run("tick 1")
+
+    assert turns == 1
+
+
+async def test_other_session_errors_are_still_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient gateway failures keep their bounded retry."""
+    turns = 0
+
+    async def _start(session: CodexSession) -> None:
+        return None
+
+    async def _turn(session: CodexSession, request: CodexTurnRequest) -> CodexSessionResult:
+        nonlocal turns
+        turns += 1
+        raise CodexSessionError("gateway 500")
+
+    monkeypatch.setattr(CodexSession, "start", _start)
+    monkeypatch.setattr(CodexSession, "turn", _turn)
+    backend = CodexBackend(
+        allowed_intents=_ORCHESTRATION_INTENTS,
+        model="gpt-5.6-sol",
+        cwd=tmp_path / "orchestration",
+        retry_policy=RetryPolicy(max_attempts=3, base_delay_s=0.0, jitter_s=0.0),
+    )
+
+    with pytest.raises(LLMCallFailed, match="gateway 500"):
+        await backend.run("tick 1")
+
+    assert turns == 3
 
 
 # The session wrapper actually forwards the schema to the SDK.

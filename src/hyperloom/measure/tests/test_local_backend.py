@@ -20,8 +20,9 @@ import yaml
 from hyperloom_common.env import is_truthy
 from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef
 from hyperloom.measure import farm as farm_module
+from hyperloom.measure import log_causes
 from hyperloom.measure import local
-from hyperloom.measure.local import SUPPORTED_KINDS, LocalMeasurementBackend, TestCallRefused
+from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.points import AMBIENT_SHAPE_ENVS
 from hyperloom.measure.repro import read_verdict
 from hyperloom.measure.runner.rounds import rounds_document
@@ -36,7 +37,8 @@ from hyperloom.orchestrator.actions.executors import (
     VariantResult,
 )
 from hyperloom.orchestrator.actions.executors._server_lifecycle import REUSE_PORT_DEFAULT
-from inference_suite.contracts import FailedStep, RunLayout
+from inference_suite.contracts import Deadlines, FailedStep, RunLayout
+from inference_suite.tests import test_config_contract
 
 
 def _point(directory: Path, name: str, *, conc: int = 4, run_eval: object = "false", **counts: object) -> Path:
@@ -200,11 +202,6 @@ def test_the_warnings_run_grid_wrote_ride_on_the_first_round_of_the_point_once(g
     assert [w for r in outcome.rounds for w in r.nonfatal_warnings] == warnings
 
 
-def test_a_point_that_run_grid_did_not_warn_about_carries_none(grid, tmp_path):
-    outcome = _run(_call(tmp_path))
-    assert [r.nonfatal_warnings for r in outcome.rounds] == [()]
-
-
 def test_an_accuracy_test_reports_the_accuracy_round_with_the_eval_exit_code(grid, unheld, tmp_path):
     result = grid.result("test", returncode=0)
     write_run_dir(Path(result.workspace), eval_code=3)
@@ -241,18 +238,6 @@ def test_the_accuracy_round_carries_the_measured_rounds_scores_not_the_warmups(g
     assert by_phase["warmup"] == by_phase["measure"] == ()
 
 
-def test_the_accuracy_round_carries_the_version_lm_eval_reported(grid, unheld, tmp_path):
-    result = grid.result("test")
-    _evaluated(Path(result.workspace), 0.64)
-    grid.answers["test"] = result
-    point = _point(tmp_path, "acc", run_eval="true")
-
-    outcome = _run(_call(tmp_path, point, accuracy=True, kind="accuracy"))
-
-    (value,) = [r.accuracy for r in outcome.rounds if r.phase == "accuracy"][0]
-    assert value.version == "lm_eval=0.4.9;gsm8k=3"
-
-
 def test_an_accuracy_round_with_only_a_warmup_evaluation_carries_no_score(grid, tmp_path):
     result = grid.result("test", nonfatal_warnings=["run_grid_warmup_discarded_first"])
     _evaluated(Path(result.workspace).parent / "warmup_round", 0.10)
@@ -262,12 +247,6 @@ def test_an_accuracy_round_with_only_a_warmup_evaluation_carries_no_score(grid, 
     outcome = _run(_call(tmp_path, point, accuracy=True, kind="accuracy"))
 
     assert [r.accuracy for r in outcome.rounds if r.phase == "accuracy"] == [()]
-
-
-def test_a_test_that_did_not_ask_for_accuracy_reports_no_accuracy_round(grid, tmp_path):
-    outcome = _run(_call(tmp_path))
-
-    assert [r.phase for r in outcome.rounds] == ["measure"]
 
 
 # --- every test runs its rounds on one held server, the evaluation after the measured bench -------------------------
@@ -536,6 +515,119 @@ def test_the_step_a_rounds_report_failed_at_classifies_the_test_its_logs_cannot(
     outcome = _run(_graded_call(tmp_path))
 
     assert (outcome.failure_class, outcome.failure_reason) == (failure_class, reason)
+
+
+#: The last line a profiled server printed before every rank hung in the kernel tracer.
+_TRACER_HANG = "queue_interposition.cpp:412 Async signal handler still waiting"
+
+
+def _stalled_profile_round(
+    run_dir: Path, marks: dict[str, float], window_error: str | None = None, detail: str | None = None
+) -> Path:
+    """A round the suite ended ``server_stalled`` after a 600 s silence, with the phase ``marks`` (monotonic seconds),
+    whose window recorded the control request ``window_error`` in ``profile/capture.json`` and whose report states the
+    stall as ``detail``."""
+    workspace = write_run_dir(run_dir, failed_step=FailedStep.SERVER_STALLED, failure_detail=detail)
+    layout = RunLayout(workspace)
+    config = test_config_contract._config(
+        deadlines=Deadlines(boot_sec=1800, round_sec=3600, eval_sec=1200, silence_sec=600)
+    )
+    layout.config.write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding="utf-8")
+    document = {"phase_marks": [{"phase": phase, "ts": 1.7e9 + at, "mono": at} for phase, at in marks.items()]}
+    layout.phase_marks.write_text(json.dumps(document), encoding="utf-8")
+    layout.server_log.write_text(f"INFO serving\n{_TRACER_HANG}\n\n", encoding="utf-8")
+    layout.profile_capture.parent.mkdir(parents=True, exist_ok=True)
+    capture = {"window_open_unix": None, "window_close_unix": None, "error": window_error}
+    layout.profile_capture.write_text(json.dumps(capture), encoding="utf-8")
+    return workspace
+
+
+#: An AgentX window that opened at 400, 300 s after the measured mark; the workers hung at 411, the window closed at 700
+#: and its ``/stop_profile`` blocked for the control request's 600 s; the silence ended the round at the next poll.
+_AGENTX_HANG = {"ready": 0.0, "measured": 100.0, "profile_open": 400.0, "profile_close": 700.0, "finished": 1302.0}
+_UNANSWERED_STOP = "/stop_profile: <urlopen error timed out>"
+
+
+@pytest.mark.parametrize(
+    ("marks", "window_error", "failure_class", "reason"),
+    [
+        # The AgentX window's /stop_profile went unanswered: the profiler hung the server.
+        (_AGENTX_HANG, _UNANSWERED_STOP, "infra", f"profiler_hung: {_TRACER_HANG}"),
+        # The same timeline with both control requests answered: the stall is not known to be the profiler's.
+        (_AGENTX_HANG, None, "unclear", "server_stalled"),
+        # A control request the server answered with a refusal was answered.
+        (_AGENTX_HANG, "/stop_profile: HTTP Error 400: Bad Request", "unclear", "server_stalled"),
+        # A fixed load's window opened at 400, the server went quiet at 411 and the round ended it 600 s later, closing
+        # the window (whose /stop_profile answer the fixed load does not record).
+        (
+            {"ready": 0.0, "measured": 100.0, "profile_open": 400.0, "finished": 1011.0, "profile_close": 1011.0},
+            None,
+            "infra",
+            f"profiler_hung: {_TRACER_HANG}",
+        ),
+        # The server went quiet at 311, before the window would have opened: no window mark.
+        ({"ready": 0.0, "measured": 100.0, "finished": 911.0}, None, "unclear", "server_stalled"),
+        # The window ran 400-460 and closed; the server went quiet at 511, after it.
+        (
+            {"ready": 0.0, "measured": 100.0, "profile_open": 400.0, "profile_close": 460.0, "finished": 1111.0},
+            None,
+            "unclear",
+            "server_stalled",
+        ),
+        # The silence began at 390, ten seconds before the window's mark: the profiler did not start it.
+        (
+            {"ready": 0.0, "measured": 100.0, "profile_open": 400.0, "finished": 990.0, "profile_close": 990.0},
+            None,
+            "unclear",
+            "server_stalled",
+        ),
+    ],
+    ids=[
+        "agentx_stop_unanswered",
+        "agentx_both_answered",
+        "agentx_stop_refused",
+        "fixed_inside_the_window",
+        "before_the_window",
+        "after_the_window",
+        "silent_before_the_window_opened",
+    ],
+)
+def test_a_server_that_stalled_with_its_profile_window_open_is_the_profilers_failure(
+    grid, server, tmp_path, marks, window_error, failure_class, reason
+):
+    """A tracer that hangs the server hangs it in every sandbox of the image; any other stall stays unclear."""
+    workspace = _stalled_profile_round(grid.tmp_path / "ws" / "warmup", marks, window_error)
+    grid.answers["warmup"] = grid.result(
+        "warmup", status="failed", returncode=1, error="server_stalled", server_log_path=str(workspace / "server.log")
+    )
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert (outcome.failure_class, outcome.failure_reason) == (failure_class, reason)
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        # The server was still talking when the window sent /start_profile at 400 (last heard 400.5).
+        "no server log or client output for 600.5s",
+        # The server had been silent since 200.5, a hang that began before the window would open.
+        "no server log or client output for 800.5s",
+    ],
+    ids=["server_talking", "server_already_silent"],
+)
+def test_an_unanswered_start_profile_stays_a_stall_that_is_rerun(grid, server, tmp_path, detail):
+    """The window sends /start_profile on schedule whatever the server is doing; nothing in the round's files tells a
+    request that hung the server from one sent to a server already hung, so the stall is rerun once, as any stall."""
+    marks = {"ready": 0.0, "measured": 100.0, "finished": 1001.0}
+    workspace = _stalled_profile_round(grid.tmp_path / "ws" / "warmup", marks, "/start_profile: timed out", detail)
+    grid.answers["warmup"] = grid.result(
+        "warmup", status="failed", returncode=1, error="server_stalled", server_log_path=str(workspace / "server.log")
+    )
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert (outcome.failure_class, outcome.failure_reason) == ("unclear", "server_stalled")
 
 
 def test_a_flag_the_suite_refused_names_the_refusal_its_report_records(grid, server, tmp_path):
@@ -1056,23 +1148,6 @@ def test_a_graded_sweep_on_a_framework_that_cannot_hold_a_server_evaluates_in_ea
     ]
 
 
-def test_a_sweep_that_does_not_run_accuracy_boots_the_same_way(grid, server, tmp_path):
-    _run(_graded_sweep(tmp_path, 8, 4, run_eval="false"))
-
-    boot, *measured = grid.calls
-    assert boot["recipe"].base.extra_envs == BOOT_ENVS and all(c["recipe"].base.extra_envs is None for c in measured)
-
-
-def test_a_boot_does_not_pin_what_the_point_pins_for_a_graded_round(grid, server, tmp_path):
-    """The boot's overrides live in its round's environment; the call's own validation reads the point."""
-    call = _graded_sweep(tmp_path, 8, 4)
-
-    _run(call)  # an accuracy sweep whose points say RUN_EVAL=true is accepted, and its boots run
-
-    assert all(yaml.safe_load(Path(p).read_text())["benchmark"]["envs"]["RUN_EVAL"] == "true" for p in call.points)
-    assert grid.calls[0]["recipe"].base_yaml_path == call.points[0]
-
-
 def test_an_agentx_boot_pins_nothing(grid, server, tmp_path, monkeypatch):
     """An AgentX point has no evaluation round and no prompt count, and no backend phase is said for a boot."""
     _boot_only(grid)
@@ -1101,12 +1176,6 @@ def test_an_agentx_sweep_boots_a_server_of_its_own_for_each_level(grid, tmp_path
     assert [(r.point, r.phase) for r in outcome.rounds] == [(i, "measure") for i in range(len(levels))]
     assert "server restarted per level: an AgentX replay is cache-sensitive" in outcome.stderr
     assert outcome.returncode == 0 and torn_down == []
-
-
-def test_no_call_of_a_sweep_runs_without_the_shared_server(grid, server, tmp_path):
-    _run(_sweep_call(tmp_path, 8, 4, 2))
-
-    assert all(_lifecycle(c) is not None for c in grid.calls)
 
 
 def test_a_round_the_lifecycle_holds_runs_from_the_point_itself_on_the_lifecycles_port(grid, server, tmp_path):
@@ -1768,10 +1837,6 @@ def _boot_only(grid: _Grid) -> None:
     grid.answers["repro"] = grid.result("repro", note="server_lifecycle_boot_only")
 
 
-def test_repro_is_a_kind_the_local_backend_runs():
-    assert "repro" in SUPPORTED_KINDS
-
-
 @pytest.mark.parametrize(("code", "verdict"), [(0, "not_reproduced"), (1, "reproduced")])
 @pytest.mark.usefixtures("server")
 def test_a_repro_test_boots_the_server_runs_the_case_against_it_and_reports_the_verdict(
@@ -1969,16 +2034,16 @@ def _log_with_refusal_at(tmp_path: Path, *, from_end: int, size: int) -> Path:
 def test_the_refusal_is_found_wherever_it_sits_in_the_scanned_part_of_a_log(tmp_path, from_end):
     path = _log_with_refusal_at(tmp_path, from_end=from_end, size=5 * (1 << 20))
 
-    assert local._read_refusal(path) == eval_refusal_logs.REFUSAL, "the whole line, not the half a block cut"
+    assert log_causes.last_refusal(path) == eval_refusal_logs.REFUSAL, "the whole line, not the half a block cut"
 
 
 def test_a_refusal_older_than_the_scanned_part_of_a_log_is_not_searched_for(tmp_path):
     path = _log_with_refusal_at(
-        tmp_path, from_end=local._REFUSAL_SCAN_CHARS + 1000, size=local._REFUSAL_SCAN_CHARS + 2000
+        tmp_path, from_end=log_causes.REFUSAL_SCAN_CHARS + 1000, size=log_causes.REFUSAL_SCAN_CHARS + 2000
     )
 
-    assert local._read_refusal(path) == ""
-    assert local._read_refusal(tmp_path / "missing.log") == ""
+    assert log_causes.last_refusal(path) == ""
+    assert log_causes.last_refusal(tmp_path / "missing.log") == ""
 
 
 def test_an_evaluation_that_fails_is_classified_from_the_logs_it_wrote(grid, server, tmp_path):

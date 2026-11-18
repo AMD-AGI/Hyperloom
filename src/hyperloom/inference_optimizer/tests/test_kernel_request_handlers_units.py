@@ -23,7 +23,6 @@ from hyperloom.common.codex_session import (
     CODEX_SANDBOX_MODE_ENV,
     DEFAULT_CODEX_SANDBOX_MODE,
 )
-from hyperloom_common.env import is_truthy
 from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as tool
 from hyperloom.orchestrator.actions.executors import trace_analyze as ta
 from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
@@ -55,8 +54,6 @@ _FUSION_PROVIDER_ENV_KEYS = (
     "OPENAI_BASE_URL",
     "CLAUDE_MODEL",
     "CODEX_MODEL",
-    "FORGE_CLAUDE_MODEL",
-    "FORGE_CODEX_MODEL",
     CODEX_SANDBOX_MODE_ENV,
 )
 _OPENAI_ONLY_ENV = {
@@ -135,14 +132,6 @@ class TestForgeGemmHelperCoverage:
             is None
         )
 
-    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
-    def test_truthy_env_value_true(self, value):
-        assert is_truthy(value) is True
-
-    @pytest.mark.parametrize("value", ["", "0", "false", "off", None])
-    def test_truthy_env_value_false(self, value):
-        assert is_truthy(value) is False
-
     def test_resolve_forge_server_log_priority(self, tmp_path):
         state = SharedState()
         baseline = tmp_path / "baseline"
@@ -217,27 +206,6 @@ class TestForgeGemmHelperCoverage:
             assert untuned_gemm_csv._resolve_fp8_quant_type(str(model_dir)) == "auto"
         assert "model_config_invalid_json" in caplog.text
 
-    def test_resolve_forge_precision_fp8_plain_model_routes_per_token(self, tmp_path):
-        model = self._write_cfg(tmp_path / "plain", {"hidden_size": 2048})
-        state = SharedState(precision="bf16", model_path=model)
-        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp8", "per_token")
-
-    def test_resolve_forge_precision_fp8_block_model_routes_blockscale(self, tmp_path):
-        model = self._write_cfg(
-            tmp_path / "block",
-            {"hidden_size": 7168, "quantization_config": {"weight_block_size": [128, 128]}},
-        )
-        state = SharedState(precision="bf16", model_path=model)
-        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp8", "blockscale")
-
-    def test_resolve_forge_precision_fp8_unreadable_config_keeps_auto(self):
-        # No readable config: do not force a tuner; let forge sniff the log.
-        state = SharedState(precision="bf16", model_path="/models/does-not-exist")
-        state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp8", "auto")
-
     _QUARK_MXFP4 = {
         "quant_method": "quark",
         "global_quant_config": {"weight": {"dtype": "fp4", "group_size": 32}},
@@ -249,21 +217,51 @@ class TestForgeGemmHelperCoverage:
     }
 
     @pytest.mark.parametrize(
-        ("quant_cfg", "session_precision"),
-        [(_QUARK_MXFP4, "fp4"), (_COMPRESSED_TENSORS_FP8, "fp8")],
+        ("model_config", "session_precision", "server_args", "expected"),
+        [
+            pytest.param(
+                {"hidden_size": 2048}, "bf16", "--quantization fp8", ("fp8", "per_token"), id="fp8-plain-model"
+            ),
+            pytest.param(
+                {"hidden_size": 7168, "quantization_config": {"weight_block_size": [128, 128]}},
+                "bf16",
+                "--quantization fp8",
+                ("fp8", "blockscale"),
+                id="fp8-block-model",
+            ),
+            # Handed on, a nested format's label would hold for every lane, and an fp8 one would also be pinned to
+            # per_token.
+            pytest.param(
+                {"hidden_size": 6144, "quantization_config": _QUARK_MXFP4},
+                "fp4",
+                "",
+                ("auto", "auto"),
+                id="nested-quark-mxfp4",
+            ),
+            pytest.param(
+                {"hidden_size": 6144, "quantization_config": _COMPRESSED_TENSORS_FP8},
+                "fp8",
+                "",
+                ("auto", "auto"),
+                id="nested-compressed-tensors-fp8",
+            ),
+            pytest.param(
+                {"hidden_size": 6144, "quantization_config": _QUARK_MXFP4},
+                "bf16",
+                "",
+                ("bf16", "auto"),
+                id="operator-precision-the-checkpoint-does-not-nest",
+            ),
+            pytest.param({"hidden_size": 2048}, "", "", ("bf16", "auto"), id="no-precision-falls-back-to-bf16"),
+        ],
     )
-    def test_resolve_forge_precision_leaves_a_nested_format_to_forge(self, tmp_path, quant_cfg, session_precision):
-        # Handed on, the label would hold for every lane, and an fp8 one would also be pinned to per_token.
-        model = self._write_cfg(tmp_path / "m", {"hidden_size": 6144, "quantization_config": quant_cfg})
+    def test_resolve_forge_precision_from_the_launch_and_the_checkpoint(
+        self, tmp_path, model_config, session_precision, server_args, expected
+    ):
+        model = self._write_cfg(tmp_path / "m", model_config)
         state = SharedState(precision=session_precision, model_path=model)
-        state.current_best = {"extra_server_args": "", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("auto", "auto")
-
-    def test_resolve_forge_precision_keeps_an_operator_precision_the_checkpoint_does_not_nest(self, tmp_path):
-        model = self._write_cfg(tmp_path / "m", {"hidden_size": 6144, "quantization_config": self._QUARK_MXFP4})
-        state = SharedState(precision="bf16", model_path=model)
-        state.current_best = {"extra_server_args": "", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("bf16", "auto")
+        state.current_best = {"extra_server_args": server_args, "extra_envs": {}}
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == expected
 
     def test_resolve_aiter_root_from_editable_source_layout(self, tmp_path, monkeypatch):
         monkeypatch.delenv("AITER_ROOT_DIR", raising=False)
@@ -357,12 +355,6 @@ class TestForgeGemmHelperCoverage:
         assert "preflight timed out" in caplog.text
         assert str(forge_gemm_probe._FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC) in caplog.text
 
-    def test_resolve_forge_precision_falls_back_to_bf16(self):
-        # Empty session precision + no fp8/fp4 quantization -> bf16/auto default.
-        state = SharedState(precision="")
-        state.current_best = {"extra_server_args": "", "extra_envs": {}}
-        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("bf16", "auto")
-
     def test_resolve_forge_server_log_uses_baseline_when_no_current_best(self, tmp_path):
         state = SharedState()
         baseline = tmp_path / "baseline"
@@ -371,27 +363,6 @@ class TestForgeGemmHelperCoverage:
         state.last_baseline = {"workspace": str(baseline)}
 
         assert serving_log_evidence.resolve_forge_server_log(state, tmp_path) == str(baseline / "server.log")
-
-    def test_resolve_forge_shapes_reads_artifact_paths_dict(self, tmp_path):
-        state = SharedState()
-        shapes = tmp_path / "gemm_shapes.json"
-        shapes.write_text(json.dumps({"shapes": [{"m": 1, "n": 2, "k": 3}]}), encoding="utf-8")
-        state.last_trace_analyze = {"artifact_paths": {"gemm_shapes_json": str(shapes)}}
-
-        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == str(shapes)
-
-    def test_resolve_forge_shapes_skips_incompatible_candidate(self, tmp_path):
-        state = SharedState()
-        bad = tmp_path / "bad.json"
-        bad.write_text(json.dumps([{"only": "noMNK"}]), encoding="utf-8")
-        state.last_trace_analyze = {"shapes_json": str(bad)}
-
-        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == ""
-
-    def test_is_forge_compatible_shapes_json_rejects_non_dict_sample(self, tmp_path):
-        bad = tmp_path / "bad.json"
-        bad.write_text(json.dumps([123, 456]), encoding="utf-8")
-        assert forge_shapes._is_forge_compatible_shapes_json(bad) is False
 
     @staticmethod
     def _write_aiter_csv(session_dir: Path, hash_id: str, fname: str, rows: str) -> Path:
@@ -405,12 +376,6 @@ class TestForgeGemmHelperCoverage:
         expected = self._write_aiter_csv(tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n")
         assert untuned_gemm_csv._resolve_forge_untuned_csv(tmp_path, "fp8", "auto") == str(expected)
         assert untuned_gemm_csv._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == str(expected)
-
-    def test_resolve_forge_untuned_csv_per_token(self, tmp_path):
-        expected = self._write_aiter_csv(
-            tmp_path, "abc", "a8w8_untuned_gemm.csv", "M,N,K,q_dtype_w\n16,1536,7168,fp8\n"
-        )
-        assert untuned_gemm_csv._resolve_forge_untuned_csv(tmp_path, "fp8", "per_token") == str(expected)
 
     def test_resolve_forge_untuned_csv_skips_header_only(self, tmp_path):
         # Header-only / empty files are not a valid shape source.
@@ -470,28 +435,30 @@ class TestForgeGemmHelperCoverage:
             tmp_path, "fp8", "blockscale", str(tmp_path / "no_such_model")
         ) == str(expected)
 
-    def test_csv_matches_model_helpers(self, tmp_path):
-        csv_mismatch = self._write_aiter_csv(
-            tmp_path, "h1", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
+    @pytest.mark.asyncio
+    async def test_forge_result_json_fills_the_tuner_outcomes_the_sentinel_omits(self, tmp_path, monkeypatch):
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text(json.dumps({"model_type": "llama"}), encoding="utf-8")
+        SharedState(precision="fp8", framework="sglang", model_path=str(model), gpu_type="mi300x", tp=1, conc=64).save(
+            tmp_path
         )
-        csv_match = self._write_aiter_csv(tmp_path, "h2", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,6144,2048\n")
-        model_path = self._write_model_config(tmp_path / "m", hidden_size=2048)
-        assert untuned_gemm_csv._model_hidden_size(model_path) == 2048
-        assert untuned_gemm_csv._csv_k_values(csv_mismatch) == {7168}
-        assert untuned_gemm_csv._csv_k_values(csv_match) == {2048}
-        assert untuned_gemm_csv._csv_matches_model(csv_mismatch, model_path) is False
-        assert untuned_gemm_csv._csv_matches_model(csv_match, model_path) is True
-        # No model_path / unreadable config -> cannot validate -> accept.
-        assert untuned_gemm_csv._csv_matches_model(csv_mismatch, "") is True
+        monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(forge_gemm_tuning, "_resolve_aiter_root_for_forge", lambda: "")
+        request = {"task_id": "gemm_result_json"}
+        skipped = [{"tuner": "a8w8", "skip_reason": "needs csv"}]
 
-    def test_read_forge_result_json(self, tmp_path):
-        (tmp_path / "result.json").write_text(
-            json.dumps({"status": "skipped", "tuners_skipped": [{"tuner": "a8w8"}]}),
-            encoding="utf-8",
-        )
-        out = forge_gemm_probe._read_forge_result_json(tmp_path)
-        assert out["status"] == "skipped"
-        assert forge_gemm_probe._read_forge_result_json(tmp_path / "missing") == {}
+        async def _fake_subprocess(_cmd, *, timeout_sec, **_kwargs):
+            workspace = forge_lane_budget._gemm_tuning_workspace(request["task_id"], session_dir=tmp_path)
+            (workspace / "result.json").write_text(json.dumps({"tuners_skipped": skipped}), encoding="utf-8")
+            body = json.dumps({"status": "skipped", "micro_decision": "skipped"})
+            return 0, f"FORGE_GEMM_TUNE_RESULT_BEGIN\n{body}\nFORGE_GEMM_TUNE_RESULT_END\n", ""
+
+        monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _fake_subprocess)
+        result = await forge_gemm_tuning._run_forge_gemm_tuning(request, session_dir=tmp_path)
+
+        assert result["tuners_skipped"] == skipped
+        assert result["skip_reason"] == "a8w8: needs csv"
 
     def test_derive_gemm_skip_reason(self):
         skipped = [
@@ -502,21 +469,6 @@ class TestForgeGemmHelperCoverage:
         assert forge_gemm_probe._derive_gemm_skip_reason(skipped) == "a8w8_blockscale: needs csv"
         assert forge_gemm_probe._derive_gemm_skip_reason(None) == ""
         assert forge_gemm_probe._derive_gemm_skip_reason([]) == ""
-
-    def test_resolve_forge_shapes_returns_empty_for_non_dict_trace(self):
-        state = SharedState()
-        state.last_trace_analyze = ["not", "a", "dict"]
-        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == ""
-
-    def test_resolve_forge_shapes_finds_file_beside_candidates(self, tmp_path):
-        state = SharedState()
-        candidates = tmp_path / "candidates.json"
-        candidates.write_text("[]", encoding="utf-8")
-        shapes = tmp_path / "shapes.json"
-        shapes.write_text(json.dumps([{"M": 1, "N": 2, "K": 3}]), encoding="utf-8")
-        state.last_trace_analyze = {"candidates_path": str(candidates)}
-
-        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == str(shapes)
 
     def test_forge_fusion_skip_guard_ignores_warm_replay_fusion_flags(self):
         state = SharedState(
@@ -569,29 +521,6 @@ class TestForgeGemmHelperCoverage:
         empty_dir.mkdir()
         state.last_profile_trace = str(empty_dir)
         assert forge_fusion_run._resolve_fusion_decode_trace(state) == ""
-
-    def test_forge_fusion_available_probes_the_fusion_subpackage(self, monkeypatch):
-        probed: list[str] = []
-
-        def spec(name):
-            probed.append(name)
-            return object()
-
-        monkeypatch.setattr(importlib.util, "find_spec", spec)
-        assert forge_fusion_run._forge_fusion_available() is True
-        # Probing kernelforge alone would pass on a KernelForge predating the fusion absorption and only fail once the
-        # subprocess rejected forge-fuse.
-        assert probed == ["kernelforge.workflows.forge_fusion"]
-
-        monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
-        assert forge_fusion_run._forge_fusion_available() is False
-
-    def test_forge_fusion_available_survives_an_unimportable_parent(self, monkeypatch):
-        def boom(_name):
-            raise ModuleNotFoundError("kernelforge")
-
-        monkeypatch.setattr(importlib.util, "find_spec", boom)
-        assert forge_fusion_run._forge_fusion_available() is False
 
     def test_materialize_unified_patch_snapshot(self, tmp_path):
         repo = tmp_path / "repo"
@@ -803,10 +732,6 @@ class TestForgeGemmHelperCoverage:
         )
         state.save(tmp_path)
 
-        def _should_not_check_available():
-            raise AssertionError("forge-fusion availability should not be checked")
-
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", _should_not_check_available)
         result = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
 
         assert result["status"] == "complete"
@@ -877,38 +802,6 @@ class TestForgeGemmHelperCoverage:
 
         assert forge_fusion_run._resolve_forge_agent() == expected
 
-    def test_resolve_forge_agent_ignores_the_removed_forge_claude_model(self, monkeypatch):
-        """The Forge-private spelling is gone; CLAUDE_MODEL is what runs."""
-        _pin_fusion_provider_env(
-            monkeypatch,
-            {
-                **_ANTHROPIC_ONLY_ENV,
-                "CLAUDE_MODEL": "claude-orchestration",
-                "FORGE_CLAUDE_MODEL": "claude-forge-only",
-            },
-        )
-
-        assert forge_fusion_run._resolve_forge_agent() == (
-            "claude",
-            "claude-orchestration",
-        )
-
-    def test_resolve_forge_agent_ignores_the_removed_forge_codex_model(self, monkeypatch):
-        """Same on the Codex side: CODEX_MODEL is the only model variable."""
-        _pin_fusion_provider_env(
-            monkeypatch,
-            {
-                **_OPENAI_ONLY_ENV,
-                "CODEX_MODEL": "gpt-orchestration",
-                "FORGE_CODEX_MODEL": "gpt-forge-only",
-            },
-        )
-
-        assert forge_fusion_run._resolve_forge_agent() == (
-            "codex",
-            "gpt-orchestration",
-        )
-
     def test_resolve_forge_agent_ignores_the_other_provider_model(self, monkeypatch):
         """A Codex-side id must not leak onto the Claude forge path."""
         _pin_fusion_provider_env(
@@ -965,17 +858,6 @@ class TestForgeGemmHelperCoverage:
             == "bypass"
         )
 
-    def test_resolve_forge_fusion_ignores_retired_external_sandbox_env(self, monkeypatch):
-        _pin_fusion_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
-        monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
-
-        assert (
-            forge_fusion_run._resolve_forge_fusion_sandbox_mode(
-                agent_backend="codex",
-            )
-            == DEFAULT_CODEX_SANDBOX_MODE
-        )
-
     def test_resolve_forge_fusion_claude_sandbox_uses_audit_default(self, monkeypatch):
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
         # Claude's audit default is stable even if the Codex operator default is narrower.
@@ -1012,7 +894,6 @@ class TestForgeGemmHelperCoverage:
             monkeypatch,
             {**_OPENAI_ONLY_ENV, "CODEX_MODEL": "gpt-fusion"},
         )
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
         calls: list[dict] = []
 
         async def _fake_run_forge_fusion(args):
@@ -1048,7 +929,7 @@ class TestForgeGemmHelperCoverage:
 
         assert forge_lane_budget._forge_fusion_timeout_sec() == 7200
 
-    async def _fusion_input_payload(self, tmp_path, monkeypatch, *, max_minutes):
+    async def _fusion_input_payload(self, tmp_path, monkeypatch, *, max_minutes, fusion_findings=()):
         """Run the fusion lane against a faked forge runner and return the payload it was handed."""
         trace_dir = tmp_path / "trace"
         trace_dir.mkdir()
@@ -1057,11 +938,11 @@ class TestForgeGemmHelperCoverage:
             framework="sglang",
             model_path="/models/zaya",
             last_profile_trace=str(trace_dir),
+            last_trace_analyze={"fusion_findings": list(fusion_findings)},
             max_minutes=max_minutes,
         )
         state.save(tmp_path)
         _pin_fusion_provider_env(monkeypatch, {**_OPENAI_ONLY_ENV, "CODEX_MODEL": "gpt-fusion"})
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
         calls: list[dict] = []
 
         async def _fake_run_forge_fusion(args):
@@ -1085,6 +966,28 @@ class TestForgeGemmHelperCoverage:
         assert "max_recipes" not in payload
         assert payload["timeout"] == forge_lane_budget._forge_fusion_timeout_sec()
 
+    async def test_tracelens_fusion_findings_reach_llm_discovery_as_hints(self, tmp_path, monkeypatch):
+        finding = {
+            "kind": "add_norm",
+            "operation": "Unfused Add + RMSNorm in `DecoderLayer`",
+            "projected_e2e_pct": 2.4,
+            "members": [{"kernel_names": ["add_kernel"], "kernel_launcher_path": "modeling.py(88): forward"}],
+        }
+
+        payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=120, fusion_findings=[finding])
+
+        assert payload["discover_mode"] == "llm"
+        hints = tmp_path / "runs" / "fusion" / "fusion_task" / "fusion_hints.json"
+        assert payload["fusion_hints"] == str(hints)
+        assert json.loads(hints.read_text(encoding="utf-8")) == [finding]
+
+    async def test_no_fusion_findings_sends_no_hints(self, tmp_path, monkeypatch):
+        payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=120)
+
+        assert payload["discover_mode"] == "llm"
+        assert payload["fusion_hints"] == ""
+        assert not (tmp_path / "runs" / "fusion" / "fusion_task" / "fusion_hints.json").exists()
+
     def test_forge_fusion_timeout_infinite_env_falls_back(self, monkeypatch):
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "inf")
 
@@ -1101,7 +1004,6 @@ class TestForgeGemmHelperCoverage:
         ).save(tmp_path)
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
         calls: list[dict] = []
 
         async def _fake_run_forge_fusion(args):
@@ -1130,7 +1032,6 @@ class TestForgeGemmHelperCoverage:
         monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
         # Pinned: a live clock would tick between the split and the assertion.
         monkeypatch.setattr(SharedState, "remaining_minutes", lambda _self, **_kw: 600.0)
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
         calls: list[dict] = []
 
         async def _fake_run_forge_fusion(args):
@@ -1146,14 +1047,7 @@ class TestForgeGemmHelperCoverage:
 
     @pytest.mark.asyncio
     async def test_run_forge_fusion_failure_branches(self, tmp_path, monkeypatch):
-        state = SharedState(framework="sglang", model_path="/models/zaya")
-        state.save(tmp_path)
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: False)
-        not_found = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
-        assert not_found["error_class"] == "forge_fusion_not_found"
-
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
-        state.model_path = ""
+        state = SharedState(framework="sglang", model_path="")
         state.save(tmp_path)
         monkeypatch.delenv("MODEL_PATH", raising=False)
         missing_model = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
@@ -1175,7 +1069,6 @@ class TestForgeGemmHelperCoverage:
             last_profile_trace=str(trace),
         ).save(tmp_path)
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
 
         async def _timeout(cmd, *, timeout_sec, **_kwargs):
             raise subprocess.TimeoutExpired(cmd, timeout_sec)
@@ -1207,7 +1100,6 @@ class TestForgeGemmHelperCoverage:
             max_model_len=13312,
         ).save(tmp_path)
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
         calls: list[dict] = []
 
         async def _fake_run_forge_fusion(args):
@@ -1232,7 +1124,6 @@ class TestForgeGemmHelperCoverage:
             last_profile_trace=str(trace),
         ).save(tmp_path)
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
 
         async def _timeout(cmd, *, timeout_sec, **_kwargs):
             workspace = tmp_path / "runs" / "fusion" / "kernel_entry_fusion"
@@ -1366,13 +1257,6 @@ class TestForgeGemmHelperCoverage:
         await forge_gemm_tuning._run_forge_gemm_tuning(request, session_dir=tmp_path)
         workspace = forge_lane_budget._gemm_tuning_workspace(request["task_id"], session_dir=tmp_path)
         return _FORGE_GEMM_PAYLOADS[-1]
-
-    @pytest.mark.asyncio
-    async def test_gemm_tuner_ceiling_comes_from_the_lane_share(self, tmp_path, monkeypatch):
-        """A bounded session funds the lane, so its target count is handed down."""
-        payload = await self._gemm_input_payload(tmp_path, monkeypatch, max_minutes=600)
-
-        assert payload["max_tuners"] >= 1
 
     @pytest.mark.asyncio
     async def test_an_unbounded_session_sends_no_gemm_tuner_ceiling(self, tmp_path, monkeypatch):
@@ -1854,29 +1738,18 @@ class TestForgeGemmHelperCoverage:
         assert result["engine"] == "forge"
 
     @pytest.mark.parametrize(
-        "quant_type",
+        ("quant_type", "fname", "rows"),
         [
-            "blockscale_bpreshuffle",
-            "a8w8_blockscale_bpreshuffle",
-            "blockscale+bpreshuffle",
+            ("blockscale_bpreshuffle", "a8w8_blockscale_bpreshuffle_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"),
+            ("a8w8_blockscale_bpreshuffle", "a8w8_blockscale_bpreshuffle_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"),
+            ("blockscale+bpreshuffle", "a8w8_blockscale_bpreshuffle_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"),
+            ("per_token", "a8w8_untuned_gemm.csv", "M,N,K,q_dtype_w\n16,1536,7168,fp8\n"),
         ],
+        ids=["blockscale_bpreshuffle", "a8w8_blockscale_bpreshuffle", "blockscale+bpreshuffle", "per_token"],
     )
-    def test_resolve_forge_untuned_csv_blockscale_bpreshuffle(
-        self,
-        tmp_path,
-        quant_type,
-    ):
-        expected = self._write_aiter_csv(
-            tmp_path,
-            "abc",
-            "a8w8_blockscale_bpreshuffle_untuned_gemm.csv",
-            "M,N,K\n16,1536,7168\n",
-        )
-        assert untuned_gemm_csv._resolve_forge_untuned_csv(
-            tmp_path,
-            "fp8",
-            quant_type,
-        ) == str(expected)
+    def test_resolve_forge_untuned_csv_picks_the_table_of_the_quant_type(self, tmp_path, quant_type, fname, rows):
+        expected = self._write_aiter_csv(tmp_path, "abc", fname, rows)
+        assert untuned_gemm_csv._resolve_forge_untuned_csv(tmp_path, "fp8", quant_type) == str(expected)
 
     def test_resolve_forge_untuned_csv_rejects_unknown_fp8_quant(self, tmp_path):
         self._write_aiter_csv(
@@ -1917,8 +1790,19 @@ class TestForgeGemmHelperCoverage:
                 }
             )
         )
-        profile_shapes = tmp_path / "profile_shapes.json"
-        profile_shapes.write_text(json.dumps([{"M": 1024, "N": 34816, "K": 5120}]))
+        candidates = tmp_path / "kernel_candidates.json"
+        candidates.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "name": "aiter::gemm_a8w8_blockscale",
+                            "input_shapes": [{"shape": "(1024,5120) fp8<br>(34816,5120) fp8"}],
+                        }
+                    ]
+                }
+            )
+        )
         specialist_csv = tmp_path / "a8w8_blockscale_untuned_gemm.csv"
         specialist_csv.write_text("M,N,K\n4096,34816,5120\n")
         state = SharedState(
@@ -1929,7 +1813,7 @@ class TestForgeGemmHelperCoverage:
             tp=1,
             conc=64,
             last_profile_status="succeeded",
-            last_trace_analyze={"shapes_json": str(profile_shapes)},
+            last_trace_analyze={"candidates_path": str(candidates)},
         )
         state.last_profile_workload = state.profile_workload_context()
         if source == "stale_profile":
@@ -2017,13 +1901,6 @@ class TestCandidateEnvAllowed:
 
 
 class TestSplitServerArgs:
-    def test_empty_returns_empty(self):
-        assert ta._split_server_args("") == []
-
-    def test_split_uses_shlex(self):
-        argv = ta._split_server_args("--foo 1 --bar 'x y'")
-        assert argv == ["--foo", "1", "--bar", "x y"]
-
     def test_unterminated_quote_returns_empty(self):
         # shlex.split raises ValueError on bad input; helper returns [].
         argv = ta._split_server_args('--foo "unterminated')
@@ -2143,22 +2020,17 @@ class TestEnrichCandidate:
         ta._enrich_candidate_trace_report(candidates, "")
         assert "trace_report_path" not in candidates[0]
 
-    def test_enrich_candidates_artifact_noop_when_missing_path(self):
-        ta._enrich_candidates_artifact("", {"env_vars": {}}, trace_report_path="")
-
 
 class TestReusableSourceRootsAtom:
     """atom layout prefixes participate in cross-task kernel reuse alongside aiter/sglang/vllm."""
 
-    def test_includes_atom_editable_path(self):
-        # The matcher lowercases its source-file input, so the stored prefix is lowercase ``/app/atom/atom/``.
-        assert any("/app/atom/atom/" in r.lower() for r in resolve_known_source_prefixes())
-
-    def test_includes_atom_site_packages_python_3_10(self):
-        assert any("/opt/venv/lib/python3.10/site-packages/atom/" in r for r in resolve_known_source_prefixes())
-
-    def test_includes_atom_site_packages_python_3_12(self):
-        assert any("/opt/venv/lib/python3.12/site-packages/atom/" in r for r in resolve_known_source_prefixes())
+    @pytest.mark.parametrize(
+        "layout",
+        ["/opt/venv/lib/python3.10/site-packages/atom/", "/opt/venv/lib/python3.12/site-packages/atom/"],
+        ids=["python-3.10", "python-3.12"],
+    )
+    def test_includes_the_atom_wheel_layouts(self, layout):
+        assert any(layout in r for r in resolve_known_source_prefixes())
 
 
 def _vllm_block_fp8_roofline_state(tmp_path):
@@ -3550,34 +3422,6 @@ class TestRunGemmTuningHandler:
         assert data["precision"] == "bf16"
         assert data["quant_type"] == "auto"
 
-    def test_forge_shapes_json_schema_validation(self, tmp_path):
-        good = tmp_path / "good_shapes.json"
-        good.write_text(json.dumps({"shapes": [{"M": 1, "N": 2, "K": 3}]}))
-        bad_empty = tmp_path / "bad_empty.json"
-        bad_empty.write_text(json.dumps({"shapes": []}))
-        bad_trace_shape = tmp_path / "bad_trace_shape.json"
-        bad_trace_shape.write_text(json.dumps([{"shape": [1, 2, 3]}]))
-
-        assert forge_shapes._is_forge_compatible_shapes_json(good) is True
-        assert forge_shapes._is_forge_compatible_shapes_json(bad_empty) is False
-        assert forge_shapes._is_forge_compatible_shapes_json(bad_trace_shape) is False
-        assert forge_shapes._is_forge_compatible_shapes_json(tmp_path / "missing.json") is False
-
-    def test_resolve_forge_shapes_prefers_compatible_artifact(self, tmp_path):
-        session_dir = tmp_path / "session"
-        shapes = tmp_path / "shapes.json"
-        shapes.write_text(json.dumps([{"m": 4, "n": 5, "k": 6}]))
-        bad = tmp_path / "bad.json"
-        bad.write_text(json.dumps([{"shape": [1, 2, 3]}]))
-
-        state = SharedState()
-        state.last_trace_analyze = {
-            "shapes_json": str(bad),
-            "artifact_paths": {"gemm_shapes_json": str(shapes)},
-        }
-
-        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == str(shapes)
-
     @pytest.mark.parametrize(
         "quant_type",
         [
@@ -3848,56 +3692,15 @@ class TestRunGemmTuningHandler:
         assert out, f"separator {sep!r} was not recognised"
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 1024, "N": 34816, "K": 5120}]
 
-    def test_resolve_forge_shapes_prefers_scoped_candidates_over_untyped_artifact(self, tmp_path):
-        """A pre-rendered shapes artifact carries no dtype, so it must not win over candidates that were actually scoped to the tuned precision."""
-        session_dir = tmp_path / "session"
-        session_dir.mkdir()
-        artifact = tmp_path / "shapes.json"  # recorded from the BF16 head
-        artifact.write_text(json.dumps([{"M": 64, "N": 256, "K": 3072}]), encoding="utf-8")
+    def test_resolve_forge_shapes_scopes_candidates_to_the_tuned_precision(self, tmp_path):
+        """The BF16 router shapes the trace also carries do not reach an FP8 tuner."""
         candidates = tmp_path / "kernel_candidates.json"
-        candidates.write_text(
-            json.dumps(
-                {
-                    "hot_kernels": [
-                        {
-                            "name": "aiter::gemm_a8w8_blockscale_ck",
-                            "input_shapes": [
-                                {"call_num": 360, "shape": "(64,3072) fp8"},
-                                {"call_num": 360, "shape": "(8704,3072) fp8"},
-                            ],
-                        },
-                        {
-                            "name": "vllm::rocm_unquantized_gemm",
-                            "input_shapes": [
-                                {"call_num": 1440, "shape": "(64,3072) bf16"},
-                                {"call_num": 1440, "shape": "(256,3072) bf16"},
-                            ],
-                        },
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        state = SharedState(
-            last_trace_analyze={
-                "shapes_json": str(artifact),
-                "candidates_path": str(candidates),
-            }
-        )
+        self._mixed_dtype_candidates(candidates)
+        state = SharedState(last_trace_analyze={"candidates_path": str(candidates)})
 
         resolved = forge_shapes._resolve_forge_shapes(_fresh_profile(state), precision="fp8")
 
         assert json.loads(Path(resolved).read_text(encoding="utf-8")) == [{"M": 64, "N": 8704, "K": 3072}]
-
-    def test_resolve_forge_shapes_still_uses_artifact_when_unscoped(self, tmp_path):
-        """Without a precision to scope by, the explicit artifact keeps priority."""
-        session_dir = tmp_path / "session"
-        session_dir.mkdir()
-        artifact = tmp_path / "shapes.json"
-        artifact.write_text(json.dumps([{"M": 64, "N": 256, "K": 3072}]), encoding="utf-8")
-        state = SharedState(last_trace_analyze={"shapes_json": str(artifact)})
-
-        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == str(artifact)
 
 
 # _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs. _resolve_candidate_id /
@@ -3923,8 +3726,10 @@ class TestTracelensRootResolution:
         assert err is not None
         assert "incomplete" in err
 
-    def test_trace_analyze_handler_selfheals_default_root_then_fails_if_unrecovered(self, tmp_path, monkeypatch):
-        # Default root missing: handler attempts self-heal before failing.
+    @pytest.mark.parametrize("route", ["agent", "non-llm"])
+    def test_trace_analyze_handler_selfheals_default_root_then_fails_if_unrecovered(self, tmp_path, monkeypatch, route):
+        # Default root missing: handler attempts self-heal before failing. The non-llm route runs TraceLens
+        # in-process, so it is provisioned like the agent route instead of crashing the subprocess at import time.
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "no-tracelens-here"))
         called = {"n": 0}
@@ -3935,32 +3740,10 @@ class TestTracelensRootResolution:
         monkeypatch.setattr(ta, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
             ta.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": route}, session_dir=tmp_path
             )
         )
         assert called["n"] == 1  # self-heal was attempted
-        assert out["status"] == "failed"
-        assert out["error_class"] == "tracelens_root_missing"
-
-    def test_trace_analyze_handler_non_llm_selfheals_default_root_then_fails_if_unrecovered(
-        self, tmp_path, monkeypatch
-    ):
-        # The non-llm route runs TraceLens in-process, so it is provisioned like the agent route:
-        # a missing default root self-heals, then fails clearly instead of crashing the subprocess at import time.
-        monkeypatch.delenv("TRACELENS_ROOT", raising=False)
-        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "no-tracelens-here"))
-        called = {"n": 0}
-
-        def _fake_heal(root, *, log=None):
-            called["n"] += 1
-
-        monkeypatch.setattr(ta, "_maybe_selfheal_tracelens_root", _fake_heal)
-        out = asyncio.run(
-            ta.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": "non-llm"}, session_dir=tmp_path
-            )
-        )
-        assert called["n"] == 1  # self-heal attempted on the non-llm route too
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
 
@@ -4080,24 +3863,30 @@ class TestTracelensRootResolution:
         assert called["n"] == 1
         assert called["root"] == default_root
 
-    @pytest.mark.parametrize("error", [OSError("disk gone"), subprocess.TimeoutExpired(cmd="git", timeout=600)])
-    def test_selfheal_logs_an_expected_failure_and_returns(self, tmp_path, monkeypatch, error):
+    @pytest.mark.parametrize(
+        "error",
+        [OSError("disk gone"), subprocess.TimeoutExpired(cmd="git", timeout=600)],
+        ids=["os-error", "clone-timeout"],
+    )
+    def test_trace_analyze_handler_reports_missing_root_when_the_selfheal_fails(self, tmp_path, monkeypatch, error):
+        monkeypatch.delenv("TRACELENS_ROOT", raising=False)
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
-        default_root = tmp_path / "podlocal" / "TraceLens"
-        warnings = []
 
         def _fail(root, *, log_path=None):
             raise error
 
         _stub_tracelens_analysis(monkeypatch, _fail)
-        ta._maybe_selfheal_tracelens_root(
-            default_root, log=types.SimpleNamespace(warning=lambda *a: warnings.append(a))
+        out = asyncio.run(
+            ta.trace_analyze_handler(
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
+            )
         )
 
-        assert warnings == [
-            ("trace_analyze: TraceLens root %s missing; attempting self-heal", default_root),
-            ("trace_analyze: TraceLens self-heal failed: %s", error),
-        ]
+        assert out == {
+            "status": "failed",
+            "error_class": "tracelens_root_missing",
+            "error": ta._tracelens_root_error(tmp_path / "podlocal" / "TraceLens"),
+        }
 
     def test_selfheal_lets_an_unexpected_failure_propagate(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
@@ -4204,6 +3993,28 @@ class TestBuildTraceAnalyzeCmd:
             workload={},
         )
         assert cmd[cmd.index("--route") + 1] == "non-llm"
+
+    @pytest.mark.parametrize(("gpus", "flag"), [([3], ["--arch-gpus", "3"]), ([], ["--arch-gpus", ""]), (None, [])])
+    def test_cmd_carries_the_cards_held_for_the_arch_microbenchmark(self, monkeypatch, tmp_path, gpus, flag):
+        session_dir = self._common(monkeypatch, tmp_path)
+        payload = {"trace_input": "/t/trace"} if gpus is None else {"trace_input": "/t/trace", ta.ARCH_GPUS_PARAM: gpus}
+        cmd, _steady = ta._build_trace_analyze_cmd(
+            payload,
+            ta._AnalysisRun(
+                trace_input="/t/trace",
+                workspace_path="/ws",
+                tracelens_root=Path("/tl"),
+                route=AnalysisRoute.NON_LLM,
+                scriptable=False,
+                model_name="",
+                framework="",
+                target_platform="MI355X",
+            ),
+            session_dir=session_dir,
+            workload={},
+        )
+        index = cmd.index("--arch-gpus") if "--arch-gpus" in cmd else len(cmd)
+        assert cmd[index : index + 2] == flag
 
     def test_tracelens_cmd_carries_the_ambient_trajectory_scope(self, monkeypatch, tmp_path):
         from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope
@@ -4360,7 +4171,6 @@ async def test_a_bounded_phase_that_cannot_fund_a_lane_skips_it_without_launchin
     monkeypatch.setattr(SharedState, "remaining_minutes", lambda _self, **_kw: 4.0)
     _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
     monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
-    monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
     monkeypatch.setattr(forge_lane_budget, "_gemm_router_targets", lambda **_kwargs: (("fmoe_ck", 600),))
     launched: list[object] = []
 

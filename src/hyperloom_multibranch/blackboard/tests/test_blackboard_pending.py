@@ -14,6 +14,7 @@ from hyperloom.contracts.measurement import RoundValue
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role
 from hyperloom_multibranch.contracts.blackboard.peers import Purpose, TestRequest, TestResult
 from hyperloom_multibranch.contracts.blackboard.records import (
+    JudgementWrite,
     BaselineRecord,
     LineageEvent,
     PendingCandidate,
@@ -83,7 +84,7 @@ async def test_a_candidate_below_the_bar_with_its_confirm_withdrawn_or_off_the_h
     on_the_head = await _pending(session)
     await toolbox.write_request(request("r0", intent("s1", "c0", "attention", "fused rope")))
     await toolbox.write_result(_measured("r0", 1040.0))
-    await session(Role.GATE).write_judgement("r0", judgement(4.0, ("r0",)), Conclusion.COMMITTED, "c1")
+    await session(Role.GATE).write_judgement(JudgementWrite("r0", judgement(4.0, ("r0",)), Conclusion.COMMITTED, "c1"))
 
     assert [candidate.request_id for candidate in on_the_head] == ["r3"]
     assert await _pending(session) == ()

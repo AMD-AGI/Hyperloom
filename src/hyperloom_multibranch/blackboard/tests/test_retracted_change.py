@@ -14,6 +14,7 @@ import pytest
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role
 from hyperloom_multibranch.contracts.blackboard.peers import TestRequest, Verdict
 from hyperloom_multibranch.contracts.blackboard.records import (
+    JudgementWrite,
     BaselineRecord,
     BlackboardSnapshot,
     LineageEvent,
@@ -49,7 +50,7 @@ async def _judged(open_as: Open, request_id: str, gain: float, value: float, con
     await open_as(Role.TOOLBOX).write_result(result(request_id))
     verdict = Verdict.IMPROVED if gain > 0 else Verdict.REGRESSED
     decided = judgement(gain, (request_id,), recorded={METRIC: value}, verdict=verdict)
-    await writer.write_judgement(request_id, decided, conclusion, **made)
+    await writer.write_judgement(JudgementWrite(request_id, decided, conclusion, **made))
 
 
 @pytest.fixture(params=[True, False], ids=["retraction", "ordinary-commit"])

@@ -25,6 +25,11 @@ from hyperloom.common.outside_facts import (
     spaced,
 )
 
+#: Where an exception names itself on its own line: not inside a word, after a dot, or in parentheses, which is how a
+#: logger quotes an error it caught and carried on from (``init failed (ImportError: ...)``).
+EXCEPTION_NAME_START = r"(?<![\w.(])"
+_EXCEPTION_START = EXCEPTION_NAME_START + r"(?:[A-Za-z_]\w*\.)*"
+
 
 # --- Failure kinds ---------------------------------------------------------
 
@@ -56,6 +61,13 @@ ACCURACY_BELOW_FLOOR = "accuracy_below_floor"
 EVAL_GENERATION_PATHOLOGY = "eval_generation_pathology"
 EVAL_RUNTIME_FAILURE = "eval_runtime_failure"
 UNKNOWN = "unknown"
+
+#: A vLLM start-time capacity error: the card holds less than the launch asked for (Mamba cache blocks, KV cache memory).
+ENGINE_CAPACITY_LINE = re.compile(
+    r"max_num_seqs \(\d+\) exceeds available \w+ cache blocks"
+    r"|KV cache is needed, which is larger than the available KV cache memory"
+    r"|No available memory for the cache blocks"
+)
 
 # --- Result model ----------------------------------------------------------
 
@@ -273,6 +285,7 @@ _RULES: tuple[_Rule, ...] = (
             re.compile(r"[Oo]ut\s+of\s+memory"),
             re.compile(r"no\s+GPU\s+memory\s+(?:for|left\s+for)\s+the\s+KV\s+[Cc]ache", re.IGNORECASE),
             re.compile(r"[Cc]annot\s+allocate\s+(?:memory|cuda|hip)"),
+            ENGINE_CAPACITY_LINE,
             re.compile(r"[Oo]ut[Oo]f[Mm]emory[Ee]rror"),
             re.compile(r"requires?\s+(?:at\s+least\s+)?(\d+)\s+GPU[s]?"),
             re.compile(r"[Tt]ensor\s+[Pp]arallel\s+[Ss]ize\s+.*?(\d+).*?GPU"),
@@ -312,8 +325,12 @@ _RULES: tuple[_Rule, ...] = (
         kind=IMPORT_ERROR,
         bridge_layer="build",
         patterns=(
-            re.compile(PY_MODULE_NOT_FOUND_ERROR + r":\s*No module named\s+['\"]([A-Za-z0-9_.]+)['\"]"),
-            re.compile(PY_IMPORT_ERROR + r":\s*(?:cannot import name\s+['\"]?([A-Za-z0-9_]+)['\"]?)?"),
+            re.compile(
+                _EXCEPTION_START + PY_MODULE_NOT_FOUND_ERROR + r":\s*No module named\s+['\"]([A-Za-z0-9_.]+)['\"]"
+            ),
+            re.compile(
+                _EXCEPTION_START + PY_IMPORT_ERROR + r":\s*(?:cannot import name\s+['\"]?([A-Za-z0-9_]+)['\"]?)?"
+            ),
         ),
         confidence=0.7,
         symbol_from=_grp,
@@ -437,6 +454,11 @@ def argparse_refusal(text: str) -> str | None:
     return None
 
 
+def is_engine_capacity_error(text: str) -> bool:
+    """Whether ``text`` carries a vLLM start-time capacity error."""
+    return ENGINE_CAPACITY_LINE.search(text) is not None
+
+
 # --- Request model ---------------------------------------------------------
 
 
@@ -499,7 +521,7 @@ def is_targeted_build_candidate(
 #: log prefix. A server that skips a model whose imports fail logs ``Ignore import error when loading <module>: ...``
 #: and carries on; that line is not an exception and does not match.
 IMPORT_FAILURE_LINE = re.compile(
-    r"(?<![\w.])(?:[A-Za-z_]\w*\.)*(?:" + PY_IMPORT_ERROR + "|" + PY_MODULE_NOT_FOUND_ERROR + r"):\s*\S"
+    _EXCEPTION_START + r"(?:" + PY_IMPORT_ERROR + "|" + PY_MODULE_NOT_FOUND_ERROR + r"):\s*\S"
 )
 #: What inference_suite's framework probe says when the serving interpreter finds no package of the framework at all
 #: (``framework_probe.probe_install``). The probe says it as the whole detail, so it is taken only at the end of the
@@ -524,7 +546,9 @@ __all__ = [
     "ACCURACY_BELOW_FLOOR",
     "CAPABILITY_DISABLED",
     "EVAL_GENERATION_PATHOLOGY",
+    "ENGINE_CAPACITY_LINE",
     "EVAL_RUNTIME_FAILURE",
+    "EXCEPTION_NAME_START",
     "HIP_KERNEL_MISSING",
     "HIP_RUNTIME_ERROR",
     "IMPORT_ERROR",
@@ -543,6 +567,7 @@ __all__ = [
     "argparse_refusal",
     "classify_failure",
     "framework_unimportable_line",
+    "is_engine_capacity_error",
     "is_targeted_build_candidate",
     "runnable_decision",
 ]

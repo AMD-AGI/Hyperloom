@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.kernel import _aiter_tuner_support as aiter_tuner_support
 from hyperloom.orchestrator.kernel import serving_log_evidence as serving_log_evidence
@@ -120,19 +122,19 @@ class TestCkMoeTunerSupport:
     def test_bf16_activation_with_fp4_weights_is_unsupported(self, tmp_path):
         """Measured: candidate generation raises 'Unsupported data type combination'."""
         log = _log(tmp_path, _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2"))
-        assert not aiter_tuner_support._aiter_ck_moe_tuner_supports(log)
+        assert not aiter_tuner_support._aiter_ck_moe_tuner_supports(log, "mi355x")
 
     def test_fp8_activation_with_fp4_weights_is_supported(self, tmp_path):
         log = _log(tmp_path, _moe_tuple("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2"))
-        assert aiter_tuner_support._aiter_ck_moe_tuner_supports(log)
+        assert aiter_tuner_support._aiter_ck_moe_tuner_supports(log, "mi355x")
 
     def test_fp4_activation_and_weights_is_supported(self, tmp_path):
         log = _log(tmp_path, _moe_tuple("torch.float4_e2m1fn_x2", "torch.float4_e2m1fn_x2"))
-        assert aiter_tuner_support._aiter_ck_moe_tuner_supports(log)
+        assert aiter_tuner_support._aiter_ck_moe_tuner_supports(log, "mi355x")
 
     def test_unquantised_bf16_moe_is_supported(self, tmp_path):
         log = _log(tmp_path, _moe_tuple("torch.bfloat16", "torch.bfloat16", "QuantType.No"))
-        assert aiter_tuner_support._aiter_ck_moe_tuner_supports(log)
+        assert aiter_tuner_support._aiter_ck_moe_tuner_supports(log, "mi355x")
 
     def test_a_mixed_log_stays_tunable_because_rows_are_filtered(self, tmp_path):
         """One checkpoint dispatches several pairs; the tunable ones still count."""
@@ -142,7 +144,7 @@ class TestCkMoeTunerSupport:
             + "\n"
             + _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2", expert=257, topk=5),
         )
-        assert aiter_tuner_support._aiter_ck_moe_tuner_supports(log)
+        assert aiter_tuner_support._aiter_ck_moe_tuner_supports(log, "mi355x")
 
     def test_an_entirely_unsupported_log_is_rejected(self, tmp_path):
         log = _log(
@@ -151,11 +153,13 @@ class TestCkMoeTunerSupport:
             + "\n"
             + _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2", expert=257, topk=5),
         )
-        assert not aiter_tuner_support._aiter_ck_moe_tuner_supports(log)
+        assert not aiter_tuner_support._aiter_ck_moe_tuner_supports(log, "mi355x")
 
-    def test_moe_evidence_without_a_parseable_tuple_defers_to_forge(self, tmp_path):
+    def test_moe_evidence_without_a_parseable_tuple_preserves_mi_routing(self, tmp_path):
         log = _log(tmp_path, "INFO Using 'AITER_MXFP4_BF16' Mxfp4 MoE backend.\n")
-        assert aiter_tuner_support._aiter_ck_moe_tuner_supports(log)
+        assert aiter_tuner_support._aiter_ck_moe_tuner_supports(log, "mi300x")
+        assert aiter_tuner_support._aiter_ck_moe_tuner_supports(log, "mi355x")
+        assert not aiter_tuner_support._aiter_ck_moe_tuner_supports(log, "r9700")
 
 
 class TestDispatchKeyExtraction:
@@ -335,7 +339,7 @@ class TestWriteFmoeUntunedCsvFromLog:
 class TestResolveVllmAiterRouting:
     def test_dense_bf16_model(self, tmp_path):
         flags = vllm_aiter_routing._resolve_vllm_aiter_routing(
-            model_path=_model(tmp_path), server_log=_log(tmp_path, AITER_BF16_MISS), tp=1
+            model_path=_model(tmp_path), server_log=_log(tmp_path, AITER_BF16_MISS), tp=1, gpu_type="mi355x"
         )
         assert flags == vllm_aiter_routing.VllmAiterRouting(bf16_dense=True, fused_moe=False)
 
@@ -344,16 +348,26 @@ class TestResolveVllmAiterRouting:
             model_path=_model(tmp_path, moe=True),
             server_log=_log(tmp_path, AITER_FUSED_MOE),
             tp=1,
+            gpu_type="mi355x",
         )
         assert flags.fused_moe is True
         # A MoE checkpoint's dense side rides along with its MoE routing.
         assert flags.bf16_dense is False
+
+    @pytest.mark.parametrize(("gpu_type", "expected"), [("r9700", False), ("mi355x", True)])
+    def test_moe_marker_without_dispatch_keys_keeps_mi_behavior(self, tmp_path, gpu_type, expected):
+        log = _log(tmp_path, "INFO Using 'AITER_MXFP4_BF16' Mxfp4 MoE backend.\n")
+        flags = vllm_aiter_routing._resolve_vllm_aiter_routing(
+            model_path=_model(tmp_path, moe=True), server_log=log, tp=1, gpu_type=gpu_type
+        )
+        assert flags.fused_moe is expected
 
     def test_moe_blocked_when_the_tuner_rejects_the_dtype_pair(self, tmp_path):
         flags = vllm_aiter_routing._resolve_vllm_aiter_routing(
             model_path=_model(tmp_path, moe=True),
             server_log=_log(tmp_path, AITER_FUSED_MOE_BF16_FP4),
             tp=1,
+            gpu_type="mi355x",
         )
         assert flags.fused_moe is False
 
@@ -363,12 +377,13 @@ class TestResolveVllmAiterRouting:
             model_path=_model(tmp_path, moe=True),
             server_log=_log(tmp_path, AITER_FUSED_MOE),
             tp=8,
+            gpu_type="mi355x",
         )
         assert flags.fused_moe is False
 
     def test_no_evidence_routes_nothing(self, tmp_path):
         flags = vllm_aiter_routing._resolve_vllm_aiter_routing(
-            model_path=_model(tmp_path), server_log=_log(tmp_path, "INFO up\n"), tp=1
+            model_path=_model(tmp_path), server_log=_log(tmp_path, "INFO up\n"), tp=1, gpu_type="mi355x"
         )
         assert flags == vllm_aiter_routing.VllmAiterRouting(bf16_dense=False, fused_moe=False)
 

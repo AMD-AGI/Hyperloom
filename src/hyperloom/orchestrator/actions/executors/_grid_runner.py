@@ -78,7 +78,9 @@ from .agentx_point import ServerArgvInvalidError, materialize_grid_variant
 from ._workload_envs import BenchmarkTarget, LaunchLayer
 
 from ._grid_base import (
+    MN_WARMUP_DIR,
     VARIANT_CONFIG_FILE,
+    WARMUP_ROUND_DIR,
     GridRound,
     GridVariant,
     RoundError,
@@ -90,6 +92,7 @@ from ._grid_base import (
     importable_overlay_dir,
     pin_xdit_tool_path,
     runnable_moe_backend_args,
+    variant_slot,
 )
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.inference_optimizer.grid_server_args import (
@@ -100,8 +103,6 @@ from hyperloom.inference_optimizer.grid_server_args import (
 
 log = logging.getLogger(__name__)
 
-#: Sub-directory of a variant's slot that its discarded warmup round runs in.
-_WARMUP_ROUND_DIR = "warmup_round"
 #: A variant whose warm-up setup or warm-up YAML could not be built.
 _WARMUP_YAML_BUILD_ERROR = "warmup_yaml_build_error"
 #: A variant whose composed config named a workload its benchmark cap could not be sized from.
@@ -401,17 +402,6 @@ def lease_cards(config_path: Path, session: Path) -> int:
     return session_cards(session, tp)
 
 
-def _mn_restart_env(
-    base_envs: dict[str, str],
-    variant: Any,
-    unset_envs: list[str],
-) -> dict[str, str]:
-    """Merge the session base's server envs under one variant's own overrides."""
-    merged = {k: v for k, v in base_envs.items() if k not in unset_envs}
-    merged.update({str(k): str(v) for k, v in (variant.extra_envs or {}).items()})
-    return merged
-
-
 def _resolve_mn_effective_server_args(cfg_path: Path) -> str:
     """The server args the materialized variant YAML carries, for a multi-node variant restart."""
     point = read_benchmark_point(cfg_path)
@@ -557,7 +547,6 @@ class _GridRun(NamedTuple):
     silence_timeout_sec: float
     rounds_per_variant: int
     mn_warmup_rounds: int
-    mn_base_envs: dict[str, str]
     auto_warmup_requested: bool
 
 
@@ -771,17 +760,6 @@ def _sweep_stale_aiter_locks() -> None:
         log.debug("grid_runner: aiter lock sweep swallowed: %r", exc)
 
 
-def _multi_node_base_envs() -> dict[str, str]:
-    """The session base's server envs, which ``restart_server_for_round`` never reads itself."""
-    from ._multi_node_env import is_multi_node
-
-    if not is_multi_node():
-        return {}
-    from hyperloom.orchestrator.state.base_launch import session_server_base
-
-    return dict(session_server_base().env)
-
-
 def _refuse_unsupported_capability(run: _GridRun, at: _VariantSlot) -> None:
     reason = unsupported_capability_reason(at.variant)
     if not reason:
@@ -886,7 +864,7 @@ async def _prepare_variant_rounds(run: _GridRun, at: _VariantSlot) -> _VariantRo
 
 async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> float | None:
     """Run and discard one benchmark pass so the measured round starts on a warm server."""
-    warmup_slot = at.path / _WARMUP_ROUND_DIR
+    warmup_slot = at.path / WARMUP_ROUND_DIR
     warmup_server_log = warmup_slot / "server.log"
     cfg_path = await _variant_yaml_or_abort(
         run,
@@ -928,7 +906,7 @@ async def _warmup_throughput(
     pass_: _BenchmarkPass,
 ) -> float | None:
     """The throughput the warmup pass measured, or end the variant when it measured none."""
-    warmup_slot = at.path / _WARMUP_ROUND_DIR
+    warmup_slot = at.path / WARMUP_ROUND_DIR
     run_ws = select_run_workspace(warmup_slot, known_before=pass_.workspaces_before)
     workspace = run_ws if run_ws is not None else warmup_slot
     harvested = harvest_leaked_artifacts(workspace, subprocess_started_unix=pass_.started_unix)
@@ -999,6 +977,7 @@ def _log_variant_banner(run: _GridRun, at: _VariantSlot) -> None:
 
 async def _restart_multi_node_server(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> None:
     """Restart sglang/vllm with this variant's flags so each multi-node row runs against a fresh server."""
+    from ._multi_node_env import round_server_env
     from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
     unset_envs = [str(k) for k in getattr(at.variant, "unset_envs", []) or [] if str(k).strip()]
@@ -1010,10 +989,7 @@ async def _restart_multi_node_server(run: _GridRun, at: _VariantSlot, rounds: _V
                 model_path=run.recipe.target.model_path,
                 ep=int(os.environ.get("EP") or 0) or None,
             ),
-            # Reference recipe envs under this variant's own overrides (e.g. MORI_* MoE-dispatch tuning) so
-            # server-side env knobs proposed by specialists take effect on the restarted sglang without dropping
-            # the envs the baseline was measured with.
-            extra_env=_mn_restart_env(run.mn_base_envs, at.variant, unset_envs),
+            extra_env=round_server_env(at.variant.extra_envs, unset_envs),
             unset_env=unset_envs,
         )
     except ServerRestartFailed as exc:
@@ -1027,7 +1003,7 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
 
     if not is_multi_node() or not mn_bench_warmup_enabled():
         return
-    warm_slot = at.path / "mn_warmup"
+    warm_slot = at.path / MN_WARMUP_DIR
     started_unix = time.time()
     proc = await _reported_round(
         run,
@@ -1181,7 +1157,7 @@ def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _Var
         slot=at.path,
     )
     if (step_class := failed_step_class(outcome.measurement)) is not None:
-        found = found._replace(error_class=step_class)
+        found = RoundError(failure_evidence.with_failure_hint(step_class, found.summary), step_class)
     log.warning(
         "grid_runner: variant %s aborted: %s (rc=%s): %s",
         _variant_tag(run, at),
@@ -1387,12 +1363,11 @@ async def run_grid(
         silence_timeout_sec=silence_timeout_sec,
         rounds_per_variant=1 + (1 if auto_warmup_requested else 0) + mn_warmup_rounds,
         mn_warmup_rounds=mn_warmup_rounds,
-        mn_base_envs=_multi_node_base_envs(),
         auto_warmup_requested=auto_warmup_requested,
     )
     results: list[VariantResult] = []
     for i, variant in enumerate(grid):
-        at = _VariantSlot(i, variant, output_root / f"variant_{i:02d}_{_safe(variant.name)}")
+        at = _VariantSlot(i, variant, variant_slot(output_root, i, variant.name))
         try:
             if _warn_budget_cannot_admit(
                 run, i, rounds_left=run.rounds_per_variant, spent_on="the variants before this one"
@@ -1462,7 +1437,7 @@ def _measurement_server_log_path(
         direct = _existing_log_path(workspace / "server.log")
     if direct:
         return direct
-    warmup_dir = owning_slot / _WARMUP_ROUND_DIR
+    warmup_dir = owning_slot / WARMUP_ROUND_DIR
     try:
         candidates = [p for d in (owning_slot, warmup_dir) for p in d.glob("*/server.log") if p.is_file()]
     except OSError:
@@ -1496,7 +1471,7 @@ def _attach_grid_launch_evidence(
             ServerArgvInvalidError.error_class,
         }:
             continue
-        slot = output_root / f"variant_{idx:02d}_{_safe(grid[idx].name)}"
+        slot = variant_slot(output_root, idx, grid[idx].name)
         config_path = slot / VARIANT_CONFIG_FILE
         workspace = Path(result.workspace) if result.workspace else None
         primary_log = Path(result.server_log_path) if result.server_log_path else slot / "server.log"
@@ -1512,11 +1487,6 @@ def _attach_grid_launch_evidence(
         )
         result.launch_evidence = evidence
         result.launch_evidence_path = persist_measurement_evidence(evidence, actual_server_log=actual_log, slot=slot)
-
-
-def _safe(name: str) -> str:
-    """Filesystem-safe slug for variant directory names."""
-    return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
 
 
 def _write_variant_abort_marker(

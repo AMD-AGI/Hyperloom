@@ -560,7 +560,9 @@ class SandboxPool:
         about a node and is no failure of the test: the sandbox kept for the next test, if any, is closed (the service
         charges a sandbox the pool cannot count, so the grant can be full beside it), then the create waits for a sandbox
         to end and is repeated, until ``wait`` runs out (:class:`AcquireTimedOut`). The create's own wait for the sandbox to run is the lesser of the pool's
-        ``request_timeout_sec`` and what is left of ``wait``.
+        ``request_timeout_sec`` and what is left of ``wait``. A sandbox the service deleted at its pending limit is asked
+        for again by the provider itself, under ``<key>:p1``, ``<key>:p2`` and so on within that wait; the sandbox
+        carries this run's and this request's metadata whatever its key, which is how a sweep or a restart finds it.
         """
         base = metadata[IDEMPOTENCY_KEY]
         spent = 0

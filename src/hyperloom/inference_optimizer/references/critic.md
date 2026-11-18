@@ -45,9 +45,10 @@ run with a clear error pointing at `--critic-mock` as the offline bypass.
 
 ## Per-turn artefacts (audit trail)
 
-Each Critic turn writes a 6-digit workdir under
+Each admitted Critic review turn writes a 6-digit workdir under
 `$SESSION_DIR/critic-workdir/<turn_idx>/` (`request.json` / `judge_bundle.json`
 / `review.json` / `emit.json`) plus session memory under
 `$SESSION_DIR/critic-session-memory/<session_id>/`. The backend prunes to the
-latest 50 turn workdirs each tick. Inspect these when debugging critic verdicts
+latest 50 review-turn workdirs. Coordinator ticks with no pending proposal
+do not start a Critic turn or create its workdir. Inspect these when debugging critic verdicts
 (see `troubleshooting.md`).

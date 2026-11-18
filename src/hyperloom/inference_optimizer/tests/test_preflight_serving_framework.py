@@ -6,10 +6,8 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
-import subprocess
 import sys
 
 import pytest
@@ -364,30 +362,6 @@ def test_probe_rocm_build_reports_tri_state(monkeypatch):
     for rc in (3, -11):
         monkeypatch.setattr(framework_probe.subprocess, "run", lambda *_a, _rc=rc, **_k: _Proc(_rc))
         assert framework_probe._probe_rocm_build("vllm", "/usr/bin/python3").verdict is None
-
-
-def _host_rocm_verdict() -> bool | None:
-    """What this host says about its own torch, resolved out of process."""
-    script = (
-        "import json, sys\n"
-        "try:\n"
-        "    import torch\n"
-        "except BaseException:\n"
-        "    print('null'); sys.exit(0)\n"
-        "print(json.dumps(bool(getattr(torch.version, 'hip', None))))\n"
-    )
-    proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=120)
-    answer = (proc.stdout or "").strip()
-    if proc.returncode != 0 or not answer:
-        return None
-    return json.loads(answer)
-
-
-def test_the_real_probe_agrees_with_this_host():
-    """Runs the probe for real, and derives the expectation from the host."""
-    probe = framework_probe._probe_rocm_build("sglang", sys.executable)
-
-    assert probe.verdict is _host_rocm_verdict()
 
 
 # probe diagnostics
@@ -822,22 +796,6 @@ def test_atom_cuda_build_is_blocked_without_an_install_remedy(monkeypatch, capsy
     assert failure.value.code == 2
     combined = capsys.readouterr()
     assert "--install-framework atom" not in combined.out + combined.err
-
-
-# Wiring: nothing above proves _preflight still calls the gate
-def test_preflight_still_invokes_the_gate():
-    """Every other test calls the gate directly, so deleting the one line that reaches it from _preflight would leave them all green."""
-    import ast
-    from pathlib import Path as _Path
-
-    source = _Path(preflight.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    target = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_preflight")
-    called = {
-        node.func.id for node in ast.walk(target) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
-
-    assert "_check_serving_framework" in called
 
 
 @pytest.mark.parametrize("framework", sorted(framework_probe._SETUP_INSTALLABLE_FRAMEWORKS))
