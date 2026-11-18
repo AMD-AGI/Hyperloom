@@ -402,17 +402,6 @@ def lease_cards(config_path: Path, session: Path) -> int:
     return session_cards(session, tp)
 
 
-def _mn_restart_env(
-    base_envs: dict[str, str],
-    variant: Any,
-    unset_envs: list[str],
-) -> dict[str, str]:
-    """Merge the session base's server envs under one variant's own overrides."""
-    merged = {k: v for k, v in base_envs.items() if k not in unset_envs}
-    merged.update({str(k): str(v) for k, v in (variant.extra_envs or {}).items()})
-    return merged
-
-
 def _resolve_mn_effective_server_args(cfg_path: Path) -> str:
     """The server args the materialized variant YAML carries, for a multi-node variant restart."""
     point = read_benchmark_point(cfg_path)
@@ -558,7 +547,6 @@ class _GridRun(NamedTuple):
     silence_timeout_sec: float
     rounds_per_variant: int
     mn_warmup_rounds: int
-    mn_base_envs: dict[str, str]
     auto_warmup_requested: bool
 
 
@@ -770,17 +758,6 @@ def _sweep_stale_aiter_locks() -> None:
             )
     except (OSError, RuntimeError) as exc:
         log.debug("grid_runner: aiter lock sweep swallowed: %r", exc)
-
-
-def _multi_node_base_envs() -> dict[str, str]:
-    """The session base's server envs, which ``restart_server_for_round`` never reads itself."""
-    from ._multi_node_env import is_multi_node
-
-    if not is_multi_node():
-        return {}
-    from hyperloom.orchestrator.state.base_launch import session_server_base
-
-    return dict(session_server_base().env)
 
 
 def _refuse_unsupported_capability(run: _GridRun, at: _VariantSlot) -> None:
@@ -1000,6 +977,7 @@ def _log_variant_banner(run: _GridRun, at: _VariantSlot) -> None:
 
 async def _restart_multi_node_server(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> None:
     """Restart sglang/vllm with this variant's flags so each multi-node row runs against a fresh server."""
+    from ._multi_node_env import round_server_env
     from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
     unset_envs = [str(k) for k in getattr(at.variant, "unset_envs", []) or [] if str(k).strip()]
@@ -1011,10 +989,7 @@ async def _restart_multi_node_server(run: _GridRun, at: _VariantSlot, rounds: _V
                 model_path=run.recipe.target.model_path,
                 ep=int(os.environ.get("EP") or 0) or None,
             ),
-            # Reference recipe envs under this variant's own overrides (e.g. MORI_* MoE-dispatch tuning) so
-            # server-side env knobs proposed by specialists take effect on the restarted sglang without dropping
-            # the envs the baseline was measured with.
-            extra_env=_mn_restart_env(run.mn_base_envs, at.variant, unset_envs),
+            extra_env=round_server_env(at.variant.extra_envs, unset_envs),
             unset_env=unset_envs,
         )
     except ServerRestartFailed as exc:
@@ -1388,7 +1363,6 @@ async def run_grid(
         silence_timeout_sec=silence_timeout_sec,
         rounds_per_variant=1 + (1 if auto_warmup_requested else 0) + mn_warmup_rounds,
         mn_warmup_rounds=mn_warmup_rounds,
-        mn_base_envs=_multi_node_base_envs(),
         auto_warmup_requested=auto_warmup_requested,
     )
     results: list[VariantResult] = []
