@@ -18,20 +18,26 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown import schema, schema_framework, schema_kernel
+from hyperloom.inference_optimizer.breakdown import (
+    schema,
+    schema_conc_sweep,
+    schema_framework,
+    schema_kernel,
+    schema_phase,
+)
 
 _RECORDER_DIR = Path(__file__).resolve().parents[1] / "breakdown" / "recorder"
 
 #: Assembler name → TypedDict that declares its top-level ``ext`` keys.
 _EXT_CONTRACTS: dict[str, type] = {
     "assemble_baseline_ext": schema.V6BaselineExt,
-    "assemble_conc_sweep_ext": schema.V6ConcSweepExt,
-    "assemble_enablement_ext": schema.V6EnablementExt,
+    "assemble_conc_sweep_ext": schema_conc_sweep.V6ConcSweepExt,
+    "assemble_enablement_ext": schema_phase.V6EnablementExt,
     "assemble_framework_ext": schema_framework.V6FrameworkExt,
     "assemble_kernel_ext": schema_kernel.V6KernelExt,
-    "assemble_phase_ext": schema.V6PhaseExt,
+    "assemble_phase_ext": schema_phase.V6PhaseExt,
     "assemble_roofline_ext": schema.V6RooflineExt,
-    "assemble_stack_ext": schema.V6StackExt,
+    "assemble_stack_ext": schema_phase.V6StackExt,
     "assemble_warm_replay_ext": schema.V6WarmReplayExt,
     "assemble_warm_start_ext": schema.V6WarmStartExt,
 }
