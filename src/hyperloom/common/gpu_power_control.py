@@ -150,7 +150,7 @@ def _ensure_ledger_dir(directory: Path) -> None:
         if st.st_uid == os.geteuid() and stat.S_IMODE(st.st_mode) != _LEDGER_DIR_MODE:
             # Set, not left to the umask or to whoever made it by hand: every account reads the records for the
             # orphan warning.
-            os.chmod(level, _LEDGER_DIR_MODE)
+            os.chmod(level, _LEDGER_DIR_MODE)  # nosec B103
 
 
 def _open_record(path: Path, flags: int) -> int:
