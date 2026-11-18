@@ -3,9 +3,9 @@
 
 """One TraceLens perf report over every PD server node, aggregated with ``combine_by_node``.
 
-Each server contributes the first GPU's trace of each node. Decode traces go through the TraceLens splitter and the
-decode-only steady-state chunk (else the generic one) is reported; prefill traces are reported whole. Every job uses
-its own server's graph-capture folder when that folder holds files. The config is written to ``pd-run.yaml`` and run
+Each server contributes the first GPU's trace of each node. Decode traces go through the TraceLens splitter, one node
+per thread, and the decode-only steady-state chunk (else the generic one) is reported; prefill traces are reported
+whole. Every job uses its own server's graph-capture folder when that folder holds files. The config is written to ``pd-run.yaml`` and run
 once with ``TraceLens.Reporting.generate_perf_report_from_config``, which writes one report per job and
 ``perf_report_aggregated_csvs/``.
 """
@@ -13,16 +13,18 @@ once with ``TraceLens.Reporting.generate_perf_report_from_config``, which writes
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from hyperloom.orchestrator.trace_analysis._trace_split import DECODE_ONLY_OR_GENERIC_MODE, _collect_split_chunks
+from hyperloom.orchestrator.trace_analysis._trace_split import DECODE_ONLY_OR_GENERIC_MODE, collect_split_chunks
 from hyperloom.orchestrator.trace_analysis._tracelens_checkout import run_command
 
 log = logging.getLogger(__name__)
@@ -63,7 +65,7 @@ def _decode_chunk(trace_path: Path, split_dir: Path, *, tracelens_root: Path, lo
     rc = run_command(cmd, cwd=tracelens_root, log_path=log_path, timeout_s=_SPLIT_TIMEOUT_S)
     if rc != 0:
         raise RuntimeError(f"trace_split_failed: TraceLens splitter exited with code {rc} for {trace_path}")
-    chunk, _meta, _modes = _collect_split_chunks(split_dir, DECODE_ONLY_OR_GENERIC_MODE, trace_path, [])
+    chunk, _meta, _modes = collect_split_chunks(split_dir, DECODE_ONLY_OR_GENERIC_MODE, trace_path, [])
     return chunk
 
 
@@ -86,15 +88,17 @@ def _report_jobs(
     tracelens_root: Path,
     log_path: Path,
 ) -> list[dict[str, Any]]:
-    """One job per server node: decode nodes as split chunks, prefill nodes as captured."""
+    """One job per server node: decode nodes as split chunks, split concurrently, prefill nodes as captured."""
+    decode = [Path(trace) for trace in node_traces.get("decode") or []]
+    split_dirs = [output_dir / "trace_split" / f"decode_{node}" for node in range(len(decode))]
+    split = functools.partial(_decode_chunk, tracelens_root=tracelens_root, log_path=log_path)
+    with ThreadPoolExecutor(max_workers=max(1, len(decode))) as pool:
+        chunks = list(pool.map(split, decode, split_dirs))
     jobs: list[dict[str, Any]] = []
     for phase in _PHASE_ORDER:
         capture_folder = role_capture_folder(trace_root, phase)
-        for node, trace in enumerate(node_traces.get(phase) or []):
-            trace_path = Path(trace)
-            if phase == "decode":
-                split_dir = output_dir / "trace_split" / f"{phase}_{node}"
-                trace_path = _decode_chunk(trace_path, split_dir, tracelens_root=tracelens_root, log_path=log_path)
+        traces = chunks if phase == "decode" else [Path(trace) for trace in node_traces.get(phase) or []]
+        for node, trace_path in enumerate(traces):
             job: dict[str, Any] = {"phase": phase, "node": node, "trace_path": str(trace_path), "platform": platform}
             if capture_folder:
                 job["capture_folder"] = capture_folder

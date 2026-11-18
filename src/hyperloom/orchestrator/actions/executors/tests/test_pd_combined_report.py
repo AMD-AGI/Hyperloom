@@ -108,7 +108,7 @@ def test_combined_report_splits_decode_per_node_and_passes_prefill_raw(tmp_path:
         {"phase": "prefill", "node": 0, "trace_path": str(prefill_trace), "platform": "MI300X"},
     ]
     split_cmds = [cmd for cmd in commands if "TraceLens.TraceUtils.split_trace.main" in cmd]
-    assert [cmd[cmd.index("TraceLens.TraceUtils.split_trace.main") + 1] for cmd in split_cmds] == [
+    assert sorted(cmd[cmd.index("TraceLens.TraceUtils.split_trace.main") + 1] for cmd in split_cmds) == [
         str(p) for p in decode_traces
     ]
     assert all(cmd[-3:] == ["--find-steady-state", "--num-steps", "32"] for cmd in split_cmds)
@@ -132,3 +132,38 @@ def test_combined_report_fails_soft_when_a_decode_split_has_no_chunk(tmp_path: P
 
     assert result["status"] == "failed"
     assert "trace_split_no_steady_state" in result["error"]
+
+
+def test_combined_report_splits_the_decode_nodes_concurrently_in_node_order(tmp_path: Path, monkeypatch) -> None:
+    import threading
+
+    traces = [tmp_path / "decode" / f"1-TP-{rank}.trace.json.gz" for rank in (0, 8, 16)]
+    together = threading.Barrier(len(traces), timeout=10)
+
+    def _split(trace_path: Path, split_dir: Path, **_kwargs) -> Path:
+        together.wait()
+        return split_dir / f"{trace_path.name}.chunk"
+
+    def _report(cmd, **_kwargs):
+        config = yaml.safe_load(Path(cmd[cmd.index("--config") + 1]).read_text())
+        (Path(config["output_dir"]) / combined.AGGREGATED_CSVS_DIR).mkdir()
+        return 0
+
+    monkeypatch.setattr(combined, "_decode_chunk", _split)
+    monkeypatch.setattr(combined, "run_command", _report)
+    out_dir = tmp_path / "out"
+
+    result = combined.run_pd_combined_report(
+        {"decode": [str(p) for p in traces]},
+        trace_root=tmp_path,
+        output_dir=out_dir,
+        platform="MI300X",
+        analysis_mode="inference",
+        tracelens_root=tmp_path,
+    )
+
+    assert result["status"] == "ok"
+    assert [(job["node"], job["trace_path"]) for job in result["jobs"]] == [
+        (node, str(out_dir / "trace_split" / f"decode_{node}" / f"{trace.name}.chunk"))
+        for node, trace in enumerate(traces)
+    ]

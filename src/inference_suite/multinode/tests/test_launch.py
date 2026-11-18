@@ -34,7 +34,7 @@ from inference_suite.multinode.record import (
     Role,
     RoleLaunch,
 )
-from inference_suite.multinode.ssh import SshClient, SshResult
+from inference_suite.multinode.ssh import SshClient, SshError, SshResult, run_process
 
 _FLAGS = "--model-path\n--mem-fraction-static\n--cuda-graph-bs-decode\n--chunked-prefill-size\n"
 
@@ -49,6 +49,8 @@ class FakeHosts:
         self.host_key_failures = host_key_failures
 
     def __call__(self, argv, stdin, timeout):
+        if argv[0] == "ssh-keygen":
+            return run_process(argv, stdin, timeout)
         if argv[0] == "ssh-keyscan":
             self.calls.append(("keyscan", argv[-1], ""))
             return SshResult(0, f"{argv[-1]} ssh-ed25519 AAAA\n", "")
@@ -204,11 +206,23 @@ def test_a_host_that_refuses_fails_the_start(tmp_path):
         start(_launch(), _cluster(tmp_path, FakeHosts(driver_rc=1)), _OPTIONS)
 
 
-def test_changed_host_key_is_rescanned_once(tmp_path):
+def test_an_unpinned_host_key_is_learned_on_first_contact(tmp_path):
     hosts = FakeHosts(host_key_failures=1)
     start(_launch(), _cluster(tmp_path, hosts), _OPTIONS)
     assert hosts.calls[1][:2] == ("keyscan", "p0")
     assert (tmp_path / "known_hosts").read_text() == "p0 ssh-ed25519 AAAA\n"
+
+
+def test_a_changed_host_key_is_refused_and_a_pinned_host_is_not_rescanned(tmp_path):
+    known = tmp_path / "known_hosts"
+    known.write_text("p0 ssh-ed25519 PINNED\n")
+    hosts = FakeHosts(host_key_failures=1)
+    client = SshClient(SshAccess(22, "root", "/keys/id"), known, runner=hosts)
+    with pytest.raises(SshError, match=f"p0.*changed.*{known}"):
+        client.run("p0", "true", 30)
+    client.learn(["p0"])
+    assert [kind for kind, _host, _stdin in hosts.calls] == ["ssh"]
+    assert known.read_text() == "p0 ssh-ed25519 PINNED\n"
 
 
 def test_stop_parks_the_router_first(tmp_path):

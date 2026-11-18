@@ -3,9 +3,9 @@
 
 """Non-interactive SSH to the hosts of a PD cluster, with strict host-key checking.
 
-Host keys are learned once per session with ``ssh-keyscan`` into a known_hosts file of the session (or the one the
-node list names); a host whose key changed is rescanned once and the command retried. The private key is passed by
-path; nothing here reads or logs its content.
+A host's key is learned with ``ssh-keyscan`` on first contact into a known_hosts file of the session (or the one the
+node list names) and pinned there; a pinned host whose key no longer verifies is refused, never rescanned. The
+private key is passed by path; nothing here reads or logs its content.
 """
 
 from __future__ import annotations
@@ -24,10 +24,11 @@ _HOST_KEY_ERRORS = (
     "offending rsa key",
 )
 _KEYSCAN_TIMEOUT_S = 30
+_DEFAULT_SSH_PORT = 22
 
 
 class SshError(RuntimeError):
-    """A host cannot be reached, or its host key cannot be learned."""
+    """A host cannot be reached, its host key cannot be learned, or its pinned host key no longer verifies."""
 
 
 @dataclass(frozen=True)
@@ -69,8 +70,15 @@ class SshClient:
             argv += ["-o", option]
         return [*argv, "-i", self.access.key_file, "-p", str(self.access.port_of(host)), f"{self.access.user}@{host}"]
 
+    def _pinned(self, host: str) -> bool:
+        """Whether ``known_hosts`` holds a key for ``host`` on its port, hashed entries included."""
+        port = self.access.port_of(host)
+        name = host if port == _DEFAULT_SSH_PORT else f"[{host}]:{port}"
+        found = self.runner(["ssh-keygen", "-F", name, "-f", str(self.known_hosts)], "", _KEYSCAN_TIMEOUT_S)
+        return found.returncode == 0 and bool(found.stdout.strip())
+
     def learn(self, hosts: Sequence[str]) -> None:
-        """Append the host keys of ``hosts`` not yet pinned to ``known_hosts``.
+        """Append the host keys of ``hosts`` not yet pinned to ``known_hosts``; a pinned host is left as pinned.
 
         Raises:
             SshError: ``ssh-keyscan`` returns no key for a host.
@@ -78,6 +86,8 @@ class SshClient:
         self.known_hosts.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.known_hosts.touch(mode=0o600, exist_ok=True)
         for host in hosts:
+            if self._pinned(host):
+                continue
             port = self.access.port_of(host)
             scanned = self.runner(["ssh-keyscan", "-p", str(port), "-H", host], "", _KEYSCAN_TIMEOUT_S)
             if scanned.returncode != 0 or not scanned.stdout.strip():
@@ -86,11 +96,20 @@ class SshClient:
                 pinned.write(scanned.stdout if scanned.stdout.endswith("\n") else f"{scanned.stdout}\n")
 
     def run(self, host: str, script: str, timeout: int) -> SshResult:
-        """``script`` run by ``bash -s`` on ``host``, after one rescan when the host key changed."""
+        """``script`` run by ``bash -s`` on ``host``, learning its host key first when none is pinned.
+
+        Raises:
+            SshError: the host's pinned key no longer verifies, or its key cannot be learned.
+        """
         body = f"set -uo pipefail\n{script}\n"
         result = self.runner([*self._argv(host), "bash", "-s"], body, timeout)
         if result.returncode == 0 or not any(marker in result.stderr.lower() for marker in _HOST_KEY_ERRORS):
             return result
+        if self._pinned(host):
+            raise SshError(
+                f"the host key of {host} changed from the one pinned in {self.known_hosts}; remove the pinned key "
+                "there to trust a new one"
+            )
         self.learn([host])
         return self.runner([*self._argv(host), "bash", "-s"], body, timeout)
 

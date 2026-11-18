@@ -33,26 +33,6 @@ def copy_unsplit_trace(trace_path: Path, split_dir: Path) -> Path:
     return target
 
 
-def _default_workspace_path() -> str:
-    """Resolve the default workspace root for ``--workspace-path``.
-
-    Fallback order: ``$USER_DATA_PATH``, then legacy ``$WORKSPACE_PATH``, then
-    ``session.paths.workspace_root()`` (which warns once when ``$USER_DATA_PATH`` is unset).
-
-    Returns:
-        The resolved default workspace path.
-    """
-    user_data = os.environ.get("USER_DATA_PATH")
-    if user_data:
-        return user_data
-    workspace = os.environ.get("WORKSPACE_PATH")
-    if workspace:
-        return workspace
-    # Neither env set: route through the shared helper so the one-shot
-    # "USER_DATA_PATH unset" warning fires.
-    return str(workspace_root())
-
-
 def _build_split_cmd(
     args,
     split_input_path: "Path",
@@ -122,7 +102,7 @@ def _refuse_missing_steady_state_mode(
     )
 
 
-def _collect_split_chunks(
+def collect_split_chunks(
     split_dir: "Path",
     steady_state_mode: str,
     analysis_trace_path: "Path",
@@ -331,7 +311,7 @@ def _run_trace_split(
             f"trace_split_failed: TraceLens splitter exited with code {split_rc}; see {log_path} for subprocess output."
         )
 
-    selected_chunk, split_meta, mode_to_chunks = _collect_split_chunks(
+    selected_chunk, split_meta, mode_to_chunks = collect_split_chunks(
         split_dir,
         args.steady_state_mode,
         analysis_trace_path,

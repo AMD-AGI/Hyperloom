@@ -243,8 +243,8 @@ class PdLaunch:
         }
 
     def digest(self) -> str:
-        """The sha256 of the launch: the mode and every digested field."""
-        return _digest({**self._launch_fields(), "mode": self.mode.value})
+        """The sha256 of the launch: the framework, the mode and every digested field."""
+        return _digest({**self._launch_fields(), "framework": self.framework.value, "mode": self.mode.value})
 
     def to_document(self) -> dict[str, Any]:
         return {

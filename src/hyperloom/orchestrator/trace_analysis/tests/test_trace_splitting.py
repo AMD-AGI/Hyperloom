@@ -11,7 +11,7 @@ functions in tracelens_analysis.py, verifying that:
 - Generic traces (xDiT/custom) produce a single steady_state chunk
   when --steady-state-mode=generic is used.
 - _build_split_cmd correctly gates LLM-specific flags.
-- _collect_split_chunks correctly handles both LLM and generic chunk layouts.
+- collect_split_chunks correctly handles both LLM and generic chunk layouts.
 """
 
 from __future__ import annotations
@@ -159,7 +159,7 @@ def _write_trace(path: Path, trace: dict) -> None:
 
 
 class TestCollectSplitChunks:
-    """Verify _collect_split_chunks handles both LLM and generic chunk layouts."""
+    """Verify collect_split_chunks handles both LLM and generic chunk layouts."""
 
     def _write_dummy_chunk(self, split_dir: Path, name: str) -> Path:
         path = split_dir / name
@@ -174,7 +174,7 @@ class TestCollectSplitChunks:
         self._write_dummy_chunk(split_dir, "decode_only_steady_state_test.json.gz")
         self._write_dummy_chunk(split_dir, "prefilldecode_steady_state_test.json.gz")
 
-        chunk, meta, mode_map = trace_split._collect_split_chunks(
+        chunk, meta, mode_map = trace_split.collect_split_chunks(
             split_dir,
             "mixed",
             tmp_path / "trace.json.gz",
@@ -190,7 +190,7 @@ class TestCollectSplitChunks:
         split_dir.mkdir()
         self._write_dummy_chunk(split_dir, "steady_state_test.json.gz")
 
-        chunk, meta, mode_map = trace_split._collect_split_chunks(
+        chunk, meta, mode_map = trace_split.collect_split_chunks(
             split_dir,
             "generic",
             tmp_path / "trace.json.gz",
@@ -203,7 +203,7 @@ class TestCollectSplitChunks:
         split_dir = tmp_path / "split"
         split_dir.mkdir()
         with pytest.raises(RuntimeError, match="trace_split_no_steady_state"):
-            trace_split._collect_split_chunks(
+            trace_split.collect_split_chunks(
                 split_dir,
                 "mixed",
                 tmp_path / "trace.json.gz",
@@ -216,14 +216,14 @@ class TestCollectSplitChunks:
         self._write_dummy_chunk(split_dir, "steady_state_test.json.gz")
         self._write_dummy_chunk(split_dir, "sglang_iteration_0-31.json.gz")
 
-        chunk, meta, _ = trace_split._collect_split_chunks(
+        chunk, meta, _ = trace_split.collect_split_chunks(
             split_dir, "decode_only_or_generic", tmp_path / "trace.json.gz", []
         )
         assert chunk.name == "steady_state_test.json.gz"
         assert meta["selected_mode"] == "decode_only_or_generic"
 
         self._write_dummy_chunk(split_dir, "decode_only_steady_state_test.json.gz")
-        chunk, _, _ = trace_split._collect_split_chunks(
+        chunk, _, _ = trace_split.collect_split_chunks(
             split_dir, "decode_only_or_generic", tmp_path / "trace.json.gz", []
         )
         assert chunk.name == "decode_only_steady_state_test.json.gz"
@@ -244,7 +244,7 @@ class TestCollectSplitChunks:
         self._write_dummy_chunk(split_dir, "decode_only_steady_state_test.json.gz")
 
         with pytest.raises(RuntimeError, match="steady_state_chunk_missing"):
-            trace_split._collect_split_chunks(
+            trace_split.collect_split_chunks(
                 split_dir,
                 "mixed",
                 tmp_path / "trace.json.gz",
@@ -390,7 +390,7 @@ class TestSplitterE2E:
     Calls _run_trace_split() directly — the same function main() uses — with
     synthetic traces and the same args the orchestrator would set. This tests
     the full chain: argparse flags -> _build_split_cmd -> TraceLens splitter
-    subprocess -> _collect_split_chunks -> _validate_selected_chunk.
+    subprocess -> collect_split_chunks -> _validate_selected_chunk.
     """
 
     @staticmethod

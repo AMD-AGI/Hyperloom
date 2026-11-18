@@ -65,6 +65,18 @@ def test_digest_covers_the_launch():
     assert replace(launch, frontend=replace(launch.frontend, args=())).digest() != launch.digest()
 
 
+def test_digest_covers_the_framework(tmp_path):
+    launch = _launch()
+    assert replace(launch, framework=Framework.ATOM).digest() != launch.digest()
+    path = tmp_path / "pd_launch.json"
+    write_record(launch, path)
+    document = json.loads(path.read_text())
+    document["framework"] = Framework.ATOM.value
+    path.write_text(json.dumps(document))
+    with pytest.raises(PdRecordError, match="digest"):
+        read_record(path)
+
+
 def test_edited_record_is_refused(tmp_path):
     path = tmp_path / "pd_launch.json"
     write_record(_launch(), path)

@@ -79,7 +79,6 @@ from ._trace_split import (
     STEADY_STATE_MODES,
     UNSPLIT_MODE,
     TraceSplitJob,
-    _default_workspace_path,
     _run_trace_split,
     copy_unsplit_trace,
 )
