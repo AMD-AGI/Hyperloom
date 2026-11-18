@@ -34,6 +34,34 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         return super().add_argument(*names, *aliases, **kwargs)
 """
 
+#: The server entrypoint as ATOM ships it: the engine's arguments, then the server's own, then the server starts.
+_SERVER = """
+import argparse
+
+try:
+    from atom.utils.arg_parser import FlexibleArgumentParser as parser_cls
+except ModuleNotFoundError as exc:
+    if exc.name not in ("atom.utils", "atom.utils.arg_parser"):
+        raise
+    parser_cls = argparse.ArgumentParser
+
+from atom.model_engine.arg_utils import EngineArgs
+
+
+def main():
+    parser = parser_cls(description="ATOM OpenAI API Server")
+    EngineArgs.add_cli_args(parser)
+    parser.add_argument("--host", type=str, default="0.0.0.0")
+    parser.add_argument("--server-port", type=int, default=8000)
+    parser.parse_args()
+    raise RuntimeError("the server started")
+"""
+
+_ENTRYPOINT = "from atom.entrypoints.openai.api_server import main\n"
+
+#: The flags the runner adds to every ATOM launch; the server defines them, the engine does not.
+_RUNNER_FLAGS = ("--host", "127.0.0.1", "--server-port", "30219")
+
 #: ``None`` is an install that predates the native parser module.
 _KV_CACHE_FLAGS = (
     pytest.param(_NATIVE_PARSER, "--kv_cache_dtype", id="native-snake"),
@@ -47,10 +75,13 @@ _SPELLINGS = pytest.mark.parametrize("equals", (False, True), ids=("separate-val
 def atom(tmp_path: Path, request: pytest.FixtureRequest) -> dict[str, str]:
     site = tmp_path / "serve"
     package = site / "atom"
-    for module in (package, package / "model_engine", package / "utils"):
+    entrypoints = package / "entrypoints"
+    for module in (package, package / "model_engine", package / "utils", entrypoints, entrypoints / "openai"):
         module.mkdir(parents=True, exist_ok=True)
         (module / "__init__.py").write_text("", encoding="utf-8")
     (package / "model_engine" / "arg_utils.py").write_text(_ENGINE_ARGS, encoding="utf-8")
+    (entrypoints / "openai" / "api_server.py").write_text(_SERVER, encoding="utf-8")
+    (entrypoints / "openai_server.py").write_text(_ENTRYPOINT, encoding="utf-8")
     parser_source = getattr(request, "param", _NATIVE_PARSER)
     if parser_source is not None:
         (package / "utils" / "arg_parser.py").write_text(parser_source, encoding="utf-8")
@@ -95,6 +126,22 @@ def test_an_unknown_flag_beside_a_known_one_is_named_alone(atom, flag, equals):
     assert answer.unknown_flags == ("--unknown-option",)
 
 
+@pytest.mark.parametrize("atom", (_NATIVE_PARSER, None), ids=("native", "legacy"), indirect=True)
+def test_the_server_flags_the_runner_adds_are_accepted(atom):
+    answer = _judge((*_RUNNER_FLAGS, "--kv_cache_dtype", "fp8"), atom)
+
+    assert answer.status is ParseStatus.ACCEPTED
+    assert answer.unknown_flags == ()
+
+
+@pytest.mark.parametrize("atom", (_NATIVE_PARSER, None), ids=("native", "legacy"), indirect=True)
+def test_a_flag_neither_the_engine_nor_the_server_has_is_named_beside_the_runner_flags(atom):
+    answer = _judge((*_RUNNER_FLAGS, "--unknown-option", "value"), atom)
+
+    assert answer.status is ParseStatus.REJECTED
+    assert answer.unknown_flags == ("--unknown-option",)
+
+
 @pytest.mark.parametrize("atom", (None,), ids=("module-absent",), indirect=True)
 @_SPELLINGS
 def test_the_legacy_parser_has_no_kebab_alias(atom, equals):
@@ -121,7 +168,7 @@ def test_the_legacy_parser_has_no_kebab_alias(atom, equals):
         ),
         pytest.param(
             _NATIVE_PARSER
-            + "\n    def __init__(self):\n        raise ImportError('native parser construction failed')\n",
+            + "\n    def __init__(self, *args, **kwargs):\n        raise ImportError('native parser construction failed')\n",
             "native parser construction failed",
             id="construction-failed",
         ),
