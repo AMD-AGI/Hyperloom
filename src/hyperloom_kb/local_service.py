@@ -18,7 +18,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
-from hyperloom_kb.http_service import SERVICE_LOCK, ServiceSettings, code_digest
+from hyperloom_kb.experience_service import code_digest
+from hyperloom_kb.http_service import SERVICE_LOCK, ServiceSettings
 from hyperloom_kb.remote import RemoteClient, RemoteClientError, RemoteConfig, is_loopback
 from hyperloom_kb.schema import JsonValue
 
