@@ -118,8 +118,7 @@ def test_a_pidfile_the_suite_did_not_write_is_skipped_and_the_rest_are_still_rea
     """An agent that starts a server by hand in its worktree writes a bare pid as ``server.pid``; the reap skips it."""
     stray = tmp_path / "session" / "runs" / "specialist" / "s1" / "worktree" / "scratch"
     stray.mkdir(parents=True)
-    (stray / "server.pid").write_text("373047
-", encoding="utf-8")
+    (stray / "server.pid").write_text("373047\n", encoding="utf-8")
     pid_dir = tmp_path / "session" / "runs" / "specialist" / "s2"
     servers.append(_boot(tmp_path, pid_dir))
     (spawned, worker) = servers[0]
@@ -129,8 +128,7 @@ def test_a_pidfile_the_suite_did_not_write_is_skipped_and_the_rest_are_still_rea
     assert {spawned.proc.pid, worker} <= set(reaped)
     assert _gone(worker)
     assert not (pid_dir / "server.pid").exists()
-    assert (stray / "server.pid").read_text(encoding="utf-8") == "373047
-"
+    assert (stray / "server.pid").read_text(encoding="utf-8") == "373047\n"
 
 
 def test_a_session_without_runs_reaps_nothing(tmp_path):
