@@ -9,6 +9,7 @@ import io
 import tarfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -37,6 +38,7 @@ from hyperloom_multibranch.contracts.toolbox import (
 from hyperloom_multibranch.contracts.blackboard import ClaimKey, ClaimLost, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus
 from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.local.segments import EntryKind
 from hyperloom_multibranch.blackboard.tests.factories import TTL, FakeClock, intent
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
 from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
@@ -700,6 +702,47 @@ async def test_a_lost_claims_withdrawal_the_blackboard_refused_is_written_by_the
     assert [(w.request_id, w.reason.startswith("claim lost")) for w in book.of("withdrawal")] == [
         (written.request_id, True)
     ]
+
+
+class UnloggedRefusals(LocalBlackboard):
+    """A blackboard whose segment cannot take the claim entry that records a refused change."""
+
+    def _append(self, kind: EntryKind, *args: Any, **kwargs: Any) -> Any:
+        if kind is EntryKind.CLAIM:
+            raise OSError("the blackboard folder cannot be written")
+        return super()._append(kind, *args, **kwargs)
+
+
+async def test_a_refusal_the_blackboard_cannot_log_withdraws_the_request_and_leaves_its_claim_released(
+    tmp_path: Path,
+) -> None:
+    """The claim is handed to the request before the change is checked against the other branches' tests: a failure
+    there must end the request, or its claim reads held, blocking its intent for every branch, for the session."""
+    root = tmp_path / "blackboard"
+    board = UnloggedRefusals(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
+    box = FakeToolbox(
+        FakeToolboxConfig(noise=QUIET),
+        blackboard=board,
+        wiring=FakeWiring(claims=board, records=board),
+        autorun=False,
+    )
+
+    def specialist(branch: str) -> LocalBlackboard:
+        return LocalBlackboard(root, Writer(Role.SPECIALIST_RUNTIME, "specialist", branch), clock=FakeClock())
+
+    first, second = intent("b1", "c0", "moe gemm", "tuned kernel"), intent("b2", "c0", "moe gemm", "more sequences")
+    await specialist("b1").acquire(first, RecipeDelta().fingerprint(), ttl_seconds=TTL)
+    await box.submit_test(_request("b1", intent_fingerprint=first.fingerprint))
+    claim = await specialist("b2").acquire(second, RecipeDelta().fingerprint(), ttl_seconds=TTL)
+
+    with pytest.raises(OSError, match="folder cannot be written"):
+        await box.submit_test(_request("b2", intent_fingerprint=second.fingerprint))
+
+    (withdrawn,) = box.withdrawn.values()
+    assert withdrawn.startswith("claim not attached: OSError(")
+    assert (await specialist("b2").lookup(claim.key, DELTA.fingerprint())).claim is None
+    state = await box.queue_state()
+    assert (state.queued, state.running_by_branch) == (0, {"b1": 1})
 
 
 class HeldClaims:

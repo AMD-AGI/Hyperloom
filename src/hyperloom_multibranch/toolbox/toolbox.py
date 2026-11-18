@@ -630,15 +630,21 @@ class RealToolbox:
 
         try:
             await self._sink.write_request(replace(accepted, priority=entry.priority))
-            if self._claims is not None and accepted.intent_fingerprint is not None:
-                await self._claims.attach_request(self._key(accepted), entry.request_id)
-        except ClaimLost as error:
-            # The row is written, so the request ends as withdrawn, logged like any outcome: it waits in no queue, and a
-            # write the blackboard refuses is retried by the next tick and the next start, never left in flight.
-            await self._record_and_write(entry, {"withdrawal": f"claim lost: {error}"})
-            raise RequestRejected(f"the claim of this request is not held: {error}") from error
         except BaseException:
             self._log.abort(entry.request_id)
+            raise
+        if self._claims is None or accepted.intent_fingerprint is None:
+            return
+        # The row is written, so a request that fails here ends as withdrawn, logged like any outcome: it waits in no
+        # queue, and a write the blackboard refuses is retried by the next tick and the next start. The claim a test
+        # carries is held until its test has an outcome, so an aborted request would hold it for the session.
+        try:
+            await self._claims.attach_request(self._key(accepted), entry.request_id)
+        except ClaimLost as error:
+            await self._record_and_write(entry, {"withdrawal": f"claim lost: {error}"})
+            raise RequestRejected(f"the claim of this request is not held: {error}") from error
+        except Exception as error:
+            await self._record_and_write(entry, {"withdrawal": f"claim not attached: {error!r}"})
             raise
 
     def _enqueue(
