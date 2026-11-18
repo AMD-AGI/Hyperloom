@@ -8,7 +8,9 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
 import stat
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -19,6 +21,9 @@ from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import REPLAY_TARGET, BlackboardSnapshot, Probation, TestRecord
 from hyperloom_multibranch.contracts.blackboard.vocab import BranchDriver, CommitOrigin, LineageKind
 from hyperloom_multibranch.blackboard.families import Mechanism, family_of
+from hyperloom_common.io import WriteOptions, atomic_write_text
+from hyperloom_common.tests.shared_accounts import other_accounts
+from hyperloom_multibranch.blackboard.local import files
 from hyperloom_multibranch.blackboard.rsi.archive import (
     ARCHIVE_ENV,
     ARCHIVED,
@@ -405,6 +410,69 @@ def test_an_archived_tree_is_readable_by_every_account_of_the_deployment_s_group
     [stored] = archive.root.glob("*.json")
     assert stat.S_IMODE(stored.stat().st_mode) == 0o644
     assert stat.S_IMODE(archive.root.stat().st_mode) == 0o2775
+
+
+@pytest.fixture(params=[0o022, 0o077], ids=["umask-022", "umask-077"])
+def any_umask(request: pytest.FixtureRequest) -> Iterator[None]:
+    previous = os.umask(request.param)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+@pytest.mark.usefixtures("any_umask")
+def test_an_archived_tree_in_a_setgid_folder_others_can_write_is_still_the_group_s_to_read_whatever_the_umask(
+    snapshot: BlackboardSnapshot, tmp_path: Path
+) -> None:
+    # a deployment's trees folder made 2777: not storage set up to be shared, yet every session of the group reads it
+    archive = TreeArchive(tmp_path / "archive")
+    archive.root.mkdir(parents=True)
+    archive.root.chmod(0o2777)
+    if not archive.root.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+
+    archive.put(tree_from_snapshot(snapshot, METRIC))
+    session_file = archive.root / "session.txt"
+    atomic_write_text(session_file, "x", options=WriteOptions(group_read=True))
+
+    [stored] = archive.root.glob("*.json")
+    assert stat.S_IMODE(stored.stat().st_mode) == 0o640
+    # the same rule a session file written with group read follows
+    assert stat.S_IMODE(session_file.stat().st_mode) == 0o640
+
+
+def test_another_account_of_the_group_reads_a_tree_archived_in_a_setgid_folder_others_can_write() -> None:
+    with other_accounts() as accounts:
+        trees = accounts.root / "trees"
+        trees.mkdir()
+        os.chown(trees, 0, accounts.group)
+        trees.chmod(0o2777)
+        accounts.add_module(Path(files.__file__), "files")
+        tree = trees / "MB-1.json"
+
+        accounts.run(
+            accounts.first,
+            f"import files, pathlib; files.publish_once(pathlib.Path({str(tree)!r}), b'{{}}', group_read=True)",
+        )
+
+        assert accounts.run(accounts.second, f"print(open({str(tree)!r}).read())").strip() == "{}"
+        with pytest.raises(AssertionError, match="Permission denied"):
+            accounts.run(accounts.outsider, f"open({str(tree)!r}).read()")
+
+
+@pytest.mark.usefixtures("any_umask")
+def test_an_archived_tree_outside_a_setgid_folder_stays_owner_only(
+    snapshot: BlackboardSnapshot, tmp_path: Path
+) -> None:
+    archive = TreeArchive(tmp_path / "archive")
+    archive.root.mkdir(parents=True)
+    archive.root.chmod(0o777)
+
+    archive.put(tree_from_snapshot(snapshot, METRIC))
+
+    [stored] = archive.root.glob("*.json")
+    assert stat.S_IMODE(stored.stat().st_mode) == 0o600
 
 
 def test_a_tree_this_account_cannot_open_is_named_with_its_owner_and_mode_not_dropped_silently(
