@@ -21,9 +21,11 @@ from kernelforge.workflows.rewrite_controller import (
 )
 
 from hyperloom_common.io import JsonFormat, atomic_write_json
+from hyperloom.orchestrator.actions.executors._nogit_patch import _apply_patch_no_git
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _git_commit_kept,
     _patch_touched_paths,
+    _patch_touched_paths_split,
 )
 from hyperloom.orchestrator.actions.executors._patch_git import _git_apply_reverse, _git_restore_to_head
 from hyperloom.orchestrator.actions.executors.patch_conflict_merge import (
@@ -32,9 +34,11 @@ from hyperloom.orchestrator.actions.executors.patch_conflict_merge import (
     apply_patch_resolving_conflicts,
 )
 from hyperloom.orchestrator.actions.stop_attribution import StoppedByTheRun
+from hyperloom.orchestrator.delivery.ledger import restore_records
 from hyperloom.orchestrator.enablement.runtime.adapters import get_adapter
 from hyperloom.orchestrator.source_snapshot import MANIFEST_NAME, SourceLayer, snapshot_source_layer
 
+from .wheel_repository import lent_work_trees
 from .controller_publication import (
     ControllerPatchPublication,
     ControllerPublicationError,
@@ -238,34 +242,44 @@ def _keep_result(
     }
 
 
-def _committed_source_layer(
-    repo: Path,
+def _kept_source_layer(
+    publication: ControllerPatchPublication,
     keep_commit: str,
-    operator_id: str,
     session_dir: Path,
     framework: str,
 ) -> dict[str, Any]:
-    """Snapshot the files the KEEP commit changed, so a resume onto a stock tree can reinstall them."""
+    """Snapshot the files the KEEP changed, so a resume onto a stock tree can reinstall them.
+
+    A committed KEEP names them by its commit. One landed on a tree with no
+    history names them by its patch, and has no commit to pin them to.
+    """
+    repo = publication.repo_root
     handles: dict[str, Any] = {"framework_root": str(repo), "source_layer_landed": True}
     try:
-        listing = _git_output(
-            repo, "-c", "core.quotepath=off", "diff-tree", "--no-commit-id", "--name-status", "-r", keep_commit
-        )
-        rows = [line.split("\t") for line in listing.splitlines() if "\t" in line]
-        import_root = get_adapter(framework).source_import_root(str(repo))
+        if keep_commit:
+            listing = _git_output(
+                repo, "-c", "core.quotepath=off", "diff-tree", "--no-commit-id", "--name-status", "-r", keep_commit
+            )
+            rows = [line.split("\t") for line in listing.splitlines() if "\t" in line]
+            rel_paths = [row[-1] for row in rows]
+            declared_ops = {row[-1]: "delete" for row in rows if row[0].startswith("D")}
+        else:
+            upserted, deleted = _patch_touched_paths_split(repo, [publication.patch_path])
+            rel_paths = upserted + deleted
+            declared_ops = dict.fromkeys(deleted, "delete")
         snap = snapshot_source_layer(
             SourceLayer(
                 framework_root=repo,
                 base_sha=keep_commit,
-                rel_paths=[row[-1] for row in rows],
-                declared_ops={row[-1]: "delete" for row in rows if row[0].startswith("D")},
-                import_root=import_root,
+                rel_paths=rel_paths,
+                declared_ops=declared_ops,
+                import_root=get_adapter(framework).source_import_root(str(repo)),
             ),
-            dest_dir=session_dir / "optimization_stack" / "src" / operator_directory_name(operator_id),
+            dest_dir=session_dir / "optimization_stack" / "src" / operator_directory_name(publication.operator_id),
             provenance=_CONTROLLER_SOURCE,
         )
     except (OSError, subprocess.SubprocessError) as error:
-        log.warning("KEEP %s committed but its source snapshot could not be written: %s", operator_id, error)
+        log.warning("KEEP %s landed but its source snapshot could not be written: %s", publication.operator_id, error)
         return handles
     if not snap:
         return handles
@@ -324,6 +338,14 @@ def _refusal(
     )
 
 
+@dataclass(frozen=True)
+class _UnversionedTrees:
+    """Trees whose lent history was withdrawn before integration, and where landing on them backs files up."""
+
+    trees: frozenset[Path]
+    backup_root: Path
+
+
 class _ControllerIntegration:
     """One sequential pass over a Controller's published patches."""
 
@@ -332,10 +354,12 @@ class _ControllerIntegration:
         validate: PatchValidator,
         persist_keep: Callable[[ControllerPatchPublication, dict[str, Any], str], Awaitable[str]],
         admit_round: RoundAdmission,
+        unversioned: _UnversionedTrees,
     ) -> None:
         self._validate = validate
         self._persist_keep = persist_keep
         self._admit_round = admit_round
+        self._unversioned = unversioned
         # One base commit, the head it was pinned against and the pin's error per
         # repository, rather than one repository per run.
         self._pins: dict[Path, tuple[str, str, str]] = {}
@@ -347,6 +371,8 @@ class _ControllerIntegration:
     async def integrate(self, publication: ControllerPatchPublication) -> PatchIntegrationResult:
         """Pin the repository, refuse a stale base or a dirty worktree, then land the patch."""
         repo = publication.repo_root
+        if repo.resolve() in self._unversioned.trees:
+            return await self._land_without_history(publication)
         if repo not in self._pins:
             self._pins[repo] = (publication.base_commit, *_head_against_base(repo, publication.base_commit))
         base, pinned_head, pin_error = self._pins[repo]
@@ -371,6 +397,43 @@ class _ControllerIntegration:
             reason = f"uncommitted tracked changes on the paths this patch modifies: {changed}"
             return _refusal(publication, "skipped_dirty_worktree", reason, head_before)
         return await self._apply_and_validate(publication, head_before, touched)
+
+    async def _land_without_history(self, publication: ControllerPatchPublication) -> PatchIntegrationResult:
+        """Land one publication on a tree whose lent history was withdrawn, through a backed-up ``patch``.
+
+        The controller hands a borrowed tree back at its base before the history
+        is withdrawn, so the tree is the base every publication diffed from. With
+        no history there is nothing to merge a stale diff against or commit a
+        KEEP into: a patch that no longer applies over an earlier KEEP is
+        reverted, and a KEEP is recorded by the files it left.
+        """
+        if (stop := self._admit_round(self._rounds_run)) is not None:
+            return PatchIntegrationResult(
+                operator_id=publication.operator_id, status=stop.error_class, reason=stop.never_started
+            )
+        backup_root = self._unversioned.backup_root / operator_directory_name(publication.operator_id)
+        applied = _apply_patch_no_git(publication.repo_root, publication.patch_path, backup_root)
+        if not applied.ok:
+            return _refusal(publication, "reverted_apply_failed", applied.error + _restore_note(applied.backups))
+
+        self._rounds_run += 1
+        try:
+            validation = await self._validate(publication)
+        except Exception as error:  # isolation boundary: one publication's E2E validation
+            log.warning("E2E validation raised for %s: %s", publication.operator_id, error, exc_info=True)
+            reason = f"E2E validation raised: {error}" + _restore_note(applied.backups)
+            return _refusal(publication, "reverted_e2e_failed", reason)
+        if not _kept(validation):
+            reason = _not_kept_reason(validation) + _restore_note(applied.backups)
+            return _refusal(publication, "reverted_e2e_failed", reason, **_measured(validation))
+
+        record_reason = await self._persist_keep(publication, validation, "")
+        return _refusal(
+            publication,
+            "kept",
+            record_reason + _settle_apply_manifest(validation, kept=True),
+            **_measured(validation),
+        )
 
     async def _apply_onto_landed(self, publication: ControllerPatchPublication) -> PatchMergeOutcome:
         """Apply one publication's patch, resolving conflicts against the patches already landed in its repo."""
@@ -417,15 +480,11 @@ class _ControllerIntegration:
             log.warning("E2E validation raised for %s: %s", publication.operator_id, error, exc_info=True)
             reason = f"E2E validation raised: {error}" + _revert_note(repo, publication.patch_path)
             return _refusal(publication, "reverted_e2e_failed", reason, head_before)
-        kept = (
-            str(validation.get("status") or "ok").lower() == "ok" and str(validation.get("decision")).upper() == "KEEP"
-        )
-        if not kept:
-            reason = str(validation.get("error") or validation.get("decision_reason") or "E2E did not KEEP")
+        if not _kept(validation):
             return _refusal(
                 publication,
                 "reverted_e2e_failed",
-                reason + _revert_note(repo, publication.patch_path),
+                _not_kept_reason(validation) + _revert_note(repo, publication.patch_path),
                 head_before,
                 **_measured(validation),
             )
@@ -454,6 +513,21 @@ class _ControllerIntegration:
             keep_commit=keep_commit,
             **_measured(validation),
         )
+
+
+def _kept(validation: dict[str, Any]) -> bool:
+    """Whether the E2E validation decided to KEEP."""
+    return str(validation.get("status") or "ok").lower() == "ok" and str(validation.get("decision")).upper() == "KEEP"
+
+
+def _not_kept_reason(validation: dict[str, Any]) -> str:
+    return str(validation.get("error") or validation.get("decision_reason") or "E2E did not KEEP")
+
+
+def _restore_note(backups: list[dict[str, Any]]) -> str:
+    """Put back what a no-history landing overwrote and render what happened as a reason suffix."""
+    _restored, errors = restore_records(backups)
+    return f" (revert failed: {'; '.join(errors)})" if errors else ""
 
 
 def _measured(validation: dict[str, Any]) -> dict[str, float]:
@@ -489,24 +563,27 @@ async def integrate_controller_patches(
         keep_commit: str,
     ) -> str:
         try:
-            layer = _committed_source_layer(
-                publication.repo_root,
+            layer = _kept_source_layer(
+                publication,
                 keep_commit,
-                publication.operator_id,
                 session.session_dir,
                 str(session.shared_state.framework or ""),
             )
             await session.record_keep({**_keep_result(publication, validation, keep_commit), **layer})
             session.shared_state.save(Path(session.session_dir))
         except OSError as error:
-            log.warning("KEEP %s committed but recording it failed: %s", publication.operator_id, error, exc_info=True)
-            return f"Git KEEP committed; SharedState recording failed: {error}"
+            log.warning("KEEP %s landed but recording it failed: %s", publication.operator_id, error, exc_info=True)
+            return f"KEEP landed; SharedState recording failed: {error}"
         return ""
 
     run = _ControllerIntegration(
         validator or (lambda publication: _default_validator(publication, session_dir=Path(session.session_dir))),
         persist_keep,
         admit_round,
+        _UnversionedTrees(
+            trees=frozenset(tree.resolve() for tree in lent_work_trees(Path(session.session_dir))),
+            backup_root=integration_root / "backups",
+        ),
     )
     results: list[PatchIntegrationResult] = []
     for index, patch_dir in enumerate(_priority_ordered_patch_dirs(layout)):

@@ -1758,3 +1758,113 @@ async def test_a_controller_keep_is_reinstalled_on_a_fresh_tree(tmp_path: Path) 
     assert installed.failed == []
     assert installed.unreproducible == []
     assert source.read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
+def _withdrawn_lent_package(tmp_path: Path, session_dir: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str]:
+    """A wheel-installed package lent this session's history, as integration finds it: pointer withdrawn."""
+    from hyperloom.orchestrator.kernel import wheel_repository
+
+    package = tmp_path / "venv" / "lib" / "python3.12" / "site-packages" / "vllm"
+    package.mkdir(parents=True)
+    (package / "first.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (package / "second.py").write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr(wheel_repository, "_installed_package_dir", lambda name: package if name == "vllm" else None)
+    assert wheel_repository.attach_wheel_histories(session_dir, ["vllm"]) == (package,)
+    return package, _git(package, "rev-parse", "HEAD")
+
+
+@pytest.mark.asyncio
+async def test_a_lent_tree_lands_keeps_and_reverts_without_a_history(tmp_path: Path, monkeypatch) -> None:
+    """The tree reads as a plain directory to every lane, so integration must not need its history back."""
+    from hyperloom.orchestrator.kernel.wheel_repository import detach_wheel_histories
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    package, base = _withdrawn_lent_package(tmp_path, session_dir, monkeypatch)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    for name, content in (("first", "VALUE = 2\n"), ("second", "VALUE = 3\n")):
+        _publish(
+            patches,
+            package,
+            base,
+            kernel_name=name,
+            kernel_path=f"{name}.py",
+            patch=_patch(package, f"{name}.py", content),
+        )
+    detach_wheel_histories(session_dir)
+
+    async def _validate(publication):
+        if publication.identity["kernel_name"] == "second":
+            return {"decision": "REVERT", "new_tput": 90.0, "gain_pct": -10.0}
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    state = _state(session_dir, package)
+    summary = await _integrate(patches_root=patches, session_dir=session_dir, shared_state=state, validator=_validate)
+
+    assert [result.status for result in summary.results] == ["kept", "reverted_e2e_failed"]
+    assert summary.results[0].keep_commit == ""
+    assert (package / "first.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert (package / "second.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert not (package / ".git").exists()
+    snapshot = Path(state.optimization_stack[-1]["source_snapshot"])
+    assert (snapshot / "files" / "first.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
+@pytest.mark.asyncio
+async def test_a_patch_that_no_longer_applies_to_a_lent_tree_is_reverted(tmp_path: Path, monkeypatch) -> None:
+    from hyperloom.orchestrator.kernel.wheel_repository import detach_wheel_histories
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    package, base = _withdrawn_lent_package(tmp_path, session_dir, monkeypatch)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        package,
+        base,
+        kernel_name="stale",
+        kernel_path="first.py",
+        patch=_patch(package, "first.py", "VALUE = 2\n"),
+    )
+    detach_wheel_histories(session_dir)
+    (package / "first.py").write_text("VALUE = 7\n", encoding="utf-8")
+
+    async def _validate(_publication):
+        raise AssertionError("a patch that did not land must never reach validation")
+
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, package),
+        validator=_validate,
+    )
+
+    assert summary.results[0].status == "reverted_apply_failed"
+    assert (package / "first.py").read_text(encoding="utf-8") == "VALUE = 7\n"
+
+
+@pytest.mark.asyncio
+async def test_lent_histories_are_withdrawn_before_integration(tmp_path, monkeypatch):
+    """Integration, and every lane after it, must find a lent tree as the plain directory it was."""
+    from hyperloom.orchestrator.kernel import controller_submit, wheel_repository
+
+    repo, _ = _repo(tmp_path)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    phase = _coordinator(session_dir, repo).phase_kernel
+    order: list[str] = []
+    monkeypatch.setattr(phase, "_kernel_rewrite_controller_timeouts", lambda: (60, 90))
+    monkeypatch.setattr(
+        controller_submit, "run_controller_subprocess", lambda **kwargs: {"status": "completed", "patch_count": 1}
+    )
+    monkeypatch.setattr(controller_submit, "record_controller_llm_usage", lambda **kwargs: None)
+    monkeypatch.setattr(wheel_repository, "detach_wheel_histories", lambda _session_dir: order.append("withdraw"))
+
+    async def _integrate_patches(**_kwargs):
+        order.append("integrate")
+        return integration.ControllerIntegrationSummary("completed", (), 0, 0, 0, "")
+
+    monkeypatch.setattr(integration, "integrate_controller_patches", _integrate_patches)
+    await phase._run_kernel_rewrite_controller(tmp_path / "handoff", tmp_path / "output", {})
+
+    assert order == ["withdraw", "integrate"]

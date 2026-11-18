@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Lend a wheel-installed kernel library a Git history for one KERNEL entry.
+"""Lend wheel-installed framework packages a Git history for the rewrite controller's run.
 
 The rewrite campaign names its base, keeps and reverts through Git, and a
 package pip installed into site-packages has no history. Its Python and Triton
@@ -9,14 +9,15 @@ sources are still the code the server imports, so a rewrite of them is as real
 as one in a checkout; the tree only lacks a commit to name.
 
 The history lives in the session directory. The package holds a ``.git`` file
-naming it and nothing else, so only the package itself reads as a repository,
-and the file is removed once integration has decided on every patch. The next
-entry re-attaches the same history, so what the session kept carries forward.
+naming it and nothing else, and only while the controller runs: the KERNEL entry
+withdraws the pointer before integration. Every other lane decides how to apply,
+replay and revert a patch by whether the tree is a checkout, and a wheel-installed
+framework's earlier KEEPs were recorded as backed-up ``patch`` runs, so the tree
+has to read as the plain directory it was whenever anything but the controller
+looks at it. Integration lands the controller's patches on it the same way.
 
-Only the kernel library is lent one. A framework package is also the tree the
-framework agent patches, and that path chooses ``git apply`` or a backed-up
-``patch`` by whether the tree is a checkout, so a history appearing under it
-would change how every one of its patches lands.
+The next entry re-attaches the same history, so what the session kept carries
+forward into the base it seals.
 
 Compiled extensions and code objects stay out of the index. They are gigabytes
 no rewrite edits, and an ignored path is also outside every restore the
@@ -29,6 +30,7 @@ import importlib.util
 import logging
 import shutil
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
 
 from hyperloom.inference_optimizer.framework_paths import framework_apply_tree
@@ -38,10 +40,10 @@ from kernelforge.workflows.rewrite_controller import reclaim_campaign_branch
 
 log = logging.getLogger(__name__)
 
-#: Wheel-installed packages whose sources a rewrite may edit.
-WHEEL_KERNEL_LIBRARIES: tuple[str, ...] = ("aiter",)
-
 _HISTORIES_DIRNAME = "wheel_repositories"
+
+#: Names, inside a history, the package directory it was lent to.
+_WORK_TREE_FILENAME = "hyperloom-lent-work-tree"
 
 _EXCLUDES: tuple[str, ...] = (
     "__pycache__/",
@@ -89,8 +91,8 @@ def _installed_package_dir(name: str) -> Path | None:
     return None if tracked_elsewhere else package_dir
 
 
-def _history_dir(session_dir: Path, name: str) -> Path:
-    return (Path(session_dir) / _HISTORIES_DIRNAME / f"{name}.git").resolve()
+def _histories_root(session_dir: Path) -> Path:
+    return (Path(session_dir) / _HISTORIES_DIRNAME).resolve()
 
 
 def _pointer_target(package_dir: Path) -> Path | None:
@@ -135,6 +137,7 @@ def _create_history(package_dir: Path, history: Path) -> None:
         _git(package_dir, "init", "-q", f"--separate-git-dir={history}")
         (history / "info").mkdir(parents=True, exist_ok=True)
         (history / "info" / "exclude").write_text("".join(f"{pattern}\n" for pattern in _EXCLUDES), encoding="utf-8")
+        (history / _WORK_TREE_FILENAME).write_text(f"{package_dir}\n", encoding="utf-8")
         _git(package_dir, "add", "-A", "--", ".")
         _git(package_dir, *_IDENTITY, "commit", "-q", "--no-verify", "-m", f"hyperloom: snapshot of {package_dir.name}")
     except (OSError, subprocess.SubprocessError):
@@ -161,18 +164,18 @@ def _attach(package_dir: Path, history: Path) -> bool:
     return True
 
 
-def attach_wheel_histories(session_dir: Path) -> tuple[Path, ...]:
-    """Lend every wheel-installed kernel library this session's history; return the packages lent one.
+def attach_wheel_histories(session_dir: Path, packages: Iterable[str]) -> tuple[Path, ...]:
+    """Lend each of ``packages`` that pip installed this session's history; return the packages lent one.
 
     Best-effort per package: a package that cannot take one costs its own
     operators, which the controller then skips for having no repository.
     """
     attached: list[Path] = []
-    for name in WHEEL_KERNEL_LIBRARIES:
+    for name in packages:
         package_dir = _installed_package_dir(name)
         if package_dir is None:
             continue
-        history = _history_dir(session_dir, name)
+        history = _histories_root(session_dir) / f"{name}.git"
         try:
             if _attach(package_dir, history):
                 attached.append(package_dir)
@@ -181,11 +184,25 @@ def attach_wheel_histories(session_dir: Path) -> tuple[Path, ...]:
     return tuple(attached)
 
 
+def lent_work_trees(session_dir: Path) -> frozenset[Path]:
+    """Every package directory this session has lent a history, whether or not it holds the pointer now."""
+    root = _histories_root(session_dir)
+    if not root.is_dir():
+        return frozenset()
+    trees: set[Path] = set()
+    for record in root.glob(f"*.git/{_WORK_TREE_FILENAME}"):
+        text = record.read_text(encoding="utf-8").strip()
+        if text:
+            trees.add(Path(text))
+    return frozenset(trees)
+
+
 def detach_wheel_histories(session_dir: Path) -> None:
     """Remove the pointers this session's histories left in installed packages."""
-    for name in WHEEL_KERNEL_LIBRARIES:
-        package_dir = _installed_package_dir(name)
-        if package_dir is None or _pointer_target(package_dir) != _history_dir(session_dir, name):
+    root = _histories_root(session_dir)
+    for package_dir in lent_work_trees(session_dir):
+        target = _pointer_target(package_dir)
+        if target is None or target.parent != root:
             continue
         try:
             (package_dir / ".git").unlink()
@@ -193,4 +210,4 @@ def detach_wheel_histories(session_dir: Path) -> None:
             log.warning("could not remove the history pointer in %s: %s", package_dir, error)
 
 
-__all__ = ["WHEEL_KERNEL_LIBRARIES", "attach_wheel_histories", "detach_wheel_histories"]
+__all__ = ["attach_wheel_histories", "detach_wheel_histories", "lent_work_trees"]

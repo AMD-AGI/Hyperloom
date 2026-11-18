@@ -22,7 +22,7 @@ import pytest
 import hyperloom.orchestrator.kernel.campaign_baseline as campaign_baseline
 import hyperloom.orchestrator.kernel.wheel_repository as wheel_repository
 from hyperloom.orchestrator.kernel.campaign_baseline import seal_campaign_baseline
-from hyperloom.orchestrator.kernel.wheel_repository import detach_wheel_histories
+from hyperloom.orchestrator.kernel.wheel_repository import detach_wheel_histories, lent_work_trees
 from kernelforge.workflows.rewrite_controller import CAMPAIGN_BRANCH_PREFIX, reclaim_campaign_branch
 from kernelforge.workflows.rewrite_controller.worktree import record_campaign_baseline, untracked_paths
 
@@ -102,14 +102,23 @@ def test_a_wheel_installed_kernel_library_is_sealed_from_a_session_history(
     assert not [path for path in tracked if "__pycache__" in path]
 
 
-def test_a_wheel_installed_framework_is_not_lent_a_history(installed: dict[str, Path], tmp_path: Path) -> None:
-    """The framework agent patches this tree too, and a history would change how its patches land."""
+def test_a_wheel_installed_framework_is_lent_a_history_too(installed: dict[str, Path], tmp_path: Path) -> None:
     vllm = installed["vllm"]
 
     pins = _seal(tmp_path / "session")
 
-    assert str(vllm) not in pins
-    assert not (vllm / ".git").exists()
+    assert _git(vllm, "show", f"{pins[str(vllm)].commit}:ops/moe.py") == "BLOCK_M = 64"
+
+
+def test_a_withdrawn_history_still_names_the_tree_it_was_lent(installed: dict[str, Path], tmp_path: Path) -> None:
+    """Integration lands on a lent tree after the pointer is gone, and has to know which trees those are."""
+    session = tmp_path / "session"
+    _seal(session)
+
+    detach_wheel_histories(session)
+
+    assert lent_work_trees(session) == frozenset(installed.values())
+    assert not [package for package in installed.values() if (package / ".git").exists()]
 
 
 def test_the_next_entry_carries_the_session_forward_after_the_pointer_is_withdrawn(

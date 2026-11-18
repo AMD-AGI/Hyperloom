@@ -762,9 +762,9 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         from ..kernel.forge_handoff import write_forge_handoff
         from ..kernel.wheel_repository import detach_wheel_histories
 
-        # Sealing may lend an installed package a history, and integration is its
-        # last reader; outside this window a ``.git`` there would change how other
-        # lanes patch the package.
+        # Sealing may lend an installed package a history, which only the controller
+        # may see; the run withdraws it before integration, and this is the backstop
+        # for an entry that ends before it gets there.
         try:
             baselines = self._seal_campaign_baselines()
             env_spec = self._coord.writeback.build_env_spec()
@@ -911,6 +911,11 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
                 result["reclaimed_repositories"] = reclaimed
         except ValueError:
             log.exception("KERNEL entry: reclaiming the campaign repositories failed")
+        # After the reclaim, which returns a lent tree through its history, and before
+        # integration, which lands on it as the plain directory every other lane sees.
+        from ..kernel.wheel_repository import detach_wheel_histories
+
+        detach_wheel_histories(self.session_dir)
         if result["status"] == "cancelled":  # unsettled: the resumed entry runs a fresh Controller
             return
         await self._integrate_controller_output(result, output_dir)

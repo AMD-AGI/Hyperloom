@@ -65,7 +65,7 @@ log = logging.getLogger(__name__)
 
 _GIT_TIMEOUT_SEC = 120
 
-#: Packages that can hold a rewritable kernel and are installed from source.
+#: Packages that can hold a rewritable kernel, installed from source or as a wheel.
 #: Probed by name rather than read from configuration: a container serving one
 #: framework has that one importable and the others absent, so the interpreter
 #: already knows the answer, while the configured roots are routinely unset --
@@ -252,15 +252,15 @@ def seal_campaign_baseline(
 ) -> dict[str, RepoBaseline]:
     """Seal every configured source repository and return what each was pinned to.
 
-    A wheel-installed kernel library is lent this session's history first, so
-    it is sealed like any checkout; the caller detaches it once integration is
-    done.
+    A wheel-installed framework package is lent this session's history first,
+    so it is sealed like any checkout; the caller withdraws it once the
+    controller has run.
 
     Best-effort per repository. One tree that cannot be sealed -- no Git, no
     write permission -- costs that repository's operators, which the controller
     refuses individually; it must not cost the whole KERNEL phase.
     """
-    attach_wheel_histories(session_dir)
+    attach_wheel_histories(session_dir, _FRAMEWORK_PACKAGES)
     branch = session_branch_name(session_id, macro_cycle)
     baselines: dict[str, RepoBaseline] = {}
     for repo in campaign_repositories(state):
