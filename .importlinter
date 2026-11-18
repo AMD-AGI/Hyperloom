@@ -535,7 +535,7 @@ ignore_imports =
     hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.kernel.kernel_decisions
     hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.phases.machine_state
     hyperloom.orchestrator.trace_analysis.tracelens_skill_runner -> hyperloom.orchestrator.roles.claude_requests
-    kernelforge.workflows.gemm_tune.dense_shapes -> kernelforge.workflows.gemm_tune.tuners._aiter_dense_common
+    kernelforge.workflows.gemm_tune.dense_shapes -> kernelforge.workflows.gemm_tune.tuners._aiter_dense_inputs
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.workflows.forge_fusion.harness_contract
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.workflows.forge_fusion.validate
     kernelforge.workflows.forge_loop.roles.specialists -> kernelforge.workflows.forge_loop.iteration.fanout
