@@ -13,10 +13,11 @@ from types import MappingProxyType, SimpleNamespace
 import pytest
 
 from hyperloom.common.env_safety import OPERATOR_EXTRA_ENV_VAR
-from hyperloom.orchestrator.actions.executors import _grid_runner
+from hyperloom.orchestrator.actions.executors import _grid_runner, _multi_node_env, profile
 from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as lifecycle
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+from hyperloom.orchestrator.kernel import _integrate_rebaseline
 from hyperloom.orchestrator.state import base_launch
 from hyperloom.orchestrator.state.base_launch import ServerBase
 from inference_suite.recipe.defaults import default_table
@@ -61,7 +62,35 @@ async def _restart_grid(tmp_path: Path, variant: GridVariant | None = None) -> N
     await _grid_runner._restart_multi_node_server(run, at, SimpleNamespace(mn_effective_args=""))
 
 
-@pytest.mark.parametrize("restart", [_restart_baseline, _restart_grid], ids=["baseline", "grid"])
+async def _restart_profile(tmp_path: Path, extra_envs=None, unset_envs=()) -> None:
+    params = {"extra_envs": dict(extra_envs or {}), "unset_envs": list(unset_envs), "model_path": "/models/m"}
+    assert await profile._restart_round_server(params, str(tmp_path)) is None
+
+
+async def _restart_integrate(tmp_path: Path, extra_envs=None, unset_envs=()) -> None:
+    params = {"extra_envs": dict(extra_envs or {}), "unset_envs": list(unset_envs)}
+    ctx = SimpleNamespace(task=SimpleNamespace(params=params), extra={})
+    rebaseline = _integrate_rebaseline._IntegrateRebaseline(tmp_path, "", None, ctx)
+    assert await _integrate_rebaseline._multi_node_restart_failure(rebaseline, {"model_path": "/models/m"}, {}) is None
+
+
+_RESTARTS = pytest.mark.parametrize(
+    "restart",
+    [_restart_baseline, _restart_grid, _restart_profile, _restart_integrate],
+    ids=["baseline", "grid", "profile", "integrate"],
+)
+_ROUND_ENV_RESTARTS = pytest.mark.parametrize(
+    "restart", [_restart_profile, _restart_integrate], ids=["profile", "integrate"]
+)
+
+
+@pytest.fixture(autouse=True)
+def _on_a_multi_node_session(monkeypatch):
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
+    monkeypatch.setattr(_integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **_kw: {})
+
+
+@_RESTARTS
 async def test_an_operator_pin_wins_over_the_default_tables_env_on_the_server(
     monkeypatch, tmp_path, forwarded, restart
 ):
@@ -74,7 +103,7 @@ async def test_an_operator_pin_wins_over_the_default_tables_env_on_the_server(
     assert forwarded == [{"VLLM_ROCM_USE_AITER": "0"}]
 
 
-@pytest.mark.parametrize("restart", [_restart_baseline, _restart_grid], ids=["baseline", "grid"])
+@_RESTARTS
 async def test_the_base_env_reaches_the_server_with_no_pin(monkeypatch, tmp_path, forwarded, restart):
     _base(monkeypatch, {"SGLANG_REF_KNOB": "1"})
 
@@ -111,7 +140,7 @@ async def test_no_base_env_and_no_pin_forwards_only_the_variants_envs(monkeypatc
     assert forwarded == [{"MORI_X": "1"}]
 
 
-@pytest.mark.parametrize("restart", [_restart_baseline, _restart_grid], ids=["baseline", "grid"])
+@_RESTARTS
 async def test_a_credential_pin_never_reaches_the_server(monkeypatch, tmp_path, forwarded, restart):
     _base(monkeypatch, {})
     _pin(monkeypatch, OPENAI_API_KEY="placeholder", NCCL_IB_DISABLE="1")
@@ -119,3 +148,15 @@ async def test_a_credential_pin_never_reaches_the_server(monkeypatch, tmp_path, 
     await restart(tmp_path)
 
     assert forwarded == [{"NCCL_IB_DISABLE": "1"}]
+
+
+@_ROUND_ENV_RESTARTS
+async def test_a_rounds_own_env_wins_over_the_pin_and_its_unset_drops_the_base(
+    monkeypatch, tmp_path, forwarded, restart
+):
+    _base(monkeypatch, {"VLLM_ROCM_USE_AITER": "1", "SGLANG_REF_KNOB": "reference"})
+    _pin(monkeypatch, VLLM_ROCM_USE_AITER="0")
+
+    await restart(tmp_path, {"VLLM_ROCM_USE_AITER": "candidate"}, ["SGLANG_REF_KNOB"])
+
+    assert forwarded == [{"VLLM_ROCM_USE_AITER": "candidate"}]
