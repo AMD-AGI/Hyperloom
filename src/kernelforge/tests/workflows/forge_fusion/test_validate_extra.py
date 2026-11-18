@@ -8,19 +8,22 @@ from __future__ import annotations
 import subprocess
 
 from kernelforge.workflows.forge_fusion.models import Recipe
-from kernelforge.workflows.forge_fusion.validate import (
+from kernelforge.workflows.forge_fusion.serving_smoke import (
     DecodeLoad,
-    HarnessKernelRunner,
     SmokeServer,
-    _parse_harness_json,
     _runtime_dir,
     _serving_crash_reason,
     _serving_smoke_launch_cmd,
     _tail_text,
     _vllm_decode_probe,
     serving_smoke,
+)
+from kernelforge.workflows.forge_fusion.validate import (
+    HarnessKernelRunner,
+    _parse_harness_json,
     validate_recipe,
 )
+from kernelforge.workflows.forge_fusion import serving_smoke as serving_smoke_mod
 from kernelforge.workflows.forge_fusion import validate
 
 import urllib.request as _urllib_rq
@@ -131,8 +134,8 @@ def test_serving_smoke_tp_exposes_enough_gpus(monkeypatch, tmp_path):
         captured["cmd"] = cmd
         return _FakeServer([0])
 
-    monkeypatch.setattr(validate.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(validate, "_tail_text", lambda *a, **k: "")
+    monkeypatch.setattr(serving_smoke_mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(serving_smoke_mod, "_tail_text", lambda *a, **k: "")
     import time
 
     monkeypatch.setattr(time, "sleep", lambda *_: None)
@@ -151,10 +154,10 @@ def test_serving_smoke_vllm_uses_vllm_launcher_and_probe(monkeypatch, tmp_path):
         captured["cmd"] = cmd
         return _FakeServer([None, None])
 
-    monkeypatch.setattr(validate.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(validate, "_tail_text", lambda *a, **k: "Application startup complete.\n")
+    monkeypatch.setattr(serving_smoke_mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(serving_smoke_mod, "_tail_text", lambda *a, **k: "Application startup complete.\n")
     # vLLM path must NOT use sglang.bench_serving; it uses the HTTP decode probe.
-    monkeypatch.setattr(validate, "_vllm_decode_probe", lambda *a, **k: (True, "3 decode completions ok"))
+    monkeypatch.setattr(serving_smoke_mod, "_vllm_decode_probe", lambda *a, **k: (True, "3 decode completions ok"))
     import time
 
     monkeypatch.setattr(time, "sleep", lambda *_: None)
@@ -227,18 +230,18 @@ class _FakeServer:
 
 
 def _patch_smoke_common(monkeypatch, tmp_path):
-    monkeypatch.setattr(validate, "_runtime_dir", lambda kind: tmp_path)
-    monkeypatch.setattr(validate.subprocess, "run", lambda *a, **k: _Proc())
-    monkeypatch.setattr(validate.os, "killpg", lambda *a, **k: None)
-    monkeypatch.setattr(validate.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(serving_smoke_mod, "_runtime_dir", lambda kind: tmp_path)
+    monkeypatch.setattr(serving_smoke_mod.subprocess, "run", lambda *a, **k: _Proc())
+    monkeypatch.setattr(serving_smoke_mod.os, "killpg", lambda *a, **k: None)
+    monkeypatch.setattr(serving_smoke_mod.os, "getpgid", lambda pid: pid)
 
 
 def test_serving_smoke_server_exits_before_ready(monkeypatch, tmp_path):
     # _tail_text returns a static string: serving_smoke truncates the log file.
     _patch_smoke_common(monkeypatch, tmp_path)
     slog = tmp_path / "s.log"
-    monkeypatch.setattr(validate, "_tail_text", lambda *a, **k: "boot...\nCUDA error: illegal\n")
-    monkeypatch.setattr(validate.subprocess, "Popen", lambda *a, **k: _FakeServer([0]))
+    monkeypatch.setattr(serving_smoke_mod, "_tail_text", lambda *a, **k: "boot...\nCUDA error: illegal\n")
+    monkeypatch.setattr(serving_smoke_mod.subprocess, "Popen", lambda *a, **k: _FakeServer([0]))
     import time
 
     monkeypatch.setattr(time, "sleep", lambda *_: None)
@@ -255,9 +258,9 @@ def test_serving_smoke_ready_then_bench_ok(monkeypatch, tmp_path):
             return _Proc(stdout="Output token throughput: 999\n", rc=0)
         return _Proc()
 
-    monkeypatch.setattr(validate.subprocess, "run", fake_run)
-    monkeypatch.setattr(validate, "_tail_text", lambda *a, **k: "The server is fired up and ready to roll!\n")
-    monkeypatch.setattr(validate.subprocess, "Popen", lambda *a, **k: _FakeServer([None, None]))
+    monkeypatch.setattr(serving_smoke_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(serving_smoke_mod, "_tail_text", lambda *a, **k: "The server is fired up and ready to roll!\n")
+    monkeypatch.setattr(serving_smoke_mod.subprocess, "Popen", lambda *a, **k: _FakeServer([None, None]))
     import time
 
     monkeypatch.setattr(time, "sleep", lambda *_: None)
@@ -278,9 +281,9 @@ def test_serving_smoke_crash_during_decode(monkeypatch, tmp_path):
             return _Proc(stdout="", rc=1)
         return _Proc()
 
-    monkeypatch.setattr(validate.subprocess, "run", fake_run)
-    monkeypatch.setattr(validate, "_tail_text", lambda *a, **k: state["tail"])
-    monkeypatch.setattr(validate.subprocess, "Popen", lambda *a, **k: _FakeServer([None, None, None]))
+    monkeypatch.setattr(serving_smoke_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(serving_smoke_mod, "_tail_text", lambda *a, **k: state["tail"])
+    monkeypatch.setattr(serving_smoke_mod.subprocess, "Popen", lambda *a, **k: _FakeServer([None, None, None]))
     import time
 
     monkeypatch.setattr(time, "sleep", lambda *_: None)
@@ -289,13 +292,13 @@ def test_serving_smoke_crash_during_decode(monkeypatch, tmp_path):
 
 
 def test_serving_smoke_harness_error_is_soft_fail(monkeypatch, tmp_path):
-    monkeypatch.setattr(validate, "_runtime_dir", lambda kind: tmp_path)
-    monkeypatch.setattr(validate.subprocess, "run", lambda *a, **k: _Proc())
+    monkeypatch.setattr(serving_smoke_mod, "_runtime_dir", lambda kind: tmp_path)
+    monkeypatch.setattr(serving_smoke_mod.subprocess, "run", lambda *a, **k: _Proc())
 
     def boom(*a, **k):
         raise RuntimeError("popen exploded")
 
-    monkeypatch.setattr(validate.subprocess, "Popen", boom)
+    monkeypatch.setattr(serving_smoke_mod.subprocess, "Popen", boom)
     import time
 
     monkeypatch.setattr(time, "sleep", lambda *_: None)
@@ -400,7 +403,7 @@ def test_apply_serving_gate_env_boot_failure_keeps_micro_keep(tmp_path, monkeypa
     from kernelforge.workflows.forge_fusion import serving_gate
     from kernelforge.workflows.forge_fusion.models import ValidationResult
 
-    from kernelforge.workflows.forge_fusion.validate import SMOKE_STAGE_STARTUP_CRASH, SmokeVerdict
+    from kernelforge.workflows.forge_fusion.serving_smoke import SMOKE_STAGE_STARTUP_CRASH, SmokeVerdict
 
     monkeypatch.setattr(serving_gate, "_serving_check_enabled", lambda: True)
     captured = {}
@@ -456,7 +459,7 @@ def test_apply_serving_gate_cuda_graph_crash_clears_keep(tmp_path, monkeypatch):
     from kernelforge.workflows.forge_fusion import serving_gate
     from kernelforge.workflows.forge_fusion.models import ValidationResult
 
-    from kernelforge.workflows.forge_fusion.validate import SMOKE_STAGE_DECODE_CRASH, SmokeVerdict
+    from kernelforge.workflows.forge_fusion.serving_smoke import SMOKE_STAGE_DECODE_CRASH, SmokeVerdict
 
     monkeypatch.setattr(serving_gate, "_serving_check_enabled", lambda: True)
     monkeypatch.setattr(

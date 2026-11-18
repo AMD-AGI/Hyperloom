@@ -19,6 +19,7 @@ import kernelforge.workflows.forge_fusion.emit
 import kernelforge.workflows.forge_fusion.harness_authoring
 import kernelforge.workflows.forge_fusion.locate
 import kernelforge.workflows.forge_fusion.serving_gate
+import kernelforge.workflows.forge_fusion.serving_smoke
 import kernelforge.workflows.forge_fusion.source_snapshot
 import kernelforge.workflows.forge_fusion.validate
 
@@ -32,6 +33,7 @@ MODULES = (
     kernelforge.workflows.forge_fusion.harness_authoring,
     kernelforge.workflows.forge_fusion.locate,
     kernelforge.workflows.forge_fusion.serving_gate,
+    kernelforge.workflows.forge_fusion.serving_smoke,
     kernelforge.workflows.forge_fusion.source_snapshot,
     kernelforge.workflows.forge_fusion.validate,
 )
