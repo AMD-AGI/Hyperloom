@@ -774,12 +774,20 @@ async def test_kernel_entry_reprofile_the_phase_cannot_fit_does_not_start(coord:
 
 
 @pytest.mark.asyncio
-async def test_kernel_entry_reprofile_swallows_failure(coord: Coordinator):
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("profile crashed"),
+        # A preflight that reads a server.pid it cannot parse raises inference_suite.PidfileError, a ValueError.
+        ValueError("the pidfile must be an object, got 373047"),
+    ],
+)
+async def test_kernel_entry_reprofile_swallows_failure(coord: Coordinator, error: Exception):
     """A reprofile failure is best-effort: it never propagates and the anchor is left untouched."""
 
     class _RaisingSub:
         async def execute_covered(self, _task: Any) -> dict[str, Any]:
-            raise RuntimeError("profile crashed")
+            raise error
 
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
     coord.sub = _RaisingSub()
