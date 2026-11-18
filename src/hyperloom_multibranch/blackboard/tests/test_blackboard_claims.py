@@ -523,6 +523,12 @@ async def test_a_runtime_claims_only_for_its_own_branch_and_only_runtimes_claim(
         await open_as(Role.TOOLBOX).acquire(intent("s1", "c0"), ACTION, ttl_seconds=TTL)
     with pytest.raises(WriterNotAllowed):
         await open_as(Role.GATE).release_branch("s1")
+    claim = await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(intent("s1", "c0"), ACTION, ttl_seconds=TTL)
+    for role in (Role.SCHEDULER, Role.TOOLBOX):
+        with pytest.raises(WriterNotAllowed):
+            await open_as(role).release(claim.key)
+    with pytest.raises(WriterNotAllowed):
+        await open_as(Role.TOOLBOX).renew(claim.key, ttl_seconds=TTL)
 
 
 async def test_attaching_a_request_checks_it_measures_that_claim(open_as: Open) -> None:
@@ -547,7 +553,7 @@ async def test_a_finished_or_released_claim_cannot_be_released_or_attached_again
     await toolbox.write_request(request("r2", other))
 
     with pytest.raises(ClaimLost):
-        await open_as(Role.SCHEDULER).release(done)
+        await s1.release(done)
     with pytest.raises(ClaimLost):
         await toolbox.attach_request(released.key, "r2")
 

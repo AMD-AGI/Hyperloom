@@ -544,13 +544,10 @@ class LocalBlackboard(
         return [effective(claim, now, state) for claim in self._leases.all_current()]
 
     def _check_holds(self, claim: Claim) -> None:
-        """Raise ``ClaimLost`` unless the caller may renew or release ``claim``: the scheduler, or its branch's runtime,
-        and only while it is its holder's own lease."""
+        """Raise ``ClaimLost`` unless the caller's branch holds ``claim``."""
 
-        role = self.writer.role
-        if not (role is Role.SCHEDULER or (role is Role.SPECIALIST_RUNTIME and claim.holder == self.writer.branch)):
+        if claim.holder != self.writer.branch:
             raise ClaimLost(f"the claim on {claim.key.parent_commit} is not {self.writer.name}'s to change")
-        _check_own_lease(claim)
 
     # --- test records ---------------------------------------------------------------------------------------------
 
@@ -821,6 +818,7 @@ class LocalBlackboard(
 
         def renewed(claim: Claim) -> Claim:
             self._check_holds(claim)
+            _check_own_lease(claim)
             return replace(claim, heartbeat_at=now, expires_at=now + ttl_seconds)
 
         return effective(self._leases.change(key, renewed), now, self._state())
@@ -898,7 +896,7 @@ class LocalBlackboard(
         self._append(EntryKind.CLAIM, decision, branch=request.branch, parent=request.parent_commit, summary=summary)
 
     async def release(self, key: ClaimKey) -> Claim:
-        self._require(Role.SPECIALIST_RUNTIME, Role.SCHEDULER)
+        self._require(Role.SPECIALIST_RUNTIME)
         now = self._clock()
 
         def released(claim: Claim) -> Claim:
