@@ -15,6 +15,8 @@ import kernelforge.workflows.forge_fusion.author
 import kernelforge.workflows.forge_fusion.pipeline
 import kernelforge.workflows.forge_fusion.compile_pass_claim
 import kernelforge.workflows.forge_fusion.discover
+import kernelforge.workflows.forge_fusion.discovery_prompt
+import kernelforge.workflows.forge_fusion.discovery_response
 import kernelforge.workflows.forge_fusion.emit
 import kernelforge.workflows.forge_fusion.harness_authoring
 import kernelforge.workflows.forge_fusion.locate
@@ -29,6 +31,8 @@ MODULES = (
     kernelforge.workflows.forge_fusion.pipeline,
     kernelforge.workflows.forge_fusion.compile_pass_claim,
     kernelforge.workflows.forge_fusion.discover,
+    kernelforge.workflows.forge_fusion.discovery_prompt,
+    kernelforge.workflows.forge_fusion.discovery_response,
     kernelforge.workflows.forge_fusion.emit,
     kernelforge.workflows.forge_fusion.harness_authoring,
     kernelforge.workflows.forge_fusion.locate,

@@ -10,9 +10,9 @@ import os
 import subprocess
 import sys
 
-from kernelforge.workflows.forge_fusion.discover import DiscoveryTarget
+from kernelforge.workflows.forge_fusion.discovery_prompt import DiscoveryTarget
 from kernelforge.workflows.forge_fusion.diagnose import TraceProfile, diagnose_from_shares
-from kernelforge.workflows.forge_fusion.discover import parse_discovered_recipes
+from kernelforge.workflows.forge_fusion.discovery_response import parse_discovered_recipes
 from kernelforge.workflows.forge_fusion.locate import (
     FrameworkInstall,
     build_recipes,
