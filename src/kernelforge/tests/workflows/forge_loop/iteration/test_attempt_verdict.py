@@ -62,6 +62,40 @@ async def test_iteration_keeps_a_gain_that_repeats_across_all_three_runs(
     assert benchmark_calls[0]["measurements"] == 3
 
 
+@pytest.mark.asyncio
+async def test_a_gfx1100_candidate_over_the_rdna3_occupancy_steps_is_reported_beside_its_vgpr_count(
+    monkeypatch, tmp_path, capsys
+):
+    """The register check's occupancy verdict reaches the iteration output, judged on the campaign's target."""
+    from kernelforge.evaluation.profiling import registers
+
+    (tmp_path / "kernel.so").write_bytes(b"")
+
+    class _Disassembly:
+        returncode = 0
+
+    async def fake_exec(*_args, **_kwargs):
+        return _Disassembly()
+
+    async def fake_communicate(_proc, timeout):
+        return b".vgpr_count: 128\n.lds_size: 66560\n", b""
+
+    loop, _calls = _measurement_loop(monkeypatch, _faster_bench())
+    from kernelforge.workflows.forge_loop.iteration import attempt_verdict
+
+    monkeypatch.setattr(attempt_verdict, "check_registers", registers.check_registers)
+    monkeypatch.setattr(registers.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(registers, "communicate_process_group", fake_communicate)
+    loop.ic.build_dir = str(tmp_path)
+    loop.config = type(loop.config)(gpu_target="gfx1100")
+
+    await loop.run_one_iteration(1)
+
+    line = next(line for line in capsys.readouterr().out.splitlines() if "[registers]" in line)
+    assert "VGPR=128 (>96: fewer than 16 waves/SIMD" in line
+    assert "LDS=65.0KB (>64KB: over the 64 KiB work-group cap: will not launch)" in line
+
+
 def _faster_bench(candidate_ms=1.0 / 1.05):
     return {
         "success": True,

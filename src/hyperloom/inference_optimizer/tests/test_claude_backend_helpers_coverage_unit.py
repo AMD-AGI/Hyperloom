@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ClaudeBackend pure helpers (no real SDK): prompt composition, usage coercion, block
-iteration/classification, tool-use parsing, text extraction, and conversation-session accessors.
+"""Coverage for ClaudeBackend helpers (no real SDK): gateway env pinning in the SDK options, tool-use parsing, and
+text collection from the streamed content blocks.
 """
 
 from __future__ import annotations
@@ -58,12 +58,6 @@ def _backend(**over: Any) -> ClaudeBackend:
     return ClaudeBackend(**kwargs)
 
 
-def test_set_context_provider_none_clears() -> None:
-    b = _backend()
-    b.set_context_provider(None)
-    assert b._context_server_config is None
-
-
 def test_build_options_pins_gateway_env_and_ignores_global_settings(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
@@ -112,31 +106,6 @@ def test_build_options_never_maps_openai_key_onto_the_anthropic_side(monkeypatch
     assert "ANTHROPIC_AUTH_TOKEN" not in child_env
     # OPENAI_CUSTOM_HEADERS is not copied to the Anthropic side.
     assert "ANTHROPIC_CUSTOM_HEADERS" not in child_env
-
-
-def test_iter_blocks() -> None:
-    assert ClaudeBackend._iter_blocks(_Msg(content=[1, 2])) == [1, 2]
-    assert ClaudeBackend._iter_blocks(_Msg(content=None)) == []
-    assert ClaudeBackend._iter_blocks(object()) == []
-
-
-def test_is_tool_use_for_emit_intent() -> None:
-    b = _backend()
-    assert (
-        b._is_tool_use_for_emit_intent(
-            ToolUseBlock(name=EMIT_INTENT_TOOL_NAME, input={}),
-        )
-        is True
-    )
-    # wrong tool name
-    assert (
-        b._is_tool_use_for_emit_intent(
-            ToolUseBlock(name="other_tool", input={}),
-        )
-        is False
-    )
-    # wrong block class
-    assert b._is_tool_use_for_emit_intent(TextBlock("hi")) is False
 
 
 def test_parse_tool_use_block_valid_and_invalid() -> None:
@@ -193,17 +162,17 @@ def test_parse_tool_use_block_unparsed_malformed_json_returns_none() -> None:
     assert b._parse_tool_use_block(bad) is None
 
 
-def test_extract_text_shapes() -> None:
-    assert ClaudeBackend._extract_text(TextBlock("hello")) == "hello"
-    assert ClaudeBackend._extract_text({"type": "text", "text": "d"}) == "d"
-    assert ClaudeBackend._extract_text({"type": "image"}) == ""
-
+async def test_raw_text_collects_every_text_shaped_block() -> None:
     class _HasText:
         text = "attr-text"
-
-    assert ClaudeBackend._extract_text(_HasText()) == "attr-text"
 
     class _NoText:
         text = 123  # non-string
 
-    assert ClaudeBackend._extract_text(_NoText()) == ""
+    async def _q(*, prompt, options):
+        yield _Msg(
+            content=[TextBlock("hello"), {"type": "text", "text": "d"}, {"type": "image"}, _HasText(), _NoText()]
+        )
+
+    res = await _backend(sdk_query_factory=_q).run("p")
+    assert res.raw_text == "hellodattr-text"

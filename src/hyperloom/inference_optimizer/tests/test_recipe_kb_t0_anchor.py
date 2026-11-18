@@ -17,7 +17,6 @@ from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _donor_is_trustworthy,
     _experience_rows,
     T0AnchorRequest,
-    _warm_recipe_source,
     run_t0_anchor,
 )
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
@@ -28,11 +27,6 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     RecipeKB,
     recipe_canonical_id,
 )
-
-
-def test_warm_recipe_source_is_local_recipe_kb(kb: RecipeKB) -> None:
-    assert _warm_recipe_source(kb=object()) == "recipe-kb"
-    assert _warm_recipe_source(kb=kb) == "local-json"
 
 
 def test_agentx_donor_ignores_fixed_length_placeholders() -> None:
@@ -183,6 +177,7 @@ def test_t0_anchor_sets_warm_start_recipe_on_state(
     assert state.warm_start_recipe.get("tier") == "seed_only"
     assert state.warm_start_recipe.get("confidence") == 0.0
     assert state.warm_start_context.get("status") == "seed_only"
+    assert state.warm_start_context["match"]["source"] == "local-json"
 
 
 # warm-start surfacing pitfalls / lessons embedded in the recipe row
@@ -472,15 +467,6 @@ def test_t0_anchor_increments_version_on_existing_row(
     after = kb.get_recipe(canonical_id=cid)
     assert after is not None
     assert after["version"] == 2
-
-
-# Defensive: anchor never raises on missing optional inputs
-def test_t0_anchor_tolerates_missing_extra_attrs(
-    kb: RecipeKB,
-    session_dir: Path,
-) -> None:
-    state = _FakeSharedState()
-    run_t0_anchor(kb, state, T0AnchorRequest(workload="m", hw="mi300x"), session_dir=session_dir)
 
 
 # _cascade_warm_start_search: the L1-L4 warm-start tier resolution.

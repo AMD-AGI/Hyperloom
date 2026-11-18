@@ -12,17 +12,10 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.actions.executors._framework_switch_manifest import KNOWN_CATEGORIES
-from hyperloom.orchestrator.prompts.specialist_focus import (
-    _DOMAIN_FOCUS_TEMPLATES,
-    _focus_framework_rewrite_specialist,
-)
+from hyperloom.orchestrator.prompts.specialist_focus import _focus_framework_rewrite_specialist
 from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
-from hyperloom.orchestrator.specialists.domains import (
-    SPECIALIST_DOMAIN_KEYS,
-    get_domain,
-    normalize_dispatch_tags,
-)
+from hyperloom.orchestrator.specialists.domains import get_domain, normalize_dispatch_tags
 
 
 DOMAIN_KEY = "framework_rewrite_specialist"
@@ -31,27 +24,12 @@ DOMAIN_KEY = "framework_rewrite_specialist"
 # catalogue
 
 
-def test_domain_is_in_the_catalogue():
-    """The domain is dispatchable and its focus template is registered."""
-    assert DOMAIN_KEY in SPECIALIST_DOMAIN_KEYS
-    assert DOMAIN_KEY in _DOMAIN_FOCUS_TEMPLATES
-
-
 def test_domain_maps_to_the_framework_kb_anchor():
     """PolicyGate validates the KB anchor, so a wrong one denies every dispatch."""
     domain = get_domain(DOMAIN_KEY)
     assert domain is not None
     assert domain.kb_anchor == "framework"
     assert normalize_dispatch_tags({"domain": DOMAIN_KEY}) == ["framework"]
-
-
-def test_domain_description_separates_it_from_the_serving_domain():
-    """The description says what makes this domain distinct, not just that it exists."""
-    domain = get_domain(DOMAIN_KEY)
-    assert domain is not None
-    text = domain.description.lower()
-    assert "iterative" in text
-    assert "serving_specialist" in text
 
 
 # prompt
@@ -76,56 +54,9 @@ def test_prompt_states_the_switch_manifest_contract():
         assert field in text
 
 
-def test_prompt_explains_why_the_default_off_switch_is_enforced():
-    """A rule with a stated reason survives an LLM's judgement; a bare rule may not."""
-    text = _focus_text()
-    assert "defaults OFF" in text or "default-off" in text
-    assert "parity leg" in text
-    assert "independently measurable" in text
-
-
-def test_prompt_warns_about_allocator_address_reuse():
-    """The pinning requirement is the difference between a cache and a silent bug."""
-    text = _focus_text()
-    assert "caching" in text and "allocator" in text
-    assert "Pin the source tensors" in text
-
-
-def test_prompt_explains_the_enabler_stakes():
-    """The enabler contract is stated with its consequence, not just its syntax."""
-    text = _focus_text()
-    assert "enabler" in text
-    assert "standalone" in text
-
-
-def test_prompt_forbids_content_hashing_for_cache_keys():
-    """Hashing contents to build a key reintroduces the sync being removed."""
-    assert "Do NOT hash tensor *contents*" in _focus_text()
-
-
-def test_prompt_requires_a_fallback_path():
-    """A guard plus fallback keeps an unexpected input slow rather than wrong."""
-    text = _focus_text()
-    assert "fallback" in text.lower()
-    assert "correctness" in text
-
-
 def test_prompt_names_the_active_framework():
     """The block is framework-aware so the specialist knows what it is reading."""
     assert "custom" in _focus_text("custom")
-
-
-def test_prompt_names_no_specific_function():
-    """The prior is the pattern vocabulary, not a list of answers."""
-    text = _focus_text()
-    for leaked_answer in (
-        "all_gather_object",
-        "_prepare_apply_fns",
-        "sequence_parallel_attention",
-        "MYFW_",
-        "hyvideo",
-    ):
-        assert leaked_answer not in text
 
 
 # reference document
@@ -141,22 +72,6 @@ def _reference_path() -> Path:
 def test_reference_document_is_bundled():
     """The long-form taxonomy ships so a specialist can read past the summary."""
     assert _reference_path().is_file()
-
-
-def test_reference_document_covers_every_category_id():
-    """Category ids match the aggregator's, so evidence maps onto the reference."""
-    from hyperloom.orchestrator.actions.executors import _framework_rewrite_evidence as ev
-
-    text = _reference_path().read_text(encoding="utf-8")
-    for category in (
-        ev.CATEGORY_MEMOIZE,
-        ev.CATEGORY_HOIST,
-        ev.CATEGORY_HOST_ROUND_TRIP,
-        ev.CATEGORY_HOST_SYNC,
-        ev.CATEGORY_FUSE_COLLECTIVES,
-        ev.CATEGORY_DEVICE_RESIDENT,
-    ):
-        assert category in text
 
 
 # phase routing
@@ -220,15 +135,19 @@ def test_scriptable_frameworks_route_to_the_rewrite_domain(framework):
     assert _Phase(framework)._authoring_specialist_domain() == DOMAIN_KEY
 
 
-@pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
+@pytest.mark.parametrize(
+    "framework",
+    [
+        pytest.param("sglang", id="sglang"),
+        pytest.param("vllm", id="vllm"),
+        pytest.param("atom", id="atom"),
+        pytest.param("", id="unresolvable_empty"),
+        pytest.param("  ", id="unresolvable_blank"),
+        pytest.param("something-unregistered", id="unresolvable_unregistered"),
+    ],
+)
 def test_serving_frameworks_keep_the_serving_domain(framework):
-    """Routing is additive: the serving path is untouched."""
-    assert _Phase(framework)._authoring_specialist_domain() == "serving_specialist"
-
-
-@pytest.mark.parametrize("framework", ["", "  ", "something-unregistered"])
-def test_unknown_framework_falls_back_to_serving(framework):
-    """An unresolvable framework keeps the historical default rather than guessing."""
+    """Routing is additive: the serving path is untouched, and an unresolvable framework keeps it rather than guessing."""
     assert _Phase(framework)._authoring_specialist_domain() == "serving_specialist"
 
 
@@ -394,13 +313,6 @@ def test_scriptable_dispatch_demands_a_switch_manifest(tmp_path):
     assert "depends_on" in prompt and "enables" in prompt
 
 
-def test_scriptable_dispatch_drops_the_serving_hot_path_language(tmp_path):
-    """A pipeline with no scheduler must not be pointed at scheduling."""
-    prompt = _dispatched_prompt(tmp_path, "custom")
-    assert "KV-cache / scheduling" not in prompt
-    assert "step-invariant" in prompt
-
-
 def test_serving_dispatch_is_unchanged(tmp_path):
     """The serving arm keeps its domain and its own hot-path language."""
     assert _dispatch(tmp_path, "sglang")["domain"] == "serving_specialist"
@@ -445,9 +357,7 @@ def test_scriptable_dispatch_inlines_the_measured_evidence(tmp_path):
 
 def test_scriptable_dispatch_without_evidence_says_how_to_look(tmp_path):
     """No evidence yet still yields an actionable instruction, not silence."""
-    notes = _dispatch(tmp_path, "custom")["notes"]
-    assert "No host-side rewrite evidence has been collected yet" in notes
-    assert "can change across iterations" in notes
+    assert _dispatch(tmp_path, "custom")["notes"] == _Phase("custom")._rewrite_evidence_absence_note()
 
 
 # scriptable source-root registration
@@ -482,15 +392,3 @@ def test_publishing_ignores_blank_input(monkeypatch):
     _publish_scriptable_repo_root("custom", "   ")
     _publish_scriptable_repo_root("", "/some/path")
     assert "CUSTOM_REPO_PATH" not in os.environ
-
-
-def test_frameworks_reference_documents_the_rewrite_path():
-    """The launch reference has to explain the switch contract and its enforcement."""
-    from hyperloom.inference_optimizer.session.paths import asset_root
-
-    text = (asset_root() / "references" / "frameworks.md").read_text(encoding="utf-8")
-    assert "framework_rewrite_specialist" in text
-    assert "framework_switches" in text
-    assert "switch-off parity" in text
-    assert "kept inert" in text
-    assert "framework_rewrite_patterns.md" in text

@@ -9,8 +9,8 @@ blackboard with its result, at most :data:`WAIT_SECONDS` in all, then takes them
 
 They are the shares the toolbox took from the analysis (``toolbox.tools.op_shares``): TraceLens' ops, or the kernels
 its report route ranks, which still give shares on a CUDA-graph trace, where TraceLens' op decomposition degrades.
-Arbor's map generator and its dossier pass take kernel names as they take ops. A job that did not succeed leaves the
-session mapping without shares at once; one whose analysis gave none, once the wait is over.
+A component agent's map generator and its dossier pass take kernel names as they take ops. A job that did not succeed
+leaves the session mapping without shares at once; one whose analysis gave none, once the wait is over.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ POLL_SECONDS = 5.0
 
 @dataclass(frozen=True)
 class RootShares:
-    """The root's shares, and what they are, as the profile file Arbor reads names them (``source``)."""
+    """The root's shares, and what they are, as the profile file a component agent reads names them (``source``)."""
 
     shares: OpShares
     source: str

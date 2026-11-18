@@ -53,6 +53,7 @@ def _resolve_vllm_aiter_routing(
     model_path: str,
     server_log: str,
     tp: int,
+    gpu_type: str,
 ) -> VllmAiterRouting:
     """Resolve the aiter-routing flags for a vLLM run from runtime evidence."""
     evidence = _aiter_serving_evidence(server_log)
@@ -71,7 +72,7 @@ def _resolve_vllm_aiter_routing(
     bf16_dense = "bf16_dense" in evidence and not is_moe
 
     fused_moe = False
-    if "fused_moe" in evidence and is_moe and _aiter_ck_moe_tuner_supports(server_log):
+    if "fused_moe" in evidence and is_moe and _aiter_ck_moe_tuner_supports(server_log, gpu_type):
         # Only route MoE when aiter's CK fused-MoE can actually serve this
         # checkpoint at this TP -- otherwise the tuner has no reachable target.
         from hyperloom.inference_optimizer.model_config_utils import (

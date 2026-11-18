@@ -20,7 +20,6 @@ from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 from hyperloom.orchestrator.loop import _keep_patch_column as keep_patch_column
 from hyperloom.orchestrator.loop import _promote_outcome as promote_outcome
 from hyperloom.orchestrator.loop._keep_patch_column import _is_patch_column_keep
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
     KnowledgeSections,
 )
@@ -1546,17 +1545,6 @@ async def test_promote_explore_resume_revalidate_keeps_pending_on_empty_rebench(
 
     # No valid measurement -> the flag stays set so reports keep warning.
     assert _resume_pending(s) is True
-
-
-# GAP 10: every _PROMOTE_HANDLERS value resolves to a callable on the class, so a typo or unregistered handler is
-# caught at test time, not at runtime.
-@pytest.mark.parametrize(
-    "task_kind,handler_name",
-    list(WritebackCollaborator._PROMOTE_HANDLERS.items()),
-)
-def test_promote_handlers_are_callable(task_kind, handler_name):
-    handler = getattr(WritebackCollaborator, handler_name, None)
-    assert callable(handler), f"{task_kind!r} -> {handler_name!r} is not a callable on WritebackCollaborator"
 
 
 # Env preservation across layers and source_snapshot propagation

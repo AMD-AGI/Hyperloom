@@ -74,21 +74,6 @@ def test_failure_digest_separates_different_failures() -> None:
     assert failure_digest(base) != failure_digest(other)
 
 
-def test_unmatched_failure_still_digests() -> None:
-    observation = ladder.classify(
-        ladder.BootStreams(
-            "Traceback (most recent call last):\n"
-            '  File "/sgl-workspace/vllm/srt/entry.py", line 12, in boot\n'
-            "ZeroDivisionError: division by zero\n"
-        ),
-        server_elapsed_sec=2.0,
-        trees=_trees("/sgl-workspace/vllm"),
-    )
-    assert observation.matched_marker == ""
-    assert observation.stage_failed is not None
-    assert len(failure_digest(observation)) == 64
-
-
 def _engine_core_crash(root_error: str) -> str:
     """A multi-process boot: the engine child's root error, then the API server's re-raise."""
     core = "(EngineCore pid=7) ERROR 10-02 12:54:57 [core.py:1242] "

@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The session's dossier pass: Arbor run once to map the directions the agent branches split.
+"""The session's dossier pass: a component agent run once to map the directions the agent branches split.
 
-With two or more Arbor agents and no map given, the session runs the first Arbor source once as its dossier pass
-(:data:`~hyperloom_multibranch.specialist.component_agent.DOSSIER_PASS`, ``component.stop_at: "map"``), as Arbor's
-``docs/hosts.md`` describes it:
+With two or more component agents and no map given, the session runs the first such source once as its dossier pass
+(:data:`~hyperloom_multibranch.specialist.component_agent.DOSSIER_PASS`, ``component.stop_at: "map"``), which its
+adapter makes ready:
 - **where:** on a worktree at the commit the branches open on, with that commit's launch, on the cards of one lease;
 - **with what:** the root's shares as its ``component.profile``, until its deadline;
 - **what it leaves:** the dossier and its map, then exit 0 with ``mapped``. The map is what the session splits
@@ -66,14 +66,14 @@ DOSSIER_HOLDER = "dossier"
 #: The pass's card time is the integration branch's.
 DOSSIER_CHARGE = LeaseCharge(LeaseKind.AUTONOMOUS, INTEGRATION_BRANCH)
 POLL_SECONDS = 10.0
-#: How long past its deadline the pass has to write its exit and end of itself before it is killed: Arbor ends a run
+#: How long past its deadline the pass has to write its exit and end of itself before it is killed: the agent ends
 #: by its deadline on its own.
 EXIT_GRACE_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
 class DossierStart:
-    """``source``, the Arbor to run; ``start_commit``, the commit the branches open on; ``deadline``, the clock time the
+    """``source``, the agent to run; ``start_commit``, the commit the branches open on; ``deadline``, the clock time the
     pass ends by; ``shares``, the root's shares for its profile (``None`` without), which came from
     ``shares_source``."""
 
@@ -100,7 +100,7 @@ DossierPass = Callable[[DossierStart], Awaitable[DossierOutcome]]
 @dataclass(frozen=True)
 class DossierSetup:
     """What the pass runs on: ``spec``, the session's agent spec with the pass's port and client; ``repo`` and
-    ``toolbox``; ``sandbox``, the sandbox of a lease; ``worktree``, the pass's own; and ``agent_dir``, where its Arbor
+    ``toolbox``; ``sandbox``, the sandbox of a lease; ``worktree``, the pass's own; and ``agent_dir``, where its agent
     is fetched. ``holder`` holds its lease, charged as ``charge`` says."""
 
     spec: AgentSpec
@@ -115,8 +115,8 @@ class DossierSetup:
     charge: LeaseCharge = DOSSIER_CHARGE
 
 
-async def _arbor_only(_checkout: Path, _prompt: str) -> str:
-    raise ModelRefused("the dossier pass runs Arbor, which is not onboarded by a model, and this source is not Arbor")
+async def _adapter_only(_checkout: Path, _prompt: str) -> str:
+    raise ModelRefused("the dossier pass runs an agent an installed adapter recognises, and none recognises this one")
 
 
 async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierOutcome:
@@ -158,7 +158,7 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
         sandbox = setup.sandbox(lease)
         onboarding = OnboardingSetup(
             sandbox,
-            _arbor_only,
+            _adapter_only,
             run=DOSSIER_PASS,
             start_seconds=START_SECONDS,
             poll_seconds=POLL_SECONDS,
@@ -171,7 +171,7 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
         return await _ended(ready, start, setup)
     finally:
         try:
-            # Always: Arbor's top process may have exited with a server it started still on the cards.
+            # Always: the agent's top process may have exited with a server it started still on the cards.
             if ready is not None:
                 await ready.process.kill()
             if sandbox is not None:

@@ -280,10 +280,14 @@ class TestFmoeCoverageGate:
 
 
 class TestFmoeApplyVerdict:
-    def test_fmoe_ck_has_no_dense_apply_verdict(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_a_dense_table_miss_does_not_block_a_served_fmoe_ck_artifact(self, tmp_path):
         _integrate_log(tmp_path, "\n".join([AITER_BF16_MISS, SYNTHETIC_SERVED]))
+        env = _envs(_candidate_csv(tmp_path))
 
-        assert _phase(tmp_path)._gemm_apply_verdict("fmoe_ck", _envs(_candidate_csv(tmp_path))) is None
+        blockers, _cand = await _phase(tmp_path)._gemm_apply_blockers({"tuner": "fmoe_ck"}, env, gain_pct=5.0)
+
+        assert blockers == []
 
 
 class TestFmoeEmbeddedReplay:

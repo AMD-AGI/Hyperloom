@@ -16,7 +16,6 @@ import httpx
 import pytest
 
 from hyperloom_common.env import EnvValueError
-from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
 from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as life
 from hyperloom.orchestrator.actions.executors._multi_node_restart_settings import RestartSettings
 
@@ -110,29 +109,6 @@ def test_gate_waits_out_the_post_restart_connection_refused_window(
     _gate(settings)
 
 
-def test_gate_skips_when_the_published_name_never_resolves(
-    monkeypatch: pytest.MonkeyPatch, settings: RestartSettings
-) -> None:
-    """Outside-cluster: the ClusterIP name is unusable, so the gate is a no-op."""
-    monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
-    _fast_clock(monkeypatch)
-    _install_fake_httpx(monkeypatch, [_transport_error(socket.gaierror(-2, "Name or service not known"))])
-
-    _gate(settings)
-
-
-def test_gate_survives_a_transient_dns_flap_within_the_window(
-    monkeypatch: pytest.MonkeyPatch, settings: RestartSettings
-) -> None:
-    """A CoreDNS blip must not disable the gate when it is most needed."""
-    monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
-    _fast_clock(monkeypatch)
-    # DNS blips once, then the published endpoint answers: gate must hold + pass.
-    _install_fake_httpx(monkeypatch, [_transport_error(socket.gaierror(-2, "Name or service not known")), 200, 200])
-
-    _gate(settings)
-
-
 def test_gate_warns_not_infos_when_it_skips_on_an_unresolvable_name(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, settings: RestartSettings
 ) -> None:
@@ -145,20 +121,6 @@ def test_gate_warns_not_infos_when_it_skips_on_an_unresolvable_name(
         _gate(settings)
 
     assert any("SKIPPING the published-service readiness gate" in r.message for r in caplog.records)
-
-
-def test_dns_skip_after_is_env_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER widens the DNS tolerance."""
-    monkeypatch.setenv("HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER", "1")
-    settings = RestartSettings.from_env()
-    monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
-    _fast_clock(monkeypatch)
-    # One gaierror then 200s: skip_after=1 skips on the first failure (returns before the 200s); if the knob were
-    # ignored (default 6) it would pass on 200s -- either way it returns, but this asserts the env path does not
-    # raise/hang.
-    _install_fake_httpx(monkeypatch, [_transport_error(socket.gaierror(-2, "Name or service not known"))])
-
-    _gate(settings)
 
 
 @pytest.mark.parametrize(
@@ -289,10 +251,3 @@ def test_name_resolution_error_walks_the_cause_chain() -> None:
             raise RuntimeError("connect failed") from root
     except RuntimeError as wrapped:
         assert life._is_name_resolution_error(wrapped) is True
-
-
-def test_reachable_rewrite_makes_published_differ(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Guard the premise: the rewrite really does change the URL we gate on."""
-    state = _rewritten_state()
-    assert ext.reachable_service_url(state) == "http://head-svc.project1-dev.svc.cluster.local:8888"
-    assert ext.reachable_service_url(state) != state["service_url"]

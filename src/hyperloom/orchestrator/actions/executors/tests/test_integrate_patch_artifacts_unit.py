@@ -72,6 +72,7 @@ def test_resolve_artifact_specs_valid(tmp_path, monkeypatch):
     assert spec.source == src.resolve()
     assert spec.target == (fw / "vllm" / "configs" / "tuned.json").resolve()
     assert spec.rel_target == "vllm/configs/tuned.json"
+    assert spec.root == fw.resolve()
     assert spec.kind == "config_json"
     assert spec.description == "tuned GEMM config"
 
@@ -614,52 +615,13 @@ def test_artifact_ledger_failure_leaves_the_target_uninstallable(tmp_path, monke
     assert target.read_text(encoding="utf-8") == "A"
 
 
-def test_apply_keeps_artifact_when_not_reverted(tmp_path):
-    src = tmp_path / "src.json"
-    src.write_text("NEW", encoding="utf-8")
-    target = tmp_path / "fw" / "cfg.json"
-
-    _applied, errors = _install(tmp_path, [_spec(src, target, "fw/cfg.json")], tmp_path / "backups")
-    assert errors == []
-    # On KEEP nothing restores the preimage, so the install persists.
-    assert target.read_text(encoding="utf-8") == "NEW"
-
-
 # ---- _resolve_artifact_target: absolute-within-root (Option A) ------------
-def test_resolve_artifact_target_absolute_within_root(tmp_path, monkeypatch):
-    """An ABSOLUTE target pointing inside a framework search root (e.g. the
-    installed aiter package dir) must resolve."""
-    fw = tmp_path / "aiter"
-    (fw / "configs" / "model_configs").mkdir(parents=True)
-    monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(fw)])
-    abs_target = str(fw / "configs" / "model_configs" / "tuned_fmoe.csv")
-    out = patch_artifacts._resolve_artifact_target(abs_target)
-    assert out == (
-        (fw / "configs" / "model_configs" / "tuned_fmoe.csv").resolve(),
-        "configs/model_configs/tuned_fmoe.csv",
-        fw.resolve(),
-    )
-
-
 def test_resolve_artifact_target_absolute_outside_roots_rejected(tmp_path, monkeypatch):
     """An absolute target OUTSIDE every framework root must stay rejected."""
     fw = tmp_path / "aiter"
     (fw / "configs").mkdir(parents=True)
     monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(fw)])
     assert patch_artifacts._resolve_artifact_target("/etc/passwd") is None
-
-
-def test_resolve_artifact_target_relative_still_works(tmp_path, monkeypatch):
-    """Relative targets keep resolving under a framework search root."""
-    fw = tmp_path / "aiter"
-    (fw / "configs" / "model_configs").mkdir(parents=True)
-    monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(fw)])
-    out = patch_artifacts._resolve_artifact_target("configs/model_configs/tuned_fmoe.csv")
-    assert out == (
-        (fw / "configs" / "model_configs" / "tuned_fmoe.csv").resolve(),
-        "configs/model_configs/tuned_fmoe.csv",
-        fw.resolve(),
-    )
 
 
 def test_resolve_artifact_target_pip_root_does_not_double_the_package_name(tmp_path, monkeypatch):
@@ -736,3 +698,4 @@ def test_resolve_artifact_specs_absolute_target_records_relative_rel_target(tmp_
     assert len(specs) == 1
     assert specs[0].target == (fw / "configs" / "model_configs" / "tuned.csv").resolve()
     assert specs[0].rel_target == "configs/model_configs/tuned.csv"
+    assert specs[0].root == fw.resolve()

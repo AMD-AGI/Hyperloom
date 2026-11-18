@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -141,23 +142,23 @@ def _clear_cap_cache() -> None:
     gr._CAP_PROBE_CACHE.clear()
 
 
-def test_capability_reason_noop_when_flag_absent(monkeypatch) -> None:
-    monkeypatch.setenv("FRAMEWORK", "vllm")
-    _clear_cap_cache()
-    # Probe must NOT even run when the flag isn't set on the variant.
+@pytest.mark.parametrize(
+    ("framework", "envs"),
+    [
+        ("vllm", {}),
+        ("sglang", {"VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "1"}),
+        ("vllm", {"VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "0"}),
+    ],
+    ids=["flag-absent", "non-vllm-framework", "falsey-flag"],
+)
+def test_capability_reason_does_not_probe_without_an_enabled_vllm_flag(monkeypatch, framework, envs) -> None:
+    monkeypatch.setenv("FRAMEWORK", framework)
     monkeypatch.setattr(
         gr,
         "_probe_vllm_aiter_shared_expert_unsupported",
         lambda: (_ for _ in ()).throw(AssertionError("probe should not run")),
     )
-    assert gr.unsupported_capability_reason(_variant("plain")) is None
-
-
-def test_capability_reason_noop_for_non_vllm_framework(monkeypatch) -> None:
-    monkeypatch.setenv("FRAMEWORK", "sglang")
-    _clear_cap_cache()
-    v = _variant("se", envs={"VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "1"})
-    assert gr.unsupported_capability_reason(v) is None
+    assert gr.unsupported_capability_reason(_variant("se", envs=envs)) is None
 
 
 def test_capability_reason_drops_when_module_missing(monkeypatch) -> None:
@@ -173,48 +174,33 @@ def test_capability_reason_drops_when_module_missing(monkeypatch) -> None:
     assert reason is not None and "rocm_aiter_fused_moe" in reason
 
 
-def test_capability_reason_falsey_flag_not_probed(monkeypatch) -> None:
+_SHARED_EXPERTS_ON = {"VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "1"}
+
+
+def _record_probe_runs(monkeypatch, status: str) -> list[list[str]]:
     monkeypatch.setenv("FRAMEWORK", "vllm")
-    _clear_cap_cache()
-    monkeypatch.setattr(
-        gr,
-        "_probe_vllm_aiter_shared_expert_unsupported",
-        lambda: (_ for _ in ()).throw(AssertionError("probe should not run")),
-    )
-    v = _variant("se", envs={"VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "0"})
-    assert gr.unsupported_capability_reason(v) is None
+    monkeypatch.setattr(gr, "_CAP_PROBE_CACHE", {})
+    runs: list[list[str]] = []
 
-
-def test_probe_caches_ok_and_unsupported(monkeypatch) -> None:
-    _clear_cap_cache()
-    calls = {"n": 0}
-
-    class _Proc:
-        def __init__(self, out: str) -> None:
-            self.stdout = out
-            self.stderr = ""
-
-    def fake_run(*_a, **_k):
-        calls["n"] += 1
-        return _Proc(json.dumps({"status": "ok"}))
+    def fake_run(cmd, *_a, **_k):
+        runs.append(list(cmd))
+        payload = {"status": status, "missing": ["vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe"]}
+        return SimpleNamespace(stdout=json.dumps(payload), stderr="")
 
     monkeypatch.setattr(gr.subprocess, "run", fake_run)
-    assert gr._probe_vllm_aiter_shared_expert_unsupported() is None
-    # Second call must hit the cache (no second subprocess).
-    assert gr._probe_vllm_aiter_shared_expert_unsupported() is None
-    assert calls["n"] == 1
+    return runs
 
 
-def test_probe_unknown_not_cached(monkeypatch) -> None:
-    _clear_cap_cache()
-
-    class _Proc:
-        stdout = json.dumps({"status": "unknown"})
-        stderr = ""
-
-    monkeypatch.setattr(gr.subprocess, "run", lambda *_a, **_k: _Proc())
-    assert gr._probe_vllm_aiter_shared_expert_unsupported() is None
-    assert "vllm" not in gr._CAP_PROBE_CACHE
+@pytest.mark.parametrize(
+    ("status", "drops", "probes"),
+    [("ok", False, 1), ("unsupported", True, 1), ("unknown", False, 2)],
+    ids=["ok", "unsupported", "unknown"],
+)
+def test_the_build_probe_answer_is_reused_across_variants_unless_unknown(monkeypatch, status, drops, probes) -> None:
+    runs = _record_probe_runs(monkeypatch, status)
+    reasons = [gr.unsupported_capability_reason(_variant(name, envs=_SHARED_EXPERTS_ON)) for name in ("se-a", "se-b")]
+    assert [reason is not None for reason in reasons] == [drops, drops]
+    assert len(runs) == probes
 
 
 def test_probe_swallows_subprocess_error(monkeypatch) -> None:
@@ -245,24 +231,14 @@ def test_resolve_probe_python_without_vllm_takes_the_images_interpreter_else_pyt
     assert bi._resolve_probe_python("sglang") == expected
 
 
-def test_probe_invokes_resolved_interpreter(monkeypatch) -> None:
-    # The capability probe must run under the resolved interpreter, not "python3".
-    _clear_cap_cache()
-    monkeypatch.setattr(gr, "_resolve_probe_python", lambda: "/srv/venv/bin/python")
-    seen: dict = {}
-
-    class _Proc:
-        stdout = json.dumps({"status": "ok"})
-        stderr = ""
-
-    def fake_run(cmd, *_a, **_k):
-        seen["cmd"] = list(cmd)
-        return _Proc()
-
-    monkeypatch.setattr(gr.subprocess, "run", fake_run)
-    gr._probe_vllm_aiter_shared_expert_unsupported()
-    assert seen["cmd"][0] == "/srv/venv/bin/python"
-    assert seen["cmd"][0] != "python3"
+def test_the_build_probe_runs_under_the_vllm_venv_interpreter(monkeypatch, tmp_path) -> None:
+    venv_python = tmp_path / "bin" / "python"
+    venv_python.parent.mkdir()
+    venv_python.touch(mode=0o755)
+    monkeypatch.setenv("VLLM_VENV_ROOT", str(tmp_path))
+    runs = _record_probe_runs(monkeypatch, "ok")
+    gr.unsupported_capability_reason(_variant("se", envs=_SHARED_EXPERTS_ON))
+    assert [cmd[0] for cmd in runs] == [str(venv_python)]
 
 
 # -- apply_runtime_benchmark_overrides ------------------------------------
@@ -309,10 +285,6 @@ def test_runtime_overrides_explicit_benchmark_script_wins(monkeypatch) -> None:
 
 
 # -- _parse_report ---------------------------------------------------------
-def test_parse_report_missing(tmp_path: Path) -> None:
-    assert gr._parse_report(tmp_path) is None
-
-
 def test_parse_report_invalid_json(tmp_path: Path) -> None:
     (tmp_path / "benchmark_report.json").write_text("{bad", encoding="utf-8")
     assert gr._parse_report(tmp_path) is None
@@ -321,14 +293,6 @@ def test_parse_report_invalid_json(tmp_path: Path) -> None:
 def test_parse_report_non_dict(tmp_path: Path) -> None:
     (tmp_path / "benchmark_report.json").write_text("[1,2,3]", encoding="utf-8")
     assert gr._parse_report(tmp_path) is None
-
-
-def test_parse_report_valid(tmp_path: Path) -> None:
-    (tmp_path / "benchmark_report.json").write_text(
-        json.dumps({"output_throughput": 100.0}),
-        encoding="utf-8",
-    )
-    assert gr._parse_report(tmp_path) == {"output_throughput": 100.0}
 
 
 # -- _build_variant_yaml ---------------------------------------------------

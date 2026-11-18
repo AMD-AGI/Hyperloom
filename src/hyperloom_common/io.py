@@ -162,9 +162,15 @@ def _private_mode(path: Path, options: WriteOptions) -> int:
     if options.preserve_mode and path.is_file():
         return stat.S_IMODE(path.stat().st_mode)
     if options.group_read:
-        directory = path.parent.stat().st_mode
-        if directory & stat.S_ISGID:
-            return stat.S_IRUSR | stat.S_IWUSR | (directory & stat.S_IRGRP)
+        return group_read_mode(path.parent.stat().st_mode)
+    return stat.S_IRUSR | stat.S_IWUSR
+
+
+def group_read_mode(directory_mode: int) -> int:
+    """The mode ``group_read`` gives a new file in a directory of ``directory_mode``: owner read-write, and the
+    group's read where the directory is setgid and its group may read it; never others'."""
+    if directory_mode & stat.S_ISGID:
+        return stat.S_IRUSR | stat.S_IWUSR | (directory_mode & stat.S_IRGRP)
     return stat.S_IRUSR | stat.S_IWUSR
 
 
@@ -279,5 +285,6 @@ __all__ = [
     "fsync_directory",
     "fsync_tree",
     "fsync_tree_directories",
+    "group_read_mode",
     "safe_mtime",
 ]

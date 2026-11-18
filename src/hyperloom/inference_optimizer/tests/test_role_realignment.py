@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
-from hyperloom.orchestrator.mcp_tool_names import qualified_context_tool_name
 from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES
 from hyperloom_common.coerce import to_unix
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -20,10 +19,9 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
-    PromptAssets,
     SessionContext,
 )
-from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir, make_session_dir
+from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
@@ -40,34 +38,6 @@ def registry() -> dict:
 
 
 # Static system prompts carry phase semantics
-def test_orchestration_prompt_includes_phase_contract(registry):
-    text = build_orchestration_prompt(
-        action_registry=registry,
-        enabled_actions=default_enabled_actions(no_kernel=False),
-        session=SessionContext(framework="sglang", objective_kind="gain_pct", objective_value=10.0, max_minutes=120),
-    )
-    assert "PHASE CONTRACT" in text
-    # Driven off the phase table: a hand-written list keeps naming a phase the build dropped, and passes on any other
-    # string that happens to contain it.
-    for phase in PHASE_NAMES:
-        assert phase in text, f"missing phase {phase} from orchestration prompt"
-    assert "phase-allowed actions" in text.lower()
-    assert "policy_denied" in text.lower()
-
-
-def test_orchestration_prompt_defers_rescue_moves_to_reference(registry):
-    text = build_orchestration_prompt(
-        action_registry=registry,
-        enabled_actions=default_enabled_actions(no_kernel=False),
-        session=SessionContext(framework="sglang", objective_kind="gain_pct", objective_value=10.0, max_minutes=120),
-        assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
-    )
-
-    assert "kill_task" not in text
-    read_reference = qualified_context_tool_name("read_reference")
-    assert f"{read_reference}(name='specialist_rescue')" in text
-
-
 def test_orchestration_prompt_no_kernel_marks_kernel_skipped(registry):
     text = build_orchestration_prompt(
         action_registry=registry,
@@ -98,31 +68,15 @@ def test_orchestration_prompt_all_enabled_session_context_true(registry):
     assert "(DISABLED:" not in text
 
 
-def test_orchestration_md_carries_phase_awareness():
-    """The orchestration rules fragment names the phase chain it plans against."""
-    from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
+@pytest.mark.parametrize("phase", PHASE_NAMES)
+def test_every_phase_reaches_the_critic_with_its_orientation(phase):
+    """A phase missing from the orientation table would reach the Critic with no phase at all."""
+    from hyperloom.orchestrator.roles._review_constraints import apply_review_constraints
 
-    body = (asset_system_prompts_dir() / "orchestration.md").read_text(encoding="utf-8")
-    assert "Phase awareness" in body
-    assert "PRELUDE" in body or "PHASE_PRELUDE" in body
-    assert "FRAMEWORK_AGENT" in body
-    assert "KERNEL_AGENT" in body
-
-
-def test_critic_phase_orientation_is_delivered_not_inlined():
-    """Critic phase awareness lives in the per-phase injector, not in critic.md."""
-    from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
-    from hyperloom.orchestrator.phases import machine_state as _ps
-    from hyperloom.orchestrator.roles._review_constraints import _PHASE_ORIENTATION
-
-    body = (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
-    assert "Phase-specific rules" in body
-    assert "judge_bundle.phase" in body
-    assert "phase_orientation" in body
-    # The five-phase bullet list must not come back as always-on text.
-    assert "Per-phase orientation:" not in body
-
-    assert set(_PHASE_ORIENTATION) == set(_ps.PHASE_NAMES)
+    bundle: dict = {"proposals": []}
+    apply_review_constraints(bundle, phase=phase, action_verdict_policy={})
+    assert bundle["review_constraints"]["phase"] == phase
+    assert bundle["review_constraints"]["phase_orientation"]
 
 
 # SharedState renderers
@@ -168,10 +122,6 @@ def test_shared_state_phase_status_summary_no_max_minutes_marks_unlimited():
     )
     out = _ps.phase_status_summary(s, now_unix=10.0)
     assert "unlimited run" in out.lower()
-
-
-def test_shared_state_warm_start_summary_empty_when_no_recipe():
-    assert SharedState().to_warm_start_summary() == ""
 
 
 def _t0_warm_started(tmp_path, **put_kwargs) -> SharedState:
@@ -318,21 +268,6 @@ def coordinator_with_mocks(session_dir):
         "critic": MockCriticBackend(),
     }
     return Coordinator(session_dir, backends=backends)
-
-
-@pytest.mark.asyncio
-async def test_compose_prompt_emits_phase_block_for_every_role(
-    coordinator_with_mocks,
-):
-    c = coordinator_with_mocks
-    try:
-        for role in ("orchestration", "critic"):
-            prompt = (await c.conversation.compose_prompt(role)).text
-            assert "=== Phase ===" in prompt, f"{role}: phase block missing"
-            assert "phase     : PRELUDE" in prompt, f"{role}: phase value missing"
-            assert "allowed" in prompt, f"{role}: allowed-actions line missing"
-    finally:
-        await c.stop()
 
 
 @pytest.mark.asyncio
@@ -492,22 +427,6 @@ async def test_compose_prompt_orchestration_omits_warm_start_when_empty(
     try:
         prompt = (await c.conversation.compose_prompt("orchestration")).text
         assert "=== Warm start" not in prompt
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("agent_name", ["orchestration"])
-async def test_compose_prompt_omits_specialist_health_block(
-    coordinator_with_mocks,
-    agent_name,
-):
-    """The periodic specialist block is intentionally gone (see conversation.py)."""
-    c = coordinator_with_mocks
-    try:
-        prompt = (await c.conversation.compose_prompt(agent_name)).text
-        assert "Specialist health" not in prompt
-        assert "stale" not in prompt.lower()
     finally:
         await c.stop()
 

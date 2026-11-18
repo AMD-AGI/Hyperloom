@@ -8,8 +8,6 @@ from __future__ import annotations
 import errno
 import json
 import os
-import subprocess
-import sys
 
 import pytest
 
@@ -91,10 +89,6 @@ def test_pod_history_failure_does_not_break_acquire(tmp_path):
         lock.release()
 
 
-@pytest.mark.skipif(
-    session_lock.fcntl is None,
-    reason="flock-based mutual exclusion requires POSIX fcntl",
-)
 def test_second_holder_rejected(tmp_path):
     """A second live holder of the same session is refused (flock backstop)."""
     held = SessionLock(tmp_path)
@@ -119,95 +113,35 @@ def test_context_manager_releases(tmp_path):
     again.release()
 
 
-def test_pid_fallback_rejects_live_owner(tmp_path, monkeypatch):
-    """Without fcntl, a lock owned by a *different* live pid is still refused."""
-    monkeypatch.setattr(session_lock, "fcntl", None)
-    live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+@pytest.mark.parametrize("body", ["", "garbage }{", '["not", "a", "dict"]'], ids=["blank", "not-json", "not-a-dict"])
+def test_a_contended_lock_whose_owner_cannot_be_parsed_is_still_refused(tmp_path, body):
+    """The refusal names no owner rather than failing on a lock body it cannot parse."""
+    held = SessionLock(tmp_path)
+    held.acquire()
     try:
-        lock_path = session_paths.optimizer_lock_path(tmp_path)
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path.write_text(
-            '{"pid": %d, "hostname": "x", "started_at": "t", "heartbeat_at": "t"}' % (live.pid),
-            encoding="utf-8",
-        )
-        with pytest.raises(SessionAlreadyRunning):
+        session_paths.optimizer_lock_path(tmp_path).write_text(body, encoding="utf-8")
+        with pytest.raises(SessionAlreadyRunning) as exc:
             SessionLock(tmp_path).acquire()
+        assert exc.value.owner == {}
+        assert "held by" not in str(exc.value)
     finally:
-        live.terminate()
-        live.wait(timeout=10)
+        held.release()
 
 
-def test_pid_fallback_takes_over_dead_owner(tmp_path, monkeypatch):
-    """Without fcntl, a lock owned by a dead pid is taken over (not refused)."""
-    monkeypatch.setattr(session_lock, "fcntl", None)
-    lock_path = session_paths.optimizer_lock_path(tmp_path)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    # A pid that is essentially guaranteed to be dead.
-    lock_path.write_text(
-        '{"pid": 2147480000, "hostname": "x", "started_at": "t", "heartbeat_at": "t"}',
-        encoding="utf-8",
-    )
-    lock = SessionLock(tmp_path)
-    lock.acquire()  # must not raise — stale owner is taken over
+def test_a_contended_lock_whose_body_cannot_be_read_is_still_refused(tmp_path, monkeypatch):
+    held = SessionLock(tmp_path)
+    held.acquire()
     try:
-        owner = _read_owner(tmp_path)
-        assert owner is not None and owner["pid"] == os.getpid()
+
+        def raise_eio(_fd, _size):
+            raise OSError(errno.EIO, "io error")
+
+        monkeypatch.setattr(session_lock.os, "read", raise_eio)
+        with pytest.raises(SessionAlreadyRunning) as exc:
+            SessionLock(tmp_path).acquire()
+        assert exc.value.owner == {}
     finally:
-        lock.release()
-
-
-def test_pid_alive_edge_cases(monkeypatch):
-    """_pid_alive covers None/non-positive, ProcessLookup, Permission, OSError."""
-    from hyperloom.inference_optimizer.session.lock import _pid_alive
-
-    assert _pid_alive(None) is False
-    assert _pid_alive(0) is False
-    assert _pid_alive(-5) is False
-    assert _pid_alive(os.getpid()) is True
-
-    def raise_perm(_pid, _sig):
-        raise PermissionError
-
-    monkeypatch.setattr(session_lock.os, "kill", raise_perm)
-    assert _pid_alive(12345) is True  # exists but owned by another user
-
-    def raise_oserror(_pid, _sig):
-        raise OSError("weird")
-
-    monkeypatch.setattr(session_lock.os, "kill", raise_oserror)
-    assert _pid_alive(12345) is False
-
-
-def test_read_owner_fd_empty_and_malformed(tmp_path):
-    """_read_owner_fd handles blank / non-JSON / non-dict bodies and OSError."""
-    lock_path = session_paths.optimizer_lock_path(tmp_path)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-    lock_path.write_text("", encoding="utf-8")
-    fd = os.open(lock_path, os.O_RDWR)
-    try:
-        assert SessionLock._read_owner_fd(fd) is None
-    finally:
-        os.close(fd)
-
-    lock_path.write_text("garbage }{", encoding="utf-8")
-    fd = os.open(lock_path, os.O_RDWR)
-    try:
-        assert SessionLock._read_owner_fd(fd) is None
-    finally:
-        os.close(fd)
-
-    lock_path.write_text('["not", "a", "dict"]', encoding="utf-8")
-    fd = os.open(lock_path, os.O_RDWR)
-    try:
-        assert SessionLock._read_owner_fd(fd) is None
-    finally:
-        os.close(fd)
-
-    # A closed fd triggers the OSError branch.
-    fd2 = os.open(lock_path, os.O_RDWR)
-    os.close(fd2)
-    assert SessionLock._read_owner_fd(fd2) is None
+        held.release()
 
 
 @pytest.mark.skipif(
@@ -241,10 +175,6 @@ def test_acquire_plain_file_still_works(tmp_path):
     again.release()
 
 
-@pytest.mark.skipif(
-    session_lock.fcntl is None,
-    reason="flock error-path requires POSIX fcntl",
-)
 def test_acquire_reraises_non_contention_oserror(tmp_path, monkeypatch):
     """A flock OSError that is not EAGAIN/EACCES/EWOULDBLOCK propagates."""
 

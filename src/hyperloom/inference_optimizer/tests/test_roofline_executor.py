@@ -15,7 +15,6 @@ from hyperloom.orchestrator.actions.executors import roofline as roofline_mod
 from hyperloom.orchestrator.actions.executors.profile import profile_trace_path
 from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
-    _fail,
     _gpu_trace_unsupported_reason,
 )
 from hyperloom.inference_optimizer.trace.task_progress import progress_scope
@@ -313,6 +312,7 @@ async def test_profile_failed_does_not_mutate_shared_state(tmp_path):
         "status": "failed",
         "error": "round exited 1",
         "error_class": "subprocess_error",
+        "output_throughput": 0.0,
     }
     p1, p2 = _patch_subs(profile_failed, _trace_analyze_success())
     executor = RooflineExecutor(shared_state=state)
@@ -323,7 +323,8 @@ async def test_profile_failed_does_not_mutate_shared_state(tmp_path):
     assert result["error_class"] == "profile_failed"
     assert result["phase"] == "profile"
     assert "round exited 1" in result["error"]
-    assert result["sub_result"]["status"] == "failed"
+    assert "executed_at_iso" in result
+    assert result["sub_result"] == {"status": "failed", "error": "round exited 1", "error_class": "subprocess_error"}
 
     assert state.last_profile_trace == "/old/trace.gz"
     assert state.last_trace_analyze["roofline_snapshot_id"] == 5
@@ -749,17 +750,18 @@ def test_profile_trace_path_prefers_main_trace_path():
     assert profile_trace_path(r) == "/main.gz"
 
 
-def test_profile_trace_path_refuses_explicitly_unready_trace():
-    r = {
-        "trace_input_ready": False,
-        "main_trace_path": "/merged.gz",
-        "trace_files": ["/merged.gz"],
-    }
-    assert profile_trace_path(r) == ""
-
-
-def test_profile_trace_path_is_empty_without_main_trace_path():
-    assert profile_trace_path({}) == ""
+@pytest.mark.parametrize(
+    "profile_result",
+    [
+        pytest.param(
+            {"trace_input_ready": False, "main_trace_path": "/merged.gz", "trace_files": ["/merged.gz"]},
+            id="explicitly-unready",
+        ),
+        pytest.param({}, id="nothing-named"),
+    ],
+)
+def test_profile_trace_path_is_empty_without_a_ready_trace(profile_result):
+    assert profile_trace_path(profile_result) == ""
 
 
 def test_profile_trace_path_handles_non_dict():
@@ -767,37 +769,32 @@ def test_profile_trace_path_handles_non_dict():
     assert profile_trace_path("garbage") == ""
 
 
-def test_fail_helper_constructs_canonical_shape():
-    f = _fail(None, "profile", "boom")
-    assert f["status"] == "failed"
-    assert f["error_class"] == "profile_failed"
-    assert f["error"] == "boom"
-    assert f["phase"] == "profile"
-    assert "executed_at_iso" in f
-    assert "sub_result" not in f
-
-    f2 = _fail(None, "trace_analyze", "x", {"status": "failed", "error": "y", "extra": "ignored"})
-    assert f2["sub_result"] == {"status": "failed", "error": "y"}
-    assert "extra" not in f2["sub_result"]
-
-
 def test_roofline_executor_requires_shared_state():
     with pytest.raises(ValueError, match="requires a SharedState"):
         RooflineExecutor(shared_state=None)
 
 
-def test_wrap_profile_ctx_creates_child_task():
-    state = SharedState()
-    exe = RooflineExecutor(shared_state=state)
-    parent = _ctx()
-    parent.extra["session_dir"] = "/sess"
-    child = exe._wrap_profile_ctx(parent)
+@pytest.mark.asyncio
+async def test_the_profile_runs_as_a_child_task_of_the_roofline(tmp_path):
+    """The profile sub-step runs as its own profile task under the roofline's lease, session and params."""
+    seen: list[RunnerContext] = []
+
+    async def fake_profile(ctx):
+        seen.append(ctx)
+        return {"status": "failed", "error": "stop after the profile"}
+
+    parent = _ctx(tmp_path)
+    parent.lease = object()
+    with patch("hyperloom.orchestrator.actions.executors.profile.profile_executor", new=fake_profile):
+        await RooflineExecutor(shared_state=_state())(parent)
+
+    (child,) = seen
     assert child.task.kind == "profile"
     assert child.task.task_id == "t-roofline-1-profile"
     assert child.task.idempotency_key == "roofline:t-1-profile"
     assert child.task.state == "running"
     assert child.task.params == {"base_extra_args": "--mem-fraction-static=0.92"}
-    assert child.extra["session_dir"] == "/sess"
+    assert child.extra["session_dir"] == str(tmp_path)
     assert child.lease is parent.lease
 
 
@@ -811,10 +808,6 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.state._shared_state.attempt_audit import (
-    _AUDIT_ACTIONS as SHARED_STATE_AUDIT_ACTIONS,
-    _KEY_METRIC_MAP,
-)
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
@@ -858,29 +851,6 @@ def _roofline_result(snapshot_id: int = 1) -> dict:
         "analysis_md_path": "/sessions/abc/kernel-agent/runs/.../analysis.md",
         "profile_workspace": "/sessions/abc/runs/roofline/.../benchmark_sglang_...",
     }
-
-
-def test_shared_state_has_roofline_audit_fields_by_default():
-    """Both audit mirrors are declared fields, so both survive a save."""
-    s = SharedState()
-    assert s.roofline_attempts == []
-    assert s.last_roofline == {}
-    assert {"roofline_attempts", "last_roofline"} <= set(s.to_dict())
-
-
-def test_audit_actions_includes_roofline():
-    """One set gates both the recorder and writeback's failed-attempt row."""
-    from hyperloom.orchestrator.loop import writeback as wb
-
-    assert "roofline" in SHARED_STATE_AUDIT_ACTIONS
-    assert wb._AUDIT_ACTIONS is SHARED_STATE_AUDIT_ACTIONS
-
-
-def test_key_metric_map_has_roofline_snapshot_id():
-    assert "roofline" in _KEY_METRIC_MAP
-    key, label = _KEY_METRIC_MAP["roofline"]
-    assert key == "snapshot_id"
-    assert label == "snapshot_id"
 
 
 def test_record_action_attempt_populates_last_roofline_and_history():
@@ -947,6 +917,8 @@ async def test_promote_roofline_flips_changed_and_saves(session_dir):
         "the tail-save; otherwise the post-promote state.json would "
         "still show the pre-mutate trace path"
     )
+    assert post["last_roofline"]["decision"] == "promoted"
+    assert [attempt["task_id"] for attempt in post["roofline_attempts"]] == ["t-rf-1"]
 
 
 @pytest.mark.asyncio
@@ -1172,39 +1144,6 @@ def test_watermark_roofline_tags_current_best_arm(tmp_path):
     assert payload.get("roofline_arm") == "current_best"
 
 
-def test_extract_picks_first_non_empty_mode():
-    res = _ta_empty_chunk_failure(non_empty=["prefilldecode"])
-    out = _extract_steady_state_retry_mode(res)
-    assert out is not None
-    mode, w = out
-    assert mode == "prefilldecode"
-    assert w["code"] == "steady_state_chunk_low_quality"
-
-
-def test_extract_handles_missing_chunk_warning():
-    res = _ta_missing_chunk_failure(available=["mixed", "prefilldecode"])
-    out = _extract_steady_state_retry_mode(res)
-    assert out is not None
-    mode, w = out
-    assert mode == "mixed"
-    assert w["code"] == "steady_state_chunk_missing"
-
-
-def test_extract_returns_none_when_no_alternate():
-    res = _ta_empty_chunk_failure(non_empty=[])
-    assert _extract_steady_state_retry_mode(res) is None
-
-
-def test_extract_returns_none_for_unrelated_warning():
-    res = {
-        "status": "failed",
-        "trace_health_warnings": [
-            {"code": "tracelens_analysis_failed", "severity": "warning"},
-        ],
-    }
-    assert _extract_steady_state_retry_mode(res) is None
-
-
 def test_extract_returns_none_for_empty_result():
     assert _extract_steady_state_retry_mode({}) is None
     assert _extract_steady_state_retry_mode({"status": "ok"}) is None
@@ -1214,13 +1153,6 @@ def test_extract_returns_none_for_empty_result():
         )
         is None
     )
-
-
-def test_extract_skips_blank_mode_entries():
-    res = _ta_empty_chunk_failure(non_empty=["", "   ", "prefilldecode"])
-    out = _extract_steady_state_retry_mode(res)
-    assert out is not None
-    assert out[0] == "prefilldecode"
 
 
 def _n26_patch_subs(profile_result, ta_results, *, on_ta_call=None):
@@ -1253,12 +1185,19 @@ def _n26_patch_subs(profile_result, ta_results, *, on_ta_call=None):
 
 
 @pytest.mark.asyncio
-async def test_auto_retry_succeeds_on_alternate_mode(tmp_path):
+@pytest.mark.parametrize(
+    "non_empty",
+    [
+        pytest.param(["prefilldecode"], id="one-alternate"),
+        pytest.param(["", "   ", "prefilldecode"], id="blank-entries-skipped"),
+    ],
+)
+async def test_auto_retry_succeeds_on_alternate_mode(tmp_path, non_empty):
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\nCompute 60%, Idle 40%\n", encoding="utf-8")
     fail = _ta_empty_chunk_failure(
         requested="mixed",
-        non_empty=["prefilldecode"],
+        non_empty=non_empty,
     )
     succ = _ta_ok(report_md=md)
     p1, p2, calls = _n26_patch_subs(_profile_ok(), [fail, succ])

@@ -65,7 +65,7 @@ template's values to the paths inside the sandbox.
 | `HYPERLOOM_RUNNER_CACHE` | no | Where the template mounts the runner cache. Default `/runner-cache`. For a v2 sheet the runner uses the inference_suite staging `cache_build` published in `inference-suite/<staging key>/` (see [The inference_suite staging](#the-inference_suite-staging)) offline and builds none, so the whole cache can be read-only. It must hold the same directory the app host's `HYPERLOOM_RUNNER_CACHE` names. How the sandbox starts from it is described below the table. |
 | `HYPERLOOM_SOURCE_SHA`, `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256` | set by the hosted multi-branch entry | The hosted multi-branch entry passes both on every create; the template must list them in its accepted create environment. |
 | `HYPERLOOM_FRAMEWORK_SNAPSHOT`, `HYPERLOOM_FRAMEWORK_SESSION_SHA256` | set by the hosted multi-branch entry | When the app host has the image's aiter tables, the hosted multi-branch entry snapshots them below `<session_dir>/framework` and passes both on every create; the template must list them in its accepted create environment, and the sandbox must see the session directory at the same path. Without the snapshot, a test that adds tuned rows to a default table is refused as `spec_rejected`. |
-| `INFERENCEX_REPO` | no | Where the runner fetches InferenceX (default: upstream on GitHub). A sandbox without egress needs a mirror it can read, for example a bare repository on the shared storage. |
+| `INFERENCEX_REPO` | no | Where the runner fetches InferenceX (default: upstream on GitHub). A sandbox without egress needs a mirror it can read, for example a bare repository on the shared storage. A path or `file://` URL may name a mirror another account owns: the runner fetches from its resolved path, and that fetch alone runs with a global git config of its own whose `safe.directory` names that path and its `.git`, so no system-wide `safe.directory` is needed. |
 | `HYPERLOOM_JIT_CACHE` | no | A read-only directory of compiled kernels shared between tests. Unset: every test builds its kernels cold, which is slower but measures the same. A test that patches aiter's `csrc` or `hsa` is refused without it, because it needs its own JIT directory. |
 
 The sandbox serves the model at the path the campaign spec names, so the template must mount the model storage at
@@ -93,9 +93,8 @@ the script is what checks the manifest, so it cannot check itself.
 The script reads the entry's `source.tar` once and unpacks it into the sandbox's scratch directory only when those bytes
 are the archive the manifest records. It copies the wheels there, checking each against the manifest as it copies,
 installs only those copies (`pip --no-index`), then runs the runner from the unpacked source; the scratch directory
-needs room for the unpacked source and the wheels. Nothing the runner or pip runs comes from the cache unchecked. A
-profile test later copies the staged ruppell tree (`<cache>/tools/ruppell-<commit>/`) and builds the copy only when it
-has the pinned digest. The prompt sets a test reads (`<cache>/evalsets/<key>/`) are data, and they are read from the
+needs room for the unpacked source and the wheels. Nothing the runner or pip runs comes from the cache unchecked.
+The prompt sets a test reads (`<cache>/evalsets/<key>/`) are data, and they are read from the
 cache again after their check. The start-up makes no network access; the runner still fetches InferenceX
 (`INFERENCEX_REPO` above).
 
@@ -240,20 +239,17 @@ of different accounts can each rename into it. Run the build with `umask 022` so
 staging. A test whose application staging differs from the runner's published one fails with `preflight_mismatch`,
 naming each package that differs.
 
-A new cluster also needs two more things staged into the runner cache, each with its own command, run where the cache
-is written (the prompt set on a host that has the model's tokenizer files). Without the prompt set, a test that asks for
-the short-prompt consistency check cannot load it; without the ruppell tree, a profile test runs without ruppell:
+A new cluster also needs the prompt set staged into the runner cache, with its own command, run where the cache is
+written, on a host that has the model's tokenizer files. Without it, a test that asks for the short-prompt consistency
+check cannot load it:
 
 ```shell
 PYTHONPATH=src python -m hyperloom.measure.short_prompts.build --model /mnt/shared/models/<model> \
     --cache /mnt/shared/hyperloom/runner-cache
-PYTHONPATH=src python -m hyperloom.measure.ruppell_stage --archive <tar.gz path or URL> \
-    --cache /mnt/shared/hyperloom/runner-cache
 ```
 
-`--commit` of the second command defaults to the commit a profile test pins, and `--archive` is `git archive`'s tarball
-of that commit, a file or a URL. Run both with `umask 022` too: they create the entry's directories and manifest with
-the process's umask, and the sandbox's account must be able to read them.
+Run it with `umask 022` too: it creates the entry's directories and manifest with the process's umask, and the
+sandbox's account must be able to read them.
 
 On a cluster whose sandboxes mount the shared volume at, say, `/data`, keep the app host's values and set the
 template's `HYPERLOOM_RUNNER_CACHE=/data/hyperloom/runner-cache` (and the mirrors below `/data`).

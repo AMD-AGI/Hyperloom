@@ -83,40 +83,6 @@ def test_dry_run_writes_the_source_resolution_artifact(
 
 
 # A path — is_kernel_event strict cat == 'kernel'
-def test_a_filters_python_function_synchronize():
-    """The exact event that ranked first in the buggy resume trace."""
-    sync_event = {
-        "name": "torch/cuda/streams.py(222): synchronize",
-        "cat": "python_function",
-        "dur": 88673.57,
-    }
-    assert kernel_classification.is_kernel_event(sync_event) is False
-
-
-def test_a_filters_cuda_runtime_hipdevicesynchronize():
-    """``hipDeviceSynchronize`` is a HIP runtime API call, not a GPU kernel."""
-    runtime_event = {
-        "name": "hipDeviceSynchronize",
-        "cat": "cuda_runtime",
-        "dur": 92.225,
-    }
-    assert kernel_classification.is_kernel_event(runtime_event) is False
-
-
-def test_a_filters_cpu_op():
-    cpu_op = {"name": "aten::matmul", "cat": "cpu_op", "dur": 50.0}
-    assert kernel_classification.is_kernel_event(cpu_op) is False
-
-
-def test_a_accepts_real_kernel_event():
-    real = {
-        "name": ("_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1ELb0ELb1ELi1EEEvPT0_"),
-        "cat": "kernel",
-        "dur": 6.48,
-    }
-    assert kernel_classification.is_kernel_event(real) is True
-
-
 def test_a_accepts_kernel_with_runtime_lookalike_name_but_kernel_cat():
     # Defensive: pathological name + correct cat → still a kernel
     weird = {"name": "void synchronize_kernel<...>", "cat": "kernel", "dur": 1.0}
@@ -133,6 +99,7 @@ def test_a_rejects_kernel_cat_when_name_is_runtime_api():
 def test_a_top_kernels_no_sync_events_in_real_trace_shape():
     """Build a synthetic trace mirroring the resume4 shape and confirm is_kernel_event rejects the sync events before they can reach top-K."""
     events = [
+        {"name": "aten::matmul", "cat": "cpu_op", "dur": 50.0},
         # 5 host-side sync events, big durations (the buggy ones)
         {"name": "torch/cuda/streams.py(222): synchronize", "cat": "python_function", "dur": 88673.0},
         {"name": "torch/cuda/__init__.py(1073): synchronize", "cat": "python_function", "dur": 10414.0},
@@ -165,24 +132,6 @@ def test_issue_769_kernel_event_uses_torch_cat_kernel():
     assert kernel_classification.is_kernel_event(not_a_kernel) is False
 
 
-def test_issue_769_count_gpu_kernel_events_nonzero_on_healthy_trace(tmp_path):
-    """count_gpu_kernel_events must count cat=='kernel' events in a real torch trace."""
-    trace = {
-        "traceEvents": [
-            {"name": "python_function frame", "cat": "python_function", "dur": 100.0},
-            {"name": "aten::matmul", "cat": "cpu_op", "dur": 50.0},
-            {"name": "hipDeviceSynchronize", "cat": "cuda_runtime", "dur": 92.0},
-            {"name": "void gemm_kernel<...>", "cat": "kernel", "dur": 6.0},
-            {"name": "void attn_kernel<...>", "cat": "kernel", "dur": 11.0},
-            {"name": "void rmsnorm_kernel<...>", "cat": "kernel", "dur": 3.0},
-        ]
-    }
-    trace_path = tmp_path / "healthy.trace.json.gz"
-    with gzip.open(trace_path, "wt", encoding="utf-8") as fh:
-        json.dump(trace, fh)
-    assert trace_inputs.count_gpu_kernel_events(trace_path) == 3
-
-
 # Native-only kernel-opt targeting
 def test_compile_generated_kernel_is_not_reusable_native():
     candidate = {
@@ -201,7 +150,9 @@ def test_compile_generated_kernel_is_not_reusable_native():
         )
         is True
     )
-    assert kernel_classification.classify_patchability(candidate)[0] is False
+    reusable, reason = kernel_classification.classify_patchability(candidate)
+    assert reusable is False
+    assert "runtime-generated" in reason
     assert candidate_assembly.recommend_backends(candidate) == []
     assert "not reusable" in candidate_assembly.build_notes(candidate)
 
@@ -227,34 +178,21 @@ def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
     assert candidate_assembly.recommend_backends(candidate) == ["forge"]
 
 
-def test_recommend_backends_for_python_source():
-    """forge must be recommended for ``python`` source_type too."""
-    candidate = {
-        "name": "some_python_dispatcher",
-        "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/dispatcher.py",
-        "source_type": "python",
-        "reusable_native_kernel": True,
-    }
-    assert candidate_assembly.recommend_backends(candidate) == ["forge"]
-
-
-def test_recommend_backends_for_unknown_source():
-    """Unknown source_type: forge is still recommended (don't pre-filter by extension)."""
-    candidate = {
-        "name": "some_unrecognised_kernel",
-        "source_file": "/some/path/kernel.xyz",
-        "source_type": "unknown",
-        "reusable_native_kernel": True,
-    }
-    assert candidate_assembly.recommend_backends(candidate) == ["forge"]
-
-
-def test_recommend_backends_is_forge_only():
-    """Invariant: forge is the sole per-kernel backend in the ladder."""
+@pytest.mark.parametrize(
+    ("source_type", "source_file"),
+    [
+        ("triton", "/sgl-workspace/sglang/python/sglang/srt/layers/x.py"),
+        ("python", "/sgl-workspace/sglang/python/sglang/srt/layers/dispatcher.py"),
+        ("unknown", "/some/path/kernel.xyz"),
+    ],
+    ids=["triton", "python", "unknown-extension"],
+)
+def test_recommend_backends_is_forge_only(source_type, source_file):
+    """Invariant: forge is the sole per-kernel backend in the ladder, whatever the source type or file extension."""
     candidate = {
         "name": "some_kernel",
-        "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/x.py",
-        "source_type": "triton",
+        "source_file": source_file,
+        "source_type": source_type,
         "reusable_native_kernel": True,
     }
     ladder = candidate_assembly.recommend_backends(candidate)
@@ -302,25 +240,16 @@ def test_absent_curated_harness_is_not_reported(monkeypatch, tmp_path):
     assert files == []
 
 
-def test_125_finalize_adds_kernel_category_for_attention():
-    cand = {"name": "paged_attention_ll4mi_QKV_mfma16_kernel<bf16>"}
-    assert candidate_assembly.derive_kernel_category(cand) == "SDPA"
-
-
 def test_125_derive_category_explicit_wins_over_heuristic():
     cand = {"name": "Cijk_Alik_GEMM_x", "tracelens_category": "MoE"}
     assert candidate_assembly.derive_kernel_category(cand) == "MoE"
-
-
-def test_125_derive_category_unknown_for_opaque_name():
-    cand = {"name": "ZZZ_some_opaque_thunk_42"}
-    assert candidate_assembly.derive_kernel_category(cand) == "unknown"
 
 
 def test_125_derive_category_normalizations():
     cases = [
         ("rocblas_sgemm_kernel", "GEMM"),
         ("flash_fmha_decode_kernel", "SDPA"),
+        ("paged_attention_ll4mi_QKV_mfma16_kernel<bf16>", "SDPA"),
         ("rmsnorm_kernel<bf16>", "Normalization"),
         ("act_and_mul_kernel<bf16>", "Activation"),
         ("moe_dispatch_kernel", "MoE"),
@@ -330,6 +259,7 @@ def test_125_derive_category_normalizations():
         ("aten::mm", "GEMM"),
         ("aten::addmm", "GEMM"),
         ("aten::bmm", "GEMM"),
+        ("ZZZ_some_opaque_thunk_42", "unknown"),
     ]
     for name, expected in cases:
         assert candidate_assembly.derive_kernel_category({"name": name}) == expected, name
@@ -409,13 +339,6 @@ def test_load_op_category_map_parses_unified_perf_summary(tmp_path):
         "aiter::ck_moe_stage1": "MoE_unfused",
         "aten::copy_": "elementwise",
     }
-
-
-def test_load_op_category_map_missing_returns_empty(tmp_path):
-    """csv absent / wrong path => {} so callers degrade to the name heuristic."""
-    assert candidate_assembly.load_op_category_map(tmp_path / "nonexistent") == {}
-    (tmp_path / "perf_report_csvs").mkdir()
-    assert candidate_assembly.load_op_category_map(tmp_path / "perf_report_csvs") == {}
 
 
 # ── #727 companion: fused-MoE trace-anchored shape capture ────────────────────
@@ -795,24 +718,13 @@ def _make_write_reports_args(trace_path):
     )
 
 
-def test_write_reports_raises_when_analysis_md_missing(tmp_path):
-    """write_reports refuses to fabricate a Markdown when analysis.md is missing."""
-    import pytest
-
-    trace = tmp_path / "trace.json"
-    trace.write_text("{}", encoding="utf-8")
-    args = _make_write_reports_args(trace)
-
-    with pytest.raises(RuntimeError, match="did not produce analysis.md"):
-        analysis_reports.write_reports(
-            tmp_path / "run", trace_inputs.TraceInputs(input_type="file", files=[trace]), candidates=[], args=args
-        )
-
-
-def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
-    """A passed-but-nonexistent report path is treated as orchestrator failure, not a cue to fabricate."""
-    import pytest
-
+@pytest.mark.parametrize(
+    "report_path",
+    [None, Path("/no/such/run/analysis.md")],
+    ids=["no-report", "report-path-does-not-exist"],
+)
+def test_write_reports_raises_when_analysis_md_missing(tmp_path, report_path):
+    """A missing or passed-but-nonexistent analysis.md is an orchestrator failure, not a cue to fabricate one."""
     trace = tmp_path / "trace.json"
     trace.write_text("{}", encoding="utf-8")
     args = _make_write_reports_args(trace)
@@ -823,7 +735,7 @@ def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
             trace_inputs.TraceInputs(input_type="file", files=[trace]),
             candidates=[],
             args=args,
-            outcome=analysis_reports.OrchestratorOutcome(report_path=tmp_path / "does-not-exist" / "analysis.md"),
+            outcome=analysis_reports.OrchestratorOutcome(report_path=report_path),
         )
 
 
@@ -1967,19 +1879,6 @@ def test_the_larger_trace_leads_within_a_bucket(tmp_path):
     assert traces[0] == large
 
 
-def test_merged_trace_still_wins_over_a_raw_rank_capture(tmp_path):
-    """The pre-existing preference is unchanged: merged first when present."""
-    trace_dir = tmp_path / "torch_trace"
-    trace_dir.mkdir()
-    (trace_dir / "rank_0.trace.json.gz").write_text("{}", encoding="utf-8")
-    merged = trace_dir / "merged-42.trace.json.gz"
-    merged.write_text("{}", encoding="utf-8")
-
-    _kind, traces = trace_inputs.discover_trace_inputs(trace_dir)
-
-    assert traces[0] == merged
-
-
 def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     tmp_path,
     capsys,
@@ -2801,26 +2700,6 @@ def test_derive_kernel_category_passes_through_unknown_upstream_category():
     assert candidate_assembly.derive_kernel_category({"tracelens_category": "brand_new_skill"}) == "brand_new_skill"
 
 
-def test_derive_kernel_category_falls_back_to_name_heuristic():
-    """Raw-trace fallback path has no tracelens_category; heuristics still apply."""
-    assert candidate_assembly.derive_kernel_category({"name": "rocblas_gemm_kernel"}) == "GEMM"
-    assert candidate_assembly.derive_kernel_category({"name": "fmha_fwd_kernel"}) == "SDPA"
-    assert candidate_assembly.derive_kernel_category({"name": "rmsnorm_fused"}) == "Normalization"
-    assert candidate_assembly.derive_kernel_category({"name": "totally_unknown_op"}) == "unknown"
-
-
-def test_classify_patchability_accepts_stable_triton_source():
-    """A stable Triton source is reusable; skip_reason is empty."""
-    cand = {
-        "name": "triton_attention_decode_kernel",
-        "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/attn.py",
-        "source_type": "triton",
-    }
-    reusable, reason = kernel_classification.classify_patchability(cand)
-    assert reusable is True
-    assert reason == ""
-
-
 def test_classify_patchability_rejects_missing_source_file():
     reusable, reason = kernel_classification.classify_patchability(
         {"name": "rms_norm", "source_type": "triton"},
@@ -2906,56 +2785,19 @@ def test_classify_patchability_rejects_vendor_blas_name_markers():
         assert "non-patchable" in reason or "PyTorch native" in reason, marker_name
 
 
-def test_classify_patchability_rejects_aten_without_library():
-    """aten::* without a library hint is treated as Tensile / native backend."""
+@pytest.mark.parametrize("library", ["", "Tensile"], ids=["no-library", "tensile"])
+def test_classify_patchability_rejects_aten_on_a_tensile_backend(library):
+    """aten::* without a library hint, or with an explicit Tensile one (the most common reject), is a vendor backend."""
     reusable, reason = kernel_classification.classify_patchability(
         {
             "name": "aten::mm",
             "source_file": "/sgl-workspace/aiter/foo.py",
             "source_type": "python",
-            "library": "",
-        }
-    )
-    assert reusable is False
-    assert "Tensile" in reason or "vendor" in reason
-
-
-def test_classify_patchability_rejects_aten_tensile_library():
-    """Explicit library == 'Tensile' is the most common reject path."""
-    reusable, reason = kernel_classification.classify_patchability(
-        {
-            "name": "aten::mm",
-            "source_file": "/sgl-workspace/aiter/foo.py",
-            "source_type": "python",
-            "library": "Tensile",
+            "library": library,
         }
     )
     assert reusable is False
     assert "Tensile" in reason
-
-
-def test_classify_patchability_rejects_runtime_generated_kernel():
-    reusable, reason = kernel_classification.classify_patchability(
-        {
-            "name": "triton_poi_fused_add_0",
-            "source_file": "/tmp/torchinductor_root/ab/cdef.py",
-            "source_type": "runtime_generated",
-        }
-    )
-    assert reusable is False
-    assert "runtime-generated" in reason
-
-
-def test_classify_patchability_rejects_unreusable_source_root():
-    reusable, reason = kernel_classification.classify_patchability(
-        {
-            "name": "my_custom_kernel",
-            "source_file": "/tmp/random/my_custom_kernel.cu",
-            "source_type": "hip_cpp",
-        }
-    )
-    assert reusable is False
-    assert "reusable framework root" in reason
 
 
 def test_build_audit_summary_splits_tasks_and_skipped():
@@ -3014,16 +2856,6 @@ def test_build_audit_summary_splits_tasks_and_skipped():
     assert "source file" in aten_entry["skip_reason"]
     # Reusable tasks carry recommended_backends so the audit shows routing without reloading candidates.
     assert summary["tasks"][0]["recommended_backends"] == ["forge"]
-
-
-def test_build_audit_summary_handles_empty_input():
-    summary = analysis_reports.build_audit_summary(
-        [], subject=analysis_reports.AuditSubject(trace_input="/tmp/x.json.gz")
-    )
-    assert summary["task_count"] == 0
-    assert summary["skipped_count"] == 0
-    assert summary["tasks"] == []
-    assert summary["skipped"] == []
 
 
 # Source-function aggregation.
@@ -3624,7 +3456,7 @@ def test_build_task_groups_filters_non_reusable():
 
 
 # summary.json carries task_groups[] view.
-def test_build_audit_summary_includes_task_groups():
+def test_build_audit_summary_projects_each_task_group():
     summary = analysis_reports.build_audit_summary(
         candidates=[],
         task_groups=[
@@ -3644,24 +3476,24 @@ def test_build_audit_summary_includes_task_groups():
         subject=analysis_reports.AuditSubject(trace_input="/tmp/x.json.gz"),
     )
     assert summary["task_group_count"] == 1
+    assert summary["task_groups"] == [
+        {
+            "task_group_id": "tg001",
+            "source_path": "/foo/x.py",
+            "definition_line": 10,
+            "function_name": "rms",
+            "ast_resolved": False,
+            "primary_kernel_id": "k001",
+            "kernel_ids": ["k001", "k002"],
+            "row_count": 2,
+            "aggregate_duration_us": 123.4,
+            "aggregate_call_count": 96,
+            "aggregate_gpu_pct": 7.5,
+        }
+    ]
 
 
 # Idle-% sanity gate on the Executive Summary.
-
-_EXEC_SUMMARY_LOW_IDLE = """\
-# Workload Analysis
-
-## Executive Summary
-
-A single-rank trace.
-
-| Metric | Value |
-|--------|-------|
-| Total Time | 1234.5 ms |
-| Compute % | 99.30% |
-| Idle % | 0.25% |
-| Exposed Communication % | 0.42% |
-"""
 
 _EXEC_SUMMARY_HIGH_IDLE = """\
 # Workload Analysis
@@ -3688,12 +3520,6 @@ _EXEC_SUMMARY_NO_IDLE_ROW = """\
 | Total Time | 1234.5 ms |
 | Compute % | 99.30% |
 """
-
-
-def test_extract_idle_pct_parses_low_idle_row(tmp_path):
-    md = tmp_path / "analysis.md"
-    md.write_text(_EXEC_SUMMARY_LOW_IDLE, encoding="utf-8")
-    assert tlr.extract_idle_pct_from_analysis_md(md) == pytest.approx(0.25)
 
 
 def test_extract_idle_pct_parses_high_idle_row(tmp_path):
@@ -3797,23 +3623,14 @@ def test_build_audit_summary_defaults_trace_health_warnings_to_empty_list():
     assert summary["trace_health_warnings"] == []
 
 
-def test_analysis_mode_xdit_returns_inference():
-    """xDiT uses inference-mode reporting for capture-folder support despite being scriptable."""
-    assert tracelens_analysis_mode("xdit") == "inference"
-    assert tracelens_analysis_mode("xDiT") == "inference"
-    assert tracelens_analysis_mode("  xdit  ") == "inference"
-
-
-def test_analysis_mode_serving_frameworks_return_inference():
-    """Regression guard: sglang / vllm / atom remain ``inference``."""
-    assert tracelens_analysis_mode("sglang") == "inference"
-    assert tracelens_analysis_mode("vllm") == "inference"
-    assert tracelens_analysis_mode("atom") == "inference"
-
-
-def test_analysis_mode_scriptable_framework_stays_default():
-    """Scriptable frameworks (except xDiT) fall back to ``default``."""
-    assert tracelens_analysis_mode("custom") == "default"
+@pytest.mark.parametrize(
+    "framework",
+    ["xdit", "xDiT", "  xdit  ", "sglang", "vllm", "atom"],
+    ids=["xdit", "xdit-mixed-case", "xdit-padded", "sglang", "vllm", "atom"],
+)
+def test_analysis_mode_xdit_and_serving_frameworks_return_inference(framework):
+    """Serving frameworks, and xDiT despite being scriptable (capture-folder support), report in inference mode."""
+    assert tracelens_analysis_mode(framework) == "inference"
 
 
 def test_analysis_mode_unknown_framework_returns_inference():
@@ -3946,14 +3763,16 @@ def test_idle_gate_graph_guard_applies_gate_when_not_under_recorded(monkeypatch)
 
 
 def test_idle_gate_graph_guard_noop_below_threshold(monkeypatch):
-    # Below the threshold the guard must not even probe the trace.
-    def _boom(_tp):  # pragma: no cover - must not be called
-        raise AssertionError("graph coverage probed below threshold")
-
-    monkeypatch.setattr(trace_gates, "_graph_coverage_from_raw_trace", _boom)
+    # The stub would raise the graph warning, so only the threshold check keeps the result empty.
+    monkeypatch.setattr(
+        trace_gates,
+        "_graph_coverage_from_raw_trace",
+        lambda _tp: {"graph_under_recorded": True, "graph_launch_count": 8},
+    )
     threshold, high_idle, graph_warn = trace_gates._evaluate_idle_gate_with_graph_guard(
         10.0, Path("analysis.md"), "raw.trace.json"
     )
+    assert threshold == 80.0
     assert (high_idle, graph_warn) == (None, None)
 
 

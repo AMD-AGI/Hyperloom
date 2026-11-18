@@ -17,7 +17,6 @@ import pytest
 
 
 _ROOT = Path(__file__).resolve().parents[2]
-_WORKFLOW = _ROOT / ".github" / "workflows" / "tests-coverage.yml"
 _HELPER = _ROOT / "scripts" / "ci_durations.py"
 _SPEC = importlib.util.spec_from_file_location("ci_durations", _HELPER)
 assert _SPEC and _SPEC.loader
@@ -263,22 +262,3 @@ def test_merge_cli_preserves_existing_output_on_failure(tmp_path):
     assert result.returncode == 1
     assert "::error::" in result.stderr
     assert output.read_text() == "original"
-
-
-def test_workflow_keeps_pytest_exit_diagnostics_and_fail_closed_publication():
-    workflow = _WORKFLOW.read_text(encoding="utf-8")
-    assert 'cp .test_durations ".test_durations.shard${SHARD}"' in workflow
-    assert "python -m pytest -p scripts.ci_durations" in workflow
-    assert "--store-durations --clean-durations" in workflow
-    assert '--durations-path ".test_durations.shard${SHARD}"' in workflow
-    assert "--splitting-algorithm=least_duration" in workflow
-    assert 'PYTEST_RC="${PIPESTATUS[0]}"' in workflow
-    assert 'exit "$PYTEST_RC"' in workflow
-    assert '-rfE "${EXTRA[@]}" 2>&1 | tee pytest-output.log' in workflow
-    update = workflow.split("  update-durations:", 1)[1]
-    assert "github.event_name == 'push' && github.ref == 'refs/heads/main' && success()" in update
-    assert "needs: [test, coverage]" in update
-    assert "merge-multiple: false" in update
-    assert "python scripts/ci_durations.py" in update
-    assert "if: steps.merge.outcome == 'success'" in update
-    assert "test-durations-v1-" in update

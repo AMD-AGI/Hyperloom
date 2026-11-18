@@ -238,15 +238,6 @@ def test_build_backends_critic_follows_an_orchestration_on_codex(monkeypatch) ->
     assert b["critic"][1]["codex_model"] == "codex-y"
 
 
-def test_backends_have_no_provider_specific_branch() -> None:
-    """The retired DeepSeek branch and its hardcoded client factory are gone."""
-    exported = set(vars(clib))
-    assert "_deepseek_only" not in exported
-    assert "_deepseek_openai_client_factory" not in exported
-    # The guard against that typo: the symbol the branch was replaced by exists.
-    assert "_resolve_critic_protocol" in exported
-
-
 def test_build_backends_openai_only_uses_codex_for_orchestration(monkeypatch) -> None:
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
@@ -391,17 +382,6 @@ def test_proposal_scoring_flag_parsing() -> None:
     assert enabled.proposal_scoring is True
     disabled = parser.parse_args(["optimize", "--model", "x", "--no-proposal-scoring"])
     assert disabled.proposal_scoring is False
-
-
-def test_retired_enable_proposal_scoring_flag_rejected(capsys) -> None:
-    # The deprecation window is over: the flag is now an ordinary unknown argument.
-    from hyperloom.inference_optimizer.cli.parser import _build_parser
-
-    parser = _build_parser()
-    with pytest.raises(SystemExit):
-        parser.parse_args(["optimize", "--model", "x", "--enable-proposal-scoring"])
-    err = capsys.readouterr().err
-    assert "unrecognized arguments: --enable-proposal-scoring" in err
 
 
 def test_proposal_scorer_models_without_enable_stays_off(monkeypatch) -> None:

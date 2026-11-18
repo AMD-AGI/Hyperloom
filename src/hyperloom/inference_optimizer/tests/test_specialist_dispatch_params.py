@@ -214,21 +214,14 @@ def test_freeform_skips_tag_and_gap_requirements(gate, orchestration_role):
     )
 
 
-def test_freeform_empty_description_rejected(gate, orchestration_role):
+@pytest.mark.parametrize(
+    "params",
+    [{"scope": "freeform", "task_description": "   "}, {"scope": "freeform"}],
+    ids=["blank", "absent"],
+)
+def test_freeform_empty_description_rejected(gate, orchestration_role, params):
     with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            orchestration_role,
-            _dispatch({"scope": "freeform", "task_description": "   "}),
-        )
-    assert exc.value.rule == "specialist_freeform_empty_description"
-
-
-def test_freeform_missing_description_rejected(gate, orchestration_role):
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            orchestration_role,
-            _dispatch({"scope": "freeform"}),
-        )
+        gate._validate_specialist_dispatch(orchestration_role, _dispatch(params))
     assert exc.value.rule == "specialist_freeform_empty_description"
 
 
@@ -687,17 +680,15 @@ def test_freeform_max_turns_above_cap_rejected(gate, orchestration_role):
         )
 
 
-def test_prepare_scoring_proposals_preserves_output_name_whitespace():
-    from hyperloom.orchestrator.scoring.proposal_scorer import (
-        _normalise_model_scores,
-        _prepare_scoring_proposals,
-    )
+async def test_a_padded_proposal_name_keeps_its_score_under_that_name():
+    """The score table looks a variant up by its proposal_set name, so the scorer must not strip it."""
+    from hyperloom.inference_optimizer.tests.test_proposal_scorer_coverage_unit import _FakeClient
+    from hyperloom.orchestrator.scoring.proposal_scorer import ProposalScorer
 
-    entries = _prepare_scoring_proposals([{"name": " x "}])
-    parsed = {"scores": {"proposal_0": {"score": 5, "reason": "ok"}}}
-    out = _normalise_model_scores(parsed, scoring_entries=entries)
-    assert " x " in out
-    assert "x" not in out
+    client = _FakeClient({"m": '{"scores": {"proposal_0": {"score": 5, "reason": "ok"}}}'})
+    scorer = ProposalScorer(models=("m",), client_factory=lambda: client)
+    out = await scorer.score(gap={"domain": "d"}, proposals=[{"name": " x "}])
+    assert list(out["models"]["m"]) == [" x "]
 
 
 def test_resolve_specialist_max_turns_zero_uses_default():
@@ -711,13 +702,11 @@ def test_resolve_specialist_max_turns_zero_uses_default():
 
 # --------------------------------------------------------------------------- # Tool surface: TaskKill and
 # SlashCommand are denied. --------------------------------------------------------------------------- #
-def test_denylist_blocks_process_kill_tools():
+def test_specialists_are_denied_only_the_process_cleanup_tools():
+    """specialist.md's containment model: every tool except these two, so patch authoring and KB writes stay open."""
     from hyperloom.orchestrator.specialists.runner import SPECIALIST_TOOL_DENYLIST
 
-    assert "KillShell" in SPECIALIST_TOOL_DENYLIST
-    assert "SlashCommand" in SPECIALIST_TOOL_DENYLIST
-    assert "Task" not in SPECIALIST_TOOL_DENYLIST
-    assert "TodoWrite" not in SPECIALIST_TOOL_DENYLIST
+    assert SPECIALIST_TOOL_DENYLIST == frozenset({"KillShell", "SlashCommand"})
 
 
 # --------------------------------------------------------------------------- # domain KEY -> kb_anchor translation

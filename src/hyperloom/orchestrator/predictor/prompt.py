@@ -42,17 +42,26 @@ def _accuracy_gate(state: SessionView) -> list[str]:
     ]
 
 
-def queue_block(state: SessionView, *, in_grids: Collection[str] = frozenset(), max_entries: int = 12) -> str:
-    """The predictor's rows still waiting for a bench, the ones a queued grid holds, and its open mandate.
+def queue_block(
+    state: SessionView,
+    *,
+    in_grids: Collection[str] = frozenset(),
+    carried: Collection[str] = frozenset(),
+    max_entries: int = 12,
+) -> str:
+    """The predictor's rows still waiting for a bench, the ones a grid holds or carried, and its open mandate.
 
     Args:
         in_grids: Content fingerprints of the variants in queued or running explore grids. A row among
             them is named rather than offered, since orchestration copies offered rows.
+        carried: Content fingerprints of the variants finished automatic explore grids carried. A row among
+            them ended without a verdict and is named rather than offered.
         max_entries: Rows rendered in full; the rest are counted.
     """
     rows = [row for row in state.untested_proposal_rows() if row["provenance"] == PROVENANCE]
-    offered = [row for row in rows if row["fingerprint"] not in in_grids]
+    offered = [row for row in rows if row["fingerprint"] not in in_grids and row["fingerprint"] not in carried]
     held = [row["name"] for row in rows if row["fingerprint"] in in_grids]
+    ended = [row["name"] for row in rows if row["fingerprint"] in carried and row["fingerprint"] not in in_grids]
     mandate = open_mandate(state)
     out: list[str] = []
     if offered:
@@ -67,6 +76,15 @@ def queue_block(state: SessionView, *, in_grids: Collection[str] = frozenset(), 
         out.append(
             flatten_for_prompt(
                 "Predictor rows already in a queued or running explore grid, not to be copied again: " + ", ".join(held)
+            )
+        )
+    if ended:
+        if out:
+            out.append("")
+        out.append(
+            flatten_for_prompt(
+                "Predictor rows an automatic explore grid carried to its end without a verdict; the Coordinator does "
+                "not bench them again: " + ", ".join(ended)
             )
         )
     if mandate:

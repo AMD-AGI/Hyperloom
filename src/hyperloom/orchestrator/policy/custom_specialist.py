@@ -15,7 +15,6 @@ __all__ = [
     "custom_only_framework",
     "deny_coordinator_dispatched_delegate",
     "deny_search_under_custom_only",
-    "skips_reactor_turn",
 ]
 
 # What Orchestration may not run in FRAMEWORK_AGENT under ``HYPERLOOM_CUSTOM_SPECIALIST_ONLY``.
@@ -46,11 +45,6 @@ def custom_only_framework(shared_state: Any) -> bool:
     if not getattr(shared_state, "custom_specialist_only", False):
         return False
     return str(shared_state.phase or "").strip().upper() == _FRAMEWORK_AGENT_PHASE
-
-
-def skips_reactor_turn(agent_name: str, shared_state: Any) -> bool:
-    """Whether ``agent_name`` sits the tick out: Orchestration under custom-only FRAMEWORK_AGENT, where all it may emit is denied."""
-    return agent_name == "orchestration" and custom_only_framework(shared_state)
 
 
 def deny_search_under_custom_only(shared_state: Any, action_name: str) -> None:

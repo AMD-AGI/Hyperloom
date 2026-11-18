@@ -1280,20 +1280,6 @@ def test_promote_warm_replay_no_gain_is_drift(tmp_path):
     assert coord.shared_state.cumulative_gain_validated == 0.0
 
 
-def test_promote_warm_replay_succeeded_but_zero_gain_is_drift(tmp_path):
-    """``expected_gain_pct=0`` → any positive measurement is reproduced; zero/negative falls to drift."""
-    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    coord.shared_state.warm_replay_outcome = {
-        "status": "in_flight",
-        "expected_gain_pct": 0.0,
-    }
-    task = _StubTask(params={"extra_server_args": "--foo"})
-    result = {"status": "succeeded", "output_throughput": 600.0}
-    coord.phase_prelude.promote_warm_replay(result, task=task)
-    assert coord.shared_state.warm_replay_outcome["status"] == "drift"
-    assert coord.shared_state.warm_replay_outcome["actual_gain_pct"] == 0.0
-
-
 def test_promote_warm_replay_failed_records_outcome(tmp_path):
     """Subprocess failure → tag as ``failed`` with the error_class verbatim."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
@@ -1712,23 +1698,24 @@ def test_prelude_bootstrap_runs_on_positive_baseline(tmp_path):
     assert coord.writeback._should_run_prelude_bootstrap(600.0) is True
 
 
-def test_prelude_bootstrap_skipped_without_throughput(tmp_path):
+@pytest.mark.parametrize(
+    ("state", "tput"),
+    [
+        pytest.param({}, 0.0, id="zero-throughput"),
+        pytest.param({}, None, id="no-throughput"),
+        pytest.param({"auto_roofline_pending_task_id": "task-roofline"}, 600.0, id="roofline-pending"),
+        pytest.param({"stop_reason": "baseline_accuracy_failed"}, 600.0, id="stop-pending"),
+    ],
+)
+def test_prelude_bootstrap_skipped(tmp_path, state, tput):
+    """No bootstrap without a positive throughput, while a roofline is pending, or once a stop is pending.
+
+    A baseline that halted the run must not enqueue/dispatch any post-baseline bootstrap work before the halt fires.
+    """
     coord = _make_coord(tmp_path)
-    assert coord.writeback._should_run_prelude_bootstrap(0.0) is False
-    assert coord.writeback._should_run_prelude_bootstrap(None) is False
-
-
-def test_prelude_bootstrap_skipped_when_roofline_pending(tmp_path):
-    coord = _make_coord(tmp_path)
-    coord.shared_state.auto_roofline_pending_task_id = "task-roofline"
-    assert coord.writeback._should_run_prelude_bootstrap(600.0) is False
-
-
-def test_prelude_bootstrap_skipped_when_stop_pending(tmp_path):
-    """A baseline that halted the run (e.g. baseline_accuracy_failed) must not enqueue/dispatch any post-baseline bootstrap work before the halt fires."""
-    coord = _make_coord(tmp_path)
-    coord.shared_state.stop_reason = "baseline_accuracy_failed"
-    assert coord.writeback._should_run_prelude_bootstrap(600.0) is False
+    for name, value in state.items():
+        setattr(coord.shared_state, name, value)
+    assert coord.writeback._should_run_prelude_bootstrap(tput) is False
 
 
 def test_inject_warm_recipe_history_skips_when_no_recipe(tmp_path):

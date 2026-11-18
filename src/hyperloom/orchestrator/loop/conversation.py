@@ -14,6 +14,8 @@ from ..bus.gpu_pool import gpus_by_task_sync
 from ..mcp_tool_names import qualified_context_tool_name
 from ..phases import dispatch_order
 from ..phases import machine_state as _phase_state
+from ..phases.proposal_bench import carried_fingerprints, explore_grid_fingerprints, waiting_proposal_rows
+from ..policy.custom_specialist import custom_only_framework
 from ..policy.projection import resource_pools_summary
 from ..specialists.in_flight import in_flight_domains
 from ..specialists.reap_watch import newest_activity, specialist_activity_paths
@@ -67,8 +69,8 @@ _INBOX_PROMPT_CHARS = 40_000
 # Task kinds that queue for the benchmark lane, in the order the backlog line lists them.
 _EXPLORE = "explore"
 _BENCH_LANE_KINDS = ("integrate_patch", _EXPLORE)
-# Longest a KERNEL_AGENT session goes without an Orchestration turn while kernel progress is unchanged.
-_KERNEL_ORCHESTRATION_HEARTBEAT_SEC = 900.0
+# Longest Orchestration goes without a turn while nothing it reads has changed.
+_ORCHESTRATION_HEARTBEAT_SEC = 900.0
 
 
 @dataclass(frozen=True)
@@ -323,9 +325,9 @@ class ConversationCollaborator(CoordinatorCollaborator):
         self.kb_last_read: ExperienceKBEvidence | None = None
         # Per-agent seq of the last message its prompt rendered.
         self._rendered_cursor: dict[str, int] = {}
-        # The kernel progress fingerprint at Orchestration's last admitted KERNEL turn, and when it was admitted.
-        self._admitted_kernel_fingerprint = ""
-        self._admitted_at = 0.0
+        # The phase and the queued and running task ids Orchestration's last settled turn left, and when it settled.
+        self._settled_view: tuple[str, frozenset[str]] | None = None
+        self._settled_at = 0.0
 
     async def _kb_prompt_block(self, untested_proposals: str) -> str:
         """Read shared Experience evidence once per FRAMEWORK_AGENT orchestration tick."""
@@ -484,10 +486,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
     def _queued_backlog_line(self) -> str:
         """Benchmark-lane backlog: queued integrate_patch / explore tasks in dispatch order, and untested proposals."""
         counts = self.tasks.queued_kind_counts_sync()
-        in_grids = self._explore_grid_fingerprints()
-        counts["untested proposals"] = sum(
-            row["fingerprint"] not in in_grids for row in self.shared_state.untested_proposal_rows()
-        )
+        counts["untested proposals"] = len(waiting_proposal_rows(self.shared_state, self.tasks))
         parts = [f"{counts[kind]} {kind}" for kind in (*_BENCH_LANE_KINDS, "untested proposals") if counts.get(kind)]
         if not parts:
             return ""
@@ -565,18 +564,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
         )
         append_conversation(session_dir=self.session_dir, record=record)
 
-    def _explore_grid_fingerprints(self) -> set[str]:
-        """Content fingerprints of the variants in every queued or running explore grid."""
-        from ..actions.executors._proposal_identity import content_fingerprint
-
-        return {
-            content_fingerprint(variant)
-            for task in (*self.tasks.queued_context_sync(), *self.tasks.running_context_sync())
-            if task.kind == _EXPLORE
-            for variant in (task.params or {}).get("grid") or ()
-            if isinstance(variant, dict)
-        }
-
     def trajectory_digest(self) -> str:
         """The deterministic trajectory digest, or "" when building it fails."""
         from ..knowledge import trajectory_reviewer
@@ -604,10 +591,13 @@ class ConversationCollaborator(CoordinatorCollaborator):
             sections.append(denial_summary)
         if (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
             # The predictor's rows lead the queue, so its block comes first, under the same section.
-            in_grids = self._explore_grid_fingerprints()
+            in_grids = explore_grid_fingerprints(self.tasks)
+            carried = carried_fingerprints(self.shared_state, self.tasks)
             blocks = (
-                queue_block(self.shared_state, in_grids=in_grids),
-                self.shared_state.to_untested_proposals_summary(skip_provenance=PROVENANCE, in_grids=in_grids),
+                queue_block(self.shared_state, in_grids=in_grids, carried=carried),
+                self.shared_state.to_untested_proposals_summary(
+                    skip_provenance=PROVENANCE, in_grids=in_grids, carried=carried
+                ),
             )
             untested_block = "\n\n".join(block for block in blocks if block)
             if untested_block:
@@ -712,18 +702,26 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
         return ComposedPrompt(context="\n".join(context), turn="\n".join(turn))
 
-    def admit_turn(self, agent_name: str, now_unix: float) -> bool:
-        """Whether ``agent_name`` takes a turn this tick; in KERNEL_AGENT, Orchestration waits for kernel progress or the heartbeat."""
-        state = self.shared_state
-        if agent_name != "orchestration" or (state.phase or "").upper() != _phase_state.PHASE_KERNEL_AGENT:
+    async def admit_turn(self, agent_name: str, now_unix: float) -> bool:
+        """Whether ``agent_name`` takes a turn this tick.
+
+        Orchestration sits out custom-only FRAMEWORK_AGENT, where all it may emit is denied. Elsewhere it takes a turn
+        when the phase or the queued and running tasks differ from what its last settled turn left, when its inbox holds
+        a message that asks something of it, or once the heartbeat elapses.
+        """
+        if agent_name != "orchestration":
             return True
-        fingerprint = state.kernel_progress_fingerprint
-        last_turn = state.agent_last_active.get("orchestration", 0.0)
-        handled = fingerprint == self._admitted_kernel_fingerprint and last_turn >= self._admitted_at
-        if handled and now_unix - last_turn < _KERNEL_ORCHESTRATION_HEARTBEAT_SEC:
+        if custom_only_framework(self.shared_state):
             return False
-        self._admitted_kernel_fingerprint, self._admitted_at = fingerprint, now_unix
-        return True
+        if now_unix - self._settled_at >= _ORCHESTRATION_HEARTBEAT_SEC:
+            return True
+        if await self._orchestration_view() != self._settled_view:
+            return True
+        cursor = await self.cursors.load(agent_name)
+        return await self.bus.has_actionable_inbox(agent_name, after_seq=cursor.last_processed_seq)
+
+    async def _orchestration_view(self) -> tuple[str, frozenset[str]]:
+        return (self.shared_state.phase or "").upper(), await self.tasks.active_task_ids()
 
     async def compose_turn(self, agent_name: str, backend: Any) -> TurnPrompt:
         """The system prompt and prompt for one turn; a backend that caches its system prompt gets the session context in it."""
@@ -733,11 +731,14 @@ class ConversationCollaborator(CoordinatorCollaborator):
             return TurnPrompt(f"{system_prompt}\n\n{composed.context}", composed.turn, composed.context)
         return TurnPrompt(system_prompt, composed.text, "")
 
-    async def advance_rendered_cursor(self, agent_name: str) -> None:
-        """Advance an agent's read cursor to the last message its prompt rendered."""
+    async def settle_turn(self, agent_name: str) -> None:
+        """Advance the agent's read cursor to the last message its prompt rendered; for Orchestration, note what it left."""
         seq = self._rendered_cursor.get(agent_name)
         if seq is not None:
             await self.cursors.advance(agent_name, seq=seq)
+        if agent_name == "orchestration":
+            self._settled_view = await self._orchestration_view()
+            self._settled_at = time.time()
 
     async def _augment_critic_inbox_with_pending(self, rendered: list["Message"]) -> list["Message"]:
         """Ensure every undecided proposal awaiting a Critic verdict is present."""
