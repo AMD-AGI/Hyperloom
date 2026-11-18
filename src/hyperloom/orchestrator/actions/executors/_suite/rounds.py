@@ -50,6 +50,7 @@ from ...cancel_channel import cancel_scope_listener
 from ...stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
 from .._accuracy_gate import ACCURACY_DIR
 from .._agentx_checkpoint import AgentxCheckpoint, SuiteRoundCheckpoint
+from .._aiter_jit import apply_session_jit_cache
 from .._benchmark_interpreter import _resolve_probe_python
 from .._failed_step import failed_step_error_class
 from .._gpu_pin import session_cards_mask
@@ -130,6 +131,7 @@ class SuiteRoute:
     """What every inference_suite round of one attempt runs on; ``manifest_sha256`` is ``None`` when nothing is staged.
 
     ``server_url`` is the server the attempt's rounds measure without starting it, ``None`` when they serve locally.
+    ``jit_cache`` maps each JIT cache env name of the base's framework to its session-scoped directory.
     """
 
     base: BaseLaunch
@@ -138,6 +140,7 @@ class SuiteRoute:
     manifest_sha256: str | None
     framework_python: str
     server_url: str | None = None
+    jit_cache: Mapping[str, str] = MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -223,6 +226,8 @@ def session_route(session_dir: Path) -> SuiteRoute | None:
     if frozen is None:
         return None
     tool_cache = staged_tool_cache()
+    jit_cache: dict[str, str] = {}
+    apply_session_jit_cache(jit_cache, framework=frozen.launch.framework, session_dir=session_dir)
     return SuiteRoute(
         base=frozen.launch,
         base_path=frozen.path,
@@ -230,6 +235,7 @@ def session_route(session_dir: Path) -> SuiteRoute | None:
         manifest_sha256=manifest_sha256(tool_cache),
         framework_python=_resolve_probe_python(frozen.launch.framework),
         server_url=client_only_server_url(),
+        jit_cache=MappingProxyType(jit_cache),
     )
 
 
@@ -288,6 +294,7 @@ def _settings(
         env_inherit=inherited_env_names({k: v for k, v in os.environ.items() if k not in env_drop}),
         deadline_unix=deadline,
         server_url=route.server_url,
+        jit_cache=route.jit_cache,
     )
 
 

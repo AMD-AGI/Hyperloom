@@ -19,8 +19,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from hyperloom_common.aiter_jit_cache import (
     invalidate_jit_cache,
     resolve_jit_build_dir,
@@ -1020,12 +1018,6 @@ def result_is_aiter_jit_registry_mismatch(result: dict[str, Any] | None) -> bool
     return is_aiter_jit_registry_mismatch(str(result.get("error") or ""))
 
 
-def benchmark_framework(config_path: Path) -> str:
-    """Read the framework a rendered Magpie config benchmarks, or "" when it names none."""
-    cfg = yaml.safe_load(Path(config_path).read_text(encoding=_UTF8)) or {}
-    return str((cfg.get("benchmark") or {}).get("framework") or "")
-
-
 def apply_session_jit_cache(env: dict[str, str], *, framework: str, session_dir: Path) -> None:
     """Point ``framework``'s JIT cache env names at session-scoped directories, in place.
 
@@ -1059,7 +1051,6 @@ __all__ = [
     "NON_JIT_SO_LIBTYPES",
     "aiter_build_targets",
     "apply_session_jit_cache",
-    "benchmark_framework",
     "card_target",
     "clean_stale_aiter_locks",
     "csv_jit_kernel_rows",

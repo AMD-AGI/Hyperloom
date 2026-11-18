@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.inference_optimizer.session.session_paths import jit_cache_dir
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors import _agentx_checkpoint
@@ -92,6 +93,17 @@ def test_a_round_without_a_frozen_base_is_refused_as_an_invalid_config(tmp_path:
         suite_route(session)
 
     assert refused.value.error_class == failed_step_error_class(FailedStep.CONFIG_INVALID)
+
+
+def test_the_route_carries_the_sessions_jit_cache_directories(session: Path) -> None:
+    route = session_route(session)
+
+    assert route is not None
+    root = jit_cache_dir(session)
+    assert dict(route.jit_cache) == {
+        "SGLANG_CACHE_DIR": str(root / "sglang_cache_dir"),
+        "AMD_COMGR_CACHE_DIR": str(root / "amd_comgr_cache_dir"),
+    }
 
 
 def test_every_point_of_a_session_with_a_frozen_base_runs_on_the_suite(session) -> None:

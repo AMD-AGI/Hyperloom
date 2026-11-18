@@ -78,6 +78,7 @@ from inference_suite.contracts import (
     LifecycleMode,
     MlperfWorkload,
     ProfileConfig,
+    RunnerLayer,
     RunPaths,
     ScriptableRunEnv,
     ScriptableWorkload,
@@ -185,7 +186,8 @@ class RoundSettings:
 
     ``base_path`` is where the frozen base the round composes on is stored; ``silence_sec`` bounds how long the
     server may log nothing once ready; ``env_inherit`` names the host environment the server and client may see;
-    ``server_url`` is the server a client-only round measures, which a point's own ``BENCHMARK_BASE_URL`` overrides.
+    ``server_url`` is the server a client-only round measures, which a point's own ``BENCHMARK_BASE_URL`` overrides;
+    ``jit_cache`` maps each JIT cache env name of the framework to its session-scoped directory.
     """
 
     base_path: str
@@ -197,6 +199,7 @@ class RoundSettings:
     env_inherit: tuple[str, ...] = ()
     deadline_unix: int | None = None
     server_url: str | None = None
+    jit_cache: Mapping[str, str] = MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -356,7 +359,14 @@ def _server(
         framework_python=settings.framework_python,
         user=user,
         env_inherit=settings.env_inherit,
+        runner=_runner_layer(point, base, settings),
     )
+
+
+def _runner_layer(point: _Point, base: BaseLaunch, settings: RoundSettings) -> RunnerLayer:
+    """The session's JIT cache directories, for each name the point, the base and the host environment leave unset."""
+    taken = {*point.envs, *base.env, *settings.env_inherit}
+    return RunnerLayer(env_set={name: path for name, path in settings.jit_cache.items() if name not in taken})
 
 
 def fixed_workload(document: Mapping[str, object]) -> FixedWorkload:

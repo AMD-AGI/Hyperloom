@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hyperloom.inference_optimizer.session.session_paths import jit_cache_dir
-from hyperloom.orchestrator.actions.executors._aiter_jit import apply_session_jit_cache, benchmark_framework
+from hyperloom.orchestrator.actions.executors._aiter_jit import apply_session_jit_cache
 
 
 def test_sglang_caches_land_under_the_session(tmp_path):
@@ -50,17 +50,3 @@ def test_a_framework_without_an_established_cache_location_is_untouched(tmp_path
 
     assert env == {}
     assert not jit_cache_dir(tmp_path).exists()
-
-
-def test_the_framework_is_read_from_the_rendered_benchmark_config(tmp_path):
-    config = tmp_path / "benchmark.yaml"
-    config.write_text("benchmark:\n  framework: sglang\n", encoding="utf-8")
-
-    assert benchmark_framework(config) == "sglang"
-
-
-def test_a_config_naming_no_framework_reads_as_empty(tmp_path):
-    config = tmp_path / "benchmark.yaml"
-    config.write_text("other: 1\n", encoding="utf-8")
-
-    assert benchmark_framework(config) == ""

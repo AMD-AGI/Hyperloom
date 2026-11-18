@@ -166,6 +166,27 @@ def test_the_translated_launch_is_the_base_under_the_points_server_layer(framewo
     assert dict(launch.env) == {**env, **_POINT_ENV}
 
 
+_JIT_CACHE = {"SGLANG_CACHE_DIR": "/session/jit/sglang", "AMD_COMGR_CACHE_DIR": "/session/jit/comgr"}
+
+
+def test_the_session_jit_cache_is_the_runner_layer_not_the_points_launch() -> None:
+    base = _base("sglang")
+    config = suite_config(_point("sglang"), base, replace(_settings(), jit_cache=_JIT_CACHE))
+
+    assert dict(config.server.runner.env_set) == _JIT_CACHE
+    assert set(_JIT_CACHE).isdisjoint(config.server.user.env_set)
+    assert {name: dict(_launch(config, base).env)[name] for name in _JIT_CACHE} == _JIT_CACHE
+
+
+def test_a_jit_cache_name_the_point_or_the_host_sets_keeps_its_location() -> None:
+    settings = replace(_settings(), jit_cache=_JIT_CACHE, env_inherit=("HOME", "AMD_COMGR_CACHE_DIR"))
+
+    config = suite_config(_point("sglang", SGLANG_CACHE_DIR="/mnt/fast/sglang"), _base("sglang"), settings)
+
+    assert dict(config.server.runner.env_set) == {}
+    assert config.server.user.env_set["SGLANG_CACHE_DIR"] == "/mnt/fast/sglang"
+
+
 def test_the_point_knobs_become_the_config_fields() -> None:
     config = suite_config(
         _point("sglang", HYPERLOOM_EVAL_PROBE_MIN_SAMPLES="64", HYPERLOOM_EVAL_LIMIT="200"),
