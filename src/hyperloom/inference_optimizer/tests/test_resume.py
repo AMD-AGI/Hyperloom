@@ -211,6 +211,7 @@ async def test_replay_rebuilds_undecided_proposals(session_dir):
         restored = c2.state.pending_proposals[original_id]
         assert restored.action_name == "baseline"
         assert restored.from_agent == "orchestration"
+        assert c2.conversation.admit_turn("critic", time.time())
     finally:
         await c2.stop()
 
@@ -232,7 +233,7 @@ async def test_replay_skips_approved_proposals(session_dir):
     )
     c1 = Coordinator(session_dir, backends=backends)
     try:
-        await c1.tick(2)
+        await c1.tick(1)
         verdicts = await c1.bus.tail(topic="review_verdict", n=100)
         assert any(v.payload.get("verdict") == "approve" for v in verdicts)
     finally:
@@ -242,6 +243,7 @@ async def test_replay_skips_approved_proposals(session_dir):
     try:
         await c2.writeback.replay_for_resume()
         assert c2.state.pending_proposals == {}
+        assert not c2.conversation.admit_turn("critic", time.time())
     finally:
         await c2.stop()
 

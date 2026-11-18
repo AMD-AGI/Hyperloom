@@ -1407,8 +1407,8 @@ class CriticIteration(TypedDict, total=False):
 
     ``verdict`` reads the iteration's rulings as one line (``2 approve, 1
     reject``) and ``verdict_counts`` carries the same distribution for callers
-    that need to count. A pass that only spoke -- a heartbeat, a request for
-    context -- rules on nothing and leaves both empty."""
+    that need to count. A review turn that produced no ruling leaves both
+    empty."""
 
     iteration_id: str
     iter: int
@@ -1431,8 +1431,8 @@ class V6Critic(TypedDict, total=False):
     """The critic agent's own run, outside the business timeline.
 
     The per-proposal verdicts stay with the proposals they judge; this key
-    carries the agent's session-level run -- how many times it was asked, about
-    what, and what it concluded each time."""
+    carries the agent's completed review turns -- what it reviewed and what
+    it concluded each time."""
 
     iterations: list[CriticIteration]
 

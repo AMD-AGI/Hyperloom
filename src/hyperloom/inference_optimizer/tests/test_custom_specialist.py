@@ -1018,9 +1018,9 @@ async def test_only_mode_leaves_framework_once_the_custom_cycle_is_done(kw, hint
 @pytest.mark.parametrize(
     ("phase", "only", "expected"),
     [
-        ("FRAMEWORK_AGENT", True, ["critic"]),
-        ("FRAMEWORK_AGENT", False, ["orchestration", "critic"]),
-        ("SWEEP", True, ["orchestration", "critic"]),
+        ("FRAMEWORK_AGENT", True, []),
+        ("FRAMEWORK_AGENT", False, ["orchestration"]),
+        ("SWEEP", True, ["orchestration"]),
     ],
 )
 async def test_only_mode_framework_ticks_without_an_orchestration_turn(tmp_path, monkeypatch, phase, only, expected):
