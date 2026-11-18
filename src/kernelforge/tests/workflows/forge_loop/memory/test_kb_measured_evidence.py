@@ -9,6 +9,7 @@ import pytest
 
 from kernelforge.config import Config
 from kernelforge.workflows.forge_loop.memory import knowledge_integration as integration
+from kernelforge.workflows.forge_loop.memory import kb_warmstart as warmstart
 from kernelforge.knowledge.kb_store import writer as sink
 from kernelforge.evaluation.scoring import passes_keep_threshold
 from kernelforge.config import KnowledgeConfig
@@ -24,7 +25,7 @@ from kernelforge.knowledge.kb_store.record_store import (
 from kernelforge.tests.knowledge.kb_store._in_memory_store import InMemoryKBStore, _remote_config
 from kernelforge.tests.conftest import kb_store_run_config as _remote_config_with_token
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
-from kernelforge.workflows.forge_loop.memory.knowledge_integration import WarmStartHarness
+from kernelforge.workflows.forge_loop.memory.kb_warmstart import WarmStartHarness
 
 PRODUCER_KERNEL_PATH = Path("packages/src/aiter_meta/ops/triton/deterministic_kernel.py")
 CONSUMER_KERNEL_PATH = Path("src/aiter/ops/triton/deterministic_kernel.py")
@@ -190,8 +191,8 @@ def _install_driver_doubles(monkeypatch: pytest.MonkeyPatch, kernel: Path) -> li
     def correctness(_driver: str, _snr_threshold: float) -> bool:
         return "BLOCK_SIZE" in kernel.read_text()
 
-    monkeypatch.setattr(integration, "_bench_once", benchmark)
-    monkeypatch.setattr(integration, "_correctness_once", correctness)
+    monkeypatch.setattr(warmstart, "_bench_once", benchmark)
+    monkeypatch.setattr(warmstart, "_correctness_once", correctness)
     return measured
 
 
@@ -216,8 +217,8 @@ def _install_suite_driver_doubles(
     def correctness(_driver: str, _snr_threshold: float) -> bool:
         return "BLOCK_SIZE" in kernel.read_text()
 
-    monkeypatch.setattr(integration, "_bench_once", benchmark)
-    monkeypatch.setattr(integration, "_correctness_once", correctness)
+    monkeypatch.setattr(warmstart, "_bench_once", benchmark)
+    monkeypatch.setattr(warmstart, "_correctness_once", correctness)
     return measured
 
 
@@ -236,7 +237,7 @@ class _StubClock:
 
 
 def _warm_start(workspace: Path, kernel: Path) -> dict:
-    return integration.kb_warmstart(
+    return warmstart.kb_warmstart(
         config=_run_config(),
         kernel=LoopKernel(kernel_path=str(kernel), kernel_backend="triton", workspace=str(workspace)),
         harness=WarmStartHarness(driver="unused-driver.py"),
@@ -407,7 +408,7 @@ def test_a_refused_measured_write_back_redacts_and_bounds_the_store_error(
         )
 
     monkeypatch.setattr(store, "put_knowledge", refuse)
-    writeback = integration._record_measured_speedup(
+    writeback = warmstart._record_measured_speedup(
         _remote_config_with_token(tmp_path, token),
         {
             "solution_slug": f"{CANONICAL_ID}/kda-attn-session",
@@ -449,7 +450,7 @@ def test_an_unexpected_write_back_error_propagates(tmp_path, monkeypatch):
     sol = {"solution_slug": f"{CANONICAL_ID}/s", "kernel_slug": CANONICAL_ID, "session_id": "s"}
 
     with pytest.raises(TypeError, match="^put_knowledge signature drifted$"):
-        integration._record_measured_speedup(_remote_config(tmp_path), sol, 5.106, rank=1)
+        warmstart._record_measured_speedup(_remote_config(tmp_path), sol, 5.106, rank=1)
 
 
 def test_warm_start_adopts_the_best_measured_candidate_not_the_first_applied(
@@ -740,7 +741,7 @@ def test_warm_start_closes_the_field_when_the_search_budget_is_spent(
     monkeypatch.setenv("FORGE_KB_WARMSTART_BUDGET_SEC", "60")
     # Opens the search at t=0 and expires it on the third candidate. Letting real time decide would make the
     # assertions below depend on how fast the machine running them happens to be.
-    monkeypatch.setattr(integration, "time", _StubClock([0.0, 0.0, 0.0, 61.0]))
+    monkeypatch.setattr(warmstart, "time", _StubClock([0.0, 0.0, 0.0, 61.0]))
     consumer, kernel, _base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
     measured = _install_driver_doubles(monkeypatch, kernel)
 
@@ -820,7 +821,7 @@ def test_warm_start_restores_the_worktree_when_no_candidate_is_adoptable(
     )
     consumer, kernel, base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
     _install_driver_doubles(monkeypatch, kernel)
-    monkeypatch.setattr(integration, "_correctness_once", lambda *_a, **_k: False)
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_a, **_k: False)
 
     warm = _warm_start(consumer, kernel)
 

@@ -17,7 +17,7 @@ import pytest
 
 from kernelforge.workflows.forge_loop.bootstrap.errors import InvalidOptionValue
 from kernelforge.workflows.forge_loop.bootstrap.run import _load_external_baseline
-from kernelforge.workflows.forge_loop.memory import knowledge_integration as integration
+from kernelforge.workflows.forge_loop.memory import kb_warmstart as warmstart
 from kernelforge.evaluation.benchmark.baseline import (
     BASELINE_DRIFT_TOLERANCE,
     BaselineReferenceError,
@@ -300,11 +300,11 @@ def _floored_case_times() -> tuple[dict[str, float], dict[str, float]]:
 
 def _try_prior_solution(monkeypatch, tmp_path, candidate: dict[str, float], pristine_bench: dict):
     """Trial a correct KB prior solution whose bench reads ``candidate`` per case against ``pristine_bench``."""
-    monkeypatch.setattr(integration, "_apply_candidate_patch", lambda *_a, **_k: "")
-    monkeypatch.setattr(integration, "_force_jit_rebuild", lambda *_a, **_k: None)
-    monkeypatch.setattr(integration, "_correctness_once", lambda *_a, **_k: True)
+    monkeypatch.setattr(warmstart, "_apply_candidate_patch", lambda *_a, **_k: "")
+    monkeypatch.setattr(warmstart, "_force_jit_rebuild", lambda *_a, **_k: None)
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_a, **_k: True)
     monkeypatch.setattr(
-        integration,
+        warmstart,
         "_bench_once",
         lambda *_a, **_k: {
             "success": True,
@@ -314,11 +314,11 @@ def _try_prior_solution(monkeypatch, tmp_path, candidate: dict[str, float], pris
         },
     )
 
-    return integration._try_apply_candidate(
+    return warmstart._try_apply_candidate(
         {"solution_slug": "prior-solution"},
-        integration._CandidateField(
+        warmstart._CandidateField(
             LoopKernel(kernel_path=str(tmp_path / "kernel.py"), kernel_backend="", workspace=str(tmp_path)),
-            integration.WarmStartHarness(str(tmp_path / "driver.py"), snr_threshold=30.0),
+            warmstart.WarmStartHarness(str(tmp_path / "driver.py"), snr_threshold=30.0),
             pristine_bench=pristine_bench,
             allowed_paths=None,
         ),
@@ -513,7 +513,7 @@ def test_a_warm_start_without_a_pristine_aggregate_refuses_to_adopt(
     candidate = {case_id: baseline_ms / MODEST_SPEEDUP for case_id, baseline_ms in pristine.items()}
     discarded: list[str] = []
     monkeypatch.setattr(
-        integration,
+        warmstart,
         "_git_discard_worktree",
         lambda workspace, **_k: discarded.append(str(workspace)),
     )
