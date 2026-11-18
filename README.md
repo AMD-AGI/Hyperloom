@@ -127,7 +127,7 @@ the knowledge base are described further in
 | Framework | SGLang, vLLM, xDiT |
 | Kernel language | HIP, Triton, FlyDSL |
 | Kernel backends | GEAK, KernelForge |
-| LLM backend | Claude, Codex, DeepSeek Harness (opt-in) |
+| LLM backend | Claude, Codex, DeepSeek Harness (opt-in, source install) |
 
 ## Get started
 
