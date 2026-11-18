@@ -13,11 +13,11 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
 from ..actions.executors._integrate_vocabulary import KEEP_STATUSES
+from ..launch_controls import LAUNCH_CONTROL_KEYS
 from ..measurement.integrate_performance import integrate_measurement_fields
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 from ..state.task_registry import Task
 from ._keep_patch_column import _is_patch_column_keep, _lever_for_keep, _source_layer_handles
-from .launch_controls import LAUNCH_CONTROL_KEYS
 from ._promote_outcome import IntegrateRecoveryIncomplete, _PromoteOutcome
 
 log = logging.getLogger(__name__)

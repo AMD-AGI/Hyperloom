@@ -698,6 +698,31 @@ async def test_revalidation_forwards_accepted_config(accepted_config, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_revalidation_does_not_remove_what_the_keep_reassigns(tmp_path):
+    """Removals run after the KEEP's layers, so one naming a flag or env the KEEP re-assigns is not forwarded."""
+    fake = _enqueue_self(
+        tmp_path,
+        enablement_validation_pending=True,
+        enablement_origin="eval",
+        enablement_accepted_config_path="/runs/specialist/accepted.yaml",
+        enablement_accepted_config={
+            "args_mode": "append",
+            "extra_server_args": "--max-num-seqs 16",
+            "extra_envs": {"VLLM_X": "1"},
+            "remove_args": ["--max-num-seqs", "--block-size"],
+            "unset_envs": ["VLLM_X", "VLLM_Y"],
+        },
+    )
+    tid = await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
+    params = (await fake.tasks.get(tid)).params
+    assert params["extra_server_args"] == "--max-num-seqs 16"
+    assert params["extra_envs"] == {"VLLM_X": "1"}
+    assert params["remove_args"] == ["--block-size"]
+    assert params["unset_envs"] == ["VLLM_Y"]
+    assert params["args_mode"] == "append"
+
+
+@pytest.mark.asyncio
 async def test_rearm_kept_stores_accepted_config(tmp_path):
     """A KEEP's effective config is persisted on the round for the revalidation to replay."""
     fake = _enqueue_self(tmp_path, enablement_origin="eval")
