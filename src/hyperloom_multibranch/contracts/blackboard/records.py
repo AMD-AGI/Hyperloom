@@ -114,6 +114,21 @@ class RetractionRef:
 
 
 @dataclass(frozen=True)
+class JudgementWrite:
+    """A judgement as written and stored: the rule gate's or the integrator's, on one request.
+
+    A judgement that makes ``commit_id`` may name ``recipe_digest``, the ``Recipe.digest()`` of the recipe the experiment
+    repository stores for it; ``retracts`` names what a retraction undoes, on a ``COMMITTED`` judgement only."""
+
+    request_id: str
+    judgement: Judgement
+    conclusion: Conclusion
+    commit_id: str | None = None
+    recipe_digest: str | None = None
+    retracts: RetractionRef | None = None
+
+
+@dataclass(frozen=True)
 class TestRecord:
     """Everything known about one test: request, result, judgement, conclusion and commit; ``retracts``, what a
     retraction the gate landed undoes, ``None`` for every other test."""
@@ -1082,6 +1097,7 @@ __all__ = [
     "Probation",
     "QuarantineEvent",
     "RecordedValue",
+    "JudgementWrite",
     "RegressionCase",
     "RetractionRef",
     "SearchHit",

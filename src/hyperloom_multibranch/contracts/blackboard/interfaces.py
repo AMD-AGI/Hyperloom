@@ -22,7 +22,6 @@ from hyperloom_multibranch.contracts.blackboard.peers import (
     BranchLogEntry,
     BranchLogType,
     Intent,
-    Judgement,
     TestRequest,
     TestResult,
 )
@@ -37,6 +36,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     CommittedCommit,
     DedupAnswer,
     InboxPage,
+    JudgementWrite,
     Learning,
     LearningRecord,
     LeaseEnd,
@@ -53,7 +53,6 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     QuarantineEvent,
     RecordedValue,
     RegressionCase,
-    RetractionRef,
     SearchHit,
     SessionProfile,
     StartupBrief,
@@ -61,7 +60,6 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     ToolResultPointer,
     Withdrawal,
 )
-from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion
 
 
 class BlackboardError(Exception):
@@ -181,20 +179,11 @@ class LeaseSink(Protocol):
 class JudgementSink(Protocol):
     """The rule gate for specialist branches and the integrator for the integration branch."""
 
-    async def write_judgement(
-        self,
-        request_id: str,
-        judgement: Judgement,
-        conclusion: Conclusion,
-        commit_id: str | None = None,
-        recipe_digest: str | None = None,
-        retracts: RetractionRef | None = None,
-    ) -> TestRecord:
+    async def write_judgement(self, write: JudgementWrite) -> TestRecord:
         """Append a judgement; the latest one of a request is in force, earlier ones stay in the history.
 
-        A judgement that makes ``commit_id`` may name ``recipe_digest``, the ``Recipe.digest()`` of the recipe the
-        experiment repository stores for it; a commit keeps the digest it was first recorded with. ``retracts`` names
-        what a retraction undoes, and only a ``COMMITTED`` judgement may carry it (``ValueError``).
+        A commit keeps the recipe digest it was first recorded with; a judgement other than ``COMMITTED`` that names
+        what it retracts is refused (``ValueError``).
         """
 
     async def record_merge_attempt(self, attempt: MergeAttempt) -> None: ...
