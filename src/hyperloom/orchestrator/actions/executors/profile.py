@@ -649,14 +649,18 @@ def _mn_round_trace_root() -> str:
 
 # Restarts the multi-node server for this profiling round; returns the refusal result when it failed.
 async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -> dict[str, Any] | None:
+    from ._multi_node_env import round_server_env
     from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
+    unset_envs = list(params.get("unset_envs") or ())
     try:
         await restart_server_for_round(
             RoundServer.from_env(
                 str(params.get("extra_server_args") or ""),
                 str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None,
             ),
+            extra_env=round_server_env(params.get("extra_envs"), unset_envs) or None,
+            unset_env=unset_envs or None,
             torch_profiler_dir=round_trace_root,
         )
     except ServerRestartFailed as exc:
