@@ -223,7 +223,8 @@ class LineageSink(Protocol):
 
 
 class ClaimService(Protocol):
-    """Same-state deduplication: the specialist runtime claims, the toolbox carries the claim through its test."""
+    """Same-state deduplication: the specialist runtime claims and renews, and the toolbox hands the claim to a test,
+    whose record decides it from then on."""
 
     async def lookup(self, key: ClaimKey, action_fingerprint: str) -> DedupAnswer: ...
 
@@ -235,7 +236,8 @@ class ClaimService(Protocol):
         ``threshold_pct`` of the baseline. Before a baseline there is no bar, and no intent is refused for its ceiling.
         """
 
-    async def renew(self, key: ClaimKey, *, ttl_seconds: float) -> Claim: ...
+    async def renew(self, key: ClaimKey, *, ttl_seconds: float) -> Claim:
+        """Extend the caller's branch's claim no test carries yet; ``ClaimLost`` for any other claim."""
 
     async def attach_request(self, key: ClaimKey, request_id: str) -> Claim:
         """Hand the claim to the test ``request_id``; from then on the claim follows that test's record, held while the
@@ -247,10 +249,13 @@ class ClaimService(Protocol):
         the request, which releases the claim.
         """
 
-    async def release(self, key: ClaimKey) -> Claim: ...
+    async def release(self, key: ClaimKey) -> Claim:
+        """Let go of the caller's branch's claim no test carries yet; ``ClaimLost`` for any other claim, a claim a test
+        carries among them: it ends with that test."""
 
     async def release_branch(self, branch: str) -> tuple[Claim, ...]:
-        """Release every claim a stopped branch holds."""
+        """Release every claim a stopped branch holds that no test carries yet, and return them; a claim a test carries
+        stays with that test, which may run on after the stop."""
 
 
 class BranchLogStore(Protocol):

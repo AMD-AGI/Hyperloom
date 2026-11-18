@@ -131,8 +131,8 @@ class ToolboxStores:
 class ToolboxTuning:
     """The queue policy, the infrastructure retries (of tests and of native builds) and the waits before a test's
     (``infra_backoff_seconds``, :class:`~.attempts.InfraBackoff`), the time between two ticks, the clock and the sleep;
-    the defaults are the real ones. ``tests_end_by`` is when every test must have ended, Unix seconds, ``None`` for no such
-    time: a hosted session's grant ends then. A wait before a retry never runs past one typical test before it, as it
+    the defaults are the real ones. ``tests_end_by`` is when every test must have ended, Unix seconds, ``None`` for no
+    such time: a hosted session's grant ends then. A wait before a retry never runs past one typical test before it, as it
     never runs past one before its branch's exploration ends; the integration branch's tests, FINAL's validation among
     them, have only this bound."""
 

@@ -7,7 +7,9 @@ The directory holds ``segments/`` (one append-only file per handle) and ``claims
 same on a local disk and on a shared NFS folder. A handle writes as one :class:`Writer`, and each write checks that the
 writer's role owns the state it writes: test requests, results and withdrawals the toolbox, specialist-branch
 judgements the rule gate, integration-branch judgements and merge attempts the integrator, branch starts and stops the
-scheduler, claims, branch logs and learnings the specialist runtime of that branch.
+scheduler, claims, branch logs and learnings the specialist runtime of that branch. The toolbox attaches a claim to a
+test, and the test's record decides the claim from then on; the scheduler releases a stopped branch's claims no test
+carries yet.
 """
 
 from __future__ import annotations
