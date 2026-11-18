@@ -96,6 +96,13 @@ def test_atom_gets_the_trace_dir_as_a_flag(tmp_path):
     assert launch.args[-1].source is LayerSource.PROFILE
 
 
+def test_atom_waits_as_long_for_its_trace_as_the_round_waits_for_stop_profile(tmp_path):
+    layer = profiler_layer(_fixed_config(tmp_path), Framework.ATOM)
+
+    assert layer is not None
+    assert float(layer.env_set["ATOM_PROFILER_TIMEOUT"]) >= 600
+
+
 def test_no_layer_without_a_profile_and_none_for_a_serverless_framework(tmp_path):
     assert profiler_layer(_fixed_config(tmp_path, ProfileConfig(enabled=False)), Framework.SGLANG) is None
     with pytest.raises(LaunchError, match="xdit runs no server"):

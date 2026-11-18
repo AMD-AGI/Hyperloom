@@ -21,7 +21,7 @@ from dataclasses import replace
 from functools import cache
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping, NamedTuple
+from typing import Any, Callable, Mapping, NamedTuple
 
 from hyperloom_common.env import env_bool, env_flag, is_truthy
 from hyperloom.common.workload_defaults import DEFAULT_CONC, DEFAULT_OSL
@@ -254,18 +254,32 @@ def prepare_profile(
     return _apply_framework_profile(bench, envs, plan, vllm_checkout=vllm_checkout)
 
 
+def atom_profile_knobs(caps: _AtomTracelensCaps) -> tuple[tuple[str, ...], dict[str, str]]:
+    """The server flags and environment that turn on the ATOM TraceLens knobs the installed package accepts."""
+    args = ("--mark-trace",) if caps.mark_trace else ()
+    env = {
+        name: "1"
+        for name, accepted in (
+            ("ATOM_ENABLE_DETAILED_ANNOTATION", caps.detailed_annotation),
+            ("ATOM_PROFILER_MORE", caps.profiler_more),
+        )
+        if accepted
+    }
+    return args, env
+
+
 def apply_atom_profile_caps(envs: dict[str, Any], caps: _AtomTracelensCaps | None) -> None:
     """Write the ATOM TraceLens knobs the installed package accepts."""
     if caps is None:
         return
-    if caps.detailed_annotation:
-        envs["ATOM_ENABLE_DETAILED_ANNOTATION"] = "1"
-    if caps.profiler_more:
-        envs["ATOM_PROFILER_MORE"] = "1"
-    if caps.mark_trace:
-        extra = str(envs.get("EXTRA_ATOM_ARGS", "")).strip()
-        if "--mark-trace" not in extra:
-            envs["EXTRA_ATOM_ARGS"] = f"{extra} --mark-trace".strip()
+    args, env = atom_profile_knobs(caps)
+    envs.update(env)
+    extra = str(envs.get("EXTRA_ATOM_ARGS", "")).strip()
+    for flag in args:
+        if flag not in extra:
+            extra = f"{extra} {flag}".strip()
+    if args:
+        envs["EXTRA_ATOM_ARGS"] = extra
 
 
 class CapturePlan(NamedTuple):
@@ -678,23 +692,46 @@ def _graph_disabled(user: LaunchDelta, base: BaseLaunch) -> bool:
     return canonical_flag_name(_SGLANG_EAGER_FLAG) in ran - removed
 
 
+def _sglang_agentx_profile(annotated: bool, user: LaunchDelta, base: BaseLaunch) -> LaunchDelta:
+    if not annotated:
+        return LaunchDelta()
+    graph = () if _graph_disabled(user, base) else (_SGLANG_GRAPH_PROFILE_FLAG,)
+    return LaunchDelta(args_add=graph, env_set=_SGLANG_ANNOTATION_ENV)
+
+
+def _vllm_agentx_profile(annotated: bool, user: LaunchDelta, base: BaseLaunch) -> LaunchDelta:
+    fields = vllm_profiler_fields(patched=annotated).items()
+    return LaunchDelta(
+        args_add=tuple(token for name, value in fields for token in (f"--profiler-config.{name}", value))
+    )
+
+
+def _atom_agentx_profile(annotated: bool, user: LaunchDelta, base: BaseLaunch) -> LaunchDelta:
+    if not annotated:
+        return LaunchDelta()
+    args, env = atom_profile_knobs(_atom_tracelens_caps())
+    return LaunchDelta(args_add=args, env_set=env)
+
+
+#: What each framework's server adds to an AgentX profile round for the annotations it asks for.
+_AGENTX_PROFILE_LAYERS: Mapping[Framework, Callable[[bool, LaunchDelta, BaseLaunch], LaunchDelta]] = MappingProxyType(
+    {
+        Framework.SGLANG: _sglang_agentx_profile,
+        Framework.VLLM: _vllm_agentx_profile,
+        Framework.ATOM: _atom_agentx_profile,
+    }
+)
+
+
 def _agentx_profile_layer(
     bench: Mapping[str, Any], framework: Framework, user: LaunchDelta, base: BaseLaunch
 ) -> LaunchDelta:
     """What an AgentX profile adds to the server's own layer ``user`` for the annotations it asks for."""
     settings = torch_profiler(bench)
-    if not settings.get("enabled"):
+    layer = _AGENTX_PROFILE_LAYERS.get(framework)
+    if not settings.get("enabled") or layer is None:
         return LaunchDelta()
-    annotated = settings.get("detailed_annotations") is True
-    if framework is Framework.VLLM:
-        fields = vllm_profiler_fields(patched=annotated).items()
-        return LaunchDelta(
-            args_add=tuple(token for name, value in fields for token in (f"--profiler-config.{name}", value))
-        )
-    if not annotated:
-        return LaunchDelta()
-    graph = () if _graph_disabled(user, base) else (_SGLANG_GRAPH_PROFILE_FLAG,)
-    return LaunchDelta(args_add=graph, env_set=_SGLANG_ANNOTATION_ENV)
+    return layer(settings.get("detailed_annotations") is True, user, base)
 
 
 def profiled_server(server: ServerConfig, bench: Mapping[str, Any], base: BaseLaunch) -> ServerConfig:

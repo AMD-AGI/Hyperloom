@@ -221,7 +221,7 @@ _FACTS: dict[Framework, FrameworkFacts] = {
     Framework.ATOM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package=Framework.ATOM.value,
-        server_flags=ServerFlags("--model", _HOST_FLAG, "--server-port", None, "--max-model-len"),
+        server_flags=ServerFlags("--model", _HOST_FLAG, "--server-port", "--served-model-name", "--max-model-len"),
         server_command=ServerCommand(
             ("python3", "-m", "atom.entrypoints.openai_server"), ("-m", "atom.entrypoints.openai_server")
         ),

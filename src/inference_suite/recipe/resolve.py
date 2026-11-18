@@ -22,7 +22,7 @@ import dataclasses
 import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from hyperloom_common.contract_fields import ContractFields
 from hyperloom_common.credential_names import is_credential_env_name
@@ -51,7 +51,12 @@ from inference_suite.contracts.base_launch import (
     UpstreamSource,
     Workload,
 )
-from inference_suite.golden import GOLDEN_OWNED_ENV_PREFIXES, GOLDEN_OWNED_SPEC_CONFIG_KEYS, is_golden_owned_flag
+from inference_suite.golden import (
+    GOLDEN_OWNED_ENV_PREFIXES,
+    GOLDEN_OWNED_SPEC_CONFIG_KEYS,
+    SIMULATED_FLAG_PREFIXES,
+    is_golden_owned_flag,
+)
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL
 from inference_suite.recipe.atom_catalog import atom_catalog_launches
 from inference_suite.recipe.defaults import TABLE_PATH, default_table
@@ -60,6 +65,7 @@ from inference_suite.recipe.golden_curve import (
     _SIMULATION_TOKEN_MODE,
     GoldenLength,
     GoldenTable,
+    _atom_draft,
     _sglang_draft,
     _vllm_draft,
     with_golden,
@@ -266,19 +272,42 @@ def _split_args(args: Sequence[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
     return tuple(kept), tuple(owned)
 
 
+_Simulation = tuple[Mapping[str, Any], str | None, str | None]
+
+
+def _sglang_simulation(occurrences: list[tuple[str, str]], env: Mapping[str, str]) -> _Simulation:
+    spec, _ = _sglang_draft(occurrences)
+    return spec, env.get(_SGLANG_METHOD), env.get(_SGLANG_TOKEN_MODE)
+
+
+def _vllm_simulation(occurrences: list[tuple[str, str]], env: Mapping[str, str]) -> _Simulation:
+    spec, _ = _vllm_draft(occurrences)
+    # vLLM's synthetic sampler streams the drafted tokens it accepts, as sglang's real-draft-token mode does.
+    return spec, spec.get("rejection_sample_method"), _SIMULATION_TOKEN_MODE
+
+
+def _atom_simulation(occurrences: list[tuple[str, str]], env: Mapping[str, str]) -> _Simulation:
+    # ATOM forces acceptance with one flag, by length or by rate; the flag that does is the method. Its accepted draft
+    # tokens are streamed, as sglang's real-draft-token mode streams them.
+    method = next((name for name, _ in reversed(occurrences) if name.startswith(SIMULATED_FLAG_PREFIXES)), None)
+    return _atom_draft(occurrences), method, _SIMULATION_TOKEN_MODE
+
+
+#: How each framework's golden layer names its draft and the acceptance simulation it runs.
+_GOLDEN_SIMULATIONS: dict[str, Callable[[list[tuple[str, str]], Mapping[str, str]], _Simulation]] = {
+    "sglang": _sglang_simulation,
+    "vllm": _vllm_simulation,
+    "atom": _atom_simulation,
+}
+
+
 def _golden_acceptance(
     launch: SourceLaunch, golden: SourceGolden, args: tuple[str, ...], env: Mapping[str, str]
 ) -> GoldenAcceptance:
-    occurrences = argv_flag_occurrences(args)
-    if launch.framework == "sglang":
-        spec, _ = _sglang_draft(occurrences)
-        method, token_mode = env.get(_SGLANG_METHOD), env.get(_SGLANG_TOKEN_MODE)
-    elif launch.framework == "vllm":
-        spec, _ = _vllm_draft(occurrences)
-        # vLLM's synthetic sampler streams the drafted tokens it accepts, as sglang's real-draft-token mode does.
-        method, token_mode = spec.get("rejection_sample_method"), _SIMULATION_TOKEN_MODE
-    else:
+    simulation = _GOLDEN_SIMULATIONS.get(launch.framework)
+    if simulation is None:
         raise RecipeSourceError(f"a {launch.framework} launch simulates no golden acceptance")
+    spec, method, token_mode = simulation(argv_flag_occurrences(args), env)
     return GoldenAcceptance(
         value=golden.value,
         method=method,

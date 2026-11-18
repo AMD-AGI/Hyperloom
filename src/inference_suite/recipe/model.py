@@ -115,7 +115,7 @@ VLLM_TOPOLOGY = TopologySpelling(
 
 ATOM_ENTRYPOINT = _entrypoint(Framework.ATOM)
 #: The ATOM server flags the runner sets or allocates for every round (canonical names), as srtctl owns them.
-ATOM_RUNNER_OWNED = frozenset({"model", _HOST, "server-port"})
+ATOM_RUNNER_OWNED = frozenset({"model", "served-model-name", _HOST, "server-port"})
 ATOM_TOPOLOGY = TopologySpelling(tp=("-tp", _TENSOR_PARALLEL_SIZE), ep_switch=("--enable-expert-parallel",))
 
 

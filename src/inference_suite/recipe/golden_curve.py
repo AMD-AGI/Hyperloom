@@ -162,6 +162,16 @@ def _sglang_draft(occurrences: list[tuple[str, str]]) -> tuple[dict[str, Any], s
     return {"method": algorithm, "num_speculative_tokens": tokens, "model": model}, verify
 
 
+def _atom_draft(occurrences: list[tuple[str, str]]) -> dict[str, Any]:
+    values = dict(occurrences)
+    method = values.get("method", "")
+    if not method:
+        return {}
+    # ATOM drafts one token when the launch names no count.
+    tokens = _count(values.get("num-speculative-tokens")) or 1
+    return {"method": method, "num_speculative_tokens": tokens, "model": values.get("draft-model", "")}
+
+
 def _vllm_draft(occurrences: list[tuple[str, str]]) -> tuple[dict[str, Any], str]:
     spec = speculative_config(occurrences)
     method = spec.get("rejection_sample_method")

@@ -220,15 +220,25 @@ def test_agentx_launch_carries_the_recorded_golden_acceptance():
     assert "CONC" not in c1.client_env
 
 
-def test_agentx_skips_atom_entries():
+def test_an_atom_agentic_entry_serves_agentx_and_its_replay_requires_atoms_metrics():
     points = [point for point in every_point(_main().bundle) if point.framework == "atom"]
     agentic = next(point for point in points if point.scenario.value == "agentic-coding")
     query = _agentx(agentic.model, concurrencies=(agentic.conc,), framework="atom", board=agentic.board)
 
+    launches = inferencex_launches(query, _main())
+
+    assert not isinstance(launches, SourceMiss), launches
+    assert {launch.framework for launch in launches} == {"atom"}
+    assert all(launch.golden is not None and launch.golden.value for launch in launches)
+    assert all(launch.client_env["AIPERF_REQUIRED_SERVER_METRIC_PREFIX"] == "atom:" for launch in launches)
+
+
+def test_agentx_skips_entries_of_frameworks_without_agentx_launches():
+    query = _agentx(_GLM53, concurrencies=(8,), framework="trtllm")
+
     miss = inferencex_launches(query, _main())
 
     assert isinstance(miss, SourceMiss)
-    assert "an AgentX launch runs ['sglang', 'vllm'], not atom" in miss.reason
 
 
 def test_main_snapshot_does_not_see_an_unmerged_entry():

@@ -20,6 +20,28 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **AgentX runs on ATOM.** `HYPERLOOM_AGENTX=1 hyperloom optimize --framework
+  atom` now starts: the base comes from InferenceX's ATOM agentic entries, with their forced
+  acceptance length (`--spec-decode-acceptance-length`) as the golden layer.
+  Before, every AgentX entry point refused ATOM. Entries that offload KV cache
+  (`extra-kv-connectors`) are still refused as unported. ATOM's own catalog
+  still serves fixed workloads only.
+- **ATOM launches pass the flag check.** The check built ATOM's parser from
+  its engine flags alone, so the `--host` and `--server-port` every round
+  passes, and recipe flags such as `--tool-call-parser`, were refused as
+  `flag_unknown` (ATOM 0.1.8 and 0.1.10): no ATOM round could start. It now
+  judges with the parser ATOM's server builds. The runner also names the served
+  model with ATOM's `--served-model-name`, as it does for SGLang and vLLM.
+- **An ATOM AgentX baseline with its prefix cache on is kept.** The check that
+  refuses a cacheless AgentX baseline took ATOM's cache as off unless the launch
+  passed `--enable_prefix_caching`; ATOM caches by default. It now refuses only
+  a launch whose argv, as the round's `launch.json` records it, ends with
+  `--no-enable_prefix_caching`.
+- **An ATOM profile round** sets `ATOM_PROFILER_TIMEOUT` to the 600 s the round
+  waits on `/stop_profile`, so a long capture is not cut off at ATOM's 300 s
+  default, and an annotated AgentX capture turns on ATOM's own trace knobs
+  (`--mark-trace`, `ATOM_ENABLE_DETAILED_ANNOTATION`, `ATOM_PROFILER_MORE`)
+  instead of SGLang's.
 - **A multi-branch session runs on MI325X.** `hyperloom-multibranch run`
   accepts `--gpu-type mi325x`. Before, it refused MI325X, a limit left from
   Magpie, which had no benchmark script of MI325X's own; InferenceSuite
