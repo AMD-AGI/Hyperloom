@@ -301,7 +301,7 @@ def redistribute_budget_pct(
 def _now_unix(state: Any) -> float:
     """Resolve the \"now\" timestamp; tests can inject ``state._now_unix``."""
     if hasattr(state, "_now_unix") and callable(state._now_unix):
-        return float(state._now_unix())  # type: ignore[attr-defined]
+        return float(state._now_unix())
     import time as _time
 
     return _time.time()

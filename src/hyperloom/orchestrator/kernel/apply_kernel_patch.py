@@ -664,7 +664,7 @@ def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
         if path.exists():
             remove_path(path)
     temp_root = Path(tempfile.gettempdir())
-    for pattern in ("torchinductor_*", "triton_*"):  # nosec B108 - intentionally clears known runtime cache prefixes.
+    for pattern in ("torchinductor_*", "triton_*"):
         for path in temp_root.glob(pattern):
             if path.exists():
                 remove_path(path)

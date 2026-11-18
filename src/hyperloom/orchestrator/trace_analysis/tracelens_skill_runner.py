@@ -172,7 +172,7 @@ _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped", "killed",
 
 def _terminal_task_statuses() -> frozenset[str]:
     try:
-        from claude_agent_sdk import TERMINAL_TASK_STATUSES  # type: ignore[import-not-found]
+        from claude_agent_sdk import TERMINAL_TASK_STATUSES
     except ImportError:
         return _TERMINAL_TASK_STATUSES
     return frozenset(str(s) for s in TERMINAL_TASK_STATUSES)
@@ -449,7 +449,7 @@ def _import_sdk() -> tuple[Any, Any]:
             the expected ``query`` / ``ClaudeAgentOptions`` attributes.
     """
     try:
-        import claude_agent_sdk as sdk  # type: ignore[import-not-found]
+        import claude_agent_sdk as sdk
     except ImportError as exc:
         spec = importlib.util.find_spec("claude_agent_sdk")
         if spec is None:

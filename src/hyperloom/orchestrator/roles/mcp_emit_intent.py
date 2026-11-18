@@ -15,7 +15,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     EXTEND_LEASE_MAX_SEC,
     IntentType,
     IntentValidationError,
-    _PAYLOAD_REQUIRED,  # type: ignore[attr-defined]
+    _PAYLOAD_REQUIRED,
     validate_envelope,
 )
 from hyperloom.orchestrator.mcp_tool_names import (

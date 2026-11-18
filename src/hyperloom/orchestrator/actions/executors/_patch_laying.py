@@ -347,7 +347,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
                 patch_bin,
                 p,
                 plan.apply_root,
-                plan.apply_strip,  # type: ignore[arg-type]
+                plan.apply_strip,
             )
         if ok:
             applied.append((p, mode))
