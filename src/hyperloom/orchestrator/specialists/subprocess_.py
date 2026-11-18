@@ -492,7 +492,7 @@ class SpecialistSubprocessDispatcher:
                 finally:
                     self._release_task(backend, request)
 
-        return self._harvest_result(request, watch, backend, outcome, held=held)
+        return self._harvest_result(request, watch, backend, outcome, held=held, env=launch.env)
 
     async def _ready(
         self, request: SpecialistSpawn, prompt_file: Path, process_log: Path
@@ -619,8 +619,11 @@ class SpecialistSubprocessDispatcher:
         outcome: dict[str, Any],
         *,
         held: HeldWorktree | None,
+        env: Mapping[str, str],
     ) -> SpecialistSubprocessResult:
         """Read the reaped specialist's done payload, patches and agent trace into its result.
+
+        ``env`` is the environment the agent CLI was launched with, after its isolation moved its home.
 
         ``held`` is the worktree as recorded before the run, and how the app's git reads it. No patch is collected when
         the worktree's path no longer names the directory it recorded: the agent may have left a link to any directory
@@ -660,7 +663,7 @@ class SpecialistSubprocessDispatcher:
                 targets=declared_targets(done_payload),
             )
 
-        trace = harvest_agent_trace(backend, request.workspace, process_log)
+        trace = harvest_agent_trace(backend, request.workspace, process_log, env)
         if trace.error and (outcome["exit_code"] not in (None, 0) or done_payload is None):
             _add_error(outcome, trace.error)
         if refused:

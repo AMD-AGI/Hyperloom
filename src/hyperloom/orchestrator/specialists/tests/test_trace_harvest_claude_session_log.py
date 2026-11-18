@@ -11,6 +11,8 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.env_safety import RunAs
+from hyperloom.orchestrator.specialists.launch_env import SANDBOX_HOME, LaunchPlace, _point_into_sandbox
 from hyperloom.orchestrator.specialists.trace_harvest import harvest_agent_trace
 
 _SESSION_ID = "b5c5d762-e7a2-42d0-846c-6349c6be1fa8"
@@ -77,19 +79,15 @@ def _cli_transcript(config_dir: Path) -> None:
 
 
 @pytest.fixture
-def config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    path = tmp_path / "claude-config"
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(path))
-    return path
+def config_dir(tmp_path: Path) -> Path:
+    return tmp_path / "claude-config"
 
 
-def test_a_run_killed_before_its_result_row_is_booked_from_the_cli_session_record(
-    tmp_path: Path, config_dir: Path
-) -> None:
-    _cli_transcript(config_dir)
+def _env(config_dir: Path) -> dict[str, str]:
+    return {"CLAUDE_CONFIG_DIR": str(config_dir)}
 
-    trace = harvest_agent_trace("claude", tmp_path, _stream_log(tmp_path))
 
+def _assert_booked(trace: Any) -> None:
     assert trace.usage is not None
     assert trace.usage["input_tokens"] == 2152 + 30
     assert trace.usage["cache_creation_input_tokens"] == 12900 + 500
@@ -97,6 +95,16 @@ def test_a_run_killed_before_its_result_row_is_booked_from_the_cli_session_recor
     assert trace.usage["output_tokens"] == 217 + 80
     assert trace.usage["model"] == "gpt-6.1-sol"
     assert [turn["output_tokens"] for turn in trace.turn_usages] == [217, 80]
+
+
+def test_a_run_killed_before_its_result_row_is_booked_from_the_cli_session_record(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    _cli_transcript(config_dir)
+
+    trace = harvest_agent_trace("claude", tmp_path, _stream_log(tmp_path), _env(config_dir))
+
+    _assert_booked(trace)
 
 
 def test_the_result_row_stays_authoritative_when_the_run_finished(tmp_path: Path, config_dir: Path) -> None:
@@ -108,7 +116,7 @@ def test_the_result_row_stays_authoritative_when_the_run_finished(tmp_path: Path
         "output_tokens": 7542,
     }
 
-    trace = harvest_agent_trace("claude", tmp_path, _stream_log(tmp_path, result=result))
+    trace = harvest_agent_trace("claude", tmp_path, _stream_log(tmp_path, result=result), _env(config_dir))
 
     assert trace.usage is not None
     assert trace.usage["input_tokens"] == 50632
@@ -116,7 +124,72 @@ def test_the_result_row_stays_authoritative_when_the_run_finished(tmp_path: Path
 
 
 def test_a_run_with_no_session_record_keeps_the_usage_its_stream_reported(tmp_path: Path, config_dir: Path) -> None:
-    trace = harvest_agent_trace("claude", tmp_path, _stream_log(tmp_path))
+    trace = harvest_agent_trace("claude", tmp_path, _stream_log(tmp_path), _env(config_dir))
 
     assert trace.usage is None
     assert [turn["input_tokens"] for turn in trace.turn_usages] == [0, 0]
+
+
+def test_a_sandboxed_run_is_booked_from_the_config_dir_its_workspace_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_home = tmp_path / "app-home"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setenv("HOME", str(app_home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(app_home / ".claude"))
+    env = {"HOME": str(app_home), "CLAUDE_CONFIG_DIR": str(app_home / ".claude")}
+    _point_into_sandbox(LaunchPlace(workspace), env)
+    assert env["CLAUDE_CONFIG_DIR"] == str(workspace / ".claude-config")
+    _cli_transcript(Path(env["CLAUDE_CONFIG_DIR"]))
+
+    trace = harvest_agent_trace("claude", workspace, _stream_log(tmp_path), env)
+
+    _assert_booked(trace)
+
+
+def test_a_sandboxed_run_without_a_config_dir_is_booked_from_the_home_its_workspace_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_home = tmp_path / "app-home"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setenv("HOME", str(app_home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    env = {"HOME": str(app_home)}
+    _point_into_sandbox(LaunchPlace(workspace), env)
+    assert env["HOME"] == str(workspace / SANDBOX_HOME)
+    _cli_transcript(workspace / SANDBOX_HOME / ".claude")
+
+    trace = harvest_agent_trace("claude", workspace, _stream_log(tmp_path), env)
+
+    _assert_booked(trace)
+
+
+def test_a_run_as_another_account_is_booked_from_that_accounts_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_home = tmp_path / "app-home"
+    account_home = tmp_path / "account-home"
+    monkeypatch.setenv("HOME", str(app_home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    env = {"HOME": str(app_home)}
+    RunAs(user="agent", uid=2000, gid=2000, groups=(2000,), home=str(account_home)).apply_env(env)
+    _cli_transcript(account_home / ".claude")
+
+    trace = harvest_agent_trace("claude", tmp_path, _stream_log(tmp_path), env)
+
+    _assert_booked(trace)
+
+
+def test_the_coordinators_own_config_dir_is_not_read_for_a_child_launched_elsewhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_home = tmp_path / "app-home"
+    monkeypatch.setenv("HOME", str(app_home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(app_home / ".claude"))
+    _cli_transcript(app_home / ".claude")
+
+    trace = harvest_agent_trace("claude", tmp_path, _stream_log(tmp_path), {"HOME": str(tmp_path / "elsewhere")})
+
+    assert trace.usage is None

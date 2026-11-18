@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-import os
+from collections.abc import Mapping
 from pathlib import Path
 
 from hyperloom_common.llm.llm_config import AGENT_BACKEND_CODEX, AGENT_BACKEND_DEEPSEEK
@@ -29,8 +29,10 @@ from hyperloom.inference_optimizer.trace.tool_events import record_stream_json_t
 from .dsh_launch import harvest_dsh_trace
 
 
-def harvest_agent_trace(backend: str, workspace: Path, process_log: Path) -> AgentTrace:
+def harvest_agent_trace(backend: str, workspace: Path, process_log: Path, env: Mapping[str, str]) -> AgentTrace:
     """Read the run's trace with the parsers for the CLI that wrote it.
+
+    ``env`` is the environment the CLI was launched with: it names where the CLI wrote its own session record.
 
     Cumulative session token usage, the reply text that lands in
     conversations.jsonl, the intel/tool calls, and per-turn usage for
@@ -52,7 +54,7 @@ def harvest_agent_trace(backend: str, workspace: Path, process_log: Path) -> Age
     record_stream_json_compactions(process_log)
     usage = parse_claude_stream_json_usage(process_log)
     turn_usages = parse_claude_stream_json_turn_usages(process_log)
-    recovered = recover_claude_session_usage(process_log, usage, _claude_config_dirs())
+    recovered = recover_claude_session_usage(process_log, usage, _claude_config_dirs(env))
     if recovered is not None:
         usage, turn_usages = recovered
     return AgentTrace(
@@ -63,7 +65,10 @@ def harvest_agent_trace(backend: str, workspace: Path, process_log: Path) -> Age
     )
 
 
-def _claude_config_dirs() -> list[Path]:
-    """Where the Claude CLI keeps its session records: ``CLAUDE_CONFIG_DIR``, else ``~/.claude``."""
-    configured = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    return [Path(configured)] if configured else [Path.home() / ".claude"]
+def _claude_config_dirs(env: Mapping[str, str]) -> list[Path]:
+    """Where a CLI launched with ``env`` keeps its session records: ``CLAUDE_CONFIG_DIR``, else ``$HOME/.claude``."""
+    configured = env.get("CLAUDE_CONFIG_DIR", "").strip()
+    if configured:
+        return [Path(configured)]
+    home = env.get("HOME", "").strip()
+    return [Path(home, ".claude")] if home else []
