@@ -759,39 +759,52 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             int(self.shared_state.macro_cycle or 0),
         )
         handoff_dir = attempt_dir / "handoff"
-        # Sealed before the handoff is written and before the controller starts,
-        # which is the last moment the serving trees stand still: reprofile,
-        # fusion and collective have all finished, and every uncommitted change
-        # they left is part of what the server is now running. Committing it is
-        # what lets a campaign name its own baseline -- the diff's starting
-        # point, and the state a borrowed repository is handed back at.
-        baselines: dict[str, object] = {}
-        try:
-            from ..kernel.campaign_baseline import seal_campaign_baseline
+        from ..kernel.forge_handoff import write_forge_handoff
+        from ..kernel.wheel_repository import detach_wheel_histories
 
+        # Sealing may lend an installed package a history, and integration is its
+        # last reader; outside this window a ``.git`` there would change how other
+        # lanes patch the package.
+        try:
+            baselines = self._seal_campaign_baselines()
+            env_spec = self._coord.writeback.build_env_spec()
+            handoff_dir = write_forge_handoff(
+                self.shared_state,
+                env_spec=env_spec,
+                handoff_dir=handoff_dir,
+                baselines=baselines,
+            )
+            log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
+            await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
+        finally:
+            detach_wheel_histories(self.session_dir)
+
+    def _seal_campaign_baselines(self) -> dict[str, object]:
+        """Seal the serving trees, which stand still only between the lanes before KERNEL and the controller.
+
+        Reprofile, fusion and collective have all finished, and every uncommitted
+        change they left is part of what the server is now running. Committing it
+        is what lets a campaign name its own baseline -- the diff's starting
+        point, and the state a borrowed repository is handed back at.
+        """
+        from ..kernel.campaign_baseline import seal_campaign_baseline
+
+        try:
             baselines = seal_campaign_baseline(
                 self.shared_state,
+                session_dir=self.session_dir,
                 session_id=str(self.shared_state.session_id or self.session_dir.name),
                 macro_cycle=int(self.shared_state.macro_cycle or 0),
             )
-            if baselines:
-                log.info(
-                    "KERNEL entry: sealed campaign baselines %s",
-                    {repo: baseline.commit for repo, baseline in baselines.items()},
-                )
         except (OSError, ValueError, subprocess.SubprocessError):
             log.exception("KERNEL entry: sealing the campaign baseline failed")
-        from ..kernel.forge_handoff import write_forge_handoff
-
-        env_spec = self._coord.writeback.build_env_spec()
-        handoff_dir = write_forge_handoff(
-            self.shared_state,
-            env_spec=env_spec,
-            handoff_dir=handoff_dir,
-            baselines=baselines,
-        )
-        log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
-        await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
+            return {}
+        if baselines:
+            log.info(
+                "KERNEL entry: sealed campaign baselines %s",
+                {repo: baseline.commit for repo, baseline in baselines.items()},
+            )
+        return dict(baselines)
 
     async def _controller_attempt_result(self, handoff_dir: Path, output_dir: Path) -> dict[str, Any]:
         from ..kernel.controller_submit import run_controller_subprocess

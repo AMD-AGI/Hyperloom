@@ -19,7 +19,7 @@ from pathlib import Path
 from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.workflows.rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.workflows.rewrite_controller.paths import ControllerLayout
-from kernelforge.utils.git import GitError, git
+from kernelforge.utils.git import GitError, git, git_admin_dir
 from kernelforge.config.edit_policy import FORGE_LOOP_OUTPUT_DIRNAME
 from kernelforge.workflows.forge_loop.api import hide_forge_loop_output
 from kernelforge.utils.editable_repo import (
@@ -144,7 +144,7 @@ BASELINE_FILENAME = "forge_campaign_baseline.json"
 
 
 def _baseline_path(repo_root: Path) -> Path:
-    return repo_root / ".git" / BASELINE_FILENAME
+    return git_admin_dir(repo_root) / BASELINE_FILENAME
 
 
 @dataclass(frozen=True)

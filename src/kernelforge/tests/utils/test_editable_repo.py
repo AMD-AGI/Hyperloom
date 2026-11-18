@@ -240,3 +240,38 @@ def test_the_lock_survives_being_keyed_on_a_relative_path(repo: Path, monkeypatc
         assert acquire_repo_lock(os.path.relpath(repo)) is None
     finally:
         release_repo_lock(absolute)
+
+
+# --- an installed package -----------------------------------------------------
+
+
+@pytest.mark.parametrize("flavour", ["site-packages", "dist-packages"])
+def test_a_repository_installed_into_site_packages_is_edited_in_place(
+    site_dir: Path, tmp_path: Path, flavour: str
+) -> None:
+    """The interpreter imports an installed package from where pip put it, so a copy is never loaded."""
+    package = tmp_path / "lib" / "python3.12" / flavour / "aiter"
+    package.mkdir(parents=True)
+
+    assert needs_inplace(str(package)) is True
+
+
+def test_the_site_packages_directory_itself_is_not_an_installed_package(site_dir: Path) -> None:
+    assert needs_inplace(str(site_dir)) is False
+
+
+def test_the_lock_lives_in_the_history_a_git_file_names(tmp_path: Path) -> None:
+    """A repository whose ``.git`` is a file has no directory under it to hold the lock."""
+    history = tmp_path / "history.git"
+    history.mkdir()
+    checkout = tmp_path / "package"
+    checkout.mkdir()
+    (checkout / ".git").write_text(f"gitdir: {history}\n", encoding="utf-8")
+
+    lock = acquire_repo_lock(str(checkout))
+    try:
+        assert lock is not None
+        assert (history / "forge_inplace.lock").is_file()
+        assert acquire_repo_lock(str(checkout)) is None
+    finally:
+        release_repo_lock(lock)

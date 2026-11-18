@@ -16,6 +16,7 @@ import pytest
 
 from kernelforge.utils import git as git_module
 from kernelforge.utils.git import (
+    git_admin_dir,
     DEFAULT_TIMEOUT_SEC,
     GitError,
     git,
@@ -222,3 +223,17 @@ def test_git_checkout_branch_reports_rather_than_raises(monkeypatch, tmp_path):
 
     monkeypatch.setattr(git_module, "git", _no_git)
     assert git_checkout_branch(root, "b").startswith("checkout failed:")
+
+
+def test_a_git_directory_is_its_own_admin_dir(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+
+    assert git_admin_dir(tmp_path) == tmp_path / ".git"
+
+
+def test_a_git_file_names_the_admin_dir_relative_to_the_work_tree(tmp_path: Path) -> None:
+    work_tree = tmp_path / "work"
+    work_tree.mkdir()
+    (work_tree / ".git").write_text("gitdir: ../store.git\n", encoding="utf-8")
+
+    assert git_admin_dir(work_tree) == (tmp_path / "store.git").resolve()

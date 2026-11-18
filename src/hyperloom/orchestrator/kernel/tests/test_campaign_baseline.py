@@ -83,7 +83,7 @@ def test_a_clean_repository_is_pinned_without_a_new_commit(tmp_path: Path) -> No
     repo = _repo(tmp_path)
     head = _git(repo, "rev-parse", "HEAD")
 
-    pins = seal_campaign_baseline(_state(repo), session_id="s1", macro_cycle=0)
+    pins = seal_campaign_baseline(_state(repo), session_dir=tmp_path / "session", session_id="s1", macro_cycle=0)
 
     assert pins[str(repo)].commit == head.lower()
     assert _git(repo, "rev-parse", "HEAD") == head
@@ -95,7 +95,7 @@ def test_the_serving_tree_is_sealed_into_the_pinned_commit(tmp_path: Path) -> No
     head = _git(repo, "rev-parse", "HEAD")
     (repo / "kernel.py").write_text("VALUE = 2\n", encoding="utf-8")
 
-    pins = seal_campaign_baseline(_state(repo), session_id="s1", macro_cycle=0)
+    pins = seal_campaign_baseline(_state(repo), session_dir=tmp_path / "session", session_id="s1", macro_cycle=0)
 
     sealed = pins[str(repo)].commit
     assert sealed != head.lower()
@@ -111,7 +111,7 @@ def test_untracked_files_are_left_out_of_the_seal(tmp_path: Path) -> None:
     (repo / "kernel.py").write_text("VALUE = 2\n", encoding="utf-8")
     (repo / "tuned_gemm.csv").write_text("shape,config\n", encoding="utf-8")
 
-    seal_campaign_baseline(_state(repo), session_id="s1", macro_cycle=0)
+    seal_campaign_baseline(_state(repo), session_dir=tmp_path / "session", session_id="s1", macro_cycle=0)
 
     assert _git(repo, "status", "--porcelain") == "?? tuned_gemm.csv"
 
@@ -122,7 +122,7 @@ def test_a_detached_head_is_sealed_onto_the_session_branch(tmp_path: Path) -> No
     _git(repo, "checkout", "--detach", "HEAD")
     (repo / "kernel.py").write_text("VALUE = 2\n", encoding="utf-8")
 
-    pins = seal_campaign_baseline(_state(repo), session_id="s1", macro_cycle=0)
+    pins = seal_campaign_baseline(_state(repo), session_dir=tmp_path / "session", session_id="s1", macro_cycle=0)
 
     assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == session_branch_name("s1", 0)
     assert _git(repo, "rev-parse", "HEAD").lower() == pins[str(repo)].commit
@@ -132,10 +132,14 @@ def test_a_second_entry_seals_on_top_of_the_first(tmp_path: Path) -> None:
     """A macro cycle can enter KERNEL twice, and the branch is already there."""
     repo = _repo(tmp_path)
     (repo / "kernel.py").write_text("VALUE = 2\n", encoding="utf-8")
-    first = seal_campaign_baseline(_state(repo), session_id="s1", macro_cycle=0)[str(repo)].commit
+    first = seal_campaign_baseline(_state(repo), session_dir=tmp_path / "session", session_id="s1", macro_cycle=0)[
+        str(repo)
+    ].commit
     (repo / "kernel.py").write_text("VALUE = 3\n", encoding="utf-8")
 
-    second = seal_campaign_baseline(_state(repo), session_id="s1", macro_cycle=0)[str(repo)].commit
+    second = seal_campaign_baseline(_state(repo), session_dir=tmp_path / "session", session_id="s1", macro_cycle=0)[
+        str(repo)
+    ].commit
 
     assert second != first
     assert _git(repo, "show", f"{second}:kernel.py") == "VALUE = 3"
@@ -151,7 +155,7 @@ def test_a_repository_that_cannot_be_sealed_does_not_stop_the_others(tmp_path: P
     state = SimpleNamespace(framework_repo_path=os.pathsep.join([str(good)]))
     os.environ["INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"] = str(broken)
     try:
-        pins = seal_campaign_baseline(state, session_id="s1", macro_cycle=0)
+        pins = seal_campaign_baseline(state, session_dir=tmp_path / "session", session_id="s1", macro_cycle=0)
     finally:
         os.environ.pop("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", None)
 
@@ -270,7 +274,7 @@ def test_a_dead_campaigns_rewrite_is_not_what_the_next_session_seals(tmp_path: P
     base = _git(repo, "rev-parse", "HEAD").lower()
     branch = _abandon_campaign(repo, base, record=True)
 
-    pins = seal_campaign_baseline(_state(repo), session_id="s2", macro_cycle=0)
+    pins = seal_campaign_baseline(_state(repo), session_dir=tmp_path / "session", session_id="s2", macro_cycle=0)
 
     assert pins[str(repo)].commit == base
     assert (repo / "kernel.py").read_text(encoding="utf-8") == "VALUE = 1\n"
@@ -285,7 +289,7 @@ def test_a_campaign_branch_nothing_recorded_is_refused_rather_than_sealed(tmp_pa
     base = _git(repo, "rev-parse", "HEAD").lower()
     branch = _abandon_campaign(repo, base, record=False)
 
-    pins = seal_campaign_baseline(_state(repo), session_id="s2", macro_cycle=0)
+    pins = seal_campaign_baseline(_state(repo), session_dir=tmp_path / "session", session_id="s2", macro_cycle=0)
 
     assert str(repo) not in pins
     assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == branch
@@ -301,7 +305,7 @@ def test_a_repository_a_live_campaign_is_still_writing_is_not_sealed(tmp_path: P
     assert held is not None
 
     try:
-        pins = seal_campaign_baseline(_state(repo), session_id="s2", macro_cycle=0)
+        pins = seal_campaign_baseline(_state(repo), session_dir=tmp_path / "session", session_id="s2", macro_cycle=0)
     finally:
         release_repo_lock(held)
 
@@ -317,7 +321,7 @@ def test_an_ordinary_tree_is_sealed_without_the_repository_lock(tmp_path: Path) 
     assert held is not None
 
     try:
-        pins = seal_campaign_baseline(_state(repo), session_id="s1", macro_cycle=0)
+        pins = seal_campaign_baseline(_state(repo), session_dir=tmp_path / "session", session_id="s1", macro_cycle=0)
     finally:
         release_repo_lock(held)
 

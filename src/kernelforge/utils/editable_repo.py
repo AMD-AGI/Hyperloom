@@ -6,7 +6,9 @@
 An editable install answers ``import`` from a ``sys.meta_path`` finder pinned to
 one directory, so a lane that copies the repository and edits the copy measures
 the original: its change is never loaded and the campaign reads as no
-improvement. Such a repository has to be edited in place, which makes it shared
+improvement. A package installed into site-packages is the same case by a
+different route: the interpreter imports it from where pip put it. Such a
+repository has to be edited in place, which makes it shared
 mutable state between every lane that reaches it -- hence one lock, taken by
 whoever is about to write, keyed on the repository itself so it holds across
 processes.
@@ -23,9 +25,14 @@ from collections.abc import Iterator
 import fcntl
 import functools
 import os
+from pathlib import Path
 import re
 import site
 import sys
+
+from kernelforge.utils.git import git_admin_dir
+
+_INSTALL_DIRNAMES = frozenset({"site-packages", "dist-packages"})
 
 
 def editable_roots() -> list[str]:
@@ -178,8 +185,17 @@ def _quoted_dirs(text: str) -> set[str]:
     return {os.path.realpath(quoted) for quoted in re.findall(r"['\"](/[^'\"]+)['\"]", text) if os.path.isdir(quoted)}
 
 
+def installed_package_path(path: str) -> bool:
+    """True when ``path`` lies inside a ``site-packages`` or ``dist-packages`` directory.
+
+    The interpreter imports an installed package from that location, so a
+    repository there is the code the process runs, and a copy of it is not.
+    """
+    return any(part in _INSTALL_DIRNAMES for part in Path(os.path.realpath(path)).parent.parts)
+
+
 def needs_inplace(kernel_repo: str) -> bool:
-    """True when kernel_repo is, contains, or sits under an editable-finder root.
+    """True when kernel_repo is installed into site-packages, or is, contains, or sits under an editable-finder root.
 
     In that case forge must edit the live repo in place (the finder imports the
     live path; a worktree copy would be invisible -> the loop would no-op).
@@ -194,6 +210,8 @@ def needs_inplace(kernel_repo: str) -> bool:
     """
     if not kernel_repo:
         return False
+    if installed_package_path(kernel_repo):
+        return True
     repo = os.path.realpath(kernel_repo)
     for root in editable_roots():
         # The separators matter: without them /a/repo-2 would match /a/repo and
@@ -237,7 +255,7 @@ def acquire_repo_lock(repo: str) -> RepoLock | None:
     get it must skip in-place. Returns the held lock (release with
     release_repo_lock) or None when already held.
     """
-    lock_path = os.path.join(repo, ".git", "forge_inplace.lock")
+    lock_path = os.fspath(git_admin_dir(repo) / "forge_inplace.lock")
     try:
         fh = open(lock_path, "a+", encoding="utf-8")
         os.chmod(lock_path, 0o600)
@@ -269,6 +287,7 @@ __all__ = [
     "RepoLock",
     "acquire_repo_lock",
     "editable_roots",
+    "installed_package_path",
     "needs_inplace",
     "release_repo_lock",
 ]

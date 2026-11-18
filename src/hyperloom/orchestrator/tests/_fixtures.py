@@ -108,9 +108,10 @@ def _isolate_framework_trees(monkeypatch) -> None:
     The CLI writes ``FRAMEWORK`` and ``FRAMEWORK_REPO_PATH`` into ``os.environ``, so one CLI test
     would otherwise point every later test at the host's live tree.
     """
-    from hyperloom.orchestrator.kernel import campaign_baseline
+    from hyperloom.orchestrator.kernel import campaign_baseline, wheel_repository
 
     monkeypatch.setattr(campaign_baseline, "_package_repository", lambda _name: None)
+    monkeypatch.setattr(wheel_repository, "_installed_package_dir", lambda _name: None)
     for name in ("FRAMEWORK", "FRAMEWORK_REPO_PATH", "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"):
         monkeypatch.delenv(name, raising=False)
 

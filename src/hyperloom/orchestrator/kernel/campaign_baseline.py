@@ -35,6 +35,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.inference_optimizer.framework_paths import framework_apply_tree
+from hyperloom.orchestrator.kernel.wheel_repository import attach_wheel_histories
 from kernelforge.workflows.rewrite_controller import (
     CAMPAIGN_BRANCH_PREFIX,
     reclaim_campaign_branch,
@@ -115,10 +117,11 @@ def _configured_repository_roots(state: Any) -> set[Path]:
 
 
 def _package_repository(name: str) -> Path | None:
-    """Return the Git top level one framework package is imported from.
+    """Return the Git checkout that tracks the package ``name`` is imported from.
 
-    ``None`` when the package is absent, or present as a wheel. A wheel carries
-    no source to rewrite, so it is not a repository any campaign can name.
+    ``None`` when the package is absent, or no checkout tracks it -- a wheel
+    that was not lent a history, or one installed into a venv that merely sits
+    inside some unrelated repository's work tree.
     """
     try:
         spec = importlib.util.find_spec(name)
@@ -126,11 +129,8 @@ def _package_repository(name: str) -> Path | None:
         return None
     if spec is None or not spec.origin:
         return None
-    package_dir = Path(spec.origin).resolve().parent
-    completed = _git(package_dir, "rev-parse", "--show-toplevel", check=False)
-    if completed.returncode != 0:
-        return None
-    return Path(completed.stdout.strip()).resolve()
+    tree = framework_apply_tree(str(Path(spec.origin).resolve().parent))
+    return tree.root.resolve() if tree is not None and tree.checkout else None
 
 
 def campaign_repositories(state: Any) -> tuple[Path, ...]:
@@ -246,15 +246,21 @@ def _seal_repository(repo: Path, branch: str) -> RepoBaseline | None:
 def seal_campaign_baseline(
     state: object,
     *,
+    session_dir: Path,
     session_id: str,
     macro_cycle: int,
 ) -> dict[str, RepoBaseline]:
     """Seal every configured source repository and return what each was pinned to.
 
+    A wheel-installed kernel library is lent this session's history first, so
+    it is sealed like any checkout; the caller detaches it once integration is
+    done.
+
     Best-effort per repository. One tree that cannot be sealed -- no Git, no
     write permission -- costs that repository's operators, which the controller
     refuses individually; it must not cost the whole KERNEL phase.
     """
+    attach_wheel_histories(session_dir)
     branch = session_branch_name(session_id, macro_cycle)
     baselines: dict[str, RepoBaseline] = {}
     for repo in campaign_repositories(state):

@@ -135,6 +135,24 @@ def git_head(cwd: str | Path) -> str:
     return lines[0] if result.returncode == 0 and lines else ""
 
 
+def git_admin_dir(repo: str | Path) -> Path:
+    """The directory git keeps ``repo``'s own state in.
+
+    ``repo/.git`` itself when that is a directory. A linked worktree, or a
+    repository whose history lives elsewhere, has a ``.git`` file instead that
+    names the directory on a ``gitdir:`` line, and anything kept beside git's
+    own state belongs there: a path under the file does not exist.
+    """
+    marker = Path(repo) / ".git"
+    if not marker.is_file():
+        return marker
+    first_line = next(iter(marker.read_text(encoding="utf-8").splitlines()), "")
+    if not first_line.startswith("gitdir:"):
+        return marker
+    target = Path(first_line.removeprefix("gitdir:").strip())
+    return target if target.is_absolute() else (Path(repo) / target).resolve()
+
+
 def git_checkout_branch(cwd: str | Path, branch: str) -> str:
     """Switch ``cwd`` to ``branch``, creating it at HEAD when it does not exist; returns git's own report."""
     if not branch:

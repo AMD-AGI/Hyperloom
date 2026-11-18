@@ -531,6 +531,32 @@ async def test_kernel_entry_does_not_launch_the_controller_without_a_handoff(
 
 
 @pytest.mark.asyncio
+async def test_kernel_entry_withdraws_lent_histories_when_the_controller_fails(
+    coord: Coordinator,
+    monkeypatch,
+) -> None:
+    """A ``.git`` left in an installed package would change how every later lane patches it."""
+    from hyperloom.orchestrator.kernel import wheel_repository
+
+    async def _skip() -> None:
+        return None
+
+    async def _crash(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("controller crashed")
+
+    withdrawn: list[Path] = []
+    monkeypatch.setattr(campaign_baseline, "seal_campaign_baseline", lambda _state, **_kwargs: {})
+    monkeypatch.setattr(wheel_repository, "detach_wheel_histories", withdrawn.append)
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip)
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_run_forge_fusion_before_kernel_opt", _skip)
+    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_rewrite_controller", _crash)
+
+    with pytest.raises(RuntimeError, match="controller crashed"):
+        await coord.phase_kernel._finish_kernel_entry()
+    assert withdrawn == [coord.session_dir]
+
+
+@pytest.mark.asyncio
 async def test_kernel_entry_always_hands_rewrite_control_to_controller(
     coord: Coordinator,
     monkeypatch,
