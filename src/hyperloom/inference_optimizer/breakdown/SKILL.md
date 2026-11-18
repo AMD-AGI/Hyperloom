@@ -24,7 +24,7 @@ A single JSON file: **`<session_dir>/session_breakdown.json`**.
 
 Beyond the envelope (`schema_version` / `exported_at_utc` / `exporter_version`), the JSON
 carries the sections below. This is the subset most consumers use, not the full set —
-`breakdown/exporter.py` (the `breakdown = {...}` literal) and `breakdown/schema.py` (with `schema_framework.py` and `schema_kernel.py`) are
+`breakdown/exporter.py` (the `breakdown = {...}` literal) and `breakdown/schema.py` (with `schema_framework.py`, `schema_kernel.py`, `schema_conc_sweep.py` and `schema_phase.py`) are
 authoritative.
 
 | Section             | What it carries                                                                                          |
