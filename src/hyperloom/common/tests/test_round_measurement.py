@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.common.gain_math import AGENTX_ERROR_RATE_THRESHOLD_PCT
-from hyperloom.common.round_measurement import LATENCY_SOURCE, round_measurement
+from hyperloom.common.round_measurement import AGENTX_CONTEXT_OVERFLOW_SKIPPED, LATENCY_SOURCE, round_measurement
 from hyperloom.orchestrator.actions.executors.benchmark_result import (
     extract_benchmark_measurement,
     is_valid_measurement,
@@ -98,6 +98,7 @@ _AGENTX_COUNTS = {
     "warmup_dropped": 14,
     "dropped_total": 22,
     "error_osl_exported": 10,
+    "context_overflow": 0,
     "input_tokens": 900_000,
     "output_tokens": 45_000,
 }
@@ -145,7 +146,7 @@ def test_the_agentx_error_rate_leaves_warmup_drops_out() -> None:
     assert round_measurement(_agentx(), None)["request_error_rate"] == pytest.approx(8.0)
 
 
-def _counts(**changes: int) -> dict[str, int]:
+def _counts(**changes: int | None) -> dict[str, int | None]:
     return {**_AGENTX_COUNTS, **changes}
 
 
@@ -158,6 +159,7 @@ def _counts(**changes: int) -> dict[str, int]:
             _agentx_result(_counts(error_dropped=12, dropped_total=26, records_total=116)), id="error-rate-over-10pct"
         ),
         pytest.param(_agentx_result(_counts(records_total=113)), id="counts-do-not-add-up"),
+        pytest.param(_agentx_result(_counts(context_overflow=1)), id="a-request-skipped-as-a-context-overflow"),
         pytest.param(_agentx_result(_counts(warmup_dropped=23)), id="more-warmup-than-dropped"),
         pytest.param(
             _agentx_result(_counts(successful=0, error_dropped=0, dropped_total=14, records_total=14)),
@@ -195,6 +197,18 @@ def test_an_agentx_round_whose_error_records_carry_no_error_osl_says_so() -> Non
 )
 def test_an_agentx_round_with_error_osl_on_an_error_record_or_no_error_record_warns_nothing(counts) -> None:
     assert round_measurement(_agentx(_agentx_result(counts)), None)["nonfatal_warnings"] == []
+
+
+def test_an_agentx_round_that_skipped_requests_as_a_context_overflow_says_how_many() -> None:
+    measurement = round_measurement(_agentx(_agentx_result(_counts(context_overflow=3))), None)
+    assert measurement["nonfatal_warnings"] == [f"{AGENTX_CONTEXT_OVERFLOW_SKIPPED}:3"]
+    assert measurement["valid_measurement"] is False
+
+
+def test_an_agentx_round_reported_before_overflow_was_counted_is_judged_as_it_was() -> None:
+    measurement = round_measurement(_agentx(_agentx_result(_counts(context_overflow=None))), None)
+    assert measurement["valid_measurement"] is True
+    assert measurement["nonfatal_warnings"] == []
 
 
 def test_an_error_rate_at_the_threshold_is_still_valid() -> None:

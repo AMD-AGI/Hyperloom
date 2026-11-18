@@ -8,11 +8,16 @@ chunks, empty deltas and the ``[DONE]`` marker only) into an error record and ke
 record; and only a metric flagged error-only is computed for an error record. Its export therefore cannot tell a server
 that produced nothing from one that produced tokens the client could not use.
 
-:func:`patch_aiperf` edits two files of the installed client: the parser keeps the token counts of the invalid record
-whole, and a new error-only metric (:data:`ERROR_OSL_METRIC`, the output length as ``output_sequence_length`` is) puts
-the count on the record's export line. The owning distribution's ``RECORD`` is rewritten for both files, so the staging
-manifest, which hashes every ``RECORD``, names the patched bytes. Staging installs the client, then patches it; a client
-whose text is not the one the patch anchors on fails the staging.
+A warmup request that fails aborts the replay before anything is exported, and aiperf's warning names only the
+request's trace, so the client log does not say why the round stopped: a request the server refused as longer than the
+context it serves reads like any other failure.
+
+:func:`patch_aiperf` edits three files of the installed client: the parser keeps the token counts of the invalid record
+whole, a new error-only metric (:data:`ERROR_OSL_METRIC`, the output length as ``output_sequence_length`` is) puts
+the count on the record's export line, and the warmup abort's warning carries the failed request's error. The owning
+distribution's ``RECORD`` is rewritten for every file, so the staging manifest, which hashes every ``RECORD``, names
+the patched bytes. Staging installs the client, then patches it; a client whose text is not the one the patch anchors
+on fails the staging.
 """
 
 from __future__ import annotations
@@ -27,8 +32,11 @@ from pathlib import Path
 ERROR_OSL_METRIC = "error_osl"
 PARSER_FILE = "aiperf/records/inference_result_parser.py"
 METRIC_FILE = "aiperf/metrics/types/output_sequence_length_metric.py"
+CALLBACK_FILE = "aiperf/credit/callback_handler.py"
 #: The files the patch rewrites, relative to the client environment's site-packages.
-PATCHED_FILES = (PARSER_FILE, METRIC_FILE)
+PATCHED_FILES = (PARSER_FILE, METRIC_FILE, CALLBACK_FILE)
+#: What the patched warmup abort's warning puts before the failed request's error, on the same line.
+WARMUP_ERROR_PREFIX = "warmup request error: "
 
 _UTF8 = "utf-8"
 #: The branch of the parser that returns a parsed record found invalid as an error record, and what replaces it.
@@ -74,8 +82,25 @@ class ErrorOutputSequenceLengthMetric(OutputSequenceLengthMetric):
     )
     console_group = MetricConsoleGroup.NONE
 '''
+#: The warmup abort's warning, and what replaces it: the same line with the error the request returned, or
+#: ``cancelled`` for a request cancelled without one.
+_CALLBACK_OLD = """\
+        _logger.warning(
+            lambda: f"Terminal warmup failure for trace {credit.conversation_id}; "
+            f"aborting run early (broadcasting ProfileCancelCommand)."
+        )
+"""
+_CALLBACK_NEW = f"""\
+        _logger.warning(
+            lambda: f"Terminal warmup failure for trace {{credit.conversation_id}}; "
+            f"aborting run early (broadcasting ProfileCancelCommand); "
+            f"{WARMUP_ERROR_PREFIX}{{credit_return.error or 'cancelled'}}"
+        )
+"""
 #: Changes whenever the edit does; the staging key carries it, so a changed patch is staged anew.
-PATCH_SHA256 = hashlib.sha256("\0".join((_PARSER_OLD, _PARSER_NEW, _METRIC_NEW)).encode(_UTF8)).hexdigest()
+PATCH_SHA256 = hashlib.sha256(
+    "\0".join((_PARSER_OLD, _PARSER_NEW, _METRIC_NEW, _CALLBACK_OLD, _CALLBACK_NEW)).encode(_UTF8)
+).hexdigest()
 
 
 class AiperfPatchError(ValueError):
@@ -94,11 +119,11 @@ def _rows(record: Path) -> list[list[str]]:
     return [row for row in csv.reader(io.StringIO(_read(record), newline="")) if row]
 
 
-def _patched_parser(path: Path) -> str:
+def _replaced_once(path: Path, old: str, new: str, what: str) -> str:
     text = _read(path)
-    if text.count(_PARSER_OLD) != 1:
-        raise AiperfPatchError(f"{path.name} does not hold the branch the patch replaces exactly once")
-    return text.replace(_PARSER_OLD, _PARSER_NEW)
+    if text.count(old) != 1:
+        raise AiperfPatchError(f"{path.name} does not hold the {what} the patch replaces exactly once")
+    return text.replace(old, new)
 
 
 def _patched_metric(path: Path) -> str:
@@ -109,12 +134,12 @@ def _patched_metric(path: Path) -> str:
 
 
 def _owning_record(site: Path) -> Path:
-    """The ``RECORD`` of the distribution that installed both files the patch rewrites."""
+    """The ``RECORD`` of the distribution that installed every file the patch rewrites."""
     for record in sorted(site.glob("*.dist-info/RECORD")):
         listed = {row[0] for row in _rows(record)}
         if listed.issuperset(PATCHED_FILES):
             return record
-    raise AiperfPatchError(f"no distribution in {site} records both {' and '.join(PATCHED_FILES)}")
+    raise AiperfPatchError(f"no distribution in {site} records all of {', '.join(PATCHED_FILES)}")
 
 
 def _record_hash(data: bytes) -> str:
@@ -133,20 +158,31 @@ def _rewrite_record(record: Path, written: dict[str, bytes]) -> None:
 
 
 def patch_aiperf(site: Path) -> None:
-    """Patch the aiperf installed in the site-packages directory ``site`` to export ``error_osl``.
+    """Patch the aiperf installed in the site-packages directory ``site`` to export ``error_osl`` and to log the error
+    of the warmup request that aborts a replay.
 
-    Both files are checked before either is written, so a client whose text is not the anchored one is changed in
-    neither.
+    Every file is checked before any is written, so a client whose text is not the anchored one is changed in none.
 
     Raises:
         AiperfPatchError: A file is absent or is not the text the patch anchors on, or no ``RECORD`` lists it.
     """
     record = _owning_record(site)
-    texts = {PARSER_FILE: _patched_parser(site / PARSER_FILE), METRIC_FILE: _patched_metric(site / METRIC_FILE)}
+    texts = {
+        PARSER_FILE: _replaced_once(site / PARSER_FILE, _PARSER_OLD, _PARSER_NEW, "branch"),
+        METRIC_FILE: _patched_metric(site / METRIC_FILE),
+        CALLBACK_FILE: _replaced_once(site / CALLBACK_FILE, _CALLBACK_OLD, _CALLBACK_NEW, "warmup abort warning"),
+    }
     written = {relative: text.encode(_UTF8) for relative, text in texts.items()}
     for relative, data in written.items():
         (site / relative).write_bytes(data)
     _rewrite_record(record, written)
 
 
-__all__ = ["ERROR_OSL_METRIC", "PATCHED_FILES", "PATCH_SHA256", "AiperfPatchError", "patch_aiperf"]
+__all__ = [
+    "ERROR_OSL_METRIC",
+    "PATCHED_FILES",
+    "PATCH_SHA256",
+    "WARMUP_ERROR_PREFIX",
+    "AiperfPatchError",
+    "patch_aiperf",
+]

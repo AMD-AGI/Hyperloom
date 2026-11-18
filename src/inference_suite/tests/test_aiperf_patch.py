@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The staged AgentX client is patched to keep the output token count of a reply it found nothing in.
+"""The staged AgentX client is patched to keep the output token count of a reply it found nothing in, and to log the
+error of the warmup request that aborts a replay.
 
-What is pinned: both files of the installed client change and nothing else; the owning ``RECORD`` names the patched
+What is pinned: the three files of the installed client change and nothing else; the owning ``RECORD`` names the patched
 bytes and is otherwise byte for byte what pip wrote; a client that is not the anchored one is changed in neither file
 and the refusal says which; and, when the real installed client is given, the real parser exports the count the server
 reported, the success line and every other failure are untouched, and the reader of ``measure.agentx_requests`` counts
@@ -24,10 +25,10 @@ import pytest
 
 from hyperloom.contracts.measurement import RequestClasses
 from hyperloom.measure.agentx_requests import read_request_classes
-from inference_suite.aiperf_patch import ERROR_OSL_METRIC, AiperfPatchError, patch_aiperf
+from inference_suite.aiperf_patch import ERROR_OSL_METRIC, WARMUP_ERROR_PREFIX, AiperfPatchError, patch_aiperf
 from inference_suite.tests import aiperf_source as source
 
-PARSER, METRIC = source.PARSER_FILE, source.METRIC_FILE
+PARSER, METRIC, CALLBACK = source.PARSER_FILE, source.METRIC_FILE, source.CALLBACK_FILE
 SITE_ENV = "INFERENCE_SUITE_TEST_AIPERF_SITE"
 PYTHON_ENV = "INFERENCE_SUITE_TEST_AIPERF_PYTHON"
 DRIVER = Path(__file__).with_name("aiperf_driver.py")
@@ -65,7 +66,7 @@ def test_the_record_names_the_patched_bytes_and_keeps_every_other_row_as_pip_wro
     after = _record_rows(record)
 
     assert after.keys() == before.keys()
-    for relative in (PARSER, METRIC):
+    for relative in (PARSER, METRIC, CALLBACK):
         data = (tmp_path / relative).read_bytes()
         digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
         assert after[relative] == f"{relative},sha256={digest},{len(data)}"
@@ -80,6 +81,30 @@ def test_a_parser_that_is_not_the_anchored_one_leaves_both_files_and_the_record_
     with pytest.raises(AiperfPatchError, match="inference_result_parser.py does not hold the branch"):
         patch_aiperf(tmp_path)
     assert _both(tmp_path) == (moved, source.OUTPUT_LENGTH_METRIC), "the metric must not be added without the parser"
+    assert (tmp_path / CALLBACK).read_text(encoding="utf-8") == source.CALLBACK
+    assert record.read_bytes() == rows
+
+
+def test_the_warmup_abort_warning_carries_the_failed_requests_error_on_its_own_line(tmp_path: Path) -> None:
+    source.write_site(tmp_path)
+    patch_aiperf(tmp_path)
+    callback = (tmp_path / CALLBACK).read_text(encoding="utf-8")
+
+    warning = callback[callback.index("_logger.warning(") : callback.index("try:")]
+    assert "Terminal warmup failure for trace {credit.conversation_id}" in warning
+    assert f"{WARMUP_ERROR_PREFIX}{{credit_return.error or 'cancelled'}}" in warning
+    changed = [line for line in callback.splitlines() if line not in source.CALLBACK.splitlines()]
+    assert len(changed) == 2, "only the warning's message changes"
+
+
+def test_a_callback_handler_that_is_not_the_anchored_one_leaves_every_file_as_it_was(tmp_path: Path) -> None:
+    moved = source.CALLBACK.replace("aborting run early", "aborting the run")
+    record = source.write_site(tmp_path, callback=moved)
+    rows = record.read_bytes()
+    with pytest.raises(AiperfPatchError, match="callback_handler.py does not hold the warmup abort warning"):
+        patch_aiperf(tmp_path)
+    assert _both(tmp_path) == (source.PARSER, source.OUTPUT_LENGTH_METRIC)
+    assert (tmp_path / CALLBACK).read_text(encoding="utf-8") == moved
     assert record.read_bytes() == rows
 
 
@@ -96,7 +121,7 @@ def test_a_metric_module_without_the_output_length_metric_is_refused_and_the_par
 def test_a_client_no_installed_distribution_records_is_refused(tmp_path: Path) -> None:
     record = source.write_site(tmp_path)
     record.unlink()
-    with pytest.raises(AiperfPatchError, match="no distribution in .* records both"):
+    with pytest.raises(AiperfPatchError, match="no distribution in .* records all of"):
         patch_aiperf(tmp_path)
     assert _both(tmp_path) == (source.PARSER, source.OUTPUT_LENGTH_METRIC)
 

@@ -24,7 +24,7 @@ from hyperloom.measure.failures import (
     classify_test_failure,
     decides_test,
 )
-from inference_suite import framework_version
+from inference_suite import WARMUP_ERROR_PREFIX, framework_version
 from inference_suite.contracts import FailedStep
 from inference_suite.framework_probe import FrameworkProbeError, probe_install, run_probe
 from inference_suite.frameworks import Framework
@@ -166,6 +166,56 @@ def test_a_client_log_is_not_read_for_a_candidates_signature_nor_a_retried_429()
         classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(tokenizer,))).failure_class
         is FailureClass.CANDIDATE
     ), "the same line, from the server"
+
+
+#: The staged client's warmup abort, as it logs a request the server refused for its length; the line that follows is
+#: the abort the client always logs.
+WARMUP_OVERFLOW_LINE = (
+    "04:15:03.501 WARNING  Terminal warmup failure for trace 03e110ac; aborting run early (broadcasting "
+    f'ProfileCancelCommand); {WARMUP_ERROR_PREFIX}code=400 type=\'Bad Request\' message=\'{{"error":{{"message":'
+    "\"This model's maximum context length is 262144 tokens. However, your prompt contains 757918 tokens.\"}}' "
+    "(callback_handler.py:310)"
+)
+WARMUP_ABORTED = "04:15:03.502 WARNING  Run aborted (warmup_failure): A root AgentX warmup request failed.\n"
+
+
+def _client_failed(client_log: str) -> FailureClassification:
+    return classify_test_failure(
+        returncode=1,
+        evidence=FailureEvidence(
+            logs=("AgentX benchmark client failed with exit code 1",),
+            client_logs=(client_log,),
+            step_failure=StepFailure(FailedStep.CLIENT_FAILED, "the AgentX client exited with code 1"),
+        ),
+    )
+
+
+def test_a_warmup_request_refused_for_its_length_is_the_candidates_and_decides_the_test() -> None:
+    verdict = _client_failed(f"{WARMUP_OVERFLOW_LINE}\n{WARMUP_ABORTED}")
+
+    assert verdict.failure_class is FailureClass.CANDIDATE
+    assert verdict.failure_reason.startswith(f"{failures.AGENTX_CONTEXT_OVERFLOW}: ")
+    assert "maximum context length is 262144" in verdict.failure_reason
+    assert decides_test(verdict)
+
+
+@pytest.mark.parametrize(
+    "client_log",
+    [
+        pytest.param(
+            WARMUP_OVERFLOW_LINE.replace("maximum context length", "upstream connect error"), id="another-refusal"
+        ),
+        pytest.param(
+            "Terminal warmup failure for trace 03e110ac; aborting run early (broadcasting ProfileCancelCommand).\n"
+            "--max-model-len 262144 caps the context length\n",
+            id="client-as-released",
+        ),
+    ],
+)
+def test_a_warmup_abort_the_server_did_not_refuse_for_its_length_stays_unclear(client_log: str) -> None:
+    verdict = _client_failed(f"{client_log}\n{WARMUP_ABORTED}")
+
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.UNCLEAR, failures.NO_KNOWN_SIGNATURE_REASON)
 
 
 def test_a_timeout_of_any_other_command_stays_unclear() -> None:
