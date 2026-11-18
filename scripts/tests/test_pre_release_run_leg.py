@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUCCESS_STOP_REASONS
+from hyperloom.inference_optimizer.cli.preflight_env import _dotenv_not_private
 
 ROOT = Path(__file__).resolve().parents[2]
 PRE_RELEASE = ROOT / ".github/pre-release"
@@ -183,6 +184,26 @@ def test_clean_stop_reason_passes_and_the_key_does_not_outlive_the_leg(leg_env: 
     assert not any(line.startswith("KERNEL_OPT_BACKEND_ORDER=") for line in lines)
     for text in (dotenv.read_text(encoding="utf-8"), result.stdout, result.stderr):
         assert FAKE_KEY not in text
+
+
+def test_a_group_writable_work_root_still_gives_setup_a_private_dotenv(leg_env: dict[str, str]) -> None:
+    # A shared LEG_WORK_DIR: setgid and group-writable, with a group umask, so a plain
+    # mkdir makes the leg workspace group-writable and setup would refuse its .env.
+    work = Path(leg_env["LEG_WORK_DIR"])
+    work.mkdir()
+    work.chmod(0o2775)
+    result = subprocess.run(
+        ["bash", "-c", 'umask 002 && exec bash "$0" "$@"', str(RUN_LEG), "docker-vllm-3h"],
+        env=leg_env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    workspace = work / "attempt-1/docker-vllm-3h"
+    assert stat.S_IMODE(workspace.stat().st_mode) & 0o022 == 0
+    assert stat.S_IMODE(work.stat().st_mode) == 0o2775  # the shared parent is left as the caller made it
+    assert _dotenv_not_private(workspace / ".env") is None
 
 
 def test_forge_leg_selects_the_forge_kernel_backend(leg_env: dict[str, str]) -> None:
