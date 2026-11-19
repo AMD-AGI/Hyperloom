@@ -54,15 +54,6 @@ class _TasksStub:
     async def running(self) -> list[Any]:
         return list(self._running)
 
-    def queued_context_sync(self) -> list[Any]:
-        return list(self._queued)
-
-    def running_context_sync(self) -> list[Any]:
-        return list(self._running)
-
-    def with_key_prefix_sync(self, kind: str, key_prefix: str) -> list[Any]:
-        return []
-
     async def create_or_return_existing(self, spec) -> Any:
         self.created.append(vars(spec))
         t = SimpleNamespace(
@@ -774,41 +765,6 @@ def test_config_levers_helper_extracts_from_proposal_set():
     assert (
         _framework_config_levers_from_done({"patches_written": [], "proposal_set": [{"name": "research-only"}]}) == {}
     )
-
-
-def test_a_config_only_round_is_handed_to_explore(tmp_path: Path):
-    """Explore benches a config-only deliverable and owns its verdict, so the round ends handed off, neither empty nor
-    charged as undelivered."""
-    stub = _stub(tmp_path)
-    attempts = list(stub.shared_state.attempts)
-    task = SimpleNamespace(
-        task_id="spec-cfg",
-        params={
-            "framework_agent_authoring": True,
-            "framework_agent_candidate_id": "https://github.com/ROCm/vllm/pull/1014",
-            "framework_batch_id": "b1",
-        },
-    )
-    done_payload = {
-        "patches_written": [],
-        "proposal_set": [
-            {"name": "shared-expert-fusion", "extra_envs": {"VLLM_FUSE_SHARED_EXPERTS": "1"}},
-            {"name": "research-notes"},
-        ],
-        "summary": "PR maps to a config lever on this build",
-    }
-
-    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
-        task=task,
-        done_payload=done_payload,
-    )
-
-    (row,) = stub.shared_state.framework_agent_phase_progress
-    assert (row["status"], row["rationale"]) == (
-        "handed_to_explore",
-        "config proposals benched by explore: shared-expert-fusion",
-    )
-    assert stub.shared_state.attempts == attempts
 
 
 def test_authoring_specialist_same_framework_no_cross(tmp_path: Path):

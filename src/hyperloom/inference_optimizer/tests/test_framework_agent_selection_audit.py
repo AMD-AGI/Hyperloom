@@ -326,6 +326,20 @@ async def test_autosubmit_config_patch_deliverable_returns(coord: Coordinator) -
 
 
 @pytest.mark.asyncio
+async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -> None:
+    done = {"proposal_set": [{"name": "mtp-toggle", "extra_envs": {"VLLM_MTP": "1"}, "extra_args": "--speculative 4"}]}
+    before = len(coord.state.pending_proposals)
+    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
+    assert len(coord.state.pending_proposals) == before + 1
+    prop = next(iter(coord.state.pending_proposals.values()))
+    assert prop.action_name == "integrate_patch"
+    params = (prop.payload or {}).get("params") or {}
+    assert params["extra_server_args"] == "--speculative 4"
+    assert params["extra_envs"] == {"VLLM_MTP": "1"}
+    assert "config_changes" not in params
+
+
+@pytest.mark.asyncio
 async def test_autosubmit_config_names_the_round_after_the_lever_it_benches(coord: Coordinator) -> None:
     done = {
         "proposal_set": [

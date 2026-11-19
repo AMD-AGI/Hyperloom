@@ -113,11 +113,6 @@ class ProposalBench(CoordinatorCollaborator):
         ]
         return rows[: self._AUTO_EXPLORE_GRID_CAP]
 
-    def _track_proposal_rows(self) -> list[dict[str, Any]]:
-        """Every other specialist's proposals waiting for a bench; the framework track benches them while it is open."""
-        rows = waiting_proposal_rows(self.shared_state, self.tasks)
-        return [r for r in rows if r["domain"] != CUSTOM_PROPOSAL_DOMAIN]
-
     def _bench_key(self, rows: list[dict[str, Any]], *, operator_priority: bool) -> str:
         """Idempotency key naming the fingerprint set, so one set of proposals is enqueued once."""
         fp_hash = sha1(",".join(sorted(row["fingerprint"] for row in rows)).encode(), usedforsecurity=False)

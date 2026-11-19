@@ -82,16 +82,7 @@ class _Tasks:
         return task, False
 
     async def with_key_prefix(self, kind: str, key_prefix: str) -> list[Any]:
-        return self.with_key_prefix_sync(kind, key_prefix)
-
-    def with_key_prefix_sync(self, kind: str, key_prefix: str) -> list[Any]:
         return [t for key, t in self._by_idem.items() if t.kind == kind and key.startswith(key_prefix)]
-
-    def queued_context_sync(self) -> list[Any]:
-        return list(self._queued)
-
-    def running_context_sync(self) -> list[Any]:
-        return list(self._running)
 
     def settle_queued(self) -> None:
         for task in self._queued:
@@ -277,24 +268,28 @@ def test_pump_falls_back_to_exit_when_arm_disabled(tmp_path: Path):
     assert stub.shared_state.framework_agent_phase_done is True
 
 
-def test_the_phase_stays_open_until_every_waiting_specialist_proposal_is_in_a_bench(tmp_path: Path):
-    """A closed phase benches nothing, so a proposal a candidate handed to explore would never be measured."""
-    stub = _stub(tmp_path, local_explore=False)
-    stub.shared_state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
-    entry = stub.specialist_dispatch.build_specialist_round_entry(
-        task=SimpleNamespace(task_id="t-spec-1", params={"domain": "serving_specialist"}),
-        done_payload={"proposal_set": [{"name": "fp8-kv", "extra_args": "--kv-cache-dtype fp8"}]},
-        source="specialist",
-    )
-    stub.shared_state.record_specialist_round(entry)
+def test_rounds_that_return_only_config_proposals_still_run_the_arm_dry(tmp_path: Path):
+    """A round that lands no patch is charged to the source lever whatever else it returned, so the streak bounds an
+    arm whose specialists keep answering with the same server flag."""
+    from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH
 
-    asyncio.run(stub.phase_framework._pump_framework_agent_phase())
-    assert stub.shared_state.framework_agent_phase_done is False
+    stub = _stub(tmp_path, local_explore=True)
+    state = stub.shared_state
+    state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
+    done = {"proposal_set": [{"name": "fp8-kv", "extra_args": "--kv-cache-dtype fp8"}]}
 
-    asyncio.run(stub.phase_framework._maybe_bench_untested_proposals())
-    asyncio.run(stub.phase_framework._pump_framework_agent_phase())
-    assert [spec["kind"] for spec in stub.tasks.created] == ["explore"]
-    assert stub.shared_state.framework_agent_phase_done is True
+    for _ in range(2 * _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK):
+        asyncio.run(stub.phase_framework._pump_framework_agent_phase())
+        if state.framework_agent_phase_done:
+            break
+        task = stub.tasks._queued[-1]
+        stub.tasks.settle_queued()
+        stub.phase_framework._record_framework_agent_authoring_empty_outcome(task=task, done_payload=done)
+
+    assert len(stub.tasks.created) == _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
+    assert state.framework_agent_phase_done is True
+    charged = [row["outcome"] for row in state.attempts if row["lever_kind"] == LEVER_SOURCE_PATCH]
+    assert charged == ["handed_to_explore"] * _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
 
 
 def test_forward_enablement_carriers_eval_origin():

@@ -377,6 +377,13 @@ On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
   producer on its placeholder driver, which burns the whole budget and then
   exits non-zero.
 
+Two variables adjust the server a kernel integrate re-baselines on:
+
+| Variable | Default | Description |
+|---|---|---|
+| `HL_INTEGRATE_VRAM_GUARD` | on | On vLLM, the re-baseline server starts with `--gpu-memory-utilization` capped at `HL_INTEGRATE_VRAM_UTIL_CAP`, unless the integrate request sets that flag itself. `0` turns the cap off. |
+| `HL_INTEGRATE_VRAM_UTIL_CAP` | `0.90` | The cap, held between `0.10` and `0.99`. |
+
 ---
 
 ## Collective candidate extraction

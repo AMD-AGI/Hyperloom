@@ -150,11 +150,6 @@ def _record_run(coord: Any, task: "Task | str", *, role: str, status: str, **fie
     )
 
 
-#: Progress-row status for a candidate whose deliverable is config proposals only: explore benches them and owns their
-#: verdict, so the candidate is attempted rather than dropped.
-FRAMEWORK_HANDED_TO_EXPLORE_STATUS: str = "handed_to_explore"
-
-
 class ProgressStamp(NamedTuple):
     """The terminal ``framework_agent_phase_progress`` row a candidate ends with."""
 
@@ -769,38 +764,28 @@ class _AuthoredOutcomeMixin:
         batch_id = str(params.get("framework_batch_id") or "")
         proposals = [normalize_proposal(e) for e in to_list(inner.get("proposal_set")) if isinstance(e, dict)]
         handed = [str(row.get("name") or "") for row in proposals if is_executable(row)]
+        # Explore benches a round's server-arg / env proposals and owns their verdict. For the source lever a round
+        # with no patch delivered nothing either way, so both are charged to it alike.
         if handed:
-            self._stamp_framework_progress(
-                ProgressStamp(
-                    candidate_id=cand_id,
-                    batch_id=batch_id,
-                    status=FRAMEWORK_HANDED_TO_EXPLORE_STATUS,
-                    rationale=f"config proposals benched by explore: {', '.join(handed)}"[:500],
-                    provenance="authored_config",
-                    gain_pct=0.0,
-                    extra={"specialist_task_id": task_id, "reauthor_attempt": params.get("reauthor_attempt")},
-                )
-            )
-            return
-        reason = first_text(inner.get("summary"))[:500]
+            status, provenance = "handed_to_explore", "authored_config"
+            rationale = f"config proposals left to explore: {', '.join(handed)}"
+        else:
+            status, provenance, rationale = "author_empty", "authored_empty", first_text(inner.get("summary"))
         recorded = self._stamp_framework_progress(
             ProgressStamp(
                 candidate_id=cand_id,
                 batch_id=batch_id,
-                status="author_empty",
-                rationale=reason,
-                provenance="authored_empty",
+                status=status,
+                rationale=rationale[:500],
+                provenance=provenance,
                 gain_pct=0.0,
-                extra={
-                    "specialist_task_id": task_id,
-                    "reauthor_attempt": params.get("reauthor_attempt"),
-                },
+                extra={"specialist_task_id": task_id, "reauthor_attempt": params.get("reauthor_attempt")},
             )
         )
         if not recorded:
             return
-        self._record_undelivered_authoring_attempt(task=task, candidate_id=cand_id, status="author_empty")
-        log.info("FRAMEWORK: authoring specialist empty deliverable candidate=%s batch=%s", cand_id, batch_id)
+        self._record_undelivered_authoring_attempt(task=task, candidate_id=cand_id, status=status)
+        log.info("FRAMEWORK: authoring round landed no patch: %s candidate=%s batch=%s", status, cand_id, batch_id)
 
     def _routed_to_integrate(self, inner: dict[str, Any], task_id: str) -> bool:
         """Whether ``maybe_autosubmit_specialist_patches`` sent this deliverable to an integrate_patch, whose

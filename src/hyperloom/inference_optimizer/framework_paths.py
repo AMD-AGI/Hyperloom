@@ -585,7 +585,7 @@ def framework_apply_tree(tree: str) -> FrameworkTree | None:
 
 
 def head_import_roots(framework: str) -> tuple[str, ...]:
-    """Where this process would import ``framework``'s tree and each kernel library from, the framework's first."""
+    """Where this process would import ``framework``'s tree and each kernel library from."""
     origins = (_find_spec_origin(package) for package in KERNEL_LIBRARY_PACKAGES)
     return (resolve_framework_tree(framework), *(str(origin) for origin in origins if origin))
 
@@ -594,10 +594,10 @@ def served_source_trees(roots: Iterable[str]) -> tuple[FrameworkTree, ...]:
     """The trees the server imports rewritable source from, given where it imports each package from.
 
     Args:
-        roots: The import roots, the framework's first.
+        roots: The import roots, in no particular order.
 
     Returns:
-        tuple[FrameworkTree, ...]: One entry per distinct root, in the order given.
+        tuple[FrameworkTree, ...]: One entry per distinct root.
     """
     by_root: dict[Path, FrameworkTree] = {}
     for tree in roots:

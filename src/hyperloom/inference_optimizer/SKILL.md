@@ -441,9 +441,10 @@ bench and by which route. The pump takes that batch in the order given; it
 does not re-rank or re-audit. When discovery comes back empty its full retry
 budget, the local-exploration arm authors against profile evidence instead;
 with that off too, the source arm reports itself dry. An authoring round that
-comes back empty, or whose specialist never runs, counts against the source
-arm's no-KEEP streak like a reverted patch; once that streak marks the arm
-dry, the local-exploration arm stops dispatching for the cycle.
+lands no patch — it came back empty, returned only server-arg / env proposals,
+or its specialist never ran — counts against the source arm's no-KEEP streak
+like a reverted patch; once that streak marks the arm dry, the
+local-exploration arm stops dispatching for the cycle.
 
 Every diff lands through `integrate_patch`, with `patch_source` naming where
 it came from. KEEP commits to the live tree so the next candidate stacks on
@@ -453,11 +454,13 @@ changes nothing else, it ends `already_present`, with that evidence on the
 result. Resume skips completed candidates by idempotency key.
 
 An authoring round whose deliverable is server-arg / env proposals only lands
-nothing: explore benches those proposals with every other specialist's, and
-the candidate ends `handed_to_explore`.
+nothing, and its candidate ends `handed_to_explore`: explore benches those
+proposals with every other specialist's, and their verdicts count for the
+configuration arm. The Coordinator benches waiting proposals for as long as
+the phase is open, whether or not the source arm has run out of candidates.
 
-The phase exits when both arms are dry or when its budget is spent, but not
-while a specialist proposal still waits for its bench.
+The phase exits when both arms are dry or when its budget is spent; a proposal
+still waiting then is left unbenched.
 
 ### IR-8 — `--framework atom` is single-node only
 
