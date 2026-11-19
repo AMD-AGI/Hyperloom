@@ -8,7 +8,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import subprocess
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -35,6 +35,7 @@ from hyperloom.orchestrator.actions.stop_attribution import StoppedByTheRun
 from hyperloom.orchestrator.enablement.runtime.adapters import get_adapter
 from hyperloom.orchestrator.source_snapshot import MANIFEST_NAME, SourceLayer, snapshot_source_layer
 
+from .campaign_baseline import RepoBaseline
 from .controller_publication import (
     ControllerPatchPublication,
     ControllerPublicationError,
@@ -217,6 +218,7 @@ def _write_result(results_dir: Path, index: int, result: PatchIntegrationResult)
 
 def _keep_result(
     publication: ControllerPatchPublication,
+    deploy_root: Path,
     validation: dict[str, Any],
     keep_commit: str,
 ) -> dict[str, Any]:
@@ -226,7 +228,7 @@ def _keep_result(
         "kernel_id": publication.operator_id,
         "operator_id": publication.operator_id,
         "patch_path": str(publication.patch_path),
-        "target_file": str(publication.repo_root / publication.kernel_path),
+        "target_file": str(deploy_root / publication.kernel_path),
         # A Controller KEEP lands as a committed source layer, not a snapshot
         # overlay; ``scope`` is what the source-layer export keys on.
         "scope": "source_patch",
@@ -239,23 +241,24 @@ def _keep_result(
 
 
 def _committed_source_layer(
-    repo: Path,
+    publication: ControllerPatchPublication,
+    deploy_root: Path,
     keep_commit: str,
-    operator_id: str,
     session_dir: Path,
     framework: str,
 ) -> dict[str, Any]:
-    """Snapshot the files the KEEP commit changed, so a resume onto a stock tree can reinstall them."""
-    handles: dict[str, Any] = {"framework_root": str(repo), "source_layer_landed": True}
+    """Snapshot the files the KEEP commit changed, as deployed under ``deploy_root``, for a resume to reinstall."""
+    repo, operator_id = publication.repo_root, publication.operator_id
+    handles: dict[str, Any] = {"framework_root": str(deploy_root), "source_layer_landed": True}
     try:
         listing = _git_output(
             repo, "-c", "core.quotepath=off", "diff-tree", "--no-commit-id", "--name-status", "-r", keep_commit
         )
         rows = [line.split("\t") for line in listing.splitlines() if "\t" in line]
-        import_root = get_adapter(framework).source_import_root(str(repo))
+        import_root = get_adapter(framework).source_import_root(str(deploy_root))
         snap = snapshot_source_layer(
             SourceLayer(
-                framework_root=repo,
+                framework_root=deploy_root,
                 base_sha=keep_commit,
                 rel_paths=[row[-1] for row in rows],
                 declared_ops={row[-1]: "delete" for row in rows if row[0].startswith("D")},
@@ -281,6 +284,7 @@ def _committed_source_layer(
 
 async def _default_validator(
     publication: ControllerPatchPublication,
+    deploy_root: Path,
     *,
     session_dir: Path,
 ) -> dict[str, Any]:
@@ -290,10 +294,10 @@ async def _default_validator(
         {
             "kernel_id": publication.operator_id,
             "patch_path": str(publication.patch_path),
-            "target_file": str(publication.repo_root / publication.kernel_path),
-            # Apply resolves the patch's paths and its final-content snapshot
-            # against this root; without it the diff has no repo to land in.
+            "target_file": str(deploy_root / publication.kernel_path),
+            # The patched bytes are read from ``repo`` and deployed at the same relative paths under ``kernel_repo``.
             "repo": str(publication.repo_root),
+            "kernel_repo": str(deploy_root),
             # The Controller's Git-derived scope when it has one; the optimizer's own manifest only as a fallback for
             # a publication without it.
             "patch_write_paths": list(publication.changed_files)
@@ -332,10 +336,12 @@ class _ControllerIntegration:
         validate: PatchValidator,
         persist_keep: Callable[[ControllerPatchPublication, dict[str, Any], str], Awaitable[str]],
         admit_round: RoundAdmission,
+        repositories: Mapping[str, RepoBaseline],
     ) -> None:
         self._validate = validate
         self._persist_keep = persist_keep
         self._admit_round = admit_round
+        self._repositories = repositories
         # One base commit, the head it was pinned against and the pin's error per
         # repository, rather than one repository per run.
         self._pins: dict[Path, tuple[str, str, str]] = {}
@@ -345,10 +351,14 @@ class _ControllerIntegration:
         self._rounds_run = 0
 
     async def integrate(self, publication: ControllerPatchPublication) -> PatchIntegrationResult:
-        """Pin the repository, refuse a stale base or a dirty worktree, then land the patch."""
+        """Refuse a repository the campaign did not seal, a stale base or a dirty worktree, then land the patch."""
         repo = publication.repo_root
+        declared = self._repositories.get(str(repo))
+        if declared is None:
+            reason = f"{repo} is not a repository this campaign sealed, so nothing deploys it to the server"
+            return _refusal(publication, "skipped_undeclared_repository", reason)
         if repo not in self._pins:
-            self._pins[repo] = (publication.base_commit, *_head_against_base(repo, publication.base_commit))
+            self._pins[repo] = (declared.commit, *_head_against_base(repo, declared.commit))
         base, pinned_head, pin_error = self._pins[repo]
         if pin_error:
             return _refusal(publication, "skipped_baseline_mismatch", pin_error, pinned_head)
@@ -465,6 +475,7 @@ async def integrate_controller_patches(
     *,
     patches_root: str | Path,
     session: KeepSession,
+    repositories: Mapping[str, RepoBaseline],
     validator: PatchValidator | None = None,
     admit_round: RoundAdmission = lambda _rounds_run: None,
 ) -> ControllerIntegrationSummary:
@@ -473,6 +484,8 @@ async def integrate_controller_patches(
     Args:
         patches_root: The Controller's published patch directory.
         session: The session every KEEP is recorded into.
+        repositories: The sealed repositories by resolved root, the only ones a
+            publication may name, each with its base commit and deploy root.
         validator: Runs the E2E decision for one publication; defaults to the
             optimizer's own integrate handler.
         admit_round: Asked before each patch is applied; a stop leaves the patch
@@ -483,6 +496,9 @@ async def integrate_controller_patches(
     results_dir = integration_root / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
 
+    def deploy_root(publication: ControllerPatchPublication) -> Path:
+        return repositories[str(publication.repo_root)].deploy_root
+
     async def persist_keep(
         publication: ControllerPatchPublication,
         validation: dict[str, Any],
@@ -490,13 +506,14 @@ async def integrate_controller_patches(
     ) -> str:
         try:
             layer = _committed_source_layer(
-                publication.repo_root,
+                publication,
+                deploy_root(publication),
                 keep_commit,
-                publication.operator_id,
                 session.session_dir,
                 str(session.shared_state.framework or ""),
             )
-            await session.record_keep({**_keep_result(publication, validation, keep_commit), **layer})
+            keep = _keep_result(publication, deploy_root(publication), validation, keep_commit)
+            await session.record_keep({**keep, **layer})
             session.shared_state.save(Path(session.session_dir))
         except OSError as error:
             log.warning("KEEP %s committed but recording it failed: %s", publication.operator_id, error, exc_info=True)
@@ -504,9 +521,15 @@ async def integrate_controller_patches(
         return ""
 
     run = _ControllerIntegration(
-        validator or (lambda publication: _default_validator(publication, session_dir=Path(session.session_dir))),
+        validator
+        or (
+            lambda publication: _default_validator(
+                publication, deploy_root(publication), session_dir=Path(session.session_dir)
+            )
+        ),
         persist_keep,
         admit_round,
+        repositories,
     )
     results: list[PatchIntegrationResult] = []
     for index, patch_dir in enumerate(_priority_ordered_patch_dirs(layout)):

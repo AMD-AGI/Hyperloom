@@ -19,6 +19,13 @@ Only tracked changes are sealed. Untracked files -- tuned GEMM tables, JIT
 caches, an operator's own notes -- are not part of any patch and have no business
 in a commit this session created.
 
+The trees sealed are the ones the server imports
+(:func:`~hyperloom.inference_optimizer.framework_paths.served_source_trees`). An
+installed package has no history of its own, so it is sealed into the session's
+snapshot of it -- the history its specialists branch off -- and the campaign
+rewrites a worktree of that commit; a validated patch deploys onto the package
+(``RepoBaseline.deploy_root``).
+
 Because it commits, sealing is also where a campaign a previous session never
 handed back has to be returned. Nothing else can: both reclaims run after the
 campaign, in the process that died holding it.
@@ -26,14 +33,11 @@ campaign, in the process that died holding it.
 
 from __future__ import annotations
 
-import importlib.util
 import logging
-import os
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from kernelforge.workflows.rewrite_controller import (
     CAMPAIGN_BRANCH_PREFIX,
@@ -41,11 +45,13 @@ from kernelforge.workflows.rewrite_controller import (
     untracked_paths,
 )
 from kernelforge.utils import acquire_repo_lock, release_repo_lock
+from hyperloom.inference_optimizer.framework_paths import served_source_trees
+from hyperloom.inference_optimizer.tree_snapshot import snapshot_repository, snapshot_tree
 
 
 @dataclass(frozen=True)
 class RepoBaseline:
-    """What one repository looked like when the campaign was given it.
+    """What one repository looked like when the campaign was given it, and where its patches are deployed.
 
     The commit alone is not enough to hand a repository back. A campaign can
     commit a file the base does not carry, and switching away from its branch
@@ -53,9 +59,14 @@ class RepoBaseline:
     which untracked paths were already there, nothing can tell the campaign's
     leavings from the operator's own, and the residue this whole path exists to
     stop accumulates again.
+
+    ``deploy_root`` is the directory a patch's repo-relative paths land in for
+    the server to run them: the repository itself for a checkout the server
+    imports, the served tree for a snapshot worktree.
     """
 
     commit: str
+    deploy_root: Path
     untracked: frozenset[str] = frozenset()
 
 
@@ -63,13 +74,6 @@ log = logging.getLogger(__name__)
 
 _GIT_TIMEOUT_SEC = 120
 
-#: Packages that can hold a rewritable kernel and are installed from source.
-#: Probed by name rather than read from configuration: a container serving one
-#: framework has that one importable and the others absent, so the interpreter
-#: already knows the answer, while the configured roots are routinely unset --
-#: in the GLM-5.2 session all three sources were empty and the handoff reported
-#: no source repository at all.
-_FRAMEWORK_PACKAGES: tuple[str, ...] = ("vllm", "sglang", "aiter")
 #: A commit nobody authored needs an author anyway, and the container's Git has
 #: no global identity to fall back on.
 _COMMIT_IDENTITY = (
@@ -90,65 +94,6 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     )
 
 
-def _configured_repository_roots(state: Any) -> set[Path]:
-    """Resolve explicitly configured source paths to distinct Git repository roots."""
-    raw_paths = [
-        getattr(state, "framework_repo_path", ""),
-        os.environ.get("FRAMEWORK_REPO_PATH", ""),
-    ]
-    raw_paths.extend(
-        value for value in os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "").split(os.pathsep) if value
-    )
-    roots: set[Path] = set()
-    for raw in raw_paths:
-        text = str(raw or "").strip()
-        if not text:
-            continue
-        path = Path(text).expanduser().resolve(strict=False)
-        if path.is_file():
-            path = path.parent
-        for candidate in (path, *path.parents):
-            if (candidate / ".git").exists():
-                roots.add(candidate)
-                break
-    return roots
-
-
-def _package_repository(name: str) -> Path | None:
-    """Return the Git top level one framework package is imported from.
-
-    ``None`` when the package is absent, or present as a wheel. A wheel carries
-    no source to rewrite, so it is not a repository any campaign can name.
-    """
-    try:
-        spec = importlib.util.find_spec(name)
-    except (ImportError, ValueError):
-        return None
-    if spec is None or not spec.origin:
-        return None
-    package_dir = Path(spec.origin).resolve().parent
-    completed = _git(package_dir, "rev-parse", "--show-toplevel", check=False)
-    if completed.returncode != 0:
-        return None
-    return Path(completed.stdout.strip()).resolve()
-
-
-def campaign_repositories(state: Any) -> tuple[Path, ...]:
-    """Every repository a rewrite could name, from the runtime and the config.
-
-    The runtime is the authority and the configuration is an addition, not the
-    other way round: an operator who points at a fourth checkout should be
-    honoured, but nobody should have to configure the framework they are
-    already serving.
-    """
-    roots = _configured_repository_roots(state)
-    for name in _FRAMEWORK_PACKAGES:
-        repo = _package_repository(name)
-        if repo is not None:
-            roots.add(repo)
-    return tuple(sorted(roots, key=str))
-
-
 def session_branch_name(session_id: str, macro_cycle: int) -> str:
     """Name the branch one session's sealed baselines live on."""
     safe = "".join(character if character.isalnum() or character in "-_." else "-" for character in str(session_id))
@@ -159,7 +104,7 @@ def _seal_one(repo: Path, branch: str) -> RepoBaseline:
     """Commit this repository's tracked changes and describe what it then was."""
     head = _git(repo, "rev-parse", "HEAD").stdout.strip().lower()
     if not _git(repo, "status", "--porcelain", "--untracked-files=no").stdout.strip():
-        return RepoBaseline(commit=head, untracked=untracked_paths(repo))
+        return RepoBaseline(commit=head, deploy_root=repo, untracked=untracked_paths(repo))
 
     current = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     if current != branch:
@@ -180,7 +125,7 @@ def _seal_one(repo: Path, branch: str) -> RepoBaseline:
     # has no inverse, and an operator reading their own checkout afterwards
     # should be able to find out from here what moved it.
     log.info("sealed %s at %s (was %s) and left it on %s", repo, sealed[:12], head[:12], branch)
-    return RepoBaseline(commit=sealed, untracked=untracked_paths(repo))
+    return RepoBaseline(commit=sealed, deploy_root=repo, untracked=untracked_paths(repo))
 
 
 def _abandoned_campaign_branch(repo: Path) -> str:
@@ -243,33 +188,51 @@ def _seal_repository(repo: Path, branch: str) -> RepoBaseline | None:
         release_repo_lock(lock)
 
 
+def _seal_snapshot(tree: Path, session_dir: Path, branch: str) -> tuple[Path, RepoBaseline]:
+    """Commit ``tree`` into the session's snapshot and check the commit out in the worktree the campaign rewrites."""
+    repo, error = snapshot_tree(tree, snapshot_repository(session_dir, tree), refresh=True)
+    if repo is None:
+        raise OSError(error)
+    commit = _git(repo, "rev-parse", "HEAD").stdout.strip().lower()
+    worktree = repo.with_suffix(".campaign")
+    if (worktree / ".git").exists():
+        _git(worktree, "checkout", "--force", "-B", branch, commit)
+    else:
+        _git(repo, "worktree", "add", "-B", branch, str(worktree), commit)
+    return worktree, RepoBaseline(commit=commit, deploy_root=tree, untracked=untracked_paths(worktree))
+
+
 def seal_campaign_baseline(
-    state: object,
+    framework: str,
     *,
+    session_dir: Path,
     session_id: str,
     macro_cycle: int,
 ) -> dict[str, RepoBaseline]:
-    """Seal every configured source repository and return what each was pinned to.
+    """Seal every tree the server imports rewritable source from, keyed by the repository it is rewritten in.
 
-    Best-effort per repository. One tree that cannot be sealed -- no Git, no
-    write permission -- costs that repository's operators, which the controller
+    Best-effort per tree. One tree that cannot be sealed -- no write permission,
+    a broken checkout -- costs that repository's operators, which the controller
     refuses individually; it must not cost the whole KERNEL phase.
     """
     branch = session_branch_name(session_id, macro_cycle)
     baselines: dict[str, RepoBaseline] = {}
-    for repo in campaign_repositories(state):
+    for tree in served_source_trees(framework):
         try:
-            baseline = _seal_repository(repo, branch)
+            if tree.checkout:
+                repo, baseline = tree.root, _seal_repository(tree.root, branch)
+            else:
+                repo, baseline = _seal_snapshot(tree.tree, session_dir, branch)
         except (OSError, subprocess.SubprocessError) as error:
             log.warning(
-                "could not seal the serving tree in %s: %s; in-place operators in this "
-                "repository will be skipped for having no base commit to borrow at",
-                repo,
+                "could not seal the serving tree %s: %s; its operators will be skipped for having no base commit",
+                tree.tree,
                 error,
             )
             continue
         if baseline is not None:
-            baselines[str(repo)] = baseline
+            # Resolved, as the controller resolves the repo_root it publishes: the two must be one key.
+            baselines[str(repo.resolve())] = baseline
     return baselines
 
 
@@ -307,7 +270,6 @@ def reclaim_campaign_repositories(baselines: Mapping[str, RepoBaseline]) -> dict
 
 __all__ = [
     "RepoBaseline",
-    "campaign_repositories",
     "reclaim_campaign_repositories",
     "seal_campaign_baseline",
     "session_branch_name",

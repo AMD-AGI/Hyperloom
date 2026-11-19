@@ -46,6 +46,7 @@ from .kernel_gemm_tuning import _GemmTuningMixin, _first_text
 
 if TYPE_CHECKING:
     from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_recorder import KernelEventRecorder
+    from ..kernel.campaign_baseline import RepoBaseline
     from .machine import Transition
 
 log = _logging.getLogger(__name__)
@@ -765,12 +766,13 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         # they left is part of what the server is now running. Committing it is
         # what lets a campaign name its own baseline -- the diff's starting
         # point, and the state a borrowed repository is handed back at.
-        baselines: dict[str, object] = {}
+        baselines: dict[str, RepoBaseline] = {}
         try:
             from ..kernel.campaign_baseline import seal_campaign_baseline
 
             baselines = seal_campaign_baseline(
-                self.shared_state,
+                self.shared_state.framework,
+                session_dir=self.session_dir,
                 session_id=str(self.shared_state.session_id or self.session_dir.name),
                 macro_cycle=int(self.shared_state.macro_cycle or 0),
             )
@@ -785,10 +787,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
 
         env_spec = self._coord.writeback.build_env_spec()
         handoff_dir = write_forge_handoff(
-            self.shared_state,
-            env_spec=env_spec,
-            handoff_dir=handoff_dir,
-            baselines=baselines,
+            self.shared_state, env_spec=env_spec, handoff_dir=handoff_dir, repositories=baselines
         )
         log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
         await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
@@ -828,7 +827,9 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         # ``state.json`` itself and must not be able to report a budget other than the one it was given.
         return {**attempt, **result, **{key: attempt[key] for key in _CONTROLLER_ATTEMPT_FACTS}}
 
-    async def _integrate_controller_output(self, result: dict[str, Any], output_dir: Path) -> None:
+    async def _integrate_controller_output(
+        self, result: dict[str, Any], output_dir: Path, baselines: Mapping[str, RepoBaseline]
+    ) -> None:
         if int(result.get("patch_count") or 0) <= 0:
             result["integration"] = {
                 "status": "not_run",
@@ -848,6 +849,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
                     shared_state=self.shared_state,
                     record_keep=self._coord.writeback.record_integrate_keep,
                 ),
+                repositories=baselines,
                 admit_round=lambda rounds_run: controller_round_stop(self.shared_state, rounds_run),
             )
             result["integration"] = integration.to_dict()
@@ -876,7 +878,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         )
 
     async def _run_kernel_rewrite_controller(
-        self, handoff_dir: Path, output_dir: Path, baselines: dict[str, object]
+        self, handoff_dir: Path, output_dir: Path, baselines: dict[str, RepoBaseline]
     ) -> None:
         """Run one Controller attempt without preselecting operators."""
         from ..kernel.controller_submit import record_controller_llm_usage
@@ -900,7 +902,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             log.exception("KERNEL entry: reclaiming the campaign repositories failed")
         if result["status"] == "cancelled":  # unsettled: the resumed entry runs a fresh Controller
             return
-        await self._integrate_controller_output(result, output_dir)
+        await self._integrate_controller_output(result, output_dir, baselines)
         self._record_kernel_rewrite_controller_timeline(result)
         self.shared_state.kernel_rewrite_controller_result = result
         self._file_controller_integration_failure(result)
