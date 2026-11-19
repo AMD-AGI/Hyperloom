@@ -619,9 +619,6 @@ def test_conc_sweep_preserves_baseline_script_through_variant_materialization(se
     state.gpu_type = "MI355X"
     state.baseline_benchmark_script = "sglang_custom.sh"
     monkeypatch.setenv("GPU_TYPE", "mi355x")
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
-    )
     calls = []
 
     async def capture_grid(**kwargs):
@@ -2177,9 +2174,6 @@ def test_single_server_boot_round_measures_its_rung_and_the_next_rung_reuses_it(
     """The round that boots an arm's server measures its own rung on it; no round of the sweep asks to boot only."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     _patch_lifecycle_eligible(monkeypatch, [])
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
-    )
     calls: list[dict[str, Any]] = []
 
     async def _fake_run_grid(*, grid: list[GridVariant], **kw):
@@ -2211,9 +2205,6 @@ def test_a_session_closing_during_a_boot_round_starts_no_round_after_it(
     """A closing session does not start the round after the one that booted the server."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     _patch_lifecycle_eligible(monkeypatch, [])
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
-    )
     calls: list[str] = []
 
     async def _fake_run_grid(*, grid: list[GridVariant], **kw):
@@ -2440,9 +2431,6 @@ def test_a_cancelled_sweep_stops_the_ladder_and_is_not_failed(
 
     teardown_log: list[tuple] = []
     _patch_lifecycle_eligible(monkeypatch, teardown_log)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
-    )
     state = _make_state(baseline_config_path=str(baseline_yaml))
     scope = CancelScope()
     transition = "phase_transition:SWEEP->CLOSE"

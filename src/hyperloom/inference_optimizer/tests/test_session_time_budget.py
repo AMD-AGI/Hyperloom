@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import math
-import os
 import sys
 import threading
 import time
@@ -15,6 +14,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from hyperloom_common.proctree import TERM_GRACE_SEC
 from hyperloom.common.deadline import Deadline
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
@@ -25,8 +25,6 @@ from hyperloom.orchestrator.actions.cancel_channel import (
     stop_was_asked_for,
     use_cancel_scope,
 )
-from hyperloom.orchestrator.actions.executors._ray_backend import SessionKillRound
-from hyperloom.orchestrator.actions.executors._ray_serving import CANCEL_ROUND_GRACE_SEC
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     COOPERATIVE_REAP_BUDGET_SEC,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -838,15 +836,11 @@ def _sleeps_in_a_thread(started: asyncio.Event, *, seconds: float = 2.0):
 
 
 class TestTheCooperativeStopWindowsCompose:
-    """Three waits on the same stop, which only mean anything together."""
+    """Waits on the same stop, which only mean anything together."""
 
-    def test_the_ray_grace_outlasts_a_round_stopping_itself(self):
-        """A round in an actor stops the same way; the grace has to cover it."""
-        assert CANCEL_ROUND_GRACE_SEC >= COOPERATIVE_REAP_BUDGET_SEC
-
-    def test_reaping_a_server_and_dropping_its_lease_are_both_paid(self):
-        """The two release waits are a sequence, so the window has to cover both."""
-        assert _COOPERATIVE_CANCEL_GRACE_SEC >= 8.5 + 0.25 + 5.0 + 10.0
+    def test_stopping_the_round_and_reaping_its_server_are_both_paid(self):
+        """The two waits are a sequence, so the window has to cover both."""
+        assert _COOPERATIVE_CANCEL_GRACE_SEC >= COOPERATIVE_REAP_BUDGET_SEC + TERM_GRACE_SEC
 
     def test_a_cancelled_scope_is_visible_to_the_work_inside_it(self):
         """The unwind's steps read the scope, not a returncode."""
@@ -871,7 +865,7 @@ class TestTheCancelChannel:
 
     @pytest.mark.asyncio
     async def test_code_outside_an_action_finds_no_scope(self):
-        """A Ray worker and a bare call are the same case: nothing to check."""
+        """A worker thread and a bare call are the same case: nothing to check."""
         assert await asyncio.to_thread(current_cancel_scope) is None
 
     def test_the_first_reason_is_the_one_kept(self):
@@ -940,94 +934,6 @@ class TestCancellingWorkThatBlocksInAThread:
 
         assert time.monotonic() - began < _COOPERATIVE_CANCEL_GRACE_SEC
         assert atask.cancelled()
-
-
-def _runs_a_round_in_a_lease(started: asyncio.Event, *, outcome: dict[str, Any], lease: Any):
-    """An executor shaped like the production default: a round inside a Ray lease."""
-
-    async def _run(_ctx) -> dict:
-        started.set()
-        rc, _out, _err = await asyncio.to_thread(
-            lease.run_session_kill,
-            SessionKillRound(
-                [sys.executable, "-c", f"import time; time.sleep({_BLOCKING_SEC})"],
-                env=dict(os.environ),
-                timeout=_BLOCKING_SEC * 4,
-            ),
-        )
-        outcome["returncode"] = rc
-        return {"returncode": rc}
-
-    return _run
-
-
-class TestCancellingARoundInsideARayLease:
-    """The production default routes rounds through a Ray actor, not a local child."""
-
-    @pytest.fixture
-    def lease(self, serving_lease_on_a_ray_double: Any) -> Any:
-        return serving_lease_on_a_ray_double
-
-    @pytest.mark.asyncio
-    async def test_the_round_in_the_actor_stops_before_the_cancel_returns(
-        self,
-        coord: Coordinator,
-        lease: Any,
-    ):
-        outcome: dict[str, Any] = {}
-        task, atask = await _start_action(
-            coord,
-            kind=_CHEAP_ACTION,
-            key="c-ray",
-            make_executor=lambda started: _runs_a_round_in_a_lease(started, outcome=outcome, lease=lease),
-        )
-        began = time.monotonic()
-
-        assert await coord.dispatcher.cancel_inflight_actions(reason="test") == [task.task_id]
-
-        assert outcome, "the cancel returned while the round was still running in the actor"
-        assert time.monotonic() - began < _BLOCKING_SEC
-        await _settle(atask)
-
-    @pytest.mark.asyncio
-    async def test_the_stop_is_attributed_to_the_orchestrator(self, coord: Coordinator, lease: Any):
-        """The actor reaps its own tree, so the sentinel is the same one the local path returns."""
-        outcome: dict[str, Any] = {}
-        await _start_action(
-            coord,
-            kind=_CHEAP_ACTION,
-            key="c-ray-rc",
-            make_executor=lambda started: _runs_a_round_in_a_lease(started, outcome=outcome, lease=lease),
-        )
-
-        await coord.dispatcher.cancel_inflight_actions(reason="test_reason")
-
-        assert outcome["returncode"] == ORCHESTRATOR_CANCELLED_RETURNCODE
-
-    @pytest.mark.asyncio
-    async def test_an_actor_that_will_not_answer_is_killed_and_the_stop_still_named(
-        self,
-        coord: Coordinator,
-        lease: Any,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
-        """A wedged actor must not hold the lease open, and must not go unattributed."""
-        from hyperloom.orchestrator.actions.executors import _ray_serving as rs
-
-        monkeypatch.setattr(rs, "CANCEL_ROUND_GRACE_SEC", 0.5)
-        monkeypatch.setattr(rs.ServingLease, "_ask_actor_to_cancel", lambda _self, _reason: False)
-        outcome: dict[str, Any] = {}
-        await _start_action(
-            coord,
-            kind=_CHEAP_ACTION,
-            key="c-ray-wedged",
-            make_executor=lambda started: _runs_a_round_in_a_lease(started, outcome=outcome, lease=lease),
-        )
-
-        await coord.dispatcher.cancel_inflight_actions(reason="test_reason")
-
-        assert outcome["returncode"] == ORCHESTRATOR_CANCELLED_RETURNCODE
-        assert lease._actor is None, "the lease must be released when its actor is killed"
 
 
 @pytest.mark.asyncio
@@ -1146,52 +1052,24 @@ async def test_cancelled_result_bookkeeping_does_not_release_gpu_capacity(coord)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("confirmed", [True, False])
-async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed):
+async def test_a_specialist_s_gpu_capacity_returns_when_its_execution_ends(coord):
     from unittest.mock import AsyncMock
 
     from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
-    from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 
     coord.gpu_specialist_pool = SpecialistGpuPool(coord.db, gpu_ids=[0])
-    events = []
-
-    class RayLease:
-        def close(self):
-            events.append("close")
-            return confirmed
-
     coord.sub.register_executor(_CHEAP_ACTION, lambda _ctx: _done({"ok": True}))
     task, _ = await coord.tasks.create_or_return_existing(
         TaskSpec(kind=_CHEAP_ACTION, params={}, idempotency_key="cleanup-order", requires_lanes=[_CHEAP_ACTION_LANE])
     )
     gpu = await coord.gpu_specialist_pool.try_acquire(count=1, holder_id=task.task_id, task_id=task.task_id)
     assert gpu is not None
-    real_release = coord.gpu_specialist_pool.release
-
-    async def release(lease):
-        events.append("gpu_release")
-        await real_release(lease)
-
-    coord.gpu_specialist_pool.release = release
     on_complete = AsyncMock()
-    execution = coord.dispatcher.run_task_registered(
-        task, HeldLeases(gpu_lease=gpu, gpu_specialist_lease=RayLease()), on_complete=on_complete
-    )
-    if confirmed:
-        await execution
-        on_complete.assert_awaited_once()
-    else:
-        with pytest.raises(ExecutionCleanupUnconfirmed):
-            await execution
-        on_complete.assert_not_awaited()
-        await coord.dispatcher.close_db_after_executions()
-        # The unconfirmed close is reported to the caller and recorded on the
-        # row; the slot still goes back, because the task it was held for is over.
-        assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is None
-    # Cleanup is asked first either way -- its answer is evidence, so it has to
-    # be in hand before the row is written -- and the capacity follows it back.
-    assert events == ["close", "gpu_release"]
+
+    await coord.dispatcher.run_task_registered(task, HeldLeases(gpu_lease=gpu), on_complete=on_complete)
+
+    on_complete.assert_awaited_once()
+    assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is None
     assert not await coord.locks.lane_holders()
 
 
@@ -1647,7 +1525,7 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
         """The run reaps its own serving pidfiles on the way out.
 
         Every in-band kill path (a live ``Popen`` handle, ``PR_SET_PDEATHSIG``
-        on a Ray actor's direct child) dies with the process that owns it, so a
+        on a direct child) dies with the process that owns it, so a
         session that ended while a benchmark server was up left it holding its
         GPUs until some later session booted in the same directory.
         """

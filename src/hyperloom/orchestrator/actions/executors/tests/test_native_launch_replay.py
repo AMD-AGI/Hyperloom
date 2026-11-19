@@ -16,7 +16,6 @@ from hyperloom.orchestrator.actions.executors import (
     _grid_runner,
     _integrate_bench,
     _integrate_results,
-    _ray_serving,
     explore,
     integrate_patch,
 )
@@ -69,7 +68,6 @@ def native_session(tmp_path, monkeypatch):
             monkeypatch.delenv(key)
     monkeypatch.setenv("FRAMEWORK", "sglang")
     monkeypatch.setenv("MODEL_PATH", _MODEL)
-    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **kwargs: None)
 
     def build(*, appended="--mem-fraction-static 0.85", recipe=None, env=None):
         canonical = list(recipe if recipe is not None else _PREFIX + [_OPTION, "256", "--enable-hierarchical-cache"])

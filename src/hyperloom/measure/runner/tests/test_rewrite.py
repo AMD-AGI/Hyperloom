@@ -86,7 +86,7 @@ def test_the_yaml_is_made_this_sandboxes(tmp_path):
     assert bench["server_lifecycle"]["pid_dir"] == f"{tmp_path}/pids"
     assert bench["inferencex_path"] == f"{tmp_path}/ix"
     assert bench["envs"]["PYTHONPATH"] == "/rt/site"
-    assert not list(tmp_path.glob("*.mask*")) and not list(tmp_path.glob("*.ray*"))
+    assert not list(tmp_path.glob("*.mask*"))
 
 
 def test_the_rebuilt_framework_goes_first_on_the_servers_path(tmp_path):

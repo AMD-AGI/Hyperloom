@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_common.llm import llm_config
-from hyperloom.common.ports import DEV_SANDBOX_PORTS, RAY_WORKER_PORTS
+from hyperloom.common.ports import DEV_SANDBOX_PORTS
 from hyperloom.common.codex_session import (
     CODEX_SANDBOX_MODE_ENV,
     DEFAULT_CODEX_SANDBOX_MODE,
@@ -2158,7 +2158,6 @@ class TestRunGemmTuningHandler:
         capture_port = int(task.params["extra_envs"]["PORT"])
         ephemeral_start = int(Path("/proc/sys/net/ipv4/ip_local_port_range").read_text(encoding="utf-8").split()[0])
         assert capture_port < ephemeral_start and capture_port not in DEV_SANDBOX_PORTS
-        assert capture_port not in RAY_WORKER_PORTS
         assert task.params["extra_envs"]["TP"] == "1"
         assert task.params["extra_envs"]["CONC"] == "128"
         assert task.params["extra_envs"]["ISL"] == "1024"

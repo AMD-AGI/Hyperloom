@@ -12,6 +12,7 @@ from hyperloom.orchestrator.state.objective import TargetGainObjective
 from hyperloom.orchestrator.knowledge.recipe_journal import (
     workload_kb_tags,
 )
+from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 from hyperloom.orchestrator.loop.dispatcher import HeldLeases
 
 from .conftest import make_coordinator
@@ -200,8 +201,6 @@ def test_run_dispatched_releases_gpu_lease_on_exception(coord: Coordinator) -> N
 def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
     import asyncio
 
-    called: list[object] = []
-
     class _Task:
         task_id = "tc-cpu"
         kind = "report"
@@ -211,16 +210,19 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
         await release_resources()
         return "CPU"
 
-    async def _fake_release(lease):
-        called.append(lease)
+    async def _run() -> object:
+        coord.gpu_specialist_pool = SpecialistGpuPool(coord.db, gpu_ids=[0])
+        held = await coord.gpu_specialist_pool.try_acquire(count=1, holder_id="other", task_id="other")
+        assert held is not None
+        out = await coord.dispatcher.run_task_registered(
+            _Task(), HeldLeases(prebound_lease=None, gpu_lease=None), extra_context={}
+        )
+        # No GPU lease -> another holder's capacity is left alone.
+        assert await coord.db.fetchone("SELECT 1 FROM gpu_leases WHERE holder_id='other'") is not None
+        return out
 
     coord.sub.run_task = _fake_run_task
-    coord.gpu_specialist_pool.release = _fake_release
-    out = asyncio.run(
-        coord.dispatcher.run_task_registered(_Task(), HeldLeases(prebound_lease=None, gpu_lease=None), extra_context={})
-    )
-    assert out == "CPU"
-    assert called == []  # no GPU lease → release never called
+    assert asyncio.run(_run()) == "CPU"
 
 
 # -- static / pure helpers -------------------------------------------------

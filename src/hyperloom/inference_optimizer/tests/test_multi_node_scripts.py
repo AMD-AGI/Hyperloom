@@ -1263,43 +1263,6 @@ def _write_meta_kwargs(**overrides):
     return defaults
 
 
-def test_ray_gcs_address_from_state_prefers_ray_address(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    p = tmp_path / "state.json"
-    p.write_text(
-        json.dumps({"ray_address": "10.1.2.3:6379", "head_pod_ip": "10.9.9.9"}),
-        encoding="utf-8",
-    )
-    p.chmod(0o600)
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(p))
-    assert mne.ray_gcs_address_from_state() == "10.1.2.3:6379"
-
-
-def test_ray_gcs_address_from_state_fallback_head(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    p = tmp_path / "state.json"
-    p.write_text(json.dumps({"head_pod_ip": "10.1.2.4"}), encoding="utf-8")
-    p.chmod(0o600)
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(p))
-    assert mne.ray_gcs_address_from_state() == "10.1.2.4:6379"
-
-
-def test_export_ray_address_to_os(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    p = tmp_path / "state.json"
-    p.write_text(json.dumps({"head_pod_ip": "10.0.0.5"}), encoding="utf-8")
-    p.chmod(0o600)
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(p))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-    # The head IP reaches a multi-node run through the hand-off, so supply it that way: state for >= 2 nodes is
-    # refused without one.
-    monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://head:8888")
-    monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.0.5")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
-    # delenv on an unset name records nothing to undo, so the address the call writes would outlive this test.
-    monkeypatch.setenv("RAY_ADDRESS", "")
-    monkeypatch.delenv("RAY_ADDRESS")
-    mne.export_ray_address_to_os()
-    assert os.environ.get("RAY_ADDRESS") == "10.0.0.5:6379"
-
-
 def test_subcommand_state_refuses_multi_node_without_handoff(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A stale state file must not stand in for a cluster hand-off."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli

@@ -22,7 +22,6 @@ from hyperloom.orchestrator.state.round_store import RoundRequest
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec, create_in_cursor
 
-from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 from hyperloom.orchestrator.actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -69,7 +68,6 @@ def test_extract_launch_log_empty_on_none_or_blank():
     "payload, err_class",
     [
         ({"error": "pinned dependency missing"}, AGENTX_PREFLIGHT_ERROR_CLASS),
-        ({"error": f"{RAY_INFEASIBLE_MARKER}: cluster has 0 GPU(s), 8 requested"}, "subprocess_nonzero"),
         ({"error": "GPU 0: held by pid 4242 (python3)"}, HOST_GPUS_UNAVAILABLE),
         ({"error": "budget reached"}, SESSION_TIME_EXHAUSTED_CLASS),
     ],

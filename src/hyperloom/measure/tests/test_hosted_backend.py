@@ -812,12 +812,9 @@ def test_attachment_and_overlay_blobs_reach_the_sandbox_before_the_sheet(rig, tm
 # -- start checks ---------------------------------------------------------------------------------------------------
 
 
-def test_start_refuses_a_multi_node_activity_and_ray_execution(tmp_path, monkeypatch) -> None:
+def test_start_refuses_a_multi_node_activity(tmp_path) -> None:
     with pytest.raises(HostedStartError, match="single-node"):
         make_rig(tmp_path, nodes=2)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
-    with pytest.raises(HostedStartError, match="RAY_EXEC"):
-        make_rig(tmp_path)
 
 
 def test_start_refuses_without_runner_templates(tmp_path) -> None:

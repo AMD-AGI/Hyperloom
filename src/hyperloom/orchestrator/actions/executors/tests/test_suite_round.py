@@ -333,7 +333,6 @@ def test_a_round_trailing_its_checkpoint_is_stopped_and_exits_as_an_early_stop(
         suite_route(session),
         _grid_round(point, AgentxCheckpoint(100.0, enforce=True)),
         env_drop=frozenset(),
-        serving_lease=None,
         on_poll=lambda: None,
     )
 
@@ -353,7 +352,6 @@ def test_a_shadow_checkpoint_records_the_ruling_and_lets_the_round_finish(
         suite_route(session),
         _grid_round(point, AgentxCheckpoint(100.0, enforce=False)),
         env_drop=frozenset(),
-        serving_lease=None,
         on_poll=lambda: None,
     )
 
@@ -377,7 +375,6 @@ def test_an_earlier_rounds_stop_ruling_does_not_turn_a_cancel_into_an_early_stop
             suite_route(session),
             _grid_round(point, AgentxCheckpoint(100.0, enforce=True)),
             env_drop=frozenset(),
-            serving_lease=None,
             on_poll=lambda: None,
         )
 
