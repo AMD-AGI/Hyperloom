@@ -21,10 +21,13 @@ from hyperloom.orchestrator.actions.executors import roofline as rf
 from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
     _extract_steady_state_retry_mode,
-    _preflight_probe,
     _profile_err_text,
     _profile_server_log_tail,
-    _server_liveness_probe,
+)
+from hyperloom.orchestrator.actions.executors.serving._profile_evidence import (
+    preflight_probe,
+    reap_session_orphans,
+    server_liveness_probe,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
@@ -232,7 +235,7 @@ def test_preflight_probe_reports_leftover_traces_and_disk(tmp_path):
     (run_dir / "old.pt.trace.json.gz").write_bytes(b"leftover")
     (run_dir / "server.log").write_text("not a trace", encoding="utf-8")
 
-    probe = _preflight_probe(tmp_path, "t-rf-units", reaped=[4242])
+    probe = preflight_probe(tmp_path, "t-rf-units", reaped=[4242])
 
     assert probe["orphans_reaped"] == [4242]
     assert probe["orphans_reaped_count"] == 1
@@ -245,7 +248,7 @@ def test_preflight_probe_reports_leftover_traces_and_disk(tmp_path):
 
 def test_preflight_probe_is_clean_on_a_fresh_session(tmp_path):
     """No runs directory is not a finding, so the leftover list stays empty rather than absent."""
-    probe = _preflight_probe(tmp_path, "t-rf-units", reaped=[])
+    probe = preflight_probe(tmp_path, "t-rf-units", reaped=[])
 
     assert probe["stale_traces"] == []
     assert probe["stale_trace_count"] == 0
@@ -268,7 +271,7 @@ def test_server_liveness_probe_reads_the_server_fate_from_this_task_reports(tmp_
     # Another task's round must not be attributed to this one.
     _write_round_report(tmp_path / "runs" / "roofline" / "t-other" / "r0", FailedStep.SERVER_DIED)
 
-    probe = _server_liveness_probe(tmp_path, "t-rf-units")
+    probe = server_liveness_probe(tmp_path, "t-rf-units")
 
     assert probe["reports"] == 4
     assert probe["server_died"] == 2
@@ -283,11 +286,11 @@ def test_server_liveness_probe_reads_the_server_fate_from_this_task_reports(tmp_
 def test_server_liveness_probe_counts_reports_whose_server_ended_cleanly(tmp_path):
     _write_round_report(tmp_path / "runs" / "roofline" / "t-rf-units" / "r0", None)
 
-    assert _server_liveness_probe(tmp_path, "t-rf-units") == {"reports": 1}
+    assert server_liveness_probe(tmp_path, "t-rf-units") == {"reports": 1}
 
 
 def test_server_liveness_probe_is_empty_without_a_runs_dir(tmp_path):
-    assert _server_liveness_probe(tmp_path, "t-rf-units") == {}
+    assert server_liveness_probe(tmp_path, "t-rf-units") == {}
 
 
 def _recorded_action(session_dir: Path) -> dict:
@@ -393,19 +396,19 @@ async def test_instrumentation_tolerates_a_profiler_without_a_report(tmp_path):
 def test_drain_instrumentation_takes_the_report_once():
     """Draining, not reading: a later attempt must not inherit an earlier attempt's report."""
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
-    from hyperloom.orchestrator.actions.executors.roofline import _drain_instrumentation
+    from hyperloom.orchestrator.actions.executors.serving._profile_evidence import drain_instrumentation
 
     executor = ProfileExecutor()
     executor._instrumentation_preflight = {"check_id": "instrumentation_preflight", "status": "passed"}
 
-    assert _drain_instrumentation(executor)["status"] == "passed"
-    assert _drain_instrumentation(executor) is None
+    assert drain_instrumentation(executor)["status"] == "passed"
+    assert drain_instrumentation(executor) is None
 
 
 def test_drain_instrumentation_tolerates_an_executor_without_one():
-    from hyperloom.orchestrator.actions.executors.roofline import _drain_instrumentation
+    from hyperloom.orchestrator.actions.executors.serving._profile_evidence import drain_instrumentation
 
-    assert _drain_instrumentation(object()) is None
+    assert drain_instrumentation(object()) is None
 
 
 # Exception-path cuda-graph classification
@@ -666,4 +669,4 @@ async def test_orphan_reap_failure_propagates(monkeypatch, tmp_path):
     )
 
     with pytest.raises(OSError, match="pidfile scan failed"):
-        await rf._reap_session_orphans(tmp_path)
+        await reap_session_orphans(tmp_path)
