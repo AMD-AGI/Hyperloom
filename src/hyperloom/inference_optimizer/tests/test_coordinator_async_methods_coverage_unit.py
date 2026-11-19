@@ -245,7 +245,6 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
 
     coord.shared_state.enablement_mode = "off"
     refused = {"status": "failed", "error_class": HOST_GPUS_UNAVAILABLE, "error": "GPU 0: held by pid 4242 (python3)"}
-    # Two different outputs: the identical-failure rule must not be what stops the third call.
     subproc_a = _nonzero_result("RuntimeError: HIP out of memory")
     subproc_b = _nonzero_result("ConnectionError: port refused")
 
@@ -1160,13 +1159,10 @@ def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
 
 def _nonzero_result(output: str) -> dict:
     """A ``subprocess_nonzero`` baseline result shaped the way the baseline executor builds one."""
-    from hyperloom.orchestrator.state.failure_evidence import nonzero_output_signature
-
     return {
         "status": "failed",
         "error_class": "subprocess_nonzero",
         "error": output[-2000:],
-        "output_signature": nonzero_output_signature("subprocess_nonzero", "", output),
     }
 
 
@@ -1181,43 +1177,17 @@ def _baseline_task(task_id: str) -> Task:
 
 
 @pytest.mark.asyncio
-async def test_unpromotable_baseline_same_failure_twice_stops_at_two(coord: Coordinator) -> None:
-    """Two subprocess_nonzero baselines that printed the same thing (modulo numbers) end the run at two."""
+async def test_unpromotable_baseline_failures_stop_the_run_at_the_third(coord: Coordinator) -> None:
+    """Two failed baselines leave the run going, even when they printed the same thing; the third ends it."""
     coord.shared_state.enablement_mode = "off"
-    first = _nonzero_result("RuntimeError: worker 1234 died at t=17")
-    second = _nonzero_result("RuntimeError: worker 98 died at t=4")
+    result = _nonzero_result("RuntimeError: worker 1234 died at t=17")
 
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-1"), first)
-    assert coord.shared_state.stop_reason != "baseline_failed"
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-2"), second)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-1"), result)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-2"), result)
     assert coord.shared_state.baseline_failure_streak == 2
+    assert coord.shared_state.stop_reason != "baseline_failed"
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-3"), result)
     assert coord.shared_state.stop_reason == "baseline_failed"
-
-
-@pytest.mark.asyncio
-async def test_unpromotable_baseline_different_failures_keep_three_strikes(coord: Coordinator) -> None:
-    """Two different failures are not evidence of a third: the three-strike budget still applies."""
-    coord.shared_state.enablement_mode = "off"
-    a = _nonzero_result("RuntimeError: HIP out of memory")
-    b = _nonzero_result("ConnectionError: port refused")
-
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-diff-1"), a)
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-diff-2"), b)
-    assert coord.shared_state.baseline_failure_streak == 2
-    assert coord.shared_state.stop_reason != "baseline_failed"
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-diff-3"), a)
-    assert coord.shared_state.stop_reason == "baseline_failed"
-
-
-@pytest.mark.asyncio
-async def test_unpromotable_baseline_repeat_of_another_class_keeps_three_strikes(coord: Coordinator) -> None:
-    """Only subprocess_nonzero carries the process's own output; a fixed sentence repeating proves nothing."""
-    result = {"status": "failed", "error_class": "no_report", "error": "benchmark_report.json missing under /x"}
-
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-nr-1"), result)
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-nr-2"), result)
-    assert coord.shared_state.baseline_failure_streak == 2
-    assert coord.shared_state.stop_reason != "baseline_failed"
 
 
 @pytest.mark.asyncio
@@ -1241,20 +1211,21 @@ async def test_unpromotable_baseline_infeasible_ray_cluster_stops_on_the_first(c
 
 
 @pytest.mark.asyncio
-async def test_unpromotable_baseline_same_failure_in_enablement_does_not_stop_early(coord: Coordinator) -> None:
-    """An ordinary repeated boot failure is enablement's input; the early stop does not pre-empt the lane."""
+async def test_unpromotable_baseline_failures_in_enablement_do_not_stop_the_run(coord: Coordinator) -> None:
+    """An ordinary boot failure is enablement's input; while the lane owns the retries, three do not stop the run."""
     from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
 
     coord.shared_state.phase = PHASE_ENABLEMENT
     result = _nonzero_result("ImportError: no module named foo")
 
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-en-1"), result)
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-en-2"), result)
+    for i in range(3):
+        await coord.writeback.handle_unpromotable_result(_baseline_task(f"bl-en-{i}"), result)
+    assert coord.shared_state.baseline_failure_streak == 3
     assert coord.shared_state.stop_reason != "baseline_failed"
 
 
 @pytest.mark.asyncio
-async def test_unpromotable_baseline_same_failure_in_prelude_with_enablement_admitted_does_not_stop_early(
+async def test_unpromotable_baseline_failures_in_prelude_with_enablement_admitted_do_not_stop_the_run(
     coord: Coordinator,
 ) -> None:
     """A retry that settles before the PRELUDE->ENABLEMENT transition is still enablement's input."""
@@ -1263,6 +1234,7 @@ async def test_unpromotable_baseline_same_failure_in_prelude_with_enablement_adm
     coord.shared_state.phase = PHASE_PRELUDE
     result = _nonzero_result("ImportError: no module named foo")
 
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-pre-1"), result)
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-pre-2"), result)
+    for i in range(3):
+        await coord.writeback.handle_unpromotable_result(_baseline_task(f"bl-pre-{i}"), result)
+    assert coord.shared_state.baseline_failure_streak == 3
     assert coord.shared_state.stop_reason != "baseline_failed"
