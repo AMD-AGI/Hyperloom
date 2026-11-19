@@ -74,9 +74,9 @@ from hyperloom.inference_optimizer.roofline_ceiling import (
     DecodeShape,
     compute_compute_bound_ceiling_tok_per_sec,
     compute_theoretical_peak_output_tok_per_sec,
-    load_model_meta,
     select_peak_and_bound,
 )
+from hyperloom.inference_optimizer.roofline_model_meta import load_model_meta
 from ..state.shared_state import SharedState
 
 
