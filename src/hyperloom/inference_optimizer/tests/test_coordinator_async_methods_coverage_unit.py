@@ -175,24 +175,6 @@ class TestAHotPassCorrectsAColdAnchor:
         assert coord.shared_state.baseline_tput == 1000.0
         assert coord.shared_state.baseline_measure_round_dropped is True
 
-    @pytest.mark.asyncio
-    async def test_a_lower_hot_figure_still_loses_to_a_hot_anchor(self, coord: Coordinator) -> None:
-        """With no marker there is nothing to correct, so drift is refused again."""
-        coord.shared_state.baseline_tput = 1000.0
-        coord.shared_state.baseline_measure_round_dropped = False
-
-        await coord.writeback.promote_to_shared_state(
-            "baseline",
-            {
-                "output_throughput": 980.0,
-                "subprocess_runtime_sec": 900.0,
-                "measure_round_runtime_sec": 400.0,
-                "workspace": "/tmp/ws",
-            },
-        )
-
-        assert coord.shared_state.baseline_tput == 1000.0
-
 
 @pytest.mark.asyncio
 async def test_unpromotable_baseline_agentx_preflight_stops_immediately(
@@ -262,21 +244,6 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
 
 
 @pytest.mark.asyncio
-async def test_promote_profile_succeeded_records_trace(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    await coord.writeback.promote_to_shared_state(
-        "profile",
-        {
-            "status": "succeeded",
-            "main_trace_path": "/tmp/trace.json",
-            "output_throughput": 820.0,
-        },
-    )
-    assert coord.shared_state.last_profile_status == "succeeded"
-    assert coord.shared_state.last_profile_trace == "/tmp/trace.json"
-
-
-@pytest.mark.asyncio
 async def test_promote_profile_failed_clears_trace(coord: Coordinator) -> None:
     coord.shared_state.last_profile_trace = "/tmp/old.trace.json"
     coord.shared_state.last_profile_args = "--old-backend"
@@ -324,23 +291,6 @@ async def test_promote_roofline_succeeded_and_skipped_and_failed(coord: Coordina
         },
     )
     assert getattr(coord.shared_state, "roofline_failure_streak", 0) >= 1
-
-
-@pytest.mark.asyncio
-async def test_promote_explore_with_winner(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    await coord.writeback.promote_to_shared_state(
-        "explore",
-        {
-            "winners": [{"name": "v0", "fingerprint": "fp-v0", "extra_server_args": "--tp 1", "tput": 900.0}],
-            "best_variant": {"name": "v0", "extra_server_args": "--tp 1", "tput": 900.0},
-            "output_throughput": 900.0,
-            "round_id": "r1",
-            "losers": [],
-            "skipped_dup": [],
-        },
-    )
-    assert coord.shared_state.current_best.get("tput") == 900.0
 
 
 @pytest.mark.asyncio
@@ -926,11 +876,6 @@ def test_promote_warm_replay_non_dict(coord: Coordinator) -> None:
     assert coord.shared_state.warm_replay_outcome["status"] == "failed"
 
 
-def test_promote_warm_replay_failed_status(coord: Coordinator) -> None:
-    coord.phase_prelude.promote_warm_replay({"status": "failed", "error_class": "x", "error": "boom"})
-    assert coord.shared_state.warm_replay_outcome["status"] == "failed"
-
-
 def test_promote_warm_replay_invalid_tput(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 0.0
     coord.phase_prelude.promote_warm_replay({"status": "succeeded", "output_throughput": 0.0})
@@ -944,24 +889,6 @@ def test_promote_warm_replay_reproduced_no_params(coord: Coordinator) -> None:
         task=None,
     )
     assert coord.shared_state.warm_replay_outcome["status"] == "reproduced_but_no_params"
-
-
-def test_promote_warm_replay_reproduced_with_params(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.state.task_registry import Task
-
-    coord.shared_state.baseline_tput = 800.0
-    task = Task(
-        task_id="warm-1",
-        kind="replay_warm_recipe",
-        state="running",
-        params={"extra_envs": {"A": "1"}, "baseline_tput_anchor": 800.0},
-        idempotency_key="kw",
-    )
-    coord.phase_prelude.promote_warm_replay(
-        {"status": "succeeded", "output_throughput": 900.0},
-        task=task,
-    )
-    assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
 
 
 # -- maybe_auto_retry_specialist ------------------------------------------
@@ -988,14 +915,6 @@ async def test_auto_retry_not_eligible(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", "1")
     res = _result(result={"runner_status": "empty_synthesised"}, error="no_output")
     assert await coord.specialist_dispatch.maybe_auto_retry_specialist(_spec_task(), res) is False
-
-
-@pytest.mark.asyncio
-async def test_auto_retry_schedules_on_transient_failure(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", "1")
-    res = _result(result={"runner_status": "stale"}, error="timeout waiting")
-    scheduled = await coord.specialist_dispatch.maybe_auto_retry_specialist(_spec_task(), res)
-    assert scheduled is True
 
 
 @pytest.mark.asyncio

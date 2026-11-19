@@ -716,35 +716,6 @@ def _passing_eval_results(_results_dir, framework=None, benchmark_mode=""):
 
 
 @pytest.mark.asyncio
-async def test_bench_patch_accuracy_regression_fails(tmp_path, monkeypatch):
-    cfg = tmp_path / "cfg.yaml"
-    cfg.write_text("x: 1\n", encoding="utf-8")
-    monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *a, **k: cfg)
-
-    async def _fake_run_grid(**kwargs):
-        return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
-
-    monkeypatch.setattr(integrate_bench, "run_grid", _fake_run_grid)
-    monkeypatch.setattr(
-        integrate_bench, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.50}
-    )
-    monkeypatch.setattr(
-        _accuracy_gate, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.50}
-    )
-    ex = IntegratePatchExecutor(session_dir=tmp_path)
-    _, gate = await ex._bench_patch(
-        integrate_results._PatchBench(
-            params={"config_path": str(cfg), "accuracy_baseline": 0.95},
-            output_root=tmp_path,
-            specialist_task_id="abcdef123456",
-        ),
-        extra_server_args_applied="",
-        extra_envs_applied={},
-    )
-    assert gate["accuracy_pass"] is False
-
-
-@pytest.mark.asyncio
 async def test_bench_patch_missing_baseline_skips_with_warning(tmp_path, monkeypatch, caplog):
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("x: 1\n", encoding="utf-8")

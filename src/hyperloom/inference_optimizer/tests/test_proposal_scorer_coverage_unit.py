@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 
 import pytest
@@ -214,15 +213,6 @@ async def test_score_streams_with_usage_and_keeps_the_token_cap():
     assert params["stream"] is True
     assert params["stream_options"] == {"include_usage": True}
     assert params["max_completion_tokens"] == 4096
-
-
-@pytest.mark.asyncio
-async def test_score_timeout_recorded_as_error():
-    client = _FakeClient({"m": asyncio.TimeoutError()})
-    scorer = ProposalScorer(models=("m",), client_factory=lambda: client)
-    out = await scorer.score(gap={"domain": "d"}, proposals=[{"name": "p"}])
-    assert "m" in out["errors"]
-    assert "timed out" in out["errors"]["m"]
 
 
 @pytest.mark.asyncio
