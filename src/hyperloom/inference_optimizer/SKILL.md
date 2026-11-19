@@ -450,10 +450,14 @@ it came from. KEEP commits to the live tree so the next candidate stacks on
 top; REVERT does `git reset --hard`. A candidate the tree already holds is not
 benchmarked: when every patch in the set reverse-applies cleanly and the round
 changes nothing else, it ends `already_present`, with that evidence on the
-result and, for a candidate with an upstream PR identity, an `already_present`
-row in the framework KB. Resume skips completed candidates by idempotency key.
+result. Resume skips completed candidates by idempotency key.
 
-The phase exits when both arms are dry or when its budget is spent.
+An authoring round whose deliverable is server-arg / env proposals only lands
+nothing: explore benches those proposals with every other specialist's, and
+the candidate ends `handed_to_explore`.
+
+The phase exits when both arms are dry or when its budget is spent, but not
+while a specialist proposal still waits for its bench.
 
 ### IR-8 — `--framework atom` is single-node only
 

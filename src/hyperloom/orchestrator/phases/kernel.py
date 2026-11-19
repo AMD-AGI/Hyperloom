@@ -768,10 +768,10 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         # point, and the state a borrowed repository is handed back at.
         baselines: dict[str, RepoBaseline] = {}
         try:
-            from ..kernel.campaign_baseline import seal_campaign_baseline
+            from ..kernel.campaign_baseline import seal_campaign_baseline, served_import_roots
 
             baselines = seal_campaign_baseline(
-                self.shared_state.framework,
+                served_import_roots(self.shared_state),
                 session_dir=self.session_dir,
                 session_id=str(self.shared_state.session_id or self.session_dir.name),
                 macro_cycle=int(self.shared_state.macro_cycle or 0),

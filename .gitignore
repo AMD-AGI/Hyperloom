@@ -41,7 +41,6 @@ inference_optimizer/runs/
 .optimization_strategies.md
 optimization_report.md
 /bench.py
-src/hyperloom/framework-agent/kb/framework_optimization/lessons.jsonl
 
 # IDE / editor
 .idea/

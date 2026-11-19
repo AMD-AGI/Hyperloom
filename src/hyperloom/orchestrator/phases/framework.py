@@ -28,9 +28,10 @@ from ..loop.proposals import integrate_review_in_flight, record_proposal
 from ..actions.executors import _integrate_vocabulary
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_owner_phase
-from .proposal_bench import CUSTOM_PROPOSAL_DOMAIN, ProposalBench, kb_exposure_of, waiting_proposal_rows
+from .proposal_bench import ProposalBench, kb_exposure_of
 from .framework_discovery import DISCOVER_FAILURE_RETRY_LIMIT, _CandidateDiscoveryMixin
 from .framework_records import (
+    FRAMEWORK_HANDED_TO_EXPLORE_STATUS,
     ProgressStamp,
     ProposalStep,
     _AuthoredOutcomeMixin,
@@ -561,6 +562,9 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
             if dispatched:
                 state.save(self.session_dir)
                 return
+        # A closed track benches nothing, so the proposals its candidates handed to explore would never be measured.
+        if self._track_proposal_rows():
+            return
         self._record_framework_agent_phase_done(
             reason="no_candidates_and_discovery_exhausted",
             failure_count=int(state.framework_agent_discover_failures or 0),
@@ -1545,12 +1549,8 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         # The single idempotent terminal-row writer for every path that ends a
         # candidate without a benched result: settling here rather than at each
         # caller keeps a new dead end from leaving its proposal ``pending``.
-        _settle(
-            self,
-            cand_id,
-            disposition="attempted" if (stamp.kept or status in {"kept", "reverted"}) else "dropped",
-            reason=status,
-        )
+        attempted = stamp.kept or status in {"kept", "reverted", FRAMEWORK_HANDED_TO_EXPLORE_STATUS}
+        _settle(self, cand_id, disposition="attempted" if attempted else "dropped", reason=status)
         try:
             state.save(self.session_dir)
         except OSError:
@@ -1770,7 +1770,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
                 return
         if state.custom_specialist_only or state.framework_agent_phase_done or explores:
             return
-        rows = [r for r in waiting_proposal_rows(state, self.tasks) if r["domain"] != CUSTOM_PROPOSAL_DOMAIN]
+        rows = self._track_proposal_rows()
         if rows:
             await self._enqueue_bench_grid(rows[: self._AUTO_EXPLORE_GRID_CAP], operator_priority=False)
 

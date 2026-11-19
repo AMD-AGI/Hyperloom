@@ -297,11 +297,12 @@ class _Rig:
         assert args == ("list",)
         return [{"gpu": card, "node_id": node} for node, card in enumerate(self.rocm_order)]
 
-    def _probe(self, python, framework, env, *, cwd):
+    def _probe(self, python, framework, env, *, cwd, packages):
         assert env["HF_TOKEN"] == _SECRET
         self.probe_cwds.append(cwd)
         self.probed.append(python)
-        return FrameworkInstall(python, "3.12.3", "/site-packages/sglang/__init__.py", self.installed)
+        roots = {name: f"/site-packages/{name}" for name in ("sglang", *packages)}
+        return FrameworkInstall(python, "3.12.3", "/site-packages/sglang/__init__.py", self.installed, roots)
 
     def _check(self, launch, python, env, *, cwd):
         self.probe_cwds.append(cwd)
@@ -866,6 +867,17 @@ def test_an_install_below_a_version_assumed_for_an_untagged_recipe_image_still_r
     )
 
 
+def test_launch_records_where_the_serving_interpreter_imports_each_probed_package(rig):
+    config = rig.config("r1")
+    config = replace(config, server=replace(config.server, import_packages=("aiter",)))
+
+    result = run.run_round(config)
+
+    assert result.report.run_status is RunStatus.COMPLETED, result.report.failure_detail
+    framework = Launch.from_document(json.loads(result.layout.launch.read_text())).framework
+    assert framework.import_roots == {"sglang": "/site-packages/sglang", "aiter": "/site-packages/aiter"}
+
+
 def test_a_flag_the_parser_refuses_names_the_candidate_layer(rig):
     rig.refusal = FlagRefusal((RefusedFlag("--cuda-graph-max-bs", LayerSource.CANDIDATE),), "unrecognized arguments")
 
@@ -957,7 +969,7 @@ def test_an_external_round_measures_a_server_it_neither_starts_nor_holds_to_the_
     assert report.fixed is not None and report.server is not None and report.server.reused
     assert report.server.log_range is None and not layout.server_log.exists()
     launch = Launch.from_document(json.loads(layout.launch.read_text()))
-    assert launch.framework.version_check is VersionCheck.NOT_HELD
+    assert (launch.framework.version_check, launch.framework.import_roots) == (VersionCheck.NOT_HELD, {})
     assert (pid_dir / "server.pid").exists()
     assert not runtime_server.stop(pid_dir).survivors
 

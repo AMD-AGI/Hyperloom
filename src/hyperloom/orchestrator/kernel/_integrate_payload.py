@@ -244,10 +244,6 @@ def _fill_integrate_snapshot_from_bundle(resolved: dict, bundle: Any) -> None:
         resolved["kernel_repo"] = str(bundle["repo_root"])
     if not resolved.get("producer_manifest") and bundle.get("producer_manifest"):
         resolved["producer_manifest"] = str(bundle["producer_manifest"])
-    if not resolved.get("patch_write_paths"):
-        write_paths = [str(path) for path in (bundle.get("write_paths") or []) if str(path or "").strip()]
-        if write_paths:
-            resolved["patch_write_paths"] = write_paths
 
 
 def _pending_integration_record(records: list[dict], integration_id: str) -> dict | None:

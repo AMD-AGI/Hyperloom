@@ -82,7 +82,16 @@ class _Tasks:
         return task, False
 
     async def with_key_prefix(self, kind: str, key_prefix: str) -> list[Any]:
+        return self.with_key_prefix_sync(kind, key_prefix)
+
+    def with_key_prefix_sync(self, kind: str, key_prefix: str) -> list[Any]:
         return [t for key, t in self._by_idem.items() if t.kind == kind and key.startswith(key_prefix)]
+
+    def queued_context_sync(self) -> list[Any]:
+        return list(self._queued)
+
+    def running_context_sync(self) -> list[Any]:
+        return list(self._running)
 
     def settle_queued(self) -> None:
         for task in self._queued:
@@ -265,6 +274,26 @@ def test_pump_falls_back_to_exit_when_arm_disabled(tmp_path: Path):
     stub.shared_state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
     asyncio.run(stub.phase_framework._pump_framework_agent_phase())
     assert stub.tasks.created == []
+    assert stub.shared_state.framework_agent_phase_done is True
+
+
+def test_the_phase_stays_open_until_every_waiting_specialist_proposal_is_in_a_bench(tmp_path: Path):
+    """A closed phase benches nothing, so a proposal a candidate handed to explore would never be measured."""
+    stub = _stub(tmp_path, local_explore=False)
+    stub.shared_state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
+    entry = stub.specialist_dispatch.build_specialist_round_entry(
+        task=SimpleNamespace(task_id="t-spec-1", params={"domain": "serving_specialist"}),
+        done_payload={"proposal_set": [{"name": "fp8-kv", "extra_args": "--kv-cache-dtype fp8"}]},
+        source="specialist",
+    )
+    stub.shared_state.record_specialist_round(entry)
+
+    asyncio.run(stub.phase_framework._pump_framework_agent_phase())
+    assert stub.shared_state.framework_agent_phase_done is False
+
+    asyncio.run(stub.phase_framework._maybe_bench_untested_proposals())
+    asyncio.run(stub.phase_framework._pump_framework_agent_phase())
+    assert [spec["kind"] for spec in stub.tasks.created] == ["explore"]
     assert stub.shared_state.framework_agent_phase_done is True
 
 

@@ -215,6 +215,7 @@ def test_the_point_knobs_become_the_config_fields() -> None:
         (4, 5),
         "/opt/venv/bin/python",
     )
+    assert config.server.import_packages == ("aiter", "aiter_meta", "sgl_kernel")
     assert (config.deadlines.boot_sec, config.deadlines.round_sec, config.deadlines.silence_sec) == (7200, 7200, 600)
     assert config.server.base.digest == _base("sglang").digest()
     assert SuiteConfig.from_document(json.loads(json.dumps(config.to_document()))) == config

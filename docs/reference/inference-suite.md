@@ -104,8 +104,15 @@ the installed framework:
   parser, after every patch on the server's path has taken effect. A flag the parser
   does not know is refused, never dropped (`flag_unknown`). A candidate's flag fails
   the candidate; a flag from the base or the operator stops the session.
+- **Import roots.** The same probe records, under `framework.import_roots` in
+  `launch.json`, the directory the interpreter imports the framework package from,
+  and each package the server config names in `import_packages` that it can import.
+  Hyperloom names the kernel libraries (`aiter`, `aiter_meta`, `sgl_kernel`): a
+  kernel rewrite is written against those trees, and a kernel integration that
+  wrote into another copy of one of them is reverted (`patch_outside_served_roots`).
 
-A round against a server it did not start (`external`) runs neither check.
+A round against a server it did not start (`external`) runs none of these probes,
+and records no import roots.
 
 The server runs in the same interpreter the checks ask: `<framework_python> -m
 sglang.launch_server`, `-m vllm.entrypoints.cli.main serve` or `-m

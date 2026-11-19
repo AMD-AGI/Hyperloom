@@ -816,11 +816,7 @@ async def _run_rewrite_integrate(
             {"accuracy_pass": accuracy_pass, "timed_out": False},
         )
 
-    async def _noop_kb(*_args, **_kwargs):
-        return None
-
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
-    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
 
     task_params: dict[str, Any] = {
         "specialist_task_id": "t-spec-rw",
@@ -1140,16 +1136,6 @@ async def test_a_parity_leg_that_produced_no_measurement_is_not_called_a_parity_
     assert "not actually inert" not in result["reason"]
     assert "could not be measured" in result["reason"]
     assert (repo / "src.py").read_text().endswith("return 1\n")
-
-
-def test_both_parity_outcomes_are_writable_to_the_framework_kb():
-    """A verdict the KB rejects is a verdict that never reaches the next session."""
-    from hyperloom.orchestrator.knowledge import kb_writeback
-
-    assert kb_writeback.OUTCOME_REVERTED_SWITCH_OFF_PARITY in kb_writeback.ALLOWED_OUTCOMES
-    assert kb_writeback.OUTCOME_REVERTED_PARITY_INCONCLUSIVE in kb_writeback.ALLOWED_OUTCOMES
-    # The two must stay distinct: one is a property of the patch, the other of the run.
-    assert kb_writeback.OUTCOME_REVERTED_SWITCH_OFF_PARITY != kb_writeback.OUTCOME_REVERTED_PARITY_INCONCLUSIVE
 
 
 @pytest.mark.asyncio

@@ -54,6 +54,15 @@ class _TasksStub:
     async def running(self) -> list[Any]:
         return list(self._running)
 
+    def queued_context_sync(self) -> list[Any]:
+        return list(self._queued)
+
+    def running_context_sync(self) -> list[Any]:
+        return list(self._running)
+
+    def with_key_prefix_sync(self, kind: str, key_prefix: str) -> list[Any]:
+        return []
+
     async def create_or_return_existing(self, spec) -> Any:
         self.created.append(vars(spec))
         t = SimpleNamespace(
@@ -767,9 +776,11 @@ def test_config_levers_helper_extracts_from_proposal_set():
     )
 
 
-def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
-    """A config-lever deliverable (proposal_set with extra_args/extra_envs and no patch) is routed to integrate_patch, so the empty-outcome bridge must NOT stamp an authored_empty row for it."""
+def test_a_config_only_round_is_handed_to_explore(tmp_path: Path):
+    """Explore benches a config-only deliverable and owns its verdict, so the round ends handed off, neither empty nor
+    charged as undelivered."""
     stub = _stub(tmp_path)
+    attempts = list(stub.shared_state.attempts)
     task = SimpleNamespace(
         task_id="spec-cfg",
         params={
@@ -780,7 +791,10 @@ def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
     )
     done_payload = {
         "patches_written": [],
-        "proposal_set": [{"name": "shared-expert-fusion", "extra_envs": {"VLLM_FUSE_SHARED_EXPERTS": "1"}}],
+        "proposal_set": [
+            {"name": "shared-expert-fusion", "extra_envs": {"VLLM_FUSE_SHARED_EXPERTS": "1"}},
+            {"name": "research-notes"},
+        ],
         "summary": "PR maps to a config lever on this build",
     }
 
@@ -789,7 +803,12 @@ def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
         done_payload=done_payload,
     )
 
-    assert stub.shared_state.framework_agent_phase_progress == []
+    (row,) = stub.shared_state.framework_agent_phase_progress
+    assert (row["status"], row["rationale"]) == (
+        "handed_to_explore",
+        "config proposals benched by explore: shared-expert-fusion",
+    )
+    assert stub.shared_state.attempts == attempts
 
 
 def test_authoring_specialist_same_framework_no_cross(tmp_path: Path):

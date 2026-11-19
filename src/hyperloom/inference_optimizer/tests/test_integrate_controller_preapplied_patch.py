@@ -128,7 +128,6 @@ def _controller_payload(applied: Path, patch_file: Path, deploy_root: Path | Non
         "target_file": str(deployed / KERNEL_REL),
         "repo": str(applied),
         "kernel_repo": str(deployed),
-        "patch_write_paths": [KERNEL_REL],
     }
 
 
