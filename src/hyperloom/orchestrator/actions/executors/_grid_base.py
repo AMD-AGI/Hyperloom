@@ -48,7 +48,6 @@ from ._subprocess_kill import (
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     sync_agentx_phase_wait,
 )
-from ._ray_serving import ServingLease
 from ._suite.rounds import RUN_DIR_PREFIX, SuiteRound, SuiteRoundRefused, SuiteRoute, deadline_unix, point_server
 from ._suite.rounds import run_suite_round
 
@@ -163,12 +162,9 @@ def run_grid_suite_round(
     round_: GridRound,
     *,
     env_drop: frozenset[str],
-    serving_lease: ServingLease | None,
     on_poll: Callable[[], None],
 ) -> SuiteRoundExit:
     """Run ``round_`` on ``route``; ``env_drop`` names host variables its processes do not inherit.
-
-    ``serving_lease`` is the Ray lease whose actor runs the round, ``None`` to run it in this process.
 
     Raises:
         SuiteRoundRefused: When the round is refused before it runs.
@@ -183,7 +179,6 @@ def run_grid_suite_round(
         boot_only=round_.boot_only,
         deadline_unix=deadline_unix(round_.session_deadline_sec),
         env_drop=env_drop,
-        serving_lease=serving_lease,
         checkpoint=round_.checkpoint,
     )
     try:
@@ -197,7 +192,6 @@ def run_grid_suite_round(
             log.error("grid: pids %s outlived SIGKILL; %s keeps their record", survivors, server.stop_after)
     if report.failed_step is None:
         return SuiteRoundExit(0)
-    # A leased round's client takes the checkpoint's SIGTERM with its CLI, so its report may name any step.
     if _stopped_by_checkpoint(round_):
         return SuiteRoundExit(AGENTX_EARLY_STOP_RETURNCODE, report.failure_detail or report.failed_step.value)
     returncode = _STOPPED_BY_THE_RUN.get(report.failed_step, _FAILED_RETURNCODE)

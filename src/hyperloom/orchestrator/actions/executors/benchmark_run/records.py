@@ -284,7 +284,6 @@ class BenchmarkAttempt:
     params: dict[str, Any]
     ctx: RunnerContext
     run_eval_disabled: bool = False
-    serving_lease: Any = None
     recorder: Any = None
     run_index: int = 0
     #: Where the attempt's rounds run on inference_suite; set once the attempt resolved its session's route.
@@ -304,7 +303,6 @@ class _BenchmarkRound(NamedTuple):
     timeout_sec: int
     silence_timeout_sec: Any
     session_deadline_sec: Any
-    serving_lease: Any
     server_already_ready: bool
     run_eval_disabled: bool
 

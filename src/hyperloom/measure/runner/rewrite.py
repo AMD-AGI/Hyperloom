@@ -11,27 +11,29 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.measure.attachments import substitute
 from hyperloom.measure.farm import Farm, place_farm
-from hyperloom.orchestrator.actions.executors import strip_visible_devices_from_config
 
 __all__ = ["Placement", "rewrite_config"]
 
 
 _UTF8 = "utf-8"
 _PATH = "PATH"
+_DEVICE_MASKS = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 
 
-def _without_device_masks(cfg: dict[str, Any], scratch: Path) -> dict[str, Any]:
-    """The config minus its ``*_VISIBLE_DEVICES`` variables, by the function the old flow strips with."""
-    scratch.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding=_UTF8)
-    stripped = strip_visible_devices_from_config(scratch)
-    result = yaml.safe_load(stripped.read_text(encoding=_UTF8)) or {}
-    if stripped != scratch:
-        stripped.unlink()
-    scratch.unlink()
-    return result
+def _without_device_masks(cfg: dict[str, Any]) -> dict[str, Any]:
+    """``cfg`` minus its ``benchmark.envs`` device masks; a config that is not a point keeps them."""
+    try:
+        envs = BenchmarkPoint.from_document(cfg).envs
+    except BenchmarkPointError:
+        return cfg
+    for key in _DEVICE_MASKS:
+        if key in envs:
+            del cfg["benchmark"]["envs"][key]
+    return cfg
 
 
 @dataclass(frozen=True)
@@ -60,7 +62,7 @@ def rewrite_config(yaml_text: str, out_path: Path, placement: Placement) -> Path
     InferenceX checkout, and the rebuilt framework, when there is one, is first on the server's import path.
     """
     config = yaml.safe_load(substitute(yaml_text, placement.placed)) or {}
-    config = _without_device_masks(config, out_path.with_name(out_path.name + ".mask"))
+    config = _without_device_masks(config)
     bench = config.setdefault("benchmark", {})
     envs = bench.setdefault("envs", {})
     if placement.visible_devices:

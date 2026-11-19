@@ -281,20 +281,12 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         # Whether THIS run actually executes lm-eval, read back from the materialized config the subprocess
         # consumes -- the single source of truth.
         attempt = replace(attempt, run_eval_disabled=materialized_run_eval_disabled(config_path))
-        # Asked before the lease, because a round that will not be run should not hold a GPU while being refused.
         refused = self._round_refused_before_ignition(attempt, output_dir, double_run=double_run, ctx_extra=extra)
         if refused is not None:
             return refused
         application = self._prepare_round_patches(params, output_dir, shared_state)
         if isinstance(application, Mapping) and application.get("status") == "failed":
             return self._roll_back_failed_patches(application, params, output_dir, shared_state)
-        # Ray-managed GPU execution (§12 T1): one held Ray lease (as many GPUs as the launch occupies) spans this baseline's benchmark
-        # rounds — a double-run's warmup + measure reuse one persistent server, so both must run under the same lease.
-        from ._grid_runner import lease_cards
-        from ._ray_serving import maybe_serving_lease
-
-        lease = maybe_serving_lease(num_gpus=lease_cards(config_path, self.session_dir))
-        attempt = replace(attempt, serving_lease=lease)
         try:
             if double_run:
                 guarded = self._run_cold_start_guarded_rounds
@@ -316,8 +308,6 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             # stay patched; reverting it here handed prelude a clean tree and silently lost the replay.
             if application and not isinstance(application, Mapping):
                 _revert_legacy_warm_patch_trees(params)
-            if lease is not None:
-                lease.close()
 
     @staticmethod
     def _release_attempt(output_dir: Path) -> None:
@@ -442,7 +432,6 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
                     suite,
                     warm_round,
                     env_drop=frozenset(),
-                    serving_lease=round_.serving_lease,
                     on_poll=activity.note,
                 )
         except SuiteRoundRefused as exc:
@@ -502,7 +491,6 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             timeout_sec=timeout_sec,
             silence_timeout_sec=silence_timeout_sec,
             session_deadline_sec=session_deadline_sec,
-            serving_lease=attempt.serving_lease,
             server_already_ready=server_already_ready,
             run_eval_disabled=attempt.run_eval_disabled,
         )

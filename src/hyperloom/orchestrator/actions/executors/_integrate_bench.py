@@ -34,7 +34,6 @@ from ._grid_runner import (
     GridStop,
     GridVariant,
     VariantResult,
-    lease_cards,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
@@ -178,8 +177,6 @@ class BenchStageMixin:
             ``gate_evidence`` carries ``accuracy_pass`` (True / False / None)
             and ``eval_probe`` (the generation-pathology record, or ``None``).
         """
-        from ._ray_serving import maybe_serving_lease
-
         params = bench_leg.params
         gate_evidence: dict[str, Any] = dict(_EMPTY_GATE_EVIDENCE)
         base_config = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
@@ -203,37 +200,25 @@ class BenchStageMixin:
         if not grid:
             return _filtered_before_bench(dropped[0], config_path), gate_evidence
 
-        # Ray-managed GPU execution holds the lease for the whole run_grid so the
-        # patch benchmark serializes against other serving instead of colliding
-        # with a concurrent GPU specialist server on the same card. ``None`` keeps
-        # the local path (multi-node / RAY_EXEC off / pytest default).
-        serving_lease = maybe_serving_lease(num_gpus=lease_cards(config_path, self.session_dir))
-        try:
-            base = LaunchLayer(
-                extra_server_args=base_extra_args,
-                extra_envs=dict(params.get("base_extra_envs") or {}),
-                remove_args=base_remove,
-                unset_envs=to_str_list(params.get("base_unset_envs")),
-                args_mode=args_mode,
-            )
-            results = await run_grid(
-                grid=grid,
-                output_root=bench_leg.output_root,
-                recipe=GridRecipe(base_yaml_path=config_path, base=base, target=target),
-                launch=GridLaunch(
-                    result_dir=result_dir,
-                    serving_lease=serving_lease,
-                ),
-                stop=GridStop(
-                    session_deadline_sec=bench_leg.session_deadline_sec,
-                    variant_expected_sec=bench_leg.variant_expected_sec,
-                    keep_going_on_failure=False,
-                    phase_deadline=bench_leg.phase_deadline,
-                ),
-            )
-        finally:
-            if serving_lease is not None:
-                serving_lease.close()
+        base = LaunchLayer(
+            extra_server_args=base_extra_args,
+            extra_envs=dict(params.get("base_extra_envs") or {}),
+            remove_args=base_remove,
+            unset_envs=to_str_list(params.get("base_unset_envs")),
+            args_mode=args_mode,
+        )
+        results = await run_grid(
+            grid=grid,
+            output_root=bench_leg.output_root,
+            recipe=GridRecipe(base_yaml_path=config_path, base=base, target=target),
+            launch=GridLaunch(result_dir=result_dir),
+            stop=GridStop(
+                session_deadline_sec=bench_leg.session_deadline_sec,
+                variant_expected_sec=bench_leg.variant_expected_sec,
+                keep_going_on_failure=False,
+                phase_deadline=bench_leg.phase_deadline,
+            ),
+        )
 
         bench: dict[str, Any] = {}
         if results:
