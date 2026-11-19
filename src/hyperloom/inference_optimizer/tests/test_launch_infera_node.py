@@ -12,11 +12,11 @@ import types
 
 import pytest
 
-from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+from hyperloom.inference_optimizer.multi_node import pod_entrypoints
 
 
 def _bundle() -> str:
-    return mn_cli._read_bundled_pod_python_script("launch_infera_node.py", mn_cli._LAUNCHER_DEPS)
+    return pod_entrypoints.read_bundled_pod_python_script("launch_infera_node.py", pod_entrypoints.LAUNCHER_DEPS)
 
 
 def _load_module():
@@ -28,13 +28,13 @@ def _load_module():
 @pytest.mark.parametrize(
     ("main", "deps"),
     [
-        ("launch_infera_node.py", mn_cli._LAUNCHER_DEPS),
-        ("kernel_node_ops.py", mn_cli._KERNEL_NODE_OPS_DEPS),
+        ("launch_infera_node.py", pod_entrypoints.LAUNCHER_DEPS),
+        ("kernel_node_ops.py", pod_entrypoints.KERNEL_NODE_OPS_DEPS),
     ],
 )
 def test_bundled_ssh_pod_script_runs_standalone(tmp_path, main, deps):
     script = tmp_path / "pod_script"
-    script.write_text(mn_cli._read_bundled_pod_python_script(main, deps), encoding="utf-8")
+    script.write_text(pod_entrypoints.read_bundled_pod_python_script(main, deps), encoding="utf-8")
     proc = subprocess.run([sys.executable, "-I", str(script), "--help"], cwd=tmp_path, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
 
