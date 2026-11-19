@@ -1185,48 +1185,6 @@ def test_ensure_python_sdks_installs_missing_claude_agent_sdk(monkeypatch, capsy
     assert "installed claude-agent-sdk" in captured
 
 
-# _ensure_ray
-def test_ensure_ray_skips_when_smoke_passes(monkeypatch, capsys):
-    """Ray smoke passes -> no pip install fires (probe uses the interpreter)."""
-    runner = _RecordingRun([_Completed(returncode=0)])
-    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
-
-    cli_preflight._ensure_ray("/opt/venv/bin/python", [])
-
-    assert len(runner.calls) == 1
-    probe = runner.calls[0]
-    # Probe validates Ray with the SAME interpreter, not shutil.which on PATH.
-    assert probe[0:2] == ["/opt/venv/bin/python", str(cli_preflight._RAY_SMOKE_SCRIPT)]
-    assert "ray OK" in capsys.readouterr().out
-
-
-def test_ensure_ray_installs_when_smoke_fails(monkeypatch, capsys):
-    """When the Ray smoke fails, pip install runs with the SAME interpreter."""
-    runner = _RecordingRun(
-        [
-            _Completed(returncode=1, stderr="ray start does not accept --resources"),
-            _Completed(returncode=0),
-            _Completed(returncode=0),
-        ]
-    )
-    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
-
-    cli_preflight._ensure_ray("/opt/venv/bin/python", ["--break-system-packages"])
-
-    assert len(runner.calls) == 3
-    install_call = runner.calls[1]
-    assert install_call[0] == "/opt/venv/bin/python"
-    assert install_call[1:4] == ["-m", "pip", "install"]
-    assert "--break-system-packages" in install_call
-    assert any(arg.startswith("ray[default]==") for arg in install_call)
-    # Only Ray is repaired: the CLI is certified by what it parses, so no click
-    # release is pinned or downgraded on the way.
-    assert not any("click" in arg for arg in install_call)
-    captured = capsys.readouterr().out
-    assert "ray unusable (ray start does not accept --resources)" in captured
-    assert "ray installed OK" in captured
-
-
 # _ensure_bench_serving_deps
 def test_ensure_bench_serving_deps_skips_when_all_present(monkeypatch, capsys):
     """find_spec probe reports nothing missing -> no pip install fires."""

@@ -319,11 +319,10 @@ def _run_installer(state_dir: Path) -> None:
     """Run the packaged ``install.sh`` (no flags, like the legacy launchers) and log its output; a failure ends the run.
 
     The script comes from the installed wheel, so it is of the commit that runs.  It is idempotent and runs on every leg.
-    Its output goes to a file, never a pipe: the Ray daemon it starts would hold a pipe open.  The log is only the
-    script's own output; the entry adds nothing from the environment.  Each leg's log is a new file of its own, renamed
-    over ``install.log`` before the script starts (:func:`~hyperloom_common.shared_storage.open_shared_replacement`):
-    the previous leg's, which may be another account's, and whatever a member of the group put there are replaced,
-    never opened.
+    Its output goes to a file.  The log is only the script's own output; the entry adds nothing from the environment.
+    Each leg's log is a new file of its own, renamed over ``install.log`` before the script starts
+    (:func:`~hyperloom_common.shared_storage.open_shared_replacement`): the previous leg's, which may be another
+    account's, and whatever a member of the group put there are replaced, never opened.
     """
     log_path = state_dir / INSTALL_LOG
     print(f"[hosted] running {INSTALL_SCRIPT.name}; log {log_path}", flush=True)
