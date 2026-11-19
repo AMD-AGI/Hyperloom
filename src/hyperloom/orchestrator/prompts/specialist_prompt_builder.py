@@ -39,6 +39,7 @@ from .specialist_prompt_text import (
     PROPOSAL_SET_RULES,
 )
 from ..measurement.runtime_findings import CORRECTNESS_FIX_MAX_DROP_PCT, CORRECTNESS_FIX_RULES
+from .bridge_switch_rule import bridge_switch_rule
 
 from ..specialists.domains import domain_for_tag
 from ..specialists.profile import MODE_PATCH
@@ -1109,6 +1110,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             f"  accuracy passes, and may KEEP a drop of up to {CORRECTNESS_FIX_MAX_DROP_PCT:.0f}% on the graded axis",
             "  (throughput, or p50 interactivity with the other interactivity guards still held)",
             "  within the latency budget.",
+            *bridge_switch_rule(gap_canonical_id=inp.gap_canonical_id, runtime_findings=inp.runtime_findings),
         ]
         no_output = "  AND no ``patches_written``/``artifacts_written``; in that case"
     else:
@@ -1139,9 +1141,8 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         *PROPOSAL_SET_RULES,
         *patch_fields,
         *no_proposal_rule,
-        "- ``new_findings`` is a list of learned items. Research scouts must",
-        "  emit source-backed ``{what, source, expected_impact, accuracy_risk,",
-        "  domain_tags[]}`` records.",
+        "- ``new_findings`` is a list of learned items. Research scouts must emit source-backed ``{what, source,",
+        "  expected_impact, accuracy_risk, domain_tags[]}`` records.",
         "- ``residual_questions`` carries to the next specialist round.",
         "",
         (f"Hard cap: at most **{inp.max_turns}** LLM turns. Emit specialist_done before the cap."),
@@ -1198,8 +1199,7 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "",
         *gpu_rule,
         *integration_rule,
-        "3. Only ``specialist_done``, ``send_message``, and ``alert`` are",
-        "   accepted intents; all others are dropped.",
+        "3. Only ``specialist_done``, ``send_message``, and ``alert`` are accepted intents; all others are dropped.",
         "4. You **MUST** finish within ``max_turns`` LLM turns and end with",
         "   exactly one ``specialist_done`` exit signal. Silence past the cap",
         "   synthesizes an empty done.",

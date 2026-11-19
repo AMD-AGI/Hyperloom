@@ -11,7 +11,10 @@ from hyperloom_common.timeutil import now_iso
 
 from ._shared_state import gap_rows
 
-__all__ = ["GapsStateMixin"]
+__all__ = ["GapsStateMixin", "STATIC_RECON_GAP_PREFIX"]
+
+#: Canonical-id prefix of every gap static recon seeds, its own recon task's included.
+STATIC_RECON_GAP_PREFIX = "gap.static_recon."
 
 # gap ledger caps; both enforced in upsert_gap.
 _GAPS_MAX_ENTRIES = 50
