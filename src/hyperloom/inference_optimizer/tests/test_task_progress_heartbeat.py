@@ -205,7 +205,8 @@ async def test_worker_cleanup_precedes_lane_release(tmp_path, monkeypatch, confi
 
     async def cleanup():
         assert (await sub.locks.lane_holders())["research_lane"] == 1
-        return confirmed
+        if not confirmed:
+            raise OSError("release failed")
 
     sub.register_executor("explore", execute)
     try:
@@ -244,7 +245,6 @@ async def test_direct_cancel_during_cleanup_releases_capacity_and_warns(tmp_path
     def close():
         entered.set()
         finish.wait(5)
-        return True
 
     async def cleanup():
         return await asyncio.to_thread(close)

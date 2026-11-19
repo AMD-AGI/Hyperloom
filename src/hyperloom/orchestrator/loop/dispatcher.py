@@ -661,15 +661,14 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
         return _report
 
     async def _record_dispatch_evidence(
-        self, task: Task, lease: Any, release_resources: Callable[[], Awaitable[bool]]
+        self, task: Task, lease: Any, release_resources: Callable[[], Awaitable[None]]
     ) -> None:
         """Record a task's dispatch evidence, or give back what it holds and refuse.
 
         Args:
             task: The task row about to run.
             lease: The lane lease the dispatch holds, if any.
-            release_resources: The execution's slot release, which reports
-                whether the worker confirmed its physical cleanup.
+            release_resources: The execution's GPU slot release.
 
         Raises:
             RuntimeError: The evidence was not durably recorded, in which case
@@ -683,8 +682,7 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
             # Nothing ran under this lease and the row stays queued, so its
             # lanes go back whatever cleanup says: holding them would make
             # the task's own next dispatch find them busy, for good.
-            if not await release_resources():
-                log.warning("dispatcher: task=%s refused with cleanup unconfirmed", task.task_id)
+            await release_resources()
             if lease is not None:
                 await self.locks.release(lease)
             self._inflight_actions.pop(task.task_id, None)
@@ -745,9 +743,8 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
             if handle is not None:
                 self._inflight_actions[task.task_id] = _InflightAction(task.kind, handle, cancel_scope)
 
-        async def release_resources() -> bool:
+        async def release_resources() -> None:
             await self.gpu_specialist_pool.release(held.gpu_lease)
-            return True
 
         await self._record_dispatch_evidence(task, lease, release_resources)
 
