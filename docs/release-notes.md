@@ -344,6 +344,16 @@ it.
   having already taken a variant slot. The refusal at materialization stays as
   the backstop for launches the filter does not compose.
 
+- **Bump validated vLLM stack to 0.34.0 (ROCm 10 docker and source build).**
+  Switches the recommended vLLM image to `docker.io/vllm/vllm-openai-rocm:v0.34.0-rocm100`
+  (docs, examples, `models.tsv`, installer hint) and bumps the bare-metal defaults
+  (`VLLM_VERSION=0.34.0`, `VLLM_SOURCE_REF` at the `v0.34.0` release commit). vLLM 0.34.0
+  publishes only a ROCm 10 wheel, so the ROCm 7.2.x wheel route now stops before any
+  change when the wheel index has no such release, instead of failing after the venv is
+  created. **Upgrade note:** move from `vllm/vllm-openai-rocm:v0.33.0-rocm100` to
+  `v0.34.0-rocm100`; on a ROCm 7.2.x bare-metal host use Docker, a ROCm 10 host, or
+  `VLLM_VERSION=0.33.0 VLLM_ROCM_VARIANT=rocm72`.
+
 - **Bump validated vLLM stack to 0.33.0 (ROCm 10 docker) and accept the relocated graph-capture marker.**
   Switches the recommended vLLM image to `docker.io/vllm/vllm-openai-rocm:v0.33.0-rocm100`
   (docs, examples, `models.tsv`, installer hint), bumps the bare-metal defaults

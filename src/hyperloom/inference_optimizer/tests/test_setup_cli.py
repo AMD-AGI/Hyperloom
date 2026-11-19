@@ -1634,7 +1634,9 @@ def test_atom_install_proceeds_beside_a_self_contained_vllm_venv(tmp_path: Path)
     assert [line for line in res.stdout.splitlines() if line.startswith("STEP ")] == ["STEP aiter", "STEP atom-source"]
 
 
-_VLLM_ROUTE_STUBS = "assert_vllm_glibc_compatible() { :; }\nensure_openmpi_runtime() { :; }\n"
+_VLLM_ROUTE_STUBS = (
+    "assert_vllm_glibc_compatible() { :; }\nassert_vllm_wheel_published() { :; }\nensure_openmpi_runtime() { :; }\n"
+)
 
 
 @pytest.mark.parametrize(
