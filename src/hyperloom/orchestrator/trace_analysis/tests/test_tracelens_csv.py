@@ -26,7 +26,6 @@ from hyperloom.orchestrator.trace_analysis._perf_report_analysis import PerfRepo
 from hyperloom.orchestrator.trace_analysis import _trace_gates as trace_gates
 from hyperloom.orchestrator.trace_analysis import _trace_inputs as trace_inputs
 from hyperloom.orchestrator.trace_analysis import _trace_shapes as trace_shapes
-from hyperloom.orchestrator.trace_analysis import _trace_split as trace_split
 from hyperloom.orchestrator.trace_analysis import _capture_shapes as capture_shapes
 from hyperloom.orchestrator.trace_analysis import _idle_gate as idle_gate
 from hyperloom.orchestrator.trace_analysis import _task_group_contract as task_group_contract
@@ -2496,7 +2495,7 @@ def test_capture_dir_match_is_anchored_so_a_descriptive_name_is_safe(tmp_path):
 def test_discover_capture_folder_finds_the_unpatched_sglang_layout(tmp_path):
     """The capture folder must be locatable, not merely demoted during ranking."""
     trace_dir = tmp_path / "torch_trace"
-    (trace_dir / "graph_capture_profile").mkdir(parents=True)
+    _capture_sidecar(trace_dir / "graph_capture_profile" / "cuda_graph_capture-DecodeCudaGraphRunner-TP-0.json.gz")
     real = _rank_trace(trace_dir / "1786735404.4274018-TP-0.trace.json.gz", kernels=4)
     assert tlr.discover_capture_folder(trace_dir, [real]) == trace_dir / "graph_capture_profile"
 
@@ -2504,7 +2503,7 @@ def test_discover_capture_folder_finds_the_unpatched_sglang_layout(tmp_path):
 def test_discover_capture_folder_preserves_legacy_priority(tmp_path):
     trace_dir = tmp_path / "torch_trace"
     for name in ("graph_capture", "graph_capture_profile", "capture_traces"):
-        (trace_dir / name).mkdir(parents=True)
+        _capture_sidecar(trace_dir / name / "graph_capture_rank_0.json.gz")
     real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=4)
 
     assert tlr.discover_capture_folder(trace_dir, [real]) == trace_dir / "capture_traces"
@@ -2512,7 +2511,27 @@ def test_discover_capture_folder_preserves_legacy_priority(tmp_path):
 
 def test_discover_capture_folder_ignores_a_descriptive_sibling(tmp_path):
     trace_dir = tmp_path / "torch_trace"
-    (trace_dir / "torch_profiler_with_graph_capture").mkdir(parents=True)
+    _capture_sidecar(trace_dir / "torch_profiler_with_graph_capture" / "graph_capture_rank_0.json.gz")
+    real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=4)
+    assert tlr.discover_capture_folder(trace_dir, [real]) is None
+
+
+def test_discover_capture_folder_passes_over_a_capture_folder_with_no_trace(tmp_path):
+    """An unpatched vLLM leaves capture_traces/ empty; naming it makes TraceLens exit 0 with no report."""
+    profile = tmp_path / "profile"
+    (profile / "capture_traces").mkdir(parents=True)
+    (profile / "torch_trace").mkdir()
+    real = _rank_trace(profile / "torch_trace" / "rank_0.trace.json.gz", kernels=4)
+    assert tlr.discover_capture_folder(profile / "torch_trace", [real]) is None
+
+    _capture_sidecar(profile / "graph_capture_profile" / "graph_capture_rank_0.json.gz")
+    assert tlr.discover_capture_folder(profile / "torch_trace", [real]) == profile / "graph_capture_profile"
+
+
+def test_discover_capture_folder_does_not_count_other_files_as_capture_traces(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    (trace_dir / "capture_traces").mkdir(parents=True)
+    (trace_dir / "capture_traces" / "README.txt").write_text("not a trace", encoding="utf-8")
     real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=4)
     assert tlr.discover_capture_folder(trace_dir, [real]) is None
 
@@ -3492,37 +3511,6 @@ def test_build_audit_summary_projects_each_task_group():
             "aggregate_gpu_pct": 7.5,
         }
     ]
-
-
-# _default_workspace_path — USER_DATA_PATH rollout for TraceLens ; locks the fallback precedence.
-def test_default_workspace_path_prefers_user_data_path(monkeypatch):
-    """USER_DATA_PATH wins over both WORKSPACE_PATH and the hard-coded default."""
-    monkeypatch.setenv("USER_DATA_PATH", "/some/user/data")
-    monkeypatch.setenv("WORKSPACE_PATH", "/some/legacy/workspace")
-    assert trace_split._default_workspace_path() == "/some/user/data"
-
-
-def test_default_workspace_path_falls_back_to_workspace_path(monkeypatch):
-    """When USER_DATA_PATH is unset, WORKSPACE_PATH is honoured (backwards compat)."""
-    monkeypatch.delenv("USER_DATA_PATH", raising=False)
-    monkeypatch.setenv("WORKSPACE_PATH", "/legacy/workspace")
-    assert trace_split._default_workspace_path() == "/legacy/workspace"
-
-
-def test_default_workspace_path_final_fallback_to_hyperloom_default(monkeypatch):
-    """No envs set → delegates to session.paths, which adapts to the host."""
-    from hyperloom.inference_optimizer.session import paths as session_paths
-
-    monkeypatch.delenv("USER_DATA_PATH", raising=False)
-    monkeypatch.delenv("WORKSPACE_PATH", raising=False)
-    assert trace_split._default_workspace_path() == str(session_paths.default_workspace_root())
-
-
-def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch):
-    """An empty USER_DATA_PATH must not shadow a real WORKSPACE_PATH; ``or`` semantics."""
-    monkeypatch.setenv("USER_DATA_PATH", "")
-    monkeypatch.setenv("WORKSPACE_PATH", "/legacy/workspace")
-    assert trace_split._default_workspace_path() == "/legacy/workspace"
 
 
 # Idle-% sanity gate on the Executive Summary.

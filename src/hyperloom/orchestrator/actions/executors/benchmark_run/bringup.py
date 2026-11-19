@@ -14,30 +14,8 @@ from datetime import datetime
 from pathlib import Path
 
 from hyperloom.inference_optimizer.grid_server_args import with_capture_disabled
-from ....state.failure_evidence import KV_CACHE_OOM_MARKERS, SUBPROCESS_NONZERO
 
 log = logging.getLogger(__name__)
-
-# Time limit for heuristic CLI-error matching; explicit configuration validation is independent of runtime.
-FAST_EXIT_THRESHOLD_SEC = 30.0
-_ARG_ERROR_CLASS = "fast_exit_arg_error"
-_ARG_ERROR_PATTERNS = (
-    "unrecognized arguments",
-    "invalid choice",
-    "Unknown attention backend",
-    "not a valid",
-)
-_ARG_ERROR_CONTEXT_PATTERNS = (
-    "argument",
-    "argparse",
-    "backend",
-    "choice",
-    "cli",
-    "invalid",
-    "option",
-    "flag",
-    "unknown",
-)
 
 
 # Strong cuda-graph capture markers: stream-capture incompatibility, reliably recoverable by disabling cuda-graph.
@@ -282,21 +260,3 @@ def _disable_cuda_graph_flag(framework: str) -> str:
 def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
     """Apply the framework-correct disable-cuda-graph flag once (idempotent)."""
     return with_capture_disabled(extra_server_args or "", _disable_cuda_graph_flag(framework))
-
-
-def _classify_subprocess_error(elapsed_sec: float, stderr_tail: str) -> str:
-    """Recognize KV-cache OOM, configuration validation, and fast argument failures."""
-    tail = (stderr_tail or "").lower()
-    # KV-cache OOM can surface long after weight load; match before the fast-exit elapsed gate below.
-    if any(m in tail for m in KV_CACHE_OOM_MARKERS):
-        return "kv_cache_oom"
-    # Config validation can follow slow framework imports; elapsed time does not change its cause.
-    if re.search(r"\bvalidation errors? for cacheconfig\b", tail):
-        return _ARG_ERROR_CLASS
-    if elapsed_sec >= FAST_EXIT_THRESHOLD_SEC:
-        return SUBPROCESS_NONZERO
-    if any(p.lower() in tail for p in _ARG_ERROR_PATTERNS):
-        return _ARG_ERROR_CLASS
-    if "valueerror:" in tail and any(p in tail for p in _ARG_ERROR_CONTEXT_PATTERNS):
-        return _ARG_ERROR_CLASS
-    return SUBPROCESS_NONZERO

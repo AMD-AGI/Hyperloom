@@ -153,7 +153,7 @@ _CAPTURE_ONLY_MESSAGE = (
     "profile produced only CUDA-graph capture sidecars under capture_traces/ (no annotated steady-state trace); "
     "the steady-state splitter cannot use these"
 )
-_NO_TRACE_MESSAGE = "profile succeeded but no trace_path in result (missing both main_trace_path and trace_files[0])"
+_NO_TRACE_MESSAGE = "profile succeeded but no trace_path in result (no main_trace_path, or trace_input_ready is False)"
 
 
 @pytest.mark.parametrize(

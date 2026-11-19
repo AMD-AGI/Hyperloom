@@ -84,7 +84,9 @@ class ClaimKey:
 
 @dataclass(frozen=True)
 class Claim:
-    """A lease on a key, held by a branch so a restarted specialist keeps it; times are Unix seconds."""
+    """A lease on a key, held by a branch so a restarted specialist keeps it; times are Unix seconds. Once
+    ``request_id`` names the test that carries it, its status is that test's, whatever ``status`` and ``expires_at``
+    store."""
 
     key: ClaimKey
     holder: str
@@ -111,6 +113,21 @@ class RetractionRef:
 
     def __str__(self) -> str:
         return f"{self.retracted_commit}, the agent's iteration {self.iteration} (its keep {self.keep}), found invalid by {self.finding}"
+
+
+@dataclass(frozen=True)
+class JudgementWrite:
+    """A judgement as written and stored: the rule gate's or the integrator's, on one request.
+
+    A judgement that makes ``commit_id`` may name ``recipe_digest``, the ``Recipe.digest()`` of the recipe the experiment
+    repository stores for it; ``retracts`` names what a retraction undoes, on a ``COMMITTED`` judgement only."""
+
+    request_id: str
+    judgement: Judgement
+    conclusion: Conclusion
+    commit_id: str | None = None
+    recipe_digest: str | None = None
+    retracts: RetractionRef | None = None
 
 
 @dataclass(frozen=True)
@@ -1082,6 +1099,7 @@ __all__ = [
     "Probation",
     "QuarantineEvent",
     "RecordedValue",
+    "JudgementWrite",
     "RegressionCase",
     "RetractionRef",
     "SearchHit",

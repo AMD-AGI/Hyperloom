@@ -24,7 +24,8 @@ class Role(str, Enum):
 
 
 class ClaimStatus(str, Enum):
-    """A claim is held until its test result arrives, its holder lets it go, or nobody renews it in time."""
+    """A claim is held until its holder lets it go or nobody renews it in time; once a test carries it, until that
+    test's result completes it, or its withdrawal or a failed measurement releases it."""
 
     HELD = "held"
     COMPLETED = "completed"

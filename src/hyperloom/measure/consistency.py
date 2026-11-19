@@ -547,22 +547,17 @@ def summarize(reports: Sequence[ItemReport], criteria: Criteria = Criteria()) ->
     diffs = [r.throughput_diff_pct for r in reports if r.compared and r.throughput_diff_pct is not None]
     median = statistics.median(diffs) if diffs else None
     p90 = percentile(diffs, 0.9) if diffs else None
+    uncompared = [r.id for r in reports if not r.compared]
     failures = [f"{r.id}: {problem}" for r in reports for problem in r.problems]
+    failures += _criteria_failures(uncompared, median, p90, criteria)
     completed_ok = all(r.completed_equal is True for r in reports)
     files_ok = all(r.rebuilt_files_equal is not False for r in reports)
     signatures_ok = all(r.signature_verified for r in reports)
-    uncompared = [r.id for r in reports if not r.compared]
-    if uncompared:
-        failures.append(f"not compared: {sorted(uncompared)}")
-    if median is None or median > criteria.median_pct:
-        failures.append(f"median throughput difference {median} exceeds {criteria.median_pct}")
-    if p90 is None or p90 > criteria.p90_pct:
-        failures.append(f"p90 throughput difference {p90} exceeds {criteria.p90_pct}")
     passed = not failures and completed_ok and files_ok and signatures_ok
     return Summary(
         PASS if passed else FAIL,
         len(reports),
-        sum(1 for r in reports if r.compared),
+        len(reports) - len(uncompared),
         median,
         p90,
         completed_ok,
@@ -570,6 +565,15 @@ def summarize(reports: Sequence[ItemReport], criteria: Criteria = Criteria()) ->
         signatures_ok,
         tuple(dict.fromkeys(failures)),
     )
+
+
+def _criteria_failures(uncompared: list[str], median: float | None, p90: float | None, criteria: Criteria) -> list[str]:
+    failures = [f"not compared: {sorted(uncompared)}"] if uncompared else []
+    if median is None or median > criteria.median_pct:
+        failures.append(f"median throughput difference {median} exceeds {criteria.median_pct}")
+    if p90 is None or p90 > criteria.p90_pct:
+        failures.append(f"p90 throughput difference {p90} exceeds {criteria.p90_pct}")
+    return failures
 
 
 def run_checklist(

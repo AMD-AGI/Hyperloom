@@ -20,6 +20,7 @@ from hyperloom_multibranch.contracts.blackboard import (
 )
 from hyperloom_multibranch.contracts.blackboard.peers import Purpose, TestRequest, TestResult, Verdict
 from hyperloom_multibranch.contracts.blackboard.records import (
+    JudgementWrite,
     BaselineRecord,
     BranchProgress,
     LineageEvent,
@@ -46,7 +47,7 @@ async def _commit(open_as: Open, tried: TestRequest, commit: str, value: float) 
     await toolbox.write_request(tried)
     await toolbox.write_result(result(tried.request_id))
     kept = judgement(2.0, (tried.request_id,), recorded={METRIC: value})
-    await open_as(Role.GATE).write_judgement(tried.request_id, kept, Conclusion.COMMITTED, commit)
+    await open_as(Role.GATE).write_judgement(JudgementWrite(tried.request_id, kept, Conclusion.COMMITTED, commit))
 
 
 async def _row(open_as: Open, branch: str) -> BranchProgress:
@@ -70,7 +71,7 @@ async def session(open_as: Open) -> Open:
     await integrator.record_merge_attempt(MergeAttempt(("c2",), "c0", request_id="m1"))
     await toolbox.write_result(result("m1"))
     merged = judgement(5.0, ("m1",), recorded={METRIC: 1050.0})
-    await integrator.write_judgement("m1", merged, Conclusion.MERGED, "i1")
+    await integrator.write_judgement(JudgementWrite("m1", merged, Conclusion.MERGED, "i1"))
     return open_as
 
 
@@ -80,7 +81,7 @@ async def test_a_rerooted_branch_stands_on_the_integration_commit_and_a_late_com
     await session(Role.TOOLBOX).write_request(request("flat", intent("s1", "c1", "sampler", "fused top-k")))
     await session(Role.TOOLBOX).write_result(result("flat"))
     flat = judgement(0.2, ("flat",), verdict=Verdict.FLAT)
-    await session(Role.GATE).write_judgement("flat", flat, Conclusion.RECORDED_ONLY)
+    await session(Role.GATE).write_judgement(JudgementWrite("flat", flat, Conclusion.RECORDED_ONLY))
     await session(Role.SPECIALIST_RUNTIME, "s1").record_lineage(REROOT)
     rerooted = await _row(session, "s1")
     await _commit(session, request("late", intent("s1", "c1", "norm", "fused rms norm")), "c3", 1030.0)

@@ -45,7 +45,7 @@ from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV
 from hyperloom_kb import ReadStatus
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
+from hyperloom_multibranch.contracts.blackboard.records import JudgementWrite, LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, InboxKind, LearningKind, LeaseKind, LineageKind
 from hyperloom_multibranch.blackboard import STALL_TESTS, LocalBlackboard
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, TreeArchive
@@ -1521,7 +1521,9 @@ async def test_the_specialist_blackboard_handle_briefs_a_branch_after_stall_test
             request_id = f"r{n}-{count}"
             await toolbox.write_request(request(request_id, intent("b01", "c0", target=request_id)))
             await toolbox.write_result(result(request_id))
-            await gate.write_judgement(request_id, judgement(0.1, (request_id,)), Conclusion.RECORDED_ONLY, None)
+            await gate.write_judgement(
+                JudgementWrite(request_id, judgement(0.1, (request_id,)), Conclusion.RECORDED_ONLY, None)
+            )
         return [item.summary for item in (await handle.poll("b01")).items if item.kind is InboxKind.BRIEF]
 
     assert await judged(STALL_TESTS - 1) == []

@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from hyperloom_multibranch.contracts.blackboard.interfaces import NotRecorded
 from hyperloom_multibranch.contracts.blackboard.peers import Purpose, TestKind, TestResult, Validity
 from hyperloom_multibranch.contracts.blackboard.records import (
+    JudgementWrite,
     BranchNode,
     BranchProgress,
     CardHold,
@@ -52,7 +53,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import (
     QuarantineAction,
 )
 from hyperloom_multibranch.blackboard.changes import describe_change
-from hyperloom_multibranch.blackboard.local.state import JudgementWrite, BlackboardState
+from hyperloom_multibranch.blackboard.local.state import BlackboardState
 
 _SPECIALIST_ORIGINS = frozenset({CommitOrigin.COMMIT, CommitOrigin.SPLIT})
 _MEASURE_PHASE = "measure"

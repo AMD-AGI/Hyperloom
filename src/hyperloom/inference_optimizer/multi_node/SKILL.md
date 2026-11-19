@@ -263,15 +263,14 @@ in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
   (`ibv_devices` empty, no `/dev/infiniband`) while NCCL is forced onto IB
   (`NCCL_IB_HCA` set). This is a **platform provisioning** issue — the pods must
   request `rdma/hca` (a partial-GPU multi-node task must still get RDMA). To
-  confirm, force TCP with `--extra-env NCCL_IB_DISABLE=1`: the baseline and
-  grid restarts forward the operator's pins to every rank (rayjob via the job
-  `runtime_env`, infera via the SSH fan-out). The profile and integrate
-  re-baseline restarts do not carry the pin yet (#2720), so the first profiling
-  round or an integrate re-baseline relaunches on IB and hangs again. The
-  lasting fix is working RDMA on the pods, or the pin in the platform's
-  create-time pod env. Do not export `HYPERLOOM_MN_EXTRA_FWD_ENV` yourself:
-  each restart sets or clears that variable for its own round, so a value
-  exported before `optimize` does not reach a restarted server.
+  confirm, force TCP with `--extra-env NCCL_IB_DISABLE=1`: every per-round
+  restart (baseline, grid, profile and integrate re-baseline) forwards the
+  operator's pins to every rank (rayjob via the job `runtime_env`, infera via
+  the SSH fan-out). It confirms the cause rather than fixing it: TCP is far
+  slower, and the lasting fix is working RDMA on the pods, or the pin in the
+  platform's create-time pod env. Do not export `HYPERLOOM_MN_EXTRA_FWD_ENV`
+  yourself: each restart sets or clears that variable for its own round, so a
+  value exported before `optimize` does not reach a restarted server.
 * **Variant aborts with no benchmark output** → read `failed_variants` in the
   round's `<action>_attempts.extras`, or the per-variant `abort_reason.json`
   under `<session_dir>/runs/<action>/<task_id>/variant_<NN>_<name>/`

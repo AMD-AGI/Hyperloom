@@ -576,18 +576,15 @@ def _own_directories(
     directory, one of the test's own in its compile directory, so nothing the server builds lands in the image. A point
     that rebuilds stale aiter modules at its first prefill gets a watchdog that waits for the builds
     (``rebuild_watchdog``)."""
-    own = own_aiter_jit(call, farm, session, ctx.environ, _compile_dir(ctx, call.task_id) / OWN_AITER_JIT_DIR, gfx_arch)
+    call = dataclasses.replace(
+        call, jit=session, tables_patch=patched_configs(farm), framework_changed=farm is not None
+    )
+    own = own_aiter_jit(call, farm, ctx.environ, _compile_dir(ctx, call.task_id) / OWN_AITER_JIT_DIR, gfx_arch)
     built = session.built_by_server if session is not None else frozenset()
-    raised = raise_rebuild_watchdog(call, farm, ctx.environ, ctx.work, built, gfx_arch)
+    raised = raise_rebuild_watchdog(call, farm, ctx.environ, built, gfx_arch)
     if raised is not None:
         ctx.notes.append(raised)
-    return dataclasses.replace(
-        call,
-        jit=session,
-        tables_patch=patched_configs(farm),
-        framework_changed=farm is not None,
-        env_overrides={**call.env_overrides, **own},
-    )
+    return dataclasses.replace(call, env_overrides={**call.env_overrides, **own})
 
 
 def _cold_start_timing(cold: ColdStart) -> dict[str, float]:

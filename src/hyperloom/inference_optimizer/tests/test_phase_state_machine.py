@@ -93,16 +93,6 @@ def test_stop_reason_vocab_includes_v06_and_v08():
     assert not is_valid_stop_reason("totally_invented")
 
 
-def test_set_stop_reason_keeps_baseline_arg_error(tmp_path):
-    """baseline_arg_error must survive set_stop_reason and not map to unknown."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    state = SharedState(session_id="t", model_name="m", model_path="m")
-    written = state.set_stop_reason("baseline_arg_error")
-    assert written == "baseline_arg_error"
-    assert state.stop_reason == "baseline_arg_error"
-
-
 def test_normalize_budget_pct_falls_back_to_defaults():
     out = phase_state.normalize_budget_pct(None)
     assert out == phase_state.DEFAULT_PHASE_BUDGET_PCT

@@ -25,7 +25,7 @@ import pytest
 
 from hyperloom_common import shared_storage
 from hyperloom_common.shared_storage import make_shared_dirs, setgid_warnings, writable_problems
-from hyperloom_common.tests.shared_accounts import other_accounts, theirs
+from hyperloom_common.tests.shared_accounts import copy_common_modules, other_accounts, theirs
 
 _SRC = str(Path(shared_storage.__file__).parents[1])
 
@@ -503,13 +503,20 @@ def test_in_a_single_id_user_namespace_the_helper_still_makes_the_groups_2775_an
             assert (_mode(path), path.stat().st_uid, path.stat().st_gid) == (mode, host_uid, accounts.group)
 
 
-def test_the_helper_needs_nothing_but_the_standard_library():
-    imported = {
-        line.split()[1].split(".")[0]
-        for line in Path(shared_storage.__file__).read_text().splitlines()
-        if line.startswith(("import ", "from "))
-    }
-    assert imported <= set(sys.stdlib_module_names) | {"__future__"}, imported
+def test_the_modules_other_accounts_import_need_nothing_but_the_standard_library(tmp_path):
+    package = copy_common_modules(tmp_path)
+    modules = sorted(f"hyperloom_common.{path.stem}" for path in package.glob("*.py") if path.stem != "__init__")
+    code = (
+        "import importlib, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "for name in sys.argv[2:]:\n"
+        "    print(importlib.import_module(name).__file__)\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", code, str(tmp_path), *modules], capture_output=True, text=True, timeout=60
+    )
+    assert done.returncode == 0, done.stderr
+    assert [Path(line).parent for line in done.stdout.splitlines()] == [package] * len(modules)
 
 
 def test_io_shared_writes_are_664_whatever_the_umask_and_make_their_parents_2775(tmp_path):

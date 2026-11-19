@@ -35,7 +35,7 @@ from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LeaseKind
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, ToolResultPointer
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, JudgementWrite, ToolResultPointer
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
 from hyperloom_multibranch.blackboard.tests.factories import judgement, result
@@ -2213,7 +2213,7 @@ async def _landed_in_turn(rig: Rig, tmp_path: Path, landed: int) -> list[TestReq
                 recipe = apply(await rig.repo.read_recipe(request.parent_commit), request.delta)
                 made = await rig.repo.commit(BRANCH, request.parent_commit, recipe, request_id)
             conclusion = Conclusion.COMMITTED if made else Conclusion.RECORDED_ONLY
-            await gate.write_judgement(request_id, judgement(-3.0, (request_id,)), conclusion, made)
+            await gate.write_judgement(JudgementWrite(request_id, judgement(-3.0, (request_id,)), conclusion, made))
     with pytest.raises(SessionFinished):
         await asyncio.wait_for(running, 10)
     return rig.toolbox.requests
@@ -2283,7 +2283,7 @@ async def test_a_retraction_whose_import_measured_nothing_goes_once_more_as_the_
     await rig.toolbox_blackboard.write_result(result("r1"))
     recipe = apply(await rig.repo.read_recipe(first.parent_commit), first.delta)
     made = await rig.repo.commit(BRANCH, first.parent_commit, recipe, "r1")
-    await gate.write_judgement("r1", judgement(-3.0, ("r1",)), Conclusion.COMMITTED, made)
+    await gate.write_judgement(JudgementWrite("r1", judgement(-3.0, ("r1",)), Conclusion.COMMITTED, made))
     await _until(lambda: len(rig.toolbox.requests) == 2, "the retraction's import")
     await rig.toolbox_blackboard.write_result(_failed("r2", Validity.MEASUREMENT_FAILED))
     await _until(lambda: len(rig.toolbox.requests) == 3, "the requeued retraction")

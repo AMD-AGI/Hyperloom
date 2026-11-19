@@ -159,20 +159,31 @@ _SGLANG_PARSER_SOURCE = (
     "    return parser\n"
 )
 
-# ATOM v0.1.5's server uses plain argparse; newer releases provide a native parser.
+# ATOM's server builds its parser inside ``main()``: the engine's arguments, then its own (``--host``,
+# ``--server-port`` and more), then it parses and starts. No function returns that parser, so ``main()`` runs until
+# it parses and the parser is taken there, before anything starts.
 _ATOM_PARSER_SOURCE = (
     "def _build_parser():\n"
     "    import argparse\n"
+    "\n"
+    "    class _Built(Exception):\n"
+    "        def __init__(self, parser):\n"
+    "            super().__init__('the ATOM server parser is built')\n"
+    "            self.parser = parser\n"
+    "\n"
+    "    def _take(self, *_args, **_kwargs):\n"
+    "        raise _Built(self)\n"
+    "\n"
+    "    parse_known_args = argparse.ArgumentParser.parse_known_args\n"
+    "    argparse.ArgumentParser.parse_known_args = _take\n"
     "    try:\n"
-    "        from atom.utils.arg_parser import FlexibleArgumentParser as parser_cls\n"
-    "    except ModuleNotFoundError as exc:\n"
-    "        if exc.name not in ('atom.utils', 'atom.utils.arg_parser'):\n"
-    "            raise\n"
-    "        parser_cls = argparse.ArgumentParser\n"
-    "    from atom.model_engine.arg_utils import EngineArgs\n"
-    "    parser = parser_cls()\n"
-    "    EngineArgs.add_cli_args(parser)\n"
-    "    return parser\n"
+    "        from atom.entrypoints.openai_server import main\n"
+    "        main()\n"
+    "    except _Built as built:\n"
+    "        return built.parser\n"
+    "    finally:\n"
+    "        argparse.ArgumentParser.parse_known_args = parse_known_args\n"
+    "    raise RuntimeError('the ATOM server returned without parsing its arguments')\n"
 )
 
 
