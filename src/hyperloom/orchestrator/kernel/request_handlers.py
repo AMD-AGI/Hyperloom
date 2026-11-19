@@ -122,7 +122,6 @@ async def integrate_handler(
     # Coordinator-internal: config-only measurements opt in explicitly; agent
     # integrate requests retain main's patch-resolution contract.
     mode = _integrate_mode(payload)
-    paired_measurement = _is_paired_gemm_measurement(payload)
     if mode != "env_only":
         payload, missing_inputs = _resolve_integrate_payload(payload, session_dir=session_dir)
         if missing_inputs is not None:
@@ -142,7 +141,6 @@ async def integrate_handler(
             state,
             apply_result,
             session_dir=session_dir,
-            paired_measurement=paired_measurement,
             preapplied_git_patch=preapplied_git_patch,
         )
     except BaseException:
@@ -160,7 +158,6 @@ async def _measure_applied_integration(
     apply_result: dict,
     *,
     session_dir: Path,
-    paired_measurement: bool,
     preapplied_git_patch: bool,
 ) -> HandlerResult:
     """Re-baseline an applied patch and grade it; a failure it returns has reverted the apply."""
@@ -196,7 +193,7 @@ async def _measure_applied_integration(
     if not rebuild_check.get("verified", True):
         return _rebuild_not_verified_failure(payload, apply_result, rebuild_check)
 
-    if paired_measurement:
+    if _is_paired_gemm_measurement(payload):
         return _paired_measurement_result(base_tput, bench_result)
     measured = _MeasuredIntegration(
         payload=payload,

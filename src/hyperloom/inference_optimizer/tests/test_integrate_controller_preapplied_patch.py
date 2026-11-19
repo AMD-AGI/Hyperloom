@@ -107,6 +107,18 @@ def stop_at_rebaseline(monkeypatch):
     )
 
 
+def _stop_at_rebaseline_reading(monkeypatch, target: Path) -> list[str]:
+    """Stop at the re-baseline like ``stop_at_rebaseline``, recording what ``target`` held when it started."""
+    seen: list[str] = []
+
+    def measure(*_args, **_kwargs):
+        seen.append(target.read_text(encoding="utf-8"))
+        raise ReachedRebaseline
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.baseline.BaselineExecutor", measure)
+    return seen
+
+
 def _controller_payload(applied: Path, patch_file: Path, deploy_root: Path | None = None) -> dict:
     """Exactly what ``_default_validator`` sends for a controller publication."""
     deployed = deploy_root or applied
@@ -204,13 +216,7 @@ def served(tmp_path) -> Path:
 async def test_a_patch_written_in_a_snapshot_worktree_lands_in_the_tree_the_server_imports(
     session_dir, applied, patch_file, served, through_apply, monkeypatch
 ):
-    seen: list[str] = []
-
-    def measure(*_args, **_kwargs):
-        seen.append((served / KERNEL_REL).read_text(encoding="utf-8"))
-        raise ReachedRebaseline
-
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.baseline.BaselineExecutor", measure)
+    seen = _stop_at_rebaseline_reading(monkeypatch, served / KERNEL_REL)
 
     with pytest.raises(ReachedRebaseline):
         await krh.integrate_handler(
@@ -239,22 +245,27 @@ async def test_a_raise_after_the_apply_restores_the_tree_the_server_imports(
     assert (applied / KERNEL_REL).read_text(encoding="utf-8") == PATCHED_SRC
 
 
-async def test_a_diff_without_the_flag_reads_the_committed_base(session_dir, smuggled, patch_file, stop_at_rebaseline):
+async def test_a_diff_without_the_flag_reads_the_committed_base(session_dir, smuggled, patch_file, monkeypatch):
     """Scope guard: only the controller's contract measures the worktree as published."""
+    seen = _stop_at_rebaseline_reading(monkeypatch, smuggled / KERNEL_REL)
+
     with pytest.raises(ReachedRebaseline):
         await krh.integrate_handler(_controller_payload(smuggled, patch_file), session_dir=session_dir)
 
-    assert (smuggled / KERNEL_REL).read_text(encoding="utf-8") == PATCHED_SRC
+    assert seen == [PATCHED_SRC]
+    assert (smuggled / KERNEL_REL).read_text(encoding="utf-8") == SMUGGLED_SRC
 
 
-async def test_a_payload_cannot_claim_to_be_preapplied(session_dir, smuggled, patch_file, stop_at_rebaseline):
+async def test_a_payload_cannot_claim_to_be_preapplied(session_dir, smuggled, patch_file, monkeypatch):
     """An agent's integrate params reach the payload verbatim, so the payload cannot carry this trust."""
     payload = {**_controller_payload(smuggled, patch_file), "_preapplied_git_patch": True}
+    seen = _stop_at_rebaseline_reading(monkeypatch, smuggled / KERNEL_REL)
 
     with pytest.raises(ReachedRebaseline):
         await krh.integrate_handler(payload, session_dir=session_dir)
 
-    assert (smuggled / KERNEL_REL).read_text(encoding="utf-8") == PATCHED_SRC
+    assert seen == [PATCHED_SRC]
+    assert (smuggled / KERNEL_REL).read_text(encoding="utf-8") == SMUGGLED_SRC
 
 
 @pytest.fixture
