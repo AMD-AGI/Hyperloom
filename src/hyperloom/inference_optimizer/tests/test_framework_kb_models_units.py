@@ -54,6 +54,15 @@ async def test_lessons_writer_and_reader_resolve_the_same_file(
     assert [(row["pr_url"], row["outcome"]) for row in read_pr_ledger()] == [("PR-1", "integrated")]
 
 
+async def test_kb_writeback_rejects_unknown_outcome() -> None:
+    from hyperloom.orchestrator.knowledge import kb_writeback
+
+    with pytest.raises(ValueError):
+        await kb_writeback.write_framework_record(
+            kb_writeback.FrameworkOutcome("u", "s", "p", "not_a_real_outcome", 1.0, "sess")
+        )
+
+
 def test_framework_kb_does_not_share_a_root_with_the_recipe_kb(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
