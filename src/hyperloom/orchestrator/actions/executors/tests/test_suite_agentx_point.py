@@ -320,10 +320,12 @@ def test_an_unannotated_atom_agentx_profile_adds_no_trace_knobs(monkeypatch) -> 
     assert not {"ATOM_ENABLE_DETAILED_ANNOTATION", "ATOM_PROFILER_RECORD_SHAPES"} & user.env_set.keys()
 
 
-def test_an_atom_agentx_capture_is_bounded_in_time_since_atom_bounds_no_steps(monkeypatch) -> None:
-    profile = _atom_profiled(monkeypatch, capture_timeout_seconds=600).profile
+def test_an_atom_agentx_capture_defaults_to_a_short_window_since_atom_bounds_no_steps(monkeypatch) -> None:
+    assert _atom_profiled(monkeypatch).profile.agentx_duration_sec == 30.0
 
-    assert profile.agentx_duration_sec == 30.0
+
+def test_an_atom_agentx_capture_keeps_the_window_the_point_names(monkeypatch) -> None:
+    assert _atom_profiled(monkeypatch, capture_timeout_seconds=120).profile.agentx_duration_sec == 120.0
 
 
 def test_a_vllm_agentx_profile_passes_the_profiler_fields_its_annotations_need() -> None:
