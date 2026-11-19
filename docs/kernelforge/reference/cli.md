@@ -33,7 +33,7 @@ kernelforge forge-fuse --trace <t> --model-path <d> --framework sglang \
 kernelforge gemm-tune run --model-path <M> --framework sglang \
     --precision <p> --output-dir <D> [options]
 kernelforge kernel-rewrite-controller --handoff-dir <H> \
-    --budget-minutes <m> --output-dir <D>
+    --budget-minutes <m> --output-dir <D> [--explicit-allocation]
 kernelforge roofline-ceiling --workspace <W> [options]
 kernelforge export-runs <LOG_ROOT>... --output <file>
 ```
@@ -54,6 +54,7 @@ source evidence but cannot run shell commands, profiling, or serving benchmarks.
 | `--handoff-dir <dir>` | required | Directory containing `workload.md`, `serving-context.md`, and `trace-evidence.md`. |
 | `--budget-minutes <m>` | required | Positive total wall-clock budget used to derive the controller deadline. |
 | `--output-dir <dir>` | required | Fresh macro-cycle output directory. Existing controller output is refused rather than resumed. |
+| `--explicit-allocation` | off | Share the remaining controller allocation across pending operator campaigns, allowing longer budgets than the default 90-minute operator cap. Every task remains bounded by the controller deadline. |
 
 ## forge-loop
 

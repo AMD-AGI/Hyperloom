@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import importlib
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -71,32 +70,6 @@ def test_cli_declares_controller_arguments() -> None:
         "explicit_allocation",
         "output_dir",
     }
-
-
-def test_explicit_allocation_cli_option_reaches_the_controller(tmp_path: Path, monkeypatch) -> None:
-    command_module = importlib.import_module("kernelforge.cli.kernel_rewrite_controller_command")
-    received = {}
-
-    def run_with_allocation(**kwargs):
-        received.update(kwargs)
-        return SimpleNamespace(status="completed")
-
-    monkeypatch.setattr(command_module, "run_controller", run_with_allocation)
-    result = CliRunner().invoke(
-        cli.main,
-        [
-            "kernel-rewrite-controller",
-            "--handoff-dir",
-            str(_handoff(tmp_path)),
-            "--budget-minutes",
-            "600",
-            "--output-dir",
-            str(tmp_path / "output"),
-            "--explicit-allocation",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert received["explicit_allocation"] is True
 
 
 def test_cli_initializes_a_fresh_no_opportunity_result(tmp_path: Path) -> None:

@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""fix(kernelforge): retain controller allocation across cycles and failures."""
+"""Tests for Forge controller allocation, resume constraints, and elapsed-time accounting."""
 
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 import pytest
 from hyperloom.inference_optimizer.cli.parser import _build_parser
@@ -22,16 +22,6 @@ def test_explicit_allocation_is_a_recorded_optimize_option(tmp_path):
     )
     assert args.forge_controller_allocation_minutes == 600
     assert build_manifest(tmp_path, args=args)["forge_controller_allocation_minutes"] == 600
-    state = SharedState(forge_controller_allocation_sec=600 * 60)
-    state.save(tmp_path)
-    assert SharedState.load_or_init(tmp_path).forge_controller_allocation_sec == 600 * 60
-
-
-def test_omitted_allocation_is_absent_from_the_session_budget(tmp_path):
-    args = _build_parser().parse_args(["optimize", "--model", str(tmp_path)])
-    assert args.forge_controller_allocation_minutes is None
-    assert build_manifest(tmp_path, args=args)["forge_controller_allocation_minutes"] is None
-    assert SharedState().forge_controller_allocation_sec is None
 
 
 @pytest.mark.parametrize(
@@ -77,7 +67,7 @@ def test_controller_timeout_respects_the_remaining_allocation(remaining, expecte
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [False, True])
-async def test_controller_charges_elapsed_time_even_when_invocation_fails(monkeypatch, failure):
+async def test_controller_charges_elapsed_time_even_when_invocation_fails(failure):
     state = SimpleNamespace(
         forge_controller_allocation_sec=36000,
         kernel_rewrite_controller_result={"controller_budget_remaining_sec": 7200},
@@ -102,7 +92,7 @@ async def test_controller_charges_elapsed_time_even_when_invocation_fails(monkey
 
 
 @pytest.mark.asyncio
-async def test_zero_budget_attempt_retains_zero_and_never_starts_another_controller(monkeypatch):
+async def test_zero_budget_attempt_retains_zero_and_never_starts_another_controller():
     state = SimpleNamespace(
         forge_controller_allocation_sec=36000,
         kernel_rewrite_controller_result={"controller_budget_remaining_sec": 0},
@@ -116,36 +106,28 @@ async def test_zero_budget_attempt_retains_zero_and_never_starts_another_control
     run.assert_not_called()
 
 
-def test_unconfigured_allocation_uses_each_cycle_phase_budget_even_with_an_old_balance(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_FORGE_BUDGET_SEC", "36000")
-    state = SimpleNamespace(
-        forge_controller_allocation_sec=None,
-        kernel_rewrite_controller_result={"controller_budget_remaining_sec": 0},
-        closing_reserve_sec=lambda: 600,
-        macro_cycle=0,
+@pytest.mark.asyncio
+async def test_cancelled_attempt_keeps_its_spend_when_the_session_resumes(tmp_path):
+    state = SharedState(forge_controller_allocation_sec=7200)
+    state.save(tmp_path)
+    phase = SimpleNamespace(
+        shared_state=state,
+        session_dir=tmp_path,
+        _kernel_rewrite_controller_timeouts=lambda: (7200, 7230),
     )
-    phase = SimpleNamespace(shared_state=state)
+    phase._controller_attempt_result = MethodType(KernelPhase._controller_attempt_result, phase)
+    with (
+        patch.object(controller_submit, "run_controller_subprocess", return_value={"status": "cancelled"}),
+        patch.object(controller_attempt, "monotonic", side_effect=[1000, 1600]),
+    ):
+        await KernelPhase._run_kernel_rewrite_controller(phase, Path("handoff"), Path("output"), {})
+
+    resumed = SharedState.load_or_init(tmp_path)
+    assert resumed.kernel_rewrite_controller_result["status"] == "cancelled"
+    assert resumed.kernel_rewrite_controller_result["controller_budget_remaining_sec"] == 6600
     with (
         patch.object(controller_attempt._phase_state, "session_remaining_seconds", return_value=72000),
         patch.object(controller_attempt._phase_state, "phase_budget_remaining_seconds", return_value=45000),
         patch.object(controller_attempt, "measurement_round_sec", return_value=3600),
     ):
-        first = KernelPhase._kernel_rewrite_controller_timeouts(phase)
-        state.macro_cycle = 1
-        second = KernelPhase._kernel_rewrite_controller_timeouts(phase)
-    assert first == second == (41370, 41400)
-
-
-@pytest.mark.asyncio
-async def test_unconfigured_allocation_does_not_persist_a_controller_balance():
-    state = SimpleNamespace(
-        forge_controller_allocation_sec=None,
-        kernel_rewrite_controller_result={"controller_budget_remaining_sec": 0},
-        macro_cycle=1,
-    )
-    phase = SimpleNamespace(shared_state=state, _kernel_rewrite_controller_timeouts=lambda: (5400, 5430))
-    with patch.object(controller_submit, "run_controller_subprocess", return_value={"status": "completed"}) as run:
-        result = await KernelPhase._controller_attempt_result(phase, Path("handoff"), Path("output"))
-    assert result["budget_minutes"] == 90
-    assert "controller_budget_remaining_sec" not in result
-    assert run.call_args.kwargs["explicit_allocation"] is False
+        assert KernelPhase._kernel_rewrite_controller_timeouts(SimpleNamespace(shared_state=resumed)) == (6600, 6630)

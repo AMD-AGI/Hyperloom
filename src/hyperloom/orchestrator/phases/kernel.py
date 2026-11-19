@@ -850,6 +850,9 @@ class KernelPhase(
         except ValueError:
             log.exception("KERNEL entry: reclaiming the campaign repositories failed")
         if result["status"] == "cancelled":  # unsettled: the resumed entry runs a fresh Controller
+            if self.shared_state.forge_controller_allocation_sec is not None:
+                self.shared_state.kernel_rewrite_controller_result = result
+                self.shared_state.save(self.session_dir)
             return
         await self._integrate_controller_output(result, output_dir)
         self._record_kernel_rewrite_controller_timeline(result)
