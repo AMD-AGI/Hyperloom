@@ -25,6 +25,7 @@ from hyperloom.measure import local
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.points import AMBIENT_SHAPE_ENVS
 from hyperloom.measure.repro import read_verdict
+from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC
 from hyperloom.measure.runner.rounds import rounds_document
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
 from hyperloom.measure.tests import eval_refusal_logs, test_hf_cache_permission, test_log_causes
@@ -1341,7 +1342,7 @@ def test_a_patched_test_tells_the_rounds_verdict_that_it_changed_the_framework(
 ):
     python, _ = installed_framework
     seen: list[bool] = []
-    ended = local._ended
+    ended = local.ended
 
     def record(run):
         seen.append(run.call.framework_changed)
@@ -1351,7 +1352,7 @@ def test_a_patched_test_tells_the_rounds_verdict_that_it_changed_the_framework(
         return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
 
     monkeypatch.setattr(local, "run_grid", look)
-    monkeypatch.setattr(local, "_ended", record)
+    monkeypatch.setattr(local, "ended", record)
     point = _point_with_python(tmp_path, python)
 
     _run(_call(tmp_path, point, environment=_compile(tmp_path, installed_framework)))
@@ -1882,7 +1883,7 @@ def test_a_case_that_cannot_run_to_a_verdict_is_a_failure_of_the_measurement_not
 
     outcome = _run(_repro_call(tmp_path, timeout_sec=1))
 
-    assert outcome.failure_class == "infra" and outcome.returncode == local.HOSTED_INFRA_FAILURE_RC
+    assert outcome.failure_class == "infra" and outcome.returncode == HOSTED_INFRA_FAILURE_RC
     assert reason in outcome.stderr and "repro_case_error" in outcome.stderr
     assert not (tmp_path / "out" / "repro" / "verdict.json").exists()
     assert len(case.events) == 1, "the server is reclaimed whatever became of the case"
