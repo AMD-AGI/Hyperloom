@@ -46,10 +46,11 @@ from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
     ReapWatch,
-    SpecialistSpawn,
 )
 from hyperloom.orchestrator.specialists import worktrees
 from hyperloom.orchestrator.specialists.worktrees import HeldWorktree, PinnedGit, _setup_worktree
+from hyperloom.orchestrator.specialists.subprocess_types import SpecialistSpawn, SpecialistSubprocessResult
+from hyperloom.orchestrator.specialists import subprocess_harvest
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -167,9 +168,9 @@ async def test_the_runner_hands_the_dispatcher_the_tasks_model_to_read(tmp_path,
     runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=session_dir)
     spawns: list[SpecialistSpawn] = []
 
-    async def run(spawn: SpecialistSpawn) -> subprocess_.SpecialistSubprocessResult:
+    async def run(spawn: SpecialistSpawn) -> SpecialistSubprocessResult:
         spawns.append(spawn)
-        return subprocess_.SpecialistSubprocessResult(exit_code=0)
+        return SpecialistSubprocessResult(exit_code=0)
 
     runner.subprocess_dispatcher.run = run
     ctx = _make_runner_ctx("t-model")
@@ -188,9 +189,9 @@ async def test_the_runner_hands_the_dispatcher_the_admin_dir_the_repository_reco
     runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=tmp_path / "session")
     spawns: list[SpecialistSpawn] = []
 
-    async def run(spawn: SpecialistSpawn) -> subprocess_.SpecialistSubprocessResult:
+    async def run(spawn: SpecialistSpawn) -> SpecialistSubprocessResult:
         spawns.append(spawn)
-        return subprocess_.SpecialistSubprocessResult(exit_code=0)
+        return SpecialistSubprocessResult(exit_code=0)
 
     runner.subprocess_dispatcher.run = run
     ctx = _make_runner_ctx("t-admin")
@@ -281,9 +282,9 @@ async def test_an_integrate_in_flight_holds_the_snapshot(tmp_path: Path):
     runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=session_dir)
     seen: list[str] = []
 
-    async def run(spawn: SpecialistSpawn) -> subprocess_.SpecialistSubprocessResult:
+    async def run(spawn: SpecialistSpawn) -> SpecialistSubprocessResult:
         seen.append((spawn.worktree / "envs.py").read_text(encoding="utf-8"))
-        return subprocess_.SpecialistSubprocessResult(exit_code=0)
+        return SpecialistSubprocessResult(exit_code=0)
 
     runner.subprocess_dispatcher.run = run
     ctx = _make_runner_ctx("t-before")
@@ -1453,7 +1454,7 @@ async def test_partial_checkpoint_published_while_alive(
     assert elapsed >= 0.0
 
 
-# ---- _collect_patches: git diff harvest ------------------------------------
+# ---- collect_patches: git diff harvest ------------------------------------
 def _make_git_worktree_pair(tmp_path: Path) -> tuple[Path, Path]:
     import subprocess as _sp
 
@@ -1474,7 +1475,7 @@ def _make_git_worktree_pair(tmp_path: Path) -> tuple[Path, Path]:
 def test_collect_patches_harvests_git_diff_when_worktree_modified(tmp_path: Path):
     base, wt = _make_git_worktree_pair(tmp_path)
     (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, roots = subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     )
     assert len(patches) == 1
@@ -1489,7 +1490,7 @@ def test_collect_patches_harvests_a_file_the_specialist_created(tmp_path: Path):
     (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
     (wt / "added.py").write_text("fresh = 3\n", encoding="utf-8")
 
-    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, _roots = subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     )
 
@@ -1505,7 +1506,7 @@ def test_collect_patches_keeps_its_own_output_out_of_the_harvest(tmp_path: Path)
     (wt / "patches").mkdir()
     (wt / "patches" / "stray.patch").write_text("--- a/z\n+++ b/z\n", encoding="utf-8")
 
-    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, _roots = subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     )
 
@@ -1527,7 +1528,7 @@ def test_collect_patches_falls_back_to_disk_scan_when_git_is_unusable(tmp_path: 
 
     monkeypatch.setattr(_sp, "run", _boom)
 
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, roots = subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(admin)
     )
 
@@ -1541,7 +1542,7 @@ def test_collect_patches_falls_back_to_disk_scan_when_no_changes(tmp_path: Path)
     ws.mkdir()
     (ws / "patches").mkdir()
     (ws / "patches" / "manual.patch").write_text("--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-a\n+b\n", encoding="utf-8")
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, roots = subprocess_harvest.collect_patches(
         wt, ws, worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     )
     assert any("manual.patch" in p for p in patches)
@@ -1553,7 +1554,7 @@ def test_collect_patches_no_worktree_falls_back_to_disk_scan(tmp_path: Path):
     ws.mkdir()
     (ws / "patches").mkdir()
     (ws / "patches" / "p.patch").write_text("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n", encoding="utf-8")
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(None, ws, pinned=None)
+    patches, roots = subprocess_harvest.collect_patches(None, ws, pinned=None)
     assert len(patches) == 1
     assert roots == {}
 
@@ -1911,7 +1912,7 @@ def test_harvest_through_a_symlinked_patches_dir_writes_nothing_outside(tmp_path
     outside = tmp_path / "outside"
     outside.mkdir()
     (wt / "patches").symlink_to(outside)
-    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, _roots = subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     )
     assert patches == []
@@ -1925,7 +1926,7 @@ def test_harvest_over_a_symlinked_patch_name_does_not_truncate_its_target(tmp_pa
     victim.write_text("precious", encoding="utf-8")
     (wt / "patches").mkdir()
     (wt / "patches" / "_worktree_diff.patch").symlink_to(victim)
-    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, _roots = subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     )
     assert victim.read_text(encoding="utf-8") == "precious"
@@ -1939,7 +1940,7 @@ def test_a_symlinked_patch_file_is_not_collected(tmp_path: Path):
     target.write_text("--- a/x\n+++ b/x\n", encoding="utf-8")
     (ws / "patches" / "good.patch").write_text("--- a/y\n+++ b/y\n", encoding="utf-8")
     (ws / "patches" / "link.patch").symlink_to(target)
-    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(None, ws, pinned=None)
+    patches, _roots = subprocess_harvest.collect_patches(None, ws, pinned=None)
     assert [Path(p).name for p in patches] == ["good.patch"]
 
 
@@ -1948,10 +1949,10 @@ def test_a_symlinked_done_file_is_not_read(tmp_path: Path):
     app_only.write_text('{"app_secret": "value"}', encoding="utf-8")
     done = tmp_path / "specialist_done.json"
     done.symlink_to(app_only)
-    assert SpecialistSubprocessDispatcher._read_done(done) is None
+    assert subprocess_harvest.read_done(done) is None
     done.unlink()
     done.write_text('{"summary": "ok"}', encoding="utf-8")
-    assert SpecialistSubprocessDispatcher._read_done(done) == {"summary": "ok"}
+    assert subprocess_harvest.read_done(done) == {"summary": "ok"}
 
 
 def test_the_codex_config_is_not_written_through_a_planted_link(tmp_path: Path):
@@ -2188,15 +2189,15 @@ def test_the_round_archive_does_not_copy_a_file_a_child_linked_to(tmp_path: Path
 
 
 def test_a_claimed_patch_path_through_a_planted_directory_link_is_not_accepted(tmp_path: Path):
-    from hyperloom.orchestrator.specialists.runner import _resolve_claimed_patch
+    from hyperloom.orchestrator.specialists.patch_claims import resolve_claimed_patch
 
     wt = tmp_path / "wt"
     (wt / "real").mkdir(parents=True)
     (wt / "real" / "a.patch").write_text("--- a/x\n+++ b/x\n", encoding="utf-8")
     (wt / "patches").symlink_to(wt / "real")
-    assert _resolve_claimed_patch("real/a.patch", [wt]) == str(wt / "real" / "a.patch")
-    assert _resolve_claimed_patch("patches/a.patch", [wt]) is None
-    assert _resolve_claimed_patch(str(wt / "patches" / "a.patch"), [wt]) is None
+    assert resolve_claimed_patch("real/a.patch", [wt]) == str(wt / "real" / "a.patch")
+    assert resolve_claimed_patch("patches/a.patch", [wt]) is None
+    assert resolve_claimed_patch(str(wt / "patches" / "a.patch"), [wt]) is None
 
 
 def test_the_archive_does_not_copy_an_applied_patch_the_child_replaced_with_a_link(tmp_path: Path):
@@ -2348,7 +2349,7 @@ def test_the_harvest_does_not_run_a_program_a_child_planted_in_a_replaced_dot_gi
     subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True, capture_output=True)
     marker.unlink(missing_ok=True)
     # Through the admin dir the repository records, what `.git` became is never read.
-    assert "+new = 2" in SpecialistSubprocessDispatcher._harvest_worktree_diff(wt, admin=admin)
+    assert "+new = 2" in subprocess_harvest._harvest_worktree_diff(wt, admin=admin)
     assert worktree_head(wt, admin=admin) == head and len(head) == 40
     assert worktree_head(wt) == ""
     assert not marker.exists()
@@ -2399,7 +2400,7 @@ echo changed >> mod.py
             **kwargs,
         )
         assert done.returncode == 0, done.stderr
-        assert "+changed" in SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree, admin=admin)
+        assert "+changed" in subprocess_harvest._harvest_worktree_diff(worktree, admin=admin)
         assert worktree_head(worktree) == ""
         assert not marker.exists()
         # The second shape: a gitfile that names an admin dir the child made itself, with a matching back pointer.
@@ -2427,7 +2428,7 @@ echo "gitdir: {workspace}/fake/.git/worktrees/w" > .git
             **kwargs,
         )
         assert done.returncode == 0, done.stderr
-        assert "+changed" in SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree, admin=admin)
+        assert "+changed" in subprocess_harvest._harvest_worktree_diff(worktree, admin=admin)
         assert worktree_head(worktree) == ""
         assert not marker.exists()
     finally:
@@ -2438,7 +2439,7 @@ def test_the_harvest_still_works_on_an_untouched_worktree(tmp_path: Path):
     base, wt = _make_git_worktree_pair(tmp_path)
     admin = recorded_admin_dir(base, wt)
     (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
-    assert "+new = 2" in SpecialistSubprocessDispatcher._harvest_worktree_diff(wt, admin=admin)
+    assert "+new = 2" in subprocess_harvest._harvest_worktree_diff(wt, admin=admin)
     assert len(worktree_head(wt)) == 40
     assert worktree_head(wt, admin=admin) == worktree_head(wt)
 
@@ -2583,7 +2584,7 @@ printf '[submodule "vendored"]\\n\\tpath = vendored\\n\\turl = ./vendored\\n\\ti
     subprocess.run(["/bin/sh", "-c", planted], check=True, capture_output=True)
     (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
 
-    diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(wt, admin=recorded_admin_dir(base, wt))
+    diff = subprocess_harvest._harvest_worktree_diff(wt, admin=recorded_admin_dir(base, wt))
 
     assert not marker.exists()
     assert "+new = 2" in diff
@@ -2607,7 +2608,7 @@ def test_the_harvest_does_not_run_git_in_a_repository_the_worktree_tracks(tmp_pa
     (nested / "f.txt").write_text("b\n", encoding="utf-8")
     (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
 
-    diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(wt, admin=recorded_admin_dir(base, wt))
+    diff = subprocess_harvest._harvest_worktree_diff(wt, admin=recorded_admin_dir(base, wt))
 
     assert not marker.exists()
     assert "+new = 2" in diff
