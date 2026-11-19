@@ -105,14 +105,6 @@ cluster expects. KubeRay runs `ray start` in the head and worker containers:
 python -m pip install "ray[default]==2.44.1"
 ```
 
-Pin no `click` version. What the image owes is a Ray whose `ray start` parses
-the argv Hyperloom passes; preflight and the kernel-tools installer certify
-exactly that, by handing a representative argv to Ray's own parser. A `click`
-release that leaves the CLI parsing is no reason to downgrade it. The one
-exception is Ray 2.44.1 failing to import its CLI under `click` 8.3+ (`is not a
-valid Sentinel`): there Hyperloom holds `click<8.3` once. Any other failure calls
-for a Ray release built against your `click`, through `RAY_VERSION`.
-
 The cluster idles through the RayJob submitter: the platform sets its entrypoint
 to `tail -f /dev/null` so the cluster stays up between rounds.
 
@@ -243,26 +235,6 @@ tokens on some configurations.
 
 ---
 
-### Ray `--num-gpus` rejected (rayjob)
-
-**Symptom**: `ray start --head --num-gpus=N` fails with `Error: no such option:
---num-gpus`, or preflight reports `ray start does not accept ...`.
-
-**Cause**: The image's Ray CLI does not parse the argv Hyperloom passes — an
-option it dropped, a value it narrowed, or a `click` release that breaks the
-CLI on import.
-
-**Fix**: reinstall Ray at the version Hyperloom pins; Hyperloom itself holds
-`click<8.3` only when 2.44.1's CLI fails with `is not a valid Sentinel`. For any
-other `click` conflict, set `RAY_VERSION` to a Ray release built against it.
-
-```bash
-pip install --quiet 'ray[default]==2.44.1'
-ray --version
-```
-
----
-
 ### Ray tasks stuck pending, GPU usage 0% (rayjob)
 
 **Cause**: Ray was started with `--num-gpus=0` or the flag was omitted. Tasks
@@ -278,8 +250,8 @@ ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dash
 ray status
 ```
 
-If a stale Ray head is already running, stop it first so Hyperloom can create a
-fresh head with the correct GPU and resource configuration.
+If a stale Ray head is already running, stop it first so the new head starts
+with the correct GPU configuration.
 
 ---
 
@@ -298,8 +270,8 @@ raised from inside the container:
 docker run --ulimit nofile=1048576 ...
 ```
 
-The runtime raises the soft limit automatically before `ray start`; the hard cap
-must be set at container launch time.
+Inside the container, `ulimit -Sn` raises the soft limit up to that cap before
+`ray start`; the hard cap must be set at container launch time.
 
 ---
 

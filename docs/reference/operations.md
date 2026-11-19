@@ -38,15 +38,15 @@ The following resource requirements apply to a single optimization session.
 
 A single Hyperloom optimization session is a long-running Python
 process that drives benchmarks; the heavy GPU work happens in the
-inference server it benchmarks (sglang or vllm) and in the Ray-scheduled
-GEAK workers. The Coordinator pod itself is small.
+inference server it benchmarks (sglang or vllm) and in GEAK's kernel
+attempts. The Coordinator pod itself is small.
 
 | Component                          | CPU       | RAM       | GPU                                       | Disk                                                                                       |
 |------------------------------------|-----------|-----------|-------------------------------------------|--------------------------------------------------------------------------------------------|
 | Coordinator + Orchestration        | 4 cores   | 16 GiB    | none                                      | minimal                                                                                    |
 | Critic (subprocess)                | 1 core    | 2 GiB     | none                                      | <100 MB (knowledge base (KB) drafts)                                                       |
-| GEAK + Ray head (kernel optimization) | 4 cores   | 16 GiB    | none for head; workers below              | varies                                                                                     |
-| Ray worker (GEAK attempt)          | 8 cores   | 32 GiB    | 1 × MI300X, MI325X, or MI355X             | ~10 GB per attempt for build artifacts                                                     |
+| GEAK (kernel optimization)         | 4 cores   | 16 GiB    | none for the driver; attempts below       | varies                                                                                     |
+| GEAK attempt                       | 8 cores   | 32 GiB    | 1 × MI300X, MI325X, or MI355X             | ~10 GB per attempt for build artifacts                                                     |
 | Inference server (sglang or vllm)  | 16 cores  | 128 GiB   | 1–8 × MI300X, MI325X, or MI355X (matches TP)| weights + KV cache; depends on model                                                      |
 | GEAK retrieval-augmented generation (RAG) index (first build) | 4 cores   | 16 GiB    | 1 × any GPU (CPU is hours-slow)           | ~1.3 GB BGE embedding model + index in `~/.cache/amd-ai-devtool/semantic-index/`           |
 
@@ -107,7 +107,7 @@ namespace: hyperloom
 ├── Job: hyperloom-session-<session_id>   # short-lived, one per optimization run
 │   ├── Pod: coordinator                  # Python CLI
 │   ├── (subprocess) critic-agent
-│   └── Ray head (launched by kernel request handlers; GEAK runs as Ray workers)
+│   └── (subprocess) GEAK (launched by the kernel GEAK dispatch phase)
 ├── PersistentVolumeClaim: user-data       # mounted at /workspace/hyperloom
 ├── PersistentVolumeClaim: tracelens-extension  # optional read-only private extension mount
 ├── Secret: hyperloom-creds                # OPENAI_API_KEY
@@ -116,13 +116,14 @@ namespace: hyperloom
 
 Notes:
 
-* Ray is launched directly by the Coordinator's programmatic kernel request
-  handlers (`orchestrator/kernel/request_handlers.py`) when GEAK runs, not by a
-  separate kernel-agent process. Hyperloom does not require Ray's Kubernetes
-  operator. (Hosted Primus-Claw deployments do use RayJob for multi-node
-  scale-out; that is internal to the Primus-Claw control plane.)
+* GEAK runs as a subprocess of the Coordinator
+  (`orchestrator/phases/kernel_geak_dispatch.py`), not in a separate
+  kernel-agent process. A single-node session does not use Ray and does not
+  require Ray's Kubernetes operator. (Hosted Primus-Claw deployments do use
+  RayJob for multi-node scale-out; that is internal to the Primus-Claw control
+  plane.)
 * Pin the pod to a single node with `nodeSelector` matching your AMD
-  GPU labels; Ray currently expects all GPUs visible to the head.
+  GPU labels; the session assigns GPUs from those visible in the pod.
 * Mount `USER_DATA_PATH` on a fast local SSD or NVMe (RWO). Network
   storage (NFS, WekaFS) works but adds latency to the per-tick state.json reads.
   If session outputs must use shared storage and Codex SDK turns are enabled,
@@ -318,7 +319,7 @@ scopes only on its `other owner scopes:` line, not per task, so let
 `--confirm-stopped` check: it refuses, with exit code 2 and nothing changed, a
 task recorded under a nonempty owner scope. It confirms one task at a time,
 after you have verified that task's whole process tree and any remote workers
-or Ray actors have stopped.
+have stopped.
 
 To rebuild only the `session_breakdown` (and push it to Langfuse) for a run
 that exited abnormally — without re-running the optimization loop — use the
@@ -360,24 +361,6 @@ confirmation that lets a refused resume proceed.
    ```
 2. Restart the optimizer with the same `KNOWLEDGE_LOCAL_ROOT` (or default). The
    local store is recreated lazily on first write.
-
-### Scenario E: Ray won't start (`--num-gpus` rejected)
-
-Preflight refuses a Ray whose `ray start` does not parse the argv Hyperloom
-passes it, and reinstalls the pinned release:
-
-```bash
-pip install --quiet 'ray[default]==2.44.1'
-ray --version
-```
-
-Where 2.44.1 has no wheel (cp314 postdates it), install `'ray[default]>=2.44.1'`;
-where 2.44.1's CLI fails to import under the interpreter's `click` 8.3+
-(`is not a valid Sentinel`), Hyperloom holds `click<8.3` once and certifies the
-CLI again; for any other failure, or a Ray set through `RAY_VERSION`, set
-`RAY_VERSION` to a release built against your `click`, as Hyperloom changes no
-`click` there. See
-[Ray `--num-gpus` rejected](troubleshooting.md#ray---num-gpus-rejected).
 
 ---
 

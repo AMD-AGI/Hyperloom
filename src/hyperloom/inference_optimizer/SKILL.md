@@ -322,7 +322,7 @@ in [Step 1](#step-1--install-one-time-per-pod--venv-rebuild). CLI preflight read
 the regenerated `kernel-agent.env.sh` in-process, from the place `install.sh`
 selected (`assets/runtime_env.sh` decides it for both); the launch shell must not
 source it. Skipping install can leave
-TraceLens/GEAK unavailable or Ray unprepared. A missing runtime env fails
+TraceLens/GEAK unavailable. A missing runtime env fails
 preflight before optimization. `install.sh --check-only` is a *diagnostic*,
 never a substitute.
 
@@ -561,7 +561,6 @@ of `src/hyperloom/inference_optimizer/assets/install.sh`):
 
 | Component | Provided by |
 |---|---|
-| `ray==2.44.1`, or the lowest published version above it that has a wheel for this interpreter; `RAY_VERSION` is honoured verbatim. The install is certified by Ray's own parser accepting the `ray start` argv Hyperloom passes (`RAY_START_ARGV`). `click` changes in one case only: when Ray 2.44.1's CLI fails to import under `click` 8.3+ (`is not a valid Sentinel`), the installer and preflight hold `click<8.3` once and certify again; nothing else changes `click` | pip |
 | TraceLens public (editable install) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_ROOT`; skills, patches, CLI, analysis orchestrator) |
 | TraceLens-internal (editable install, **optional**) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_INTERNAL_ROOT` only when set; mirrors read-only checkout to `${HYPERLOOM_ROOT}/TraceLens-internal`; rehydration module). Unset => open-source-only. |
 | GEAKv4 Claude Code workflow checkout + SDK deps | `ensure_geak` |
@@ -875,14 +874,12 @@ bash "$INSTALL_SH"
 ```
 
 Quirks: with `set -u`, assign dependent vars on separate lines (chained
-`export A=... B=$A` can fail with `unbound variable`). The installer
-leaves a live Ray head; `ray status` must succeed because `trace_analyze`
-submits tasks with `num_gpus>=1` — never restart Ray with `--num-gpus=0`.
+`export A=... B=$A` can fail with `unbound variable`).
 
 `_preflight()` runs every launch as the in-loop counterpart of IR-2 and
 **owns** the things the launcher must NOT do by hand: re-export auth
 aliases (LLM) from `OPENAI_API_KEY`,
-auto-`pip install` the SDKs / `ray`, ROCm hygiene, `--gpu-type` auto-detect, and it emits the
+auto-`pip install` the SDKs, ROCm hygiene, `--gpu-type` auto-detect, and it emits the
 canonical `Preflight diagnostics:` block (paste verbatim into status
 reports). Two checks **abort** the run on failure: the model gate
 (probed against `<OPENAI_BASE_URL>/models`; the allowlist
@@ -893,7 +890,7 @@ the catalog probe is the sole gate; see
 `## Failure Handling`) and, when `--critic-agent` is active, the
 critic-agent runtime probe (`## Critic Backend Selection`).
 
-Don't manually pip-install SDKs, start Ray,
+Don't manually pip-install SDKs
 or `curl /v1/models` — `_preflight()` owns these. See `docs/reference/kernel-execution-path.md`
 for the kernel dispatch and artifact layout.
 

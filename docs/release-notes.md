@@ -20,6 +20,19 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A single-node session no longer uses Ray.** Serving rounds run in the
+  Coordinator's process, one at a time behind the resource lanes, and GPU
+  specialists take their cards from the session's GPU pool only. The installer
+  and preflight no longer install, certify or start a Ray head, nor raise the
+  open-files limit for one; `RAY_VERSION`, `SKIP_RAY_START` and the
+  `INFERENCE_OPTIMIZER_RAY_*` settings are no longer read. The failure classes
+  `ray_cluster_infeasible`, `ray_actor_error` and `ray_round_unplaced`, the
+  return codes -913 and -916, and `serving_lease_held` / `ensure_ray` in
+  `session_breakdown.json` are gone. A cancelled GPU specialist now gets 13.5 s
+  to stop instead of 23.75 s. Multi-node (RayJob, Infera) is unchanged, except
+  that GEAK no longer receives a `RAY_ADDRESS` nothing read. Stop the head an
+  older install started with `ray stop --force` once; see
+  [Upgrade](reference/upgrade.md).
 - **AgentX runs on ATOM.** `HYPERLOOM_AGENTX=1 hyperloom optimize --framework
   atom` now starts: the base comes from InferenceX's ATOM agentic entries, with their forced
   acceptance length (`--spec-decode-acceptance-length`) as the golden layer.
@@ -400,21 +413,6 @@ it.
   `GEAK_TERM_GRACE_S` is removed: the outer kill is now only a backstop, and
   run_e2e's chance to flush `result.json` is the `GEAK_FLUSH_GRACE_S` window
   geak_runner already gives it before that kill.
-- **A Ray install is certified by Ray's own `ray start` parser**, not by the
-  version of `click` it is built on. Preflight and the kernel-tools installer
-  hand `ray start` a representative argv of the one Hyperloom runs on the head
-  and accept the CLI exactly when it parses, so a `click` release that leaves
-  the CLI working no longer triggers a reinstall or a downgrade.
-  `RAY_CLI_CLICK_MAX_VERSION` is removed, superseding the 1.1.4 entry that
-  introduced it; `RAY_VERSION` is still honoured verbatim.
-- **Ray 2.44.1 installs on images whose `click` is 8.3 or newer.** A fresh
-  `pip install ray[default]==2.44.1` on Python 3.10 resolves `click` 8.5, and Ray's
-  CLI then fails to import (`ValueError: ... is not a valid Sentinel`), which
-  ended the install. Preflight and the kernel-tools installer now hold
-  `click<8.3` once, for that failure on the default 2.44.1 pin only, and certify
-  the CLI again. Every other failure, and any Ray set through `RAY_VERSION`,
-  leaves `click` untouched; this narrows the no-downgrade rule of the entry above
-  and has no setting.
 - **Code Hyperloom and KernelForge share lives in the `hyperloom_common`
   package.** `aiter_jit_cache`, `checkpoint_quant`, `coerce`, `entry_points`,
   `env`, `fs_utils`, `git_safety`, `gpu_identity`, `io`, `jsonio`,

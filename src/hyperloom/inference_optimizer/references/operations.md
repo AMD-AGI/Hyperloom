@@ -79,7 +79,7 @@ A non-zero exit indicates GPU occupancy above the allowed threshold, a stale
 serving process, or an unreadable GPU state. Do not continue to
 `python -m hyperloom optimize` in any of these cases.
 
-Do not manually pip-install SDKs, start Ray, or
+Do not manually pip-install SDKs or
 `curl /v1/models` unless debugging a failed preflight. `_preflight()` and
 `install.sh` own those repairs.
 
