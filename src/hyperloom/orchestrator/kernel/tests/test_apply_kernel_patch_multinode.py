@@ -11,6 +11,7 @@ from dataclasses import replace
 import pytest
 
 from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
+from hyperloom.orchestrator.kernel import patch_restore
 
 
 def test_is_multi_node_true_when_env_ge_2(monkeypatch):
@@ -232,7 +233,7 @@ def test_a_repo_root_that_does_not_contain_the_resolved_target_fails_the_fan_out
 )
 def test_a_failed_pod_revert_is_recorded_as_a_revert_issue(tmp_path, monkeypatch, failure):
     manifest_path = _applied_on_a_pod(tmp_path, monkeypatch)
-    monkeypatch.setattr(akp, "_dispatch_multinode_revert", _raising(failure))
+    monkeypatch.setattr(patch_restore, "_dispatch_multinode_revert", _raising(failure))
 
     result = akp.revert_kernel_patch(manifest_path)
 
@@ -246,7 +247,7 @@ def test_a_failed_pod_revert_is_recorded_as_a_revert_issue(tmp_path, monkeypatch
 def test_an_unexpected_fan_out_failure_propagates(tmp_path, monkeypatch, kind):
     if kind == "revert":
         manifest_path = _applied_on_a_pod(tmp_path, monkeypatch)
-        monkeypatch.setattr(akp, "_dispatch_multinode_revert", _raising(TypeError("bad pod spec")))
+        monkeypatch.setattr(patch_restore, "_dispatch_multinode_revert", _raising(TypeError("bad pod spec")))
         call = lambda: akp.revert_kernel_patch(manifest_path)  # noqa: E731
     else:
         monkeypatch.setattr(akp, "_is_multi_node", lambda: True)

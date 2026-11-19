@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_common.unified_diff import PatchOp, PatchTarget
-from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
+from hyperloom.orchestrator.kernel import patch_snapshot
 
 
 def _repo_with_kernel(tmp_path: Path) -> tuple[Path, Path]:
@@ -25,7 +25,7 @@ def _repo_with_kernel(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _apply(tmp_path: Path, repo_root: Path, snapshot: Path, descriptors: list[PatchTarget]) -> dict:
-    return akp.apply_snapshot(
+    return patch_snapshot.apply_snapshot(
         descriptors=descriptors,
         snapshot_dir=snapshot,
         repo_root=repo_root,

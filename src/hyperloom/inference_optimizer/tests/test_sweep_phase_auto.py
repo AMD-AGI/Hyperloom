@@ -489,7 +489,7 @@ async def test_stack_validation_preserves_actual_measurement(
 ):
     """The real stack verdict and its writeback envelope share one E2E measurement."""
     import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
-    from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
+    from hyperloom.orchestrator.kernel import apply_kernel_patch as akp, patch_restore
 
     agentx = grading_mode != "synthetic"
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1" if agentx else "0")
@@ -499,7 +499,8 @@ async def test_stack_validation_preserves_actual_measurement(
     monkeypatch.delenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", raising=False)
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
-    monkeypatch.setattr(akp, "_clear_python_kernel_caches", lambda target: {"status": "skipped"})
+    for module in (akp, patch_restore):
+        monkeypatch.setattr(module, "clear_python_kernel_caches", lambda target: {"status": "skipped"})
     c = _stack_validation_coordinator(tmp_path)
     c.shared_state.framework = "vllm"
     c.shared_state.benchmark_mode = "agentx" if agentx else "synthetic"
@@ -1764,9 +1765,10 @@ def _materialize_stack_sources(tmp_path: Path, stack: list[dict[str, Any]]) -> N
 
 def _stub_python_cache_clear(monkeypatch) -> None:
     """Keep the real apply away from this machine's Triton / inductor cache directories."""
-    from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
+    from hyperloom.orchestrator.kernel import apply_kernel_patch as akp, patch_restore
 
-    monkeypatch.setattr(akp, "_clear_python_kernel_caches", lambda target: {"status": "skipped"})
+    for module in (akp, patch_restore):
+        monkeypatch.setattr(module, "clear_python_kernel_caches", lambda target: {"status": "skipped"})
 
 
 def _stub_stack_benchmark(monkeypatch, *, new_tput: float) -> None:
