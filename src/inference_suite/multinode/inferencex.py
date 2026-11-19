@@ -387,16 +387,23 @@ def _with_warning(candidate: Candidate, warning: str) -> Candidate:
     return dataclasses.replace(candidate, warnings=(*candidate.warnings, warning))
 
 
+def _search_rows(entry: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
+    """Every search-space row of every scenario block of a master entry."""
+    for blocks in (entry.get("scenarios") or {}).values():
+        for block in blocks or ():
+            yield from block.get("search-space") or ()
+
+
 def _named_recipes(master: Mapping[str, Any]) -> set[str]:
     """``<path>:<selector>`` of every recipe variant a master entry names."""
     named = set()
     for entry in master.values():
-        for blocks in (entry.get("scenarios") or {}).values():
-            for block in blocks or ():
-                for row in block.get("search-space") or ():
-                    if "srt-recipe" in row and "srt-recipe-dir" in entry:
-                        file, _, selector = str(row["srt-recipe"]).partition(":")
-                        named.add(f"{MULTI_NODE_RECIPES}/{entry['srt-recipe-dir']}/{file}:{selector}")
+        if "srt-recipe-dir" not in entry:
+            continue
+        for row in _search_rows(entry):
+            if "srt-recipe" in row:
+                file, _, selector = str(row["srt-recipe"]).partition(":")
+                named.add(f"{MULTI_NODE_RECIPES}/{entry['srt-recipe-dir']}/{file}:{selector}")
     return named
 
 

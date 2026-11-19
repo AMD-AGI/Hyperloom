@@ -247,6 +247,13 @@ def test_restart_refuses_a_round_flag_the_engine_does_not_list(tmp_path):
     assert ran.decode.stripped == ("unsupported --retired-flag",)
 
 
+def test_restart_refuses_a_prefill_override_of_a_decode_only_flag(tmp_path):
+    hosts = FakeHosts()
+    with pytest.raises(LaunchError, match="prefill --cuda-graph-bs"):
+        restart(_launch(), {"prefill": ["--cuda-graph-bs", "4"]}, _cluster(tmp_path, hosts), _OPTIONS)
+    assert hosts.driven("restart") == []
+
+
 def test_overrides_cannot_set_launcher_flags():
     with pytest.raises(LaunchError, match="the launcher sets"):
         with_overrides(_launch(), {"decode": ["--port", "1"]})

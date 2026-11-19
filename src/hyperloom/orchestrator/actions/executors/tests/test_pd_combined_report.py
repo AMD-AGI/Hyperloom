@@ -77,11 +77,13 @@ def test_combined_report_splits_decode_per_node_and_passes_prefill_raw(tmp_path:
 
     result = combined.run_pd_combined_report(
         {"decode": [str(p) for p in decode_traces], "prefill": [str(prefill_trace)]},
-        trace_root=root,
-        output_dir=out_dir,
-        platform="MI300X",
-        analysis_mode="inference",
-        tracelens_root=tmp_path,
+        combined.PdReportRun(
+            trace_root=root,
+            output_dir=out_dir,
+            platform="MI300X",
+            analysis_mode="inference",
+            tracelens_root=tmp_path,
+        ),
     )
 
     assert result["status"] == "ok"
@@ -123,11 +125,13 @@ def test_combined_report_fails_soft_when_a_decode_split_has_no_chunk(tmp_path: P
 
     result = combined.run_pd_combined_report(
         {"decode": [str(trace)]},
-        trace_root=tmp_path,
-        output_dir=tmp_path / "out",
-        platform="MI300X",
-        analysis_mode="inference",
-        tracelens_root=tmp_path,
+        combined.PdReportRun(
+            trace_root=tmp_path,
+            output_dir=tmp_path / "out",
+            platform="MI300X",
+            analysis_mode="inference",
+            tracelens_root=tmp_path,
+        ),
     )
 
     assert result["status"] == "failed"
@@ -155,11 +159,13 @@ def test_combined_report_splits_the_decode_nodes_concurrently_in_node_order(tmp_
 
     result = combined.run_pd_combined_report(
         {"decode": [str(p) for p in traces]},
-        trace_root=tmp_path,
-        output_dir=out_dir,
-        platform="MI300X",
-        analysis_mode="inference",
-        tracelens_root=tmp_path,
+        combined.PdReportRun(
+            trace_root=tmp_path,
+            output_dir=out_dir,
+            platform="MI300X",
+            analysis_mode="inference",
+            tracelens_root=tmp_path,
+        ),
     )
 
     assert result["status"] == "ok"

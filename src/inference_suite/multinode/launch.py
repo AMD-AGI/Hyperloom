@@ -241,9 +241,10 @@ def probe_engine_flags(launch: PdLaunch, cluster: Cluster, timeout: int) -> froz
     return frozenset(group_flag([line.strip()]) for line in result.stdout.splitlines() if line.startswith("--"))
 
 
-def _engine_takes(name: str, flags: frozenset[str]) -> bool:
-    """Whether an engine listing ``flags`` takes flag ``name``, as itself or in its decode spelling."""
-    return name in flags or (name in SPLIT_ROLE_FLAGS and f"{name}-decode" in flags)
+def _engine_takes(role: Role, name: str, flags: frozenset[str]) -> bool:
+    """Whether ``role``'s engine listing ``flags`` takes flag ``name``, as itself or, on decode, in its decode
+    spelling."""
+    return name in flags or (role is Role.DECODE and name in SPLIT_ROLE_FLAGS and f"{name}-decode" in flags)
 
 
 def _fit_role(role: Role, launched: RoleLaunch, flags: frozenset[str], source: PdSourceKind) -> RoleLaunch:
@@ -257,7 +258,7 @@ def _fit_role(role: Role, launched: RoleLaunch, flags: frozenset[str], source: P
         split = name in SPLIT_ROLE_FLAGS and name not in flags and f"{name}-decode" in flags
         if split and role is Role.DECODE:
             kept += [f"--{name}-decode{sign}{value}", *group[1:]]
-        elif split or (name and not _engine_takes(name, flags) and source is not PdSourceKind.OPERATOR):
+        elif split or (name and not _engine_takes(role, name, flags) and source is not PdSourceKind.OPERATOR):
             dropped.append(f"unsupported {spelled}")
         else:
             kept += group
@@ -276,15 +277,17 @@ def _refuse_untaken_overrides(launch: PdLaunch, overrides: Mapping[str, Sequence
     """Refuse engine overrides that :func:`fit_to_engine` would drop from ``launch`` on an engine listing ``flags``.
 
     Raises:
-        LaunchError: an override of a non-operator launch sets a flag the engine does not list.
+        LaunchError: an override sets a flag the role's engine does not take: any unlisted flag of a non-operator
+            launch, or a prefill split flag the engine lists only in its decode spelling.
     """
-    if not flags or launch.source.kind is PdSourceKind.OPERATOR:
+    if not flags:
         return
+    operator = launch.source.kind is PdSourceKind.OPERATOR
     untaken = [
         f"{role.value} --{name}"
         for role in launch.served_roles
         for name in dict.fromkeys(group_flag(group) for group in flag_groups(overrides.get(role.value, ())))
-        if name and not _engine_takes(name, flags)
+        if name and not _engine_takes(role, name, flags) and (not operator or name in SPLIT_ROLE_FLAGS)
     ]
     if untaken:
         raise LaunchError(f"the engine does not list the round's flags {untaken}")

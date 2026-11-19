@@ -314,7 +314,7 @@ def parse_node_list(document: Any) -> NodeList:
     topology = _mapping(fields.get("topology") or {}, "topology", frozenset(role.value for role in MODE_ROLES[mode]))
     ssh = _ssh(fields["ssh"]) if fields.get("ssh") is not None else None
     ports = _host_ports(fields)
-    return NodeList(
+    nodes = NodeList(
         framework=framework,
         model=_text(fields["model"], "model"),
         service_url=_url(fields["service_url"], "service_url"),
@@ -335,6 +335,23 @@ def parse_node_list(document: Any) -> NodeList:
         operator=_operator(fields["config"], mode) if fields.get("config") is not None else OperatorArgs(),
         frontend=frontend,
     )
+    return _refuse_router_port_clash(nodes)
+
+
+def _refuse_router_port_clash(nodes: NodeList) -> NodeList:
+    """``nodes`` unchanged when its router host serves no engine on the router's port.
+
+    Raises:
+        NodeListError: a role's host is the router host and its engines serve on the router's port.
+    """
+    from inference_suite.multinode.commands import ROUTER_PORT, engine_port
+
+    if not nodes.router or nodes.frontend is FrontendType.INFERA:
+        return nodes
+    for role in nodes.roles:
+        if nodes.router in nodes.hosts(role) and engine_port(nodes, role) == ROUTER_PORT:
+            raise NodeListError(f"router host {nodes.router} also serves a {role.value} engine on port {ROUTER_PORT}")
+    return nodes
 
 
 def read_node_list(environ: Mapping[str, str]) -> NodeList:

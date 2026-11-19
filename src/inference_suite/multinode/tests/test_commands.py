@@ -16,7 +16,7 @@ from inference_suite.multinode.commands import (
     process_needle,
     router_command,
 )
-from inference_suite.multinode.nodes import LaunchMode, parse_node_list
+from inference_suite.multinode.nodes import LaunchMode, NodeListError, parse_node_list
 from inference_suite.multinode.record import (
     Frontend,
     FrontendType,
@@ -162,28 +162,21 @@ def _aggregated(framework=Framework.SGLANG, frontend=FrontendType.SGLANG_ROUTER,
 
 
 @pytest.mark.parametrize(
-    ("launch", "nodes", "clash"),
+    ("nodes", "clash"),
     [
-        (_launch(), _nodes(router={"host": "d0"}), "d0"),
-        (
-            replace(_aggregated(), frontend=Frontend(FrontendType.SGLANG_ROUTER, "w0", ())),
-            _aggregated_nodes(router={"host": "w0"}),
-            "w0",
-        ),
-        (
-            _launch(Framework.ATOM, FrontendType.ATOMESH, decode_tp=8),
-            _nodes(framework="atom", router={"host": "d0"}),
-            "",
-        ),
+        (lambda: _nodes(router={"host": "d0"}), "d0"),
+        (lambda: _aggregated_nodes(router={"host": "w0"}), "w0"),
     ],
-    ids=["sglang-decode", "aggregated-worker", "atom-co-located"],
+    ids=["sglang-decode", "aggregated-worker"],
 )
-def test_the_router_host_cannot_serve_an_engine_on_the_router_port(launch, nodes, clash):
-    if clash:
-        with pytest.raises(CommandError, match=f"{clash}.*8000"):
-            cluster_commands(launch, nodes)
-    else:
-        assert cluster_commands(launch, nodes)[-1].host == "d0"
+def test_a_node_list_whose_router_host_serves_an_engine_on_the_router_port_is_refused(nodes, clash):
+    with pytest.raises(NodeListError, match=f"{clash}.*8000"):
+        nodes()
+
+
+def test_a_router_co_located_with_an_engine_on_another_port_runs():
+    launch = _launch(Framework.ATOM, FrontendType.ATOMESH, decode_tp=8)
+    assert cluster_commands(launch, _nodes(framework="atom", router={"host": "d0"}))[-1].host == "d0"
 
 
 def test_aggregated_sglang_worker_spans_hosts_without_disaggregation():

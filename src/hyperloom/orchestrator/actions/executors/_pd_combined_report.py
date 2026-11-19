@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,17 @@ _CAPTURE_DIR_NAMES = ("capture_traces", "graph_capture_profile", "graph_capture"
 _PHASE_ORDER = ("decode", "prefill")
 _SPLIT_TIMEOUT_S = 1800
 _REPORT_TIMEOUT_S = 3600
+
+
+@dataclass(frozen=True)
+class PdReportRun:
+    """Where a combined PD report reads its traces, writes its output and finds TraceLens."""
+
+    trace_root: Path
+    output_dir: Path
+    platform: str
+    analysis_mode: str
+    tracelens_root: Path
 
 
 def role_capture_folder(trace_root: Path, role: str) -> str:
@@ -79,63 +91,48 @@ def pd_report_config(jobs: list[dict[str, Any]], *, output_dir: Path, analysis_m
     }
 
 
-def _report_jobs(
-    node_traces: dict[str, list[str]],
-    *,
-    trace_root: Path,
-    output_dir: Path,
-    platform: str,
-    tracelens_root: Path,
-    log_path: Path,
-) -> list[dict[str, Any]]:
+def _report_jobs(node_traces: dict[str, list[str]], run: PdReportRun, log_path: Path) -> list[dict[str, Any]]:
     """One job per server node: decode nodes as split chunks, split concurrently, prefill nodes as captured."""
     decode = [Path(trace) for trace in node_traces.get("decode") or []]
-    split_dirs = [output_dir / "trace_split" / f"decode_{node}" for node in range(len(decode))]
-    split = functools.partial(_decode_chunk, tracelens_root=tracelens_root, log_path=log_path)
+    split_dirs = [run.output_dir / "trace_split" / f"decode_{node}" for node in range(len(decode))]
+    split = functools.partial(_decode_chunk, tracelens_root=run.tracelens_root, log_path=log_path)
     with ThreadPoolExecutor(max_workers=max(1, len(decode))) as pool:
         chunks = list(pool.map(split, decode, split_dirs))
     jobs: list[dict[str, Any]] = []
     for phase in _PHASE_ORDER:
-        capture_folder = role_capture_folder(trace_root, phase)
+        capture_folder = role_capture_folder(run.trace_root, phase)
         traces = chunks if phase == "decode" else [Path(trace) for trace in node_traces.get(phase) or []]
         for node, trace_path in enumerate(traces):
-            job: dict[str, Any] = {"phase": phase, "node": node, "trace_path": str(trace_path), "platform": platform}
+            job: dict[str, Any] = {
+                "phase": phase,
+                "node": node,
+                "trace_path": str(trace_path),
+                "platform": run.platform,
+            }
             if capture_folder:
                 job["capture_folder"] = capture_folder
             jobs.append(job)
     return jobs
 
 
-def run_pd_combined_report(
-    node_traces: dict[str, list[str]],
-    *,
-    trace_root: Path,
-    output_dir: Path,
-    platform: str,
-    analysis_mode: str,
-    tracelens_root: Path,
-) -> dict[str, Any]:
-    """Write ``pd-run.yaml`` for ``node_traces`` under ``output_dir``, run it once, and summarise the outcome.
+def run_pd_combined_report(node_traces: dict[str, list[str]], run: PdReportRun) -> dict[str, Any]:
+    """Write ``pd-run.yaml`` for ``node_traces`` under ``run.output_dir``, run it once, and summarise the outcome.
 
     Never raises: a failed split or report comes back as ``status="failed"`` with the error.
     """
+    output_dir = run.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "pd_report.log"
     config_path = output_dir / PD_REPORT_CONFIG_NAME
     result: dict[str, Any] = {"status": "failed", "output_dir": str(output_dir), "config": str(config_path)}
     try:
-        jobs = _report_jobs(
-            node_traces,
-            trace_root=trace_root,
-            output_dir=output_dir,
-            platform=platform,
-            tracelens_root=tracelens_root,
-            log_path=log_path,
-        )
+        jobs = _report_jobs(node_traces, run, log_path)
         if not jobs:
             raise RuntimeError("no PD node traces to report")
         config_path.write_text(
-            yaml.safe_dump(pd_report_config(jobs, output_dir=output_dir, analysis_mode=analysis_mode), sort_keys=False),
+            yaml.safe_dump(
+                pd_report_config(jobs, output_dir=output_dir, analysis_mode=run.analysis_mode), sort_keys=False
+            ),
             encoding="utf-8",
         )
         cmd = [
@@ -145,7 +142,7 @@ def run_pd_combined_report(
             "--config",
             str(config_path),
         ]
-        rc = run_command(cmd, cwd=tracelens_root, log_path=log_path, timeout_s=_REPORT_TIMEOUT_S)
+        rc = run_command(cmd, cwd=run.tracelens_root, log_path=log_path, timeout_s=_REPORT_TIMEOUT_S)
         if rc != 0:
             raise RuntimeError(f"perf_report_failed: TraceLens report exited with code {rc}; see {log_path}")
     except (OSError, RuntimeError, ValueError) as exc:
@@ -177,11 +174,13 @@ async def report_pd_profile(profile_result: dict[str, Any], *, framework: str, p
     summary = await asyncio.to_thread(
         run_pd_combined_report,
         node_traces,
-        trace_root=Path(trace_dir),
-        output_dir=Path(trace_dir).parent / "tracelens" / stamp,
-        platform=(platform or os.environ.get("GPU_TYPE", "")).strip().upper(),
-        analysis_mode=tracelens_analysis_mode(framework),
-        tracelens_root=paths.tracelens_root(),
+        PdReportRun(
+            trace_root=Path(trace_dir),
+            output_dir=Path(trace_dir).parent / "tracelens" / stamp,
+            platform=(platform or os.environ.get("GPU_TYPE", "")).strip().upper(),
+            analysis_mode=tracelens_analysis_mode(framework),
+            tracelens_root=paths.tracelens_root(),
+        ),
     )
     profile_result["pd_combined_report"] = summary
     if summary.get("status") == "ok":
