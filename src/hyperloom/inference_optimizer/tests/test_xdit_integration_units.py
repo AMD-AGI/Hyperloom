@@ -16,7 +16,7 @@ from hyperloom.orchestrator.actions.executors import benchmark_result as br
 from hyperloom.orchestrator.actions.executors.grid import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors.grid._grid_variant_filter import ServingStack
 from hyperloom.orchestrator.actions.executors.grid import _grid_variant_filter as vf
-from hyperloom.orchestrator.actions.executors import explore as ex
+from hyperloom.orchestrator.actions.executors.grid import _grid_base as ex
 
 
 class TestFrameworkRegistry:

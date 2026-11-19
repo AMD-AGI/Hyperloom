@@ -9,8 +9,6 @@ from hyperloom.common.benchmark_config import BenchmarkPoint
 import functools
 import logging
 import os
-import tempfile
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +16,6 @@ import yaml
 
 from hyperloom_common.coerce import to_float, to_int, to_str_list
 from hyperloom.common.gain_math import accuracy_passed, gain_pct, graded_gate_row
-from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,
@@ -39,13 +36,10 @@ from hyperloom.common.perf_metric import (
 from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ...state.explore_ledger import land_verdict, ledger_view, variant_knobs
+from ...state.explore_ledger import land_verdict, ledger_view
 from ...state.failure_evidence import (
-    UNMEASURED_OUTCOMES,
     FAILURE_STAGE_DECISION,
     FAILURE_STAGE_WARMUP,
-    classify_failure_attribution,
-    make_failure_id,
     tail_excerpt,
 )
 from ...state.shared_state import (
@@ -56,26 +50,45 @@ from ...state.shared_state import (
 )
 from ..stop_attribution import StoppedByTheRun, stopped_by_the_run_class, variant_budget_stop
 from ._accuracy_gate import AccuracyReference, parse_eval_results
-from .framework_change import _framework_switch_manifest as _switch_manifest
-from .explore_prefilter.declared_levers import declared_lever_payload
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import (
     BaseControls,
     controls_of,
     effective_fingerprint,
     keeps_effective_args,
-    normalize_proposal,
 )
 from .explore_prefilter.measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
-from .grid._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP, _default_grid_for_framework
-from .grid._grid_base import _safe, importable_overlay_dir, variant_config_of
+from .grid._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP
+from .grid._grid_base import _safe, variant_config_of
 from .grid._grid_base import apply_base_env
 from .workload._agentx_checkpoint import round_checkpoint
 from ._subprocess_kill import AGENTX_EARLY_STOP_ERROR_CLASS
 from .benchmark_result import double_run_requested
 from .benchmark_run.accuracy import accuracy_round_due, record_accuracy_round, run_candidate_accuracy_round
 from .explore_prefilter._prefilter import prefilter_round, record_decision_round
-from .explore_prefilter._remeasure import STACK_REVALIDATE_SOURCE, _is_config_replay_variant, is_stack_revalidation
+from .explore_prefilter._remeasure import STACK_REVALIDATE_SOURCE, is_stack_revalidation
+from .explore_prefilter.grid_payload import (
+    framework_lever_attributions,
+    grid_variants_from_payload,
+    resolved_grid_payload,
+)
+from .explore_prefilter.launch_filters import (
+    filter_baseline_noop_variants,
+    filter_context_copy_drafts,
+    filter_operator_pinned_envs,
+    launch_identity,
+    observed_launch_from_state,
+)
+from .grid._explore_variants import (
+    LOSER_FIELDS,
+    REJECTED_FIELDS,
+    decision_fields,
+    outcome_row,
+    staged_variant,
+    variant_facts,
+    variant_fingerprint,
+    variant_with_eval_off,
+)
 from .grid._grid_inputs import SessionDirField, session_grid_bounds
 from .grid._grid_inputs import sanitize_result_dir, sanitize_script_name
 from .grid._grid_runner import (
@@ -83,7 +96,6 @@ from .grid._grid_runner import (
     GridRecipe,
     GridStop,
     GridVariant,
-    _build_variant_yaml,
     run_grid,
     teardown_variant_server,
 )
@@ -98,10 +110,10 @@ from .grid._grid_variant_filter import (
 )
 from hyperloom.inference_optimizer.framework_registry import is_scriptable, server_args_env_name
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
-from .framework_change._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
+from .framework_change._spec_decode_context_copy import CONTEXT_COPY_REFUSAL
 
-from .workload._launch_restatement import Launch, config_envs, launch_change, observed_launch_after, read_launch
-from .serving._server_argv import ConfigUnreadable, config_point, config_server_argv
+from .workload._launch_restatement import observed_launch_after
+from .serving._server_argv import ConfigUnreadable, config_point
 from .serving._server_lifecycle import resolve_lifecycle_params
 from .workload._workload_envs import (
     BenchmarkTarget,
@@ -125,335 +137,6 @@ ROUND_DUP: str = "round_dup"
 
 #: The provenance of a grid row that names none: the model proposed it directly.
 _DIRECT_PROVENANCE = "llm_direct"
-# ``framework_lever_source`` of an arm that switches one active lever off.
-_LEAVE_ONE_OUT = "leave_one_out"
-
-
-# Audit/provenance metadata stashed on a GridVariant that must survive being rebuilt into a derived variant.
-_CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
-    "provenance",
-    "reasoning_origin",
-    "scope",
-    "overlay_pythonpath",
-    "accepted_kernels",
-    "experience_citations",
-)
-
-
-def _decision_fields(gv: Any) -> dict[str, Any]:
-    """Why this variant was proposed, as authored at action time, for every row that records it."""
-    return {
-        "note": gv.note,
-        "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
-        "experience_citations": list(getattr(gv, "experience_citations", []) or []),
-    }
-
-
-def _variant_with_eval_off(gv: Any) -> Any:
-    """Return a copy of ``gv`` with ``RUN_EVAL`` forced off.
-
-    The variant layer is the last one :func:`run_grid` applies over the
-    accumulated stack, so forcing the key here holds whatever the stack carries.
-    """
-    envs = dict(gv.extra_envs)
-    envs["RUN_EVAL"] = "false"
-    return _carry_variant_metadata(
-        gv,
-        GridVariant(
-            name=gv.name,
-            extra_server_args=gv.extra_server_args,
-            extra_envs=envs,
-            note=gv.note,
-            remove_args=to_str_list(getattr(gv, "remove_args", [])),
-            unset_envs=to_str_list(getattr(gv, "unset_envs", [])),
-            args_mode=str(getattr(gv, "args_mode", "append") or "append"),
-        ),
-    )
-
-
-def _carry_variant_metadata(src: Any, dst: Any) -> Any:
-    """Copy the carried audit metadata from ``src`` onto ``dst``."""
-    for attr in _CARRIED_VARIANT_ATTRS:
-        if hasattr(src, attr):
-            setattr(dst, attr, getattr(src, attr))
-    return dst
-
-
-def _variant_fingerprint(variant: Any) -> str:
-    """The canonical fingerprint stamped on a variant before the round launched it."""
-    return str(getattr(variant, "canonical_fp", "") or "")
-
-
-def _action_reasoning(raw: dict[str, Any]) -> tuple[str, str]:
-    """Return the action-authored rationale and the payload field that supplied it."""
-    for field in ("reasoning", "rationale", "reason", "note"):
-        value = str(raw.get(field) or "").strip()
-        if value:
-            return value, f"action_payload.{field}"
-    return "", ""
-
-
-def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
-    """Convert the LLM/specialist grid payload into GridVariant objects."""
-    out: list[GridVariant] = []
-    for raw in payload or []:
-        if not isinstance(raw, dict) or not raw.get("name"):
-            continue
-        fields = normalize_proposal(raw)
-        reasoning, reasoning_origin = _action_reasoning(raw)
-        gv = GridVariant(
-            name=fields["name"],
-            extra_server_args=fields["extra_args"],
-            extra_envs=fields["extra_envs"],
-            note=reasoning,
-            remove_args=fields["remove_args"],
-            unset_envs=fields["unset_envs"],
-            args_mode=fields["args_mode"],
-        )
-        # Stash extra metadata on the GridVariant so the ledger writer can pull provenance.
-        gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
-        gv.reasoning_origin = reasoning_origin  # type: ignore[attr-defined]
-        gv.scope = str(raw.get("scope") or "")  # type: ignore[attr-defined]
-        # Authored-kernel overlay dir (PYTHONPATH prefix); "" for env/flag variants.
-        gv.overlay_pythonpath = str(raw.get("overlay_pythonpath") or "")
-        # Authored kernels this variant's overlay installs.
-        gv.accepted_kernels = [  # type: ignore[attr-defined]
-            str(k).strip() for k in (raw.get("accepted_kernels") or []) if str(k).strip()
-        ]
-        # Validated against what the proposing agent was shown before the grid reached this executor.
-        gv.experience_citations = [  # type: ignore[attr-defined]
-            dict(item) for item in (raw.get("experience_citations") or []) if isinstance(item, dict)
-        ]
-        out.append(gv)
-    return out
-
-
-def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
-    """Build explore variants that attribute each registered rewrite lever."""
-    if shared_state is None:
-        return []
-    rows = [row for row in getattr(shared_state, "authored_framework_levers", None) or [] if isinstance(row, dict)]
-    # Arms are built over every registered lever, so attribution only picks which run, never which envs they set.
-    pending = {row["switch"] for row in rows if row.get("attributed_gain_pct") is None}
-    payload: list[dict[str, Any]] = []
-    for variant in _switch_manifest.additive_variants([row for row in rows if not row.get("default_on")]):
-        payload.append({**variant, "framework_lever_source": "additive"})
-    for variant in _switch_manifest.leave_one_out_variants([row for row in rows if row.get("default_on")]):
-        payload.append({**variant, "framework_lever_source": _LEAVE_ONE_OUT})
-    return _switch_manifest.unattributed_arms(payload, pending)
-
-
-def _framework_lever_attributions(
-    per_variant_outcomes: list[dict[str, Any]],
-    lever_payload: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Derive each rewrite lever's own contribution from this round's outcomes."""
-    if not lever_payload:
-        return []
-    by_name = {
-        str(v.get("name") or ""): v
-        for v in lever_payload
-        if isinstance(v, dict) and str(v.get("framework_lever") or "")
-    }
-    if not by_name:
-        return []
-    out: list[dict[str, Any]] = []
-    for row in per_variant_outcomes:
-        seed = by_name.get(str(row.get("variant_name") or ""))
-        if seed is None:
-            continue
-        # A REVERT keeps its measured movement in ``graded_gain_pct``; a regressed leave-one-out arm is that case.
-        metrics = row.get("metrics") or {}
-        measured = metrics.get("gain_pct", metrics.get("graded_gain_pct"))
-        if not isinstance(measured, (int, float)):
-            continue
-        source = str(seed.get("framework_lever_source") or "")
-        gain = -float(measured) if source == _LEAVE_ONE_OUT else float(measured)
-        out.append(
-            {
-                "switch": str(seed["framework_lever"]),
-                "gain_pct": round(gain, 4),
-                "source": source,
-                "variant_name": str(row.get("variant_name") or ""),
-                "outcome": str(row.get("outcome") or ""),
-            }
-        )
-    return out
-
-
-def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, str]]:
-    """The running server's resolved config and env, empty unless ``current_best`` observed them.
-
-    A setting the engine rewrote after parsing it is left out of the config: its
-    resolved value is not the value a flag would pass, so it reads as unknown
-    and a variant touching it runs.
-    """
-    measurement = getattr(state, "current_best_measurement", None)
-    if not isinstance(measurement, dict) or not measurement:
-        return {}, {}
-    evidence = measurement.get("launch_evidence")
-    if not isinstance(evidence, Mapping):
-        return {}, {}
-
-    raw_config = evidence.get("observed_server_config")
-    config = dict(raw_config) if isinstance(raw_config, Mapping) else {}
-    raw_adjusted = evidence.get("engine_adjusted_settings")
-    for name in settings_the_engine_rewrote(config, raw_adjusted if isinstance(raw_adjusted, Mapping) else None):
-        config.pop(name, None)
-    raw_env = evidence.get("requested_server_env")
-    # Same shape as a variant's extra_envs, so the two compare directly.
-    env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, Mapping) else {}
-    return config, env
-
-
-#: Names the throwaway variant that materializes the unchanged baseline to diff against.
-_NOOP_PROBE_BASE_NAME = "__baseline_noop_probe_base__"
-
-
-def _materialized_launch(recipe: GridRecipe, gv: GridVariant, output_subdir: Path) -> tuple[str, dict[str, str]]:
-    """The server argv and benchmark envs ``run_grid`` would launch *gv* with."""
-    out_path = _build_variant_yaml(recipe, gv, output_subdir=output_subdir)
-    return config_server_argv(out_path).text, config_envs(out_path)
-
-
-#: What reading a probe launch can raise; a launch that cannot be read is never judged unchanged.
-_UNREADABLE_LAUNCH = (OSError, ValueError, yaml.YAMLError, ConfigUnreadable)
-
-
-def _probe_launch(recipe: GridRecipe, gv: GridVariant, output_subdir: Path) -> Launch:
-    """The whole launch ``run_grid`` would start *gv* with on ``recipe``'s base."""
-    out_path = _build_variant_yaml(recipe, gv, output_subdir=output_subdir)
-    return read_launch(out_path, [*to_str_list(recipe.base.unset_envs), *to_str_list(gv.unset_envs)])
-
-
-def filter_context_copy_drafts(
-    grid: list[GridVariant], *, recipe: GridRecipe
-) -> tuple[list[GridVariant], list[tuple[str, str]]]:
-    """Drop variants that introduce or change a context-copying speculative-decoding draft (synthetic sessions only).
-
-    Each variant and its base are materialized through ``_build_variant_yaml``, the way ``run_grid`` builds the round,
-    so a draft reached through args, replace mode, envs or a server-args env counts. A launch that cannot be
-    materialized is judged on the variant's own args and envs against an empty base.
-
-    Returns the variants still to run, plus ``(name, reason)`` for each drop.
-    """
-    if not grid:
-        return [], []
-    kept: list[GridVariant] = []
-    dropped: list[tuple[str, str]] = []
-    with tempfile.TemporaryDirectory(prefix="explore_spec_probe_") as tmp_dir:
-        tmp_root = Path(tmp_dir)
-        try:
-            base = _materialized_launch(recipe, GridVariant(_NOOP_PROBE_BASE_NAME), tmp_root / "base")
-        except _UNREADABLE_LAUNCH as exc:
-            log.warning("explore: could not materialize the base to read its speculative decoding (%s)", exc)
-            base = ("", {})
-        for idx, gv in enumerate(grid):
-            against = base
-            try:
-                launch = _materialized_launch(recipe, gv, tmp_root / f"v{idx}")
-            except _UNREADABLE_LAUNCH as exc:
-                log.warning("explore: could not materialize %s to read its speculative decoding (%s)", gv.name, exc)
-                launch = (str(gv.extra_server_args or ""), {str(k): str(v) for k, v in (gv.extra_envs or {}).items()})
-                against = ("", {})
-            reason = context_copy_refusal(against[0], against[1], launch[0], launch[1])
-            if reason:
-                dropped.append((gv.name, reason))
-            else:
-                kept.append(gv)
-    return kept, dropped
-
-
-def filter_baseline_noop_variants(
-    grid: list[GridVariant],
-    *,
-    observed: tuple[Mapping[str, Any], Mapping[str, str]],
-    recipe: GridRecipe,
-) -> tuple[list[GridVariant], list[tuple[str, str]]]:
-    """Drop variants that would launch the server the stack is already running.
-
-    The baseline and each variant are materialized through ``_build_variant_yaml`` and read back whole, so a
-    removal, a replaced argv, an overlay or an AgentX launch override shows as the change it is; ``launch_change``
-    then discounts what the observed server already resolved. A variant whose launch cannot be read always runs;
-    a stack revalidation round never reaches this filter.
-
-    Returns the variants still to run, plus ``(name, reason)`` for each drop.
-    """
-    if not grid:
-        return [], []
-    kept: list[GridVariant] = []
-    dropped: list[tuple[str, str]] = []
-    with tempfile.TemporaryDirectory(prefix="explore_noop_probe_") as tmp_dir:
-        tmp_root = Path(tmp_dir)
-        try:
-            base = _probe_launch(recipe, GridVariant(_NOOP_PROBE_BASE_NAME), tmp_root / "base")
-        except _UNREADABLE_LAUNCH as exc:
-            log.warning(
-                "explore: baseline-noop probe could not read the baseline launch (%s); keeping every variant", exc
-            )
-            return list(grid), []
-        for idx, gv in enumerate(grid):
-            try:
-                launch = _probe_launch(recipe, gv, tmp_root / f"v{idx}")
-            except _UNREADABLE_LAUNCH as exc:
-                log.warning("explore: baseline-noop probe could not read variant %s (%s); keeping it", gv.name, exc)
-                kept.append(gv)
-                continue
-            if launch_change(base, launch, observed):
-                kept.append(gv)
-            else:
-                dropped.append((gv.name, "launches the server the stack already runs (baseline noop)"))
-    return kept, dropped
-
-
-def restates_the_baseline_launch(state: Any, args: str, envs: Mapping[str, Any]) -> bool:
-    """Whether ``args`` and ``envs`` laid onto the baseline's materialized config start the baseline's own server.
-
-    Judged as a variant on that config is. The observed launch discounts settings only when ``current_best`` was
-    observed running that very config.
-    """
-    config_path = str(getattr(state, "baseline_config_path", "") or "")
-    if not config_path:
-        return False
-    measurement = getattr(state, "current_best_measurement", None)
-    evidence = measurement.get("launch_evidence") if isinstance(measurement, Mapping) else None
-    observed_here = isinstance(evidence, Mapping) and evidence.get("materialized_config_path") == config_path
-    _, dropped = filter_baseline_noop_variants(
-        [GridVariant("warm_replay", str(args or ""), {str(k): str(v) for k, v in envs.items()})],
-        observed=observed_launch_from_state(state) if observed_here else ({}, {}),
-        recipe=GridRecipe(base_yaml_path=Path(config_path)),
-    )
-    return bool(dropped)
-
-
-def filter_operator_pinned_envs(
-    grid: list[GridVariant],
-    baseline_envs: dict[str, Any] | None,
-) -> tuple[list[GridVariant], list[tuple[str, str]]]:
-    """Drop variants that overwrite an env the operator pinned in the baseline."""
-    pinned = {str(k).strip().upper() for k in (baseline_envs or {}) if str(k).strip()}
-    if not pinned:
-        return list(grid), []
-
-    kept: list[GridVariant] = []
-    dropped: list[tuple[str, str]] = []
-    for gv in grid:
-        clash = sorted(
-            key for key in (str(k).strip().upper() for k in (getattr(gv, "extra_envs", None) or {})) if key in pinned
-        )
-        # A replay reproduces a config another component already measured, so it carries the pinned values verbatim by
-        # construction.
-        if clash and not _is_config_replay_variant(gv):
-            dropped.append(
-                (
-                    str(getattr(gv, "name", "?")),
-                    f"overwrites baseline-pinned env {', '.join(clash)}, which would make "
-                    "its number incomparable to the baseline",
-                )
-            )
-            continue
-        kept.append(gv)
-    return kept, dropped
 
 
 class _RoundRefused(Exception):
@@ -516,147 +199,6 @@ def _anchor_the_params(params: dict[str, Any], ss: Any) -> None:
     # record) authoritative.
     if first_positive_tput(cb) > 0:
         params.update(stack_base_params(cb))
-
-
-def _lever_seeded_payload(payload: list[Any], levers: list[dict[str, Any]]) -> list[Any]:
-    named = {str(v.get("name") or "") for v in payload if isinstance(v, dict)}
-    fresh = [v for v in levers if str(v.get("name") or "") not in named]
-    if not fresh:
-        return payload
-    log.info("explore: seeding %d framework-rewrite lever variant(s) for attribution", len(fresh))
-    # A leave-one-out arm only attributes a switch already on, so the arms that could KEEP run before it.
-    attribution = [v for v in fresh if v.get("framework_lever_source") == _LEAVE_ONE_OUT]
-    return [v for v in fresh if v not in attribution] + list(payload) + attribution
-
-
-def _seed_grid_payload(params: dict[str, Any], framework: str, yaml_envs: dict[str, Any]) -> list[Any]:
-    model_class = str(params.get("model_class") or "").strip() or os.environ.get("MODEL_CLASS", "").strip()
-    conc = to_int(params.get("conc") or yaml_envs.get("CONC") or os.environ.get("CONC") or 0, 0) or 0
-    seed = _default_grid_for_framework(framework, model_class=model_class, conc=conc)
-    if not seed:
-        return []
-    log.info(
-        "explore: empty grid for framework=%s; falling through to %d default_grid seed variants "
-        "(model_class=%r conc=%d)",
-        framework or "?",
-        len(seed),
-        model_class or "?",
-        conc,
-    )
-    return [
-        {
-            "name": v.name,
-            "extra_server_args": v.extra_server_args,
-            "extra_envs": dict(v.extra_envs or {}),
-            "note": v.note or "default_grid",
-            "provenance": getattr(v, "provenance", "default_grid"),
-        }
-        for v in seed
-    ]
-
-
-def _resolved_grid_payload(
-    params: Mapping[str, Any],
-    *,
-    shared_state: Any,
-    framework: str,
-    yaml_envs: Mapping[str, Any] | None = None,
-) -> tuple[list[Any], list[dict[str, Any]]]:
-    """The payload a round over ``params`` measures, and the lever variants seeded into it.
-
-    The sent grid with this session's fresh lever variants in front of it; only when that leaves
-    nothing does the framework's default grid stand in. A non-empty sent grid therefore never
-    reaches the default grid, however little of it is a variant.
-    """
-    payload = params.get("grid") or []
-    if not isinstance(payload, list):
-        payload = []
-    # A stack revalidation re-measures the recorded stack on purpose. Seeding a lever
-    # into it would validate stack+lever instead, so the declarations sit this round out.
-    declared = [] if is_stack_revalidation(params) else declared_lever_payload(shared_state, framework)
-    lever_payload = framework_lever_grid(shared_state) + declared
-    payload = _lever_seeded_payload(payload, lever_payload)
-    if not payload:
-        payload = _seed_grid_payload(dict(params), framework, dict(yaml_envs or {}))
-    return payload, lever_payload
-
-
-def runnable_grid_variants(params: Mapping[str, Any] | None, shared_state: Any) -> list[GridVariant]:
-    """The variants an explore over ``params`` would have to measure, by the round's own reckoning.
-
-    Admission asks this before spending a dispatch on a round that would refuse itself. The round
-    reads its framework back from the materialized YAML, which a proposal has not got yet, so the
-    session's framework answers for it; a ``framework`` in ``params`` is not consulted, since the
-    round never seeds its grid from one and the gate would otherwise judge a grid the round will not
-    run. The config-pinned-env filter that follows in the round needs that YAML, so the variants it
-    drops stay the round's to report.
-    """
-    p = dict(params or {})
-    framework = str(getattr(shared_state, "framework", "") or "")
-    payload, _ = _resolved_grid_payload(p, shared_state=shared_state, framework=framework)
-    return _grid_variants_from_payload(payload)
-
-
-# The numbers a measured variant produced. ``base_tput`` is carried verbatim rather than left to be back-solved
-# from the gain: each KEEP advances the round anchor, so a consumer dividing the gain out of the final throughput
-# reconstructs whichever anchor happens to be current, and a FAILED variant has no gain to divide.
-_VARIANT_METRIC_KEYS: tuple[str, ...] = ("tput", "gain_pct", "graded_gain_pct", "base_tput")
-
-# The ledgers' views of the row the round records for a variant.
-_VARIANT_FIELDS: tuple[str, ...] = (
-    "fingerprint",
-    "name",
-    "extra_server_args",
-    "extra_envs",
-    "remove_args",
-    "unset_envs",
-    "args_mode",
-)
-_LOSER_FIELDS: tuple[str, ...] = (*_VARIANT_FIELDS, "provenance", "gain_pct", "tput", "reason", "workspace")
-_REJECTED_FIELDS: tuple[str, ...] = (
-    *_LOSER_FIELDS,
-    "round_id",
-    "ts",
-    "stage",
-    "error_class",
-    "error_excerpt",
-    "server_log_path",
-)
-
-
-def _outcome_row(te: dict[str, Any], fingerprint: str, reason: str, task_id: str) -> dict[str, Any]:
-    name = str(te.get("name") or "")
-    outcome = str(te.get("outcome") or "")
-    return {
-        "variant_name": name,
-        "outcome": outcome,
-        "fingerprint": fingerprint,
-        "failure_id": make_failure_id(task_id=task_id, fingerprint=fingerprint, variant_name=name),
-        "stage": str(te.get("stage") or FAILURE_STAGE_DECISION),
-        "error_excerpt": te.get("error_excerpt"),
-        "provenance": str(te.get("provenance") or ""),
-        "scope": str(te.get("scope") or ""),
-        "metrics": {key: te[key] for key in _VARIANT_METRIC_KEYS if te.get(key) is not None},
-        "reason": reason,
-        "error_class": str(te.get("error_class") or ""),
-        "failure_attribution": classify_failure_attribution(
-            error_class=te.get("error_class"),
-            framework_changed=bool(te.get("framework_changed")),
-            error_excerpt=te.get("error_excerpt"),
-            reason=reason,
-        )
-        if outcome in UNMEASURED_OUTCOMES
-        else "",
-        "server_log_path": te.get("server_log_path"),
-        "workspace": te.get("workspace"),
-        "raw_result_path": te.get("raw_result_path"),
-        "variant": variant_knobs(te),
-        # The verdicts and the stack behind them, as the round ruled. Absent keys mean the variant never got that
-        # far: no gate ruled on a warmup failure, and nothing validated one that was killed before it was graded.
-        "measured_against": te.get("measured_against") or {},
-        "gates": [gate for gate in (te.get("gates") or []) if isinstance(gate, dict)],
-        "validation_basis": str(te.get("validation_basis") or ""),
-    }
 
 
 def _sanitized_overrides(params: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -760,7 +302,7 @@ class _ExploreRound:
                 continue
             slot = self.output_root / f"v{idx:02d}_{_safe(gv.name)}"
             slot.mkdir(parents=True, exist_ok=True)
-            run_gv = self._staged(gv)
+            run_gv = staged_variant(gv, self.envs, self.unset_envs)
             try:
                 measurement = await self._measure(gv, run_gv, idx, slot)
                 if self.run_stop is not None:
@@ -836,7 +378,7 @@ class _ExploreRound:
     # ----- the grid --------------------------------------------------------
 
     def _resolve_grid(self) -> None:
-        payload, self.lever_payload = _resolved_grid_payload(
+        payload, self.lever_payload = resolved_grid_payload(
             self.params,
             shared_state=self.ss,
             framework=self.framework,
@@ -850,7 +392,7 @@ class _ExploreRound:
                 "should fill this from specialist proposals / default_grid.",
                 workspace=self.output_root.as_posix(),
             )
-        grid = _grid_variants_from_payload(payload)
+        grid = grid_variants_from_payload(payload)
         if self.framework == "custom":
             grid, pinned = filter_operator_pinned_envs(grid, self.yaml_envs)
             for name, reason in pinned:
@@ -967,7 +509,7 @@ class _ExploreRound:
     # ----- one variant -----------------------------------------------------
 
     def _refused(self, gv: GridVariant, idx: int) -> bool:
-        if twin := self.launched.get(self._launch_identity(gv)):
+        if twin := self.launched.get(launch_identity(self._recipe(), gv)):
             self._decided_without_measuring(gv, ROUND_DUP, duplicate_of=twin)
             return True
         if restated := self._restates_stack(gv):
@@ -987,7 +529,7 @@ class _ExploreRound:
         Its ledger row marks the proposal decided, so the untested-proposal queue moves past it; a change the ledger
         already holds keeps its row, since a measurement outranks a skip.
         """
-        fingerprint = _variant_fingerprint(gv)
+        fingerprint = variant_fingerprint(gv)
         log.info("explore: skipping %s variant %s (%s)", reason, gv.name, detail or duplicate_of)
         self.skipped.append(
             {"name": gv.name, "fingerprint": fingerprint, "reason": reason, "detail": detail or duplicate_of}
@@ -996,7 +538,7 @@ class _ExploreRound:
         if not fingerprint or fingerprint in self.tested or fingerprint in known:
             return
         self.tested[fingerprint] = {
-            **self._variant_facts(gv),
+            **variant_facts(gv),
             "outcome": TS_SKIPPED_DEDUP,
             "reason": reason,
             "duplicate_of": duplicate_of,
@@ -1005,15 +547,6 @@ class _ExploreRound:
             "provenance": getattr(gv, "provenance", _DIRECT_PROVENANCE),
             "workload_signature": self.ws_sig,
         }
-
-    def _launch_identity(self, gv: GridVariant) -> str:
-        """The server ``gv`` would launch on the stack as it stands now; its fingerprint when that cannot be read."""
-        with tempfile.TemporaryDirectory(prefix="explore_launch_") as tmp_dir:
-            try:
-                return _probe_launch(self._recipe(), gv, Path(tmp_dir)).identity
-            except _UNREADABLE_LAUNCH as exc:
-                log.warning("explore: could not read the launch of %s (%s); deduping on its fingerprint", gv.name, exc)
-                return _variant_fingerprint(gv)
 
     def _restates_stack(self, gv: GridVariant) -> str:
         """Why ``gv`` only restates the launch the stack runs as it stands now, or ``""`` when it changes it.
@@ -1040,7 +573,7 @@ class _ExploreRound:
         """
         if self.ss is None or is_stack_revalidation(self.params) or getattr(gv, "overlay_pythonpath", ""):
             return False
-        fingerprint = _variant_fingerprint(gv)
+        fingerprint = variant_fingerprint(gv)
         prior = measured_verdict(
             getattr(self.ss, "explore_search", None),
             fingerprint,
@@ -1097,22 +630,6 @@ class _ExploreRound:
         self.skipped.append({"name": gv.name, "reason": CONTEXT_COPY_REFUSAL, "detail": refused[0][1]})
         return True
 
-    def _staged(self, gv: GridVariant) -> GridVariant:
-        envs = dict(self.envs)
-        for key in gv.unset_envs:
-            envs.pop(key, None)
-        envs.update(gv.extra_envs)
-        run_gv = GridVariant(
-            name=gv.name,
-            extra_server_args=gv.extra_server_args,
-            extra_envs=envs,
-            note=gv.note,
-            remove_args=list(gv.remove_args),
-            unset_envs=list(dict.fromkeys(self.unset_envs + to_str_list(getattr(gv, "unset_envs", [])))),
-            args_mode=str(getattr(gv, "args_mode", "append") or "append"),
-        )
-        return _carry_variant_metadata(gv, run_gv)
-
     def _stopped_by_the_run(self, result: Any, gv: GridVariant, idx: int, round_label: str) -> bool:
         """Whether the run stopped this round, and record it if it did."""
         stopped = stopped_by_the_run_class(getattr(result, "error_class", "") if result is not None else "")
@@ -1132,7 +649,7 @@ class _ExploreRound:
         return True
 
     async def _measure(self, gv: GridVariant, run_gv: GridVariant, idx: int, slot: Path) -> Any:
-        self.launched[self._launch_identity(gv)] = _variant_fingerprint(gv)
+        self.launched[launch_identity(self._recipe(), gv)] = variant_fingerprint(gv)
         # The warmup and decision rounds share this slot as the lifecycle pid_dir so the decision round
         # re-attaches to the server the warmup left hot.
         lifecycle = (
@@ -1146,7 +663,7 @@ class _ExploreRound:
         # ``parse_eval_results`` falls back to the score the warmup took. Without a warmup there is nothing to
         # fall back to, so a cold decision round keeps its own eval.
         results = await run_grid(
-            grid=[_variant_with_eval_off(run_gv) if self.use_warm_decision else run_gv],
+            grid=[variant_with_eval_off(run_gv) if self.use_warm_decision else run_gv],
             output_root=slot,
             recipe=self._recipe(),
             launch=GridLaunch(
@@ -1196,7 +713,7 @@ class _ExploreRound:
         self._record(
             gv,
             {
-                **self._variant_facts(gv),
+                **variant_facts(gv),
                 "outcome": TS_FAILED,
                 "status": getattr(warmup, "status", "failed") if warmup is not None else "failed",
                 "tput": None,
@@ -1243,7 +760,7 @@ class _ExploreRound:
         }
         stamp_output_per_gpu(variant_meas, getattr(self.ss, "tp", None))
         row = {
-            **self._variant_facts(gv),
+            **variant_facts(gv),
             **self._graded_verdict(gv, r, variant_meas),
             "status": r.status,
             "tput": r.output_throughput,
@@ -1272,17 +789,6 @@ class _ExploreRound:
         if row["outcome"] == "KEEP":
             self.winners.append(self._keep(gv, run_gv, r, row, variant_meas))
         return row
-
-    def _variant_facts(self, gv: GridVariant) -> dict[str, Any]:
-        return {
-            "fingerprint": _variant_fingerprint(gv),
-            "name": gv.name,
-            "extra_server_args": gv.extra_server_args,
-            "extra_envs": dict(gv.extra_envs),
-            **controls_of(vars(gv)),
-            **_decision_fields(gv),
-            "framework_changed": bool(importable_overlay_dir(gv)),
-        }
 
     def _graded_verdict(self, gv: GridVariant, r: Any, variant_meas: dict[str, Any]) -> dict[str, Any]:
         # How the graded comparison ruled on this measurement, and which gate ended the arc.
@@ -1387,15 +893,13 @@ class _ExploreRound:
     def _record(self, gv: GridVariant, row: dict[str, Any]) -> None:
         self.tested[row["fingerprint"]] = row
         if row["outcome"] != "KEEP":
-            rejected = {**ledger_view(row, _REJECTED_FIELDS), **_decision_fields(gv)}
+            rejected = {**ledger_view(row, REJECTED_FIELDS), **decision_fields(gv)}
             self.rejected.append(rejected)
-            self.losers.append(ledger_view(row, _LOSER_FIELDS))
+            self.losers.append(ledger_view(row, LOSER_FIELDS))
             if self.ss is not None and self.session_dir is not None:
                 # A preempted round keeps the verdicts it judged; a KEEP lands at settlement.
-                outcome = _outcome_row(
-                    row, row["fingerprint"], str(row.get("reason") or ""), str(self.ctx.task.task_id)
-                )
-                attributions = _framework_lever_attributions([outcome], self.lever_payload)
+                outcome = outcome_row(row, row["fingerprint"], str(row.get("reason") or ""), str(self.ctx.task.task_id))
+                attributions = framework_lever_attributions([outcome], self.lever_payload)
                 land_verdict(
                     self.ss,
                     self.session_dir,
@@ -1477,7 +981,7 @@ class _ExploreRound:
             "effective_extra_server_args": next_effective_args,
             "extra_envs": dict(run_gv.extra_envs),
             **effective,
-            **_decision_fields(gv),
+            **decision_fields(gv),
             "provenance": row["provenance"],
             # Names of the authored kernels this config carried, when an overlay was loaded.
             "accepted_kernels": list(getattr(gv, "accepted_kernels", []) or []),
@@ -1503,7 +1007,7 @@ class _ExploreRound:
     def _per_variant_outcomes(self, reasons: dict[str, str]) -> list[dict[str, Any]]:
         task_id = str(self.ctx.task.task_id)
         outcomes = [
-            _outcome_row(te, fingerprint, reasons.get(fingerprint, ""), task_id)
+            outcome_row(te, fingerprint, reasons.get(fingerprint, ""), task_id)
             for fingerprint, te in self.tested.items()
             if te.get("outcome") in ("KEEP", "REVERT", TS_FAILED)
         ]
@@ -1523,7 +1027,7 @@ class _ExploreRound:
     def _result(self) -> dict[str, Any]:
         rejected = {row["fingerprint"]: row for row in self.rejected if row["fingerprint"]}
         outcomes = self._per_variant_outcomes({fp: str(row.get("reason") or "") for fp, row in rejected.items()})
-        levers = _framework_lever_attributions(outcomes, self.lever_payload)
+        levers = framework_lever_attributions(outcomes, self.lever_payload)
         if levers:
             log.info(
                 "explore: attributed %d framework rewrite lever(s): %s",
