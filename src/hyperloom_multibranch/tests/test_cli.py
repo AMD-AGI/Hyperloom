@@ -98,8 +98,8 @@ from hyperloom_multibranch.scheduling.prelude import BASELINE_ESTABLISHED
 from hyperloom_multibranch.scheduling import review
 from hyperloom_multibranch.scheduling.layout import REVIEW_DIR, SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
-from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, SessionOutcome, persisted_run
-from hyperloom_multibranch.scheduling.resumption import ResumeRefused, resumable_run
+from hyperloom_multibranch.scheduling.resumption import PersistedRun, ResumeRefused, persisted_run, resumable_run
+from hyperloom_multibranch.scheduling.session_types import COMPLETED_REASONS, SessionOutcome
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version, read_manifest
 from hyperloom_multibranch.scheduling import local_peers
@@ -2243,7 +2243,7 @@ def test_a_restart_that_finishes_a_preempted_session_ends_the_run_as_its_final_w
         finishes.append((persisted.ended, restart))
         ended = SessionStopReason.FINISHED_AFTER_RESTART if restart and chose else persisted.ended
         _report(persisted.layout, stop_reason=ended.value, final={"chosen": {"commit": "c9"}} if chose else None)
-        return 0 if ended in lifecycle.COMPLETED_REASONS else 1
+        return 0 if ended in COMPLETED_REASONS else 1
 
     monkeypatch.setattr(cli, "final_only", finish)
 

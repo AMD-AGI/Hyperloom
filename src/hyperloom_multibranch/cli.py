@@ -170,14 +170,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
 )
 from hyperloom_multibranch.scheduling import review
 from hyperloom_multibranch.scheduling.layout import create_session
-from hyperloom_multibranch.scheduling.lifecycle import (
-    PersistedRun,
-    Session,
-    SessionHost,
-    SessionOutcome,
-    SessionServices,
-    persisted_run,
-)
+from hyperloom_multibranch.scheduling.lifecycle import Session
 from hyperloom_multibranch.scheduling.llm import (
     MB_RESOLVER_MAX_TOKENS,
     MB_RESOLVER_READ_TIMEOUT_SECONDS,
@@ -191,7 +184,12 @@ from hyperloom_multibranch.scheduling.local_peers import (
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting_orphans
 from hyperloom_multibranch.scheduling.reference import ReferenceSource, reference_source
-from hyperloom_multibranch.scheduling.resumption import deadline_after_downtime, resumable_run
+from hyperloom_multibranch.scheduling.resumption import (
+    PersistedRun,
+    deadline_after_downtime,
+    persisted_run,
+    resumable_run,
+)
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.session_environment import (
     EnvironmentIncomplete,
@@ -200,6 +198,7 @@ from hyperloom_multibranch.scheduling.session_environment import (
     require_session_environment,
     require_writable_storage,
 )
+from hyperloom_multibranch.scheduling.session_types import SessionHost, SessionOutcome, SessionServices
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.scheduling.settings import (
     AGENT_PORT,
