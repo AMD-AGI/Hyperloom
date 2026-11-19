@@ -410,7 +410,7 @@ def _build_arm_grid(
             note=f"arm={arm.name} conc={conc} isl={isl} osl={osl}",
             **arm.controls,
         )
-        variant.overlay_pythonpath = arm.overlay  # type: ignore[attr-defined]
+        variant.overlay_pythonpath = arm.overlay
         out.append(variant)
     return out
 

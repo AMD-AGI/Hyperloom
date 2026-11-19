@@ -51,7 +51,7 @@ from hyperloom_kb import (
 from hyperloom_kb.config import PACKAGED_DECLARATION
 from hyperloom_kb import database as database_module
 from hyperloom_kb.database import Database, open_database
-from hyperloom_kb.http_service import code_digest
+from hyperloom_kb.experience_service import code_digest
 from hyperloom_kb.tests.conftest import fresh_database
 
 NOW = datetime(2026, 9, 28, tzinfo=timezone.utc)

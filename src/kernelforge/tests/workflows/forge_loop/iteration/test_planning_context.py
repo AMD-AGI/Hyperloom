@@ -18,7 +18,7 @@ from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
 from kernelforge.workflows.forge_loop.campaign.run_state import BestRecord, LoopStateStore, RoundCost, RunState
 from kernelforge.workflows.forge_loop.campaign.unmeasured_lanes import UnmeasuredLane, UnmeasuredLaneArchive
 from kernelforge.evaluation.scoring import GateScoring
-from kernelforge.workflows.forge_loop.roles.analysis import AnalysisBundle
+from kernelforge.workflows.forge_loop.roles.analysis_bundle import AnalysisBundle
 from kernelforge.workflows.forge_loop.roles.contracts import EvidenceRef, PlanCriticOutcome
 from kernelforge.workflows.forge_loop.roles.supervisor import latest_supervisor_ruling_path
 from kernelforge.workflows.forge_loop.search.search_policy import (

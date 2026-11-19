@@ -219,7 +219,7 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         gv.reasoning_origin = reasoning_origin  # type: ignore[attr-defined]
         gv.scope = str(raw.get("scope") or "")  # type: ignore[attr-defined]
         # Authored-kernel overlay dir (PYTHONPATH prefix); "" for env/flag variants.
-        gv.overlay_pythonpath = str(raw.get("overlay_pythonpath") or "")  # type: ignore[attr-defined]
+        gv.overlay_pythonpath = str(raw.get("overlay_pythonpath") or "")
         # Authored kernels this variant's overlay installs.
         gv.accepted_kernels = [  # type: ignore[attr-defined]
             str(k).strip() for k in (raw.get("accepted_kernels") or []) if str(k).strip()

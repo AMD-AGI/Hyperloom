@@ -229,7 +229,7 @@ def detect_kineto_backend(trace_path: str | Path) -> str:
         path = traces[-1]
     try:
         opener = gzip.open if path.suffix == ".gz" else open
-        with opener(path, "rb") as handle:  # type: ignore[operator]
+        with opener(path, "rb") as handle:
             head = handle.read(_TRACE_HEAD_BYTES)
     except (OSError, EOFError, gzip.BadGzipFile):
         return ""

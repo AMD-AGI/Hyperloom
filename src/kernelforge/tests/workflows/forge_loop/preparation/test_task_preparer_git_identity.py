@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 from kernelforge.workflows.forge_loop.memory import knowledge_integration
 from kernelforge.workflows.forge_loop.preparation import task_preparer
+from kernelforge.workflows.forge_loop.preparation import task_scaffold
 from kernelforge.workflows.forge_loop.preparation import task_preflight
 
 FORGE_IDENTITY = "KernelForge <kernel-forge@localhost>"
@@ -73,7 +74,7 @@ def _conforming_preparation(monkeypatch, driver: Path) -> None:
     """Everything ahead of the commit succeeds, so only the commit is on trial."""
 
     def fake_materialize_reference(_workspace):
-        ref_dir = driver.parent / task_preparer.REFERENCE_SUBDIR
+        ref_dir = driver.parent / task_scaffold.REFERENCE_SUBDIR
         ref_dir.mkdir(exist_ok=True)
         (ref_dir / "CONTRACT.md").write_text("driver contract\n", encoding="utf-8")
         return ref_dir

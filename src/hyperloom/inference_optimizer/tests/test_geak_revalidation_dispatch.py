@@ -1355,7 +1355,8 @@ async def test_internal_stack_rebench_preserves_baseline_script(
 @pytest.mark.parametrize("mode", ["synthetic", "agentx"])
 @pytest.mark.parametrize("settled", [False, True])
 async def test_invalid_handoff_configuration_never_launches_geak(coordinator, monkeypatch, mode, settled):
-    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_GEAK, make_kernel_recorder
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_GEAK
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_recorder import make_kernel_recorder
     from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 
     def invalid_spec():

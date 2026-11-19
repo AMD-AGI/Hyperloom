@@ -9,12 +9,12 @@ from pathlib import Path
 import pytest
 
 from kernelforge.config import Config
-from kernelforge.workflows.forge_loop.memory import knowledge_integration as integration
+from kernelforge.workflows.forge_loop.memory import kb_warmstart as warmstart
 from kernelforge.knowledge.kb_store import writer as sink
 from kernelforge.config import KnowledgeConfig
 from kernelforge.workflows.forge_loop.campaign import recovery
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
-from kernelforge.workflows.forge_loop.memory.knowledge_integration import WarmStartHarness
+from kernelforge.workflows.forge_loop.memory.kb_warmstart import WarmStartHarness
 
 
 PRODUCER_KERNEL_PATH = Path("packages/src/aiter_meta/ops/triton/deterministic_kernel.py")
@@ -185,8 +185,8 @@ def _install_driver_execution_doubles(
         correctness_sources.append(source)
         return "BLOCK_SIZE = 64" in source
 
-    monkeypatch.setattr(integration, "_bench_once", benchmark)
-    monkeypatch.setattr(integration, "_correctness_once", correctness)
+    monkeypatch.setattr(warmstart, "_bench_once", benchmark)
+    monkeypatch.setattr(warmstart, "_correctness_once", correctness)
     return benchmark_results, correctness_sources
 
 
@@ -197,7 +197,7 @@ def _warm_start(
     gpu_type: str,
     source_files: list[str] | None = None,
 ) -> dict:
-    return integration.kb_warmstart(
+    return warmstart.kb_warmstart(
         config=_run_config(gpu_type),
         kernel=LoopKernel(
             kernel_path=str(consumer_kernel),

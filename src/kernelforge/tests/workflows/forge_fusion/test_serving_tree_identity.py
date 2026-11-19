@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kernelforge.workflows.forge_fusion.validate import framework_tree_is_the_imported_one
+from kernelforge.workflows.forge_fusion.serving_smoke import framework_tree_is_the_imported_one
 
 
 def _tree(tmp_path: Path, name: str, pkg: str = "vllm") -> Path:
