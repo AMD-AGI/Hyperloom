@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable
 
+from kernelforge.utils.interpreter import driver_python
 from kernelforge.utils.process_group import kill_process_group
 
 # Optional bench-mode companion to the driver contract's --warmup/--iters, asking the driver to time ONE declared case
@@ -131,7 +132,7 @@ def bench_command(run: BenchRun) -> list[str]:
     ]
     if run.repeat > 1:
         args += ["--repeat", str(run.repeat)]
-    return [sys.executable, run.driver_script] + args
+    return [driver_python(), run.driver_script] + args
 
 
 def parse_case_timings(text: str) -> tuple[dict[str, float], list[str], set[str]]:

@@ -14,7 +14,6 @@ import os
 import pathlib
 import shutil
 import signal
-import sys
 import tempfile
 import time
 import traceback
@@ -26,6 +25,7 @@ from kernelforge.evaluation.correctness.driver import test_correctness
 from kernelforge.evaluation.profiling.contracts import PROFILE_RUN_FLAG
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.utils.aiter_cache import cleanup_current_owned_aiter_locks
+from kernelforge.utils.interpreter import driver_python
 
 log = logging.getLogger(__name__)
 
@@ -503,7 +503,7 @@ async def _count_graph_replays(
     pathlib.Path(probe_dir, "sitecustomize.py").write_text(_GRAPH_PROBE_SITECUSTOMIZE)
     env = _graph_probe_env(out_path, probe_dir, require_ranks)
     cmd = [
-        sys.executable,
+        driver_python(),
         driver,
         "--warmup",
         str(warmup),
@@ -563,7 +563,7 @@ async def _check_profile_contract(
 ) -> tuple[bool, str]:
     """Verify the prepared driver owns a kernel-only profiling path."""
     proc = await asyncio.create_subprocess_exec(
-        sys.executable,
+        driver_python(),
         driver,
         PROFILE_RUN_FLAG,
         stdout=asyncio.subprocess.PIPE,

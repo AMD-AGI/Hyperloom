@@ -28,9 +28,13 @@ _GPU_TYPE_BY_ARCH = {
     "gfx950": "mi355x",
     "gfx1100": "w7900",
     "gfx1151": "radeon8060s",
+    # One board carries this SM count today, so the arch names it the way gfx942 names mi300x.
+    "sm_121": "gb10",
 }
-# A concrete target only: rocminfo also lists generic ISAs such as ``gfx12-generic`` beside the chip's own.
-_GFX_RE = re.compile(r"\bgfx[0-9a-f]+\b(?!-)", re.IGNORECASE)
+# A concrete target only: rocminfo also lists generic ISAs such as ``gfx12-generic`` beside the chip's own. A CUDA
+# target (``sm_121``) is concrete in the same sense and has to match here, or ``GPU_TARGET=sm_121`` -- the only
+# spelling a non-ROCm host can offer -- is refused as malformed when the campaign reads it back.
+_GFX_RE = re.compile(r"\b(?:gfx[0-9a-f]+|sm_\d+)\b(?!-)", re.IGNORECASE)
 
 
 def canon_arch(value: str) -> str:
@@ -170,9 +174,33 @@ and collect only small runtime-supported counter groups with finite timeouts; un
 scaled-FP4 ceilings remain unknown. The Analysis Agent stays static-only under the current profiling plan;
 the implementer self-profiles with rocprofv3 when profiling is requested."""
 
+_BLACKWELL_SM_PROMPT_NOTE = """\
+## Target architecture: sm_121 (NVIDIA Blackwell SM, GB10 class) driven through Triton — overrides any AMD fact in this prompt
+
+The backend guidance and the knowledge cards are written for Instinct (CDNA) and RDNA parts. On this target:
+- The ISA is NVIDIA SASS, reached through the **Triton** backend only. There is no HIP, no `hipcc`, no `amdclang++`,
+  no `rocm_agent_enabler`, and no AMD chip library (`ck`, `hipblaslt`, `aiter`, `flydsl`).
+- There are no MFMA or WMMA instructions and no AGPRs. Matrix work goes through Triton's `tl.dot`, which lowers to
+  `mma`/`wgmma` (`tcgen05` where the shape allows) on this SM. Warp size is **32**, not CDNA's 64: lane, shuffle,
+  ballot and reduction math follow 32.
+- Memory is LPDDR5X behind a wide, small-L2 cache, not HBM. Every bandwidth, capacity and ridge-point number in
+  `hardware/` is an AMD number and is **wrong here** — measure instead of citing one.
+- No profiler is available (no `rocprof-compute`, no `rocprofv3`), so the Analysis Agent stays static and the
+  implementer gets no PMC counters. Judge a candidate by the driver's measured milliseconds and by the wall-clock
+  shape of the kernel, never by "MFMA busy" or "wait" ratios.
+- Triton compiles for this SM ahead of the first launch, so the first run of a new variant pays the compile cost;
+  keep benchmark cases long enough that it does not dominate."""
+
 _ARCH_PROFILES: dict[str, ArchProfile] = {
     "gfx942": ArchProfile(family="CDNA3"),
     "gfx950": ArchProfile(family="CDNA4"),
+    # A CUDA SM target: Triton is the only backend that builds here, and nothing on the box speaks rocprof.
+    "sm_121": ArchProfile(
+        family="Blackwell",
+        profiler=Profiler.NONE,
+        kernel_backends=frozenset({"triton"}),
+        prompt_note=_BLACKWELL_SM_PROMPT_NOTE,
+    ),
     "gfx1100": ArchProfile(
         family="RDNA3",
         hardware_knowledge="hardware/rdna3",

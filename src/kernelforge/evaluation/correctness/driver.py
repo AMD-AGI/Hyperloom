@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import re
-import sys
 
-from kernelforge.utils.process_group import kill_process_group
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.utils.interpreter import driver_python
+from kernelforge.utils.process_group import kill_process_group
 
 
 async def test_correctness(
@@ -20,7 +20,7 @@ async def test_correctness(
     timeout_sec: int = 120,
 ) -> dict:
     """Run a kernel test driver and extract its SNR pre-filter verdict."""
-    cmd = [sys.executable, driver_script] + (driver_args or [])
+    cmd = [driver_python(), driver_script] + (driver_args or [])
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
