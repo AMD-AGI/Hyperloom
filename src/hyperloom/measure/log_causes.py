@@ -22,6 +22,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from inference_suite import WARMUP_ERROR_PREFIX
 from inference_suite.contracts import RunLayout
 
 from hyperloom.common.failure_signature import (
@@ -31,6 +32,7 @@ from hyperloom.common.failure_signature import (
     argparse_refusal,
 )
 from hyperloom.common.outside_facts import (
+    AIPERF_CONTEXT_OVERFLOW,
     HIP_ERROR_PREFIX,
     HIP_NO_BINARY_FOR_GPU,
     HIP_NO_KERNEL_IMAGE,
@@ -72,6 +74,7 @@ _WATCHDOG_TIMEOUT = re.compile(r"watchdog timeout", re.IGNORECASE)
 #: the replay client) that timed out: ``subprocess.TimeoutExpired: Command ['git', ...] timed out after N seconds``.
 _GIT_FETCH_TIMEOUT = re.compile(r"TimeoutExpired: Command \[['\"]git['\"],.*\] timed out after")
 _HUB_RATE_LIMITED = re.compile(HUB_RATE_LIMITED)
+_CONTEXT_OVERFLOW = re.compile(AIPERF_CONTEXT_OVERFLOW)
 #: A frame of aiter's JIT build in a stack dumped at the watchdog: py-spy writes ``build_module (aiter/jit/core.py:N)``, a
 #: Python traceback ``File ".../aiter/jit/core.py", line N, in build_module``.
 _JIT_BUILD_FRAME = re.compile(r"\bbuild_module\b.*\baiter[/.]jit[/.]core\b|\baiter[/.]jit[/.]core\b.*\bbuild_module\b")
@@ -210,6 +213,18 @@ def hub_rate_limited(text: str) -> str | None:
     """The line that says the Hugging Face Hub refused a download for the rate limit, once the client's retries were spent:
     a limit of the egress address, which no candidate can cause."""
     return _last_matching(text, lambda line: bool(_HUB_RATE_LIMITED.search(line)))
+
+
+def warmup_context_overflow(text: str) -> str | None:
+    """The line of the AgentX client's warmup abort whose request the server refused as longer than the context it
+    serves. Only the error the patched client logs after :data:`WARMUP_ERROR_PREFIX` is read: the server's refusal, not
+    any line that mentions a context length."""
+
+    def refused(line: str) -> bool:
+        _, prefix, error = line.partition(WARMUP_ERROR_PREFIX)
+        return bool(prefix) and bool(_CONTEXT_OVERFLOW.search(error))
+
+    return _last_matching(text, refused)
 
 
 def terminal_error(text: str) -> str | None:

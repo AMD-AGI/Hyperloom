@@ -24,6 +24,7 @@ from hyperloom.common.outside_facts.component_layout import ComponentLayoutSpec
 from hyperloom.common.outside_facts.rule_pack import default_pack
 
 __all__ = [
+    "AIPERF_CONTEXT_OVERFLOW",
     "AIPERF_ERROR_CLASS_KEY",
     "AIPERF_ERROR_KEY",
     "AIPERF_EXPORT_DIR",
@@ -283,6 +284,7 @@ AIPERF_PROFILING_PHASE = _aiperf_export["profiling_phase"]
 AIPERF_INVALID_REPLY_ERROR = _PACK.names("aiperf_invalid_reply", "error_class")["error_class"]
 
 HUB_RATE_LIMITED = _PACK.pattern("hub_rate_limited")
+AIPERF_CONTEXT_OVERFLOW = _PACK.pattern("aiperf_context_overflow")
 
 
 def spaced(phrase: str) -> str:

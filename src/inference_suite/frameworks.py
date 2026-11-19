@@ -101,6 +101,8 @@ class FrameworkFacts:
     ``parser_source`` is Python source defining ``_build_parser()``, run in the serving interpreter so an argv is
     judged by the parser that would refuse it; ``None`` when no server parser can be reached. ``metrics_flag`` is the
     switch without which the server serves no ``/metrics``; ``None`` when it serves them by default.
+    ``ready_timeout_env`` is the variable, in seconds, after which the server gives up on its own start and exits;
+    ``None`` when it waits for its start without a limit of its own.
     """
 
     kind: FrameworkKind
@@ -111,6 +113,7 @@ class FrameworkFacts:
     data_parallel: DataParallelFlag | None = None
     parser_source: str | None = None
     metrics_flag: str | None = None
+    ready_timeout_env: str | None = None
 
     def cards(self, tp: int, args: Sequence[str]) -> int:
         """The GPUs a launch at ``tp`` running ``args`` occupies: ``tp`` for each data-parallel replica that holds
@@ -198,6 +201,9 @@ _FACTS: dict[Framework, FrameworkFacts] = {
         data_parallel=DataParallelFlag(("--data-parallel-size", "--dp-size"), shares_tp=("--enable-dp-attention",)),
         parser_source=_SGLANG_PARSER_SOURCE,
         metrics_flag="--enable-metrics",
+        # The warmup request it sends once its HTTP server is up; past it the server kills itself before it reports
+        # ready. Unset (-1) means 600 s.
+        ready_timeout_env="SGLANG_WARMUP_TIMEOUT",
     ),
     Framework.VLLM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
@@ -208,6 +214,9 @@ _FACTS: dict[Framework, FrameworkFacts] = {
         expert_parallel=ExpertParallelFlag(_VLLM_STYLE_EP_SWITCH, (_VLLM_STYLE_EP_SWITCH, "-ep"), False),
         data_parallel=DataParallelFlag(("--data-parallel-size", "-dp")),
         parser_source=_VLLM_PARSER_SOURCE,
+        # How long the frontend waits for the engine cores to report ready (600 s unset), the Rust frontend's
+        # ``engine_ready_timeout_secs`` included.
+        ready_timeout_env="VLLM_ENGINE_READY_TIMEOUT_S",
     ),
     Framework.ATOM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
