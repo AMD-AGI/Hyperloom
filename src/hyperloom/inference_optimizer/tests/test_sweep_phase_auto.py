@@ -31,6 +31,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.kernel.patch_lifecycle import lifecycle_complete
 from hyperloom.orchestrator.phases import machine_state
+from hyperloom.orchestrator.phases import phase_transitions
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 from .conftest import seed_kernel_keep
@@ -913,7 +914,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     assert coord.shared_state.last_conc_sweep["status"] == "failed"
     assert coord.shared_state.last_conc_sweep["skip_reason"] == "enqueue_failed"
     assert coord.shared_state.save_count >= 1
-    exit_reason, _ = machine_state._sweep_exit({"sweep_result": coord.shared_state.last_conc_sweep})
+    exit_reason, _ = phase_transitions._sweep_exit({"sweep_result": coord.shared_state.last_conc_sweep})
     assert exit_reason == "sweep_failed"
 
 

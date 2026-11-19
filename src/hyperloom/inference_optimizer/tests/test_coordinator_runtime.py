@@ -49,6 +49,7 @@ from hyperloom.inference_optimizer.session.session_paths import target_baseline_
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from ._dispatch_helpers import pump_until_settled
 from .conftest import seed_pending_critic_proposal
+from hyperloom.orchestrator.phases import phase_predicates, phase_transitions
 
 
 async def _immediately(payload: dict) -> dict:
@@ -2217,7 +2218,6 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
 @pytest.mark.asyncio
 async def test_handle_unpromotable_profile_clears_the_initial_analysis_gate(session_dir):
     """With enable_roofline off the initial analysis is a profile; a failed one must release PRELUDE."""
-    from hyperloom.orchestrator.phases import machine_state as phase_state
 
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
@@ -2231,7 +2231,7 @@ async def test_handle_unpromotable_profile_clears_the_initial_analysis_gate(sess
         )
         assert c.shared_state.auto_roofline_pending_task_id == ""
         assert (
-            phase_state.compute_next_phase(c.shared_state, flags=phase_state.PhaseFlags(kernel_enabled=True))
+            phase_transitions.compute_next_phase(c.shared_state, flags=phase_predicates.PhaseFlags(kernel_enabled=True))
             is not None
         )
 
@@ -2265,7 +2265,6 @@ async def test_a_phase_settles_the_initial_analysis_gate_when_its_task_ended_unb
     Both phases release the marker, except that PRELUDE asks again for an analysis that was cancelled
     before it ran and holds on that one instead.
     """
-    from hyperloom.orchestrator.phases import machine_state as phase_state
 
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
@@ -2282,7 +2281,10 @@ async def test_a_phase_settles_the_initial_analysis_gate_when_its_task_ended_unb
         assert c.shared_state.auto_roofline_pending_task_id == task.task_id
 
         await c.tasks.transition(task.task_id, ending)
-        assert phase_state.compute_next_phase(c.shared_state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
+        assert (
+            phase_transitions.compute_next_phase(c.shared_state, flags=phase_predicates.PhaseFlags(kernel_enabled=True))
+            is None
+        )
         await c.phase_machine.advance_phase_if_needed()
         marker = c.shared_state.auto_roofline_pending_task_id
         if asks_again:

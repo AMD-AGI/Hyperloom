@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.phases import phase_predicates, phase_transitions
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_VOCAB, SharedState, is_valid_escalate_hint
 
 
@@ -42,19 +43,19 @@ def test_normalize_budget_pct_defaults_and_filters() -> None:
 def test_now_unix_injected() -> None:
     state = SharedState()
     state._now_unix = lambda: 1234.0  # type: ignore[attr-defined]
-    assert ps._now_unix(state) == 1234.0
+    assert ps.state_now_unix(state) == 1234.0
 
 
 def test_phase_started_unix_bad_value() -> None:
-    assert ps._phase_started_unix(SharedState(phase_started_unix="bad")) == 0.0
-    assert ps._phase_started_unix(SharedState(phase_started_unix=10.0)) == 10.0
+    assert ps.phase_started_unix(SharedState(phase_started_unix="bad")) == 0.0
+    assert ps.phase_started_unix(SharedState(phase_started_unix=10.0)) == 10.0
 
 
 def test_pending_escalate_hint() -> None:
     valid = next(iter(ESCALATE_HINT_VOCAB))
-    assert ps._pending_escalate_hint(SharedState(pending_escalate_hint=valid)) == valid
-    assert ps._pending_escalate_hint(SharedState(pending_escalate_hint="garbage")) == ""
-    assert ps._pending_escalate_hint(SharedState(pending_escalate_hint="")) == ""
+    assert phase_predicates._pending_escalate_hint(SharedState(pending_escalate_hint=valid)) == valid
+    assert phase_predicates._pending_escalate_hint(SharedState(pending_escalate_hint="garbage")) == ""
+    assert phase_predicates._pending_escalate_hint(SharedState(pending_escalate_hint="")) == ""
 
 
 def test_max_minutes_coercion() -> None:
@@ -172,7 +173,7 @@ def test_an_unarmed_anchor_between_legs_is_not_charged_for_the_idle_gap() -> Non
     ],
 )
 def test_post_prelude_target(optimize: bool, kernel: bool, target: str) -> None:
-    assert ps._post_prelude_target(optimize_enabled=optimize, kernel_enabled=kernel) == target
+    assert phase_transitions._post_prelude_target(optimize_enabled=optimize, kernel_enabled=kernel) == target
 
 
 def test_make_history_row() -> None:

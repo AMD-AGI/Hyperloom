@@ -33,6 +33,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
 )
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator, RunOptions
 from hyperloom.orchestrator.phases import machine_state
+from hyperloom.orchestrator.phases import phase_transitions
 from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.phases.close import (
     _CLOSE_STEP_WAIT_CEILING_SEC,
@@ -971,7 +972,7 @@ async def _advance_into_close(coord, monkeypatch, reason: str) -> None:
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
     monkeypatch.setattr(
-        machine_state,
+        phase_transitions,
         "compute_next_phase",
         lambda *_a, **_k: (machine_state.PHASE_CLOSE, reason, {"terminal": True}),
     )
@@ -1123,7 +1124,7 @@ class TestEveryTerminalReachesAWrittenReport:
                 "CLOSE",
                 transition_reason,
             )
-            replay = machine_state.replay_next_phase(transition["evidence"]["predicate_inputs"])
+            replay = phase_transitions.replay_next_phase(transition["evidence"]["predicate_inputs"])
             assert replay[:2] == ("CLOSE", transition_reason)
             assert transition["ts_unix"] == transition["evidence"]["predicate_inputs"]["now_unix"]
             assert state.pending_escalate_hint == ""
@@ -1202,7 +1203,7 @@ class TestEveryTerminalReachesAWrittenReport:
             assert state.stop_reason == "time_exhausted"
             transition = state.phase_history[-1]
             assert transition["reason"] == "time_exhausted"
-            assert machine_state.replay_next_phase(transition["evidence"]["predicate_inputs"])[:2] == (
+            assert phase_transitions.replay_next_phase(transition["evidence"]["predicate_inputs"])[:2] == (
                 "CLOSE",
                 "time_exhausted",
             )

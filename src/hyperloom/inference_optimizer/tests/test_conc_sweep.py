@@ -1118,7 +1118,8 @@ def test_record_conc_sweep_writes_last_conc_sweep():
 
 def test_sweep_exits_based_on_ladder_status():
     """The concurrency ladder is the only sweep, so its status is the phase's."""
-    from hyperloom.orchestrator.phases.machine_state import PhaseFlags, compute_next_phase
+    from hyperloom.orchestrator.phases.phase_predicates import PhaseFlags
+    from hyperloom.orchestrator.phases.phase_transitions import compute_next_phase
 
     def _State(last_conc_sweep=None):
         return SharedState(
@@ -1155,7 +1156,7 @@ def test_sweep_exits_based_on_ladder_status():
 
 def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
     """``was_skipped`` covers both outcomes, so the row must carry what tells them apart."""
-    from hyperloom.orchestrator.phases.machine_state import compute_next_phase
+    from hyperloom.orchestrator.phases.phase_transitions import compute_next_phase
 
     state = SharedState(
         phase="SWEEP",
@@ -2435,7 +2436,8 @@ def test_a_cancelled_sweep_stops_the_ladder_and_is_not_failed(
     """
     from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
     from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
-    from hyperloom.orchestrator.phases.machine_state import PhaseFlags, compute_next_phase
+    from hyperloom.orchestrator.phases.phase_predicates import PhaseFlags
+    from hyperloom.orchestrator.phases.phase_transitions import compute_next_phase
 
     teardown_log: list[tuple] = []
     _patch_lifecycle_eligible(monkeypatch, teardown_log)
@@ -2505,7 +2507,8 @@ def test_the_sweep_phase_budget_waits_for_the_sweep_it_granted():
     enqueued on entry was granted the rest of the session clock. With no result yet, the phase waits for the grant;
     once the grant has run out, or the sweep has landed, the ordinary exits apply again.
     """
-    from hyperloom.orchestrator.phases.machine_state import PhaseFlags, compute_next_phase
+    from hyperloom.orchestrator.phases.phase_predicates import PhaseFlags
+    from hyperloom.orchestrator.phases.phase_transitions import compute_next_phase
 
     now = 1_800_000_000.0
 
