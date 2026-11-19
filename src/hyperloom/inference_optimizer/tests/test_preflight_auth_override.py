@@ -30,6 +30,7 @@ from hyperloom.inference_optimizer.cli import framework_probe as cli_framework_p
 from hyperloom.inference_optimizer.cli import model_catalog
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
 from hyperloom.inference_optimizer.cli import preflight_env as cli_preflight_env
+from hyperloom.inference_optimizer.cli import ray_provision
 from hyperloom.inference_optimizer.cli import session_setup
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 
@@ -1190,14 +1191,14 @@ def test_ensure_python_sdks_installs_missing_claude_agent_sdk(monkeypatch, capsy
 def test_ensure_ray_skips_when_smoke_passes(monkeypatch, capsys):
     """Ray smoke passes -> no pip install fires (probe uses the interpreter)."""
     runner = _RecordingRun([_Completed(returncode=0)])
-    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
+    monkeypatch.setattr(ray_provision.subprocess, "run", runner)
 
-    cli_preflight._ensure_ray("/opt/venv/bin/python", [])
+    ray_provision._ensure_ray("/opt/venv/bin/python", [])
 
     assert len(runner.calls) == 1
     probe = runner.calls[0]
     # Probe validates Ray with the SAME interpreter, not shutil.which on PATH.
-    assert probe[0:2] == ["/opt/venv/bin/python", str(cli_preflight._RAY_SMOKE_SCRIPT)]
+    assert probe[0:2] == ["/opt/venv/bin/python", str(ray_provision._RAY_SMOKE_SCRIPT)]
     assert "ray OK" in capsys.readouterr().out
 
 
@@ -1210,9 +1211,9 @@ def test_ensure_ray_installs_when_smoke_fails(monkeypatch, capsys):
             _Completed(returncode=0),
         ]
     )
-    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
+    monkeypatch.setattr(ray_provision.subprocess, "run", runner)
 
-    cli_preflight._ensure_ray("/opt/venv/bin/python", ["--break-system-packages"])
+    ray_provision._ensure_ray("/opt/venv/bin/python", ["--break-system-packages"])
 
     assert len(runner.calls) == 3
     install_call = runner.calls[1]

@@ -38,8 +38,8 @@ from .launch_shape import (
     _resolve_workload_knobs,
     _seed_env_from_resumed_state,
 )
+from .install_event import _persist_install_event
 from .model_gate import _record_resumed_model_gate
-from .preflight import _persist_install_event
 from .session_setup import (
     PartitionRequest,
     _SessionStart,

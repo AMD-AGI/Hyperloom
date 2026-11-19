@@ -131,10 +131,9 @@ from .custom_specialist import (
 from .parser import (
     _build_parser as _build_parser,
 )
+from .install_event import _mark_pending_install_event_failed, _persist_install_event
 from .preflight import (
     _check_gfx_arch_resolvable,
-    _mark_pending_install_event_failed,
-    _persist_install_event,
     _preflight as _preflight,
 )
 from .session_resume import _resume_session
