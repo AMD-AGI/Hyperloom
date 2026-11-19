@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,9 @@ from kernelforge.workflows.rewrite_controller import (
     TRACE_EVIDENCE_FILENAME,
     WORKLOAD_FILENAME,
 )
+
+# Session-scoped, not cycle-scoped: the verdicts that matter are the ones a later macro cycle must not repeat.
+E2E_REJECTIONS_FILENAME = "e2e-rejections.json"
 
 
 def _display(value: Any) -> str:
@@ -109,10 +113,112 @@ def _bullet_section(heading: str, *body: str) -> list[str]:
     return ["", heading, "", *([f"- {line}" for line in body if line] or ["- not available"])]
 
 
+def _rejections_path(session_dir: str | Path) -> Path:
+    """Where one session keeps the operators its end-to-end gate already turned down."""
+    return Path(session_dir) / "kernel-agent" / E2E_REJECTIONS_FILENAME
+
+
+def load_e2e_rejections(session_dir: str | Path) -> list[dict[str, Any]]:
+    """Read the session's end-to-end rejection ledger; an absent or unreadable ledger is empty."""
+    try:
+        rows = json.loads(_rejections_path(session_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def record_e2e_rejections(
+    session_dir: str | Path,
+    integration: Mapping[str, Any] | None,
+    *,
+    macro_cycle: int = 0,
+) -> int:
+    """Append every patch the end-to-end gate reverted to the session's rejection ledger.
+
+    A forge patch can clear the in-session speed gate and still lose end to end -- the
+    microbenchmark measures one operator, the gate measures the served workload. The
+    Controller re-analyses from the sealed baseline every macro cycle and carries no
+    memory of that verdict, so without this ledger the next cycle re-publishes the same
+    rewrite. Returns the number of rows written.
+    """
+    rows = [
+        row
+        for row in (integration or {}).get("results") or ()
+        if isinstance(row, dict) and str(row.get("status") or "").startswith("reverted_")
+    ]
+    if not rows:
+        return 0
+    ledger = {
+        str(row.get("operator_id")): row
+        for row in load_e2e_rejections(session_dir)
+        if str(row.get("operator_id") or "")
+    }
+    for row in rows:
+        operator_id = str(row.get("operator_id") or "")
+        if not operator_id:
+            continue
+        ledger[operator_id] = {
+            "operator_id": operator_id,
+            "macro_cycle": int(macro_cycle),
+            "status": str(row.get("status") or ""),
+            "reason": str(row.get("reason") or ""),
+            "e2e_gain_pct": row.get("gain_pct"),
+            "e2e_tput": row.get("new_tput"),
+            "best_commit": str(row.get("best_commit") or ""),
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+    path = _rejections_path(session_dir)
+    atomic_write_text(
+        path,
+        json.dumps(list(ledger.values()), indent=2, sort_keys=True) + "\n",
+        options=WriteOptions(make_parents=True, fsync=True, fsync_dir=True, mode=0o600),
+    )
+    return len(rows)
+
+
+def _rejection_section(rejections: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The handoff section that keeps a reverted rewrite from being published again."""
+    if not rejections:
+        return []
+    ordered = sorted(
+        rejections,
+        key=lambda row: abs(row.get("e2e_gain_pct") if isinstance(row.get("e2e_gain_pct"), (int, float)) else 0.0),
+        reverse=True,
+    )
+    bullets = []
+    for row in ordered:
+        gain = row.get("e2e_gain_pct")
+        tput = row.get("e2e_tput")
+        status = _display(row.get("status"))
+        if isinstance(gain, (int, float)):
+            tput_text = f" ({float(tput):.1f} tok/s)" if isinstance(tput, (int, float)) else ""
+            verdict = f"end-to-end {float(gain):+.2f}%{tput_text}, {status}"
+        else:
+            # No end-to-end number: the operator was excluded before integration, so its reason is
+            # the whole verdict and dropping it would leave the exclusion unjustified.
+            reason = _display(row.get("reason"))
+            verdict = f"excluded before integration, {status}" + (f" — {reason}" if reason else "")
+        bullets.append(
+            f"`{_display(row.get('operator_id'))}` — macro cycle {row.get('macro_cycle') or '?'}: {verdict}"
+        )
+    return [
+        *_bullet_section("## Operators Already Reverted By End-To-End Validation", *bullets),
+        "",
+        "Each operator above was excluded on a measured number, not a guess: either its patch",
+        "cleared the in-session speed gate and still made the full served workload slower, so its",
+        "microbenchmark gain did not survive the real batch, or its benchmark cases are so",
+        "launch-bound that no kernel-body rewrite can clear the gate at all. Do not re-publish",
+        "these operators: prefer an operator that is not listed. If one of them is the only viable",
+        "candidate, attack a different bottleneck and state in the plan what evidence contradicts",
+        "the verdict recorded here.",
+    ]
+
+
 def build_serving_context_md(
     state: Any,
     env_spec: Mapping[str, Any] | None = None,
     baselines: Mapping[str, Any] | None = None,
+    rejections: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """Render the framework, serving arguments, and environment overrides."""
     context = _workload_context(state)
@@ -155,6 +261,7 @@ def build_serving_context_md(
             "## Unset Environment Variables",
             *(f"`{_display(value)}`" for value in context.get("unset_envs") or ()),
         ),
+        *_rejection_section(rejections),
     ]
     return "\n".join(lines) + "\n"
 
@@ -252,12 +359,13 @@ def write_forge_handoff(
     handoff_dir: Path,
     env_spec: Mapping[str, Any] | None = None,
     baselines: Mapping[str, Any] | None = None,
+    rejections: Sequence[Mapping[str, Any]] = (),
 ) -> Path:
     """Atomically write one Forge handoff into ``handoff_dir`` and return it."""
     handoff_dir = Path(handoff_dir)
     documents = {
         WORKLOAD_FILENAME: build_workload_md(state),
-        SERVING_CONTEXT_FILENAME: build_serving_context_md(state, env_spec, baselines),
+        SERVING_CONTEXT_FILENAME: build_serving_context_md(state, env_spec, baselines, rejections),
         TRACE_EVIDENCE_FILENAME: build_trace_evidence_md(state),
     }
     for filename, text in documents.items():
@@ -273,5 +381,7 @@ __all__ = [
     "build_serving_context_md",
     "build_trace_evidence_md",
     "build_workload_md",
+    "load_e2e_rejections",
+    "record_e2e_rejections",
     "write_forge_handoff",
 ]

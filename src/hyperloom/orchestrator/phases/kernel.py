@@ -781,7 +781,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
                 )
         except (OSError, ValueError, subprocess.SubprocessError):
             log.exception("KERNEL entry: sealing the campaign baseline failed")
-        from ..kernel.forge_handoff import write_forge_handoff
+        from ..kernel.forge_handoff import load_e2e_rejections, write_forge_handoff
 
         env_spec = self._coord.writeback.build_env_spec()
         handoff_dir = write_forge_handoff(
@@ -789,6 +789,9 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             env_spec=env_spec,
             handoff_dir=handoff_dir,
             baselines=baselines,
+            # The Controller re-analyses from the sealed baseline every macro cycle, so the
+            # verdicts of the previous ones only reach it through this document.
+            rejections=load_e2e_rejections(self.session_dir),
         )
         log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
         await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
@@ -875,6 +878,28 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             },
         )
 
+    def _remember_e2e_rejections(self, result: dict[str, Any]) -> None:
+        """Persist every patch the end-to-end gate reverted, so the next cycle does not re-publish it.
+
+        ``reverted_e2e_failed`` is neither a failure of the Controller nor of the patch's own
+        correctness -- the rewrite did what it claimed and the served workload still got slower --
+        so it earns no action-failure record. It does have to reach the next handoff, because the
+        Controller starts every macro cycle from the sealed baseline with no memory of it.
+        """
+        from ..kernel.forge_handoff import record_e2e_rejections
+
+        try:
+            written = record_e2e_rejections(
+                self.session_dir,
+                result.get("integration"),
+                macro_cycle=int(self.shared_state.macro_cycle or 0),
+            )
+        except (OSError, ValueError):
+            log.exception("KERNEL: recording the end-to-end rejections failed")
+            return
+        if written:
+            log.info("KERNEL: remembered %d operator(s) reverted by end-to-end validation", written)
+
     async def _run_kernel_rewrite_controller(
         self, handoff_dir: Path, output_dir: Path, baselines: dict[str, object]
     ) -> None:
@@ -904,6 +929,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         self._record_kernel_rewrite_controller_timeline(result)
         self.shared_state.kernel_rewrite_controller_result = result
         self._file_controller_integration_failure(result)
+        self._remember_e2e_rejections(result)
         self.shared_state.save(self.session_dir)
         # The summary rides a ``response`` message the inbox dumps raw once.
         await self.bus.append_and_seq(
