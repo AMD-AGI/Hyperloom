@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown import schema
+from hyperloom.inference_optimizer.breakdown import schema_conc_sweep
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
 from hyperloom.inference_optimizer.breakdown.recorder.sections import CONC_SWEEP_EVENT_SECTIONS
 from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
@@ -922,27 +922,27 @@ def test_every_recorded_block_is_the_block_the_schema_declares(_bound_session):
     ceiling = ext["roofline_ceiling"]
     blocks = {
         # ``superseded_sweeps`` is written only when a second sweep lands.
-        "ext": (set(ext) | {"superseded_sweeps"}, schema.V6ConcSweepExt),
-        "request": (set(ext["request"]), schema.V6ConcSweepRequest),
-        "workload": (set(ext["workload"]), schema.V6ConcSweepWorkload),
-        "input_anchor": (set(ext["input_anchor"]), schema.V6ConcSweepInputAnchor),
-        "plan": (set(ext["plan"]), schema.V6ConcSweepPlan),
-        "budget": (set(ext["budget"]), schema.V6ConcSweepBudget),
-        "environment": (set(ext["environment"]), schema.V6ConcSweepEnvironment),
-        "artifacts": (set(ext["artifacts"]), schema.V6ConcSweepArtifacts),
-        "result": (set(ext["result"]), schema.V6ConcSweepResult),
-        "runtime": (set(ext["runtime"]), schema.V6ConcSweepRuntime),
-        "roofline_ceiling": (set(ceiling), schema.V6ConcSweepCeiling),
-        "roofline_ceiling.model_meta": (set(ceiling["model_meta"]), schema.V6ConcSweepCeilingModel),
-        "roofline_ceiling.rows": (set(ceiling["rows"][0]), schema.V6ConcSweepCeilingRow),
-        "arm": (set(arm), schema.V6ConcSweepArm),
-        "arm.lifecycle": (set(arm["lifecycle"]), schema.V6ConcSweepLifecycle),
-        "arm.grid": (set(arm["grid"][0]), schema.V6ConcSweepRung),
-        "arm.boot": (set(arm["boot"]), schema.V6ConcSweepBoot),
-        "arm.boot.attempts": (set(arm["boot"]["attempts"][0]), schema.V6ConcSweepBootAttempt),
-        "arm.points": (set(arm["points"][0]), schema.V6ConcSweepPoint),
-        "comparison": (set(ext["comparison"][0]), schema.V6ConcSweepPair),
-        "baseline.refused": (set(ext["arms"][ARM_BASELINE]["refused"]), schema.V6ConcSweepRefused),
+        "ext": (set(ext) | {"superseded_sweeps"}, schema_conc_sweep.V6ConcSweepExt),
+        "request": (set(ext["request"]), schema_conc_sweep.V6ConcSweepRequest),
+        "workload": (set(ext["workload"]), schema_conc_sweep.V6ConcSweepWorkload),
+        "input_anchor": (set(ext["input_anchor"]), schema_conc_sweep.V6ConcSweepInputAnchor),
+        "plan": (set(ext["plan"]), schema_conc_sweep.V6ConcSweepPlan),
+        "budget": (set(ext["budget"]), schema_conc_sweep.V6ConcSweepBudget),
+        "environment": (set(ext["environment"]), schema_conc_sweep.V6ConcSweepEnvironment),
+        "artifacts": (set(ext["artifacts"]), schema_conc_sweep.V6ConcSweepArtifacts),
+        "result": (set(ext["result"]), schema_conc_sweep.V6ConcSweepResult),
+        "runtime": (set(ext["runtime"]), schema_conc_sweep.V6ConcSweepRuntime),
+        "roofline_ceiling": (set(ceiling), schema_conc_sweep.V6ConcSweepCeiling),
+        "roofline_ceiling.model_meta": (set(ceiling["model_meta"]), schema_conc_sweep.V6ConcSweepCeilingModel),
+        "roofline_ceiling.rows": (set(ceiling["rows"][0]), schema_conc_sweep.V6ConcSweepCeilingRow),
+        "arm": (set(arm), schema_conc_sweep.V6ConcSweepArm),
+        "arm.lifecycle": (set(arm["lifecycle"]), schema_conc_sweep.V6ConcSweepLifecycle),
+        "arm.grid": (set(arm["grid"][0]), schema_conc_sweep.V6ConcSweepRung),
+        "arm.boot": (set(arm["boot"]), schema_conc_sweep.V6ConcSweepBoot),
+        "arm.boot.attempts": (set(arm["boot"]["attempts"][0]), schema_conc_sweep.V6ConcSweepBootAttempt),
+        "arm.points": (set(arm["points"][0]), schema_conc_sweep.V6ConcSweepPoint),
+        "comparison": (set(ext["comparison"][0]), schema_conc_sweep.V6ConcSweepPair),
+        "baseline.refused": (set(ext["arms"][ARM_BASELINE]["refused"]), schema_conc_sweep.V6ConcSweepRefused),
     }
 
     assert {name: recorded ^ set(declared.__annotations__) for name, (recorded, declared) in blocks.items()} == {

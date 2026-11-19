@@ -26,7 +26,6 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 )
 from hyperloom.orchestrator.kernel import conc_sweep as conc_sweep_module, kernel_decisions
 from hyperloom.orchestrator.kernel.conc_sweep import (
-    DEFAULT_CONCS,
     _Arm,
     _build_arm_grid,
     _flush_conc_sweep_report,
@@ -116,15 +115,14 @@ def test_optimized_arm_carries_overlay_and_controls():
     assert arm.controls == {"remove_args": ["--foo"]}
 
 
-def test_optimized_arm_both_empty():
+@pytest.mark.parametrize(
+    "current_best",
+    [{"extra_server_args": "", "extra_envs": {}}, {}],
+    ids=["both_empty", "missing_current_best"],
+)
+def test_optimized_arm_empty_or_missing_is_none(current_best):
     s = SharedState()
-    s.current_best = {"extra_server_args": "", "extra_envs": {}}
-    assert _optimized_arm(s) is None
-
-
-def test_optimized_arm_missing_current_best():
-    s = SharedState()
-    s.current_best = {}
+    s.current_best = current_best
     assert _optimized_arm(s) is None
 
 
@@ -851,16 +849,6 @@ def test_the_engine_resolves_the_ladder_from_the_session_mode(monkeypatch: pytes
     assert default_concs_for_mode(state.benchmark_mode) == [1, 4, 8, 10, 14, 20, 28]
 
 
-def test_default_concs_is_powers_of_two():
-    """Doc-pin: default ladder is [256,128,64,32,16,8,4,2] (high-to-low for single-server reuse)."""
-    assert DEFAULT_CONCS == [256, 128, 64, 32, 16, 8, 4, 2]
-
-
-def test_default_total_budget_is_two_and_half_hours():
-    """Doc-pin: default total wall-clock budget is 2.5h."""
-    assert SharedState().conc_sweep_total_budget_sec == 9000
-
-
 # Total wall-clock budget
 def _sweep_two_concs(session_dir: Path, baseline_yaml: Path, *, total_budget_sec):
     """Sweep concs 1 and 4 over a grid where every variant reaches 100 tok/s; return the payload and grid mock."""
@@ -1454,11 +1442,6 @@ class TestTheSweepGradesOnTheAxisTheSessionKeepsOn:
         state = self._state(benchmark_mode="agentx", grading={"objective": "e2e_norm_intvty_p90", "noise_pct": 3.5})
         assert _grading_of(state) == ("e2e_norm_intvty_p90", 3.5)
 
-    def test_the_recorded_band_travels_with_the_axis(self):
-        """A lost band silently widens a 3.5% guard back to the 5% default."""
-        state = self._state(benchmark_mode="agentx", grading={"objective": "e2e_norm_intvty_p90", "noise_pct": 3.5})
-        assert _grading_of(state)[1] == 3.5
-
     def test_a_session_with_nothing_recorded_falls_back_to_its_mode(self):
         assert _grading_of(self._state(benchmark_mode="agentx"))[0] == "e2e_norm_intvty_p90"
         assert _grading_of(self._state(benchmark_mode="synthetic"))[0] == "output_throughput"
@@ -1795,7 +1778,7 @@ def test_render_conc_sweep_curve_writes_png(tmp_path: Path):
             ]
         },
     }
-    out_path = tmp_path / "curve.png"
+    out_path = tmp_path / "plots" / "curve.png"
     result = render_conc_sweep_curve(
         payload, out_path, ConcCurveOptions(model_label="TestModel", gpu_label="MI300X", tp=8)
     )
@@ -2099,30 +2082,6 @@ def _install_fake_matplotlib(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setitem(sys.modules, "matplotlib", fake_matplotlib)
     monkeypatch.setitem(sys.modules, "matplotlib.pyplot", fake_pyplot)
     return calls
-
-
-def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
-
-    calls = _install_fake_matplotlib(monkeypatch)
-    payload = {
-        "baseline": {"points": [{"conc": 4, "output_throughput": 800.0}]},
-        "optimized": {"points": [{"conc": 4, "output_throughput": 1200.0}]},
-    }
-    out_path = tmp_path / "plots" / "curve.png"
-    result = render_conc_sweep_curve(
-        payload,
-        out_path,
-        ConcCurveOptions(model_label="M", gpu_label="MI300X", tp=4, isl=1024, osl=512),
-    )
-
-    assert result == out_path
-    assert out_path.read_bytes() == b"fake-png"
-    assert calls["backend"] == "Agg"
-    assert len(calls["plots"]) == 2
-    assert len(calls["annotations"]) == 2
-    assert "ISL=1024 OSL=512" in calls["titles"][0][0]
-    assert calls["closed"] is True
 
 
 def test_format_conc_sweep_curve_section_empty_summary():

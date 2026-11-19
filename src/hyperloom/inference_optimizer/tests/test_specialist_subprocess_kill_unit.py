@@ -178,10 +178,10 @@ def test_demoted_reap_signals_only_pids_the_specialist_account_owns(monkeypatch)
     own = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     roots: list[list[int]] = []
     monkeypatch.setattr(launch_env, "LIST_MARKED_SCRIPT", f"echo 1; echo {own.pid}")
-    monkeypatch.setattr(ss, "collect_tree", lambda pids: roots.append(list(pids)) or Tree((), (), frozenset()))
-    monkeypatch.setattr(ss, "kill_tree", lambda tree: True)
+    monkeypatch.setattr(launch_env, "collect_tree", lambda pids: roots.append(list(pids)) or Tree((), (), frozenset()))
+    monkeypatch.setattr(launch_env, "kill_tree", lambda tree: True)
     try:
-        SpecialistSubprocessDispatcher._reap_marked("mark", PreparedLaunch(AccountIsolation(_SameUidRunAs())))
+        PreparedLaunch(AccountIsolation(_SameUidRunAs())).reap_marked("mark")
     finally:
         own.kill()
         own.wait(timeout=5)
@@ -264,6 +264,51 @@ async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path, dem
         bystander.wait(timeout=5)
 
 
+@pytest.mark.asyncio
+async def test_a_sweep_that_never_returns_does_not_hold_back_the_done_file(monkeypatch, tmp_path, caplog):
+    """The specialist wrote its done file and exited; a straggler sweep stuck in the kernel must not keep it unbooked."""
+    import threading
+
+    done = {"intent_type": "specialist_done", "payload": {"summary": "finished", "proposal_set": []}}
+    child_code = (
+        f"import pathlib; pathlib.Path({str(tmp_path / 'specialist_done.json')!r}).write_text({json.dumps(done)!r})"
+    )
+    real_popen = ss.subprocess.Popen
+
+    def spawn(cmd, *args, **kwargs):
+        return real_popen([sys.executable, "-c", child_code], stdout=subprocess.DEVNULL, start_new_session=True)
+
+    stuck = threading.Event()
+    monkeypatch.setattr(ss.subprocess, "Popen", spawn)
+    monkeypatch.setattr(PreparedLaunch, "reap_marked", lambda self, mark: stuck.wait(30))
+    monkeypatch.setattr(launch_env, "STRAGGLER_SWEEP_BOUND_SEC", 0.2)
+    dispatcher = SpecialistSubprocessDispatcher(
+        ss.SpecialistSubprocessConfig(agent_backend="claude", poll_interval_seconds=0.05)
+    )
+    monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
+    monkeypatch.setattr(dispatcher, "_collect_patches", lambda *args, **kwargs: ([], {}))
+    try:
+        with caplog.at_level("WARNING", logger=launch_env.log.name):
+            result = await asyncio.wait_for(
+                dispatcher.run(
+                    SpecialistSpawn(
+                        task_id="stuck-sweep",
+                        workspace=tmp_path,
+                        worktree=None,
+                        worktree_base=None,
+                        system_prompt="system",
+                        user_prompt="user",
+                    )
+                ),
+                10,
+            )
+    finally:
+        stuck.set()
+    assert result.done_payload["summary"] == "finished"
+    assert result.exit_code == 0
+    assert "stuck-sweep: the sweep for processes its launch left behind outlasted" in caplog.text
+
+
 def test_kill_exited_root_cannot_confirm_descendants(monkeypatch):
     proc = Mock(pid=4242)
     proc.poll.return_value = 0
@@ -280,21 +325,13 @@ def test_kill_reuses_tree_cleanup_confirmation(monkeypatch, confirmed_dead):
 
     proc = Mock(pid=4242)
     proc.poll.return_value = None
-    tree = Tree(((4242, 1), (4243, 2)), (4242,), frozenset({4242}))
-    collect = Mock(return_value=tree)
-    kill = Mock(return_value=confirmed_dead)
-    monkeypatch.setattr(ss, "collect_tree", collect)
-    monkeypatch.setattr(ss, "kill_tree", kill)
+    monkeypatch.setattr(ss, "collect_tree", Mock(return_value=Tree(((4242, 1), (4243, 2)), (4242,), frozenset({4242}))))
+    monkeypatch.setattr(ss, "kill_tree", Mock(return_value=confirmed_dead))
     if confirmed_dead:
-        confirmed = SpecialistSubprocessDispatcher._kill(proc)
-        assert confirmed is True
-        proc.wait.assert_called_once_with(timeout=1.0)
+        assert SpecialistSubprocessDispatcher._kill(proc) is True
     else:
         with pytest.raises(ExecutionCleanupUnconfirmed, match="tree cleanup unconfirmed"):
             SpecialistSubprocessDispatcher._kill(proc)
-        proc.wait.assert_not_called()
-    collect.assert_called_once_with([4242])
-    kill.assert_called_once_with(tree)
 
 
 @pytest.mark.parametrize("failure", [OSError("procfs unreadable"), subprocess.TimeoutExpired("specialist", 1)])

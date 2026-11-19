@@ -37,10 +37,6 @@ def _parse(*argv):
     return _build_parser().parse_args(["optimize", "--model", "/tmp/m", *argv])
 
 
-def test_the_flag_is_absent_by_default(workspace):
-    assert _parse().session_dir is None
-
-
 def test_a_session_dir_below_the_workspace_is_accepted(workspace):
     assert _parse("--session-dir", str(workspace / "m" / "s1")).session_dir == workspace / "m" / "s1"
 

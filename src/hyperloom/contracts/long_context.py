@@ -40,7 +40,10 @@ from hyperloom.contracts._validate import (
 __all__ = [
     "CI_Z",
     "LONG_CONTEXT_COMPLETE",
+    "LONG_CONTEXT_HELD",
     "LONG_CONTEXT_INCOMPLETE",
+    "LONG_CONTEXT_REAL_ACCEPTANCE",
+    "LONG_CONTEXT_SERVERS",
     "LONG_CONTEXT_STATUSES",
     "PROMPT_ERROR",
     "PROMPT_NOT_RUN",
@@ -62,6 +65,11 @@ __all__ = [
 LONG_CONTEXT_COMPLETE = "complete"
 LONG_CONTEXT_INCOMPLETE = "incomplete"
 LONG_CONTEXT_STATUSES = (LONG_CONTEXT_COMPLETE, LONG_CONTEXT_INCOMPLETE)
+#: The server a check asked: the test's own measured server, held up past its rounds, or a server booted after them
+#: from the measured launch with the golden layer's acceptance simulation taken out, so its text is the model's own.
+LONG_CONTEXT_HELD = "held"
+LONG_CONTEXT_REAL_ACCEPTANCE = "real_acceptance"
+LONG_CONTEXT_SERVERS = (LONG_CONTEXT_HELD, LONG_CONTEXT_REAL_ACCEPTANCE)
 #: What became of one prompt: answered, its request failed, or it was never sent.
 PROMPT_OK = "ok"
 PROMPT_ERROR = "error"
@@ -219,7 +227,8 @@ class LongContextResult:
     not read states no prompt: ``n`` is 0 and ``score`` is ``None``, never a score of zero. ``length`` is the prompts' token
     length, ``served_context`` the context the launch serves when it states one, ``seconds`` the time the questions took and
     ``prefill_tokens`` the prompt tokens of the answered prompts. ``outputs`` is where the raw answers are in the bundle.
-    ``bound`` is the context bound the prompt set was built under (``None`` for a set that records none).
+    ``bound`` is the context bound the prompt set was built under (``None`` for a set that records none). ``server`` is
+    the server the check asked (``LONG_CONTEXT_SERVERS``); a document without it is a ``held`` check.
     """
 
     status: str
@@ -240,8 +249,11 @@ class LongContextResult:
     outputs: str = ""
     root: LongContextRoot | None = None
     bound: int | None = None
+    server: str = LONG_CONTEXT_HELD
 
     def __post_init__(self) -> None:
+        if self.server not in LONG_CONTEXT_SERVERS:
+            raise MeasurementError(f"server must be one of {LONG_CONTEXT_SERVERS}, got {self.server!r}")
         if self.root is not None and not isinstance(self.root, LongContextRoot):
             raise MeasurementError(f"root must be a LongContextRoot, got {self.root!r}")
         if self.status not in LONG_CONTEXT_STATUSES:
@@ -304,6 +316,7 @@ class LongContextResult:
             "outputs": self.outputs,
             **({} if self.root is None else {"root": self.root.to_document()}),
             **({} if self.bound is None else {"bound": self.bound}),
+            **({} if self.server == LONG_CONTEXT_HELD else {"server": self.server}),
         }
 
     @classmethod
@@ -318,6 +331,7 @@ class LongContextResult:
             prompts=tuple(map(LongContextPrompt.from_document, _items(f.get("prompts"), "prompts"))),
             trigger=tuple(_items(f.get("trigger", ()), "trigger")),  # type: ignore[arg-type]
             root=None if f.get("root") is None else LongContextRoot.from_document(f.get("root")),
+            server=f.get("server", LONG_CONTEXT_HELD),  # type: ignore[arg-type]
             **{key: f.get(key) for key in scalars},  # type: ignore[arg-type]
         )
 

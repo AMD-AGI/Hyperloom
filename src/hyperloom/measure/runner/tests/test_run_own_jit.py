@@ -148,16 +148,16 @@ def test_a_jit_directory_a_points_server_environment_names_is_left_as_it_is(imag
     point.write_text(yaml.safe_dump({"benchmark": {"envs": {"AITER_JIT_DIR": "/elsewhere"}}}), encoding="utf-8")
     call = TestCall(points=(point,), output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), task_id="t")
 
-    assert own_aiter_jit(call, None, None, {}, tmp_path / OWN_AITER_JIT_DIR) == {}
+    assert own_aiter_jit(call, None, {}, tmp_path / OWN_AITER_JIT_DIR) == {}
     plain = dataclasses.replace(call, points=(_plain_point(tmp_path),))
-    assert own_aiter_jit(plain, None, None, {}, tmp_path / OWN_AITER_JIT_DIR) == {
+    assert own_aiter_jit(plain, None, {}, tmp_path / OWN_AITER_JIT_DIR) == {
         "AITER_JIT_DIR": str(tmp_path / OWN_AITER_JIT_DIR)
     }
-    assert own_aiter_jit(plain, None, None, {"AITER_JIT_DIR": "/inherited"}, tmp_path / "other") == {}
+    assert own_aiter_jit(plain, None, {"AITER_JIT_DIR": "/inherited"}, tmp_path / "other") == {}
     rebuilt = Farm(tmp_path / "farm" / "site", ("aiter",))
-    assert own_aiter_jit(plain, rebuilt, None, {}, tmp_path / "farm_test") == {}, "the farm's jit is the test's own"
+    assert own_aiter_jit(plain, rebuilt, {}, tmp_path / "farm_test") == {}, "the farm's jit is the test's own"
     other = Farm(tmp_path / "farm" / "site", ("sglang",))
-    assert own_aiter_jit(plain, other, None, {}, tmp_path / "sglang_test") != {}, "the server imports the image's aiter"
+    assert own_aiter_jit(plain, other, {}, tmp_path / "sglang_test") != {}, "the server imports the image's aiter"
 
 
 def _plain_point(tmp_path: Path) -> Path:

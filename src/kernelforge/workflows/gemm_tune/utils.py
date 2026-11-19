@@ -176,6 +176,19 @@ def cap_build_parallelism(env: dict[str, str]) -> dict[str, str]:
     return env
 
 
+def with_one_device_mask(env: dict[str, str]) -> dict[str, str]:
+    """Give ``HIP_VISIBLE_DEVICES`` and ``CUDA_VISIBLE_DEVICES`` one value when either is set.
+
+    The HIP runtime aborts a process whose two masks disagree, and a tuner script that defaults each one separately
+    pairs an inherited mask with its own. HIP's mask wins a disagreement, as it does in the runtime.
+    """
+    mask = env.get("HIP_VISIBLE_DEVICES", "").strip() or env.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if mask:
+        env["HIP_VISIBLE_DEVICES"] = mask
+        env["CUDA_VISIBLE_DEVICES"] = mask
+    return env
+
+
 def run_subprocess(
     cmd: list[str],
     *,
@@ -193,6 +206,7 @@ def run_subprocess(
     # Every tuner here shells out to something that ends in an aiter JIT build.
     cap_build_parallelism(env)
     without_inherited_profiler(env)
+    with_one_device_mask(env)
 
     log.info("Running: %s", " ".join(cmd))
     started = time.time()

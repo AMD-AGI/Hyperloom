@@ -77,7 +77,7 @@ def _own_process_chain() -> set[int]:
 def _print_torch_visibility() -> bool:
     """Print torch CUDA visibility and report whether a device is usable."""
     try:
-        import torch  # type: ignore[import-not-found]
+        import torch
     except ImportError as exc:
         print("torch_check_error=", type(exc).__name__, str(exc)[:300])
         return False

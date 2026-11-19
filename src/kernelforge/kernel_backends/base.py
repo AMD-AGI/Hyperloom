@@ -56,17 +56,18 @@ def build_single_kernel_backend_prompt(
 
     root = Path(config.local_knowledge_dir)
     language = resolve_language_dirs(backend, root)
-    served = {
-        "aiter": backend == "aiter" or _is_aiter_operator(task_type, source_paths),
-        # Experimental ablation-only knob (off by default): see Config.include_mori_kb.
-        "mori": bool(getattr(config, "include_mori_kb", False)),
-        "sgl_amd_mono": includes_sgl_amd_mono(backend, source_paths),
-    }
+    frameworks = ["aiter"] if backend == "aiter" or _is_aiter_operator(task_type, source_paths) else []
+    # Experimental ablation-only knob (off by default): see Config.include_mori_kb.
+    if getattr(config, "include_mori_kb", False):
+        frameworks.append("mori")
+    if includes_sgl_amd_mono(backend, source_paths):
+        frameworks.append("sgl_amd_mono")
 
     knowledge = build_forge_knowledge(
         root,
+        gpu_target=config.gpu_target,
         language=language,
-        frameworks=[name for name, wanted in served.items() if wanted],
+        frameworks=frameworks,
         defer_all=bool(getattr(config, "defer_knowledge_maps", False)),
     )
 

@@ -47,7 +47,6 @@ from ..bus.storage.connection import SqliteConnection
 from hyperloom.inference_optimizer.protocol.intent import NoIntentEmitted
 from ..bus.message_bus import MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
-from ..policy.custom_specialist import skips_reactor_turn
 from ..policy.gate import PolicyGate
 from ..policy.projection import serving_tp_for_policy
 from ..state.round_store import RoundStore
@@ -59,6 +58,7 @@ from .signals import SignalDrain
 from .intent_router import IntentRouter
 from hyperloom.inference_optimizer.model_config_utils import infer_model_class
 from .sub_agent_runner import SubAgentRunner
+from .turn_pump import PumpBesideTurn
 from ..state.task_registry import TaskRegistry, task_dispatch_origin
 from ..collaborator import OrchestrationPrompt
 from hyperloom.inference_optimizer.trace.llm_trace import (
@@ -683,19 +683,14 @@ class Coordinator:
                     break
                 if time.monotonic() < self._backend_retry_at.get(name, 0.0):
                     continue
-                if skips_reactor_turn(name, self.shared_state) or not self.conversation.admit_turn(name, time.time()):
+                if not await self.conversation.admit_turn(name, time.time()):
                     continue
                 await self.await_within_session_bound(lambda n=name: self.reactor_pass(n), stage=f"reactor:{name}")
             await self.phase_machine.refresh_admission_freeze()
         if not self.stop_requested():
             await self.dispatcher.pump_dispatcher_once()
         if not in_closing:
-            phase = (self.shared_state.phase or "").strip().upper()
-            if not self.phase_machine.pump_table:
-                self.phase_machine.build_dispatch_tables()
-            pump = self.phase_machine.pump_table.get(phase)
-            if pump is not None:
-                await pump()
+            await self.phase_machine.pump_current_phase()
             # Phase-independent enablement pump: repair a non-runnable combo.
             await self.enablement_lane.pump_enablement_safely()
         # phase machine advance; runs even in_closing so CLOSE is recorded.
@@ -1051,12 +1046,13 @@ class Coordinator:
         """Run one reactor turn for ``agent_name``, route its intents, and return the turn's result.
 
         ``request`` is appended to the composed prompt; a turn that carries one may legitimately reply without
-        intents. The turn is scoped as that agent on the trajectory.
+        intents. The turn is scoped as that agent on the trajectory, and the dispatcher pumps beside its LLM call.
         """
+        pump = PumpBesideTurn(self.dispatcher, self.stop_requested)
         with trajectory_scope(component=agent_name, agent=agent_name):
-            return await self._reactor_turn(agent_name, request=request)
+            return await self._reactor_turn(agent_name, request=request, pump=pump)
 
-    async def _reactor_turn(self, agent_name: str, *, request: str = "") -> BackendTurnResult | None:
+    async def _reactor_turn(self, agent_name: str, *, request: str, pump: PumpBesideTurn) -> BackendTurnResult | None:
         """Body of :meth:`reactor_pass`."""
         backend = self.backends[agent_name]
         turn = await self.conversation.compose_turn(agent_name, backend)
@@ -1078,12 +1074,10 @@ class Coordinator:
                         agent_name, prompt=prompt, system_prompt=turn.system_prompt, tools=tools
                     )
                 )
-                result: BackendTurnResult = await backend.run(
-                    prompt=prompt,
-                    system_prompt=turn.system_prompt,
-                    tools=tools,
-                    max_turns=0,
-                )
+                async with pump:
+                    result: BackendTurnResult = await backend.run(
+                        prompt=prompt, system_prompt=turn.system_prompt, tools=tools, max_turns=0
+                    )
                 call_span.finish(**llm_call_summary(result.metadata))
         except BackendError as exc:
             if isinstance(exc, LLMCallFailed) and not backend_self_traces:
@@ -1103,7 +1097,7 @@ class Coordinator:
         except NoIntentEmitted as exc:
             # No parseable intents; surface as observation so the next tick self-corrects.
             await self._record_no_intent_turn(agent_name, str(exc)[:500])
-            await self.conversation.advance_rendered_cursor(agent_name)
+            await self.conversation.settle_turn(agent_name)
             return None
         except Exception as exc:  # isolation boundary: one agent's reactor turn
             log.exception("reactor pass for %s raised", agent_name)
@@ -1163,7 +1157,7 @@ class Coordinator:
             self._no_intent_streak.pop(agent_name, None)
         elif not request:
             await self._record_no_intent_turn(agent_name, "the turn emitted no intents")
-        await self.conversation.advance_rendered_cursor(agent_name)
+        await self.conversation.settle_turn(agent_name)
         if agent_name == "orchestration":
             state = self.shared_state
             state.last_discarded_escalate_hint = ""

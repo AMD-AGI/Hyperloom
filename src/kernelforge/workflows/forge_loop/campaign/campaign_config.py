@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from kernelforge.utils.git import git
-from kernelforge.utils.gpu_arch import canon_arch, canonical_gpu_type, detect_arch
+from kernelforge.utils.gpu_arch import arch_profile, canon_arch, canonical_gpu_type, detect_arch
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS, SGL_AMD_MONO_PACKAGE
 from kernelforge.knowledge.kb_store.identity.source_resolution import (
     KernelSources,
@@ -522,6 +522,19 @@ def _source_owner_framework(
     )
 
 
+def _resolve_gpu_target(requested: str, kernel_backend: str) -> str:
+    """The campaign's gfx target, refused before any GPU work when ``kernel_backend`` cannot build for it."""
+    gpu_target = requested.strip() or detect_gpu_target()
+    profile = arch_profile(gpu_target)
+    if not profile.supports_kernel_backend(kernel_backend):
+        supported = ", ".join(sorted(profile.kernel_backends or ()))
+        raise ValueError(
+            f"kernel backend {kernel_backend!r} does not target {gpu_target} ({profile.family}); "
+            f"backends that do: {supported}"
+        )
+    return gpu_target
+
+
 def create_campaign_config(
     workspace_dir: str,
     inputs: CampaignInputs,
@@ -538,6 +551,7 @@ def create_campaign_config(
     raw_source_paths = _campaign_source_paths(workspace, kernel_path, normalized_sources)
     pristine_sources = _read_pristine_sources(workspace, raw_source_paths, base_commit=resolved_base_commit)
     resolved_kernel_backend = _resolved_kernel_backend(workspace, inputs.kernel_backend, normalized_sources)
+    gpu_target = _resolve_gpu_target(inputs.gpu_target, resolved_kernel_backend)
     resolved_targets = parse_list(inputs.target_functions) or _derive_target_functions(
         workspace,
         normalized_sources,
@@ -573,7 +587,7 @@ def create_campaign_config(
         program_md_path="forge_experiments/program.md" if inputs.program_md_file else "",
         program_md_sha256=program_md_sha256,
         snr_threshold=resolved_snr_threshold,
-        gpu_target=(gpu_target := inputs.gpu_target.strip() or detect_gpu_target()),
+        gpu_target=gpu_target,
         gpu_type=(inputs.gpu_type or canonical_gpu_type(gpu_target)).strip().lower(),
         kernel_backend=resolved_kernel_backend,
         task_type=inputs.task_type.strip() or ("repository" if len(normalized_sources) > 1 else ""),

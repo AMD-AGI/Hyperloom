@@ -14,7 +14,7 @@ from kernelforge.agent_backends.base import (
 
 from kernelforge.workflows.forge_fusion.discover import DiscoveryRetry, DiscoverySession
 from kernelforge.workflows.forge_fusion import discover as discover_module
-from kernelforge.workflows.forge_fusion.discover import _extract_json_array
+from kernelforge.workflows.forge_fusion.discovery_response import _extract_json_array
 
 TRUNCATED_MID_RATIONALE = """```json
 [

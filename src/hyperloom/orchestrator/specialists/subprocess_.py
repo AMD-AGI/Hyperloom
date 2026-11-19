@@ -37,6 +37,7 @@ from typing import Any, Mapping, Sequence
 
 from hyperloom.common.agent_cli import resolve_codex_executable
 from hyperloom.common.codex_session import (
+    CODEX_BASE_OVERRIDES,
     CodexSessionError,
     probe_codex_sandbox_capability,
     resolve_codex_provider_config,
@@ -482,7 +483,7 @@ class SpecialistSubprocessDispatcher:
                 self._confirm_cancel_teardown(request, proc)
                 raise
             finally:
-                await asyncio.to_thread(self._reap_marked, launch.reap_mark, prepared)
+                await prepared.sweep_marked(launch.reap_mark, task_id=request.task_id)
                 prepared.release()
                 if log_fh is not None:
                     log_fh.close()
@@ -491,7 +492,7 @@ class SpecialistSubprocessDispatcher:
                 finally:
                     self._release_task(backend, request)
 
-        return self._harvest_result(request, watch, backend, outcome, held=held)
+        return self._harvest_result(request, watch, launch, outcome, held=held)
 
     async def _ready(
         self, request: SpecialistSpawn, prompt_file: Path, process_log: Path
@@ -614,7 +615,7 @@ class SpecialistSubprocessDispatcher:
         self,
         request: SpecialistSpawn,
         watch: ReapWatch,
-        backend: str,
+        launch: SpecialistLaunch,
         outcome: dict[str, Any],
         *,
         held: HeldWorktree | None,
@@ -659,7 +660,7 @@ class SpecialistSubprocessDispatcher:
                 targets=declared_targets(done_payload),
             )
 
-        trace = harvest_agent_trace(backend, request.workspace, process_log)
+        trace = harvest_agent_trace(launch.backend, request.workspace, process_log, launch.env)
         if trace.error and (outcome["exit_code"] not in (None, 0) or done_payload is None):
             _add_error(outcome, trace.error)
         if refused:
@@ -678,13 +679,6 @@ class SpecialistSubprocessDispatcher:
             worktree_refused=refused,
             error=outcome["error"],
         )
-
-    @staticmethod
-    def _reap_marked(mark: str, prepared: PreparedLaunch) -> None:
-        """End every process that inherited this launch's reap mark, including one re-parented after the CLI exited."""
-        pids = prepared.marked_pids(mark)
-        if pids and not kill_tree(collect_tree(pids)):
-            log.warning("specialist reap: marked processes %s outlived SIGKILL", pids)
 
     def _confirm_cancel_teardown(self, request: SpecialistSpawn, proc: Any) -> None:
         """Tear a cancelled specialist down, raising ``ExecutionCleanupUnconfirmed`` unless teardown is confirmed."""
@@ -909,9 +903,7 @@ class SpecialistSubprocessDispatcher:
         cmd.extend(["-C", str(worktree or workspace)])
         for extra_dir in writable_dirs[1:]:
             cmd.extend(["--add-dir", extra_dir])
-        # ``features.memories=false`` matches the SDK session: a specialist must
-        # not carry state between tasks.
-        for override in ("features.memories=false", *overrides):
+        for override in (*CODEX_BASE_OVERRIDES, *overrides):
             cmd.extend(["-c", override])
         if cfg.model:
             cmd.extend(["-m", cfg.model])

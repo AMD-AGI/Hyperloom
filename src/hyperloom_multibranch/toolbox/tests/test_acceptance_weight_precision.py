@@ -160,7 +160,7 @@ OTHER_FORMS = [
     ("--model-pa /models/fp8", "the checkpoint: (not set) -> /models/fp8"),
     ("--online_q /quant/a.yaml", "--online-quant-config: (not set) -> /quant/a.yaml"),
     ("--quantization-c.linear fp8_per_channel", "--quantization-config: (not set) -> .linear fp8_per_channel"),
-    # The same readings for the flags added with Arbor's copy of the list.
+    # The same readings for the checkpoint's revision, the config file of flags and the other quantization flags.
     ("--revision=abc123", "the checkpoint's revision: (not set) -> abc123"),
     ("--rev abc123", "the checkpoint's revision: (not set) -> abc123"),
     ("--revision.x abc123", "the checkpoint's revision: (not set) -> .x abc123"),
@@ -357,7 +357,7 @@ def _changes(before: str, after: str) -> list[str]:
         ("", "-- --max-num-seqs 8", []),
     ],
 )
-def test_the_comparison_reads_flags_as_arbor_does(before: str, after: str, expected: list[str]) -> None:
+def test_the_comparison_reads_flags_and_their_values(before: str, after: str, expected: list[str]) -> None:
     assert _changes(before, after) == expected
 
 
@@ -1227,17 +1227,17 @@ def test_the_speed_only_load_formats_are_the_default_loader_ones() -> None:
     assert not SPEED_ONLY_LOAD_FORMATS & set(NOT_SPEED_ONLY)
 
 
-# --- Arbor's cases (arbor/tests/test_weight_precision.py) ------------------------------------------------------------
+# --- more cases ------------------------------------------------------------------------------------------------------
 
 BASE = "--tensor-parallel-size 1 --max-num-seqs 64 --kv-cache-dtype auto"
 
 
-def test_arbor_a_weight_quantization_added_is_a_change() -> None:
+def test_a_weight_quantization_added_is_a_change() -> None:
     assert _changes(BASE, BASE + " --quantization fp8_per_channel") == ["--quantization: (not set) -> fp8_per_channel"]
     assert _changes(BASE, BASE + " -q=mxfp4") == ["--quantization: (not set) -> mxfp4"]
 
 
-def test_arbor_removing_changing_or_reconfiguring_weight_precision_is_a_change() -> None:
+def test_removing_changing_or_reconfiguring_weight_precision_is_a_change() -> None:
     quantized = BASE + " --quantization fp8"
     assert _changes(quantized, BASE)
     assert _changes(quantized, BASE + " --quantization mxfp8")
@@ -1247,13 +1247,13 @@ def test_arbor_removing_changing_or_reconfiguring_weight_precision_is_a_change()
     assert _changes(BASE + " --model-path /models/a-bf16", BASE + " --model-path /models/a-fp8")
 
 
-def test_arbor_intermediates_and_unchanged_weight_flags_are_not() -> None:
+def test_intermediates_and_unchanged_weight_flags_are_no_change() -> None:
     assert _changes(BASE, BASE.replace("--kv-cache-dtype auto", "--kv-cache-dtype fp8")) == []
     assert _changes(BASE, BASE + " --enable-aiter-allreduce-fusion --attention-backend aiter") == []
     assert _changes("--quantization fp8 " + BASE, BASE + " --quantization=fp8 --max-num-seqs 128") == []
 
 
-def test_arbor_the_spellings_a_parser_reads_as_a_listed_flag() -> None:
+def test_the_spellings_a_parser_reads_as_a_listed_flag() -> None:
     assert _changes(BASE, BASE + " -qfp8_per_channel") == ["--quantization: (not set) -> fp8_per_channel"]
     assert _changes(BASE, BASE + " --dty float16") == ["--dtype: (not set) -> float16"]
     assert _changes(BASE, BASE + " --quantization_config '{\"a\": 1}'") == [
@@ -1270,13 +1270,13 @@ def test_arbor_the_spellings_a_parser_reads_as_a_listed_flag() -> None:
     }
 
 
-def test_arbor_one_setting_under_two_spellings_is_one_setting() -> None:
+def test_one_setting_under_two_spellings_is_one_setting() -> None:
     root = BASE + " --quantization fp8"
     assert _changes(root, BASE + " -q fp8 --quantization fp8") == []
     assert _changes(root, BASE + " --quantization=fp8") == []
 
 
-def test_arbor_the_flags_toolbox_added_and_the_overrides() -> None:
+def test_the_revision_the_config_file_the_other_quantization_flags_and_the_overrides() -> None:
     assert _changes(BASE, BASE + " --revision abc123") == ["the checkpoint's revision: (not set) -> abc123"]
     for flag in ("--modelopt-quant fp8", "--torchao-config int4wo-128", "--quantize-and-serve", "--config c.yaml"):
         assert _changes(BASE, f"{BASE} {flag}"), flag

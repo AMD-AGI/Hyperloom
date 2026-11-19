@@ -56,6 +56,7 @@ from hyperloom_common.shared_storage import (
     parent_is_shared,
 )
 from hyperloom_multibranch.repo.isolated_git import (
+    SESSION_IDENTITY,
     INIT,
     NO_EXCLUDES_FILE,
     blank_driver_programs,
@@ -81,13 +82,7 @@ SKIPPED = ("__pycache__", "*.pyc", "*.pyo", "*.so", "*.a", "*.o", "*.co", "*.hsa
 BASE_BRANCH = "installed"
 HEAD_SUBJECT = "head "
 GIT_TIMEOUT_S = 300.0
-# The commits are the session's own, whoever runs it, and the bytes must reach the patch as they are on disk.
-_GIT_IDENTITY = {
-    "GIT_AUTHOR_NAME": "hyperloom-multibranch",
-    "GIT_AUTHOR_EMAIL": "multibranch@hyperloom.invalid",
-    "GIT_COMMITTER_NAME": "hyperloom-multibranch",
-    "GIT_COMMITTER_EMAIL": "multibranch@hyperloom.invalid",
-}
+# The bytes must reach the patch as they are on disk.
 _FIXED_CONFIG = (
     "-c",
     "core.autocrlf=false",
@@ -262,7 +257,7 @@ def _git(cwd: Path, *args: str, index: Path | None = None, common: Path | None =
     (:func:`~hyperloom_common.git_safety.check_session_repository`). Either way no program the config names runs. An
     ``init`` runs under :func:`~hyperloom_common.git_safety.git_dir_umask`, any other command under this process's
     umask, or the shared child umask there."""
-    pinned = _GIT_IDENTITY if index is None else {**_GIT_IDENTITY, "GIT_INDEX_FILE": str(index)}
+    pinned = SESSION_IDENTITY if index is None else {**SESSION_IDENTITY, "GIT_INDEX_FILE": str(index)}
     if common is not None:
         return _worktree_git(cwd, common, args, pinned)
     umask = git_dir_umask() if tuple(args[: len(INIT)]) == INIT else -1

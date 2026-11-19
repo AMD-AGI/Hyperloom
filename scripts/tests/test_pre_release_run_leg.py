@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUCCESS_STOP_REASONS
+from hyperloom.inference_optimizer.cli.preflight_env import _dotenv_not_private
 
 ROOT = Path(__file__).resolve().parents[2]
 PRE_RELEASE = ROOT / ".github/pre-release"
@@ -35,6 +36,8 @@ LEGS = {
     "docker-vllm-12h": ("setup-image-vllm.md", "demo-12h.md", "Qwen3-14B-FP8"),
     "docker-sglang-forge-12h": ("setup-image-sglang.md", "demo-12h-forge.md", "Qwen3-14B-FP8"),
     "docker-vllm-forge-12h": ("setup-image-vllm.md", "demo-12h-forge.md", "Qwen3-14B-FP8"),
+    "baremetal-atom-12h": ("setup-baremetal-atom.md", "demo-12h-atom.md", "Qwen3-14B-FP8"),
+    "docker-atom-12h": ("setup-image-atom.md", "demo-12h-atom.md", "Qwen3-14B-FP8"),
     "baremetal-atom-forge-12h": ("setup-baremetal-atom.md", "demo-12h-atom-forge.md", "Qwen3-14B-FP8"),
     "docker-atom-forge-12h": ("setup-image-atom.md", "demo-12h-atom-forge.md", "Qwen3-14B-FP8"),
     "baremetal-sglang-3h": ("setup-baremetal-sglang.md", "demo-3h.md", "Qwen3-8B"),
@@ -144,7 +147,7 @@ def test_every_matrix_leg_resolves_to_shipped_prompts(leg: str) -> None:
 
 @pytest.mark.parametrize(
     "leg",
-    ["docker-vllm-forge-3h", "baremetal-atom-12h", "docker-sglang-4h", "kube-vllm-3h", "docker-vllm-3h;id"],
+    ["docker-vllm-forge-3h", "baremetal-atom-forge-3h", "docker-sglang-4h", "kube-vllm-3h", "docker-vllm-3h;id"],
 )
 def test_legs_outside_the_matrix_are_rejected(leg: str) -> None:
     result = _run(["--resolve", leg], {"PATH": os.environ["PATH"]})
@@ -185,12 +188,42 @@ def test_clean_stop_reason_passes_and_the_key_does_not_outlive_the_leg(leg_env: 
         assert FAKE_KEY not in text
 
 
+def test_a_group_writable_work_root_still_gives_setup_a_private_dotenv(leg_env: dict[str, str]) -> None:
+    # A shared LEG_WORK_DIR: setgid and group-writable, with a group umask, so a plain
+    # mkdir makes the leg workspace group-writable and setup would refuse its .env.
+    work = Path(leg_env["LEG_WORK_DIR"])
+    work.mkdir()
+    work.chmod(0o2775)
+    result = subprocess.run(
+        ["bash", "-c", 'umask 002 && exec bash "$0" "$@"', str(RUN_LEG), "docker-vllm-3h"],
+        env=leg_env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    workspace = work / "attempt-1/docker-vllm-3h"
+    assert stat.S_IMODE(workspace.stat().st_mode) & 0o022 == 0
+    assert stat.S_IMODE(work.stat().st_mode) == 0o2775  # the shared parent is left as the caller made it
+    assert _dotenv_not_private(workspace / ".env") is None
+
+
 def test_forge_leg_selects_the_forge_kernel_backend(leg_env: dict[str, str]) -> None:
     result = _run(["docker-sglang-forge-12h"], leg_env)
     assert result.returncode == 0, result.stdout + result.stderr
     dotenv = Path(leg_env["LEG_WORK_DIR"]) / "attempt-1/docker-sglang-forge-12h/.env"
     lines = dotenv.read_text(encoding="utf-8").splitlines()
     assert "KERNEL_OPT_BACKEND_ORDER=forge" in lines
+    assert f"MODEL_PATH={leg_env['LEG_MODELS_DIR']}/Qwen3-14B-FP8" in lines
+
+
+def test_atom_12h_leg_without_forge_leaves_the_kernel_backend_to_geak(leg_env: dict[str, str]) -> None:
+    result = _run(["docker-atom-12h"], leg_env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    dotenv = Path(leg_env["LEG_WORK_DIR"]) / "attempt-1/docker-atom-12h/.env"
+    lines = dotenv.read_text(encoding="utf-8").splitlines()
+    assert not any(line.startswith("KERNEL_OPT_BACKEND_ORDER=") for line in lines)
+    assert "FRAMEWORK=atom" in lines
     assert f"MODEL_PATH={leg_env['LEG_MODELS_DIR']}/Qwen3-14B-FP8" in lines
 
 
@@ -344,6 +377,7 @@ _LEG_DEFINITION = [
     RUN_LEG,
     *sorted(PROMPTS.glob("setup-image-*.md")),
     PROMPTS / "setup-baremetal-atom.md",
+    PROMPTS / "demo-12h-atom.md",
     PROMPTS / "demo-12h-atom-forge.md",
 ]
 

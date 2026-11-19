@@ -225,7 +225,7 @@ def test_a_request_and_the_state_it_changes_are_logged_with_its_id_and_client(
         client = RemoteClient(RemoteConfig(url, TOKEN))
         client.identify("kb-0123456789abcdef0123456789abcdef", "laptop")
         client.write(experience, declaration=SCHEMA)
-        with caplog.at_level(logging.INFO, logger="hyperloom_kb.http_service"):
+        with caplog.at_level(logging.INFO, logger="hyperloom_kb"):
             client.exclude(experience.id, reason="measured on a noisy node")
             request = _logged(caplog, "http_request", route="/v1/exclusions")
     audit = _logged(caplog, "audit", action="exclude")

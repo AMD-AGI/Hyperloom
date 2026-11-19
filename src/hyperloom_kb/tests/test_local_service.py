@@ -40,7 +40,7 @@ from hyperloom_kb import (
 )
 from hyperloom_kb import local_service
 from hyperloom_kb.database import SQLITE_FILE
-from hyperloom_kb.http_service import code_digest
+from hyperloom_kb.experience_service import code_digest
 from hyperloom_kb.tests.conftest import fresh_database
 
 TOKEN = "local-service-token"

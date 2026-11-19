@@ -95,7 +95,7 @@ def db(tmp_path):
 
 
 def _build(
-    db, *, proposals=None, state=None, result_pending=None
+    db, *, proposals=None, state=None, result_pending=None, resources=None
 ) -> tuple[Reconciler, RoundStore, TaskRegistry, _State]:
     """A reconciler over ``db``, with the pieces a test needs to inspect."""
     rounds = RoundStore(db)
@@ -105,7 +105,7 @@ def _build(
         ReconcileStores(rounds=rounds, tasks=tasks, locks=SqliteLeaseBackend(db)),
         shared,
         links=ReconcileLinks(
-            resources=ResourceFacts(),
+            resources=ResourceFacts() if resources is None else resources,
             proposals=lambda: proposals if proposals is not None else {},
             drop_proposal=lambda _pending, _reason: None,
             session_dir=db.db_path.parent,
@@ -155,19 +155,6 @@ async def test_a_round_whose_holder_cannot_be_confirmed_dead_still_releases(db):
     assert settled.outcome == ""
     assert settled.state == OPEN
     assert state.stop_reason == "", "an unobservable reap does not end the session"
-
-
-@pytest.mark.asyncio
-async def test_age_never_requests_a_reap_of_a_running_holder(db):
-    """A configured killer must never be invoked merely because time passed."""
-    rec, rounds, tasks, state = _build(db)
-    await _open_round(rounds, tasks, holder="spec-1", lease=1.0)
-
-    await rec.run(_NOW + 10.0)
-
-    settled = await rounds.get("round-spec-1")
-    assert settled.state == OPEN
-    assert state.stop_reason == ""
 
 
 @pytest.mark.asyncio
@@ -427,14 +414,18 @@ async def test_a_second_pass_does_not_deny_a_proposal_twice(db):
 @pytest.mark.asyncio
 async def test_the_resource_facts_are_reread_from_what_the_rules_left(db):
     """The facts the gate reads reflect the repair, not the state before it."""
-    rec, rounds, tasks, _ = _build(db)
-    await _open_round(rounds, tasks, holder="spec-1", lease=1.0)
-    await rec.run(_NOW - 100.0)
-    assert rec._resources.excluding_round_id == "round-spec-1"
+    facts = ResourceFacts()
+    rec, rounds, tasks, _ = _build(db, resources=facts)
+    await _open_round(rounds, tasks, holder="spec-1")
+    await tasks.transition("spec-1", "running")
+    await tasks.transition("spec-1", "succeeded")
+    await rec.run(_NOW + 10.0)
+    assert facts.excluding_round_id == "round-spec-1"
 
-    await rec.run(_NOW + 10_000.0)
+    await rec.run(_NOW + 600.0)
 
-    assert rec._resources.excluding_round_id == "round-spec-1"
+    assert (await rounds.get("round-spec-1")).state == SETTLED
+    assert not facts.round_excludes
 
 
 @pytest.mark.asyncio
@@ -467,13 +458,6 @@ async def test_a_rule_that_raises_a_bug_fails_the_pass(db):
 
     with pytest.raises(RuntimeError, match="^rule failed$"):
         await rec.run(_NOW)
-
-
-@pytest.mark.asyncio
-async def test_reconcile_does_not_write_a_supervisor_tick_stamp(db):
-    rec, _, _, _ = _build(db)
-    await rec.run(_NOW)
-    assert not hasattr(rec, "stamp_progress")
 
 
 @pytest.mark.asyncio

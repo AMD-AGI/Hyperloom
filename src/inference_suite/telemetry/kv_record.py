@@ -54,15 +54,11 @@ log = logging.getLogger(__name__)
 
 
 __all__ = [
-    "KV_ARTIFACT_NAME",
     "PHASES",
     "KvMetricsRecorder",
     "counter_delta",
 ]
 
-
-#: Artifact the recorder writes, alongside the round's ``server.log``.
-KV_ARTIFACT_NAME = "kv_metrics.json"
 
 _BOOT = "boot"
 #: The one phase whose numbers may be compared against another round's.
@@ -257,6 +253,7 @@ class KvMetricsRecorder:
                     "prefix_cache_queries": sample.prefix_cache_queries,
                     "prefix_cache_hits": sample.prefix_cache_hits,
                     "cached_tokens_total": sample.cached_tokens_total,
+                    "prompt_tokens_total": sample.prompt_tokens_total,
                 },
             }
         )
@@ -269,6 +266,7 @@ class KvMetricsRecorder:
             ("prefix_cache_queries", sample.prefix_cache_queries),
             ("prefix_cache_hits", sample.prefix_cache_hits),
             ("cached_tokens_total", sample.cached_tokens_total),
+            ("prompt_tokens_total", sample.prompt_tokens_total),
         ):
             if not series:
                 continue
@@ -294,7 +292,7 @@ class KvMetricsRecorder:
         total is what makes a hit rate belong to the round that earned it.
         """
         window: dict[str, Any] = {}
-        for name in ("prefix_cache_queries", "prefix_cache_hits", "cached_tokens_total"):
+        for name in ("prefix_cache_queries", "prefix_cache_hits", "cached_tokens_total", "prompt_tokens_total"):
             measured, by_phase = self._counter_deltas(name)
             if not by_phase:
                 continue

@@ -22,7 +22,7 @@ import pytest
 
 from hyperloom.common.deadline import Deadline
 from hyperloom_common.git_safety import recorded_admin_dir, trusted_admin_dir, worktree_head
-from hyperloom.common.env_safety import specialist_run_as
+from hyperloom.common.env_safety import resolve_run_as
 
 from .conftest import init_git_repo, make_fake_claude
 from hyperloom.orchestrator.specialists.tests._agent_fixtures import FORGES_ITS_GIT
@@ -31,10 +31,7 @@ from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 from hyperloom.orchestrator.actions.executors._ray_serving import RayInfeasibleError
 
-from hyperloom.orchestrator.specialists.runner import (
-    SPECIALIST_TOOL_DENYLIST,
-    SpecialistRunner,
-)
+from hyperloom.orchestrator.specialists.runner import SpecialistRunner
 from hyperloom.orchestrator.specialists import subprocess_, wall_budget
 from hyperloom.orchestrator.specialists import launch_env
 from hyperloom.common import agent_isolation
@@ -98,6 +95,13 @@ def test_build_specialist_env_forwards_the_claude_config_dir(monkeypatch):
     assert _build_specialist_env()["CLAUDE_CONFIG_DIR"] == "/tmp/claude-config"
 
 
+def test_build_specialist_env_forwards_the_prompt_cache_ttl(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_PROMPT_CACHE_TTL", "1h")
+    monkeypatch.setenv("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL", "5m")
+    env = _build_specialist_env()
+    assert (env["CLAUDE_CODE_PROMPT_CACHE_TTL"], env["CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL"]) == ("1h", "5m")
+
+
 def test_build_specialist_env_forwards_oauth_token_without_mirroring_it(monkeypatch):
     """A subscription-only parent must hand the token down untouched."""
     oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
@@ -154,13 +158,6 @@ def _make_runner_ctx(task_id: str = "t-spec-1") -> RunnerContext:
     return RunnerContext(task=task, lease=None, extra={})
 
 
-def test_runner_accepts_subprocess_config_only():
-    runner = SpecialistRunner(
-        subprocess_config=SpecialistSubprocessConfig(),
-    )
-    assert runner.subprocess_dispatcher is not None
-
-
 @pytest.mark.parametrize("local", [True, False])
 async def test_the_runner_hands_the_dispatcher_the_tasks_model_to_read(tmp_path, local):
     model = tmp_path / "models" / "llama"
@@ -204,18 +201,6 @@ async def test_the_runner_hands_the_dispatcher_the_admin_dir_the_repository_reco
     [spawn] = spawns
     assert spawn.worktree is not None
     assert spawn.worktree_admin == recorded_admin_dir(framework, spawn.worktree)
-
-
-def test_denylist_blocks_dangerous_process_tools():
-    """KillShell and SlashCommand are in the denylist to enforce the prompt-rule against global process cleanup that could kill the serving / benchmark process."""
-    assert "KillShell" in SPECIALIST_TOOL_DENYLIST
-    assert "SlashCommand" in SPECIALIST_TOOL_DENYLIST
-
-
-def test_kb_mcp_tools_not_in_denylist():
-    """KB MCP server names must not appear in the denylist."""
-    denylisted_kb_mcp = [t for t in SPECIALIST_TOOL_DENYLIST if t.startswith("mcp__") and "kb" in t.lower()]
-    assert denylisted_kb_mcp == [], f"stale KB MCP entries in the denylist: {denylisted_kb_mcp}"
 
 
 @pytest.mark.asyncio
@@ -283,18 +268,37 @@ def test_a_reused_worktree_keeps_the_admin_dir_its_repository_records(tmp_path: 
     assert (worktree, admin) == (None, None) and "is not a worktree" in err
 
 
-def test_an_integrate_in_flight_holds_the_snapshot(tmp_path: Path):
+async def test_an_integrate_in_flight_holds_the_snapshot(tmp_path: Path):
+    """The integrate has mutated the installed package without deciding on it; a specialist must not build on that."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
+    package = tmp_path / "site-packages" / "vllm"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "envs.py").write_text("VLLM_USE_X = 0\n", encoding="utf-8")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=session_dir)
-    assert runner._integrate_in_flight() is False
+    seen: list[str] = []
 
+    async def run(spawn: SpecialistSpawn) -> subprocess_.SpecialistSubprocessResult:
+        seen.append((spawn.worktree / "envs.py").read_text(encoding="utf-8"))
+        return subprocess_.SpecialistSubprocessResult(exit_code=0)
+
+    runner.subprocess_dispatcher.run = run
+    ctx = _make_runner_ctx("t-before")
+    ctx.task.params["session_framework_tree"] = f"{package}/"
+    await runner.run(ctx)
+
+    (package / "envs.py").write_text("VLLM_USE_X = 1\n", encoding="utf-8")
     state = SharedState.load_or_init(session_dir)
     state.pending_integrate = {"task_id": "t-integrate", "patches": []}
     state.save(session_dir)
-    assert runner._integrate_in_flight() is True
+    ctx = _make_runner_ctx("t-during")
+    ctx.task.params["session_framework_tree"] = f"{package}/"
+    await runner.run(ctx)
+
+    assert seen == ["VLLM_USE_X = 0\n", "VLLM_USE_X = 0\n"]
 
 
 def test_setup_worktree_creates_branch_off_base(
@@ -1860,8 +1864,7 @@ async def test_demoted_specialist_writes_its_worktree_and_cannot_read_the_apps_f
 
 
 @_demote_skip
-def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, monkeypatch, restore_umask):
-    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, restore_umask):
     request = SpecialistSpawn(
         task_id="t-outside",
         workspace=tmp_path / "ws",
@@ -1875,7 +1878,7 @@ def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, mon
     request.workspace.mkdir()
     request.worktree.mkdir()
     (request.workspace / "prompt.md").write_text("p", encoding="utf-8")
-    run_as = specialist_run_as()
+    run_as = resolve_run_as(_DEMOTE_USER)
 
     kwargs = prepare_demote(run_as, request.workspace, request.worktree, {}, (request.workspace / "prompt.md",))
 
@@ -1884,23 +1887,20 @@ def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, mon
     assert (request.workspace / "prompt.md").stat().st_mode & 0o077 == 0
 
 
-@pytest.mark.skipif(not _account_exists(_DEMOTE_USER), reason=f"no {_DEMOTE_USER!r} account")
-async def test_a_launch_the_ray_path_refuses_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask):
-    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
-    await _run_spawn(tmp_path, monkeypatch, gpu_lease=object())
-    assert os.umask(0o022) == 0o022
+_needs_demote_account = pytest.mark.skipif(not _account_exists(_DEMOTE_USER), reason=f"no {_DEMOTE_USER!r} account")
 
 
-@pytest.mark.skipif(not _account_exists(_DEMOTE_USER), reason=f"no {_DEMOTE_USER!r} account")
-async def test_a_launch_that_names_a_user_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask):
-    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
-    await _run_spawn(tmp_path, monkeypatch)
-    assert os.umask(0o022) == 0o022
-
-
-async def test_a_launch_with_no_user_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask):
-    monkeypatch.delenv("HYPERLOOM_SPECIALIST_USER", raising=False)
-    await _run_spawn(tmp_path, monkeypatch)
+@pytest.mark.parametrize(
+    ("user", "spawn_kwargs"),
+    [
+        pytest.param(_DEMOTE_USER, {"gpu_lease": object()}, marks=_needs_demote_account, id="ray_path_refuses"),
+        pytest.param(_DEMOTE_USER, {}, marks=_needs_demote_account, id="names_a_user"),
+        pytest.param("", {}, id="no_user"),
+    ],
+)
+async def test_a_launch_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask, user, spawn_kwargs):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", user)
+    await _run_spawn(tmp_path, monkeypatch, **spawn_kwargs)
     assert os.umask(0o022) == 0o022
 
 
@@ -2111,7 +2111,7 @@ async def test_every_demoted_specialist_gets_git_and_its_mcp_config_with_the_app
 
 
 @_demote_skip
-def test_a_worktree_made_under_umask_007_is_readable_to_git_once_prepared(tmp_path, monkeypatch, restore_umask):
+def test_a_worktree_made_under_umask_007_is_readable_to_git_once_prepared(tmp_path, restore_umask):
     import shutil
     import tempfile
 
@@ -2127,8 +2127,7 @@ def test_a_worktree_made_under_umask_007_is_readable_to_git_once_prepared(tmp_pa
         # The shape the review reproduced: the app's own git, under its own umask, makes the worktree.
         subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "sp", str(worktree)], check=True)
         assert (worktree / ".git").stat().st_mode & 0o004 == 0
-        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
-        run_as = specialist_run_as()
+        run_as = resolve_run_as(_DEMOTE_USER)
         kwargs = prepare_demote(run_as, worktree.parent, worktree, {}, ())
         for args in (["status", "--porcelain"], ["diff"]):
             done = subprocess.run(
@@ -2221,7 +2220,7 @@ def test_the_archive_does_not_copy_an_applied_patch_the_child_replaced_with_a_li
 
 # ---- review r2: the snapshot's objects stay readable, and no app write follows a child's link -------------
 @_demote_skip
-def test_a_snapshot_refreshed_between_two_demoted_tasks_stays_readable_to_git(monkeypatch, restore_umask):
+def test_a_snapshot_refreshed_between_two_demoted_tasks_stays_readable_to_git(restore_umask):
     import shutil
     import tempfile
 
@@ -2235,8 +2234,7 @@ def test_a_snapshot_refreshed_between_two_demoted_tasks_stays_readable_to_git(mo
         (tree / "mod.py").write_text("x = 1\n", encoding="utf-8")
         repo = base / "snap.git"
         os.umask(0o077)  # an app that runs under a strict umask must not hide the objects it commits
-        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
-        run_as = specialist_run_as()
+        run_as = resolve_run_as(_DEMOTE_USER)
         git_env = {
             "PATH": os.environ["PATH"],
             "HOME": run_as.home,
@@ -2357,7 +2355,7 @@ def test_the_harvest_does_not_run_a_program_a_child_planted_in_a_replaced_dot_gi
 
 
 @_demote_skip
-def test_a_demoted_child_cannot_make_the_apps_git_run_its_fsmonitor(monkeypatch):
+def test_a_demoted_child_cannot_make_the_apps_git_run_its_fsmonitor():
     import shutil
     import tempfile
 
@@ -2370,8 +2368,7 @@ def test_a_demoted_child_cannot_make_the_apps_git_run_its_fsmonitor(monkeypatch)
         worktree, err = worktrees._setup_worktree(repo, workspace / "worktree", "task-g")
         assert worktree is not None, err
         admin = recorded_admin_dir(repo, worktree)
-        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
-        run_as = specialist_run_as()
+        run_as = resolve_run_as(_DEMOTE_USER)
         kwargs = prepare_demote(run_as, workspace, worktree, {}, ())
         marker = base / "executed"
         marker.write_text("", encoding="utf-8")

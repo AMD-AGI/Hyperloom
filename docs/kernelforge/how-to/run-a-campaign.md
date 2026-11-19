@@ -100,7 +100,9 @@ launcher, and measurement contract.
 
 To optimize a monokernel, such as one in
 [sgl-amd-mono](https://github.com/sgl-project/sgl-amd-mono), use `--kernel-backend mono`;
-forge also infers it for sources under the `sgl_amd_mono/` package. The workspace root
+forge also infers it for sources under the `sgl_amd_mono/` package. Like every backend, it
+builds for the targets whose `ArchProfile` (`kernelforge.utils.gpu_arch`) admits it: gfx942 and
+gfx950 do, and a campaign on gfx1100 refuses it. The workspace root
 must carry a `config.yaml` whose `compile_command` and `correctness_command` run the
 task's own tests for the launch. Forge runs them on every candidate it would otherwise
 keep, and refuses the candidate when the file is missing. A tensor-parallel launch is

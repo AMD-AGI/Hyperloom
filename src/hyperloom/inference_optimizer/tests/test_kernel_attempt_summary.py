@@ -14,9 +14,9 @@ from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_N
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     ROUTE_FORGE,
     ROUTE_GEAK,
-    make_kernel_recorder,
-    record_integrate_verdict,
 )
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_recorder import make_kernel_recorder
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_rows import record_integrate_verdict
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     GeakRebenchAttempt,
     GemmTuningRun,

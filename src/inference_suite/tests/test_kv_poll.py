@@ -279,6 +279,28 @@ def test_prefix_cache_counters_are_read():
     assert aggregate_series(sg.cached_tokens_total) == 4600439.0
 
 
+def test_sglang_prompt_tokens_are_read_beside_cached_tokens():
+    """SGLang labels the prompt counter by streaming and the cached one by cache tier: neither is a shard, so each
+    sums across its series into the prompt tokens served and the cached tokens among them."""
+    text = (
+        'sglang:prompt_tokens_total{is_streaming="false",model_name="glm"} 900.0\n'
+        'sglang:prompt_tokens_total{is_streaming="true",model_name="glm"} 100.0\n'
+        'sglang:cached_tokens_total{cache_source="device",model_name="glm"} 900.0\n'
+        'sglang:cached_tokens_total{cache_source="host",model_name="glm"} 50.0\n'
+    )
+    sample = sample_from_families(parse_prometheus_text(text))
+
+    assert aggregate_series(sample.prompt_tokens_total) == 1000.0
+    assert aggregate_series(sample.cached_tokens_total) == 950.0
+
+
+def test_prompt_tokens_only_sample_is_not_discarded():
+    sample = sample_from_families(parse_prometheus_text('sglang:prompt_tokens_total{is_streaming="false"} 1000.0\n'))
+
+    assert sample.has_readings()
+    assert aggregate_series(sample.prompt_tokens_total) == 1000.0
+
+
 def test_prefix_cache_only_sample_is_not_discarded():
     text = 'vllm:prefix_cache_queries_total{engine="0"} 1000.0\nvllm:prefix_cache_hits_total{engine="0"} 529.0\n'
     sample = sample_from_families(parse_prometheus_text(text))

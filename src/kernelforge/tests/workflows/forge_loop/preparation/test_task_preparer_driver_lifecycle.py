@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.workflows.forge_loop.preparation import task_preparer
+from kernelforge.workflows.forge_loop.preparation import task_scaffold
 from kernelforge.workflows.forge_loop.preparation import task_preflight
 from kernelforge.utils.git import git_head
 
@@ -138,7 +139,7 @@ def _prepare_with_spec_reading_driver(
 
     def fake_materialize_reference(target_workspace):
         """Stand in for the shipped examples bundle (kept small and local)."""
-        ref_dir = Path(target_workspace) / task_preparer.REFERENCE_SUBDIR
+        ref_dir = Path(target_workspace) / task_scaffold.REFERENCE_SUBDIR
         example = ref_dir / "example-forge-loop"
         example.mkdir(parents=True, exist_ok=True)
         (ref_dir / "README.md").write_text("contract\n", encoding="utf-8")
@@ -235,8 +236,8 @@ def test_authoring_scaffolding_is_gone_before_preflight_validates(tmp_path, monk
     prepared = _prepare_with_spec_reading_driver(tmp_path, monkeypatch)
     workspace = prepared["workspace"]
 
-    assert not (workspace / task_preparer.REFERENCE_SUBDIR).exists()
-    assert not prepared["spec_rel"].startswith(task_preparer.REFERENCE_SUBDIR)
+    assert not (workspace / task_scaffold.REFERENCE_SUBDIR).exists()
+    assert not prepared["spec_rel"].startswith(task_scaffold.REFERENCE_SUBDIR)
 
 
 def test_prompt_marks_the_reference_bundle_as_temporary(tmp_path, monkeypatch):
@@ -244,7 +245,7 @@ def test_prompt_marks_the_reference_bundle_as_temporary(tmp_path, monkeypatch):
     prepared = _prepare_with_spec_reading_driver(tmp_path, monkeypatch)
     prompt = prepared["prompt"]
 
-    assert task_preparer.REFERENCE_SUBDIR in prompt
+    assert task_scaffold.REFERENCE_SUBDIR in prompt
     assert "never read it at runtime" in prompt
     assert "DURABLE" in prompt
 
@@ -271,7 +272,7 @@ def test_surviving_scaffolding_aborts_preparation_instead_of_being_committed(tmp
         real_rmtree = task_preparer._safe_rmtree
 
         def keep_reference_bundle(path):
-            if path is not None and path.name == task_preparer.REFERENCE_SUBDIR:
+            if path is not None and path.name == task_scaffold.REFERENCE_SUBDIR:
                 return
             real_rmtree(path)
 
@@ -289,7 +290,7 @@ def test_surviving_scaffolding_aborts_preparation_instead_of_being_committed(tmp
     assert len([line for line in log.splitlines() if line.strip()]) == 1
     code, tracked = task_preparer._git(workspace, "ls-files")
     assert code == 0, tracked
-    assert task_preparer.REFERENCE_SUBDIR not in tracked
+    assert task_scaffold.REFERENCE_SUBDIR not in tracked
 
 
 def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(tmp_path, monkeypatch, caplog):
@@ -318,7 +319,7 @@ def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(t
         )
 
     monkeypatch.setattr(
-        task_preparer,
+        task_scaffold,
         "_materialize_invocation_spec",
         lambda *_args, **_kwargs: (None, ""),
     )
@@ -327,7 +328,7 @@ def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(t
     monkeypatch.setattr(task_preparer, "_preflight_async", recording_preflight)
     monkeypatch.setattr(task_preparer, "PREPARE_MAX_ATTEMPTS", 1)
 
-    with caplog.at_level("WARNING", logger="kernelforge.workflows.forge_loop.preparation.task_preparer"):
+    with caplog.at_level("WARNING", logger="kernelforge.workflows.forge_loop.preparation.task_scaffold"):
         asyncio.run(
             task_preparer.prepare_task(
                 config=SimpleNamespace(
@@ -366,7 +367,7 @@ def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(tmp_path
         materializations.append(1)
         if len(materializations) > 1:
             return None
-        ref_dir = Path(target_workspace) / task_preparer.REFERENCE_SUBDIR
+        ref_dir = Path(target_workspace) / task_scaffold.REFERENCE_SUBDIR
         ref_dir.mkdir(parents=True, exist_ok=True)
         (ref_dir / "README.md").write_text("contract\n", encoding="utf-8")
         return ref_dir
@@ -409,8 +410,8 @@ def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(tmp_path
         )
 
     assert len(prompts) == 2, prompts
-    assert f"{task_preparer.REFERENCE_SUBDIR}/README.md" in prompts[0]
-    assert f"{task_preparer.REFERENCE_SUBDIR}/README.md" not in prompts[1]
+    assert f"{task_scaffold.REFERENCE_SUBDIR}/README.md" in prompts[0]
+    assert f"{task_scaffold.REFERENCE_SUBDIR}/README.md" not in prompts[1]
     assert "No reference files were available" in prompts[1]
     assert "could not re-materialize the authoring reference bundle" in caplog.text
 
@@ -766,7 +767,7 @@ def test_external_bundle_reuses_its_own_spec_beside_the_driver(tmp_path, monkeyp
     original_spec_bytes = source_spec.read_bytes()
 
     def fake_materialize_reference(target_workspace):
-        ref_dir = Path(target_workspace) / task_preparer.REFERENCE_SUBDIR
+        ref_dir = Path(target_workspace) / task_scaffold.REFERENCE_SUBDIR
         ref_dir.mkdir(parents=True, exist_ok=True)
         (ref_dir / "README.md").write_text("contract\n", encoding="utf-8")
         return ref_dir

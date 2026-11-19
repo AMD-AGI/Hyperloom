@@ -22,7 +22,6 @@ from hyperloom_multibranch.contracts.blackboard.peers import (
     BranchLogEntry,
     BranchLogType,
     Intent,
-    Judgement,
     TestRequest,
     TestResult,
 )
@@ -37,6 +36,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     CommittedCommit,
     DedupAnswer,
     InboxPage,
+    JudgementWrite,
     Learning,
     LearningRecord,
     LeaseEnd,
@@ -53,7 +53,6 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     QuarantineEvent,
     RecordedValue,
     RegressionCase,
-    RetractionRef,
     SearchHit,
     SessionProfile,
     StartupBrief,
@@ -61,7 +60,6 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     ToolResultPointer,
     Withdrawal,
 )
-from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion
 
 
 class BlackboardError(Exception):
@@ -181,20 +179,11 @@ class LeaseSink(Protocol):
 class JudgementSink(Protocol):
     """The rule gate for specialist branches and the integrator for the integration branch."""
 
-    async def write_judgement(
-        self,
-        request_id: str,
-        judgement: Judgement,
-        conclusion: Conclusion,
-        commit_id: str | None = None,
-        recipe_digest: str | None = None,
-        retracts: RetractionRef | None = None,
-    ) -> TestRecord:
+    async def write_judgement(self, write: JudgementWrite) -> TestRecord:
         """Append a judgement; the latest one of a request is in force, earlier ones stay in the history.
 
-        A judgement that makes ``commit_id`` may name ``recipe_digest``, the ``Recipe.digest()`` of the recipe the
-        experiment repository stores for it; a commit keeps the digest it was first recorded with. ``retracts`` names
-        what a retraction undoes, and only a ``COMMITTED`` judgement may carry it (``ValueError``).
+        A commit keeps the recipe digest it was first recorded with; a judgement other than ``COMMITTED`` that names
+        what it retracts is refused (``ValueError``).
         """
 
     async def record_merge_attempt(self, attempt: MergeAttempt) -> None: ...
@@ -223,7 +212,8 @@ class LineageSink(Protocol):
 
 
 class ClaimService(Protocol):
-    """Same-state deduplication: the specialist runtime claims, the toolbox carries the claim through its test."""
+    """Same-state deduplication: the specialist runtime claims and renews, and the toolbox hands the claim to a test,
+    whose record decides it from then on."""
 
     async def lookup(self, key: ClaimKey, action_fingerprint: str) -> DedupAnswer: ...
 
@@ -235,19 +225,26 @@ class ClaimService(Protocol):
         ``threshold_pct`` of the baseline. Before a baseline there is no bar, and no intent is refused for its ceiling.
         """
 
-    async def renew(self, key: ClaimKey, *, ttl_seconds: float) -> Claim: ...
+    async def renew(self, key: ClaimKey, *, ttl_seconds: float) -> Claim:
+        """Extend the caller's branch's claim no test carries yet; ``ClaimLost`` for any other claim."""
 
-    async def attach_request(self, key: ClaimKey, request_id: str, *, ttl_seconds: float) -> Claim:
-        """Hand the claim to the toolbox's test; the toolbox renews it from then on.
+    async def attach_request(self, key: ClaimKey, request_id: str) -> Claim:
+        """Hand the claim to the test ``request_id``; from then on the claim follows that test's record, held while the
+        test is in flight, completed by its result, released by its withdrawal or a failed measurement, and nobody
+        renews, releases or changes it. Attaching it to the same test again changes nothing.
 
         ``ClaimLost`` refuses an explore whose change another branch asked first to explore on the same commit, while
-        that test is in flight or once it is measured; the toolbox then withdraws the request, which releases the claim.
+        that test is in flight or once it is measured; the claim stays with the request, and the toolbox then withdraws
+        the request, which releases the claim.
         """
 
-    async def release(self, key: ClaimKey) -> Claim: ...
+    async def release(self, key: ClaimKey) -> Claim:
+        """Let go of the caller's branch's claim no test carries yet; ``ClaimLost`` for any other claim, a claim a test
+        carries among them: it ends with that test."""
 
     async def release_branch(self, branch: str) -> tuple[Claim, ...]:
-        """Release every claim a stopped branch holds."""
+        """Release every claim a stopped branch holds that no test carries yet, and return them; a claim a test carries
+        stays with that test, which may run on after the stop."""
 
 
 class BranchLogStore(Protocol):
@@ -333,7 +330,7 @@ class DirectionNotes(Protocol):
 
 
 class SessionRecords(Protocol):
-    """What the session is, what it ran with and Arbor's map of its directions; the scheduler writes all three, the
+    """What the session is, what it ran with and the agent map of its directions; the scheduler writes all three, the
     profile once at PRELUDE."""
 
     async def write_session_profile(self, profile: SessionProfile) -> None: ...
@@ -346,7 +343,7 @@ class SessionRecords(Protocol):
     async def manifest_fingerprints(self) -> tuple[ManifestFingerprint, ...]: ...
 
     async def write_agent_map(self, directions: Sequence[MapDirection]) -> None:
-        """Keep Arbor's map, its ``directions`` in the map's order; the latest map written is in force. Raises
+        """Keep the agent map, its ``directions`` in the map's order; the latest map written is in force. Raises
         ``ValueError`` for a direction without an id or with the id of another."""
 
 
@@ -365,11 +362,15 @@ class RecordSearch(Protocol):
     async def record(self, request_id: str) -> TestRecord: ...
 
     async def profiles(self, commit_id: str) -> tuple[TestRecord, ...]:
-        """The profile tests of ``commit_id`` that produced an artifact."""
+        """The profile tests of ``commit_id``'s recipe that produced an artifact: its own, and those of another commit
+        of the same recipe digest that changed nothing."""
 
     async def op_shares(self, commit_id: str) -> OpShares | None:
         """The latest TraceLens op shares a tool reported on ``commit_id``, else on a commit of the same recipe digest,
         which runs the same ops; ``None`` when no commit of its recipe was analysed."""
+
+    async def baseline(self) -> BaselineRecord:
+        """The PRELUDE baseline the rule gate measured; raises :class:`NotRecorded` before it wrote one."""
 
 
 class Blackboard(

@@ -108,10 +108,7 @@ class FakeClient:
         self.index.mkdir()
         #: What installing the fake agentx-harness lays down in site-packages, by path.
         self.harness = self.index / "agentx-harness.tree"
-        for relative, text in (
-            (aiperf_source.PARSER_FILE, aiperf_source.PARSER),
-            (aiperf_source.METRIC_FILE, aiperf_source.OUTPUT_LENGTH_METRIC),
-        ):
+        for relative, text in aiperf_source.SOURCES:
             (self.harness / relative).parent.mkdir(parents=True, exist_ok=True)
             (self.harness / relative).write_text(text, encoding="utf-8")
         lines = []

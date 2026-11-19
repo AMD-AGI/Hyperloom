@@ -70,10 +70,12 @@ from inference_suite.contracts.normalised import (
     PackageIdentity,
 )
 from inference_suite.contracts.report import (
+    AGENTX_CONTEXT_OVERFLOW,
     AGENTX_ERROR_RATE_DEFINITION,
     FIXED_METRIC_KEYS,
     GPU_METRIC_KEYS,
     REPORT_KEYS,
+    READABLE_REPORT_SCHEMAS,
     REPORT_SCHEMA,
     STEPS_BEFORE_SPAWN,
     AgentxResult,
@@ -98,6 +100,7 @@ from inference_suite.contracts.report import (
 
 __all__ = [
     "AGENTX_CLIENT_ENV_PREFIX",
+    "AGENTX_CONTEXT_OVERFLOW",
     "AGENTX_ERROR_RATE_DEFINITION",
     "AGENTX_DEFAULT_DURATION_SEC",
     "AGENTX_FAST_MODE_ENV",
@@ -109,6 +112,7 @@ __all__ = [
     "GPU_METRIC_KEYS",
     "NORMALISED_SCHEMA",
     "REPORT_KEYS",
+    "READABLE_REPORT_SCHEMAS",
     "REPORT_SCHEMA",
     "STEPS_BEFORE_SPAWN",
     "AgentxResult",

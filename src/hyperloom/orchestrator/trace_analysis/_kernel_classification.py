@@ -30,7 +30,7 @@ from ._vendor_operator_playbooks import match_vendor_operator_playbook
 try:
     from TraceLens.TraceUtils.kernel_source.triton_pin import triton_def_line as _triton_def_line
 except ImportError:
-    _triton_def_line = None  # type: ignore[assignment]
+    _triton_def_line = None
 
 
 _log = logging.getLogger(__name__)

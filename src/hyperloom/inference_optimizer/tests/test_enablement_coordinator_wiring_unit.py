@@ -14,14 +14,13 @@ import pytest
 
 from hyperloom.agents.framework.sources.pr_monitor import PRMonitorError
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, TerminalFrame
-from hyperloom.common.deadline import Deadline
 from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.inference_optimizer.breakdown.stop_reasons import HOST_GPUS_UNAVAILABLE
 from hyperloom.orchestrator.bringup import observation_summary
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.round_store import RoundRequest
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.state.task_registry import TaskSpec, create_in_cursor
+from hyperloom.orchestrator.state.task_registry import Task, TaskSpec, create_in_cursor
 
 from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 from hyperloom.orchestrator.actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
@@ -40,20 +39,24 @@ _MISSING_ARCH_LOG = (
 )
 
 
-# ---- _authorable_launch_log (pure) ----
+# ---- _authorable_launch_log ----
 
 
-def test_extract_launch_log_joins_error_fields():
-    payload = {"error": "boom", "stderr": "trace here", "status": "failed"}
-    out = _authorable_launch_log(payload, err_class="subprocess_nonzero")
-    assert "boom" in out
-    assert "trace here" in out
-
-
-def test_extract_launch_log_handles_list_fields():
-    payload = {"log_tail": ["line1", "", "line2"]}
-    out = _authorable_launch_log(payload, err_class="")
-    assert "line1" in out and "line2" in out
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("evidence", "launch_log"),
+    [
+        pytest.param({"error": "boom", "stderr": "trace here"}, "boom\ntrace here", id="every_text_field"),
+        pytest.param({"log_tail": ["line1", "", "line2"]}, "line1\nline2", id="list_field_lines"),
+    ],
+)
+async def test_a_failed_boot_hands_enablement_all_of_its_text(session_dir, evidence, launch_log):
+    coord = make_coordinator(session_dir)
+    task = Task(task_id="bl", kind="baseline", state="running", params={}, idempotency_key="bl")
+    await coord.writeback.handle_unpromotable_result(
+        task, {"status": "failed", "error_class": "subprocess_nonzero", **evidence}
+    )
+    assert coord.shared_state.enablement.launch_log == launch_log
 
 
 def test_extract_launch_log_empty_on_none_or_blank():
@@ -65,7 +68,6 @@ def test_extract_launch_log_empty_on_none_or_blank():
 @pytest.mark.parametrize(
     "payload, err_class",
     [
-        ({"error": "bad --flag"}, "fast_exit_arg_error"),
         ({"error": "pinned dependency missing"}, AGENTX_PREFLIGHT_ERROR_CLASS),
         ({"error": f"{RAY_INFEASIBLE_MARKER}: cluster has 0 GPU(s), 8 requested"}, "subprocess_nonzero"),
         ({"error": "GPU 0: held by pid 4242 (python3)"}, HOST_GPUS_UNAVAILABLE),
@@ -120,14 +122,10 @@ def test_enablement_discovery_honors_pr_monitor_gate(
     monkeypatch.setattr(sources, "enumerate_candidates", lambda request: seen.append(request) or [])
     fake = _enqueue_self(tmp_path)
     fake.knowledge_plane = types.SimpleNamespace(pr_monitor_enabled=enabled)
-    plan = types.SimpleNamespace(
-        repos=("https://github.com/sgl-project/sglang.git",),
-        keywords=("scheduler",),
-    )
 
-    deadline = Deadline.after(60)
-    assert fake.enablement_params._discover_enablement_candidate_refs(plan, deadline=deadline) == ()
-    assert seen[0].search_modes == expected_modes
+    fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
+
+    assert {request.search_modes for request in seen} == {expected_modes}
 
 
 def test_build_params_actionable_failure_tags_enablement(monkeypatch, tmp_path):
@@ -699,6 +697,31 @@ async def test_revalidation_forwards_accepted_config(accepted_config, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_revalidation_does_not_remove_what_the_keep_reassigns(tmp_path):
+    """Removals run after the KEEP's layers, so one naming a flag or env the KEEP re-assigns is not forwarded."""
+    fake = _enqueue_self(
+        tmp_path,
+        enablement_validation_pending=True,
+        enablement_origin="eval",
+        enablement_accepted_config_path="/runs/specialist/accepted.yaml",
+        enablement_accepted_config={
+            "args_mode": "append",
+            "extra_server_args": "--max-num-seqs 16",
+            "extra_envs": {"VLLM_X": "1"},
+            "remove_args": ["--max-num-seqs", "--block-size"],
+            "unset_envs": ["VLLM_X", "VLLM_Y"],
+        },
+    )
+    tid = await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
+    params = (await fake.tasks.get(tid)).params
+    assert params["extra_server_args"] == "--max-num-seqs 16"
+    assert params["extra_envs"] == {"VLLM_X": "1"}
+    assert params["remove_args"] == ["--block-size"]
+    assert params["unset_envs"] == ["VLLM_Y"]
+    assert params["args_mode"] == "append"
+
+
+@pytest.mark.asyncio
 async def test_rearm_kept_stores_accepted_config(tmp_path):
     """A KEEP's effective config is persisted on the round for the revalidation to replay."""
     fake = _enqueue_self(tmp_path, enablement_origin="eval")
@@ -1216,24 +1239,17 @@ def _write_index(model_dir, weight_map):
     (model_dir / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
 
 
-def test_derive_weight_facts_blank_log_returns_empty():
-    fake = _facts_self()
-    assert EnablementParams._derive_checkpoint_weight_facts(fake, "") == ""
-    assert EnablementParams._derive_checkpoint_weight_facts(fake, None) == ""
-
-
-def test_derive_weight_facts_no_trigger_returns_empty():
-    """A log with no weight-init phrase and no weighty names does not fire."""
-    fake = _facts_self()
-    out = EnablementParams._derive_checkpoint_weight_facts(
-        fake, "ValueError: Model architecture 'Foo' is not supported"
-    )
-    assert out == ""
-
-
-def test_derive_weight_facts_no_model_path_returns_empty():
-    fake = _facts_self(model_path="")
-    assert EnablementParams._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG) == ""
+@pytest.mark.parametrize(
+    "launch_log",
+    [
+        pytest.param("", id="blank_log"),
+        pytest.param(None, id="no_log"),
+        pytest.param("ValueError: Model architecture 'Foo' is not supported", id="no_weight_init_failure"),
+        pytest.param(_WEIGHT_INIT_LOG, id="no_model_path"),
+    ],
+)
+def test_derive_weight_facts_returns_empty(launch_log):
+    assert EnablementParams._derive_checkpoint_weight_facts(_facts_self(), launch_log) == ""
 
 
 def test_derive_weight_facts_missing_index_returns_empty(tmp_path):
@@ -1356,22 +1372,6 @@ def _make_coord_with_phase(session_dir) -> "Coordinator":
     )
     backends = {name: MockBackend(plan, name=name) for name in ("orchestration", "critic")}
     return Coordinator(session_dir, backends=backends)
-
-
-@pytest.mark.asyncio
-async def test_rearm_authored_lane_delegates_enablement(session_dir):
-    """_maybe_rearm_authored_lane with lane=enablement calls maybe_rearm_enablement."""
-    coord = _make_coord_with_phase(session_dir)
-    called = []
-
-    async def _fake_rearm(res):
-        called.append(res)
-
-    coord.enablement_lane.maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
-
-    res = {"status": "apply_failed", "lane": "enablement", "enablement": True}
-    await coord.phase_framework._maybe_rearm_authored_lane(res, {})
-    assert len(called) == 1 and called[0] is res
 
 
 @pytest.mark.asyncio

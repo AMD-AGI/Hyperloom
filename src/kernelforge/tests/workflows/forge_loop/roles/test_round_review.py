@@ -13,7 +13,8 @@ import pytest
 
 from kernelforge.agent_backends import AgentRunResult
 from kernelforge.workflows.forge_loop.roles.contracts import LaneDrop, PlanCriticOutcome, SynthesizedPlan
-from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationAgent, OrchestrationService
+from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationService
+from kernelforge.workflows.forge_loop.roles.orchestration_agent import OrchestrationAgent
 from kernelforge.workflows.forge_loop.roles.specialists import SpecialistAgent, SpecialistPool
 from kernelforge.workflows.forge_loop.roles.plan_critic import PlanCriticAgent
 from kernelforge.tests.workflows.forge_loop.roles._orchestration_fakes import (

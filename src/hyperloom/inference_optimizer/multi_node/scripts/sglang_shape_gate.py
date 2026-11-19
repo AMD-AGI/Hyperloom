@@ -12,13 +12,14 @@ from pathlib import Path
 
 _KERNEL_SHAPE_TOOL_REL = ("TraceLens", "TraceUtils", "kernel_shape_tool")
 SGLANG_SITECUSTOMIZE_MIN_VERSION = (0, 5, 18)
+SGLANG_GC_PATCH_LAST_VERSION = (0, 5, 21)
 
 
 def sglang_shape_mode() -> str:
     """Return ``"sitecustomize"`` for SGLang >= 0.5.18 (no-patch shape tool), else ``"patched"``."""
     version = ""
     try:
-        import sglang  # type: ignore[import-not-found]
+        import sglang
 
         version = (getattr(sglang, "__version__", "") or "").strip()
     except (ImportError, OSError):

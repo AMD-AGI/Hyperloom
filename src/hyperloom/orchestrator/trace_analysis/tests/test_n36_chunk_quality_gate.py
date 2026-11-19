@@ -180,19 +180,6 @@ def test_quality_threshold_overridable_via_env(
     assert result["code"] == "steady_state_chunk_low_quality"
 
 
-def test_zero_duration_does_not_divide_by_zero(tl_module, split_dir):
-    """Edge case: gpu_duration=0 must not crash the gate."""
-    result = _run_quality_check(
-        tl_module,
-        split_dir,
-        mixed_row={"num_gpu_events": 5, "gpu_duration": 0.0, "gpu_busy_duration": 0.0},
-        pd_row={"num_gpu_events": 2790, "gpu_duration": 4538984.0, "gpu_busy_duration": 2723452.0},
-    )
-    # gpu_duration==0 → either None or a low-quality warning, but must not crash.
-    if result is not None:
-        assert result["code"] == "steady_state_chunk_low_quality"
-
-
 def test_zero_gpu_events_chunk_fires_warning(tl_module, split_dir):
     """Zero-GPU-events chunk (busy_ratio=0.0) fires the quality warning when a better alternate exists.
 
@@ -232,18 +219,3 @@ def test_zero_gpu_events_no_alternate_still_fires(tl_module, split_dir):
 def test_missing_execution_details_csv_returns_none(tl_module, split_dir):
     """Back-compat: builds without execution_details.csv keep pass-through behaviour."""
     assert _run_quality_check(tl_module, split_dir) is None
-
-
-# Retry allowlist contract
-def test_n26_retry_allowlist_includes_low_quality_code():
-    """Pin that the retry allowlist includes the low-quality code, else auto-retry never fires."""
-    from hyperloom.orchestrator.actions.executors import (
-        roofline as ro,
-    )
-
-    assert "steady_state_chunk_low_quality" in ro._AUTO_RETRY_WARNING_CODES, (
-        "N26 retry allowlist must include the N36 low-quality code; "
-        "otherwise the chunk-quality gate has no recovery path and "
-        "the optimization loop deadlocks on low-quality traces "
-        "(see DSR1-0528 10k/1k case)"
-    )

@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-from kernelforge.workflows.forge_fusion import validate
-from kernelforge.workflows.forge_fusion.validate import (
+from kernelforge.workflows.forge_fusion import serving_smoke
+from kernelforge.workflows.forge_fusion.serving_smoke import (
     SMOKE_STAGE_BOOT_TIMEOUT,
     SMOKE_STAGE_DECODE_BENCH,
     SMOKE_STAGE_DECODE_CRASH,
@@ -40,13 +40,13 @@ class _FakeServer:
 
 
 def _patch_smoke(monkeypatch, tmp_path, *, tail, poll_seq, run=None):
-    monkeypatch.setattr(validate, "_runtime_dir", lambda kind: tmp_path)
-    monkeypatch.setattr(validate.os, "killpg", lambda *a, **k: None)
-    monkeypatch.setattr(validate.os, "getpgid", lambda pid: pid)
-    monkeypatch.setattr(validate.subprocess, "run", run or (lambda *a, **k: _Proc()))
-    monkeypatch.setattr(validate.subprocess, "Popen", lambda *a, **k: _FakeServer(poll_seq))
-    monkeypatch.setattr(validate, "_tail_text", tail if callable(tail) else (lambda *a, **k: tail))
-    monkeypatch.setattr(validate, "_full_log_text", lambda *a, **k: "")
+    monkeypatch.setattr(serving_smoke, "_runtime_dir", lambda kind: tmp_path)
+    monkeypatch.setattr(serving_smoke.os, "killpg", lambda *a, **k: None)
+    monkeypatch.setattr(serving_smoke.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(serving_smoke.subprocess, "run", run or (lambda *a, **k: _Proc()))
+    monkeypatch.setattr(serving_smoke.subprocess, "Popen", lambda *a, **k: _FakeServer(poll_seq))
+    monkeypatch.setattr(serving_smoke, "_tail_text", tail if callable(tail) else (lambda *a, **k: tail))
+    monkeypatch.setattr(serving_smoke, "_full_log_text", lambda *a, **k: "")
     import time
 
     monkeypatch.setattr(time, "sleep", lambda *_: None)
@@ -121,7 +121,7 @@ def test_a_probe_transport_error_is_not_the_kernel(monkeypatch, tmp_path):
     """The server is up and unfaulted; the probe could not reach it."""
     _patch_smoke(monkeypatch, tmp_path, tail="Application startup complete.\n", poll_seq=[None, None, None])
     monkeypatch.setattr(
-        validate,
+        serving_smoke,
         "_vllm_decode_probe",
         lambda *a, **k: (False, "/v1/models probe error: OSError: boom"),
     )
@@ -142,7 +142,7 @@ def test_a_fault_during_decode_blames_the_kernel(monkeypatch, tmp_path):
         tail=ready + "HSA_STATUS_ERROR_EXCEPTION hardware exception\n",
         poll_seq=[None, None, None],
     )
-    monkeypatch.setattr(validate, "_vllm_decode_probe", lambda *a, **k: (True, "ok"))
+    monkeypatch.setattr(serving_smoke, "_vllm_decode_probe", lambda *a, **k: (True, "ok"))
 
     verdict = serving_smoke_verdict(
         SmokeServer("/m", {"F": "1"}, framework="vllm"), timeout_s=5, log_path=str(tmp_path / "e.log")
@@ -161,7 +161,7 @@ def test_an_oom_death_during_decode_is_still_the_environment(monkeypatch, tmp_pa
         tail=ready + "RuntimeError: HIP error: out of memory\n",
         poll_seq=[None, None, 1],
     )
-    monkeypatch.setattr(validate, "_vllm_decode_probe", lambda *a, **k: (False, "no tokens"))
+    monkeypatch.setattr(serving_smoke, "_vllm_decode_probe", lambda *a, **k: (False, "no tokens"))
 
     verdict = serving_smoke_verdict(
         SmokeServer("/m", {"F": "1"}, framework="vllm"), timeout_s=5, log_path=str(tmp_path / "f.log")
@@ -219,13 +219,13 @@ def test_a_bench_that_could_not_run_is_not_the_kernel(monkeypatch, tmp_path):
 
 
 def test_a_harness_error_is_not_the_kernel(monkeypatch, tmp_path):
-    monkeypatch.setattr(validate, "_runtime_dir", lambda kind: tmp_path)
-    monkeypatch.setattr(validate.subprocess, "run", lambda *a, **k: _Proc())
+    monkeypatch.setattr(serving_smoke, "_runtime_dir", lambda kind: tmp_path)
+    monkeypatch.setattr(serving_smoke.subprocess, "run", lambda *a, **k: _Proc())
 
     def boom(*a, **k):
         raise RuntimeError("popen exploded")
 
-    monkeypatch.setattr(validate.subprocess, "Popen", boom)
+    monkeypatch.setattr(serving_smoke.subprocess, "Popen", boom)
     import time
 
     monkeypatch.setattr(time, "sleep", lambda *_: None)
@@ -244,9 +244,9 @@ def test_serving_smoke_still_returns_the_two_tuple_callers_expect(monkeypatch, t
         tail="Application startup complete.\n",
         poll_seq=[None, None, None],
     )
-    monkeypatch.setattr(validate, "_vllm_decode_probe", lambda *a, **k: (True, "ok"))
+    monkeypatch.setattr(serving_smoke, "_vllm_decode_probe", lambda *a, **k: (True, "ok"))
 
-    ok, reason = validate.serving_smoke(
+    ok, reason = serving_smoke.serving_smoke(
         SmokeServer("/m", {"F": "1"}, framework="vllm"), timeout_s=5, log_path=str(tmp_path / "j.log")
     )
 

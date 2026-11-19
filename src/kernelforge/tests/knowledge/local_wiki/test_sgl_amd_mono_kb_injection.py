@@ -47,16 +47,12 @@ def test_the_framework_level_sits_between_the_pillars_and_the_languages():
     assert _SECTION not in build_forge_knowledge(_KB, language=("flydsl",))
 
 
-def test_framework_levels_keep_their_reading_order_whatever_order_they_are_named_in():
-    block = build_forge_knowledge(_KB, frameworks=("sgl_amd_mono", "aiter"))
+def test_a_task_served_both_frameworks_reads_aiter_first():
+    """``build_forge_knowledge`` keeps the order its caller names; the backend prompt names AITER first."""
+    config = Config(gpu_target="gfx942", defer_knowledge_maps=False)
+    prompt = build_single_kernel_backend_prompt(config, "aiter", source_paths=[_MONO_SOURCE])
 
-    assert block.index("## framework/aiter/") < block.index(_SECTION)
-
-
-def test_a_framework_that_does_not_exist_is_refused_rather_than_skipped():
-    """A misspelt name would otherwise serve the task one level fewer, silently."""
-    with pytest.raises(ValueError):
-        build_forge_knowledge(_KB, frameworks=("sgl-amd-mono",))
+    assert prompt.index("## framework/aiter/") < prompt.index(_SECTION)
 
 
 def test_a_monokernel_prompt_carries_the_framework_map():
@@ -79,7 +75,7 @@ class _Orchestrator(AnalysisEvidenceMixin):
     """The slice of a campaign the orchestration knowledge index reads."""
 
     def __init__(self, backend: str, sources: list[str]) -> None:
-        self.config = SimpleNamespace(local_knowledge_dir=str(_KB), defer_knowledge_maps=False)
+        self.config = SimpleNamespace(local_knowledge_dir=str(_KB), defer_knowledge_maps=False, gpu_target="gfx942")
         self.ic = SimpleNamespace(kernel_backend=backend, backend=backend)
         self._sources = sources
 

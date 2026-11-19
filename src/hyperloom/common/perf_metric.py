@@ -241,11 +241,6 @@ def axis_of(snapshot: Mapping[str, float] | None, key: str) -> float:
     return float(snapshot.get(key) or 0.0)
 
 
-def intvty_of(snapshot: Mapping[str, float] | None) -> float:
-    """Slow-tail interactivity from a perf snapshot; 0.0 when unavailable."""
-    return axis_of(snapshot, GRADED_INTVTY)
-
-
 def snapshot_axis(metric: str) -> str:
     """The key a perf snapshot carries round metric *metric* under: the snapshot normalises total token throughput."""
     return GRADED_TOTAL if metric == TOTAL_TOKEN_THROUGHPUT else metric
@@ -600,7 +595,6 @@ __all__ = [
     "holds_within_band",
     "incomparability_reason",
     "intvty_grading_enabled",
-    "intvty_of",
     "intvty_serving_grading_enabled",
     "is_agentx_mode",
     "constraint_fields",

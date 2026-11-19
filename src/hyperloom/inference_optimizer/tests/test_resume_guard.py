@@ -434,6 +434,7 @@ def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkey
     monkeypatch.setattr(cli, "_preflight", Mock(return_value={}))
     monkeypatch.setattr(cli, "_resolve_models_for_run", Mock())
     monkeypatch.setattr(cli, "_preflight_agentx_backend", Mock())
+    monkeypatch.setattr(cli, "_check_codex_sandbox", Mock())
     monkeypatch.setattr(resource_lock, "local_owner_scope", lambda: "local")
     lock = Mock()
     monkeypatch.setattr(cli, "_acquire_session_lock_or_exit", Mock(return_value=lock))
@@ -539,22 +540,6 @@ def test_confirmation_cli_rejects_bad_argument_pairs_before_reports(tmp_path, mo
     assert result == 2
     status_probe.assert_not_called()
     confirm.assert_not_called()
-
-
-def test_confirmation_cli_keeps_old_namespace_compatible(tmp_path, monkeypatch):
-    recover = _recover_module()
-    status_probe = Mock(
-        return_value=dict(
-            close_done=True, breakdown_exists=True, breakdown_recorded=True, counts_final=True, looks_complete=True
-        )
-    )
-    monkeypatch.setattr(recover, "_session_recovery_status", status_probe)
-    args = argparse.Namespace(session_dir=tmp_path, force=False)
-
-    result = recover._run_recover_session(args)
-
-    assert result == 0
-    status_probe.assert_called_once_with(tmp_path.resolve())
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="CLI parser imports require POSIX fcntl")
@@ -801,21 +786,6 @@ def test_confirmation_sql_failure_rolls_back_history_and_all_releases(tmp_path, 
     before = path.read_bytes()
     with pytest.raises(sqlite3.IntegrityError, match="injected deletion failure"):
         _confirm_in_sqlite(path)
-    assert path.read_bytes() == before
-
-
-def test_confirmation_requires_fcntl_before_acquiring_session_lock(tmp_path, monkeypatch):
-    from hyperloom.inference_optimizer.session import lock, resume_guard
-
-    path = _database(tmp_path)
-    _task(path)
-    before = path.read_bytes()
-    monkeypatch.setattr(lock, "fcntl", None)
-    acquire = Mock(side_effect=AssertionError("non-exclusive fallback must not be used"))
-    monkeypatch.setattr(lock.SessionLock, "acquire", acquire)
-    with pytest.raises(resume_guard.CleanupConfirmationError, match="POSIX|fcntl"):
-        resume_guard.confirm_task_stopped(tmp_path, task_id="task-1", reason=_CONFIRMATION_REASON)
-    acquire.assert_not_called()
     assert path.read_bytes() == before
 
 

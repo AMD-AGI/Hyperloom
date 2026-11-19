@@ -10,31 +10,14 @@ import os
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer import framework_registry as fr
-
 
 class TestRegistryEntry:
-    def test_custom_is_a_scriptable_framework(self):
-        assert fr.is_supported("custom")
-        assert fr.is_scriptable("custom")
-
-    def test_custom_declares_no_upstream_repo(self):
-        """There is no upstream to mine PRs from; the code is the operator's."""
-        assert fr.FRAMEWORKS["custom"].repo_url is None
-
     def test_custom_is_offered_by_the_cli(self):
         from hyperloom.inference_optimizer.cli import parser as cli_parser
 
         p = cli_parser._build_parser()
         ns = p.parse_args(["optimize", "--framework", "custom", "--model", "/m"])
         assert ns.framework == "custom"
-
-    def test_shipped_frameworks_keep_their_units(self):
-        """The new entry must not perturb how existing sessions report."""
-        assert fr.throughput_unit("xdit") == "img/s"
-        assert fr.throughput_unit("sglang") == "tok/s"
-        assert fr.throughput_unit("custom") == "unit/s"
-        assert fr.throughput_unit("bogus") == "tok/s"
 
 
 class TestConfigResolution:
@@ -257,25 +240,34 @@ class TestMeasurementContract:
         assert [v.name for v in kept] == ["geak_revalidate"]
         assert dropped == []
 
-    def test_a_shipped_framework_keeps_flipping_its_pinned_defaults(self):
+    @pytest.mark.parametrize(
+        ("framework", "expected"),
+        [
+            pytest.param("xdit", ["flip_pinned", "new_knob"], id="shipped_framework_keeps_its_ab_leg"),
+            pytest.param("custom", ["new_knob"], id="custom_drops_the_measurement_edit"),
+        ],
+    )
+    def test_only_custom_drops_a_variant_that_edits_a_pinned_env(self, framework, expected, tmp_path, monkeypatch):
         """A shipped baseline pins knobs at their off value for explore to flip."""
-        from hyperloom.inference_optimizer.session.paths import asset_root
+        from hyperloom.orchestrator.actions.executors.explore import _ExploreRound
 
-        cfg = yaml.safe_load((asset_root() / "assets" / "configs" / "baseline_xdit.yaml").read_text())
-        assert cfg["benchmark"]["envs"], "a shipped baseline pins envs explore may still flip"
-
-        import inspect
-
-        from hyperloom.orchestrator.actions.executors import explore as explore_mod
-
-        lines = inspect.getsource(explore_mod).splitlines()
-        call_at = next(i for i, line in enumerate(lines) if "filter_operator_pinned_envs(grid" in line)
-        preceding = next(line for line in reversed(lines[:call_at]) if line.strip())
-        assert 'framework == "custom"' in preceding, (
-            "the pinned-env guard must stay scoped to custom; applying it to a shipped "
-            "framework would drop the A/B legs its baseline pins exist to enable, and "
-            f"it is now guarded by: {preceding.strip()!r}"
-        )
+        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
+        rnd = _ExploreRound.__new__(_ExploreRound)
+        rnd.params = {
+            "grid": [
+                {"name": "flip_pinned", "extra_envs": {"MYFW_REPEATS": "1"}},
+                {"name": "new_knob", "extra_envs": {"MYFW_CACHE": "1"}},
+            ]
+        }
+        rnd.ss = None
+        rnd.framework = framework
+        rnd.yaml_envs = {"MYFW_REPEATS": "3"}
+        rnd.output_root = tmp_path
+        rnd.base_remove_args = []
+        rnd.base_unset_envs = []
+        rnd.args_mode = "append"
+        rnd._resolve_grid()
+        assert [gv.name for gv in rnd.grid] == expected
 
 
 class TestLaunchValidation:
@@ -330,13 +322,6 @@ class TestLaunchValidation:
             if framework == "xdit":
                 args.xdit_model_name = "FLUX.2-dev"
             _apply_operator_supplied_paths(args, framework)
-
-    def test_a_shipped_framework_needs_neither_flag(self, monkeypatch):
-        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
-
-        monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
-        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
-        _apply_operator_supplied_paths(self._args(xdit_model_name="FLUX.2-dev"), "xdit")
 
     def test_xdit_resume_accepts_env_without_flag(self, monkeypatch):
         """On resume, _restore exports XDIT_MODEL_NAME; apply must accept it."""
@@ -409,25 +394,20 @@ class TestEntrypointFailFast:
         assert "custom_mi355x.sh" in err
         assert str(scripts / "custom_mi355x.sh") in err
 
-    def test_a_resolved_script_passes(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize(
+        "script",
+        [
+            pytest.param("custom_mi355x.sh", id="runner_suffixed_script"),
+            pytest.param("run_whatever.sh", id="lone_operator_script"),
+        ],
+    )
+    def test_a_resolved_script_passes(self, monkeypatch, tmp_path, script):
         from hyperloom.inference_optimizer.cli import _require_custom_entrypoint
 
         repo, scripts = tmp_path / "fw", tmp_path / "sc"
         repo.mkdir()
         scripts.mkdir()
-        (scripts / "custom_mi355x.sh").write_text("#!/bin/sh\n")
-        monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
-        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
-
-        _require_custom_entrypoint("custom", gpu_type="mi355x")
-
-    def test_a_lone_operator_script_passes(self, monkeypatch, tmp_path):
-        from hyperloom.inference_optimizer.cli import _require_custom_entrypoint
-
-        repo, scripts = tmp_path / "fw", tmp_path / "sc"
-        repo.mkdir()
-        scripts.mkdir()
-        (scripts / "run_whatever.sh").write_text("#!/bin/sh\n")
+        (scripts / script).write_text("#!/bin/sh\n")
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
 

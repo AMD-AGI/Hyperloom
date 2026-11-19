@@ -10,7 +10,6 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -349,21 +348,6 @@ def test_manifest_preserves_quantized_model_identity(tmp_path: Path) -> None:
     assert built["model_name"] == "google-gemma-4-26B-A4B-it-quantized"
     assert built["model_name"] != "quantized"
     assert built["model_path"].endswith("/quantized")
-
-
-def test_resolve_model_display_name_helper() -> None:
-    """Unit cover for the identity resolver: pinned override wins, else basename."""
-    plain = SimpleNamespace(model="/models/Qwen3-32B")
-    assert cb.resolve_model_display_name(plain) == "Qwen3-32B"
-
-    pinned = SimpleNamespace(
-        model="/tmp/quantization/x/quantized",
-        model_display_name="x-quantized",
-    )
-    assert cb.resolve_model_display_name(pinned) == "x-quantized"
-
-    empty_override = SimpleNamespace(model="/models/Foo", model_display_name="")
-    assert cb.resolve_model_display_name(empty_override) == "Foo"
 
 
 def test_conc_sweep_parser(caplog) -> None:

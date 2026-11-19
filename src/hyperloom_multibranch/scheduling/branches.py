@@ -15,8 +15,9 @@ fork is cut by the rule gate at that same commit, which lands the fix on it firs
 ``SPLIT`` lineage, so it gets no ``OPEN``: it is opened at its head once the gate has landed it, and a fork the gate
 does not land is stopped as not started. A repair's specialist starts on the request it was admitted for,
 and a repair branch is stopped :data:`REPAIR_BRANCH_SECONDS` after its entry into the roster. Stopping a branch
-withdraws its specialist, its tool jobs, the processes the scheduler registered for it, its claims, and the forks and
-repairs of it that are queued, or admitted but not started yet, as the fork desk admits nothing for a stopped branch.
+withdraws its specialist, its tool jobs, the processes the scheduler registered for it, its claims no test carries yet
+(a claim a test carries ends with that test), and the forks and repairs of it that are queued, or admitted but not
+started yet, as the fork desk admits nothing for a stopped branch.
 Its queued and running tests run to their end under the K it had, and their results are recorded, unless the session's
 end stopped it, which withdraws them too; the end of EXPLORE withdraws every test a stopped branch still has. Every
 fork and repair voided that way, stopped before it started, or whose start failed is handed to the rule gate, which
@@ -110,7 +111,7 @@ class Launch:
     """What a branch's specialist starts on: the repair the branch was opened for, the focus the session's briefs keep
     for it unless ``None``, the direction the user wrote for a user branch, and the agent the user named for an agent's
     branch with the file of its share of the session's directions, if it has one; ``map_for`` makes an agent branch a
-    mapping branch, which maps the directions those Arbor agents split (:attr:`BranchTask.map_for`)."""
+    mapping branch, which maps the directions those component agents split (:attr:`BranchTask.map_for`)."""
 
     repair: RepairRequest | None = None
     focus: BranchFocus | None = None
@@ -199,7 +200,7 @@ class BranchControl:
     async def open_map_branch(
         self, map_for: tuple[str, ...], start_commit: str, deadline: float
     ) -> tuple[BranchEntry, ...]:
-        """Open one :attr:`BranchOrigin.AGENT` branch at ``start_commit`` that maps the directions the Arbor agents
+        """Open one :attr:`BranchOrigin.AGENT` branch at ``start_commit`` that maps the directions the component agents
         ``map_for`` split, with the first one's dossier pass; each share then opens as a branch the fork desk admits, into
         the slots the mapping branch holds for them meanwhile."""
 
@@ -321,8 +322,8 @@ class BranchControl:
     async def stop_branch(self, branch: str, stop: BranchStop) -> tuple[BaseException, ...]:
         """Withdraw what of ``branch`` its stop ends and return the steps that failed; stopping it again does nothing.
 
-        Every step runs even when an earlier one fails, so the tool jobs, processes and claims of the branch, and its
-        tests when the stop does not let them finish, are always withdrawn and, once the branch is in the lineage, its
+        Every step runs even when an earlier one fails, so the tool jobs, processes and claims no test carries of the
+        branch, and its tests when the stop does not let them finish, are always withdrawn and, once the branch is in the lineage, its
         ``STOP`` recorded; the ``STOP`` decision names each failure, and the caller decides what one means to it.
         """
 

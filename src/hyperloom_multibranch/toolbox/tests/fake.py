@@ -315,7 +315,7 @@ class FakeToolbox(RealToolbox):
         tuning = ToolboxTuning(
             policy=self._policy(self.config.default_k),
             max_infra_retries=self.config.max_infra_retries,
-            claim_ttl_seconds=self.config.claim_ttl_seconds,
+            tick_seconds=self.config.tick_seconds,
             clock=lambda: self.executor.now,
             build_retry_seconds=0.0,
             infra_backoff_seconds=(),

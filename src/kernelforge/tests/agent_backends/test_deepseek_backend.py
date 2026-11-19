@@ -497,6 +497,46 @@ def test_a_session_scoped_gateway_reaches_the_runtime_environment(tmp_path: Path
     assert env["DEEPSEEK_API_KEY"] == "scoped"
 
 
+def test_the_output_cap_reaches_the_forge_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Forge starts its own runtimes, so the cap ``HYPERLOOM_DSH_MAX_TOKENS`` sets must ride on those too."""
+    monkeypatch.setenv("HYPERLOOM_DSH_MAX_TOKENS", "64000")
+    repo, kernel = _make_repo(tmp_path)
+
+    asyncio.run(_backend().run(_spec(repo, kernel)))
+
+    assert _FakeHarness.instances[-1].kwargs["max_tokens"] == 64000
+
+
+def test_a_session_scoped_output_cap_reaches_the_forge_runtime(tmp_path: Path) -> None:
+    repo, kernel = _make_repo(tmp_path)
+
+    asyncio.run(_backend().run(_spec(repo, kernel, env={"HYPERLOOM_DSH_MAX_TOKENS": "32000"})))
+
+    assert _FakeHarness.instances[-1].kwargs["max_tokens"] == 32000
+
+
+def test_no_output_cap_leaves_the_forge_runtime_at_the_harness_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HYPERLOOM_DSH_MAX_TOKENS", raising=False)
+    repo, kernel = _make_repo(tmp_path)
+
+    asyncio.run(_backend().run(_spec(repo, kernel)))
+
+    assert _FakeHarness.instances[-1].kwargs["max_tokens"] is None
+
+
+def test_an_unusable_output_cap_is_refused_before_the_runtime_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_DSH_MAX_TOKENS", "lots")
+    repo, kernel = _make_repo(tmp_path)
+
+    with pytest.raises(DeepSeekHarnessUnavailableError, match="HYPERLOOM_DSH_MAX_TOKENS"):
+        asyncio.run(_backend().run(_spec(repo, kernel)))
+    assert not _FakeHarness.instances
+
+
 def test_probe_runs_the_handshake_so_a_bad_route_fails_at_launch(tmp_path: Path) -> None:
     """Construction is lazy in the SDK: a missing binary or a bogus model only shows when the handshake runs."""
     repo, _kernel = _make_repo(tmp_path)

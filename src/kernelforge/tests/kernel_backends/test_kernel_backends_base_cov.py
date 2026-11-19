@@ -75,7 +75,7 @@ def test_a_monokernel_reads_flydsl_first_and_carries_its_isa_and_hip_neighbours(
 
 def test_build_single_kernel_backend_prompt_aiter_operator():
     config = Config(gpu_target="gfx950")
-    # AITER operator path exercises include_aiter=True branch.
+    # The AITER operator path adds the framework/aiter knowledge.
     prompt = build_single_kernel_backend_prompt(
         config,
         "ck",

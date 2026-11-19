@@ -17,7 +17,7 @@ from ._workload_envs import (
     default_baseline_config,
     materialize_benchmark_config,
 )
-from ._grid_base import GridVariant, VariantResult
+from ._grid_base import GridVariant, VariantResult, grid_run_dirs, variant_slot
 from ._profile_setup import VLLM_PATCH_PROFILER_FIELDS
 from ._server_patcher import ensure_vllm_patched_for_tracelens
 from ._grid_runner import _run_grid_warmup_enabled as run_grid_warmup_enabled
@@ -36,7 +36,7 @@ from ._agentx_checkpoint import CHECKPOINT_ARTIFACT_NAME, AgentxCheckpoint
 from ._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_cacheless_agentx_baseline
 from ._failed_step import failed_step_error_class
 from ._round_folder import RoundFolder, is_round_folder, read_round_launch
-from ._suite.config import fixed_workload
+from ._suite.config import CHECK_SERVER_ENVS, fixed_workload
 from ._suite.rounds import TOOL_CACHE_ENV, SuiteRoundRefused, external_agentx_config, staged_tool_cache
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 from ._spec_decode_pin import (
@@ -58,6 +58,7 @@ __all__ = [
     "is_patched_copy",
     "lay_tracelens_patch",
     "CONTEXT_COPY_REFUSAL",
+    "CHECK_SERVER_ENVS",
     "BenchmarkTarget",
     "COOPERATIVE_REAP_BUDGET_SEC",
     "GridLaunch",
@@ -87,6 +88,7 @@ __all__ = [
     "failed_step_error_class",
     "external_agentx_config",
     "fixed_workload",
+    "grid_run_dirs",
     "harvest_leaked_artifacts",
     "is_round_folder",
     "materialize_benchmark_config",
@@ -104,4 +106,5 @@ __all__ = [
     "speculative_pin_reason",
     "strip_visible_devices_from_config",
     "teardown_variant_server",
+    "variant_slot",
 ]

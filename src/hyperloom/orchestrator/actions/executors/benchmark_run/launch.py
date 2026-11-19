@@ -33,6 +33,7 @@ from ..benchmark_result import (
     extract_benchmark_measurement,
 )
 from .._failed_step import failed_step_error_class
+from ....state.failure_evidence import with_failure_hint
 from .._round_folder import RoundFolder, round_report_path
 from .._suite.rounds import SuiteRound, SuiteRoundRefused, SuiteRoute, deadline_unix, round_lifecycle, run_suite_round
 from ..agentx_point import ServerArgvInvalidError
@@ -178,7 +179,9 @@ def _suite_round_failure(
     """The failed result of an inference_suite round: the step it stopped at, or a load that measured nothing."""
     step = measurement.get("failed_step")
     if step is not None:
-        error_class, error = failed_step_error_class(FailedStep(step)), measurement.get("failure_detail") or step
+        detail = measurement.get("failure_detail") or ""
+        error_class = failed_step_error_class(FailedStep(step), detail)
+        error = with_failure_hint(error_class, detail or step)
     else:
         error_class, error = "invalid_measurement", "the round report holds no positive throughput and served requests"
     report_path = round_report_path(finished.workspace)
@@ -301,6 +304,7 @@ class _BenchmarkLaunchMixin:
         server_args: str,
         resolved_model: str,
     ) -> dict[str, Any] | None:
+        from .._multi_node_env import round_server_env
         from .._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
         if round_.ctx_extra.get("mn_round_restarted"):
@@ -319,13 +323,12 @@ class _BenchmarkLaunchMixin:
                 base = merge_server_args(base, operator_args) if base else operator_args
             # Base on ``server_args`` (carries the one-shot cuda-graph eager-fallback flag when armed) so the MN
             # per-round restart keeps that fallback too.
-            env = dict(server_base.env)
             # PD knobs auto-resolved by the helper from $PD_* env, falling back to state.json.
             await restart_server_for_round(
                 RoundServer.from_env(
                     merge_server_args(base, server_args) if base else server_args, resolved_model or None
                 ),
-                extra_env=env or None,
+                extra_env=round_server_env() or None,
             )
         except ServerRestartFailed as exc:
             return {

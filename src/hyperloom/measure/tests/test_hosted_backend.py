@@ -463,17 +463,14 @@ def test_a_sandbox_that_failed_before_it_ran_is_an_infrastructure_failure_with_t
 
 @pytest.mark.parametrize(
     ("reason", "returncode", "label"),
-    [
-        (PENDING_TIMEOUT_MESSAGE, HOSTED_RUNNER_UNAVAILABLE_RC, "runner_start_timeout"),
-        (SAFE_CREATE_FAILED_MESSAGE, HOSTED_INFRA_FAILURE_RC, "sandbox_create_failed"),
-    ],
-    ids=["pending_timeout", "sandbox_create_failed"],
+    [(SAFE_CREATE_FAILED_MESSAGE, HOSTED_INFRA_FAILURE_RC, "sandbox_create_failed")],
+    ids=["sandbox_create_failed"],
 )
 def test_a_create_whose_replay_finds_its_key_spent_is_labelled_by_the_reason_the_platform_stored(
     rig, tmp_path, monkeypatch, service: _Service, reason: str, returncode: int, label: str
 ) -> None:
-    """The gateway cuts the create and the replay is told the key is spent, with how its sandbox ended: a pending
-    timeout is a runner that did not start in time, as its 503 would have been; a failed create is the platform's."""
+    """The gateway cuts the create and the replay is told the key is spent, with how its sandbox ended: a failed create
+    is the platform's. (A pending timeout is asked for again under a fresh key, see the next test.)"""
     r = rig(gpus=1)
     platform = E2BSandboxProvider(
         {"measurement": KEY_MEASUREMENT}, api_url=service.url, sandbox_url=service.url, retry=FAST
@@ -485,6 +482,30 @@ def test_a_create_whose_replay_finds_its_key_spent_is_labelled_by_the_reason_the
     assert reason in outcome.stderr, "the stored reason reaches the outcome"
     keys = [call.body["metadata"][IDEMPOTENCY_KEY] for call in service.calls("POST", "/v2/sandboxes")]
     assert keys == ["run-1:req-1:1", "run-1:req-1:1"], "the cut create is replayed once, its key not replaced"
+    assert r.backend._pool.active == 0
+
+
+def test_a_runner_the_platform_never_ran_within_the_start_timeout_is_unavailable_after_fresh_keys(
+    rig, tmp_path, monkeypatch, service: _Service
+) -> None:
+    """The gateway cuts the create and the replay is told the key is spent at the service's pending limit: the create
+    asks again under fresh keys until the runner's start timeout, then it is a runner that did not start in time."""
+    r = rig(gpus=1, runner_start_timeout_sec=0.5)
+    platform = E2BSandboxProvider(
+        {"measurement": KEY_MEASUREMENT}, api_url=service.url, sandbox_url=service.url, retry=FAST
+    )
+    service.reply("POST", "/v2/sandboxes", GATEWAY_CUTS[0], (410, key_spent_body(PENDING_TIMEOUT_MESSAGE)))
+    monkeypatch.setattr(r.provider, "create", platform.create)
+    _, outcome = _run(r, tmp_path)
+    assert (outcome.returncode, outcome.failure_class.value, outcome.failure_reason) == (
+        HOSTED_RUNNER_UNAVAILABLE_RC,
+        "infra",
+        "runner_start_timeout",
+    )
+    assert PENDING_TIMEOUT_MESSAGE in outcome.stderr, "the stored reason reaches the outcome"
+    keys = [call.body["metadata"][IDEMPOTENCY_KEY] for call in service.calls("POST", "/v2/sandboxes")]
+    fresh = [f"run-1:req-1:1:p{n}" for n in range(1, len(keys) - 1)]
+    assert keys == ["run-1:req-1:1", "run-1:req-1:1", *fresh] and fresh, "the cut create is replayed once, then renewed"
     assert r.backend._pool.active == 0
 
 

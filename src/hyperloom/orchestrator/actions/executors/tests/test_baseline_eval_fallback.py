@@ -15,7 +15,6 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom_common.env import is_truthy
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
 )
@@ -37,27 +36,6 @@ def _make_ctx(params: dict, *, enablement_mode: str = "off") -> SimpleNamespace:
 
 def _run(coro):
     return asyncio.run(coro)
-
-
-# --- is_truthy ------------------------------------------------------------
-@pytest.mark.parametrize(
-    "value,expected",
-    [
-        (True, True),
-        (False, False),
-        ("true", True),
-        ("1", True),
-        ("yes", True),
-        ("on", True),
-        ("false", False),
-        ("0", False),
-        ("", False),
-        (None, False),
-        ("nonsense", False),
-    ],
-)
-def test_is_truthy(value, expected):
-    assert is_truthy(value) is expected
 
 
 # --- _is_eval_rooted_failure ----------------------------------------------
@@ -131,71 +109,39 @@ def _stopped(
 
 
 # --- accuracy-stop decision matrix -----------------------------------------
-def test_stop_scriptable_missing_gate_zero_accuracy():
-    # Finding: scriptable fail-closed records accuracy=0.0 -> must still stop.
-    reason = _stopped(
-        "xdit",
-        {"status": "succeeded", "accuracy": 0.0, "run_eval_disabled": True},
-    )
-    assert reason == "baseline_accuracy_failed"
+@pytest.mark.parametrize(
+    ("framework", "result"),
+    [
+        ("xdit", {"status": "succeeded", "accuracy": 0.0, "run_eval_disabled": True}),
+        ("sglang", {"status": "succeeded", "run_eval_disabled": False}),
+        ("sglang", {"status": "succeeded", "accuracy": 0.0, "run_eval_disabled": False}),
+        ("sglang", {"status": "succeeded", "run_eval_disabled": True}),
+        ("sglang", {"status": "succeeded", "run_eval_disabled": True, "accuracy_source": "eval_unavailable"}),
+    ],
+    ids=[
+        "scriptable_fail_closed_zero",
+        "serving_no_accuracy_eval_on",
+        "serving_zero_accuracy",
+        "serving_eval_disabled_via_config",
+        "serving_eval_failure_fallback",
+    ],
+)
+def test_stop_when_a_genuine_baseline_has_no_usable_accuracy(framework, result):
+    """A genuine baseline has no opt-out: however the eval was turned off, a missing reference still stops the run."""
+    assert _stopped(framework, result) == "baseline_accuracy_failed"
 
 
-def test_stop_serving_no_accuracy_eval_on():
-    reason = _stopped(
-        "sglang",
-        {"status": "succeeded", "run_eval_disabled": False},
-    )
-    assert reason == "baseline_accuracy_failed"
-
-
-def test_stop_serving_zero_accuracy():
-    reason = _stopped(
-        "sglang",
-        {"status": "succeeded", "accuracy": 0.0, "run_eval_disabled": False},
-    )
-    assert reason == "baseline_accuracy_failed"
-
-
-def test_stop_serving_operator_disabled_via_config():
-    # A YAML/reference-env RUN_EVAL=false folds into run_eval_disabled, but a genuine baseline has no opt-out: turning
-    # the eval off does not make a missing accuracy reference acceptable, so the run still stops.
-    reason = _stopped(
-        "sglang",
-        {"status": "succeeded", "run_eval_disabled": True},
-    )
-    assert reason == "baseline_accuracy_failed"
-
-
-def test_no_stop_when_quality_ref_exempt():
-    # Synthetic kernel-lane re-baselines (kind="baseline" + quality_ref_exempt) are throughput-only A/B probes: no
-    # accuracy, no stop.
-    reason = _stopped(
-        "sglang",
-        {"status": "succeeded", "run_eval_disabled": True},
-        params={"quality_ref_exempt": True},
-    )
-    assert reason == ""
-
-
-def test_stop_serving_eval_failure_fallback():
-    # Fallback forces RUN_EVAL=false but eval was expected and broke -> stop.
-    reason = _stopped(
-        "sglang",
-        {
-            "status": "succeeded",
-            "run_eval_disabled": True,
-            "accuracy_source": "eval_unavailable",
-        },
-    )
-    assert reason == "baseline_accuracy_failed"
-
-
-def test_no_stop_valid_accuracy():
-    reason = _stopped(
-        "sglang",
-        {"status": "succeeded", "accuracy": 0.85, "run_eval_disabled": False},
-    )
-    assert reason == ""
+@pytest.mark.parametrize(
+    ("result", "params"),
+    [
+        ({"status": "succeeded", "accuracy": 0.85, "run_eval_disabled": False}, None),
+        # Synthetic kernel-lane re-baselines (kind="baseline" + quality_ref_exempt) are throughput-only A/B probes.
+        ({"status": "succeeded", "run_eval_disabled": True}, {"quality_ref_exempt": True}),
+    ],
+    ids=["valid_accuracy", "quality_ref_exempt"],
+)
+def test_no_stop_when_accuracy_is_usable_or_exempt(result, params):
+    assert _stopped("sglang", result, params=params) == ""
 
 
 def test_no_stop_when_not_genuine_baseline():
@@ -493,12 +439,14 @@ def test_eval_enablement_missing_accuracy_routes_not_stop(monkeypatch, tmp_path)
     assert result["eval_origin"] == "eval"
 
 
-def test_eval_enablement_zero_accuracy_below_floor(monkeypatch):
-    result = {"status": "succeeded", "accuracy": 0.0, "run_eval_disabled": False}
+@pytest.mark.parametrize("observed", [0.0, DEFAULT_ENABLEMENT_ACCURACY_FLOOR / 2], ids=["zero", "positive"])
+def test_eval_enablement_accuracy_below_floor(monkeypatch, observed):
+    result = {"status": "succeeded", "accuracy": observed, "run_eval_disabled": False}
     reason = _route(monkeypatch, "sglang", result)
     assert reason == ""
     assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_ACCURACY_BELOW_FLOOR
-    assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] == 0.0
+    assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] == observed
+    assert result[BASELINE_EVAL_ACCURACY_FLOOR_KEY] == DEFAULT_ENABLEMENT_ACCURACY_FLOOR
 
 
 def test_eval_enablement_probe_reports_generation_pathology(monkeypatch):
@@ -521,16 +469,6 @@ def test_eval_enablement_probe_reports_generation_pathology(monkeypatch):
     evidence = result[BASELINE_EVAL_EVIDENCE_KEY]
     assert "128/128" in evidence
     assert "16384" in evidence
-
-
-def test_eval_enablement_positive_below_floor(monkeypatch):
-    observed = DEFAULT_ENABLEMENT_ACCURACY_FLOOR / 2
-    result = {"status": "succeeded", "accuracy": observed, "run_eval_disabled": False}
-    reason = _route(monkeypatch, "sglang", result)
-    assert reason == ""
-    assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_ACCURACY_BELOW_FLOOR
-    assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] == observed
-    assert result[BASELINE_EVAL_ACCURACY_FLOOR_KEY] == DEFAULT_ENABLEMENT_ACCURACY_FLOOR
 
 
 def test_eval_enablement_accuracy_at_floor_passes(monkeypatch):

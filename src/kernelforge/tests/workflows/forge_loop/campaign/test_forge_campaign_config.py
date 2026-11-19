@@ -905,3 +905,40 @@ def test_pending_campaign_head_accepts_only_its_own_lineage(tmp_path, monkeypatc
 
     with pytest.raises(GitError, match="git rev-parse .* failed"):
         validate_pending_campaign_head(str(workspace), "no-such-commit")
+
+
+@pytest.mark.parametrize("backend", ["aiter", "flydsl", "assembly", "gluon", "fusion", "ave", "mono"])
+def test_a_fresh_campaign_refuses_a_backend_that_cannot_build_for_gfx1100(tmp_path, monkeypatch, backend):
+    workspace, kernel, _helper, driver = _git_workspace(tmp_path)
+    monkeypatch.setenv("GPU_TARGET", "gfx1100")
+
+    with pytest.raises(ValueError, match=rf"kernel backend '{backend}' does not target gfx1100 \(RDNA3\)"):
+        create_campaign_config(
+            str(workspace),
+            CampaignInputs(
+                kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None, kernel_backend=backend
+            ),
+        )
+
+
+@pytest.mark.parametrize(("gpu_type", "recorded"), [("", "w7900"), ("W7900D", "w7900d")])
+def test_a_gfx1100_campaign_with_a_supported_backend_keeps_the_board_it_names(
+    tmp_path, monkeypatch, gpu_type, recorded
+):
+    """A bare gfx1100 is recorded as the W7900; an explicit board is kept as given."""
+    workspace, kernel, _helper, driver = _git_workspace(tmp_path)
+    monkeypatch.setenv("GPU_TARGET", "gfx1100")
+
+    config = create_campaign_config(
+        str(workspace),
+        CampaignInputs(
+            kernel=str(kernel),
+            driver=str(driver),
+            source_files="",
+            program_md_file=None,
+            kernel_backend="triton",
+            gpu_type=gpu_type,
+        ),
+    )
+
+    assert (config.gpu_target, config.gpu_type, config.kernel_backend) == ("gfx1100", recorded, "triton")

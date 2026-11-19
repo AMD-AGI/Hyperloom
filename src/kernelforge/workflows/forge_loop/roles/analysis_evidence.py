@@ -180,14 +180,15 @@ class AnalysisEvidenceMixin:
                 backend = self.ic.kernel_backend.strip() or self.ic.backend
                 root = Path(local_knowledge_root)
                 sources = self._target_source_files()
-                served = {
-                    "aiter": backend == "aiter" or any("aiter" in Path(source).parts for source in sources),
-                    "sgl_amd_mono": includes_sgl_amd_mono(backend, sources),
-                }
+                include_aiter = backend == "aiter" or any("aiter" in Path(source).parts for source in sources)
+                frameworks = ["aiter"] if include_aiter else []
+                if includes_sgl_amd_mono(backend, sources):
+                    frameworks.append("sgl_amd_mono")
                 knowledge_index = build_forge_knowledge(
                     root,
+                    gpu_target=self.config.gpu_target,
                     language=resolve_language_dirs(backend, root),
-                    frameworks=[name for name, wanted in served.items() if wanted],
+                    frameworks=frameworks,
                     # The orchestration context is inlined into every specialist
                     # and analysis prompt, so the ablation has to reach it too or
                     # it only measures half the knowledge block's cost.
@@ -267,13 +268,13 @@ class AnalysisEvidenceMixin:
 
     def _published_analysis_bundle_root(self, commit: str) -> Path | None:
         """Return the published analysis generation directory for one commit."""
-        from kernelforge.workflows.forge_loop.roles.analysis import AnalysisAgentService
+        from kernelforge.workflows.forge_loop.roles.analysis_bundle import _published_generation_root
 
         if not self._looks_like_git_commit(commit):
             return None
         workspace = Path(self.ic.workspace_dir).resolve()
         commit_root = workspace / "forge_experiments" / "analysis" / commit
-        return AnalysisAgentService._published_generation_root(commit_root)
+        return _published_generation_root(commit_root)
 
     def _nearest_published_analysis_commit(self, start_commit: str) -> str:
         """Walk Git ancestors until a published analysis bundle is found."""

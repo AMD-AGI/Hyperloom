@@ -301,7 +301,7 @@ def redistribute_budget_pct(
 def _now_unix(state: Any) -> float:
     """Resolve the \"now\" timestamp; tests can inject ``state._now_unix``."""
     if hasattr(state, "_now_unix") and callable(state._now_unix):
-        return float(state._now_unix())  # type: ignore[attr-defined]
+        return float(state._now_unix())
     import time as _time
 
     return _time.time()
@@ -837,7 +837,7 @@ def _config_lever_evidence(state: Any, overrides: dict[str, Any]) -> dict[str, A
     }
 
 
-def _patch_lever_evidence(state: Any, overrides: dict[str, Any]) -> dict[str, Any]:
+def _patch_lever_evidence(state: Any) -> dict[str, Any]:
     """The facts the patch levers' plateau verdict is judged on.
 
     Source patches and upstream PRs share a supply — the discovery and authoring
@@ -846,14 +846,11 @@ def _patch_lever_evidence(state: Any, overrides: dict[str, Any]) -> dict[str, An
     authoring round that came back empty or never ran resolves its candidate
     too, so a lane that cannot run dries up like one that finds nothing.
     """
-    streak_floor = int(
-        overrides.get("framework_no_keep_streak", DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK),
-    )
     streak = _trailing_no_keep(_lever_attempts(state, LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR))
     exhausted = bool(state.framework_agent_phase_done)
     return {
         "source_consecutive_no_keep": streak,
-        "source_threshold": streak_floor,
+        "source_threshold": DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK,
         "source_candidates_exhausted": exhausted,
     }
 
@@ -866,7 +863,7 @@ def per_lever_dryness(state: Any) -> tuple[bool, dict[str, Any]]:
     """
     overrides = _resolve_plateau_overrides(state)
     plateau = framework_plateau(
-        {**_config_lever_evidence(state, overrides), **_patch_lever_evidence(state, overrides)},
+        {**_config_lever_evidence(state, overrides), **_patch_lever_evidence(state)},
     )
     return (plateau.config_dry and plateau.source_dry), plateau.arms
 

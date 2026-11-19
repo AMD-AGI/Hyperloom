@@ -15,6 +15,7 @@ from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.peers import Purpose, TestKind, Validity, Verdict
 from hyperloom_multibranch.contracts.blackboard.records import (
+    JudgementWrite,
     BranchProgress,
     FrontierScore,
     LineageEvent,
@@ -135,7 +136,7 @@ async def test_a_new_branch_without_a_commit_keeps_a_floor_until_its_tests_settl
         await toolbox.write_request(request(request_id, intent("s3", "c1", target=request_id)))
         await toolbox.write_result(result(request_id))
         flat = judgement(0.2, (request_id,), verdict=Verdict.FLAT)
-        await gate.write_judgement(request_id, flat, Conclusion.RECORDED_ONLY)
+        await gate.write_judgement(JudgementWrite(request_id, flat, Conclusion.RECORDED_ONLY))
 
     fresh = _scores(await observer.snapshot())["s3"]
     clock.advance(WINDOW_SECONDS)
@@ -179,11 +180,13 @@ async def test_the_floor_ends_with_the_judges_grace_at_the_explore_tests_that_su
     failed = _scores(await observer.snapshot())["s3"]
     for n in range(SETTLED_TESTS - 1):
         await ended(f"j{n}", Validity.SUCCEEDED)
-        await gate.write_judgement(f"j{n}", judgement(0.1, (f"j{n}",), verdict=Verdict.FLAT), Conclusion.RECORDED_ONLY)
+        await gate.write_judgement(
+            JudgementWrite(f"j{n}", judgement(0.1, (f"j{n}",), verdict=Verdict.FLAT), Conclusion.RECORDED_ONLY)
+        )
     await ended("unjudged", Validity.SUCCEEDED)
     unjudged = _scores(await observer.snapshot())["s3"]
     await gate.write_judgement(
-        "unjudged", judgement(0.1, ("unjudged",), verdict=Verdict.FLAT), Conclusion.RECORDED_ONLY
+        JudgementWrite("unjudged", judgement(0.1, ("unjudged",), verdict=Verdict.FLAT), Conclusion.RECORDED_ONLY)
     )
     settled = _scores(await observer.snapshot())["s3"]
 
@@ -416,7 +419,7 @@ async def test_a_young_repair_branch_scores_at_least_the_gain_of_the_blocked_can
         await toolbox.write_request(request(request_id, intent(branch, "c1", target=request_id)))
         await toolbox.write_result(result(request_id))
         found = judgement(0.2, (request_id,), verdict=verdict, recorded={METRIC: value})
-        await gate.write_judgement(request_id, found, conclusion)
+        await gate.write_judgement(JudgementWrite(request_id, found, conclusion))
 
     await judged("x1", "s1", Verdict.BLOCKED, Conclusion.REPAIR_REQUESTED, 1092.0)
     opened = LineageEvent(LineageKind.OPEN, "s3", from_commit="c1", reason="repair branch of s1", repairs="x1")

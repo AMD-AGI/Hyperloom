@@ -12,14 +12,31 @@ from hyperloom.agents.quantization.driver import result_collector as rc
 from hyperloom.agents.quantization.driver import runner
 
 
-# --------------------------------------------------------------------------- # runner._iter_message_text #
+# --------------------------------------------------------------------------- # runner.run_one_attempt #
 # --------------------------------------------------------------------------- #
-def test_iter_message_text_shapes() -> None:
-    obj_block = SimpleNamespace(text="from-object")
-    dict_block = {"text": "from-dict"}
-    msg = SimpleNamespace(content=[obj_block, dict_block, SimpleNamespace(text="")], result="final-result")
-    out = list(runner._iter_message_text(msg))
-    assert out == ["from-object", "from-dict", "final-result"]
+async def test_an_attempt_logs_each_non_empty_text_fragment_of_a_message(tmp_path: Path) -> None:
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("contract", encoding="utf-8")
+    message = SimpleNamespace(
+        content=[SimpleNamespace(text="from-object"), {"text": "from-dict"}, SimpleNamespace(text="")],
+        result="final-result",
+    )
+
+    async def _query(*, prompt, options):
+        yield message
+
+    logs: list[str] = []
+    await runner.run_one_attempt(
+        runner.AttemptContext(user_prompt="quantize", workspace=tmp_path / "ws", quark_root=tmp_path),
+        skill_path=skill,
+        log=logs.append,
+        sdk=runner.ClaudeAgentSdk(query=_query, options_cls=dict),
+    )
+    assert [line for line in logs if line.startswith("[claude-sdk] ")] == [
+        "[claude-sdk] from-object",
+        "[claude-sdk] from-dict",
+        "[claude-sdk] final-result",
+    ]
 
 
 async def test_run_one_attempt_captures_sdk_error(tmp_path: Path) -> None:
@@ -69,17 +86,12 @@ def test_read_text_oserror_on_directory(tmp_path: Path) -> None:
     assert rc._read_text(tmp_path) is None
 
 
-def test_resolve_quantized_dir_not_mapping(tmp_path: Path) -> None:
+def test_a_manifest_that_is_not_a_mapping_is_a_parse_error(tmp_path: Path) -> None:
     (tmp_path / "run_manifest.yaml").write_text("just-a-scalar", encoding="utf-8")
-    path, present, err = rc._resolve_quantized_dir(tmp_path)
-    assert path is None
-    assert present is True
-    assert err == "manifest_not_mapping"
-
-
-def test_resolve_quantized_dir_missing_manifest(tmp_path: Path) -> None:
-    path, present, err = rc._resolve_quantized_dir(tmp_path)
-    assert (path, present, err) == (None, False, None)
+    art = rc.collect_artifacts(tmp_path)
+    assert art.quantized_model_dir is None
+    assert art.manifest_present is True
+    assert art.manifest_parse_error == "manifest_not_mapping"
 
 
 def test_resolve_quantized_dir_pyyaml_missing(tmp_path: Path, monkeypatch) -> None:

@@ -82,11 +82,11 @@ class PeerSetup:
     copied into the session, for the specialist role to send the specialists to. ``dev_leases`` is how many dev
     sandboxes the session lends its specialists at once, from the toolbox's cards; 0 lends none. ``agents`` are the
     third-party agents the user named, each run on an autonomous branch of its own, ``reference_script`` the operator's
-    launch file the session freezes as its base (``""`` for none), ``agent_pack`` the pack an
-    Arbor among them runs (``""`` for the adapter's default), ``agent_launch`` the file of the launch its recipe's
+    launch file the session freezes as its base (``""`` for none), ``agent_pack`` the pack a component agent
+    among them runs (``""`` for the adapter's default), ``agent_launch`` the file of the launch its recipe's
     adds to (``""`` for the session's frozen base), ``agent_port`` the first port of their port blocks,
     ``agent_dossier`` the dossier the run gives every agent branch with its reviewed map (``""`` for none), and
-    ``agent_review`` how an Arbor's own review gate is handed over (``AgentSpec.review``: the host reviews, nobody
+    ``agent_review`` how a component agent's review gate is handed over (``AgentSpec.review``: the host reviews, nobody
     does, or ``""`` for neither), ``agent_maps`` the scheduler's side of a mapping branch, ``None`` without agents, and
     ``agent_share_minutes`` the least an agent must have left to run for its branch to wait for cards its lease was
     refused. ``inferencex_commit`` is the commit a fresh session's base launch reads InferenceX at (``""`` for the

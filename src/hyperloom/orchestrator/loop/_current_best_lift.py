@@ -21,10 +21,10 @@ from hyperloom.orchestrator.lever import FRAMEWORK_STACK_ACTION, lever_kind_for_
 from hyperloom.plugs import progress as _progress
 
 from ..framework.artifacts import candidate_key
+from ..launch_controls import kept_launch_controls
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 from ..source_snapshot import report_missing_source_snapshot
 from ..state.shared_state import resolve_graded_comparison
-from .launch_controls import kept_launch_controls
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:

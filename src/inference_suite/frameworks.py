@@ -101,6 +101,8 @@ class FrameworkFacts:
     ``parser_source`` is Python source defining ``_build_parser()``, run in the serving interpreter so an argv is
     judged by the parser that would refuse it; ``None`` when no server parser can be reached. ``metrics_flag`` is the
     switch without which the server serves no ``/metrics``; ``None`` when it serves them by default.
+    ``ready_timeout_env`` is the variable, in seconds, after which the server gives up on its own start and exits;
+    ``None`` when it waits for its start without a limit of its own.
     """
 
     kind: FrameworkKind
@@ -111,6 +113,7 @@ class FrameworkFacts:
     data_parallel: DataParallelFlag | None = None
     parser_source: str | None = None
     metrics_flag: str | None = None
+    ready_timeout_env: str | None = None
 
     def cards(self, tp: int, args: Sequence[str]) -> int:
         """The GPUs a launch at ``tp`` running ``args`` occupies: ``tp`` for each data-parallel replica that holds
@@ -118,15 +121,28 @@ class FrameworkFacts:
         return tp * (1 if self.data_parallel is None else self.data_parallel.replicas(args))
 
 
-# vLLM 0.30 moved the serve parser from ``entrypoints.openai`` to ``entrypoints.launchers``.
+# vLLM 0.30 moved the serve parser from ``entrypoints.openai`` to ``entrypoints.launchers``, and 0.32 nightlies moved
+# it on to ``entrypoints.common``; newest first, so an install that keeps an older module beside it reads the one
+# ``vllm serve`` imports.
+_VLLM_PARSER_MODULES = (
+    "vllm.entrypoints.common.cli_args",
+    "vllm.entrypoints.launchers.cli_args",
+    "vllm.entrypoints.openai.cli_args",
+)
 _VLLM_PARSER_SOURCE = (
     "def _build_parser():\n"
-    "    try:\n"
-    "        from vllm.entrypoints.launchers.cli_args import make_arg_parser\n"
-    "    except ModuleNotFoundError as exc:\n"
-    "        if exc.name not in ('vllm.entrypoints.launchers', 'vllm.entrypoints.launchers.cli_args'):\n"
-    "            raise\n"
-    "        from vllm.entrypoints.openai.cli_args import make_arg_parser\n"
+    "    import importlib\n"
+    f"    for module in {_VLLM_PARSER_MODULES!r}:\n"
+    "        try:\n"
+    "            make_arg_parser = importlib.import_module(module).make_arg_parser\n"
+    "        except ModuleNotFoundError as exc:\n"
+    "            if exc.name not in (module, module.rpartition('.')[0]):\n"
+    "                raise\n"
+    "            missing = exc\n"
+    "            continue\n"
+    "        break\n"
+    "    else:\n"
+    "        raise missing\n"
     "    try:\n"
     "        from vllm.utils.argparse_utils import FlexibleArgumentParser\n"
     "    except ImportError:\n"
@@ -143,20 +159,31 @@ _SGLANG_PARSER_SOURCE = (
     "    return parser\n"
 )
 
-# ATOM v0.1.5's server uses plain argparse; newer releases provide a native parser.
+# ATOM's server builds its parser inside ``main()``: the engine's arguments, then its own (``--host``,
+# ``--server-port`` and more), then it parses and starts. No function returns that parser, so ``main()`` runs until
+# it parses and the parser is taken there, before anything starts.
 _ATOM_PARSER_SOURCE = (
     "def _build_parser():\n"
     "    import argparse\n"
+    "\n"
+    "    class _Built(Exception):\n"
+    "        def __init__(self, parser):\n"
+    "            super().__init__('the ATOM server parser is built')\n"
+    "            self.parser = parser\n"
+    "\n"
+    "    def _take(self, *_args, **_kwargs):\n"
+    "        raise _Built(self)\n"
+    "\n"
+    "    parse_known_args = argparse.ArgumentParser.parse_known_args\n"
+    "    argparse.ArgumentParser.parse_known_args = _take\n"
     "    try:\n"
-    "        from atom.utils.arg_parser import FlexibleArgumentParser as parser_cls\n"
-    "    except ModuleNotFoundError as exc:\n"
-    "        if exc.name not in ('atom.utils', 'atom.utils.arg_parser'):\n"
-    "            raise\n"
-    "        parser_cls = argparse.ArgumentParser\n"
-    "    from atom.model_engine.arg_utils import EngineArgs\n"
-    "    parser = parser_cls()\n"
-    "    EngineArgs.add_cli_args(parser)\n"
-    "    return parser\n"
+    "        from atom.entrypoints.openai_server import main\n"
+    "        main()\n"
+    "    except _Built as built:\n"
+    "        return built.parser\n"
+    "    finally:\n"
+    "        argparse.ArgumentParser.parse_known_args = parse_known_args\n"
+    "    raise RuntimeError('the ATOM server returned without parsing its arguments')\n"
 )
 
 
@@ -174,6 +201,9 @@ _FACTS: dict[Framework, FrameworkFacts] = {
         data_parallel=DataParallelFlag(("--data-parallel-size", "--dp-size"), shares_tp=("--enable-dp-attention",)),
         parser_source=_SGLANG_PARSER_SOURCE,
         metrics_flag="--enable-metrics",
+        # The warmup request it sends once its HTTP server is up; past it the server kills itself before it reports
+        # ready. Unset (-1) means 600 s.
+        ready_timeout_env="SGLANG_WARMUP_TIMEOUT",
     ),
     Framework.VLLM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
@@ -184,6 +214,9 @@ _FACTS: dict[Framework, FrameworkFacts] = {
         expert_parallel=ExpertParallelFlag(_VLLM_STYLE_EP_SWITCH, (_VLLM_STYLE_EP_SWITCH, "-ep"), False),
         data_parallel=DataParallelFlag(("--data-parallel-size", "-dp")),
         parser_source=_VLLM_PARSER_SOURCE,
+        # How long the frontend waits for the engine cores to report ready (600 s unset), the Rust frontend's
+        # ``engine_ready_timeout_secs`` included.
+        ready_timeout_env="VLLM_ENGINE_READY_TIMEOUT_S",
     ),
     Framework.ATOM: FrameworkFacts(
         kind=FrameworkKind.SERVING,

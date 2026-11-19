@@ -274,6 +274,7 @@ class DeepSeekBackend:
         input_tokens = to_int(usage.get("input_tokens"), 0)
         output_tokens = to_int(usage.get("output_tokens"), 0)
         cache_read_tokens = to_int(usage.get("cache_read_input_tokens"), 0)
+        cache_creation_tokens = to_int(usage.get("cache_creation_input_tokens"), 0)
         metadata: dict[str, Any] = {
             "model": self.model,
             "session_id": sdk_result.session_id,
@@ -282,7 +283,7 @@ class DeepSeekBackend:
             "call_id": current_context().call_id or new_call_id(),
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
-            "cache_creation_input_tokens": 0,
+            "cache_creation_input_tokens": cache_creation_tokens,
             "cache_read_input_tokens": cache_read_tokens,
             # The largest single request of the turn -- the figure the checkpoint
             # policy compares against the model's window.

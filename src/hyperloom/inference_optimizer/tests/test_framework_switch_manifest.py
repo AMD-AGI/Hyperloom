@@ -324,11 +324,6 @@ def test_leave_one_out_variants_carry_no_extra_envs():
 # summary
 
 
-def test_summary_is_empty_for_nothing():
-    """A non-rewrite patch logs no manifest block."""
-    assert manifest.summarize([], []) == ""
-
-
 def test_summary_lists_switches_and_problems():
     """The log line carries both what was accepted and what was dropped."""
     switches, _ = manifest.parse_manifest([_entry("HL_A", category="memoize_invariant", target="a.py:f")])

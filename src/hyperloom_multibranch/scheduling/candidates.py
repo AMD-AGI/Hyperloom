@@ -28,8 +28,8 @@ merge attempt the candidate took part in, so a conflict on a later head, which r
 reset it.
 
 The commits offered on a head come in two groups, each in the order the blackboard gives them: first those no merge
-attempt took yet, then those coming back. The integration branch tests one merge at a time, and a commit waiting for
-its first answer learns more, and tells its branch more, than one coming back for another.
+attempt took yet, then those coming back. The integration branch tests only as many merges at a time as its K, and a
+commit waiting for its first answer learns more, and tells its branch more, than one coming back for another.
 
 A commit that a retraction on its branch was committed on top of is never offered: the retraction undoes a change one
 of those commits made, the agent found that change invalid, and merging the retraction carries what the rest changed.

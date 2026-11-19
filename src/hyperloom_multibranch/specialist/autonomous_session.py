@@ -27,7 +27,7 @@ what it said before, so other branches read them; what it wrote after its last k
 branch's judge judges the imports as it judges any branch's tests; nothing of its verdicts reaches the agent, but
 what the integration head holds does, through the notes (:mod:`agent_knowledge`) rewritten whenever the head moves,
 and the agent is given until its last import can still be judged in EXPLORE as its time budget. An agent that writes
-a snapshot of each keep (Arbor's component mode) runs to that time as its absolute deadline, against the commit its
+a snapshot of each keep (component mode) runs to that time as its absolute deadline, against the commit its
 workspace starts on, and has its newest snapshot read whole, chained back to that commit, its launch only as it
 differs from the one MB started it with (:func:`read_snapshot`); a variable the measurement sets itself is left out of
 every keep and noted once; why it ended, from its exit file, goes into the branch log; one that refuses its config
@@ -109,7 +109,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
 )
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, newest_write
-from hyperloom_multibranch.specialist.arbor_adapter import EXIT_REFUSED, exit_reason, refused_reasons, served_config
+from hyperloom_multibranch.specialist.component_agent import EXIT_REFUSED, exit_reason, refused_reasons, served_config
 from hyperloom_multibranch.specialist.dev_sandbox import MINUTE, TOO_MANY
 from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
 from hyperloom_multibranch.specialist.judging import NOTICE

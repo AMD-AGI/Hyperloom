@@ -90,12 +90,19 @@ def test_safe_redact_aws_and_custom_headers():
     assert "[REDACTED]" in out
 
 
-def test_extra_focus_tags(monkeypatch):
-    monkeypatch.setattr(sr, "normalize_dispatch_tags", lambda params: ["anchor", "extra1", "extra2", ""])
-    domain = SimpleNamespace(kb_anchor="anchor")
-    tags = sr._extra_focus_tags({"dispatch_tags": []}, domain)
-    assert "anchor" not in tags
-    assert set(tags) == {"extra1", "extra2"}
+@pytest.mark.asyncio
+async def test_a_dispatch_tag_beyond_the_primary_domain_adds_that_domains_focus(tmp_path):
+    task = Task(
+        task_id="t1",
+        kind="specialist",
+        state="queued",
+        params={"domain": "serving_specialist", "tags": ["serving_specialist", "comm_specialist"], "mode": "research"},
+        idempotency_key="t1",
+        requires_lanes=tuple(),
+    )
+    prep = await _runner(session_dir=tmp_path)._prepare(RunnerContext(task=task, lease=None, extra={}))
+    assert prep.system_prompt.count("### Domain focus — serving_specialist") == 1
+    assert "### Domain focus — comm_specialist" in prep.system_prompt
 
 
 def test_classify_succeeded():
@@ -121,22 +128,11 @@ def test_classify_unknown():
 
 def test_build_empty_specialist_done():
     out = build_empty_specialist_done(gap_canonical_id="g1", domain="kernel_agent", reason="no idea", confidence=2.0)
-    assert out["proposal_set"] == []
+    assert out["gap_canonical_id"] == "g1"
+    assert out["domain"] == "kernel_agent"
     assert out["proposal_set"] == []
     assert out["confidence"] == 1.0
     assert out["summary"] == "no idea"
-
-
-def test_build_empty_specialist_done_default_reason():
-    out = build_empty_specialist_done(gap_canonical_id="g", domain="d", reason="")
-    assert out["summary"] == "specialist exited empty"
-
-
-def test_path_helpers_none_workspace():
-    r = _runner()
-    assert r._transcript_path(None) is None
-    assert r._heartbeat_path(None) is None
-    assert r._done_path(None) is None
 
 
 def test_path_helpers_with_workspace(tmp_path):
@@ -403,16 +399,6 @@ async def test_patch_vetting_runs_off_the_event_loop_thread(tmp_path, monkeypatc
     assert seen["ident"] != loop_ident
 
 
-def test_maybe_setup_worktree_research_mode_skips_worktree(tmp_path):
-    from hyperloom.orchestrator.specialists.profile import resolve_specialist_profile
-
-    cfg = sr.SpecialistSubprocessConfig()
-    r = _runner(subprocess_config=cfg)
-    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"mode": "research"}))
-    profile = resolve_specialist_profile(ctx.task.params)
-    assert r._maybe_setup_worktree(ctx, workspace=tmp_path, profile=profile) == (None, None, "", None)
-
-
 def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, monkeypatch):
     """A framework specialist must get a worktree of the framework it patches.
 
@@ -527,21 +513,24 @@ def test_patch_path_within_bases_rejects_outside_paths(tmp_path):
     assert sr._patch_path_within_bases(tmp_path / "sibling.patch", bases) is False
 
 
-def test_subprocess_backend_error_leading_tokens():
-    assert sr._subprocess_backend_error(sr.SpecialistSubprocessResult(timed_out=True)) == "subprocess_timeout"
-    assert (
-        sr._subprocess_backend_error(sr.SpecialistSubprocessResult(timed_out=True, error="  late  "))
-        == "subprocess_timeout: late"
-    )
-    assert (
-        sr._subprocess_backend_error(sr.SpecialistSubprocessResult(stale_heartbeat=True))
-        == "subprocess_stale_heartbeat"
-    )
-    assert (
-        sr._subprocess_backend_error(sr.SpecialistSubprocessResult(exit_code=1, done_payload=None))
-        == "subprocess_exit_code:1"
-    )
-    assert sr._subprocess_backend_error(sr.SpecialistSubprocessResult(error="boom")) == "subprocess_error:boom"
+@pytest.mark.parametrize(
+    ("reaped", "expected"),
+    [
+        ({"timed_out": True, "error": "deadline reached"}, SpecialistFailureType.TIMEOUT),
+        ({"stale_heartbeat": True, "error": "heartbeat stale"}, SpecialistFailureType.STALE_HEARTBEAT),
+        ({"exit_code": 1}, SpecialistFailureType.CRASH),
+        ({"error": "boom"}, SpecialistFailureType.CRASH),
+    ],
+    ids=["timeout", "stale_heartbeat", "exit_code", "error"],
+)
+def test_a_reaped_subprocess_is_classified_by_why_it_was_reaped(tmp_path, reaped, expected):
+    """The classifier keys off the error's leading token, not the reaper's own text kept after it."""
+    prep = sr._PreparedRun(domain=SimpleNamespace(key="serving_specialist"), gap="gap-1", workspace=tmp_path)
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
+    result = _runner()._finalize(ctx=ctx, prep=prep, sub_result=sr.SpecialistSubprocessResult(**reaped))
+    assert result.status == "stale"
+    assert result.error.endswith(reaped.get("error", ""))
+    assert classify_specialist_failure(result.status, result.error) == (expected, True)
 
 
 def test_finalize_notes_a_recovered_partial_payload(tmp_path):

@@ -22,7 +22,6 @@ from hyperloom.orchestrator.actions.executors._grid_variant_filter import Servin
 from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 from hyperloom.orchestrator.actions.executors._grid_base import _atom_default_grid
 from hyperloom.orchestrator.actions.executors.explore import (
-    _default_grid_for_framework,
     filter_baseline_noop_variants,
     observed_launch_from_state,
     restates_the_baseline_launch,
@@ -764,12 +763,6 @@ def test_atom_default_grid_variants_have_unique_names():
         assert len(names) == len(set(names)), f"duplicate names in atom grid for model_class={mc!r}: {names}"
 
 
-def test_atom_default_grid_names_use_atom_prefix():
-    grid = _atom_default_grid(model_class="moe_mla", conc=64)
-    for v in grid:
-        assert v.name.startswith("atom_"), f"variant name does not start with 'atom_': {v.name!r}"
-
-
 def test_atom_default_grid_variants_carry_default_grid_provenance():
     grid = _atom_default_grid(model_class="moe_mla", conc=64)
     for v in grid:
@@ -782,27 +775,6 @@ def test_atom_default_grid_conc_zero_omits_cudagraph_bracket():
     """When CONC is unavailable, the bracket variant is skipped."""
     grid = _atom_default_grid(model_class="dense", conc=0)
     assert "atom_cudagraph_bracket" not in _names(grid)
-
-
-def test_default_grid_for_framework_atom_returns_seeded_grid():
-    grid = _default_grid_for_framework(
-        "atom",
-        model_class="moe_mla",
-        conc=64,
-    )
-    assert grid, "atom framework should produce a non-empty default grid"
-    assert any(v.name == "atom_level_2" for v in grid)
-
-
-@pytest.mark.parametrize("framework", ["sglang", "vllm", "", "unknown"])
-def test_default_grid_for_framework_non_atom_returns_empty(framework):
-    """Sglang/vllm rely on LLM-emitted variants; unknown frameworks also return ``[]`` (no crash)."""
-    grid = _default_grid_for_framework(
-        framework,
-        model_class="moe_mla",
-        conc=64,
-    )
-    assert grid == []
 
 
 def _write_atom_baseline_yaml(path: Path) -> None:

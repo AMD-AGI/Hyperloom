@@ -78,7 +78,7 @@ def _apply_pragmas(conn: sqlite3.Connection, journal_mode: str) -> None:
     """
     cur = conn.cursor()
     try:
-        cur.execute(f"PRAGMA journal_mode = {journal_mode}")  # nosec B608 - validated against JOURNAL_MODES.
+        cur.execute(f"PRAGMA journal_mode = {journal_mode}")
         for pragma in _PRAGMAS:
             cur.execute(pragma)
         cur.execute("PRAGMA journal_mode")

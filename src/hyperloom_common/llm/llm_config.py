@@ -512,7 +512,7 @@ def build_http_timeout(
 def _openai_sdk_client_class(class_name: str) -> object:
     """Resolve one OpenAI SDK client class, importing the SDK on demand."""
     try:
-        import openai  # type: ignore[import-not-found]
+        import openai
     except ImportError as exc:
         raise LLMConfigError(_OPENAI_SDK_MISSING) from exc
     return getattr(openai, class_name)
@@ -757,7 +757,7 @@ def chat_completion(
     with observed_request(
         protocol=PROTOCOL_OPENAI_CHAT, component=component, operation=operation, model=params.get("model")
     ) as observation:
-        resp = client.chat.completions.create(**_tag_request(params, component, operation))  # type: ignore[union-attr]
+        resp = client.chat.completions.create(**_tag_request(params, component, operation))
         return _observe_chat(observation, resp)
 
 
@@ -772,7 +772,7 @@ async def achat_completion(
     with observed_request(
         protocol=PROTOCOL_OPENAI_CHAT, component=component, operation=operation, model=params.get("model")
     ) as observation:
-        resp = await client.chat.completions.create(**_tag_request(params, component, operation))  # type: ignore[union-attr]
+        resp = await client.chat.completions.create(**_tag_request(params, component, operation))
         return _observe_chat(observation, resp)
 
 
@@ -873,7 +873,7 @@ def _dial_anthropic_messages(
     for _ in range(ANTHROPIC_CONNECT_RETRIES):
         try:
             return dial.enter_context(
-                client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+                client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)
             )
         except connect_failures:
             # A dial begun at or past the deadline would send a POST the reader is already bound to drop.
@@ -882,9 +882,7 @@ def _dial_anthropic_messages(
             time.sleep(delay)
             delay *= 2
     # The last dial speaks for itself: its failure reaches the caller.
-    return dial.enter_context(
-        client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
-    )
+    return dial.enter_context(client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag))
 
 
 async def _adial_anthropic_messages(
@@ -897,13 +895,13 @@ async def _adial_anthropic_messages(
     for _ in range(ANTHROPIC_CONNECT_RETRIES):
         try:
             return await dial.enter_async_context(
-                client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+                client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)
             )
         except connect_failures:
             await asyncio.sleep(delay)
             delay *= 2
     return await dial.enter_async_context(
-        client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+        client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)
     )
 
 
@@ -1094,7 +1092,7 @@ async def astream_chat_completion_text(
         model=params.get("model"),
         streamed=True,
     ) as observation:
-        stream = await client.chat.completions.create(**_tag_request(params, component, operation))  # type: ignore[union-attr]
+        stream = await client.chat.completions.create(**_tag_request(params, component, operation))
         async for chunk in stream:
             _observe_stream_chunk(observation, chunk)
             if getattr(chunk, "usage", None) is not None:

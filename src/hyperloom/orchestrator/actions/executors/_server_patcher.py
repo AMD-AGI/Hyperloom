@@ -274,8 +274,8 @@ def ensure_vllm_patched_for_tracelens(checkout: Path | None = None) -> PatchedSe
 
 
 def ensure_sglang_patched_for_tracelens() -> PatchedServer | None:
-    """This host's copy of the installed SGLang with the roofline set (< 0.5.18) or ``sglang_gc_patch`` (>= 0.5.18)
-    laid in; ``None`` when it cannot be laid."""
+    """This host's copy of the installed SGLang with the roofline set (< 0.5.18) or ``sglang_gc_patch`` (0.5.18 to
+    0.5.21) laid in; ``None`` when it cannot be laid."""
     if resolve_sglang_shape_mode() == "sitecustomize":
         return _ensure_sglang_gc_patched()
     plan = _discover_sglang_plan()
@@ -329,6 +329,8 @@ def _plan_for(package: str, checkout: Path | None = None) -> _PatchPlan | None:
 # SGLang shape-discovery gate: >= 0.5.18 uses the no-patch TraceLens tool
 # (PYTHONPATH + sitecustomize + TRACELENS_SHAPE_DISCOVERY); older uses git-apply.
 _SGLANG_SITECUSTOMIZE_MIN_VERSION: tuple[int, ...] = (0, 5, 18)
+# The graph-capture tags land upstream in SGLang 0.5.22, so ``sglang_gc_patch`` is only needed up to 0.5.21.
+_SGLANG_GC_PATCH_LAST_VERSION: tuple[int, ...] = (0, 5, 21)
 # No-patch tool location, relative to TRACELENS_ROOT.
 _KERNEL_SHAPE_TOOL_REL: tuple[str, ...] = ("TraceLens", "TraceUtils", "kernel_shape_tool")
 
@@ -346,6 +348,12 @@ def sglang_shape_mode(version: str) -> str:
     return "sitecustomize" if vt >= _SGLANG_SITECUSTOMIZE_MIN_VERSION else "patched"
 
 
+def sglang_gc_patch_needed(version: str) -> bool:
+    """Whether SGLang ``version`` still needs TraceLens's ``sglang_gc_patch``: 0.5.18 through 0.5.21."""
+    vt = _version_tuple(version)
+    return vt is not None and _SGLANG_SITECUSTOMIZE_MIN_VERSION <= vt[:3] <= _SGLANG_GC_PATCH_LAST_VERSION
+
+
 def kernel_shape_tool_dir() -> Path | None:
     """Resolve the no-patch ``kernel_shape_tool`` dir under TRACELENS_ROOT, or None."""
     root = _resolve_tracelens_root()
@@ -358,7 +366,7 @@ def kernel_shape_tool_dir() -> Path | None:
 def _detect_installed_sglang_version() -> str | None:
     """Return the locally-installed SGLang version, or ``None`` if unimportable."""
     try:
-        import sglang  # type: ignore[import-not-found]
+        import sglang
     except (ImportError, OSError):
         return None
     return (getattr(sglang, "__version__", "") or "").strip() or None
@@ -376,13 +384,22 @@ def resolve_sglang_shape_mode() -> str:
     return sglang_shape_mode(version)
 
 
+def resolve_sglang_gc_patch_needed() -> bool:
+    """Whether the locally-installed SGLang, else the MN version pin, still needs ``sglang_gc_patch``."""
+    version = _detect_installed_sglang_version() or os.environ.get("HYPERLOOM_SGLANG_VERSION_PIN", "").strip()
+    return sglang_gc_patch_needed(version)
+
+
 def resolve_sglang_patch_set() -> str:
-    """Patch set the multi-node pods must apply: ``graph-capture`` in sitecustomize mode, else ``roofline``.
+    """Patch set the multi-node pods must apply: ``roofline`` below sitecustomize mode, ``graph-capture`` in it while
+    ``sglang_gc_patch`` is needed, else ``none``.
 
     Resolved on the controller and passed to every pod, which cannot see the
     controller's version pin and would otherwise decide alone.
     """
-    return "graph-capture" if resolve_sglang_shape_mode() == "sitecustomize" else "roofline"
+    if resolve_sglang_shape_mode() != "sitecustomize":
+        return "roofline"
+    return "graph-capture" if resolve_sglang_gc_patch_needed() else "none"
 
 
 def _gc_patch_deferred_to_pods() -> bool:
@@ -660,7 +677,7 @@ def _discover_vllm_install() -> tuple[str, Path] | None:
     version = ""
     install_root: Path | None = None
     try:
-        import vllm  # type: ignore[import-not-found]
+        import vllm
 
         version = (getattr(vllm, "__version__", "") or "").strip()
         install_root = Path(vllm.__file__).resolve().parent.parent
@@ -754,7 +771,7 @@ def _discover_sglang_plan() -> _PatchPlan | None:
         return None
 
     try:
-        import sglang  # type: ignore[import-not-found]
+        import sglang
     except (ImportError, OSError, RuntimeError) as e:
         log.warning("_server_patcher: sglang not importable (%s); skip patch", e)
         return None
@@ -887,7 +904,7 @@ def _discover_sglang_gc_plan(version: str) -> _PatchPlan | None:
         return None
 
     try:
-        import sglang  # type: ignore[import-not-found]
+        import sglang
     except (ImportError, OSError, RuntimeError) as e:
         log.warning("_server_patcher: sglang not importable (%s); skip graph-capture patch", e)
         return None
