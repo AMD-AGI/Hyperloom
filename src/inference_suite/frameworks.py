@@ -73,6 +73,10 @@ class ServerFlags:
     served_model_name: str | None
     context_length: str
 
+    def guarded(self) -> tuple[str, ...]:
+        """The flags the runner's guard sets on every round: the model, the address and the served name."""
+        return tuple(flag for flag in (self.model, self.host, self.port, self.served_model_name) if flag)
+
 
 @dataclass(frozen=True)
 class ServerCommand:
@@ -188,6 +192,7 @@ _ATOM_PARSER_SOURCE = (
 
 
 _HOST_FLAG = "--host"
+_SERVED_MODEL_NAME_FLAG = "--served-model-name"
 #: The expert-parallel switch vLLM and ATOM share.
 _VLLM_STYLE_EP_SWITCH = "--enable-expert-parallel"
 
@@ -195,7 +200,7 @@ _FACTS: dict[Framework, FrameworkFacts] = {
     Framework.SGLANG: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package=Framework.SGLANG.value,
-        server_flags=ServerFlags("--model-path", _HOST_FLAG, "--port", "--served-model-name", "--context-length"),
+        server_flags=ServerFlags("--model-path", _HOST_FLAG, "--port", _SERVED_MODEL_NAME_FLAG, "--context-length"),
         server_command=ServerCommand(("python3", "-m", "sglang.launch_server"), ("-m", "sglang.launch_server")),
         expert_parallel=ExpertParallelFlag("--ep-size", ("--ep-size", "--expert-parallel-size", "--ep"), True),
         data_parallel=DataParallelFlag(("--data-parallel-size", "--dp-size"), shares_tp=("--enable-dp-attention",)),
@@ -208,7 +213,7 @@ _FACTS: dict[Framework, FrameworkFacts] = {
     Framework.VLLM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package=Framework.VLLM.value,
-        server_flags=ServerFlags("--model", _HOST_FLAG, "--port", "--served-model-name", "--max-model-len"),
+        server_flags=ServerFlags("--model", _HOST_FLAG, "--port", _SERVED_MODEL_NAME_FLAG, "--max-model-len"),
         # The ``vllm`` console script is ``vllm.entrypoints.cli.main:main``.
         server_command=ServerCommand(("vllm", "serve"), ("-m", "vllm.entrypoints.cli.main", "serve")),
         expert_parallel=ExpertParallelFlag(_VLLM_STYLE_EP_SWITCH, (_VLLM_STYLE_EP_SWITCH, "-ep"), False),
@@ -221,7 +226,7 @@ _FACTS: dict[Framework, FrameworkFacts] = {
     Framework.ATOM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package=Framework.ATOM.value,
-        server_flags=ServerFlags("--model", _HOST_FLAG, "--server-port", "--served-model-name", "--max-model-len"),
+        server_flags=ServerFlags("--model", _HOST_FLAG, "--server-port", _SERVED_MODEL_NAME_FLAG, "--max-model-len"),
         server_command=ServerCommand(
             ("python3", "-m", "atom.entrypoints.openai_server"), ("-m", "atom.entrypoints.openai_server")
         ),

@@ -38,6 +38,9 @@ from inference_suite.recipe.inferencex import (
     srtctl_cli_args,
 )
 from inference_suite.recipe.model import (
+    ATOM_RUNNER_OWNED,
+    SGLANG_RUNNER_OWNED,
+    VLLM_RUNNER_OWNED,
     InferencexSnapshot,
     RepoBundle,
     RecipeSourceError,
@@ -126,6 +129,22 @@ def test_argv_renders_role_args_as_srtctl_does():
         engine = engine["type"] if isinstance(engine, dict) else engine
 
         assert list(srtctl_cli_args(engine, selection.recipe["roles"]["agg"]["args"])) == recorded[key], key
+
+
+@pytest.mark.parametrize(
+    ("owned", "own"),
+    [
+        (
+            SGLANG_RUNNER_OWNED,
+            {"model-path", "port", "enable-metrics", "nccl-port", "grpc-http-sidecar-port", "smg-http-sidecar-port"},
+        ),
+        (VLLM_RUNNER_OWNED, {"model", "port", "headless", "master-addr", "nnodes", "node-rank"}),
+        (ATOM_RUNNER_OWNED, {"model", "server-port"}),
+    ],
+    ids=("sglang", "vllm", "atom"),
+)
+def test_a_recipe_keeps_none_of_the_flags_the_runner_sets_on_every_round(owned, own):
+    assert owned == {"host", "served-model-name", *own}
 
 
 def test_dsr1_fixed_launch_is_the_selected_variant_without_runner_owned_flags():
