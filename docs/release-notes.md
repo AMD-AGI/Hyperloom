@@ -34,8 +34,9 @@ it.
 - **An ATOM AgentX baseline with its prefix cache on is kept.** The check that
   refuses a cacheless AgentX baseline took ATOM's cache as off unless the launch
   passed `--enable_prefix_caching`; ATOM caches by default. It now refuses only
-  a launch whose argv, as the round's `launch.json` records it, ends with
-  `--no-enable_prefix_caching`.
+  a launch whose argv, as the round's `launch.json` records it, turns the cache
+  off: its last prefix-cache switch is `--no-enable_prefix_caching` (either
+  spelling).
 - **An ATOM profile round** sets `ATOM_PROFILER_TIMEOUT` to the 600 s the round
   waits on `/stop_profile`, so a long capture is not cut off at ATOM's 300 s
   default. An annotated ATOM AgentX capture turns on ATOM's own light knobs
