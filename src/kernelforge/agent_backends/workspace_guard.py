@@ -53,18 +53,6 @@ def _git_output(cwd: Path, *args: str) -> str:
     return result.stdout.decode(errors="surrogateescape")
 
 
-def remove_filesystem_path(path: Path) -> None:
-    """Remove one path without following a symbolic link."""
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError:
-        return
-    if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
-        shutil.rmtree(path)
-    else:
-        path.unlink()
-
-
 class WorkspaceGuard:
     """Protect Forge git state and benchmark files around an agent session."""
 
@@ -325,14 +313,27 @@ class WorkspaceGuard:
         raise WorkspaceSafetyError(f"the read-only guard does not support path type: {path}")
 
     @staticmethod
+    def _remove_filesystem_path(path: Path) -> None:
+        """Remove one path without following a symbolic link."""
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return
+        if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+    @classmethod
     def _restore_filesystem_snapshot(
+        cls,
         path: Path,
         snapshot: tuple[str, bytes, int],
     ) -> None:
         """Restore one exact file, link, directory, or missing-path state."""
         kind, content, mode = snapshot
         if kind == "missing":
-            remove_filesystem_path(path)
+            cls._remove_filesystem_path(path)
             return
 
         try:
@@ -346,7 +347,7 @@ class WorkspaceGuard:
                 or (kind == "directory" and stat.S_ISDIR(metadata.st_mode))
             )
             if not same_kind or kind == "symlink":
-                remove_filesystem_path(path)
+                cls._remove_filesystem_path(path)
 
         path.parent.mkdir(parents=True, exist_ok=True)
         if kind == "file":
@@ -488,7 +489,7 @@ class WorkspaceGuard:
     def _checkout_index_path(self, relative: str) -> None:
         """Restore one clean tracked path from the already-restored index."""
         # checkout-index skips a path whose stat matches the index entry, which a same-size edit can satisfy.
-        remove_filesystem_path(self.root / relative)
+        self._remove_filesystem_path(self.root / relative)
         self._run_git_restore("checkout-index", "--force", "--", relative)
 
     def _restore_baseline_refs(self) -> None:
@@ -552,11 +553,11 @@ class WorkspaceGuard:
             elif relative in self.baseline_tracked_paths:
                 self._checkout_index_path(relative)
             else:
-                remove_filesystem_path(path)
+                self._remove_filesystem_path(path)
                 self._remove_empty_parents(path)
 
         for path in before_protected - self.baseline_protected_ignored:
-            remove_filesystem_path(path)
+            self._remove_filesystem_path(path)
             self._remove_empty_parents(path)
         for path, snapshot in self.snapshots.items():
             if self._filesystem_snapshot(path) != snapshot:
@@ -785,18 +786,3 @@ class WorkspaceGuard:
                 ]
             )
         )
-
-    def verify_or_rollback(self) -> list[str]:
-        """What the session changed, rolling the workspace back when :meth:`verify` cannot say.
-
-        ``verify()`` restores the baseline itself before raising a rejection, so
-        this covers the paths that fail earlier and must not mask them.
-        """
-        try:
-            return self.verify()
-        except Exception:
-            try:
-                self.rollback()
-            except (WorkspaceSafetyError, OSError, subprocess.SubprocessError):
-                log.warning("workspace rollback after a failed verify also failed", exc_info=True)
-            raise

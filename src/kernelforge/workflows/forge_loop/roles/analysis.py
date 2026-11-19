@@ -43,6 +43,7 @@ from kernelforge.workflows.forge_loop.roles.analysis_bundle import (
     _parse_request_payload,
     _parse_workflow_payload,
     _published_generation_root,
+    _sha256,
     _source_digest,
     _tier_label,
     _validate_bundle,
@@ -62,7 +63,6 @@ from kernelforge.workflows.forge_loop.roles.analysis_session import (
     AnalysisAttemptLimitError,
     AnalysisSessionJournal,
     MAX_ANALYSIS_SESSION_ATTEMPTS,
-    _sha256,
 )
 from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json, fsync_directory, fsync_tree
 from kernelforge.config.resources import assert_sandbox_grant
