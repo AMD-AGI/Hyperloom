@@ -65,7 +65,7 @@ def test_a_table_that_makes_modules_stale_raises_the_watchdog_of_both_carriers(i
     plain = _point(tmp_path, "plain.yaml", args="--tp 4", **tuned)
     agentx = _point(tmp_path, "agentx.yaml", agentx=True, args="--tp 4", **tuned)
 
-    note = raise_rebuild_watchdog(_call(tmp_path, plain, agentx), None, {}, tmp_path)
+    note = raise_rebuild_watchdog(_call(tmp_path, plain, agentx), None, {})
 
     seconds = rebuild_watchdog_sec({"module_gemm_a8w8_blockscale_bpreshuffle", "module_deepgemm_opus"})
     assert _bench(plain)["envs"]["EXTRA_SGLANG_ARGS"] == f"--tp 4 {_FLAG} {seconds}"
@@ -99,7 +99,7 @@ def test_a_stale_cktile_module_raises_the_watchdog_by_its_own_time(
     monkeypatch.setattr(rebuild_watchdog, "stale_table_modules", lambda *args: stale)
     point = _point(tmp_path, "point.yaml", args="--tp 1", **_tuned(tmp_path))
 
-    note = raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path)
+    note = raise_rebuild_watchdog(_call(tmp_path, point), None, {})
 
     assert _watchdog(point, False) == f"--tp 1 {_FLAG} 3600", (
         "2700 s for the CK-tile module, 600 s for the other, 300 s"
@@ -111,7 +111,7 @@ def test_a_module_the_patch_touches_that_the_server_builds_raises_the_watchdog_t
     """A table the test does not change makes nothing stale; the patch's CK-tile module is still built at first call."""
     point = _point(tmp_path, "point.yaml", args="--tp 1")
 
-    note = raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path, {"module_gemm_a8w8_bpreshuffle_cktile"})
+    note = raise_rebuild_watchdog(_call(tmp_path, point), None, {}, {"module_gemm_a8w8_bpreshuffle_cktile"})
 
     assert _watchdog(point, False) == f"--tp 1 {_FLAG} 3000"
     assert note is not None and "module_gemm_a8w8_bpreshuffle_cktile" in note
@@ -122,7 +122,7 @@ def test_an_agentx_point_with_null_launch_overrides_is_given_the_watchdog(image,
     bench = {"framework": "sglang", "agentx": {"enabled": True, "launch_overrides": None}}
     point.write_text(yaml.safe_dump({"benchmark": bench}), encoding=_UTF8)
 
-    raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path, {"module_gemm_a8w8_bpreshuffle_cktile"})
+    raise_rebuild_watchdog(_call(tmp_path, point), None, {}, {"module_gemm_a8w8_bpreshuffle_cktile"})
 
     assert _watchdog(point, True) == f"{_FLAG} 3000"
 
@@ -145,7 +145,7 @@ def test_a_build_variable_set_otherwise_than_the_runner_has_raises_the_watchdog_
     (image / "jit" / "optCompilerConfig.json").write_text(json.dumps(config), encoding=_UTF8)
     point = _point(tmp_path, "point.yaml", args="--tp 1", FLATMM_HIP_CLANG_PATH="/opt/clang")
 
-    note = raise_rebuild_watchdog(_call(tmp_path, point), None, inherited, tmp_path)
+    note = raise_rebuild_watchdog(_call(tmp_path, point), None, inherited)
 
     if stale:
         assert _watchdog(point, False) == f"--tp 1 {_FLAG} 3000"
@@ -174,7 +174,7 @@ def test_a_present_watchdog_below_the_estimate_is_raised_to_it(
     monkeypatch.setattr(rebuild_watchdog, "stale_table_modules", lambda *args: frozenset({"m1", "m2", "m3"}))
     point = _point(tmp_path, "point.yaml", agentx=agentx, args=f"--tp 4 {_FLAG}{sep}1800 --mem 0.8", **_tuned(tmp_path))
 
-    note = raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path)
+    note = raise_rebuild_watchdog(_call(tmp_path, point), None, {})
 
     assert rebuild_watchdog_sec({"m1", "m2", "m3"}) == 2100
     assert _watchdog(point, agentx) == f"--tp 4 {_FLAG}{sep}2100 --mem 0.8"
@@ -191,7 +191,7 @@ def test_a_present_watchdog_at_or_above_the_estimate_is_kept(
     point = _point(tmp_path, "point.yaml", agentx=agentx, args=f"--tp 4 {_FLAG}{sep}{present}", **_tuned(tmp_path))
     before = point.read_text(encoding=_UTF8)
 
-    assert raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path) is None
+    assert raise_rebuild_watchdog(_call(tmp_path, point), None, {}) is None
     assert point.read_text(encoding=_UTF8) == before
 
 
@@ -200,7 +200,7 @@ def test_the_last_of_two_watchdogs_is_the_one_raised(image, tmp_path: Path, agen
     """sglang's parser takes the last value, so that is the one compared and raised."""
     point = _point(tmp_path, "point.yaml", agentx=agentx, args=f"{_FLAG} 4000 {_FLAG} 120", **_tuned(tmp_path))
 
-    raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path)
+    raise_rebuild_watchdog(_call(tmp_path, point), None, {})
 
     assert _watchdog(point, agentx) == f"{_FLAG} 4000 {_FLAG} 1500"
 
@@ -222,7 +222,7 @@ _LINES = [
 def test_a_plain_launch_names_the_flag_only_as_a_whole_argument(image, tmp_path: Path, line: str, raised: str) -> None:
     point = _point(tmp_path, "point.yaml", args=line, **_tuned(tmp_path))
 
-    raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path)
+    raise_rebuild_watchdog(_call(tmp_path, point), None, {})
 
     assert _watchdog(point, agentx=False) == raised
 
@@ -230,14 +230,14 @@ def test_a_plain_launch_names_the_flag_only_as_a_whole_argument(image, tmp_path:
 def test_a_test_whose_tables_are_the_images_keeps_sglangs_watchdog(image, tmp_path: Path) -> None:
     point = _point(tmp_path, "point.yaml", args="--tp 4")
 
-    assert raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path) is None
+    assert raise_rebuild_watchdog(_call(tmp_path, point), None, {}) is None
     assert _FLAG not in point.read_text(encoding=_UTF8)
 
 
 def test_a_vllm_point_is_left_as_it_is(image, tmp_path: Path) -> None:
     point = _point(tmp_path, "point.yaml", framework="vllm", **_tuned(tmp_path))
 
-    assert raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path) is None
+    assert raise_rebuild_watchdog(_call(tmp_path, point), None, {}) is None
     assert _FLAG not in point.read_text(encoding=_UTF8)
 
 
@@ -310,7 +310,7 @@ def test_a_module_built_once_under_another_value_than_the_servers_raises_the_wat
     (image / "jit" / "hyperloom-prewarm.json").write_text(json.dumps(document), encoding=_UTF8)
     point = _point(tmp_path, "point.yaml", args="--tp 1", **envs)
 
-    note = raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path, gfx_arch="gfx950")
+    note = raise_rebuild_watchdog(_call(tmp_path, point), None, {}, gfx_arch="gfx950")
 
     if raised:
         assert _watchdog(point, False) == f"--tp 1 {_FLAG} {rebuild_watchdog_sec([module])}"

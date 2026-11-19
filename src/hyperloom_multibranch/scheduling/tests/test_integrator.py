@@ -46,7 +46,7 @@ from hyperloom.contracts.recipe import (
 from hyperloom.measure.compile import LocalBlobStore, PackageBase
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
+from hyperloom_multibranch.contracts.blackboard.records import JudgementWrite, LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LineageKind, MergeOutcome
 from hyperloom_multibranch.contracts.repo import RebasedPatch, ReplacedPatch, RepoMerge, ResolvedPatch, UnitedTable
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
@@ -269,10 +269,12 @@ async def _commit_specialist_work(bench: Bench, invalid: bool, foundation: str, 
         await toolbox.write_request(test)
         await toolbox.write_result(result(test.request_id))
         await gate.write_judgement(
-            test.request_id,
-            judgement(GAINS[tag], (test.request_id,), foundation_fix=tag == foundation),
-            Conclusion.COMMITTED,
-            commit,
+            JudgementWrite(
+                test.request_id,
+                judgement(GAINS[tag], (test.request_id,), foundation_fix=tag == foundation),
+                Conclusion.COMMITTED,
+                commit,
+            )
         )
         bench.commits[tag], parent = commit, commit
 
@@ -1033,7 +1035,7 @@ async def _committed_on(
     await toolbox.write_request(test)
     await toolbox.write_result(result(test.request_id))
     judged = judgement(gain, (test.request_id,), foundation_fix=foundation)
-    await gate.write_judgement(test.request_id, judged, Conclusion.COMMITTED, commit)
+    await gate.write_judgement(JudgementWrite(test.request_id, judged, Conclusion.COMMITTED, commit))
     return commit
 
 
@@ -1381,7 +1383,9 @@ async def _commit_moving_the_component(bench: Bench, ref: str) -> str:
     test = request("rc3", intent("s2", bench.root, mechanism="c3"), change)
     await toolbox.write_request(test)
     await toolbox.write_result(result(test.request_id))
-    await gate.write_judgement(test.request_id, judgement(1.0, (test.request_id,)), Conclusion.COMMITTED, commit)
+    await gate.write_judgement(
+        JudgementWrite(test.request_id, judgement(1.0, (test.request_id,)), Conclusion.COMMITTED, commit)
+    )
     return commit
 
 

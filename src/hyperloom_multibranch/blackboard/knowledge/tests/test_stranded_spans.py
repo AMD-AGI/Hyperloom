@@ -11,7 +11,12 @@ import pytest
 
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role
 from hyperloom_multibranch.contracts.blackboard.peers import Purpose, Validity
-from hyperloom_multibranch.contracts.blackboard.records import LineageEvent, MergeAttempt, BlackboardSnapshot
+from hyperloom_multibranch.contracts.blackboard.records import (
+    LineageEvent,
+    MergeAttempt,
+    BlackboardSnapshot,
+    JudgementWrite,
+)
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LineageKind, MergeOutcome
 from hyperloom_multibranch.blackboard.knowledge.breakdown import CloseOutcome, build_breakdown
 from hyperloom_multibranch.blackboard.knowledge.stranded_spans import stranded_spans
@@ -34,7 +39,9 @@ async def _stranded_then_merged(root: Path, clock: FakeClock) -> tuple[Blackboar
     )
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s3", from_commit="i1", reason="refill"))
     await w.measure("s3", "u1", intent("s3", "i1", "sampler", "fused top-k"), FUSED)
-    await gate.write_judgement("u1", judgement(8.0, ("u1",), recorded={METRIC: 1124.0}), Conclusion.COMMITTED, "c3")
+    await gate.write_judgement(
+        JudgementWrite("u1", judgement(8.0, ("u1",), recorded={METRIC: 1124.0}), Conclusion.COMMITTED, "c3")
+    )
     clock.advance(10 * MINUTE)
     await integrator.record_merge_attempt(MergeAttempt(("c3",), "i1", skipped_reason="unresolved patch conflict"))
     failed_at = clock.now
@@ -43,7 +50,9 @@ async def _stranded_then_merged(root: Path, clock: FakeClock) -> tuple[Blackboar
     await toolbox.write_request(request("m2", merge, FUSED, purpose=Purpose.INTEGRATION))
     await integrator.record_merge_attempt(MergeAttempt(("c3",), "i1", request_id="m2"))
     await toolbox.write_result(result("m2"))
-    await integrator.write_judgement("m2", judgement(7.6, ("m2",), recorded={METRIC: 1120.0}), Conclusion.MERGED, "i2")
+    await integrator.write_judgement(
+        JudgementWrite("m2", judgement(7.6, ("m2",), recorded={METRIC: 1120.0}), Conclusion.MERGED, "i2")
+    )
     clock.advance(20 * MINUTE)
     return await w.as_role(Role.OBSERVER).snapshot(), failed_at
 
@@ -68,7 +77,7 @@ async def test_a_lead_a_branch_takes_again_after_its_failed_commit_merged_is_not
     w = Writers(root, clock)
     await w.measure("s3", "u2", intent("s3", "c3", "attention", "fused rope"), delta("--attention fused-rope"))
     ahead = judgement(7.7, ("u2",), recorded={METRIC: 1210.0})
-    await w.as_role(Role.GATE).write_judgement("u2", ahead, Conclusion.COMMITTED, "c5")
+    await w.as_role(Role.GATE).write_judgement(JudgementWrite("u2", ahead, Conclusion.COMMITTED, "c5"))
     clock.advance(40 * MINUTE)
     snapshot = await w.as_role(Role.OBSERVER).snapshot()
 
@@ -104,7 +113,7 @@ async def test_a_merge_test_the_candidate_failed_fails_its_commit_and_a_failed_m
         await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit="i1", reason="refill"))
         await w.measure(branch, f"u-{branch}", intent(branch, "i1", "sampler", f"fused {branch}"), change)
         kept = judgement(8.0, (f"u-{branch}",), recorded={METRIC: 1124.0})
-        await gate.write_judgement(f"u-{branch}", kept, Conclusion.COMMITTED, commit)
+        await gate.write_judgement(JudgementWrite(f"u-{branch}", kept, Conclusion.COMMITTED, commit))
     clock.advance(10 * MINUTE)
     failed_at = clock.now
     for branch, commit, merge, validity in tested:

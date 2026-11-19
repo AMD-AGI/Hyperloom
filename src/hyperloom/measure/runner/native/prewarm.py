@@ -273,16 +273,14 @@ def prewarm(
     gfx: str,
     cu_num: int | None = None,
     tables: Collection[str] | None = None,
-    environ: Mapping[str, str] | None = None,
 ) -> PrewarmReport:
     """Build the modules the image's own tuned tables generate (by its ``optCompilerConfig.json``) that its ``aiter/jit``
     lacks and aiter can build by name, with ``builder``, and install them into it (see the module); with ``cu_num``, only
     when they cover the image's tables for ``(gfx, cu_num)``. ``image_root`` is the image's aiter package directory (the
     one holding ``jit/`` and ``configs/``); ``tables`` narrows the modules to those generated from one of these
-    ``AITER_CONFIG_*`` variables' tables (every tuned table when ``None``). ``environ`` is what ``builder`` builds under,
-    which the manifest records (:func:`build_environment` of this process's when ``None``). Never raises for a build or
-    an install that fails: the report says why, the image is unchanged, and the launch builds them at its first
-    prefill."""
+    ``AITER_CONFIG_*`` variables' tables (every tuned table when ``None``). The manifest records :func:`build_environment`
+    of this process's as what ``builder`` builds under. Never raises for a build or an install that fails: the report
+    says why, the image is unchanged, and the launch builds them at its first prefill."""
     started = time.monotonic()
     package = Path(image_root)
     jit = package / _JIT_DIR
@@ -296,7 +294,7 @@ def prewarm(
     left = tuple(sorted(set(missing) - buildable))
     if not buildable:
         return _ended(PrewarmReport(present=present, left=left), started)
-    build = _Build(gfx, cu_num, build_environment(os.environ, cu_num) if environ is None else environ, config)
+    build = _Build(gfx, cu_num, build_environment(os.environ, cu_num), config)
     logger.warning(
         "aiter prewarm: building %s for %s on CPU, about %d s (each module's typical build on a card)",
         ", ".join(sorted(buildable)),
@@ -373,7 +371,7 @@ def _prewarm_image(
     under :func:`build_environment` of this process's."""
     environ = build_environment(os.environ, cu_num)
     builder = isolated_builder(BuildMachine(_LOCAL_IMAGE, _LOCAL_IMAGE, gfx, python), environ=environ)
-    return prewarm(package, builder, gfx=gfx, cu_num=cu_num, tables=tables, environ=environ)
+    return prewarm(package, builder, gfx=gfx, cu_num=cu_num, tables=tables)
 
 
 def _gfx(given: str | None) -> str:

@@ -412,6 +412,26 @@ of this by hand. See
 [Authentication and credentials](../reference/authentication.md) for the full
 set of accepted shapes, including split entrypoints and self-hosted gateways.
 
+### Use the DeepSeek Harness
+
+The DeepSeek Harness (`dsh`) is a third agent backend beside Claude and Codex.
+It is not in a published release yet (the latest wheel, 1.1.5, has neither the
+`deepseek` extra nor the harness code), so it needs a source checkout. Hyperloom
+never picks it automatically, and the setup skill does not configure it. To run
+on it:
+
+1. From the repository root, install the `deepseek` extra:
+   `pip install -e '.[deepseek]'`.
+2. Set `OPENAI_BASE_URL` and `OPENAI_API_KEY` to an OpenAI-protocol gateway that
+   serves the model.
+3. Set `INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`, and `DSH_MODEL` to the model
+   id the gateway serves.
+
+The backend then runs orchestration, specialists, Forge, TraceLens and
+quantization. Specialists run on the `dsh` CLI without a sandbox of their own.
+See [environment variables](../reference/environment-variables.md) for
+`INFERENCE_OPTIMIZER_AGENT_BACKEND`, `DSH_MODEL` and `HYPERLOOM_DSH_MAX_TOKENS`.
+
 ### Bare metal (source)
 
 Make sure the host already provides the required base environment:

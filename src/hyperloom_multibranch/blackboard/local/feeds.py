@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, TestKind, TestResult, Validity
 from hyperloom_multibranch.contracts.blackboard.records import (
+    JudgementWrite,
     SHORT_COMMIT,
     Claim,
     InboxItem,
@@ -54,7 +55,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import (
 from hyperloom_multibranch.blackboard.families import note_family
 from hyperloom_multibranch.blackboard.learning_search import SAME_FAMILY, family_of_learning, kinship, names
 from hyperloom_multibranch.blackboard.local.segments import Entry, EntryKind
-from hyperloom_multibranch.blackboard.local.state import ClaimDecision, JudgementWrite, BlackboardState
+from hyperloom_multibranch.blackboard.local.state import ClaimDecision, BlackboardState
 from hyperloom_multibranch.blackboard.local.views import judged_since_commit, lineage_view, merge_state
 
 #: How many tests judged since the last commit make a stall. The run entry has no setting for it, and the judge's

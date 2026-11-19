@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from hyperloom.orchestrator.trace_analysis import tracelens_skill_runner as tr
 
 
@@ -152,6 +154,62 @@ class TestBackgroundTasks:
 
     def test_silence_with_nothing_in_flight_stays_tightly_bounded(self):
         assert not _busy_after([AssistantMessage(TextBlock("reading the skill file"))])
+
+    def test_a_background_shell_outlives_its_turn_result(self):
+        """The CLI ends the turn while the shell it backgrounded still runs, and notifies it after."""
+        assert _busy_after(
+            [
+                AssistantMessage(ToolUseBlock("Bash")),
+                TaskStartedMessage("shell"),
+                AssistantMessage(ToolResultBlock()),
+                AssistantMessage(TextBlock("Waiting for the command to finish.")),
+                ResultMessage(),
+            ]
+        )
+
+    def test_notification_after_the_turn_result_releases_the_task(self):
+        assert not _busy_after(
+            [
+                TaskStartedMessage("shell"),
+                AssistantMessage(ToolResultBlock()),
+                ResultMessage(),
+                TaskNotificationMessage("shell"),
+            ]
+        )
+
+
+async def _replay(messages: list[object], silence_after: int, silence_sec: float):
+    for index, message in enumerate(messages):
+        if index == silence_after:
+            await asyncio.sleep(silence_sec)
+        yield message
+
+
+def _stream_error(messages: list[object], *, silence_after: int) -> str:
+    """Drive the watchdog over ``messages`` with a silence longer than the message bound before ``silence_after``."""
+    bounds = tr._StreamIdleBounds(message=0.05, tool=5.0)
+    stream = _replay(messages, silence_after, silence_sec=0.3)
+    return asyncio.run(tr._drive_sdk_stream(stream, bounds, observe=lambda _message: None, log=None))
+
+
+class TestStreamWatchdog:
+    def test_waits_through_a_background_shell_past_the_turn_result(self):
+        """The killed roofline: the report generator outran the CLI's foreground limit and ran on in the background."""
+        messages = [
+            AssistantMessage(ToolUseBlock("Bash")),
+            TaskStartedMessage("shell"),
+            AssistantMessage(ToolResultBlock()),
+            ResultMessage(),
+            TaskNotificationMessage("shell"),
+            ResultMessage(),
+        ]
+
+        assert _stream_error(messages, silence_after=4) == ""
+
+    def test_silence_after_a_turn_with_nothing_running_still_times_out(self):
+        messages = [AssistantMessage(TextBlock("done")), ResultMessage(), ResultMessage()]
+
+        assert "with no tool call in flight" in _stream_error(messages, silence_after=2)
 
 
 class TestToolIdleTimeoutResolution:

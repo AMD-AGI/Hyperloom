@@ -74,7 +74,7 @@ from ._trace_inputs import (
     _trace_file_size,
     discover_trace_inputs,
 )
-from ._trace_split import TraceSplitJob, _default_workspace_path, _run_trace_split
+from ._trace_split import TraceSplitJob, _run_trace_split
 
 # trace_analyze heals a vanished checkout through this module's _ensure_tracelens_checkout.
 from ._tracelens_checkout import (
@@ -643,17 +643,11 @@ def _add_chunk_selection_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_root_args(parser: argparse.ArgumentParser) -> None:
-    """Add the workspace and TraceLens checkout root flags; their env defaults are read now."""
+    """Add the workspace and TraceLens checkout root flags; the checkout roots' env defaults are read now."""
     parser.add_argument(
         "--workspace-path",
-        default=_default_workspace_path(),
-        help=(
-            "Root the tool writes under (output lands at "
-            "<workspace_path>/kernel-agent/runs/<session_id>/...). "
-            "Defaults to $USER_DATA_PATH so every kernel-agent artefact "
-            "stays inside the session dir; falls back to $WORKSPACE_PATH "
-            "for legacy launchers, then to /workspace/hyperloom."
-        ),
+        required=True,
+        help="Root the tool writes under (output lands at <workspace_path>/kernel-agent/runs/<session_id>/...).",
     )
     parser.add_argument(
         "--tracelens-root",

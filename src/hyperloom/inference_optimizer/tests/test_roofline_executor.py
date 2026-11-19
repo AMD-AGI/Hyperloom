@@ -12,9 +12,9 @@ from unittest.mock import patch
 import pytest
 
 from hyperloom.orchestrator.actions.executors import roofline as roofline_mod
+from hyperloom.orchestrator.actions.executors.profile import profile_trace_path
 from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
-    _extract_trace_path,
     _gpu_trace_unsupported_reason,
 )
 from hyperloom.inference_optimizer.trace.task_progress import progress_scope
@@ -460,7 +460,7 @@ async def test_deterministic_capture_failures_are_not_retried(tmp_path, reason):
 
 @pytest.mark.asyncio
 async def test_profile_no_trace_path(tmp_path):
-    """Profile succeeded but result lacks main_trace_path / trace_files."""
+    """Profile succeeded but result has no main_trace_path."""
     state = _state()
     ctx = _ctx(tmp_path)
     profile_bad = {"status": "succeeded", "output_throughput": 110.0}
@@ -742,17 +742,12 @@ async def test_trace_analyze_returns_non_dict(tmp_path):
     assert "non-dict" in result["error"]
 
 
-def test_extract_trace_path_prefers_main_trace_path():
+def test_profile_trace_path_prefers_main_trace_path():
     r = {
         "main_trace_path": "/main.gz",
         "trace_files": ["/alt-0.gz", "/alt-1.gz"],
     }
-    assert _extract_trace_path(r) == "/main.gz"
-
-
-def test_extract_trace_path_falls_back_to_first_trace_file():
-    r = {"trace_files": ["/first.gz", "/second.gz"]}
-    assert _extract_trace_path(r) == "/first.gz"
+    assert profile_trace_path(r) == "/main.gz"
 
 
 @pytest.mark.parametrize(
@@ -763,17 +758,15 @@ def test_extract_trace_path_falls_back_to_first_trace_file():
             id="explicitly-unready",
         ),
         pytest.param({}, id="nothing-named"),
-        pytest.param({"trace_files": []}, id="no-trace-files"),
-        pytest.param({"trace_files": [None]}, id="null-trace-file"),
     ],
 )
-def test_extract_trace_path_is_empty_without_a_ready_trace(profile_result):
-    assert _extract_trace_path(profile_result) == ""
+def test_profile_trace_path_is_empty_without_a_ready_trace(profile_result):
+    assert profile_trace_path(profile_result) == ""
 
 
-def test_extract_trace_path_handles_non_dict():
-    assert _extract_trace_path(None) == ""  # type: ignore[arg-type]
-    assert _extract_trace_path("garbage") == ""  # type: ignore[arg-type]
+def test_profile_trace_path_handles_non_dict():
+    assert profile_trace_path(None) == ""
+    assert profile_trace_path("garbage") == ""
 
 
 def test_roofline_executor_requires_shared_state():

@@ -16,6 +16,7 @@ from hyperloom_multibranch.contracts.judgement import AccuracyVerdict
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer, Purpose, Verdict
 from hyperloom_multibranch.contracts.blackboard.records import (
+    JudgementWrite,
     REPLAY_TARGET,
     LineageEvent,
     MergeAttempt,
@@ -52,7 +53,9 @@ async def _leftovers(root: Path, clock: FakeClock) -> LocalBlackboard:
     for branch, start in (("s3", "i1"), ("s4", "c0")):
         await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit=start, reason="refill"))
     await w.measure("s3", "u1", LANDED, delta("--sampler fused"))
-    await gate.write_judgement("u1", judgement(3.0, ("u1",), recorded={METRIC: 1071.0}), Conclusion.COMMITTED, "c3")
+    await gate.write_judgement(
+        JudgementWrite("u1", judgement(3.0, ("u1",), recorded={METRIC: 1071.0}), Conclusion.COMMITTED, "c3")
+    )
     await toolbox.write_request(
         request(
             "m2", intent(INTEGRATION_BRANCH, "i1", "merge", "c3"), delta("--sampler fused"), purpose=Purpose.INTEGRATION
@@ -61,20 +64,22 @@ async def _leftovers(root: Path, clock: FakeClock) -> LocalBlackboard:
     await integrator.record_merge_attempt(MergeAttempt(("c3",), "i1", request_id="m2"))
     await toolbox.write_result(result("m2"))
     unstacked = judgement(-0.5, ("m2",), verdict=Verdict.REGRESSED)
-    await integrator.write_judgement("m2", unstacked, Conclusion.NOT_STACKABLE)
+    await integrator.write_judgement(JudgementWrite("m2", unstacked, Conclusion.NOT_STACKABLE))
     await w.measure("s3", "u2", intent("s3", "c3", "sampler", "fused min-p"), delta("--min-p fused"))
-    await gate.write_judgement("u2", judgement(2.0, ("u2",), recorded={METRIC: 1090.0}), Conclusion.COMMITTED, "c4")
+    await gate.write_judgement(
+        JudgementWrite("u2", judgement(2.0, ("u2",), recorded={METRIC: 1090.0}), Conclusion.COMMITTED, "c4")
+    )
     await w.measure("s3", "n1", NEAR, delta("--n1"))
     short = judgement(0.8, ("n1",), verdict=Verdict.FLAT)
-    await gate.write_judgement("n1", short, Conclusion.RECORDED_ONLY)
+    await gate.write_judgement(JudgementWrite("n1", short, Conclusion.RECORDED_ONLY))
     for request_id, of, change in (("d1", BLOCKED, "--fp8-gemm"), ("d2", RETRIED, "--d2"), ("d3", CLAIMED, "--d3")):
         await w.measure("s3", request_id, of, delta(change))
         blocked = judgement(2.0, (request_id,), verdict=Verdict.BLOCKED)
-        await gate.write_judgement(request_id, blocked, Conclusion.DIAGNOSIS_PENDING)
+        await gate.write_judgement(JudgementWrite(request_id, blocked, Conclusion.DIAGNOSIS_PENDING))
     dropped = delta("--chunked-prefill-size 8192")
     claim = await w.as_role(Role.SPECIALIST_RUNTIME, "s3").acquire(DROPPED, dropped.fingerprint(), ttl_seconds=TTL)
     await toolbox.write_request(request("x1", DROPPED, dropped))
-    await toolbox.attach_request(claim.key, "x1", ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, "x1")
     await toolbox.write_withdrawal(Withdrawal("x1", "branch stopped"))
     await scheduler.record_lineage(LineageEvent(LineageKind.STOP, "s3", reason="no progress"))
     await scheduler.release_branch("s3")
@@ -111,7 +116,7 @@ async def test_a_result_just_short_of_its_bar_is_no_lead_whether_or_not_its_eval
     w = Writers(root, clock)
     await w.measure("s4", "q1", intent("s4", "c0", "moe", "fused moe"), delta("--q1"))
     short = replace(judgement(0.95, ("q1",), verdict=Verdict.FLAT), accuracy=accuracy)
-    await w.as_role(Role.GATE).write_judgement("q1", short, Conclusion.RECORDED_ONLY)
+    await w.as_role(Role.GATE).write_judgement(JudgementWrite("q1", short, Conclusion.RECORDED_ONLY))
 
     brief = await observer.startup_brief("i1")
 
@@ -139,14 +144,14 @@ async def test_a_lead_another_branch_replayed_drops_out_and_a_withdrawn_replay_o
         replaying, delta("--fp8-gemm").fingerprint(), ttl_seconds=TTL
     )
     await toolbox.write_request(request("p2", replaying, delta("--fp8-gemm")))
-    await toolbox.attach_request(claim.key, "p2", ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, "p2")
     await toolbox.write_withdrawal(Withdrawal("p2", "branch stopped"))
     measured_before = intent("s4", "c0", "rope", "replay n1 on my head")
     claim = await w.as_role(Role.SPECIALIST_RUNTIME, "s4").acquire(
         measured_before, delta("--n1").fingerprint(), ttl_seconds=TTL
     )
     await toolbox.write_request(request("p3", measured_before, delta("--n1")))
-    await toolbox.attach_request(claim.key, "p3", ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, "p3")
     await toolbox.write_withdrawal(Withdrawal("p3", "branch stopped"))
 
     brief = await observer.startup_brief("i1")

@@ -12,13 +12,13 @@ torch trace. Its result document is kept verbatim; judging it is the caller's (D
 
 from __future__ import annotations
 
-import hashlib
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from hyperloom_common.fs_utils import file_sha256
 from inference_suite.contracts.base_launch import (
     BaseLaunch,
     BaseLaunchError,
@@ -80,10 +80,6 @@ def script_path(script: str) -> Path | None:
     return path if path.is_absolute() and path.is_file() else None
 
 
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def scriptable_base(query: LaunchQuery, script: str | None, model: LaunchModel, topology: Topology) -> BaseLaunch:
     """The base of a scriptable session: ``script``, a shipped name or an absolute path, frozen with its content.
 
@@ -108,7 +104,7 @@ def scriptable_base(query: LaunchQuery, script: str | None, model: LaunchModel, 
         source=LaunchSource(
             kind=SourceKind.DEFAULT_TABLE if shipped else SourceKind.USER_FILE,
             path=str(path),
-            files={script: _sha256(path)},
+            files={script: file_sha256(path)},
         ),
         point=LaunchPoint(conc=query.concurrencies[0], exact=True),
         image=ImageFacts(run=None, recipe=None, framework_version=None, version_basis=VersionBasis.NOT_APPLICABLE),
@@ -158,7 +154,7 @@ def scriptable_invocation(config: SuiteConfig, base: BaseLaunch) -> ScriptableIn
     path = script_path(base.script)
     if path is None:
         return Stop(FailedStep.CONFIG_INVALID, f"{base.script!r} is no shipped script and no absolute script path")
-    if _sha256(path) != base.source.files[base.script]:
+    if file_sha256(path) != base.source.files[base.script]:
         return Stop(FailedStep.SOURCE_FILES_CHANGED, f"the script {path} changed since the session froze its base")
     env = script_env(workload, config.server, RunLayout(Path(config.paths.run_dir)), config.profile.enabled)
     return ScriptableInvocation((*base.entrypoint[:-1], str(path)), env)

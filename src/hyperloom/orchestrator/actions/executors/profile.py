@@ -649,14 +649,18 @@ def _mn_round_trace_root() -> str:
 
 # Restarts the multi-node server for this profiling round; returns the refusal result when it failed.
 async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -> dict[str, Any] | None:
+    from ._multi_node_env import round_server_env
     from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
+    unset_envs = list(params.get("unset_envs") or ())
     try:
         await restart_server_for_round(
             RoundServer.from_env(
                 str(params.get("extra_server_args") or ""),
                 str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None,
             ),
+            extra_env=round_server_env(params.get("extra_envs"), unset_envs) or None,
+            unset_env=unset_envs or None,
             torch_profiler_dir=round_trace_root,
         )
     except ServerRestartFailed as exc:
@@ -831,6 +835,13 @@ def _record_workspace_traces(result: dict[str, Any], workspace_str: str, framewo
         _record_trace_validation(result, trace_dir, main_trace, framework, preflight)
     except (OSError, RuntimeError, ValueError, TypeError) as exc:
         log.debug("profile_executor: trace structure validator failed: %s", exc)
+
+
+def profile_trace_path(result: Any) -> str:
+    """The trace a profile result offers for analysis; ``""`` when it has none or marks it not ready."""
+    if not isinstance(result, dict) or result.get("trace_input_ready") is False:
+        return ""
+    return str(result.get("main_trace_path") or "")
 
 
 PROFILE_DEFAULT_TIMEOUT_SEC = 14400  # 4 h wall cap
@@ -1113,4 +1124,5 @@ __all__ = [
     "PROFILE_DEFAULT_TIMEOUT_SEC",
     "ProfileExecutor",
     "profile_executor",
+    "profile_trace_path",
 ]
