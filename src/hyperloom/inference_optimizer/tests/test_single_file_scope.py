@@ -24,7 +24,7 @@ from hyperloom.common.optimization_scope import (
     optimization_scope,
     scope_instructions,
 )
-from hyperloom.orchestrator.framework.optimization_scope import check_patch_scope
+from hyperloom.orchestrator.framework.optimization_scope import artifacts_refused_by_scope, check_patch_scope
 
 from .conftest import _make_workload, declare, patch
 
@@ -131,6 +131,35 @@ def test_a_patch_reaching_outside_the_boundary_is_refused(
     _declare(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="permits changes only to"):
         check_patch_scope(tmp_path, [_patch(*targets)])
+
+
+def test_no_declaration_admits_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(tmp_path))
+    assert artifacts_refused_by_scope(["aiter/configs/tuned_gemm.csv"]) == []
+
+
+@pytest.mark.parametrize(
+    "targets",
+    [("aiter/configs/tuned_gemm.csv",), ("hyperloom_optimize.py",)],
+    ids=["another_tree", "beside_the_module"],
+)
+def test_every_artifact_is_refused_under_a_declaration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, targets: tuple[str, ...]
+) -> None:
+    """Target makes no difference: the export ships the module, so any installed file is lost.
+
+    One landing outside the framework root is not even snapshotted, so no export-time
+    check could find it -- the refusal has to happen before it is applied.
+    """
+    _declare(tmp_path, monkeypatch)
+    assert artifacts_refused_by_scope(targets) == list(targets)
+
+
+def test_an_unreadable_declaration_still_refuses_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patches are refused under a broken declaration, so artifacts must not be the way through."""
+    (tmp_path / "optimization_scope.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(tmp_path))
+    assert artifacts_refused_by_scope(["anything.csv"]) == ["anything.csv"]
 
 
 def test_a_patch_against_another_tree_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
