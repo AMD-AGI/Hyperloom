@@ -192,12 +192,25 @@ async def test_the_patched_file_survives_the_apply(session_dir, applied, patch_f
     assert (applied / KERNEL_REL).read_text(encoding="utf-8") == PATCHED_SRC
 
 
+@pytest.fixture
+def served(tmp_path) -> Path:
+    """The tree the server imports, apart from the worktree the patch was written in."""
+    root = tmp_path / "site-packages" / "sglang"
+    (root / KERNEL_REL).parent.mkdir(parents=True)
+    (root / KERNEL_REL).write_text(BASE_SRC, encoding="utf-8")
+    return root
+
+
 async def test_a_patch_written_in_a_snapshot_worktree_lands_in_the_tree_the_server_imports(
-    session_dir, applied, patch_file, stop_at_rebaseline, through_apply, tmp_path
+    session_dir, applied, patch_file, served, through_apply, monkeypatch
 ):
-    served = tmp_path / "site-packages" / "sglang"
-    (served / KERNEL_REL).parent.mkdir(parents=True)
-    (served / KERNEL_REL).write_text(BASE_SRC, encoding="utf-8")
+    seen: list[str] = []
+
+    def measure(*_args, **_kwargs):
+        seen.append((served / KERNEL_REL).read_text(encoding="utf-8"))
+        raise ReachedRebaseline
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.baseline.BaselineExecutor", measure)
 
     with pytest.raises(ReachedRebaseline):
         await krh.integrate_handler(
@@ -206,9 +219,24 @@ async def test_a_patch_written_in_a_snapshot_worktree_lands_in_the_tree_the_serv
             preapplied_git_patch=True,
         )
 
-    assert (served / KERNEL_REL).read_text(encoding="utf-8") == PATCHED_SRC
+    assert seen == [PATCHED_SRC]
     _payload, result = through_apply[0]
     assert result["status"] == "ok", result
+
+
+async def test_a_raise_after_the_apply_restores_the_tree_the_server_imports(
+    session_dir, applied, patch_file, served, stop_at_rebaseline
+):
+    """The caller never sees the apply manifest of a handler that raised, so the handler undoes its own apply."""
+    with pytest.raises(ReachedRebaseline):
+        await krh.integrate_handler(
+            _controller_payload(applied, patch_file, deploy_root=served),
+            session_dir=session_dir,
+            preapplied_git_patch=True,
+        )
+
+    assert (served / KERNEL_REL).read_text(encoding="utf-8") == BASE_SRC
+    assert (applied / KERNEL_REL).read_text(encoding="utf-8") == PATCHED_SRC
 
 
 async def test_a_diff_without_the_flag_reads_the_committed_base(session_dir, smuggled, patch_file, stop_at_rebaseline):
