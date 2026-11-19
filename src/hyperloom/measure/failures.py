@@ -137,9 +137,11 @@ PROFILER_HUNG = "profiler_hung"
 #: The server of a profile round died while the round's profile window was open (``FailedStep.SERVER_DIED``), and its
 #: logs name no failure a candidate is known to cause. The profiler killed the server: an image whose activity tracer
 #: crashes a worker on live serving steps crashes it in every sandbox of that image, and the candidate, whose measurement
-#: runs without the profiler, is not what failed. An infrastructure failure every sandbox repeats
-#: (``hyperloom_multibranch.toolbox.attempts`` ends the test with it at once). The reason is ``<this>: <the round's
-#: failure detail>`` when the round gave one. A death before the window opened, or after it closed, stays with the logs.
+#: runs without the profiler, is not what failed. An infrastructure failure a fresh sandbox likely repeats, though not
+#: when the fault was the node's (``hyperloom_multibranch.toolbox.attempts`` retries it once, on another node). The reason is ``<this>: <the round's
+#: failure detail>`` when the round gave one. A death before the window opened stays with the logs, and so does one
+#: after it closed: after a closing ``/stop_profile`` the server answered, or, for a window that closed before the
+#: round's ``finished`` mark, after that close (``round_marks.died_in_profile_window``).
 PROFILER_DIED = "profiler_died"
 
 #: ``error_class`` values a runner, the hosted backend or the platform reports that are not about the candidate.

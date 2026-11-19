@@ -421,13 +421,15 @@ _ENGINE_DIED = "RuntimeError: Engine core process EngineCore died unexpectedly.\
 _FATAL = "EngineCore encountered a fatal error.\nRuntimeError: cancelled"
 
 
-async def test_a_profile_whose_server_died_inside_its_window_is_not_retried_and_ends_unmeasured() -> None:
-    """The tracer kills a worker when it starts on live serving steps, in every sandbox of the image."""
+async def test_a_profile_whose_server_died_inside_its_window_is_retried_once_elsewhere_then_ends_unmeasured() -> None:
+    """The tracer kills a worker when it starts on live serving steps, most often in every sandbox of the image; one
+    retry on another node separates that from a fault of the first node."""
     death = StepFailure(FailedStep.SERVER_DIED, _FATAL, profile_death=True)
 
     result, executor, reported = await _profile(_ENGINE_DIED, death)
 
-    assert len(executor.jobs) == 1, "a death in the profile window is not retried"
+    assert len(executor.jobs) == 2, "a death in the profile window is retried once, and only once"
+    assert "n1" in executor.jobs[1].avoid_nodes, "the retry goes to a node other than the first"
     assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
     assert result.failure_reason == f"{PROFILER_DIED}: EngineCore encountered a fatal error. RuntimeError: cancelled"
     assert reported == [], "the image's profiler, not the node, killed the server"

@@ -15,7 +15,8 @@ attempts into the request's single result:
   and the quarantine already move it to another node. An infrastructure
   failure every sandbox repeats (:data:`UNRETRIED_INFRA_REASONS`) ends as ``measurement_failed`` at once, and its node
   is not reported; one it likely repeats (:data:`ONCE_RETRIED_INFRA_REASONS`: an aiter build past the watchdog, a
-  sandbox that failed before it ran, a merge smoke that could not run) is retried once, and its node is not reported either. One that says nothing about
+  sandbox that failed before it ran, a merge smoke that could not run, a profile's server that died in its window) is
+  retried once, and its node is not reported either. One that says nothing about
   the node (:data:`NODE_BLAMELESS_INFRA_REASONS`: a runner that could not start, a runner lost, a Hub download refused
   for its rate limit) is retried like any other, and its node is not reported.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
@@ -81,11 +82,10 @@ INFRA_BACKOFF_SECONDS: tuple[float, ...] = (60.0, 120.0, 240.0)
 #: whose server died in the profiler's memory-snapshot dump (``PROFILER_SNAPSHOT_FAILED``) dies there in every sandbox of
 #: the image, and says nothing of the candidate. A profile whose server went silent with its profile window open
 #: (``PROFILER_HUNG``) hangs again at the same point on the same image; a retry only holds the cards for another silence
-#: limit, or meets them still held by the hung server's ranks. A profile whose server died with its profile window open
-#: (``PROFILER_DIED``) dies again when the tracer starts on the same image, after the same boot and warmup. The failed
-#: profile tells the session its backend cannot profile, so it asks for none again.
+#: limit, or meets them still held by the hung server's ranks. The failed profile tells the session its backend cannot
+#: profile, so it asks for none again.
 UNRETRIED_INFRA_REASONS: frozenset[str] = frozenset(
-    {INERT_PATCH, SANDBOX_ACQUIRE_TIMEOUT, HF_CACHE_PERMISSION, PROFILER_SNAPSHOT_FAILED, PROFILER_HUNG, PROFILER_DIED}
+    {INERT_PATCH, SANDBOX_ACQUIRE_TIMEOUT, HF_CACHE_PERMISSION, PROFILER_SNAPSHOT_FAILED, PROFILER_HUNG}
 )
 #: The hosted backend's ``error_class`` when the platform made the sandbox and it failed before it ran
 #: (``hyperloom.measure.hosted.SANDBOX_CREATE_FAILED``).
@@ -97,7 +97,14 @@ SANDBOX_CREATE_FAILED = "sandbox_create_failed"
 #: separates that from a platform hiccup, where giving up at once would lose the test.
 #: A merge smoke that could not run (:data:`~.merge_smoke.SMOKE_NOT_RUN`: no interpreter, a child past its timeout) ran
 #: on this host, not on a node; one more try separates a host busy for a moment from one that cannot run it.
-ONCE_RETRIED_INFRA_REASONS: frozenset[str] = frozenset({JIT_BUILD_TIMEOUT, SANDBOX_CREATE_FAILED, SMOKE_NOT_RUN})
+#: A profile whose server died with its profile window open (``PROFILER_DIED``) most often dies again when the tracer
+#: starts on the same image, after the same boot and warmup; the retry, on a node the avoid set has not seen fail,
+#: separates that from a fault of the first node, which would otherwise end the test and, through the failed profile,
+#: switch profiling off for the session. A profile whose retry dies the same way ends ``measurement_failed``, and the
+#: session asks for no profile again.
+ONCE_RETRIED_INFRA_REASONS: frozenset[str] = frozenset(
+    {JIT_BUILD_TIMEOUT, SANDBOX_CREATE_FAILED, SMOKE_NOT_RUN, PROFILER_DIED}
+)
 #: The runner's ``error_class`` when it could not start (``hyperloom.measure.runner``).
 RUNNER_START_FAILED = "runner_start_failed"
 #: The hosted backend's ``error_class`` when it lost the sandbox (``hyperloom.measure.hosted.RUNNER_LOST``).
