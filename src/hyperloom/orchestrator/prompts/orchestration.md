@@ -435,7 +435,7 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   this architecture drives its components. Promote via
   `integrate_patch`. A `code_patch` KEEP resets the counter.
 * **You CANNOT** delegate kernel_agent-owned actions; write a state field;
-  read or write KB directly (Critic owns it). You **CAN** emit
+  read or write KB directly. You **CAN** emit
   `escalate_strategy_change` with a `skip_to_kernel` hint —
   and `prune_branch`; use `escalate_strategy_change` to advance
   FRAMEWORK_AGENT once its lever is exhausted (see "Phase awareness").

@@ -679,7 +679,6 @@ class CriticIteration(TypedDict, total=False):
     review_path: str
     phase: str
     macro_cycle: int
-    kb_priors: dict[str, Any]
     framework_reviews: list[dict[str, Any]]
 
 

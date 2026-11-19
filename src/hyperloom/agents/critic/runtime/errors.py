@@ -20,49 +20,14 @@ class SessionMemoryError(RuntimeAdapterError):
     """An I/O or schema error happened while accessing session memory."""
 
 
-class ScopeError(RuntimeAdapterError):
-    """The packet/context cannot be turned into a valid KB scope."""
-
-
-class SlugifyError(RuntimeAdapterError):
-    """The slugify input cannot be reduced to a non-empty deterministic slug."""
-
-
-class KBError(RuntimeAdapterError):
-    """Base class for KB transport errors."""
-
-
-class KBValidationError(KBError):
-    """The KB rejected the payload (HTTP 400 / 422)."""
-
-
-class KBNotFoundError(KBError):
-    """The KB returned 404 (e.g. edge target absent)."""
-
-
-class KBConflictError(KBError):
-    """The KB returned 409 — should not occur with upsert mode."""
-
-
-class KBTransportError(KBError):
-    """Network / 5xx / timeout errors after exhausting retries."""
-
-
 class IntentEnvelopeValidationError(RuntimeAdapterError):
     """The intent envelope produced for the Coordinator is invalid."""
 
 
 __all__ = [
     "IntentEnvelopeValidationError",
-    "KBConflictError",
-    "KBError",
-    "KBNotFoundError",
-    "KBTransportError",
-    "KBValidationError",
     "RequestValidationError",
     "ReviewValidationError",
     "RuntimeAdapterError",
-    "ScopeError",
     "SessionMemoryError",
-    "SlugifyError",
 ]

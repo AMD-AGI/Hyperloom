@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Integration tests for the prepare/commit lifecycle via :class:`InMemoryKBClient`."""
+"""Integration tests for the prepare/commit lifecycle against a temp session memory."""
 
 from __future__ import annotations
 
@@ -11,33 +11,13 @@ import pytest
 
 from hyperloom.agents.critic.runtime.decision_reviewer import DecisionReviewer
 from hyperloom.agents.critic.runtime.errors import ReviewValidationError
-from hyperloom.agents.critic.runtime.in_memory_kb_client import InMemoryKBClient
-from hyperloom.agents.critic.runtime.kb_client import KBListQuery
-from hyperloom.agents.critic.runtime.kb_writer import KBWriter
-from hyperloom.agents.critic.runtime.request_models import Proposal
 from hyperloom.agents.critic.runtime.session_memory import SessionMemory
-
-
-def test_topic_for_proposal_prefers_action_then_payload_then_fallback(reviewer):
-    rev, _, _ = reviewer
-    assert rev._topic_for_proposal(Proposal(msg_id="m1", from_agent="o", action_name="explore")) == "explore"
-    assert (
-        rev._topic_for_proposal(Proposal(msg_id="m2", from_agent="o", payload={"topic": "  tune gemm  "}))
-        == "tune gemm"
-    )
-    assert (
-        rev._topic_for_proposal(Proposal(msg_id="m3", from_agent="o", payload={"summary": "raise conc"}))
-        == "raise conc"
-    )
-    assert rev._topic_for_proposal(Proposal(msg_id="m4", from_agent="o", payload={})) == "proposal-m4"
 
 
 @pytest.fixture()
 def reviewer(tmp_path):
     sm = SessionMemory(root=tmp_path / "sm")
-    kb = InMemoryKBClient()
-    writer = KBWriter(kb, session_memory=sm)
-    return DecisionReviewer(kb_writer=writer), kb, sm
+    return DecisionReviewer(session_memory=sm), sm
 
 
 def _coordinator_request(prompt: str, session_id: str = "sess_a") -> dict:
@@ -57,13 +37,12 @@ _PROMPT_WITH_TWO_PROPOSALS = (
 
 
 def test_prepare_review_for_coordinator_inbox_extracts_proposals(reviewer):
-    rev, kb, sm = reviewer
+    rev, sm = reviewer
     bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS))
     assert sorted(p["msg_id"] for p in bundle.proposals) == ["aaa1", "bbb2"]
     # Context merged from shared_state.
     assert bundle.merged_context["model"] == "Qwen3-14B"
     assert bundle.merged_context["framework"] == "sglang"
-    assert bundle.kb_read_skipped_reason is None
     # Mixed batch: strictest class wins at bundle level (evidence_producer).
     constraints = bundle.review_constraints
     assert constraints["bundle_action_class"] == "evidence_producer"
@@ -81,7 +60,7 @@ def test_prepare_review_for_coordinator_inbox_extracts_proposals(reviewer):
 
 
 def test_prepare_review_propagates_known_actions(reviewer):
-    rev, kb, sm = reviewer
+    rev, sm = reviewer
     bundle = rev.prepare_review(
         {
             "session_id": "sess_known",
@@ -97,7 +76,7 @@ def test_prepare_review_propagates_known_actions(reviewer):
 
 
 def test_prepare_review_omits_known_actions_when_absent(reviewer):
-    rev, kb, sm = reviewer
+    rev, sm = reviewer
     bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS))
     assert "known_actions" not in bundle.review_constraints
 
@@ -142,7 +121,7 @@ def _mixed_prompt() -> str:
 
 
 def test_prepare_review_evidence_producer_relaxes_approve_requires(reviewer):
-    rev, _, _ = reviewer
+    rev, _ = reviewer
     bundle = rev.prepare_review(_coordinator_request(_explore_only_prompt(), "sess_evp"))
     constraints = bundle.review_constraints
     assert constraints["bundle_action_class"] == "evidence_producer"
@@ -158,7 +137,7 @@ def test_prepare_review_evidence_producer_relaxes_approve_requires(reviewer):
 
 
 def test_prepare_review_patch_landing_uses_strict_approve_requires(reviewer):
-    rev, _, _ = reviewer
+    rev, _ = reviewer
     bundle = rev.prepare_review(_coordinator_request(_patch_landing_prompt(), "sess_pl"))
     constraints = bundle.review_constraints
     assert constraints["bundle_action_class"] == "patch_landing"
@@ -173,7 +152,7 @@ def test_prepare_review_patch_landing_uses_strict_approve_requires(reviewer):
 
 
 def test_prepare_review_framework_op_emits_empty_approve_requires(reviewer):
-    rev, _, _ = reviewer
+    rev, _ = reviewer
     bundle = rev.prepare_review(_coordinator_request(_framework_op_prompt(), "sess_fw"))
     constraints = bundle.review_constraints
     assert constraints["bundle_action_class"] == "framework_op"
@@ -230,7 +209,7 @@ def test_classify_enablement_integrate_patch_is_enablement_landing():
 
 
 def test_prepare_review_enablement_integrate_relaxes_approve_requires(reviewer):
-    rev, _, _ = reviewer
+    rev, _ = reviewer
     prompt = (
         "=== Shared session state ===\n"
         "model=deepseek-v4 framework=vllm baseline_tput=0\n"
@@ -250,7 +229,7 @@ def test_prepare_review_enablement_integrate_relaxes_approve_requires(reviewer):
 
 def test_prepare_review_enablement_mixed_with_real_patch_stays_strict(reviewer):
     """A real production integrate in the same batch still forces the strict bar."""
-    rev, _, _ = reviewer
+    rev, _ = reviewer
     prompt = (
         "=== Shared session state ===\n"
         "model=deepseek-v4 framework=vllm baseline_tput=1200\n"
@@ -271,7 +250,7 @@ def test_prepare_review_enablement_mixed_with_real_patch_stays_strict(reviewer):
 
 
 def test_prepare_review_mixed_batch_uses_strictest_class(reviewer):
-    rev, _, _ = reviewer
+    rev, _ = reviewer
     bundle = rev.prepare_review(_coordinator_request(_mixed_prompt(), "sess_mix"))
     constraints = bundle.review_constraints
     # patch_landing wins over evidence_producer at the bundle level.
@@ -285,7 +264,7 @@ def test_prepare_review_mixed_batch_uses_strictest_class(reviewer):
 
 
 def test_prepare_review_unknown_action_falls_back_to_evidence_producer(reviewer):
-    rev, _, _ = reviewer
+    rev, _ = reviewer
     prompt = (
         "=== Shared session state ===\n"
         "model=qwen3-14b framework=sglang baseline_tput=1200\n"
@@ -299,8 +278,8 @@ def test_prepare_review_unknown_action_falls_back_to_evidence_producer(reviewer)
 
 
 def test_prepare_review_no_proposals_uses_strict_default(reviewer):
-    """No inbox proposals: the strict checklist stays the safe default and no KB lookup runs."""
-    rev, _, _ = reviewer
+    """No inbox proposals: the strict checklist stays the safe default."""
+    rev, _ = reviewer
     request = _coordinator_request("=== Inbox for critic ===\n(no new messages)\n", "sess_nop")
     request["context"] = {"model": "qwen3-14b", "framework": "sglang"}
     bundle = rev.prepare_review(request)
@@ -313,52 +292,20 @@ def test_prepare_review_no_proposals_uses_strict_default(reviewer):
     ]
     assert "proposal_action_classes" not in constraints
     assert "bundle_action_class" not in constraints
-    assert bundle.kb_priors_by_proposal == {}
-    assert bundle.kb_priors_trace["configured"] is True
-    assert bundle.kb_priors_trace["requests"] == []
 
 
-def test_prepare_review_skips_kb_when_critical_context_missing(reviewer):
-    rev, kb, sm = reviewer
+def test_prepare_review_asks_for_missing_critical_context(reviewer):
+    rev, sm = reviewer
     prompt = (
         "=== Inbox for critic ===\n"
         "  seq=1 msg_id=aaa from=orchestration topic=proposal payload={'action_name': 'kernel_opt'}\n"
     )
     bundle = rev.prepare_review(_coordinator_request(prompt, "sess_b"))
     assert bundle.required_context == ["model", "framework"]
-    assert bundle.kb_read_skipped_reason == "missing_critical_context"
-
-
-def test_prepare_review_returns_kb_priors_per_proposal(reviewer):
-    rev, kb, sm = reviewer
-    kb.upsert(
-        {
-            "scope": {
-                "org": "hyperloom",
-                "framework": "sglang",
-                "model": "qwen3-14b",
-                "model_family": "qwen",
-                "workload": "decode",
-                "precision": "fp8",
-            },
-            "kind": "pitfall",
-            "slug": "active-path-unproven-pitfall",
-            "importance": 0.5,
-            "metadata": {"topic": "active path"},
-        }
-    )
-    prompt = (
-        "=== Shared session state ===\n"
-        "model=qwen3-14b framework=sglang workload=decode precision=fp8\n"
-        "=== Inbox for critic ===\n"
-        "  seq=1 msg_id=aaa from=orchestration topic=proposal payload={'action_name': 'kernel_opt'}\n"
-    )
-    bundle = rev.prepare_review(_coordinator_request(prompt, "sess_priors"))
-    assert "aaa" in bundle.kb_priors_by_proposal
 
 
 def test_prepare_review_filters_already_reviewed_proposals(reviewer):
-    rev, kb, sm = reviewer
+    rev, sm = reviewer
     sm.mark_reviewed("sess_dedup", "aaa1", "approve")
     bundle = rev.prepare_review(
         _coordinator_request(
@@ -371,7 +318,7 @@ def test_prepare_review_filters_already_reviewed_proposals(reviewer):
 
 
 def test_commit_review_for_coordinator_inbox_emits_intent_envelope(reviewer):
-    rev, kb, sm = reviewer
+    rev, sm = reviewer
     rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_c"))
     review = {
         "review_verdicts": [
@@ -414,7 +361,7 @@ def _verdict_intent_for(intents: list[dict], target: str) -> dict:
 
 def test_commit_review_carries_the_cited_rule_into_the_intent(reviewer):
     """The Coordinator holds a reject to the verdict its rule declared, and it can only do that if the code the Critic cited survives the commit path."""
-    rev, _kb, sm = reviewer
+    rev, sm = reviewer
     rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_code"))
     review = {
         "review_verdicts": [
@@ -451,7 +398,7 @@ def test_commit_review_carries_the_cited_rule_into_the_intent(reviewer):
 
 
 def test_commit_review_backfills_advice_text_from_advice_entry(reviewer):
-    rev, kb, sm = reviewer
+    rev, sm = reviewer
     rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_advice"))
     review = {
         "review_verdicts": [
@@ -483,7 +430,7 @@ def test_commit_review_backfills_advice_text_from_advice_entry(reviewer):
 
 
 def test_commit_review_merges_inline_and_advice_entries(reviewer):
-    rev, kb, sm = reviewer
+    rev, sm = reviewer
     rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_merge"))
     review = {
         "review_verdicts": [
@@ -511,7 +458,7 @@ def test_commit_review_merges_inline_and_advice_entries(reviewer):
 
 
 def test_commit_review_keeps_advice_text_empty_when_no_advice(reviewer):
-    rev, kb, sm = reviewer
+    rev, sm = reviewer
     rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_empty"))
     review = {
         "review_verdicts": [
@@ -532,7 +479,7 @@ def test_commit_review_keeps_advice_text_empty_when_no_advice(reviewer):
 
 
 def test_commit_review_invalid_verdict_raises(reviewer):
-    rev, kb, sm = reviewer
+    rev, sm = reviewer
     rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_d"))
     with pytest.raises(ReviewValidationError, match="not valid"):
         rev.commit_review(
@@ -542,7 +489,7 @@ def test_commit_review_invalid_verdict_raises(reviewer):
 
 
 def test_commit_review_empty_target_raises(reviewer):
-    rev, kb, sm = reviewer
+    rev, sm = reviewer
     with pytest.raises(ReviewValidationError, match="missing"):
         rev.commit_review(
             _coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_d2"),
@@ -551,7 +498,7 @@ def test_commit_review_empty_target_raises(reviewer):
 
 
 def test_commit_review_no_proposals_emits_idle_observation(reviewer):
-    rev, kb, sm = reviewer
+    rev, sm = reviewer
     prompt = (
         "=== Shared session state ===\nmodel=qwen3-14b framework=sglang\n=== Inbox for critic ===\n(no new messages)\n"
     )
@@ -564,93 +511,3 @@ def test_commit_review_no_proposals_emits_idle_observation(reviewer):
     assert len(intents) == 1
     assert intents[0]["intent_type"] == "send_message"
     assert intents[0]["payload"]["topic"] == "observation"
-
-
-def test_commit_review_persists_to_kb_when_flagged(reviewer):
-    rev, kb, sm = reviewer
-    rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_f"))
-    review = {
-        "review_verdicts": [
-            {
-                "target_proposal_msg_id": "aaa1",
-                "verdict": "reject",
-                "reasoning": "active dispatch path unproven for this kernel",
-                "packet_evidence": ["benchmark.after.gain_pct"],
-                "persist_to_kb": True,
-                "topic": "active dispatch path unproven",
-            },
-        ]
-    }
-    outcome = rev.commit_review(
-        _coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_f"),
-        review,
-    )
-    assert any(w["trigger"] == "review_verdict" for w in outcome.kb_writes)
-    assert kb.list(KBListQuery(scope_filter={}))["entries"]
-
-
-def test_kb_priors_cache_hit_avoids_second_kb_call(reviewer):
-    rev, kb, sm = reviewer
-    kb.upsert(
-        {
-            "scope": {
-                "org": "hyperloom",
-                "framework": "sglang",
-                "model": "qwen3-14b",
-                "model_family": "qwen",
-                "workload": "decode",
-                "precision": "fp8",
-            },
-            "kind": "pitfall",
-            "slug": "active-path-unproven-pitfall",
-            "importance": 0.5,
-            "metadata": {"topic": "active path"},
-        }
-    )
-    prompt = (
-        "=== Shared session state ===\n"
-        "model=qwen3-14b framework=sglang workload=decode precision=fp8\n"
-        "=== Inbox for critic ===\n"
-        "  seq=1 msg_id=aaa from=orchestration topic=proposal payload={'action_name': 'kernel_opt'}\n"
-    )
-    rev.prepare_review(_coordinator_request(prompt, "sess_cache_e2e"))
-    rev.kb_writer.client = InMemoryKBClient()
-    bundle = rev.prepare_review(_coordinator_request(prompt, "sess_cache_e2e"))
-    # KB is now empty, but the bundle still has priors from the cache hit.
-    assert bundle.kb_priors_by_proposal["aaa"]
-
-
-# KB trace audit fields (kb_priors_trace)
-def test_kb_priors_trace_records_scope_and_requests(tmp_path):
-    sm = SessionMemory(root=tmp_path / "sm")
-    kb = InMemoryKBClient()
-    kb.upsert(
-        {
-            "scope": {
-                "org": "hyperloom",
-                "framework": "sglang",
-                "model": "qwen3-14b",
-                "model_family": "qwen",
-                "workload": "decode",
-                "precision": "fp8",
-            },
-            "kind": "pitfall",
-            "slug": "active-path-unproven-pitfall",
-            "importance": 0.5,
-            "metadata": {"topic": "active path"},
-        }
-    )
-    writer = KBWriter(kb, session_memory=sm)
-    rev = DecisionReviewer(kb_writer=writer)
-    prompt = (
-        "=== Shared session state ===\n"
-        "model=qwen3-14b framework=sglang workload=decode precision=fp8\n"
-        "=== Inbox for critic ===\n"
-        "  seq=1 msg_id=aaa from=orchestration topic=proposal payload={'action_name': 'kernel_opt'}\n"
-    )
-    bundle = rev.prepare_review(_coordinator_request(prompt, "sess_pt"))
-    trace = bundle.kb_priors_trace
-    assert trace["configured"] is True
-    assert trace["mode"] == "per_proposal"
-    assert trace["scope_filter"].get("model") == "qwen3-14b"
-    assert any(r["msg_id"] == "aaa" for r in trace["requests"])

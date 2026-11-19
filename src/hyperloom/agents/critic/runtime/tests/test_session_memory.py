@@ -6,14 +6,11 @@
 from __future__ import annotations
 
 import json
-import os
-import time
 
 import pytest
 
 from hyperloom.agents.critic.runtime.errors import SessionMemoryError
 from hyperloom.agents.critic.runtime.session_memory import (
-    DEFAULT_PRIOR_CACHE_TTL_SECONDS,
     MergeResult,
     SessionMemory,
 )
@@ -80,30 +77,6 @@ def test_append_decision_rejects_non_dict(tmp_session_root):
     sm = SessionMemory(root=tmp_session_root)
     with pytest.raises(SessionMemoryError):
         sm.append_decision("sess_1", "not a dict")  # type: ignore[arg-type]
-
-
-def test_priors_cache_hit_and_miss(tmp_session_root, monkeypatch):
-    sm = SessionMemory(root=tmp_session_root)
-    sm.put_cached_priors("sess_1", "scope-x|topic-y", [{"id": "kb_a"}])
-    assert sm.get_cached_priors("sess_1", "scope-x|topic-y") == [{"id": "kb_a"}]
-    assert sm.get_cached_priors("sess_1", "scope-x|topic-z") is None
-
-
-def test_priors_cache_expires_after_ttl(tmp_session_root):
-    os_environ_backup = dict(os.environ)
-    try:
-        os.environ["CRITIC_PRIOR_CACHE_TTL_SECONDS"] = "0.001"
-        sm = SessionMemory(root=tmp_session_root)
-        sm.put_cached_priors("sess_1", "k", [{"id": "kb_a"}])
-        time.sleep(0.01)
-        assert sm.get_cached_priors("sess_1", "k") is None
-    finally:
-        os.environ.clear()
-        os.environ.update(os_environ_backup)
-
-
-def test_default_ttl_constant_exposed():
-    assert DEFAULT_PRIOR_CACHE_TTL_SECONDS == 3600
 
 
 def test_mark_reviewed_dedup(tmp_session_root):

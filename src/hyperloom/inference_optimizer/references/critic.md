@@ -31,9 +31,6 @@ Claude subscription; `auto` would otherwise choose the OpenAI transport.
 | Var | Purpose | Default |
 |---|---|---|
 | `CRITIC_AGENT_ROOT` | Path to the directory containing `runtime/cli.py`. | in-tree `$REPO_ROOT/src/hyperloom/agents/critic/` |
-| `CRITIC_KB_CLIENT_MODE` | Critic runtime prior-store mode. Hyperloom sets this to `inmemory` by default; use `live` only when deliberately wiring the standalone critic KB client. | `inmemory` |
-| `KB_BASE_URL` | Required only when `CRITIC_KB_CLIENT_MODE=live`; unused in the default Hyperloom path. | unset |
-| `KB_TIMEOUT_MS` / `KB_RETRY_MAX` / `KB_DEAD_LETTER_DIR` | Optional runtime tuning for the critic KB client and dead-letter handling. | runtime defaults |
 | `CRITIC_SESSION_MEMORY_DIR` | Where the runtime persists per-session decisions / reviewed_msg_ids. | `$SESSION_DIR/critic-session-memory` (auto-set by the optimizer; co-located with the Coordinator session and cleaned up alongside it). |
 | `WORKSPACE_PATH` | Skill root the critic-agent runtime resolves prompt assets against. | `$REPO_ROOT` (auto-set). |
 

@@ -87,9 +87,7 @@ PROPOSAL_SET_RULES: tuple[str, ...] = (
         "is better than one."
     ),
     (
-        "- The Critic reviews each surviving variant against the KB "
-        + "before benchmarking, so a marginal-quality proposal costs you "
-        + "a reject (and a pitfall fact that will warn future sessions "
-        + "off the same dead-end)."
+        "- The Critic reviews each surviving variant before benchmarking, "
+        "so a marginal-quality proposal costs you a reject."
     ),
 )

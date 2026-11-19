@@ -6,39 +6,20 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
-from typing import Any
 
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom.common.subprocess_bridge import emit_json
 
-from .dead_letter import DeadLetter
 from .decision_reviewer import DecisionReviewer
 from .errors import RuntimeAdapterError
-from .in_memory_kb_client import InMemoryKBClient
-from .kb_client import DEFAULT_RETRY_MAX, DEFAULT_TIMEOUT_MS, HTTPKBClient, KBClient
-from .kb_writer import KBWriter
 from .session_memory import SessionMemory
-
-
-def _resolve_kb_client() -> KBClient:
-    """Build the KB client selected by ``CRITIC_KB_CLIENT_MODE``."""
-    mode = os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower()
-    timeout_ms = int(os.environ.get("KB_TIMEOUT_MS", str(DEFAULT_TIMEOUT_MS)))
-    retry_max = int(os.environ.get("KB_RETRY_MAX", str(DEFAULT_RETRY_MAX)))
-    if mode == "live":
-        base_url = os.environ.get("KB_BASE_URL")
-        if not base_url:
-            raise RuntimeAdapterError("CRITIC_KB_CLIENT_MODE=live but KB_BASE_URL is not set")
-        return HTTPKBClient(base_url=base_url, timeout_ms=timeout_ms, retry_max=retry_max)
-    return InMemoryKBClient()
 
 
 def _resolve_reviewer() -> DecisionReviewer:
     """Build a fully wired :class:`DecisionReviewer` for CLI commands."""
-    return DecisionReviewer(kb_writer=KBWriter(_resolve_kb_client(), session_memory=SessionMemory()))
+    return DecisionReviewer(session_memory=SessionMemory())
 
 
 def _cmd_prepare_review(args: argparse.Namespace) -> None:
@@ -60,24 +41,6 @@ def _cmd_commit_review(args: argparse.Namespace) -> None:
     emit_json(outcome.to_dict(), args.out)
 
 
-def _cmd_replay_dead_letter(args: argparse.Namespace) -> None:
-    """Handle ``replay-dead-letter``: re-dispatch queued failed KB writes."""
-    dlq = DeadLetter(root=args.dir or None)
-    client = _resolve_kb_client()
-    summary = dlq.replay(
-        lambda endpoint, payload: _replay_dispatch(client, endpoint, payload),
-        delete_on_success=not args.keep_on_success,
-    )
-    emit_json(summary.to_dict(), args.out)
-
-
-def _replay_dispatch(client: KBClient, endpoint: str, payload: dict[str, Any]) -> None:
-    """Re-dispatch a single dead-lettered KB request to ``client``."""
-    if endpoint != "upsert":
-        raise RuntimeAdapterError(f"replay-dead-letter: unknown endpoint {endpoint!r}")
-    client.upsert(payload)
-
-
 def _make_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with all Critic CLI subcommands."""
     p = argparse.ArgumentParser(prog="hyperloom.agents.critic.runtime.cli", description="Critic runtime CLI")
@@ -93,12 +56,6 @@ def _make_parser() -> argparse.ArgumentParser:
     commit.add_argument("--review", type=Path, required=True)
     commit.add_argument("--out", default="-")
     commit.set_defaults(func=_cmd_commit_review)
-
-    rd = sub.add_parser("replay-dead-letter")
-    rd.add_argument("--dir", default=None)
-    rd.add_argument("--keep-on-success", action="store_true")
-    rd.add_argument("--out", default="-")
-    rd.set_defaults(func=_cmd_replay_dead_letter)
 
     return p
 

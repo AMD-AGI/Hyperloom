@@ -7,16 +7,12 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.agents.critic.runtime.errors import (
-    IntentEnvelopeValidationError,
-    SlugifyError,
-)
+from hyperloom.agents.critic.runtime.errors import IntentEnvelopeValidationError
 from hyperloom.agents.critic.runtime.importance_mapping import (
     cap_importance,
     importance_for_verdict,
 )
 from hyperloom.agents.critic.runtime.intent_envelope import validate_envelope
-from hyperloom.agents.critic.runtime.slugify import slugify, slugify_safe
 
 
 # importance_mapping tests
@@ -33,29 +29,6 @@ def test_cap_importance() -> None:
     assert cap_importance(2.0) == 0.84
     assert cap_importance(-1.0) == 0.0
     assert cap_importance(0.3) == pytest.approx(0.3)
-
-
-# slugify
-def test_slugify_errors_and_success() -> None:
-    assert slugify("Hello World Optimization") == "hello-world-optimization"
-    with pytest.raises(SlugifyError):
-        slugify(123)  # type: ignore[arg-type]
-    with pytest.raises(SlugifyError):
-        slugify("   ")
-    with pytest.raises(SlugifyError):
-        slugify("héllo-non-ascii-ünïcode")
-    with pytest.raises(SlugifyError):
-        slugify("short")  # below the minimum length
-
-
-def test_slugify_safe_paths() -> None:
-    assert slugify_safe("plain-ascii-topic") == "plain-ascii-topic"
-    with pytest.raises(SlugifyError):
-        slugify_safe("   ")
-
-    # Non-ascii -> hash fallback.
-    out2 = slugify_safe("Ελληνικά θέματα")
-    assert out2.startswith("auto-")
 
 
 # intent_envelope.validate_envelope
