@@ -112,28 +112,40 @@ def _moe_ctx(tmp_path) -> TuneContext:
     )
 
 
-class TestTheConfigNameStatesTheMeasuredDtype:
-    """vLLM loads a tuned config by the dtype in its filename, so the name is a claim about the measurement.
+class TestTheConfigFileIsTheOneVllmLoads:
+    """vLLM finds a tuned config only under the exact name it computes, and reads every batch size from it.
 
-    Which precisions may be swept at all is the router's decision (see
-    ``test_router.TestOnlyTheMeasuredPrecisionIsTuned``); the tuner only has to name what it measured.
+    The sweep asks the serving vLLM for that name (device name, per-rank N, dtype selector); a name built here from
+    the GPU type and the unsharded N was never found, so the server ran its default and the e2e check compared it
+    with itself. Which precisions may be swept at all is the router's decision (see
+    ``test_router.TestOnlyTheMeasuredPrecisionIsTuned``).
     """
 
-    def test_the_written_config_is_named_for_the_dtype_that_was_benchmarked(self, tmp_path, monkeypatch):
+    def test_the_file_is_written_under_the_name_vllm_reported_with_every_batch_size(self, tmp_path, monkeypatch):
         tuner = mt.VllmMoeTritonTuner(_moe_ctx(tmp_path))
+        vllm_name = "E=128,N=1536,device_name=AMD_Instinct_MI355X.json"
+        table = {"16": {"BLOCK_SIZE_M": 64}, "64": {"BLOCK_SIZE_M": 16}}
 
         def fake_sweep(cmd, *, timeout_s, log_file):
-            (tuner.work_dir / "sweep_results.json").write_text(
-                json.dumps({"16": {"BLOCK_SIZE_M": 64}}), encoding="utf-8"
-            )
-            return 0, json.dumps({"status": "ok", "shape_details": [], "best_speedup": 1.2}), ""
+            (tuner.work_dir / "sweep_results.json").write_text(json.dumps({"16": table["16"]}), encoding="utf-8")
+            (tuner.work_dir / mt._CONFIG_TABLE).write_text(json.dumps(table), encoding="utf-8")
+            summary = {"status": "ok", "shape_details": [], "best_speedup": 1.2, "config_file_name": vllm_name}
+            return 0, json.dumps(summary), ""
 
         monkeypatch.setattr(mt, "run_subprocess", fake_sweep)
 
         result = tuner.run()
 
-        written = [p.name for p in Path(result.artifact_path).iterdir()]
-        assert written == ["E=128,N=1536,device_name=AMD_Instinct_MI355X,dtype=bfloat16.json"]
+        written = list(Path(result.artifact_path).iterdir())
+        assert [p.name for p in written] == [vllm_name]
+        assert json.loads(written[0].read_text(encoding="utf-8")) == table
+        assert result.status == "ok"
+
+    def test_an_expert_dimension_tp_cannot_split_evenly_is_not_swept(self, tmp_path):
+        ctx = _moe_ctx(tmp_path)
+        ctx.tp = 7
+
+        assert "tp=7" in (mt.VllmMoeTritonTuner(ctx).validate() or "")
 
 
 class TestCap:
