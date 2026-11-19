@@ -21,7 +21,7 @@ __all__ = ["Placement", "rewrite_config"]
 
 _UTF8 = "utf-8"
 _PATH = "PATH"
-_DEVICE_MASKS = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+_DEVICE_MASKS = (ROCR_VISIBLE_DEVICES_ENV, "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 
 
 def _without_device_masks(cfg: dict[str, Any]) -> dict[str, Any]:

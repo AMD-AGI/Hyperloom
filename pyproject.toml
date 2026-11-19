@@ -293,7 +293,6 @@ hyperloom = [
     "actions/*.md",
     # Release-contract shell installers + configs.
     "assets/*.sh",
-    "assets/*.py",
     "assets/*.example",
     "assets/configs/*.yaml",
     # Workload template for the InferaSim projection EXPLORE pre-filters with.

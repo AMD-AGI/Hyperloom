@@ -744,7 +744,8 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
                 self._inflight_actions[task.task_id] = _InflightAction(task.kind, handle, cancel_scope)
 
         async def release_resources() -> None:
-            await self.gpu_specialist_pool.release(held.gpu_lease)
+            if held.gpu_lease is not None:
+                await self.gpu_specialist_pool.release(held.gpu_lease)
 
         await self._record_dispatch_evidence(task, lease, release_resources)
 
