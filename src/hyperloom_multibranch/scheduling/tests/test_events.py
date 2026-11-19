@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
+from hyperloom.measure.failures import PROFILER_DIED
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.records import (
@@ -52,6 +53,7 @@ from hyperloom_multibranch.scheduling.requests import SessionTests, integration_
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
 from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, CODE_PROFILE_UNVERIFIED
 from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
+from hyperloom_multibranch.toolbox.tests import fake_model
 from hyperloom_multibranch.toolbox.tests.fake_model import Fate, FakeToolboxConfig
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
 
@@ -647,6 +649,32 @@ async def test_a_backend_that_cannot_profile_is_tried_once_per_session(
     profiles = [row for row in _logged(log) if row["kind"] == "profile"]
     assert [row["reason"] for row in profiles] == [PROFILE_UNAVAILABLE]
     assert not [row for row in _logged(log) if row["detail"].get("event") == "bottleneck_moved"]
+
+
+async def test_a_profile_whose_server_died_in_its_window_ends_unmeasured_and_no_profile_is_asked_again(
+    log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real attempts end the profile at once, not the commit's failure; a retry would have succeeded here."""
+    monkeypatch.setitem(fake_model.FAILURE_REASONS, Fate.INFRA, f"{PROFILER_DIED}: RuntimeError: cancelled")
+    shares = _Shares({"c-root": _op_shares("c-root", BEFORE)})
+    toolbox = _AnalysingToolbox(shares)
+    toolbox.script(lambda request: request.kind is TestKind.PROFILE, [Fate.INFRA, Fate.OK])
+    events = _events(_Health(), log, toolbox, shares)
+    events.note_merges((_moved_onto("c-merged"),))
+    await events.detect()
+    events.hand_over()
+    await _until(lambda: not events.profiling)
+
+    events.note_merges((_moved_onto("c-next"),))
+    await events.detect()
+
+    assert not events.profiling and len(toolbox.requests) == 1 and toolbox.analyses == []
+    [request_id] = toolbox.requests
+    assert len((await toolbox.outcome(request_id)).attempts) == 1, "the death in the window was not retried"
+    [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
+    assert profile["reason"] == PROFILE_UNAVAILABLE
+    assert profile["detail"]["validity"] == "measurement_failed"
+    assert profile["detail"]["failure_reason"].startswith(f"{PROFILER_DIED}: ")
 
 
 async def test_a_profile_that_failed_unexpectedly_raises_once_from_stop(log: Path) -> None:

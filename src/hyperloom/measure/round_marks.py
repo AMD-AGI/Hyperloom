@@ -27,6 +27,7 @@ import yaml
 
 from hyperloom.common.outside_facts import SGLANG_CUDA_GRAPH_CAPTURE_END
 from hyperloom.measure import log_causes
+from hyperloom.measure.failures import StepFailure
 from hyperloom.measure.boot_watch import read_ready_stamp
 from hyperloom.measure.hosted_live import finite_number
 from hyperloom.measure.phases import (
@@ -58,8 +59,11 @@ __all__ = [
     "boot_parts",
     "read_runs",
     "round_boundaries",
+    "died_in_profile_window",
+    "profile_death",
     "profile_stall",
     "stalled_in_profile_window",
+    "step_failure",
 ]
 
 #: The roles of a round's call: one that only boots the server, the warmup round of a test on a held server, one that
@@ -334,21 +338,49 @@ def stalled_in_profile_window(run_dir: Path) -> bool:
         return True
     try:
         config = SuiteConfig.from_document(yaml.safe_load(layout.config.read_text(encoding=_UTF8)))
-        document = json.loads(layout.phase_marks.read_text(encoding=_UTF8))
     except (OSError, ValueError, yaml.YAMLError):
         return False
-    marks = document.get("phase_marks") if isinstance(document, dict) else None
-    instants: dict[str, float] = {}
-    for mark in marks if isinstance(marks, list) else []:
-        phase, at = (mark.get("phase"), finite_number(mark.get("mono"))) if isinstance(mark, dict) else (None, None)
-        if isinstance(phase, str) and at is not None:
-            instants.setdefault(phase, at)
+    instants = _mono_marks(layout)
     opened, finished = instants.get(_PROFILE_OPEN), instants.get(_CLIENT_FINISHED)
     if opened is None or finished is None:
         return False
     began = finished - config.deadlines.silence_sec
     closed = instants.get(_PROFILE_CLOSE)
     return opened <= began and (closed is None or closed > began)
+
+
+def died_in_profile_window(run_dir: Path) -> bool:
+    """Whether the server of the round in ``run_dir``, which the round ended for its death, died while the round's
+    profile window was open.
+
+    The window marks ``profile_open`` only once the server answered its ``/start_profile``, so the server was alive
+    then. The round marks ``finished`` as it sees the death (the watch polls the server process), so the death came at
+    or before that mark. It came in the window when ``profile_open`` is at or before ``finished`` and ``profile_close``
+    is absent or not before it: an AgentX window that ran its whole duration closed before the round ended, and one open
+    when the round ended is closed at that instant; a fixed load's window closes after ``finished``. A death before the
+    window opened leaves no ``profile_open``. A round whose marks cannot be read is not known to have died there.
+    """
+    instants = _mono_marks(RunLayout(run_dir))
+    opened, finished = instants.get(_PROFILE_OPEN), instants.get(_CLIENT_FINISHED)
+    if opened is None or finished is None:
+        return False
+    closed = instants.get(_PROFILE_CLOSE)
+    return opened <= finished and (closed is None or closed >= finished)
+
+
+def _mono_marks(layout: RunLayout) -> dict[str, float]:
+    """The monotonic instant of the first mark of each phase in the round's ``phase_marks.json``; none when unreadable."""
+    try:
+        document = json.loads(layout.phase_marks.read_text(encoding=_UTF8))
+    except (OSError, ValueError):
+        return {}
+    marks = document.get("phase_marks") if isinstance(document, dict) else None
+    instants: dict[str, float] = {}
+    for mark in marks if isinstance(marks, list) else []:
+        phase, at = (mark.get("phase"), finite_number(mark.get("mono"))) if isinstance(mark, dict) else (None, None)
+        if isinstance(phase, str) and at is not None:
+            instants.setdefault(phase, at)
+    return instants
 
 
 def _stop_unanswered(layout: RunLayout) -> bool:
@@ -375,3 +407,15 @@ def profile_stall(run_dir: Path, step: FailedStep) -> str | None:
             return log_causes.last_line(handle.read().decode(_UTF8, errors="replace"))
     except OSError:
         return ""
+
+
+def profile_death(run_dir: Path, step: FailedStep) -> bool:
+    """Whether the round in ``run_dir`` failed at ``step`` ``server_died`` while its profile window was open
+    (:func:`died_in_profile_window`)."""
+    return step is FailedStep.SERVER_DIED and died_in_profile_window(run_dir)
+
+
+def step_failure(run_dir: Path, step: FailedStep, detail: str) -> StepFailure:
+    """The step the round in ``run_dir`` failed at and its ``detail``, with what its profile window says of it: a stall
+    (:func:`profile_stall`) or a death (:func:`profile_death`) while the window was open."""
+    return StepFailure(step, detail, profile_stall(run_dir, step), profile_death(run_dir, step))

@@ -34,6 +34,8 @@ from hyperloom.measure.round_marks import (
     RunMarks,
     boot_parts,
     read_runs,
+    died_in_profile_window,
+    profile_death,
     profile_stall,
     round_boundaries,
     stalled_in_profile_window,
@@ -613,3 +615,60 @@ def test_a_round_whose_marks_or_config_cannot_be_read_is_not_known_to_have_stall
         (tmp_path / name).write_text(text, encoding="utf-8")
 
     assert not stalled_in_profile_window(tmp_path)
+
+
+def _marked_round(directory: Path, marks: dict[str, float]) -> Path:
+    document = {"phase_marks": [{"phase": phase, "ts": at, "mono": at} for phase, at in marks.items()]}
+    (directory / "phase_marks.json").write_text(json.dumps(document), encoding="utf-8")
+    return directory
+
+
+@pytest.mark.parametrize(
+    ("marks", "died"),
+    [
+        # The AgentX window open when the round ended: closed at the same instant as the death ended it.
+        ({"measured": 100.0, "profile_open": 400.0, "finished": 411.0, "profile_close": 411.0}, True),
+        # A fixed load's window closes after the finished mark.
+        ({"profile_open": 400.0, "finished": 411.0, "profile_close": 411.5}, True),
+        ({"profile_open": 400.0, "finished": 411.0}, True),
+        # The server died before the window opened: no open mark (or one after the end, which the clock never writes).
+        ({"measured": 100.0, "finished": 350.0}, False),
+        ({"profile_open": 400.0, "finished": 350.0}, False),
+        # The window ran its whole duration and closed; the server died after that.
+        ({"measured": 100.0, "profile_open": 400.0, "profile_close": 700.0, "finished": 900.0}, False),
+        ({"profile_open": 400.0}, False),
+    ],
+    ids=[
+        "agentx_window_open_at_death",
+        "fixed_window_open_at_death",
+        "never_closed",
+        "died_before_the_window",
+        "open_after_the_end",
+        "died_after_the_window_closed",
+        "no_finished_mark",
+    ],
+)
+def test_a_death_is_in_the_profile_window_when_the_window_was_open_when_the_round_ended(
+    tmp_path: Path, marks: dict[str, float], died: bool
+) -> None:
+    assert died_in_profile_window(_marked_round(tmp_path, marks)) is died
+
+
+def test_a_round_whose_marks_cannot_be_read_is_not_known_to_have_died_in_its_window(tmp_path: Path) -> None:
+    directory = _marked_round(tmp_path, {"profile_open": 400.0, "finished": 411.0, "profile_close": 411.0})
+    assert died_in_profile_window(directory), "the case is a death inside the window until its marks are broken"
+
+    (directory / "phase_marks.json").write_text("{not json", encoding="utf-8")
+
+    assert not died_in_profile_window(directory)
+
+
+@pytest.mark.parametrize(
+    ("step", "death"),
+    [(FailedStep.SERVER_DIED, True), (FailedStep.SERVER_STALLED, False), (FailedStep.CLIENT_FAILED, False)],
+    ids=["died", "stalled_is_no_death", "client_failed_is_no_death"],
+)
+def test_a_profile_death_is_a_died_round_in_its_window(tmp_path: Path, step: FailedStep, death: bool) -> None:
+    directory = _marked_round(tmp_path, {"profile_open": 400.0, "finished": 411.0, "profile_close": 411.0})
+
+    assert profile_death(directory, step) is death

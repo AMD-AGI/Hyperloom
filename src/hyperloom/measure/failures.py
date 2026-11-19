@@ -11,7 +11,8 @@ wherever it is read. The classes drive different follow-ups in the tool layer:
   it did not become ready within its boot limit; record a negative result;
 * ``unclear``: non-zero with no known signature, a stalled server, or a timeout; rerun once in a fresh sandbox. The
   reason still names what the log says (a refused evaluation request, a Python exception) when it says anything. A
-  profile's server that stalled with its profile window open is no candidate's doing: :data:`PROFILER_HUNG`, ``infra``.
+  profile's server that stalled with its profile window open is no candidate's doing: :data:`PROFILER_HUNG`, ``infra``;
+  nor is one that died with it open and left no failure a candidate is known to cause: :data:`PROFILER_DIED`, ``infra``.
 
 A refused instruction sheet or a rejected result bundle is none of these. It is a program error (or a tampered result),
 so it gets no failure class at all: calling it ``candidate`` would write a false negative, and calling it ``unclear`` or
@@ -132,6 +133,14 @@ PROFILER_SNAPSHOT_FAILED = "profiler_snapshot_failed"
 #: last line>`` when the log has one. A stall before the window opened, or after it closed, stays ``server_stalled``, and
 #: so does one whose only sign is an unanswered ``/start_profile``: the window sends it whatever the server is doing.
 PROFILER_HUNG = "profiler_hung"
+
+#: The server of a profile round died while the round's profile window was open (``FailedStep.SERVER_DIED``), and its
+#: logs name no failure a candidate is known to cause. The profiler killed the server: an image whose activity tracer
+#: crashes a worker on live serving steps crashes it in every sandbox of that image, and the candidate, whose measurement
+#: runs without the profiler, is not what failed. An infrastructure failure every sandbox repeats
+#: (``hyperloom_multibranch.toolbox.attempts`` ends the test with it at once). The reason is ``<this>: <the round's
+#: failure detail>`` when the round gave one. A death before the window opened, or after it closed, stays with the logs.
+PROFILER_DIED = "profiler_died"
 
 #: ``error_class`` values a runner, the hosted backend or the platform reports that are not about the candidate.
 INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
@@ -278,6 +287,8 @@ class StepFailure:
     #: ``None`` unless the round stalled while its profile window was open; then the last line of its server log, ``""``
     #: when it has none.
     profile_stall: str | None = None
+    #: Whether the round died while its profile window was open.
+    profile_death: bool = False
 
 
 @dataclass(frozen=True)
@@ -342,7 +353,7 @@ def classify_test_failure(
     overflow = log_causes.warmup_context_overflow(client_text)
     if overflow:
         return _candidate(f"{AGENTX_CONTEXT_OVERFLOW}: {overflow}")
-    named = _named_by_logs(text, parts, eval_failed=step is FailedStep.EVAL_FAILED)
+    named = _named_or_profiler_death(text, parts, reported)
     if named is not None:
         return named
     if returncode == SERVER_BOOT_TIMEOUT_RC or step is FailedStep.SERVER_BOOT_TIMEOUT:
@@ -448,6 +459,18 @@ def _named_by_logs(text: str, parts: list[str], *, eval_failed: bool = False) ->
     if snapshot:
         return _infra(f"{PROFILER_SNAPSHOT_FAILED}: {snapshot}")
     return None
+
+
+def _named_or_profiler_death(text: str, parts: list[str], reported: StepFailure | None) -> FailureClassification | None:
+    """The verdict the logs give by themselves (:func:`_named_by_logs`); else :data:`PROFILER_DIED` for a round that died
+    with its profile window open; else ``None``. The death comes after the signatures, as the snapshot dump does: a
+    failure a candidate is known to cause stays the candidate's even when the profiler was running."""
+    eval_failed = reported is not None and reported.step is FailedStep.EVAL_FAILED
+    named = _named_by_logs(text, parts, eval_failed=eval_failed)
+    if named is not None or reported is None or not reported.profile_death:
+        return named
+    detail = log_causes.one_line(reported.detail)
+    return _infra(f"{PROFILER_DIED}: {detail}" if detail else PROFILER_DIED)
 
 
 def _hf_cache_refusal(parts: list[str]) -> str | None:
