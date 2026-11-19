@@ -44,6 +44,7 @@ _MAX_PROGRESS_NOTES = 120
 _DISPATCH_CLASSES = frozenset({"llm", "coordinator", "inline"})
 _QUEUED_SQL = "SELECT * FROM tasks WHERE state='queued' ORDER BY created_at ASC"
 _RUNNING_SQL = "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC"
+_KEY_PREFIX_SQL = "SELECT * FROM tasks WHERE kind=? AND substr(idempotency_key, 1, ?)=? ORDER BY created_at ASC"
 
 
 @dataclass(frozen=True)
@@ -496,10 +497,12 @@ class TaskRegistry:
 
     async def with_key_prefix(self, kind: str, key_prefix: str) -> list[Task]:
         """Return every task of ``kind`` whose idempotency key starts with ``key_prefix``, oldest first."""
-        rows = await self.db.fetchall(
-            "SELECT * FROM tasks WHERE kind=? AND substr(idempotency_key, 1, ?)=? ORDER BY created_at ASC",
-            (kind, len(key_prefix), key_prefix),
-        )
+        rows = await self.db.fetchall(_KEY_PREFIX_SQL, (kind, len(key_prefix), key_prefix))
+        return [Task.from_row(r) for r in rows]
+
+    def with_key_prefix_sync(self, kind: str, key_prefix: str) -> list[Task]:
+        """:meth:`with_key_prefix` off the sync path."""
+        rows = self.db.fetchall_sync(_KEY_PREFIX_SQL, (kind, len(key_prefix), key_prefix))
         return [Task.from_row(r) for r in rows]
 
     async def find_by_idempotency_key(self, idempotency_key: str) -> Task | None:
@@ -517,6 +520,11 @@ class TaskRegistry:
     async def running(self) -> list[Task]:
         """Return all running tasks ordered least-recently-updated-first."""
         return [Task.from_row(r) for r in await self.db.fetchall(_RUNNING_SQL)]
+
+    async def active_task_ids(self) -> frozenset[str]:
+        """Ids of the tasks that are queued or running."""
+        rows = await self.db.fetchall("SELECT task_id FROM tasks WHERE state IN ('queued', 'running')")
+        return frozenset(str(row["task_id"]) for row in rows)
 
     def running_context_sync(self) -> list[Task]:
         """:meth:`running` off the sync path."""

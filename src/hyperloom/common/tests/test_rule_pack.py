@@ -85,6 +85,7 @@ _SHORT_PROMPT_TOUCH = r"""(?ix) ^ (?:
 #: Every value ``outside_facts`` held as a literal before the pack existed. Written out, not derived from the pack or
 #: from ``outside_facts``, so that a value that moved with the pack would fail here.
 _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
+    "AIPERF_CONTEXT_OVERFLOW": r"(?i)context length|maximum context|context_length_exceeded|prompt is too long",
     "AIPERF_ERROR_CLASS_KEY": "type",
     "AIPERF_ERROR_KEY": "error",
     "AIPERF_EXPORT_DIR": "aiperf_artifacts",
@@ -230,7 +231,7 @@ def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     assert pack.version == str(yaml.safe_load(DEFAULT_PACK_PATH.read_text(encoding="utf-8"))["version"])
     assert Counter(entry.kind for entry in pack.entries.values()) == {
         Kind.NAMES: 18,
-        Kind.LOG_REGEX: 16,
+        Kind.LOG_REGEX: 17,
         Kind.ENV_DEFAULT: 2,
         Kind.COMPONENT_LAYOUT: 9,
     }

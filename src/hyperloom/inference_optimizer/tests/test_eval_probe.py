@@ -78,10 +78,6 @@ def test_read_eval_probe_reports_a_tripped_suite_probe_with_its_counts(tmp_path)
     assert "128 sampled responses" in summary and "90%" in summary
 
 
-def test_eval_probe_summary_is_empty_without_a_probe():
-    assert eval_probe_summary(None) == ""
-
-
 def test_eval_probe_summary_names_the_kind_and_the_evidence():
     summary = eval_probe_summary({"observed_samples": 16, "cap_hits": 16, "max_completion_tokens_seen": 16384})
     assert EVAL_KIND_GENERATION_PATHOLOGY in summary

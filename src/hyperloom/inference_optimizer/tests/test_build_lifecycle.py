@@ -466,12 +466,6 @@ async def test_real_component_writes_plan_json_before_spawn(build_coord, tmp_pat
 # Policy gate
 
 
-def test_targeted_build_in_coordinator_internal_actions():
-    from hyperloom.inference_optimizer.protocol.action_surfaces import COORDINATOR_INTERNAL_ACTIONS
-
-    assert "targeted_build" in COORDINATOR_INTERNAL_ACTIONS
-
-
 def test_targeted_build_params_pass_policy_gate(tmp_path):
     """Build params must not be misidentified as path-like fields."""
     from hyperloom.orchestrator.policy.gate import PolicyGate

@@ -23,17 +23,16 @@ value``; a long flag's name reads ``_`` as ``-`` and ends at its first ``.``, an
 (``--dty``) is each setting it begins, as argparse takes a prefix of an option for the option, unless the word is an
 option of the frameworks' servers itself (:data:`_OWN_OPTIONS`).
 
-The comparison is then Arbor's (``arbor/measure/precision.py``): a flag's values are the words up to the next flag, and
-a word before any flag is a positional, not compared; a word that reads as a number (``-1``) is a value, not a flag; a
-JSON object or array compares in canonical form (sorted keys, no spaces) and any other value as its text; a flag given
-without a value reads as on; a flag added, removed or given another value is a change. The spellings of one setting are
-one flag, and a value it is given twice counts once, under one spelling or two. An override flag's values are what its
-occurrences set under the keys (:func:`_override_setting`): a launch none of whose occurrences sets a key does not make
-the setting, and in one where some occurrence does, an occurrence that sets none is a value too. A flag the launch
-removes from the resolved launch (``LaunchConfig.remove_args``) has the value
-:data:`~hyperloom.contracts.recipe.REMOVED`.
+The comparison then reads a flag's values as the words up to the next flag, and a word before any flag as a positional,
+not compared; a word that reads as a number (``-1``) is a value, not a flag; a JSON object or array compares in
+canonical form (sorted keys, no spaces) and any other value as its text; a flag given without a value reads as on; a
+flag added, removed or given another value is a change. The spellings of one setting are one flag, and a value it is
+given twice counts once, under one spelling or two. An override flag's values are what its occurrences set under the
+keys (:func:`_override_setting`): a launch none of whose occurrences sets a key does not make the setting, and in one
+where some occurrence does, an occurrence that sets none is a value too. A flag the launch removes from the resolved
+launch (``LaunchConfig.remove_args``) has the value :data:`~hyperloom.contracts.recipe.REMOVED`.
 
-Beyond Arbor's, a setting a launch gives two or more distinct values also compares by the value that takes effect
+Beyond that, a setting a launch gives two or more distinct values also compares by the value that takes effect
 (:func:`_in_order`): the server keeps one, so two launches that give the same values in another order, or that drop
 one occurrence and give its value again, can serve another precision.
 

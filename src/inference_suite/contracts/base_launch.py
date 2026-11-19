@@ -567,7 +567,7 @@ class GoldenAcceptance:
 class ClientLaunch:
     """The load generator the base is measured with, pinned by commit.
 
-    :attr:`command` renders it as one shell line, the form Arbor runs a client from.
+    :attr:`command` renders it as one shell line, the form an agent runs a client from.
     """
 
     tool: str

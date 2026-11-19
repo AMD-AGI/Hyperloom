@@ -17,6 +17,7 @@ from hyperloom.common.gain_math import AGENTX_ERROR_RATE_THRESHOLD_PCT
 from hyperloom.common.perf_metric import TOTAL_TOKEN_THROUGHPUT
 from hyperloom_common.coerce import to_float, to_int
 from inference_suite.contracts import (
+    AGENTX_CONTEXT_OVERFLOW,
     FIXED_METRIC_KEYS,
     AgentxResult,
     MlperfResult,
@@ -81,6 +82,10 @@ _SUBMISSION_VALID = "submission_valid"
 #: failures cannot be told empty from short. Expected of a client staging did not patch; a patched one leaves it off
 #: only when every failure was a transport one.
 AGENTX_ERROR_OSL_NOT_EXPORTED = "agentx_error_osl_not_exported"
+#: A warning of an AgentX round whose replay skipped requests the server refused as longer than the context it serves,
+#: ``<this>:<how many>``. aiperf keeps them out of every count and metric, so the round measured a lighter corpus than
+#: its reference did: it is no valid measurement, whatever its error rate.
+AGENTX_CONTEXT_OVERFLOW_SKIPPED = "agentx_context_overflow_skipped"
 
 
 def _agentx_error_rate_pct(counts: Mapping[str, int]) -> float | None:
@@ -102,12 +107,19 @@ def _agentx_counts_add_up(counts: Mapping[str, int]) -> bool:
     )
 
 
+def _agentx_overflowed(counts: Mapping[str, int | None]) -> int:
+    """The requests the replay skipped as a context overflow; 0 for a report written before they were counted."""
+    return counts[AGENTX_CONTEXT_OVERFLOW] or 0
+
+
 def _agentx_valid(result: AgentxResult, measurement: Mapping[str, Any]) -> bool:
-    """A canonical replay the threshold did not stop, whose counts add up and whose error rate is within InferenceX's."""
+    """A canonical replay the threshold did not stop, that skipped no request as a context overflow, whose counts add
+    up and whose error rate is within InferenceX's."""
     rate = measurement[_REQUEST_ERROR_RATE]
     return (
         not result.stopped_by_threshold
         and not result.fast_mode
+        and not _agentx_overflowed(result.counts)
         and _agentx_counts_add_up(result.counts)
         and _positive(measurement[_COMPLETED_REQUESTS])
         and rate is not None
@@ -129,10 +141,14 @@ def _agentx_metrics(result: AgentxResult) -> dict[str, Any]:
 
 
 def _agentx_warnings(result: AgentxResult) -> list[str]:
+    warnings = []
     errors = result.counts["error_dropped"]
     if errors and not result.counts["error_osl_exported"]:
-        return [f"{AGENTX_ERROR_OSL_NOT_EXPORTED}:{errors}"]
-    return []
+        warnings.append(f"{AGENTX_ERROR_OSL_NOT_EXPORTED}:{errors}")
+    overflowed = _agentx_overflowed(result.counts)
+    if overflowed:
+        warnings.append(f"{AGENTX_CONTEXT_OVERFLOW_SKIPPED}:{overflowed}")
+    return warnings
 
 
 def _scriptable_metrics(result: ScriptableResult) -> dict[str, Any]:
@@ -226,4 +242,4 @@ def round_measurement(report: Report, launch: Launch | None) -> dict[str, Any]:
     return measurement
 
 
-__all__ = ["AGENTX_ERROR_OSL_NOT_EXPORTED", "LATENCY_SOURCE", "round_measurement"]
+__all__ = ["AGENTX_CONTEXT_OVERFLOW_SKIPPED", "AGENTX_ERROR_OSL_NOT_EXPORTED", "LATENCY_SOURCE", "round_measurement"]

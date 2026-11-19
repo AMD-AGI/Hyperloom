@@ -201,7 +201,7 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     path = Path(config_path)
     if not path.exists():
         return {}
-    import yaml  # type: ignore[import-untyped]
+    import yaml
 
     try:
         point = read_benchmark_point(path)

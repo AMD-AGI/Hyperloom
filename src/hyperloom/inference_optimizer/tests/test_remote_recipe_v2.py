@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 from io import BytesIO
 import json
 from pathlib import Path
@@ -3101,41 +3100,6 @@ def test_owner_sdk_rejects_symlink_timeline_ref(
     sections = KnowledgeSections(tmp_path / "draft", warm_start_dir=warm)
 
     assert PatchKB(sections).prior_file(ref) is None
-
-
-def test_remote_read_is_wired_into_cli_t0_and_close_write_remains() -> None:
-    bootstrap_source = inspect.getsource(
-        __import__(
-            "hyperloom.inference_optimizer.cli.kb",
-            fromlist=["_bootstrap_recipe_kb"],
-        )._bootstrap_recipe_kb
-    )
-    close_source = inspect.getsource(RecipeJournalCollaborator._publish_remote_recipe)
-    assert "RemoteWarmRecipeAdapter" in bootstrap_source
-    assert "write_final_remote_recipe(" in close_source
-
-
-def test_obsolete_remote_contract_exports_are_removed() -> None:
-    from hyperloom.orchestrator.knowledge import remote_recipe
-
-    for name in (
-        "convert_v1_recipe_to_knowledge",
-        "envelope_to_v1_recipe",
-        "read_remote_champion",
-    ):
-        assert not hasattr(remote_recipe, name)
-    assert not hasattr(PatchKB, "write_snapshot")
-    # patch_roots could never survive publication, so the surface is gone.
-    assert not hasattr(PatchKB, "read_patch_roots")
-    assert not hasattr(RemoteRecipeClient, "read_champion")
-
-
-def test_vendored_sdk_exposes_view_and_identity_search() -> None:
-    assert callable(kb_store_client.KBStoreClient.get_hyperloom_recipe_view)
-    assert callable(kb_store_client.KBStoreClient.search_identities)
-    view_source = inspect.getsource(RemoteRecipeClient.get_view)
-    assert "get_hyperloom_recipe_view" in view_source
-    assert "get_best_record" not in view_source
 
 
 def test_vendored_sdk_matches_upstream_git_blob() -> None:

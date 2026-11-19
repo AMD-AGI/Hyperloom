@@ -135,7 +135,7 @@ def test_empty_rounds_alone_run_the_source_arm_dry(tmp_path: Path):
             task=_task(f"local_explore:{i}"), done_payload={}, run_error=_GATE_ERROR
         )
 
-    evidence = _patch_lever_evidence(stub.shared_state, {})
+    evidence = _patch_lever_evidence(stub.shared_state)
     assert framework_plateau(evidence).source_dry is True
     assert evidence["source_consecutive_no_keep"] == DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
 

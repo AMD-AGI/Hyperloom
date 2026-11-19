@@ -58,23 +58,22 @@ async def test_a_measured_test_is_written_to_the_blackboard_as_a_result(tmp_path
     assert rig.toolbox._log.get(request_id).settled  # type: ignore[union-attr]
 
 
-async def test_the_claim_is_carried_by_the_request_renewed_and_completed_by_the_result(tmp_path: Path) -> None:
+async def test_the_claim_is_carried_by_the_request_held_with_no_renewal_and_completed_by_the_result(
+    tmp_path: Path,
+) -> None:
     rig = build(tmp_path, executor=_gated())
     specialist = rig.open_blackboard(Role.SPECIALIST_RUNTIME, "b1")
     target, action = intent("b1", PARENT), delta()
     claim = await specialist.acquire(target, action.fingerprint(), ttl_seconds=TTL)
     request_id = await rig.toolbox.submit_test(req(intent=target.fingerprint, change=action))
     await settle()
+    rig.clock.advance(10 * TTL)  # type: ignore[attr-defined]
     held = (await specialist.lookup(claim.key, action.fingerprint())).claim
-    assert held is not None and held.request_id == request_id
-    rig.clock.advance(100)  # type: ignore[attr-defined]
-    await rig.toolbox.renew_claims()
-    renewed = (await specialist.lookup(claim.key, action.fingerprint())).claim
-    assert renewed is not None and renewed.expires_at > held.expires_at
+    assert held is not None and (held.request_id, held.status) == (request_id, ClaimStatus.HELD)
     rig.executor.gate.set()  # type: ignore[union-attr]
     await rig.toolbox.drain()
-    done = (await specialist.lookup(claim.key, action.fingerprint())).claim
-    assert done is None or done.status is ClaimStatus.COMPLETED
+    (done,) = [found for found in (await specialist.snapshot()).claims if found.key == claim.key]
+    assert done.status is ClaimStatus.COMPLETED
 
 
 async def test_a_request_whose_claim_is_not_held_is_refused_and_withdrawn_and_its_number_is_not_reused(

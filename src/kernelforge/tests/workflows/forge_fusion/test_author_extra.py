@@ -17,7 +17,7 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
 )
 
-from kernelforge.workflows.forge_fusion import author, emit
+from kernelforge.workflows.forge_fusion import author, author_guard, emit
 from kernelforge.workflows.forge_fusion.author import (
     AUTHOR_RC_FAILED,
     AUTHOR_RC_SAFETY,
@@ -386,7 +386,7 @@ def test_registered_author_reraises_an_interrupt_after_a_workspace_verdict(
         def broken_enforce(self):
             raise OSError("guard defect")
 
-        monkeypatch.setattr(author._AuthorWorkspaceGuard, "enforce", broken_enforce)
+        monkeypatch.setattr(author_guard.AuthorWorkspaceGuard, "enforce", broken_enforce)
 
     class Backend:
         name = "codex"
@@ -597,7 +597,7 @@ def test_edit_hook_is_no_stricter_than_the_guard_on_staging(tmp_path):
     repo, target, _non_target = _author_repo(tmp_path)
     models = repo / "models"
     models.mkdir()
-    guard = author._AuthorWorkspaceGuard(
+    guard = author_guard.AuthorWorkspaceGuard(
         str(repo),
         [str(target)],
         new_module_dirs=[str(models)],
@@ -1167,10 +1167,10 @@ def test_capture_path_state_reports_io_failures_as_transient(tmp_path, monkeypat
     def failing_lstat(_self):
         raise OSError(5, "Input/output error")
 
-    monkeypatch.setattr(author.Path, "lstat", failing_lstat)
+    monkeypatch.setattr(author_guard.Path, "lstat", failing_lstat)
 
-    with pytest.raises(author.AuthorSafetyError) as raised:
-        author._capture_path_state(path)
+    with pytest.raises(author_guard.AuthorSafetyError) as raised:
+        author_guard._capture_path_state(path)
 
     assert raised.value.transient is True
 
@@ -1183,10 +1183,10 @@ def test_capture_path_state_reports_an_unreadable_file_as_transient(tmp_path, mo
     def failing_read(_self):
         raise OSError(5, "Input/output error")
 
-    monkeypatch.setattr(author.Path, "read_bytes", failing_read)
+    monkeypatch.setattr(author_guard.Path, "read_bytes", failing_read)
 
-    with pytest.raises(author.AuthorSafetyError) as raised:
-        author._capture_path_state(path)
+    with pytest.raises(author_guard.AuthorSafetyError) as raised:
+        author_guard._capture_path_state(path)
 
     assert raised.value.transient is True
 
@@ -1201,10 +1201,10 @@ def test_capture_path_state_reports_an_unreadable_symlink_as_transient(tmp_path,
     def failing_readlink(_path):
         raise OSError(5, "Input/output error")
 
-    monkeypatch.setattr(author.os, "readlink", failing_readlink)
+    monkeypatch.setattr(author_guard.os, "readlink", failing_readlink)
 
-    with pytest.raises(author.AuthorSafetyError) as raised:
-        author._capture_path_state(link)
+    with pytest.raises(author_guard.AuthorSafetyError) as raised:
+        author_guard._capture_path_state(link)
 
     assert raised.value.transient is True
 
@@ -1219,10 +1219,10 @@ def test_module_directory_inventory_reports_io_failures_as_transient(tmp_path, m
     def failing_listdir(_path):
         raise OSError(5, "Input/output error")
 
-    monkeypatch.setattr(author.os, "listdir", failing_listdir)
+    monkeypatch.setattr(author_guard.os, "listdir", failing_listdir)
 
-    with pytest.raises(author.AuthorSafetyError) as raised:
-        author._AuthorWorkspaceGuard(
+    with pytest.raises(author_guard.AuthorSafetyError) as raised:
+        author_guard.AuthorWorkspaceGuard(
             str(repo),
             [str(repo / "kernel.py")],
             new_module_dirs=[str(repo / "models")],

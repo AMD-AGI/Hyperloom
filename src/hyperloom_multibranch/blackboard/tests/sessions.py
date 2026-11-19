@@ -33,6 +33,7 @@ from hyperloom_multibranch.contracts.blackboard.peers import (
     Verdict,
 )
 from hyperloom_multibranch.contracts.blackboard.records import (
+    JudgementWrite,
     BaselineRecord,
     LineageEvent,
     LlmUsage,
@@ -76,7 +77,7 @@ class Writers:
         claim = await self.as_role(Role.SPECIALIST_RUNTIME, branch).acquire(of, change.fingerprint(), ttl_seconds=TTL)
         toolbox = self.as_role(Role.TOOLBOX)
         await toolbox.write_request(request(request_id, of, change))
-        await toolbox.attach_request(claim.key, request_id, ttl_seconds=TTL)
+        await toolbox.attach_request(claim.key, request_id)
         await toolbox.write_result(outcome or result(request_id))
 
 
@@ -95,23 +96,27 @@ async def scripted_session(root: Path, clock: FakeClock) -> LocalBlackboard:
         await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit="c0", reason="first batch"))
 
     await w.measure("s1", "r1", GEMM, delta("--max-num-seqs 256"))
-    await gate.write_judgement("r1", judgement(4.0, ("r1",), recorded={METRIC: 1040.0}), Conclusion.COMMITTED, "c1")
+    await gate.write_judgement(
+        JudgementWrite("r1", judgement(4.0, ("r1",), recorded={METRIC: 1040.0}), Conclusion.COMMITTED, "c1")
+    )
     await w.measure("s2", "r2", SPLIT_KV, delta("--block-size 32"))
     regressed = judgement(-2.0, ("r2",), recorded={METRIC: 980.0}, verdict=Verdict.REGRESSED)
-    await gate.write_judgement("r2", regressed, Conclusion.RECORDED_ONLY)
+    await gate.write_judgement(JudgementWrite("r2", regressed, Conclusion.RECORDED_ONLY))
     launch_failure = result("r3", validity=Validity.CANDIDATE_FAILED, failure_reason="server exited during warmup")
     await w.measure("s2", "r3", CHUNKED_PREFILL, delta("--enable-chunked-prefill"), launch_failure)
     await w.measure("s2", "r5", FP8_KV, delta("--kv-cache-dtype fp8"))
-    await gate.write_judgement("r5", judgement(6.0, ("r5",), recorded={METRIC: 1060.0}), Conclusion.ACCURACY_FAILED)
+    await gate.write_judgement(
+        JudgementWrite("r5", judgement(6.0, ("r5",), recorded={METRIC: 1060.0}), Conclusion.ACCURACY_FAILED)
+    )
     await w.measure("s1", "r4", GEMM_AGAIN, delta("--max-num-seqs 512"))
     flat = judgement(0.3, ("r4",), recorded={METRIC: 1043.0}, verdict=Verdict.FLAT)
-    await gate.write_judgement("r4", flat, Conclusion.RECORDED_ONLY)
+    await gate.write_judgement(JudgementWrite("r4", flat, Conclusion.RECORDED_ONLY))
 
     await w.as_role(Role.TOOLBOX).write_request(request("m1", intent(INTEGRATION_BRANCH, "c0", "merge", "c1")))
     await integrator.record_merge_attempt(MergeAttempt(("c1",), "c0", request_id="m1"))
     await w.as_role(Role.TOOLBOX).write_result(result("m1", node="node-2"))
     merged = judgement(4.1, ("m1",), recorded={METRIC: 1041.0})
-    await integrator.write_judgement("m1", merged, Conclusion.MERGED, "i1")
+    await integrator.write_judgement(JudgementWrite("m1", merged, Conclusion.MERGED, "i1"))
 
     confirmed = BranchLogEntry(
         "s1",

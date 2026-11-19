@@ -37,8 +37,6 @@ subtrees:
         title: AgentKernelArena
   - file: conceptual/optimization-loop.md
     title: Hyperloom optimization loop
-  - file: conceptual/multibranch-arbor.md
-    title: Arbor in multi-branch, who runs what
 
 - caption: How to
   entries:
@@ -53,7 +51,7 @@ subtrees:
   - file: how-to/run-multibranch.md
     title: Run a multi-branch session
   - file: how-to/multibranch-review-gate.md
-    title: Review the agent map before the Arbor branches open
+    title: Review the agent map before the agent branches open
 
 - caption: Reference
   entries:
@@ -114,6 +112,8 @@ subtrees:
     title: Fuse a launch-bound decode path
   - file: kernelforge/how-to/debug-task-preparation.md
     title: Debug task preparation
+  - file: kernelforge/how-to/radeon-w7900.md
+    title: Run on a Radeon PRO W7900 (gfx1100)
   - file: kernelforge/how-to/extending.md
     title: Add a kernel backend, tool, or knowledge
   - file: kernelforge/reference/cli.md

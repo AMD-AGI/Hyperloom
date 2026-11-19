@@ -8,8 +8,8 @@ from __future__ import annotations
 import json
 
 from kernelforge.workflows.forge_fusion.locate import FrameworkInstall
-from kernelforge.workflows.forge_fusion.discover import DiscoveryTarget
-from kernelforge.workflows.forge_fusion.discover import parse_discovered_recipes
+from kernelforge.workflows.forge_fusion.discovery_prompt import DiscoveryTarget
+from kernelforge.workflows.forge_fusion.discovery_response import parse_discovered_recipes
 from kernelforge.workflows.forge_fusion.locate import out_of_scope_terms
 
 # The shape that matters: a model file that norms and applies RoPE, imports its MLP from a sibling module, and never

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 
+import pytest
+
 from kernelforge.evaluation.profiling.compiler_output import (
     RegisterInfo,
     parse_register_info,
 )
+from kernelforge.utils.gpu_arch import arch_profile
 
 
 # ─── RegisterInfo ───
@@ -30,6 +33,20 @@ def test_register_info_high_pressure_and_spill():
     assert "single-occupancy" in analysis
     assert "SPILL" in analysis
     assert info.has_spill
+
+
+@pytest.mark.parametrize("gpu_target", ["gfx1100", "gfx1201"])
+def test_register_info_reads_the_occupancy_steps_of_its_target(gpu_target):
+    occupancy = arch_profile(gpu_target).occupancy
+
+    full = RegisterInfo(vgpr=96, lds_bytes=64 * 1024, occupancy_rule=occupancy).occupancy_analysis
+    assert "VGPR=96 (≤96: 16 waves/SIMD" in full
+    assert "LDS=64.0KB (≤64KB: fits the 64 KiB work-group cap" in full
+
+    pressured = RegisterInfo(vgpr=128, lds_bytes=65 * 1024, occupancy_rule=occupancy).occupancy_analysis
+    assert "VGPR=128 (>96: fewer than 16 waves/SIMD" in pressured
+    assert "will not launch" in pressured
+    assert "occupancy=1 ONLY" not in pressured
 
 
 def test_register_info_unknown():

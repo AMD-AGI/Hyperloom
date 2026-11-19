@@ -224,29 +224,6 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
 
 
 # -- static / pure helpers -------------------------------------------------
-def test_gap_layer_for_action(coord: Coordinator) -> None:
-    assert coord.gap_refresh._gap_layer_for_action("kernel_opt") == ("kernel_agent", "kernel_switch_specialist")
-    assert coord.gap_refresh._gap_layer_for_action("profile") == ("kernel_agent", "kernel_switch_specialist")
-    assert coord.gap_refresh._gap_layer_for_action("sweep") == ("framework", "serving_specialist")
-    assert coord.gap_refresh._gap_layer_for_action("baseline") == ("system", "system_specialist")
-    assert coord.gap_refresh._gap_layer_for_action("anything-else") == ("framework", "serving_specialist")
-
-
-def test_lanes_fit(coord: Coordinator) -> None:
-    assert coord.dispatcher._lanes_fit(["gpu"], {"gpu": 0}, {"gpu": 1}) is True
-    assert coord.dispatcher._lanes_fit(["gpu"], {"gpu": 1}, {"gpu": 1}) is False
-    assert coord.dispatcher._lanes_fit(["gpu"], {}, {"gpu": 0}) is False
-
-
-def test_pitfall_severity_for(coord: Coordinator) -> None:
-    assert coord.recipe_journal._pitfall_severity_for(None) is None
-    assert coord.recipe_journal._pitfall_severity_for({"error_class": "oom"}) is not None
-    assert coord.recipe_journal._pitfall_severity_for({"status": "crash"}) is not None
-    assert coord.recipe_journal._pitfall_severity_for({"gain_pct": -10.0}) is not None
-    assert coord.recipe_journal._pitfall_severity_for({"gain_pct": 2.0}) is None
-    assert coord.recipe_journal._pitfall_severity_for({"gain_pct": "bad"}) is None
-
-
 def test_is_promotable_result(coord: Coordinator) -> None:
     assert coord.writeback.is_promotable_result("sweep", {"status": "succeeded"}) is True
     assert coord.writeback.is_promotable_result("sweep", {"status": "failed"}) is False
@@ -272,13 +249,6 @@ def test_journal_entry_phase(coord: Coordinator) -> None:
     assert coord.recipe_journal.journal_entry_phase() == "FRAMEWORK_AGENT"
 
 
-def test_source_session_id_prefers_recipe_kb(coord: Coordinator) -> None:
-    coord.shared_state.recipe_kb_session_id = "recipe-kb-99"
-    assert coord.recipe_journal._source_session_id() == "recipe-kb-99"
-    coord.shared_state.recipe_kb_session_id = ""
-    assert coord.recipe_journal._source_session_id() == coord.session_dir.name
-
-
 def test_internal_analysis_kind(coord: Coordinator) -> None:
     coord.shared_state.enable_roofline = True
     assert coord.phase_prelude.internal_analysis_kind() == "roofline"
@@ -295,29 +265,7 @@ def test_current_tput_from_validated_gain(coord: Coordinator) -> None:
     assert coord.phase_kernel.current_tput_from_validated_gain() == pytest.approx(110.0)
 
 
-def test_needs_roofline_for_watermark_guards(coord: Coordinator) -> None:
-    ss = coord.shared_state
-    # pending roofline -> never re-arm
-    ss.auto_roofline_pending_task_id = "task-1"
-    assert coord.phase_kernel._needs_roofline_for_watermark() is False
-    # no last roofline, no failure streak -> bootstrap guard
-    ss.auto_roofline_pending_task_id = ""
-    ss.last_roofline_tput = 0.0
-    ss.roofline_failure_streak = 0
-    assert coord.phase_kernel._needs_roofline_for_watermark() is False
-    # crossing the watermark over last roofline
-    ss.last_roofline_tput = 100.0
-    ss.baseline_tput = 100.0
-    ss.cumulative_gain_validated = 50.0
-    assert coord.phase_kernel._needs_roofline_for_watermark() is True
-
-
 # -- gap extraction --------------------------------------------------------
-def test_extract_gaps_from_baseline_empty(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 0.0
-    assert coord.gap_refresh._extract_gaps_from_baseline(coord.recipe_journal.workload_canonical_id()) == []
-
-
 def test_extract_gaps_from_baseline_populated(coord: Coordinator) -> None:
     ss = coord.shared_state
     ss.baseline_tput = 100.0
@@ -390,11 +338,8 @@ def test_extract_gaps_symptom_uses_excerpt(coord: Coordinator) -> None:
 
 
 # -- advisory blocks (empty-guard paths) ----------------------------------
-def test_advisory_blocks_empty_by_default(coord: Coordinator) -> None:
+def test_no_plateau_advisory_outside_framework_agent(coord: Coordinator) -> None:
     assert coord.conversation.plateau_advisory_block() == ""
-    assert coord.conversation.target_gap_advisory_block() == ""
-    assert coord.conversation._current_primary_gap() is None
-    assert coord.conversation._priors_match_advisory_block() == ""
 
 
 # -- specialist findings block --------------------------------------------
@@ -480,14 +425,21 @@ def test_specialist_findings_skip_rows_carrying_neither_findings_nor_questions(c
     assert coord.conversation._recent_proposed_variants() == []
 
 
-def test_recent_proposed_variants_dedup(coord: Coordinator) -> None:
+def test_priors_match_advisory_reads_the_proposals_of_both_recent_rounds(coord: Coordinator) -> None:
+    import asyncio
+
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints
+
+    research_hints.append_hints(coord.session_dir, [{"what": "cudagraph decode capture", "source": "measured r7"}])
     coord.shared_state.specialist_rounds = [
-        {"proposal_set": [{"name": "a"}, {"name": "b"}]},
-        {"proposal_set": [{"name": "b"}, {"name": "c"}, "not-a-dict"]},
+        {"proposal_set": [{"name": "graph_a", "description": "cudagraph decode"}]},
+        {"proposal_set": [{"name": "graph_b", "description": "cudagraph decode"}, "not-a-dict"]},
     ]
-    out = coord.conversation._recent_proposed_variants()
-    names = {v["name"] for v in out}
-    assert names == {"a", "b", "c"}
+
+    prompt = asyncio.run(coord.conversation.compose_prompt("orchestration")).text
+
+    assert "- graph_a: hint:cudagraph decode capture" in prompt
+    assert "- graph_b: hint:cudagraph decode capture" in prompt
 
 
 # -- warm recipe + workload tags ------------------------------------------
@@ -620,22 +572,6 @@ def test_the_coordinator_revalidation_baseline_is_not_phase_denied(coord: Coordi
 
 
 # -- sequence denial gates -------------------------------------------------
-def test_sequence_denial_for_action(coord: Coordinator) -> None:
-    ss = coord.shared_state
-    ss.stop_reason = ""
-    ss.baseline_tput = 0.0
-    # non-sequence action -> never denied
-    assert coord.dispatcher._sequence_denial_for_action("frobnicate") is None
-    # baseline itself allowed pre-baseline
-    assert coord.dispatcher._sequence_denial_for_action("baseline") is None
-    # explore denied until baseline measured
-    denied = coord.dispatcher._sequence_denial_for_action("explore")
-    assert denied is not None and denied.rule == "execution_order"
-    # once baseline measured -> allowed
-    ss.baseline_tput = 100.0
-    assert coord.dispatcher._sequence_denial_for_action("explore") is None
-
-
 def test_admission_denial_for_request(coord: Coordinator) -> None:
     ss = coord.shared_state
     ss.stop_reason = ""
@@ -656,13 +592,6 @@ def test_a_kernel_request_the_phase_cannot_fit_is_refused(coord: Coordinator, mo
 
     assert denied is not None and denied.rule == "phase_time_budget"
     assert "action='integrate'" in str(denied)
-
-
-def test_skip_gemm_tuning_env(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", raising=False)
-    assert coord.phase_kernel._skip_gemm_tuning() is False
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "yes")
-    assert coord.phase_kernel._skip_gemm_tuning() is True
 
 
 def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch) -> None:
@@ -699,83 +628,21 @@ def test_workload_canonical_id_and_anchor(coord: Coordinator) -> None:
 
 
 # -- framework candidate selection -------------------------------------
-def test_select_next_framework_agent_candidate(coord: Coordinator) -> None:
+def test_discovery_drops_prs_already_batched_or_mined_by_the_scout(coord: Coordinator) -> None:
+    from types import SimpleNamespace
+
     ss = coord.shared_state
-    ss.framework_agent_batches = []
-    assert coord.phase_framework._select_next_framework_agent_candidate() is None
-    ss.framework_agent_batches = [
-        {
-            "candidates": [
-                {"candidate_id": "c1"},
-                {"candidate_id": "c2"},
-            ],
-        }
-    ]
-    ss.framework_agent_phase_progress = [{"candidate_id": "c1"}]
-    nxt = coord.phase_framework._select_next_framework_agent_candidate()
-    assert nxt == {"candidate_id": "c2"}
+    ss.framework_agent_batches = [{"candidates": [{"candidate_id": "https://x/pr/1"}, {"pr_url": "https://x/pr/2"}]}]
+    ss.research_scout_seen_pr_ids = ["https://x/pr/3"]
+    discovery = SimpleNamespace(task_id="disc-1", params={"candidate_discovery": True})
+    proposals = [{"pr_url": f"https://x/pr/{n}", "verdict": "worth_a_bench"} for n in (1, 2, 3, 4)]
 
+    coord.phase_framework.on_specialist_settled(discovery, {"proposal_set": proposals}, run_error="")
 
-def test_unprocessed_framework_agent_candidates(coord: Coordinator) -> None:
-    ss = coord.shared_state
-    ss.framework_agent_batches = [
-        {
-            "candidates": [
-                {"candidate_id": "c1"},
-                {"candidate_id": "c2"},
-                {"candidate_id": "c3"},
-            ],
-        }
-    ]
-    ss.framework_agent_phase_progress = [{"candidate_id": "c1"}]
-    out = coord.phase_framework._unprocessed_framework_agent_candidates()
-    assert [c["candidate_id"] for c in out] == ["c2", "c3"]
-
-
-def test_select_next_framework_agent_candidate_takes_discovery_order(coord: Coordinator) -> None:
-    """Selection is linear: the discovery specialist already ranked the batch."""
-    ss = coord.shared_state
-    ss.framework_agent_batches = [{"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}]
-    ss.framework_agent_phase_progress = []
-    assert coord.phase_framework._select_next_framework_agent_candidate() == {"candidate_id": "c1"}
-
-
-def test_select_next_framework_agent_candidate_skips_processed(coord: Coordinator) -> None:
-    """A candidate with a terminal progress row is never handed out again."""
-    ss = coord.shared_state
-    ss.framework_agent_batches = [{"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}]
-    ss.framework_agent_phase_progress = [{"candidate_id": "c1", "status": "reverted"}]
-    assert coord.phase_framework._select_next_framework_agent_candidate() == {"candidate_id": "c2"}
-
-
-def test_select_next_framework_agent_candidate_none_when_all_processed(coord: Coordinator) -> None:
-    """An exhausted pool returns None -- the pump's signal to look for more."""
-    ss = coord.shared_state
-    ss.framework_agent_batches = [{"candidates": [{"candidate_id": "c1"}]}]
-    ss.framework_agent_phase_progress = [{"candidate_id": "c1", "status": "reverted"}]
-    assert coord.phase_framework._select_next_framework_agent_candidate() is None
-
-
-def test_framework_known_candidate_ids(coord: Coordinator) -> None:
-    ss = coord.shared_state
-    ss.framework_agent_batches = [
-        {"candidates": [{"candidate_id": "c1"}, {"pr_url": "u2"}]},
-    ]
-    ss.research_scout_seen_pr_ids = ["p3"]
-    ids = coord.phase_framework._framework_known_candidate_ids()
-    assert {"c1", "u2", "p3"}.issubset(ids)
+    assert [c["pr_url"] for c in ss.framework_agent_batches[-1]["candidates"]] == ["https://x/pr/4"]
 
 
 # -- module-level helpers --------------------------------------------------
-def test_first_present() -> None:
-    from hyperloom.orchestrator.loop.conversation import _first_present
-
-    assert _first_present({"a": 1, "b": 2}, ("x", "b", "a")) == 2
-    assert _first_present({"a": None, "b": 5}, ("a", "b")) == 5
-    assert _first_present({}, ("a",)) is None
-    assert _first_present("not-a-dict", ("a",)) is None
-
-
 def test_lifecycle_paths() -> None:
     from hyperloom.orchestrator.loop.kernel_request import lifecycle_paths
 

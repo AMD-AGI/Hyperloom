@@ -27,24 +27,21 @@ AITER_2STAGE = (
 
 
 class CollectiveSymbolTests(unittest.TestCase):
-    def test_mangled_name_yields_device_function(self) -> None:
-        self.assertEqual(collective_symbol(AITER_2STAGE), "cross_device_reduce_2stage")
+    def test_trace_name_yields_bare_device_symbol(self) -> None:
+        for case, name, expected in (
+            ("mangled", AITER_2STAGE, "cross_device_reduce_2stage"),
+            ("plain", "ncclDevKernel_Generic_1", "ncclDevKernel_Generic_1"),
+            ("empty", "", ""),
+            ("blank", "   ", ""),
+        ):
+            with self.subTest(case=case):
+                self.assertEqual(collective_symbol(name), expected)
 
     def test_demangled_name_drops_namespace_and_template(self) -> None:
         self.assertEqual(
             collective_symbol("aiter::cross_device_reduce_1stage<__hip_bfloat16, 8>"),
             "cross_device_reduce_1stage",
         )
-
-    def test_plain_name_passes_through(self) -> None:
-        self.assertEqual(collective_symbol("ncclDevKernel_Generic_1"), "ncclDevKernel_Generic_1")
-
-    def test_empty_name_yields_empty(self) -> None:
-        self.assertEqual(collective_symbol(""), "")
-        self.assertEqual(collective_symbol("   "), "")
-
-    def test_non_nested_mangled_name_yields_device_function(self) -> None:
-        self.assertEqual(collective_symbol("_Z21ncclDevKernel_Genericv"), "ncclDevKernel_Generic")
 
     def test_non_nested_mangled_name_ignores_parameter_type_names(self) -> None:
         self.assertEqual(
@@ -301,13 +298,11 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             extract_collective_candidates(self.tl, [str(self.src_root)])
 
-    def test_absent_nccl_summary_yields_nothing(self) -> None:
-        self._write_metrics({"status": "OK"})
-        self.assertEqual(extract_collective_candidates(self.tl, [str(self.src_root)]), [])
-
-    def test_empty_top_ops_yields_nothing(self) -> None:
-        self._write_metrics(self._summary(top_ops=[]))
-        self.assertEqual(extract_collective_candidates(self.tl, [str(self.src_root)]), [])
+    def test_a_summary_without_sampled_collectives_yields_nothing(self) -> None:
+        for case, payload in (("no-nccl-summary", {"status": "OK"}), ("empty-top-ops", self._summary(top_ops=[]))):
+            with self.subTest(case=case):
+                self._write_metrics(payload)
+                self.assertEqual(extract_collective_candidates(self.tl, [str(self.src_root)]), [])
 
     def test_zero_total_time_is_rejected(self) -> None:
         self._write_metrics(self._summary(total_time_ms=0.0))

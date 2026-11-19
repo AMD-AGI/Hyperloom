@@ -172,7 +172,7 @@ _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped", "killed",
 
 def _terminal_task_statuses() -> frozenset[str]:
     try:
-        from claude_agent_sdk import TERMINAL_TASK_STATUSES  # type: ignore[import-not-found]
+        from claude_agent_sdk import TERMINAL_TASK_STATUSES
     except ImportError:
         return _TERMINAL_TASK_STATUSES
     return frozenset(str(s) for s in TERMINAL_TASK_STATUSES)
@@ -181,11 +181,13 @@ def _terminal_task_statuses() -> frozenset[str]:
 class _InFlight:
     """Whether the run is waiting on work that emits no SDK message until it ends.
 
-    That is a foreground tool call, or a background task (an async sub-agent)
-    whose launching tool call already returned. A background task is tracked by
-    id from ``TaskStartedMessage`` until a ``TaskNotificationMessage`` or a
-    ``TaskUpdatedMessage`` with a terminal status, which is how the SDK says
-    active task ids must be cleared.
+    That is a foreground tool call, or a background task (an async sub-agent, or
+    a shell the CLI moved to the background) whose launching tool call already
+    returned. A background task is tracked by id from ``TaskStartedMessage``
+    until a ``TaskNotificationMessage`` or a ``TaskUpdatedMessage`` with a
+    terminal status, which is how the SDK says active task ids must be cleared.
+    A ``ResultMessage`` does not clear it: the CLI ends the turn while the task
+    still runs, and starts the next turn from the task's notification.
     """
 
     def __init__(self) -> None:
@@ -204,11 +206,9 @@ class _InFlight:
             self.tool = False
         name = type(message).__name__
         task_id = str(getattr(message, "task_id", "") or "")
-        if name == "ResultMessage":
-            self.tasks.clear()
-        elif not task_id:
+        if not task_id:
             return
-        elif name == "TaskStartedMessage":
+        if name == "TaskStartedMessage":
             self.tasks.add(task_id)
         elif name == "TaskNotificationMessage":
             self.tasks.discard(task_id)
@@ -294,6 +294,15 @@ def write_run_config(
     return config_path
 
 
+def _holds_capture_traces(folder: Path) -> bool:
+    # TraceLens reads every .json / .json.gz in the capture folder as a capture trace, and when there is none it
+    # exits 0 without writing any report.
+    try:
+        return any(child.is_file() and child.name.endswith((".json", ".json.gz")) for child in folder.iterdir())
+    except OSError:
+        return False
+
+
 def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path | None:
     """Find a graph-capture folder near a torch_trace input.
 
@@ -302,14 +311,16 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
     layout that ranking already demotes is also a layout discovery can find.
     Matching by shape rather than by two hard-coded names is what lets an
     unpatched SGLang's ``graph_capture_profile/`` through, so the capture folder
-    is passed on whenever the workload trace was picked.
+    is passed on whenever the workload trace was picked. A folder with no capture
+    trace in it is passed over: the capture path fired but wrote nothing, and
+    the workload trace is still analysable without one.
 
     Args:
         trace_input (Path): The trace input path (file or directory).
         trace_files (list[Path]): Discovered trace files; only the first is used.
 
     Returns:
-        Path | None: The capture folder if one exists nearby, else ``None``.
+        Path | None: The capture folder if one holding a capture trace exists nearby, else ``None``.
     """
 
     capture_dir_priority = ("capture_traces", "graph_capture_profile", "graph_capture")
@@ -324,7 +335,7 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
             continue
         seen.add(root)
         try:
-            children = [child for child in root.iterdir() if child.is_dir()]
+            children = [child for child in root.iterdir() if child.is_dir() and _holds_capture_traces(child)]
         except OSError:
             continue
         children_by_name = {child.name.lower(): child for child in children}
@@ -449,7 +460,7 @@ def _import_sdk() -> tuple[Any, Any]:
             the expected ``query`` / ``ClaudeAgentOptions`` attributes.
     """
     try:
-        import claude_agent_sdk as sdk  # type: ignore[import-not-found]
+        import claude_agent_sdk as sdk
     except ImportError as exc:
         spec = importlib.util.find_spec("claude_agent_sdk")
         if spec is None:

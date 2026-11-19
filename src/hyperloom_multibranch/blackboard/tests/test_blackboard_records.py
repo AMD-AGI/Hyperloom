@@ -39,6 +39,7 @@ from hyperloom_multibranch.contracts.blackboard.peers import (
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.repo import ResolvedPatch
 from hyperloom_multibranch.contracts.blackboard.records import (
+    JudgementWrite,
     BaselineRecord,
     BuildNotice,
     Learning,
@@ -141,9 +142,11 @@ async def test_results_and_judgements_need_the_request_and_judgements_need_the_r
     with pytest.raises(UnknownRequest):
         await toolbox.write_result(result("r-missing"))
     with pytest.raises(UnknownRequest):
-        await gate.write_judgement("r-missing", judgement(1.0, ("r-missing",)), Conclusion.RECORDED_ONLY)
+        await gate.write_judgement(
+            JudgementWrite("r-missing", judgement(1.0, ("r-missing",)), Conclusion.RECORDED_ONLY)
+        )
     with pytest.raises(NotRecorded):
-        await gate.write_judgement("r1", judgement(1.0, ("r1",)), Conclusion.RECORDED_ONLY)
+        await gate.write_judgement(JudgementWrite("r1", judgement(1.0, ("r1",)), Conclusion.RECORDED_ONLY))
 
 
 async def test_the_gate_judges_specialist_branches_and_the_integrator_the_integration_branch(open_as: Open) -> None:
@@ -152,15 +155,15 @@ async def test_the_gate_judges_specialist_branches_and_the_integrator_the_integr
     gate, integrator = open_as(Role.GATE), open_as(Role.INTEGRATOR)
 
     with pytest.raises(WriterNotAllowed):
-        await integrator.write_judgement("r1", judgement(1.0, ("r1",)), Conclusion.COMMITTED, "c1")
+        await integrator.write_judgement(JudgementWrite("r1", judgement(1.0, ("r1",)), Conclusion.COMMITTED, "c1"))
     with pytest.raises(WriterNotAllowed):
-        await gate.write_judgement("m1", judgement(1.0, ("m1",)), Conclusion.MERGED, "i1")
+        await gate.write_judgement(JudgementWrite("m1", judgement(1.0, ("m1",)), Conclusion.MERGED, "i1"))
     with pytest.raises(WriterNotAllowed):
-        await gate.write_judgement("r1", judgement(1.0, ("r1",)), Conclusion.MERGED, "i1")
+        await gate.write_judgement(JudgementWrite("r1", judgement(1.0, ("r1",)), Conclusion.MERGED, "i1"))
     with pytest.raises(ValueError, match="names a commit"):
-        await gate.write_judgement("r1", judgement(1.0, ("r1",)), Conclusion.COMMITTED)
+        await gate.write_judgement(JudgementWrite("r1", judgement(1.0, ("r1",)), Conclusion.COMMITTED))
     with pytest.raises(ValueError, match="names a commit"):
-        await gate.write_judgement("r1", judgement(1.0, ("r1",)), Conclusion.RECORDED_ONLY, "c1")
+        await gate.write_judgement(JudgementWrite("r1", judgement(1.0, ("r1",)), Conclusion.RECORDED_ONLY, "c1"))
 
 
 async def test_a_retest_appends_a_judgement_and_the_latest_one_is_in_force(open_as: Open) -> None:
@@ -169,8 +172,8 @@ async def test_a_retest_appends_a_judgement_and_the_latest_one_is_in_force(open_
     gate = open_as(Role.GATE)
 
     provisional = replace(judgement(5.0, ("r1",)), verdict=Verdict.NEEDS_CONFIRM)
-    await gate.write_judgement("r1", provisional, Conclusion.RECORDED_ONLY)
-    record = await gate.write_judgement("r1", judgement(3.5, ("r1", "r1b")), Conclusion.COMMITTED, "c1")
+    await gate.write_judgement(JudgementWrite("r1", provisional, Conclusion.RECORDED_ONLY))
+    record = await gate.write_judgement(JudgementWrite("r1", judgement(3.5, ("r1", "r1b")), Conclusion.COMMITTED, "c1"))
 
     assert (record.conclusion, record.commit_id, record.judgement.request_ids) == (
         Conclusion.COMMITTED,
@@ -322,16 +325,24 @@ async def test_a_commit_keeps_the_recipe_digest_it_was_recorded_with(open_as: Op
     await scheduler.record_lineage(root)
     await _tested(open_as, "r1")
     await _tested(open_as, "r2")
-    await gate.write_judgement("r1", judgement(3.0, ("r1",)), Conclusion.COMMITTED, "c1", recipe_digest=CHILD_RECIPE)
+    await gate.write_judgement(
+        JudgementWrite("r1", judgement(3.0, ("r1",)), Conclusion.COMMITTED, "c1", recipe_digest=CHILD_RECIPE)
+    )
 
     with pytest.raises(ConflictingWrite):
-        await gate.write_judgement("r1", judgement(3.0, ("r1",)), Conclusion.COMMITTED, "c1", recipe_digest=ROOT_RECIPE)
+        await gate.write_judgement(
+            JudgementWrite("r1", judgement(3.0, ("r1",)), Conclusion.COMMITTED, "c1", recipe_digest=ROOT_RECIPE)
+        )
     with pytest.raises(ConflictingWrite):
         await scheduler.record_lineage(replace(root, recipe_digest=CHILD_RECIPE))
     with pytest.raises(ValueError, match="names the recipe"):
-        await gate.write_judgement("r2", judgement(0.1, ("r2",)), Conclusion.RECORDED_ONLY, recipe_digest=ROOT_RECIPE)
+        await gate.write_judgement(
+            JudgementWrite("r2", judgement(0.1, ("r2",)), Conclusion.RECORDED_ONLY, recipe_digest=ROOT_RECIPE)
+        )
     with pytest.raises(ValueError, match="64 hex digits"):
-        await gate.write_judgement("r2", judgement(3.0, ("r2",)), Conclusion.COMMITTED, "c2", recipe_digest="sha256:c2")
+        await gate.write_judgement(
+            JudgementWrite("r2", judgement(3.0, ("r2",)), Conclusion.COMMITTED, "c2", recipe_digest="sha256:c2")
+        )
     lineage = await gate.lineage()
     assert {node.commit_id: node.recipe_digest for node in lineage.commits} == {"c0": ROOT_RECIPE, "c1": CHILD_RECIPE}
 
@@ -346,7 +357,9 @@ async def test_a_commit_no_tool_profiled_has_the_op_shares_of_the_last_profiled_
     for n in (1, 2, 3):
         await _tested(open_as, f"r{n}", branch=f"s{n}")
         await gate.write_judgement(
-            f"r{n}", judgement(3.0, (f"r{n}",)), Conclusion.COMMITTED, f"c{n}", recipe_digest=CHILD_RECIPE
+            JudgementWrite(
+                f"r{n}", judgement(3.0, (f"r{n}",)), Conclusion.COMMITTED, f"c{n}", recipe_digest=CHILD_RECIPE
+            )
         )
 
     async def profiled(job: str, commit: str) -> None:
@@ -400,7 +413,7 @@ async def test_a_withdrawn_test_is_settled_unmeasured_and_frees_its_claim(open_a
     wanted = intent("s1", "c0")
     claim = await runtime.acquire(wanted, delta().fingerprint(), ttl_seconds=TTL)
     await toolbox.write_request(request("r1", wanted))
-    await toolbox.attach_request(claim.key, "r1", ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, "r1")
 
     record = await toolbox.write_withdrawal(Withdrawal("r1", "branch s1 stopped"))
 
@@ -467,7 +480,7 @@ async def test_a_failed_measurement_keeps_its_cost_frees_its_claim_and_takes_no_
     wanted = intent("s1", "c0")
     claim = await runtime.acquire(wanted, delta().fingerprint(), ttl_seconds=TTL)
     await toolbox.write_request(request("r1", wanted))
-    await toolbox.attach_request(claim.key, "r1", ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, "r1")
     failed = result("r1", validity=Validity.MEASUREMENT_FAILED, failure_reason="no healthy node", gpu_seconds=90.0)
 
     record = await toolbox.write_result(failed)
@@ -475,7 +488,9 @@ async def test_a_failed_measurement_keeps_its_cost_frees_its_claim_and_takes_no_
     assert (record.in_flight, record.measured, record.result) == (False, False, failed)
     assert (await runtime.lookup(claim.key, delta().fingerprint())).status is DedupStatus.FREE
     with pytest.raises(NotRecorded, match="failed"):
-        await open_as(Role.GATE).write_judgement("r1", judgement(1.0, ("r1",)), Conclusion.RECORDED_ONLY)
+        await open_as(Role.GATE).write_judgement(
+            JudgementWrite("r1", judgement(1.0, ("r1",)), Conclusion.RECORDED_ONLY)
+        )
 
 
 async def test_a_failed_measurement_costs_its_branch_but_is_no_direction_tried(open_as: Open) -> None:
@@ -502,10 +517,12 @@ async def test_a_result_the_gate_could_not_re_verify_is_no_test_of_its_change_an
     wanted = intent("s1", "c0")
     claim = await runtime.acquire(wanted, delta().fingerprint(), ttl_seconds=TTL)
     await toolbox.write_request(request("r1", wanted))
-    await toolbox.attach_request(claim.key, "r1", ttl_seconds=TTL)
+    await toolbox.attach_request(claim.key, "r1")
     await toolbox.write_result(result("r1", gpu_seconds=90.0))
 
-    record = await open_as(Role.GATE).write_judgement("r1", judgement(4.0, ("r1",)), Conclusion.UNVERIFIED)
+    record = await open_as(Role.GATE).write_judgement(
+        JudgementWrite("r1", judgement(4.0, ("r1",)), Conclusion.UNVERIFIED)
+    )
     (row,) = [row for row in await scheduler.progress() if row.branch == "s1"]
 
     assert (record.measured, record.conclusion) == (False, Conclusion.UNVERIFIED)
@@ -523,7 +540,7 @@ async def test_a_request_without_an_intent_carries_no_claim_and_matches_no_looku
     key = ClaimKey("c0", intent("s1", "c0").fingerprint)
 
     with pytest.raises(ConflictingWrite, match="no intent"):
-        await toolbox.attach_request(key, "r0", ttl_seconds=TTL)
+        await toolbox.attach_request(key, "r0")
     with pytest.raises(ValueError, match="accepted"):
         await toolbox.write_request(replace(baseline, request_id=None))
     answer = await runtime.lookup(key, RecipeDelta().fingerprint())
@@ -852,11 +869,13 @@ async def test_merges_that_did_not_land_say_why_in_the_commit_query(open_as: Ope
     await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
     for request_id in ("r1", "r2"):
         await _tested(open_as, request_id)
-    await gate.write_judgement("r1", judgement(3.0, ("r1",)), Conclusion.COMMITTED, "c1")
-    await gate.write_judgement("r2", judgement(2.0, ("r2",)), Conclusion.COMMITTED, "c2")
+    await gate.write_judgement(JudgementWrite("r1", judgement(3.0, ("r1",)), Conclusion.COMMITTED, "c1"))
+    await gate.write_judgement(JudgementWrite("r2", judgement(2.0, ("r2",)), Conclusion.COMMITTED, "c2"))
     await _tested(open_as, "m1", branch=INTEGRATION_BRANCH)
     await integrator.record_merge_attempt(MergeAttempt(("c1",), "c0", request_id="m1"))
-    await integrator.write_judgement("m1", judgement(0.1, ("m1",), verdict=Verdict.FLAT), Conclusion.NOT_STACKABLE)
+    await integrator.write_judgement(
+        JudgementWrite("m1", judgement(0.1, ("m1",), verdict=Verdict.FLAT), Conclusion.NOT_STACKABLE)
+    )
     await integrator.record_merge_attempt(MergeAttempt(("c2",), "c0", skipped_reason="patch conflict in fused_moe.py"))
     clock.advance(600.0)
     await integrator.record_merge_attempt(MergeAttempt(("c2",), "c0", skipped_reason="patch conflict in qwen3.py"))
@@ -889,7 +908,7 @@ async def test_the_patches_a_model_wrote_for_a_tested_merge_reach_the_snapshot(o
     scheduler, gate, integrator = open_as(Role.SCHEDULER), open_as(Role.GATE), open_as(Role.INTEGRATOR)
     await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
     await _tested(open_as, "r1")
-    await gate.write_judgement("r1", judgement(3.0, ("r1",)), Conclusion.COMMITTED, "c1")
+    await gate.write_judgement(JudgementWrite("r1", judgement(3.0, ("r1",)), Conclusion.COMMITTED, "c1"))
     await _tested(open_as, "m1", branch=INTEGRATION_BRANCH)
     written = ResolvedPatch(
         "sglang", "patch/sglang/qwen3.patch", PatchRef("patch/sglang/m1.patch", "e" * 64), "m", "v1", 2
@@ -907,7 +926,7 @@ async def test_the_patches_a_model_wrote_for_a_tested_merge_reach_the_snapshot(o
 async def test_a_merge_skipped_because_its_change_is_already_on_the_head_is_no_conflict(open_as: Open) -> None:
     await open_as(Role.SCHEDULER).record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
     await _tested(open_as, "r1")
-    await open_as(Role.GATE).write_judgement("r1", judgement(3.0, ("r1",)), Conclusion.COMMITTED, "c1")
+    await open_as(Role.GATE).write_judgement(JudgementWrite("r1", judgement(3.0, ("r1",)), Conclusion.COMMITTED, "c1"))
     integrator = open_as(Role.INTEGRATOR)
     skipped = MergeAttempt(
         ("c1",), "c0", skipped_reason="its change is already on the head", skipped_outcome=MergeOutcome.ALREADY_ON_HEAD
@@ -924,7 +943,7 @@ async def test_a_merge_skipped_because_its_change_is_already_on_the_head_is_no_c
 async def test_a_pending_merge_shows_as_pending(open_as: Open) -> None:
     await open_as(Role.SCHEDULER).record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
     await _tested(open_as, "r1")
-    await open_as(Role.GATE).write_judgement("r1", judgement(3.0, ("r1",)), Conclusion.COMMITTED, "c1")
+    await open_as(Role.GATE).write_judgement(JudgementWrite("r1", judgement(3.0, ("r1",)), Conclusion.COMMITTED, "c1"))
     toolbox, integrator = open_as(Role.TOOLBOX), open_as(Role.INTEGRATOR)
     await toolbox.write_request(request("m1", intent(INTEGRATION_BRANCH, "c0")))
     await integrator.record_merge_attempt(MergeAttempt(("c1",), "c0", request_id="m1"))
@@ -970,3 +989,26 @@ async def test_profiles_of_a_commit_are_its_profile_tests_that_left_an_artifact(
 
     assert [record.request_id for record in found] == ["p1"]
     assert (await toolbox.record("p1")).result.profile_location == "/profiles/p1.json"
+
+
+async def test_profiles_of_a_commit_are_also_those_of_another_commit_of_its_recipe_that_changed_nothing(
+    open_as: Open,
+) -> None:
+    scheduler, gate, toolbox = open_as(Role.SCHEDULER), open_as(Role.GATE), open_as(Role.TOOLBOX)
+    await scheduler.record_lineage(
+        LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0", recipe_digest=ROOT_RECIPE)
+    )
+    for n in (1, 2):
+        await _tested(open_as, f"r{n}", branch=f"s{n}")
+        await gate.write_judgement(
+            JudgementWrite(
+                f"r{n}", judgement(3.0, (f"r{n}",)), Conclusion.COMMITTED, f"c{n}", recipe_digest=CHILD_RECIPE
+            )
+        )
+    for request_id, parent, change in (("p0", "c0", RecipeDelta()), ("p1", "c1", RecipeDelta()), ("p2", "c1", delta())):
+        await toolbox.write_request(request(request_id, intent("s1", parent), change, kind=TestKind.PROFILE))
+        await toolbox.write_result(result(request_id, profile_location=f"/profiles/{request_id}.json"))
+
+    assert [record.request_id for record in await toolbox.profiles("c2")] == ["p1"]
+    assert [record.request_id for record in await toolbox.profiles("c1")] == ["p1", "p2"]
+    assert [record.request_id for record in await toolbox.profiles("c0")] == ["p0"]

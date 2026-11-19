@@ -7,9 +7,9 @@ toolbox's tool registry serves (:attr:`AnalysisStarter.analysis_tools`).
 
 The caller names the tool and its own parameters. The commit the analysis is about is never the caller's: it is the
 head of the caller's branch in the experiment repository, read here. ``profile_request_id`` is kept only when the
-blackboard holds a PROFILE test of that id on that commit, whichever branch asked for it: a profile describes a commit,
-and ``submit_test`` refuses a second profile of a commit with the id of the first (``profile_exists``). The trace and
-the trace splitter's workload hints are that profile test's own: the caller names neither. A point that names no
+blackboard holds a PROFILE test of that id of that commit's recipe, whichever branch asked for it: a profile describes
+a recipe, and ``submit_test`` refuses a second profile of a recipe with the id of the first (``profile_exists``). The
+trace and the trace splitter's workload hints are that profile test's own: the caller names neither. A point that names no
 prompt and output length (an AgentX replay) has its phase windows weighted by the lengths the session's baseline
 measured (:mod:`~.tools.baseline_lengths`), which the caller names no more than the hints. A ``kernel_tune`` request
 names a test (``test_request_id``) and gets the directory its output landed in, resolved inside the session, from the
@@ -92,9 +92,9 @@ async def _verified_profile(
 ) -> TestRecord | None:
     """The PROFILE record ``request_id`` of the head ``commit`` of ``branch``, or ``None`` when no id was given.
 
-    What a profile describes is a commit, so any branch's profile of ``commit`` qualifies (``records.profiles`` is the
-    same commit identity ``profile_exists`` keys on); the branch that ran it does not matter. A profile of another
-    commit, or an id the blackboard holds no profile for, is refused.
+    What a profile describes is a recipe, so any branch's profile of ``commit``'s recipe qualifies (``records.profiles``
+    is the recipe identity ``profile_exists`` keys on); the branch that ran it does not matter. A profile of another
+    recipe, or an id the blackboard holds no profile for, is refused.
     """
     if not request_id:
         return None

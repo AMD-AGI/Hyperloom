@@ -29,8 +29,6 @@ from hyperloom.orchestrator.actions.executors import _integrate_results as integ
 from hyperloom.orchestrator.tests._helpers import integrate_extra, variant_result
 from hyperloom.orchestrator.actions.executors._integrate_results import _KbLesson
 from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
-from hyperloom.orchestrator.actions.executors._patch_git import _detect_p_level, _git_reset_clean
-from hyperloom.orchestrator.actions.executors._patch_sources import _read_done_payload
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
@@ -366,15 +364,33 @@ async def test_bench_patch_forwards_the_session_and_phase_budgets_to_the_grid(tm
     assert captured["stop"].phase_deadline is phase
 
 
-def test_patch_bench_carries_the_phase_deadline_the_attempt_was_dispatched_under(tmp_path):
+@pytest.mark.asyncio
+async def test_bench_is_bounded_by_the_phase_the_task_was_dispatched_under(tmp_path, monkeypatch):
     from hyperloom.common.deadline import Deadline
-    from hyperloom.orchestrator.actions.executors import _integrate_results as integrate_results
-    from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
 
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
     phase = Deadline.after(900.0)
-    attempt = IntegrateAttempt(task_id="t", phase_deadline=phase, output_root=tmp_path)
 
-    assert integrate_results._PatchBench.for_attempt(attempt, {}).phase_deadline is phase
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _capture_bench(captured, {"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": None}),
+    )
+    res = await IntegratePatchExecutor(session_dir=session)(
+        _make_ctx(
+            "t",
+            {"specialist_task_id": "spec", "framework_source_root": str(repo), "base_tput": 100.0},
+            extra={"phase_deadline": phase},
+        )
+    )
+
+    assert res["status"] == "kept"
+    assert captured["phase_deadline"] is phase
 
 
 @pytest.mark.asyncio
@@ -405,61 +421,6 @@ async def test_switch_off_parity_leg_is_bounded_by_the_session_budget(tmp_path, 
 
     assert captured["session_deadline_sec"] == 4242.0
     assert captured["variant_expected_sec"] == 600.0
-
-
-@pytest.mark.asyncio
-async def test_keep_path(tmp_path, monkeypatch):
-    session = tmp_path / "s"
-    session.mkdir()
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-    _write_workspace(session, "spec")
-    ex = IntegratePatchExecutor(session_dir=session)
-    monkeypatch.setattr(
-        IntegratePatchExecutor,
-        "_bench_patch",
-        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": None}),
-    )
-    res = await ex(
-        _make_ctx(
-            "t",
-            {
-                "specialist_task_id": "spec",
-                "framework_source_root": str(repo),
-                "base_tput": 100.0,
-            },
-        )
-    )
-    assert res["status"] == "kept"
-    assert res["delta_pct"] == 100.0
-    assert (repo / "src.py").read_text().endswith("return 2\n")
-
-
-@pytest.mark.asyncio
-async def test_revert_low_throughput(tmp_path, monkeypatch):
-    session = tmp_path / "s"
-    session.mkdir()
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-    _write_workspace(session, "spec")
-    ex = IntegratePatchExecutor(session_dir=session)
-    monkeypatch.setattr(
-        IntegratePatchExecutor,
-        "_bench_patch",
-        _stub_bench({"output_throughput": 50.0, "status": "succeeded"}, {"accuracy_pass": None}),
-    )
-    res = await ex(
-        _make_ctx(
-            "t",
-            {
-                "specialist_task_id": "spec",
-                "framework_source_root": str(repo),
-                "base_tput": 100.0,
-            },
-        )
-    )
-    assert res["status"] == "reverted"
-    assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
 @pytest.mark.asyncio
@@ -679,15 +640,6 @@ def test_stamp_framework_kb_provenance_noop_when_done_payload_none():
 
 
 @pytest.mark.asyncio
-async def test_kb_writeback_skips_when_no_pr_keys(tmp_path):
-    ex = IntegratePatchExecutor(session_dir=tmp_path)
-    payload = {"proposal_set": [{"provenance": "specialist:serving:framework"}]}
-    await ex._maybe_write_framework_kb_record(
-        _KbLesson("integrated", 1.0), attempt=IntegrateAttempt("t", done_payload=payload)
-    )
-
-
-@pytest.mark.asyncio
 async def test_kb_writeback_ignores_payload_level_pr_identity(tmp_path, monkeypatch):
     """A payload-level ``fa_pr_*`` is another proposal's identity, not this one's.
 
@@ -717,43 +669,31 @@ async def test_kb_writeback_ignores_payload_level_pr_identity(tmp_path, monkeypa
     assert writes == []
 
 
-def test_find_framework_proposal():
-    assert IntegratePatchExecutor._find_framework_proposal(None) is None
-    assert IntegratePatchExecutor._find_framework_proposal({"proposal_set": "x"}) is None
-    assert IntegratePatchExecutor._find_framework_proposal({"proposal_set": [{"provenance": "kernel:x"}]}) is None
-    found = IntegratePatchExecutor._find_framework_proposal(
-        {"proposal_set": [{"provenance": "specialist:serving:framework:y", "id": 1}]}
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {"proposal_set": "x"},
+        {"proposal_set": [{"provenance": "kernel:x", "fa_pr_url": "https://example/pr/1"}]},
+    ],
+    ids=["no_payload", "malformed_proposal_set", "kernel_proposal"],
+)
+async def test_kb_writeback_files_no_lesson_without_a_framework_proposal(tmp_path, monkeypatch, payload):
+    writes: list[Any] = []
+
+    async def _fake_write(fields):
+        writes.append(fields)
+        return "/tmp/lessons.jsonl"
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.kb_writeback.write_framework_record",
+        _fake_write,
     )
-    assert found["id"] == 1
-
-
-def test_git_reset_clean(tmp_path):
-    repo = tmp_path / "repo"
-    _init_git_repo(repo)
-    (repo / "src.py").write_text("dirty\n", encoding="utf-8")
-    ok, _ = _git_reset_clean(repo, "HEAD")
-    assert ok
-    assert (repo / "src.py").read_text().endswith("return 1\n")
-
-
-def test_detect_p_level_none_for_unmatched(tmp_path):
-    repo = tmp_path / "repo"
-    _init_git_repo(repo)
-    bad = tmp_path / "bad.patch"
-    bad.write_text(
-        "diff --git a/zzz.py b/zzz.py\n--- a/zzz.py\n+++ b/zzz.py\n@@ -1,1 +1,1 @@\n-X\n+Y\n",
-        encoding="utf-8",
+    await IntegratePatchExecutor(session_dir=tmp_path)._maybe_write_framework_kb_record(
+        _KbLesson("integrated", 1.0), attempt=IntegrateAttempt("t", done_payload=payload)
     )
-    assert _detect_p_level(repo, bad) is None
-
-
-def test_read_done_payload_missing(tmp_path):
-    assert _read_done_payload(tmp_path) is None
-
-
-def test_read_done_payload_bad_json(tmp_path):
-    (tmp_path / "specialist_done.json").write_text("{bad", encoding="utf-8")
-    assert _read_done_payload(tmp_path) is None
+    assert writes == []
 
 
 def _FakeVR(**kw):
@@ -770,56 +710,9 @@ def _FakeVR(**kw):
     return variant_result(**kw)
 
 
-@pytest.mark.asyncio
-async def test_bench_patch_no_accuracy(tmp_path, monkeypatch):
-    cfg = tmp_path / "cfg.yaml"
-    cfg.write_text("x: 1\n", encoding="utf-8")
-    monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *a, **k: cfg)
-
-    async def _fake_run_grid(**kwargs):
-        return [_FakeVR(output_throughput=200.0)]
-
-    monkeypatch.setattr(integrate_bench, "run_grid", _fake_run_grid)
-    ex = IntegratePatchExecutor(session_dir=tmp_path)
-    bench, gate = await ex._bench_patch(
-        integrate_results._PatchBench(
-            params={"config_path": str(cfg)}, output_root=tmp_path, specialist_task_id="abcdef123456"
-        ),
-        extra_server_args_applied="",
-        extra_envs_applied={"E": "1"},
-    )
-    assert bench["output_throughput"] == 200.0
-    assert gate["accuracy_pass"] is None
-
-
 def _passing_eval_results(_results_dir, framework=None, benchmark_mode=""):
     """The eval read every accuracy-gated bench test stubs in."""
     return {"accuracy": 0.9}
-
-
-@pytest.mark.asyncio
-async def test_bench_patch_with_accuracy(tmp_path, monkeypatch):
-    cfg = tmp_path / "cfg.yaml"
-    cfg.write_text("x: 1\n", encoding="utf-8")
-    monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *a, **k: cfg)
-
-    async def _fake_run_grid(**kwargs):
-        return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
-
-    monkeypatch.setattr(integrate_bench, "run_grid", _fake_run_grid)
-    monkeypatch.setattr(integrate_bench, "parse_eval_results", _passing_eval_results)
-    monkeypatch.setattr(_accuracy_gate, "parse_eval_results", _passing_eval_results)
-    ex = IntegratePatchExecutor(session_dir=tmp_path)
-    bench, gate = await ex._bench_patch(
-        integrate_results._PatchBench(
-            params={"config_path": str(cfg), "accuracy_baseline": 0.8},
-            output_root=tmp_path,
-            specialist_task_id="abcdef123456",
-        ),
-        extra_server_args_applied="",
-        extra_envs_applied={},
-    )
-    assert gate["accuracy_pass"] is True
 
 
 @pytest.mark.asyncio

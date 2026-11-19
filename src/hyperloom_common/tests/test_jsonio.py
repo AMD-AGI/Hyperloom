@@ -24,19 +24,10 @@ class TestReadJson:
         assert read_json(tmp_path / "nope.json") is None
         assert read_json(tmp_path / "nope.json", default={"x": 1}) == {"x": 1}
 
-    def test_tolerant_malformed(self, tmp_path):
-        p = tmp_path / "bad.json"
-        p.write_text("{not json}")
-        assert read_json(p, default="fallback") == "fallback"
-
-    def test_require_dict_tolerant(self, tmp_path):
-        p = tmp_path / "list.json"
-        p.write_text("[1, 2]")
-        assert read_json(p, require_dict=True) is None
-
     def test_require_dict_tolerant_reports_error(self, tmp_path):
         p = tmp_path / "list.json"
         p.write_text("[1, 2]")
+        assert read_json(p, require_dict=True) is None
         errors: list[BaseException] = []
         assert read_json(p, default={}, require_dict=True, on_error=errors.append) == {}
         assert isinstance(errors[0], ValueError)

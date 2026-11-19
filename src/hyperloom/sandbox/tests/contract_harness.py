@@ -29,6 +29,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
@@ -178,14 +179,17 @@ def standin_harness(workdir: Path, rig: Rig) -> Iterator[Harness]:
 def claw_service_harness() -> Iterator[Harness]:
     from hyperloom.sandbox.e2b import E2BSandboxProvider
 
-    environ = {
-        **os.environ,
-        "E2B_API_URL": os.environ[SERVICE_URL_ENV],
-        "E2B_SANDBOX_URL": os.environ.get(_SERVICE_SANDBOX_URL_ENV, os.environ[SERVICE_URL_ENV]),
-    }
+    api_url = os.environ[SERVICE_URL_ENV]
+    keys = {role: key for role in get_args(Role) if (key := os.environ.get(f"HYPERLOOM_SANDBOX_KEY_{role.upper()}"))}
+    service = E2BSandboxProvider(
+        keys,
+        api_url=api_url,
+        sandbox_url=os.environ.get(_SERVICE_SANDBOX_URL_ENV, api_url),
+        workspace=os.environ.get("HYPERLOOM_SANDBOX_WORKSPACE") or None,
+    )
     sealed, dev, subrun = os.environ[_SERVICE_TEMPLATES_ENV].split(",")
     wait_sec = float(os.environ.get(_SERVICE_WAIT_ENV, _SERVICE_WAIT_SEC))
-    provider = _KillsWhatItMade(E2BSandboxProvider.from_environ(environ), min_wait_sec=wait_sec)
+    provider = _KillsWhatItMade(service, min_wait_sec=wait_sec)
     try:
         yield Harness(provider, sealed, dev, subrun)
     finally:

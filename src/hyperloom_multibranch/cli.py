@@ -33,16 +33,16 @@ envelope or probation.
 Each ``--autonomous-agent SOURCE`` opens one branch where EXPLORE starts, after the user's directions and within
 ``--max-branches``, whose specialist runs that third-party agent end to end in a sandbox of its own; a source that
 carries credentials in its URL is a usage error. ``--agent-directions FILE`` names a directions map that is split, after
-PRELUDE, into disjoint shares, one per Arbor agent among them, each its ``component.plan``; a map with no directions, or
-one given with no agent, is a usage error. Without one, two or more Arbors split the map of a dossier pass, the first
-Arbor run once on a mapping branch EXPLORE opens beside the others, for at most ``--agent-dossier-minutes`` (default
-90), or, when it gives none or the minutes are 0, a map Arbor generates from the root's profile (its op shares, else its
-kernel shares); each share then opens as a branch of its own, when it still has ``--agent-share-minutes`` (default 63,
-0 for always) to its cutoff, the least in which Arbor runs an iteration. A negative or non-finite value of either,
-as of any other limit, is a usage error.
-``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's serving template; a name that is not one
-directory, or one given with no agent, is a usage error, and a pack the Arbor checkout lacks is refused when the branch
-starts. Those Arbors are served the session's frozen base launch, resolved from the recipe sources or
+PRELUDE, into disjoint shares, one per component agent (an agent an installed adapter recognises), each its
+``component.plan``; a map with no directions, or one given with no agent, is a usage error. Without one, two or more
+component agents split the map of a dossier pass, one run of the first on a mapping branch EXPLORE opens beside the
+others, for at most ``--agent-dossier-minutes`` (default 90), or, when it gives none or the minutes are 0, a map the
+adapter generates from the root's profile (its op shares, else its kernel shares); each share then opens as a branch of
+its own, when it still has ``--agent-share-minutes`` (default 63, 0 for always) to its cutoff, the least in which a
+component agent runs one iteration. A negative or non-finite value of either, as of any other limit, is a usage error.
+``--agent-pack NAME`` names the pack those component agents run instead of the adapter's default; a name that is not
+one directory, or one given with no agent, is a usage error, and a pack the agent's checkout lacks is refused when the
+branch starts. The component agents are served the session's frozen base launch, resolved from the recipe sources or
 ``--reference-script``, and check their launch against it. ``--agent-launch FILE`` serves them that launch file
 instead; a file the adapter cannot use, an unfilled template among them, a base launch record, or one given with no
 agent or with ``--reference-script``, is a usage error. ``--reference-script FILE`` is the session's base launch, as for
@@ -229,7 +229,7 @@ ENCODING = "utf-8"
 FILE_METAVAR = "FILE"
 log = logging.getLogger(__name__)
 #: The GPU types a session runs on; the toolbox's environment exports the board itself as ``GPU_TYPE``.
-SESSION_GPU_TYPES = ("mi300x", "mi350x", "mi355x")
+SESSION_GPU_TYPES = ("mi300x", "mi325x", "mi350x", "mi355x")
 #: The options ``run`` requires unless it is given ``--resume``, by their argparse names.
 RUN_REQUIRED = ("model", "framework", "gpu_type", "workload", "tp", "conc", "precision")
 #: The options an inferencex workload requires and an agentx one refuses.
@@ -338,8 +338,8 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
         help=(
             "The session's base launch, as for hyperloom optimize: a shell launch script, or a base launch record"
             " (hyperloom-base-launch/1) frozen by another session, which is frozen without reading any recipe source"
-            " (examples/multibranch-arbor-launch). It wins over every recipe source; omitted, the base comes from"
-            " InferenceX, then the framework's cookbook, then the default table. Every Arbor --autonomous-agent is"
+            " (examples/multibranch-agent-launch). It wins over every recipe source; omitted, the base comes from"
+            " InferenceX, then the framework's cookbook, then the default table. Every component agent is"
             " served the frozen base. Not the --reference directories the specialists read."
         ),
     )
@@ -395,7 +395,7 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         default=None,
         help="Tests running at once; default as many as the machine's cards, or the grant, run at TP.",
     )
-    run.add_argument("--max-k-per-branch", type=int, default=DEFAULT_MAX_K_PER_BRANCH, help="Highest K of a branch.")
+    run.add_argument("--max-k-per-branch", type=int, default=DEFAULT_MAX_K_PER_BRANCH, help="Highest specialist K.")
     run.add_argument(
         "--dev-leases",
         type=int,
@@ -468,7 +468,7 @@ def _add_specialist_input_options(run: argparse.ArgumentParser) -> None:
 
 
 def _add_agent_options(run: argparse.ArgumentParser) -> None:
-    """The third-party agents some branches run, and what the Arbors among them are given."""
+    """The third-party agents some branches run, and what the component agents among them are given."""
 
     run.add_argument(
         "--autonomous-agent",
@@ -477,9 +477,8 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
         default=None,
         metavar="SOURCE",
         help=(
-            "A third-party agent to run end to end on one branch, a git URL (URL@ref for a ref), a local path, or"
-            f" {ARBOR_KEYWORD} for the Arbor vendored with Hyperloom (src/hyperloom_arbor); repeatable, each"
-            " opens one branch where EXPLORE starts, within --max-branches."
+            "A third-party agent to run end to end on one branch, a git URL (URL@ref for a ref) or a local path;"
+            " repeatable, each opens one branch where EXPLORE starts, within --max-branches."
         ),
     )
     run.add_argument(
@@ -489,20 +488,20 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
         default=None,
         metavar=FILE_METAVAR,
         help=(
-            'A directions map, a JSON list of directions or {"directions": [...]} as Arbor\'s component.plan reads it;'
-            " split into disjoint shares, one per Arbor --autonomous-agent, before EXPLORE opens their branches."
-            " Default: for two or more Arbors, the map of a dossier pass a mapping branch runs in EXPLORE"
-            " (--agent-dossier-minutes), else one Arbor generates from the root's profile; each share then opens as a"
-            " branch of its own."
+            'A directions map, a JSON list of directions or {"directions": [...]} as a component agent\'s'
+            " component.plan reads it; split into disjoint shares, one per component agent (an --autonomous-agent an"
+            " installed adapter recognises), before EXPLORE opens their branches. Default: for two or more of them,"
+            " the map of a dossier pass a mapping branch runs in EXPLORE (--agent-dossier-minutes), else one the"
+            " adapter generates from the root's profile; each share then opens as a branch of its own."
         ),
     )
     _add_agent_minutes_options(run)
-    _add_arbor_start_options(run)
+    _add_agent_start_options(run)
     _add_agent_review_options(run)
 
 
 def _add_agent_minutes_options(run: argparse.ArgumentParser) -> None:
-    """How long the dossier pass may map the Arbors' directions, and how long their shares must have left to open."""
+    """How long the dossier pass may take to make the agent map, and how long its shares must have left to open."""
 
     run.add_argument(
         "--agent-dossier-minutes",
@@ -511,9 +510,9 @@ def _add_agent_minutes_options(run: argparse.ArgumentParser) -> None:
         default=DOSSIER_MINUTES,
         metavar="MINUTES",
         help=(
-            "Without --agent-directions, how long the dossier pass that maps two or more Arbor agents' directions may"
-            " run on its mapping branch before their share branches open, out of EXPLORE's time, while the other"
-            " branches work; it ends once its map is set. Arbor starts no"
+            "Without --agent-directions, how long the dossier pass that maps two or more component agents' directions"
+            " may run on its mapping branch before their share branches open, out of EXPLORE's time, while the other"
+            " branches work; it ends once its map is set. A component agent starts no"
             f" iteration with under 63 minutes left, so less runs none; 0 skips it (default {DOSSIER_MINUTES:g})."
         ),
     )
@@ -525,22 +524,22 @@ def _add_agent_minutes_options(run: argparse.ArgumentParser) -> None:
         metavar="MINUTES",
         help=(
             "The least time to their cutoff the share branches of a split map must still have, after the dossier pass"
-            " and the review, to open: Arbor starts no iteration with less. Below it none opens, and the session says"
+            " and the review, to open: one iteration of a component agent. Below it none opens, and the session says"
             " why. It is also the least an agent branch whose lease finds no free cards must still have to run to"
             f" keep waiting for them; 0 always opens them and waits while any time is left (default {SHARE_MINUTES:g})."
         ),
     )
 
 
-def _add_arbor_start_options(run: argparse.ArgumentParser) -> None:
-    """How an Arbor --autonomous-agent is started: its pack, the launch its recipe adds to, and its servers' ports."""
+def _add_agent_start_options(run: argparse.ArgumentParser) -> None:
+    """How a component agent is started: its pack, the launch its recipe adds to, and its servers' ports."""
 
     run.add_argument(
         "--agent-pack",
         dest="agent_pack",
         default=None,
         metavar="NAME",
-        help="The pack an Arbor --autonomous-agent runs, a directory under the Arbor checkout's packs/; default serving.",
+        help="The pack a component agent runs, the name of one pack directory in its checkout; default: the adapter's.",
     )
     run.add_argument(
         "--agent-launch",
@@ -549,9 +548,9 @@ def _add_arbor_start_options(run: argparse.ArgumentParser) -> None:
         default=None,
         metavar=FILE_METAVAR,
         help=(
-            "For an Arbor --autonomous-agent: the launch an AgentX recipe's adds to (server_flags, server_env,"
-            " model_name, client; examples/multibranch-arbor-launch), served instead of the session's frozen base,"
-            " which the Arbors are served without it. A base launch record is given as --reference-script."
+            "For a component agent: the launch an AgentX recipe's adds to (server_flags, server_env,"
+            " model_name; examples/multibranch-agent-launch), served instead of the session's frozen base,"
+            " which the component agents are served without it. A base launch record is given as --reference-script."
         ),
     )
     run.add_argument(
@@ -568,15 +567,15 @@ def _add_arbor_start_options(run: argparse.ArgumentParser) -> None:
 
 
 def _add_agent_review_options(run: argparse.ArgumentParser) -> None:
-    """The stages of a person's review of the Arbor agents' map: stop once it is made, run on a reviewed one, or skip
-    the review."""
+    """The stages of a person's review of the agent map: stop once it is made, run on a reviewed one, or skip the
+    review."""
 
     run.add_argument(
         "--stop-after-map",
         dest="stop_after_map",
         action=SWITCH,
         help=(
-            "End the session before EXPLORE once the Arbor --autonomous-agent directions are mapped, one Arbor's"
+            "End the session before EXPLORE once the component agents' directions are mapped, those of a single one"
             " too: PRELUDE, the dossier pass (--agent-dossier-minutes; with 0, a map generated from the root's"
             " profile), then CLOSE. The map and its dossier are kept in the session's MB-agent-map/ for review."
         ),
@@ -588,8 +587,8 @@ def _add_agent_review_options(run: argparse.ArgumentParser) -> None:
         default=None,
         metavar="DIR",
         help=(
-            "The dossier the reviewed --agent-directions map was made with, a directory with Arbor's dossier index:"
-            " every Arbor --autonomous-agent branch gets it in its checkout, as it would a dossier pass's"
+            "The dossier the reviewed --agent-directions map was made with, a directory with the component agent's"
+            " dossier index: every component agent's branch gets it in its checkout, as it would a dossier pass's"
             " (a --stop-after-map session keeps it under MB-agent-map/dossier/)."
         ),
     )
@@ -598,11 +597,11 @@ def _add_agent_review_options(run: argparse.ArgumentParser) -> None:
         dest="review_gate",
         action="store_false",
         help=(
-            "Open the Arbor --autonomous-agent branches without a person's review: by default they wait once their map"
+            "Open the component agents' branches without a person's review: by default they wait once their map"
             " is made, holding no cards, until `hyperloom-multibranch review --session DIR approve` (or reject); the"
             " other branches go on, and a --agent-directions map is reviewed before EXPLORE. With this flag nothing"
-            " waits, and its Arbors are started with their own review gate off. For unattended runs, and for the"
-            " second stage of a reviewed run."
+            " waits, and the component agents are started with their own review gate off. For unattended runs, and for"
+            " the second stage of a reviewed run."
         ),
     )
 
@@ -644,15 +643,11 @@ def _workload_model(args: argparse.Namespace) -> str:
 
 #: Schemes whose URL user is a login name rather than a credential; any other scheme's user, or a password, is one.
 SSH_SCHEMES = frozenset({"ssh", "git+ssh", "svn+ssh"})
-#: The --autonomous-agent source that names the Arbor vendored beside this package, in a checkout or a wheel install.
-ARBOR_KEYWORD = "arbor"
-VENDORED_ARBOR = Path(__file__).resolve().parent.parent / "hyperloom_arbor"
 
 
 def _agents(sources: list[str], free: int) -> tuple[str, ...]:
-    """The agent sources, :data:`ARBOR_KEYWORD` as :data:`VENDORED_ARBOR`'s absolute path; refused when one carries
-    credentials, which come from the sandbox's environment only, when there are more than the ``free`` branches the
-    user's directions leave, or when :data:`ARBOR_KEYWORD` is given and this install has no vendored Arbor."""
+    """The agent sources; refused when one carries credentials, which come from the sandbox's environment only, or
+    when there are more than the ``free`` branches the user's directions leave."""
 
     if len(sources) > free:
         raise ValueError(f"--autonomous-agent is given {len(sources)} times, more than the {free} branches left")
@@ -663,17 +658,12 @@ def _agents(sources: list[str], free: int) -> tuple[str, ...]:
         scheme = credentialed["scheme"].removesuffix("://")
         if ":" in credentialed["userinfo"] or scheme.lower() not in SSH_SCHEMES:
             raise ValueError(f"--autonomous-agent {scheme}://... carries credentials; give them in the environment")
-    if ARBOR_KEYWORD in sources and not VENDORED_ARBOR.is_dir():
-        raise ValueError(
-            f"--autonomous-agent {ARBOR_KEYWORD} names the Arbor vendored at {VENDORED_ARBOR}, which this install does"
-            " not have; reinstall Hyperloom, or give an Arbor checkout's path or URL instead"
-        )
-    return tuple(str(VENDORED_ARBOR) if source == ARBOR_KEYWORD else source for source in sources)
+    return tuple(sources)
 
 
 def _agent_directions(path: Path | None, agents: list[str]) -> str:
-    """The absolute path of the directions map the Arbor agents split, ``""`` without one; refused with no agent to
-    split it for, or when it holds no directions as Arbor's ``component.plan`` reads them."""
+    """The absolute path of the directions map the component agents split, ``""`` without one; refused with no agent
+    to split it for, or when it holds no directions as a component agent's ``component.plan`` reads them."""
 
     if path is None:
         return ""
@@ -690,8 +680,8 @@ def _agent_directions(path: Path | None, agents: list[str]) -> str:
 
 
 def _agent_pack(name: str | None, agents: list[str]) -> str:
-    """The pack the Arbor agents run, ``""`` for the adapter's default; refused with no agent to run it, or when it
-    is not one directory name under an Arbor checkout's ``packs/``."""
+    """The pack the component agents run, ``""`` for the adapter's default; refused with no agent to run it, or when
+    it is not the name of one pack directory."""
 
     if name is None:
         return ""
@@ -703,8 +693,8 @@ def _agent_pack(name: str | None, agents: list[str]) -> str:
 
 
 def _agent_launch(path: Path | None, agents: list[str], reference_script: Path | None) -> str:
-    """The absolute path of the launch file the Arbor agents are served, ``""`` without one; refused with no agent to
-    serve, beside a ``reference_script``, whose frozen base they are served, when it is a base launch record, which
+    """The absolute path of the launch file the component agents are served, ``""`` without one; refused with no agent
+    to serve, beside a ``reference_script``, whose frozen base they are served, when it is a base launch record, which
     is given as ``reference_script``, or with every reason the adapter could not use it."""
 
     if path is None:
@@ -712,7 +702,7 @@ def _agent_launch(path: Path | None, agents: list[str], reference_script: Path |
     if not agents:
         raise ValueError("--agent-launch needs an --autonomous-agent to serve it")
     if reference_script is not None:
-        raise ValueError("--agent-launch is not taken with --reference-script: the Arbors are served the frozen base")
+        raise ValueError("--agent-launch is not taken with --reference-script: the agents are served the frozen base")
     try:
         launch = read_launch(path)
     except AgentRefused as exc:
@@ -720,7 +710,7 @@ def _agent_launch(path: Path | None, agents: list[str], reference_script: Path |
     if launch.record:
         raise ValueError(
             f"--agent-launch {path} is a base launch record; give it as --reference-script, which freezes it as the"
-            " session's base and serves it to the Arbors"
+            " session's base and serves it to the agents"
         )
     return str(path.absolute())
 
@@ -750,8 +740,8 @@ def _stop_after_map(stop: bool, agents: list[str], directions: Path | None) -> b
 
 
 def _agent_dossier(path: Path | None, directions: Path | None) -> str:
-    """The absolute path of the dossier every Arbor branch is given, ``""`` without one; refused without the reviewed
-    map it was made with, or when it is no dossier: a directory with Arbor's dossier index."""
+    """The absolute path of the dossier every agent branch is given, ``""`` without one; refused without the reviewed
+    map it was made with, or when it is no dossier: a directory with the component agent's dossier index."""
 
     if path is None:
         return ""

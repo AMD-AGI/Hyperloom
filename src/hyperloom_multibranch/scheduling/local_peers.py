@@ -49,7 +49,12 @@ from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from inference_suite.contracts import AGENTX_DEFAULT_DURATION_SEC
-from hyperloom_common.llm.llm_config import preferred_agent_backend, provider_model_defaults, resolve_forge_llm_model
+from hyperloom_common.llm.llm_config import (
+    AGENT_BACKEND_CLAUDE,
+    preferred_agent_backend,
+    provider_model_defaults,
+    resolve_forge_llm_model,
+)
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
@@ -347,7 +352,7 @@ def specialist_recall(reports: Path) -> LessonRecall:
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
     """The session's peers on this machine; exports the workload into this process (:func:`_export_workload`) and
     freezes the base launch every test runs on in ``MB-toolbox`` unless the session froze one
-    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`), which its Arbor agents are served
+    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`), which its component agents are served
     unless the operator gave them a launch file. Raises :class:`PeersUnavailable`
     when no base launch can be frozen or the session's canonical measurement cannot be taken.
 
@@ -602,18 +607,37 @@ def specialist_model(env: Mapping[str, str]) -> str:
     return resolve_forge_llm_model(preferred_agent_backend(env), env={**env, **provider_model_defaults(env)})
 
 
+#: Where install.sh installs the Claude CLI, below the home (``ensure_claude_cli``). Only a shell that sourced the
+#: kernel-agent env file has it on ``PATH``; a command line started from any other shell does not.
+INSTALLED_CLI_DIR = os.path.join(".local", "bin")
+
+
+def _installed_cli_dir(backend: str, env: Mapping[str, str]) -> str | None:
+    """The directory install.sh installs ``backend``'s CLI in under ``env``'s home (:data:`INSTALLED_CLI_DIR`); ``None``
+    for a backend it does not install there, or without an absolute ``HOME``."""
+
+    home = env.get("HOME", "")
+    if backend != AGENT_BACKEND_CLAUDE or not os.path.isabs(home):
+        return None
+    return os.path.join(home, INSTALLED_CLI_DIR)
+
+
 def specialist_command(env: Mapping[str, str]) -> AgentCommand:
     """The agent CLI every specialist of a session runs: the backend ``env`` is credentialed for, found on its
-    ``PATH``, on :func:`specialist_model`; raises :class:`PeersUnavailable` when that CLI is not installed. A model the
-    price sheet does not list records its tokens only, which the command line accepts only without a dollar cap, and
-    says so here."""
+    ``PATH``, else where install.sh installs it (:func:`_installed_cli_dir`), on :func:`specialist_model`; raises
+    :class:`PeersUnavailable` when that CLI is not installed. A model the price sheet does not list records its tokens
+    only, which the command line accepts only without a dollar cap, and says so here."""
 
     from hyperloom_multibranch.specialist.agent_session import AgentCommand
 
     backend = preferred_agent_backend(env)
+    installed = _installed_cli_dir(backend, env)
     executable = shutil.which(backend, path=env.get("PATH"))
+    if executable is None and installed is not None:
+        executable = shutil.which(backend, path=installed)
     if executable is None:
-        raise PeersUnavailable(f"the {backend} CLI the specialists run is not on PATH")
+        where = f" nor in {installed}" if installed else ""
+        raise PeersUnavailable(f"the {backend} CLI the specialists run is not on PATH{where}")
     model = specialist_model(env)
     if price_of(model) is None:
         logger.warning("the specialists run on %s, which the price sheet does not list: they record tokens only", model)
@@ -654,19 +678,40 @@ def _specialist_role(workload: Workload) -> str:
 AITER = "aiter"
 
 
+#: The variables that set a Claude CLI's prompt-cache TTL: its own, and its subagents'.
+PROMPT_CACHE_TTL_ENV = ("CLAUDE_CODE_PROMPT_CACHE_TTL", "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL")
+#: The TTL a specialist caches its prompt at on an InferenceX workload, where it waits for a test in the same
+#: conversation past the CLI's default of 5 minutes and would write the whole conversation to the cache again.
+INFERENCEX_PROMPT_CACHE_TTL = "1h"
+
+
+def specialist_env(workload: Workload) -> dict[str, str]:
+    """The environment a branch's specialist runs with: the main flow's allowlisted one, which carries the prompt-cache
+    TTL an operator sets, with :data:`INFERENCEX_PROMPT_CACHE_TTL` for each TTL it lacks on an InferenceX workload; on
+    an AgentX one, whose test outlasts even an hour's cache, the CLI keeps its own default."""
+
+    from hyperloom.orchestrator.specialists.agent_runner import build_specialist_env
+
+    env = dict(build_specialist_env())
+    if workload.inferencex is not None:
+        for name in PROMPT_CACHE_TTL_ENV:
+            env.setdefault(name, INFERENCEX_PROMPT_CACHE_TTL)
+    return env
+
+
 def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
     """Sessions that run ``command`` for every branch's specialist, in a worktree of the workload's framework, and
     each branch's third-party agent in a sandbox leased from the session's toolbox (``wiring.agent_sandboxes``), given
     the gate's benchmark client of the session's canonical configuration; a session that runs no agent reads no
     canonical.
 
-    The CLI runs on the main flow's allowlisted specialist environment, through a local AI work socket whose resource
-    log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
+    The CLI runs on :func:`specialist_env`, the main flow's allowlisted specialist environment with an InferenceX
+    workload's prompt-cache TTL, through a local AI work socket whose resource log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
     branch's brief at the head it starts from.
     """
 
     def build(wiring: SessionWiring) -> ModelSessions:
-        from hyperloom.orchestrator.specialists.agent_runner import Liveness, LocalAgentRunner, build_specialist_env
+        from hyperloom.orchestrator.specialists.agent_runner import Liveness, LocalAgentRunner
         from hyperloom_multibranch.specialist.agent_session import SPECIALIST_LOST_AFTER_S, AgentSetup
         from hyperloom_multibranch.specialist.agent_sessions import AgentSessions, with_agents
         from hyperloom_multibranch.specialist.model_sessions import model_sessions
@@ -685,7 +730,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
                 dev_leases=wiring.dev_leases.limits.cap if wiring.dev_leases else 0,
                 native=wiring.native,
             ),
-            env=build_specialist_env(),
+            env=specialist_env(workload),
             runner=LocalAgentRunner(
                 session_dir=layout.logs, liveness=Liveness(lost_after_seconds=SPECIALIST_LOST_AFTER_S)
             ),
@@ -826,10 +871,10 @@ def native_trees(environ: Mapping[str, str]) -> dict[str, NativeTree]:
 def _agent_spec(
     workload: Workload, pack: str = "", launch: str = "", port: int = AGENT_PORT, review: str = ""
 ) -> AgentSpec:
-    """What every agent of a session of ``workload`` is asked to optimize, an Arbor on ``pack`` when one is named,
-    served the launch in the file ``launch`` with the root's added when one is given, its own review gate handed over
-    as ``review`` says; the root's launch, the workspace, the cards and a port block from ``port`` on are each
-    branch's own."""
+    """What every agent of a session of ``workload`` is asked to optimize, a component agent on ``pack`` when one is
+    named, served the launch in the file ``launch`` with the root's added when one is given, its own review gate
+    handed over as ``review`` says; the root's launch, the workspace, the cards and a port block from ``port`` on are
+    each branch's own."""
 
     from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec
 
@@ -899,9 +944,11 @@ __all__ = [
     "AGENTX_ENV",
     "CLAIM_TTL_SECONDS",
     "GATE_WRITER",
+    "INFERENCEX_PROMPT_CACHE_TTL",
     "InferenceXCheckout",
     "LocalCards",
     "MeasurementHost",
+    "PROMPT_CACHE_TTL_ENV",
     "RENDER_NODE_DIR",
     "SessionWiring",
     "SpecialistSessions",
@@ -917,6 +964,7 @@ __all__ = [
     "render_nodes",
     "require_framework_package",
     "specialist_command",
+    "specialist_env",
     "specialist_model",
     "specialist_recall",
     "workload_environment",

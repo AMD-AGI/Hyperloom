@@ -49,16 +49,6 @@ def test_qualified():
         mct.qualified_context_tool_name("foo")
 
 
-def test_provider_projections():
-    p = _provider(shared_state=_shared_state())
-    assert p.mission_status() == "mission"
-    assert p.shared_state_summary() == "prompt"
-    assert p.gaps() == "gaps"
-    assert p.warm_start() == "warm"
-    assert p.proposal_scores() == "scores"
-    assert p.intervention_mix() == "mix"
-
-
 def test_safe_handles_exception():
     def boom():
         raise RuntimeError("x")
@@ -68,20 +58,10 @@ def test_safe_handles_exception():
         p._safe(boom, "lbl")
 
 
-def test_safe_empty_marker():
-    p = _provider(shared_state=SimpleNamespace())
-    assert p._safe(lambda: "", "lbl") == "(lbl: empty)"
-    assert p._safe(lambda: None, "lbl") == "(lbl: empty)"
-
-
-def test_why_denied_via_shared_state():
-    p = _provider(shared_state=_shared_state())
-    assert p.why_denied(top_k=3) == "denials(3)"
-
-
-def test_analysis_md_wired():
-    p = _provider(shared_state=_shared_state(), analysis_reader=lambda: "md")
-    assert p.analysis_md() == "md"
+def test_an_empty_projection_reads_as_empty():
+    p = _provider(shared_state=SimpleNamespace(to_mission_summary=lambda: ""), analysis_reader=lambda: None)
+    assert p.mission_status() == "(mission_status: empty)"
+    assert p.analysis_md() == "(analysis_md: empty)"
 
 
 def test_runtime_findings_reads_current_best_slot(tmp_path):
@@ -97,18 +77,7 @@ def test_runtime_findings_reads_current_best_slot(tmp_path):
     assert "get_runtime_findings" in mct.CONTEXT_TOOL_NAMES
 
 
-def test_tool_name_tuples():
-    assert "get_mission_status" in mct.CONTEXT_TOOL_NAMES
-    assert mct.CONTEXT_TOOL_QUALIFIED_NAMES[0].startswith("mcp__")
-    assert len(mct.CONTEXT_TOOL_NAMES) == len(mct.CONTEXT_TOOL_SPECS)
-
-
 # ---- sdk resolution ----
-
-
-def test_resolve_sdk_explicit():
-    sentinel = object()
-    assert mcp_sdk._resolve_sdk(sentinel) is sentinel
 
 
 def test_resolve_sdk_import_error(monkeypatch):
@@ -129,18 +98,19 @@ async def test_make_handler_success():
     assert out["content"][0]["text"] == "mission"
 
 
-async def test_make_handler_forwards_kwargs():
-    p = _provider(shared_state=_shared_state())
-    handler = mct._make_handler(p, "why_denied")
-    out = await handler({"top_k": 2})
-    assert out["content"][0]["text"] == "denials(2)"
-
-
-async def test_make_handler_forwards_since_seq():
+@pytest.mark.parametrize(
+    ("method_name", "args", "expected"),
+    [
+        ("why_denied", {"top_k": 2}, "denials(2)"),
+        ("inbox", {"since_seq": 9}, "inbox(9)"),
+        ("get_failure", {"failure_id": "fail.t1.abc"}, "fail.t1.abc"),
+    ],
+    ids=["top_k", "since_seq", "failure_id"],
+)
+async def test_make_handler_forwards_kwargs(method_name, args, expected):
     p = _provider(shared_state=_shared_state(), inbox_reader=lambda s: f"inbox({s})")
-    handler = mct._make_handler(p, "inbox")
-    out = await handler({"since_seq": 9})
-    assert out["content"][0]["text"] == "inbox(9)"
+    out = await mct._make_handler(p, method_name)(args)
+    assert expected in out["content"][0]["text"]
 
 
 async def test_make_handler_non_str_result():
@@ -207,6 +177,29 @@ def test_build_server_with_fake_factories():
     assert len(created["tools"]) == len(mct.CONTEXT_TOOL_SPECS)
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "text"),
+    [
+        ("get_mission_status", "mission"),
+        ("get_shared_state", "prompt"),
+        ("get_gaps", "gaps"),
+        ("get_warm_start", "warm"),
+        ("get_proposal_scores", "scores"),
+        ("get_intervention_mix", "mix"),
+        ("show_analysis_md", "md"),
+    ],
+)
+async def test_a_mounted_tool_returns_the_projection_it_names(tool_name, text):
+    handlers = {}
+    mct.build_context_tools_server(
+        _provider(shared_state=_shared_state(), analysis_reader=lambda: "md"),
+        tool_factory=lambda name, _description, _schema: lambda handler: handlers.setdefault(name, handler),
+        server_factory=lambda _name, _version, tools: tools,
+    )
+    out = await handlers[tool_name]({})
+    assert out["content"][0]["text"] == text
+
+
 def test_spec_methods_all_exist_on_provider():
     """Every CONTEXT_TOOL_SPECS entry must name a real ContextProvider method."""
     for _, _, _, method_name in mct.CONTEXT_TOOL_SPECS:
@@ -260,10 +253,3 @@ def test_get_variant_failures_returns_entries():
     assert len(lines) == 2
     ids = {json.loads(l)["failure_id"] for l in lines}
     assert ids == {"fail.t1.a", "fail.t1.b"}
-
-
-async def test_make_handler_forwards_failure_id():
-    p = _provider(shared_state=_shared_state())
-    handler = mct._make_handler(p, "get_failure")
-    out = await handler({"failure_id": "fail.t1.abc"})
-    assert "fail.t1.abc" in out["content"][0]["text"]

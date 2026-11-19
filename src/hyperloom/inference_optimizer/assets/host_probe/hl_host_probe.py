@@ -443,7 +443,7 @@ class HostProbe:
                             log.debug("host call record failed for %s", api, exc_info=True)
                     return result
 
-                wrapper._hl_host_probe = True  # type: ignore[attr-defined]
+                wrapper._hl_host_probe = True
                 return wrapper
 
             wrapper = make()

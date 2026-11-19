@@ -53,13 +53,13 @@ class _Stalls:
         self.inner, self.conclusion, self.refuse = inner, conclusion, refuse
         self.writing, self.release = asyncio.Event(), asyncio.Event()
 
-    async def write_judgement(self, request_id, judgement, conclusion, *args):
-        if conclusion is self.conclusion:
+    async def write_judgement(self, write):
+        if write.conclusion is self.conclusion:
             if self.refuse:
                 raise OSError("no space left on device")
             self.writing.set()
             await self.release.wait()
-        return await self.inner.write_judgement(request_id, judgement, conclusion, *args)
+        return await self.inner.write_judgement(write)
 
     def __getattr__(self, name):
         return getattr(self.inner, name)

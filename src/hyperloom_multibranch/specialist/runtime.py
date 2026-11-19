@@ -31,8 +31,8 @@ specialist: it is not restarted, and the branch's session is stopped so no candi
 judge. Both leave a notice in the branch log. A branch stopped with ``finish_tests`` keeps its judge, without its
 specialist, until no test of the branch is left in flight, so a test that wins after the stop still commits and is
 offered to the integrator; a plain stop ends that judge too. While the specialist writes a change, the runtime
-renews the claims it holds, so a claim does not lapse while a model thinks; once a test carries a claim, the toolbox
-renews it. When the scheduler stops a branch, its last session gives back what the branch's runs held across them.
+renews the claims it holds, so a claim does not lapse while a model thinks; once a test carries a claim, the claim
+follows that test and nobody renews it. When the scheduler stops a branch, its last session gives back what the branch's runs held across them.
 """
 
 from __future__ import annotations
@@ -104,7 +104,7 @@ class SessionFinished(RuntimeError):
 
 
 class SessionRefused(SessionFinished):
-    """A run of a third-party agent that refused the config it was given, as Arbor's exit 2 says, or kept a source change
+    """A run of a third-party agent that refused the config it was given (a component's exit 2) or kept a source change
     after being told none can land: started again, it would do so again, so it ends its specialist as a finished run
     does, with why."""
 

@@ -106,7 +106,8 @@ from hyperloom.common.ports import pick_server_port
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces, round_has_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC, SERVER_BOOT_TIMEOUT_RC
-from hyperloom.measure import ruppell
+from hyperloom.measure import second_tracer
+from hyperloom.measure.second_tracer import SecondTracer as _Tracer
 from hyperloom.measure.round_marks import ROLE_BOOT, ROLE_EVAL, ROLE_MEASURE, ROLE_WARMUP, RoundShape
 from hyperloom.measure.round_marks import profile_stall, read_runs, round_boundaries
 from hyperloom.sandbox.node import node_name
@@ -224,8 +225,8 @@ class _Run:
     held: HeldAnswers | None = None
     #: Whether the long-context check wrote its outputs on a server (or why a check server gave none).
     long_context_ran: bool = False
-    #: The ruppell that traces the test's server (a profile's); ``None`` when it runs untraced.
-    traced: ruppell.Tracer | None = None
+    #: The second tracer that traces the test's server (a profile's); ``None`` when it runs untraced.
+    traced: _Tracer | None = None
 
     def add(self, point: int, result: VariantResult) -> bool:
         """Record one result; say whether the test must go on."""
@@ -254,17 +255,15 @@ class LocalMeasurementBackend:
                 tracer = _tracer(call, notes)
                 run = _measure(call, phases, tracer, notes)
                 failed = _traced_attempt_failed(run)
-                if failed:
-                    notes.append(f"ruppell: attempt failed ({failed}), profiled again without it")
+                if failed and tracer is not None:
+                    notes.append(f"{tracer.name}: attempt failed ({failed}), profiled again without it")
                     _set_aside(run)
                     run = _measure(call, phases, None, notes)
             _raise_on_timeout(run)
             if run.call.kind == _PROFILE:
                 _gather_traces(run)
             if run.traced is not None:
-                notes.append(run.traced.report(Path(run.call.output_dir), _ranks(run.call)))
-                if run.traced.packet_capture_off:
-                    notes.append(ruppell.KINETO_NOTE)
+                notes.extend(run.traced.report(Path(run.call.output_dir), _ranks(run.call)))
         finally:
             if tracer is not None:
                 tracer.close()
@@ -294,7 +293,7 @@ def _staged(outcome: TestOutcome, call: TestCall, phases: PhaseRecorder) -> Test
     return outcome
 
 
-def _measure(call: TestCall, phases: PhaseRecorder, tracer: ruppell.Tracer | None, notes: list[str]) -> _Run:
+def _measure(call: TestCall, phases: PhaseRecorder, tracer: _Tracer | None, notes: list[str]) -> _Run:
     """Lay out the test's environment, run its rounds and give what they produced; ``tracer`` traces the server of a
     profile, when it can be given the points (a note says why not)."""
     with (
@@ -1015,31 +1014,31 @@ def _held_checks_of(call: TestCall) -> HeldChecks:
     return HeldChecks(call.short_prompts, call.long_context, Path(call.output_dir), served)
 
 
-def _tracer(call: TestCall, notes: list[str]) -> ruppell.Tracer | None:
-    """ruppell built for a profile test, or ``None`` with a note saying why the profile runs without it."""
+def _tracer(call: TestCall, notes: list[str]) -> _Tracer | None:
+    """The installed second tracer made ready for a profile test, or ``None``, with a note when it says why not."""
     if call.kind != _PROFILE:
         return None
-    prepared = ruppell.prepare(call.points, os.environ)
+    prepared = second_tracer.prepare(call.points, os.environ)
     if isinstance(prepared, str):
         notes.append(prepared)
         return None
     return prepared
 
 
-def _traced(call: TestCall, tracer: ruppell.Tracer | None, notes: list[str]) -> tuple[TestCall, ruppell.Tracer | None]:
+def _traced(call: TestCall, tracer: _Tracer | None, notes: list[str]) -> tuple[TestCall, _Tracer | None]:
     """The call whose points launch their servers under ``tracer``; unchanged, with a note, when it cannot be given
     them. Read in the test's own process environment, which the server inherits."""
     if tracer is None:
         return call, None
     try:
         return dataclasses.replace(call, points=tracer.traced_points(call.points, os.environ)), tracer
-    except (ruppell.RuppellError, OSError, ValueError, yaml.YAMLError) as exc:
-        notes.append(f"ruppell: skipped ({str(exc).strip()[:300]})")
+    except (second_tracer.TracerError, OSError, ValueError, yaml.YAMLError) as exc:
+        notes.append(f"{tracer.name}: skipped ({str(exc).strip()[:300]})")
         return call, None
 
 
 def _traced_attempt_failed(run: _Run) -> str:
-    """Why the traced attempt of a profile failed in a way a run without ruppell may not, or ``""``.
+    """Why the traced attempt of a profile failed in a way a run without the tracer may not, or ``""``.
 
     A round that failed, or passed with no trace, is run again; a timeout, a cancellation or a run out of the session's
     time is not: the time is spent.
@@ -1059,19 +1058,17 @@ def _traced_attempt_failed(run: _Run) -> str:
 
 def _set_aside(run: _Run) -> None:
     """Remove what the failed traced attempt left in the test's output, keeping the tail of its server log, so the
-    attempt without ruppell starts from an empty one and the bundle carries one attempt's traces."""
-    tracer = run.traced
-    assert tracer is not None
+    attempt without the tracer starts from an empty one and the bundle carries one attempt's traces."""
     output = Path(run.call.output_dir)
     for _, result in run.results:
-        tracer.keep_attempt(result.server_log_path, output)
+        second_tracer.keep_attempt(result.server_log_path, output)
         if result.workspace:
             shutil.rmtree(result.workspace, ignore_errors=True)
     shutil.rmtree(output / "capture_traces", ignore_errors=True)
 
 
 def _ranks(call: TestCall) -> int:
-    """The worker processes ruppell's check expects: the point's tensor-parallel size."""
+    """The worker processes a second tracer's check expects: the point's tensor-parallel size."""
     try:
         return max(1, int(_point(call.points[0]).envs.get(ENV_TP) or 1))
     except (TypeError, ValueError):

@@ -7,14 +7,14 @@ from __future__ import annotations
 
 import json
 
-from kernelforge.workflows.forge_fusion.discover import DiscoveryTarget
+from kernelforge.workflows.forge_fusion.discovery_prompt import DiscoveryTarget
 from kernelforge.workflows.forge_fusion import calibration as cal
 from kernelforge.workflows.forge_fusion.diagnose import (
     TraceProfile,
     diagnose_from_shares,
     load_op_bytes_from_kineto_trace,
 )
-from kernelforge.workflows.forge_fusion.discover import parse_discovered_recipes
+from kernelforge.workflows.forge_fusion.discovery_response import parse_discovered_recipes
 from kernelforge.workflows.forge_fusion.locate import FrameworkInstall, build_recipes, covered_by_vllm_compile_pass
 from kernelforge.workflows.forge_fusion.patterns import PATTERNS, match_patterns
 from kernelforge.workflows.forge_fusion.vllm_passes import PassState

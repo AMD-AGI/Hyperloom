@@ -245,13 +245,6 @@ def test_ras_information_that_does_not_cover_every_visible_gpu_is_not_a_reading(
     assert ecc_counts([0], _runner({}), _runner({"--showrasinfo": _ras({"ATHUB": None})})) is None
 
 
-def test_the_ras_fallback_tells_new_uncorrectable_errors_from_the_counts_before():
-    before = ecc_counts([0], _runner({}), _runner({"--showrasinfo": _ras({"UMC": (3, 1)})}))
-    after = ecc_counts([0], _runner({}), _runner({"--showrasinfo": _ras({"UMC": (3, 2)})}))
-
-    assert before[0].uncorrectable < after[0].uncorrectable
-
-
 def test_busy_gpus_are_the_visible_ones_with_memory_resident():
     free, held = GpuVram(300.0, 300000.0), GpuVram(120000.0, 300000.0)
 

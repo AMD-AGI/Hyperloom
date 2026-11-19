@@ -53,6 +53,7 @@ def _resolve_vllm_aiter_routing(
     model_path: str,
     server_log: str,
     tp: int,
+    gpu_type: str,
 ) -> VllmAiterRouting:
     """Resolve the aiter-routing flags for a vLLM run from runtime evidence."""
     evidence = _aiter_serving_evidence(server_log)
@@ -71,7 +72,7 @@ def _resolve_vllm_aiter_routing(
     bf16_dense = "bf16_dense" in evidence and not is_moe
 
     fused_moe = False
-    if "fused_moe" in evidence and is_moe and _aiter_ck_moe_tuner_supports(server_log):
+    if "fused_moe" in evidence and is_moe and _aiter_ck_moe_tuner_supports(server_log, gpu_type):
         # Only route MoE when aiter's CK fused-MoE can actually serve this
         # checkpoint at this TP -- otherwise the tuner has no reachable target.
         from hyperloom.inference_optimizer.model_config_utils import (
@@ -103,17 +104,8 @@ def _warn_if_moe_routing_is_coarser_than_the_log(server_log: str, routing: VllmA
     """
     if not routing.fused_moe:
         return
-    try:
-        from kernelforge.workflows.gemm_tune import parse_log_file
-    except ImportError:
-        # kernelforge is in this wheel, so a miss is a broken install, and a bare return makes the
-        # missing routing warning indistinguishable from a clean run.
-        log.warning(
-            "kernelforge.workflows.gemm_tune is not importable, so the aiter/vLLM MoE "
-            "routing check is skipped -- it ships with Hyperloom, so this means "
-            'an incomplete install; reinstall with pip install -e ".[forge]"'
-        )
-        return
+    from kernelforge.workflows.gemm_tune import parse_log_file
+
     moe = (parse_log_file(server_log).get("dispatch") or {}).get("moe") or {}
     if moe.get("impl") == "mixed" or moe.get("vllm_config_hit"):
         log.warning(

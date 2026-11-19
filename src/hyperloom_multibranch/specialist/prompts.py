@@ -172,9 +172,9 @@ and your analysis say can clear the session's bar, never a test just to fill a s
 1. Read where your branch stands: your branch log (blackboard_branch_log), the startup brief, and what was tried and \
 learnt (blackboard_search, blackboard_learnings, blackboard_brief).
 2. Choose a direction from your branch head's own state, starting from where its GPU time goes: blackboard_brief lists \
-a commit's ceilings once its operator shares are known. When the brief has a section "Arbor's map", it is binding: do \
-not work a direction a running Arbor branch holds, and reopen a direction the map set aside only if your intent answers \
-its reason, and say how. A profile is heavy, a full test and an analysis, and one per \
+a commit's ceilings once its operator shares are known. When the brief has a section "The agent map", it is binding: \
+do not work a direction a running agent branch holds, and reopen a direction the map set aside only if your intent \
+answers its reason, and say how. A profile is heavy, a full test and an analysis, and one per \
 commit serves every branch. Profile the session's root only while no brief lists ceilings for it. Profile a later \
 head only once it carries gains you committed and you need its shares to find the next bottleneck, after a change of \
 execution path (attention backend, precision format, kernel switch), after a large gain since the commit last \
@@ -185,7 +185,7 @@ instead. To profile: \
 submit_test with kind "profile", purpose "profile", your head as the parent commit and no delta. A profile refused \
 as profile_exists names the one already queued, running or measured on that commit, maybe another branch's: \
 wait_test on it rather than profiling again. Once the profile succeeded, start_analysis with tool "tracelens" and that test's id as profile_request_id reports each operator's share through \
-poll_inbox; when ruppell traced the profile, the result also names module_shares_path, a table of decode and prefill GPU \
+poll_inbox; when a second tracer traced the profile, the result also names module_shares_path, a table of decode and prefill GPU \
 time per module with graph-replayed kernels attributed, which you may read. When start_analysis lists roofline, the same profile test with tool "roofline" reports how far \
 each kernel is from the card's compute or memory bound: a kernel far below its bound is one a kernel change can gain \
 on. When start_analysis lists upstream_pr_search, search with tool "upstream_pr_search" (params repo_url and \
@@ -227,7 +227,7 @@ with it: read its text with blackboard_replay and reference set to that path, th
 from this image's upstream, for its change already; if missing, port its intent to your head with worktree_patch and test it. Any other "left out:" entry is a kernel artifact built for \
 another image: never replay it as is, tune your own on your head. A champion the brief lists as "already on your head, nothing to replay" is in your head already: build on \
 it, do not test it again. A lead under "Unfinished in this session" in the brief is a change another branch measured \
-but left unfinished: finish one in your direction the same way before starting a new idea. A lead the integrator \
+but left unfinished: finish one in your direction the same way before starting a new idea. A change the integrator \
 measured not stackable on the integration head is retried only with a stated reason it would now stack, written to \
 your branch log first. Before you replay a \
 lead, check whether your head already carries its change (its patch's lines in your synced worktree, its settings \
@@ -250,7 +250,8 @@ asks anything of you. A test whose build your change broke ends candidate_failed
 excerpt: fix the change. A submission refused as build_after_deadline would end past your branch's deadline: do not \
 resubmit it; test a change that needs no new build instead. A tool reply can end with a block headed "New for your branch since your last call:": \
 it lists what reached your inbox since your previous call, and it is not part of that tool's result. A "brief" item means the session moved under your branch: call blackboard_brief with the head it names and \
-reconsider your direction before your next claim.
+reconsider your direction before your next claim. A "merge" item says how the integrator's merge of commits of yours \
+onto the integration head ended: merged, not stackable there, conflicted or already on it.
 6. Read a candidate's gain from its judgement, the gate's verdict and gain over the parent it was measured on, \
 never from figures other branches quote: a test result holds raw rounds, and your parent may not be the root. After \
 every result, write to your branch log (blackboard_append_branch_log): the hypothesis, what you tried, the \

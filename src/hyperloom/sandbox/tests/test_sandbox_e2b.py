@@ -21,7 +21,6 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 import e2b
-import httpx
 import pytest
 
 from hyperloom.sandbox import CreateOptions, OutputSinks, RunSettings
@@ -605,47 +604,8 @@ def test_keys_stay_out_of_repr_errors_and_logs(
     assert not any(KEY_DEV in text or KEY_MEASUREMENT in text for text in shown)
 
 
-def test_from_environ_reads_the_keys_and_both_addresses(service: _Service) -> None:
-    environ = {
-        "HYPERLOOM_SANDBOX_KEY_DEV": KEY_DEV,
-        "HYPERLOOM_SANDBOX_KEY_SUBRUN": "",
-        "E2B_API_URL": service.url,
-        "E2B_SANDBOX_URL": service.url,
-    }
-    provider = E2BSandboxProvider.from_environ(environ, retry=FAST)
-    assert repr(provider) == "E2BSandboxProvider(roles=['dev'])"
-    service.reply("GET", "/v2/sandboxes", (200, []))
-    assert provider.find({}, role="dev") == []
-    assert service.calls("GET", "/v2/sandboxes")[0].headers["x-api-key"] == KEY_DEV
-
-
 #: Addresses that resolve nowhere, for a provider that is refused before it sends anything.
 NOWHERE = {"E2B_API_URL": "http://api.invalid", "E2B_SANDBOX_URL": "http://sandboxes.invalid"}
-
-
-@pytest.mark.parametrize("missing", sorted(NOWHERE))
-@pytest.mark.parametrize("given", ["unset", "empty"])
-def test_from_environ_refuses_a_missing_service_url_before_any_request(
-    monkeypatch: pytest.MonkeyPatch, missing: str, given: str
-) -> None:
-    """Without the URL the SDK would take its own default, the public E2B service, and send it the role's key."""
-    for name in (*NOWHERE, "E2B_DOMAIN"):
-        monkeypatch.delenv(name, raising=False)
-    sent: list[httpx.Request] = []
-
-    def send(client: httpx.Client, request: httpx.Request, *args: Any, **kwargs: Any) -> httpx.Response:
-        sent.append(request)
-        raise httpx.ConnectError("intercepted", request=request)
-
-    monkeypatch.setattr(httpx.Client, "send", send)
-    environ = {"HYPERLOOM_SANDBOX_KEY_DEV": KEY_DEV, **NOWHERE}
-    if given == "unset":
-        del environ[missing]
-    else:
-        environ[missing] = ""
-    with pytest.raises(ValueError, match=f"^{missing} is not set"):
-        E2BSandboxProvider.from_environ(environ, retry=FAST).find({}, role="dev")
-    assert [str(request.url) for request in sent] == []
 
 
 @pytest.mark.parametrize("blank", ["api_url", "sandbox_url"])
@@ -675,26 +635,6 @@ def test_the_workspace_goes_with_every_create_and_a_workspace_the_caller_names_w
         {WORKSPACE_KEY: "other", PENDING_TIMEOUT_KEY: "60"},
     ]
     assert given == {"a": "b"}, "the caller's mapping is not changed"
-
-
-@pytest.mark.parametrize(
-    ("named", "sent"),
-    [
-        ({}, {"a": "b"}),
-        ({WORKSPACE_ENV: ""}, {"a": "b"}),
-        ({WORKSPACE_ENV: WORKSPACE}, {"a": "b", WORKSPACE_KEY: WORKSPACE}),
-    ],
-    ids=["unset_as_on_claw", "empty", "set_for_a_safe_key"],
-)
-def test_from_environ_sends_a_workspace_only_when_the_variable_names_one(
-    service: _Service, named: dict[str, str], sent: dict[str, str]
-) -> None:
-    environ = {"HYPERLOOM_SANDBOX_KEY_DEV": KEY_DEV, "E2B_API_URL": service.url, "E2B_SANDBOX_URL": service.url}
-    provider = E2BSandboxProvider.from_environ({**environ, **named}, retry=FAST)
-    service.reply("POST", "/v2/sandboxes", (201, SANDBOX))
-    _create(provider, metadata={"a": "b"})
-    [call] = service.calls("POST", "/v2/sandboxes")
-    assert call.body["metadata"] == {**sent, PENDING_TIMEOUT_KEY: "60"}
 
 
 def test_a_blank_workspace_is_refused() -> None:

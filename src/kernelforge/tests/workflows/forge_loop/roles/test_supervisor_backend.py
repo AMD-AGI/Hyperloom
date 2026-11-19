@@ -153,6 +153,7 @@ def test_supervisor_backend_initialization_failure_reaches_the_runner(
     )
 
     supervisor_fn = make_supervisor_fn(
+        gpu_target="gfx942",
         program_md="Optimize the kernel.",
         backend="codex",
         config=config,
@@ -199,12 +200,13 @@ def test_supervisor_api_failure_is_not_parsed_or_repaired(
         fake_factory,
     )
     supervisor_fn = make_supervisor_fn(
+        gpu_target="gfx942",
         config=Config(
             workspace=str(tmp_path),
             agent_backend="codex",
             agent_model="gpt-codex-test",
             agent_precheck=False,
-        )
+        ),
     )
 
     with pytest.raises(SupervisorBackendFailure, match="^gateway unavailable$"):
@@ -264,7 +266,7 @@ def test_supervisor_provider_switch_clears_backend_specific_runtime(
         agent_options={"codex_only": True},
     )
 
-    supervisor_fn = make_supervisor_fn(backend="claude", config=config)
+    supervisor_fn = make_supervisor_fn(gpu_target="gfx942", backend="claude", config=config)
     asyncio.run(
         supervisor_fn(
             digest="iteration stalled",
@@ -332,6 +334,7 @@ def test_codex_supervisor_uses_shared_backend_config_and_usage(
     )
     usage = object()
     supervisor_fn = make_supervisor_fn(
+        gpu_target="gfx942",
         program_md="Optimize the kernel.",
         backend="codex",
         config=config,

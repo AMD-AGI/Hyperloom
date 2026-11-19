@@ -6,6 +6,8 @@ import argparse
 import json
 from pathlib import Path
 
+import pytest
+
 from hyperloom.inference_optimizer.cli import model_gate as cli
 
 
@@ -180,26 +182,21 @@ def test_detect_phi3v_causal_lm_rejected(tmp_path):
     assert "Phi3VForCausalLM" in hit["signal"]
 
 
-def test_detect_causal_lm_allowed(tmp_path):
-    """Standard ForCausalLM architectures pass through."""
-    for i, arch in enumerate(["MistralForCausalLM", "Qwen2ForCausalLM", "LlamaForCausalLM"]):
-        m = tmp_path / f"text{i}"
-        _write_config(m, {"architectures": [arch], "model_type": "llama"})
-        assert cli._detect_unsupported_model(str(m)) is None
-
-
-def test_detect_causal_lm_variant_allowed(tmp_path):
-    """Text-generation variants with suffixes after ForCausalLM pass through."""
-    for i, arch in enumerate(["DeepseekV3ForCausalLMNextN", "LlamaForCausalLMEagle3"]):
-        m = tmp_path / f"variant{i}"
-        _write_config(m, {"architectures": [arch], "model_type": "llama"})
-        assert cli._detect_unsupported_model(str(m)) is None
-
-
-def test_detect_lm_head_model_allowed(tmp_path):
-    """GPT2LMHeadModel style architectures pass through."""
-    m = tmp_path / "gpt2"
-    _write_config(m, {"architectures": ["GPT2LMHeadModel"], "model_type": "gpt2"})
+@pytest.mark.parametrize(
+    ("arch", "model_type"),
+    [
+        ("MistralForCausalLM", "llama"),
+        ("Qwen2ForCausalLM", "llama"),
+        ("LlamaForCausalLM", "llama"),
+        ("DeepseekV3ForCausalLMNextN", "llama"),
+        ("LlamaForCausalLMEagle3", "llama"),
+        ("GPT2LMHeadModel", "gpt2"),
+    ],
+)
+def test_detect_causal_lm_allowed(tmp_path, arch, model_type):
+    """ForCausalLM architectures, their suffixed variants and GPT2LMHeadModel-style ones pass through."""
+    m = tmp_path / "text"
+    _write_config(m, {"architectures": [arch], "model_type": model_type})
     assert cli._detect_unsupported_model(str(m)) is None
 
 
@@ -242,30 +239,23 @@ def test_detect_causal_lm_with_vision_config_is_text_coercible(tmp_path):
     assert "vision_config" in hit["signal"]
 
 
-def test_detect_kimi_k25_text_coercible(tmp_path):
-    """Kimi-K2.6 carries vision_config but its text MoE path benchmarks fine -> text_coercible (degrade with warning), not fail-fast."""
-    m = tmp_path / "kimi_k25"
+@pytest.mark.parametrize(
+    ("arch", "model_type"),
+    [
+        ("KimiK25ForConditionalGeneration", "kimi_k25"),
+        ("Qwen3_5MoeForConditionalGeneration", "qwen3_5_moe"),
+    ],
+)
+def test_detect_vision_config_text_moe_is_text_coercible(tmp_path, arch, model_type):
+    """Kimi-K2.6 and Qwen3.6 MoE carry vision_config but their text MoE path benchmarks fine -> text_coercible (degrade
+    with warning), not fail-fast.
+    """
+    m = tmp_path / model_type
     _write_config(
         m,
         {
-            "architectures": ["KimiK25ForConditionalGeneration"],
-            "model_type": "kimi_k25",
-            "vision_config": {"hidden_size": 1024},
-        },
-    )
-    hit = cli._detect_unsupported_model(str(m))
-    assert hit is not None
-    assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
-
-
-def test_detect_qwen35_moe_text_coercible(tmp_path):
-    """Qwen3.6 MoE carries vision_config but benchmarks as text-only -> text_coercible."""
-    m = tmp_path / "qwen3_5_moe"
-    _write_config(
-        m,
-        {
-            "architectures": ["Qwen3_5MoeForConditionalGeneration"],
-            "model_type": "qwen3_5_moe",
+            "architectures": [arch],
+            "model_type": model_type,
             "vision_config": {"hidden_size": 1024},
         },
     )
@@ -407,16 +397,6 @@ def test_preflight_allows_missing_config(tmp_path, monkeypatch):
 
 
 # 3. stop_reason vocabulary registration
-def test_stop_reason_is_canonical_vocab():
-    from hyperloom.inference_optimizer.breakdown.stop_reasons import (
-        STOP_REASON_VOCAB,
-        is_valid_stop_reason,
-    )
-
-    assert "unsupported_model_arch" in STOP_REASON_VOCAB
-    assert is_valid_stop_reason("unsupported_model_arch")
-
-
 def test_preflight_persists_stop_reason_under_strict_env(tmp_path, monkeypatch):
     """Under strict mode the preflight must still persist the stop_reason."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_STRICT_STOP_REASON", "1")

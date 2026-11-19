@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.config import Config
-from kernelforge.workflows.forge_loop.memory import knowledge_integration as experience_integration
+from kernelforge.workflows.forge_loop.memory import kb_warmstart as warmstart
 from kernelforge.knowledge.kb_store import writer as experience_sink
 from kernelforge.config import KnowledgeConfig, KnowledgeStoreMode
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
@@ -692,7 +692,7 @@ def test_a_refused_measured_write_back_redacts_the_error_that_opened_the_store(
 
     monkeypatch.setattr(agent_kb_module, "create_rewrite_record_store", refuse_to_open)
 
-    writeback = experience_integration._record_measured_speedup(
+    writeback = warmstart._record_measured_speedup(
         _remote_config_with_token(tmp_path, token),
         {
             "solution_slug": f"{SOFTMAX_IDENTITY}/kda-attn-session",

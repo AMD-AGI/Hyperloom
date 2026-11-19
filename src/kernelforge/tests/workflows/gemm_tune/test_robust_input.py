@@ -16,13 +16,9 @@ from kernelforge.workflows.gemm_tune.pipeline import (
     _safe_is_file,
 )
 from kernelforge.workflows.gemm_tune.evidence import padded_m
-from kernelforge.workflows.gemm_tune.tuners import _aiter_dense_common as ac
-from kernelforge.workflows.gemm_tune.tuners._aiter_dense_common import (
-    _conform_csv_columns,
-    _parse_tuner_stdout,
-    _resolve_input_csv,
-    validate_dense_tuner_inputs,
-)
+from kernelforge.workflows.gemm_tune.tuners import _aiter_dense_inputs as adi
+from kernelforge.workflows.gemm_tune.tuners._aiter_dense_common import _parse_tuner_stdout, validate_dense_tuner_inputs
+from kernelforge.workflows.gemm_tune.tuners._aiter_dense_inputs import _conform_csv_columns, _resolve_input_csv
 from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
 from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
 
@@ -36,7 +32,7 @@ _STUB_FP8 = "torch.float8_e4m3fn"
 @pytest.fixture
 def stub_fp8_dtype(monkeypatch):
     """Resolve dtypes without aiter so these stay pure unit tests."""
-    monkeypatch.setattr(ac, "_aiter_dtype_str", lambda alias: _STUB_FP8)
+    monkeypatch.setattr(adi, "_aiter_dtype_str", lambda alias: _STUB_FP8)
     return _STUB_FP8
 
 
@@ -387,8 +383,8 @@ def test_aiter_dtype_str_rejects_a_dtype_outside_aiters_table(monkeypatch):
     )
     monkeypatch.setitem(__import__("sys").modules, "aiter", fake)
 
-    with pytest.raises(ac.AiterDtypeUnavailable, match="dtype2str_dict"):
-        ac._aiter_fp8_dtype_str()
+    with pytest.raises(adi.AiterDtypeUnavailable, match="dtype2str_dict"):
+        adi._aiter_fp8_dtype_str()
 
 
 def test_aiter_dtype_str_reports_a_missing_alias(monkeypatch):
@@ -397,8 +393,8 @@ def test_aiter_dtype_str_reports_a_missing_alias(monkeypatch):
     fake = types.SimpleNamespace(dtypes=types.SimpleNamespace(), dtype2str_dict={})
     monkeypatch.setitem(__import__("sys").modules, "aiter", fake)
 
-    with pytest.raises(ac.AiterDtypeUnavailable, match="no dtypes.fp4x2"):
-        ac._aiter_dtype_str("fp4x2")
+    with pytest.raises(adi.AiterDtypeUnavailable, match="no dtypes.fp4x2"):
+        adi._aiter_dtype_str("fp4x2")
 
 
 def test_manifest_keeps_curated_shapes_in_thorough_mode(tmp_path, monkeypatch):

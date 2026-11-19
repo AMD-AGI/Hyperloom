@@ -425,15 +425,6 @@ def test_kb_section_renders_research_hints_when_kb_empty():
     assert "COLD-START MODE" not in text
 
 
-def test_bare_cold_start_still_uses_domain_focus_fallback():
-    from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import _section_kb_context
-
-    inp = SpecialistPromptInputs(domain="serving_specialist")
-    text = "\n".join(_section_kb_context(inp))
-    assert "COLD-START MODE" in text
-
-
 def test_scout_focus_lists_already_proven():
     from hyperloom.orchestrator.prompts.specialist_focus import _focus_research_scout_specialist
     from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs

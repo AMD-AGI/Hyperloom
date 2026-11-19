@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The two files of the AgentX client staging patches, as agentx-harness 1.0.13 installs them.
+"""The three files of the AgentX client staging patches, as agentx-harness 1.0.13 installs them.
 
-The whole output length metric module, and the part of ``inference_result_parser.py`` around the branch that returns a
-parsed record found invalid as an error record. A test of the patch that holds these and one that is given the real
-installed client (``INFERENCE_SUITE_TEST_AIPERF_SITE``) anchor on the same text.
+The whole output length metric module, the part of ``inference_result_parser.py`` around the branch that returns a
+parsed record found invalid as an error record, and the part of ``callback_handler.py`` around the warmup abort's
+warning. A test of the patch that holds these and one that is given the real installed client
+(``INFERENCE_SUITE_TEST_AIPERF_SITE``) anchor on the same text.
 """
 
 from __future__ import annotations
@@ -14,10 +15,35 @@ import base64
 import hashlib
 from pathlib import Path
 
-#: Where the two files are below the client environment's site-packages, written out and not read from the patch.
+#: Where the three files are below the client environment's site-packages, written out and not read from the patch.
 PARSER_FILE = "aiperf/records/inference_result_parser.py"
 METRIC_FILE = "aiperf/metrics/types/output_sequence_length_metric.py"
+CALLBACK_FILE = "aiperf/credit/callback_handler.py"
 DIST_INFO = "agentx_harness-1.0.13.dist-info"
+
+CALLBACK = """\
+        record_warmup_failure = getattr(handler.strategy, "record_warmup_failure", None)
+        if record_warmup_failure is None:
+            return
+        record_warmup_failure(credit.conversation_id)
+        if self._on_warmup_abort is None or self._warmup_abort_triggered:
+            return
+        self._warmup_abort_triggered = True
+        _logger.warning(
+            lambda: f"Terminal warmup failure for trace {credit.conversation_id}; "
+            f"aborting run early (broadcasting ProfileCancelCommand)."
+        )
+        try:
+            await self._on_warmup_abort()
+        except Exception as exc:
+            # Mirror the records-side threshold abort: if the broadcast fails,
+            # reset the flag so a later warmup return retries, and the runner's
+            # teardown backstop can still surface the failure.
+            self._warmup_abort_triggered = False
+            _logger.warning(
+                lambda exc=exc: f"Failed to broadcast warmup abort: {exc!r}"
+            )
+"""
 
 PARSER = """\
         else:
@@ -132,10 +158,16 @@ def record_line(relative: str, data: bytes) -> str:
     return f"{relative},sha256={digest},{len(data)}\r\n"
 
 
-def write_site(site: Path, *, parser: str = PARSER, metric: str = OUTPUT_LENGTH_METRIC) -> Path:
-    """A site-packages directory at ``site`` where agentx-harness installed the given two files; its ``RECORD``."""
+#: Each file the patch rewrites, with its text as the released client installs it.
+SOURCES = ((PARSER_FILE, PARSER), (METRIC_FILE, OUTPUT_LENGTH_METRIC), (CALLBACK_FILE, CALLBACK))
+
+
+def write_site(
+    site: Path, *, parser: str = PARSER, metric: str = OUTPUT_LENGTH_METRIC, callback: str = CALLBACK
+) -> Path:
+    """A site-packages directory at ``site`` where agentx-harness installed the given three files; its ``RECORD``."""
     rows = []
-    for relative, text in ((PARSER_FILE, parser), (METRIC_FILE, metric)):
+    for relative, text in ((PARSER_FILE, parser), (METRIC_FILE, metric), (CALLBACK_FILE, callback)):
         (site / relative).parent.mkdir(parents=True, exist_ok=True)
         (site / relative).write_text(text, encoding="utf-8")
         rows.append(record_line(relative, text.encode()))

@@ -52,13 +52,9 @@ What holds, for operators. After step 1 nothing the runner or pip runs comes fro
 every module it imports later included, comes from the copy unpacked on the sandbox's disk from bytes that matched the
 manifest, and pip installs the copies of the wheels that matched it. A file of the entry that changes after the check (in
 ``source/``, ``source.tar``, a wheel or the manifest) never reaches the runner or pip, so for the runner's code and
-wheels it no longer matters who else can write the cache once the check has run. Later in a test the runner reads two
-more things from the cache:
+wheels it no longer matters who else can write the cache once the check has run. Later in a test the runner reads one
+more thing from the cache:
 
-- The ruppell tree (``<cache>/tools/ruppell-<commit>/source``, :mod:`hyperloom.measure.ruppell`), the one other piece of
-  code, which a profile test builds and runs in the measured server. The test copies the tree into its own directory
-  first and checks the copy against :data:`~hyperloom.measure.ruppell.RUPPELL_TREE_SHA256`, so what is built is the
-  pinned tree whatever the cache holds before, during or after the copy.
 - The prompts of an evalset (``<cache>/evalsets/<key>``, :mod:`hyperloom.measure.short_prompts.staging`), data and
   never code. The check reads the prompts file the entry's manifest names and compares it with the SHA-256 the plan
   names; the test then loads ``data/prompts.jsonl`` from the cache again. So whoever can write the cache can still

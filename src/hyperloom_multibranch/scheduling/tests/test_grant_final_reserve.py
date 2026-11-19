@@ -295,7 +295,7 @@ async def test_the_reserve_covers_two_candidates_sweeps_reproductions_and_regres
 ) -> None:
     cases = {"i1": (CASE_SEC,) * 4, "c7": (CASE_SEC,) * 4}
 
-    work, needed = await _validated(FinalCandidates(INTEGRATION, BRANCH), parallel, cases)
+    work, needed = await _validated(FinalCandidates(INTEGRATION, BRANCH, 1000.0), parallel, cases)
 
     sweep = len(WORKLOAD.final_concs) * TEST_SEC
     assert len(WORKLOAD.final_concs) == 3
@@ -307,8 +307,8 @@ async def test_the_reserve_covers_two_candidates_sweeps_reproductions_and_regres
 async def test_more_slots_keep_a_smaller_reserve_but_never_less_than_the_longest_sweep() -> None:
     cases = {"i1": (CASE_SEC, CASE_SEC), "c7": (CASE_SEC, CASE_SEC)}
 
-    one, _ = await _validated(FinalCandidates(INTEGRATION, BRANCH), 1, cases)
-    four, _ = await _validated(FinalCandidates(INTEGRATION, BRANCH), 4, cases)
+    one, _ = await _validated(FinalCandidates(INTEGRATION, BRANCH, 1000.0), 1, cases)
+    four, _ = await _validated(FinalCandidates(INTEGRATION, BRANCH, 1000.0), 4, cases)
     many = replace(four, parallel=64)
 
     assert final_reserve_seconds(four) < final_reserve_seconds(one)
@@ -318,7 +318,7 @@ async def test_more_slots_keep_a_smaller_reserve_but_never_less_than_the_longest
 async def test_a_sweep_dominated_chain_whose_sweep_meets_two_infra_failures_ends_inside_the_reserve() -> None:
     root = FinalCandidate("integration", INTEGRATION_BRANCH, ROOT, None, root=True)
 
-    work, needed = await _validated(FinalCandidates(root, None), 4, {}, sweep_failures=2)
+    work, needed = await _validated(FinalCandidates(root, None, 1000.0), 4, {}, sweep_failures=2)
 
     assert work.longest == len(WORKLOAD.final_concs) * TEST_SEC
     assert final_reserve_seconds(work) >= needed

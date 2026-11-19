@@ -341,8 +341,8 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     )
     assert "Chosen: integration `i1`" in markdown
     header = (
-        "| candidate | commit | eligible | reproduced | gain % | refused by | waived for the root "
-        "| regression cases | degraded concs | error |"
+        "| candidate | commit | eligible | gain over baseline % | reproduced | vs its record % | refused by "
+        "| waived for the root | regression cases | degraded concs | error |"
     )
     assert header in markdown
     assert f"Experiences: {DISABLED} {MB_FAKE_EXPERIENCE_KB}" in markdown
@@ -657,30 +657,43 @@ def test_a_report_that_records_a_final_choice_refuses_a_second_final(layout: Ses
         ended_before_final(_written(layout, SessionStopReason.TIME_EXHAUSTED, CHOICE))
 
 
-def test_the_report_says_how_each_candidate_reproduced_and_how_many_regression_cases_ran_on_it() -> None:
+def test_the_report_says_each_candidate_s_gain_over_the_baseline_how_it_reproduced_and_its_regression_cases() -> None:
     chosen = FinalCandidate("integration", INTEGRATION_BRANCH, CHOSEN, 1041.0, root=True)
     checks = (
-        CandidateCheck(chosen, {64: 1041.0}, True, True, True, regression_cases=2, waived=("p90_regressed",)),
+        CandidateCheck(
+            chosen,
+            {64: 1041.0},
+            True,
+            True,
+            True,
+            regression_cases=2,
+            gain_pct=4.9,
+            reproduction_pct=-0.5,
+            waived=("p90_regressed",),
+        ),
         CandidateCheck(
             FinalCandidate("best branch", "b01", "c7", 1030.0),
             {64: 1030.0},
             True,
             False,
             True,
-            gain_pct=-6.4,
+            gain_pct=-1.2,
+            reproduction_pct=-6.4,
             refused_by=("below_reproduction_tolerance", "extra_failed_requests"),
         ),
+        CandidateCheck(FinalCandidate("other", "b02", "c8", 1020.0), error="a validation test was withdrawn"),
     )
     final = FinalChoice(chosen, checks, "the higher value", METRIC, 64)
     report = CloseReport(SessionStopReason.TIME_EXHAUSTED, final, None, StopReport((), QueueState()), "")
 
     lines = report_markdown(report, "s", ISOLATION).splitlines()
 
-    assert "| integration | `i1` | True | True |  |  | p90_regressed | 2 |  |  |" in lines
+    assert "| integration | `i1` | True | +4.9 | True | -0.5 |  | p90_regressed | 2 |  |  |" in lines
     assert (
-        "| best branch | `c7` | False | False | -6.4 | below_reproduction_tolerance, extra_failed_requests |  | 0 |  |  |"
-        in lines
+        "| best branch | `c7` | False | -1.2 | False | -6.4 | below_reproduction_tolerance, extra_failed_requests |  | 0 "
+        "|  |  |" in lines
     )
+    assert "| other | `c8` | False |  | False |  |  |  | 0 |  | a validation test was withdrawn |" in lines
 
 
 def test_the_report_of_a_session_whose_manifest_recorded_no_isolation_says_so() -> None:

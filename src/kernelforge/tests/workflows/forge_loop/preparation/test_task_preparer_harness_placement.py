@@ -22,6 +22,7 @@ import ast
 from pathlib import Path
 
 from kernelforge.workflows.forge_loop.preparation import task_preparer
+from kernelforge.workflows.forge_loop.preparation import task_scaffold
 
 
 def _placement_expression(name: str) -> ast.expr:
@@ -92,8 +93,8 @@ def test_what_is_shipped_is_the_module_the_tests_exercise() -> None:
     property that makes ``_dist_harness_text`` read the file instead of
     importing it.
     """
-    shipped = task_preparer._dist_harness_text()
-    on_disk = Path(task_preparer.__file__).parent / "dist_harness.py"
+    shipped = task_scaffold._dist_harness_text()
+    on_disk = Path(task_scaffold.__file__).parent / "dist_harness.py"
 
     assert shipped == on_disk.read_text(encoding="utf-8")
 
@@ -104,7 +105,7 @@ def test_the_shipped_source_offers_the_entry_point_the_prompt_names() -> None:
     Read rather than executed: the module imports torch, and this suite runs on
     images without it.
     """
-    shipped = task_preparer._dist_harness_text()
+    shipped = task_scaffold._dist_harness_text()
     assert shipped is not None
     tree = ast.parse(shipped)
     defined = {

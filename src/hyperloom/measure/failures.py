@@ -7,8 +7,8 @@ One function decides for the local backend, the hosted backend and the runner, s
 wherever it is read. The classes drive different follow-ups in the tool layer:
 
 * ``infra``: nothing about the candidate was learned; retry in a fresh sandbox, write no negative result;
-* ``candidate``: the log carries a known failure signature, the server refused its own command line, or it did not
-  become ready within its boot limit; record a negative result;
+* ``candidate``: the log carries a known failure signature, the server or the suite refused its own command line, or
+  it did not become ready within its boot limit; record a negative result;
 * ``unclear``: non-zero with no known signature, a stalled server, or a timeout; rerun once in a fresh sandbox. The
   reason still names what the log says (a refused evaluation request, a Python exception) when it says anything. A
   profile's server that stalled with its profile window open is no candidate's doing: :data:`PROFILER_HUNG`, ``infra``.
@@ -32,6 +32,7 @@ from hyperloom.common.failure_signature import (
     HIP_KERNEL_MISSING,
     HIP_RUNTIME_ERROR,
     IMPORT_ERROR,
+    RESOURCE_CONSTRAINT,
     SERVE_FLAG,
     FailureSignature,
     classify_failure,
@@ -106,6 +107,11 @@ HF_CACHE_PERMISSION = "hf_cache_permission"
 #: sandboxes: ``hyperloom_multibranch.toolbox.attempts`` ends the test with it.
 SANDBOX_ACQUIRE_TIMEOUT = "sandbox_acquire_timeout"
 
+#: A warmup request of an AgentX replay was refused as longer than the context the server serves, so the replay aborted
+#: before profiling; the reason is ``<this>: <the client's warmup abort line>``. The candidate served a shorter context
+#: than the corpus needs (a smaller ``--max-model-len``, say), and every rerun replays the same requests: decisive.
+AGENTX_CONTEXT_OVERFLOW = "agentx_context_overflow"
+
 #: The AgentX checkpoint stopped the measured round for trailing its reference by more than the allowed drop
 #: (``measure.checkpoint``): a ruling on the candidate, never retried. The ruling itself is in the round's slot.
 AGENTX_EARLY_STOP = "agentx_early_stop"
@@ -172,6 +178,8 @@ FRAMEWORK_UNIMPORTABLE_REASON = "framework_unimportable"
 _FAILED_STEP_VERDICTS: dict[FailedStep, tuple[FailureClass, str]] = {
     # The suite parses the argv before the server starts, so no server log holds the refusal.
     FailedStep.FLAG_UNKNOWN: (FailureClass.CANDIDATE, SERVE_FLAG),
+    # The candidate's layer sets or removes a setting the golden launch owns; refused before the server starts.
+    FailedStep.GOLDEN_OWNED_TOUCHED: (FailureClass.CANDIDATE, SERVE_FLAG),
     FailedStep.PORT_IN_USE: (FailureClass.INFRA, PORT_IN_USE_REASON),
     FailedStep.GPUS_UNAVAILABLE: (FailureClass.INFRA, HOST_GPUS_UNAVAILABLE_REASON),
     FailedStep.SERVER_SILENT_BEFORE_READY: (FailureClass.INFRA, HUNG_BEFORE_READY),
@@ -179,12 +187,15 @@ _FAILED_STEP_VERDICTS: dict[FailedStep, tuple[FailureClass, str]] = {
     FailedStep.SERVER_STALLED: (FailureClass.UNCLEAR, SERVER_STALLED_REASON),
 }
 #: The steps whose reason quotes the report's ``failure_detail``, as ``<reason>: <detail>``.
-_DETAILED_STEPS = frozenset({FailedStep.FLAG_UNKNOWN})
+_DETAILED_STEPS = frozenset({FailedStep.FLAG_UNKNOWN, FailedStep.GOLDEN_OWNED_TOUCHED})
 #: The two causes an unclear failure names when its log carries them; the reason is ``<prefix>: <the log's line>``.
 #: A failure the log only calls a crashed evaluation names the refused request too, when the log carries one.
 LM_EVAL_BAD_REQUEST_REASON = "lm_eval_http_400"
 PYTHON_EXCEPTION_REASON = "python_exception"
 NO_KNOWN_SIGNATURE_REASON = "no_known_signature"
+#: The server died at start because the card holds less than the launch asked for (Mamba cache blocks, KV cache memory);
+#: the reason is ``<this>: <the log's line>``. A fresh sandbox of the same card meets it again.
+ENGINE_CAPACITY_REASON = "engine_capacity"
 #: The kinds of the shared signature table whose reason also quotes the log line that states them, with the reader of it.
 _QUOTED_KINDS = {
     SERVE_FLAG: log_causes.argparse_error,
@@ -202,9 +213,11 @@ _DECISIVE_REASONS = frozenset(
         IMPORT_ERROR,
         SERVE_FLAG,
         EVAL_RUNTIME_FAILURE,
+        ENGINE_CAPACITY_REASON,
         LM_EVAL_BAD_REQUEST_REASON,
         PYTHON_EXCEPTION_REASON,
         SERVER_BOOT_TIMEOUT_REASON,
+        AGENTX_CONTEXT_OVERFLOW,
     }
 )
 _PORT_IN_USE = re.compile(r"address already in use|\[Errno 98\]", re.IGNORECASE)
@@ -273,8 +286,9 @@ class FailureEvidence:
 
     ``logs`` are the texts a known failure signature may be found in (stdout and stderr tails, the tails of
     ``server.log`` and of the benchmark's stderr); ``client_logs`` are the benchmark client's own output, read only for
-    the infrastructure cause it states (a Hub download refused), never for a candidate's signature, since a client that
-    failed on its own says nothing of the server; ``detail`` is what the caller observed of a boot timeout, which the
+    the infrastructure cause it states (a Hub download refused) and for the server's refusal of a warmup request it
+    quotes (:data:`AGENTX_CONTEXT_OVERFLOW`), never for a candidate's signature, since a client that failed on its own
+    says nothing of the server; ``detail`` is what the caller observed of a boot timeout, which the
     return code alone does not say; ``step_failure`` is the step the failed round's ``report.json`` names, with its
     detail, which inference_suite records in place of the return code it exits with; ``unrun`` is ``<error_class>:
     <message>`` of a failed round refused before it ran, which left no log: the only account of it there is;
@@ -315,7 +329,8 @@ def classify_test_failure(
         return FailureClassification(Disposition.SUCCEEDED)
     parts = [_bounded(part) for part in evidence.logs if part]
     text = "\n".join(parts)
-    refused = log_causes.hub_rate_limited("\n".join([text, *(_bounded(part) for part in evidence.client_logs if part)]))
+    client_text = "\n".join(map(_bounded, evidence.client_logs))
+    refused = log_causes.hub_rate_limited("\n".join([text, client_text]))
     if refused:
         # Before the signatures: the client that was refused may then fail to load a tokenizer, which reads as one.
         return _infra(f"{HUB_RATE_LIMITED}: {refused}")
@@ -324,6 +339,9 @@ def classify_test_failure(
     by_step = _from_step(reported, evidence.framework_changed) if reported else None
     if by_step is not None:
         return by_step
+    overflow = log_causes.warmup_context_overflow(client_text)
+    if overflow:
+        return _candidate(f"{AGENTX_CONTEXT_OVERFLOW}: {overflow}")
     named = _named_by_logs(text, parts, eval_failed=step is FailedStep.EVAL_FAILED)
     if named is not None:
         return named
@@ -407,6 +425,10 @@ def _named_by_logs(text: str, parts: list[str], *, eval_failed: bool = False) ->
     if hang:
         return _infra(f"{JIT_BUILD_TIMEOUT}: {hang}")
     signature = classify_failure(text)
+    if signature.kind == RESOURCE_CONSTRAINT:
+        capacity = log_causes.engine_capacity(text)
+        if capacity:
+            return _candidate(f"{ENGINE_CAPACITY_REASON}: {capacity}")
     if eval_failed and not signature.is_actionable:
         signature = FailureSignature(kind=EVAL_RUNTIME_FAILURE)
     if signature.kind == EVAL_RUNTIME_FAILURE:

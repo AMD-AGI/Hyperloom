@@ -26,6 +26,8 @@ class BoardPolicy:
     names_its_arch: bool = False
 
 
+_VLLM_ONLY = frozenset({"vllm"})
+
 #: Keyed by ``AMD_GPU_BOARDS``: every board has exactly one policy row.
 _BOARD_POLICIES: dict[str, BoardPolicy] = {
     "mi300x": BoardPolicy(names_its_arch=True),
@@ -34,17 +36,15 @@ _BOARD_POLICIES: dict[str, BoardPolicy] = {
     # The same gfx950 die as mi355x; gfx950 alone still names mi355x.
     "mi350x": BoardPolicy(),
     "mi355x": BoardPolicy(names_its_arch=True),
-    "r9700": BoardPolicy(
-        validated_frameworks=frozenset({"vllm"}), targeted_build_validated=False, geak_identity_pinned=True
-    ),
-    "r9600d": BoardPolicy(
-        validated_frameworks=frozenset({"vllm"}), targeted_build_validated=False, geak_identity_pinned=True
-    ),
+    "r9700": BoardPolicy(validated_frameworks=_VLLM_ONLY, targeted_build_validated=False, geak_identity_pinned=True),
+    "r9600d": BoardPolicy(validated_frameworks=_VLLM_ONLY, targeted_build_validated=False, geak_identity_pinned=True),
+    "w7900": BoardPolicy(validated_frameworks=_VLLM_ONLY, targeted_build_validated=False),
+    "w7900d": BoardPolicy(validated_frameworks=_VLLM_ONLY, targeted_build_validated=False),
     "radeon8060s": BoardPolicy(),
 }
 
-#: A bare arch resolves only to a board marked ``names_its_arch`` (gfx942 to mi300x, gfx950 to mi355x); gfx12 and
-#: gfx1151 cover several products, so those resolve through the product name.
+#: A bare arch resolves only to a board marked ``names_its_arch`` (gfx942 to mi300x, gfx950 to mi355x); gfx1100,
+#: gfx12 and gfx1151 cover several products, so those resolve through the product name.
 _GFX_REFERENCE_BOARDS: dict[str, str] = {
     AMD_GPU_BOARDS[product].gfx: product for product, policy in _BOARD_POLICIES.items() if policy.names_its_arch
 }

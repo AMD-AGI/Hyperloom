@@ -27,6 +27,10 @@ _BUDGET_EXIT_STOP_REASONS = {
 # The FRAMEWORK_AGENT exit reason for a plateau or an LLM hint; budget and terminal exits never wait.
 _LEVERAGE_EXIT_REASON = "optimize_no_more_leverage"
 
+# SWEEP's pump dispatches nothing: it writes the directive the next macro-cycle opens on, so it runs while SWEEP's
+# exit is held.
+_PUMPS_RUN_WHILE_LEAVING = frozenset({_phase_state.PHASE_SWEEP})
+
 
 def is_leverage_exit(next_phase: tuple[str, str, dict[str, Any]]) -> bool:
     """Whether a FRAMEWORK_AGENT transition is the plateau or LLM-hint exit, the one operator work may hold."""
@@ -223,6 +227,23 @@ class MachinePhase(CoordinatorCollaborator):
 
     def _transition_pending(self, next_phase: tuple[str, str, dict[str, Any]] | None) -> bool:
         return next_phase is not None and next_phase[0] != (self.shared_state.phase or "").upper()
+
+    async def pump_current_phase(self) -> None:
+        """Run the current phase's pump, unless the machine is leaving the phase.
+
+        While a transition waits for running work, what FRAMEWORK_AGENT's pump queues -- candidate discovery and
+        authoring, forced and scout specialists, explore grids -- is work no phase it moves to admits:
+        :meth:`_drain_for_transition` cancels it on the same tick, and the pump would queue it again on the next.
+        """
+        if not self.pump_table:
+            self.build_dispatch_tables()
+        phase = (self.shared_state.phase or "").strip().upper()
+        pump = self.pump_table.get(phase)
+        if pump is None:
+            return
+        if self._coord.dispatcher.admission_frozen and phase not in _PUMPS_RUN_WHILE_LEAVING:
+            return
+        await pump()
 
     async def refresh_admission_freeze(self) -> None:
         """Re-derive the freeze after reactors, releasing any hold they settled."""

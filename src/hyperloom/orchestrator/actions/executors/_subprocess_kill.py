@@ -228,7 +228,6 @@ class _StreamCapture:
     ) -> None:
         """Set up capture/mirror threads for a child's stdout and stderr."""
         self._on_output = on_output
-        self.last_activity_at: float | None = None
         self._stdout_chunks: list[str] = []
         self._stderr_chunks: list[str] = []
         self._threads: list[threading.Thread] = []
@@ -275,7 +274,6 @@ class _StreamCapture:
                 data = raw.read1(65536)
                 if not data:
                     break
-                self.last_activity_at = time.monotonic()
                 self.note_output()
                 chunk = decoder.decode(data)
                 if chunk:

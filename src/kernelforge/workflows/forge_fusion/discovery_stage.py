@@ -15,10 +15,10 @@ from .anchor import AnchorReport, AnchorResolutionError, KernelAnchor, discover_
 from .discover import (
     DiscoveryPrompting,
     DiscoverySession,
-    DiscoveryTarget,
     discover_recipes,
     registered_agent_llm_fn,
 )
+from .discovery_prompt import DiscoveryTarget
 from .errors import FuseUsageError
 from .llm_failure import LlmUnavailableError
 from .locate import FrameworkInstall, _framework_repo_root, build_recipes, resolve_framework_source_file

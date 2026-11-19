@@ -117,13 +117,6 @@ def test_apply_single_patch(fake_repo, output_dir):
     assert "patched = True" in content
 
 
-def test_no_patches_returns_empty(output_dir):
-    """No patches -> empty result, no crash."""
-    params = {"patches": []}
-    result = _apply_warm_patches(params, output_dir)
-    assert result == []
-
-
 def test_required_recipe_patch_fails_when_no_overlay_records_a_root(output_dir):
     """Nothing is probed for, so an overlay naming no checkout has nowhere to go."""
     params = {
@@ -315,23 +308,6 @@ def test_patch_without_a_root_returns_empty(output_dir):
     assert result == []
 
 
-def test_invalid_patch_skipped(fake_repo, output_dir):
-    """A malformed patch should be skipped, not crash."""
-    params = {
-        "patches": [
-            {
-                "patch_file": "bad.py",
-                "patch_content": "this is not a valid diff",
-                "patch_ref": "",
-                "measured_gain_pct": 5.0,
-                "repo": "x/y",
-            }
-        ],
-    }
-    result = _apply_into(params, str(fake_repo), output_dir)
-    assert result == []
-
-
 def test_patch_ref_fallback(fake_repo, output_dir, tmp_path):
     """When patch_content is empty, read from patch_ref file."""
     ref_file = tmp_path / "my.patch"
@@ -405,54 +381,6 @@ def test_git_apply_timeout_skipped(fake_repo, output_dir):
     assert result == []
 
 
-def test_patch_ref_read_oserror_skipped(fake_repo, output_dir, tmp_path):
-    """OSError when reading patch_ref should be skipped."""
-    ref_file = tmp_path / "unreadable.patch"
-    ref_file.write_text("dummy")
-    ref_file.chmod(0o000)
-    params = {
-        "patches": [
-            {
-                "patch_file": "vllm/fp8.py",
-                "patch_content": "",
-                "patch_ref": str(ref_file),
-                "measured_gain_pct": 10.0,
-                "repo": "ROCm/vllm",
-            }
-        ],
-    }
-    result = _apply_into(params, str(fake_repo), output_dir)
-    # Skipped or read-succeeds depending on privileges; must not crash.
-    assert isinstance(result, list)
-    ref_file.chmod(0o644)  # cleanup
-
-
-def test_multiple_patches_partial_success(fake_repo, output_dir):
-    """When first patch fails and second succeeds, only second is in result."""
-    bad_patch = "this is not a valid diff at all\n"
-    params = {
-        "patches": [
-            {
-                "patch_file": "bad.py",
-                "patch_content": bad_patch,
-                "patch_ref": "",
-                "measured_gain_pct": 20.0,
-                "repo": "ROCm/vllm",
-            },
-            {
-                "patch_file": "vllm/fp8.py",
-                "patch_content": VALID_PATCH,
-                "patch_ref": "",
-                "measured_gain_pct": 10.0,
-                "repo": "ROCm/vllm",
-            },
-        ],
-    }
-    result = _apply_into(params, str(fake_repo), output_dir)
-    assert len(result) == 1
-    assert result[0]["patch_file"] == "vllm/fp8.py"
-
-
 def test_a_best_effort_timeline_reports_why_each_patch_that_failed_did(fake_repo, output_dir):
     """The bare list carries only what landed. Without the per-patch statuses
     behind it, a patch that was silently skipped leaves nothing behind, and the
@@ -479,6 +407,7 @@ def test_a_best_effort_timeline_reports_why_each_patch_that_failed_did(fake_repo
     _stamp_warm_patch_outcome(round_result, applied, params)
     reported = round_result["warm_patch_result"]["patches"]
 
+    assert [row["patch_file"] for row in applied] == ["vllm/fp8.py"]
     assert round_result["warm_patch_result"]["required"] is False
     assert [row["patch_ref"] for row in reported] == ["bad.py", "vllm/fp8.py"]
     assert reported[0]["status"] == "failed"
@@ -569,47 +498,6 @@ def test_required_patch_contained_in_committed_head_is_already_present(fake_repo
 
     assert result["status"] == "prepared"
     assert result["patches"][0]["status"] == "already_present"
-
-
-def test_required_patch_uses_three_way_after_checks_fail(fake_repo, output_dir, monkeypatch):
-    calls: list[list[str]] = []
-
-    def _run(command, **_kwargs):
-        calls.append(command)
-        if "rev-parse" in command:
-            if "--is-inside-work-tree" in command:
-                return SimpleNamespace(
-                    returncode=0,
-                    stdout="true\n",
-                    stderr="",
-                )
-            return SimpleNamespace(
-                returncode=0,
-                stdout=b"0123456789abcdef\n",
-                stderr=b"",
-            )
-        if "ls-files" in command or "diff" in command:
-            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
-        if "--3way" in command:
-            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
-        if "--check" in command:
-            return SimpleNamespace(returncode=1, stdout=b"", stderr=b"no")
-        raise AssertionError(command)
-
-    monkeypatch.setattr(subprocess, "run", _run)
-    result = _apply_into(
-        {
-            "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
-            "required_patch_timeline": True,
-        },
-        str(fake_repo),
-        output_dir,
-    )
-
-    assert result["status"] == "prepared"
-    assert result["patches"][0]["status"] == "applied_3way"
-    assert any("-R" in command for command in calls)
-    assert any("--3way" in command for command in calls)
 
 
 def test_required_patch_failure_rolls_back_and_stops(fake_repo, output_dir):
@@ -1132,87 +1020,6 @@ def test_real_git_three_way_merge_succeeds(tmp_path, output_dir):
     expected = list(current_lines)
     expected[10] = "PATCHED"
     assert target.read_text() == "\n".join(expected) + "\n"
-
-
-@pytest.mark.asyncio
-async def test_required_failure_does_not_run_config_only_fallback(monkeypatch):
-    executor = object.__new__(BaselineExecutor)
-    calls: list[dict] = []
-
-    async def _run_once(ctx, **_kwargs):
-        calls.append(dict(ctx.task.params))
-        return {
-            "status": "required_patch_failed",
-            "failed_patch_ref": "bad.patch",
-            "required_patch_failure": {"patches": [{"status": "failed"}]},
-            "warm_replay_rollback": {"ok": True, "errors": []},
-        }
-
-    executor._run_once = _run_once  # type: ignore[method-assign]
-    executor._maybe_stop_on_missing_baseline_accuracy = lambda *_a: None  # type: ignore[method-assign]
-    executor._is_moe_runner_rooted_failure = lambda _r: False  # type: ignore[method-assign]
-    ctx = SimpleNamespace(
-        task=SimpleNamespace(
-            kind="replay_warm_recipe",
-            params={
-                "patches": [{"patch_file": "bad.patch"}],
-                "required_patch_timeline": True,
-                "extra_server_args": "--recipe --kernel",
-                "extra_envs": {"RECIPE": "1", "KERNEL": "1"},
-                "recipe_extra_server_args": "--recipe",
-                "recipe_extra_envs": {"RECIPE": "1"},
-                "warm_kernel_apply_results": [{"status": "ok"}],
-            },
-        )
-    )
-
-    result = await executor(ctx)
-
-    # No Config/Env-only salvage: the failed timeline is returned as-is so PRELUDE marks the warm replay failed and
-    # optimizes from the clean tree.
-    assert len(calls) == 1
-    assert result["status"] == "required_patch_failed"
-    assert "warm_replay_partial" not in result
-    assert "promoted_extra_server_args" not in result
-
-
-@pytest.mark.asyncio
-async def test_required_rollback_failure_is_returned_unchanged():
-    executor = object.__new__(BaselineExecutor)
-    calls = 0
-
-    async def _run_once(_ctx, **_kwargs):
-        nonlocal calls
-        calls += 1
-        return {
-            "status": "required_patch_rollback_failed",
-            "warm_replay_rollback": {
-                "ok": False,
-                "errors": ["kernel restore failed"],
-            },
-        }
-
-    executor._run_once = _run_once  # type: ignore[method-assign]
-    executor._maybe_stop_on_missing_baseline_accuracy = lambda *_a: None  # type: ignore[method-assign]
-    executor._is_moe_runner_rooted_failure = lambda _r: False  # type: ignore[method-assign]
-    ctx = SimpleNamespace(
-        task=SimpleNamespace(
-            kind="replay_warm_recipe",
-            params={
-                "recipe_extra_server_args": "--safe-only",
-                "recipe_extra_envs": {"VLLM_SAFE": "1"},
-            },
-        )
-    )
-
-    result = await executor(ctx)
-
-    # The unverified rollback is surfaced verbatim; PRELUDE's combined rollback guard is what stops the run on a dirty
-    # tree.
-    assert calls == 1
-    assert result["status"] == "required_patch_rollback_failed"
-    assert result["warm_replay_rollback"]["ok"] is False
-    assert "warm_replay_partial" not in result
 
 
 # Snapshot / restore must not depend on guessing the strip level

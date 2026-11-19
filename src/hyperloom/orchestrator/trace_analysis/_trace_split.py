@@ -6,37 +6,14 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
-from hyperloom.inference_optimizer.session.paths import workspace_root
-
 from ._io_utils import append_log
 from ._trace_gates import _check_chunk_quality
 from ._tracelens_checkout import run_command
-
-
-def _default_workspace_path() -> str:
-    """Resolve the default workspace root for ``--workspace-path``.
-
-    Fallback order: ``$USER_DATA_PATH``, then legacy ``$WORKSPACE_PATH``, then
-    ``session.paths.workspace_root()`` (which warns once when ``$USER_DATA_PATH`` is unset).
-
-    Returns:
-        The resolved default workspace path.
-    """
-    user_data = os.environ.get("USER_DATA_PATH")
-    if user_data:
-        return user_data
-    workspace = os.environ.get("WORKSPACE_PATH")
-    if workspace:
-        return workspace
-    # Neither env set: route through the shared helper so the one-shot
-    # "USER_DATA_PATH unset" warning fires.
-    return str(workspace_root())
 
 
 def _build_split_cmd(

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -26,20 +25,6 @@ from .lane_budget import LANE_FUSION
 
 
 # forge-fusion (autonomous kernel fusion)
-def _forge_fusion_available() -> bool:
-    """Check that KernelForge's fusion pipeline is importable.
-
-    Probes the subpackage rather than ``kernelforge``: an installation
-    predating the fusion absorption would satisfy the parent import and only
-    fail once the subprocess rejected ``forge-fuse``. PATH is not consulted
-    because the tool is invoked through ``sys.executable -m``.
-    """
-    try:
-        return importlib.util.find_spec("kernelforge.workflows.forge_fusion") is not None
-    except (ModuleNotFoundError, ValueError):
-        return False
-
-
 def _resolve_fusion_decode_trace(state) -> str:
     """Reuse this run's PRELUDE/roofline decode trace for fusion discovery.
 
@@ -171,11 +156,6 @@ def _fusion_precondition_refusal(state: Any, *, model_path: str, trace_path: str
             ),
             "source": "forge_fusion",
         }
-    if not _forge_fusion_available():
-        return _fusion_failure(
-            "forge_fusion_not_found",
-            "KernelForge fusion pipeline not found. Install via 'pip install <KernelForge>[claude,codex]'.",
-        )
     if not model_path:
         return _fusion_failure("model_path_missing", "model_path is required")
     if not trace_path:

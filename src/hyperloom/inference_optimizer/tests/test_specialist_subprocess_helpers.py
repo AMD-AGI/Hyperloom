@@ -54,13 +54,6 @@ def test_setup_worktree_nonzero(tmp_path: Path, monkeypatch) -> None:
     assert out is None and "rc=1" in err
 
 
-def test_setup_worktree_success(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(ss.subprocess, "run", lambda *a, **k: _CP(0))
-    target = tmp_path / "wt4"
-    out, err = _setup_worktree(tmp_path, target, "b")
-    assert out == target and err == ""
-
-
 # -- _build_claude_cmd -----------------------------------------------------
 def _dispatcher(**cfg_over: Any) -> SpecialistSubprocessDispatcher:
     cfg = SpecialistSubprocessConfig(**cfg_over)

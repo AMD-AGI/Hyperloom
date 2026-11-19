@@ -45,7 +45,7 @@ from .kernel_geak_promotion import _GeakPromotionMixin, _covered_step
 from .kernel_gemm_tuning import _GemmTuningMixin, _first_text
 
 if TYPE_CHECKING:
-    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import KernelEventRecorder
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_recorder import KernelEventRecorder
     from .machine import Transition
 
 log = _logging.getLogger(__name__)
@@ -276,7 +276,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         reprofile_task = _covered_step(task_kind, params, idempotency_key=f"internal-analysis-{idempotency_reason}")
         try:
             await self.sub.execute_covered(reprofile_task)
-        except (OSError, RuntimeError):  # the kernel-entry reprofile step, recorded as dispatch_failed
+        except (OSError, RuntimeError, ValueError):  # the kernel-entry reprofile step, recorded as dispatch_failed
             log.exception("kernel-entry reprofile failed; the phase proceeds on the existing snapshot")
             _note_reprofile(replace(attempt, ran=True, skipped_reason="dispatch_failed"))
             return
@@ -305,7 +305,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
 
     def _open_kernel_timeline(self, *, route: str, route_reason: str, from_phase: str) -> None:
         """Open the kernel timeline event for this KERNEL entry."""
-        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import make_kernel_recorder
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_recorder import make_kernel_recorder
 
         state = self.shared_state
         recorder = make_kernel_recorder(

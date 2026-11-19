@@ -16,7 +16,8 @@ from kernelforge.workflows.forge_loop.roles.contracts import (
     SpecialistRound,
     SynthesizedPlan,
 )
-from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationAgent, OrchestrationService
+from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationService
+from kernelforge.workflows.forge_loop.roles.orchestration_agent import OrchestrationAgent
 from kernelforge.workflows.forge_loop.roles.plan_prompts import (
     LANE_SYNTHESIS_SYSTEM_PROMPT,
     REVISION_SYSTEM_PROMPT,

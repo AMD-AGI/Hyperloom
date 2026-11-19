@@ -124,6 +124,7 @@ from hyperloom_multibranch.scheduling.settings import (
 from hyperloom_multibranch.scheduling.session_base import freeze_session_base
 from hyperloom_multibranch.scheduling.session_environment import hosted_runner_cache, require_writable_storage
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
+from hyperloom_multibranch.tests.agent_rig import install_stand_in
 from hyperloom_multibranch.tests.base_records import write_record
 from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
 from inference_suite.recipe import sources
@@ -226,15 +227,19 @@ def test_a_gpu_type_names_the_same_board_in_any_case() -> None:
     assert _settings("--gpu-type", "MI355X").workload.gpu_type == "mi355x"
 
 
+def test_a_session_runs_on_mi325x() -> None:
+    assert _settings("--gpu-type", "MI325X").workload.gpu_type == "mi325x"
+
+
 def test_an_unknown_gpu_type_is_refused_naming_the_types_a_session_runs_on(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
-        cli.main(["run", *WORKLOAD_ARGS, "--gpu-type", "MI325X"])
+        cli.main(["run", *WORKLOAD_ARGS, "--gpu-type", "MI308X"])
 
     assert exc.value.code == cli.EXIT_USAGE
     err = capsys.readouterr().err
-    assert "invalid choice: 'mi325x'" in err
+    assert "invalid choice: 'mi308x'" in err
     # argparse quotes the choices before Python 3.12.8 and lists them bare from it on.
-    assert "(choose from mi300x, mi350x, mi355x)" in err.replace("'", "")
+    assert "(choose from mi300x, mi325x, mi350x, mi355x)" in err.replace("'", "")
 
 
 def test_an_agentx_run_has_no_sequence_lengths_and_is_graded_on_p50_interactivity_at_its_conc_alone() -> None:
@@ -359,7 +364,6 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *WORKLOAD_ARGS, "--conc", "many"],
         ["run", *WORKLOAD_ARGS[:-2]],
         ["run", *WORKLOAD_ARGS, "--gpu-type", "h100"],
-        ["run", *WORKLOAD_ARGS, "--gpu-type", "mi325x"],
         ["run", *WORKLOAD_ARGS, "--gpu-type", "mi308x"],
         ["run", *WORKLOAD_ARGS, "--kernel-optimizer", "triton"],
         ["run", *_without(WORKLOAD_ARGS, "--workload")],
@@ -424,21 +428,6 @@ def test_an_agent_source_whose_user_is_an_ssh_login_is_accepted(source: str) -> 
     assert _settings("--autonomous-agent", source).agents == (source,)
 
 
-def test_the_arbor_keyword_is_the_vendored_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "VENDORED_ARBOR", tmp_path)
-
-    assert _settings("--autonomous-agent", "arbor", "--autonomous-agent", "/a").agents == (str(tmp_path), "/a")
-
-
-def test_the_arbor_keyword_without_a_vendored_tree_is_a_usage_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(cli, "VENDORED_ARBOR", tmp_path / "missing")
-
-    with pytest.raises(ValueError, match="--autonomous-agent arbor"):
-        _settings("--autonomous-agent", "arbor")
-
-
 def test_an_ssh_source_with_a_password_carries_credentials() -> None:
     with pytest.raises(ValueError, match="credentials"):
         _settings("--autonomous-agent", "ssh://git:secret@github.com/acme/agent.git")
@@ -448,40 +437,40 @@ def test_the_agent_directions_map_is_kept_by_its_absolute_path(tmp_path: Path, m
     monkeypatch.chdir(tmp_path)
     (tmp_path / "map.json").write_text(json.dumps({"directions": [{"id": "m-attn", "title": "attention"}]}))
 
-    settings = _settings("--autonomous-agent", "/agents/arbor", "--agent-directions", "map.json")
+    settings = _settings("--autonomous-agent", "/agents/component", "--agent-directions", "map.json")
 
     assert settings.agent_directions == str(tmp_path / "map.json")
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_directions == ""
+    assert _settings("--autonomous-agent", "/agents/component").agent_directions == ""
 
 
 def test_the_dossier_pass_has_ninety_minutes_unless_the_run_gives_it_others_and_none_below_zero() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_dossier_minutes == DOSSIER_MINUTES == 90.0
+    assert _settings("--autonomous-agent", "/agents/component").agent_dossier_minutes == DOSSIER_MINUTES == 90.0
     assert _settings("--agent-dossier-minutes", "0").agent_dossier_minutes == 0.0
     with pytest.raises(ValueError, match=r"--agent-dossier-minutes must be 0 \(runs no dossier pass\) or positive"):
         _settings("--agent-dossier-minutes", "-5")
 
 
-def test_the_shares_need_an_arbor_iteration_s_63_minutes_unless_the_run_says_otherwise_and_none_below_zero() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_share_minutes == SHARE_MINUTES == 63.0
+def test_the_shares_need_a_component_agent_iteration_s_63_minutes_by_default_and_none_below_zero() -> None:
+    assert _settings("--autonomous-agent", "/agents/component").agent_share_minutes == SHARE_MINUTES == 63.0
     assert _settings("--agent-share-minutes", "0").agent_share_minutes == 0.0
     with pytest.raises(ValueError, match=r"--agent-share-minutes must be 0 \(always opens the shares\) or positive"):
         _settings("--agent-share-minutes", "-1")
 
 
 def test_the_agent_pack_is_kept_by_name_and_empty_without_one() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor", "--agent-pack", "agentx-qwen38-1").agent_pack == (
-        "agentx-qwen38-1"
+    assert _settings("--autonomous-agent", "/agents/component", "--agent-pack", "agentx-pack").agent_pack == (
+        "agentx-pack"
     )
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_pack == ""
+    assert _settings("--autonomous-agent", "/agents/component").agent_pack == ""
 
 
 @pytest.mark.parametrize(
     ("extra", "match"),
     [
-        (["--agent-pack", "agentx-qwen38-1"], "needs an --autonomous-agent"),
-        (["--autonomous-agent", "/agents/arbor", "--agent-pack", "packs/agentx"], "not the name of one pack"),
-        (["--autonomous-agent", "/agents/arbor", "--agent-pack", ".."], "not the name of one pack"),
-        (["--autonomous-agent", "/agents/arbor", "--agent-pack", ""], "not the name of one pack"),
+        (["--agent-pack", "agentx-pack"], "needs an --autonomous-agent"),
+        (["--autonomous-agent", "/agents/component", "--agent-pack", "packs/agentx"], "not the name of one pack"),
+        (["--autonomous-agent", "/agents/component", "--agent-pack", ".."], "not the name of one pack"),
+        (["--autonomous-agent", "/agents/component", "--agent-pack", ""], "not the name of one pack"),
     ],
 )
 def test_an_agent_pack_without_an_agent_or_not_one_directory_is_a_usage_error(extra: list[str], match: str) -> None:
@@ -503,27 +492,29 @@ def test_the_agent_launch_file_is_kept_by_its_absolute_path(tmp_path: Path, monk
     monkeypatch.chdir(tmp_path)
     (tmp_path / "launch.json").write_text(json.dumps({"server_flags": "--tp 1", "server_env": {}}))
 
-    settings = _settings("--autonomous-agent", "/agents/arbor", "--agent-launch", "launch.json")
+    settings = _settings("--autonomous-agent", "/agents/component", "--agent-launch", "launch.json")
 
     assert settings.agent_launch == str(tmp_path / "launch.json")
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_launch == ""
+    assert _settings("--autonomous-agent", "/agents/component").agent_launch == ""
 
 
 def test_a_base_launch_record_given_as_an_agent_launch_is_refused_for_the_reference_script(tmp_path: Path) -> None:
     record = write_record(tmp_path / "base_launch.json")
 
     with pytest.raises(ValueError, match="--agent-launch .* is a base launch record; give it as --reference-script"):
-        _settings("--autonomous-agent", "/agents/arbor", "--agent-launch", str(record))
+        _settings("--autonomous-agent", "/agents/component", "--agent-launch", str(record))
 
 
 def test_an_unfilled_template_is_a_usage_error(tmp_path: Path) -> None:
-    template = Path(__file__).parents[3] / "examples" / "multibranch-arbor-launch" / "launch.template.json"
+    template = Path(__file__).parents[3] / "examples" / "multibranch-agent-launch" / "launch.template.json"
 
     with pytest.raises(ValueError, match="--agent-launch: .*still hold the template's placeholders"):
-        _settings("--autonomous-agent", "/agents/arbor", "--agent-launch", str(template))
+        _settings("--autonomous-agent", "/agents/component", "--agent-launch", str(template))
 
 
-@pytest.mark.parametrize("agent", [[], ["--autonomous-agent", "/agents/arbor"]], ids=["specialists-only", "arbor"])
+@pytest.mark.parametrize(
+    "agent", [[], ["--autonomous-agent", "/agents/component"]], ids=["specialists-only", "component-agent"]
+)
 @pytest.mark.parametrize(
     "launch",
     [
@@ -574,10 +565,10 @@ def test_an_agent_launch_beside_a_reference_script_is_a_usage_error(tmp_path: Pa
     launch.write_text(json.dumps({"server_flags": "--tp 1", "server_env": {}}))
 
     with pytest.raises(
-        ValueError, match="--agent-launch is not taken with --reference-script: the Arbors are served the frozen base"
+        ValueError, match="--agent-launch is not taken with --reference-script: the agents are served the frozen base"
     ):
         _settings(
-            "--autonomous-agent", "/agents/arbor", "--reference-script", str(record), "--agent-launch", str(launch)
+            "--autonomous-agent", "/agents/component", "--reference-script", str(record), "--agent-launch", str(launch)
         )
 
 
@@ -596,23 +587,23 @@ def test_an_agent_launch_without_an_agent_or_unusable_is_a_usage_error(
     path = tmp_path / "launch.json"
     if document is not None:
         path.write_text(json.dumps(document))
-    extra = ["--autonomous-agent", "/agents/arbor"] if agent else []
+    extra = ["--autonomous-agent", "/agents/component"] if agent else []
 
     with pytest.raises(ValueError, match=match):
         _settings(*extra, "--agent-launch", str(path))
 
 
 def test_the_agent_port_is_the_run_s_own_or_the_shared_default() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor", "--agent-port", "32100").agent_port == 32100
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_port == AGENT_PORT
+    assert _settings("--autonomous-agent", "/agents/component", "--agent-port", "32100").agent_port == 32100
+    assert _settings("--autonomous-agent", "/agents/component").agent_port == AGENT_PORT
 
 
 @pytest.mark.parametrize(
     ("extra", "match"),
     [
         (["--agent-port", "32100"], "needs an --autonomous-agent"),
-        (["--autonomous-agent", "/agents/arbor", "--agent-port", "0"], "is not a port"),
-        (["--autonomous-agent", "/agents/arbor", "--agent-port", "65536"], "is not a port"),
+        (["--autonomous-agent", "/agents/component", "--agent-port", "0"], "is not a port"),
+        (["--autonomous-agent", "/agents/component", "--agent-port", "65536"], "is not a port"),
     ],
     ids=["no-agent", "zero", "past-the-last-port"],
 )
@@ -622,13 +613,13 @@ def test_an_agent_port_without_an_agent_or_that_is_no_port_is_a_usage_error(extr
 
 
 def test_a_run_stops_after_its_map_only_when_asked() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor", "--stop-after-map").stop_after_map
-    assert not _settings("--autonomous-agent", "/agents/arbor").stop_after_map
+    assert _settings("--autonomous-agent", "/agents/component", "--stop-after-map").stop_after_map
+    assert not _settings("--autonomous-agent", "/agents/component").stop_after_map
 
 
 def test_the_review_gate_is_on_unless_the_run_turns_it_off() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor").review_gate
-    assert not _settings("--autonomous-agent", "/agents/arbor", "--no-review-gate").review_gate
+    assert _settings("--autonomous-agent", "/agents/component").review_gate
+    assert not _settings("--autonomous-agent", "/agents/component", "--no-review-gate").review_gate
 
 
 def test_a_person_shows_and_approves_a_session_s_review_and_a_second_decision_is_refused(
@@ -659,7 +650,7 @@ def test_stopping_after_the_map_without_an_agent_or_with_a_map_given_is_a_usage_
     with pytest.raises(ValueError, match="needs an --autonomous-agent"):
         _settings("--stop-after-map")
     with pytest.raises(ValueError, match="already gives them"):
-        _settings("--autonomous-agent", "/agents/arbor", "--agent-directions", str(given), "--stop-after-map")
+        _settings("--autonomous-agent", "/agents/component", "--agent-directions", str(given), "--stop-after-map")
 
 
 def _reviewed(tmp_path: Path) -> tuple[Path, Path]:
@@ -676,8 +667,9 @@ def test_the_reviewed_dossier_is_kept_by_its_absolute_path_beside_its_map(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    install_stand_in(monkeypatch)
     given, _ = _reviewed(tmp_path)
-    agent = ["--autonomous-agent", "/agents/arbor", "--agent-directions", str(given)]
+    agent = ["--autonomous-agent", "/agents/component", "--agent-directions", str(given)]
 
     assert _settings(*agent, "--agent-dossier", "dossier/qwen3-8b").agent_dossier == str(
         tmp_path / "dossier" / "qwen3-8b"
@@ -689,10 +681,15 @@ def test_a_dossier_without_its_map_or_that_is_no_dossier_is_a_usage_error(tmp_pa
     given, dossier = _reviewed(tmp_path)
 
     with pytest.raises(ValueError, match="with the --agent-directions map"):
-        _settings("--autonomous-agent", "/agents/arbor", "--agent-dossier", str(dossier))
+        _settings("--autonomous-agent", "/agents/component", "--agent-dossier", str(dossier))
     with pytest.raises(ValueError, match="is no dossier"):
         _settings(
-            "--autonomous-agent", "/agents/arbor", "--agent-directions", str(given), "--agent-dossier", str(tmp_path)
+            "--autonomous-agent",
+            "/agents/component",
+            "--agent-directions",
+            str(given),
+            "--agent-dossier",
+            str(tmp_path),
         )
 
 
@@ -710,7 +707,7 @@ def test_an_agent_directions_map_without_an_agent_or_directions_is_a_usage_error
 ) -> None:
     path = tmp_path / "map.json"
     path.write_text("{not json" if document is None else json.dumps(document))
-    agents = ["--autonomous-agent", "/agents/arbor"] if agent else []
+    agents = ["--autonomous-agent", "/agents/component"] if agent else []
 
     with pytest.raises(ValueError, match=match):
         _settings(*agents, "--agent-directions", str(path))
@@ -991,6 +988,7 @@ def test_run_without_the_agent_cli_fails_loudly_before_creating_anything(
 ) -> None:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
     monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
     assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
 
@@ -998,6 +996,27 @@ def test_run_without_the_agent_cli_fails_loudly_before_creating_anything(
     assert "CLI the specialists run is not on PATH" in captured.err
     assert captured.out == ""
     assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_run_finds_the_claude_cli_where_install_sh_installed_it_off_path(
+    agent_cli: list[RunSettings],
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path_factory.mktemp("home")
+    installed = home / ".local" / "bin"
+    installed.mkdir(parents=True)
+    (installed / AGENT_BACKEND_CLAUDE).write_text("#!/bin/sh\nexit 0\n")
+    (installed / AGENT_BACKEND_CLAUDE).chmod(0o755)
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path_factory.mktemp("empty-bin")))
+    monkeypatch.setenv("HOME", str(home))
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == 0
+
+    assert agent_cli == [_settings()]
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_binaries")

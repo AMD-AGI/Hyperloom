@@ -601,6 +601,26 @@ class ServedPoints:
     unread: Mapping[str, str]
 
 
+def inferencex_model_id(model_id: str, bundle: RepoBundle) -> str | None:
+    """The Hugging Face id ``bundle`` names a checkpoint by when ``model_id`` is only the checkpoint's directory name.
+
+    That is the one ``org/repo`` model of the master config whose ``repo`` is ``model_id``, compared without case.
+    ``None`` for an id that already names its organisation, and for a name no model, or several organisations' models,
+    carry: a local checkpoint that records no Hugging Face id is asked for by its directory name, and every entry
+    names an ``org/repo``.
+    """
+    if "/" in model_id:
+        return None
+    named = {
+        model
+        for entry in _yaml_mapping(bundle, MASTER).values()
+        if isinstance(model := entry.get("model"), str)
+        and "/" in model
+        and model.rpartition("/")[2].casefold() == model_id.casefold()
+    }
+    return next(iter(named)) if len(named) == 1 else None
+
+
 def served_points(query: LaunchQuery, bundle: RepoBundle) -> ServedPoints:
     """The points of ``bundle`` that serve ``query``'s model with its framework on a board interchangeable with its own:
     every point a snapshot must record InferenceX's selection for to answer ``query``.
@@ -667,6 +687,7 @@ __all__ = [
     "ServedPoints",
     "agentx_trace",
     "inferencex_launches",
+    "inferencex_model_id",
     "model_prefixes",
     "served_points",
     "srtctl_cli_args",

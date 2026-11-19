@@ -16,6 +16,8 @@ from hyperloom.inference_optimizer.framework_registry import server_args_env_nam
 from hyperloom.inference_optimizer.recipe_snapshot_constants import KbTopology
 from hyperloom.orchestrator.actions.executors import _profile_setup as profile_setup
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
+from hyperloom.orchestrator.state.base_launch import ServerBase
+from inference_suite.recipe.defaults import default_table
 
 from ._workload_envs_helpers import clear_env, materialize, write_config
 
@@ -259,6 +261,23 @@ def test_an_extra_env_ep_that_does_not_divide_tp_adds_no_flag(monkeypatch, tmp_p
     assert "EP=3 does not divide the launched TP=8" in caplog.text
 
 
+def test_an_operator_pin_wins_over_the_default_launch_tables_env(monkeypatch, tmp_path):
+    """``--extra-env VLLM_ROCM_USE_AITER=0`` reaches a vLLM round whose base is the default table's ``=1`` row."""
+    clear_env(monkeypatch)
+    row = default_table().row("vllm", "gfx950")
+    monkeypatch.setattr(we, "session_server_base", lambda: ServerBase(args=" ".join(row.args), env=row.env))
+    # ``--extra-env`` serializes the pin and also exports it under its own name.
+    monkeypatch.setenv(OPERATOR_EXTRA_ENV_VAR, json.dumps({"VLLM_ROCM_USE_AITER": "0"}))
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "0")
+    src = write_config(tmp_path / "cfg.yaml", framework="vllm", envs={"EXTRA_VLLM_ARGS": "--max-num-seqs 256"})
+
+    envs = materialize(src, tmp_path / "out")["envs"]
+
+    assert row.env["VLLM_ROCM_USE_AITER"] == "1"
+    assert envs["VLLM_ROCM_USE_AITER"] == "0"
+    assert "--gpu-memory-utilization" in envs["EXTRA_VLLM_ARGS"].split()
+
+
 @pytest.mark.parametrize("operator_pin", [False, True])
 def test_materialize_leaves_multi_node_ep_to_the_launcher(monkeypatch, tmp_path, operator_pin):
     """The multi-node launcher passes EP itself; this pod's GPU count is not the cluster's TP."""
@@ -341,16 +360,7 @@ def test_profile_negative_delay_clamped(monkeypatch, tmp_path):
     # PROFILE triggers is_profile; bad RANDOM_RANGE_RATIO hits the except branch.
     src = write_config(tmp_path / "cfg.yaml", envs={"PROFILE": "1", "RANDOM_RANGE_RATIO": "not-a-float"})
     bench = materialize(src, tmp_path / "out")
-    assert "NUM_PROMPTS" in bench["envs"]
-
-
-def test_profile_max_iters_override(monkeypatch, tmp_path):
-    clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "8")
-    monkeypatch.setenv("HYPERLOOM_PROFILE_DELAY_ITERS", "4")
-    src = write_config(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
-    bench = materialize(src, tmp_path / "out")
-    assert "NUM_PROMPTS" in bench["envs"]
+    assert json.loads(bench["envs"]["PROFILE_EXTRA_BODY"])["start_step"] == 0
 
 
 def test_a_synthetic_run_still_honors_the_delay_override(monkeypatch, tmp_path):
@@ -652,9 +662,6 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
     expected = str(sess / "storage" / "quality_ref" / "baseline.png")
     assert bench["envs"]["XDIT_QUALITY_REF"] == ""
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == expected
-
-
-# Scriptable baseline sampling cost (measurement contract values)
 
 
 # ---- naming the client's tokenizer, only when HF cannot ----------------------

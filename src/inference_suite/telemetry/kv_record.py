@@ -54,15 +54,11 @@ log = logging.getLogger(__name__)
 
 
 __all__ = [
-    "KV_ARTIFACT_NAME",
     "PHASES",
     "KvMetricsRecorder",
     "counter_delta",
 ]
 
-
-#: Artifact the recorder writes, alongside the round's ``server.log``.
-KV_ARTIFACT_NAME = "kv_metrics.json"
 
 _BOOT = "boot"
 #: The one phase whose numbers may be compared against another round's.

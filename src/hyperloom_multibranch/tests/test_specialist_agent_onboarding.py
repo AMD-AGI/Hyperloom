@@ -32,7 +32,6 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     split_source,
 )
 from hyperloom_multibranch.specialist.agent_session import AgentCommand
-from hyperloom_multibranch.specialist.arbor_adapter import MARKERS, is_arbor
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
 from hyperloom_multibranch.tests.agent_rig import Onboarder, Process, Sandbox, _setup
 
@@ -327,19 +326,20 @@ def _git_out(cwd: Path, *argv: str) -> str:
 async def test_a_source_tree_outside_git_is_copied_and_committed_once(tmp_path: Path) -> None:
     host = _agent_repo(tmp_path)
     tree = host / "src" / "vendored"
-    for marker in (*MARKERS, "__pycache__/component.pyc"):
-        (tree / marker).parent.mkdir(parents=True, exist_ok=True)
-        (tree / marker).write_text("x", encoding="utf-8")
+    files = ("agent/__init__.py", "docs/guide.md")
+    for name in (*files, "__pycache__/component.pyc"):
+        (tree / name).parent.mkdir(parents=True, exist_ok=True)
+        (tree / name).write_text("x", encoding="utf-8")
     checkout = tmp_path / "checkout"
 
     commit = await fetch_source(str(tree), checkout)
 
-    assert is_arbor(checkout) and not (checkout / "__pycache__").exists()
+    assert all((checkout / name).is_file() for name in files) and not (checkout / "__pycache__").exists()
     assert commit == _git_out(checkout, "rev-parse", "HEAD")
     assert _git_out(host, "rev-parse", "HEAD") in _git_out(checkout, "log", "-1", "--format=%B")
-    (tree / MARKERS[0]).write_text("changed", encoding="utf-8")
+    (tree / files[0]).write_text("changed", encoding="utf-8")
     assert await fetch_source(str(tree), checkout) == commit
-    assert (checkout / MARKERS[0]).read_text(encoding="utf-8") == "x"
+    assert (checkout / files[0]).read_text(encoding="utf-8") == "x"
 
 
 async def test_a_bare_repository_source_is_cloned_not_copied(tmp_path: Path) -> None:

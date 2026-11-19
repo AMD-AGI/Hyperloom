@@ -84,7 +84,9 @@ class ClaimKey:
 
 @dataclass(frozen=True)
 class Claim:
-    """A lease on a key, held by a branch so a restarted specialist keeps it; times are Unix seconds."""
+    """A lease on a key, held by a branch so a restarted specialist keeps it; times are Unix seconds. Once
+    ``request_id`` names the test that carries it, its status is that test's, whatever ``status`` and ``expires_at``
+    store."""
 
     key: ClaimKey
     holder: str
@@ -111,6 +113,21 @@ class RetractionRef:
 
     def __str__(self) -> str:
         return f"{self.retracted_commit}, the agent's iteration {self.iteration} (its keep {self.keep}), found invalid by {self.finding}"
+
+
+@dataclass(frozen=True)
+class JudgementWrite:
+    """A judgement as written and stored: the rule gate's or the integrator's, on one request.
+
+    A judgement that makes ``commit_id`` may name ``recipe_digest``, the ``Recipe.digest()`` of the recipe the experiment
+    repository stores for it; ``retracts`` names what a retraction undoes, on a ``COMMITTED`` judgement only."""
+
+    request_id: str
+    judgement: Judgement
+    conclusion: Conclusion
+    commit_id: str | None = None
+    recipe_digest: str | None = None
+    retracts: RetractionRef | None = None
 
 
 @dataclass(frozen=True)
@@ -614,6 +631,15 @@ class LineageView:
     def commit(self, commit_id: str) -> CommitNode | None:
         return next((node for node in self.commits if node.commit_id == commit_id), None)
 
+    def same_recipe(self, first: str, second: str) -> bool:
+        """Whether ``first`` and ``second`` hold one recipe: they are one commit, or their writers named one digest."""
+
+        if first == second:
+            return True
+        digests = {node.commit_id: node.recipe_digest for node in self.commits if node.commit_id in (first, second)}
+        found = digests.get(first)
+        return found is not None and found == digests.get(second)
+
     def ancestry(self, commit_id: str) -> tuple[str, ...]:
         """``commit_id`` and every commit it builds on, through parents and the sources merges brought in."""
 
@@ -756,8 +782,7 @@ class UnfinishedLead:
     """A result of this session worth finishing, by replaying test ``request_id`` of ``branch`` on another head.
 
     ``target`` and ``mechanism`` are its intent's, ``change`` its recipe delta in one line, ``measured_on`` the commit it
-    was tested on, ``gain_pct`` its judged gain where it had one, and ``detail`` more on ``reason``: the commit it made
-    and what its merge test found, the bar it fell short of, or why it was withdrawn.
+    was tested on, ``gain_pct`` its judged gain where it had one, and ``detail`` why it was withdrawn.
     """
 
     request_id: str
@@ -789,15 +814,15 @@ class FocusBranch:
     under_start: bool = False
 
 
-#: Arbor's status of a direction of its map still to work; any other status sets the direction aside, with its ``why``.
+#: The map's status of a direction still to work; any other status sets the direction aside, with its ``why``.
 MAP_OPEN = "open"
 
 
 @dataclass(frozen=True)
 class MapDirection:
-    """A direction of Arbor's map: its map ``id`` (``m-...``), ``title``, Arbor ``status`` and the ``why`` of it.
+    """A direction of the agent map: its map ``id`` (``m-...``), ``title``, map ``status`` and the ``why`` of it.
 
-    ``holder`` is the Arbor branch the share the direction is in was dealt to, empty for one in no share; the branch
+    ``holder`` is the agent branch the share the direction is in was dealt to, empty for one in no share; the branch
     holds an open direction while it runs. ``ops`` are the profile ops the direction acts on when the map names them
     exactly; without them, its id, title and why name its ops.
     """
@@ -826,8 +851,8 @@ class StartupBrief:
     ``settings_menu`` is the settings this session has not tried and ``code_menu`` the source and kernel changes, each
     ranked for the branch, a line each, the ops it acts on and its family's note indented under it; none for a branch
     of the menu's control. ``focus_history`` are the stopped branches opened on the same focus op, newest first.
-    ``agent_map`` is what the branch is shown of Arbor's map, in the map's order: the directions that name its focus
-    op, those a running Arbor branch holds, each with its holder in ``map_holders``, and those the map set aside; none
+    ``agent_map`` is what the branch is shown of the agent map, in the map's order: the directions that name its focus
+    op, those a running agent branch holds, each with its holder in ``map_holders``, and those the map set aside; none
     in a session without a map.
     """
 
@@ -936,7 +961,7 @@ class BlackboardSnapshot:
     """Everything the blackboard held at ``taken_at``, read at once: what the RSI, the dashboard and the exports use.
     ``resolved_patches`` are the model-written patches of every merge recorded, in the order the merges were.
     ``op_shares`` holds, by commit, the op shares :meth:`RecordSearch.op_shares` gives it: a commit no tool profiled
-    has those of the last profiled commit of the same recipe. ``agent_map`` holds the directions of Arbor's map the
+    has those of the last profiled commit of the same recipe. ``agent_map`` holds the directions of the agent map the
     scheduler wrote last, in the map's order; none in a session without a map."""
 
     taken_at: float
@@ -1010,7 +1035,7 @@ class BlackboardSnapshot:
         return made.judgement.recorded_value if made is not None and made.judgement is not None else {}
 
     def map_holders(self) -> dict[str, str]:
-        """The Arbor branch that holds each open direction of ``agent_map``, by the direction's id: its ``holder``
+        """The agent branch that holds each open direction of ``agent_map``, by the direction's id: its ``holder``
         while the lineage shows that branch running. Once the branch stops, the direction is held by none."""
 
         running = {node.branch for node in self.lineage.branches if node.stopped_at is None}
@@ -1074,6 +1099,7 @@ __all__ = [
     "Probation",
     "QuarantineEvent",
     "RecordedValue",
+    "JudgementWrite",
     "RegressionCase",
     "RetractionRef",
     "SearchHit",

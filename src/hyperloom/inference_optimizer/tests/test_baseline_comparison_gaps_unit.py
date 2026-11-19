@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import (
     _format_report_md,
     _row_to_point,
@@ -17,13 +19,9 @@ from hyperloom.inference_optimizer.baseline_comparison.types import (
 )
 
 
-def test_to_inferencex_name_none_on_empty() -> None:
-    assert to_inferencex_name("") is None
-
-
-def test_to_inferencex_name_none_on_whitespace_only() -> None:
-    """A string that is empty after ``strip()`` returns None (never raises)."""
-    assert to_inferencex_name("   \t  ") is None
+@pytest.mark.parametrize("name", ["", "   \t  "], ids=["empty", "whitespace-only"])
+def test_to_inferencex_name_none_on_blank(name: str) -> None:
+    assert to_inferencex_name(name) is None
 
 
 def test_to_inferencex_name_none_on_unknown_model() -> None:

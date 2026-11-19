@@ -9,16 +9,20 @@ import gzip
 import json
 
 from kernelforge.workflows.forge_fusion.locate import FrameworkInstall
-from kernelforge.workflows.forge_fusion.discover import DiscoveryEvidence, DiscoveryPrompting, DiscoveryTarget
+from kernelforge.workflows.forge_fusion.discovery_prompt import (
+    DiscoveryEvidence,
+    DiscoveryTarget,
+    build_discovery_prompt,
+)
+from kernelforge.workflows.forge_fusion.discover import DiscoveryPrompting
 from kernelforge.workflows.forge_fusion.diagnose import TraceProfile, diagnose_from_shares
 from kernelforge.workflows.forge_fusion.discover import (
-    build_discovery_prompt,
     discover_recipes,
     existing_operator_hints_from_knowledge,
     hot_kernels_from_trace,
     ordered_fusion_boundaries_from_trace,
-    parse_discovered_recipes,
 )
+from kernelforge.workflows.forge_fusion.discovery_response import parse_discovered_recipes
 
 
 def _candidate_diag(shares=None, busy=0.21):

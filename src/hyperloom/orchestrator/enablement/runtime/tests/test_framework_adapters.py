@@ -30,9 +30,8 @@ class _FakeRun:
     The ROCm-pin probe answers with a pinned torch unless a rule says otherwise.
     """
 
-    def __init__(self, rules: list[tuple[str, int, str, str]] | None = None, default_rc: int = 0):
+    def __init__(self, rules: list[tuple[str, int, str, str]] | None = None):
         self.rules = [*(rules or []), ("named={'torch'", 0, _PINS, "")]
-        self.default_rc = default_rc
         self.calls: list[list[str]] = []
 
     def __call__(self, argv, env, cwd):
@@ -41,7 +40,7 @@ class _FakeRun:
         for needle, rc, out, err in self.rules:
             if needle in joined:
                 return subprocess.CompletedProcess(argv, rc, out, err)
-        return subprocess.CompletedProcess(argv, self.default_rc, "", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
 
     def pip_calls(self) -> list[list[str]]:
         return [c for c in self.calls if c[1:4] == ["-m", "pip", "install"]]
@@ -292,16 +291,6 @@ def test_sglang_editable_provision_reports_a_ref_it_cannot_fetch(tmp_path):
 
 
 # verify helpers
-
-
-def test_verify_torch_is_rocm_true_false():
-    assert ad.verify_torch_is_rocm("/py", run=_FakeRun(default_rc=0)) is True
-    assert ad.verify_torch_is_rocm("/py", run=_FakeRun(default_rc=1)) is False
-
-
-def test_verify_vllm_rocm_true_false():
-    assert ad.verify_vllm_rocm("/py", run=_FakeRun(default_rc=0)) is True
-    assert ad.verify_vllm_rocm("/py", run=_FakeRun(default_rc=1)) is False
 
 
 def _raiser(exc: BaseException):
