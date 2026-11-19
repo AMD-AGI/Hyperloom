@@ -148,7 +148,7 @@ mirror, set the registry prefix accordingly.
      - GPU
    * - ``lmsysorg/sglang-rocm:v0.5.23-rocm10-mi30x-20261102``
      - MI300X / MI325X
-   * - ``lmsysorg/sglang-rocm:v0.5.23-rocm10-mi35x-20261102``
+   * - ``lmsysorg/sglang-rocm:v0.5.23-rocm10-mi35x-20261118``
      - MI355X
    * - ``vllm/vllm-openai-rocm:v0.33.0-rocm100``
      - MI300X / MI325X / MI355X
