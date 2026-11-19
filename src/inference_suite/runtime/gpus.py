@@ -17,6 +17,8 @@ likely the previous round's server still exiting; a GPU no wait can free refuses
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -78,8 +80,68 @@ def _refusal(gpu: int, rocm_order: Sequence[int], rows: Mapping[int, Mapping[str
     return None
 
 
+def _nvidia_query(columns: str) -> list[list[str]]:
+    """One ``nvidia-smi --query-*`` reading, as rows of trimmed fields."""
+    done = subprocess.run(
+        ["nvidia-smi", f"--query-{columns}", "--format=csv,noheader,nounits"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    if done.returncode != 0:
+        raise OSError(done.stderr.strip() or f"nvidia-smi exited {done.returncode}")
+    return [[field.strip() for field in line.split(",")] for line in done.stdout.splitlines() if line.strip()]
+
+
+def _nvidia_refusals(gpus: Sequence[int]) -> list[_Refusal]:
+    """``_refusals`` for a host with no ``amd-smi``: an NVIDIA board, where the cards are ``nvidia-smi``'s.
+
+    A card is held when the compute processes on it account for more than the same 1 GiB: graphics clients (a desktop
+    compositor, an overlay) draw on the card but run no compute context a server would collide with, so they are not
+    read as holders the way a compute-only adapter's whole VRAM figure would.
+    """
+    try:
+        mine = {
+            row[0].lower(): int(row[1]) if row[1].isdigit() else 0
+            for row in _nvidia_query("compute-apps=gpu_uuid,used_memory")
+        }
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        return [_Refusal(f"GPUs {', '.join(map(str, gpus))} cannot be checked: {exc}", held=False)]
+    try:
+        uuid_of = {int(row[0]): row[1].lower() for row in _nvidia_query("gpu=index,uuid")}
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        return [_Refusal(f"GPUs {', '.join(map(str, gpus))} cannot be checked: {exc}", held=False)]
+    used: dict[int, int] = {}
+    for index, uuid in uuid_of.items():
+        used[index] = sum(bytes_ for key, bytes_ in mine.items() if key == uuid)
+    refusals: list[_Refusal] = []
+    for gpu in gpus:
+        if gpu not in uuid_of:
+            refusals.append(_Refusal(f"GPU {gpu}: not visible (the host has GPUs 0-{len(uuid_of) - 1})", held=False))
+        elif used.get(gpu, 0) > _OPENED_ONLY_VRAM_BYTES:
+            refusals.append(_Refusal(f"GPU {gpu} (nvidia-smi card {gpu}): held by a compute process", held=True))
+    return refusals
+
+
+def _smi_tool() -> str:
+    """The tool that reports this host's cards: the platform's own, else the one a non-AMD board ships.
+
+    ``amd-smi`` wins whenever it is on the host, so an AMD machine reads exactly what it read before. A host without
+    it is not an AMD host, and ``nvidia-smi`` is read instead when that is there. With neither, the name comes back
+    as ``amd-smi`` so the failure below still reads the way it always has.
+    """
+    if shutil.which("amd-smi") is not None:
+        return "amd-smi"
+    if shutil.which("nvidia-smi") is not None:
+        return "nvidia-smi"
+    return "amd-smi"
+
+
 def _refusals(gpus: Sequence[int]) -> list[_Refusal]:
-    """One ``amd-smi`` reading of why each of ``gpus`` cannot take a new server; empty when all are free."""
+    """One SMI reading of why each of ``gpus`` cannot take a new server; empty when all are free."""
+    if _smi_tool() == "nvidia-smi":
+        return _nvidia_refusals(gpus)
     try:
         rocm_order = gpus_in_rocm_order()
         rows = {row["gpu"]: row for row in gpu_rows(read_amd_smi_json("process"))}

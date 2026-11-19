@@ -11,6 +11,7 @@ and the AgentX client's interpreter by the URL and sha256 of its build.
 
 from __future__ import annotations
 
+import platform
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -40,16 +41,30 @@ LM_EVAL_DISTRIBUTION = "lm_eval"
 LM_EVAL_REQUIREMENT = f"{LM_EVAL_DISTRIBUTION}[api]=={LM_EVAL_VERSION}"
 #: The sha256 of the one wheel PyPI serves for that release; ``requirements/runner*.lock`` list it for the sealed runner.
 LM_EVAL_WHEEL_SHA256 = "5daaa1973bf874005f64f28d3834b875f6886f0d6475878e6a6c821994a5286a"
-#: The relocatable CPython the AgentX client runs under: a python-build-standalone ``install_only`` build for Linux
-#: x86_64, unpacked as is, so a staging can be built in one directory and renamed into another.
-AGENTX_PYTHON_BUILD = PinnedArchive(
-    url=(
-        "https://releases.astral.sh/github/python-build-standalone/releases/download/20261021/"
-        "cpython-3.12.15%2B20261021-x86_64-unknown-linux-gnu-install_only.tar.gz"
-    ),
-    sha256="5ff9f0602ce964a529ed1e8555d3abab6341926d724402ba9a15e9e877191124",
-    version="3.12.15",
+#: The relocatable CPython the AgentX client runs under: a python-build-standalone ``install_only`` build for Linux,
+#: unpacked as is, so a staging can be built in one directory and renamed into another. One pin per machine
+#: architecture: upstream carries only the x86_64 one, so an aarch64 host (a GB10-class box) would otherwise stage a
+#: build it cannot execute.
+_AGENTX_PYTHON_RELEASE = (
+    "https://releases.astral.sh/github/python-build-standalone/releases/download/20261021/"
+    "cpython-3.12.15%2B20261021-{machine}-unknown-linux-gnu-install_only.tar.gz"
 )
+_AGENTX_PYTHON_BUILDS: Mapping[str, PinnedArchive] = MappingProxyType(
+    {
+        "x86_64": PinnedArchive(
+            url=_AGENTX_PYTHON_RELEASE.format(machine="x86_64"),
+            sha256="5ff9f0602ce964a529ed1e8555d3abab6341926d724402ba9a15e9e877191124",
+            version="3.12.15",
+        ),
+        "aarch64": PinnedArchive(
+            url=_AGENTX_PYTHON_RELEASE.format(machine="aarch64"),
+            sha256="f53cca8fcd20805bddaa8bff1ef722a6918f8225d37561bd36ad901d13d580af",
+            version="3.12.15",
+        ),
+    }
+)
+#: The build this host runs: its own architecture's, or the x86_64 one where no pin names it.
+AGENTX_PYTHON_BUILD = _AGENTX_PYTHON_BUILDS.get(platform.machine().lower(), _AGENTX_PYTHON_BUILDS["x86_64"])
 
 #: Every pinned tool's commit, by the name it is staged under.
 PINNED_TOOLS: Mapping[str, str] = MappingProxyType({INFERENCEX_TOOL: INFERENCEX_CLIENT_COMMIT})

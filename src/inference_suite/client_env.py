@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -41,8 +42,14 @@ from inference_suite import aiperf_patch
 from inference_suite.contracts.normalised import NormalisedManifest, PackageIdentity, canonical_name
 from inference_suite.pins import AGENTX_PYTHON_BUILD, INFERENCEX_CLIENT_COMMIT, PinnedArchive
 
-#: The lock shipped beside this module, and the name it is staged under.
-AGENTX_LOCK = Path(__file__).with_name("agentx-client.lock")
+#: The architecture this host resolves its tool pins for. Upstream pins x86_64; an arm64 host resolves its own the
+#: same way, and everything keyed on the architecture below follows it.
+LOCK_ARCH = "aarch64" if platform.machine().lower() in ("arm64", "aarch64") else "x86_64"
+#: The lock shipped beside this module for this architecture, and the name it is staged under. The x86_64 lock is
+#: upstream's own file and is left untouched; an aarch64 host resolves the one generated for its wheels beside it.
+AGENTX_LOCK = Path(__file__).with_name(
+    "agentx-client.lock" if LOCK_ARCH == "x86_64" else f"agentx-client-{LOCK_ARCH}.lock"
+)
 #: The client environment below a staged root: the unpacked build, the interpreter the load runs, what was installed.
 CLIENT_DIR = "agentx-python"
 CLIENT_PYTHON = f"{CLIENT_DIR}/bin/python3"
@@ -54,8 +61,12 @@ PATCHED_FILES = tuple(f"{CLIENT_DIR}/{_SITE_PACKAGES}/{relative}" for relative i
 #: Inside an inputs directory: the interpreter build and the lock's wheels.
 INPUT_ARCHIVE = "python-build.tar.gz"
 INPUT_WHEELS = "wheels"
-#: The platforms the lock's wheels are chosen for: glibc 2.17 to 2.28 on x86_64, what the measurement images run.
-LOCK_PLATFORMS = (*(f"manylinux_2_{minor}_x86_64" for minor in range(28, 16, -1)), "manylinux2014_x86_64")
+#: The platforms the lock's wheels are chosen for: glibc 2.17 to 2.28 on this machine's architecture, which is what
+#: the measurement images run.
+LOCK_PLATFORMS = (
+    *(f"manylinux_2_{minor}_{LOCK_ARCH}" for minor in range(28, 16, -1)),
+    f"manylinux2014_{LOCK_ARCH}",
+)
 #: The directory the build's archive unpacks to.
 _ARCHIVE_ROOT = "python"
 _ENCODING = "utf-8"
@@ -72,7 +83,7 @@ _CHUNK = 1 << 20
 _TAIL = 2000
 _LOCK_HEADER = """\
 # The AgentX client's full dependency tree: one wheel per distribution, by sha256. Staging installs it with --no-deps.
-# Made for CPython {version} (build sha256 {build}), glibc 2.28 x86_64, from {requirements} of InferenceX {pin}.
+# Made for CPython {version} (build sha256 {build}), glibc 2.28 {arch}, from {requirements} of InferenceX {pin}.
 # To regenerate, with network, after either pin moves:
 #   python -m inference_suite.client_env lock --requirements <InferenceX>/inferencex-e2e/{requirements} \\
 #       > src/inference_suite/{lock}
@@ -129,6 +140,7 @@ def lock_text(report: Mapping[str, object], requirements: str) -> str:
         requirements=requirements,
         pin=INFERENCEX_CLIENT_COMMIT,
         lock=AGENTX_LOCK.name,
+        arch=LOCK_ARCH,
     )
     return header + "".join(f"{line}\n" for line in sorted(lines))
 
