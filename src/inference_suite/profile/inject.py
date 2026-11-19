@@ -4,8 +4,9 @@
 """Turn the torch profiler on in a profile round's server, and keep its three trace directories apart.
 
 SGLang reads the trace dir from its environment and opens the window on ``/start_profile`` with the body the client
-sends. vLLM takes the dir and the window as ``--profiler-config.*`` flags, and ATOM (fixed load only) takes the dir as
-a flag. The layer composes last, so the dir it names beats any placeholder an earlier layer carries.
+sends. vLLM takes the dir and the window as ``--profiler-config.*`` flags, and ATOM takes the dir as a flag and bounds
+no steps, so its window is the time between ``/start_profile`` and ``/stop_profile``. The layer composes last, so the
+dir it names beats any placeholder an earlier layer carries.
 
 TraceLens-patched servers write their CUDA-graph capture sidecars into ``capture_traces`` and
 ``graph_capture_profile`` below the trace dir; :func:`settle_traces` lifts them beside ``torch_trace``, so a reader
@@ -32,6 +33,9 @@ from inference_suite.frameworks import Framework
 
 SGLANG_PROFILER_DIR_ENV = "SGLANG_TORCH_PROFILER_DIR"
 ATOM_PROFILER_DIR_FLAG = "--torch-profiler-dir"
+#: How long ATOM's server waits for its engine to write the trace before ``/stop_profile`` fails (300 s by default);
+#: set to the round's own wait, so a capture the round would still wait for is not cut short by the server.
+ATOM_PROFILER_TIMEOUT_ENV = "ATOM_PROFILER_TIMEOUT"
 VLLM_PROFILER_CONFIG = "--profiler-config."
 #: The ``/start_profile`` body keys that bound SGLang's capture window, in engine forward steps.
 SGLANG_WINDOW_KEYS = ("start_step", "num_steps")
@@ -66,7 +70,10 @@ def profiler_layer(config: SuiteConfig, framework: Framework) -> LaunchDelta | N
     if framework is Framework.VLLM:
         return LaunchDelta(args_add=_vllm_args(config.profile, trace_dir))
     if framework is Framework.ATOM:
-        return LaunchDelta(args_add=(ATOM_PROFILER_DIR_FLAG, trace_dir))
+        return LaunchDelta(
+            args_add=(ATOM_PROFILER_DIR_FLAG, trace_dir),
+            env_set={ATOM_PROFILER_TIMEOUT_ENV: f"{_CONTROL_TIMEOUT_SEC:g}"},
+        )
     raise LaunchError(f"{framework.value} runs no server to profile")
 
 

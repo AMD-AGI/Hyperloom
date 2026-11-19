@@ -67,7 +67,7 @@ _VLLM_ARGV = (
 )
 _ATOM_ARGV = (
     *("-tp", "2", "--max-model-len", "8192", "--trust-remote-code", "--model", _MODEL, "--host", "127.0.0.1"),
-    *("--server-port", "8888"),
+    *("--server-port", "8888", "--served-model-name", _MODEL),
 )
 #: The server environment every framework gets from ``_point``: its non-knob variables and the round's GPU masks.
 _POINT_ENV = {

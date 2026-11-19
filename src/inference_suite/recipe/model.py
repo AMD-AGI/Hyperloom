@@ -86,26 +86,27 @@ def _entrypoint(framework: Framework) -> tuple[str, ...]:
     return command.entrypoint
 
 
-#: The spellings sglang, vLLM and ATOM share for the bind host and the TP size.
-_HOST = "host"
+#: The spelling sglang, vLLM and ATOM share for the TP size.
 _TENSOR_PARALLEL_SIZE = "--tensor-parallel-size"
 
+
+def _runner_owned(framework: Framework, *allocated: str) -> frozenset[str]:
+    """The server flags the runner sets for every round of ``framework`` (canonical names): its guard's flags and the
+    metrics switch it turns on when the round scrapes ``/metrics``, as the framework's facts spell them, and the
+    ``allocated`` ones srtctl owns beside them."""
+    facts = framework_facts(framework)
+    guard = facts.server_flags.guarded() if facts.server_flags is not None else ()
+    return frozenset({*allocated, *(canonical_flag_name(flag) for flag in (*guard, facts.metrics_flag) if flag)})
+
+
 SGLANG_ENTRYPOINT = _entrypoint(Framework.SGLANG)
-#: The sglang server flags the runner sets or allocates for every round (canonical names): what srtctl owns, and the
-#: metrics switch the runner turns on when the round scrapes ``/metrics``.
-SGLANG_RUNNER_OWNED = frozenset(
-    {"model-path", "served-model-name", _HOST, "port", "nccl-port", "grpc-http-sidecar-port", "smg-http-sidecar-port"}
-    | {canonical_flag_name(flag) for flag in (framework_facts(Framework.SGLANG).metrics_flag,) if flag}
-)
+SGLANG_RUNNER_OWNED = _runner_owned(Framework.SGLANG, "nccl-port", "grpc-http-sidecar-port", "smg-http-sidecar-port")
 SGLANG_TOPOLOGY = TopologySpelling(
     tp=(_TENSOR_PARALLEL_SIZE, "--tp-size", "--tp"), ep=("--ep-size", "--expert-parallel-size", "--ep")
 )
 
 VLLM_ENTRYPOINT = _entrypoint(Framework.VLLM)
-#: The vLLM server flags the runner sets or allocates for every round (canonical names), as srtctl owns them.
-VLLM_RUNNER_OWNED = frozenset(
-    {"model", "served-model-name", _HOST, "port", "headless", "master-addr", "nnodes", "node-rank"}
-)
+VLLM_RUNNER_OWNED = _runner_owned(Framework.VLLM, "headless", "master-addr", "nnodes", "node-rank")
 VLLM_TOPOLOGY = TopologySpelling(
     tp=(_TENSOR_PARALLEL_SIZE, "-tp"),
     ep_switch=("--enable-expert-parallel", "-ep"),
@@ -114,8 +115,7 @@ VLLM_TOPOLOGY = TopologySpelling(
 
 
 ATOM_ENTRYPOINT = _entrypoint(Framework.ATOM)
-#: The ATOM server flags the runner sets or allocates for every round (canonical names), as srtctl owns them.
-ATOM_RUNNER_OWNED = frozenset({"model", _HOST, "server-port"})
+ATOM_RUNNER_OWNED = _runner_owned(Framework.ATOM)
 ATOM_TOPOLOGY = TopologySpelling(tp=("-tp", _TENSOR_PARALLEL_SIZE), ep_switch=("--enable-expert-parallel",))
 
 

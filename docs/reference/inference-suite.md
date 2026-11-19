@@ -132,7 +132,7 @@ that set each flag and environment variable and what it overrode:
    sets and above Hyperloom's default boot limit, so a slow start ends at the
    round's `boot_sec` as `server_boot_timeout`, not at the framework's 600 s;
 6. the runner's layer: the environment and floors a host needs, and the
-   framework's metrics switch (`--enable-metrics` for SGLang; vLLM needs none)
+   framework's metrics switch (`--enable-metrics` for SGLang; vLLM and ATOM need none)
    when the round samples KV telemetry;
 7. the profiler layer of a profile round.
 

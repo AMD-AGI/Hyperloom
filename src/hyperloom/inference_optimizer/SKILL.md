@@ -1022,11 +1022,12 @@ An AgentX baseline whose server ran with the prefix cache off fails with
 `stop_reason='baseline_failed'` on the first occurrence, whichever AgentX client
 replayed it. Each engine is read from its own launch account: SGLang's resolved
 `disable_radix_cache=True`, vLLM's launch record showing
-`enable_prefix_caching=False`, and, because ATOM keeps the cache off by default
-and prints no record, ATOM server args without `--enable_prefix_caching`. A
-launch whose account cannot be read is left alone. Do not propose
-`--disable-radix-cache` or `--no-enable-prefix-caching` for an AgentX baseline;
-on ATOM pass `--server-args "--enable_prefix_caching"`.
+`enable_prefix_caching=False`, and, because ATOM prints no record, the argv the
+round's `launch.json` records: ATOM caches by default, so it is refused only when
+its last prefix-cache switch is `--no-enable_prefix_caching` (either spelling).
+A launch whose account cannot be read is left alone. Do not propose
+`--disable-radix-cache` or `--no-enable-prefix-caching` for an AgentX baseline,
+nor `--no-enable_prefix_caching` on ATOM.
 
 Operator server flags have one supported CLI entry point:
 `optimize --server-args "<framework serve flags>"`. The CLI exports this as
@@ -1037,7 +1038,7 @@ wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is accepted for compatibility; baseline uses the first value.
 Use `--conc-sweep-concs` to override the synthetic ladder SWEEP measures (`256,128,64,32,16,8,4,2`). Native AgentX uses `HYPERLOOM_AGENTX=1` with the ordinary workload flags, or `--benchmark-config` for an AgentX workload YAML. Hyperloom archives the resolved workload as `benchmark.yaml`; CONC is fixed per session, so start a separate session to measure another concurrency.
 
-Native AgentX supports one node and SGLang/vLLM. It rejects `--enable-conc-sweep`,
+Native AgentX supports one node and SGLang, vLLM or ATOM; an ATOM session takes its base from InferenceX's ATOM agentic entries. It rejects `--enable-conc-sweep`,
 `--isl`, `--osl`, `--profile-osl`, `--max-model-len`, `--quantize` and
 `--quantize-scheme`. `--reference-script` is its base launch, ahead of the
 recipes; a session no recipe serves and given no script exits 2. Prepare quantized checkpoints before the run.
