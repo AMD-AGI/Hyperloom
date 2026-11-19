@@ -246,8 +246,8 @@ class Coordinator:
         self.conversation.attach_orchestration_context_tools()
         # Resume detection must run before any boot-time state.json write.
         self.writeback.detect_resume_state()
-        # Reap serving processes orphaned by a prior monitor-process crash (e.g. a raylet death that took the
-        # optimizer down mid-benchmark), scoped strictly to this session's own pidfiles.
+        # Reap serving processes orphaned by a prior monitor-process crash, scoped strictly to this session's own
+        # pidfiles.
         reap_orphaned_servers_best_effort(self.session_dir, phase="boot")
         # Before any bring-up can dispatch: an attempt classified against a
         # different pin is not comparable with its neighbours.

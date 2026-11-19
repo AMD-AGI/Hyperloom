@@ -131,12 +131,8 @@ def kill_my_spawned_server(
 #: run instead of opening a framework enablement round.
 AGENTX_PREFLIGHT_ERROR_CLASS: str = "agentx_preflight"
 
-# -913 is ``_ray_serving._RAY_ACTOR_DIED_RC``.
-
 # Sentinel ``returncode`` when the session wall-clock budget ran out mid-round and the tree was reaped.
 SESSION_TIME_EXHAUSTED_RETURNCODE: int = -915
-
-# -916 is ``_ray_serving._ACTOR_TIMEOUT_RC``.
 
 # Sentinel ``returncode`` when the orchestrator cancelled the action this child was launched for -- a shutdown, or a
 # budget that is spent.

@@ -343,11 +343,12 @@ async def _run_subprocess(
     def _run(on_output: Callable[[], None]) -> tuple[int, str, str]:
         """Run the command synchronously in a worker thread.
 
-        Copies the environment, injects the Ray GCS address in multi-node mode,
-        and prepends the venv ``bin`` to ``PATH``. Launches the child in its own
-        POSIX session and, on timeout, reaps the whole process group so a hung
-        grandchild dies with the wrapper. Mirrors ``subprocess.run``: captures
-        stdout/stderr and re-raises ``TimeoutExpired``.
+        Copies the environment, routes GEAK GPU work to an Infera pod over SSH
+        in multi-node mode, and prepends the venv ``bin`` to ``PATH``. Launches
+        the child in its own POSIX session and, on timeout, reaps the whole
+        process group so a hung grandchild dies with the wrapper. Mirrors
+        ``subprocess.run``: captures stdout/stderr and re-raises
+        ``TimeoutExpired``.
 
         Args:
             on_output: Liveness callback invoked per line the child emits.
@@ -359,23 +360,13 @@ async def _run_subprocess(
             subprocess.TimeoutExpired: When the command exceeds ``timeout_sec``.
         """
         child_env = dict(base_env) if base_env is not None else os.environ.copy()
-        from ._multi_node_env import (
-            is_multi_node,
-            ray_gcs_address_from_state,
-            infera_ssh_env_from_state,
-        )
+        from ._multi_node_env import infera_ssh_env_from_state, is_multi_node
         from ._subprocess_kill import RoundWatch, run_with_session_kill
 
         if is_multi_node():
-            # Infera backend: route GEAK GPU work to a pod over SSH (no Ray).
-            # infera_ssh_env_from_state() returns {} for RayJob/single-node, so
-            # the RAY_ADDRESS path below is unchanged for those.
             ssh_env = infera_ssh_env_from_state()
             if ssh_env:
                 child_env.update(ssh_env)
-            addr = "" if ssh_env else ray_gcs_address_from_state()
-            if addr:
-                child_env.setdefault("RAY_ADDRESS", addr)
         child_env["PATH"] = f"/opt/venv/bin:{child_env.get('PATH', '')}"
         # The heartbeat around this call is only as honest as the child's
         # flushing: block-buffered on a pipe, it looks dead between flushes.

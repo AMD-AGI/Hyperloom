@@ -28,7 +28,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from hyperloom_common.env import env_bool
 from hyperloom.contracts.measurement import AccuracyValue, FailureClass, SandboxFacts
 from hyperloom.measure import bundle as bundle_mod
 from hyperloom.measure.archive import ArchiveError, ResultArchive
@@ -347,11 +346,9 @@ class HostedMeasurementBackend:
     # -- lifecycle ----------------------------------------------------------------------------------------------
 
     def start(self) -> None:
-        """Check what is known before any test (one node, no Ray, runner templates, an archive); refuse on a miss."""
+        """Check what is known before any test (one node, runner templates, an archive); refuse on a miss."""
         if self._config.nodes != 1:
             raise HostedStartError(f"hosted measurement runs single-node activities, this one has {self._config.nodes}")
-        if env_bool("INFERENCE_OPTIMIZER_RAY_EXEC", default=False):
-            raise HostedStartError("INFERENCE_OPTIMIZER_RAY_EXEC is on; hosted measurement does not use Ray")
         if not self._config.runner_templates:
             raise HostedStartError("no runner template list: set the host information or runner_templates")
         if self._config.archive is None:

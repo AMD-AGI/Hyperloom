@@ -3,9 +3,9 @@
 """Visible-device mask names and parsing, shared by every layer that reads one.
 
 The same tuple of mask variables and the same "split on ``,``/``;``, keep the
-first occurrence of each non-negative int" parser had accumulated five separate
-copies (``bus/gpu_pool``, ``policy/gate``, ``actions/executors/_ray_serving``,
-``common/env_safety``, ``actions/executors/_gpu_pin``), and their empty-mask
+first occurrence of each non-negative int" parser had accumulated separate
+copies (``bus/gpu_pool``, ``policy/gate``, ``common/env_safety``,
+``actions/executors/_gpu_pin``), and their empty-mask
 semantics had already drifted apart. This module is the single definition; it
 imports nothing outside the standard library and ``outside_facts`` (constants
 only) so the pure-helper layers can use it without dragging in the SQLite
@@ -87,8 +87,8 @@ _UNCOUNTED_VISIBLE_DEVICE_VARS: frozenset[str] = frozenset(
     }
 )
 
-#: The subset the capacity-counting layers read — ``gpu_pool``, ``policy.gate``,
-#: ``actions.executors._ray_serving``. DERIVED from
+#: The subset the capacity-counting layers read — ``gpu_pool``, ``policy.gate``.
+#: DERIVED from
 #: :data:`VISIBLE_DEVICE_VARS` rather than re-listed, so a var added to the
 #: precedence chain is counted by default and can only be left out by naming it
 #: in :data:`_UNCOUNTED_VISIBLE_DEVICE_VARS`. The two tuples cannot silently

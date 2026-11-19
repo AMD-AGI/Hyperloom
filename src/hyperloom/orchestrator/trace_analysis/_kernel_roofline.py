@@ -155,8 +155,7 @@ def _candidate_model_config_paths(model_name: str) -> list[Path]:
         candidates.append(raw)
     candidates.append(raw / "config.json")
     # Optional models-root override (env-only; no hardcoded default). Standalone
-    # kernel-agent tools cannot import hyperloom.common (the Ray/subprocess
-    # sys.path contract in hyperloom.common.__init__), so this mirrors the shared
+    # kernel-agent tools cannot import hyperloom.common, so this mirrors the shared
     # resolver's strategy (local path + HF hub cache) independently.
     _root = os.environ.get("HYPERLOOM_MODELS_ROOT", "").strip()
     if _root:

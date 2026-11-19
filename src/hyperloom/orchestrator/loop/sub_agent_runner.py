@@ -117,8 +117,7 @@ class ExecutionCleanupUnconfirmed(RuntimeError):
         result: The executor's own outcome, for the terminal row.
         tree_pgid: Process group whose teardown went unconfirmed, or None when
             the raise site has no local group to name -- a cleanup that failed
-            before any process existed, or a Ray actor whose ids belong to
-            another node.
+            before any process existed.
     """
 
     def __init__(
