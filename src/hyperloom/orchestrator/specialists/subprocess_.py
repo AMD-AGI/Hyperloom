@@ -492,7 +492,7 @@ class SpecialistSubprocessDispatcher:
                 finally:
                     self._release_task(backend, request)
 
-        return self._harvest_result(request, watch, backend, outcome, held=held)
+        return self._harvest_result(request, watch, launch, outcome, held=held)
 
     async def _ready(
         self, request: SpecialistSpawn, prompt_file: Path, process_log: Path
@@ -615,7 +615,7 @@ class SpecialistSubprocessDispatcher:
         self,
         request: SpecialistSpawn,
         watch: ReapWatch,
-        backend: str,
+        launch: SpecialistLaunch,
         outcome: dict[str, Any],
         *,
         held: HeldWorktree | None,
@@ -660,7 +660,7 @@ class SpecialistSubprocessDispatcher:
                 targets=declared_targets(done_payload),
             )
 
-        trace = harvest_agent_trace(backend, request.workspace, process_log)
+        trace = harvest_agent_trace(launch.backend, request.workspace, process_log, launch.env)
         if trace.error and (outcome["exit_code"] not in (None, 0) or done_payload is None):
             _add_error(outcome, trace.error)
         if refused:
