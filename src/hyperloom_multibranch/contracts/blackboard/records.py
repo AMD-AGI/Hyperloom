@@ -84,7 +84,9 @@ class ClaimKey:
 
 @dataclass(frozen=True)
 class Claim:
-    """A lease on a key, held by a branch so a restarted specialist keeps it; times are Unix seconds."""
+    """A lease on a key, held by a branch so a restarted specialist keeps it; times are Unix seconds. Once
+    ``request_id`` names the test that carries it, its status is that test's, whatever ``status`` and ``expires_at``
+    store."""
 
     key: ClaimKey
     holder: str

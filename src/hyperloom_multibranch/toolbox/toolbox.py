@@ -30,7 +30,6 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind
 from hyperloom_multibranch.contracts.blackboard.interfaces import (
-    BlackboardError,
     ClaimLost,
     ClaimService,
     ConflictingWrite,
@@ -91,7 +90,8 @@ from hyperloom_multibranch.toolbox.tools.op_shares import PROFILE_REQUEST_PARAM
 
 logger = logging.getLogger(__name__)
 
-CLAIM_TTL_SECONDS = 600.0
+#: How often :meth:`RealToolbox.tick` runs while the toolbox is started.
+TICK_SECONDS = 200.0
 WRITE_RETRIES = 3
 #: How long a native build that failed for the machine waits before it is tried again.
 BUILD_RETRY_SECONDS = 30.0
@@ -130,15 +130,15 @@ class ToolboxStores:
 @dataclass(frozen=True)
 class ToolboxTuning:
     """The queue policy, the infrastructure retries (of tests and of native builds) and the waits before a test's
-    (``infra_backoff_seconds``, :class:`~.attempts.InfraBackoff`), the claim lifetime, the clock and the sleep; the
-    defaults are the real ones. ``tests_end_by`` is when every test must have ended, Unix seconds, ``None`` for no such
-    time: a hosted session's grant ends then. A wait before a retry never runs past one typical test before it, as it
+    (``infra_backoff_seconds``, :class:`~.attempts.InfraBackoff`), the time between two ticks, the clock and the sleep;
+    the defaults are the real ones. ``tests_end_by`` is when every test must have ended, Unix seconds, ``None`` for no
+    such time: a hosted session's grant ends then. A wait before a retry never runs past one typical test before it, as it
     never runs past one before its branch's exploration ends; the integration branch's tests, FINAL's validation among
     them, have only this bound."""
 
     policy: QueuePolicy | None = None
     max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
-    claim_ttl_seconds: float = CLAIM_TTL_SECONDS
+    tick_seconds: float = TICK_SECONDS
     clock: Callable[[], float] = time.time
     build_retry_seconds: float = BUILD_RETRY_SECONDS
     infra_backoff_seconds: tuple[float, ...] = INFRA_BACKOFF_SECONDS
@@ -189,7 +189,7 @@ class RealToolbox:
                 tuning.infra_backoff_seconds, self._latest_retry_start, clock=tuning.clock, sleep=tuning.sleep
             ),
         )
-        self._ttl, self._clock = tuning.claim_ttl_seconds, tuning.clock
+        self._tick_seconds, self._clock = tuning.tick_seconds, tuning.clock
         self._tests_end_by = tuning.tests_end_by
         self._tools, self._repo, self._kinds = tools, acceptance.repo, acceptance.supported_kinds
         self._closed = False
@@ -198,7 +198,7 @@ class RealToolbox:
         self._lock = asyncio.Lock()
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._outcome_events: dict[str, asyncio.Event] = {}
-        self._renewer: asyncio.Task[None] | None = None
+        self._ticker: asyncio.Task[None] | None = None
         hooks = BuildHooks(ready=self._builds_ready, ended=self._builds_ended, notify=self._notify_build)
         self._builds = PendingBuilds(
             stores.builds, hooks, max_infra_retries=tuning.max_infra_retries, retry_seconds=tuning.build_retry_seconds
@@ -207,11 +207,11 @@ class RealToolbox:
     # --- lifecycle ---------------------------------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Read the quarantine list, recover what the log says is unfinished, and start renewing claims."""
+        """Read the quarantine list, recover what the log says is unfinished, and start ticking."""
 
         await self._quarantine.load()
         await self.recover()
-        self._renewer = asyncio.create_task(self._renew_loop())
+        self._ticker = asyncio.create_task(self._tick_loop())
 
     async def close(self) -> None:
         """Stop without withdrawing anything: running tests are picked up from the log by the next start.
@@ -220,13 +220,13 @@ class RealToolbox:
         """
 
         self._closed = True
-        tasks = [*self._tasks.values(), *([self._renewer] if self._renewer else [])]
+        tasks = [*self._tasks.values(), *([self._ticker] if self._ticker else [])]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await self._builds.close()
         self._tasks.clear()
-        self._renewer = None
+        self._ticker = None
         if self._tools is not None:
             await self._tools.close()
 
@@ -571,12 +571,8 @@ class RealToolbox:
         self._pump()
 
     async def tick(self) -> None:
-        """One round of housekeeping: renew the claims of live tests and retry outcomes the blackboard refused.
+        """One round of housekeeping: the backend's own, then retry the outcomes the blackboard refused."""
 
-        A claim whose renewal fails is logged by :meth:`_renew_each` and holds up nothing after it in the round.
-        """
-
-        await self._renew_each()
         await self._housekeeping()
         for entry in self._log.entries():
             if entry.unwritten:
@@ -590,42 +586,6 @@ class RealToolbox:
         files; ``None`` here by default."""
 
         return None
-
-    async def renew_claims(self) -> None:
-        """Renew the claim of every queued and running test, each on its own (see :meth:`_renew_each`).
-
-        Once every claim had its turn, the first renewal that failed for a reason not the blackboard's is raised.
-        """
-
-        errors = await self._renew_each()
-        if errors:
-            raise errors[0]
-
-    async def _renew_each(self) -> list[Exception]:
-        """Renew the claim of every queued and running test; the errors not the blackboard's, in claim order.
-
-        A renewal the blackboard refused, or that did not reach it, is logged as a warning. One that failed for any other
-        reason is logged with its traceback, naming the claim. Either way the round goes on to the claims after it, which
-        would otherwise lapse at their TTL, round after round, behind the one that keeps failing.
-        """
-
-        if self._claims is None:
-            return []
-        errors: list[Exception] = []
-        for item in self._queue.items():
-            if item.request.intent_fingerprint is None:
-                continue
-            key = self._key(item.request)
-            try:
-                await self._claims.renew(key, ttl_seconds=self._ttl)
-            except (BlackboardError, OSError):  # the blackboard refused or was not reached: the next tick retries
-                message = "could not renew the claim of %s; it lapses at its TTL unless a later renewal lands"
-                logger.warning(message, item.request_id, exc_info=True)
-            except Exception as error:
-                message = "renewing the claim of %s (intent %s on %s) failed; the other claims are renewed"
-                logger.exception(message, item.request_id, key.intent_fingerprint, key.parent_commit)
-                errors.append(error)
-        return errors
 
     # --- accepting and recovering --------------------------------------------------------------------------------
 
@@ -670,15 +630,21 @@ class RealToolbox:
 
         try:
             await self._sink.write_request(replace(accepted, priority=entry.priority))
-            if self._claims is not None and accepted.intent_fingerprint is not None:
-                await self._claims.attach_request(self._key(accepted), entry.request_id, ttl_seconds=self._ttl)
-        except ClaimLost as error:
-            # The row is written, so the request ends as withdrawn, logged like any outcome: it waits in no queue, and a
-            # write the blackboard refuses is retried by the next tick and the next start, never left in flight.
-            await self._record_and_write(entry, {"withdrawal": f"claim lost: {error}"})
-            raise RequestRejected(f"the claim of this request is not held: {error}") from error
         except BaseException:
             self._log.abort(entry.request_id)
+            raise
+        if self._claims is None or accepted.intent_fingerprint is None:
+            return
+        # The row is written, so a request that fails here ends as withdrawn, logged like any outcome: it waits in no
+        # queue, and a write the blackboard refuses is retried by the next tick and the next start. The claim a test
+        # carries is held until its test has an outcome, so an aborted request would hold it for the session.
+        try:
+            await self._claims.attach_request(self._key(accepted), entry.request_id)
+        except ClaimLost as error:
+            await self._record_and_write(entry, {"withdrawal": f"claim lost: {error}"})
+            raise RequestRejected(f"the claim of this request is not held: {error}") from error
+        except Exception as error:
+            await self._record_and_write(entry, {"withdrawal": f"claim not attached: {error!r}"})
             raise
 
     def _enqueue(
@@ -876,13 +842,13 @@ class RealToolbox:
         else:
             await self._quarantine.add_suspect(node, reason)
 
-    async def _renew_loop(self) -> None:
+    async def _tick_loop(self) -> None:
         while True:
-            await asyncio.sleep(self._ttl / 3)
+            await asyncio.sleep(self._tick_seconds)
             try:
                 await self.tick()
-            except Exception:  # ended, the loop would let every live claim lapse at its TTL, and close() says nothing
-                logger.exception("a renewal round failed; the claims of live tests are renewed again at the next one")
+            except Exception:  # ended, the loop would retry no refused outcome again, and close() says nothing
+                logger.exception("a tick failed; the next one runs in %.0f s", self._tick_seconds)
 
 
 __all__ = ["AcceptanceSetup", "RealToolbox", "ToolboxStores", "ToolboxTuning"]
