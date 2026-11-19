@@ -35,11 +35,11 @@ from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.specialist.judging import BranchJudge, Judging
 from hyperloom_multibranch.tests import test_specialist_judging as judging
 from hyperloom_multibranch.tests.test_cli import WORKLOAD_ARGS
-from hyperloom_multibranch import cli
+from hyperloom_multibranch import cli_options
 
 
 def _settings() -> RunSettings:
-    return cli.settings_from(cli.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 4)
+    return cli_options.settings_from(cli_options.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 4)
 
 
 def _intent():  # type: ignore[no-untyped-def]
