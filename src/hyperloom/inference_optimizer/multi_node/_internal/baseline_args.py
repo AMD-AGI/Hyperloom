@@ -238,7 +238,9 @@ def _inferencex(env: Mapping[str, str]) -> BaselineArgs | None:
     prefill_ep = _role_ep(env, "prefill")
     decode_ep = _role_ep(env, "decode")
     prefill = base + (ep_flags if prefill_ep else []) + prefill_mode
-    decode = base + (ep_flags if decode_ep else []) + _decode_flags(entry.get("decode") or {}, decode_ep, prefill_context)
+    decode = (
+        base + (ep_flags if decode_ep else []) + _decode_flags(entry.get("decode") or {}, decode_ep, prefill_context)
+    )
     return BaselineArgs(
         SOURCE_INFERENCEX,
         shlex.join(prefill),
@@ -276,9 +278,7 @@ def export_baseline_args(choice: BaselineArgs) -> None:
         os.environ["PD_TRANSFER_BACKEND"] = choice.transfer_backend
 
 
-def record_baseline_args(
-    state: dict[str, Any], choice: BaselineArgs, env: Mapping[str, str] | None = None
-) -> None:
+def record_baseline_args(state: dict[str, Any], choice: BaselineArgs, env: Mapping[str, str] | None = None) -> None:
     """Write the chosen source, per-role args, and the model/EP they were resolved for into the multi-node state."""
     state["baseline_identity"] = _identity(env if env is not None else os.environ)
     state["baseline_args_source"] = choice.source

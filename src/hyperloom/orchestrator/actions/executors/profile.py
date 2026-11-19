@@ -22,7 +22,7 @@ from hyperloom_common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
-from hyperloom.inference_optimizer import framework_registry
+from hyperloom.inference_optimizer import framework_registry, multi_node
 from .benchmark_result import round_succeeded
 from inference_suite.contracts import RunLayout
 from inference_suite.contracts.layout import CAPTURE_TRACE_DIRS
@@ -284,8 +284,9 @@ def _certify_trace_dir(trace_dir: Path, trace_input: Path, framework: str) -> di
 
 # A run_dir keeps the capture sidecars beside its ``torch_trace``.
 def _capture_trace_files(trace_dir: Path) -> tuple[Path | None, list[Path]]:
-    """The graph-capture folder under ``trace_dir`` (or a PD role's subdir, decode first, or its parent) and its files."""
-    bases = (trace_dir, trace_dir / "decode", trace_dir / "prefill", trace_dir.parent)
+    """The graph-capture folder and its files under ``trace_dir``, a PD first-pod or role subdir, or its parent."""
+    pod_dirs = tuple(Path(multi_node.pd_pod_trace_dir(str(trace_dir), role, 0)) for role in ("decode", "prefill"))
+    bases = (trace_dir, *pod_dirs, trace_dir / "decode", trace_dir / "prefill", trace_dir.parent)
     capture_dirs = [base / name for base in bases for name in CAPTURE_TRACE_DIRS]
     capture = next((path for path in capture_dirs if path.is_dir()), None)
     if capture is None:
@@ -750,7 +751,7 @@ _PD_TRACE_POLL_S = 5.0
 
 
 async def _await_pd_role_traces(root: str, roles: list[str], since_unix: float) -> None:
-    """Wait until each of ``roles`` has a trace written under ``<root>/<role>`` since ``since_unix``.
+    """Wait until each of ``roles`` has a trace written under ``root`` since ``since_unix``.
 
     Polls every ``_PD_TRACE_POLL_S`` seconds for at most ``HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S`` (default 600).
     """
@@ -843,7 +844,7 @@ async def _infera_profile_window(round_trace_root: str, since_unix: float = 0.0)
                 await trigger_pd_engine_profile("stop")
 
 
-# Attaches this round's multi-node trace files. A PD cluster's prefill and decode traces land in per-role subdirs and
+# Attaches this round's multi-node trace files. A PD cluster's prefill and decode traces land in per-engine subdirs and
 # are recorded as ``role_traces``, decode's being the main trace; otherwise the heaviest file is the main trace.
 def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_started_unix: float) -> None:
     from ._multi_node_server_lifecycle import select_pd_node_traces

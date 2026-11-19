@@ -148,18 +148,19 @@ def test_pd_route_outcome_records_every_nodes_shares(tmp_path: Path, monkeypatch
     assert shares["nodes"]["decode_0"]["idle_pct"] == 15.0 and not shares["nodes"]["decode_0"]["failing"]
 
 
-def _pd_layout(tmp_path: Path) -> tuple[Path, list[Path], Path, Path]:
-    """A torch_trace root with two decode nodes, one prefill node and a decode graph-capture folder."""
+def _pd_layout(tmp_path: Path) -> tuple[Path, list[Path], Path, list[Path]]:
+    """A torch_trace root with two decode pods, each with its graph-capture folder, and one prefill pod."""
     root = tmp_path / "torch_trace"
-    decode_capture = root / "decode" / "graph_capture_profile"
-    decode_capture.mkdir(parents=True)
-    (decode_capture / "DecodeCudaGraphRunner_bs_1_rank0.json.gz").write_bytes(b"x")
-    (root / "prefill").mkdir()
-    decode_traces = [root / "decode" / f"1-TP-{rank}.trace.json.gz" for rank in (0, 8)]
-    prefill_trace = root / "prefill" / "1-TP-0-EXTEND.trace.json.gz"
+    decode_captures = [root / "decode" / str(pod) / "graph_capture_profile" for pod in (0, 1)]
+    for capture in decode_captures:
+        capture.mkdir(parents=True)
+        (capture / "DecodeCudaGraphRunner_bs_1_rank0.json.gz").write_bytes(b"x")
+    (root / "prefill" / "0").mkdir(parents=True)
+    decode_traces = [root / "decode" / str(pod) / f"{pod + 1}-TP-0.trace.json.gz" for pod in (0, 1)]
+    prefill_trace = root / "prefill" / "0" / "1-TP-0-EXTEND.trace.json.gz"
     for path in [*decode_traces, prefill_trace]:
         path.write_bytes(b"trace")
-    return root, decode_traces, prefill_trace, decode_capture
+    return root, decode_traces, prefill_trace, decode_captures
 
 
 def _fake_splitter(commands: list[list[str]]):
@@ -176,7 +177,7 @@ def _fake_splitter(commands: list[list[str]]):
 
 
 def test_jobs_split_and_clamp_decode_per_node_and_pass_prefill_raw(tmp_path: Path, monkeypatch) -> None:
-    root, decode_traces, prefill_trace, decode_capture = _pd_layout(tmp_path)
+    root, decode_traces, prefill_trace, decode_captures = _pd_layout(tmp_path)
     commands: list[list[str]] = []
     clamped: list[Path] = []
     monkeypatch.setattr(jobs_mod, "run_command", _fake_splitter(commands))
@@ -185,7 +186,6 @@ def test_jobs_split_and_clamp_decode_per_node_and_pass_prefill_raw(tmp_path: Pat
 
     jobs = jobs_mod.pd_report_jobs(
         {"prefill": [str(prefill_trace)], "decode": [str(p) for p in decode_traces]},
-        trace_root=root,
         output_dir=out,
         platform="MI300X",
         tracelens_root=tmp_path,
@@ -199,7 +199,7 @@ def test_jobs_split_and_clamp_decode_per_node_and_pass_prefill_raw(tmp_path: Pat
             "node": n,
             "trace_path": str(chunk),
             "platform": "MI300X",
-            "capture_folder": str(decode_capture),
+            "capture_folder": str(decode_captures[n]),
         }
         for n, chunk in enumerate(decode_chunks)
     ] + [{"phase": "prefill", "node": 0, "trace_path": str(prefill_trace), "platform": "MI300X"}]
@@ -216,7 +216,6 @@ def test_focus_mode_applies_only_to_the_first_decode_node(tmp_path: Path, monkey
 
     jobs = jobs_mod.pd_report_jobs(
         {"decode": [str(p) for p in decode_traces], "prefill": [str(prefill_trace)]},
-        trace_root=root,
         output_dir=out,
         platform="MI300X",
         tracelens_root=tmp_path,
@@ -237,7 +236,6 @@ def test_a_missing_focus_chunk_records_the_n26_retry_hint(tmp_path: Path, monkey
     with pytest.raises(RuntimeError, match="steady_state_chunk_missing"):
         jobs_mod.pd_report_jobs(
             {"decode": [str(decode_traces[0])], "prefill": [str(prefill_trace)]},
-            trace_root=root,
             output_dir=tmp_path / "tracelens",
             platform="MI300X",
             tracelens_root=tmp_path,
@@ -251,14 +249,14 @@ def test_a_missing_focus_chunk_records_the_n26_retry_hint(tmp_path: Path, monkey
 
 
 def test_multi_trace_run_config_is_combine_by_node_and_passes_check_config(tmp_path: Path) -> None:
-    root, decode_traces, prefill_trace, decode_capture = _pd_layout(tmp_path)
+    root, decode_traces, prefill_trace, decode_captures = _pd_layout(tmp_path)
     out = tmp_path / "tracelens"
     out.mkdir()
     jobs = [
         {"phase": "decode", "node": 0, "trace_path": str(decode_traces[0]), "platform": "MI300X"},
         {"phase": "prefill", "node": 0, "trace_path": str(prefill_trace), "platform": "MI300X"},
     ]
-    jobs[0]["capture_folder"] = str(decode_capture)
+    jobs[0]["capture_folder"] = str(decode_captures[0])
 
     path = tlr.write_multi_trace_run_config(output_dir=out, jobs=jobs, analysis_mode="inference")
 
@@ -267,7 +265,7 @@ def test_multi_trace_run_config_is_combine_by_node_and_passes_check_config(tmp_p
     assert "kernel_summary" not in config
     assert [(job["phase"], job["node"]) for job in config["jobs"]] == [("decode", 0), ("prefill", 0)]
     assert {job["platform"] for job in config["jobs"]} == {"MI300X"}
-    assert config["jobs"][0]["capture_folder"] == str(decode_capture.resolve())
+    assert config["jobs"][0]["capture_folder"] == str(decode_captures[0].resolve())
     assert "capture_folder" not in config["jobs"][1]
     assert check_config(config, "multi_trace").variables["focus_job"] == "decode_0"
 

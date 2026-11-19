@@ -5,7 +5,7 @@
 
 from ._internal.external_state import external_has_server_control
 from ._internal.infera_support import INFERA_POD_LOG_FILE
-from ._internal.pd_cluster import record_profile_paths
+from ._internal.pd_cluster import pd_pod_trace_dir, record_profile_paths, role_engine_pods
 from ._internal.serving_probe import completion_probe_min_tokens, completion_probe_tokens, generated_tokens
 from ._internal.ssh_client import SshTarget, ssh_run
 from ._internal.topology_file import (
@@ -27,7 +27,9 @@ __all__ = [
     "external_has_server_control",
     "generated_tokens",
     "normalize_mn_backend",
+    "pd_pod_trace_dir",
     "record_profile_paths",
+    "role_engine_pods",
     "ssh_run",
     "topology_file_overlay",
 ]

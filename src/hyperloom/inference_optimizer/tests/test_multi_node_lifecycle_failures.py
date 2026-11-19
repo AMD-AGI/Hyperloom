@@ -220,9 +220,7 @@ def test_pd_worker_health_dials_the_engine_port_of_each_role(serve, monkeypatch:
     assert seen == ["10.0.0.1:8010", "10.0.0.2:8020"]
 
 
-def test_pd_worker_wait_holds_until_every_engine_on_a_shared_ip_answers(
-    serve, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_pd_worker_wait_holds_until_every_engine_on_a_shared_ip_answers(serve, monkeypatch: pytest.MonkeyPatch) -> None:
     """Two engines on one IP are two targets: prefill answering must not mark decode ready."""
     seen: list[int] = []
     real_client = httpx.AsyncClient
@@ -313,6 +311,24 @@ def test_pd_engines_lost_reason_names_engines_that_are_gone(monkeypatch: pytest.
     assert life.pd_engines_lost_reason() is None
 
 
+def test_engine_lost_gate_skips_a_handoff_without_server_control(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from hyperloom.inference_optimizer.multi_node._internal import topology_file
+    from hyperloom.orchestrator.actions.executors.benchmark_run.launch import _BenchmarkLaunchMixin
+
+    monkeypatch.delenv(topology_file.TOPOLOGY_FILE_ENV, raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SSH_KEY", raising=False)
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://10.0.0.9:8000")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "atomesh")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_PREFILL_IPS", "10.0.0.1")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_DECODE_IPS", "10.0.0.2")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_ROUTER_IPS", "10.0.0.9")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "3")
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", str(tmp_path))
+    assert life._read_state()["decode_pods"] and "ssh_key_path" not in life._read_state()
+
+    assert asyncio.run(_BenchmarkLaunchMixin._multi_node_engines_lost()) is None
+
+
 def test_pd_engine_profile_uses_engine_urls_without_pods(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     seen: list[tuple[str, dict]] = []
     real_client = httpx.AsyncClient
@@ -331,8 +347,8 @@ def test_pd_engine_profile_uses_engine_urls_without_pods(monkeypatch: pytest.Mon
     asyncio.run(life.trigger_pd_engine_profile("start", {"output_dir": str(tmp_path)}))
 
     assert seen == [
-        ("http://p-svc:8010/start_profile", {"output_dir": str(tmp_path / "prefill"), "with_stack": False}),
-        ("http://d-svc:8020/start_profile", {"output_dir": str(tmp_path / "decode"), "with_stack": False}),
+        ("http://p-svc:8010/start_profile", {"output_dir": str(tmp_path / "prefill" / "0"), "with_stack": False}),
+        ("http://d-svc:8020/start_profile", {"output_dir": str(tmp_path / "decode" / "0"), "with_stack": False}),
     ]
 
 
@@ -470,7 +486,9 @@ def test_pd_role_traces_take_the_first_gpu_of_each_node(monkeypatch: pytest.Monk
         (root / "prefill" / f"7-TP-{rank}-DECODE.trace.json.gz").write_bytes(b"x" * 50)
         (root / "prefill" / f"7-TP-{rank}-EXTEND.trace.json.gz").write_bytes(b"x")
     pods = [{"podIP": "10.0.0.1"}, {"podIP": "10.0.0.2"}]
-    monkeypatch.setattr(life, "_read_state", lambda: {"decode_pods": pods, "prefill_pods": pods[:1]})
+    monkeypatch.setattr(
+        life, "_read_state", lambda: {"backend": "infera", "decode_pods": pods, "prefill_pods": pods[:1]}
+    )
 
     since = min(p.stat().st_mtime for p in (root / "decode").iterdir()) - 1
     by_node = life.select_pd_node_traces(str(root), since)
@@ -480,6 +498,36 @@ def test_pd_role_traces_take_the_first_gpu_of_each_node(monkeypatch: pytest.Monk
         "decode": [str(root / "decode" / "5-TP-0.trace.json.gz"), str(root / "decode" / "5-TP-8.trace.json.gz")],
     }
     assert life.select_pd_role_traces(str(root), since) == {role: paths[0] for role, paths in by_node.items()}
+
+
+def test_pd_role_traces_take_the_first_gpu_of_each_pod(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import os
+
+    root = tmp_path / "torch_trace"
+    decode_dirs = [root / "decode" / "0", root / "decode" / "1"]
+    prefill_dir = root / "prefill" / "0"
+    for pod_dir in [*decode_dirs, prefill_dir]:
+        pod_dir.mkdir(parents=True)
+    for rank in range(8):
+        for batch, pod_dir in zip(("5", "6"), decode_dirs):
+            (pod_dir / f"{batch}-TP-{rank}.trace.json.gz").write_bytes(b"x" * (100 if rank == 3 else 10))
+        stale = decode_dirs[1] / f"9-TP-{rank}.trace.json.gz"
+        stale.write_bytes(b"x")
+        os.utime(stale, (stale.stat().st_mtime - 60, stale.stat().st_mtime - 60))
+        (prefill_dir / f"7-TP-{rank}-DECODE.trace.json.gz").write_bytes(b"x" * 50)
+        (prefill_dir / f"7-TP-{rank}-EXTEND.trace.json.gz").write_bytes(b"x")
+    pods = [{"podIP": "10.0.0.1"}, {"podIP": "10.0.0.2"}]
+    monkeypatch.setattr(
+        life, "_read_state", lambda: {"backend": "sglangrouter", "decode_pods": pods, "prefill_pods": pods[:1]}
+    )
+
+    since = min(p.stat().st_mtime for p in decode_dirs[0].iterdir()) - 1
+    by_node = life.select_pd_node_traces(str(root), since)
+
+    assert by_node == {
+        "prefill": [str(prefill_dir / "7-TP-0-EXTEND.trace.json.gz")],
+        "decode": [str(decode_dirs[0] / "5-TP-0.trace.json.gz"), str(decode_dirs[1] / "6-TP-0.trace.json.gz")],
+    }
 
 
 def test_the_multi_node_sglang_defaults_keep_the_prefix_cache_on() -> None:

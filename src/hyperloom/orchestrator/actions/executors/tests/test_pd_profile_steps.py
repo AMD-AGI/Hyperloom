@@ -62,14 +62,14 @@ def test_steps_mode_is_the_default_and_sends_each_role_its_step_window(engines, 
             "profile_by_stage": True,
             "record_shapes": True,
             "with_stack": False,
-            "output_dir": str(tmp_path / "prefill"),
+            "output_dir": str(tmp_path / "prefill" / "0"),
         },
         "decode": {
             "num_steps": 256,
             "profile_by_stage": False,
             "record_shapes": True,
             "with_stack": False,
-            "output_dir": str(tmp_path / "decode"),
+            "output_dir": str(tmp_path / "decode" / "0"),
         },
     }
 
@@ -97,8 +97,8 @@ def test_time_mode_sends_only_the_output_dir_and_stack_flag(
     asyncio.run(life.trigger_pd_engine_profile("stop"))
 
     assert seen == [
-        ("prefill", "/start_profile", {"output_dir": str(tmp_path / "prefill"), "with_stack": False}),
-        ("decode", "/start_profile", {"output_dir": str(tmp_path / "decode"), "with_stack": False}),
+        ("prefill", "/start_profile", {"output_dir": str(tmp_path / "prefill" / "0"), "with_stack": False}),
+        ("decode", "/start_profile", {"output_dir": str(tmp_path / "decode" / "0"), "with_stack": False}),
         ("prefill", "/stop_profile", {}),
         ("decode", "/stop_profile", {}),
     ]

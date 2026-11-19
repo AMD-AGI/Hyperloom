@@ -12,12 +12,14 @@ import socket
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
 
 from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
 from hyperloom.inference_optimizer.multi_node._internal import pd_cluster as pd_internal
+from hyperloom.inference_optimizer.multi_node._internal import process_image
 from hyperloom.inference_optimizer.multi_node._internal import topology_file as topo
 from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import (
     drop_unsupported_baseline_flags,
@@ -40,6 +42,8 @@ def _spec(**overrides: object) -> LaunchSpec:
         prefill_tp=8,
         decode_tp=8,
         ep=1,
+        prefill_ep=1,
+        decode_ep=1,
         kv="mooncake",
         ib="",
         server_args="",
@@ -82,6 +86,21 @@ def test_engine_listens_on_the_port_of_its_role_url() -> None:
     no_port = _spec(prefill_url="http://w-prefill", decode_url="")
     assert "--port 8000 " in engine_command("prefill", no_port)
     assert "--port 8000 " in engine_command("decode", no_port)
+
+
+def test_engine_ep_size_follows_the_role_ep(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("EP", "PD_PREFILL_EP", "PD_DECODE_EP"):
+        monkeypatch.delenv(name, raising=False)
+    state = {"backend": "atomesh", "prefill_pod_ips": ["10.0.0.1"], "decode_pod_ips": ["10.0.0.2"]}
+    restart = pd_internal.spec_from_restart(types.SimpleNamespace(model="/m", ep=1, pd_decode_ep=8), state)
+    assert "--ep-size" not in engine_command("prefill", restart)
+    assert "--ep-size 8" in engine_command("decode", restart)
+
+    monkeypatch.setenv("EP", "8")
+    monkeypatch.setenv("PD_PREFILL_EP", "1")
+    handed_off = pd_internal.spec_from_env(state)
+    assert "--ep-size" not in engine_command("prefill", handed_off)
+    assert "--ep-size 8" in engine_command("decode", handed_off)
 
 
 _SPLIT_FLAGS = frozenset(
@@ -423,24 +442,64 @@ def test_replace_process_image_drops_env_exported_by_the_previous_image(tmp_path
     assert marker.read_text(encoding="utf-8") == "orig|"
 
 
-def test_replace_process_image_reports_a_failed_exec_and_leaves_the_process_running() -> None:
-    pid = os.fork()
-    if pid == 0:
-        os.execv("/bin/sleep", ["/bin/sleep", "30"])
+def test_replace_process_image_refuses_a_missing_executable_and_leaves_the_process_running() -> None:
+    server = subprocess.Popen(["/bin/sh", "-c", "/bin/sleep 30 & wait"])
     try:
-        _wait_for_cmdline(pid, b"/bin/sleep\x0030")
-        with pytest.raises(OSError) as raised:
-            replace_process_image(pid, ["/nonexistent/hl-no-such-binary"])
-        assert raised.value.errno == errno.ENOENT
+        deadline = time.monotonic() + 10
+        while not process_image.descendant_pids(server.pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        children = process_image.descendant_pids(server.pid)
+        assert children
+        with pytest.raises(OSError, match="not an executable"):
+            replace_process_image(server.pid, ["/nonexistent/hl-no-such-binary"])
         time.sleep(0.3)
-        assert os.waitpid(pid, os.WNOHANG) == (0, 0)
-        assert Path(f"/proc/{pid}/cmdline").read_bytes().startswith(b"/bin/sleep\x0030")
+        assert server.poll() is None
+        assert process_image.descendant_pids(server.pid) == children
     finally:
-        try:
-            os.kill(pid, 9)
-            os.waitpid(pid, 0)
-        except OSError:
-            pass
+        for child in process_image.descendant_pids(server.pid):
+            os.kill(child, 9)
+        server.kill()
+        server.wait()
+
+
+@pytest.mark.parametrize(
+    ("failing", "killed"),
+    [("_syscall_gadget", False), ("_stack_slot", False), ("_check_exec", True)],
+)
+def test_replace_process_image_kills_only_once_the_exec_is_under_way(
+    monkeypatch: pytest.MonkeyPatch, failing: str, killed: bool
+) -> None:
+    kills: list[tuple[int, int]] = []
+    stopped_by_trap = (5 << 8) | 0x7F
+
+    def _fail(*_args: object, **_kwargs: object) -> int:
+        raise OSError(errno.ENOENT, "boom")
+
+    monkeypatch.setattr(process_image, "_ptrace", lambda *_args: 0)
+    monkeypatch.setattr(process_image, "_libc", types.SimpleNamespace(ptrace=lambda *_args: 0))
+    monkeypatch.setattr(process_image, "_syscall_gadget", lambda _pid: 0x1000)
+    monkeypatch.setattr(process_image, "_stack_slot", lambda _pid, _rsp, _nbytes: 0x2000)
+    monkeypatch.setattr(process_image, "_check_exec", lambda *_args: None)
+    monkeypatch.setattr(process_image, "merged_environ", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(process_image, "descendant_pids", lambda _pid: [4243])
+    monkeypatch.setattr(process_image, failing, _fail)
+    monkeypatch.setattr(os, "waitpid", lambda pid, _flags: (pid, stopped_by_trap))
+    monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    with pytest.raises(OSError):
+        process_image.replace_process_image(4242, ["/bin/true"])
+
+    assert kills == ([(4243, 9), (4242, 9)] if killed else [])
+
+
+def test_cstr_table_writes_undecodable_environment_bytes_back_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    written: list[bytes] = []
+    monkeypatch.setattr(process_image, "_poke", lambda _pid, _addr, blob: written.append(blob))
+    raw = b"HL_RAW=\xff\xfe"
+
+    process_image._write_cstr_table(4242, 0x1000, [raw.decode("utf-8", "surrogateescape")])
+
+    assert written[0] == raw + b"\0"
 
 
 class _FakeCli:
@@ -584,19 +643,45 @@ def test_tracelens_patch_runs_under_the_container_environment(monkeypatch: pytes
     assert "--local --tracelens-root /tl --patch-set roofline" in ran.stdout
 
 
-def test_engine_restart_gives_each_role_its_own_profiler_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_engine_restart_gives_each_pod_its_own_profiler_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeCli({})
     fake._extract_pod_json = lambda _stdout: {}
     monkeypatch.setattr(pd_cmds, "_cli", lambda: fake)
     env = {"SGLANG_TORCH_PROFILER_DIR": "/shared/torch_trace"}
     router = {"role": "router", "podIP": "10.0.0.3", "sshPort": 29000}
-    for pod in [*_PD_STATE["prefill_pods"], *_PD_STATE["decode_pods"], router]:
-        pd_cmds._ssh_pod(dict(_PD_STATE), pod, action="restart", extra_env=env, timeout=5)
+    second_decode = {"role": "decode", "podIP": "10.0.0.4", "sshPort": 29000}
+    state = dict(_PD_STATE, decode_pods=[*_PD_STATE["decode_pods"], second_decode])
+    for pod in [*state["prefill_pods"], *state["decode_pods"], router]:
+        pd_cmds._ssh_pod(state, pod, action="restart", extra_env=env, timeout=5)
     scripts = dict(fake.calls)
-    assert "export SGLANG_TORCH_PROFILER_DIR=/shared/torch_trace/prefill\n" in scripts["10.0.0.1"]
-    assert "export SGLANG_TORCH_PROFILER_DIR=/shared/torch_trace/decode\n" in scripts["10.0.0.2"]
+    assert "export SGLANG_TORCH_PROFILER_DIR=/shared/torch_trace/prefill/0\n" in scripts["10.0.0.1"]
+    assert "export SGLANG_TORCH_PROFILER_DIR=/shared/torch_trace/decode/0\n" in scripts["10.0.0.2"]
+    assert "export SGLANG_TORCH_PROFILER_DIR=/shared/torch_trace/decode/1\n" in scripts["10.0.0.4"]
     assert "SGLANG_TORCH_PROFILER_DIR" not in scripts["10.0.0.3"]
     assert env == {"SGLANG_TORCH_PROFILER_DIR": "/shared/torch_trace"}
+
+
+@pytest.mark.parametrize(
+    ("service_url", "port"), [("http://svc.ns.svc.cluster.local:80", 8000), ("http://10.0.0.9:9000", 9000)]
+)
+def test_infera_frontend_listens_on_the_router_pod_port(
+    monkeypatch: pytest.MonkeyPatch, service_url: str, port: int
+) -> None:
+    from hyperloom.inference_optimizer.multi_node.commands import infera
+
+    fake = _FakeCli({})
+    fake._extract_pod_json = lambda _stdout: {}
+    monkeypatch.setattr(infera, "_mn_cli", fake)
+    state = {
+        "service_url": service_url,
+        "ssh_port": 29000,
+        "router_pods": [{"role": "router", "podIP": "10.0.0.9", "sshPort": 29000}],
+    }
+
+    infera._infera_ensure_frontend(state, "/m", 5)
+
+    [(_ip, script)] = fake.calls
+    assert f"--port {port} --router-tokenizer-path" in script
 
 
 def test_engines_not_running_names_pods_whose_launch_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -659,6 +744,21 @@ def test_remote_driver_finds_the_server_by_any_needle(tmp_path: Path) -> None:
     finally:
         named.kill()
         named.wait()
+
+
+def test_remote_driver_ignores_a_pidfile_naming_an_unrelated_process(tmp_path: Path) -> None:
+    driver = pd_cmds._REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
+    scope: dict[str, object] = {"os": os}
+    exec(driver, scope)
+    unrelated = subprocess.Popen(["sleep", "30"])
+    pidfile = tmp_path / "decode.pid"
+    pidfile.write_text(str(unrelated.pid), encoding="utf-8")
+    try:
+        time.sleep(0.2)
+        assert scope["_find_server"](str(pidfile), "sglang.launch_server") != unrelated.pid
+    finally:
+        unrelated.kill()
+        unrelated.wait()
 
 
 def test_remote_driver_takes_over_a_parked_launcher_child(tmp_path: Path) -> None:

@@ -26,10 +26,10 @@ _PHASE_ORDER = ("decode", "prefill")
 _SPLIT_TIMEOUT_S = 1800
 
 
-def role_capture_folder(trace_root: Path, role: str) -> str:
-    """The graph-capture folder ``role``'s server wrote under ``trace_root``; '' when none holds files."""
+def engine_capture_folder(trace_path: Path) -> str:
+    """The graph-capture folder the engine of ``trace_path`` wrote beside it; '' when none holds files."""
     for name in _CAPTURE_DIR_NAMES:
-        folder = trace_root / role / name
+        folder = trace_path.parent / name
         if folder.is_dir() and any(path.is_file() for path in folder.iterdir()):
             return str(folder)
     return ""
@@ -84,7 +84,6 @@ def _decode_chunk(
 def pd_report_jobs(
     node_traces: dict[str, list[str]],
     *,
-    trace_root: Path,
     output_dir: Path,
     platform: str,
     tracelens_root: Path,
@@ -99,9 +98,9 @@ def pd_report_jobs(
     """
     jobs: list[dict[str, Any]] = []
     for phase in _PHASE_ORDER:
-        capture_folder = role_capture_folder(trace_root, phase)
         for node, trace in enumerate(node_traces.get(phase) or []):
             trace_path = Path(trace)
+            capture_folder = engine_capture_folder(trace_path)
             if phase == "decode":
                 focus = node == 0
                 trace_path = _decode_chunk(

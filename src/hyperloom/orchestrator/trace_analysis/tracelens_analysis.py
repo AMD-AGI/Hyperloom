@@ -1165,7 +1165,6 @@ def _analyse_pd_traces(run: AnalysisRun, pd_input: dict[str, Any]) -> _RouteResu
     focus_mode = args.steady_state_mode
     jobs = pd_report_jobs(
         node_traces,
-        trace_root=Path(str(pd_input.get("trace_dir") or "")),
         output_dir=tracelens_dir,
         platform=args.target_platform,
         tracelens_root=tl_root,

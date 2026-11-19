@@ -11,6 +11,7 @@ uses the one SSH port from ``HYPERLOOM_MN_EXT_SSH_PORT`` (no per-role stride).
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shlex
@@ -46,7 +47,10 @@ class LaunchSpec:
     framework: str
     prefill_tp: int
     decode_tp: int
+    # Shared EP size; each role's own size is resolved into ``prefill_ep`` / ``decode_ep``.
     ep: int
+    prefill_ep: int
+    decode_ep: int
     kv: str
     ib: str
     server_args: str
@@ -166,6 +170,7 @@ def adapt_split_role_flags(role: str, words: list[str], engine_flags: frozenset[
 def engine_command(role: str, spec: LaunchSpec) -> str:
     """sglang prefill or decode command for one pod."""
     tp = spec.prefill_tp if role == "prefill" else spec.decode_tp
+    ep = spec.prefill_ep if role == "prefill" else spec.decode_ep
     bootstrap = PREFILL_BOOTSTRAP_PORT if role == "prefill" else DECODE_BOOTSTRAP_PORT
     # Shared args go last: the engine keeps the last value of a repeated flag, so a candidate overrides the baseline.
     extra = _words(spec.prefill_extra if role == "prefill" else spec.decode_extra) + _words(spec.server_args)
@@ -190,8 +195,8 @@ def engine_command(role: str, spec: LaunchSpec) -> str:
     ]
     if spec.ib.strip():
         argv.extend(["--disaggregation-ib-device", spec.ib.strip()])
-    if spec.ep > 1:
-        argv.extend(["--ep-size", str(spec.ep)])
+    if ep > 1:
+        argv.extend(["--ep-size", str(ep)])
     argv.extend(adapt_split_role_flags(role, extra, spec.engine_flags))
     return _join(argv)
 
@@ -302,11 +307,17 @@ def _positive(raw: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _role_ep(role: str, explicit: Any, shared: int) -> int:
+    """EP size of ``role``: ``explicit``, else ``PD_<ROLE>_EP``, else ``shared``; zero or invalid falls through."""
+    return _positive(str(explicit or 0), _positive(os.environ.get(f"PD_{role.upper()}_EP", ""), shared))
+
+
 def spec_from_env(state: dict[str, Any], get: Lookup | None = None) -> LaunchSpec:
     """Build a launch spec from the process environment and cluster URLs."""
     lookup = get or (lambda name: os.environ.get(name, ""))
     gpus = _positive(str(state.get("gpus_per_node") or ""), 8)
     tp = _positive(os.environ.get("TP", ""), gpus)
+    ep = _positive(os.environ.get("EP", ""), 1)
     prefill_ips = list(state.get("prefill_pod_ips") or [])
     decode_ips = list(state.get("decode_pod_ips") or [])
     prefill_url = lookup("HYPERLOOM_MN_EXT_PREFILL_URL").strip()
@@ -321,7 +332,9 @@ def spec_from_env(state: dict[str, Any], get: Lookup | None = None) -> LaunchSpe
         framework=(os.environ.get("FRAMEWORK", "") or "sglang").strip().lower() or "sglang",
         prefill_tp=_positive(os.environ.get("PD_PREFILL_TP", ""), tp),
         decode_tp=_positive(os.environ.get("PD_DECODE_TP", ""), tp),
-        ep=_positive(os.environ.get("EP", ""), 1),
+        ep=ep,
+        prefill_ep=_role_ep("prefill", 0, ep),
+        decode_ep=_role_ep("decode", 0, ep),
         kv=os.environ.get("PD_TRANSFER_BACKEND", "").strip(),
         ib=os.environ.get("PD_IB_DEVICE", "").strip(),
         server_args=os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip(),
@@ -343,6 +356,7 @@ def spec_from_restart(args: Any, state: dict[str, Any]) -> LaunchSpec:
     """Build a launch spec from one restart-server invocation."""
     gpus = _positive(str(state.get("gpus_per_node") or ""), 8)
     tp = _positive(str(getattr(args, "tp", 0) or 0), _positive(os.environ.get("TP", ""), gpus))
+    ep = _positive(str(getattr(args, "ep", 0) or 0), _positive(os.environ.get("EP", ""), 1))
     prefill_ips = [str(ip) for ip in (state.get("prefill_pod_ips") or [])]
     decode_ips = [str(ip) for ip in (state.get("decode_pod_ips") or [])]
     prefill_url = _endpoint(os.environ.get("HYPERLOOM_MN_EXT_PREFILL_URL", ""), prefill_ips)
@@ -353,7 +367,9 @@ def spec_from_restart(args: Any, state: dict[str, Any]) -> LaunchSpec:
         framework=str(getattr(args, "framework", "") or os.environ.get("FRAMEWORK", "") or "sglang").strip().lower(),
         prefill_tp=_positive(str(getattr(args, "pd_prefill_tp", 0) or 0), tp),
         decode_tp=_positive(str(getattr(args, "pd_decode_tp", 0) or 0), tp),
-        ep=_positive(str(getattr(args, "ep", 0) or 0), _positive(os.environ.get("EP", ""), 1)),
+        ep=ep,
+        prefill_ep=_role_ep("prefill", getattr(args, "pd_prefill_ep", 0), ep),
+        decode_ep=_role_ep("decode", getattr(args, "pd_decode_ep", 0), ep),
         kv=str(getattr(args, "pd_transfer_backend", "") or os.environ.get("PD_TRANSFER_BACKEND", "")).strip(),
         ib=str(getattr(args, "pd_ib_device", "") or os.environ.get("PD_IB_DEVICE", "")).strip(),
         server_args=str(getattr(args, "extra_args", "") or "").strip(),
@@ -383,13 +399,33 @@ def _pod(
     return pod
 
 
+def role_engine_pods(state: dict[str, Any], role: str) -> list[dict[str, Any]]:
+    """``role``'s pod records that carry an IP, in state order; a pod's position is its trace-dir index."""
+    return [pod for pod in (state.get(f"{role}_pods") or []) if isinstance(pod, dict) and pod.get("podIP")]
+
+
+def pd_pod_trace_dir(root: str, role: str, pod_index: int) -> str:
+    """Torch trace dir of ``role``'s ``pod_index``-th engine under a profiling round's trace root."""
+    return os.path.join(root, role, str(pod_index))
+
+
+@functools.lru_cache(maxsize=None)
+def _resolve_host(host: str) -> str:
+    """IP ``host`` resolves to, memoized per host for the process.
+
+    A failed lookup raises ``OSError`` and is not memoized, so a service name the platform has not published yet
+    resolves on a later call.
+    """
+    return socket.gethostbyname(host)
+
+
 def _service_ip(service_url: str) -> str:
     """IP the service host resolves to, or the host itself when it does not resolve."""
     host = urlsplit(service_url).hostname or ""
     if not host:
         return ""
     try:
-        return socket.gethostbyname(host)
+        return _resolve_host(host)
     except OSError:
         return host
 

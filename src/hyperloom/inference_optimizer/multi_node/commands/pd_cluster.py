@@ -5,7 +5,7 @@
 
 The platform launcher waits on the server pid. The remote helper execs the new
 command into that pid so the pod is not recreated with the original entrypoint.
-Prefill and decode receive ``SGLANG_TORCH_PROFILER_DIR``; the router does not.
+Each prefill and decode pod receives its own ``SGLANG_TORCH_PROFILER_DIR``; the router does not.
 """
 
 from __future__ import annotations
@@ -32,7 +32,9 @@ from .._internal.pd_cluster import (
     cmdline_needle,
     drop_unsupported_baseline_flags,
     launch_script,
+    pd_pod_trace_dir,
     pods_for,
+    role_engine_pods,
     spec_from_restart,
     uses_split_role_flags,
 )
@@ -100,15 +102,25 @@ def _held_by_launcher(pid):
         return False
 
 
+def _runs_server(pid, needle):
+    '''Whether ``pid`` runs the server, its launch script, or the parked launcher child.'''
+    cmd = open("/proc/%d/cmdline" % pid, "rb").read().replace(b"\0", b" ").decode("utf-8", "replace")
+    launch = os.environ.get("HL_LAUNCH_PATH", "")
+    if any(part and part in cmd for part in needle.split("|")) or (launch and launch in cmd):
+        return True
+    return _is_parked(pid, _ppid(pid), cmd)
+
+
 def _find_server(pidfile, needle):
+    self_pid = os.getpid()
     if os.path.exists(pidfile):
         try:
             cand = int(open(pidfile, encoding="utf-8").read().strip())
             os.kill(cand, 0)
-            return cand
+            if cand != self_pid and _runs_server(cand, needle):
+                return cand
         except (OSError, ValueError):
             pass
-    self_pid = os.getpid()
     fallback = 0
     parked = 0
     for entry in os.listdir("/proc"):
@@ -227,8 +239,8 @@ def _bash_payload(role: str, script_body: str, needle: str, action: str) -> str:
             f"cat > \"$launch\" << '{launch_end}'",
             script_body.rstrip("\n"),
             launch_end,
-            "chmod +x \"$launch\"",
-            f"export HL_LAUNCH_PATH=\"$launch\"",
+            'chmod +x "$launch"',
+            'export HL_LAUNCH_PATH="$launch"',
             f"export HL_NEEDLE={shlex.quote(needle)}",
             f"export HL_PIDFILE={_pidfile(role)}",
             f"export HL_ACTION={shlex.quote(action)}",
@@ -291,12 +303,14 @@ def _refresh_pods(state: dict[str, Any], spec: LaunchSpec) -> None:
     state["decode_pods"] = [pod for pod in pods if pod["role"] == "decode"]
 
 
-def _role_env(extra_env: dict[str, str], role: str) -> dict[str, str]:
-    """``extra_env`` with an engine role's ``SGLANG_TORCH_PROFILER_DIR`` narrowed to ``<dir>/<role>``."""
+def _pod_env(extra_env: dict[str, str], state: dict[str, Any], pod: dict[str, Any]) -> dict[str, str]:
+    """``extra_env`` with an engine pod's ``SGLANG_TORCH_PROFILER_DIR`` narrowed to its :func:`pd_pod_trace_dir`."""
+    role = str(pod.get("role") or "")
     profiler_dir = str(extra_env.get("SGLANG_TORCH_PROFILER_DIR") or "").rstrip("/")
     if role not in ("prefill", "decode") or not profiler_dir:
         return extra_env
-    return {**extra_env, "SGLANG_TORCH_PROFILER_DIR": f"{profiler_dir}/{role}"}
+    index = role_engine_pods(state, role).index(pod)
+    return {**extra_env, "SGLANG_TORCH_PROFILER_DIR": pd_pod_trace_dir(profiler_dir, role, index)}
 
 
 def _ssh_pod(
@@ -313,7 +327,7 @@ def _ssh_pod(
     body = launch_script(
         role,
         str(pod.get("launch_command") or "true"),
-        _role_env(extra_env, role),
+        _pod_env(extra_env, state, pod),
         log_ip=ip,
         server_port=int(pod.get("routerPort") or ENGINE_PORT),
     )
@@ -340,8 +354,7 @@ def _ssh_pod(
 
 def _engine_pods(state: dict[str, Any]) -> list[dict[str, Any]]:
     """Prefill then decode pod records that carry an IP."""
-    pods = list(state.get("prefill_pods") or []) + list(state.get("decode_pods") or [])
-    return [pod for pod in pods if isinstance(pod, dict) and pod.get("podIP")]
+    return role_engine_pods(state, "prefill") + role_engine_pods(state, "decode")
 
 
 CONTAINER_ENVIRON_PATH = "/proc/1/environ"
@@ -555,7 +568,9 @@ def apply_tracelens_patch(args: argparse.Namespace) -> int:
                 row["host"] = ip
                 per_pod.append(row)
         else:
-            pod_errors = "; ".join(str(row["error"]) for row in rows or [] if isinstance(row, dict) and row.get("error"))
+            pod_errors = "; ".join(
+                str(row["error"]) for row in rows or [] if isinstance(row, dict) and row.get("error")
+            )
             failures.append(
                 {
                     "host": ip,

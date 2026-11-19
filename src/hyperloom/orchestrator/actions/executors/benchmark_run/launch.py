@@ -405,10 +405,15 @@ class _BenchmarkLaunchMixin:
 
     @staticmethod
     async def _multi_node_engines_lost() -> str | None:
-        """Why a multi-node round's engines are gone (replaced or exited), or None when they run or the run is single-node."""
+        """Why a multi-node round's engines are gone (replaced or exited), or None when they run or the run is single-node.
+
+        Also None when the hand-off grants no server control, which leaves no SSH access to check the engines.
+        """
+        from hyperloom.inference_optimizer.multi_node import external_has_server_control
+
         from .._multi_node_env import is_multi_node
 
-        if not is_multi_node():
+        if not is_multi_node() or not external_has_server_control():
             return None
         from .._multi_node_server_lifecycle import pd_engines_lost_reason
 

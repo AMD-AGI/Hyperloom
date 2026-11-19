@@ -264,7 +264,7 @@ def _drop_graph_captures(torch_profiler_dir: str) -> None:
     """
     root = Path(torch_profiler_dir)
     for name in _GRAPH_CAPTURE_DIR_NAMES:
-        for folder in (root / name, *root.glob(f"*/{name}")):
+        for folder in (root / name, *root.glob(f"*/{name}"), *root.glob(f"*/*/{name}")):
             if not folder.is_dir():
                 continue
             try:
@@ -657,26 +657,27 @@ async def trigger_infera_engine_profile(
 PD_PROFILE_ROLES = ("prefill", "decode")
 
 
-def pd_role_trace_dir(root: str, role: str) -> str:
-    """Return the per-role torch trace dir under a profiling round's trace root."""
-    return str(Path(root) / role)
-
-
 _RANK_TRACE_RE = re.compile(r"\A(?P<batch>.+)-TP-(?P<rank>\d+)(?:-(?P<stage>[A-Z]+))?\.trace\.json\.gz\Z")
 _ROLE_STAGE = {"prefill": "EXTEND", "decode": "DECODE"}
 
 
-def _role_node_count(state: Mapping[str, Any], role: str) -> int:
-    """Number of nodes (pods) serving ``role``; one when the state lists none."""
-    pods = [pod for pod in (state.get(f"{role}_pods") or []) if isinstance(pod, dict)]
-    return max(1, len(pods))
+def _engine_trace_dirs(state: dict[str, Any], root: str, role: str) -> dict[str, int]:
+    """Trace dir and node count of each ``role`` engine under ``root``, in pod order.
+
+    An atomesh/sglangrouter pod runs its own engine under :func:`multi_node.pd_pod_trace_dir`; an Infera role runs one
+    engine across all its pods under ``<root>/<role>``. A role with no pods in state counts as one engine on one node.
+    """
+    pods = max(1, len(multi_node.role_engine_pods(state, role)))
+    if str(state.get("backend") or "").strip().lower() in multi_node.PD_ROUTER_BACKENDS:
+        return {multi_node.pd_pod_trace_dir(root, role, index): 1 for index in range(pods)}
+    return {str(Path(root) / role): pods}
 
 
 def _first_gpu_traces(paths: list[Path], role: str, nodes: int) -> list[str]:
     """The first GPU's trace of each node from the newest batch in ``paths``; the heaviest file when none is per-rank.
 
-    SGLang numbers TP ranks across a role's nodes, so node ``n`` starts at rank ``n * ranks_per_node``. A stage-split
-    trace prefers the role's own stage.
+    SGLang numbers TP ranks across an engine's nodes, so node ``n`` starts at rank ``n * ranks_per_node``. A
+    stage-split trace prefers the role's own stage.
     """
     batches: dict[str, dict[int, dict[str, Path]]] = {}
     newest: dict[str, float] = {}
@@ -700,16 +701,18 @@ def _first_gpu_traces(paths: list[Path], role: str, nodes: int) -> list[str]:
 
 
 def select_pd_node_traces(root: str, since_unix: float) -> dict[str, list[str]]:
-    """Return, per PD role, the first GPU's trace of each node written since ``since_unix`` under ``<root>/<role>``."""
+    """Return, per PD role, the first GPU's trace of each node written since ``since_unix``, nodes in pod order."""
     state = _read_state() or {}
     selected: dict[str, list[str]] = {}
     for role in PD_PROFILE_ROLES:
-        fresh = [
-            path
-            for path in Path(pd_role_trace_dir(root, role)).glob("*.trace.json.gz")
-            if path.is_file() and safe_mtime(path) >= since_unix
-        ]
-        picks = _first_gpu_traces(fresh, role, _role_node_count(state, role))
+        picks: list[str] = []
+        for trace_dir, nodes in _engine_trace_dirs(state, root, role).items():
+            fresh = [
+                path
+                for path in Path(trace_dir).glob("*.trace.json.gz")
+                if path.is_file() and safe_mtime(path) >= since_unix
+            ]
+            picks.extend(_first_gpu_traces(fresh, role, nodes))
         if picks:
             selected[role] = picks
     return selected
@@ -750,7 +753,8 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> li
 
     The router does not write GPU traces. Each engine listens on its pod's
     ``enginePort``, else the worker port. A role with no pods in state is reached through
-    ``HYPERLOOM_MN_EXT_<ROLE>_URL``. A start sends ``output_dir`` and ``with_stack``
+    ``HYPERLOOM_MN_EXT_<ROLE>_URL`` as pod 0. A start sends each engine its pod's
+    :func:`multi_node.pd_pod_trace_dir` under ``output_dir``, and ``with_stack``
     (``HYPERLOOM_MN_PROFILE_WITH_STACK``, default off). In ``steps`` mode
     (:func:`pd_profile_mode`) it also sends the role's step window: prefill records 8 steps split by stage, decode
     256 steps (``HYPERLOOM_MN_PD_<ROLE>_PROFILE_STEPS``), both with shapes, and each engine closes its own window.
@@ -764,13 +768,16 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> li
     if str(state.get("backend") or "").strip().lower() not in multi_node.PD_ROUTER_BACKENDS:
         return []
     port = str(os.environ.get("HYPERLOOM_MN_WORKER_PORT", "8000") or "8000").strip() or "8000"
-    targets: list[tuple[str, str]] = []
+    targets: list[tuple[str, int, str]] = []
     for role in PD_PROFILE_ROLES:
-        role_pods = [pod for pod in (state.get(f"{role}_pods") or []) if isinstance(pod, dict) and pod.get("podIP")]
-        targets.extend((role, f"http://{pod['podIP']}:{pod.get('enginePort') or port}") for pod in role_pods)
+        role_pods = multi_node.role_engine_pods(state, role)
+        targets.extend(
+            (role, index, f"http://{pod['podIP']}:{pod.get('enginePort') or port}")
+            for index, pod in enumerate(role_pods)
+        )
         engine_url = os.environ.get(f"HYPERLOOM_MN_EXT_{role.upper()}_URL", "").strip().rstrip("/")
         if not role_pods and engine_url:
-            targets.append((role, engine_url))
+            targets.append((role, 0, engine_url))
     if not targets:
         log.warning("trigger_pd_engine_profile(%s): no prefill/decode pods or engine URLs", action)
         return []
@@ -788,7 +795,7 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> li
     else:
         client_timeout = float(os.environ.get("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", "600") or 600)
 
-    async def _post(client: Any, role: str, base_url: str) -> bool:
+    async def _post(client: Any, role: str, pod_index: int, base_url: str) -> bool:
         """Send ``route`` to one engine and return whether it answered without an error status.
 
         A transport error or error status is logged, not raised.
@@ -796,13 +803,12 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> li
         url = f"{base_url}/{route}"
         payload: dict = _pd_step_window(role) if action == "start" and by_steps else {}
         if output_dir:
-            # Each role writes under <output_dir>/<role> so its traces stay attributable.
-            role_dir = pd_role_trace_dir(output_dir, role)
+            pod_dir = multi_node.pd_pod_trace_dir(output_dir, role, pod_index)
             try:
-                Path(role_dir).mkdir(parents=True, exist_ok=True)
+                Path(pod_dir).mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                log.debug("pd-cluster profile: cannot mkdir %s: %s", role_dir, exc)
-            payload["output_dir"] = role_dir
+                log.debug("pd-cluster profile: cannot mkdir %s: %s", pod_dir, exc)
+            payload["output_dir"] = pod_dir
         if action == "start":
             payload["with_stack"] = with_stack
         try:
@@ -815,8 +821,8 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> li
 
     # stop_profile returns after the trace export; engines start and stop together so each records the same window.
     async with _httpx.AsyncClient(timeout=client_timeout) as client:
-        answered = await asyncio.gather(*(_post(client, role, base_url) for role, base_url in targets))
-    return list(dict.fromkeys(role for (role, _url), ok in zip(targets, answered) if ok))
+        answered = await asyncio.gather(*(_post(client, *target) for target in targets))
+    return list(dict.fromkeys(role for (role, _index, _url), ok in zip(targets, answered) if ok))
 
 
 async def _probe_health(client: Any, health_url: str) -> tuple[bool, str]:

@@ -133,7 +133,7 @@ def _write_cstr_table(pid: int, addr: int, items: list[str]) -> tuple[int, int, 
     cursor = addr
     ptrs: list[int] = []
     for item in items:
-        raw = item.encode("utf-8") + b"\0"
+        raw = item.encode("utf-8", "surrogateescape") + b"\0"
         _poke(pid, cursor, raw)
         ptrs.append(cursor)
         cursor += (len(raw) + 7) & ~7
@@ -210,6 +210,15 @@ def descendant_pids(pid: int) -> list[int]:
     return found
 
 
+def _kill_descendants(pid: int) -> None:
+    """SIGKILL every descendant of ``pid``."""
+    for child in descendant_pids(pid):
+        try:
+            os.kill(child, 9)
+        except OSError:
+            pass
+
+
 def _check_exec(pid: int, status: int, gadget: int, saved: _Regs) -> None:
     """Raise ``OSError`` unless the single-stepped ``execve`` replaced the image; a failed one restores ``saved``."""
     if not os.WIFSTOPPED(status) or os.WSTOPSIG(status) != signal.SIGTRAP:
@@ -227,6 +236,18 @@ def _check_exec(pid: int, status: int, gadget: int, saved: _Regs) -> None:
     raise OSError(-ret, f"execve in pid {pid} failed: {os.strerror(-ret)}")
 
 
+def _exec_staged(pid: int, regs: _Regs, gadget: int, saved: _Regs) -> None:
+    """Load the staged ``execve`` registers into the stopped ``pid`` and single-step it; ``OSError`` when it fails."""
+    if _libc.ptrace(_PTRACE_SETREGS, ctypes.c_int(pid), None, ctypes.byref(regs)) < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+    _ptrace(_PTRACE_SINGLESTEP, pid)
+    _pid, status = os.waitpid(pid, 0)
+    if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+        raise OSError(f"process {pid} died during exec (status={status})")
+    _check_exec(pid, status, gadget, saved)
+
+
 def replace_process_image(
     pid: int,
     argv: list[str],
@@ -238,21 +259,21 @@ def replace_process_image(
 
     With ``env_snapshot`` the new image starts from the environment ``pid`` had
     before its first replacement, not from the one the current image inherited.
-    Descendants are killed while the target is stopped so a waiting parent
-    (the container launcher) keeps waiting on the same pid. The injected
-    ``syscall`` is single-stepped: when ``execve`` fails, the original registers
-    are restored, the process resumes its own image, and ``OSError`` carries the errno.
+    An ``argv[0]`` that is not an executable file is refused before ``pid`` is touched.
+    Descendants are killed while the target is stopped, once the exec is staged, so a
+    waiting parent (the container launcher) keeps waiting on the same pid; a failure
+    before that leaves the process and its descendants running. The injected ``syscall``
+    is single-stepped. Once the descendants are gone, a failed exec restores the original
+    registers, detaches and SIGKILLs ``pid`` so the platform recreates the pod, and raises
+    ``OSError`` carrying the errno.
     """
     if not argv or any("\0" in part for part in argv):
         raise ValueError("argv must be non-empty and contain no NULs")
+    if not os.access(argv[0], os.X_OK):
+        raise OSError(f"{argv[0]} is not an executable file; pid {pid} left untouched")
     _ptrace(_PTRACE_ATTACH, pid)
     try:
         os.waitpid(pid, 0)
-        for child in descendant_pids(pid):
-            try:
-                os.kill(child, 9)
-            except OSError:
-                pass
         regs = _Regs()
         if _libc.ptrace(_PTRACE_GETREGS, ctypes.c_int(pid), None, ctypes.byref(regs)) < 0:
             err = ctypes.get_errno()
@@ -261,7 +282,7 @@ def replace_process_image(
         gadget = _syscall_gadget(pid)
         env_items = merged_environ(pid, env_overrides, snapshot_path=env_snapshot)
         # Strings, two pointer arrays, and alignment slack.
-        nbytes = 256 + sum(len(item) + 16 for item in argv + env_items)
+        nbytes = 256 + sum(len(item.encode("utf-8", "surrogateescape")) + 16 for item in argv + env_items)
         slot = _stack_slot(pid, regs.rsp, nbytes)
         argv_array, cursor, filename = _write_cstr_table(pid, slot, argv)
         env_array, _next, _env0 = _write_cstr_table(pid, (cursor + 15) & ~0xF, env_items)
@@ -270,14 +291,20 @@ def replace_process_image(
         regs.rdi = filename
         regs.rsi = argv_array
         regs.rdx = env_array
-        if _libc.ptrace(_PTRACE_SETREGS, ctypes.c_int(pid), None, ctypes.byref(regs)) < 0:
-            err = ctypes.get_errno()
-            raise OSError(err, os.strerror(err))
-        _ptrace(_PTRACE_SINGLESTEP, pid)
-        _pid, status = os.waitpid(pid, 0)
-        if os.WIFEXITED(status) or os.WIFSIGNALED(status):
-            raise OSError(f"process {pid} died during exec (status={status})")
-        _check_exec(pid, status, gadget, saved)
+        _kill_descendants(pid)
+        try:
+            _exec_staged(pid, regs, gadget, saved)
+        except OSError as exc:
+            try:
+                _ptrace(_PTRACE_DETACH, pid)
+            except OSError:
+                pass
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+            message = f"{exc.strerror or exc}; killed pid {pid} so the platform recreates it"
+            raise (OSError(exc.errno, message) if exc.errno else OSError(message)) from exc
     except Exception:
         try:
             _ptrace(_PTRACE_DETACH, pid)

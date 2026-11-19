@@ -612,7 +612,7 @@ def test_infera_restart_ensures_the_frontend(monkeypatch: pytest.MonkeyPatch, re
     assert [(ip, port) for ip, port, _ in sent] == [("10.0.0.9", 2242)]
     script = sent[0][2]
     assert "export HL_ACTION=ensure" in script
-    assert "python3 -m infera.server --host 0.0.0.0 --port 21234 --router-tokenizer-path /models/m" in script
+    assert "python3 -m infera.server --host 0.0.0.0 --port 8000 --router-tokenizer-path /models/m" in script
 
 
 def test_infera_node_ops_apply_and_revert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

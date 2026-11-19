@@ -14,11 +14,11 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from .._internal import infera_support
 from .._internal.env_safety import filter_forward_env
 from .._internal.log import info, warn, err
+from .._internal.pd_cluster import router_port
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
 from .._internal.ssh_client import RemoteScript
 
@@ -383,20 +383,23 @@ def _record_last_restart(state: dict[str, Any], args: argparse.Namespace, framew
 
 
 def _infera_ensure_frontend(state: dict[str, Any], model: str, timeout: int) -> tuple[int, list[dict]]:
-    """Start the frontend on each router pod that has none running; a running frontend is left as is."""
+    """Start the frontend on each router pod that has none running; a running frontend is left as is.
+
+    Each frontend listens on its pod's :func:`router_port` for ``service_url``.
+    """
     from .pd_cluster import ensure_payload
 
-    port = urlsplit(str(state.get("service_url") or "")).port or 8000
-    command = (
-        f"python3 -m {infera_support.INFERA_FRONTEND_NEEDLE} --host 0.0.0.0 --port {port} "
-        f"--router-tokenizer-path {shlex.quote(model)}"
-    )
-    payload = ensure_payload("router", command, infera_support.INFERA_FRONTEND_NEEDLE)
+    service_url = str(state.get("service_url") or "")
     rc_total = 0
     results: list[dict] = []
     for target in infera_support.role_ssh_targets(state, "router"):
         ip = str(target["podIP"])
         ssh_port = int(target.get("sshPort") or 0)
+        command = (
+            f"python3 -m {infera_support.INFERA_FRONTEND_NEEDLE} --host 0.0.0.0 --port {router_port(ip, service_url)} "
+            f"--router-tokenizer-path {shlex.quote(model)}"
+        )
+        payload = ensure_payload("router", command, infera_support.INFERA_FRONTEND_NEEDLE)
         info(f"ensure-frontend: ssh -> {ip}:{ssh_port}")
         try:
             cp = _mn_cli._infera_ssh_bash_with_env(state, ip, payload, timeout=timeout, port=ssh_port)
