@@ -328,11 +328,8 @@ def test_an_atom_agentx_base_takes_its_forced_acceptance_as_the_golden_layer():
 
     golden = base.golden_al
     assert (base.framework, base.source.kind) == ("atom", SourceKind.INFERENCEX)
-    assert (golden.value, golden.method, golden.token_mode) == (
-        3.39,
-        "spec-decode-acceptance-length",
-        "real-draft-token",
-    )
+    # ATOM streams "synthetic " for every token it forces, so the layer is not named for the draft's own text.
+    assert (golden.value, golden.method, golden.token_mode) == (3.39, "spec-decode-acceptance-length", "synthetic-text")
     assert (golden.spec_method, golden.draft_length, golden.draft_model) == ("mtp", 3, None)
     assert golden.args == (
         "--method",

@@ -28,8 +28,9 @@ it.
   still serves fixed workloads only.
 - **The runner names an ATOM server's model.** An ATOM round now passes
   `--served-model-name`, as SGLang and vLLM rounds do, so ATOM needs v0.1.6 or
-  later, and a frozen ATOM base whose own args carry `--served-model-name` is
-  refused on resume as setting a runner-owned flag: start a new session.
+  later: an older server is refused before launch as `flag_unknown`. A layer or
+  a frozen ATOM base whose own args set `--served-model-name` is refused as
+  setting a runner-owned flag; for a frozen base, start a new session.
 - **An ATOM AgentX baseline with its prefix cache on is kept.** The check that
   refuses a cacheless AgentX baseline took ATOM's cache as off unless the launch
   passed `--enable_prefix_caching`; ATOM caches by default. It now refuses only
@@ -39,8 +40,9 @@ it.
   waits on `/stop_profile`, so a long capture is not cut off at ATOM's 300 s
   default. An annotated ATOM AgentX capture turns on ATOM's own light knobs
   (`ATOM_ENABLE_DETAILED_ANNOTATION`, `ATOM_PROFILER_RECORD_SHAPES`) instead of
-  SGLang's, and records at most 30 s: ATOM's profiler takes no step bound,
-  and a longer capture stalls the replay past what the AgentX client accepts.
+  SGLang's (v0.1.6 records no tensor shapes). Unless the point sets
+  `capture_timeout_seconds`, it records 30 s rather than 300 s: ATOM's profiler
+  takes no step bound, and a long capture slows the replay it runs inside.
 - **A multi-branch session runs on MI325X.** `hyperloom-multibranch run`
   accepts `--gpu-type mi325x`. Before, it refused MI325X, a limit left from
   Magpie, which had no benchmark script of MI325X's own; InferenceSuite

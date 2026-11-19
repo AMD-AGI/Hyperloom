@@ -126,7 +126,7 @@ The following inference frameworks are supported:
        frameworks within one session
    * - ATOM
      - 7.2.4 (recorded image stack)
-     - AMD out-of-tree engine, launched as ``python3 -m atom.entrypoints.openai_server``. Supports Docker, direct execution in a preinstalled ATOM/ROCm torch environment, or a bare-metal source install with ``--install-framework atom``. The recorded image-based stack used ``rocm/atom-dev:v0.1.7-rc0`` on MI355X, not a universal ATOM pip-version minimum. Other builds require local validation. An unset or empty ``KERNEL_OPT_BACKEND_ORDER`` resolves to GEAK here as it does for every framework, and explicit values are preserved.
+     - AMD out-of-tree engine, launched as ``python3 -m atom.entrypoints.openai_server``. Supports Docker, direct execution in a preinstalled ATOM/ROCm torch environment, or a bare-metal source install with ``--install-framework atom``. The recorded image-based stack used ``rocm/atom-dev:v0.1.7-rc0`` on MI355X. ATOM v0.1.6 is the minimum: every round passes ``--served-model-name``, which older servers do not take, so the pre-launch flag check refuses them as ``flag_unknown``. An AgentX profile on v0.1.6 records no tensor shapes (``ATOM_PROFILER_RECORD_SHAPES`` arrived in v0.1.7). Other builds require local validation. An unset or empty ``KERNEL_OPT_BACKEND_ORDER`` resolves to GEAK here as it does for every framework, and explicit values are preserved.
    * - ``custom``
      - Host-defined
      - Escape hatch for your own benchmark script; Hyperloom does not manage the server lifecycle. Requires ``--framework-path`` (or ``FRAMEWORK_REPO_PATH``) and ``--benchmark-scripts-dir`` (or ``HYPERLOOM_BYPASS_SCRIPTS_DIR``); the CLI exits with status 2 when either is missing.

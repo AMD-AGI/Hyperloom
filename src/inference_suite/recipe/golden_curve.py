@@ -49,6 +49,8 @@ _SGLANG_SIMULATION = ("SGLANG_SIMULATE_ACC_LEN", "SGLANG_SIMULATE_ACC_METHOD", "
 _SIMULATION_METHOD = "match-expected"
 _SIMULATION_TOKEN_MODE = "real-draft-token"
 _SYNTHETIC = "synthetic"
+#: Hyperloom's own name for what ATOM streams under forced acceptance; ATOM has no token-mode setting to read.
+_ATOM_SIMULATION_TOKEN_MODE = "synthetic-text"
 
 
 @dataclass(frozen=True)
@@ -192,10 +194,10 @@ def _atom_draft(occurrences: list[tuple[str, str]], env: Mapping[str, str]) -> L
     # ATOM drafts one token when the launch names no count. InferenceX keys no ATOM curve by its verifier.
     tokens = _count(values.get("num-speculative-tokens")) or 1
     spec = {"method": method, "num_speculative_tokens": tokens, "model": values.get("draft-model", "")}
-    # ATOM forces acceptance with one flag, by length or by rate, and the flag that does is the simulation. Its
-    # accepted draft tokens are streamed, as sglang's real-draft-token mode streams them.
+    # ATOM forces acceptance with one flag, by length or by rate, and the flag that does is the simulation. While it
+    # does, the server streams every output token's text as "synthetic ": counts and timing hold, the text does not.
     forced = next((name for name, _ in reversed(occurrences) if name.startswith(SIMULATED_FLAG_PREFIXES)), None)
-    return LaunchDraft(spec, None, forced, _SIMULATION_TOKEN_MODE)
+    return LaunchDraft(spec, None, forced, _ATOM_SIMULATION_TOKEN_MODE)
 
 
 def _force_sglang(launch: SourceLaunch, request: GoldenRequest, value: float) -> SourceLaunch:
@@ -251,7 +253,6 @@ def _golden_plan(
     launch: SourceLaunch, query: LaunchQuery, bundle: RepoBundle, base_model: str | None
 ) -> GoldenRequest | SourceGolden | None:
     """What ``golden_length`` is asked for ``launch``; ``None`` when it drafts nothing, else why it is not asked."""
-    _force(launch.framework)
     draft = launch_draft(launch.framework, launch.args, launch.env)
     if not draft.spec:
         return None
