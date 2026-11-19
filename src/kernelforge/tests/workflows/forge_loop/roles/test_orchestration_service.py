@@ -9,10 +9,10 @@ import pytest
 
 from kernelforge.utils.process_reaping import ReapReport
 from kernelforge.workflows.forge_loop.roles.contracts import DispatchPlan, SpecialistRound
-from kernelforge.workflows.forge_loop.roles.orchestration import (
+from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationService
+from kernelforge.workflows.forge_loop.roles.orchestration_agent import (
     OrchestrationAgent,
     OrchestrationInfrastructureError,
-    OrchestrationService,
 )
 from kernelforge.workflows.forge_loop.roles import specialists as specialists_module
 from kernelforge.workflows.forge_loop.roles.specialists import SpecialistAgent, SpecialistPool, SpecialistProbeConfig

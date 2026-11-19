@@ -56,7 +56,7 @@ def resolve_codex_executable(explicit: str = "") -> str:
         return on_path
     try:
         # Installed as the ``openai-codex`` SDK's own runtime dependency.
-        from codex_cli_bin import bundled_codex_path  # type: ignore[import-not-found]
+        from codex_cli_bin import bundled_codex_path
 
         bundled = Path(bundled_codex_path())
     except ImportError:

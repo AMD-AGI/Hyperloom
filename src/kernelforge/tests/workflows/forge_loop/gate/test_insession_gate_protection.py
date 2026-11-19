@@ -10,6 +10,7 @@ import kernelforge.workflows.forge_loop.gate.insession_gate as gate_module
 import pytest
 from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement, GateScope
 from kernelforge.workflows.forge_loop.gate.insession_gate import InSessionGate
+from kernelforge.workflows.forge_loop.gate.insession_scope import _python_command_payloads
 from kernelforge.utils.git import GitError
 
 
@@ -249,7 +250,7 @@ def test_python_c_payload_scanner_rejects_long_unterminated_quotes():
         "python -c '" + "\\&" * 10_000,
     )
 
-    assert all(not gate_module._python_command_payloads(command) for command in commands)
+    assert all(not _python_command_payloads(command) for command in commands)
 
 
 @pytest.mark.parametrize(
@@ -264,7 +265,7 @@ def test_python_c_payload_scanner_rejects_long_unterminated_quotes():
     ],
 )
 def test_python_c_payload_follows_the_options_before_it(command, payload):
-    found = [source for source, _start, _end in gate_module._python_command_payloads(command)]
+    found = [source for source, _start, _end in _python_command_payloads(command)]
 
     assert found == ([payload] if payload else [])
 
@@ -272,7 +273,7 @@ def test_python_c_payload_follows_the_options_before_it(command, payload):
 def test_a_long_option_run_before_python_c_still_yields_its_payload():
     command = "python\t" + "-A\x7f-A " * 20_000 + "-c 'x=1'"
 
-    assert [source for source, _start, _end in gate_module._python_command_payloads(command)] == ["x=1"]
+    assert [source for source, _start, _end in _python_command_payloads(command)] == ["x=1"]
 
 
 def test_candidate_diff_fingerprint_failure_is_fail_closed(

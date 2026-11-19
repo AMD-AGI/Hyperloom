@@ -12,26 +12,34 @@ from pathlib import Path
 
 import kernelforge.workflows.forge_fusion.agent_selection
 import kernelforge.workflows.forge_fusion.author
+import kernelforge.workflows.forge_fusion.author_guard
 import kernelforge.workflows.forge_fusion.pipeline
 import kernelforge.workflows.forge_fusion.compile_pass_claim
 import kernelforge.workflows.forge_fusion.discover
+import kernelforge.workflows.forge_fusion.discovery_prompt
+import kernelforge.workflows.forge_fusion.discovery_response
 import kernelforge.workflows.forge_fusion.emit
 import kernelforge.workflows.forge_fusion.harness_authoring
 import kernelforge.workflows.forge_fusion.locate
 import kernelforge.workflows.forge_fusion.serving_gate
+import kernelforge.workflows.forge_fusion.serving_smoke
 import kernelforge.workflows.forge_fusion.source_snapshot
 import kernelforge.workflows.forge_fusion.validate
 
 MODULES = (
     kernelforge.workflows.forge_fusion.agent_selection,
     kernelforge.workflows.forge_fusion.author,
+    kernelforge.workflows.forge_fusion.author_guard,
     kernelforge.workflows.forge_fusion.pipeline,
     kernelforge.workflows.forge_fusion.compile_pass_claim,
     kernelforge.workflows.forge_fusion.discover,
+    kernelforge.workflows.forge_fusion.discovery_prompt,
+    kernelforge.workflows.forge_fusion.discovery_response,
     kernelforge.workflows.forge_fusion.emit,
     kernelforge.workflows.forge_fusion.harness_authoring,
     kernelforge.workflows.forge_fusion.locate,
     kernelforge.workflows.forge_fusion.serving_gate,
+    kernelforge.workflows.forge_fusion.serving_smoke,
     kernelforge.workflows.forge_fusion.source_snapshot,
     kernelforge.workflows.forge_fusion.validate,
 )

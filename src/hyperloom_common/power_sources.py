@@ -102,7 +102,7 @@ def amd_smi_query(*args: str, run: Callable[..., subprocess.CompletedProcess] = 
         OSError, subprocess.SubprocessError, RuntimeError, ValueError: amd-smi could not run, failed, or printed no JSON.
     """
     done = run(
-        ["amd-smi", *args, "--json"],  # nosec B603 B607
+        ["amd-smi", *args, "--json"],
         capture_output=True,
         text=True,
         timeout=_QUERY_TIMEOUT_SEC,

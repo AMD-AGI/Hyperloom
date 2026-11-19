@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from kernelforge.workflows.forge_loop.memory import knowledge_integration as integ
+from kernelforge.workflows.forge_loop.memory import kb_warmstart as warmstart
 from kernelforge.knowledge.kb_store import record_store
 from kernelforge.knowledge.kb_store.identity.implementation import implementation_signature
 from kernelforge.workflows.flydsl_rewrite import driver_contract, runner
@@ -20,7 +21,8 @@ from kernelforge.workflows.flydsl_rewrite.ingest import RewriteSubject
 from kernelforge.workflows.flydsl_rewrite.request import DriverSetup, RewriteRun, RewriteWorkspace
 from kernelforge.tests.conftest import kb_store_run_config as _kb_store_config
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
-from kernelforge.workflows.forge_loop.memory.knowledge_integration import ExperiencePublication, WarmStartHarness
+from kernelforge.workflows.forge_loop.memory.kb_warmstart import WarmStartHarness
+from kernelforge.workflows.forge_loop.memory.knowledge_integration import ExperiencePublication
 
 #: The cap :func:`sanitize_read_error` bounds a persisted store error at.
 MAX_READ_ERROR_LENGTH = 240
@@ -61,7 +63,7 @@ OUTSIDE_PATCH = """diff --git a/helper.py b/helper.py
 
 def _warmstart(repo):
     """Warm-start the repository's kernel.py through the standard test driver."""
-    return integ.kb_warmstart(
+    return warmstart.kb_warmstart(
         config=object(),
         kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
         harness=WarmStartHarness(driver="driver.py"),
@@ -213,13 +215,13 @@ def test_kb_warmstart_uses_canonical_path_mapping_end_to_end(
     )
     benches = _three_measurements(_bench(10.0), _bench(5.0))
     monkeypatch.setattr(
-        integ,
+        warmstart,
         "_bench_once",
         lambda *_a, **_k: next(benches),
     )
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_a, **_k: True)
 
-    warm = integ.kb_warmstart(
+    warm = warmstart.kb_warmstart(
         config=object(),
         kernel=LoopKernel(kernel_path=str(consumer), kernel_backend="triton", framework="aiter", workspace=str(repo)),
         harness=WarmStartHarness(driver="driver.py"),
@@ -394,8 +396,8 @@ def test_kb_warmstart_applies_ranked_solution_when_safe(monkeypatch, tmp_path):
         ),
     )
     benches = _three_measurements(_bench(10.0), _bench(5.0))
-    monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
+    monkeypatch.setattr(warmstart, "_bench_once", lambda *_a, **_k: next(benches))
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_a, **_k: True)
 
     warm = _warmstart(repo)
 
@@ -418,8 +420,8 @@ def test_kb_warmstart_tries_next_candidate_when_first_ranked_fails(
         _solution(APPLICABLE_PATCH, solution_slug="kernelforge-exp/kernel/second"),
     )
     benches = _three_measurements(_bench(10.0), _bench(5.0))
-    monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
+    monkeypatch.setattr(warmstart, "_bench_once", lambda *_a, **_k: next(benches))
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_a, **_k: True)
 
     warm = _warmstart(repo)
 
@@ -445,7 +447,7 @@ def test_kb_warmstart_persists_all_available_references_without_truncation(
         _solution(long_patch, solution_slug="solution/fast", speedup=4.0),
         _solution(BAD_PATCH, solution_slug="solution/second", speedup=2.0),
     )
-    monkeypatch.setattr(integ, "_bench_once", lambda *_args: None)
+    monkeypatch.setattr(warmstart, "_bench_once", lambda *_args: None)
 
     warm = _warmstart(repo)
 
@@ -584,7 +586,7 @@ def test_kb_warmstart_resume_skips_read_and_restores_reference_pointer(
         "kernelforge.knowledge.kb_store.reader.read_top_solutions",
         fail_read,
     )
-    warm = integ.kb_warmstart(
+    warm = warmstart.kb_warmstart(
         config=object(),
         kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
         harness=WarmStartHarness(driver="driver.py"),
@@ -602,8 +604,8 @@ def test_kb_warmstart_applies_benches_and_commits(monkeypatch, tmp_path):
     repo = _init_repo(tmp_path)
     _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
     benches = _three_measurements(_bench(10.0), _bench(5.0))
-    monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
+    monkeypatch.setattr(warmstart, "_bench_once", lambda *_a, **_k: next(benches))
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_a, **_k: True)
 
     warm = _warmstart(repo)
 
@@ -648,10 +650,10 @@ def test_kb_warmstart_preserves_candidate_measurements_and_repeat(
         received_repeats.append(bench_repeat)
         return next(benches)
 
-    monkeypatch.setattr(integ, "_bench_once", bench)
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_args: True)
+    monkeypatch.setattr(warmstart, "_bench_once", bench)
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_args: True)
 
-    warm = integ.kb_warmstart(
+    warm = warmstart.kb_warmstart(
         config=object(),
         kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
         harness=WarmStartHarness(driver="driver.py", bench_repeat=4),
@@ -702,11 +704,11 @@ def test_kb_warmstart_uses_three_measurement_medians(monkeypatch, tmp_path):
         ]
     )
     monkeypatch.setattr(
-        integ,
+        warmstart,
         "_bench_once",
         lambda *_args, **_kwargs: next(benches),
     )
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_args: True)
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_args: True)
 
     warm = _warmstart(repo)
 
@@ -776,11 +778,11 @@ def test_kb_warmstart_matches_mean_only_keep_policy(
     _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
     benches = _three_measurements(pristine_bench, candidate_bench)
     monkeypatch.setattr(
-        integ,
+        warmstart,
         "_bench_once",
         lambda *_args, **_kwargs: next(benches),
     )
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_args: True)
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_args: True)
 
     warm = _warmstart(repo)
 
@@ -794,12 +796,12 @@ def test_kb_warmstart_is_reference_only_without_pristine_baseline(
 ):
     repo = _init_repo(tmp_path)
     _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
-    monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: None)
+    monkeypatch.setattr(warmstart, "_bench_once", lambda *_a, **_k: None)
 
     def fail_apply(*_args, **_kwargs):
         raise AssertionError("warm-start must not apply without a pristine baseline")
 
-    monkeypatch.setattr(integ, "_git_apply", fail_apply)
+    monkeypatch.setattr(warmstart, "_git_apply", fail_apply)
     warm = _warmstart(repo)
 
     assert warm["applied"] is False
@@ -823,9 +825,9 @@ def test_kb_warmstart_preserves_preexisting_staged_changes(
     def fail_mutation(*_args, **_kwargs):
         raise AssertionError("dirty workspace must not be benchmarked or patched")
 
-    monkeypatch.setattr(integ, "_bench_once", fail_mutation)
-    monkeypatch.setattr(integ, "_git_apply", fail_mutation)
-    warm = integ.kb_warmstart(
+    monkeypatch.setattr(warmstart, "_bench_once", fail_mutation)
+    monkeypatch.setattr(warmstart, "_git_apply", fail_mutation)
+    warm = warmstart.kb_warmstart(
         config=object(),
         kernel=LoopKernel(kernel_path=str(kernel), kernel_backend="triton", workspace=str(repo)),
         harness=WarmStartHarness(driver="driver.py"),
@@ -845,10 +847,10 @@ def test_kb_warmstart_rollback_preserves_existing_untracked_and_removes_new(
     existing.write_text("keep me\n")
     helper = repo / "helper.py"
     _patch_read_solution(monkeypatch, NEW_FILE_PATCH)
-    monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: _bench(10.0))
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: False)
+    monkeypatch.setattr(warmstart, "_bench_once", lambda *_a, **_k: _bench(10.0))
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_a, **_k: False)
 
-    warm = integ.kb_warmstart(
+    warm = warmstart.kb_warmstart(
         config=object(),
         kernel=LoopKernel(
             kernel_path=str(repo / "kernel.py"),
@@ -872,10 +874,10 @@ def test_kb_warmstart_commits_allowed_new_source_file(monkeypatch, tmp_path):
     helper = repo / "helper.py"
     _patch_read_solution(monkeypatch, NEW_FILE_PATCH)
     benches = _three_measurements(_bench(10.0), _bench(5.0))
-    monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
+    monkeypatch.setattr(warmstart, "_bench_once", lambda *_a, **_k: next(benches))
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_a, **_k: True)
 
-    warm = integ.kb_warmstart(
+    warm = warmstart.kb_warmstart(
         config=object(),
         kernel=LoopKernel(
             kernel_path=str(repo / "kernel.py"),
@@ -900,7 +902,7 @@ def test_kb_warmstart_mismatched_candidate_falls_back_when_patch_does_not_apply(
         monkeypatch,
         _solution(BAD_PATCH, implementation_match=False),
     )
-    monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: _bench(10.0))
+    monkeypatch.setattr(warmstart, "_bench_once", lambda *_a, **_k: _bench(10.0))
 
     warm = _warmstart(repo)
 
@@ -921,8 +923,8 @@ def test_kb_warmstart_rolls_back_when_applied_kernel_fails_bench(monkeypatch, tm
     repo = _init_repo(tmp_path)
     _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
     benches = _three_measurements(_bench(10.0), None)
-    monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
+    monkeypatch.setattr(warmstart, "_bench_once", lambda *_a, **_k: next(benches))
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_a, **_k: True)
 
     warm = _warmstart(repo)
 
@@ -939,8 +941,8 @@ def test_kb_warmstart_rolls_back_when_applied_kernel_fails_correctness(monkeypat
     # Only the three pristine measurements should run; correctness rejects the applied patch before candidate
     # measurement.
     benches = _three_measurements(_bench(10.0))
-    monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: False)
+    monkeypatch.setattr(warmstart, "_bench_once", lambda *_a, **_k: next(benches))
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_a, **_k: False)
 
     warm = _warmstart(repo)
 
@@ -967,7 +969,7 @@ def test_rejected_warmstart_removes_only_new_untracked_probe_artifacts(
     ignored_preserved.parent.mkdir()
     ignored_preserved.write_text("keep ignored\n")
     _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
-    monkeypatch.setattr(integ, "_bench_once", lambda *_args: _bench(10.0))
+    monkeypatch.setattr(warmstart, "_bench_once", lambda *_args: _bench(10.0))
 
     def fail_correctness(*_args, **_kwargs):
         probe_dir = repo / "probe-output"
@@ -976,7 +978,7 @@ def test_rejected_warmstart_removes_only_new_untracked_probe_artifacts(
         (repo / ".probe-cache" / "generated.bin").write_text("remove ignored\n")
         return False
 
-    monkeypatch.setattr(integ, "_correctness_once", fail_correctness)
+    monkeypatch.setattr(warmstart, "_correctness_once", fail_correctness)
 
     warm = _warmstart(repo)
 
@@ -994,8 +996,8 @@ def test_kb_warmstart_rolls_back_when_applied_kernel_is_slower(monkeypatch, tmp_
     # Applied kernel is correct but slower than the pristine baseline (12 >= 10): it must be discarded and the loop
     # cold-started from the pristine baseline.
     benches = _three_measurements(_bench(10.0), _bench(12.0))
-    monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
+    monkeypatch.setattr(warmstart, "_bench_once", lambda *_a, **_k: next(benches))
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_a, **_k: True)
 
     warm = _warmstart(repo)
 
@@ -1028,13 +1030,13 @@ def test_kb_warmstart_applies_for_every_backend_when_driver_validates(
     _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
     benches = _three_measurements(_bench(10.0), _bench(5.0))
     monkeypatch.setattr(
-        integ,
+        warmstart,
         "_bench_once",
         lambda *_a, **_k: next(benches),
     )
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_a, **_k: True)
 
-    warm = integ.kb_warmstart(
+    warm = warmstart.kb_warmstart(
         config=object(),
         kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend=kernel_backend, workspace=str(repo)),
         harness=WarmStartHarness(driver="driver.py"),
@@ -1060,11 +1062,11 @@ def test_kb_warmstart_attempts_candidate_on_implementation_mismatch(
     )
     benches = _three_measurements(_bench(10.0), _bench(5.0))
     monkeypatch.setattr(
-        integ,
+        warmstart,
         "_bench_once",
         lambda *_a, **_k: next(benches),
     )
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_a, **_k: True)
 
     warm = _warmstart(repo)
 
@@ -1080,7 +1082,7 @@ def test_kb_warmstart_reference_only_when_pristine_baseline_unavailable(
 ):
     repo = _init_repo(tmp_path)
     _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
-    monkeypatch.setattr(integ, "_bench_once", lambda *_args: None)
+    monkeypatch.setattr(warmstart, "_bench_once", lambda *_args: None)
 
     warm = _warmstart(repo)
 
@@ -1098,10 +1100,10 @@ def test_kb_warmstart_applies_patch_to_undeclared_non_protected_source(
     _run(["git", "commit", "-m", "helper"], repo)
     _patch_read_solutions(monkeypatch, _solution(OUTSIDE_PATCH))
     benches = _three_measurements(_bench(10.0), _bench(5.0))
-    monkeypatch.setattr(integ, "_bench_once", lambda *_args: next(benches))
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_args: True)
+    monkeypatch.setattr(warmstart, "_bench_once", lambda *_args: next(benches))
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_args: True)
 
-    warm = integ.kb_warmstart(
+    warm = warmstart.kb_warmstart(
         config=object(),
         kernel=LoopKernel(
             kernel_path=str(repo / "kernel.py"), kernel_backend="triton", source_files=[], workspace=str(repo)
@@ -1131,9 +1133,9 @@ def test_kb_warmstart_rejects_patch_to_protected_config(
 +value: forged
 """
     _patch_read_solutions(monkeypatch, _solution(patch))
-    monkeypatch.setattr(integ, "_bench_once", lambda *_args: _bench(10.0))
+    monkeypatch.setattr(warmstart, "_bench_once", lambda *_args: _bench(10.0))
 
-    warm = integ.kb_warmstart(
+    warm = warmstart.kb_warmstart(
         config=object(),
         kernel=LoopKernel(
             kernel_path=str(repo / "kernel.py"), kernel_backend="triton", source_files=[], workspace=str(repo)
@@ -1154,11 +1156,11 @@ def test_kb_warmstart_rejects_and_restores_on_commit_failure(
     _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
     benches = _three_measurements(_bench(10.0), _bench(5.0))
     monkeypatch.setattr(
-        integ,
+        warmstart,
         "_bench_once",
         lambda *_a, **_k: next(benches),
     )
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
+    monkeypatch.setattr(warmstart, "_correctness_once", lambda *_a, **_k: True)
     real_git = integ.git
 
     def fail_commit(*args, **kwargs):
@@ -1494,8 +1496,8 @@ def _experience_write_reason(monkeypatch, tmp_path, config, failure) -> str:
 
 
 def _warm_start_reason(monkeypatch, tmp_path, config, failure) -> str:
-    monkeypatch.setattr(integ, "_WarmStartAttempt", failure)
-    warm = integ.kb_warmstart(
+    monkeypatch.setattr(warmstart, "_WarmStartAttempt", failure)
+    warm = warmstart.kb_warmstart(
         config=config,
         kernel=LoopKernel(kernel_path=str(tmp_path / "kernel.py"), kernel_backend="triton", workspace=str(tmp_path)),
         harness=WarmStartHarness(driver="driver.py"),
@@ -1515,7 +1517,7 @@ def _rewrite_read_reason(monkeypatch, tmp_path, config, failure) -> str:
     ("site", "logger_name"),
     [
         (_experience_write_reason, "kernelforge.knowledge.kb_store.writer"),
-        (_warm_start_reason, "kernelforge.workflows.forge_loop.memory.knowledge_integration"),
+        (_warm_start_reason, "kernelforge.workflows.forge_loop.memory.kb_warmstart"),
         (_rewrite_read_reason, "kernelforge.workflows.flydsl_rewrite.runner"),
     ],
     ids=["experience_write", "warm_start", "rewrite_read"],

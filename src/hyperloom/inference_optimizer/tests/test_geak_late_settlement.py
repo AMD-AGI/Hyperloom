@@ -12,7 +12,7 @@ import subprocess
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.recorder import kernel_event
+from hyperloom.inference_optimizer.breakdown.recorder import kernel_event, kernel_event_rows
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.tests.test_geak_promotion_retention import (
     promotion as promotion,
@@ -129,7 +129,7 @@ def test_late_rejection_does_not_create_an_event(tmp_path):
     from hyperloom.inference_optimizer.session.session_binding import session_scope
 
     with session_scope(tmp_path):
-        kernel_event.reject_geak_attempts(
+        kernel_event_rows.reject_geak_attempts(
             event=kernel_event.kernel_event_id(7),
             measured_tput=90.0,
             current_best_tput=100.0,

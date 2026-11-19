@@ -66,7 +66,7 @@ class AttemptResult:
 def _import_sdk() -> ClaudeAgentSdk:
     """Import the Claude Agent SDK and return its query primitives."""
     try:
-        import claude_agent_sdk as sdk  # type: ignore[import-not-found]
+        import claude_agent_sdk as sdk
     except ImportError as exc:  # pragma: no cover - exercised via injection seams in tests
         raise RuntimeError("claude_agent_sdk not installed; run the quantization-agent installer") from exc
     return ClaudeAgentSdk(query=sdk.query, options_cls=sdk.ClaudeAgentOptions)

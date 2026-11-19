@@ -15,13 +15,13 @@ from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 
 from .campaign import _safe_artifact_id
 from .emit import FusionFiles, export_artifacts
-from .validate import (
+from .serving_smoke import (
     KERNEL_KEEP_CHECKPOINT,
     DecodeLoad,
     SmokeServer,
-    fused_symbol_invocation_evidence,
     serving_smoke_verdict,
 )
+from .validate import fused_symbol_invocation_evidence
 
 log = logging.getLogger("forge_fusion")
 

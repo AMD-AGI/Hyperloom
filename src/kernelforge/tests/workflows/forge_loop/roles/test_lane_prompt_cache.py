@@ -13,7 +13,7 @@ import pytest
 from kernelforge.workflows.forge_loop.roles import lane_prompts as lane_prompts_module
 from kernelforge.workflows.forge_loop.roles.lane_prompts import lane_last_prompt
 from kernelforge.agent_backends import AgentCapabilities, AgentRunResult
-from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationAgent
+from kernelforge.workflows.forge_loop.roles.orchestration_agent import OrchestrationAgent
 from kernelforge.tests.workflows.forge_loop.roles._orchestration_fakes import (
     GROUND_A,
     GROUND_B,

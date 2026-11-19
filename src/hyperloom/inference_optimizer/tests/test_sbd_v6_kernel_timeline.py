@@ -27,7 +27,9 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     SOURCE_KERNEL_REWRITE,
     assemble_kernel_ext,
     kernel_event_id,
-    make_kernel_recorder,
+)
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_recorder import make_kernel_recorder
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_rows import (
     record_geak_attempts,
     record_integrate_axis,
     record_integrate_verdict,
@@ -1486,7 +1488,7 @@ def test_a_measurement_that_lands_after_the_visit_closed_is_still_published(tmp_
     """
     from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import BaselineRequest, make_baseline_recorder
     from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
-    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_rows import record_integrate_verdict
 
     recorder = _forge_recorder()
     recorder.finish(KernelExit(tput_after=1000.0))

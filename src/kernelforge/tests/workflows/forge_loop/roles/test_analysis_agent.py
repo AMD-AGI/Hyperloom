@@ -12,11 +12,11 @@ import pytest
 
 from kernelforge.agent_backends import AgentRunResult
 from kernelforge.workflows.forge_loop.roles.analysis import (
-    AnalysisBundleError,
     AnalysisConfigurationError,
     AnalysisSources,
     IncrementalAnalysisInput,
 )
+from kernelforge.workflows.forge_loop.roles.analysis_bundle import AnalysisBundleError
 from kernelforge.workflows.forge_loop.roles.analysis_protection import AnalysisProtection
 from kernelforge.workflows.forge_loop.roles.analysis_session import (
     AnalysisAttemptLimitError,
