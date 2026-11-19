@@ -5,13 +5,13 @@ a failure surfaces, not by file size or churn.
 
 | Tier | File | Blast radius / failure mode |
 |---|---|---|
-| 1 | `inference_optimizer/cli/__init__.py` | Eagerly imports Coordinator, executors, `_workload_envs`, `ACTION_CATALOGUE`. Any ImportError in that chain kills the run before a session dir exists |
-| 1 | `orchestrator/loop/coordinator.py` | Coordinator wires 23 collaborator properties. A missing property or wrong factory is an `AttributeError` hours in, not at import |
+| 1 | `inference_optimizer/cli/__init__.py`, `cli/session_setup.py`, `cli/session_resume.py` | Eagerly imports Coordinator, executors, `_workload_envs`, `ACTION_CATALOGUE`. Any ImportError in that chain kills the run before a session dir exists |
+| 1 | `orchestrator/loop/coordinator.py`, `loop/coordinator_state.py`, `loop/reactor_turn.py` | Coordinator wires 23 collaborator properties. A missing property or wrong factory is an `AttributeError` hours in, not at import |
 | 1 | `orchestrator/state/shared_state.py` | Sole writer of `state.json` and the only owner of its field set. A dropped field silently changes what every phase reads, and what `--resume-from` can interpret |
 | 1 | `orchestrator/loop/writeback.py` | The one path turning a measurement into KEEP/REVERT + KB record. A win recorded as a regression, or nothing persisted and no error |
-| 1 | `orchestrator/phases/machine_state.py` | Phase identifiers, ordering, budget redistribution, exit scan. Stall in a phase forever, or wrong budget math for all phases at once |
+| 1 | `orchestrator/phases/machine_state.py`, `phases/phase_predicates.py`, `phases/phase_transitions.py` | Phase identifiers, ordering, budget redistribution, exit scan. Stall in a phase forever, or wrong budget math for all phases at once |
 | 1 | `orchestrator/loop/dispatcher.py` | In-flight table, deadlines, cancellation. Actions never retire, GPU lanes never free, subprocesses leak past session end |
-| 1 | `orchestrator/policy/gate.py` | The single chokepoint every Intent crosses before a side effect. A denied action executes, or everything is denied |
+| 1 | `orchestrator/policy/gate.py`, `policy/validators.py` | The single chokepoint every Intent crosses before a side effect. A denied action executes, or everything is denied |
 | 2 | `orchestrator/kernel/request_handlers.py` | `KERNEL_REQUEST_HANDLERS` dispatch table. A renamed kind dead-ends the lane; the agent waits out its budget |
 | 2 | `actions/executors/baseline.py`, `actions/executors/benchmark_run/` | The anchor every gain % is measured against |
 | 2 | `actions/executors/integrate_patch.py` | Patches live framework trees. A failed revert contaminates every later measurement |
@@ -21,7 +21,7 @@ a failure surfaces, not by file size or churn.
 | 2 | `protocol/action_surfaces.py` | Consumed by the CLI catalogue, the gate, the phase machine and the dispatcher. An action here but not in the owning role's set is unroutable |
 | 2 | `protocol/intent.py` | Severity/verdict frozensets deliberately duplicated from `agents/critic/runtime/intent_envelope.py`. Change one copy and the emitter produces intents the transport rejects |
 | 2 | `hyperloom_common/llm/llm_config.py`, `common/perf_metric.py` | Gateway env resolution and client construction for every role; `graded_axes_of` is what the phase handlers and writeback grade against |
-| 2 | `breakdown/schema.py`, `schema_framework.py`, `schema_kernel.py` | Typed shape of the persisted `session_breakdown.json`. Zero import fan-in, so nothing catches writer/reader drift |
+| 2 | `breakdown/schema.py`, `schema_framework.py`, `schema_kernel.py`, `schema_conc_sweep.py`, `schema_phase.py` | Typed shape of the persisted `session_breakdown.json`. Zero import fan-in, so nothing catches writer/reader drift |
 | 2 | `inference_optimizer/framework_paths.py` | Three non-interchangeable resolvers. Patches land in the wrong tree, or the session optimizes a tree it is not measuring |
 | 2 | `kernelforge/cli/`, `kernelforge/config/` | Dispatched as `python -m kernelforge.cli` — a subprocess contract |
 | 3 | everything else | one phase handler, one executor helper, one agent tool, one KB view |
