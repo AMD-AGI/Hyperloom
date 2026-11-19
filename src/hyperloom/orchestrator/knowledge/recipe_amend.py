@@ -104,7 +104,7 @@ def amended_recipe_extras(live: Mapping[str, Any], overrides: Mapping[str, Any],
 
 def extract_kept_best_config(
     *,
-    task: "Task",
+    task: Task,
     variant_attrs: dict[str, Any] | None = None,
     result_dict: dict[str, Any] | None = None,
 ) -> dict[str, Any]:

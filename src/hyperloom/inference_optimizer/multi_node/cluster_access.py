@@ -28,7 +28,7 @@ from .state_paths import _ensure_runtime_dir, resolve_state_file
 
 
 # Default poll budget sized under the sandbox 120s ceiling.
-_DEFAULT_POLL_INTERVAL_S = 6
+DEFAULT_POLL_INTERVAL_S = 6
 _DEFAULT_POLL_TIMEOUT_S = 110
 
 

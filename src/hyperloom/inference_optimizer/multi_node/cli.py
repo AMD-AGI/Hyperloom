@@ -27,7 +27,7 @@ from .cluster_access import (
     EXIT_TRANSIENT,
     ConfigurationError,
     TransientFailure,
-    _DEFAULT_POLL_INTERVAL_S,
+    DEFAULT_POLL_INTERVAL_S,
     _DEFAULT_POLL_TIMEOUT_S,
     _TERMINAL_OK_STATUSES,
     _load_state,
@@ -77,7 +77,7 @@ def install_geak_on_pods_best_effort() -> int:
     ns = argparse.Namespace(
         geak_src=None,
         print_logs=False,
-        poll_interval=_DEFAULT_POLL_INTERVAL_S,
+        poll_interval=DEFAULT_POLL_INTERVAL_S,
         poll_timeout=resolve_poll_timeout_s(),
     )
     return cmd_install_geak(ns)
@@ -777,7 +777,7 @@ def kill_inference_for_kernel_agent_best_effort() -> None:
     ns = argparse.Namespace(
         pid_file=None,
         print_logs=False,
-        poll_interval=_DEFAULT_POLL_INTERVAL_S,
+        poll_interval=DEFAULT_POLL_INTERVAL_S,
         poll_timeout=resolve_poll_timeout_s(),
     )
     try:
@@ -791,8 +791,8 @@ def _add_common_poll_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--poll-interval",
         type=int,
-        default=_DEFAULT_POLL_INTERVAL_S,
-        help=f"seconds between polls (default {_DEFAULT_POLL_INTERVAL_S})",
+        default=DEFAULT_POLL_INTERVAL_S,
+        help=f"seconds between polls (default {DEFAULT_POLL_INTERVAL_S})",
     )
     p.add_argument(
         "--poll-timeout",
