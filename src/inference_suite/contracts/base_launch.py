@@ -29,7 +29,7 @@ from inference_suite.golden import golden_owned_settings
 BASE_LAUNCH_SCHEMA = "hyperloom-base-launch/1"
 DIGEST_PREFIX = "sha256:"
 DEFAULT_THINKING_MODE = "thinking_on"
-#: The frameworks InferenceX and the cookbooks publish AgentX launches for.
+#: The frameworks an AgentX launch is published for: by InferenceX for all three, by the cookbooks for sglang and vLLM.
 AGENTX_FRAMEWORKS = frozenset({"sglang", "vllm", "atom"})
 
 #: The field every launch layer keeps its argv in.
