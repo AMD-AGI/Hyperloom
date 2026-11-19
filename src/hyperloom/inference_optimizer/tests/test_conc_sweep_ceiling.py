@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests pinning ``orchestrator.kernel.conc_sweep._build_roofline_ceiling`` (MoE/dense ceiling + MBU + safe-degrade)."""
+"""Tests pinning ``orchestrator.kernel.conc_sweep_report.build_roofline_ceiling`` (MoE/dense ceiling + MBU + safe-degrade)."""
 
 from __future__ import annotations
 
@@ -12,11 +12,11 @@ import pytest
 
 # kernel.conc_sweep and actions.executors.conc_sweep import each other; this resolves only once executors is already
 # in sys.modules.
-from hyperloom.orchestrator.kernel.conc_sweep import _ArmCurves, _build_roofline_ceiling
+from hyperloom.orchestrator.kernel.conc_sweep_report import ArmCurves, build_roofline_ceiling
 from hyperloom.inference_optimizer.roofline_model_meta import ModelMeta
 from hyperloom.orchestrator.state.shared_state import SharedState
 
-_LOAD_META_PATH = "hyperloom.orchestrator.kernel.conc_sweep.load_model_meta"
+_LOAD_META_PATH = "hyperloom.orchestrator.kernel.conc_sweep_report.load_model_meta"
 
 
 def _make_state(
@@ -84,8 +84,8 @@ def test_happy_path_moe_qwen3_30b_a3b_mi355x(stub_meta: ModelMeta) -> None:
     baseline_points = [{"conc": c, "output_throughput": float(c) * 100.0} for c in concs]
     optimized_points = [{"conc": c, "output_throughput": float(c) * 120.0} for c in concs]
 
-    block = _build_roofline_ceiling(
-        state, _ArmCurves(baseline=baseline_points, optimized=optimized_points), concs=concs, isl=1024, osl=1024
+    block = build_roofline_ceiling(
+        state, ArmCurves(baseline=baseline_points, optimized=optimized_points), concs=concs, isl=1024, osl=1024
     )
     assert block is not None
     assert block["schema_version"] == 1
@@ -128,8 +128,8 @@ def test_mbu_matches_measured_over_t_peak(stub_meta: ModelMeta) -> None:
         {"conc": 4, "output_throughput": 950.0},
         {"conc": 8, "output_throughput": 1800.0},
     ]
-    block = _build_roofline_ceiling(
-        state, _ArmCurves(baseline=baseline_points, optimized=optimized_points), concs=concs, isl=1024, osl=1024
+    block = build_roofline_ceiling(
+        state, ArmCurves(baseline=baseline_points, optimized=optimized_points), concs=concs, isl=1024, osl=1024
     )
     assert block is not None
     for row, base, opt in zip(block["rows"], [800.0, 1500.0], [950.0, 1800.0]):
@@ -157,8 +157,8 @@ def test_mbu_none_on_failed_or_missing_measurement(
     optimized_points = [
         {"conc": 2, "output_throughput": 400.0},
     ]
-    block = _build_roofline_ceiling(
-        state, _ArmCurves(baseline=baseline_points, optimized=optimized_points), concs=concs, isl=1024, osl=1024
+    block = build_roofline_ceiling(
+        state, ArmCurves(baseline=baseline_points, optimized=optimized_points), concs=concs, isl=1024, osl=1024
     )
     assert block is not None
     rows = {r["conc"]: r for r in block["rows"]}
@@ -184,8 +184,8 @@ def test_dense_fallback_no_moe_fields() -> None:
     )
     state = _make_state()
     with patch(_LOAD_META_PATH, return_value=dense_meta):
-        block = _build_roofline_ceiling(
-            state, _ArmCurves(baseline=[], optimized=[]), concs=[1, 8, 128], isl=1024, osl=1024
+        block = build_roofline_ceiling(
+            state, ArmCurves(baseline=[], optimized=[]), concs=[1, 8, 128], isl=1024, osl=1024
         )
     assert block is not None
     rows = block["rows"]
@@ -208,5 +208,5 @@ def test_dense_fallback_no_moe_fields() -> None:
 def test_returns_none_when_an_input_is_unavailable(meta: ModelMeta | None, state_overrides: dict[str, Any]) -> None:
     state = _make_state(**state_overrides)
     with patch(_LOAD_META_PATH, return_value=meta):
-        block = _build_roofline_ceiling(state, _ArmCurves(baseline=[], optimized=[]), concs=[1, 8], isl=1024, osl=1024)
+        block = build_roofline_ceiling(state, ArmCurves(baseline=[], optimized=[]), concs=[1, 8], isl=1024, osl=1024)
     assert block is None
