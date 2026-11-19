@@ -160,7 +160,7 @@ async def _noop_finalize() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_failed_close_sequence_fails_the_run_after_releasing_it(session_dir):
+async def test_a_failed_close_sequence_fails_the_run_after_releasing_it(session_dir, monkeypatch):
     c = Coordinator(session_dir, backends=_build_backends({}))
     c._stop.set()
     finalize_calls = 0
@@ -175,7 +175,10 @@ async def test_a_failed_close_sequence_fails_the_run_after_releasing_it(session_
     closed_proposals: list[str] = []
     c.phase_close.ensure_close_sequence = _close
     c._recipe_kb_t4_hook = _finalize
-    c._close_undecided_proposals = closed_proposals.append
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.loop.coordinator.close_undecided_proposals",
+        lambda _session_dir, _pending, stop_reason: closed_proposals.append(stop_reason),
+    )
     try:
         with pytest.raises(RuntimeError, match="^close sequence broke$"):
             await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=1))

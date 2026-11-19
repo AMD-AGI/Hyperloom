@@ -27,6 +27,7 @@ from hyperloom.orchestrator.roles.mcp_context_tools import ContextProvider, _mak
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.actions.executors.explore import STACK_REVALIDATE_SOURCE
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.reactor_turn import trace_mcp_setup
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 from hyperloom.orchestrator.loop._promote_outcome import IntegrateRecoveryIncomplete
@@ -170,7 +171,7 @@ def test_trace_mcp_setup_persists_diagnostics(coord: Coordinator) -> None:
         },
     )
 
-    coord._trace_mcp_setup(agent_name="orchestration", backend=backend)
+    trace_mcp_setup(coord.session_dir, agent_name="orchestration", backend=backend)
 
     setup = json.loads((coord.session_dir / "agents" / "orchestration" / "mcp_setup.json").read_text())
     assert setup["emit_intent"]["registered"] is True
