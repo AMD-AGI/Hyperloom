@@ -1169,8 +1169,7 @@ def _write_mn_state(tmp_path, monkeypatch, payload):
 
 
 def test_infera_ssh_env_empty_for_rayjob(tmp_path, monkeypatch):
-    # RayJob backend (or single-node) must yield {} so the Ray RAY_ADDRESS placement path is left completely
-    # untouched.
+    # RayJob backend (or single-node) must yield {}: only Infera routes GEAK GPU work over SSH.
     from hyperloom.orchestrator.actions.executors import _multi_node_env
 
     _write_mn_state(
