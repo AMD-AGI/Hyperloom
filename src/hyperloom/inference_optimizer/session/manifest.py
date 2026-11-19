@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import atomic_write_json
-from hyperloom.common.provenance import build_provenance
+from hyperloom.common.provenance import GPU_IDENTITY_ENV, build_provenance
 from hyperloom.common.session_files import shared_options
 from hyperloom.common.url_userinfo import strip_url_userinfo
 from hyperloom_common.timeutil import now_iso, utc_now_compact
@@ -146,6 +146,15 @@ def _env_digits(name: str) -> int | None:
     return int(raw) if raw.strip().isdigit() else None
 
 
+def _published_gpu_identity() -> dict[str, Any] | None:
+    """The GPU identity the CLI published for this launch, or ``None`` when it published none."""
+    try:
+        identity = json.loads(os.environ.get(GPU_IDENTITY_ENV) or "{}")
+    except ValueError:
+        return None
+    return identity if isinstance(identity, dict) and identity else None
+
+
 def build_manifest(
     session_dir: Path,
     *,
@@ -194,6 +203,8 @@ def build_manifest(
         "model_name": model_name,
         "framework": framework or "sglang",
         "gpu_type": gpu_type,
+        # The nameplate and PCI ID rocminfo reported, which the gpu_type alone does not say (W7900 or its Dual Slot).
+        "gpu_identity": _published_gpu_identity(),
         "tp": _env_digits("TP"),
         **{key: _prov.get(key) for key in ("gfx_arch", "ep", "graph_mode", "server_args", "server_args_hash")},
         "workload": workload,

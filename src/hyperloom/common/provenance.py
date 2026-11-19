@@ -10,16 +10,19 @@ import hashlib
 import os
 import gzip
 import re
+import shutil
 import subprocess  # nosec B404 - best-effort, guarded provenance probes only.
 import sys
+from dataclasses import dataclass
 from importlib import metadata as _im
 from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom_common.coerce import to_int
-from hyperloom_common.gpu_identity import gfx_arch_for_gpu_type
+from hyperloom_common.gpu_identity import GpuAgent, gfx_arch_for_gpu_type, rocminfo_gpu_agents
 
 from hyperloom.common.outside_facts import ENV_CONC, ENV_EP, ENV_ISL, ENV_MAX_MODEL_LEN, ENV_OSL, ENV_TP
+from hyperloom.common.visible_devices import effective_mask_tokens
 
 PROVENANCE_VERSION = 1
 
@@ -121,6 +124,71 @@ def detect_gfx_arch(env: Mapping[str, str], *, gpu_type: str | None = None, prob
     except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
         pass
     return None
+
+
+_ROCMINFO_TIMEOUT_SEC = 10
+#: Published by the CLI at launch: the identity of the GPU the session runs on, as :func:`detect_gpu_identity` read it.
+GPU_IDENTITY_ENV = "HYPERLOOM_GPU_IDENTITY"
+
+
+def _rocminfo_binary() -> str | None:
+    found = shutil.which("rocminfo")
+    if found:
+        return found
+    fallback = Path("/opt/rocm/bin/rocminfo")
+    return str(fallback) if fallback.is_file() else None
+
+
+@dataclass(frozen=True)
+class GpuProbe:
+    """One rocminfo run, as this session sees it."""
+
+    #: rocminfo's output, which ``ROCR_VISIBLE_DEVICES`` already limits.
+    rocminfo: str
+    #: Its GPU agents in runtime order, after a numeric HIP mask picked from them.
+    agents: list[GpuAgent]
+
+
+def probe_gpus(env: Mapping[str, str] | None = None) -> GpuProbe | None:
+    """Run rocminfo once for this session's view of the GPUs; ``None`` when it cannot run.
+
+    rocminfo applies ``ROCR_VISIBLE_DEVICES`` itself; a numeric ``HIP_VISIBLE_DEVICES`` (or ``CUDA_VISIBLE_DEVICES``)
+    then picks from what it lists, as the HIP runtime does. Any other HIP mask leaves the ROCr view as it is.
+    """
+    env = os.environ if env is None else env
+    binary = _rocminfo_binary()
+    if binary is None:
+        return None
+    run_env = None if env is os.environ else {**os.environ, **env}
+    try:
+        out = subprocess.run(  # nosec B603
+            [binary], capture_output=True, text=True, timeout=_ROCMINFO_TIMEOUT_SEC, env=run_env
+        )
+    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    agents = rocminfo_gpu_agents(out.stdout)
+    hip = next((env[name] for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES") if name in env), None)
+    tokens = effective_mask_tokens(hip) if hip is not None else []
+    if tokens and all(tok.isdigit() and int(tok) < len(agents) for tok in tokens):
+        agents = [agents[int(tok)] for tok in tokens]
+    return GpuProbe(out.stdout, agents)
+
+
+def detect_gpu_identity(gpu_type: str | None, agents: list[GpuAgent] | None) -> dict[str, Any]:
+    """The product, nameplate and PCI device ID of the session's first visible GPU, for the manifest and the report.
+
+    ``agents`` is :func:`probe_gpus`'s; with none, only the product is known.
+    """
+    first = agents[0] if agents else None
+    return {
+        "product": str(gpu_type or "").strip().lower() or None,
+        "marketing_name": (first.marketing_name or None) if first else None,
+        "pci_device_id": (first.pci_device_id or None) if first else None,
+        "gfx_arch": first.gfx if first else None,
+        "visible_gpus": len(agents) if agents is not None else None,
+    }
 
 
 def detect_graph_mode(env: Mapping[str, str]) -> str | None:
@@ -382,13 +450,17 @@ def build_provenance(
 
 
 __all__ = [
+    "GPU_IDENTITY_ENV",
+    "GpuProbe",
     "PROVENANCE_VERSION",
     "RESOLVED_FRAMEWORK_ENV",
     "RESOLVED_FRAMEWORK_PYTHON_ENV",
     "build_provenance",
     "server_args_hash",
     "detect_gfx_arch",
+    "detect_gpu_identity",
     "detect_graph_mode",
+    "probe_gpus",
     "detect_stack_fingerprint",
     "framework_distribution_version",
     "detect_code_revision",

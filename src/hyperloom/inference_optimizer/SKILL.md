@@ -1231,7 +1231,8 @@ full env-var set, and `docs/reference/session-breakdown.md` for the emitted
 
 Pick the GPU explicitly with `--gpu-type` or `$GPU_TYPE`; without
 either, the optimizer auto-detects via `rocm-smi --showproductname`
-(falling back to `torch.cuda.get_device_properties(0).gcnArchName`).
+(falling back to the `rocminfo` product name or PCI ID, then
+`torch.cuda.get_device_properties(0).gcnArchName`).
 
 ```bash
 python3 -m hyperloom optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
@@ -1249,6 +1250,17 @@ run with `--framework vllm` only, and `r9700` (Radeon AI PRO R9700, gfx1201) and
 `w7900d` (Radeon PRO W7900D, gfx1100) with `vllm` or `llamacpp`. On these boards
 pass `--framework` explicitly, since another framework (including the default)
 exits with code 2 at launch.
+
+`w7900` (Radeon PRO W7900 and W7900 Dual Slot) is confirmed on the card at
+launch: every GPU rocminfo shows must report gfx1100 and the W7900's product
+name or PCI ID (`1002:7448`, `1002:744a`), never a bare gfx1100. A
+`--gpu-type w7900` the probe contradicts, or another `--gpu-type` on a W7900,
+exits with code 2, as do a local launch where rocminfo cannot run or lists no
+GPU and a kernel phase whose GEAK checkout does not identify the card as
+`w7900` (pass `--no-kernel` to skip it). A gfx1100, gfx1101 or gfx1102 GPU that
+names no supported board is refused unless `--gpu-type` names a board on that
+ISA (set `ROCR_VISIBLE_DEVICES` to leave such a card out). `w7900d` keeps the
+probe-wins rule.
 
 Do not set `HIP_VISIBLE_DEVICES` on the known ROCm stack unless the user asks;
 it can make `torch.cuda.is_available()` return false. Use

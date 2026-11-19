@@ -7,15 +7,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
+from hyperloom_common.gpu_identity import GpuAgent, rocminfo_gpu_agents
 from hyperloom.common.provenance import (
     build_provenance,
     detect_gfx_arch,
+    detect_gpu_identity,
+    probe_gpus as _real_probe_gpus,
     server_args_hash,
 )
+
+#: The four GPU agents rocminfo lists on a host with four W7900 Dual Slot cards, in KFD node order, each cut to its
+#: top-level fields up to its Compute Unit.
+_ROCMINFO_4X_W7900 = Path(__file__).parent / "fixtures" / "rocminfo_4x_w7900_dual_slot.txt"
 
 
 def _ns(**kw):
@@ -236,6 +245,157 @@ def _rocminfo_not_installed(*a, **k):
 def test_gfx_arch_probe_failure_is_none(monkeypatch, run):
     monkeypatch.setattr(_prov.subprocess, "run", run)
     assert detect_gfx_arch({}, probe=True) is None
+
+
+# --- the GPU agents rocminfo lists, and the identity the session records ---------------------------------------------
+
+_W7900_DS = GpuAgent("gfx1100", "AMD Radeon Pro W7900 Dual Slot", "0x744a", 96)
+
+
+def test_rocminfo_lists_the_gpu_agents_in_order():
+    agents = rocminfo_gpu_agents(_ROCMINFO_4X_W7900.read_text(encoding="utf-8"))
+    assert agents == [_W7900_DS] * 4
+    assert agents[0].pci_device_id == "1002:744a"
+
+
+def test_each_agent_keeps_its_own_fields_not_its_isa_sections_and_the_cpu_is_skipped():
+    text = "\n".join(
+        [
+            "*******",
+            "Agent 1",
+            "*******",
+            "  Name:                    AMD Ryzen 9 7950X 16-Core Processor",
+            "  Marketing Name:          AMD Ryzen 9 7950X 16-Core Processor",
+            "  Device Type:             CPU",
+            "  Chip ID:                 0(0x0)",
+            "  Compute Unit:            32",
+            "  ISA Info:",
+            "*******",
+            "Agent 2",
+            "*******",
+            "  Name:                    gfx1100",
+            "  Marketing Name:          AMD   Radeon Pro W7900",
+            "  Chip ID:                 29768(0x7448)",
+            "  Compute Unit:            96",
+            "  ISA Info:",
+            "    ISA 1",
+            "      Name:                    amdgcn-amd-amdhsa--gfx1100",
+            "Agent 3",
+            "  Name:                    gfx000",
+            "Agent 4",
+            "  Name:                    gfx1201",
+            "  Marketing Name:          ",
+        ]
+    )
+    assert rocminfo_gpu_agents(text) == [
+        GpuAgent("gfx1100", "AMD Radeon Pro W7900", "0x7448", 96),
+        GpuAgent("gfx1201", "", "", None),
+    ]
+    assert rocminfo_gpu_agents("") == [] and rocminfo_gpu_agents(None) == []
+
+
+@pytest.fixture
+def rocminfo(monkeypatch):
+    """A rocminfo that lists four W7900s, the first a blower card, and records the env it ran under."""
+    calls: list[dict | None] = []
+    listing = _ROCMINFO_4X_W7900.read_text(encoding="utf-8").replace("29770(0x744a)", "29768(0x7448)", 1)
+
+    def _run(cmd, **kwargs):
+        calls.append(kwargs.get("env"))
+        return subprocess.CompletedProcess(cmd, 0, listing, "")
+
+    monkeypatch.setattr(_prov, "_rocminfo_binary", lambda: "/opt/rocm/bin/rocminfo")
+    monkeypatch.setattr(_prov.subprocess, "run", _run)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("hip", "chips"),
+    [
+        (None, ["0x7448", "0x744a", "0x744a", "0x744a"]),
+        ({"HIP_VISIBLE_DEVICES": "1"}, ["0x744a"]),
+        ({"HIP_VISIBLE_DEVICES": "0"}, ["0x7448"]),
+        ({"CUDA_VISIBLE_DEVICES": "2,0"}, ["0x744a", "0x7448"]),
+        ({"HIP_VISIBLE_DEVICES": "GPU-0000000000000001"}, ["0x7448", "0x744a", "0x744a", "0x744a"]),
+        ({"HIP_VISIBLE_DEVICES": "4"}, ["0x7448", "0x744a", "0x744a", "0x744a"]),
+    ],
+    ids=["unmasked", "hip-1", "hip-0", "cuda-reordered", "hip-uuid-left-to-rocr", "hip-beyond-rocr"],
+)
+def test_a_numeric_hip_mask_picks_from_what_rocminfo_lists(rocminfo, hip, chips):
+    probe = _real_probe_gpus(hip or {})
+    assert [agent.chip_id for agent in probe.agents] == chips
+    assert len(rocminfo_gpu_agents(probe.rocminfo)) == 4
+
+
+def test_the_probe_runs_rocminfo_under_the_env_it_is_given(rocminfo, monkeypatch):
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "2")
+    _real_probe_gpus()
+    _real_probe_gpus({"ROCR_VISIBLE_DEVICES": "0"})
+    assert rocminfo[0] is None
+    assert rocminfo[1]["ROCR_VISIBLE_DEVICES"] == "0"
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "HSA_STATUS_ERROR_OUT_OF_RESOURCES"),
+        lambda cmd, **kw: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd, 10)),
+        lambda cmd, **kw: (_ for _ in ()).throw(PermissionError("/dev/kfd")),
+    ],
+    ids=["nonzero", "timeout", "no-kfd-access"],
+)
+def test_a_rocminfo_that_cannot_run_reads_as_no_probe(monkeypatch, run):
+    monkeypatch.setattr(_prov, "_rocminfo_binary", lambda: "/opt/rocm/bin/rocminfo")
+    monkeypatch.setattr(_prov.subprocess, "run", run)
+    assert _real_probe_gpus({}) is None
+
+
+def test_no_rocminfo_binary_reads_as_no_probe(monkeypatch):
+    monkeypatch.setattr(_prov, "_rocminfo_binary", lambda: None)
+    monkeypatch.setattr(_prov.subprocess, "run", lambda *a, **k: pytest.fail("nothing to run"))
+    assert _real_probe_gpus({}) is None
+
+
+@pytest.mark.parametrize(
+    ("gpu_type", "agents", "identity"),
+    [
+        (
+            "W7900",
+            [_W7900_DS, _W7900_DS],
+            {
+                "product": "w7900",
+                "marketing_name": "AMD Radeon Pro W7900 Dual Slot",
+                "pci_device_id": "1002:744a",
+                "gfx_arch": "gfx1100",
+                "visible_gpus": 2,
+            },
+        ),
+        (
+            "mi300x",
+            None,
+            {
+                "product": "mi300x",
+                "marketing_name": None,
+                "pci_device_id": None,
+                "gfx_arch": None,
+                "visible_gpus": None,
+            },
+        ),
+        (
+            None,
+            [GpuAgent("gfx942")],
+            {"product": None, "marketing_name": None, "pci_device_id": None, "gfx_arch": "gfx942", "visible_gpus": 1},
+        ),
+        (
+            "r9700",
+            [],
+            {"product": "r9700", "marketing_name": None, "pci_device_id": None, "gfx_arch": None, "visible_gpus": 0},
+        ),
+    ],
+    ids=["w7900", "remote-or-no-rocminfo", "unnamed", "no-gpu-visible"],
+)
+def test_the_identity_is_the_first_visible_gpus(gpu_type, agents, identity):
+    assert detect_gpu_identity(gpu_type, agents) == identity
 
 
 def test_read_first_line(tmp_path):

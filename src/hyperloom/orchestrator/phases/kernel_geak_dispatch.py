@@ -427,12 +427,15 @@ class _GeakDispatchMixin:
         # resolve through one helper: a handoff that named a different axis than the one KEEP is
         # decided on would have GEAK searching against a reference it was never measured against.
         e2e_metric, _ = geak_metric_axis(benchmark_mode=str(state.benchmark_mode or ""), grading=state.grading or None)
+        # GEAK picks its hardware-counter set from the perf level; an undeclared level leaves GEAK's own default.
+        perf_level = str(((state.gpu_power_settings or {}).get("declared") or {}).get("perf_level") or "")
         return {
             # v2 adds baseline_env_spec; v3 adds actual GPU-pinning metadata.
             "schema_version": 3,
             "model_path": str(state.model_path or os.environ.get("MODEL_PATH", "")),
             "framework": str(state.framework or os.environ.get("FRAMEWORK", "") or "sglang"),
             **_resolve_handoff_gpu_identity(state.gpu_type or os.environ.get("GPU_TYPE", "")),
+            **({"gpu_perf_level": perf_level} if perf_level else {}),
             "workload": {"isl": int(state.isl), "osl": int(state.osl), "conc": int(state.conc or 64)},
             # AgentX canonical throughput is not a reference for GEAK's proxy workload.
             "raw_baseline_tput": 0.0 if agentx else float(state.baseline_tput or 0.0),

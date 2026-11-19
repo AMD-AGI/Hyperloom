@@ -40,15 +40,15 @@ def isolated_env(monkeypatch):
         monkeypatch.setenv(key, "")
 
 
-def _seed(tmp_path, monkeypatch, framework: str) -> None:
+def _seed(tmp_path, monkeypatch, framework: str, gpu_type: str = "r9700", *extra: str) -> None:
     args = _build_parser().parse_args(
-        ["optimize", "--model", "/model", "--framework", framework, "--gpu-type", "r9700"]
+        ["optimize", "--model", "/model", "--framework", framework, "--gpu-type", gpu_type, *extra]
     )
     configure_benchmark(args)
     launch_shape._resolve_run_topology(args)
     for name in ("_enforce_expected_framework", "_apply_operator_supplied_paths", "_check_gfx_arch_resolvable"):
         monkeypatch.setattr(cli, name, lambda *a, **kw: None)
-    monkeypatch.setattr(cli, "_autodetect_gpu_type", lambda: None)
+    monkeypatch.setattr(cli, "_autodetect_gpu_type", lambda agents=None: None)
     monkeypatch.setattr(cli, "resolve_framework_version", lambda args: "test-version")
     monkeypatch.setattr(cli, "make_session_dir", lambda **kw: tmp_path)
     monkeypatch.setattr(cli, "_acquire_session_lock_or_exit", lambda path: None)
@@ -64,16 +64,22 @@ def _seed(tmp_path, monkeypatch, framework: str) -> None:
         asyncio.run(cli._seed_fresh_session(args, nodes_resolved=1))
 
 
-def test_fresh_r9700_sglang_launch_exits_2(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize(("product", "validated"), [("r9700", "llamacpp, vllm"), ("w7900", "vllm")])
+def test_fresh_radeon_sglang_launch_exits_2(tmp_path, monkeypatch, capsys, product, validated):
     with pytest.raises(SystemExit) as exc:
-        _seed(tmp_path, monkeypatch, "sglang")
+        _seed(tmp_path, monkeypatch, "sglang", product)
     assert exc.value.code == 2
-    assert "r9700 is currently validated only for llamacpp, vllm" in capsys.readouterr().err
+    assert f"{product} is currently validated only for {validated}" in capsys.readouterr().err
 
 
-def test_fresh_r9700_vllm_launch_passes_the_gate_and_exports_the_board_itself(tmp_path, monkeypatch):
-    _seed(tmp_path, monkeypatch, "vllm")
-    assert os.environ["GPU_TYPE"] == os.environ["TARGET_GPU_TYPE"] == "r9700"
+@pytest.mark.parametrize(
+    ("product", "flags"),
+    [("r9700", ()), ("w7900", ()), ("w7900", ("--no-kernel",))],
+    ids=["r9700", "w7900", "w7900-no-kernel"],
+)
+def test_fresh_radeon_vllm_launch_passes_the_gate_and_exports_the_board_itself(tmp_path, monkeypatch, product, flags):
+    _seed(tmp_path, monkeypatch, "vllm", product, *flags)
+    assert os.environ["GPU_TYPE"] == os.environ["TARGET_GPU_TYPE"] == product
 
 
 def test_resume_runs_the_gate():

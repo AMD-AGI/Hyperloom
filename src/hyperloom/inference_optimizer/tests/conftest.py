@@ -80,6 +80,20 @@ def process_environ():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _no_rocminfo(monkeypatch):
+    """No test reaches a real ``rocminfo``: the host reads as one without it, which refuses a w7900 launch.
+
+    A test of the gate patches ``probe_gpus`` again with what it needs rocminfo to show. A launch a test seeds
+    publishes the identity it read to the process env, so each test starts, and leaves, with none published.
+    """
+    from hyperloom.common import provenance
+
+    monkeypatch.setattr(provenance, "probe_gpus", lambda env=None: None)
+    monkeypatch.setenv(provenance.GPU_IDENTITY_ENV, "")
+    monkeypatch.delenv(provenance.GPU_IDENTITY_ENV)
+
+
 def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
     """Put the executors in multi-node mode with a no-op per-round server restart."""
     from hyperloom.orchestrator.actions.executors.serving import _multi_node_server_lifecycle as mnl

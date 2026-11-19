@@ -1,0 +1,95 @@
+==========
+HSA Agents
+==========
+*******
+Agent 2
+*******
+  Name:                    gfx1100
+  Uuid:                    GPU-0000000000000001
+  Marketing Name:          AMD Radeon Pro W7900 Dual Slot
+  Vendor Name:             AMD
+  Feature:                 KERNEL_DISPATCH
+  Profile:                 BASE_PROFILE
+  Float Round Mode:        NEAR
+  Max Queue Number:        128(0x80)
+  Queue Min Size:          64(0x40)
+  Queue Max Size:          131072(0x20000)
+  Queue Type:              MULTI
+  Node:                    1
+  Device Type:             GPU
+  Chip ID:                 29770(0x744a)
+  ASIC Revision:           0(0x0)
+  Cacheline Size:          128(0x80)
+  Max Clock Freq. (MHz):   1760
+  BDFID:                   4096
+  Internal Node ID:        1
+  Compute Unit:            96
+*******
+Agent 3
+*******
+  Name:                    gfx1100
+  Uuid:                    GPU-0000000000000002
+  Marketing Name:          AMD Radeon Pro W7900 Dual Slot
+  Vendor Name:             AMD
+  Feature:                 KERNEL_DISPATCH
+  Profile:                 BASE_PROFILE
+  Float Round Mode:        NEAR
+  Max Queue Number:        128(0x80)
+  Queue Min Size:          64(0x40)
+  Queue Max Size:          131072(0x20000)
+  Queue Type:              MULTI
+  Node:                    2
+  Device Type:             GPU
+  Chip ID:                 29770(0x744a)
+  ASIC Revision:           0(0x0)
+  Cacheline Size:          128(0x80)
+  Max Clock Freq. (MHz):   1760
+  BDFID:                   8192
+  Internal Node ID:        2
+  Compute Unit:            96
+*******
+Agent 4
+*******
+  Name:                    gfx1100
+  Uuid:                    GPU-0000000000000003
+  Marketing Name:          AMD Radeon Pro W7900 Dual Slot
+  Vendor Name:             AMD
+  Feature:                 KERNEL_DISPATCH
+  Profile:                 BASE_PROFILE
+  Float Round Mode:        NEAR
+  Max Queue Number:        128(0x80)
+  Queue Min Size:          64(0x40)
+  Queue Max Size:          131072(0x20000)
+  Queue Type:              MULTI
+  Node:                    3
+  Device Type:             GPU
+  Chip ID:                 29770(0x744a)
+  ASIC Revision:           0(0x0)
+  Cacheline Size:          128(0x80)
+  Max Clock Freq. (MHz):   1760
+  BDFID:                   12288
+  Internal Node ID:        3
+  Compute Unit:            96
+*******
+Agent 5
+*******
+  Name:                    gfx1100
+  Uuid:                    GPU-0000000000000004
+  Marketing Name:          AMD Radeon Pro W7900 Dual Slot
+  Vendor Name:             AMD
+  Feature:                 KERNEL_DISPATCH
+  Profile:                 BASE_PROFILE
+  Float Round Mode:        NEAR
+  Max Queue Number:        128(0x80)
+  Queue Min Size:          64(0x40)
+  Queue Max Size:          131072(0x20000)
+  Queue Type:              MULTI
+  Node:                    4
+  Device Type:             GPU
+  Chip ID:                 29770(0x744a)
+  ASIC Revision:           0(0x0)
+  Cacheline Size:          128(0x80)
+  Max Clock Freq. (MHz):   1760
+  BDFID:                   16384
+  Internal Node ID:        4
+  Compute Unit:            96

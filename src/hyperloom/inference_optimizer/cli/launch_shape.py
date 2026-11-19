@@ -27,7 +27,7 @@ from .model_gate import (
 )
 from .multi_node import _resolve_gpus_per_node, _resolve_mn_backend
 from .parser import _positive_int_arg
-from .preflight import _resumed_session_state
+from .resumed_session import _resumed_session_state
 
 
 def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:

@@ -6,10 +6,8 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -331,16 +329,6 @@ def _export_partition_shape(
     # is the point.
     os.environ.update(runtime_env(verdict.layout, streams, fanout=fanout))
     return session_shape_summary(verdict.layout, streams, fanout_expected=fanout)
-
-
-def _publish_gpu_power_settings(record: Mapping[str, Any]) -> None:
-    """Expose the recorded power settings to the platform fingerprint, the way the partition shape is."""
-    from hyperloom.common.platform_probe import GPU_POWER_SETTINGS_ENV
-
-    if record:
-        os.environ[GPU_POWER_SETTINGS_ENV] = json.dumps(record, sort_keys=True)
-    else:
-        os.environ.pop(GPU_POWER_SETTINGS_ENV, None)
 
 
 def _restore_partition_shape_from_state(args: Any, state: SharedState) -> None:
