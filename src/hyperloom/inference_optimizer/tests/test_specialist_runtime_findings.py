@@ -13,10 +13,8 @@ import pytest
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    _section_runtime_findings,
-    build_specialist_prompts,
-)
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
+from hyperloom.orchestrator.prompts.specialist_context_sections import _section_runtime_findings
 from hyperloom.orchestrator.specialists.domains import get_domain
 from hyperloom.orchestrator.state.shared_state import SharedState
 
