@@ -602,6 +602,13 @@ def moe_runner_requires_aiter(server_args: str | None, model_path: str | None) -
     )
 
 
+def _is_option(token: str) -> bool:
+    """Whether ``token`` names an option: ``--flag``, or a single-dash one such as ATOM's ``-tp``, but not ``-1``."""
+    if token.startswith("--"):
+        return True
+    return len(token) > 1 and token.startswith("-") and not _NUMERIC_VALUE_RE.match(token[1:])
+
+
 def _flag_pair_at(tokens: list[str], i: int) -> tuple[list[str], int]:
     """Return the flag at ``tokens[i]`` followed by its values, and the index past them."""
     t = tokens[i]
@@ -611,10 +618,10 @@ def _flag_pair_at(tokens: list[str], i: int) -> tuple[list[str], int]:
     i += 1
     pair = [t]
     if t in _MULTI_VALUE_FLAGS:
-        while i < len(tokens) and not tokens[i].startswith("--"):
+        while i < len(tokens) and not _is_option(tokens[i]):
             pair.append(tokens[i])
             i += 1
-    elif i < len(tokens) and not tokens[i].startswith("--"):
+    elif i < len(tokens) and not _is_option(tokens[i]):
         pair.append(tokens[i])
         i += 1
     return pair, i
@@ -633,7 +640,7 @@ def dedupe_extra_server_args(args_str: str) -> str:
     i = 0
     while i < len(tokens):
         t = tokens[i]
-        if t.startswith("--"):
+        if _is_option(t):
             pair, i = _flag_pair_at(tokens, i)
             flag = pair[0]
             if flag not in pair_by_flag:

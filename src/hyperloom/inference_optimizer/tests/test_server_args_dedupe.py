@@ -28,6 +28,21 @@ def test_dedupe_positional_token():
     assert out == "foo --tp 8"
 
 
+def test_dedupe_keeps_a_single_dash_flag_with_its_value():
+    out = dedupe_extra_server_args("--trust-remote-code -tp 1 --trust-remote-code -tp 1 --trust-remote-code")
+    assert out == "--trust-remote-code -tp 1"
+
+
+def test_dedupe_keeps_the_last_value_of_a_single_dash_flag():
+    out = dedupe_extra_server_args("-tp 1 --kv_cache_dtype fp8 -tp 2")
+    assert out == "-tp 2 --kv_cache_dtype fp8"
+
+
+def test_dedupe_keeps_a_negative_number_as_a_value():
+    out = dedupe_extra_server_args("--seed -1 --seed -2")
+    assert out == "--seed -2"
+
+
 def test_dedupe_normalizes_equals_form():
     out = dedupe_extra_server_args("--attention-backend=ROCM_ATTN --attention-backend ROCM_AITER_FA")
     assert out == "--attention-backend ROCM_AITER_FA"
