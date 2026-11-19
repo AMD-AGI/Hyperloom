@@ -68,7 +68,6 @@ def test_extract_launch_log_empty_on_none_or_blank():
 @pytest.mark.parametrize(
     "payload, err_class",
     [
-        ({"error": "bad --flag"}, "fast_exit_arg_error"),
         ({"error": "pinned dependency missing"}, AGENTX_PREFLIGHT_ERROR_CLASS),
         ({"error": f"{RAY_INFEASIBLE_MARKER}: cluster has 0 GPU(s), 8 requested"}, "subprocess_nonzero"),
         ({"error": "GPU 0: held by pid 4242 (python3)"}, HOST_GPUS_UNAVAILABLE),
@@ -695,6 +694,31 @@ async def test_revalidation_forwards_accepted_config(accepted_config, tmp_path):
     params = (await fake.tasks.get(tid)).params
     for key in ("extra_envs", "extra_server_args", "remove_args", "unset_envs", "args_mode"):
         assert params.get(key) == accepted_config.get(key), key
+
+
+@pytest.mark.asyncio
+async def test_revalidation_does_not_remove_what_the_keep_reassigns(tmp_path):
+    """Removals run after the KEEP's layers, so one naming a flag or env the KEEP re-assigns is not forwarded."""
+    fake = _enqueue_self(
+        tmp_path,
+        enablement_validation_pending=True,
+        enablement_origin="eval",
+        enablement_accepted_config_path="/runs/specialist/accepted.yaml",
+        enablement_accepted_config={
+            "args_mode": "append",
+            "extra_server_args": "--max-num-seqs 16",
+            "extra_envs": {"VLLM_X": "1"},
+            "remove_args": ["--max-num-seqs", "--block-size"],
+            "unset_envs": ["VLLM_X", "VLLM_Y"],
+        },
+    )
+    tid = await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
+    params = (await fake.tasks.get(tid)).params
+    assert params["extra_server_args"] == "--max-num-seqs 16"
+    assert params["extra_envs"] == {"VLLM_X": "1"}
+    assert params["remove_args"] == ["--block-size"]
+    assert params["unset_envs"] == ["VLLM_Y"]
+    assert params["args_mode"] == "append"
 
 
 @pytest.mark.asyncio

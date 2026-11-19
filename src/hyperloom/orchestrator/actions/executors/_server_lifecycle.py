@@ -18,7 +18,7 @@ from hyperloom.common import rocm_smi
 from hyperloom.common.benchmark_config import BenchmarkPointError, read_benchmark_point
 from hyperloom.common.ports import pick_server_port
 from hyperloom.inference_optimizer import framework_registry
-from inference_suite import stop
+from inference_suite import PidfileError, stop
 from inference_suite.contracts.layout import SERVER_PID
 
 
@@ -119,11 +119,18 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
     Each ``server.pid`` directory goes through :func:`inference_suite.stop`: the recorded pid is signalled only while
     its start time still matches, and once that leader is gone its workers are found by the pidfile's run mark, so a
     co-located session's server and a recycled pid are never touched. A pidfile whose server outlives SIGKILL is kept.
+    A ``server.pid`` the suite did not write -- an agent that started a server by hand in its worktree records a bare
+    pid under the same name -- is logged and left alone: it names no run mark to reap by, and one stray file must not
+    abort the reap of every other server, nor the phase that asked for it.
     """
     runs = Path(session_dir) / "runs"
     reaped: list[int] = []
     for pid_dir in _suite_pid_dirs(runs):
-        outcome = stop(pid_dir)
+        try:
+            outcome = stop(pid_dir)
+        except PidfileError as exc:
+            log.warning("orphan-reaper: skipping %s, not a server.pid inference_suite wrote: %s", pid_dir, exc)
+            continue
         reaped.extend(outcome.reaped)
         if outcome.survivors:
             log.error("orphan-reaper: pids %s from %s outlived SIGKILL", list(outcome.survivors), pid_dir)

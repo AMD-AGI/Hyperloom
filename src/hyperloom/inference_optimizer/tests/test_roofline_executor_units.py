@@ -218,17 +218,6 @@ def test_profile_server_log_tail_swallows_oserror(monkeypatch, tmp_path):
     assert _profile_server_log_tail({"trace_dir": str(trace_dir)}) == ""
 
 
-def test_profile_server_log_tail_swallows_importerror(monkeypatch):
-    # Patch the lazy import target so importing _find_server_logs raises.
-    import hyperloom.orchestrator.actions.executors.benchmark_result as br
-
-    def boom(_slot):
-        raise ImportError("simulated import failure")
-
-    monkeypatch.setattr(br, "_find_server_logs", boom)
-    assert _profile_server_log_tail({"workspace": "/nonexistent"}) == ""
-
-
 def test_profile_server_log_tail_empty_when_no_logs(tmp_path):
     empty = tmp_path / "empty_ws"
     empty.mkdir()

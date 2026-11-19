@@ -3,9 +3,8 @@
 
 """Unit tests for the critic breakdown renderer.
 
-The critic watches the session from outside the optimization loop, and its quiet
-mode must not read as absence: a critic pass that ruled on nothing still says
-the critic was asked.
+The critic section reports completed review turns, including a review that
+produced no ruling. A session with no reviews has no critic section.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ def _critic(*iterations: dict) -> dict:
 # ---- critic ----
 
 
-def test_a_session_without_a_critic_is_skipped():
+def test_a_session_without_critic_reviews_is_skipped():
     assert cr.render({}).skipped is True
     assert cr.render(_critic()).skipped is True
 

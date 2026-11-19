@@ -24,7 +24,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "23"
+version: "24"
 facts:
   aiter_merged_view:
     kind: names
@@ -742,6 +742,28 @@ facts:
         - "HTTP Error 429 thrown while requesting HEAD https://huggingface.co/datasets/semianalysisai/cc-traces-weka-062126/resolve/main/README.md"
         - 'INFO:     127.0.0.1:41234 - "POST /v1/chat/completions HTTP/1.1" 429 Too Many Requests'
         - "429 Too Many Requests for url: https://api.github.com/repos/SemiAnalysisAI/aiperf"
+
+  aiperf_context_overflow:
+    kind: log_regex
+    project: aiperf (the replay client of an AgentX round, SemiAnalysisAI fork pinned by InferenceX) and the servers it drives
+    reason: >-
+      aiperf calls a refused request a context overflow when its error body holds one of the substrings of its own
+      allowlist, matched without regard to case (Environment.AGENTX.CONTEXT_OVERFLOW_SUBSTRINGS, read by
+      common/scenario/context_overflow.py). vLLM refuses a prompt longer than its max-model-len with "This model's maximum
+      context length is <n> tokens. However, your prompt contains ..." and SGLang with "... is longer than the model's
+      context length ...". The pattern is that allowlist; the reader applies it to the request error the staged client's
+      warmup abort logs (inference_suite.aiperf_patch), not to every line of the log.
+    pattern: >-
+      (?i)context length|maximum context|context_length_exceeded|prompt is too long
+    examples:
+      match:
+        - "04:15:03.501 WARNING  Terminal warmup failure for trace 03e110ac6921c2fe9ac7772a9654314a2beb; aborting run early (broadcasting ProfileCancelCommand); warmup request error: code=400 type='Bad Request' message='{\"error\":{\"message\":\"This model's maximum context length is 262144 tokens. However, your prompt contains 757918 tokens.\",\"type\":\"BadRequestError\",\"code\":400}}' cause_chain=None (callback_handler.py:310)"
+        - "warmup request error: code=400 type='Bad Request' message='{\"object\":\"error\",\"message\":\"The input (300000 tokens) is longer than the model's context length (262144 tokens).\",\"code\":400}'"
+        - "warmup request error: code=400 type='Bad Request' message='{\"error\":{\"code\":\"context_length_exceeded\"}}'"
+      no_match:
+        - "04:15:03.501 WARNING  Terminal warmup failure for trace 03e110ac6921c2fe9ac7772a9654314a2beb; aborting run early (broadcasting ProfileCancelCommand). (callback_handler.py:310)"
+        - "warmup request error: code=502 type='Bad Gateway' message='upstream connect error'"
+        - "python3 -m sglang.launch_server --context-length 262144 --max-model-len 262144"
 
   short_prompt_check:
     kind: names

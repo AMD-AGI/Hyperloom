@@ -73,7 +73,13 @@ _ROOT_SESSION: list[dict[str, Any]] = _session_rows(
         _assistant(
             1,
             [{"type": "tool-call", "id": "call_1", "name": "bash", "arguments": '{"command": "echo hi > hello.txt"}'}],
-            {"inputTokens": 6542, "outputTokens": 67, "totalTokens": 7377, "cacheReadTokens": 768},
+            {
+                "inputTokens": 6542,
+                "outputTokens": 67,
+                "totalTokens": 7377,
+                "cacheReadTokens": 768,
+                "cacheWriteTokens": 100,
+            },
         ),
         {
             "type": "tool/call",
@@ -82,7 +88,14 @@ _ROOT_SESSION: list[dict[str, Any]] = _session_rows(
         _assistant(
             2,
             [{"type": "text", "text": "DONE"}],
-            {"inputTokens": 222, "outputTokens": 3, "totalTokens": 7393, "cacheReadTokens": 7168, "reasoningTokens": 0},
+            {
+                "inputTokens": 222,
+                "outputTokens": 3,
+                "totalTokens": 7393,
+                "cacheReadTokens": 7168,
+                "cacheWriteTokens": 20,
+                "reasoningTokens": 0,
+            },
         ),
         {"type": "turn/end", "data": {"turn": 1, "reason": {"kind": "completed"}}},
     ],
@@ -260,7 +273,7 @@ async def test_a_deepseek_selection_runs_the_specialist_on_the_dsh_cli(
     assert trace.usage == {
         "input_tokens": 6542 + 222 + 10,
         "output_tokens": 67 + 3 + 5,
-        "cache_creation_input_tokens": None,
+        "cache_creation_input_tokens": 100 + 20,
         "cache_read_input_tokens": 768 + 7168,
         "reasoning_output_tokens": 0,
     }

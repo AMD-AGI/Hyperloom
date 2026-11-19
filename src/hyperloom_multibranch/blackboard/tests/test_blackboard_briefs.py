@@ -14,7 +14,7 @@ import pytest
 
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, ClaimHeld, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
-from hyperloom_multibranch.contracts.blackboard.records import InboxItem, Learning, LineageEvent
+from hyperloom_multibranch.contracts.blackboard.records import InboxItem, JudgementWrite, Learning, LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, InboxKind, LearningKind, LineageKind
 from hyperloom_multibranch.blackboard import STALL_TESTS, BriefTriggers, LocalBlackboard
 from hyperloom_multibranch.blackboard.local import feeds
@@ -44,7 +44,9 @@ async def _judged(open_as: Open, request_id: str, conclusion: Conclusion, parent
     toolbox = open_as(Role.TOOLBOX)
     await toolbox.write_request(request(request_id, intent("s1", parent, target=request_id), delta()))
     await toolbox.write_result(result(request_id))
-    await open_as(Role.GATE).write_judgement(request_id, judgement(0.1, (request_id,)), conclusion, commit or None)
+    await open_as(Role.GATE).write_judgement(
+        JudgementWrite(request_id, judgement(0.1, (request_id,)), conclusion, commit or None)
+    )
 
 
 def _briefs(items: tuple[InboxItem, ...]) -> list[tuple[str, str]]:

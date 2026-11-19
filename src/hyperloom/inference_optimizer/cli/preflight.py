@@ -387,9 +387,9 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
 def _resumed_session_state(args: argparse.Namespace) -> dict[str, Any] | None:
     """The persisted ``state.json`` of the session ``--resume-from`` names, or ``None``.
 
-    Preflight runs before the resume block loads the session, so anything preflight decides from a session-pinned
-    setting has to read it here. ``None`` (no session named, or no readable state) leaves the decision to the flags;
-    the resume block reports a missing or unreadable state itself.
+    Preflight and the launch-shape export run before the resume block loads the session, so anything they decide from
+    a session-pinned setting has to read it here. ``None`` (no session named, or no readable state) leaves the decision
+    to the flags; the resume block reports a missing or unreadable state itself.
     """
     raw = str(getattr(args, "resume_from", "") or "").strip()
     if not raw:

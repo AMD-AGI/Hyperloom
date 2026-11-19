@@ -59,7 +59,8 @@ FINAL and baseline tests, correctness fixes and retractions are never judged, no
 throughput verdict.
 
 `HYPERLOOM_ACTIVE_IMAGE_REF` and `HYPERLOOM_ACTIVE_IMAGE_DIGEST` must name the image the session runs on, and the
-agent CLI the specialists run must be installed. `--measurement hosted` also needs the grant variables its help lists
+agent CLI the specialists run must be installed: on `PATH`, or, for `claude`, in `~/.local/bin`, where `install.sh`
+puts it (only a shell that sourced the kernel-agent env file has that on `PATH`). `--measurement hosted` also needs the grant variables its help lists
 (see [Hosted run inputs](../reference/environment-variables.md#hosted-run-inputs)).
 
 Before a test that carries patches is given a sandbox or cards, its toolbox byte-compiles every Python file the patch

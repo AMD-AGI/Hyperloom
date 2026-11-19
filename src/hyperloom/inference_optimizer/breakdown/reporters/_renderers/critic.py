@@ -1,18 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Critic renderer — the review agent's own run, pass by pass.
+"""Critic renderer — completed review turns.
 
 The per-proposal verdicts are reported by the sections that own the proposals
-they judge; this one reports the agent itself: how often it was asked, what it
-was asked about, how its rulings fell each time, and what it left on disk.
+they judge; this one reports the review turns: what was reviewed, how the
+rulings fell each time, and what was left on disk. A review turn that produced
+no ruling is still recorded.
 
-A pass that only spoke is kept rather than filtered out. A session where the
-critic was asked forty times and ruled on nothing reads very differently from
-one where it was never asked, and dropping the silent passes would make those
-two look the same.
-
-Silently skipped when the critic never ran.
+Silently skipped when the critic never reviewed.
 """
 
 from __future__ import annotations
@@ -120,7 +116,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     Returns:
         RenderedSection: The rendered critic section, or a skipped placeholder
-            when the critic never ran.
+            when the critic never reviewed.
     """
     iterations = critic_iterations_of(breakdown)
     if not iterations:

@@ -36,8 +36,6 @@ from inference_suite.server_log import death_excerpt
 class _FakeCapture:
     """A capture whose child wrote ``out`` and ``err`` and nothing the watchdog could see arrive."""
 
-    last_activity_at = None
-
     def __init__(self, out: str = "", err: str = "") -> None:
         self._captured = (out, err)
 
@@ -73,13 +71,11 @@ def test_capture_partial_utf8_records_bytes_before_newline():
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    capture = sk._StreamCapture(proc)
+    activity = threading.Event()
+    capture = sk._StreamCapture(proc, on_output=activity.set)
     capture.start()
     try:
-        deadline = time.monotonic() + 0.35
-        while capture.last_activity_at is None and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert capture.last_activity_at is not None
+        assert activity.wait(0.35)
         assert proc.poll() is None
         proc.wait(timeout=5)
         stdout, stderr = capture.finish()

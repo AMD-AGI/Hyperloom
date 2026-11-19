@@ -35,7 +35,7 @@ from inference_suite.tests.test_config_contract import _AGENTX
 from inference_suite.tests.test_load import _DEADLINES, _flag, _round_config
 
 _WORKLOAD = replace(_AGENTX, warmup_seed=_AGENTX.seed)
-_FAKE_ENV = ("FAKE_CALLS", "FAKE_EXIT", "FAKE_EXPORT", "FAKE_AGGREGATE", "FAKE_LOG", "FAKE_PACE")
+_FAKE_ENV = ("FAKE_CALLS", "FAKE_EXIT", "FAKE_EXPORT", "FAKE_SUMMARY", "FAKE_AGGREGATE", "FAKE_LOG", "FAKE_PACE")
 _FAKE_HARNESS = textwrap.dedent(
     """
     import json, os, shutil, sys, time
@@ -46,6 +46,8 @@ _FAKE_HARNESS = textwrap.dedent(
         artifacts = argv[argv.index("--output-artifact-dir") + 1]
         os.makedirs(artifacts, exist_ok=True)
         shutil.copy(os.environ["FAKE_EXPORT"], os.path.join(artifacts, "profile_export.jsonl"))
+        if os.environ.get("FAKE_SUMMARY"):
+            shutil.copy(os.environ["FAKE_SUMMARY"], os.path.join(artifacts, "profile_export_aiperf.json"))
         for pause in os.environ.get("FAKE_PACE", "").split():
             time.sleep(float(pause))
             print("progress", flush=True)
@@ -124,8 +126,11 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AgentxTool:
     export.write_text("".join(json.dumps(record) + "\n" for record in _EXPORT))
     aggregate = tmp_path / "aggregate.json"
     aggregate.write_text(json.dumps(_aggregate()))
+    summary = tmp_path / "summary.json"
+    summary.write_text(json.dumps({"request_count": {"unit": "requests", "avg": 3.0}}))
     monkeypatch.setenv("FAKE_CALLS", str(tmp_path / "calls.jsonl"))
     monkeypatch.setenv("FAKE_EXPORT", str(export))
+    monkeypatch.setenv("FAKE_SUMMARY", str(summary))
     monkeypatch.setenv("FAKE_AGGREGATE", str(aggregate))
     return AgentxTool.staged(root)
 
@@ -220,7 +225,7 @@ def test_run_replays_then_aggregates_and_keeps_counts_that_agree(tmp_path, harne
     assert outcome.invocation.seed == outcome.invocation.warmup_seed == 42
     assert outcome.invocation.env == {"AIPERF_EXPERIMENTAL_FAST": "0"}
     result = outcome.result
-    assert dict(result.counts) == _COUNTS
+    assert dict(result.counts) == {**_COUNTS, "context_overflow": 0}, "aiperf writes no overflow count when none was"
     assert result.throughput["request_throughput"] == 1.5 and result.throughput["input_tokens_per_second"] is None
     assert result.latency_seconds["ttft_p99"] == 2.0 and result.e2e_norm_intvty["p50"] == 0.1
     assert not result.stopped_by_threshold and not result.fast_mode
@@ -248,6 +253,33 @@ def test_a_threshold_stop_keeps_the_aggregated_result_and_fails_the_round(tmp_pa
     outcome = run_agentx(_round(tmp_path, harness))
     assert outcome.returncode == 1 and outcome.stop.step is FailedStep.CLIENT_FAILED
     assert outcome.result is not None and outcome.result.stopped_by_threshold
+
+
+def test_the_requests_aiperf_skipped_as_a_context_overflow_are_counted_from_its_summary(tmp_path, harness):
+    summary = {"skipped_context_overflow_count": {"unit": "requests", "avg": 7.0}}
+    (tmp_path / "summary.json").write_text(json.dumps(summary))
+    outcome = run_agentx(_round(tmp_path, harness))
+    assert outcome.stop is None
+    assert outcome.result.counts["context_overflow"] == 7
+    assert outcome.result.counts["records_total"] == _COUNTS["records_total"], "the skipped requests are in no export"
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        pytest.param(None, id="absent"),
+        pytest.param("[]", id="not-an-object"),
+        pytest.param(json.dumps({"skipped_context_overflow_count": {"avg": 1.5}}), id="not-a-count"),
+    ],
+)
+def test_a_summary_that_gives_no_overflow_count_fails_the_output(tmp_path, harness, monkeypatch, summary):
+    if summary is None:
+        monkeypatch.setenv("FAKE_SUMMARY", "")
+    else:
+        (tmp_path / "summary.json").write_text(summary)
+    outcome = run_agentx(_round(tmp_path, harness))
+    assert outcome.result is None and outcome.stop.step is FailedStep.CLIENT_OUTPUT_MISSING
+    assert "the AgentX summary cannot be read" in outcome.stop.detail
 
 
 def test_a_missing_aggregate_fails_the_output(tmp_path, harness, monkeypatch):

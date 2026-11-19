@@ -49,7 +49,12 @@ from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from inference_suite.contracts import AGENTX_DEFAULT_DURATION_SEC
-from hyperloom_common.llm.llm_config import preferred_agent_backend, provider_model_defaults, resolve_forge_llm_model
+from hyperloom_common.llm.llm_config import (
+    AGENT_BACKEND_CLAUDE,
+    preferred_agent_backend,
+    provider_model_defaults,
+    resolve_forge_llm_model,
+)
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
@@ -602,18 +607,37 @@ def specialist_model(env: Mapping[str, str]) -> str:
     return resolve_forge_llm_model(preferred_agent_backend(env), env={**env, **provider_model_defaults(env)})
 
 
+#: Where install.sh installs the Claude CLI, below the home (``ensure_claude_cli``). Only a shell that sourced the
+#: kernel-agent env file has it on ``PATH``; a command line started from any other shell does not.
+INSTALLED_CLI_DIR = os.path.join(".local", "bin")
+
+
+def _installed_cli_dir(backend: str, env: Mapping[str, str]) -> str | None:
+    """The directory install.sh installs ``backend``'s CLI in under ``env``'s home (:data:`INSTALLED_CLI_DIR`); ``None``
+    for a backend it does not install there, or without an absolute ``HOME``."""
+
+    home = env.get("HOME", "")
+    if backend != AGENT_BACKEND_CLAUDE or not os.path.isabs(home):
+        return None
+    return os.path.join(home, INSTALLED_CLI_DIR)
+
+
 def specialist_command(env: Mapping[str, str]) -> AgentCommand:
     """The agent CLI every specialist of a session runs: the backend ``env`` is credentialed for, found on its
-    ``PATH``, on :func:`specialist_model`; raises :class:`PeersUnavailable` when that CLI is not installed. A model the
-    price sheet does not list records its tokens only, which the command line accepts only without a dollar cap, and
-    says so here."""
+    ``PATH``, else where install.sh installs it (:func:`_installed_cli_dir`), on :func:`specialist_model`; raises
+    :class:`PeersUnavailable` when that CLI is not installed. A model the price sheet does not list records its tokens
+    only, which the command line accepts only without a dollar cap, and says so here."""
 
     from hyperloom_multibranch.specialist.agent_session import AgentCommand
 
     backend = preferred_agent_backend(env)
+    installed = _installed_cli_dir(backend, env)
     executable = shutil.which(backend, path=env.get("PATH"))
+    if executable is None and installed is not None:
+        executable = shutil.which(backend, path=installed)
     if executable is None:
-        raise PeersUnavailable(f"the {backend} CLI the specialists run is not on PATH")
+        where = f" nor in {installed}" if installed else ""
+        raise PeersUnavailable(f"the {backend} CLI the specialists run is not on PATH{where}")
     model = specialist_model(env)
     if price_of(model) is None:
         logger.warning("the specialists run on %s, which the price sheet does not list: they record tokens only", model)

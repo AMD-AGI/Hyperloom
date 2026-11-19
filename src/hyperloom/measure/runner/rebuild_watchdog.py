@@ -58,7 +58,6 @@ def raise_rebuild_watchdog(
     call: TestCall,
     farm: Farm | None,
     environ: Mapping[str, str],
-    cwd: Path,
     built: Collection[str] = (),
     gfx_arch: str | None = None,
 ) -> str | None:
@@ -72,7 +71,7 @@ def raise_rebuild_watchdog(
     configs = point_configs(call)
     if not configs:
         return None
-    stale = _stale_modules(configs, server_environments(call, configs, environ), environ, farm, cwd, gfx_arch)
+    stale = _stale_modules(call, configs, environ, farm, gfx_arch)
     modules = stale | set(built)
     if not modules:
         return None
@@ -92,18 +91,14 @@ def raise_rebuild_watchdog(
 
 
 def _stale_modules(
-    configs: list[dict],
-    servers: list[dict[str, str]],
-    environ: Mapping[str, str],
-    farm: Farm | None,
-    cwd: Path,
-    gfx_arch: str | None,
+    call: TestCall, configs: list[dict], environ: Mapping[str, str], farm: Farm | None, gfx_arch: str | None
 ) -> frozenset[str]:
     """The module config entries the servers' tuned tables, or the build variables they set otherwise than ``environ``
     (or than the prewarm built a module of the image under), make stale, as the aiter they import resolves them (the
     farm's, when it rebuilds aiter); none when the image has no aiter or its module config cannot be read."""
+    servers = server_environments(call, configs, environ)
     try:
-        image = locate_package(AITER_PACKAGE, server_python(configs[0], default="python3"), cwd)
+        image = locate_package(AITER_PACKAGE, server_python(configs[0], default="python3"), Path(call.cwd))
     except FarmError:
         return frozenset()
     package = farm.site / AITER_PACKAGE if farm is not None and AITER_PACKAGE in farm.packages else image

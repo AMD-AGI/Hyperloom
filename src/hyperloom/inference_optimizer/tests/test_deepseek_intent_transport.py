@@ -619,6 +619,41 @@ def test_per_step_counts_are_summed_and_the_running_total_is_ignored() -> None:
     assert "total_tokens" not in usage
 
 
+def test_cache_writes_are_booked_as_cache_creation_input() -> None:
+    """``inputTokens`` excludes both cache counters; dropping ``cacheWriteTokens`` leaves that spend off the ledger."""
+    events = [
+        {
+            "type": "assistant/message",
+            "data": {
+                "usage": {"inputTokens": 3, "cacheReadTokens": 8253, "cacheWriteTokens": 4071, "totalTokens": 12384}
+            },
+        },
+        {
+            "type": "assistant/message",
+            "data": {
+                "usage": {"inputTokens": 3, "cacheReadTokens": 8253, "cacheWriteTokens": 7070, "totalTokens": 15400}
+            },
+        },
+    ]
+    usage = usage_from_events(events)
+    assert usage["cache_creation_input_tokens"] == 4071 + 7070
+    assert usage["cache_read_input_tokens"] == 8253 * 2
+
+
+def test_the_context_peak_counts_the_cache_writes_of_the_request() -> None:
+    events = [
+        {
+            "type": "assistant/message",
+            "data": {"usage": {"inputTokens": 3, "cacheReadTokens": 8253, "cacheWriteTokens": 4071}},
+        },
+        {
+            "type": "assistant/message",
+            "data": {"usage": {"inputTokens": 3, "cacheReadTokens": 8253, "cacheWriteTokens": 7070}},
+        },
+    ]
+    assert usage_from_events(events)["context_tokens_peak"] == 3 + 8253 + 7070
+
+
 def test_the_context_peak_is_the_largest_single_step_request() -> None:
     """Each step resends the whole context; summing steps overstates it, and inputTokens alone omits the cache."""
     events = [
@@ -639,6 +674,17 @@ async def test_the_reported_context_peak_reaches_the_checkpoint_policy(
     result = await _backend(tmp_path).run("status?")
 
     assert result.metadata["context_tokens_peak"] == 1050
+
+
+async def test_the_turn_row_carries_the_cache_writes_the_harness_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    usage = {"input_tokens": 6, "cache_read_input_tokens": 16506, "cache_creation_input_tokens": 11141}
+    _stub_turn(monkeypatch, DeepSeekSessionResult(text=_reply("send_message", {"topic": "x"}), usage=usage))
+    result = await _backend(tmp_path).run("status?")
+
+    assert result.metadata["cache_creation_input_tokens"] == 11141
 
 
 async def test_an_open_trajectory_span_owns_the_call_id(

@@ -2754,6 +2754,7 @@ def test_model_preflight_runs_off_the_event_loop_so_a_subscription_token_can_ans
     monkeypatch.setattr(cli.llm_config, "is_openai_only", lambda: False)
     monkeypatch.setattr(cli.llm_config, "is_anthropic_only", lambda: False)
     monkeypatch.setattr(cli, "_preflight", Mock(return_value={}))
+    monkeypatch.setattr(cli, "_check_codex_sandbox", Mock())
     monkeypatch.setattr(cli, "_resolve_models_for_run", _resolve)
     args = cli._build_parser().parse_args(["optimize", "--model", "/models/m"])
 

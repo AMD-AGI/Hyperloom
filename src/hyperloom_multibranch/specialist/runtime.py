@@ -31,8 +31,8 @@ specialist: it is not restarted, and the branch's session is stopped so no candi
 judge. Both leave a notice in the branch log. A branch stopped with ``finish_tests`` keeps its judge, without its
 specialist, until no test of the branch is left in flight, so a test that wins after the stop still commits and is
 offered to the integrator; a plain stop ends that judge too. While the specialist writes a change, the runtime
-renews the claims it holds, so a claim does not lapse while a model thinks; once a test carries a claim, the toolbox
-renews it. When the scheduler stops a branch, its last session gives back what the branch's runs held across them.
+renews the claims it holds, so a claim does not lapse while a model thinks; once a test carries a claim, the claim
+follows that test and nobody renews it. When the scheduler stops a branch, its last session gives back what the branch's runs held across them.
 """
 
 from __future__ import annotations

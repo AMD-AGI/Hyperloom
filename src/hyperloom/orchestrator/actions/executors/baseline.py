@@ -18,11 +18,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
-import yaml
-
 from hyperloom_common.coerce import optional_positive_float
 from hyperloom_common.env import is_truthy
-from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom.common.perf_metric import agentx_active, with_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_SINGLE,
@@ -522,14 +519,6 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             if warmup is not None:
                 return warmup
         return await self._suite_round_result(round_, attempt.suite, warmup=warmup_round, warnings=round_warnings)
-
-
-def _readable_point(config_path: Path) -> BenchmarkPoint | None:
-    """The point at ``config_path``, or ``None`` when it cannot be read."""
-    try:
-        return read_benchmark_point(Path(config_path))
-    except (OSError, ValueError, yaml.YAMLError):
-        return None
 
 
 class BaselineExecutor(BenchmarkRunExecutor):

@@ -14,6 +14,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..collaborator import CoordinatorCollaborator
+from ..launch_controls import kept_launch_controls
 from ..state.round_store import RoundRequest
 from ..state.task_registry import TaskSpec, TerminalTaskReuse, create_in_cursor, task_dispatch_origin
 from .generation_scan import GenerationScan
@@ -83,9 +84,18 @@ class EnablementRevalidation(CoordinatorCollaborator):
         cfg = enablement.accepted_config_path or enablement.probe_config_path
         if cfg:
             params["config_path"] = cfg
-        for key in ("extra_envs", "extra_server_args", "remove_args", "unset_envs", "args_mode"):
-            if enablement.accepted_config.get(key):
-                params[key] = enablement.accepted_config[key]
+        accepted = enablement.accepted_config
+        for key in ("extra_envs", "extra_server_args"):
+            if accepted.get(key):
+                params[key] = accepted[key]
+        params.update(
+            kept_launch_controls(
+                accepted,
+                {},
+                extra_server_args=accepted.get("extra_server_args"),
+                extra_envs=accepted.get("extra_envs") or {},
+            )
+        )
         if enablement.active_runtime:
             from .runtime.stack_actions import FrameworkRuntime
 

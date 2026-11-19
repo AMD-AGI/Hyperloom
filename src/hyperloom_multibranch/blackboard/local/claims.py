@@ -3,10 +3,11 @@
 
 """Claim generations: which branch holds which (parent commit, intent) key right now.
 
-Every change of a claim (acquired, renewed, attached to a test, released, completed) writes the next generation file,
+Every change of a claim (acquired, renewed, attached to a test, released) writes the next generation file,
 ``<token>.<generation>.json``, exclusively. Only one writer can create a given generation, on any host of a shared
 folder, so two writers racing on one claim cannot both win; the loser reads the new generation and decides again. The
-highest generation is in force. Expiry is derived from ``expires_at`` and never written.
+highest generation is in force. What a claim's status is in effect is derived (:func:`effective`) and never written:
+expiry from ``expires_at``, and the whole status of a claim a test carries from that test's record.
 """
 
 from __future__ import annotations
@@ -18,10 +19,12 @@ from dataclasses import replace
 from pathlib import Path
 
 from hyperloom_multibranch.contracts.blackboard.interfaces import ClaimLost
+from hyperloom_multibranch.contracts.blackboard.peers import Validity
 from hyperloom_multibranch.contracts.blackboard.records import CLAIM_TOKEN_LENGTH, Claim, ClaimKey
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus
 from hyperloom_multibranch.blackboard import codec
 from hyperloom_multibranch.blackboard.local.files import encode_json, publish_once
+from hyperloom_multibranch.blackboard.local.state import BlackboardState
 
 #: How often a change is re-read and retried when other writers keep creating the next generation first.
 CHANGE_ATTEMPTS = 8
@@ -37,15 +40,25 @@ class LeaseTaken(Exception):
         self.claim = claim
 
 
-def is_live(claim: Claim, now: float) -> bool:
-    return claim.status is ClaimStatus.HELD and claim.expires_at > now
+def effective(claim: Claim, now: float, tests: BlackboardState) -> Claim:
+    """``claim`` as callers see it at ``now``, its test's record read from ``tests``.
 
+    A claim a test carries follows that test, whatever status its file stores: held while the test is in flight,
+    completed by its result, released by its withdrawal or a failed measurement. A claim no test carries yet is held
+    until its holder lets it go, and has expired once nobody renewed it in time.
+    """
 
-def effective(claim: Claim, now: float) -> Claim:
-    """``claim`` as callers see it: a held claim nobody renewed in time has expired."""
-
+    if claim.request_id is not None:
+        return replace(claim, status=_carried(claim.request_id, tests))
     expired = claim.status is ClaimStatus.HELD and claim.expires_at <= now
     return replace(claim, status=ClaimStatus.EXPIRED) if expired else claim
+
+
+def _carried(request_id: str, tests: BlackboardState) -> ClaimStatus:
+    result = tests.results.get(request_id)
+    if result is not None:
+        return ClaimStatus.RELEASED if result.validity is Validity.MEASUREMENT_FAILED else ClaimStatus.COMPLETED
+    return ClaimStatus.RELEASED if request_id in tests.withdrawals else ClaimStatus.HELD
 
 
 class LeaseStore:
@@ -83,11 +96,11 @@ class LeaseStore:
                 latest[match["token"]] = max(int(match["generation"]), latest.get(match["token"], 0))
         return [self._load(token, latest[token]) for token in sorted(latest)]
 
-    def acquire(self, claim: Claim, now: float) -> Claim:
+    def acquire(self, claim: Claim, now: float, tests: BlackboardState) -> Claim:
         """Create the next generation for ``claim.key``; raises :class:`LeaseTaken` while a live claim holds it."""
 
         current = self.current(claim.key)
-        if current is not None and is_live(current, now):
+        if current is not None and effective(current, now, tests).status is ClaimStatus.HELD:
             raise LeaseTaken(current)
         acquired = replace(claim, generation=(current.generation if current is not None else 0) + 1)
         if not publish_once(self._path(claim.key.token, acquired.generation), encode_json(codec.encode(acquired))):
@@ -111,4 +124,4 @@ class LeaseStore:
         raise ClaimLost(f"the claim on {key.parent_commit} kept changing under {CHANGE_ATTEMPTS} attempts")
 
 
-__all__ = ["CHANGE_ATTEMPTS", "LeaseStore", "LeaseTaken", "effective", "is_live"]
+__all__ = ["CHANGE_ATTEMPTS", "LeaseStore", "LeaseTaken", "effective"]

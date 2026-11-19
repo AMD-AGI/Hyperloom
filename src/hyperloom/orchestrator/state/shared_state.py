@@ -406,7 +406,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     baseline_failure_streak: int = 0
     # The live leg's share of ``baseline_failure_streak``; ``begin_leg`` and every reset of the streak zero it.
     baseline_failures_this_leg: int = 0
-    baseline_arg_error_streak: int = 0
+    baseline_arg_error_streak: int = 0  # Nothing advances it; old sessions' state.json and close-out records carry it.
     # Signature of the last failure counted in ``baseline_failure_streak``; two in a row that match end the run.
     baseline_last_failure_signature: str = ""
     # Combined backstop counting ANY baseline failure regardless of error_class, catching mixed classes that never

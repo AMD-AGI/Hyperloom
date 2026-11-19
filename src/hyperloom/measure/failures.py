@@ -107,6 +107,11 @@ HF_CACHE_PERMISSION = "hf_cache_permission"
 #: sandboxes: ``hyperloom_multibranch.toolbox.attempts`` ends the test with it.
 SANDBOX_ACQUIRE_TIMEOUT = "sandbox_acquire_timeout"
 
+#: A warmup request of an AgentX replay was refused as longer than the context the server serves, so the replay aborted
+#: before profiling; the reason is ``<this>: <the client's warmup abort line>``. The candidate served a shorter context
+#: than the corpus needs (a smaller ``--max-model-len``, say), and every rerun replays the same requests: decisive.
+AGENTX_CONTEXT_OVERFLOW = "agentx_context_overflow"
+
 #: The AgentX checkpoint stopped the measured round for trailing its reference by more than the allowed drop
 #: (``measure.checkpoint``): a ruling on the candidate, never retried. The ruling itself is in the round's slot.
 AGENTX_EARLY_STOP = "agentx_early_stop"
@@ -212,6 +217,7 @@ _DECISIVE_REASONS = frozenset(
         LM_EVAL_BAD_REQUEST_REASON,
         PYTHON_EXCEPTION_REASON,
         SERVER_BOOT_TIMEOUT_REASON,
+        AGENTX_CONTEXT_OVERFLOW,
     }
 )
 _PORT_IN_USE = re.compile(r"address already in use|\[Errno 98\]", re.IGNORECASE)
@@ -280,8 +286,9 @@ class FailureEvidence:
 
     ``logs`` are the texts a known failure signature may be found in (stdout and stderr tails, the tails of
     ``server.log`` and of the benchmark's stderr); ``client_logs`` are the benchmark client's own output, read only for
-    the infrastructure cause it states (a Hub download refused), never for a candidate's signature, since a client that
-    failed on its own says nothing of the server; ``detail`` is what the caller observed of a boot timeout, which the
+    the infrastructure cause it states (a Hub download refused) and for the server's refusal of a warmup request it
+    quotes (:data:`AGENTX_CONTEXT_OVERFLOW`), never for a candidate's signature, since a client that failed on its own
+    says nothing of the server; ``detail`` is what the caller observed of a boot timeout, which the
     return code alone does not say; ``step_failure`` is the step the failed round's ``report.json`` names, with its
     detail, which inference_suite records in place of the return code it exits with; ``unrun`` is ``<error_class>:
     <message>`` of a failed round refused before it ran, which left no log: the only account of it there is;
@@ -322,7 +329,8 @@ def classify_test_failure(
         return FailureClassification(Disposition.SUCCEEDED)
     parts = [_bounded(part) for part in evidence.logs if part]
     text = "\n".join(parts)
-    refused = log_causes.hub_rate_limited("\n".join([text, *(_bounded(part) for part in evidence.client_logs if part)]))
+    client_text = "\n".join(map(_bounded, evidence.client_logs))
+    refused = log_causes.hub_rate_limited("\n".join([text, client_text]))
     if refused:
         # Before the signatures: the client that was refused may then fail to load a tokenizer, which reads as one.
         return _infra(f"{HUB_RATE_LIMITED}: {refused}")
@@ -331,6 +339,9 @@ def classify_test_failure(
     by_step = _from_step(reported, evidence.framework_changed) if reported else None
     if by_step is not None:
         return by_step
+    overflow = log_causes.warmup_context_overflow(client_text)
+    if overflow:
+        return _candidate(f"{AGENTX_CONTEXT_OVERFLOW}: {overflow}")
     named = _named_by_logs(text, parts, eval_failed=step is FailedStep.EVAL_FAILED)
     if named is not None:
         return named

@@ -147,9 +147,9 @@ The backend guidance and the knowledge cards are mostly written for Instinct (CD
 Every concrete number for this chip is in `hardware/rdna3/`. Where another card cites `hardware/mi350_*.md`, read the
 RDNA 3 card for that topic instead (the map in `hardware/rdna3/INDEX.md` pairs them); the MI350 numbers are wrong here."""
 
-#: gfx1100 in wave32: 1536 VGPRs per SIMD allocated in blocks of 24 and at most 16 waves, so 96 VGPRs is the last
-#: count that keeps every wave slot; LDS is 128 KiB per WGP with a 64 KiB cap per work-group (RDNA 3 ISA §3.3).
-_RDNA3_OCCUPANCY = OccupancyRule(
+#: gfx1100/gfx1201 static wave32: 1536 VGPRs per SIMD, allocation granule 24 and at most 16 waves; LLVM's
+#: Feature1536VGPRs owns that rule. LDS is 128 KiB per WGP with a 64 KiB work-group cap.
+_RDNA_WAVE32_OCCUPANCY = OccupancyRule(
     vgpr_limit=96,
     vgpr_within="16 waves/SIMD, full occupancy in wave32",
     vgpr_beyond="fewer than 16 waves/SIMD: 1536 / VGPRs rounded up to 24",
@@ -157,6 +157,18 @@ _RDNA3_OCCUPANCY = OccupancyRule(
     lds_within="fits the 64 KiB work-group cap; 128 KiB per WGP",
     lds_beyond="over the 64 KiB work-group cap: will not launch",
 )
+
+_RDNA4_PROMPT_NOTE = """\
+## Target architecture: gfx1201 (RDNA 4, Radeon AI PRO R9700) — overrides any Instinct fact in this prompt
+
+Use wave32 and WMMA; inspect the compiled gfx1201 ISA before choosing lane layouts or matrix instructions.
+Use VGPRs for accumulators and the GDDR6 memory facts in `hardware/rdna4/`.
+For GPT-OSS BF16 activation × packed-MXFP4 weight tuning, read
+`languages/triton/skills/optimize/triton_levers/r9700_mxfp4_matmul_ogs.md`.
+Use rocprofv3 kernel tracing where installed, retain raw traces,
+and collect only small runtime-supported counter groups with finite timeouts; unavailable counters and native
+scaled-FP4 ceilings remain unknown. The Analysis Agent stays static-only under the current profiling plan;
+the implementer self-profiles with rocprofv3 when profiling is requested."""
 
 _ARCH_PROFILES: dict[str, ArchProfile] = {
     "gfx942": ArchProfile(family="CDNA3"),
@@ -166,8 +178,15 @@ _ARCH_PROFILES: dict[str, ArchProfile] = {
         hardware_knowledge="hardware/rdna3",
         profiler=Profiler.ROCPROFV3,
         kernel_backends=frozenset({"triton", "hip", "hipblaslt", "ck"}),
-        occupancy=_RDNA3_OCCUPANCY,
+        occupancy=_RDNA_WAVE32_OCCUPANCY,
         prompt_note=_RDNA3_PROMPT_NOTE,
+    ),
+    "gfx1201": ArchProfile(
+        family="RDNA4",
+        hardware_knowledge="hardware/rdna4",
+        profiler=Profiler.ROCPROFV3,
+        occupancy=_RDNA_WAVE32_OCCUPANCY,
+        prompt_note=_RDNA4_PROMPT_NOTE,
     ),
 }
 _DEFAULT_PROFILE = ArchProfile(family="")

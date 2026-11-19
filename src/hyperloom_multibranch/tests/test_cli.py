@@ -988,6 +988,7 @@ def test_run_without_the_agent_cli_fails_loudly_before_creating_anything(
 ) -> None:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
     monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
     assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
 
@@ -995,6 +996,27 @@ def test_run_without_the_agent_cli_fails_loudly_before_creating_anything(
     assert "CLI the specialists run is not on PATH" in captured.err
     assert captured.out == ""
     assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_run_finds_the_claude_cli_where_install_sh_installed_it_off_path(
+    agent_cli: list[RunSettings],
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path_factory.mktemp("home")
+    installed = home / ".local" / "bin"
+    installed.mkdir(parents=True)
+    (installed / AGENT_BACKEND_CLAUDE).write_text("#!/bin/sh\nexit 0\n")
+    (installed / AGENT_BACKEND_CLAUDE).chmod(0o755)
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path_factory.mktemp("empty-bin")))
+    monkeypatch.setenv("HOME", str(home))
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == 0
+
+    assert agent_cli == [_settings()]
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_binaries")
