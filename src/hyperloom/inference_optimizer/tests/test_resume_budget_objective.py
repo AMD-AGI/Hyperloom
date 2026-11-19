@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
-from hyperloom.inference_optimizer.cli import _restore_budget_and_objective
+from hyperloom.inference_optimizer.cli.session_resume import _restore_budget_and_objective
 from hyperloom.inference_optimizer.cli.parser import DEFAULT_MAX_HOURS
 
 

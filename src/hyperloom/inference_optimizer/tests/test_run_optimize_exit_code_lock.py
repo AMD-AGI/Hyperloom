@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import hyperloom.inference_optimizer.cli as ocli
-from hyperloom.inference_optimizer.cli import launch_shape, model_catalog
+from hyperloom.inference_optimizer.cli import launch_shape, model_catalog, session_setup
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts
 from hyperloom.inference_optimizer.breakdown.recorder.outcome_stage import record_stage_reached
 from hyperloom.inference_optimizer.session.lock import SessionLock
@@ -117,8 +117,8 @@ def test_session_busy_exits_with_session_busy_code(tmp_path: Path) -> None:
     held.acquire()
     try:
         with pytest.raises(SystemExit) as exc:
-            ocli._acquire_session_lock_or_exit(tmp_path)
-        assert exc.value.code == ocli.SESSION_BUSY_EXIT_CODE == 3
+            session_setup._acquire_session_lock_or_exit(tmp_path)
+        assert exc.value.code == session_setup.SESSION_BUSY_EXIT_CODE == 3
     finally:
         held.release()
 

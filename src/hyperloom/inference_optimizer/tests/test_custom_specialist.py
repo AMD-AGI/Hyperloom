@@ -17,13 +17,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hyperloom.inference_optimizer.cli import (
-    _apply_custom_specialist_resume,
     OrchestrationPromptContext,
     _build_orchestration_prompt,
     _custom_specialist_conflict,
     _load_custom_specialist_args,
     main,
 )
+from hyperloom.inference_optimizer.cli.custom_specialist import _apply_custom_specialist_resume
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.phases.dispatch_order import in_dispatch_order

@@ -21,7 +21,7 @@ import os
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import _apply_atom_auto_tighten
+from hyperloom.inference_optimizer.cli.session_setup import _apply_atom_auto_tighten
 
 
 def _args(**overrides: object) -> argparse.Namespace:
@@ -77,16 +77,19 @@ def test_multi_node_still_fails_fast(monkeypatch):
 
 
 def _cli_source_tree():
-    """Parse ``cli/__init__.py`` as source.
+    """Parse ``cli/__init__.py`` and ``cli/session_resume.py`` as one source tree.
 
-    Read the file rather than import the package: these assertions are about
+    Read the files rather than import the package: these assertions are about
     source shape, and the import chain needs a POSIX-only module.
     """
     import ast
     import pathlib
 
-    cli_init = pathlib.Path(__file__).resolve().parents[1] / "cli" / "__init__.py"
-    return ast, ast.parse(cli_init.read_text(encoding="utf-8"))
+    cli_dir = pathlib.Path(__file__).resolve().parents[1] / "cli"
+    tree = ast.Module(body=[], type_ignores=[])
+    for name in ("__init__.py", "session_resume.py"):
+        tree.body.extend(ast.parse((cli_dir / name).read_text(encoding="utf-8")).body)
+    return ast, tree
 
 
 def _calls_auto_tighten(ast, node) -> bool:

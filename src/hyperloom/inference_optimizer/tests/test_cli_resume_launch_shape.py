@@ -294,7 +294,7 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
         raise RuntimeError("resume cleared the staleness guard")
 
     # The first call after the guard: reaching it means the guard did not reject the session.
-    monkeypatch.setattr(f"{cli_mod}.latency_budget_scope_error", past_the_guard)
+    monkeypatch.setattr(f"{cli_mod}.session_resume.latency_budget_scope_error", past_the_guard)
     args = _build_parser().parse_args(["optimize", "--resume-from", str(resume_dir), "--critic-mock"])
 
     # A SystemExit instead means the guard compared the session's pinned backend against an unpinned environment.
@@ -457,7 +457,7 @@ def test_the_resume_exports_its_pins_again_after_the_topology_step_rewrote_them(
         raise RuntimeError("resume passed its pin export")
 
     # The first call after the export in ``_resume_session``.
-    monkeypatch.setattr(f"{cli_mod}.latency_budget_scope_error", past_the_export)
+    monkeypatch.setattr(f"{cli_mod}.session_resume.latency_budget_scope_error", past_the_export)
     args = _build_parser().parse_args(["optimize", "--resume-from", str(resume_dir), "--critic-mock"])
 
     with pytest.raises(RuntimeError, match="resume passed its pin export"):
@@ -595,7 +595,7 @@ def test_state_archived_with_the_retired_backend_field_still_loads():
 
 
 def test_restore_operator_paths_fills_env_from_state(monkeypatch):
-    from hyperloom.inference_optimizer.cli import _restore_operator_supplied_paths_from_state
+    from hyperloom.inference_optimizer.cli.session_setup import _restore_operator_supplied_paths_from_state
 
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
@@ -614,7 +614,7 @@ def test_restore_operator_paths_fills_env_from_state(monkeypatch):
 
 
 def test_restore_operator_paths_leaves_env_when_cli_repasses(monkeypatch):
-    from hyperloom.inference_optimizer.cli import _restore_operator_supplied_paths_from_state
+    from hyperloom.inference_optimizer.cli.session_setup import _restore_operator_supplied_paths_from_state
 
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
