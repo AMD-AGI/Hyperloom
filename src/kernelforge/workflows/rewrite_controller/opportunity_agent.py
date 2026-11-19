@@ -12,7 +12,9 @@ import logging
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -221,13 +223,12 @@ class _AnalysisToolGuard:
 
 @dataclass
 class _AnalysisSession:
-    """One running analysis session: its provider, spec, Stop guard, staging layout, refusals, deadline and usage."""
+    """One running analysis session: its provider, spec, Stop guard, task publisher, deadline and usage."""
 
     backend: AgentBackend
     spec: AgentRunSpec
     guard: _AnalysisToolGuard
-    layout: ControllerLayout
-    refused: dict[str, float]
+    publish: Callable[..., tuple[TaskPublicationResult, ...]]
     deadline_monotonic: float
     usage: UsageAccumulator
 
@@ -242,9 +243,7 @@ class _AnalysisSession:
         if not hasattr(self.backend, "resume"):
             return run_result, ()
         while True:
-            resume_publications.extend(
-                publish_complete_staged_tasks(self.layout, quiescent_sec=0.0, refused=self.refused)
-            )
+            resume_publications.extend(self.publish(quiescent_sec=0.0))
             decision = await self.guard._on_stop({}, None, None)
             if decision.get("decision") != "block":
                 break
@@ -295,7 +294,7 @@ def _ensure_agent_workspace(path: Path) -> None:
 
 
 def _additional_directories(handoff: HandoffBundle) -> list[str]:
-    directories = {handoff.root}
+    directories = {handoff.root, *handoff.repositories}
     for document in (handoff.workload, handoff.serving_context, handoff.trace_evidence):
         for raw in _ABSOLUTE_PATH_RE.findall(document):
             path = Path(raw).expanduser()
@@ -336,10 +335,11 @@ Apply these non-negotiable opportunity rules:
    Establish the active runtime path from trace/log evidence or by evaluating
    the deterministic dispatch conditions against the current serving state.
    Skip code that merely exists in the repository but is inactive here.
-2. Publish only operators with editable implementation source in one supplied
-   Git repository. If the active implementation is available only as a binary,
-   shared library, HSACO, or other generated artifact without a tracked editable
-   generator source, skip it. Read this rule carefully before applying it to a
+2. Publish only operators with editable implementation source in one of the
+   source repositories the user prompt lists; no other checkout is deployed to
+   the server, so a task naming one is refused. If the active implementation is
+   available only as a binary, shared library, HSACO, or other generated
+   artifact without a tracked editable generator source, skip it. Read this rule carefully before applying it to a
    collective: its kernel usually does ship inside a vendor comms library, and
    that alone does not disqualify it. What drives the collective is editable
    here -- which algorithm is chosen, the size thresholds that choose it, buffer
@@ -416,7 +416,7 @@ task.json must use this exact top-level structure:
     "backend": "<backend>"
   },
   "base_commit": "",
-  "repo_root": "<absolute Git top-level>",
+  "repo_root": "<one of the listed source repositories, exactly as written>",
   "kernel_path": "<repo-relative source path>",
   "operator_name": "<entry point spelled as its source spells it>",
   "driver_path": "driver.py",
@@ -501,10 +501,15 @@ def _system_prompt() -> str:
 
 
 def _user_prompt(handoff: HandoffBundle, staging_root: Path) -> str:
+    repositories = "\n".join(f"- `{root}`" for root in handoff.repositories)
     return f"""\
 # Controller staging directory
 
 `{staging_root}`
+
+# Source repositories
+
+{repositories}
 
 # workload.md
 
@@ -580,6 +585,7 @@ class OpportunityAnalysisAgent:
         # Carried across polls so a draft this host already refused is not re-validated on every half-second tick for
         # the rest of the session.
         refused: dict[str, float] = {}
+        publish = partial(publish_complete_staged_tasks, layout, handoff.repositories, refused=refused)
         status = ANALYSIS_STATUS_COMPLETED
         reason = ""
         deadline = time.monotonic() + self.timeout_sec
@@ -592,11 +598,11 @@ class OpportunityAnalysisAgent:
                     backend_task.cancel()
                     break
                 await asyncio.wait({backend_task}, timeout=min(_PUBLISH_POLL_SEC, remaining))
-                publications.update(_by_draft(publish_complete_staged_tasks(layout, refused=refused)))
+                publications.update(_by_draft(publish()))
             if not backend_task.cancelled():
                 try:
                     agent_result = await backend_task
-                    session = _AnalysisSession(self.backend, spec, tool_guard, layout, refused, deadline, usage)
+                    session = _AnalysisSession(self.backend, spec, tool_guard, publish, deadline, usage)
                     agent_result, resume_publications = await session.resume_for_refused_staging_drafts(agent_result)
                     publications.update(_by_draft(resume_publications))
                     unfinished = self._unfinished_session(agent_result)
@@ -616,7 +622,7 @@ class OpportunityAnalysisAgent:
                     await backend_task
             # No quiescence window here: the session has stopped, so nothing is still writing, and waiting would
             # strand a task finished moments before the deadline -- the case incremental publication exists for.
-            publications.update(_by_draft(publish_complete_staged_tasks(layout, quiescent_sec=0.0, refused=refused)))
+            publications.update(_by_draft(publish(quiescent_sec=0.0)))
             if spec.progress_log:
                 atomic_write_text(
                     layout.agent_root / "progress.log", "\n".join(spec.progress_log) + "\n", options=DURABLE

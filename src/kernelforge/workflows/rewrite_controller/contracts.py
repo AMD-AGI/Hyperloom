@@ -18,6 +18,7 @@ STATE_FILENAME = "state.json"
 WORKLOAD_FILENAME = "workload.md"
 SERVING_CONTEXT_FILENAME = "serving-context.md"
 TRACE_EVIDENCE_FILENAME = "trace-evidence.md"
+REPOSITORIES_FILENAME = "repositories.json"
 
 TASK_STATUS_READY = "ready"
 TASK_STATUS_RUNNING = "running"
@@ -56,12 +57,13 @@ class TaskStateError(ValueError):
 
 @dataclass(frozen=True)
 class HandoffBundle:
-    """The three Markdown documents supplied by Hyperloom."""
+    """The three Markdown documents supplied by Hyperloom, and the repositories a task may name as its ``repo_root``."""
 
     root: Path
     workload: str
     serving_context: str
     trace_evidence: str
+    repositories: tuple[Path, ...]
 
 
 @dataclass(frozen=True)
@@ -156,6 +158,7 @@ __all__ = [
     "HandoffBundle",
     "HandoffContractError",
     "KernelRewriteTask",
+    "REPOSITORIES_FILENAME",
     "SERVING_CONTEXT_FILENAME",
     "STATE_FILENAME",
     "TASK_FILENAME",

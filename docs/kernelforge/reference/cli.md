@@ -51,9 +51,13 @@ source evidence but cannot run shell commands, profiling, or serving benchmarks.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--handoff-dir <dir>` | required | Directory containing `workload.md`, `serving-context.md`, and `trace-evidence.md`. |
+| `--handoff-dir <dir>` | required | Directory containing `workload.md`, `serving-context.md`, `trace-evidence.md`, and `repositories.json`. |
 | `--budget-minutes <m>` | required | Positive total wall-clock budget used to derive the controller deadline. |
 | `--output-dir <dir>` | required | Fresh macro-cycle output directory. Existing controller output is refused rather than resumed. |
+
+`repositories.json` is `{"repositories": ["<absolute path>", ...]}`: the Git
+top-levels the host deploys onto the server, at least one. A task's `repo_root`
+must be one of them; a draft naming any other checkout is refused.
 
 ## forge-loop
 

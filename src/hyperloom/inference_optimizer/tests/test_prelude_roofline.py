@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from kernelforge.workflows.rewrite_controller import read_handoff
 
 import hyperloom.orchestrator.kernel.campaign_baseline as campaign_baseline
 
@@ -519,7 +520,7 @@ async def test_kernel_entry_does_not_launch_the_controller_without_a_handoff(
     def _unwritable(*_args: Any, **_kwargs: Any) -> Path:
         raise OSError("No space left on device")
 
-    monkeypatch.setattr(campaign_baseline, "seal_campaign_baseline", lambda _state, **_kwargs: {})
+    monkeypatch.setattr(campaign_baseline, "seal_campaign_baseline", lambda _framework, **_kwargs: {})
     monkeypatch.setattr(forge_handoff, "write_forge_handoff", _unwritable)
     monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip)
     monkeypatch.setattr(coord.phase_kernel, "_maybe_run_forge_fusion_before_kernel_opt", _skip)
@@ -553,11 +554,11 @@ async def test_kernel_entry_always_hands_rewrite_control_to_controller(
 
     # Sealing commits, and it finds its repositories from the interpreter, so it
     # would reach whatever framework this host has installed.
-    sealed = campaign_baseline.RepoBaseline(commit="a" * 40)
+    sealed = campaign_baseline.RepoBaseline(commit="a" * 40, deploy_root=Path("/repo"))
     monkeypatch.setattr(
         campaign_baseline,
         "seal_campaign_baseline",
-        lambda _state, **_kwargs: {"/repo": sealed},
+        lambda _framework, **_kwargs: {"/repo": sealed},
     )
     monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip)
     monkeypatch.setattr(coord.phase_kernel, "_maybe_run_forge_fusion_before_kernel_opt", _skip)
@@ -580,6 +581,7 @@ async def test_kernel_entry_always_hands_rewrite_control_to_controller(
         assert (handoff_dir / "workload.md").is_file()
         assert (handoff_dir / "serving-context.md").is_file()
         assert (handoff_dir / "trace-evidence.md").is_file()
+        assert read_handoff(handoff_dir).repositories == (Path("/repo"),)
 
 
 def test_a_trace_recorded_with_task_params_is_not_stale(coord: Coordinator):
