@@ -17,7 +17,10 @@ from kernelforge.workflows.rewrite_controller.controller import ControllerRunErr
     "--handoff-dir",
     required=True,
     type=click.Path(exists=True, file_okay=False, dir_okay=True, readable=True, path_type=Path),
-    help="Directory containing workload.md, serving-context.md, and trace-evidence.md.",
+    help=(
+        "Directory containing workload.md, serving-context.md, trace-evidence.md, and repositories.json "
+        '({"repositories": ["<absolute Git top-level>", ...]}, at least one).'
+    ),
 )
 @click.option(
     "--budget-minutes",

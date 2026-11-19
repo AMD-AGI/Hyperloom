@@ -55,6 +55,7 @@ def _handoff(tmp_path: Path):
     (root / "workload.md").write_text("# Workload\n", encoding="utf-8")
     (root / "serving-context.md").write_text("# Serving Context\n", encoding="utf-8")
     (root / "trace-evidence.md").write_text("# Trace Evidence\n", encoding="utf-8")
+    (root / "repositories.json").write_text(json.dumps({"repositories": [str(tmp_path / "repo")]}), encoding="utf-8")
     return read_handoff(root)
 
 
@@ -385,6 +386,14 @@ def test_agent_prompt_spells_out_nested_identity_and_evidence_list() -> None:
     assert "CUDA/HIP graph replays" in prompt
     assert "driver.py --profile-run" in prompt
     assert "before investigating secondary candidates" in prompt
+
+
+def test_the_agent_is_shown_the_declared_repositories_and_may_read_them(tmp_path: Path) -> None:
+    handoff = _handoff(tmp_path)
+    repo = str((tmp_path / "repo").resolve())
+
+    assert repo in opportunity_agent_module._user_prompt(handoff, tmp_path / "staging")
+    assert repo in opportunity_agent_module._additional_directories(handoff)
 
 
 def test_the_prompt_does_not_talk_a_collective_out_of_being_published() -> None:

@@ -25,7 +25,7 @@ from hyperloom_common.coerce import first_str, first_text
 from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom_common.timeutil import now_iso
 
-from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, runs_dir, specialist_intel_path
+from hyperloom.inference_optimizer.session.session_paths import runs_dir, specialist_intel_path
 from ..state.experience_citations import normalize_citations, shown_ids
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
@@ -54,7 +54,7 @@ from .patch_claims import grounding_explicit_root, patch_path_within_bases, reso
 from . import patch_safety as _patch_safety
 from .profile import MODE_PATCH, SpecialistProfile, resolve_specialist_profile
 from .prompt_inputs import SpecialistPromptInputs
-from .tree_snapshot import snapshot_tree
+from hyperloom.inference_optimizer.tree_snapshot import snapshot_repository, snapshot_tree
 from .workspace_files import (
     append_transcript,
     done_path,
@@ -1005,7 +1005,7 @@ class SpecialistRunner:
         if not source.checkout:
             if self.session_dir is None:
                 return None, source, f"{source.tree} has no checkout and no session dir to snapshot it into", None
-            repo = self.session_dir / "tree_snapshots" / f"{fs_safe_id(str(source.tree))}.git"
+            repo = snapshot_repository(self.session_dir, source.tree)
             snapshot, err = snapshot_tree(source.tree, repo, refresh=not self._integrate_in_flight())
             if snapshot is None:
                 return None, source, err, None

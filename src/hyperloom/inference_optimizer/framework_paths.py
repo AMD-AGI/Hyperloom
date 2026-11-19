@@ -17,6 +17,10 @@ lists the trees worth searching, filtered to what exists here.
 that could hold source, including those absent from this host. None is a
 permission set: what may be written is decided by the integration step that
 applies the patch.
+
+:func:`served_source_trees` answers a fourth question: which trees the server
+imports rewritable source from, and where an edit to each lands. A kernel
+rewrite is written against these only.
 """
 
 from __future__ import annotations
@@ -49,6 +53,8 @@ _DEFAULT_SOURCE_ROOTS: tuple[str, ...] = (
     *(root for name in _reg.names() if (root := _reg.source_root(name))),
 )
 
+_KERNEL_LIBRARY_PACKAGES: tuple[str, ...] = (_KERNEL_LIBRARY, "aiter_meta", "sgl_kernel")
+
 #: Every package whose installed tree counts as framework source: the kernel
 #: libraries, then each registered framework's ``python_package``. The single
 #: authoritative list: importlib discovery, the ``$VIRTUAL_ENV`` glob and the
@@ -58,9 +64,7 @@ _DEFAULT_SOURCE_ROOTS: tuple[str, ...] = (
 #: greps for kernel source listed it -- and a root that is never searched reads
 #: downstream exactly like a kernel whose source is not on this host.
 FRAMEWORK_SOURCE_PACKAGES: tuple[str, ...] = (
-    _KERNEL_LIBRARY,
-    "aiter_meta",
-    "sgl_kernel",
+    *_KERNEL_LIBRARY_PACKAGES,
     *(package for name in _reg.names() if (package := _reg.python_package(name))),
 )
 
@@ -576,6 +580,25 @@ def framework_apply_tree(tree: str) -> FrameworkTree | None:
     return FrameworkTree(tree=path, root=path, checkout=False)
 
 
+def served_source_trees(framework: str) -> tuple[FrameworkTree, ...]:
+    """The trees the server imports rewritable source from: ``framework``'s own and each importable kernel library's.
+
+    Args:
+        framework: Registered framework name.
+
+    Returns:
+        tuple[FrameworkTree, ...]: One entry per distinct root, the framework's first.
+    """
+    trees = [resolve_framework_tree(framework)]
+    trees += [str(origin) for package in _KERNEL_LIBRARY_PACKAGES if (origin := _find_spec_origin(package))]
+    by_root: dict[Path, FrameworkTree] = {}
+    for tree in trees:
+        applied = framework_apply_tree(tree)
+        if applied is not None:
+            by_root.setdefault(applied.root, applied)
+    return tuple(by_root.values())
+
+
 def resolve_framework_tree(framework: str) -> str:
     """Return the source tree belonging to ``framework``, or ``""``.
 
@@ -745,5 +768,6 @@ __all__ = [
     "resolve_known_source_prefixes",
     "resolve_session_framework_root",
     "resolved_within",
+    "served_source_trees",
     "summarise_framework_root_discovery",
 ]

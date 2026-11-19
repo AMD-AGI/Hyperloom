@@ -17,7 +17,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from ..actions.executors._kernel_agent_tool import HandlerResult
+from ..actions.executors._kernel_agent_tool import HandlerResult, _maybe_revert_kernel_patch
 from ..actions.executors.trace_analyze import trace_analyze_handler
 from ._forge_fusion_run import run_fusion_handler
 from ._forge_gemm_tuning import _run_forge_gemm_tuning
@@ -109,7 +109,6 @@ async def integrate_handler(
     ``gain_pct`` follows ``graded_objective`` and ``bench_result`` retains the
     E2E measurement.
     """
-    from ..actions.executors.benchmark_result import is_valid_measurement
     from ..state.shared_state import SharedState
 
     requested_controls = _request_overrides_serving_controls(payload)
@@ -123,7 +122,6 @@ async def integrate_handler(
     # Coordinator-internal: config-only measurements opt in explicitly; agent
     # integrate requests retain main's patch-resolution contract.
     mode = _integrate_mode(payload)
-    paired_measurement = _is_paired_gemm_measurement(payload)
     if mode != "env_only":
         payload, missing_inputs = _resolve_integrate_payload(payload, session_dir=session_dir)
         if missing_inputs is not None:
@@ -136,6 +134,34 @@ async def integrate_handler(
     unapplied = _unapplied_patch_failure(payload, apply_result)
     if unapplied is not None:
         return unapplied
+
+    try:
+        return await _measure_applied_integration(
+            payload,
+            state,
+            apply_result,
+            session_dir=session_dir,
+            preapplied_git_patch=preapplied_git_patch,
+        )
+    except BaseException:
+        # A raise after the apply never reaches ``_integrate_failure``, and the caller cannot see ``apply_result``,
+        # so the revert is owned here: the installed tree must not keep what no verdict covers.
+        reverted = _maybe_revert_kernel_patch(apply_result)
+        if reverted.get("status") not in {"ok", "skipped"}:
+            log.error("integrate_handler: raised after the apply and its revert failed: %s", reverted)
+        raise
+
+
+async def _measure_applied_integration(
+    payload: dict,
+    state: Any,
+    apply_result: dict,
+    *,
+    session_dir: Path,
+    preapplied_git_patch: bool,
+) -> HandlerResult:
+    """Re-baseline an applied patch and grade it; a failure it returns has reverted the apply."""
+    from ..actions.executors.benchmark_result import is_valid_measurement
 
     base_tput = float(payload.get("base_tput", 0.0))
     performance_policy = {
@@ -167,7 +193,7 @@ async def integrate_handler(
     if not rebuild_check.get("verified", True):
         return _rebuild_not_verified_failure(payload, apply_result, rebuild_check)
 
-    if paired_measurement:
+    if _is_paired_gemm_measurement(payload):
         return _paired_measurement_result(base_tput, bench_result)
     measured = _MeasuredIntegration(
         payload=payload,
