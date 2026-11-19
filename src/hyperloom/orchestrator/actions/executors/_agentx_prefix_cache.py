@@ -24,9 +24,9 @@ PREFIX_CACHE_OFF_ERROR_CLASS = "agentx_baseline_prefix_cache_off"
 _ATOM_CACHE_ON, _ATOM_CACHE_OFF = "enable-prefix-caching", "no-enable-prefix-caching"
 
 
-def _atom_evidence(workspace: object) -> str:
+def _atom_evidence(workspace: str | None) -> str:
     """Read from the argv the round's ``launch.json`` records: the base the session froze and every layer above it."""
-    run_dir = Path(str(workspace)) if workspace else None
+    run_dir = Path(workspace) if workspace else None
     launch = read_round_launch(run_dir) if run_dir is not None and is_round_folder(run_dir) else None
     if launch is None:
         return ""

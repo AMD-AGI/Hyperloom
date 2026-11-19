@@ -663,17 +663,15 @@ def agentx_profile(bench: Mapping[str, Any], framework: Framework) -> ProfileCon
     refuse_agentx_keys(settings, _AGENTX_PROFILE_KEYS, "profiler.torch_profiler")
     if settings.get("num_profiles", 1) != 1:
         raise ConfigError(f"the AgentX point asks for {settings['num_profiles']} captures; a round opens one")
-    annotated = framework is Framework.SGLANG and settings.get("detailed_annotations") is True
-    duration = settings.get("capture_timeout_seconds", _AGENTX_CAPTURE_SEC)
-    if framework is Framework.ATOM:
-        duration = min(duration, _ATOM_AGENTX_CAPTURE_SEC)
+    spelling = _AGENTX_PROFILES[framework]
+    annotated = spelling.annotates_on_start and settings.get("detailed_annotations") is True
     return ProfileConfig(
         enabled=True,
         start_body={"detailed_annotations": True} if annotated else None,
         delay_iters=0,
         max_iters=settings.get("num_steps", _AGENTX_CAPTURE_STEPS),
         agentx_open_after_sec=settings.get("start_seconds", 0.0),
-        agentx_duration_sec=duration,
+        agentx_duration_sec=min(settings.get("capture_timeout_seconds", _AGENTX_CAPTURE_SEC), spelling.max_capture_sec),
     )
 
 
@@ -709,12 +707,22 @@ def _atom_agentx_profile(annotated: bool, user: LaunchDelta, base: BaseLaunch) -
     return LaunchDelta(env_set=env)
 
 
-#: What each framework's server adds to an AgentX profile round for the annotations it asks for.
-_AGENTX_PROFILE_LAYERS: Mapping[Framework, Callable[[bool, LaunchDelta, BaseLaunch], LaunchDelta]] = MappingProxyType(
+class _AgentxProfileSpelling(NamedTuple):
+    """How one framework's server is profiled in an AgentX round."""
+
+    #: What its server adds to its own layer for the annotations the point asks for.
+    layer: Callable[[bool, LaunchDelta, BaseLaunch], LaunchDelta]
+    #: Whether it takes the annotations in the ``/start_profile`` body as well as from its launch.
+    annotates_on_start: bool = False
+    #: The longest window it records, whatever the point asks for.
+    max_capture_sec: float = float("inf")
+
+
+_AGENTX_PROFILES: Mapping[Framework, _AgentxProfileSpelling] = MappingProxyType(
     {
-        Framework.SGLANG: _sglang_agentx_profile,
-        Framework.VLLM: _vllm_agentx_profile,
-        Framework.ATOM: _atom_agentx_profile,
+        Framework.SGLANG: _AgentxProfileSpelling(_sglang_agentx_profile, annotates_on_start=True),
+        Framework.VLLM: _AgentxProfileSpelling(_vllm_agentx_profile),
+        Framework.ATOM: _AgentxProfileSpelling(_atom_agentx_profile, max_capture_sec=_ATOM_AGENTX_CAPTURE_SEC),
     }
 )
 
@@ -724,10 +732,9 @@ def _agentx_profile_layer(
 ) -> LaunchDelta:
     """What an AgentX profile adds to the server's own layer ``user`` for the annotations it asks for."""
     settings = torch_profiler(bench)
-    layer = _AGENTX_PROFILE_LAYERS.get(framework)
-    if not settings.get("enabled") or layer is None:
+    if not settings.get("enabled"):
         return LaunchDelta()
-    return layer(settings.get("detailed_annotations") is True, user, base)
+    return _AGENTX_PROFILES[framework].layer(settings.get("detailed_annotations") is True, user, base)
 
 
 def profiled_server(server: ServerConfig, bench: Mapping[str, Any], base: BaseLaunch) -> ServerConfig:

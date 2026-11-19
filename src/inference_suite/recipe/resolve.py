@@ -22,7 +22,7 @@ import dataclasses
 import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, TypeVar
+from typing import TypeVar
 
 from hyperloom_common.contract_fields import ContractFields
 from hyperloom_common.credential_names import is_credential_env_name
@@ -51,23 +51,11 @@ from inference_suite.contracts.base_launch import (
     UpstreamSource,
     Workload,
 )
-from inference_suite.golden import (
-    GOLDEN_OWNED_ENV_PREFIXES,
-    GOLDEN_OWNED_SPEC_CONFIG_KEYS,
-    SIMULATED_FLAG_PREFIXES,
-    is_golden_owned_flag,
-)
+from inference_suite.golden import GOLDEN_OWNED_ENV_PREFIXES, GOLDEN_OWNED_SPEC_CONFIG_KEYS, is_golden_owned_flag
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL
 from inference_suite.recipe.atom_catalog import atom_catalog_launches
 from inference_suite.recipe.defaults import TABLE_PATH, default_table
-from inference_suite.recipe.golden_curve import (
-    _SGLANG_SIMULATION,
-    _SIMULATION_TOKEN_MODE,
-    GoldenLength,
-    DRAFTS,
-    GoldenTable,
-    with_golden,
-)
+from inference_suite.recipe.golden_curve import GoldenLength, GoldenTable, launch_draft, with_golden
 from inference_suite.recipe.image_version import NO_RECIPE_IMAGE, recipe_image_facts
 from inference_suite.recipe.inferencex import AGENTX_TRACE_ENV, agentx_trace, inferencex_launches
 from inference_suite.recipe.model import (
@@ -101,7 +89,6 @@ _RUNNER_OWNED = {"sglang": SGLANG_RUNNER_OWNED, "vllm": VLLM_RUNNER_OWNED, "atom
 _RUNNER_OWNED_ENV = frozenset({"CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"})
 _TOPOLOGY = {"sglang": SGLANG_TOPOLOGY, "vllm": VLLM_TOPOLOGY, "atom": ATOM_TOPOLOGY}
 _NO_KV_OFFLOADING = "none"
-_SGLANG_METHOD, _SGLANG_TOKEN_MODE = _SGLANG_SIMULATION[1:]
 
 
 @dataclass(frozen=True)
@@ -270,58 +257,18 @@ def _split_args(args: Sequence[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
     return tuple(kept), tuple(owned)
 
 
-_SimulationNames = Callable[
-    [Mapping[str, Any], list[tuple[str, str]], Mapping[str, str]], tuple[str | None, str | None]
-]
-
-
-def _sglang_simulation(
-    spec: Mapping[str, Any], occurrences: list[tuple[str, str]], env: Mapping[str, str]
-) -> tuple[str | None, str | None]:
-    return env.get(_SGLANG_METHOD), env.get(_SGLANG_TOKEN_MODE)
-
-
-def _vllm_simulation(
-    spec: Mapping[str, Any], occurrences: list[tuple[str, str]], env: Mapping[str, str]
-) -> tuple[str | None, str | None]:
-    # vLLM's synthetic sampler streams the drafted tokens it accepts, as sglang's real-draft-token mode does.
-    return spec.get("rejection_sample_method"), _SIMULATION_TOKEN_MODE
-
-
-def _atom_simulation(
-    spec: Mapping[str, Any], occurrences: list[tuple[str, str]], env: Mapping[str, str]
-) -> tuple[str | None, str | None]:
-    # ATOM forces acceptance with one flag, by length or by rate; the flag that does is the method. Its accepted draft
-    # tokens are streamed, as sglang's real-draft-token mode streams them.
-    method = next((name for name, _ in reversed(occurrences) if name.startswith(SIMULATED_FLAG_PREFIXES)), None)
-    return method, _SIMULATION_TOKEN_MODE
-
-
-#: How each framework's golden layer names the acceptance simulation it runs: its method and token mode.
-_SIMULATION_NAMES: dict[str, _SimulationNames] = {
-    "sglang": _sglang_simulation,
-    "vllm": _vllm_simulation,
-    "atom": _atom_simulation,
-}
-
-
 def _golden_acceptance(
     launch: SourceLaunch, golden: SourceGolden, args: tuple[str, ...], env: Mapping[str, str]
 ) -> GoldenAcceptance:
-    names = _SIMULATION_NAMES.get(launch.framework)
-    if names is None:
-        raise RecipeSourceError(f"a {launch.framework} launch simulates no golden acceptance")
-    occurrences = argv_flag_occurrences(args)
-    spec, _verify = DRAFTS[launch.framework](occurrences)
-    method, token_mode = names(spec, occurrences, env)
+    draft = launch_draft(launch.framework, args, env)
     return GoldenAcceptance(
         value=golden.value,
-        method=method,
-        token_mode=token_mode,
-        spec_method=spec.get("method"),
-        draft_length=spec.get("num_speculative_tokens"),
+        method=draft.simulation,
+        token_mode=draft.token_mode,
+        spec_method=draft.spec.get("method"),
+        draft_length=draft.spec.get("num_speculative_tokens"),
         curve=golden.curve,
-        draft_model=spec.get("model") or None,
+        draft_model=draft.spec.get("model") or None,
         args=args,
         env=env,
     )
