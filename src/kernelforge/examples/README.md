@@ -28,7 +28,8 @@ examples/
 ├── hip_gemma_fused_add_rmsnorm/       # production hot kernel (HIP fused add+RMSNorm)
 ├── triton2flydsl-softmax-flydsl-rewrite/
 ├── triton2flydsl-mxfp8-grouped-gemm/  # SGLang MXFP8 MoE grouped GEMM rewrite
-└── mori_ep_dispatch_combine/          # distributed op (MoRI-EP dispatch/combine, 8-GPU EP)
+├── mori_ep_dispatch_combine/          # distributed op (MoRI-EP dispatch/combine, 8-GPU EP)
+└── mono-qwen3-seam-gfx942-forge-loop/ # monokernel (Qwen3 o_proj + all-reduce + add + RMSNorm, TP4)
 ```
 
 Each task directory ships the standard files (`<op>_kernel.py`, `driver.py`,
@@ -52,6 +53,7 @@ file in the scratch workspace.
 | `triton2flydsl-softmax-flydsl-rewrite/` | Triton → FlyDSL | Correctness-first softmax port followed by FlyDSL optimization. |
 | `triton2flydsl-mxfp8-grouped-gemm/` | Triton → FlyDSL | SGLang MXFP8 grouped GEMM for MiniMax-M3 MoE on MI355X, covering decode and prefill. |
 | `mori_ep_dispatch_combine/` | aiter (MoRI-EP) | Distributed 8-GPU multi-rank task: tune MoRI-EP dispatch/combine launch config (block_num, warp_per_block, kernel_type, buffer mode) for EP8 MoE all-to-all. No `graph_harness.py` — each rank captures its own graph through `driver.py --graph-mode`. |
+| `mono-qwen3-seam-gfx942-forge-loop/` | mono (FlyDSL) | A monokernel on 4 × MI300X: one persistent launch per layer and rank runs Qwen3-14B-FP8's o_proj, the TP all-reduce, the residual add and the post-attention RMSNorm, waiting on other CTAs and ranks inside itself. Every case declares one resident launch to `dist_harness`; `res_out` is held bit for bit to SGLang's path, and the acceptance suite stalls each wait to check every rank stops. Its own `README.md` describes the layout. |
 
 Production tasks ship a correct-but-slow eager-Torch seed so forge can measure a
 real `baseline_ms` before editing anything. That is also why they have obvious

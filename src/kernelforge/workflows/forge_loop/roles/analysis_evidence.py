@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from kernelforge.utils.git import git
-from kernelforge.kernel_backends.constants import resolve_language_dirs
+from kernelforge.kernel_backends.constants import includes_sgl_amd_mono, resolve_language_dirs
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
 from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, EvidenceRef, OrchestrationContext
 from hyperloom_common.io import DURABLE, atomic_write_text
@@ -179,14 +179,16 @@ class AnalysisEvidenceMixin:
 
                 backend = self.ic.kernel_backend.strip() or self.ic.backend
                 root = Path(local_knowledge_root)
-                include_aiter = backend == "aiter" or any(
-                    "aiter" in Path(source).parts for source in self._target_source_files()
-                )
+                sources = self._target_source_files()
+                include_aiter = backend == "aiter" or any("aiter" in Path(source).parts for source in sources)
+                frameworks = ["aiter"] if include_aiter else []
+                if includes_sgl_amd_mono(backend, sources):
+                    frameworks.append("sgl_amd_mono")
                 knowledge_index = build_forge_knowledge(
                     root,
                     gpu_target=self.config.gpu_target,
                     language=resolve_language_dirs(backend, root),
-                    frameworks=("aiter",) if include_aiter else (),
+                    frameworks=frameworks,
                     # The orchestration context is inlined into every specialist
                     # and analysis prompt, so the ablation has to reach it too or
                     # it only measures half the knowledge block's cost.

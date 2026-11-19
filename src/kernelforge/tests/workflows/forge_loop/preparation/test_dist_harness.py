@@ -19,6 +19,7 @@ device binding, and any behaviour of a real NCCL/RCCL collective.
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,7 +30,7 @@ import pytest
 torch = pytest.importorskip("torch", exc_type=ImportError)
 
 from kernelforge.workflows.forge_loop.preparation import dist_harness
-from kernelforge.workflows.forge_loop.preparation.dist_harness import Case, HarnessError, RankContext
+from kernelforge.workflows.forge_loop.preparation.dist_harness import Case, HarnessError, Judgement, RankContext
 
 requires_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 
@@ -335,6 +336,272 @@ def test_each_sample_reports_the_slowest_rank(solo, context):
     dist_harness._bench_case(_case(), context, seed=11, warmup=2, iters=4)
 
     assert solo.reductions == ["max"] * 4
+
+
+# --- a suite that brings its own judge ---------------------------------------
+
+
+def _exact_judge(ctx, got, want):
+    return Judgement(passed=bool(torch.equal(got, want)), metrics={"max_abs": float((got - want).abs().max())})
+
+
+def _wrong_candidate(ctx, inputs):
+    return inputs * 2 + 1.0
+
+
+def test_a_suite_that_mixes_judged_and_snr_cases_is_refused():
+    """One run prints one verdict, so a suite cannot be half allclose and half SNR."""
+    with pytest.raises(HarnessError, match="every case has a judge or none does"):
+        dist_harness.run([_case(judge=_exact_judge), _case(case_id="other")], world_size=2)
+
+
+def test_a_replay_check_without_a_judge_is_refused():
+    with pytest.raises(HarnessError, match="no judge to verify the replay with"):
+        dist_harness.run([_case(verify_replay=True)], world_size=2)
+
+
+@requires_gpu
+def test_the_judge_holds_each_parity_call_to_its_own_reference(solo, context):
+    seen = []
+
+    def judge(ctx, got, want):
+        seen.append((got.clone(), want.clone()))
+        return _exact_judge(ctx, got, want)
+
+    assert dist_harness._judge_case(_case(judge=judge), context, seed=11) is True
+
+    (first_got, first_want), (second_got, second_want) = seen
+    assert torch.equal(first_got, first_want)
+    assert torch.equal(second_got, second_want)
+    assert not torch.equal(first_got, second_got)
+    assert solo.reductions == ["min"]
+
+
+@requires_gpu
+def test_one_wrong_parity_call_fails_the_case(solo, context):
+    """The second call is the one a removed synchronization breaks, so it is judged too."""
+    calls = []
+
+    def call_candidate(ctx, inputs):
+        calls.append(1)
+        return inputs * 2 if len(calls) == 1 else _wrong_candidate(ctx, inputs)
+
+    case = _case(call_candidate=call_candidate, judge=_exact_judge)
+
+    assert dist_harness._judge_case(case, context, seed=11) is False
+
+
+@requires_gpu
+def test_a_judged_suite_reports_allclose_over_every_case(solo, context, capsys, monkeypatch):
+    monkeypatch.setattr(dist_harness, "MEASURED", [0])
+    cases = [_case(judge=_exact_judge), _case(case_id="wrong", call_candidate=_wrong_candidate, judge=_exact_judge)]
+
+    assert dist_harness._run_worker(cases, context, 11, dist_harness._parse_args([])) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[-1] == "allclose: False"
+    assert "judge: default call1 rank=0 passed=True max_abs=0" in lines
+    assert "judge: wrong call2 rank=0 passed=False max_abs=1" in lines
+    assert not any(line.startswith("SNR:") for line in lines)
+
+
+def test_a_failing_rank_other_than_zero_speaks_on_stderr(capsys):
+    """Rank 0 owns stdout; a failing peer still has to say which rank and why."""
+    peer = RankContext(rank=1, local_rank=1, world_size=2, device=torch.device("cpu"), case_id="default")
+
+    dist_harness._report_judgement("default", "call1", Judgement(passed=True), peer)
+    dist_harness._report_judgement("default", "call2", Judgement(passed=False, metrics={"mismatches": 3}), peer)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == "judge: default call2 rank=1 passed=False mismatches=3"
+
+
+@pytest.mark.parametrize(
+    "metrics",
+    [{"SNR:": 40.0}, {"note": "allclose: True"}, {"rel err": 0.1}, {"value": torch.tensor(1.0)}],
+)
+def test_a_metric_that_is_not_a_plain_token_is_refused(metrics):
+    """A metric line that could read as the loop's ``SNR:`` or ``allclose:`` line would become the verdict."""
+    with pytest.raises(HarnessError, match="not a plain token"):
+        dist_harness._format_metrics(metrics)
+
+
+def test_plain_metrics_are_printed_as_fields():
+    metrics = {"max_abs": 0.25, "mismatches": 0, "dtype": "fp8_e4m3fnuz"}
+
+    assert dist_harness._format_metrics(metrics) == "max_abs=0.25 mismatches=0 dtype=fp8_e4m3fnuz"
+
+
+@requires_gpu
+def test_a_verified_replay_that_still_answers_is_timed(solo, context):
+    case = _case(judge=_exact_judge, verify_replay=True)
+
+    samples = dist_harness._bench_case(case, context, seed=11, warmup=2, iters=3)
+
+    assert len(samples) == 3
+    assert solo.reductions == ["max"] * 3 + ["min"]
+
+
+@requires_gpu
+def test_a_replay_that_no_longer_answers_is_refused_rather_than_timed(solo, context):
+    """Right when called and wrong when replayed is wrong in the graph the loop times."""
+
+    def call_candidate(ctx, inputs):
+        out = inputs * 2
+        return out + 1.0 if torch.cuda.is_current_stream_capturing() else out
+
+    case = _case(call_candidate=call_candidate, judge=_exact_judge, verify_replay=True)
+
+    assert dist_harness._judge_case(case, context, seed=11) is True
+    with pytest.raises(HarnessError, match="last timed graph replay fails its judge"):
+        dist_harness._bench_case(case, context, seed=11, warmup=2, iters=3)
+
+
+@requires_gpu
+def test_a_refused_replay_releases_its_graph_before_the_teardown(solo, context, monkeypatch):
+    """Destroying the process group while a graph holding a captured collective is alive hangs."""
+    resets = []
+    original = torch.cuda.CUDAGraph.reset
+
+    def counted(self):
+        resets.append(1)
+        return original(self)
+
+    monkeypatch.setattr(torch.cuda.CUDAGraph, "reset", counted)
+    case = _case(judge=lambda ctx, got, want: Judgement(passed=False), verify_replay=True)
+
+    with pytest.raises(HarnessError):
+        dist_harness._bench_case(case, context, seed=11, warmup=2, iters=3)
+
+    assert resets == [1]
+
+
+# --- a declared launch structure ---------------------------------------------
+
+
+def _kernel(ctas=256, per_cu=1):
+    return dist_harness._GraphNode(kind="kernel", ctas=ctas, resident_per_cu=per_cu)
+
+
+def test_a_call_that_captures_a_second_kernel_breaks_a_declared_single_launch():
+    violation = dist_harness._launch_violation(_case(launches=1), [_kernel(), _kernel()], compute_units=304)
+
+    assert "captured 2 graph node(s) (kernel x2)" in violation
+
+
+def test_a_copy_beside_the_one_kernel_is_not_a_single_launch():
+    """A launch that moved half its work into a memcpy has split, whatever the kernel count."""
+    nodes = [_kernel(), dist_harness._GraphNode(kind="memcpy")]
+
+    violation = dist_harness._launch_violation(_case(launches=1), nodes, compute_units=304)
+
+    assert "(kernel x1, memcpy x1)" in violation
+
+
+def test_a_grid_larger_than_the_gpu_holds_at_once_is_refused():
+    """Workgroups that wait on each other deadlock when some of them cannot be resident."""
+    violation = dist_harness._launch_violation(_case(resident=True), [_kernel(ctas=512)], compute_units=304)
+
+    assert "grid of 512 CTAs exceeds the 304 that can be resident (1 per CU x 304 CUs)" in violation
+
+
+def test_a_kernel_whose_occupancy_is_unknown_is_not_taken_as_resident():
+    violation = dist_harness._launch_violation(_case(resident=True), [_kernel(per_cu=None)], compute_units=304)
+
+    assert "cannot be verified" in violation
+
+
+def test_one_resident_launch_meets_the_declared_structure():
+    case = _case(launches=1, resident=True)
+
+    assert dist_harness._launch_violation(case, [_kernel(ctas=256)], compute_units=304) is None
+
+
+def test_a_case_that_declares_no_launch_structure_is_never_captured(solo, context, monkeypatch):
+    def _refuse(*args, **kwargs):
+        raise AssertionError("an undeclared launch structure must not be captured")
+
+    monkeypatch.setattr(dist_harness, "_captured_nodes", _refuse)
+
+    dist_harness._check_launch_structure(_case(), context, seed=11)
+
+
+def test_a_broken_launch_structure_is_refused_on_every_rank_together(solo, context, monkeypatch):
+    """A rank that refused alone would strand the others in the next collective."""
+    monkeypatch.setattr(dist_harness, "_captured_nodes", lambda case, ctx, seed: [_kernel(), _kernel()])
+    monkeypatch.setattr(
+        dist_harness.torch.cuda, "get_device_properties", lambda device: SimpleNamespace(multi_processor_count=304)
+    )
+
+    with pytest.raises(HarnessError, match="captured 2 graph node"):
+        dist_harness._check_launch_structure(_case(launches=1), context, seed=11)
+    assert solo.reductions == ["min"]
+
+
+@requires_gpu
+def test_the_captured_graph_counts_each_kernel_and_reads_its_residency(solo, context):
+    nodes = dist_harness._captured_nodes(_case(call_candidate=lambda ctx, inputs: inputs * 2 + 1.0), context, seed=11)
+
+    kernels = [node for node in nodes if node.kind == "kernel"]
+    assert len(kernels) == 2
+    assert all(node.ctas >= 1 and node.resident_per_cu >= 1 for node in kernels)
+
+
+def test_a_lookup_that_does_not_know_the_kernel_leaves_no_hip_error(monkeypatch):
+    """torch reports HIP's last error as its own after its next kernel launch."""
+    calls = []
+
+    class _Hip:
+        def hipOccupancyMaxActiveBlocksPerMultiprocessor(self, blocks, func, threads, lds_bytes):
+            calls.append("runtime query")
+            return 98  # hipErrorInvalidDeviceFunction: the handle is a module function
+
+        def hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(self, blocks, func, threads, lds_bytes):
+            calls.append("module query")
+            blocks._obj.value = 2
+            return 0
+
+        def hipGetLastError(self):
+            calls.append("error cleared")
+            return 98
+
+    monkeypatch.setattr(dist_harness, "_hip_runtime", _Hip)
+
+    assert dist_harness._resident_per_cu(0x1234, 512, 0) == 2
+    assert calls == ["runtime query", "error cleared", "module query"]
+
+
+@requires_gpu
+def test_a_module_kernel_is_read_without_leaving_a_hip_error(solo, context):
+    """A DSL kernel arrives as a module function, which the runtime-API lookup does not know."""
+    triton = pytest.importorskip("triton")
+    tl = pytest.importorskip("triton.language")
+
+    @triton.jit
+    def add_one(x, n, block: tl.constexpr):
+        offsets = tl.program_id(0) * block + tl.arange(0, block)
+        tl.store(x + offsets, tl.load(x + offsets, mask=offsets < n) + 1, mask=offsets < n)
+
+    def call(ctx, inputs):
+        add_one[(1,)](inputs, inputs.numel(), block=1024)
+        return inputs
+
+    nodes = dist_harness._captured_nodes(_case(call_candidate=call), context, seed=11)
+
+    assert [node.kind for node in nodes] == ["kernel"]
+    assert nodes[0].resident_per_cu >= 1
+    torch.ones(4, device=context.device).add_(1)
+    torch.cuda.synchronize()
+
+
+@requires_gpu
+def test_a_judged_run_refuses_a_candidate_that_splits_its_declared_launch(solo, context, monkeypatch):
+    monkeypatch.setattr(dist_harness, "MEASURED", [0])
+    case = _case(call_candidate=lambda ctx, inputs: inputs * 2 + 0.0, judge=_exact_judge, launches=1)
+
+    with pytest.raises(HarnessError, match="captured 2 graph node"):
+        dist_harness._run_worker([case], context, 11, dist_harness._parse_args([]))
 
 
 # --- the scoring helpers -----------------------------------------------------

@@ -69,7 +69,7 @@ The flags that decide what a campaign is:
   talks to it over stdout, and blocks edits to it.
 - `--kernel-backend` — which backend's domain knowledge is injected into the agent's
   prompt: one of `assembly`, `ck`, `flydsl`, `triton`, `gluon`, `aiter`, `hip`,
-  `hipblaslt`, or `ave`, written as the bare `<backend>` key.
+  `hipblaslt`, `fusion`, `ave`, or `mono`, written as the bare `<backend>` key.
 - `--snr-threshold` — the correctness gate in dB, fixed for the campaign.
 - `--max-hours` — the wall-clock budget (minimum 1.0). The campaign is
   time-driven; it does not stop at a fixed iteration count. It stops when what
@@ -97,6 +97,39 @@ Python launcher as the anchor. Automatic capture currently supports a single exp
 FlyDSL compile call. It can follow a source-language campaign as an optional second stage. See
 {doc}`Assembly candidates </kernelforge/how-to/assembly>` for the compiler,
 launcher, and measurement contract.
+
+To optimize a monokernel, such as one in
+[sgl-amd-mono](https://github.com/sgl-project/sgl-amd-mono), use `--kernel-backend mono`;
+forge also infers it for sources under the `sgl_amd_mono/` package. Like every backend, it
+builds for the targets whose `ArchProfile` (`kernelforge.utils.gpu_arch`) admits it: gfx942 and
+gfx950 do, and a campaign on gfx1100 refuses it. The workspace root
+must carry a `config.yaml` whose `compile_command` and `correctness_command` run the
+task's own tests for the launch. Forge runs them on every candidate it would otherwise
+keep, and refuses the candidate when the file is missing. A tensor-parallel launch is
+measured by a multi-rank driver inside `dist_harness` (`--nproc-per-node`). When one SNR
+cannot state the launch's contract, such as an output that must stay bitwise next to a
+toleranced one, each case brings a `judge`, and `verify_replay=True` also judges the last
+timed graph replay. A case also declares the launch structure it is measured on:
+`launches=N` refuses a candidate whose call captures to anything but N kernels, and
+`resident=True` one whose grid cannot be resident on the GPU at once, before the case is
+judged or timed. The example `src/kernelforge/examples/mono-qwen3-seam-gfx942-forge-loop/`
+puts these together for a FlyDSL monokernel on 4 x MI300X.
+
+Three things to settle when a monokernel task in sgl-amd-mono judges a candidate against a
+pristine copy of the launch:
+
+- Keep the copy inside the `sgl_amd_mono` package, under a directory forge protects (for
+  example `sgl_amd_mono/benchmark/<model>_ref/`): the repository's JIT cache key
+  (`common/plan.py`, `kernel_sources`) traces only modules of that package, so a copy
+  anywhere else fails to import.
+- Give the copy's modules names of their own (`ffn_pristine.py` beside the candidate's
+  `ffn.py`), with its relative imports renamed to match. A shell command that names a file by
+  a basename it shares with a protected one is refused unless the session's directory or a
+  `cd` in the command places it outside the protected tree.
+- `dist_harness` times one graph replayed on one set of weights. A launch that streams more
+  experts than a step touches keeps them in the GPU's last-level cache between replays, which
+  a served model's layers do not; time weight-streaming changes again with the weights
+  rotating through several copies before quoting them.
 
 Before the first iteration, the loop checks the driver against the contract it
 enforces at run time and repairs it if needed. When that fails the run aborts

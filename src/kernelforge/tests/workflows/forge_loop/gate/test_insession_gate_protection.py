@@ -26,6 +26,11 @@ def _gate(tmp_path: Path) -> tuple[InSessionGate, Path]:
     (scripts / "task_runner.py").write_text("print('runner')\n")
     kernel = source / "kernel.cu"
     kernel.write_text("__global__ void kernel() {}\n")
+    return _committed_gate(workspace, kernel), workspace
+
+
+def _committed_gate(workspace: Path, kernel: Path) -> InSessionGate:
+    """A gate over ``workspace``, whose driver is ``forge_driver.py``, once its tree is committed."""
     # The gate diffs the session's edits against HEAD, so its workspace is a repo that has one.
     subprocess.run(["git", "init", "-q"], cwd=workspace, check=True, capture_output=True)
     subprocess.run(["git", "add", "-A"], cwd=workspace, check=True, capture_output=True)
@@ -35,14 +40,12 @@ def _gate(tmp_path: Path) -> tuple[InSessionGate, Path]:
         check=True,
         capture_output=True,
     )
-
-    gate = InSessionGate(
+    return InSessionGate(
         GateMeasurement(driver_script=str(workspace / "forge_driver.py"), snr_threshold=30.0),
         GateScope(kernel_file=str(kernel), target_files=[str(kernel)]),
         baseline_case_times={"case": 1.0},
         best_mean_case_speedup=1.0,
     )
-    return gate, workspace
 
 
 def test_gate_protects_task_harness_and_config(tmp_path: Path):
@@ -742,3 +745,74 @@ def test_bytecode_behind_a_linked_cache_dir_is_reported_and_left_in_place(
 
     assert gate.finalize_integrity()
     assert (elsewhere / cached.name).read_bytes() == b"not the session's"
+
+
+def _gate_with_a_pristine_reference(tmp_path: Path) -> tuple[InSessionGate, Path]:
+    """A monokernel task's layout: the candidate ``pkg/ffn.py`` and a protected pristine
+    copy of it, ``benchmark/ref/ffn.py``, which share a basename."""
+    workspace = tmp_path / "ws"
+    (workspace / "pkg").mkdir(parents=True)
+    (workspace / "benchmark" / "ref").mkdir(parents=True)
+    (workspace / "forge_driver.py").write_text("print('driver')\n")
+    kernel = workspace / "pkg" / "ffn.py"
+    kernel.write_text("X = 1\n")
+    (workspace / "benchmark" / "ref" / "ffn.py").write_text("X = 1\n")
+    return _committed_gate(workspace, kernel), workspace
+
+
+_WRITE_FFN = "python3 - <<'EOF'\np = 'ffn.py'\nopen(p, 'w').write(open(p).read())\nEOF\n"
+
+
+def test_a_basename_shared_with_a_protected_copy_is_resolved_where_the_command_runs(tmp_path: Path):
+    gate, workspace = _gate_with_a_pristine_reference(tmp_path)
+    candidate_dir, reference_dir = workspace / "pkg", workspace / "benchmark" / "ref"
+
+    assert gate._names.shared == {"ffn.py"}
+    # the candidate, by its directory: the session's, or a cd in the command
+    assert not gate._bash_deny_reason(_WRITE_FFN, str(candidate_dir))
+    assert not gate._bash_deny_reason(f"cd {candidate_dir} && {_WRITE_FFN}", str(workspace))
+    assert not gate._bash_deny_reason(f"cd {candidate_dir}; sed -i s/1/2/ ffn.py")
+    assert not gate._bash_deny_reason("sed -i s/1/2/ pkg/ffn.py", str(workspace))
+    # the protected copy, by its path or its directory
+    assert gate._bash_deny_reason("sed -i s/1/2/ benchmark/ref/ffn.py", str(workspace))
+    assert gate._bash_deny_reason(_WRITE_FFN, str(reference_dir))
+    assert gate._bash_deny_reason(f"cd {reference_dir} && {_WRITE_FFN}", str(workspace))
+    # nowhere to resolve it against: still protected
+    assert gate._bash_deny_reason(_WRITE_FFN)
+
+
+def test_a_shared_basename_alone_is_not_a_mention_of_the_protected_copy(tmp_path: Path):
+    gate, workspace = _gate_with_a_pristine_reference(tmp_path)
+
+    assert gate._names.mention("perl -e 'open(F, \">ffn.py\")'") == ""
+    assert gate._names.mention(f"open({str(workspace / 'benchmark' / 'ref' / 'ffn.py')!r})") == "ffn.py"
+    assert gate._names.mention("print('forge_driver.py')") == "forge_driver.py"
+
+
+def test_copy_verbs_write_only_their_destination(tmp_path: Path):
+    gate, _workspace = _gate(tmp_path)
+
+    assert not gate._bash_deny_reason("cp forge_driver.py /tmp/driver_copy.py")
+    assert not gate._bash_deny_reason("cp -p config.yaml scripts/task_runner.py /tmp/")
+    assert not gate._bash_deny_reason("dd if=forge_driver.py of=/tmp/driver_copy.py status=none")
+    assert not gate._bash_deny_reason("ln -s forge_driver.py /tmp/driver_link.py")
+    assert gate._bash_deny_reason("cp /tmp/x.py forge_driver.py")
+    assert gate._bash_deny_reason("cp -t scripts /tmp/task_runner.py")
+    assert gate._bash_deny_reason("cp /tmp/task_runner.py scripts/")
+    assert gate._bash_deny_reason("cp --target-directory=scripts /tmp/task_runner.py")
+    assert gate._bash_deny_reason("install -m 644 /tmp/x.yaml config.yaml")
+    assert gate._bash_deny_reason("dd if=/tmp/x.py of=forge_driver.py")
+    assert gate._bash_deny_reason("ln -sf /tmp/x.py forge_driver.py")
+    assert gate._bash_deny_reason("mv forge_driver.py /tmp/driver_copy.py")
+
+
+def test_the_bash_hook_resolves_a_shared_basename_in_the_sessions_directory(tmp_path: Path):
+    gate, workspace = _gate_with_a_pristine_reference(tmp_path)
+
+    def decide(cwd: Path) -> str:
+        data = {"tool_name": "Bash", "tool_input": {"command": "sed -i s/1/2/ ffn.py"}, "cwd": str(cwd)}
+        out = asyncio.run(gate._on_pre_bash(data, None, None))
+        return (out.get("hookSpecificOutput") or {}).get("permissionDecision", "allow")
+
+    assert decide(workspace / "pkg") == "allow"
+    assert decide(workspace / "benchmark" / "ref") == "deny"

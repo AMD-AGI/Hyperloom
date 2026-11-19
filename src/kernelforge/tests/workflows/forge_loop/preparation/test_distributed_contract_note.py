@@ -78,6 +78,14 @@ def test_the_distributed_reference_is_named_as_the_one_thing_left(note: str) -> 
     assert "`torch.distributed` collective" in remaining
 
 
+def test_a_contract_one_snr_cannot_state_is_handed_to_a_judge(note: str) -> None:
+    """A driver that does not know a judge exists folds an exact output into one SNR."""
+    assert "give every `Case` a `judge=`" in note
+    assert "returns `Judgement(passed, metrics)`" in note
+    assert "reports `allclose` from the worst rank" in note
+    assert "`verify_replay=True`" in note
+
+
 def test_a_correctness_slip_is_not_described_as_a_wasted_validation(note: str) -> None:
     """The end-to-end gate can adopt on throughput without scoring accuracy.
 

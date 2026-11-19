@@ -32,12 +32,13 @@ def _config(workspace, *commands: str, **settings) -> None:
     workspace.joinpath("config.yaml").write_text(yaml.safe_dump(document))
 
 
-def _run(workspace, *, timeout_cap_sec: int = 60):
+def _run(workspace, *, timeout_cap_sec: int = 60, kernel_backend: str = ""):
     return asyncio.run(
         accept_candidate(
             str(workspace),
             timeout_cap_sec=timeout_cap_sec,
             candidate_label="test candidate",
+            kernel_backend=kernel_backend,
         )
     )
 
@@ -102,6 +103,25 @@ def test_missing_config_leaves_the_candidate_unverified_rather_than_failed(tmp_p
 
     assert result.passed is True
     assert "ships no config.yaml" in result.unverified_reason
+
+
+def test_a_monokernel_without_its_suite_is_refused_rather_than_unverified(tmp_path):
+    """A monokernel's KEEP rests on the repository's own tests, so without them nothing stands behind it."""
+    result = _run(tmp_path, kernel_backend="mono")
+
+    assert result.passed is False
+    assert result.outcome == "unverified"
+    assert "mono acceptance requires config.yaml" in result.detail
+
+
+def test_a_monokernel_suite_needs_no_numerical_contract(tmp_path):
+    """The repository's tests carry the tolerances; only assembly declares a numerical_validation contract."""
+    _config(tmp_path, "print('test/kernels: 12 passed')")
+
+    result = _run(tmp_path, kernel_backend="mono")
+
+    assert result.passed is True
+    assert result.unverified_reason == ""
 
 
 def test_config_without_a_correctness_command_fails_the_gate(tmp_path):

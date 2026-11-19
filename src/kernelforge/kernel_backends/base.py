@@ -12,6 +12,7 @@ from pathlib import Path
 from kernelforge.config import Config
 from kernelforge.kernel_backends.constants import (
     KERNEL_BACKEND_PROMPT_MODULES,
+    includes_sgl_amd_mono,
     resolve_language_dirs,
 )
 from kernelforge.evaluation.scoring import canonical_gate_prompt
@@ -59,6 +60,8 @@ def build_single_kernel_backend_prompt(
     # Experimental ablation-only knob (off by default): see Config.include_mori_kb.
     if getattr(config, "include_mori_kb", False):
         frameworks.append("mori")
+    if includes_sgl_amd_mono(backend, source_paths):
+        frameworks.append("sgl_amd_mono")
 
     knowledge = build_forge_knowledge(
         root,
