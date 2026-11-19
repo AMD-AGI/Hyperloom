@@ -41,6 +41,8 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
         "eligible": False,
         "framework": "",
         "port": REUSE_PORT_DEFAULT,
+        # Whether the round boots its own server on this host, which then listens on ``port``.
+        "local_server": False,
         "reason": "",
     }
     try:
@@ -65,16 +67,24 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
         info["reason"] = "multi-node (server_lifecycle is local-only)"
         return info
 
+    # A free port rather than the fixed default, for every server this host boots, reused or not: a server a prior
+    # attempt left up, or a co-tenant job on a shared host, may hold the default.
+    info["port"] = pick_server_port()
+    info["local_server"] = True
+
     if point.torch_profiler:
         info["reason"] = "torch_profiler enabled (incompatible with reuse)"
         return info
 
-    # A per-session free port rather than the fixed default: a server a prior attempt left up, or a co-tenant job,
-    # may hold the default.
-    info["port"] = pick_server_port()
-
     info["eligible"] = True
     return info
+
+
+def pin_server_port(materialized_config_path: Path, port: int) -> None:
+    """Write ``port`` into the materialized config as the ``PORT`` its single round's server and client use."""
+    cfg = yaml.safe_load(Path(materialized_config_path).read_text(encoding="utf-8")) or {}
+    cfg.setdefault("benchmark", {}).setdefault("envs", {})["PORT"] = int(port)
+    Path(materialized_config_path).write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
 
 def inject_lifecycle(
