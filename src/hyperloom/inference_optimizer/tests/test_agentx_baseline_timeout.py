@@ -10,7 +10,7 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
-from hyperloom.orchestrator.actions.executors.workload._workload_envs import apply_agentx_switch
+from hyperloom.orchestrator.actions.executors.workload._agentx_switch import apply_agentx_switch
 
 
 def _clear(monkeypatch):

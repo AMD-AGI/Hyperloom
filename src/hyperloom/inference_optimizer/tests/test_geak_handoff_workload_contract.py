@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors.serving._server_lifecycle import GpuHandoff
-from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
+from hyperloom.orchestrator.actions.executors.workload._agentx_switch import (
     build_agentx_workload_spec,
     geak_grading_fields,
 )

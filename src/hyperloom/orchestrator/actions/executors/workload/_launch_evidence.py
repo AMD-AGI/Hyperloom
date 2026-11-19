@@ -25,7 +25,7 @@ from hyperloom.common.launch_log_evidence import (
 )
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from ....measurement.runtime_findings import persist_runtime_findings, scan_server_log
-from ._workload_envs import VLLM_SOURCE_ROOT_ENVS
+from ._framework_runtime import VLLM_SOURCE_ROOT_ENVS
 
 log = logging.getLogger(__name__)
 

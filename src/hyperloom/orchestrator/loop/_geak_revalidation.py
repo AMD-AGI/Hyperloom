@@ -664,7 +664,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         from hyperloom_common.jsonio import read_json
         from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
         from ..actions.executors._geak_sweep import GeakSweepSpec, sweep_via_geak
-        from ..actions.executors.workload._workload_envs import geak_metric_axis
+        from ..actions.executors.workload._agentx_switch import geak_metric_axis
 
         regime = _replay_regime(accepted)
         return await sweep_via_geak(

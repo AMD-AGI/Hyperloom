@@ -365,7 +365,7 @@ def test_scriptable_dispatch_without_evidence_says_how_to_look(tmp_path):
 
 def test_publishing_never_overrides_an_operator_value(monkeypatch, tmp_path):
     """An explicitly exported checkout wins; Hyperloom only fills a gap."""
-    from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
+    from hyperloom.orchestrator.actions.executors.workload._framework_runtime import (
         _publish_scriptable_repo_root,
     )
 
@@ -382,7 +382,7 @@ def test_publishing_never_overrides_an_operator_value(monkeypatch, tmp_path):
 
 def test_publishing_ignores_blank_input(monkeypatch):
     """A blank path would make the allowlist claim a root that does not exist."""
-    from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
+    from hyperloom.orchestrator.actions.executors.workload._framework_runtime import (
         _publish_scriptable_repo_root,
     )
 

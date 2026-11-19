@@ -99,7 +99,7 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_schemes
     hyperloom.inference_optimizer.cli.session_resume -> hyperloom.orchestrator.bus.resource_lock
     hyperloom.inference_optimizer.cli.session_setup -> hyperloom.orchestrator.actions.executors.gpu._partition_shape
-    hyperloom.inference_optimizer.cli.session_setup -> hyperloom.orchestrator.actions.executors.workload._workload_envs
+    hyperloom.inference_optimizer.cli.session_setup -> hyperloom.orchestrator.actions.executors.workload._framework_runtime
     hyperloom.inference_optimizer.cli.session_setup -> hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers
 unmatched_ignore_imports_alerting = error
 
@@ -459,7 +459,7 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_schemes
     hyperloom.inference_optimizer.cli.session_resume -> hyperloom.orchestrator.bus.resource_lock
     hyperloom.inference_optimizer.cli.session_setup -> hyperloom.orchestrator.actions.executors.gpu._partition_shape
-    hyperloom.inference_optimizer.cli.session_setup -> hyperloom.orchestrator.actions.executors.workload._workload_envs
+    hyperloom.inference_optimizer.cli.session_setup -> hyperloom.orchestrator.actions.executors.workload._framework_runtime
     hyperloom.inference_optimizer.cli.session_setup -> hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers
     hyperloom.inference_optimizer.multi_node.state_paths -> hyperloom.inference_optimizer.multi_node._internal.log
     hyperloom.inference_optimizer.session.manifest -> hyperloom.inference_optimizer.breakdown.recorder

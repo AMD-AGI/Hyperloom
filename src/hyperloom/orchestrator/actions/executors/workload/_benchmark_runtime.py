@@ -12,10 +12,8 @@ from hyperloom.common.agentx_workload import is_agentx_client_script, pin_mlperf
 from hyperloom.inference_optimizer.session.paths import session_dir
 from hyperloom.orchestrator.state.base_launch import session_cards
 
-from ._workload_envs import (
-    apply_agentx_switch,
-    apply_scriptable_runtime_defaults,
-)
+from ._agentx_switch import apply_agentx_switch
+from ._framework_runtime import apply_scriptable_runtime_defaults
 from ..gpu._gpu_pin import pin_rocr_visible_devices
 
 

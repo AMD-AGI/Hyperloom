@@ -11,7 +11,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
+from hyperloom.orchestrator.actions.executors.workload._framework_runtime import _apply_vllm_source_runtime
 
 _INSTALL = Path(__file__).resolve().parents[1] / "assets" / "install.sh"
 _COMMIT = "f46a9dfe2c5f57bebbd29556cbbb25eabd874226"
@@ -202,7 +202,7 @@ def test_vllm_launch_uses_one_source_root(monkeypatch) -> None:
     bench = {"framework": "vllm"}
     envs: dict[str, str] = {}
 
-    we._apply_vllm_source_runtime(bench, envs)
+    _apply_vllm_source_runtime(bench, envs)
 
     assert {key: envs[key] for key in ("FRAMEWORK_REPO_PATH", "VLLM_REPO_PATH", "VLLM_DIR")} == {
         "FRAMEWORK_REPO_PATH": "/app/vllm",
@@ -217,6 +217,6 @@ def test_non_vllm_launch_is_unchanged(monkeypatch) -> None:
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", "/app/vllm")
     envs = {"PYTHONPATH": "/original"}
 
-    we._apply_vllm_source_runtime({"framework": "sglang"}, envs)
+    _apply_vllm_source_runtime({"framework": "sglang"}, envs)
 
     assert envs == {"PYTHONPATH": "/original"}
