@@ -26,6 +26,12 @@ from kernelforge.workflows.rewrite_controller.controller import ControllerRunErr
     help="Total controller wall-clock budget in minutes.",
 )
 @click.option(
+    "--explicit-allocation",
+    is_flag=True,
+    default=False,
+    help="Share an operator-specified allocation across the prepared kernels; omitted keeps the 90-minute per-kernel cap.",
+)
+@click.option(
     "--output-dir",
     required=True,
     type=click.Path(file_okay=False, dir_okay=True, writable=True, path_type=Path),
@@ -34,6 +40,7 @@ from kernelforge.workflows.rewrite_controller.controller import ControllerRunErr
 def kernel_rewrite_controller_command(
     handoff_dir: Path,
     budget_minutes: float,
+    explicit_allocation: bool,
     output_dir: Path,
 ) -> None:
     """Analyze and run autonomous single-operator rewrite campaigns."""
@@ -42,6 +49,7 @@ def kernel_rewrite_controller_command(
             handoff_dir=handoff_dir,
             budget_minutes=budget_minutes,
             output_dir=output_dir,
+            explicit_allocation=explicit_allocation,
         )
     except ControllerRunError as error:
         raise click.ClickException(str(error)) from error

@@ -72,6 +72,13 @@ for the full prompt field reference (every field maps to a CLI flag defined in
 `cli/parser.py`, in `cli/constraint_args.py` for the latency and power budgets,
 or in `cli/gpu_power_args.py` for the GPU power settings).
 
+Forge controller allocation is optional: omit `--forge-controller-allocation-minutes`
+to keep automatic per-cycle budgeting and the default 90-minute operator cap.
+To share an allocation across macro cycles, pass `--forge-controller-allocation-minutes N`
+with a positive minute value. The allocation is recorded with the session, and an
+explicit resume value must match it. Elapsed time is charged when the controller
+returns, including failed and cancelled outcomes.
+
 ## Monitor the run
 
 The agent reports a session ID, log path, and PID, then reads persisted state

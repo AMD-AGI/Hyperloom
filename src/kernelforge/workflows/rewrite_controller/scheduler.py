@@ -109,6 +109,7 @@ def dispatch_prepared_tasks(
     layout: ControllerLayout,
     *,
     controller_deadline_unix: float,
+    explicit_allocation: bool = False,
     clock: Callable[[], float] = time.time,
     on_progress: Callable[[ScheduleResult], None] | None = None,
 ) -> ScheduleResult:
@@ -176,10 +177,12 @@ def dispatch_prepared_tasks(
             _report()
             break
 
-        task_deadline = min(
-            float(controller_deadline_unix),
-            now + FORGE_LOOP_BUDGET_SEC,
+        task_budget_sec = (
+            max(FORGE_LOOP_BUDGET_SEC, remaining / (len(tasks) - index))
+            if explicit_allocation
+            else FORGE_LOOP_BUDGET_SEC
         )
+        task_deadline = min(float(controller_deadline_unix), now + task_budget_sec)
         results.append(
             dispatch_single_task(
                 task_dir,

@@ -60,13 +60,14 @@ def _invoke(tmp_path: Path, handoff: Path, *, budget: str = "10", output_name: s
     )
 
 
-def test_cli_declares_the_three_controller_arguments() -> None:
+def test_cli_declares_controller_arguments() -> None:
     command = cli.main.get_command(None, "kernel-rewrite-controller")
 
     assert command is not None
     assert {parameter.name for parameter in command.params} == {
         "handoff_dir",
         "budget_minutes",
+        "explicit_allocation",
         "output_dir",
     }
 

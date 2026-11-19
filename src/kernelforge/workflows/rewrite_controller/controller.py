@@ -258,6 +258,7 @@ def run_controller(
     handoff_dir: str | Path,
     budget_minutes: float,
     output_dir: str | Path,
+    explicit_allocation: bool = False,
 ) -> ControllerRunState:
     """Run one macro cycle's rewrite campaign against a fresh output directory."""
     budget = _validate_budget(budget_minutes)
@@ -305,6 +306,7 @@ def run_controller(
         schedule = dispatch_prepared_tasks(
             layout,
             controller_deadline_unix=running.deadline_unix,
+            explicit_allocation=explicit_allocation,
             on_progress=lambda partial: _publish_running(
                 task_count=partial.task_count,
                 patch_count=len(published_operator_dirs(layout)),

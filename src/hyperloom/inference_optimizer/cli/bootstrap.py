@@ -430,6 +430,12 @@ def constraint_budget_resume_conflict(args: Any, state: Any) -> str:
             nodes=max(int(getattr(args, _NODES, 1) or 1), int(getattr(state, _NODES, 1) or 1)),
             framework=state.framework,
         )
+        or (
+            "--forge-controller-allocation-minutes differs from the persisted allocation"
+            if getattr(args, "forge_controller_allocation_minutes", None) is not None
+            and _forge_controller_allocation_sec(args) != state.forge_controller_allocation_sec
+            else ""
+        )
     )
 
 
@@ -822,6 +828,12 @@ def _phase_toggle_fields(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _forge_controller_allocation_sec(args: argparse.Namespace) -> int | None:
+    """Convert the recorded optional controller grant into seconds."""
+    minutes = getattr(args, "forge_controller_allocation_minutes", None)
+    return int(minutes) * 60 if minutes is not None else None
+
+
 def _conc_sweep_enabled(args: argparse.Namespace, benchmark_mode: str) -> bool:
     # Off under AgentX by default: each rung is a 3600s window and the session grades at a fixed CONC.
     return not is_agentx_mode(benchmark_mode) if args.enable_conc_sweep is None else args.enable_conc_sweep
@@ -886,6 +898,7 @@ def _seed_shared_state(
         **workload,
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
+        forge_controller_allocation_sec=_forge_controller_allocation_sec(args),
         # AgentX corpus shape: seeded from canonical constants if AgentX is on.
         agentx_corpus_shape=_build_agentx_corpus_shape_seed() if is_agentx_mode(benchmark_mode) else {},
         baseline_tput=0.0,
