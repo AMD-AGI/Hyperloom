@@ -2496,7 +2496,7 @@ def test_capture_dir_match_is_anchored_so_a_descriptive_name_is_safe(tmp_path):
 def test_discover_capture_folder_finds_the_unpatched_sglang_layout(tmp_path):
     """The capture folder must be locatable, not merely demoted during ranking."""
     trace_dir = tmp_path / "torch_trace"
-    (trace_dir / "graph_capture_profile").mkdir(parents=True)
+    _capture_sidecar(trace_dir / "graph_capture_profile" / "cuda_graph_capture-DecodeCudaGraphRunner-TP-0.json.gz")
     real = _rank_trace(trace_dir / "1786735404.4274018-TP-0.trace.json.gz", kernels=4)
     assert tlr.discover_capture_folder(trace_dir, [real]) == trace_dir / "graph_capture_profile"
 
@@ -2504,7 +2504,7 @@ def test_discover_capture_folder_finds_the_unpatched_sglang_layout(tmp_path):
 def test_discover_capture_folder_preserves_legacy_priority(tmp_path):
     trace_dir = tmp_path / "torch_trace"
     for name in ("graph_capture", "graph_capture_profile", "capture_traces"):
-        (trace_dir / name).mkdir(parents=True)
+        _capture_sidecar(trace_dir / name / "graph_capture_rank_0.json.gz")
     real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=4)
 
     assert tlr.discover_capture_folder(trace_dir, [real]) == trace_dir / "capture_traces"
@@ -2512,7 +2512,27 @@ def test_discover_capture_folder_preserves_legacy_priority(tmp_path):
 
 def test_discover_capture_folder_ignores_a_descriptive_sibling(tmp_path):
     trace_dir = tmp_path / "torch_trace"
-    (trace_dir / "torch_profiler_with_graph_capture").mkdir(parents=True)
+    _capture_sidecar(trace_dir / "torch_profiler_with_graph_capture" / "graph_capture_rank_0.json.gz")
+    real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=4)
+    assert tlr.discover_capture_folder(trace_dir, [real]) is None
+
+
+def test_discover_capture_folder_passes_over_a_capture_folder_with_no_trace(tmp_path):
+    """An unpatched vLLM leaves capture_traces/ empty; naming it makes TraceLens exit 0 with no report."""
+    profile = tmp_path / "profile"
+    (profile / "capture_traces").mkdir(parents=True)
+    (profile / "torch_trace").mkdir()
+    real = _rank_trace(profile / "torch_trace" / "rank_0.trace.json.gz", kernels=4)
+    assert tlr.discover_capture_folder(profile / "torch_trace", [real]) is None
+
+    _capture_sidecar(profile / "graph_capture_profile" / "graph_capture_rank_0.json.gz")
+    assert tlr.discover_capture_folder(profile / "torch_trace", [real]) == profile / "graph_capture_profile"
+
+
+def test_discover_capture_folder_does_not_count_other_files_as_capture_traces(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    (trace_dir / "capture_traces").mkdir(parents=True)
+    (trace_dir / "capture_traces" / "README.txt").write_text("not a trace", encoding="utf-8")
     real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=4)
     assert tlr.discover_capture_folder(trace_dir, [real]) is None
 
