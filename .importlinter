@@ -469,7 +469,7 @@ ignore_imports =
     hyperloom.inference_optimizer.trace.langfuse_emitter -> hyperloom.inference_optimizer.breakdown.recorder
     hyperloom.inference_optimizer.trace.llm_trace -> hyperloom.inference_optimizer.trace.langfuse_emitter
     hyperloom.orchestrator.actions.executors._geak_sweep -> hyperloom.orchestrator.kernel.geak_config
-    hyperloom.orchestrator.actions.executors.grid._grid_runner -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.orchestrator.actions.executors.grid._grid_inputs -> hyperloom.orchestrator.phases.machine_state
     hyperloom.orchestrator.actions.executors._kernel_agent_tool -> hyperloom.orchestrator.kernel.apply_kernel_patch
     hyperloom.orchestrator.actions.executors.baseline -> hyperloom.orchestrator.loop.sub_agent_runner
     hyperloom.orchestrator.actions.executors.baseline -> hyperloom.orchestrator.phases.machine_state

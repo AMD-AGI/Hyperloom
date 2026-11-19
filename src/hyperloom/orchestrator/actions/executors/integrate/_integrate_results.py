@@ -20,7 +20,7 @@ from hyperloom_common.timeutil import now_iso
 from ..framework_change import _framework_switch_manifest as _switch_manifest
 from ..patching._apply_feedback import ApplyFeedback
 from ..framework_change._enablement_config import _parse_framework_switches
-from ..grid._grid_runner import session_grid_bounds
+from ..grid._grid_inputs import session_grid_bounds
 from .._integrate_attempt import IntegrateAttempt
 from ._integrate_refusals import _FIX_ACCURACY_UNAVAILABLE, _derive_lane, _preflight_missing_targets
 from ..patching._patch_artifacts import _ArtifactSpec, _resolve_artifact_specs, _validate_aiter_gemm_artifacts

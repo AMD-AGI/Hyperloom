@@ -1052,7 +1052,7 @@ def test_grid_variants_do_not_treat_provenance_as_reasoning():
 
 
 def test_on_disk_stderr_tail_reads_benchmark_stderr_log(tmp_path):
-    from hyperloom.orchestrator.actions.executors.grid._grid_runner import (
+    from hyperloom.orchestrator.actions.executors.grid._round_report import (
         _on_disk_stderr_tail,
         _report_errors_summary,
     )

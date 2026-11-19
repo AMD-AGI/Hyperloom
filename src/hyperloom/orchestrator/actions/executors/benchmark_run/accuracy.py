@@ -30,7 +30,7 @@ from .._accuracy_gate import (
     parse_eval_results,
 )
 from .._failed_step import failed_step_error_class
-from ..grid._grid_runner import session_grid_bounds
+from ..grid._grid_inputs import session_grid_bounds
 from .._subprocess_kill import resolve_benchmark_timeouts
 from .._suite.rounds import AccuracyRound, SuiteRoundRefused, deadline_unix, run_accuracy_suite_round, session_route
 from .records import (

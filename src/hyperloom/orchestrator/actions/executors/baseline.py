@@ -45,7 +45,7 @@ from ._suite.rounds import SuiteRoundRefused, SuiteRoute, suite_route
 # The grid module is the namespace the helpers both benching arms share ended up in: how a sentinel returncode reads
 # back, how a round's cap is clamped to the budget, how the two session bounds are resolved, and the hygiene every
 # launch needs.
-from .grid._grid_runner import SessionDirField, session_grid_bounds
+from .grid._grid_inputs import SessionDirField, session_grid_bounds
 from .grid._grid_base import sync_benchmark_timeout
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,

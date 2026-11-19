@@ -17,6 +17,8 @@ from hyperloom.inference_optimizer.grid_server_args import (
     removals_absent_from_args,
 )
 from hyperloom.orchestrator.actions.executors.grid import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors.grid import _capability_probe as cp
+from hyperloom.orchestrator.actions.executors.grid import _round_report as rr
 from hyperloom.orchestrator.actions.executors.grid._grid_variant_filter import ServingStack
 from hyperloom.orchestrator.actions.executors import _benchmark_interpreter as bi
 from hyperloom.orchestrator.actions.executors.workload._benchmark_runtime import apply_runtime_benchmark_overrides
@@ -60,7 +62,7 @@ def test_ungrounded_env_file_reason_drops_missing_config_path(tmp_path) -> None:
     # A proposal may point a config env at an artifact no stage authored; the server would read it
     # unconditionally and die at config load, so the variant must be dropped with a reason.
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(tmp_path / "nope.csv")})
-    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    reason = cp.ungrounded_env_file_reason(v.extra_envs)
     assert reason and "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE" in reason
     assert str(tmp_path / "nope.csv") in reason
 
@@ -70,7 +72,7 @@ def test_ungrounded_env_file_reason_drops_colon_joined_missing_element(tmp_path)
     a.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
     missing = str(tmp_path / "never_authored.csv")
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{a}:{missing}"})
-    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    reason = cp.ungrounded_env_file_reason(v.extra_envs)
     assert reason and missing in reason and str(a) not in reason.split("element(s)")[1].split(" do not exist")[0]
 
 
@@ -81,7 +83,7 @@ def test_ungrounded_env_file_reason_treats_an_unreadable_path_as_missing(monkeyp
 
     monkeypatch.setattr(gr.Path, "is_file", raise_eacces)
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": "/root/private/tuned.csv"})
-    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    reason = cp.ungrounded_env_file_reason(v.extra_envs)
     assert reason and "/root/private/tuned.csv" in reason
 
 
@@ -89,7 +91,7 @@ def test_run_grid_fast_fail_drops_a_variant_whose_config_file_is_missing(tmp_pat
     # The backstop of the admission check: run_grid's fast-fail drops it before boot, whatever the framework.
     monkeypatch.setenv("FRAMEWORK", "sglang")
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": str(tmp_path / "never_written.csv")})
-    assert "AITER_CONFIG_GEMM_BF16" in (gr.unsupported_capability_reason(v) or "")
+    assert "AITER_CONFIG_GEMM_BF16" in (cp.unsupported_capability_reason(v) or "")
 
 
 def test_run_grid_fast_fail_drops_a_list_whose_other_table_is_written(tmp_path, monkeypatch) -> None:
@@ -101,7 +103,7 @@ def test_run_grid_fast_fail_drops_a_list_whose_other_table_is_written(tmp_path, 
     written.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
     missing = str(tmp_path / "never_written.csv")
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{written}:{missing}"})
-    named_missing = (gr.unsupported_capability_reason(v) or "").split("element(s)")[-1].split(" do not exist")[0]
+    named_missing = (cp.unsupported_capability_reason(v) or "").split("element(s)")[-1].split(" do not exist")[0]
     assert missing in named_missing and str(written) not in named_missing
 
 
@@ -115,12 +117,12 @@ def test_ungrounded_env_file_reason_noop_without_config_envs(tmp_path) -> None:
             "AITER_CONFIG_GEMM_A8W8": "",
         },
     )
-    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
+    assert cp.ungrounded_env_file_reason(v.extra_envs) is None
 
 
 # -- unsupported_capability_reason (env-flag build probe) -----------------
 def _clear_cap_cache() -> None:
-    gr._CAP_PROBE_CACHE.clear()
+    cp._CAP_PROBE_CACHE.clear()
 
 
 @pytest.mark.parametrize(
@@ -135,23 +137,23 @@ def _clear_cap_cache() -> None:
 def test_capability_reason_does_not_probe_without_an_enabled_vllm_flag(monkeypatch, framework, envs) -> None:
     monkeypatch.setenv("FRAMEWORK", framework)
     monkeypatch.setattr(
-        gr,
+        cp,
         "_probe_vllm_aiter_shared_expert_unsupported",
         lambda: (_ for _ in ()).throw(AssertionError("probe should not run")),
     )
-    assert gr.unsupported_capability_reason(_variant("se", envs=envs)) is None
+    assert cp.unsupported_capability_reason(_variant("se", envs=envs)) is None
 
 
 def test_capability_reason_drops_when_module_missing(monkeypatch) -> None:
     monkeypatch.setenv("FRAMEWORK", "vllm")
     _clear_cap_cache()
     monkeypatch.setattr(
-        gr,
+        cp,
         "_probe_vllm_aiter_shared_expert_unsupported",
         lambda: "missing module(s): vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe",
     )
     v = _variant("se", envs={"VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "1"})
-    reason = gr.unsupported_capability_reason(v)
+    reason = cp.unsupported_capability_reason(v)
     assert reason is not None and "rocm_aiter_fused_moe" in reason
 
 
@@ -160,7 +162,7 @@ _SHARED_EXPERTS_ON = {"VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "1"}
 
 def _record_probe_runs(monkeypatch, status: str) -> list[list[str]]:
     monkeypatch.setenv("FRAMEWORK", "vllm")
-    monkeypatch.setattr(gr, "_CAP_PROBE_CACHE", {})
+    monkeypatch.setattr(cp, "_CAP_PROBE_CACHE", {})
     runs: list[list[str]] = []
 
     def fake_run(cmd, *_a, **_k):
@@ -168,7 +170,7 @@ def _record_probe_runs(monkeypatch, status: str) -> list[list[str]]:
         payload = {"status": status, "missing": ["vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe"]}
         return SimpleNamespace(stdout=json.dumps(payload), stderr="")
 
-    monkeypatch.setattr(gr.subprocess, "run", fake_run)
+    monkeypatch.setattr(cp.subprocess, "run", fake_run)
     return runs
 
 
@@ -179,7 +181,7 @@ def _record_probe_runs(monkeypatch, status: str) -> list[list[str]]:
 )
 def test_the_build_probe_answer_is_reused_across_variants_unless_unknown(monkeypatch, status, drops, probes) -> None:
     runs = _record_probe_runs(monkeypatch, status)
-    reasons = [gr.unsupported_capability_reason(_variant(name, envs=_SHARED_EXPERTS_ON)) for name in ("se-a", "se-b")]
+    reasons = [cp.unsupported_capability_reason(_variant(name, envs=_SHARED_EXPERTS_ON)) for name in ("se-a", "se-b")]
     assert [reason is not None for reason in reasons] == [drops, drops]
     assert len(runs) == probes
 
@@ -190,8 +192,8 @@ def test_probe_swallows_subprocess_error(monkeypatch) -> None:
     def boom(*_a, **_k):
         raise OSError("no python3")
 
-    monkeypatch.setattr(gr.subprocess, "run", boom)
-    assert gr._probe_vllm_aiter_shared_expert_unsupported() is None
+    monkeypatch.setattr(cp.subprocess, "run", boom)
+    assert cp._probe_vllm_aiter_shared_expert_unsupported() is None
 
 
 # -- _resolve_probe_python / probe interpreter selection ------------------
@@ -211,7 +213,7 @@ def test_the_build_probe_runs_under_the_vllm_venv_interpreter(monkeypatch, tmp_p
     venv_python.touch(mode=0o755)
     monkeypatch.setenv("VLLM_VENV_ROOT", str(tmp_path))
     runs = _record_probe_runs(monkeypatch, "ok")
-    gr.unsupported_capability_reason(_variant("se", envs=_SHARED_EXPERTS_ON))
+    cp.unsupported_capability_reason(_variant("se", envs=_SHARED_EXPERTS_ON))
     assert [cmd[0] for cmd in runs] == [str(venv_python)]
 
 
@@ -249,12 +251,12 @@ def test_runtime_overrides_env_ints_and_rocr_autofill(monkeypatch) -> None:
 # -- _parse_report ---------------------------------------------------------
 def test_parse_report_invalid_json(tmp_path: Path) -> None:
     (tmp_path / "benchmark_report.json").write_text("{bad", encoding="utf-8")
-    assert gr._parse_report(tmp_path) is None
+    assert rr._parse_report(tmp_path) is None
 
 
 def test_parse_report_non_dict(tmp_path: Path) -> None:
     (tmp_path / "benchmark_report.json").write_text("[1,2,3]", encoding="utf-8")
-    assert gr._parse_report(tmp_path) is None
+    assert rr._parse_report(tmp_path) is None
 
 
 # -- _build_variant_yaml ---------------------------------------------------

@@ -11,7 +11,7 @@ from typing import Any
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 
 from .grid._grid_base import DEFAULT_KEEP_THRESHOLD_PCT
-from .grid._grid_runner import SessionDirField
+from .grid._grid_inputs import SessionDirField
 from .integrate._integrate_apply import ApplyStageMixin
 from ._integrate_attempt import IntegrateAttempt
 from .integrate._integrate_bench import BenchStageMixin

@@ -20,7 +20,7 @@ from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import BaselineInvocation
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
 from inference_suite.contracts import FailedStep, LifecycleMode
-from ..grid._grid_runner import sanitize_result_dir, sanitize_script_name
+from ..grid._grid_inputs import sanitize_result_dir, sanitize_script_name
 from ..workload._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
 from ..workload._workload_envs import (
     BenchmarkTarget,
@@ -113,10 +113,10 @@ def _attach_baseline_launch_evidence(
     framework: str,
 ) -> None:
     """Persist the declared and observed server identity, and its runtime findings, for a baseline result."""
-    from ..grid._grid_runner import _measurement_server_log_path
+    from ..grid._round_report import measurement_server_log_path
 
     workspace = Path(str(result.get("workspace") or "")) if result.get("workspace") else None
-    actual_log = _measurement_server_log_path(output_dir / "server.log", workspace, slot=output_dir)
+    actual_log = measurement_server_log_path(output_dir / "server.log", workspace, slot=output_dir)
     result["server_log_path"] = actual_log or ""
     evidence = build_launch_evidence(
         RequestedLaunch(config_path, framework), actual_server_log=actual_log, slot=output_dir

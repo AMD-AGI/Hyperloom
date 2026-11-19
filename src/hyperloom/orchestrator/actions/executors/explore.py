@@ -76,17 +76,15 @@ from .benchmark_result import double_run_requested
 from .benchmark_run.accuracy import accuracy_round_due, record_accuracy_round, run_candidate_accuracy_round
 from .explore_prefilter._prefilter import prefilter_round, record_decision_round
 from .explore_prefilter._remeasure import STACK_REVALIDATE_SOURCE, _is_config_replay_variant, is_stack_revalidation
+from .grid._grid_inputs import SessionDirField, session_grid_bounds
+from .grid._grid_inputs import sanitize_result_dir, sanitize_script_name
 from .grid._grid_runner import (
     GridLaunch,
     GridRecipe,
     GridStop,
     GridVariant,
-    SessionDirField,
     _build_variant_yaml,
     run_grid,
-    sanitize_result_dir,
-    sanitize_script_name,
-    session_grid_bounds,
     teardown_variant_server,
 )
 from .grid._grid_variant_filter import (

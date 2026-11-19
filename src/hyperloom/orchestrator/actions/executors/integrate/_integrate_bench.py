@@ -28,6 +28,7 @@ from .._accuracy_gate import (
     parse_eval_results,
     read_eval_probe,
 )
+from ..grid._grid_inputs import sanitize_result_dir, sanitize_script_name
 from ..grid._grid_runner import (
     GridLaunch,
     GridRecipe,
@@ -35,8 +36,6 @@ from ..grid._grid_runner import (
     GridVariant,
     VariantResult,
     run_grid,
-    sanitize_result_dir,
-    sanitize_script_name,
 )
 from ..grid._grid_base import variant_config_of
 from ..grid._grid_variant_filter import (

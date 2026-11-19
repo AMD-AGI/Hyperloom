@@ -9,14 +9,10 @@ Every round runs on inference_suite with the base launch its session froze (:fun
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
-import re
-import subprocess
 import time
 from dataclasses import dataclass, replace
-from enum import Enum, auto
 from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
 
@@ -25,14 +21,9 @@ from inference_suite import stop
 from inference_suite.server_log import death_excerpt
 
 from hyperloom.common.deadline import Deadline
-from hyperloom_common.env import env_flag, is_truthy
-from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT, constraint_fields
-from hyperloom.common.env_safety import (
-    redact_secret_values,
-    ungrounded_env_file_reason,
-)
+from hyperloom_common.env import env_flag
+from hyperloom.common.env_safety import redact_secret_values
 
-from ....phases import machine_state as _phase_state
 from ....state import failure_evidence
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...stop_attribution import (
@@ -43,7 +34,6 @@ from ...stop_attribution import (
     StoppedByTheRun,
 )
 from ..workload._benchmark_runtime import apply_runtime_benchmark_overrides
-from .._benchmark_interpreter import _resolve_probe_python
 from ..workload._agentx_checkpoint import AgentxCheckpoint, checkpoint_summary, read_checkpoint
 from .._subprocess_kill import (
     AGENTX_EARLY_STOP_ERROR_CLASS,
@@ -57,11 +47,9 @@ from ..benchmark_result import (
     harvest_leaked_artifacts,
     round_succeeded,
     select_run_workspace,
-    served_complete_protocol,
     snapshot_workspaces,
 )
-from ..gpu._gpu_metrics import write_gpu_metrics_from_report
-from .._round_folder import RoundFolder, is_round_folder, round_report_path
+from .._round_folder import round_report_path
 from .._suite.rounds import SuiteRoundRefused, suite_route
 from ..benchmark_config import composed_benchmark_timeout_sec
 from ..workload._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
@@ -98,6 +86,32 @@ from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
     dedupe_extra_server_args,
 )
+from ._capability_probe import unsupported_capability_reason
+from ._grid_inputs import _resolve_session_dir
+from ._round_report import (
+    REPORT_SETTLE_SECONDS,
+    _existing_log_path,
+    _on_disk_stderr_tail,
+    _report_errors_summary,
+    _settled_measurement,
+    measurement_server_log_path,
+)
+from ._variant_rows import (
+    _abort_variant,
+    _BenchmarkPass,
+    _Halt,
+    _measured_row,
+    _MeasuredVariant,
+    _not_run_skip_result,
+    _RoundAttempt,
+    _RoundProcess,
+    _VariantAborted,
+    _VariantFailure,
+    _VariantOutcome,
+    _VariantRounds,
+    _VariantSlot,
+    _write_variant_abort_marker,
+)
 
 
 log = logging.getLogger(__name__)
@@ -108,233 +122,7 @@ _WARMUP_YAML_BUILD_ERROR = "warmup_yaml_build_error"
 _BENCHMARK_CAP_ERROR = "benchmark_cap_error"
 
 
-class _Halt(Enum):
-    """What one variant's end means for the rest of the grid: walk on, stop unless told otherwise, or stop."""
-
-    CONTINUE = auto()
-    ON_FAILURE = auto()
-    STOP = auto()
-
-
-class _VariantAborted(Exception):
-    """A variant ended before its result was assembled, carrying what the grid records for it."""
-
-    def __init__(
-        self, result: VariantResult, *, halt: _Halt = _Halt.ON_FAILURE, abandoned: StoppedByTheRun | None = None
-    ) -> None:
-        super().__init__(result.error_class)
-        self.result = result
-        self.halt = halt
-        self.abandoned = abandoned
-
-
-def _resolve_session_dir() -> Path:
-    """Resolve the active session_dir for executors that need an output root."""
-    from hyperloom.inference_optimizer.session.paths import session_dir as _sd
-
-    return _sd()
-
-
-class SessionDirField:
-    """An executor's ``session_dir``, resolved on read rather than at construction.
-
-    The executors here are module-level singletons built at import, which is
-    before the CLI pins the session. Resolving in ``__init__`` freezes them on
-    the workspace root that concurrent sessions share.
-    """
-
-    def __set_name__(self, owner: type, name: str) -> None:
-        self._slot = f"_{name}"
-
-    def __get__(self, obj: Any, _objtype: type | None = None) -> Any:
-        if obj is None:
-            return self
-        explicit = getattr(obj, self._slot, None)
-        return explicit if explicit is not None else _resolve_session_dir()
-
-    def __set__(self, obj: Any, value: Path | str | None) -> None:
-        setattr(obj, self._slot, Path(value) if value else None)
-
-
 # SKIP_VARIANTS: comma/whitespace patterns matched (exact or fnmatch) against ``GridVariant.name``.
-
-
-# Env-flag capability probe: a serving env flag can be defined in the build yet still crash the server at engine init
-# because the code path it activates imports a module the build did not package.
-_UNSET = object()
-
-# Cached probe result keyed by framework.
-_CAP_PROBE_CACHE: dict[str, str | None] = {}
-
-# Subprocess probe: locate the installed vLLM package via ``find_spec`` without importing it, read the aiter
-# shared-expert router source, extract the ``fused_moe.*`` modules it imports, and verify each resolves to a real file
-# in THIS build.
-_AITER_SHARED_EXPERT_PROBE_SCRIPT = (
-    "import importlib.util as u, os, re, json\n"
-    "def go():\n"
-    "    try:\n"
-    "        spec = u.find_spec('vllm')\n"
-    "    except (ImportError, ValueError):\n"
-    "        return {'status': 'unknown'}\n"
-    "    if not spec or not spec.origin:\n"
-    "        return {'status': 'unknown'}\n"
-    "    vdir = os.path.dirname(spec.origin)\n"
-    "    router = os.path.join(vdir, 'model_executor', 'layers', 'fused_moe',\n"
-    "                          'router', 'aiter_shared_routed_fused_moe_router.py')\n"
-    "    if not os.path.exists(router):\n"
-    "        return {'status': 'unknown'}\n"
-    "    try:\n"
-    "        text = open(router, encoding='utf-8').read()\n"
-    "    except (OSError, UnicodeDecodeError):\n"
-    "        return {'status': 'unknown'}\n"
-    "    mods = re.findall(r'from\\s+(vllm\\.model_executor\\.layers\\.fused_moe\\.[A-Za-z0-9_.]+)\\s+import', text)\n"
-    "    missing = []\n"
-    "    for m in sorted(set(mods)):\n"
-    "        rel = m[len('vllm.'):].replace('.', os.sep)\n"
-    "        if not (os.path.exists(os.path.join(vdir, rel + '.py'))\n"
-    "                or os.path.exists(os.path.join(vdir, rel, '__init__.py'))):\n"
-    "            missing.append(m)\n"
-    "    return {'status': 'unsupported', 'missing': missing} if missing else {'status': 'ok'}\n"
-    "print(json.dumps(go()))\n"
-)
-
-
-def _probe_vllm_aiter_shared_expert_unsupported() -> str | None:
-    """Return a drop reason if the installed vLLM build can't honour the aiter shared-expert fusion flag, else ``None``."""
-    cached = _CAP_PROBE_CACHE.get("vllm", _UNSET)
-    if cached is not _UNSET:
-        return cached  # type: ignore[return-value]
-    try:
-        proc = subprocess.run(
-            [_resolve_probe_python(), "-c", _AITER_SHARED_EXPERT_PROBE_SCRIPT],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
-        payload = json.loads(lines[-1]) if lines else {}
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        return None
-    status = payload.get("status")
-    if status == "ok":
-        _CAP_PROBE_CACHE["vllm"] = None
-        return None
-    if status == "unsupported":
-        missing = ", ".join(payload.get("missing") or []) or "(unknown module)"
-        reason = (
-            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS enabled but the installed "
-            "vLLM build's aiter shared-expert router imports missing module(s): "
-            f"{missing}. Flag unusable on this build (server crashes at engine "
-            "init); upgrade vLLM to a build that ships the module."
-        )
-        _CAP_PROBE_CACHE["vllm"] = reason
-        return reason
-    return None  # unknown => do not drop or cache
-
-
-def unsupported_capability_reason(variant: "GridVariant") -> str | None:
-    """Return why a variant cannot run (a config table not on disk, an env flag the build lacks), else ``None``."""
-    envs = {str(k): str(v) for k, v in (getattr(variant, "extra_envs", None) or {}).items()}
-    if missing_file := ungrounded_env_file_reason(envs):
-        return missing_file
-    if (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower() != "vllm":
-        return None
-    val = envs.get("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS")
-    if val is None or not is_truthy(val, default=True):
-        return None
-    return _probe_vllm_aiter_shared_expert_unsupported()
-
-
-# Sanitization for LLM-supplied overrides (benchmark_script / result_dir): reject path separators / shell
-# metacharacters, raising ``ValueError`` instead of running an unsafe subprocess.
-_SCRIPT_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+\.sh$")
-_RESULT_DIR_FORBID_RE = re.compile(r"[\s\"'`$;&|<>(){}\[\]\\*?!]")
-
-
-def sanitize_script_name(value: Any) -> str | None:
-    """Return ``value`` if it's a safe benchmark script file name."""
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    if not _SCRIPT_NAME_RE.match(text):
-        raise ValueError(
-            f"benchmark_script={text!r} rejected: must be a bare *.sh "
-            "file name (no path separators, no shell metacharacters)"
-        )
-    return text
-
-
-def sanitize_result_dir(value: Any) -> str | None:
-    """Return ``value`` if it's a safe absolute (or workspace-relative) dir."""
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    if _RESULT_DIR_FORBID_RE.search(text):
-        raise ValueError(
-            f"result_dir={text!r} rejected: contains whitespace or shell "
-            "metacharacters; pass an absolute or workspace-relative path"
-        )
-    return text
-
-
-def _parse_report(workspace: Path) -> dict[str, Any] | None:
-    """Load ``benchmark_report.json`` from a benchmark workspace."""
-    report = workspace / "benchmark_report.json"
-    if not report.exists():
-        return None
-    try:
-        with report.open(encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
-# How long to keep re-reading ``benchmark_report.json`` when the report does not yet parse into a valid measurement.
-REPORT_SETTLE_SECONDS = 30.0
-REPORT_SETTLE_POLL_SECONDS = 1.0
-
-
-async def _settled_measurement(
-    workspace: Path,
-    *,
-    subprocess_started_unix: float | None,
-    settle_seconds: float = REPORT_SETTLE_SECONDS,
-    poll_seconds: float = REPORT_SETTLE_POLL_SECONDS,
-) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """Read the benchmark report, re-reading briefly while it is still settling; a finished run_dir never settles."""
-    if is_round_folder(workspace):
-        RoundFolder.read(workspace).write_gpu_metrics(workspace.parent)
-        settle_seconds = 0.0
-    deadline = time.monotonic() + max(0.0, float(settle_seconds))
-    attempts = 0
-    while True:
-        report = _parse_report(workspace)
-        measurement = extract_benchmark_measurement(
-            report,
-            workspace=workspace,
-            subprocess_started_unix=subprocess_started_unix,
-        )
-        attempts += 1
-        succeeded = round_succeeded(measurement)
-        if succeeded or time.monotonic() >= deadline:
-            if attempts > 1 and succeeded:
-                log.info(
-                    "grid_runner: benchmark_report became valid after %d read(s); "
-                    "the report was still being written when the subprocess was reaped",
-                    attempts,
-                )
-            # Harvest already tried this, but it runs before the report is guaranteed to exist: a report the round
-            # finishes writing after the subprocess is reaped would otherwise leave the round with no GPU artifact at
-            # all. Here the report is in hand, so write it from that rather than reading the file a second time.
-            if report is not None:
-                write_gpu_metrics_from_report(workspace, report, source="benchmark_report.json")
-            return report, measurement
-        await asyncio.sleep(max(0.01, float(poll_seconds)))
 
 
 def _run_grid_warmup_enabled() -> bool:
@@ -428,26 +216,6 @@ def stopped_by_the_run(returncode: int | None) -> StoppedByTheRun | None:
     return _STOPPED_BY_THE_RUN.get(int(returncode))
 
 
-def session_grid_bounds(shared_state: Any) -> tuple[float | None, float | None]:
-    """Resolve ``(session_deadline_sec, variant_expected_sec)`` for a :func:`run_grid` call."""
-    if shared_state is None:
-        return (None, None)
-    deadline_fn = getattr(shared_state, "grid_session_deadline_sec", None)
-    deadline = deadline_fn() if callable(deadline_fn) else None
-    variant_sec = _phase_state.one_more_measurement_sec(shared_state)
-    if variant_sec is None:
-        variant_sec = _phase_state.measured_seconds(shared_state, "baseline_runtime_sec")
-    return (deadline, variant_sec)
-
-
-class _RoundProcess(NamedTuple):
-    """What the benchmark subprocess of one grid round returned."""
-
-    returncode: Any
-    stdout: str
-    stderr: str
-
-
 def _invalid_measurement_error(
     proc: _RoundProcess,
     *,
@@ -480,50 +248,6 @@ def _multi_node_warmup_rounds(variant_expected_sec: Any) -> int:
     return 1 if (is_multi_node() and mn_bench_warmup_enabled()) else 0
 
 
-class _VariantSlot(NamedTuple):
-    """One variant's place in the grid, the directory its rounds write to, and the time they are granted.
-
-    The cap belongs to the slot rather than to the grid because a sweep's rungs differ in
-    the concurrency they measure, so they differ in the work one round has to get through.
-    It is ``None`` until this variant's config has been composed, because until then nobody
-    has seen the env the rounds will run under: a slot still holding ``None`` names a
-    variant whose rounds never started, and was granted nothing.
-    """
-
-    idx: int
-    variant: GridVariant
-    path: Path
-    benchmark_timeout_sec: float | None = None
-
-
-class _VariantFailure(NamedTuple):
-    """Why one variant ended, and what its ending means for the rest of the grid.
-
-    ``error`` is the row's own message when it says more than the marker's ``recorded``
-    summary; ``abandoned`` is why the variants a halted grid will not reach never started,
-    and is set exactly when ``halt`` is ``STOP``.
-    """
-
-    error_class: str
-    recorded: str
-    error: str | None = None
-    halt: _Halt = _Halt.ON_FAILURE
-    abandoned: StoppedByTheRun | None = None
-
-
-class _RoundAttempt(NamedTuple):
-    """One variant's run of one round, and what it left behind.
-
-    ``server_survivors`` are the servers the variant booted that outlived its teardown.
-    """
-
-    at: _VariantSlot
-    returncode: int | None
-    started_unix: float
-    server_log: Path
-    server_survivors: tuple[int, ...]
-
-
 class _GridRun(NamedTuple):
     """One grid: its variants, the recipe they derive from, how each is launched, and when it must stop."""
 
@@ -538,79 +262,8 @@ class _GridRun(NamedTuple):
     auto_warmup_requested: bool
 
 
-class _VariantRounds(NamedTuple):
-    """The config one variant's rounds share, the server they were given, and the time they are granted.
-
-    ``benchmark_timeout_sec`` is sized from ``cfg_path`` and not from the variant spec,
-    because that config is where every layer of the launch env has already landed.
-    """
-
-    cfg_path: Path
-    lifecycle: dict[str, Any]
-    auto_warmup: bool
-    mn_effective_args: str
-    benchmark_timeout_sec: float
-
-
-class _BenchmarkPass(NamedTuple):
-    """One benchmark pass of one variant, and what it left behind.
-
-    ``server_survivors`` are the servers the pass booted that outlived the teardown that
-    followed it; a pass whose servers the next round still needs leaves it empty.
-    """
-
-    proc: _RoundProcess
-    started_unix: float
-    workspaces_before: Any
-    server_survivors: tuple[int, ...] = ()
-
-
-class _MeasuredVariant(NamedTuple):
-    """One variant's measured round, the workspace and salvage it left on disk, and the warmup it discarded."""
-
-    rounds: _VariantRounds
-    round: _BenchmarkPass
-    workspace: Path
-    artifacts: list[Any]
-    warmup_tput: float | None
-
-
-class _VariantOutcome(NamedTuple):
-    """A measured variant together with what its benchmark report turned out to say."""
-
-    measured: _MeasuredVariant
-    report: dict[str, Any] | None
-    measurement: dict[str, Any]
-    warnings: list[str]
-
-
 def _variant_tag(run: _GridRun, at: _VariantSlot) -> str:
     return f"{at.idx + 1}/{len(run.grid)} name={at.variant.name}"
-
-
-def _abort_variant(at: _VariantSlot, failure: _VariantFailure, **fields: Any) -> NoReturn:
-    _write_variant_abort_marker(
-        at.path,
-        variant_name=at.variant.name,
-        error_class=failure.error_class,
-        error_summary=failure.recorded,
-        extra_args=at.variant.extra_server_args,
-    )
-    raise _VariantAborted(
-        VariantResult(
-            name=at.variant.name,
-            extra_server_args=at.variant.extra_server_args,
-            extra_envs=dict(at.variant.extra_envs),
-            status="failed",
-            error=failure.recorded if failure.error is None else failure.error,
-            error_class=failure.error_class,
-            note=at.variant.note,
-            granted_cap_sec=at.benchmark_timeout_sec,
-            **fields,
-        ),
-        halt=failure.halt,
-        abandoned=failure.abandoned,
-    )
 
 
 def _abort_on_round_stop(
@@ -652,7 +305,7 @@ def _abort_on_round_stop(
             runtime_sec=runtime_sec,
             error=stopped.interrupted,
             error_class=stopped.error_class,
-            server_log_path=_measurement_server_log_path(attempt.server_log, slot=at.path),
+            server_log_path=measurement_server_log_path(attempt.server_log, slot=at.path),
             note=at.variant.note,
             nonfatal_warnings=[f"server_survived_teardown:{pid}" for pid in attempt.server_survivors],
             granted_cap_sec=at.benchmark_timeout_sec,
@@ -922,7 +575,7 @@ async def _warmup_throughput(
     teardown_variant_server(at.path)
     warmup_server_log = warmup_slot / "server.log"
     report_path = round_report_path(workspace)
-    found = argv_refusal(_measurement_server_log_path(warmup_server_log, workspace)) or RoundError(
+    found = argv_refusal(measurement_server_log_path(warmup_server_log, workspace)) or RoundError(
         death_excerpt(str(warmup_server_log)) or redact_secret_values((pass_.proc.stderr or pass_.proc.stdout)[-2000:])
         if returncode != 0
         else "warmup benchmark_report missing valid throughput/completed requests",
@@ -935,7 +588,7 @@ async def _warmup_throughput(
         returncode,
         found.summary[:200],
     )
-    _abort_variant(
+    return _abort_variant(
         at,
         _VariantFailure(found.error_class, found.summary),
         workspace=str(workspace) if run_ws is not None else None,
@@ -1137,7 +790,7 @@ def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _Var
     workspace = outcome.measured.workspace
     report_path = round_report_path(workspace)
     server_log = at.path / "server.log"
-    found = argv_refusal(_measurement_server_log_path(server_log, workspace)) or _invalid_measurement_error(
+    found = argv_refusal(measurement_server_log_path(server_log, workspace)) or _invalid_measurement_error(
         outcome.measured.round.proc,
         report=outcome.report,
         death_excerpt=death_excerpt(str(server_log)),
@@ -1202,91 +855,6 @@ def _unmeasured_row(at: _VariantSlot, outcome: _VariantOutcome, launch: GridLaun
         note="evaluation_only" if launch.evaluation_only else "server_lifecycle_boot_only",
         granted_cap_sec=at.benchmark_timeout_sec,
     )
-
-
-def _kept_nonzero_exit(at: _VariantSlot, outcome: _VariantOutcome) -> str | None:
-    """The exit code this measurement is kept despite, or None when the round exited clean."""
-    returncode = outcome.measured.round.proc.returncode
-    if returncode == 0:
-        return None
-    proc = outcome.measured.round.proc
-    nonzero_error = redact_secret_values((proc.stderr or proc.stdout)[-2000:])
-    measurement = outcome.measurement
-    if not served_complete_protocol(measurement):
-        log.warning(
-            "grid_runner: variant %s aborted: round_nonzero_after_valid_measurement (rc=%d, served %s of %s requests)",
-            at.variant.name,
-            returncode,
-            measurement.get("completed_requests"),
-            measurement.get("requested_requests"),
-        )
-        workspace = outcome.measured.workspace
-        report_path = round_report_path(workspace)
-        _abort_variant(
-            at,
-            _VariantFailure("round_nonzero_after_valid_measurement", nonzero_error),
-            workspace=str(workspace),
-            report_path=str(report_path) if report_path.exists() else None,
-            raw_result_path=measurement.get("raw_result_path"),
-            reported_success=measurement.get("reported_success"),
-            returncode=returncode,
-            nonfatal_warnings=outcome.warnings,
-            server_log_path=None,
-        )
-    # Every request the client recorded as requested was served, so the exit code came from
-    # something the round had already finished with. The cause stays on the result: a reader
-    # comparing this point to its neighbours is owed the reason it is not a clean zero.
-    outcome.warnings.append(f"nonzero_rc_after_complete_protocol:{returncode}")
-    log.warning(
-        "grid_runner: variant %s exited %d after serving its whole protocol "
-        "(%s of %s requests); keeping the measurement: %s",
-        at.variant.name,
-        returncode,
-        measurement.get("completed_requests"),
-        measurement.get("requested_requests"),
-        nonzero_error,
-    )
-    return nonzero_error
-
-
-def _measured_row(at: _VariantSlot, outcome: _VariantOutcome) -> VariantResult:
-    nonzero_kept_error = _kept_nonzero_exit(at, outcome)
-    measurement = outcome.measurement
-    workspace = outcome.measured.workspace
-    report_path = round_report_path(workspace)
-    row = VariantResult(
-        name=at.variant.name,
-        extra_server_args=at.variant.extra_server_args,
-        extra_envs=dict(at.variant.extra_envs),
-        status="succeeded",
-        output_throughput=measurement.get("output_throughput"),
-        request_throughput=measurement.get("request_throughput"),
-        total_token_throughput=measurement.get("total_token_throughput"),
-        completed_requests=measurement.get("completed_requests"),
-        duration_seconds=measurement.get("duration_seconds"),
-        ttft_mean_ms=measurement.get("ttft_mean_ms"),
-        **constraint_fields(measurement),
-        tpot_mean_ms=measurement.get("tpot_mean_ms"),
-        input_throughput=measurement.get("input_throughput"),
-        tpot_p90_ms=measurement.get("tpot_p90_ms"),
-        intvty_p90=measurement.get("e2e_norm_intvty_p90"),
-        intvty_p50=measurement.get("e2e_norm_intvty_p50"),
-        intvty_p50_checkpoint=measurement.get(GRADED_INTVTY_P50_CHECKPOINT),
-        request_error_rate=measurement.get("request_error_rate"),
-        workspace=str(workspace),
-        report_path=str(report_path) if report_path.exists() else None,
-        raw_result_path=measurement.get("raw_result_path"),
-        reported_success=measurement.get("reported_success"),
-        returncode=outcome.measured.round.proc.returncode,
-        nonfatal_warnings=outcome.warnings,
-        error=nonzero_kept_error,
-        server_log_path=None,
-        note=at.variant.note,
-        runtime_sec=round(max(0.0, time.time() - outcome.measured.round.started_unix), 2),
-        granted_cap_sec=at.benchmark_timeout_sec,
-    )
-    log.info("grid_runner: variant %s tput=%.1f tok/s", at.variant.name, row.output_throughput or 0.0)
-    return row
 
 
 async def _measure_variant(run: _GridRun, at: _VariantSlot) -> VariantResult:
@@ -1394,50 +962,6 @@ def teardown_variant_server(slot: Path) -> list[int]:
     return list(stop(slot).survivors)
 
 
-def _not_run_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> VariantResult:
-    """Build the ``skipped`` result for a variant the run never got to."""
-    return VariantResult(
-        name=variant.name,
-        extra_server_args=variant.extra_server_args,
-        extra_envs=dict(variant.extra_envs),
-        status="skipped",
-        error=stopped.never_started,
-        error_class=stopped.error_class,
-        note=variant.note,
-    )
-
-
-def _existing_log_path(path: Path) -> str | None:
-    """Return ``path`` as a string when it exists, else ``None``."""
-    return str(path) if path.exists() else None
-
-
-def _measurement_server_log_path(
-    server_log: Path,
-    workspace: Path | None = None,
-    *,
-    slot: Path | None = None,
-) -> str | None:
-    """Return the server log attributable to this variant's measurement."""
-    owning_slot = slot or server_log.parent
-    direct = _existing_log_path(server_log)
-    if not direct and workspace is not None:
-        direct = _existing_log_path(workspace / "server.log")
-    if direct:
-        return direct
-    warmup_dir = owning_slot / WARMUP_ROUND_DIR
-    try:
-        candidates = [p for d in (owning_slot, warmup_dir) for p in d.glob("*/server.log") if p.is_file()]
-    except OSError:
-        candidates = []
-    if not candidates:
-        return None
-    try:
-        return str(max(candidates, key=lambda path: path.stat().st_mtime))
-    except OSError:
-        return None
-
-
 def _attach_grid_launch_evidence(
     results: list[VariantResult],
     *,
@@ -1463,7 +987,7 @@ def _attach_grid_launch_evidence(
         config_path = slot / VARIANT_CONFIG_FILE
         workspace = Path(result.workspace) if result.workspace else None
         primary_log = Path(result.server_log_path) if result.server_log_path else slot / "server.log"
-        actual_log = _measurement_server_log_path(primary_log, workspace, slot=slot)
+        actual_log = measurement_server_log_path(primary_log, workspace, slot=slot)
         if not actual_log and ready_server_log:
             actual_log = _existing_log_path(Path(ready_server_log))
         result.server_log_path = actual_log
@@ -1477,68 +1001,6 @@ def _attach_grid_launch_evidence(
         result.launch_evidence_path = persist_measurement_evidence(evidence, actual_server_log=actual_log, slot=slot)
 
 
-def _write_variant_abort_marker(
-    slot: Path,
-    *,
-    variant_name: str,
-    error_class: str,
-    error_summary: str,
-    extra_args: str = "",
-) -> None:
-    """Write ``abort_reason.json`` into the variant slot directory."""
-    try:
-        slot.mkdir(parents=True, exist_ok=True)
-        marker = {
-            "variant": variant_name,
-            "error_class": error_class,
-            "error": (error_summary or "")[:2000],
-            "extra_args": extra_args,
-            "aborted_at_utc": time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ",
-                time.gmtime(),
-            ),
-        }
-        (slot / "abort_reason.json").write_text(
-            json.dumps(marker, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        log.warning(
-            "_grid_runner: failed to write abort_reason.json at %s: %s",
-            slot,
-            exc,
-        )
-
-
-def _report_errors_summary(report: dict[str, Any] | None, limit: int = 2000) -> str:
-    """Join ``benchmark_report.json`` ``errors`` into a single diagnostic."""
-    if not isinstance(report, dict):
-        return ""
-    errors = report.get("errors")
-    if not isinstance(errors, list):
-        return ""
-    text = "; ".join(str(item).strip() for item in errors if str(item).strip())
-    return text[-limit:] if text else ""
-
-
-def _on_disk_stderr_tail(*dirs: Path, limit: int = 2000) -> str:
-    """Return the tail of the first non-empty on-disk benchmark log."""
-    for d in dirs:
-        if not d:
-            continue
-        for name in ("benchmark_stderr.log", "benchmark_stdout.log"):
-            try:
-                p = d / name
-                if not p.is_file():
-                    continue
-                text = p.read_text(encoding="utf-8", errors="replace").strip()
-                if text:
-                    return f"[{name}] {text[-limit:]}"
-            except OSError:
-                continue
-    return ""
-
-
 __all__ = [
     "GridVariant",
     "ORCHESTRATOR_CANCELLED_CLASS",
@@ -1546,9 +1008,6 @@ __all__ = [
     "StoppedByTheRun",
     "VariantResult",
     "run_grid",
-    "sanitize_result_dir",
-    "sanitize_script_name",
-    "session_grid_bounds",
     "stopped_by_the_run",
     "teardown_variant_server",
 ]

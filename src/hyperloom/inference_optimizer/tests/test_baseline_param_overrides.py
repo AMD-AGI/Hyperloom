@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors.grid._grid_runner import (
+from hyperloom.orchestrator.actions.executors.grid._grid_inputs import (
     sanitize_result_dir,
     sanitize_script_name,
 )
