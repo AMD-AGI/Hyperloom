@@ -294,6 +294,15 @@ def write_run_config(
     return config_path
 
 
+def _holds_capture_traces(folder: Path) -> bool:
+    # TraceLens reads every .json / .json.gz in the capture folder as a capture trace, and when there is none it
+    # exits 0 without writing any report.
+    try:
+        return any(child.is_file() and child.name.endswith((".json", ".json.gz")) for child in folder.iterdir())
+    except OSError:
+        return False
+
+
 def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path | None:
     """Find a graph-capture folder near a torch_trace input.
 
@@ -302,14 +311,16 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
     layout that ranking already demotes is also a layout discovery can find.
     Matching by shape rather than by two hard-coded names is what lets an
     unpatched SGLang's ``graph_capture_profile/`` through, so the capture folder
-    is passed on whenever the workload trace was picked.
+    is passed on whenever the workload trace was picked. A folder with no capture
+    trace in it is passed over: the capture path fired but wrote nothing, and
+    the workload trace is still analysable without one.
 
     Args:
         trace_input (Path): The trace input path (file or directory).
         trace_files (list[Path]): Discovered trace files; only the first is used.
 
     Returns:
-        Path | None: The capture folder if one exists nearby, else ``None``.
+        Path | None: The capture folder if one holding a capture trace exists nearby, else ``None``.
     """
 
     capture_dir_priority = ("capture_traces", "graph_capture_profile", "graph_capture")
@@ -324,7 +335,7 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
             continue
         seen.add(root)
         try:
-            children = [child for child in root.iterdir() if child.is_dir()]
+            children = [child for child in root.iterdir() if child.is_dir() and _holds_capture_traces(child)]
         except OSError:
             continue
         children_by_name = {child.name.lower(): child for child in children}
