@@ -20,6 +20,10 @@ from hyperloom.orchestrator.policy.gate import (
     research_lane_ceiling,
 )
 from hyperloom.orchestrator.policy.projection import gpu_specialist_ceiling
+from hyperloom.orchestrator.policy.validators import (
+    SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS,
+    check_freeform_task_description,
+)
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
 
@@ -113,29 +117,29 @@ def test_path_in_trace_allowlist(monkeypatch) -> None:
     assert g._path_in_trace_allowlist("/shared/profileX/run.json.gz") is False
 
 
-# -- _check_freeform_task_description -------------------------------------
+# -- check_freeform_task_description --------------------------------------
 def test_freeform_description_empty() -> None:
     with pytest.raises(PolicyDenied) as exc:
-        PolicyGate._check_freeform_task_description("", where="task[0]")
+        check_freeform_task_description("", where="task[0]")
     assert exc.value.rule == "specialist_freeform_empty_description"
 
 
 def test_freeform_description_too_long() -> None:
-    big = "x" * (pol.SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS + 1)
+    big = "x" * (SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS + 1)
     with pytest.raises(PolicyDenied) as exc:
-        PolicyGate._check_freeform_task_description(big, where="task[0]")
+        check_freeform_task_description(big, where="task[0]")
     assert exc.value.rule == "specialist_freeform_description_too_long"
 
 
 def test_freeform_description_valid() -> None:
-    PolicyGate._check_freeform_task_description(
+    check_freeform_task_description(
         "Investigate the MoE kernel launch overhead and propose tuning.",
         where="task[0]",
     )
 
 
 def test_freeform_description_destructive_text_allowed() -> None:
-    PolicyGate._check_freeform_task_description(
+    check_freeform_task_description(
         "killall -9 python",
         where="task[0]",
     )
