@@ -134,9 +134,6 @@ from hyperloom_kb.schema import (
     default_search_weight,
     derive_schema_ref,
 )
-from hyperloom_kb.service import (
-    CompleteExperienceRequired,
-)
 from hyperloom_kb.storage import (
     ExperienceStore,
     ImmutableExperienceConflict,
@@ -172,7 +169,6 @@ __all__ = [
     "CandidateProvider",
     "CapabilityState",
     "CapabilityUnavailable",
-    "CompleteExperienceRequired",
     "ConfigurationError",
     "ConfiguredExperienceKB",
     "EXPERIENCE_ID_NAMESPACE",
