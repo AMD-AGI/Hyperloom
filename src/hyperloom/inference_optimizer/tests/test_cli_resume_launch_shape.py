@@ -294,7 +294,7 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
         raise RuntimeError("resume cleared the staleness guard")
 
     # The first call after the guard: reaching it means the guard did not reject the session.
-    monkeypatch.setattr(f"{cli_mod}.session_resume.latency_budget_scope_error", past_the_guard)
+    monkeypatch.setattr(f"{cli_mod}.latency_budget_scope_error", past_the_guard)
     args = _build_parser().parse_args(["optimize", "--resume-from", str(resume_dir), "--critic-mock"])
 
     # A SystemExit instead means the guard compared the session's pinned backend against an unpinned environment.
@@ -457,7 +457,7 @@ def test_the_resume_exports_its_pins_again_after_the_topology_step_rewrote_them(
         raise RuntimeError("resume passed its pin export")
 
     # The first call after the export in ``_resume_session``.
-    monkeypatch.setattr(f"{cli_mod}.session_resume.latency_budget_scope_error", past_the_export)
+    monkeypatch.setattr(f"{cli_mod}.latency_budget_scope_error", past_the_export)
     args = _build_parser().parse_args(["optimize", "--resume-from", str(resume_dir), "--critic-mock"])
 
     with pytest.raises(RuntimeError, match="resume passed its pin export"):
