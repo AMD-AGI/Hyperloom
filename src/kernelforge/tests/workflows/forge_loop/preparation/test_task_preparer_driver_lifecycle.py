@@ -41,13 +41,10 @@ def _case_ids():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bench-mode", action="store_true")
-    parser.add_argument("--profile-run", action="store_true")
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=30)
     args, _ = parser.parse_known_args()
     case_ids = _case_ids()
-    if args.profile_run:
-        return 0
     if args.bench_mode:
         for index, case_id in enumerate(case_ids, start=1):
             print(f"case_ms: {{case_id}} {{float(index):.6f}}")
@@ -168,7 +165,6 @@ def _prepare_with_spec_reading_driver(
             correctness_ok=ok,
             bench_ok=ok,
             graph_ok=True,
-            profile_ok=True,
             reasons=[] if ok else [f"bench exited {bench.returncode}"],
             details={"bench": {"case_count": len(case_ids)}},
         )
@@ -446,7 +442,6 @@ def _prepare_a_driver_the_agent_repairs(tmp_path, monkeypatch, driver_relpath: s
             correctness_ok=ok,
             bench_ok=ok,
             graph_ok=True,
-            profile_ok=True,
             reasons=[] if ok else ["bench exited 1"],
         )
 
@@ -608,7 +603,6 @@ def test_a_source_the_rollback_cannot_put_back_fails_the_preparation(tmp_path, m
             correctness_ok=True,
             bench_ok=True,
             graph_ok=True,
-            profile_ok=True,
         )
 
     monkeypatch.setattr(task_preparer, "_materialize_reference", lambda _w: None)
@@ -676,7 +670,6 @@ def test_a_source_that_comes_back_on_a_retry_is_not_still_reported_as_lost(tmp_p
             correctness_ok=ok,
             bench_ok=ok,
             graph_ok=ok,
-            profile_ok=ok,
         )
 
     monkeypatch.setattr(task_preparer, "_materialize_reference", lambda _w: None)
@@ -727,7 +720,6 @@ def test_preparation_gives_back_the_source_the_caller_had_not_the_one_head_holds
             correctness_ok=True,
             bench_ok=True,
             graph_ok=True,
-            profile_ok=True,
         )
 
     monkeypatch.setattr(task_preparer, "_materialize_reference", lambda _w: None)
@@ -792,7 +784,6 @@ def test_external_bundle_reuses_its_own_spec_beside_the_driver(tmp_path, monkeyp
             correctness_ok=ok,
             bench_ok=ok,
             graph_ok=True,
-            profile_ok=True,
             reasons=[] if ok else [f"bench exited {bench.returncode}"],
         )
 

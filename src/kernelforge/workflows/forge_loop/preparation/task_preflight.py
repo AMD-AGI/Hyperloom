@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic driver-contract preflight: correctness, benchmark, graph-replay and profile probes."""
+"""Deterministic driver-contract preflight: correctness, benchmark and graph-replay probes."""
 
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ from pathlib import Path
 
 from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock
 from kernelforge.evaluation.correctness.driver import test_correctness
-from kernelforge.evaluation.profiling.contracts import PROFILE_RUN_FLAG
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.utils.aiter_cache import cleanup_current_owned_aiter_locks
 
@@ -40,7 +39,6 @@ class PreflightResult:
     correctness_ok: bool
     bench_ok: bool
     graph_ok: bool = True
-    profile_ok: bool = True
     ranks_ok: bool = True
     reasons: list[str] = field(default_factory=list)
     details: dict = field(default_factory=dict)
@@ -210,10 +208,9 @@ atexit.register(_dump)
 # just needs to compile once.
 PREFLIGHT_CORRECTNESS_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_CORRECTNESS_TIMEOUT", "1800") or "1800")
 PREFLIGHT_BENCH_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_BENCH_TIMEOUT", "1800") or "1800")
-# graph-replay and profiling preflight run *after* bench, so the JIT cache is usually warm by then, but on a cold
-# first run a fresh module can still compile here.
+# The graph-replay preflight runs *after* bench, so the JIT cache is usually warm by then, but on a cold first run a
+# fresh module can still compile here.
 PREFLIGHT_GRAPH_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_GRAPH_TIMEOUT", "900") or "900")
-PREFLIGHT_PROFILE_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_PROFILE_TIMEOUT", "900") or "900")
 
 
 # How much of a failed stage's stdout+stderr to carry into the audit record and the repair agent's next prompt.
@@ -556,48 +553,12 @@ async def _count_graph_replays(
     return replays, tail
 
 
-async def _check_profile_contract(
-    driver: str,
-    *,
-    timeout_sec: float,
-) -> tuple[bool, str]:
-    """Verify the prepared driver owns a kernel-only profiling path."""
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        driver,
-        PROFILE_RUN_FLAG,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
-    )
-    try:
-        out, err = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=timeout_sec,
-        )
-    except asyncio.TimeoutError:
-        _kill_process_group(proc)
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(proc.wait(), timeout=10)
-        return False, "profile-run timed out"
-    except asyncio.CancelledError:
-        _kill_process_group(proc)
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(proc.wait(), timeout=10)
-        raise
-    output = (out.decode(errors="replace") if out else "") + (err.decode(errors="replace") if err else "")
-    if proc.returncode != 0:
-        return False, f"profile-run exited {proc.returncode}: {output[-200:]}"
-    return True, "verified"
-
-
 @dataclass(frozen=True)
 class DriverContract:
-    """What a driver must satisfy: the correctness threshold, graph timing, a profile run, its ranks and cases."""
+    """What a driver must satisfy: the correctness threshold, graph timing, its ranks and cases."""
 
     snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB
     require_graph: bool = False
-    require_profile: bool = False
     require_ranks: int = 1
     expected_case_ids: list[str] | None = None
 
@@ -732,25 +693,6 @@ class _PreflightWork:
             )
         return failed
 
-    async def check_profile(self, driver: str, deadline_unix: float) -> bool:
-        if not self.bench_ok:
-            self.reasons.append("cannot verify profiling contract because bench produced no timing")
-            return False
-        stage_started = time.monotonic()
-        profile_ok, profile_detail = await _check_profile_contract(
-            driver,
-            timeout_sec=_deadline_timeout(deadline_unix, PREFLIGHT_PROFILE_TIMEOUT_S),
-        )
-        self.details["profile"] = {
-            "ok": profile_ok,
-            "contract": profile_detail if profile_ok else "",
-            "seconds": _stage_seconds(stage_started),
-        }
-        if not profile_ok:
-            self.diagnostics["profile"] = profile_detail
-            self.reasons.append(f"profiling contract failed ({profile_detail})")
-        return profile_ok
-
 
 async def _preflight_async(
     driver: str,
@@ -767,7 +709,6 @@ async def _preflight_async(
             correctness_ok=False,
             bench_ok=False,
             graph_ok=not contract.require_graph,
-            profile_ok=not contract.require_profile,
             ranks_ok=contract.require_ranks <= 1,
             reasons=[f"driver file not found: {driver}"],
         )
@@ -791,16 +732,12 @@ async def _preflight_async(
         )
     if contract.require_ranks > 1:
         work.details["distributed"] = {"ok": graph.ranks_ok, "required_ranks": contract.require_ranks}
-    profile_ok = True
-    if contract.require_profile:
-        profile_ok = await work.check_profile(driver, deadline_unix)
-    ok = correctness_ok and work.bench_ok and graph.graph_ok and profile_ok and graph.ranks_ok
+    ok = correctness_ok and work.bench_ok and graph.graph_ok and graph.ranks_ok
     return PreflightResult(
         ok=ok,
         correctness_ok=correctness_ok,
         bench_ok=work.bench_ok,
         graph_ok=graph.graph_ok,
-        profile_ok=profile_ok,
         ranks_ok=graph.ranks_ok,
         reasons=work.reasons,
         details=work.details,

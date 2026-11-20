@@ -529,8 +529,8 @@ def _run_campaign(inputs: _RunInputs) -> dict:
     # Resolved before the loop is built: the ceiling estimator captures it, and the raw option is ``None`` by default.
     session_timeout_sec = _forge_session_timeout_sec(request.budget.max_hours, request.budget.session_timeout_sec)
 
-    # Construct the loop only after task preparation has resolved the profiling contract; IterationLoop snapshots that
-    # readiness in its runtime state.
+    # Construct the loop only after task preparation, which settles the driver, the persisted campaign and the source
+    # files the loop is built from.
     loop_runner = _build_loop_runner(run, assembly.source_files, session_timeout_sec)
 
     warm_start = _read_kb_warm_start(run, assembly.program_md, assembly.kb_warmstart_enabled)

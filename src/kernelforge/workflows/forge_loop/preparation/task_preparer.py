@@ -470,7 +470,6 @@ async def prepare_task(
         snr_threshold=task.snr_threshold,
         # A produced driver must actually time under a CUDA/HIP graph, not eagerly (nor silently fall back to eager).
         require_graph=True,
-        require_profile=True,
         require_ranks=task.nproc_per_node,
         expected_case_ids=list(task.expected_case_ids),
     )

@@ -122,7 +122,6 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
         contract=DriverContract(
             snr_threshold=iter_config.snr_threshold,
             require_graph=True,
-            require_profile=True,
             require_ranks=iter_config.nproc_per_node,
             expected_case_ids=expected_case_ids,
         ),

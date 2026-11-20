@@ -52,11 +52,11 @@ the kernel the loop is editing.
 ## The measurement surface
 
 Everything the loop decides on is produced by the task's own driver, invoked as
-`python driver.py <args>` and read over stdout: the correctness suite, the
-benchmark, and the workload that hardware profiling replays. That makes the
-driver — together with its timing harness and correctness reference — the
-measurement surface, and the loop protects it: an implementer edit or shell
-write that touches it is refused while the session can still be saved.
+`python driver.py <args>` and read over stdout: the correctness suite and the
+benchmark. That makes the driver — together with its timing harness and
+correctness reference — the measurement surface, and the loop protects it: an
+implementer edit or shell write that touches it is refused while the session
+can still be saved.
 
 The kernel sources are the opposite: the anchor named by `--kernel` and any
 tracked implementation file outside the protected surface may be edited. What

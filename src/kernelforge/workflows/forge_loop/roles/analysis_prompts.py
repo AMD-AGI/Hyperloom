@@ -36,7 +36,12 @@ Markdown-first output contract:
 
 The profiling reference has already been copied into the staging tools
 directory. Inspect that exact file; do not search the filesystem for another
-copy. If it does not fit this driver, create a separate adapter in staging/tools.
+copy. It profiles one command of your choosing, replayed once per counter group.
+Choose a command that launches the canonical kernel on the case being profiled
+and little else: no reference implementation, no correctness check, no timing
+loop. A mode of the driver that already does this is the cheapest; otherwise
+write an adapter in staging/tools that builds the case's inputs the way the
+driver does and calls the kernel 1-3 times once JIT compilation has settled.
 You may use other
 profilers, compiler IR, ISA, register, occupancy, cache, or roofline tools when
 useful. Preserve raw evidence and record every command in commands.jsonl.

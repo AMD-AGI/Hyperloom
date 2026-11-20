@@ -384,7 +384,7 @@ def test_agent_prompt_spells_out_nested_identity_and_evidence_list() -> None:
     assert "one task cannot modify multiple repos" in prompt
     assert "case_ms: <case> <ms>" in prompt
     assert "CUDA/HIP graph replays" in prompt
-    assert "driver.py --profile-run" in prompt
+    assert "--profile-run" not in prompt
     assert "before investigating secondary candidates" in prompt
 
 

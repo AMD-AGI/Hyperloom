@@ -240,8 +240,8 @@ def _build_prompt(brief: PromptBrief, reference_note: str, retry_note: RetryNote
         retry = (
             f"\n## {retry_note.heading}\n"
             f"{retry_note.failure}\n"
-            "Fix the driver so all preflight checks pass (correctness, benchmark, "
-            "graph timing, and profiling contract). Do not stop until "
+            "Fix the driver so all preflight checks pass (correctness, benchmark "
+            "and graph timing). Do not stop until "
             f"`python {driver_rel}` prints a correctness metric AND timing.\n"
         )
     return f"""\
@@ -285,11 +285,10 @@ Rules:
 {DRIVER_CONTRACT_SPEC}
 {retry}
 When done, ensure `python {driver_rel}` runs the complete correctness suite and
-prints an `SNR:`/`allclose:` line,
+prints an `SNR:`/`allclose:` line, and
 `python {driver_rel} --bench-mode --warmup 3 --iters 10` runs the complete
-benchmark suite and prints `wall_ms:`/`median_ms:` plus `case_ms:` lines, and
-`python {driver_rel} --profile-run` runs only the driver-selected profile case's
-target kernel; all commands must exit 0.
+benchmark suite and prints `wall_ms:`/`median_ms:` plus `case_ms:` lines; both
+commands must exit 0.
 """
 
 
@@ -378,11 +377,8 @@ is to make a task benchmarkable by forge-loop by writing a correct measurement
 driver (plus any helper files it needs). You NEVER modify the kernel or source
 files under optimization — only the measurement scaffolding. Time on the GPU
 (graph timing strongly preferred); the caller runs deterministic verification
-after every edit attempt. The finished driver MUST also expose the complete
-profiling contract: benchmark mode prints `case_ms: <case_id> <ms>` for every
-case the task declares, and `--profile-run` lets the driver select one
-representative case and run only its target kernel without a reference
-implementation or timing output.
+after every edit attempt. The finished driver MUST also report per-case timing:
+benchmark mode prints `case_ms: <case_id> <ms>` for every case the task declares.
 
 The driver you leave behind is committed and then re-run unchanged for hours. It
 may only depend at runtime on itself, the helpers you write beside it, and the
@@ -440,11 +436,6 @@ id is not one it declares. This is what makes "hold the code, vary one dispatch
 constant, time one shape" cost seconds instead of a full suite; a driver that
 ignores the flag still measures correctly, it just makes every such question cost
 the whole suite.
-Profiling — `python driver.py --profile-run`
-selects one representative case inside the driver and runs only its target
-kernel (no reference/correctness path), performs
-only enough warmup to settle JIT selection, launches 1-3 profiled iterations,
-synchronizes, and exits 0 without printing timing data.
 
 Rules:
 - Case definitions come from the task's real harness/config; do not invent
@@ -487,7 +478,7 @@ than settling for eager timing.
 
 
 REFERENCE_DRIVER_TEMPLATE = r'''
-"""Measurement driver — correctness (SNR) + graph-timed benchmark + profiling."""
+"""Measurement driver — correctness (SNR) + graph-timed benchmark."""
 from __future__ import annotations
 
 import argparse
@@ -566,22 +557,10 @@ def _run_bench(dims, case_id, warmup, iters, device):
     return 0
 
 
-def _run_profile(dims, device):
-    x = _make_inputs(dims, "full", device)
-    for _ in range(3):
-        your_entry_point(x)
-    torch.cuda.synchronize()
-    for _ in range(3):
-        your_entry_point(x)
-    torch.cuda.synchronize()
-    return 0
-
-
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--bench-mode", action="store_true")
     p.add_argument("--bench-case", default="")
-    p.add_argument("--profile-run", action="store_true")
     p.add_argument("--warmup", type=int, default=10)
     p.add_argument("--iters", type=int, default=30)
     args, _ = p.parse_known_args()
@@ -589,10 +568,6 @@ def main():
     if not torch.cuda.is_available():
         print("error: no GPU"); return 1
     device = "cuda"
-
-    if args.profile_run:
-        profile_dims = next(iter(CASES.values()))
-        return _run_profile(profile_dims, device)
 
     if args.bench_mode:
         selected = CASES
