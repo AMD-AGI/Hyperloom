@@ -192,6 +192,9 @@ def _section_session_context(session: SessionContext, *, kernel_enabled: bool) -
     if session.objective_value not in (None, ""):
         obj = f"{session.objective_kind}={session.objective_value}"
     roots = session.framework_source_roots or ()
+    from hyperloom.common.optimization_scope import scope_instructions
+
+    scope = scope_instructions()
     roots_line = ", ".join(roots) if roots else "none discovered on this host"
     tree = str(session.session_framework_tree or "").strip()
     tree_lines = [f"- session_framework_tree: {tree}  (the tree under optimisation)"] if tree else []
@@ -205,6 +208,7 @@ def _section_session_context(session: SessionContext, *, kernel_enabled: bool) -
         f"- graded_axis      : {graded_metric_key(benchmark_mode=session.benchmark_mode)}",
         f"- max_minutes      : {session.max_minutes}",
         *tree_lines,
+        *([scope] if scope else []),
         f"- framework_source_roots: {roots_line}  (source roots to search)",
     ]
     if is_agentx_mode(session.benchmark_mode):

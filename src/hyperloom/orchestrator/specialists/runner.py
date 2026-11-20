@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -96,6 +97,21 @@ def _worktree_source(params: dict[str, Any], *, framework_repo_path: str = "") -
         or resolve_framework_tree(str(params.get("framework") or ""))
         or str(framework_repo_path or "").strip()
     )
+
+
+def _scope_readable() -> tuple[Path, ...]:
+    """The benchmark directory, and what its prepared workload reads: the user's script and working directory.
+
+    ``HYPERLOOM_BYPASS_SCRIPTS_DIR`` reaches the specialist's environment but no bind
+    follows it -- it is not one of ``confinement.DATA_VARIABLES`` -- so in a sandbox the
+    variable names a directory that is not there and reading the declaration is ``ENOENT``.
+    The script is the model code the specialist rewrites around; without its directory
+    bound the specialist ships a generic wrapper for a model it could not read.
+    """
+    from hyperloom.inference_optimizer.script_workload import benchmark_inputs
+
+    declared = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
+    return tuple(dict.fromkeys((Path(declared), *benchmark_inputs(Path(declared))))) if declared else ()
 
 
 def _subprocess_call_outcome(result: SpecialistSubprocessResult) -> tuple[str, dict[str, Any]]:
@@ -743,7 +759,7 @@ class SpecialistRunner:
                     deadline=deadline,
                     gpu_lease=ctx.extra.get("gpu_specialist_lease"),
                     progress_cb=ctx.extra.get("specialist_progress_cb"),
-                    readable=(Path(str((ctx.task.params or {}).get("model_path") or "")),),
+                    readable=(Path(str((ctx.task.params or {}).get("model_path") or "")), *_scope_readable()),
                 )
             )
             call_status, call_attributes = _subprocess_call_outcome(sub_result)

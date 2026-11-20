@@ -87,6 +87,10 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "state.json",
     "manifest.json",
     "current_setting.sh",
+    "deployment/**",
+    # The export metadata sits outside deployment/, which each CLOSE replaces wholesale:
+    # a refusal empties that directory, and the reason for it has to survive.
+    "reports/deployment.json",
     # ── final report ──────────────────────────────────────────────────
     "reports/final.json",
     # ── bring-up ladder: pinned source trees, one JSON per attempt ────

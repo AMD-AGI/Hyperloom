@@ -325,6 +325,19 @@ class LaunchIdentityMixin:
             "final_overlay": str(cb.get("final_overlay") or "").strip(),
         }
 
+    def _inert_layers_in(self, stack: Any) -> list[dict[str, Any]]:
+        """The inert source layers that were already in the tree ``current_best`` was measured on.
+
+        An inert layer that landed *after* that lift was not in the tree at measurement
+        time, so replaying it would reconstruct a tree the number never described.
+        """
+        entries = [e for e in (stack or []) if isinstance(e, dict)]
+        return [
+            layer
+            for layer in (getattr(self.shared_state, "inert_source_layers", None) or [])
+            if int(layer.get("after_stack_len") or 0) < len(entries)
+        ]
+
     def build_env_spec(
         self,
         *,
@@ -383,7 +396,9 @@ class LaunchIdentityMixin:
             # current_best's embedded stack was promoted with its tput. Reading the
             # mutable global stack here could attach an unrelated source patch after
             # a resume or partial state write.
-            "source_snapshots": _source_snapshot_layers(cb.get("optimization_stack")),
+            "source_snapshots": _source_snapshot_layers(
+                cb.get("optimization_stack"), self._inert_layers_in(cb.get("optimization_stack"))
+            ),
             "overlay_pythonpath": materialized.get("final_overlay") or "",
             "overlay_digest": _geak_overlay_digest(str(materialized.get("final_overlay") or "")),
             "launch_json": str(RunLayout(Path(measurement["benchmark_workspace"])).launch) if launch else "",
