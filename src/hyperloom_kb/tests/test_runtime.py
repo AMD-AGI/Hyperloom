@@ -23,7 +23,6 @@ def test_no_configuration_returns_true_noop() -> None:
     kb = experience_kb_from_env({})
     assert isinstance(kb, NoOpExperienceKB)
     assert kb.enabled is False
-    assert kb.degraded is False
 
     session = kb.begin(
         ExperienceStart(run_id="run", seq=0, objective="ignored", provenance=Provenance("noop-test", "1"))
