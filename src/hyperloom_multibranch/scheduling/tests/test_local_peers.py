@@ -56,7 +56,7 @@ from hyperloom_multibranch.blackboard.rsi.lesson_recall import LessonRecall
 from hyperloom_multibranch.blackboard.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
 from hyperloom_multibranch.blackboard.rsi.similarity import task_conditions
 from hyperloom_multibranch.blackboard.tests.factories import START, delta, intent, judgement, profile, request, result
-from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
+from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, WorkloadKind
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, FixCase, read_case
 from hyperloom_multibranch.rulegate.gate import RuleGate
@@ -68,6 +68,7 @@ from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
+from hyperloom_multibranch.scheduling.experience_kb import ExperienceReaders
 from hyperloom_multibranch.scheduling.hosted_peers import HostedSandboxes
 from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, SessionLayout, create_session
 from hyperloom_multibranch.scheduling import launch_isolation as launch_isolation_module
@@ -809,7 +810,26 @@ async def test_the_briefs_of_an_inferencex_session_recall_tests_under_both_schem
         briefs = built.peers.briefs
 
     assert isinstance(briefs.experiences, SchemaReaders) and len(briefs.experiences.readers) == 2
-    assert isinstance(briefs.learnings, LessonRecall)
+
+
+async def test_the_briefs_and_the_learnings_tool_read_the_readers_of_the_sessions_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tests, learnings = FakeExperienceReader(completed_read()), FakeExperienceReader(completed_read())
+    kinds: list[WorkloadKind] = []
+
+    def readers(kind: WorkloadKind) -> ExperienceReaders:
+        kinds.append(kind)
+        return ExperienceReaders(tests, learnings)
+
+    monkeypatch.setattr(local_peers_module, "experience_readers", readers)
+
+    async with _peers(tmp_path / "run", monkeypatch, WORKLOAD) as built:
+        briefs = built.peers.briefs
+
+    assert kinds == [WorkloadKind.INFERENCEX] and briefs.experiences is tests
+    assert briefs.learnings is not None and briefs.learnings.past(profile(), "kv cache", limit=5).status == "completed"
+    assert len(learnings.calls) == 1 and tests.calls == []
 
 
 def test_the_specialists_recall_past_sessions_lessons_from_the_pool_beside_the_archive(

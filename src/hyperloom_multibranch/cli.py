@@ -362,7 +362,8 @@ def hosted_ready_session(host: HostInfo, workload: Workload, *, local: bool = Fa
 
 def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory], **storage: Path) -> ReadySession:
     """The peers ``load`` has for ``workload`` and the services, the Recipe KB, the RSI archive and the directories of
-    ``storage`` checked and the Experience KB started first; raises EnvironmentIncomplete or PeersUnavailable."""
+    ``storage`` checked and the Experience KB service started first; raises :class:`EnvironmentIncomplete` or
+    :class:`PeersUnavailable` naming the problem."""
 
     recipe_kb = recipe_kb_from_env()
     require_writable_storage(os.environ, storage)

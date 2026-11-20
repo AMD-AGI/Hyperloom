@@ -986,6 +986,22 @@ def test_a_ready_environment_without_an_experience_kb_runs_the_session_on_the_mo
     assert agent_cli == [_settings()]
 
 
+@pytest.mark.usefixtures("ready_environment")
+def test_a_ready_environment_with_an_experience_kb_starts_its_service_before_the_session_runs(
+    agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("HYPERLOOM_KB_URL", "http://127.0.0.1:24680")
+    monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "workspace-token")
+    started: list[int] = []
+    monkeypatch.setattr(cli, "start_experience_kb", lambda: started.append(len(agent_cli)))
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == 0
+
+    # Started once, while no session had run yet.
+    assert started == [0] and agent_cli == [_settings()]
+
+
 @pytest.mark.parametrize(("workload", "switch"), [(AGENTX_ARGS, None), (AGENTX_ARGS, "1"), (WORKLOAD_ARGS, "0")])
 @pytest.mark.usefixtures("ready_environment")
 def test_an_agentx_switch_that_agrees_with_the_workload_runs_the_session(

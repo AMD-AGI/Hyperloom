@@ -31,6 +31,7 @@ import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
+from itertools import zip_longest
 from typing import Any, Protocol, cast
 
 from hyperloom.common.perf_metric import TOTAL_TOKEN_THROUGHPUT
@@ -83,20 +84,24 @@ class ExperienceExport(Protocol):
 class SchemaReaders:
     """One read over several schemas of a service: each reader is asked in turn and the completed reads answer
     together, so one schema the service does not know yet leaves the others' Experiences; with none completed, the
-    first read's status answers. Every read's warnings are kept."""
+    first read's status answers. Their Experiences take turns by schema, at most ``limit`` in all, so no schema's are
+    always the ones cut. Every read's warnings are kept."""
 
     readers: tuple[ExperienceReader, ...]
 
     def read(self, decision: str, context: Mapping[str, Any], *, limit: int | None = None) -> RemoteReadResult:
         results = [reader.read(decision, context, limit=limit) for reader in self.readers]
         answering = [result for result in results if _status(result) == ReadStatus.COMPLETED.value] or results[:1]
+        turns = zip_longest(*(result.experiences for result in answering))
+        experiences = tuple(item for turn in turns for item in turn if item is not None)[:limit]
+        kept = {item.get("experience_id") for item in experiences}
         return RemoteReadResult(
             read_id=", ".join(str(result.read_id) for result in answering if result.read_id),
             status=_status(answering[0]),
             prompt_block="\n".join(str(result.prompt_block) for result in answering if result.prompt_block),
-            rendered_refs=tuple(ref for result in answering for ref in result.rendered_refs),
+            rendered_refs=tuple(ref for result in answering for ref in result.rendered_refs if ref.id in kept),
             warnings=tuple(str(warning) for result in results for warning in result.warnings),
-            experiences=tuple(item for result in answering for item in result.experiences),
+            experiences=experiences,
         )
 
 

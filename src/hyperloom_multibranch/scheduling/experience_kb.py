@@ -15,6 +15,10 @@ tests all go to ``multibranch-recipe-v1``, an InferenceX session's to ``inferenc
 changes, which go to ``multibranch-recipe-v1`` too, so an InferenceX session reads both
 (:class:`~hyperloom_multibranch.blackboard.knowledge.recall.SchemaReaders`). Without ``HYPERLOOM_KB_URL`` there are
 none.
+
+:func:`close_targets` is where CLOSE writes: one client of that KB for every schema, with the request timeout of the
+main flow's runs and the spool beside the workspace's service, which its next launch delivers. Once one write spools,
+the rest spool without a request, so a service that does not answer costs CLOSE one timeout.
 """
 
 from __future__ import annotations
@@ -31,14 +35,16 @@ from hyperloom_kb import RemoteClient, RemoteClientError, RemoteConfig, RemoteEx
 from hyperloom_kb.collect import load_mapping
 from hyperloom_multibranch.blackboard.knowledge import experience, learnings
 from hyperloom_multibranch.blackboard.knowledge.recall import ExperienceReader, SchemaReaders
+from hyperloom_multibranch.blackboard.rsi.session import CloseTargets
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
+from hyperloom_multibranch.scheduling.layout import SessionLayout
 
 log = logging.getLogger(__name__)
 
 KB_URL_ENV = "HYPERLOOM_KB_URL"
 ENSURE_COMMAND = ("-m", "hyperloom.inference_optimizer.experience_kb_service", "ensure", "--no-restart")
-#: Past the local service's own start timeout (60 s), so the start fails there first and says why.
-ENSURE_TIMEOUT_SECONDS = 90.0
+#: Past the local service's start (60 s) plus one health check (30 s), so a start fails there first and says why.
+ENSURE_TIMEOUT_SECONDS = 120.0
 #: The mappings each kind of session publishes its tests through, the schema of each one read.
 TEST_MAPPINGS: dict[WorkloadKind, tuple[Path, ...]] = {
     WorkloadKind.AGENTX: (experience.MULTIBRANCH_MAPPING_PATH,),
@@ -104,10 +110,44 @@ def experience_readers(kind: WorkloadKind, env: Mapping[str, str] | None = None)
     return ExperienceReaders(tests[0] if len(tests) == 1 else SchemaReaders(tests), reader(learnings.MAPPING_PATH))
 
 
+def close_targets(layout: SessionLayout) -> CloseTargets:
+    """Where CLOSE writes ``layout``'s session: the environment's KB, which writes nothing when none is configured
+    and fails each step when it is misconfigured, else one client of it for every schema."""
+
+    from hyperloom.inference_optimizer.experience_kb_service import REQUEST_TIMEOUT_SECONDS, spool_root
+
+    reports, judge, blobs = layout.reports, layout.judge, layout.blobs
+    try:
+        config = RemoteConfig.from_env(spool_root=spool_root(), timeout_seconds=REQUEST_TIMEOUT_SECONDS)
+    except RemoteClientError as exc:
+        log.warning("CLOSE cannot write to the Experience KB: %s", exc)
+        config = None
+    if config is None:
+        return CloseTargets(receipts=reports, judge_transcript=judge, blobs=blobs)
+    client = RemoteClient(config)
+    try:
+        client.flush_spool()
+    except (RemoteClientError, OSError) as exc:
+        log.warning("Experience KB spool flush deferred: %s", exc)
+
+    def writer(mapping: Path) -> RemoteExperienceKB:
+        return RemoteExperienceKB(client, load_mapping(mapping).declaration)
+
+    return CloseTargets(
+        experience_kb=writer(experience.MAPPING_PATH),
+        learning_kb=writer(learnings.MAPPING_PATH),
+        receipts=reports,
+        judge_transcript=judge,
+        blobs=blobs,
+        multibranch_kb=writer(experience.MULTIBRANCH_MAPPING_PATH),
+    )
+
+
 __all__ = [
     "ENSURE_COMMAND",
     "TEST_MAPPINGS",
     "ExperienceReaders",
+    "close_targets",
     "experience_readers",
     "start_experience_kb",
 ]
