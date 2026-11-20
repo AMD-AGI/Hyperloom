@@ -673,7 +673,7 @@ class HostedMeasurementBackend:
             silent = silence.silent_for(self._clock())
             if silent is not None:
                 self._save_logs(handle, Path(call.output_dir))
-                detail = f"no output for {silent:.0f}s before the server was ready"
+                detail = f"no output for {silent:.0f}s before the server was ready, nor CPU use of its booting server"
                 return _infra(
                     call, HOSTED_INFRA_FAILURE_RC, HUNG_BEFORE_READY, detail, facts=_facts_of(attempt.runner, None)
                 )
