@@ -114,20 +114,7 @@ class QueryExecutor:
             for hit in hits:
                 contribution = self._contribution(signal_id, signal, hit)
                 contributions.append(contribution)
-                adjusted.append(
-                    CandidateHit(
-                        hit.experience_id,
-                        hit.capability,
-                        contribution.contribution,
-                        {
-                            **hit.details,
-                            "signal_id": signal_id,
-                            "signal_weight": signal.weight,
-                            "raw_score": contribution.raw_score,
-                            "normalized_score": contribution.normalized_score,
-                        },
-                    )
-                )
+                adjusted.append(CandidateHit(hit.experience_id, hit.capability, contribution.contribution))
             candidate_sets.append(tuple(adjusted))
         return _Recall(tuple(contributions), tuple(candidate_sets))
 
