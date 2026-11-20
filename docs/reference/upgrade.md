@@ -154,6 +154,24 @@ or the `bypass` route produced; read `ceiling_available` instead of
 Versioning in [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
 The trace certificate's `production_*` keys go with them; read `selected_role`.
 
+### Required: the Critic's knowledge-base client is removed
+
+`python -m hyperloom.agents.critic.runtime.cli replay-dead-letter` is removed
+and exits 2 as an unknown subcommand; there was never anything to replay.
+
+These are no longer read and are silently ignored, so drop them:
+
+* `CRITIC_KB_CLIENT_MODE` and `KB_BASE_URL`; `optimize` no longer exits 2 on
+  an unknown mode, or on `live` without a base URL.
+* `KB_READ_ENABLED`, `KB_WRITE_ENABLED`, `KB_TIMEOUT_MS`, `KB_RETRY_MAX`,
+  `KB_DEAD_LETTER_DIR` and `KB_SERVICE_TOKEN`.
+* `CRITIC_PRIOR_CACHE_TTL_SECONDS`, `CRITIC_KB_PRIOR_LIMIT`,
+  `CRITIC_KB_BREAKER_THRESHOLD` and `CRITIC_KB_BREAKER_COOLDOWN_SECONDS`.
+
+`session_breakdown.json` drops `kb_priors` from critic iteration rows and `kb`
+from `critic_review` on framework proposals. Consumers that read them should
+stop.
+
 ### Required: quantization failure exits 4
 
 A failed `--quantize` prelude now exits 4 instead of 3; exit 3 means only

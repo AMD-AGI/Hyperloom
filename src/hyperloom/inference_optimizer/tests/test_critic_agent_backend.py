@@ -425,9 +425,7 @@ async def test_single_proposal_yields_matching_verdict(
                 "active_path_proof_when_relevant",
                 "rollback_plan",
             ],
-            "ceiling_importance": 0.84,
         },
-        "notes": [],
     }
     reply = """```json
 {"review_verdicts": [
@@ -505,7 +503,6 @@ async def test_multiple_proposals_yield_one_verdict_each(
             },
         ],
         "review_constraints": {},
-        "notes": [],
         "missing_context": [],
         "required_context": [],
     }
@@ -538,7 +535,6 @@ async def test_empty_proposals_yields_heartbeat_no_llm(
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [],
         "review_constraints": {},
-        "notes": [],
         "missing_context": [],
         "required_context": [],
     }
@@ -576,7 +572,6 @@ async def test_unparseable_llm_reply_fails_the_turn(
             }
         ],
         "review_constraints": {},
-        "notes": [],
         "missing_context": [],
         "required_context": [],
     }
@@ -603,7 +598,6 @@ def _single_proposal_judge_bundle() -> dict[str, Any]:
             }
         ],
         "review_constraints": {},
-        "notes": [],
         "missing_context": [],
         "required_context": [],
     }
@@ -677,7 +671,6 @@ async def test_missing_critical_context_yields_needs_review(
             }
         ],
         "review_constraints": {},
-        "notes": [],
         "missing_context": ["model", "framework"],
         "required_context": ["model", "framework"],
     }
@@ -737,7 +730,6 @@ async def test_commit_review_subprocess_failure_raises(
             }
         ],
         "review_constraints": {},
-        "notes": [],
         "missing_context": [],
         "required_context": [],
     }
@@ -848,7 +840,6 @@ async def test_per_turn_workdirs_are_isolated(
             }
         ],
         "review_constraints": {},
-        "notes": [],
         "missing_context": [],
         "required_context": [],
     }
@@ -883,7 +874,6 @@ async def test_user_prompt_includes_judge_bundle_and_instructions(
             }
         ],
         "review_constraints": {},
-        "notes": [],
         "missing_context": [],
         "required_context": [],
     }
@@ -926,7 +916,6 @@ def _bundle_reviewing(action_name: str) -> dict[str, Any]:
             }
         ],
         "review_constraints": {},
-        "notes": [],
         "missing_context": [],
         "required_context": [],
     }
@@ -1023,7 +1012,6 @@ async def test_run_populates_request_context_from_manifest(
             }
         ],
         "review_constraints": {},
-        "notes": [],
         "missing_context": [],
         "required_context": [],
     }
@@ -1091,7 +1079,6 @@ async def test_missing_manifest_falls_back_to_empty_context(
         "merged_context": {},
         "proposals": [],
         "review_constraints": {},
-        "notes": [],
         "missing_context": [],
         "required_context": [],
     }
@@ -1180,7 +1167,6 @@ async def test_required_context_reaches_recorded_judge_bundle(
             }
         ],
         "review_constraints": {},
-        "notes": [],
         "missing_context": ["model", "framework"],
         "required_context": ["model", "framework"],
     }
@@ -1514,7 +1500,6 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
             }
         ],
         "review_constraints": {"allowed_verdicts": ["approve", "reject"]},
-        "notes": [],
     }
     review_json = (
         '{"review_verdicts": [{"target_proposal_msg_id": "abc1", '
@@ -1596,7 +1581,7 @@ async def test_critic_cache_blocks_preserve_transport_prompt(
     from hyperloom_common.llm import claude_oneshot, llm_config
 
     bundle = _minimal_judge_bundle()
-    bundle["notes"] = ["Unicode \u03bb ==== JUDGE BUNDLE ==== inside data"]
+    bundle["missing_context"] = ["Unicode \u03bb ==== JUDGE BUNDLE ==== inside data"]
     reply = '{"review_verdicts":[{"target_proposal_msg_id":"p1","verdict":"approve"}]}'
     backend, _ = _make_anthropic_backend(
         fake_critic_root, fake_session_dir, monkeypatch, results=[], judge_bundle=bundle
@@ -1651,7 +1636,6 @@ async def test_critic_cache_blocks_preserve_transport_prompt(
             "required_context",
             "proposals",
             "review_constraints",
-            "notes",
         )
     }
     dynamic = (

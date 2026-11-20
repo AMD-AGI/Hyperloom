@@ -5,7 +5,7 @@ needed).
 
 | Flag | Backend class | Behaviour |
 |---|---|---|
-| (none) / `--critic-agent` | `CriticAgentBackend` | Drives the `hyperloom.agents.critic` skill runtime via `python -m hyperloom.agents.critic.runtime.cli prepare-review` → Codex chat completion → `python -m hyperloom.agents.critic.runtime.cli commit-review`. Adds recipe KB priors when configured, per-session memory + idempotent `reviewed_msg_ids` (no double-verdict), `judge_bundle.review_constraints` injected into the LLM prompt, and `needs_review` / `critic_unavailable` source when context is missing. |
+| (none) / `--critic-agent` | `CriticAgentBackend` | Drives the `hyperloom.agents.critic` skill runtime via `python -m hyperloom.agents.critic.runtime.cli prepare-review` → Codex chat completion → `python -m hyperloom.agents.critic.runtime.cli commit-review`. Adds per-session memory + idempotent `reviewed_msg_ids` (no double-verdict), `judge_bundle.review_constraints` injected into the LLM prompt, and `needs_review` / `critic_unavailable` source when context is missing. |
 | `--critic-mock` | `MockCriticBackend` | Always-approve adapter. Use for offline / smoke tests when Codex creds aren't available. |
 
 Default is overridable per pod via `INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND`

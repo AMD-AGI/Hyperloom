@@ -275,7 +275,6 @@ def _review_prompt(judge_bundle: dict[str, Any]) -> str:
         "required_context": judge_bundle.get("required_context"),
         "proposals": judge_bundle.get("proposals"),
         "review_constraints": judge_bundle.get("review_constraints"),
-        "notes": judge_bundle.get("notes"),
     }
     bundle_text = json.dumps(bundle_view, ensure_ascii=False, separators=(",", ":"))
     return f"==== JUDGE BUNDLE ====\n{bundle_text}\n==== END JUDGE BUNDLE ====\n\n{_REVIEW_OUTPUT_INSTRUCTIONS}"

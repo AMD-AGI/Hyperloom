@@ -43,6 +43,7 @@ def test_prepare_review_for_coordinator_inbox_extracts_proposals(reviewer):
     # Context merged from shared_state.
     assert bundle.merged_context["model"] == "Qwen3-14B"
     assert bundle.merged_context["framework"] == "sglang"
+    assert bundle.required_context == []
     # Mixed batch: strictest class wins at bundle level (evidence_producer).
     constraints = bundle.review_constraints
     assert constraints["bundle_action_class"] == "evidence_producer"

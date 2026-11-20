@@ -16,7 +16,6 @@ from .errors import (
     IntentEnvelopeValidationError,
     ReviewValidationError,
 )
-from .importance_mapping import CRITIC_IMPORTANCE_CEILING
 from .inbox_parser import parse_inbox_prompt
 from .intent_envelope import (
     Intent,
@@ -141,7 +140,6 @@ class JudgeBundle:
     required_context: list[str] = field(default_factory=list)
     proposals: list[dict[str, Any]] = field(default_factory=list)
     review_constraints: dict[str, Any] = field(default_factory=dict)
-    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a deep, JSON-serialisable copy of the judge bundle."""
@@ -154,7 +152,6 @@ class JudgeBundle:
             "required_context": list(self.required_context),
             "proposals": [dict(p) for p in self.proposals],
             "review_constraints": dict(self.review_constraints),
-            "notes": list(self.notes),
         }
 
 
@@ -277,7 +274,6 @@ class DecisionReviewer:
         """Return the per-bundle review constraints payload."""
         constraints: dict[str, Any] = {
             "allowed_verdicts": sorted(ALLOWED_VERDICTS),
-            "ceiling_importance": CRITIC_IMPORTANCE_CEILING,
         }
         if not proposals:
             constraints["approve_requires"] = list(_APPROVE_REQUIRES_PATCH_LANDING)

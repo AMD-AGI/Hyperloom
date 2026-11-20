@@ -8,27 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.agents.critic.runtime.errors import IntentEnvelopeValidationError
-from hyperloom.agents.critic.runtime.importance_mapping import (
-    cap_importance,
-    importance_for_verdict,
-)
 from hyperloom.agents.critic.runtime.intent_envelope import validate_envelope
-
-
-# importance_mapping tests
-def test_importance_for_verdict() -> None:
-    assert importance_for_verdict(verdict="advise") == 0.4
-    assert importance_for_verdict(verdict="approve", confidence="high", has_measurement=True) == 0.7
-    assert importance_for_verdict(verdict="approve", confidence="high", has_measurement=False) == 0.4
-    assert importance_for_verdict(verdict="approve", confidence="low") == 0.4
-    assert importance_for_verdict(verdict="approve", confidence="medium", has_measurement=True) == 0.5
-    assert importance_for_verdict(verdict="approve", confidence=None) == 0.4
-
-
-def test_cap_importance() -> None:
-    assert cap_importance(2.0) == 0.84
-    assert cap_importance(-1.0) == 0.0
-    assert cap_importance(0.3) == pytest.approx(0.3)
 
 
 # intent_envelope.validate_envelope

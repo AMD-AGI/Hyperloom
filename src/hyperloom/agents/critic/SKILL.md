@@ -86,7 +86,6 @@ hard rules. These mirror the contract:
   batch; per-proposal class is in `proposal_action_classes` (a
   `{msg_id: class}` map). Apply the per-proposal class — not the
   bundle-level fallback — when emitting verdicts.
-- Critic-written `importance` is capped at `0.84`.
 - Verdicts must be drawn from the bundle's `allowed_verdicts` list.
 
 ## Action Classes
