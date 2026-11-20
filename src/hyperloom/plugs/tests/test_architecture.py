@@ -28,6 +28,7 @@ _HOSTED = (
     "hyperloom.measure.consistency",
     "hyperloom.measure.consistency_resume",
     "hyperloom.measure.local",
+    "hyperloom.measure.local_outcome",
     "hyperloom.measure.local_templates",
     "hyperloom.measure.runner",
     "hyperloom_multibranch",

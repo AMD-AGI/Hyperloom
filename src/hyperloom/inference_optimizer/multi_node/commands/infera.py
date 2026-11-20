@@ -20,20 +20,9 @@ from .._internal.env_safety import filter_forward_env
 from .._internal.log import info, warn, err
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
 from .._internal.ssh_client import RemoteScript
+from .. import cluster_access as _mn_cli
 from ..pod_entrypoints import KERNEL_NODE_OPS_DEPS, LAUNCHER_DEPS, SHAPE_GATE_DEPS, extract_pod_json
 from ..pod_entrypoints import read_bundled_pod_python_script, read_pod_script
-
-
-class _MnCliProxy:
-    """Lazy proxy preserving ``inf._mn_cli`` monkeypatch compatibility."""
-
-    def __getattr__(self, name: str) -> Any:
-        from .. import cluster_access
-
-        return getattr(cluster_access, name)
-
-
-_mn_cli = _MnCliProxy()
 
 
 def _infera_target_for_host(state: dict[str, Any], ip: str) -> dict[str, Any]:
