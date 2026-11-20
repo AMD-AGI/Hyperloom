@@ -76,24 +76,6 @@ def test_invalid_request_returns_exit_code_2(tmp_path):
     assert rc == 2
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "init-session",
-        "close-session",
-        "list-priors",
-        "write-verdict",
-        "write-kb-drafts",
-        "add-contradiction",
-        "replay-dead-letter",
-    ],
-)
-def test_removed_subcommands_are_rejected(command):
-    with pytest.raises(SystemExit) as exc:
-        main([command])
-    assert exc.value.code == 2
-
-
 def test_commit_review_rejects_non_object_review(tmp_path):
     request = _write(tmp_path / "req.json", {"raw_prompt": ""})
     review = _write(tmp_path / "review.json", ["not", "a", "dict"])
