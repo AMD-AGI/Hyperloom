@@ -54,8 +54,6 @@ class CandidateProvider(Protocol):
         self,
         request: dict[str, JsonValue],
         view: QueryView,
-        *,
-        limit: int,
     ) -> tuple[CandidateHit, ...]:
         """Return source-labelled candidate hits for one exact Query View."""
 
@@ -99,22 +97,16 @@ class LocalRetrievalService:
         ):
             raise ValueError("external providers may implement only fuzzy or semantic recall")
 
-    def query(self, where: dict[str, JsonScalar], *, limit: int = 200) -> tuple[CandidateHit, ...]:
-        return self._structured_query(where, capability=RetrievalCapability.FILTER, limit=limit)
+    def query(self, where: dict[str, JsonScalar]) -> tuple[CandidateHit, ...]:
+        return self._structured_query(where, RetrievalCapability.FILTER)
 
-    def exact(self, where: dict[str, JsonScalar], *, limit: int = 200) -> tuple[CandidateHit, ...]:
-        return self._structured_query(where, capability=RetrievalCapability.EXACT, limit=limit)
+    def exact(self, where: dict[str, JsonScalar]) -> tuple[CandidateHit, ...]:
+        return self._structured_query(where, RetrievalCapability.EXACT)
 
     def _structured_query(
-        self,
-        where: dict[str, JsonScalar],
-        *,
-        capability: RetrievalCapability,
-        limit: int,
+        self, where: dict[str, JsonScalar], capability: RetrievalCapability
     ) -> tuple[CandidateHit, ...]:
         snapshot = self._view
-        if limit < 0:
-            raise ValueError("limit must be non-negative")
         candidate_ids = set(snapshot.visible_experience_ids)
         for field_name, value in sorted(where.items()):
             values = snapshot.field_lookup.get(field_name)
@@ -122,14 +114,12 @@ class LocalRetrievalService:
                 candidate_ids.clear()
                 break
             candidate_ids.intersection_update(values.get(_value_key(value), ()))
-        return tuple(CandidateHit(experience_id, capability) for experience_id in sorted(candidate_ids)[:limit])
+        return tuple(CandidateHit(experience_id, capability) for experience_id in sorted(candidate_ids))
 
     def recall(
         self,
         capability: RetrievalCapability,
         request: dict[str, JsonValue],
-        *,
-        limit: int = 20,
     ) -> tuple[CandidateHit, ...]:
         if capability not in {RetrievalCapability.FUZZY, RetrievalCapability.SEMANTIC}:
             raise ValueError("recall capability must be fuzzy or semantic")
@@ -142,9 +132,9 @@ class LocalRetrievalService:
         visible = set(snapshot.visible_experience_ids)
         return tuple(
             hit
-            for hit in provider.recall(request, snapshot, limit=limit)
+            for hit in provider.recall(request, snapshot)
             if hit.experience_id in visible and hit.capability is capability
-        )[:limit]
+        )
 
     def organize(self, candidate_sets: tuple[tuple[CandidateHit, ...], ...]) -> tuple[GroupCandidate, ...]:
         snapshot = self._view
