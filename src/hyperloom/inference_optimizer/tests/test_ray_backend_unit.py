@@ -1765,6 +1765,17 @@ def test_gpu_specialist_lease_infeasible_raises(monkeypatch: pytest.MonkeyPatch)
         lease.start_async(rs.ActorLaunch(["agent"]))
 
 
+@pytest.mark.parametrize(("cluster_gpus", "hinted"), [(0.0, True), (2.0, False)])
+def test_a_cluster_with_no_gpu_at_all_names_rocm_path(monkeypatch: pytest.MonkeyPatch, cluster_gpus, hinted):
+    """Zero is the signature of Ray's detector finding no librocm_smi64.so; too few is not."""
+    _install_infeasible_ray(monkeypatch, _InfeasibleFakeRay(gpus=cluster_gpus, has_serving_slot=True))
+
+    with pytest.raises(rs.RayInfeasibleError) as caught:
+        rs._assert_cluster_feasible(num_gpus=4, serving_slot=True)
+
+    assert ("ROCM_PATH" in str(caught.value)) is hinted
+
+
 class _PendingAcquireFakeRay:
     """Leave the actor pending once, then expose the benchmark result."""
 
