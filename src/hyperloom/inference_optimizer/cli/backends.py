@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import argparse
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +21,6 @@ from hyperloom.orchestrator.roles import (
     MockCriticBackend,
 )
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
-from hyperloom.orchestrator.scoring.proposal_scorer import ProposalScorer
 
 CRITIC_PROTOCOL_CHOICES: tuple[str, ...] = ("auto", "openai", "anthropic")
 
@@ -220,19 +218,3 @@ def _orchestration_banner(backend: Any, *, claude_model: str, codex_model: str) 
     if name == "codex":
         return f"Codex({codex_model})"
     return f"{backend.__class__.__name__}({getattr(backend, 'model', '') or codex_model})"
-
-
-def _build_proposal_scorer(
-    args: argparse.Namespace,
-    session_dir: Path | None = None,
-) -> ProposalScorer | None:
-    """Construct the advisory specialist-proposal scorer, or ``None``."""
-    if not getattr(args, "proposal_scoring", False):
-        return None
-    if llm_config.is_anthropic_only():
-        # ProposalScorer is OpenAI-compatible only.
-        return None
-    models = tuple(m for m in (s.strip() for s in str(args.proposal_scorer_models).split(",")) if m)
-    if not models:
-        return None
-    return ProposalScorer(models=models, session_dir=session_dir)

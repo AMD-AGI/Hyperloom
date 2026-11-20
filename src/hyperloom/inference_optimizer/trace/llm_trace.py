@@ -27,7 +27,6 @@ VALID_COMPONENTS: frozenset[str] = frozenset(
         "kernel_agent",
         "specialist",
         "critic",
-        "proposal_scorer",
         "geak",
         "forge",
         "tracelens",

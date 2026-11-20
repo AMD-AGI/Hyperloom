@@ -97,41 +97,6 @@ async def test_an_unknown_call_site_component_keeps_the_ambient_one(tmp_path):
     assert row["component"] == "coordinator"
 
 
-async def test_a_streamed_completion_reads_id_and_usage_off_its_chunks(tmp_path):
-    def chunk(content=None, finish=None, usage=None):
-        choices = []
-        if content is not None or finish is not None:
-            choices = [SimpleNamespace(delta=SimpleNamespace(content=content), finish_reason=finish)]
-        return SimpleNamespace(id="chatcmpl-s", model="gpt-s", choices=choices, usage=usage)
-
-    chunks = [
-        chunk(content="he"),
-        chunk(content="llo", finish="stop"),
-        chunk(usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2)),
-    ]
-
-    async def stream():
-        for item in chunks:
-            yield item
-
-    async def create(**_):
-        return stream()
-
-    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-    with tt.trajectory_scope(session_dir=tmp_path, component="coordinator"):
-        text, _usage = await llm_config.astream_chat_completion_text(client, component="proposal_scorer", model="gpt-s")
-
-    assert text == "hello"
-    (row,) = _requests(tmp_path)
-    attributes = row["attributes"]
-    assert row["component"] == "proposal_scorer"
-    assert attributes["message_id"] == "chatcmpl-s"
-    assert attributes["timing_source"] == tt.TIMING_HTTP_STREAM
-    assert attributes["ttft_ms"] is not None
-    assert (attributes["input_tokens"], attributes["output_tokens"]) == (10, 2)
-    assert attributes["stop_reason"] == "stop"
-
-
 def test_an_anthropic_messages_reply_is_one_streamed_request(tmp_path):
     usage = {"input_tokens": 5, "output_tokens": 0, "cache_read_input_tokens": 90}
     events = (

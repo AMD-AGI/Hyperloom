@@ -162,40 +162,7 @@ def _decision_id(kind: str, *facts: Any) -> str:
     return hashlib.sha256(json.dumps([kind, *facts]).encode("utf-8")).hexdigest()[:16]
 
 
-def _proposal_scores_by_variant(state: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-    """Index ``specialist_rounds[].ensemble_scores`` by variant name."""
-    out: dict[str, list[dict[str, Any]]] = {}
-    rounds = state.get("specialist_rounds")
-    if not isinstance(rounds, list):
-        return out
-    for r in rounds:
-        if not isinstance(r, dict):
-            continue
-        ens = r.get("ensemble_scores")
-        models = ens.get("models") if isinstance(ens, dict) else None
-        if not isinstance(models, dict):
-            continue
-        for slug, per_model in models.items():
-            if not isinstance(per_model, dict):
-                continue
-            for name, cell in per_model.items():
-                if not isinstance(cell, dict) or cell.get("score") is None:
-                    continue
-                out.setdefault(str(name), []).append(
-                    {
-                        "rater": str(slug),
-                        "score": _to_float(cell.get("score")),
-                        "reason": str(cell.get("reason") or ""),
-                    }
-                )
-    return out
-
-
-def _keep_revert_decision(
-    entry: JournalEntry,
-    phase_windows: list[tuple[float, str]],
-    scores_by_variant: dict[str, list[dict[str, Any]]],
-) -> dict[str, Any]:
+def _keep_revert_decision(entry: JournalEntry, phase_windows: list[tuple[float, str]]) -> dict[str, Any]:
     """The trace row for one KEEP/REVERT journal entry, still carrying its call-join ``key``."""
     ts = iso_z(entry.ts)
     decision: dict[str, Any] = {
@@ -216,9 +183,6 @@ def _keep_revert_decision(
         decision["predicted_gain_pct"] = predicted_gain
     if entry.metrics:
         decision["metrics"] = entry.metrics
-    scored = scores_by_variant.get(entry.variant_name)
-    if scored:
-        decision["proposal_scores"] = scored
     return {
         "decision_id": _decision_id("keep_revert", *entry.dedupe_key()),
         "key": _decision_key(entry.task_id),
@@ -249,7 +213,6 @@ def write_decision_trace(
     """
     calls = _load_llm_calls(session_dir, warnings)
     phase_windows = _build_phase_windows(state)
-    scores_by_variant = _proposal_scores_by_variant(state)
 
     _attribute_critic_calls(calls, _load_proposal_task_map(session_dir, warnings))
 
@@ -264,7 +227,7 @@ def write_decision_trace(
     entries = read_journal_entries(
         session_dir, on_error=lambda exc: warnings.append(f"failed to parse {journal_file}: {exc!r}")
     )
-    decisions = [_keep_revert_decision(e, phase_windows, scores_by_variant) for e in entries]
+    decisions = [_keep_revert_decision(e, phase_windows) for e in entries]
 
     # Sorted by time, the first decision that names a key takes that key's calls.
     decisions.sort(key=lambda d: d["ts"])
