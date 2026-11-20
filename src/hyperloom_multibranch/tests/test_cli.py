@@ -99,7 +99,7 @@ from hyperloom_multibranch.scheduling import review
 from hyperloom_multibranch.scheduling.layout import REVIEW_DIR, SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, SessionOutcome, persisted_run
-from hyperloom_multibranch.scheduling.resumption import ResumeRefused, resumable_run
+from hyperloom_multibranch.scheduling.resumption import ResumeRefused
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version, read_manifest
 from hyperloom_multibranch.scheduling import local_peers
@@ -1551,15 +1551,12 @@ def test_a_resume_continues_the_session_on_the_settings_its_manifest_holds(
     assert 3600.0 + before <= deadline <= 3600.0 + time.time(), "the first deadline, moved by the time it was down"
 
 
-def _hosted_ended_before_final(root: Path, **manifest: object) -> PersistedRun:
+def _hosted_ended_before_final(root: Path) -> PersistedRun:
     """A session measured in a grant's sandboxes, killed with the container it ran in, as a restart of the run in
-    another container reads it back: its last decision at 0, its deadline at 3600 and ``manifest`` written over its
-    manifest."""
+    another container reads it back: its last decision at 0 and its deadline at 3600."""
 
     layout = _ended_before_final(root)
     layout.runner_source.mkdir()
-    if manifest:
-        _manifest(layout, **manifest)
     _killed(layout, ANOTHER_POD)
     state_dir = root.parent / "state"
     state_dir.mkdir()
@@ -1569,30 +1566,18 @@ def _hosted_ended_before_final(root: Path, **manifest: object) -> PersistedRun:
     return persisted
 
 
-def test_a_hosted_restart_resumes_up_to_the_first_starts_deadline_giving_no_downtime_back(tmp_path: Path) -> None:
-    persisted = _hosted_ended_before_final(tmp_path / "session")
-    before = _tree(persisted.layout.root)
-
-    assert hosted_resume_deadline(persisted, 1800.0) == 3600.0
-    assert _tree(persisted.layout.root) == before
-    with pytest.raises(ResumeRefused, match="a grant's sandboxes"):
-        resumable_run(persisted.layout.root)
-
-
 @pytest.mark.parametrize(
-    ("stop_after_map", "baseline_decision", "now", "error"),
+    ("baseline_decision", "now", "error"),
     [
-        (False, False, 0.0, "recorded no baseline to resume from"),
-        (True, True, 0.0, "its map"),
-        (False, True, 3600.0, "used its budget, which ended 0 s ago"),
+        (False, 0.0, "recorded no baseline to resume from"),
+        (True, 3600.0, "used its budget, which ended 0 s ago"),
     ],
-    ids=["no baseline decision", "stop after map", "budget used"],
+    ids=["no baseline decision", "budget used"],
 )
 def test_a_hosted_restart_refuses_a_resume_it_should_finish_instead(
-    stop_after_map: bool, baseline_decision: bool, now: float, error: str, tmp_path: Path
+    baseline_decision: bool, now: float, error: str, tmp_path: Path
 ) -> None:
-    settings = encode(replace(_settings(), stop_after_map=stop_after_map))
-    persisted = _hosted_ended_before_final(tmp_path / "session", settings=settings)
+    persisted = _hosted_ended_before_final(tmp_path / "session")
     if not baseline_decision:
         persisted.layout.decisions.write_text("", encoding="utf-8")
     before = _tree(persisted.layout.root)

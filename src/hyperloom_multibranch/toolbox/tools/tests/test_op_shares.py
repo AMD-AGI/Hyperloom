@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The ``tracelens`` and ``roofline`` pointers carry the profiled commit's per-op shares; no other tool's does."""
+"""The ``tracelens`` pointer carries the profiled commit's per-op shares; no other tool's does."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from hyperloom_multibranch.toolbox.tools import (
     JobStatus,
     ToolJobs,
     ToolRequest,
-    build_tool,
+    roofline_tool,
     tracelens_tool,
 )
 from hyperloom_multibranch.toolbox.tools.op_shares import OPS_SUMMARY
@@ -88,15 +88,15 @@ async def test_a_trace_that_did_not_come_from_a_profile_test_has_no_request_id(t
 async def test_another_tool_keeps_the_pointer_defaults_even_beside_a_table(tmp_path: Path) -> None:
     report = _report(tmp_path, {"silu": 5.0})
 
-    class Executor:
-        async def __call__(self, ctx: Any) -> dict:
-            return {"ok": True, "analysis_md_path": str(report)}
+    async def handler(payload: dict, *, session_dir: Path) -> dict:
+        return {"status": "ok", "hot_kernels": ["silu"], "analysis_md_path": str(report)}
 
-    tool = build_tool()
-    tool._factory = lambda workdir: Executor()
+    tool = roofline_tool()
+    tool._handler = handler
     sink = RecordingSink()
     jobs = ToolJobs([tool], sink, tmp_path / "jobs", push_delay_seconds=0)
-    await jobs.wait(jobs.submit(ToolRequest("build", "b1", dict(_IDS))))
+    job = jobs.submit(ToolRequest("roofline", "b1", {"trace_input": "/t", **_IDS}))
+    assert await jobs.wait(job) is JobStatus.SUCCEEDED
     pointer = sink.pointers[0]
     assert (pointer.commit_id, pointer.profile_request_id, dict(pointer.op_shares)) == ("", "", {})
 
