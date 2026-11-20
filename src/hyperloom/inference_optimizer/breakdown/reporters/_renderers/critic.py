@@ -89,24 +89,6 @@ def _totals(iterations: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(totals.items()))
 
 
-def _priors_facts(iterations: list[dict[str, Any]]) -> list[str]:
-    """What the knowledge base contributed, when it was wired up at all."""
-    configured = [it for it in iterations if to_mapping(it.get("kb_priors")).get("configured")]
-    if not configured:
-        return []
-    referenced = sum(1 for it in configured if to_mapping(it.get("kb_priors")).get("referenced_in_verdict"))
-    priors = 0
-    for it in configured:
-        try:
-            priors += int(to_mapping(it.get("kb_priors")).get("prior_count") or 0)
-        except (TypeError, ValueError):
-            continue
-    return [
-        f"Knowledge base was configured for {len(configured)} of {len(iterations)} passes, "
-        f"supplied {priors} prior(s), and was cited in {referenced} verdict(s)."
-    ]
-
-
 @register_renderer("critic")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
     """Render the critic-agent section.
@@ -131,7 +113,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         facts.append("Rulings across the session: " + ", ".join(f"{n} {v}" for v, n in totals.items()) + ".")
     else:
         facts.append("The critic was asked but never ruled on a proposal.")
-    facts.extend(_priors_facts(iterations))
 
     passes = md_table(
         ["#", "phase", "macro_cycle", "topic", "rulings", "said"],

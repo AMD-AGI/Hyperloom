@@ -232,6 +232,29 @@ async def test_retry_with_backoff_exhausts_and_raises():
         )
 
 
+@pytest.mark.asyncio
+async def test_retry_with_backoff_propagates_on_retry_callback_error() -> None:
+    from hyperloom.orchestrator.roles.base import RetryPolicy, retry_with_backoff
+
+    async def _flaky():
+        raise ConnectionError("transient")
+
+    async def _sleep(delay: float) -> None:
+        raise AssertionError("must not sleep after the callback raised")
+
+    def _bad_on_retry(*_args):
+        raise RuntimeError("telemetry failed")
+
+    with pytest.raises(RuntimeError, match="telemetry failed"):
+        await retry_with_backoff(
+            _flaky,
+            policy=RetryPolicy(max_attempts=2, base_delay_s=0.0, jitter_s=0.0),
+            retry_on=(ConnectionError,),
+            sleep=_sleep,
+            on_retry=_bad_on_retry,
+        )
+
+
 def test_retry_policy_from_env(monkeypatch):
     from hyperloom.orchestrator.roles.base import RetryPolicy
 

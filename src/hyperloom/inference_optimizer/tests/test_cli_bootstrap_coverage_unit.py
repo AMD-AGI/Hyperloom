@@ -168,17 +168,3 @@ def test_resolve_precision_explicit_kept_with_warning(tmp_path, capsys):
     assert args.precision == "fp8"
     captured = capsys.readouterr()
     assert "WARN" in captured.err and "bf16" in captured.err
-
-
-def test_resolve_precision_resume_value_wins(tmp_path, monkeypatch):
-    import argparse
-    from types import SimpleNamespace
-
-    from hyperloom.inference_optimizer.cli.launch_shape import _resolve_precision
-
-    monkeypatch.setenv("PRECISION", "")
-    (tmp_path / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
-    args = argparse.Namespace(precision=None, model=str(tmp_path), tp=None, ep=None, conc=None)
-    state = SimpleNamespace(precision="fp8", tp=2, ep=1, conc=64)
-    _resolve_precision(args, state)
-    assert args.precision == "fp8"

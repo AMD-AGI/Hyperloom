@@ -1003,6 +1003,25 @@ def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     assert coord.shared_state.current_best["tput"] == 738.0
 
 
+def test_promote_warm_replay_reproduced_with_envs_only_pushes_stack(tmp_path):
+    """Envs alone are a configuration to replay: a replay whose params carry no server args is still adopted."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "expected_gain_pct": 25.0,
+        "replay_task_id": "task-warm-replay-prelude",
+    }
+    task = _StubTask(params={"extra_envs": {"VLLM_ROCM_USE_AITER": "1"}, "baseline_tput_anchor": 600.0})
+
+    coord.phase_prelude.promote_warm_replay({"status": "succeeded", "output_throughput": 738.0}, task=task)
+
+    assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
+    assert len(coord.shared_state.optimization_stack) == 1
+    entry = coord.shared_state.optimization_stack[0]
+    assert entry["extra_server_args"] == ""
+    assert entry["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
+
+
 def test_promote_warm_replay_refused_by_the_lift_is_not_reproduced(tmp_path):
     """A replay that beats the baseline but not the adopted configuration is not adopted.
 
