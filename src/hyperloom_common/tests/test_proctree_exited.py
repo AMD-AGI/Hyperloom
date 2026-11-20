@@ -192,6 +192,22 @@ def test_tree_cpu_sec_sums_the_tree_and_skips_what_exited_or_was_replaced(monkey
     assert proctree.tree_cpu_sec(1) is None, "a tree that cannot be listed is no reading"
 
 
+def test_tree_cpu_sec_counts_a_child_collected_between_the_listing_and_its_read_through_the_root(monkeypatch):
+    collected = False
+
+    def read(pid: int) -> list[str]:
+        nonlocal collected
+        if pid == 2:
+            collected = True  # it exits now, and the root waits for it before its own read
+            raise FileNotFoundError(pid)
+        cutime = 10 if collected else 0
+        return ["S", *["0"] * 10, "5", "0", str(cutime), "0", *["0"] * 4, "100"]
+
+    monkeypatch.setattr(proctree, "_stat_fields", read)
+    monkeypatch.setattr(proctree, "descendants", lambda root: [(2, 200)])
+    assert proctree.tree_cpu_sec(1) == pytest.approx(15 / os.sysconf("SC_CLK_TCK"))
+
+
 def test_tree_cpu_sec_reads_this_process(sleeper):
     assert (proctree.tree_cpu_sec(os.getpid()) or 0.0) > 0.0
     assert proctree.tree_cpu_sec(sleeper.pid) is not None

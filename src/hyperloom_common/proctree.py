@@ -97,18 +97,19 @@ def tree_cpu_sec(root_pid: int) -> float | None:
     """The CPU seconds, user and system, that ``root_pid`` and its live descendants have used so far.
 
     Each process counts the children it has already waited for, so a descendant that exits and is collected keeps its
-    time in its parent's count; one that exits between the listing and its read is left out of this reading, and the
-    total may then fall, which a caller reads as no growth. ``None`` when ``root_pid`` or ``/proc`` cannot be read.
+    time in its parent's count. The root is read last, so a child collected between the listing and its own read is
+    counted through the root rather than lost from this reading and found again in the next one; a total that still
+    falls is one a caller reads as no growth. ``None`` when ``root_pid`` or ``/proc`` cannot be read.
     """
-    root = _cpu_ticks(root_pid, None)
-    if root is None:
-        return None
     try:
         below = descendants(root_pid)
     except OSError:
         return None
-    ticks = root + sum(_cpu_ticks(pid, start_time) or 0 for pid, start_time in below)
-    return ticks / os.sysconf("SC_CLK_TCK")
+    ticks = sum(_cpu_ticks(pid, start_time) or 0 for pid, start_time in below)
+    root = _cpu_ticks(root_pid, None)
+    if root is None:
+        return None
+    return (root + ticks) / os.sysconf("SC_CLK_TCK")
 
 
 def boot_unix() -> float:
