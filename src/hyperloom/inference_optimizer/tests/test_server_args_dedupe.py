@@ -43,6 +43,11 @@ def test_dedupe_keeps_a_negative_number_as_a_value():
     assert out == "--seed -2"
 
 
+def test_dedupe_keeps_a_scientific_negative_number_as_a_value():
+    out = dedupe_extra_server_args("--x -1e-3 --x 2")
+    assert out == "--x 2"
+
+
 def test_dedupe_normalizes_equals_form():
     out = dedupe_extra_server_args("--attention-backend=ROCM_ATTN --attention-backend ROCM_AITER_FA")
     assert out == "--attention-backend ROCM_AITER_FA"
