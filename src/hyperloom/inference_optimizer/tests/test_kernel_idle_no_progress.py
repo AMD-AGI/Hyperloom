@@ -9,10 +9,11 @@ import pytest
 
 from hyperloom_common.env import EnvValueError
 from hyperloom.orchestrator.phases import machine_state as ms
+from hyperloom.orchestrator.phases import phase_predicates, phase_transitions
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
-def _state(idle_ticks, *, idle_seconds=ms._kernel_idle_min_seconds()):
+def _state(idle_ticks, *, idle_seconds=phase_predicates._kernel_idle_min_seconds()):
     # ``now_unix`` is pinned at 10_000.0 by the callers below, so backdating the streak start by ``idle_seconds``
     # gives an exact idle window.
     return SharedState(
@@ -34,23 +35,23 @@ def _patch(monkeypatch, *, work_pending):
 
 def test_idle_at_threshold_winds_down_to_sweep(monkeypatch):
     _patch(monkeypatch, work_pending=True)
-    state = _state(ms._kernel_idle_max_ticks())
-    result = ms.compute_next_phase(state, now_unix=10_000.0)
+    state = _state(phase_predicates._kernel_idle_max_ticks())
+    result = phase_transitions.compute_next_phase(state, now_unix=10_000.0)
     assert result is not None
     _target, reason, evidence = result
     assert reason == "kernel_no_more_leverage"
     assert evidence["evidence"] == "kernel_idle_no_progress"
-    assert evidence["idle_ticks"] == ms._kernel_idle_max_ticks()
-    assert evidence["idle_max_ticks"] == ms._kernel_idle_max_ticks()
-    assert evidence["idle_seconds"] == ms._kernel_idle_min_seconds()
-    assert evidence["idle_min_seconds"] == ms._kernel_idle_min_seconds()
+    assert evidence["idle_ticks"] == phase_predicates._kernel_idle_max_ticks()
+    assert evidence["idle_max_ticks"] == phase_predicates._kernel_idle_max_ticks()
+    assert evidence["idle_seconds"] == phase_predicates._kernel_idle_min_seconds()
+    assert evidence["idle_min_seconds"] == phase_predicates._kernel_idle_min_seconds()
 
 
 def test_idle_below_tick_threshold_does_not_exit(monkeypatch):
     _patch(monkeypatch, work_pending=True)
-    state = _state(ms._kernel_idle_max_ticks() - 1)
+    state = _state(phase_predicates._kernel_idle_max_ticks() - 1)
     # Below the tick threshold and budget healthy -> KERNEL keeps running.
-    assert ms.compute_next_phase(state, now_unix=10_000.0) is None
+    assert phase_transitions.compute_next_phase(state, now_unix=10_000.0) is None
 
 
 def test_idle_below_wall_clock_floor_does_not_exit(monkeypatch):
@@ -59,27 +60,27 @@ def test_idle_below_wall_clock_floor_does_not_exit(monkeypatch):
     # dispatch would otherwise look like a stall.
     _patch(monkeypatch, work_pending=True)
     state = _state(
-        ms._kernel_idle_max_ticks() * 100,
-        idle_seconds=ms._kernel_idle_min_seconds() - 1.0,
+        phase_predicates._kernel_idle_max_ticks() * 100,
+        idle_seconds=phase_predicates._kernel_idle_min_seconds() - 1.0,
     )
-    assert ms.compute_next_phase(state, now_unix=10_000.0) is None
+    assert phase_transitions.compute_next_phase(state, now_unix=10_000.0) is None
 
 
 def test_unstamped_streak_start_does_not_exit(monkeypatch):
     # A hand-built or partially-initialised state has no measured idle window; the guard must refuse to act on a tick
     # count it did not observe itself.
     _patch(monkeypatch, work_pending=True)
-    state = _state(ms._kernel_idle_max_ticks())
+    state = _state(phase_predicates._kernel_idle_max_ticks())
     state.kernel_idle_since_unix = 0.0
-    assert ms.compute_next_phase(state, now_unix=10_000.0) is None
+    assert phase_transitions.compute_next_phase(state, now_unix=10_000.0) is None
 
 
 def test_work_pending_no_longer_blocks_idle_exit(monkeypatch):
     # Regression for the production stall: ``kernel_work_pending`` answered True for 1130 consecutive idle ticks
     # because three attempts on the ledger could never be advanced.
     _patch(monkeypatch, work_pending=True)
-    state = _state(ms._kernel_idle_max_ticks() + 5)
-    result = ms.compute_next_phase(state, now_unix=10_000.0)
+    state = _state(phase_predicates._kernel_idle_max_ticks() + 5)
+    result = phase_transitions.compute_next_phase(state, now_unix=10_000.0)
     assert result is not None
     _target, reason, evidence = result
     assert reason == "kernel_no_more_leverage"
@@ -89,33 +90,33 @@ def test_work_pending_no_longer_blocks_idle_exit(monkeypatch):
 def test_default_idle_max_ticks_is_three(monkeypatch):
     # Lock in the documented default when the env override is absent.
     monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", raising=False)
-    assert ms._kernel_idle_max_ticks() == 3
+    assert phase_predicates._kernel_idle_max_ticks() == 3
 
 
 def test_idle_max_ticks_env_override(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "5")
-    assert ms._kernel_idle_max_ticks() == 5
+    assert phase_predicates._kernel_idle_max_ticks() == 5
     # Non-positive falls back to 3.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "0")
-    assert ms._kernel_idle_max_ticks() == 3
+    assert phase_predicates._kernel_idle_max_ticks() == 3
     # Malformed raises.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "xx")
     with pytest.raises(EnvValueError):
-        ms._kernel_idle_max_ticks()
+        phase_predicates._kernel_idle_max_ticks()
 
 
 def test_default_idle_min_seconds_is_ten_minutes(monkeypatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", raising=False)
-    assert ms._kernel_idle_min_seconds() == 600.0
+    assert phase_predicates._kernel_idle_min_seconds() == 600.0
 
 
 def test_idle_min_seconds_env_override(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", "90")
-    assert ms._kernel_idle_min_seconds() == 90.0
+    assert phase_predicates._kernel_idle_min_seconds() == 90.0
     # Non-positive falls back to the 600s default.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", "0")
-    assert ms._kernel_idle_min_seconds() == 600.0
+    assert phase_predicates._kernel_idle_min_seconds() == 600.0
     # Malformed raises.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", "xx")
     with pytest.raises(EnvValueError):
-        ms._kernel_idle_min_seconds()
+        phase_predicates._kernel_idle_min_seconds()

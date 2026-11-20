@@ -309,7 +309,7 @@ class TestBaselineFailsClosedAtTheBoundary:
     def test_the_stop_reason_is_in_the_closed_vocabulary(self):
         """PolicyGate rejects anything outside it, so an unregistered value would
         silently degrade into "the run did not stop"."""
-        from hyperloom.orchestrator.phases.machine_state import is_valid_stop_reason
+        from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 
         assert is_valid_stop_reason("baseline_over_latency_budget")
 

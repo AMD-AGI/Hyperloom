@@ -21,7 +21,10 @@ from hyperloom.orchestrator.rehearsal import (
     SpecialistStep,
     VirtualClock,
 )
-from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn, SpecialistSubprocessDispatcher
+from hyperloom.orchestrator.specialists.subprocess_ import (
+    SpecialistSubprocessDispatcher,
+)
+from hyperloom.orchestrator.specialists.subprocess_types import SpecialistSpawn
 
 
 def _spawn(task_id: str, workspace: Path) -> SpecialistSpawn:

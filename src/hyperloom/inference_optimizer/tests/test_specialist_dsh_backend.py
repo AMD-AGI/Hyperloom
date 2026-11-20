@@ -20,6 +20,7 @@ from hyperloom.common.deadline import Deadline
 
 import hyperloom.orchestrator.specialists.dsh_launch as dsh_launch
 import hyperloom.orchestrator.specialists.subprocess_ as sp
+from hyperloom.orchestrator.specialists.subprocess_types import SpecialistSpawn
 from hyperloom.inference_optimizer.trace.parse_dsh_session import parse_dsh_session_trace
 
 SpecialistAgentUnavailableError = sp.SpecialistAgentUnavailableError
@@ -215,7 +216,7 @@ async def _run(dispatcher: Any, tmp_path: Path, **overrides: Any) -> Any:
         "deadline": Deadline.after(60.0),
     }
     kwargs.update(overrides)
-    return await dispatcher.run(sp.SpecialistSpawn(**kwargs))
+    return await dispatcher.run(SpecialistSpawn(**kwargs))
 
 
 def _dispatcher(dsh: Path | str, **config: Any) -> Any:

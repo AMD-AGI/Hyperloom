@@ -12,6 +12,7 @@ import pytest
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
+from hyperloom.orchestrator.loop.coordinator_state import close_undecided_proposals
 from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.roles import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -186,7 +187,7 @@ async def test_a_proposal_the_session_ends_without_a_verdict_on_closes_cancelled
         proposal_id = next(iter(c.state.pending_proposals))
         # A resumed leg ending over the same proposal must not close it twice.
         with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
-            c._close_undecided_proposals("max_ticks")
+            close_undecided_proposals(c.session_dir, c.state.pending_proposals, "max_ticks")
     finally:
         await c.stop()
 
@@ -212,7 +213,7 @@ async def test_a_supervisor_restart_leaves_undecided_proposals_open(session_dir)
     try:
         with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
             await c.tick(1)
-            c._close_undecided_proposals(SUPERVISOR_RESTART_REASON)
+            close_undecided_proposals(c.session_dir, c.state.pending_proposals, SUPERVISOR_RESTART_REASON)
     finally:
         await c.stop()
 

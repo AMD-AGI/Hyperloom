@@ -9,13 +9,12 @@ import pytest
 
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.policy.denial import PolicyDenied
-from hyperloom.orchestrator.policy.gate import (
-    KNOWLEDGE_DOMAIN_TAG_SET,
-    PolicyGate,
+from hyperloom.orchestrator.policy.gate import PolicyGate
+from hyperloom.orchestrator.policy.validators import (
     SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS,
     SPECIALIST_FREEFORM_WAVE_MAX,
 )
-from hyperloom.orchestrator.specialists.domains import SPECIALIST_DOMAINS
+from hyperloom.orchestrator.specialists.domains import KNOWLEDGE_DOMAIN_TAG_SET, SPECIALIST_DOMAINS
 from hyperloom.orchestrator.specialists.profile import (
     DEFAULT_BENCH,
     DEFAULT_MODE,

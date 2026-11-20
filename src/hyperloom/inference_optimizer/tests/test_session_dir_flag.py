@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_common.tests.shared_accounts import other_accounts
-from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer.cli import session_resume
 from hyperloom.inference_optimizer.breakdown import session_package
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.inference_optimizer.session import paths
@@ -98,7 +98,7 @@ def test_make_session_dir_without_a_target_still_generates_a_name(workspace):
 def test_resume_refuses_a_session_dir_flag(workspace, capsys):
     args = argparse.Namespace(resume_from=str(workspace / "m" / "s"), session_dir=workspace / "m" / "t")
     with pytest.raises(SystemExit) as raised:
-        cli._open_resumed_session(args)
+        session_resume._open_resumed_session(args)
     assert raised.value.code == 2
     assert "cannot be combined with --resume-from" in capsys.readouterr().err
 

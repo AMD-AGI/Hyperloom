@@ -12,6 +12,7 @@ import pytest
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.phases import machine_state as _ps
+from hyperloom.orchestrator.phases import phase_predicates, phase_transitions
 from hyperloom.orchestrator.prompts.prompt_builder import (
     _filter_rules_fragment,
     build_orchestration_prompt,
@@ -257,13 +258,13 @@ def test_reloop_line_and_transition_agree_at_the_cycle_limits(saturated, target_
     s.saturated_directions = {"kv_cache": {"saturated": saturated}}
     s.target_reached_at = target_reached_at
     s.last_conc_sweep = {"status": "succeeded", "summary": {"successful_pairs": 1}}
-    transition = _ps.compute_next_phase(s)
+    transition = phase_transitions.compute_next_phase(s)
     loops_back = bool(transition) and transition[0] == _ps.PHASE_FRAMEWORK_AGENT
 
-    reloop, _ = _ps.cycle_reloop_decision(s)
+    reloop, _ = phase_transitions.cycle_reloop_decision(s)
 
     assert reloop is loops_back
-    assert f"cycle_reloop_feasible={'true' if reloop else 'false'}" in _ps.phase_status_summary(s)
+    assert f"cycle_reloop_feasible={'true' if reloop else 'false'}" in phase_transitions.phase_status_summary(s)
 
 
 def test_phase_seam_snapshot_never_overwrites_the_boot_file(tmp_path):
@@ -381,7 +382,7 @@ def _render_state(phase: str, max_minutes: float = 120.0):
 
 
 def _reloop_line(phase: str) -> str | None:
-    out = _ps.phase_status_summary(_render_state(phase))
+    out = phase_transitions.phase_status_summary(_render_state(phase))
     return next((line for line in out.splitlines() if line.startswith("reloop")), None)
 
 
@@ -407,7 +408,7 @@ def test_reloop_is_a_projection_before_sweep():
 
 def test_reloop_feasibility_matches_the_transition_decision():
     s = _render_state(_ps.PHASE_SWEEP)
-    reloop, _ = _ps._reloop_decision(_ps.workflow_predicate_inputs(s))
+    reloop, _ = phase_transitions._reloop_decision(phase_predicates.workflow_predicate_inputs(s))
     expected = "true" if reloop else "false"
     assert f"cycle_reloop_feasible={expected}" in (_reloop_line(_ps.PHASE_SWEEP) or "")
 
@@ -415,7 +416,7 @@ def test_reloop_feasibility_matches_the_transition_decision():
 def test_reloop_infeasible_when_the_target_phase_is_disabled():
     s = _render_state(_ps.PHASE_SWEEP)
     s.framework_agent_phase_enabled = False
-    line = next(line for line in _ps.phase_status_summary(s).splitlines() if line.startswith("reloop"))
+    line = next(line for line in phase_transitions.phase_status_summary(s).splitlines() if line.startswith("reloop"))
     assert "cycle_reloop_feasible=false" in line
 
 

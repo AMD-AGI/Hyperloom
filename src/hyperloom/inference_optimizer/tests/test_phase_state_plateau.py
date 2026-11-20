@@ -19,10 +19,10 @@ from hyperloom.orchestrator.phases.machine_state import (
     PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
     _config_lever_evidence,
-    compute_next_phase,
     kernel_work_pending,
-    PhaseFlags,
 )
+from hyperloom.orchestrator.phases.phase_transitions import compute_next_phase
+from hyperloom.orchestrator.phases.phase_predicates import PhaseFlags
 from hyperloom.orchestrator.state import shared_state
 from hyperloom.orchestrator.state.shared_state import (
     ESCALATE_HINT_SKIP_TO_KERNEL,

@@ -29,9 +29,9 @@ from hyperloom.orchestrator.loop import dispatcher as dispatcher_module
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator, HeldLeases
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
+from hyperloom.orchestrator.specialists.subprocess_types import SpecialistSpawn
 
 from ._dispatch_helpers import pump_until_settled, stub_gpu_pool
-from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn
 
 
 def _dispatcher(tmp_path):
@@ -704,7 +704,7 @@ def test_specialist_followup_ack_reaches_dispatcher_cleanup(tmp_path, monkeypatc
     )
     monkeypatch.setattr(specialist, "_build_claude_cmd", lambda **kw: ["unused"])
     harvest = Mock(return_value=([], {}))
-    monkeypatch.setattr(specialist, "_collect_patches", harvest)
+    monkeypatch.setattr(ss, "collect_patches", harvest)
     scope = CancelScope()
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(ss, "time", SimpleNamespace(monotonic=lambda: clock.now, time=lambda: 100.0))

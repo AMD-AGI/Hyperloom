@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import preflight
+from hyperloom.inference_optimizer.cli import ray_provision
 
 from .test_preflight_ray_version_floor import _RAY_START_OPTION_DECLS, write_ray_cli_shim
 
@@ -47,22 +47,22 @@ def test_configured_installed_ray_avoids_reinstallation(monkeypatch, ray_package
     actual_run = subprocess.run
 
     def probe_only(argv, **kwargs):
-        assert argv[:2] == [sys.executable, str(preflight._RAY_SMOKE_SCRIPT)], (
+        assert argv[:2] == [sys.executable, str(ray_provision._RAY_SMOKE_SCRIPT)], (
             "An already matching runtime must not be reinstalled"
         )
         return actual_run(argv, **kwargs)
 
-    monkeypatch.setattr(preflight.subprocess, "run", probe_only)
-    result = preflight._ensure_ray(sys.executable, [])
+    monkeypatch.setattr(ray_provision.subprocess, "run", probe_only)
+    result = ray_provision._ensure_ray(sys.executable, [])
     assert result["status"] == "already_present"
     assert result["version_after"] == installed_ray
-    assert result["spec"] == f"ray[default]=={ray_override or preflight._RAY_MIN_VERSION}"
+    assert result["spec"] == f"ray[default]=={ray_override or ray_provision._RAY_MIN_VERSION}"
 
 
 @pytest.mark.parametrize("ray_version", ["2.44.1", "2.55.0"])
 def test_override_keeps_version_check(ray_packages, ray_version):
     ray_packages(ray_version)
-    result = preflight._ray_smoke(sys.executable, "2.58.0")
+    result = ray_provision._ray_smoke(sys.executable, "2.58.0")
     assert result.returncode != 0
     assert "version mismatch" in result.stderr
 
@@ -70,7 +70,7 @@ def test_override_keeps_version_check(ray_packages, ray_version):
 def test_override_keeps_cli_import_check(ray_packages, tmp_path):
     ray_packages("2.58.0")
     (tmp_path / "ray/scripts/scripts.py").write_text("raise ImportError('broken CLI')\n")
-    result = preflight._ray_smoke(sys.executable, "2.58.0")
+    result = ray_provision._ray_smoke(sys.executable, "2.58.0")
     assert result.returncode != 0
     assert "ray CLI import failed" in result.stderr
 
@@ -80,12 +80,12 @@ def test_override_keeps_the_cli_parse_check(ray_packages):
     # when that CLI parses the argv the orchestrator hands `ray start`.
     offered = {opt: _RAY_START_OPTION_DECLS[opt] for opt in ("--head", "--port")}
     ray_packages("2.58.0", start_options=offered)
-    result = preflight._ray_smoke(sys.executable, "2.58.0")
+    result = ray_provision._ray_smoke(sys.executable, "2.58.0")
     assert result.returncode != 0
-    assert f"ray start does not accept {' '.join(preflight._RAY_START_ARGV)}" in result.stderr
+    assert f"ray start does not accept {' '.join(ray_provision._RAY_START_ARGV)}" in result.stderr
 
     ray_packages("2.58.0")
-    assert preflight._ray_smoke(sys.executable, "2.58.0").returncode == 0
+    assert ray_provision._ray_smoke(sys.executable, "2.58.0").returncode == 0
 
 
 @pytest.mark.parametrize("post_install_returncode", [0, 1])
@@ -98,12 +98,12 @@ def test_install_and_recheck_share_overrides(monkeypatch, post_install_returncod
         code = 1 if len(calls) == 1 else post_install_returncode if len(calls) == 3 else 0
         return subprocess.CompletedProcess(argv, code, stdout="", stderr="probe failed" if code else "")
 
-    monkeypatch.setattr(preflight.subprocess, "run", fake_run)
+    monkeypatch.setattr(ray_provision.subprocess, "run", fake_run)
     if post_install_returncode:
         with pytest.raises(RuntimeError, match="smoke test still failed"):
-            preflight._ensure_ray("/runtime/python", ["--break-system-packages"])
+            ray_provision._ensure_ray("/runtime/python", ["--break-system-packages"])
     else:
-        result = preflight._ensure_ray("/runtime/python", ["--break-system-packages"])
+        result = ray_provision._ensure_ray("/runtime/python", ["--break-system-packages"])
         assert result["status"] == "applied"
         assert result["version_after"] == "2.58.0"
     assert calls[0] == calls[2]
@@ -127,9 +127,9 @@ def test_explicit_ray_pin_does_not_fall_back_to_another_release(monkeypatch):
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="No matching distribution found")
 
-    monkeypatch.setattr(preflight.subprocess, "run", fail_run)
+    monkeypatch.setattr(ray_provision.subprocess, "run", fail_run)
     with pytest.raises(RuntimeError, match=r"Ray install failed for ray\[default\]==2.58.0"):
-        preflight._ensure_ray("/runtime/python", [])
+        ray_provision._ensure_ray("/runtime/python", [])
     assert len(calls) == 2
     assert calls[1][-1] == "ray[default]==2.58.0"
 
@@ -144,8 +144,8 @@ def test_floor_fallback_when_the_default_ray_pin_cannot_resolve(monkeypatch):
         code, stdout = next(results)
         return subprocess.CompletedProcess(argv, code, stdout=stdout, stderr="unavailable" if code else "")
 
-    monkeypatch.setattr(preflight.subprocess, "run", fake_run)
-    result = preflight._ensure_ray("/runtime/python", [])
+    monkeypatch.setattr(ray_provision.subprocess, "run", fake_run)
+    result = ray_provision._ensure_ray("/runtime/python", [])
     assert calls[0] == calls[3]
     assert calls[0][-1] == ""
     assert calls[1][-1] == "ray[default]==2.44.1"
@@ -158,6 +158,6 @@ def test_newer_ray_and_click_pass_without_an_override(ray_packages):
     # The pair that preflight used to refuse: the CLI parses what Hyperloom
     # passes, so the probe accepts it and no repair is attempted.
     ray_packages("2.44.1")
-    result = preflight._ray_smoke(sys.executable, "")
+    result = ray_provision._ray_smoke(sys.executable, "")
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "2.44.1"

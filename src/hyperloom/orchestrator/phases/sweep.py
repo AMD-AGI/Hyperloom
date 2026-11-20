@@ -12,6 +12,7 @@ from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec
 from ..state.orchestration_memory import CYCLE_DIRECTIVE_REQUEST, build_cycle_memory
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
+from . import phase_transitions
 
 if TYPE_CHECKING:
     from .machine import Transition
@@ -53,7 +54,7 @@ class SweepPhase(CoordinatorCollaborator):
             or state.orchestration_memory.get("for_cycle") == state.macro_cycle
         ):
             return
-        feasible, _ = _phase_state.cycle_reloop_decision(state)
+        feasible, _ = phase_transitions.cycle_reloop_decision(state)
         if not feasible:
             return
         replies: list[Any] = []
@@ -248,7 +249,7 @@ class SweepPhase(CoordinatorCollaborator):
     def _grant_conc_sweep(self, task: Task, *, was_existing: bool, budget: int | None) -> None:
         """Grant the phase's budget exits' deferral to the sweep it is waiting on."""
         state = self.shared_state
-        now_unix = _phase_state._now_unix(state)
+        now_unix = _phase_state.state_now_unix(state)
         if not was_existing and budget is not None and budget > 0:
             # The phase granted this budget, so its own budget exits must not cut the sweep short of it: they defer
             # until the grant (and the lease grace that bounds the task anyway) runs out.

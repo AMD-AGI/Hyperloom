@@ -465,7 +465,7 @@ still waiting then is left unbenched.
 ### IR-8 — `--framework atom` is single-node only
 
 `--framework atom` (`atom.entrypoints.openai_server`) reaches full parity with sglang/vllm
-EXCEPT multi-node: `_apply_atom_auto_tighten` in `cli.py` rejects
+EXCEPT multi-node: `_apply_atom_auto_tighten` in `cli/session_setup.py` rejects
 `--nodes >= 2` with `SystemExit(2)` (atom upstream has no multi-node TP
 wiring). No other flag is auto-flipped — kernel-agent, framework-agent,
 profile / roofline / TraceLens all run on atom. The atom-specific

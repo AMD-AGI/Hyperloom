@@ -582,7 +582,7 @@ def test_a_sweep_that_could_not_write_its_report_records_the_step_that_broke(
 
     with (
         session_scope(session_dir),
-        patch("hyperloom.orchestrator.kernel.conc_sweep._write_csv", side_effect=_no_csv),
+        patch("hyperloom.orchestrator.kernel.conc_sweep_report._write_csv", side_effect=_no_csv),
     ):
         payload = _run(state, session_dir, recorder=_recorder(), run_grid=_all_succeed)
         event = _sweep_event(session_dir)
