@@ -192,6 +192,52 @@ def _maskless_round(path: Path) -> SuiteRound:
     return SuiteRound(path, path.parent, round_lifecycle(path.parent, LifecycleMode.OWN))
 
 
+def _portless_point(path: Path) -> Path:
+    """A point that names no ``PORT``, as every round the server lifecycle does not hold (a profile round) is."""
+    _write_point(path)
+    point = yaml.safe_load(path.read_text(encoding="utf-8"))
+    del point["benchmark"]["envs"]["PORT"]
+    path.write_text(yaml.safe_dump(point), encoding="utf-8")
+    return path
+
+
+def test_each_round_of_a_point_without_a_port_boots_on_a_free_port_of_its_own(session, tmp_path, monkeypatch) -> None:
+    # Such a round used to listen on the launcher's default 8888: two profile rounds on one machine, or one beside a
+    # co-tenant holding 8888 on a shared host, failed with port_in_use before the profiler ran.
+    free = iter((23001, 23002))
+    monkeypatch.setattr(suite_rounds, "pick_server_port", lambda: next(free))
+    rounds = _rounds(2)
+    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
+    points = [_portless_point(tmp_path / f"slot{i}" / "point.yaml") for i in range(2)]
+    written = [point.read_text(encoding="utf-8") for point in points]
+
+    for point in points:
+        request = SuiteRound(point, point.parent, round_lifecycle(point.parent, LifecycleMode.OWN))
+        run_suite_round(suite_route(session), request, on_poll=lambda: None)
+
+    assert [call.config.server.port for call in rounds.calls] == [23001, 23002]
+    assert [point.read_text(encoding="utf-8") for point in points] == written, (
+        "the port goes into the round, not the point"
+    )
+
+
+def test_a_point_that_names_its_port_keeps_it(session, tmp_path, monkeypatch) -> None:
+    # The server lifecycle pins PORT (inject_lifecycle) so every round it holds reaches the one server it keeps up.
+    monkeypatch.setattr(suite_rounds, "pick_server_port", lambda: pytest.fail("a named port was replaced"))
+    rounds = _rounds()
+    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
+    point = _write_point(tmp_path / "slot" / "point.yaml", PORT="8123")
+
+    run_suite_round(
+        suite_route(session),
+        SuiteRound(point, point.parent, round_lifecycle(point.parent, LifecycleMode.OWN)),
+        on_poll=lambda: None,
+    )
+
+    (config,) = [call.config for call in rounds.calls]
+    assert config.server.port == 8123
+
+
 def test_the_round_sees_the_host_environment_but_not_its_gpu_masks() -> None:
     names = inherited_env_names({"PATH": "/bin", "HF_HOME": "/hf", "ROCR_VISIBLE_DEVICES": "0", "BASH_FUNC_x%%": "()"})
 

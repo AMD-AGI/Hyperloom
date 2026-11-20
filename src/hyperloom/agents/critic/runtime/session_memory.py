@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import os
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -18,11 +17,11 @@ from hyperloom_common.jsonio import read_json_strict as _common_read_json_strict
 from hyperloom_common.timeutil import now_iso
 
 from .errors import SessionMemoryError
-from .scope_builder import UNKNOWN_SCOPE_VALUES
 
 
 DEFAULT_SESSION_MEMORY_DIR = "/var/lib/critic-session-memory"
-DEFAULT_PRIOR_CACHE_TTL_SECONDS = 3600
+
+_UNKNOWN_VALUES: frozenset[str] = frozenset({"", "unknown", "null", "none"})
 
 # Keys whose stored value can be filled in for the next request.
 _MERGEABLE_CONTEXT_KEYS: tuple[str, ...] = (
@@ -44,7 +43,7 @@ def _is_missing(value: Any) -> bool:
     """Return ``True`` if value should be treated as absent."""
     if value is None:
         return True
-    if isinstance(value, str) and value.strip().lower() in UNKNOWN_SCOPE_VALUES:
+    if isinstance(value, str) and value.strip().lower() in _UNKNOWN_VALUES:
         return True
     return False
 
@@ -67,12 +66,6 @@ class SessionMemory:
         if root is None:
             root = os.environ.get("CRITIC_SESSION_MEMORY_DIR", DEFAULT_SESSION_MEMORY_DIR)
         self.root = Path(root)
-        self.prior_cache_ttl = float(
-            os.environ.get(
-                "CRITIC_PRIOR_CACHE_TTL_SECONDS",
-                str(DEFAULT_PRIOR_CACHE_TTL_SECONDS),
-            )
-        )
 
     # Path helpers
     def session_dir(self, session_id: str) -> Path:
@@ -97,10 +90,6 @@ class SessionMemory:
     def _decisions_path(self, session_id: str) -> Path:
         """Return the path to the session's ``decisions.jsonl``."""
         return self.session_dir(session_id) / "decisions.jsonl"
-
-    def _priors_cache_path(self, session_id: str) -> Path:
-        """Return the path to the session's ``kb_priors_cache.json``."""
-        return self.session_dir(session_id) / "kb_priors_cache.json"
 
     def _reviewed_path(self, session_id: str) -> Path:
         """Return the path to the session's ``reviewed_msg_ids.json``."""
@@ -148,38 +137,6 @@ class SessionMemory:
         }
         _common_append_jsonl(self._decisions_path(session_id), record, fmt=JsonLineFormat(ensure_ascii=False))
 
-    # KB priors cache (per-scope+topic)
-    def get_cached_priors(self, session_id: str, cache_key: str) -> list[dict[str, Any]] | None:
-        """Return cached KB priors for a key if present and not expired."""
-        cache = _read_object(self._priors_cache_path(session_id), default={})
-        entry = cache.get(cache_key)
-        if not isinstance(entry, dict):
-            return None
-        ts = entry.get("ts")
-        priors = entry.get("priors")
-        if not isinstance(priors, list) or not isinstance(ts, (int, float)):
-            return None
-        if time.time() - float(ts) > self.prior_cache_ttl:
-            return None
-        return priors
-
-    def put_cached_priors(
-        self,
-        session_id: str,
-        cache_key: str,
-        priors: list[dict[str, Any]],
-    ) -> None:
-        """Store KB priors under ``cache_key`` with the current timestamp."""
-        if not isinstance(priors, list):
-            raise SessionMemoryError("priors must be a list")
-        self._ensure_session_dir(session_id)
-        path = self._priors_cache_path(session_id)
-        cache = _read_object(path, default={})
-        cache[cache_key] = {"ts": time.time(), "priors": list(priors)}
-        _common_atomic_write_json(
-            path, cache, fmt=JsonFormat(sort_keys=False, ensure_ascii=False), options=WriteOptions()
-        )
-
     # Already-reviewed proposals
     def mark_reviewed(
         self,
@@ -226,7 +183,6 @@ def _read_object(path: Path, *, default: dict[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
-    "DEFAULT_PRIOR_CACHE_TTL_SECONDS",
     "DEFAULT_SESSION_MEMORY_DIR",
     "MergeResult",
     "SessionMemory",

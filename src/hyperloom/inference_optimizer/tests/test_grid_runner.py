@@ -31,9 +31,12 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     VariantResult,
     _build_variant_yaml,
     GridRecipe,
+    run_grid,
 )
 
 from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
+
+from .conftest import write_benchmark_yaml
 
 
 # Section 1: _write_variant_abort_marker
@@ -181,6 +184,28 @@ def test_variant_result_carries_error_class_field():
         status="succeeded",
     )
     assert vr_ok.to_dict()["error_class"] == ""
+
+
+@pytest.mark.asyncio
+async def test_a_variant_whose_config_cannot_be_built_fails_as_yaml_build_error(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+    base = tmp_path / "base.yaml"
+    write_benchmark_yaml(base)
+
+    def _boom(*_a, **_k):
+        raise ValueError("bad yaml render")
+
+    monkeypatch.setattr(gr, "_build_variant_yaml", _boom)
+    results = await run_grid(
+        grid=[GridVariant("vA")],
+        output_root=tmp_path / "out",
+        recipe=GridRecipe(base_yaml_path=base),
+    )
+    assert len(results) == 1
+    assert results[0].status == "failed"
+    assert results[0].error_class == "yaml_build_error"
 
 
 # Section 2: helper-level units

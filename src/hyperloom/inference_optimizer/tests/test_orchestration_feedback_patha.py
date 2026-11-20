@@ -14,6 +14,7 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.conversation import _first_present, _format_inbox_event
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.inference_optimizer.session.paths import make_session_dir
+from hyperloom.orchestrator.phases import phase_transitions
 
 
 # A1 — structured inbox formatter
@@ -494,7 +495,7 @@ def test_short_session_reloop_boundary(monkeypatch, benchmark_timeout, expected_
         monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", benchmark_timeout)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", raising=False)
     remaining_sec = expected_floor + remaining_offset
-    target, _reason, ev = ps.compute_next_phase(st, now_unix=start_unix + 7200 - remaining_sec)
+    target, _reason, ev = phase_transitions.compute_next_phase(st, now_unix=start_unix + 7200 - remaining_sec)
 
     assert ev["min_remaining_sec_effective"] == expected_floor
     assert (target == ps.PHASE_FRAMEWORK_AGENT) is (remaining_offset >= 0), ev

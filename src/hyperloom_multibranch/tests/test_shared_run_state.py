@@ -19,6 +19,7 @@ import pytest
 
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom_multibranch import cli
+from hyperloom_multibranch import cli_options
 from hyperloom_multibranch.scheduling import hosted_run
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.hosted_run import (
@@ -100,7 +101,7 @@ def test_a_session_json_this_account_cannot_read_ends_the_run_naming_it(
 
 def test_the_manifest_a_later_leg_finishes_the_session_from_is_the_group_s(shared: Path) -> None:
     tmp_path = shared
-    settings = cli.settings_from(cli.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda _tp: 1)
+    settings = cli_options.settings_from(cli_options.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda _tp: 1)
     manifest = SessionManifest(
         code_version=code_version(),
         rule_pack=dict(rule_pack_identity()),

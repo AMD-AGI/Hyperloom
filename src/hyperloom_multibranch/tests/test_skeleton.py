@@ -140,22 +140,22 @@ from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.hosted_run import prelude_landed
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
-from hyperloom_multibranch.scheduling.lifecycle import (
-    COMPLETED_REASONS,
-    CUT_SHORT,
-    LESSONS_KEY,
-    NO_BASELINE,
-    NO_CARDS_LEFT,
+from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, LESSONS_KEY, NO_BASELINE, NO_CARDS_LEFT, Session
+from hyperloom_multibranch.scheduling.local_peers import workload_rule
+from hyperloom_multibranch.scheduling.manifest import read_manifest
+from hyperloom_multibranch.scheduling.resumption import (
     PersistedRun,
-    Session,
+    ResumeRefused,
+    deadline_after_downtime,
+    persisted_run,
+    resumable_run,
+)
+from hyperloom_multibranch.scheduling.session_types import (
+    COMPLETED_REASONS,
     SessionHost,
     SessionOutcome,
     SessionServices,
-    persisted_run,
 )
-from hyperloom_multibranch.scheduling.local_peers import workload_rule
-from hyperloom_multibranch.scheduling.manifest import read_manifest
-from hyperloom_multibranch.scheduling.resumption import ResumeRefused, deadline_after_downtime, resumable_run
 from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.prelude import roofline_ceiling

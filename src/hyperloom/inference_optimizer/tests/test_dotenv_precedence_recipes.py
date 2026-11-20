@@ -35,7 +35,6 @@ SETUP_DOC = REPO_ROOT / "src" / "hyperloom" / "skills" / "hyperloom-setup" / "SK
 # In-package docs ship in the wheel; examples/ only exists in a source checkout.
 RECIPE_DOCS = (
     PKG_ROOT / "SKILL.md",
-    PKG_ROOT / "references" / "operations.md",
     REPO_ROOT / "examples" / "hyperloom-custom-advanced" / "SKILL.md",
     REPO_ROOT / "examples" / "hyperloom-qwen3-8b-3h" / "SKILL.md",
     ATOM_DOC,

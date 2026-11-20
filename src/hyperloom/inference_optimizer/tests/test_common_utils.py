@@ -430,7 +430,7 @@ def test_infera_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
     assert inf._collect_forward_env()["MORI_FOO"] == "1"
 
     calls: list[tuple[str, str]] = []
-    monkeypatch.setattr(inf._mn_cli, "_read_pod_script", lambda name: f"script:{name}")
+    monkeypatch.setattr(inf, "read_pod_script", lambda name: f"script:{name}")
 
     def _run(state, ip, script, **kw):
         calls.append((ip, script.args))
@@ -460,9 +460,10 @@ def test_infera_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_rayjob_forward_runtime_env_carries_extra_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """The RayJob launch must ship per-round env to every rank via runtime_env."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import cluster_access
 
     def runtime_env():
-        return mn_cli._forward_runtime_env(mn_cli.per_round_forward_overrides())
+        return mn_cli._forward_runtime_env(cluster_access.per_round_forward_overrides())
 
     monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
     assert runtime_env() is None
@@ -588,7 +589,7 @@ def test_infera_node_ops_apply_and_revert(tmp_path: Path, monkeypatch: pytest.Mo
         "ssh_port": 2222,
     }
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
-    monkeypatch.setattr(inf._mn_cli, "_read_bundled_pod_python_script", lambda name, deps: f"script:{name}")
+    monkeypatch.setattr(inf, "read_bundled_pod_python_script", lambda name, deps: f"script:{name}")
     monkeypatch.setattr(
         inf._mn_cli,
         "_infera_ssh_run_script",
@@ -668,7 +669,7 @@ def test_infera_tracelens_and_geak_install(monkeypatch: pytest.MonkeyPatch, tmp_
     }
     saved = _patch_infera_state(monkeypatch, state)
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
-    monkeypatch.setattr(inf._mn_cli, "_read_pod_script", lambda name: f"script:{name}")
+    monkeypatch.setattr(inf, "read_pod_script", lambda name: f"script:{name}")
     monkeypatch.setattr(inf._mn_cli, "_poll_timeout_from_args", lambda args: 5)
 
     calls: list[tuple[str, str, str]] = []
@@ -721,7 +722,7 @@ def test_infera_process_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
         == inf._mn_cli.EXIT_CONFIG_ERROR
     )
 
-    monkeypatch.setattr(inf._mn_cli, "_read_pod_script", lambda name: f"script:{name}")
+    monkeypatch.setattr(inf, "read_pod_script", lambda name: f"script:{name}")
     monkeypatch.setattr(inf._mn_cli, "_poll_timeout_from_args", lambda args: 1)
     monkeypatch.setattr(
         inf._mn_cli,
@@ -936,7 +937,7 @@ def test_infera_install_timeout_failure(monkeypatch: pytest.MonkeyPatch) -> None
     }
     monkeypatch.setattr(inf._mn_cli, "_load_state", lambda: dict(state))
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
-    monkeypatch.setattr(inf._mn_cli, "_read_pod_script", lambda name: f"script:{name}")
+    monkeypatch.setattr(inf, "read_pod_script", lambda name: f"script:{name}")
     monkeypatch.setattr(inf._mn_cli, "_poll_timeout_from_args", lambda args: 5)
 
     geak_calls = {"n": 0}
@@ -1183,6 +1184,57 @@ def test_gpu_type_autodetect_is_none_when_torch_cannot_load_its_library(monkeypa
     monkeypatch.setattr(sys, "meta_path", [SimpleNamespace(find_spec=_loader_failure), *sys.meta_path])
 
     assert gpu_types._autodetect_gpu_type() is None
+
+
+def test_r9700_autodetect_requires_exact_product_not_gfx1201(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer import gpu_types
+
+    class _Completed:
+        stdout = "GPU[0] : Card series: AMD Radeon AI PRO R9700"
+
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: _Completed())
+    assert gpu_types._autodetect_gpu_type() == "r9700"
+
+    _Completed.stdout = "GPU[0] : Card series: AMD Radeon AI PRO R9700S"
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(get_device_properties=lambda _idx: SimpleNamespace(gcnArchName="gfx1201"))
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    assert gpu_types._autodetect_gpu_type() is None
+
+
+def test_amd_gpu_type_resolves_explicit_then_env_then_probe_and_rejects_unknown_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hyperloom.inference_optimizer import gpu_types
+
+    monkeypatch.delenv("TARGET_GPU_TYPE", raising=False)
+    monkeypatch.delenv("GPU_TYPE", raising=False)
+    assert gpu_types._resolve_amd_gpu_type("mi308x") == "mi308x"
+    assert gpu_types._resolve_amd_gpu_type("nvidia") is None
+
+    monkeypatch.setenv("GPU_TYPE", " MI325X ")
+    assert gpu_types._resolve_amd_gpu_type() == "mi325x"
+    monkeypatch.setenv("TARGET_GPU_TYPE", "MI325X")
+    monkeypatch.setenv("GPU_TYPE", "mi300x")
+    assert gpu_types._resolve_amd_gpu_type() == "mi325x"
+    monkeypatch.delenv("TARGET_GPU_TYPE")
+    monkeypatch.setenv("GPU_TYPE", "unknown")
+    assert gpu_types._resolve_amd_gpu_type() is None
+
+    monkeypatch.setenv("TARGET_GPU_TYPE", "r9700")
+    monkeypatch.setenv("GPU_TYPE", "gfx12")
+    assert gpu_types._resolve_amd_gpu_type() == "r9700"
+
+    monkeypatch.delenv("TARGET_GPU_TYPE", raising=False)
+    monkeypatch.setenv("GPU_TYPE", "gfx1201")
+    assert gpu_types._resolve_amd_gpu_type() is None
+
+    monkeypatch.delenv("GPU_TYPE", raising=False)
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: "mi355x")
+    assert gpu_types._resolve_amd_gpu_type() == "mi355x"
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: "gfx000")
+    assert gpu_types._resolve_amd_gpu_type() is None
 
 
 # Tests for breakdown.reporters

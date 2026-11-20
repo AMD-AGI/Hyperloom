@@ -52,8 +52,6 @@ in-phase kernel patch would.
 
 * `judge_bundle.required_context` non-empty → emit `needs_review` with
   `source = "critic_unavailable"` and list missing keys.
-* `judge_bundle.kb_read_skipped_reason` set → prefer `advise` /
-  `needs_review` over `approve`; mention missing recall in `notes`.
 * Honor `judge_bundle.review_constraints.approve_requires`.
 
 ### Hard rules (terse mirror of SKILL.md)

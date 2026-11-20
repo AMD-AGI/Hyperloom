@@ -17,6 +17,7 @@ import pytest
 
 from hyperloom_common.unified_diff import PatchOp, PatchTarget
 from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
+from hyperloom.orchestrator.kernel import patch_restore, patch_snapshot
 from hyperloom.orchestrator.kernel import patch_jit_cache, patch_rebuild
 
 
@@ -374,7 +375,7 @@ def test_apply_snapshot_keeps_legacy_optional_deploy_roots(
     snapshot.mkdir()
     (snapshot / "kernel.py").write_text("VALUE = 2\n", encoding="utf-8")
 
-    result = akp.apply_snapshot(
+    result = patch_snapshot.apply_snapshot(
         descriptors=[PatchTarget(PatchOp.WRITE, "kernel.py")],
         snapshot_dir=snapshot,
         repo_root=repo_root,
@@ -546,7 +547,7 @@ def test_revert_exposes_runtime_jit_restore_failure(
     )
     assert applied["status"] == "ok", applied
     monkeypatch.setattr(
-        akp,
+        patch_restore,
         "_restore_aiter_jit_build",
         lambda *args, **kwargs: {
             "status": "failed",
@@ -593,7 +594,7 @@ def test_a_retried_revert_that_succeeds_reports_no_issues(
             return {"status": "failed", "error": "simulated restore failure"}
         return {"status": "ok", "restored_to": str(jit_build_dir)}
 
-    monkeypatch.setattr(akp, "_restore_aiter_jit_build", _restore_once_it_is_retried)
+    monkeypatch.setattr(patch_restore, "_restore_aiter_jit_build", _restore_once_it_is_retried)
 
     failed = akp.revert_kernel_patch(applied["manifest_path"])
     retried = akp.revert_kernel_patch(applied["manifest_path"])
@@ -1103,7 +1104,7 @@ def test_multinode_runtime_jit_must_be_invalidated_on_every_pod(
         return {"status": "ok"}
 
     monkeypatch.setattr(akp, "_dispatch_multinode_apply", _fake_dispatch)
-    monkeypatch.setattr(akp, "_dispatch_multinode_revert", _fake_revert)
+    monkeypatch.setattr(patch_restore, "_dispatch_multinode_revert", _fake_revert)
 
     result = akp.apply_kernel_patch(
         akp.KernelPatchRequest(
@@ -1141,7 +1142,8 @@ def _make_importable_checkout(tmp_path, monkeypatch):
     monkeypatch.delenv("AITER_JIT_DIR", raising=False)
     monkeypatch.delenv("AITER_META_DIR", raising=False)
     monkeypatch.setattr(akp, "_is_multi_node", lambda: False)
-    monkeypatch.setattr(akp, "_clear_python_kernel_caches", lambda target: {"status": "ok"})
+    for module in (akp, patch_restore):
+        monkeypatch.setattr(module, "clear_python_kernel_caches", lambda target: {"status": "ok"})
     return checkout, package
 
 

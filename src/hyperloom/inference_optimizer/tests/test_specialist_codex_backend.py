@@ -21,8 +21,8 @@ from hyperloom.common.deadline import Deadline
 
 import hyperloom.orchestrator.specialists.agent_cli_config as agent_cli_config
 import hyperloom.orchestrator.specialists.subprocess_ as sp
+from hyperloom.orchestrator.specialists.subprocess_types import SpecialistSpawn
 from hyperloom.inference_optimizer.trace import parse_usage as pu
-from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn
 
 AGENT_BACKEND_CLAUDE = llm_config.AGENT_BACKEND_CLAUDE
 AGENT_BACKEND_CODEX = llm_config.AGENT_BACKEND_CODEX

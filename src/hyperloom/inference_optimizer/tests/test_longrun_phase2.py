@@ -11,6 +11,7 @@ import pytest
 
 from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.phases import phase_transitions
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 from .conftest import make_mock_critic_coordinator
@@ -46,7 +47,7 @@ def _plateaued_explore_state(
 # plateau → actionable
 def test_both_arms_dry_is_actionable():
     st = _plateaued_explore_state()
-    out = ps.compute_next_phase(st)
+    out = phase_transitions.compute_next_phase(st)
     assert out is not None
     _target, reason, evidence = out
     assert reason == "optimize_no_more_leverage"
@@ -56,7 +57,7 @@ def test_both_arms_dry_is_actionable():
 
 def test_compute_next_phase_plateau_routes_optimize_to_kernel():
     st = _plateaued_explore_state()
-    target, reason, evidence = ps.compute_next_phase(st)
+    target, reason, evidence = phase_transitions.compute_next_phase(st)
     # Exhausted optimisation leverage switches lever to KERNEL.
     assert target == ps.PHASE_KERNEL_AGENT
     assert reason == "optimize_no_more_leverage"

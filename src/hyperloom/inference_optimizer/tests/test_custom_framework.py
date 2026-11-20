@@ -278,7 +278,7 @@ class TestLaunchValidation:
 
     def test_custom_without_its_paths_exits_instead_of_running(self, monkeypatch):
         """Failing here beats failing at the first benchmark, half an hour in."""
-        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+        from hyperloom.inference_optimizer.cli.session_setup import _apply_operator_supplied_paths
 
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
@@ -287,7 +287,7 @@ class TestLaunchValidation:
         assert exc.value.code == 2
 
     def test_a_path_that_is_not_a_directory_exits(self, monkeypatch, tmp_path):
-        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+        from hyperloom.inference_optimizer.cli.session_setup import _apply_operator_supplied_paths
 
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
@@ -298,7 +298,7 @@ class TestLaunchValidation:
         assert exc.value.code == 2
 
     def test_the_flags_publish_the_env_the_executors_read(self, monkeypatch, tmp_path):
-        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+        from hyperloom.inference_optimizer.cli.session_setup import _apply_operator_supplied_paths
 
         repo, scripts = tmp_path / "fw", tmp_path / "sc"
         repo.mkdir()
@@ -315,7 +315,7 @@ class TestLaunchValidation:
 
     def test_a_shipped_framework_keeps_its_backend_freedom(self, monkeypatch):
         """The gate is scoped to custom; xdit/sglang launches are untouched."""
-        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+        from hyperloom.inference_optimizer.cli.session_setup import _apply_operator_supplied_paths
 
         for framework in ("sglang", "vllm", "xdit"):
             args = self._args()
@@ -325,7 +325,7 @@ class TestLaunchValidation:
 
     def test_xdit_resume_accepts_env_without_flag(self, monkeypatch):
         """On resume, _restore exports XDIT_MODEL_NAME; apply must accept it."""
-        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+        from hyperloom.inference_optimizer.cli.session_setup import _apply_operator_supplied_paths
 
         monkeypatch.setenv("XDIT_MODEL_NAME", "FLUX.2-dev")
         args = self._args()
@@ -334,7 +334,7 @@ class TestLaunchValidation:
 
     def test_xdit_without_flag_or_env_exits(self, monkeypatch):
         """Neither flag nor env → exit 2."""
-        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+        from hyperloom.inference_optimizer.cli.session_setup import _apply_operator_supplied_paths
 
         monkeypatch.delenv("XDIT_MODEL_NAME", raising=False)
         args = self._args()
@@ -344,7 +344,7 @@ class TestLaunchValidation:
 
     def test_an_exported_env_outranks_the_flag(self, monkeypatch, tmp_path):
         """Matches every other path override in the loop."""
-        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+        from hyperloom.inference_optimizer.cli.session_setup import _apply_operator_supplied_paths
 
         repo = tmp_path / "fw"
         repo.mkdir()
@@ -358,7 +358,7 @@ class TestLaunchValidation:
 
     def test_an_exported_xdit_model_name_outranks_the_flag(self, monkeypatch):
         """XDIT_MODEL_NAME follows the same env-wins rule as the path overrides."""
-        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+        from hyperloom.inference_optimizer.cli.session_setup import _apply_operator_supplied_paths
 
         monkeypatch.setenv("XDIT_MODEL_NAME", "black-forest-labs/FLUX.2-dev")
         _apply_operator_supplied_paths(self._args(xdit_model_name="stale/override"), "xdit")
@@ -378,7 +378,7 @@ class TestEntrypointFailFast:
 
     def test_an_empty_scripts_dir_exits_listing_candidates(self, monkeypatch, tmp_path, capsys):
         """Failing here beats looping round_nonzero_invalid_measurement for hours."""
-        from hyperloom.inference_optimizer.cli import _require_custom_entrypoint
+        from hyperloom.inference_optimizer.cli.session_setup import _require_custom_entrypoint
 
         repo, scripts = tmp_path / "fw", tmp_path / "sc"
         repo.mkdir()
@@ -402,7 +402,7 @@ class TestEntrypointFailFast:
         ],
     )
     def test_a_resolved_script_passes(self, monkeypatch, tmp_path, script):
-        from hyperloom.inference_optimizer.cli import _require_custom_entrypoint
+        from hyperloom.inference_optimizer.cli.session_setup import _require_custom_entrypoint
 
         repo, scripts = tmp_path / "fw", tmp_path / "sc"
         repo.mkdir()
@@ -414,7 +414,7 @@ class TestEntrypointFailFast:
         _require_custom_entrypoint("custom", gpu_type="mi355x")
 
     def test_shipped_frameworks_are_not_gated(self):
-        from hyperloom.inference_optimizer.cli import _require_custom_entrypoint
+        from hyperloom.inference_optimizer.cli.session_setup import _require_custom_entrypoint
 
         _require_custom_entrypoint("sglang", gpu_type="mi300x")
         _require_custom_entrypoint("xdit", gpu_type="mi300x")
@@ -427,7 +427,7 @@ class TestResumeReappliesOperatorPaths:
         return Namespace(framework_path=None, benchmark_scripts_dir=None, **kw)
 
     def test_repassing_the_flags_publishes_them(self, monkeypatch, tmp_path):
-        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+        from hyperloom.inference_optimizer.cli.session_setup import _apply_operator_supplied_paths
 
         repo, scripts = tmp_path / "fw", tmp_path / "sc"
         repo.mkdir()
@@ -444,7 +444,7 @@ class TestResumeReappliesOperatorPaths:
         assert os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == str(scripts.resolve())
 
     def test_archived_paths_fill_in_when_flags_are_omitted(self, monkeypatch, tmp_path):
-        from hyperloom.inference_optimizer.cli import (
+        from hyperloom.inference_optimizer.cli.session_setup import (
             _apply_operator_supplied_paths,
             _restore_operator_supplied_paths_from_state,
         )
@@ -471,7 +471,7 @@ class TestResumeReappliesOperatorPaths:
         assert os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == str(scripts)
 
     def test_a_repassed_flag_outranks_the_archive(self, monkeypatch, tmp_path):
-        from hyperloom.inference_optimizer.cli import (
+        from hyperloom.inference_optimizer.cli.session_setup import (
             _apply_operator_supplied_paths,
             _restore_operator_supplied_paths_from_state,
         )

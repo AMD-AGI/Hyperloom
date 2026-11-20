@@ -28,14 +28,13 @@ from hyperloom.orchestrator.kernel import conc_sweep as conc_sweep_module, kerne
 from hyperloom.orchestrator.kernel.conc_sweep import (
     _Arm,
     _build_arm_grid,
-    _flush_conc_sweep_report,
     _grading_of,
     _optimized_arm,
     _workload_ladder,
-    _point_from_variant,
     conc_sweep_declined_to_run,
     run_conc_sweep,
 )
+from hyperloom.orchestrator.kernel.conc_sweep_report import flush_conc_sweep_report, point_from_variant
 from hyperloom.common.gain_math import conc_pair_comparison as _build_comparison
 from hyperloom.common.perf_metric import graded_metric_key
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -1119,7 +1118,8 @@ def test_record_conc_sweep_writes_last_conc_sweep():
 
 def test_sweep_exits_based_on_ladder_status():
     """The concurrency ladder is the only sweep, so its status is the phase's."""
-    from hyperloom.orchestrator.phases.machine_state import PhaseFlags, compute_next_phase
+    from hyperloom.orchestrator.phases.phase_predicates import PhaseFlags
+    from hyperloom.orchestrator.phases.phase_transitions import compute_next_phase
 
     def _State(last_conc_sweep=None):
         return SharedState(
@@ -1156,7 +1156,7 @@ def test_sweep_exits_based_on_ladder_status():
 
 def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
     """``was_skipped`` covers both outcomes, so the row must carry what tells them apart."""
-    from hyperloom.orchestrator.phases.machine_state import compute_next_phase
+    from hyperloom.orchestrator.phases.phase_transitions import compute_next_phase
 
     state = SharedState(
         phase="SWEEP",
@@ -1337,7 +1337,7 @@ def test_each_arm_runs_the_anchor_first_then_cheapest_first(
     assert call_log == [f"{arm}_conc{conc}" for arm in ("baseline", "optimized") for conc in (4, 1, 16)]
 
 
-# ───────────────────────────────────────────────────────────────────────────── Change 5: _flush_conc_sweep_report
+# ───────────────────────────────────────────────────────────────────────────── Change 5: flush_conc_sweep_report
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1354,7 +1354,7 @@ def test_flush_conc_sweep_report_writes_json_and_csv(session_dir: Path):
         "baseline": {"points": [{"arm": "baseline", "conc": 4, "status": "succeeded", "output_throughput": 100.0}]},
         "optimized": {"points": []},
     }
-    _flush_conc_sweep_report(payload, session_dir)
+    flush_conc_sweep_report(payload, session_dir)
     assert json_path.exists()
     assert csv_path.exists()
     loaded = json.loads(json_path.read_text())
@@ -1532,21 +1532,21 @@ class TestAnUnreportedTotalComesFromItsHalves:
         )
 
     def test_the_halves_sum_when_the_parser_named_no_total(self):
-        point = _point_from_variant(
+        point = point_from_variant(
             self._variant(input_throughput=24000.0, output_throughput=180.0),
             arm="baseline",
         )
         assert point["total_token_throughput"] == pytest.approx(24180.0)
 
     def test_a_reported_total_is_not_recomputed(self):
-        point = _point_from_variant(
+        point = point_from_variant(
             self._variant(input_throughput=1.0, output_throughput=1.0, total_token_throughput=25984.8),
             arm="baseline",
         )
         assert point["total_token_throughput"] == pytest.approx(25984.8)
 
     def test_a_missing_half_leaves_the_total_unmeasured(self):
-        point = _point_from_variant(self._variant(output_throughput=180.0), arm="baseline")
+        point = point_from_variant(self._variant(output_throughput=180.0), arm="baseline")
         assert point["total_token_throughput"] is None
 
 
@@ -1567,7 +1567,7 @@ class TestTheCurveCarriesBothAxisPairs:
         return VariantResult(**base)
 
     def test_the_agentic_pair_reaches_the_point(self):
-        point = _point_from_variant(
+        point = point_from_variant(
             self._variant(
                 output_throughput=183.44,
                 total_token_throughput=25984.8,
@@ -1578,13 +1578,13 @@ class TestTheCurveCarriesBothAxisPairs:
             arm="optimized",
         )
         assert point["total_token_throughput"] == pytest.approx(25984.8)
-        # _point_from_variant maps VariantResult.intvty_p90 -> e2e_norm_intvty_p90 dict key
+        # point_from_variant maps VariantResult.intvty_p90 -> e2e_norm_intvty_p90 dict key
         assert point["e2e_norm_intvty_p90"] == pytest.approx(447.2)
         assert point["input_throughput"] == pytest.approx(25801.36)
         assert point["tpot_p90_ms"] == pytest.approx(2.4)
 
     def test_the_synthetic_pair_is_unaffected(self):
-        point = _point_from_variant(
+        point = point_from_variant(
             self._variant(output_throughput=1200.0, e2el_mean_ms=850.0),
             arm="baseline",
         )
@@ -1598,11 +1598,11 @@ class TestTheCurveCarriesBothAxisPairs:
         rdir.mkdir(parents=True, exist_ok=True)
         json_path = rdir / "conc_sweep_summary.json"
         csv_path = rdir / "conc_sweep_raw.csv"
-        point = _point_from_variant(
+        point = point_from_variant(
             self._variant(total_token_throughput=25984.8, intvty_p90=447.2),
             arm="optimized",
         )
-        _flush_conc_sweep_report(
+        flush_conc_sweep_report(
             {
                 "schema_version": "1.0",
                 "status": "succeeded",
@@ -1619,7 +1619,7 @@ class TestTheCurveCarriesBothAxisPairs:
 
 
 def test_flush_conc_sweep_report_is_atomic(session_dir: Path, monkeypatch: pytest.MonkeyPatch):
-    """_flush_conc_sweep_report silently catches IO errors."""
+    """flush_conc_sweep_report silently catches IO errors."""
     rdir = session_dir / "reports"
     rdir.mkdir(parents=True, exist_ok=True)
     json_path = rdir / "conc_sweep_summary.json"
@@ -1635,20 +1635,20 @@ def test_flush_conc_sweep_report_is_atomic(session_dir: Path, monkeypatch: pytes
     from hyperloom_common import io as _common_io
 
     monkeypatch.setattr(_common_io, "atomic_write_text", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
-    _flush_conc_sweep_report(payload, session_dir)  # must not raise
+    flush_conc_sweep_report(payload, session_dir)  # must not raise
 
 
 def _record_summary_writes(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Capture ``conc_sweep_summary.json`` as it stands on disk after every write."""
     writes: list[dict[str, Any]] = []
-    real_flush = conc_sweep_module._flush_conc_sweep_report
+    real_flush = conc_sweep_module.flush_conc_sweep_report
 
     def _flush(payload: dict[str, Any], session_dir: Path) -> Exception | None:
         error = real_flush(payload, session_dir)
         writes.append(json.loads(Path(payload["report_json_path"]).read_text()))
         return error
 
-    monkeypatch.setattr(conc_sweep_module, "_flush_conc_sweep_report", _flush)
+    monkeypatch.setattr(conc_sweep_module, "flush_conc_sweep_report", _flush)
     return writes
 
 
@@ -2436,7 +2436,8 @@ def test_a_cancelled_sweep_stops_the_ladder_and_is_not_failed(
     """
     from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
     from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
-    from hyperloom.orchestrator.phases.machine_state import PhaseFlags, compute_next_phase
+    from hyperloom.orchestrator.phases.phase_predicates import PhaseFlags
+    from hyperloom.orchestrator.phases.phase_transitions import compute_next_phase
 
     teardown_log: list[tuple] = []
     _patch_lifecycle_eligible(monkeypatch, teardown_log)
@@ -2506,7 +2507,8 @@ def test_the_sweep_phase_budget_waits_for_the_sweep_it_granted():
     enqueued on entry was granted the rest of the session clock. With no result yet, the phase waits for the grant;
     once the grant has run out, or the sweep has landed, the ordinary exits apply again.
     """
-    from hyperloom.orchestrator.phases.machine_state import PhaseFlags, compute_next_phase
+    from hyperloom.orchestrator.phases.phase_predicates import PhaseFlags
+    from hyperloom.orchestrator.phases.phase_transitions import compute_next_phase
 
     now = 1_800_000_000.0
 

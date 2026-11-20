@@ -54,11 +54,7 @@ ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._aiter_jit
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._partition_shape
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._subprocess_kill
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._workload_envs
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.bus.resource_lock
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.collaborator
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.loop.coordinator
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.phases.machine_state
@@ -102,6 +98,10 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._subprocess_kill
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_request_handlers
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_schemes
+    hyperloom.inference_optimizer.cli.session_resume -> hyperloom.orchestrator.bus.resource_lock
+    hyperloom.inference_optimizer.cli.session_setup -> hyperloom.orchestrator.actions.executors._partition_shape
+    hyperloom.inference_optimizer.cli.session_setup -> hyperloom.orchestrator.actions.executors._workload_envs
+    hyperloom.inference_optimizer.cli.session_setup -> hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers
 unmatched_ignore_imports_alerting = error
 
 
@@ -420,11 +420,7 @@ ignore_imports =
     hyperloom_common.llm.llm_config -> hyperloom_common.llm.claude_oneshot
     hyperloom.inference_optimizer.breakdown.critic_reviews -> hyperloom.inference_optimizer.breakdown.collectors._common
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._aiter_jit
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._partition_shape
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._subprocess_kill
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._workload_envs
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.bus.resource_lock
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.collaborator
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.loop.coordinator
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.phases.machine_state
@@ -468,7 +464,10 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._subprocess_kill
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_request_handlers
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_schemes
-    hyperloom.inference_optimizer.multi_node.commands.infera -> hyperloom.inference_optimizer.multi_node.cli
+    hyperloom.inference_optimizer.cli.session_resume -> hyperloom.orchestrator.bus.resource_lock
+    hyperloom.inference_optimizer.cli.session_setup -> hyperloom.orchestrator.actions.executors._partition_shape
+    hyperloom.inference_optimizer.cli.session_setup -> hyperloom.orchestrator.actions.executors._workload_envs
+    hyperloom.inference_optimizer.cli.session_setup -> hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers
     hyperloom.inference_optimizer.multi_node.state_paths -> hyperloom.inference_optimizer.multi_node._internal.log
     hyperloom.inference_optimizer.session.manifest -> hyperloom.inference_optimizer.breakdown.recorder
     hyperloom.inference_optimizer.session.manifest -> hyperloom.inference_optimizer.breakdown.workflow_contract

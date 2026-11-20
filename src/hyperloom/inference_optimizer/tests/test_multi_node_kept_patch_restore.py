@@ -14,6 +14,7 @@ import pytest
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as tool
 from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
+from hyperloom.orchestrator.kernel import patch_restore
 from hyperloom.orchestrator.kernel import kept_patch_restore as restore
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop._promote_outcome import IntegrateRecoveryIncomplete
@@ -28,7 +29,7 @@ def coord(session_dir: Path, monkeypatch: pytest.MonkeyPatch) -> Coordinator:
         monkeypatch.setattr(module, "_is_multi_node", lambda: True)
         monkeypatch.setattr(module, "_dispatch_multinode_apply", lambda apply: {"status": "ok", "per_node": []})
         monkeypatch.setattr(module, "_dispatch_multinode_finalize", lambda records_by_host: {"status": "ok"})
-    monkeypatch.setattr(akp, "_dispatch_multinode_revert", lambda **_kw: {"status": "ok"})
+    monkeypatch.setattr(patch_restore, "_dispatch_multinode_revert", lambda **_kw: {"status": "ok"})
     monkeypatch.setattr(restore, "external_has_server_control", lambda: True)
     coord = make_coordinator(session_dir)
     coord.writeback._resumed_from["is_resume"] = True

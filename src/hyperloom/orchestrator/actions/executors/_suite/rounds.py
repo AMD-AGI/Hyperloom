@@ -30,6 +30,7 @@ import yaml
 
 from hyperloom_common.env import env_flag
 from hyperloom.common.env_safety import scrub_benchmark_process_env
+from hyperloom.common.ports import pick_server_port
 from hyperloom.inference_optimizer.session.paths import resolve_dep_dir
 from hyperloom.orchestrator.state.base_launch import frozen_base
 from inference_suite import EXIT_REFUSED, RoundResult, manifest_sha256, run_round
@@ -69,6 +70,7 @@ from .._subprocess_kill import (
 from .config import (
     CHECK_SERVER_PHASE,
     _GPU_MASK_ENV,
+    _PORT_ENV,
     _RUN_PHASE_ENV,
     _SERVER_ONLY_PHASE,
     _UTF8,
@@ -175,20 +177,26 @@ def _read_point(config_path: Path) -> Mapping[str, object]:
 
 
 def _round_point(config_path: Path, lease: ServingLease | None, cards: int) -> Mapping[str, object]:
-    """The point a round runs: a leased one without GPU masks, a local one on the session's cards when it names none.
+    """The point a round runs: a leased one without GPU masks, a local one on the session's cards when it names none,
+    and either on a free port when it names none.
 
     Ray places a leased round on GPUs of its choosing, so no host mask may size it. A local server drops the masks it
     inherits and runs on its GPU ids as absolute cards, so a point without a mask (an AgentX point never carries one)
     runs on the front of the session's mask rather than on ``0..cards-1``.
+
+    A point naming no ``PORT`` would boot on the launcher's default, which another round on this machine, or a
+    co-tenant on a shared host, may already hold. A round whose server outlives it -- the server lifecycle's -- names
+    the port ``inject_lifecycle`` pinned, and keeps it.
     """
-    if lease is not None:
-        return _read_point(strip_visible_devices_from_config(config_path))
-    document = _read_point(config_path)
+    document = _read_point(strip_visible_devices_from_config(config_path) if lease is not None else config_path)
     bench = _bench(document)
     envs = _envs(bench)
-    if envs.get(_GPU_MASK_ENV, "").strip():
-        return document
-    return {**document, "benchmark": {**bench, "envs": {**envs, _GPU_MASK_ENV: ",".join(session_cards_mask(cards))}}}
+    filled = dict(bench.get("envs") or {})
+    if not envs.get(_PORT_ENV, "").strip():
+        filled[_PORT_ENV] = str(pick_server_port())
+    if lease is None and not envs.get(_GPU_MASK_ENV, "").strip():
+        filled[_GPU_MASK_ENV] = ",".join(session_cards_mask(cards))
+    return {**document, "benchmark": {**bench, "envs": filled}}
 
 
 def _server_phase_point(document: Mapping[str, object]) -> Mapping[str, object]:

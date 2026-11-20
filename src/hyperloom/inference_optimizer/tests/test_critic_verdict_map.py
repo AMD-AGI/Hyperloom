@@ -14,10 +14,8 @@ import pytest
 
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
-from hyperloom.orchestrator.loop.coordinator import (
-    Coordinator,
-    CoordinatorState,
-)
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator_state import CoordinatorState
 from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import preflight as cli_preflight
+from hyperloom.inference_optimizer.cli import ray_provision
 from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
 
 
@@ -71,7 +71,7 @@ def _fake_site(tmp_path: Path, *, ray_version: str, start_options: dict[str, str
 
 def _run_smoke(site: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        cli_preflight._ray_smoke_command(sys.executable, ""),
+        ray_provision._ray_smoke_command(sys.executable, ""),
         capture_output=True,
         text=True,
         env={"PYTHONPATH": str(site), "PATH": "/usr/bin:/bin"},
@@ -174,7 +174,7 @@ def test_certified_start_options_are_the_ones_the_head_is_started_with(monkeypat
 
     rr.force_restart_local_cluster(num_gpus=8)
 
-    certified = {token.split("=", 1)[0] for token in cli_preflight._RAY_START_ARGV if token.startswith("--")}
+    certified = {token.split("=", 1)[0] for token in ray_provision._RAY_START_ARGV if token.startswith("--")}
     (argv,) = started
     passed = {token.split("=", 1)[0] for token in argv if token.startswith("--")}
     assert passed <= certified, f"the head gets {sorted(passed - certified)}, which preflight never certifies"
@@ -184,24 +184,24 @@ def test_probe_env_reindexes_hip_devices_from_rocr(monkeypatch) -> None:
     monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "3")
 
-    assert cli_preflight._ray_probe_env()["HIP_VISIBLE_DEVICES"] == "0"
+    assert ray_provision._ray_probe_env()["HIP_VISIBLE_DEVICES"] == "0"
 
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "2,5,6")
-    assert cli_preflight._ray_probe_env()["HIP_VISIBLE_DEVICES"] == "0,1,2"
+    assert ray_provision._ray_probe_env()["HIP_VISIBLE_DEVICES"] == "0,1,2"
 
 
 def test_probe_env_keeps_an_existing_hip_value(monkeypatch) -> None:
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "3")
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "1")
 
-    assert cli_preflight._ray_probe_env()["HIP_VISIBLE_DEVICES"] == "1"
+    assert ray_provision._ray_probe_env()["HIP_VISIBLE_DEVICES"] == "1"
 
 
 def test_probe_env_leaves_hip_unset_without_rocr(monkeypatch) -> None:
     monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
 
-    assert "HIP_VISIBLE_DEVICES" not in cli_preflight._ray_probe_env()
+    assert "HIP_VISIBLE_DEVICES" not in ray_provision._ray_probe_env()
 
 
 class _InstallRecorder:
@@ -226,9 +226,9 @@ def _ensure_ray_with(monkeypatch, recorder: _InstallRecorder, *, version_after: 
             subprocess.CompletedProcess([], 0, f"{version_after}\n", ""),
         ]
     )
-    monkeypatch.setattr(cli_preflight, "_ray_smoke", lambda _exe, *_overrides: next(smoke_results))
-    monkeypatch.setattr(cli_preflight.subprocess, "run", recorder)
-    return cli_preflight._ensure_ray("/usr/bin/python3", [])
+    monkeypatch.setattr(ray_provision, "_ray_smoke", lambda _exe, *_overrides: next(smoke_results))
+    monkeypatch.setattr(ray_provision.subprocess, "run", recorder)
+    return ray_provision._ensure_ray("/usr/bin/python3", [])
 
 
 def test_ensure_ray_keeps_the_pin_when_it_resolves(monkeypatch) -> None:
@@ -265,11 +265,11 @@ def test_ensure_ray_reports_what_the_repair_really_did(monkeypatch) -> None:
             subprocess.CompletedProcess([], 1, "", "ray start does not accept --resources"),
         ]
     )
-    monkeypatch.setattr(cli_preflight, "_ray_smoke", lambda _exe, *_overrides: next(smoke_results))
-    monkeypatch.setattr(cli_preflight.subprocess, "run", recorder)
+    monkeypatch.setattr(ray_provision, "_ray_smoke", lambda _exe, *_overrides: next(smoke_results))
+    monkeypatch.setattr(ray_provision.subprocess, "run", recorder)
 
     with pytest.raises(RuntimeError) as excinfo:
-        cli_preflight._ensure_ray("/usr/bin/python3", [])
+        ray_provision._ensure_ray("/usr/bin/python3", [])
 
     message = str(excinfo.value)
     assert "pip install ray[default]>=2.44.1 succeeded" in message
@@ -288,7 +288,7 @@ def _sentinel_site(tmp_path: Path, *, ray_version: str = "2.44.1") -> Path:
 def test_smoke_gives_the_sentinel_import_failure_of_the_pinned_ray_its_own_exit_code(tmp_path: Path) -> None:
     result = _run_smoke(_sentinel_site(tmp_path))
 
-    assert result.returncode == cli_preflight._RAY_SENTINEL_EXIT
+    assert result.returncode == ray_provision._RAY_SENTINEL_EXIT
     assert "is not a valid Sentinel" in result.stderr
 
 
@@ -303,20 +303,20 @@ def _completed(returncode: int, stdout: str = "", stderr: str = "") -> subproces
 def _scripted(monkeypatch, smokes: list[subprocess.CompletedProcess], pip_rc: int = 0) -> list[tuple[str, ...]]:
     """Smoke answers in turn; returns the specs every pip call received."""
     pips: list[tuple[str, ...]] = []
-    monkeypatch.setattr(cli_preflight, "_ray_smoke", lambda *_a, **_k: smokes.pop(0))
+    monkeypatch.setattr(ray_provision, "_ray_smoke", lambda *_a, **_k: smokes.pop(0))
 
     def pip(_py, _extra, specs):
         pips.append(tuple(specs))
         return _completed(pip_rc)
 
-    monkeypatch.setattr(cli_preflight, "_pip_install_ray", pip)
+    monkeypatch.setattr(ray_provision, "_pip_install_ray", pip)
     return pips
 
 
 def test_the_sentinel_failure_holds_click_and_smokes_again(monkeypatch) -> None:
-    pips = _scripted(monkeypatch, [_completed(cli_preflight._RAY_SENTINEL_EXIT), _completed(0, "2.44.1\n")])
+    pips = _scripted(monkeypatch, [_completed(ray_provision._RAY_SENTINEL_EXIT), _completed(0, "2.44.1\n")])
 
-    record = cli_preflight._ensure_ray("python3", [])
+    record = ray_provision._ensure_ray("python3", [])
 
     assert pips == [("click<8.3",)]
     assert record["status"] == "applied"
@@ -326,12 +326,12 @@ def test_the_sentinel_failure_holds_click_and_smokes_again(monkeypatch) -> None:
 def test_the_sentinel_failure_after_a_ray_install_holds_click_too(monkeypatch) -> None:
     smokes = [
         _completed(1, stderr="ray import failed: x"),
-        _completed(cli_preflight._RAY_SENTINEL_EXIT),
+        _completed(ray_provision._RAY_SENTINEL_EXIT),
         _completed(0, "2.44.1\n"),
     ]
     pips = _scripted(monkeypatch, smokes)
 
-    record = cli_preflight._ensure_ray("python3", [])
+    record = ray_provision._ensure_ray("python3", [])
 
     assert pips == [("ray[default]==2.44.1",), ("click<8.3",)]
     assert record["status"] == "applied"
@@ -348,7 +348,7 @@ def test_any_other_smoke_failure_never_touches_click(monkeypatch, version) -> No
     )
 
     with pytest.raises(RuntimeError, match="smoke test still failed"):
-        cli_preflight._ensure_ray("python3", [])
+        ray_provision._ensure_ray("python3", [])
 
     assert all("click" not in " ".join(specs) for specs in pips)
     assert len(pips) == 1
@@ -358,14 +358,14 @@ def test_a_sentinel_failure_the_hold_does_not_fix_fails_the_install(monkeypatch)
     pips = _scripted(
         monkeypatch,
         [
-            _completed(cli_preflight._RAY_SENTINEL_EXIT),
-            _completed(cli_preflight._RAY_SENTINEL_EXIT),
-            _completed(cli_preflight._RAY_SENTINEL_EXIT),
-            _completed(cli_preflight._RAY_SENTINEL_EXIT),
+            _completed(ray_provision._RAY_SENTINEL_EXIT),
+            _completed(ray_provision._RAY_SENTINEL_EXIT),
+            _completed(ray_provision._RAY_SENTINEL_EXIT),
+            _completed(ray_provision._RAY_SENTINEL_EXIT),
         ],
     )
 
     with pytest.raises(RuntimeError, match="smoke test still failed"):
-        cli_preflight._ensure_ray("python3", [])
+        ray_provision._ensure_ray("python3", [])
 
     assert ("click<8.3",) in pips

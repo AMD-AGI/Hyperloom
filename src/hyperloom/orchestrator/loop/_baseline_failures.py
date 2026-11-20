@@ -262,20 +262,8 @@ class BaselineFailureMixin:
         Returns:
             ``True`` when the run should stop as ``baseline_failed``.
         """
-        # A process that exited with the same output as last time (modulo numbers)
-        # will do so again: stop at two instead of spending a third attempt. The
-        # executor decides which classes are worth signing and signs them from the
-        # process's whole output rather than the 2000-character ``error`` tail, so a
-        # signature is present exactly when it identifies the failure.
-        signature = str(result_payload.get("output_signature") or "")
-        repeated = bool(
-            signature
-            and self.shared_state.baseline_failure_streak >= 1
-            and signature == self.shared_state.baseline_last_failure_signature
-        )
         self.shared_state.baseline_failure_streak += 1
         self.shared_state.baseline_failures_this_leg += 1
-        self.shared_state.baseline_last_failure_signature = signature
         streak = self.shared_state.baseline_failure_streak
         if _is_ray_cluster_infeasible(result_payload):
             # The Ray cluster cannot place the round, and the runtime has already
@@ -291,7 +279,7 @@ class BaselineFailureMixin:
                 result_payload.get("error") or err_class,
             )
             return True
-        return not retries_suppressed and (streak >= 3 or (streak >= 2 and repeated))
+        return not retries_suppressed and streak >= 3
 
     def _arms_baseline_failure_gates(self, err_class: str) -> bool:
         """Whether a failed baseline goes through the streak and stop gates.

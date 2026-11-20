@@ -29,7 +29,7 @@ _PROBE_CMD = (
     'print(torch.cuda.get_device_properties(0).gcnArchName)" 2>/dev/null'
 )
 
-# Ray Dashboard job terminal states (mirror multi_node.cli).
+# Ray Dashboard job terminal states (mirror multi_node.cluster_access).
 _TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "STOPPED"}
 
 

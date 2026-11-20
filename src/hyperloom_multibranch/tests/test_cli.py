@@ -71,6 +71,7 @@ from hyperloom.measure.runner.cache_build import CacheBuildError
 from hyperloom.orchestrator.state.base_launch import frozen_base
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom_multibranch import cli
+from hyperloom_multibranch import cli_options
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord
@@ -98,8 +99,8 @@ from hyperloom_multibranch.scheduling.prelude import BASELINE_ESTABLISHED
 from hyperloom_multibranch.scheduling import review
 from hyperloom_multibranch.scheduling.layout import REVIEW_DIR, SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
-from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, SessionOutcome, persisted_run
-from hyperloom_multibranch.scheduling.resumption import ResumeRefused
+from hyperloom_multibranch.scheduling.resumption import PersistedRun, ResumeRefused, persisted_run
+from hyperloom_multibranch.scheduling.session_types import COMPLETED_REASONS, SessionOutcome
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version, read_manifest
 from hyperloom_multibranch.scheduling import local_peers
@@ -165,7 +166,7 @@ IMPORT_PROBE = (
 
 
 def _settings(*extra: str, workload: list[str] = WORKLOAD_ARGS) -> RunSettings:
-    return cli.settings_from(cli.build_parser().parse_args(["run", *workload, *extra]))
+    return cli_options.settings_from(cli_options.build_parser().parse_args(["run", *workload, *extra]))
 
 
 def _without(args: list[str], option: str) -> list[str]:
@@ -177,7 +178,7 @@ def test_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         cli.main(["--help"])
     assert exc.value.code == 0
-    assert cli.PROG in capsys.readouterr().out
+    assert cli_options.PROG in capsys.readouterr().out
 
 
 def test_reference_help_says_which_name_briefs_inferencex_reference_launches(
@@ -331,7 +332,9 @@ def test_kernel_optimizer_can_be_geak() -> None:
 
 
 def test_parallel_tests_default_fills_the_machine() -> None:
-    settings = cli.settings_from(cli.build_parser().parse_args(["run", *WORKLOAD_ARGS[:5], "8", *WORKLOAD_ARGS[6:]]))
+    settings = cli_options.settings_from(
+        cli_options.build_parser().parse_args(["run", *WORKLOAD_ARGS[:5], "8", *WORKLOAD_ARGS[6:]])
+    )
     assert settings.caps.max_parallel_tests == 1
 
 
@@ -1036,7 +1039,10 @@ def test_a_canonical_measurement_that_cannot_be_taken_fails_like_the_other_start
     assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
 
     captured = capsys.readouterr()
-    assert captured.err == f"{cli.PROG}: cannot run a session, the canonical measurement cannot be taken: {refusal}\n"
+    assert (
+        captured.err
+        == f"{cli_options.PROG}: cannot run a session, the canonical measurement cannot be taken: {refusal}\n"
+    )
     session_dir = Path(captured.out.strip())
     assert session_dir.is_dir() and tmp_path in session_dir.parents
 
@@ -1057,7 +1063,7 @@ def test_a_strict_image_check_that_fails_is_refused_like_the_other_start_up_refu
     assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
 
     expected = f"image check failed under {MODE_ENV}=strict: sglang.renamed-flag"
-    assert capsys.readouterr().err == f"{cli.PROG}: cannot run a session, {expected}\n"
+    assert capsys.readouterr().err == f"{cli_options.PROG}: cannot run a session, {expected}\n"
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
@@ -2228,7 +2234,7 @@ def test_a_restart_that_finishes_a_preempted_session_ends_the_run_as_its_final_w
         finishes.append((persisted.ended, restart))
         ended = SessionStopReason.FINISHED_AFTER_RESTART if restart and chose else persisted.ended
         _report(persisted.layout, stop_reason=ended.value, final={"chosen": {"commit": "c9"}} if chose else None)
-        return 0 if ended in lifecycle.COMPLETED_REASONS else 1
+        return 0 if ended in COMPLETED_REASONS else 1
 
     monkeypatch.setattr(cli, "final_only", finish)
 
@@ -2844,7 +2850,7 @@ def handed(agent_binaries: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 
 def test_run_measures_on_local_cards_unless_told_hosted() -> None:
-    parser = cli.build_parser()
+    parser = cli_options.build_parser()
 
     assert parser.parse_args(["run", *WORKLOAD_ARGS]).measurement == "local"
     assert parser.parse_args(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]).measurement == "hosted"
@@ -2868,7 +2874,9 @@ def test_a_hosted_run_measures_in_the_sandboxes_of_the_grant_handed_to_it(handed
     )
     assert host.sandbox_keys.measurement.reveal() == HANDED["HYPERLOOM_SANDBOX_KEY_MEASUREMENT"]
     assert settings.caps.max_parallel_tests == 2, "TP=2 on 8 GPUs and 3 sandboxes, one test's room kept for a handover"
-    on_two_tests = cli.settings_from(cli.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 2)
+    on_two_tests = cli_options.settings_from(
+        cli_options.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 2
+    )
     assert settings == replace(on_two_tests, max_hours=settings.max_hours), "the flags give the workload"
     assert "HYPERLOOM_SANDBOX_KEY_MEASUREMENT" not in os.environ, "no child process inherits a grant key"
 

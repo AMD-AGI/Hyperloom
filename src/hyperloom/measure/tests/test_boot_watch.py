@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 import yaml
 
-from hyperloom.measure import boot_watch, local
+from hyperloom.measure import boot_watch, local, local_outcome
 from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.measure.boot_watch import BOOT_SHARE, boot_limit_sec, boot_seconds
 from hyperloom.measure.local import LocalMeasurementBackend
@@ -169,7 +169,7 @@ def test_only_a_round_that_boots_a_server_is_watched(monkeypatch, tmp_path) -> N
     monkeypatch.setattr(local, "run_grid", _ServerGrid(READY_SERVER))
     watched = _record_watches(monkeypatch)
 
-    async def boot_then_reuse(run: local._Run) -> None:
+    async def boot_then_reuse(run: local_outcome.Run) -> None:
         run.add(0, await local._grid(run, 0, "boot"))
         run.add(0, await local._grid(run, 0, "reuse", server_already_ready=True))
 

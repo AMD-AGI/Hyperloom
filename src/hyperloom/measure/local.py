@@ -32,7 +32,6 @@ import tempfile
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -51,20 +50,14 @@ from hyperloom.common.outside_facts import (
     ROCR_VISIBLE_DEVICES_ENV,
 )
 from hyperloom.contracts.long_context import LONG_CONTEXT_HELD, LONG_CONTEXT_REAL_ACCEPTANCE
-from hyperloom.contracts.measurement import PhaseTiming, SandboxFacts
+from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.measure.attachments import AttachmentError, place_attachments, substitute
-from hyperloom.measure.accuracy import read_accuracy
-from hyperloom.measure import log_causes
-from hyperloom.measure.boot_watch import BOOT_CANCEL_REASON, BootGuard, boot_limit_sec
+from hyperloom.measure.boot_watch import BootGuard, boot_limit_sec
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.jit.native.config import store_from_environment
 from hyperloom.measure.jit.native.laying import NamedBuild, NativeLayError, SheetBuilds, sheet_builds
 from hyperloom.measure.failures import (
     Disposition,
-    FailureClassification,
-    FailureEvidence,
-    StepFailure,
-    classify_test_failure,
     decides_test,
 )
 from hyperloom.measure.farm import (
@@ -91,6 +84,7 @@ from hyperloom.measure.long_context.held import (
     run_held_checks,
     served_by,
 )
+from hyperloom.measure.local_outcome import ACCURACY, Run, ended, is_failure, stamped_phases, test_failed
 from hyperloom.measure.long_context import staging as long_context_staging
 from hyperloom.measure.phases import (
     JIT_CACHE,
@@ -102,25 +96,20 @@ from hyperloom.measure.phases import (
     PhaseRecorder,
 )
 from hyperloom.measure.points import AMBIENT_SHAPE_ENVS, launch_carriers
-from hyperloom.common.ports import pick_server_port
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces, round_has_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
-from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC, SERVER_BOOT_TIMEOUT_RC
 from hyperloom.measure import second_tracer
 from hyperloom.measure.second_tracer import SecondTracer as _Tracer
 from hyperloom.measure.round_marks import ROLE_BOOT, ROLE_EVAL, ROLE_MEASURE, ROLE_WARMUP, RoundShape
-from hyperloom.measure.round_marks import read_runs, round_boundaries, step_failure
+from hyperloom.measure.round_marks import read_runs, round_boundaries
 from hyperloom.sandbox.node import node_name
 from hyperloom.measure.short_prompts.rounds import Serving, write_answered
 from hyperloom.measure.short_prompts.staging import load_prompt_set
 from hyperloom.measure.short_prompts.prompts import PromptSetError
-from hyperloom.measure.socket import MeasurementTimeout, RoundOutcome, TestCall, TestOutcome
+from hyperloom.measure.socket import MeasurementTimeout, TestCall, TestOutcome
 from hyperloom.measure.spec import Attachment, EnvRoot as SpecEnvRoot
 from hyperloom.orchestrator.actions.executors import (
     CHECK_SERVER_ENVS,
-    ORCHESTRATOR_CANCELLED_RETURNCODE,
-    SESSION_TIME_EXHAUSTED_RETURNCODE,
-    RoundFolder,
     GridLaunch,
     GridRecipe,
     GridStop,
@@ -128,28 +117,19 @@ from hyperloom.orchestrator.actions.executors import (
     LaunchLayer,
     VariantResult,
     grid_run_dirs,
-    is_round_folder,
     resolve_lifecycle_params,
     run_grid,
     run_grid_warmup_enabled,
     teardown_variant_server,
 )
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, current_cancel_scope, use_cancel_scope
-from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
 from hyperloom.orchestrator.state.base_launch import freeze_base
 
 __all__ = ["LocalMeasurementBackend", "SUPPORTED_KINDS", "TestCallRefused"]
 
 #: ``VariantResult.error_class`` of a round the per-round cap reaped.
 _TIMEOUT_CLASSES = frozenset({FailedStep.ROUND_TIMEOUT.value})
-#: Return codes of rounds the run itself stopped, keyed by the class the result carries.
-_STOP_RETURNCODES = {
-    SESSION_TIME_EXHAUSTED_CLASS: SESSION_TIME_EXHAUSTED_RETURNCODE,
-    ORCHESTRATOR_CANCELLED_CLASS: ORCHESTRATOR_CANCELLED_RETURNCODE,
-}
-_BOOT_ONLY_NOTE = "server_lifecycle_boot_only"
 _OUTPUT_POLL_SEC = 5.0
-_ACCURACY = "accuracy"
 _UTF8 = "utf-8"
 _PROFILE = "profile"
 #: The ``/start_profile`` body of the benchmark client. It reads it from its own process environment, not from the
@@ -163,9 +143,9 @@ _CASE_TIMEOUT_SEC = 600.0
 _CASE_TIME_SHARE = 0.8
 _TEST = "test"
 #: The kinds of ``TestCall`` this backend runs; a toolbox refuses any other at acceptance.
-SUPPORTED_KINDS = (_TEST, _ACCURACY, _PROFILE, _REPRO)
+SUPPORTED_KINDS = (_TEST, ACCURACY, _PROFILE, _REPRO)
 #: The kinds of test whose compiled code another test may be given: a profile or a repro ran under other settings.
-_CONTRIBUTING = frozenset({_TEST, _ACCURACY})
+_CONTRIBUTING = frozenset({_TEST, ACCURACY})
 
 #: The old flow reads the process environment, so two tests in one process would see each other's settings.
 _PROCESS_LOCK = threading.Lock()
@@ -182,8 +162,6 @@ _BENCH_ENVS = {ENV_RUN_EVAL: "false"}
 #: The evaluation round runs no bench: InferenceX's ``run_benchmark_serving`` returns before it on ``EVAL_ONLY``, a
 #: client-only knob (an ``EVAL_*`` name).
 _EVAL_ENVS = {ENV_RUN_EVAL: "true", ENV_EVAL_ONLY: "true"}
-#: What ``run_grid`` writes on a point whose warmup round it discarded, with the throughput of that round.
-_WARMUP_DISCARDED = "run_grid_warmup_discarded_first"
 #: What a test that failed records in place of the short-prompt check it would have run.
 _CHECK_SKIPPED = "short_prompt_check skipped: test failed"
 _LONG_CONTEXT_SKIPPED = "long_context_check skipped: test failed"
@@ -192,49 +170,12 @@ _NOT_CHECKED = "the test's server was not held up for the check (an AgentX test 
 #: The boot round of an AgentX test's real-acceptance check server, and what its check records when it did not come up.
 _CHECK_SERVER = "check_server"
 _CHECK_SERVER_FAILED = "check server did not start: {why}"
-_WARMUP_TPUT = "warmup_round_tput"
 
 
 class TestCallRefused(ValueError):
     """The call asks for something the local backend does not run, or contradicts itself."""
 
     __test__ = False
-
-
-@dataclass
-class _Run:
-    """What one test has produced so far."""
-
-    call: TestCall
-    unset_envs: list[str]
-    results: list[tuple[int, VariantResult]] = field(default_factory=list)
-    stopped_rc: int | None = None
-    #: The warmup and evaluation rounds of a test on a held server, which evaluates apart from its benches.
-    warmup: VariantResult | None = None
-    evaluation: VariantResult | None = None
-    evaluates_apart: bool = False
-    traceless: bool = False
-    case_failed: bool = False
-    started: float = field(default_factory=time.monotonic)
-    notes: list[str] = field(default_factory=list)
-    #: Ends a round whose server is not ready in time; ``None`` when the caller owns the cancellation.
-    boot: BootGuard | None = None
-    #: Where the test's phases are stamped: the caller's recorder when the call carries one, else the backend's own.
-    phases: PhaseRecorder = field(default_factory=PhaseRecorder)
-    #: What the accuracy checks left on the test's own server before its teardown; ``None`` until they ran there.
-    held: HeldAnswers | None = None
-    #: Whether the long-context check wrote its outputs on a server (or why a check server gave none).
-    long_context_ran: bool = False
-    #: The second tracer that traces the test's server (a profile's); ``None`` when it runs untraced.
-    traced: _Tracer | None = None
-
-    def add(self, point: int, result: VariantResult) -> bool:
-        """Record one result; say whether the test must go on."""
-        self.results.append((point, result))
-        stop = _STOP_RETURNCODES.get(result.error_class)
-        if stop is not None:
-            self.stopped_rc = stop
-        return stop is None
 
 
 class LocalMeasurementBackend:
@@ -293,7 +234,7 @@ def _staged(outcome: TestOutcome, call: TestCall, phases: PhaseRecorder) -> Test
     return outcome
 
 
-def _measure(call: TestCall, phases: PhaseRecorder, tracer: _Tracer | None, notes: list[str]) -> _Run:
+def _measure(call: TestCall, phases: PhaseRecorder, tracer: _Tracer | None, notes: list[str]) -> Run:
     """Lay out the test's environment, run its rounds and give what they produced; ``tracer`` traces the server of a
     profile, when it can be given the points (a note says why not)."""
     with (
@@ -303,7 +244,7 @@ def _measure(call: TestCall, phases: PhaseRecorder, tracer: _Tracer | None, note
     ):
         with _test_environment(call) as unset_envs:
             call, tracer = _traced(call, tracer, notes)
-            run = _Run(call, [name for name in unset_envs if name not in private.redirected], phases=phases)
+            run = Run(call, [name for name in unset_envs if name not in private.redirected], phases=phases)
             run.traced = tracer
             with _watch_output(call), _guard_boot(run):
                 asyncio.run(_runner_of(call)(run))
@@ -341,7 +282,7 @@ def _validate(call: TestCall) -> None:
         raise TestCallRefused("a test needs at least one measurement point")
     if call.prep == _GRID and len(call.points) != 1:
         raise TestCallRefused(f"a single-point test has exactly one point, got {len(call.points)}")
-    if call.kind == _ACCURACY and not call.accuracy:
+    if call.kind == ACCURACY and not call.accuracy:
         raise TestCallRefused("an accuracy test must ask for accuracy")
     if call.kind == _PROFILE:
         _validate_profile(call)
@@ -577,7 +518,7 @@ def _watch_output(call: TestCall) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def _guard_boot(run: _Run) -> Iterator[None]:
+def _guard_boot(run: Run) -> Iterator[None]:
     """Publish the cancel scope a round's boot limit cancels (the call's, when it carries one), unless the caller already
     published its own."""
     if current_cancel_scope() is not None:
@@ -589,7 +530,7 @@ def _guard_boot(run: _Run) -> Iterator[None]:
         yield
 
 
-def _booting(run: _Run, point: int, round_args: dict[str, Any]) -> contextlib.AbstractContextManager[None]:
+def _booting(run: Run, point: int, round_args: dict[str, Any]) -> contextlib.AbstractContextManager[None]:
     """Watch the boot of the round about to run, unless it reuses a ready server or no ready stamp can be expected."""
     call = run.call
     if run.boot is None or round_args.get("server_already_ready") or call.serving_lease is not None:
@@ -601,41 +542,19 @@ def _booting(run: _Run, point: int, round_args: dict[str, Any]) -> contextlib.Ab
 # --- running ------------------------------------------------------------------------------------------------------
 
 
-@contextlib.contextmanager
-def _free_port_for(point: Path, server_lifecycle: dict[str, Any] | None) -> Iterator[Path]:
-    """The point a round runs from: with a free port of its own in ``benchmark.envs.PORT``, unless a lifecycle pins one.
-
-    A round the server lifecycle does not hold (a profile round, a framework that cannot hold a server, a warmup that
-    is not planned) has no port assigned, and its server listens on the default: two of them on one machine collide on
-    it. The InferenceX script and the AgentX server both read the port from ``benchmark.envs.PORT``, so it goes
-    there, into a copy: the point itself is shared by every test that runs it. The port is picked where the server is
-    launched (:func:`~hyperloom.common.ports.pick_server_port`).
-    """
-    if server_lifecycle is not None:
-        yield point  # ``inject_lifecycle`` pins PORT in every round the lifecycle builds
-        return
-    config = _point_config(point)
-    benchmark = config.get("benchmark") or {}
-    benchmark["envs"] = {**(benchmark.get("envs") or {}), "PORT": pick_server_port()}
-    config["benchmark"] = benchmark
-    with tempfile.TemporaryDirectory(prefix="hl-port-") as work:
-        pinned = Path(work) / Path(point).name
-        pinned.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
-        yield pinned
-
-
-async def _grid(run: _Run, point: int, name: str, *, watch_boot: bool = True, **launch: Any) -> VariantResult:
+async def _grid(run: Run, point: int, name: str, *, watch_boot: bool = True, **launch: Any) -> VariantResult:
     """One ``run_grid`` call for the point at index ``point``: ``launch`` its GridLaunch, and its base_extra_envs. A boot
     not ``watch_boot`` is bounded by its round's own boot deadline alone, so its timeout never cancels the test."""
     call, envs = run.call, launch.pop("base_extra_envs", None)
     launch.setdefault("warmup_round", name == _WARMUP)  # the held warmup draws its own prompts (_held_rounds)
     watched = _booting(run, point, launch) if watch_boot else contextlib.nullcontext()
-    with _free_port_for(call.points[point], launch.get("server_lifecycle")) as base_yaml, watched:
+    # The round's server gets a free port where every round's point is read (``_suite.rounds._round_point``).
+    with watched:
         started = time.time()
         results = await run_grid(
             grid=[GridVariant(name, unset_envs=run.unset_envs)],
             output_root=Path(call.output_dir),
-            recipe=GridRecipe(base_yaml, base=LaunchLayer(extra_envs=envs)),
+            recipe=GridRecipe(call.points[point], base=LaunchLayer(extra_envs=envs)),
             launch=GridLaunch(call.result_dir, call.serving_lease, **launch),
             stop=GridStop(call.session_deadline_sec, checkpoint=call.checkpoint and call.checkpoint.on(name == _TEST)),
         )
@@ -644,7 +563,7 @@ async def _grid(run: _Run, point: int, name: str, *, watch_boot: bool = True, **
     return results[0]
 
 
-def _round_shape(run: _Run, point: int, name: str, kwargs: dict[str, Any], result: VariantResult) -> RoundShape:
+def _round_shape(run: Run, point: int, name: str, kwargs: dict[str, Any], result: VariantResult) -> RoundShape:
     """What a round's call says about it, for reading the phases off the marks it left."""
     lifecycle = kwargs.get("server_lifecycle")
     role = ROLE_BOOT if kwargs.get("lifecycle_boot_only") else name if name in (_WARMUP, _EVAL) else ROLE_MEASURE
@@ -653,19 +572,19 @@ def _round_shape(run: _Run, point: int, name: str, kwargs: dict[str, Any], resul
         role,
         _point(run.call.points[point]).agentx,
         bool(kwargs.get("server_already_ready")),
-        _is_failure(result),
+        is_failure(result),
         ROUND_COLLECT if stays_up else TEARDOWN,
     )
 
 
-def _stamp_round(run: _Run, point: int, shape: RoundShape, window: tuple[float, float]) -> None:
+def _stamp_round(run: Run, point: int, shape: RoundShape, window: tuple[float, float]) -> None:
     """Stamp the phases of the round that ran in ``window``; what follows it is ``other`` until something stamps."""
     for boundary in round_boundaries(window, read_runs(grid_run_dirs(Path(run.call.output_dir)), window), shape):
         run.phases.begin(boundary.name, at=boundary.at, point=point)
     run.phases.begin(OTHER, at=window[1])
 
 
-async def _single(run: _Run) -> None:
+async def _single(run: Run) -> None:
     # A profiled round is not a statistic: it runs once, with no warmup before it.
     once = run.call.kind == _PROFILE or _point(run.call.points[0]).measured_once
     warmup = 0 if once else run.call.rounds.warmup_rounds
@@ -701,7 +620,7 @@ def _stays_up(call: TestCall) -> bool:
     return _checks_held(call) or _agentx_check_server(call) == LONG_CONTEXT_HELD
 
 
-async def _held_rounds(run: _Run, lifecycle: _Lifecycle, warm: bool) -> None:
+async def _held_rounds(run: Run, lifecycle: _Lifecycle, warm: bool) -> None:
     """The warmup bench when ``warm``, the measured bench and, for a graded test, the evaluation (``_evaluate``), on one
     server; then the accuracy checks on it (``_checks_held``). A bench that followed the evaluation started on the KV pool it left full, and
     read lower. The warmup draws prompts of its own (``_grid``); when it failed, was stopped or its logs name a cause
@@ -728,33 +647,33 @@ async def _held_rounds(run: _Run, lifecycle: _Lifecycle, warm: bool) -> None:
         lifecycle.teardown()
 
 
-async def _warmup_round(run: _Run, lifecycle: _Lifecycle, envs: dict[str, str] | None) -> bool:
+async def _warmup_round(run: Run, lifecycle: _Lifecycle, envs: dict[str, str] | None) -> bool:
     """The warmup bench on the server it leaves up; whether the measured round follows."""
     held = lifecycle.settings(cleanup=False)
     warmup = await _grid(run, 0, _WARMUP, server_lifecycle=held, base_extra_envs=envs, warmup_before_measure=False)
     run.warmup = warmup
-    return run.add(0, warmup) and not _is_failure(warmup) and not decides_test(_ended(run).verdict)
+    return run.add(0, warmup) and not is_failure(warmup) and not decides_test(ended(run).verdict)
 
 
-async def _evaluate(run: _Run, lifecycle: _Lifecycle, point: int) -> None:
+async def _evaluate(run: Run, lifecycle: _Lifecycle, point: int) -> None:
     """A graded test's evaluation from the point at index ``point``, after its last bench, on the server it left up;
     none after a failed bench or a stop. One that fails fails the test's accuracy, never a bench's reading."""
-    if run.call.accuracy and run.stopped_rc is None and not _test_failed(run):
+    if run.call.accuracy and run.stopped_rc is None and not test_failed(run):
         held = lifecycle.settings(cleanup=not _stays_up(run.call))
         launch = {"server_already_ready": True, "warmup_before_measure": False, "evaluation_only": True}
         run.evaluation = await _grid(run, point, _EVAL, server_lifecycle=held, base_extra_envs=_EVAL_ENVS, **launch)
         run.add(point, run.evaluation)
 
 
-async def _held_checks(run: _Run, lifecycle: _Lifecycle) -> None:
+async def _held_checks(run: Run, lifecycle: _Lifecycle) -> None:
     """The checks the test plans, on its own server after its last round; none for a test that failed or is stopping."""
     call = run.call
-    if not _checks_held(call) or run.stopped_rc is not None or _test_failed(run):
+    if not _checks_held(call) or run.stopped_rc is not None or test_failed(run):
         return
     run.held = await _ask_held(run, lifecycle, _held_checks_of(call))
 
 
-async def _ask_held(run: _Run, lifecycle: _Lifecycle, checks: HeldChecks) -> HeldAnswers:
+async def _ask_held(run: Run, lifecycle: _Lifecycle, checks: HeldChecks) -> HeldAnswers:
     """Ask ``checks`` of the server up on the lifecycle's port; the flush's note goes on the test."""
     serving = Serving(f"http://127.0.0.1:{lifecycle.port}", _model_of(run.call))
     server = HeldServer(serving, lifecycle.framework, lambda: run.stopped_rc is not None)
@@ -764,7 +683,7 @@ async def _ask_held(run: _Run, lifecycle: _Lifecycle, checks: HeldChecks) -> Hel
     return held
 
 
-async def _agentx_long_context(run: _Run, lifecycle: _Lifecycle) -> None:
+async def _agentx_long_context(run: Run, lifecycle: _Lifecycle) -> None:
     """An AgentX test's long-context check, after its measured round; none for a test that failed or is stopping.
 
     Without a golden layer it asks the measured server, which that round left up. With one, the measured server is down
@@ -774,7 +693,7 @@ async def _agentx_long_context(run: _Run, lifecycle: _Lifecycle) -> None:
     short-prompt check stays unheld either way.
     """
     server = _agentx_check_server(run.call)
-    if server is None or run.stopped_rc is not None or _test_failed(run):
+    if server is None or run.stopped_rc is not None or test_failed(run):
         return
     checks = dataclasses.replace(_held_checks_of(run.call), short_prompts=None, server=server)
     if server == LONG_CONTEXT_HELD:
@@ -790,7 +709,7 @@ async def _agentx_long_context(run: _Run, lifecycle: _Lifecycle) -> None:
         warmup_before_measure=False,
         lifecycle_boot_only=True,
     )
-    if _is_failure(boot):
+    if is_failure(boot):
         why = (boot.error or boot.error_class or "its boot round failed").strip()
         run.long_context_ran = True
         await long_context_unheld(checks, _CHECK_SERVER_FAILED.format(why=why))
@@ -798,7 +717,7 @@ async def _agentx_long_context(run: _Run, lifecycle: _Lifecycle) -> None:
     await _ask_held(run, lifecycle, checks)
 
 
-def _runner_of(call: TestCall) -> Callable[[_Run], Awaitable[None]]:
+def _runner_of(call: TestCall) -> Callable[[Run], Awaitable[None]]:
     if call.kind == _REPRO:
         return _repro
     rounds = _sweep if call.prep == "conc_sweep" else _single
@@ -810,13 +729,13 @@ def _runner_of(call: TestCall) -> Callable[[_Run], Awaitable[None]]:
 
 
 def _then_check(
-    rounds: Callable[[_Run], Awaitable[None]], check: Callable[[_Run], Awaitable[None]], skipped: str
-) -> Callable[[_Run], Awaitable[None]]:
+    rounds: Callable[[Run], Awaitable[None]], check: Callable[[Run], Awaitable[None]], skipped: str
+) -> Callable[[Run], Awaitable[None]]:
     """``rounds``, then ``check`` when the test ran clean; a test that failed spends no time on it and says so."""
 
-    async def run_all(run: _Run) -> None:
+    async def run_all(run: Run) -> None:
         await rounds(run)
-        if run.stopped_rc is None and run.results and not _test_failed(run):
+        if run.stopped_rc is None and run.results and not test_failed(run):
             await check(run)
         else:
             run.notes.append(skipped)
@@ -824,23 +743,10 @@ def _then_check(
     return run_all
 
 
-def _test_failed(run: _Run) -> bool:
-    """Whether a round of the test failed: by its status, or by the return code of a part of it (a benchmark that served
-    its whole protocol keeps its status when its evaluation fails, so the evaluation's return code says it)."""
-    return any(
-        _is_failure(result) or any(r.returncode != 0 for r in _rounds(run, point, result))
-        for point, result in run.results
-    )
-
-
-def _is_failure(result: VariantResult) -> bool:
-    return result.status in {"failed", "skipped"}
-
-
 class _Lifecycle:
     """The persistent server one sweep arm shares: where its pid files are and which port it listens on."""
 
-    def __init__(self, run: _Run) -> None:
+    def __init__(self, run: Run) -> None:
         pid_dir = Path(run.call.output_dir) / "server_arm"
         pid_dir.mkdir(parents=True, exist_ok=True)
         info = resolve_lifecycle_params(run.call.points[0])
@@ -863,7 +769,7 @@ class _Lifecycle:
         self._phases.begin(OTHER)
 
 
-async def _sweep(run: _Run) -> None:
+async def _sweep(run: Run) -> None:
     """One arm: boot once on the highest level, bench every level on that server, evaluate a graded arm once after the
     last bench from the level it booted on (the quickest to evaluate), tear the server down."""
     order = sorted(range(len(run.call.points)), key=lambda i: -_levels(run.call.points)[i])
@@ -892,7 +798,7 @@ def _boot_envs(point: Path) -> dict[str, str]:
     return {} if _point(point).agentx else dict(_BOOT_CLIENT_ENVS)
 
 
-async def _boot_server(run: _Run, lifecycle: _Lifecycle, point: int, name: str) -> VariantResult:
+async def _boot_server(run: Run, lifecycle: _Lifecycle, point: int, name: str) -> VariantResult:
     """Start the persistent server for the point at index ``point`` and leave it running (no round is measured).
 
     The point is the one the measured rounds run from; only this round's environment says it is a boot (see
@@ -909,17 +815,17 @@ async def _boot_server(run: _Run, lifecycle: _Lifecycle, point: int, name: str) 
     )
 
 
-async def _boot(run: _Run, lifecycle: _Lifecycle, point: int) -> bool:
+async def _boot(run: Run, lifecycle: _Lifecycle, point: int) -> bool:
     """Boot the server from the point at index ``point``; whether it is up. A failed boot is the arm's failed row: no
     level boots another server, as ``CONC`` never reaches the server's launch."""
     boot = await _boot_server(run, lifecycle, point, f"c{_levels(run.call.points)[point]}")
-    if _is_failure(boot):
+    if is_failure(boot):
         run.add(point, boot)
         return False
     return True
 
 
-async def _reuse(run: _Run, lifecycle: _Lifecycle, order: list[int]) -> None:
+async def _reuse(run: Run, lifecycle: _Lifecycle, order: list[int]) -> None:
     """Bench each level of ``order`` on the running server; the last one tears it down unless a round follows it."""
     graded, stays_up = run.call.accuracy, run.call.accuracy or _checks_held(run.call)
     for position, point in enumerate(order):
@@ -936,7 +842,7 @@ async def _reuse(run: _Run, lifecycle: _Lifecycle, order: list[int]) -> None:
             return
 
 
-async def _sweep_by_restart(run: _Run, order: list[int]) -> None:
+async def _sweep_by_restart(run: Run, order: list[int]) -> None:
     """One server per level, booted and torn down by the level's own round."""
     for point in order:
         result = await _grid(run, point, f"c{_levels(run.call.points)[point]}", warmup_before_measure=False)
@@ -944,7 +850,7 @@ async def _sweep_by_restart(run: _Run, order: list[int]) -> None:
             return
 
 
-async def _repro(run: _Run) -> None:
+async def _repro(run: Run) -> None:
     """Boot the server the way a test does, run the case against it, tear the server down.
 
     No warmup and no measured round: the server only has to be up. A server that does not boot ends the test as a
@@ -957,7 +863,7 @@ async def _repro(run: _Run) -> None:
     try:
         boot = await _boot_server(run, lifecycle, 0, "repro")
         run.add(0, boot)
-        if not _is_failure(boot) and run.stopped_rc is None:
+        if not is_failure(boot) and run.stopped_rc is None:
             run.phases.begin(REPRO_CASE)
             await asyncio.to_thread(_run_case, run, lifecycle.port)
             run.phases.begin(OTHER)
@@ -965,12 +871,12 @@ async def _repro(run: _Run) -> None:
         lifecycle.teardown()
 
 
-def _fail_case(run: _Run, reason: str) -> None:
+def _fail_case(run: Run, reason: str) -> None:
     run.case_failed = True
     run.notes.append(f"repro_case_error: {reason}")
 
 
-def _run_case(run: _Run, port: int) -> None:
+def _run_case(run: Run, port: int) -> None:
     call = run.call
     left = call.timeout_sec - (time.monotonic() - run.started)
     timeout = max(1.0, min(_CASE_TIMEOUT_SEC, left * _CASE_TIME_SHARE))
@@ -991,7 +897,7 @@ def _model_of(call: TestCall) -> str:
     return _point(call.points[0]).model
 
 
-async def _short_prompts(run: _Run) -> None:
+async def _short_prompts(run: Run) -> None:
     """Write the short-prompt check: the test's own server's answers, or why it gave none; a failure of the check is the
     check's (``outputs.json`` says), never the test's."""
     first = run.held.short if run.held is not None else not_held(_held_checks_of(run.call), _unheld_reason(run.call))
@@ -999,7 +905,7 @@ async def _short_prompts(run: _Run) -> None:
         write_answered(first, Path(run.call.output_dir))
 
 
-async def _long_context_unheld(run: _Run) -> None:
+async def _long_context_unheld(run: Run) -> None:
     """The long-context check of a test whose server was not held up for it (one that was ran it there)."""
     if not run.long_context_ran:
         await long_context_unheld(_held_checks_of(run.call), _unheld_reason(run.call))
@@ -1037,7 +943,7 @@ def _traced(call: TestCall, tracer: _Tracer | None, notes: list[str]) -> tuple[T
         return call, None
 
 
-def _traced_attempt_failed(run: _Run) -> str:
+def _traced_attempt_failed(run: Run) -> str:
     """Why the traced attempt of a profile failed in a way a run without the tracer may not, or ``""``.
 
     A round that failed, or passed with no trace, is run again; a timeout, a cancellation or a run out of the session's
@@ -1048,7 +954,7 @@ def _traced_attempt_failed(run: _Run) -> str:
     if any(result.error_class in _TIMEOUT_CLASSES for _, result in run.results):
         return ""
     for _, result in run.results:
-        if _is_failure(result):
+        if is_failure(result):
             first = (result.error or result.error_class or "the round failed").strip().splitlines()
             return (first[0] if first else "the round failed")[:300]
     if not any(result.workspace and round_has_traces(Path(result.workspace)) for _, result in run.results):
@@ -1056,7 +962,7 @@ def _traced_attempt_failed(run: _Run) -> str:
     return ""
 
 
-def _set_aside(run: _Run) -> None:
+def _set_aside(run: Run) -> None:
     """Remove what the failed traced attempt left in the test's output, keeping the tail of its server log, so the
     attempt without the tracer starts from an empty one and the bundle carries one attempt's traces."""
     output = Path(run.call.output_dir)
@@ -1075,10 +981,10 @@ def _ranks(call: TestCall) -> int:
         return 1
 
 
-def _gather_traces(run: _Run) -> None:
+def _gather_traces(run: Run) -> None:
     """Move the profiled round's traces into ``<output_dir>/profile``, where the bundle and the analysis find them."""
     destination = Path(run.call.output_dir) / PROFILE_DIR
-    ok = [result for _, result in run.results if result.workspace and not _is_failure(result)]
+    ok = [result for _, result in run.results if result.workspace and not is_failure(result)]
     moved = sum(collect_traces(Path(result.workspace), destination) for result in ok)
     if ok and not moved:
         run.traceless = True
@@ -1088,63 +994,12 @@ def _gather_traces(run: _Run) -> None:
 # --- the outcome --------------------------------------------------------------------------------------------------
 
 
-def _raise_on_timeout(run: _Run) -> None:
+def _raise_on_timeout(run: Run) -> None:
     for _, result in run.results:
         if result.error_class in _TIMEOUT_CLASSES:
             raise MeasurementTimeout(
-                run.call.task_id, run.call.timeout_sec, output=result.error, phases=_stamped_phases(run)
+                run.call.task_id, run.call.timeout_sec, output=result.error, phases=stamped_phases(run)
             )
-
-
-def _stamped_phases(run: _Run) -> tuple[PhaseTiming, ...]:
-    """The phases stamped so far; a recorder the backend made itself is closed first, a runner's goes on."""
-    return run.phases.finish() if run.call.phases is None else run.phases.phases
-
-
-def _result_returncode(result: VariantResult) -> int:
-    if result.returncode is not None:
-        return int(result.returncode)
-    stop = _STOP_RETURNCODES.get(result.error_class)
-    if stop is not None:
-        return stop
-    return 1 if _is_failure(result) else 0
-
-
-def _eval_returncode(result: VariantResult) -> int:
-    """The accuracy pass's own exit code when its run_dir's report has one, else the round's."""
-    workspace = Path(result.workspace or "")
-    code = RoundFolder.read(workspace).report.codes.eval if is_round_folder(workspace) else None
-    return _result_returncode(result) if code is None else code
-
-
-def _warmup_round_outcome(point: int, result: VariantResult, workspace: Path) -> RoundOutcome:
-    """The warmup round of a held test, which says what ``run_grid`` says of a warmup it discarded."""
-    warnings = list(result.nonfatal_warnings)
-    if not _is_failure(result):
-        discarded = [_WARMUP_DISCARDED]
-        if result.output_throughput is not None:
-            discarded.append(f"{_WARMUP_TPUT}:{float(result.output_throughput):.1f}")
-        warnings = [*discarded, *warnings]
-    return RoundOutcome(point, _WARMUP, workspace, _result_returncode(result), nonfatal_warnings=tuple(warnings))
-
-
-def _rounds(run: _Run, point: int, result: VariantResult) -> list[RoundOutcome]:
-    workspace = Path(result.workspace) if result.workspace else Path(run.call.output_dir)
-    if result is run.warmup:
-        return [_warmup_round_outcome(point, result, workspace)]
-    if result is run.evaluation:  # no scores from an evaluation that failed
-        scores, warnings = () if _is_failure(result) else read_accuracy(workspace), tuple(result.nonfatal_warnings)
-        return [RoundOutcome(point, _ACCURACY, workspace, _eval_returncode(result), scores, warnings)]
-    rounds = []
-    if any(w == _WARMUP_DISCARDED for w in result.nonfatal_warnings):
-        rounds.append(RoundOutcome(point, _WARMUP, workspace.parent / "warmup_round", 0))
-    if result.note != _BOOT_ONLY_NOTE:
-        rounds.append(RoundOutcome(point, "measure", workspace, _result_returncode(result)))
-    if run.call.accuracy and not run.evaluates_apart and not _is_failure(result):
-        rounds.append(RoundOutcome(point, _ACCURACY, workspace, _eval_returncode(result), read_accuracy(workspace)))
-    if rounds:
-        rounds[0] = dataclasses.replace(rounds[0], nonfatal_warnings=tuple(result.nonfatal_warnings))
-    return rounds
 
 
 def _image_digest(call: TestCall) -> str | None:
@@ -1168,88 +1023,10 @@ def _sandbox_facts(call: TestCall) -> SandboxFacts:
     )
 
 
-def _clean_returncode(run: _Run) -> int:
-    """The return code of a test whose rounds all passed: a case that could not run, or a trace-less profile, is not 0."""
-    return HOSTED_INFRA_FAILURE_RC if run.case_failed else int(run.traceless)
-
-
-def _boot_timeout_detail(run: _Run, failing: list[VariantResult]) -> str:
-    """What the boot guard saw when it ended the test, or ``""`` when it did not: the limit, the time aiter's module builds
-    were left out of it, and where the log stopped."""
-    if run.boot is None or run.boot.expired_after is None or run.stopped_rc != ORCHESTRATOR_CANCELLED_RETURNCODE:
-        return ""
-    logs = [log_causes.log_tail(result.server_log_path) for result in failing]
-    ends = log_causes.last_line(next((text for text in logs if text), ""))
-    detail = f"the server was not ready within {run.boot.expired_after:.0f}s"
-    if run.boot.building_sec > 0:
-        detail += f" plus {run.boot.building_sec:.0f}s of aiter module builds ({run.boot.waited_sec:.0f}s in all)"
-    detail += f" of the {run.call.timeout_sec:.0f}s a round may take"
-    return f"{detail}; its log ends: {ends}" if ends else detail
-
-
-@dataclass(frozen=True)
-class _Ended:
-    """How the rounds a test has run end it: the rounds, the return code and stderr they leave, and the verdict on them."""
-
-    rounds: list[RoundOutcome]
-    returncode: int
-    stderr: str
-    verdict: FailureClassification
-
-
-def _ended(run: _Run) -> _Ended:
-    """The end the test has if it stops after the results it holds, which is what ``_outcome`` reports when it does."""
-    by_result = [(result, _rounds(run, point, result)) for point, result in run.results]
-    rounds = [r for _, of_result in by_result for r in of_result]
-    # A benchmark that served its whole protocol keeps its status when its evaluation fails, so a round's own return
-    # code, not its status, says whose logs hold the cause.
-    failing = [result for result, of_result in by_result if any(r.returncode != 0 for r in of_result)]
-    detail = _boot_timeout_detail(run, failing)
-    notes = list(run.notes)
-    if detail:
-        # The guard ended the round by cancelling it; the cancellation is the symptom, the slow boot the failure.
-        rounds = [
-            dataclasses.replace(r, returncode=SERVER_BOOT_TIMEOUT_RC) if r.returncode == run.stopped_rc else r
-            for r in rounds
-        ]
-        notes.append(f"{BOOT_CANCEL_REASON}: {detail}")
-    failed = [r for r in rounds if r.returncode != 0]
-    returncode = failed[0].returncode if failed else _clean_returncode(run)
-    stderr = "\n".join([*(result.error for _, result in run.results if result.error), *notes])
-    evidence = FailureEvidence(
-        logs=(stderr, *log_causes.failure_logs(failing)),
-        client_logs=tuple(log_causes.client_logs(failing)),
-        detail=detail,
-        step_failure=_step_failure(failing),
-        unrun=_unrun(failing),
-        framework_changed=run.call.framework_changed,
-    )
-    verdict = classify_test_failure(returncode=returncode, evidence=evidence)
-    return _Ended(rounds, returncode, stderr, verdict)
-
-
-def _step_failure(failing: list[VariantResult]) -> StepFailure | None:
-    """The failed step and detail of the first failed round whose report names one; a round with no run_dir names none."""
-    folders = (Path(result.workspace) for result in failing if result.workspace)
-    for round_ in (RoundFolder.read(folder) for folder in folders if is_round_folder(folder)):
-        if (step := round_.report.failed_step) is not None:
-            return step_failure(round_.layout.root, step, round_.report.failure_detail or "")
-    return None
-
-
-def _unrun(failing: list[VariantResult]) -> str:
-    """``<error_class>: <error>`` of the first failed round that left neither a workspace nor a server log (it was refused
-    before it ran), else ``""``."""
-    for result in failing:
-        if result.error_class and not result.workspace and not result.server_log_path:
-            return f"{result.error_class}: {result.error}" if result.error else result.error_class
-    return ""
-
-
-def _outcome(run: _Run) -> TestOutcome:
+def _outcome(run: Run) -> TestOutcome:
     call = run.call
-    ended = _ended(run)
-    rounds, returncode, stderr, verdict = ended.rounds, ended.returncode, ended.stderr, ended.verdict
+    end = ended(run)
+    rounds, returncode, stderr, verdict = end.rounds, end.returncode, end.stderr, end.verdict
     summary = [
         {"point": p, "name": r.name, "status": r.status, "returncode": r.returncode, "error_class": r.error_class}
         for p, r in run.results
@@ -1264,5 +1041,5 @@ def _outcome(run: _Run) -> TestOutcome:
         request_id=call.task_id,
         failure_class=failure_class,
         failure_reason=verdict.failure_reason,
-        phases=_stamped_phases(run),
+        phases=stamped_phases(run),
     )

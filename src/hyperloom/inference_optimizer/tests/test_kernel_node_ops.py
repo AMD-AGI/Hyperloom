@@ -13,7 +13,7 @@ import types
 
 import pytest
 
-from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+from hyperloom.inference_optimizer.multi_node import pod_entrypoints
 
 
 @pytest.fixture
@@ -28,14 +28,14 @@ def patch_env(tmp_path, monkeypatch):
 
 
 def _bundle_kernel_node_ops() -> str:
-    return mn_cli._read_bundled_pod_python_script("kernel_node_ops.py", mn_cli._KERNEL_NODE_OPS_DEPS)
+    return pod_entrypoints.read_bundled_pod_python_script("kernel_node_ops.py", pod_entrypoints.KERNEL_NODE_OPS_DEPS)
 
 
 def _load(unique_name: str):
     mod = types.ModuleType(unique_name)
-    mod.__file__ = str(mn_cli._SCRIPTS_DIR / "kernel_node_ops.py")
+    mod.__file__ = str(pod_entrypoints._SCRIPTS_DIR / "kernel_node_ops.py")
     with pytest.MonkeyPatch.context() as context:
-        for dep in mn_cli._KERNEL_NODE_OPS_DEPS:
+        for dep in pod_entrypoints.KERNEL_NODE_OPS_DEPS:
             context.setitem(sys.modules, dep.stem, sys.modules.get(dep.stem))
         exec(compile(_bundle_kernel_node_ops(), mod.__file__, "exec"), mod.__dict__)
     sys.modules[unique_name] = mod

@@ -5,7 +5,7 @@ needed).
 
 | Flag | Backend class | Behaviour |
 |---|---|---|
-| (none) / `--critic-agent` | `CriticAgentBackend` | Drives the `hyperloom.agents.critic` skill runtime via `python -m hyperloom.agents.critic.runtime.cli prepare-review` → Codex chat completion → `python -m hyperloom.agents.critic.runtime.cli commit-review`. Adds recipe KB priors when configured, per-session memory + idempotent `reviewed_msg_ids` (no double-verdict), `judge_bundle.review_constraints` injected into the LLM prompt, and `needs_review` / `critic_unavailable` source when context is missing. |
+| (none) / `--critic-agent` | `CriticAgentBackend` | Drives the `hyperloom.agents.critic` skill runtime via `python -m hyperloom.agents.critic.runtime.cli prepare-review` → Codex chat completion → `python -m hyperloom.agents.critic.runtime.cli commit-review`. Adds per-session memory + idempotent `reviewed_msg_ids` (no double-verdict), `judge_bundle.review_constraints` injected into the LLM prompt, and `needs_review` / `critic_unavailable` source when context is missing. |
 | `--critic-mock` | `MockCriticBackend` | Always-approve adapter. Use for offline / smoke tests when Codex creds aren't available. |
 
 Default is overridable per pod via `INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND`
@@ -31,9 +31,6 @@ Claude subscription; `auto` would otherwise choose the OpenAI transport.
 | Var | Purpose | Default |
 |---|---|---|
 | `CRITIC_AGENT_ROOT` | Path to the directory containing `runtime/cli.py`. | in-tree `$REPO_ROOT/src/hyperloom/agents/critic/` |
-| `CRITIC_KB_CLIENT_MODE` | Critic runtime prior-store mode. Hyperloom sets this to `inmemory` by default; use `live` only when deliberately wiring the standalone critic KB client. | `inmemory` |
-| `KB_BASE_URL` | Required only when `CRITIC_KB_CLIENT_MODE=live`; unused in the default Hyperloom path. | unset |
-| `KB_TIMEOUT_MS` / `KB_RETRY_MAX` / `KB_DEAD_LETTER_DIR` | Optional runtime tuning for the critic KB client and dead-letter handling. | runtime defaults |
 | `CRITIC_SESSION_MEMORY_DIR` | Where the runtime persists per-session decisions / reviewed_msg_ids. | `$SESSION_DIR/critic-session-memory` (auto-set by the optimizer; co-located with the Coordinator session and cleaned up alongside it). |
 | `WORKSPACE_PATH` | Skill root the critic-agent runtime resolves prompt assets against. | `$REPO_ROOT` (auto-set). |
 

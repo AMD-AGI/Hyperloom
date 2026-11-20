@@ -40,7 +40,7 @@ class RestartSettings:
     def from_env(cls) -> RestartSettings:
         """Read every setting; raises EnvValueError naming the first one that is set but is not an integer."""
         # Local import to keep httpx out of the single-node import path.
-        from hyperloom.inference_optimizer.multi_node.cli import resolve_poll_timeout_s
+        from hyperloom.inference_optimizer.multi_node.cluster_access import resolve_poll_timeout_s
 
         return cls(
             poll_timeout_s=resolve_poll_timeout_s(DEFAULT_HEALTH_TIMEOUT_S),

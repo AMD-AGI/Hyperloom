@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.phases import phase_predicates
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskSpec
 
@@ -75,13 +76,13 @@ async def test_idle_kernel_winds_down_even_while_work_pending(kernel_coordinator
     assert st.kernel_idle_ticks == 0
     assert st.kernel_idle_since_unix > 0.0
 
-    for _ in range(ps._kernel_idle_max_ticks()):
+    for _ in range(phase_predicates._kernel_idle_max_ticks()):
         await c.phase_machine.advance_phase_if_needed()
-    assert st.kernel_idle_ticks >= ps._kernel_idle_max_ticks()
+    assert st.kernel_idle_ticks >= phase_predicates._kernel_idle_max_ticks()
     # The wall-clock floor has not elapsed yet, so the phase is still KERNEL.
     assert st.phase == ps.PHASE_KERNEL_AGENT
 
-    _backdate_streak(st, ps._kernel_idle_min_seconds() + 1.0)
+    _backdate_streak(st, phase_predicates._kernel_idle_min_seconds() + 1.0)
     await c.phase_machine.advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_SWEEP
@@ -110,11 +111,11 @@ async def test_running_kernel_task_never_winds_down(kernel_coordinator):
 
     # A real build compiles and benchmarks for 30+ minutes without writing a single ledger field while ticks keep
     # arriving every few seconds.
-    for _ in range(ps._kernel_idle_max_ticks() * 20):
+    for _ in range(phase_predicates._kernel_idle_max_ticks() * 20):
         await c.phase_machine.advance_phase_if_needed()
         # Even an aged streak clock must not help: the in-flight branch rebases it every scan, so no idle window can
         # accumulate under the build.
-        _backdate_streak(st, ps._kernel_idle_min_seconds() * 10)
+        _backdate_streak(st, phase_predicates._kernel_idle_min_seconds() * 10)
 
     assert st.phase == ps.PHASE_KERNEL_AGENT
     assert st.kernel_idle_ticks == 0
@@ -129,11 +130,11 @@ async def test_inline_kernel_request_never_winds_down(kernel_coordinator):
     _arm_kernel_phase(st)
     _owe_hot_kernels(st)
 
-    for _ in range(ps._kernel_idle_max_ticks() * 20):
+    for _ in range(phase_predicates._kernel_idle_max_ticks() * 20):
         # What the intent router's heartbeat stamps while the handler runs.
         st.kernel_inline_step_seen_unix = datetime.now(timezone.utc).timestamp()
         await c.phase_machine.advance_phase_if_needed()
-        _backdate_streak(st, ps._kernel_idle_min_seconds() * 10)
+        _backdate_streak(st, phase_predicates._kernel_idle_min_seconds() * 10)
 
     assert st.phase == ps.PHASE_KERNEL_AGENT
     assert st.kernel_idle_ticks == 0
@@ -150,9 +151,9 @@ async def test_orphaned_inline_step_stamp_still_winds_down(kernel_coordinator):
     st.kernel_inline_step_seen_unix = datetime.now(timezone.utc).timestamp() - ps.KERNEL_INLINE_STEP_STALE_SECONDS - 1.0
 
     await c.phase_machine.advance_phase_if_needed()
-    for _ in range(ps._kernel_idle_max_ticks()):
+    for _ in range(phase_predicates._kernel_idle_max_ticks()):
         await c.phase_machine.advance_phase_if_needed()
-    _backdate_streak(st, ps._kernel_idle_min_seconds() + 1.0)
+    _backdate_streak(st, phase_predicates._kernel_idle_min_seconds() + 1.0)
     await c.phase_machine.advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_SWEEP
@@ -175,9 +176,9 @@ async def test_queued_kernel_task_never_winds_down(kernel_coordinator):
         ),
     )
 
-    for _ in range(ps._kernel_idle_max_ticks() * 20):
+    for _ in range(phase_predicates._kernel_idle_max_ticks() * 20):
         await c.phase_machine.advance_phase_if_needed()
-        _backdate_streak(st, ps._kernel_idle_min_seconds() * 10)
+        _backdate_streak(st, phase_predicates._kernel_idle_min_seconds() * 10)
 
     assert st.phase == ps.PHASE_KERNEL_AGENT
     assert st.kernel_idle_ticks == 0
@@ -190,13 +191,13 @@ async def test_an_integrate_verdict_restarts_the_streak(kernel_coordinator):
     _arm_kernel_phase(st)
     _owe_hot_kernels(st)
 
-    for _ in range(ps._kernel_idle_max_ticks() + 1):
+    for _ in range(phase_predicates._kernel_idle_max_ticks() + 1):
         await c.phase_machine.advance_phase_if_needed()
-    assert st.kernel_idle_ticks >= ps._kernel_idle_max_ticks()
+    assert st.kernel_idle_ticks >= phase_predicates._kernel_idle_max_ticks()
 
     # An attempt resolves: real forward motion resets the streak, and the aged clock is re-stamped so the floor
     # restarts from this moment too.
-    _backdate_streak(st, ps._kernel_idle_min_seconds() * 10)
+    _backdate_streak(st, phase_predicates._kernel_idle_min_seconds() * 10)
     st.record_kernel_integrate_result(
         {"kernel_id": "k000", "patch_path": "/tmp/k000.patch", "target_file": "/repo/op0.py", "decision": "REVERT"}
     )

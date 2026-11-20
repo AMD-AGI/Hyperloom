@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
+from hyperloom.orchestrator.kernel import patch_restore
 
 
 @pytest.mark.parametrize("root_kind", ["default", "vllm", "xdg", "tilde"])
@@ -19,7 +19,7 @@ def test_clears_active_vllm_compile_cache_with_triton_sources(tmp_path, monkeypa
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("VLLM_CACHE_ROOT", raising=False)
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
-    monkeypatch.setattr(akp.tempfile, "gettempdir", lambda: str(tmp_path / "isolated-tmp"))
+    monkeypatch.setattr(patch_restore.tempfile, "gettempdir", lambda: str(tmp_path / "isolated-tmp"))
     if root_kind == "vllm":
         cache_root = tmp_path / "custom-vllm"
         monkeypatch.setenv("VLLM_CACHE_ROOT", str(cache_root))
@@ -43,7 +43,7 @@ def test_clears_active_vllm_compile_cache_with_triton_sources(tmp_path, monkeypa
     target = tmp_path / "kernel.py"
     target.write_text("VALUE = 1\n")
 
-    result = akp._clear_python_kernel_caches(target)
+    result = patch_restore.clear_python_kernel_caches(target)
 
     assert result["status"] == "ok"
     assert not source.exists()

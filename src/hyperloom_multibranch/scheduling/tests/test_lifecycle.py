@@ -17,7 +17,7 @@ from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.scheduling.close import CloseReport
 from hyperloom_multibranch.scheduling.final import FinalCandidate, FinalChoice
-from hyperloom_multibranch.scheduling.lifecycle import SessionOutcome
+from hyperloom_multibranch.scheduling.session_types import SessionOutcome
 from hyperloom_multibranch.scheduling.processes import ProcessRecord
 from hyperloom_multibranch.scheduling.stops import SessionStopReason, StopReport
 
