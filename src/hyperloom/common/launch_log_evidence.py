@@ -118,6 +118,30 @@ def _kept_launch_tokens(tokens: list[str]) -> list[str]:
     return kept
 
 
+#: A bare word of letters, perhaps ending a sentence: prose, not a flag value.
+_PROSE_WORD_RE = re.compile(r"[A-Za-z]+[.,;:!?]?")
+
+
+def _reads_as_argv(tokens: list[str]) -> bool:
+    """Whether kept launch tokens read as flags and their values rather than prose.
+
+    vLLM logs advice that names its own command -- ``Restart vllm serve with
+    --enable-scale-out to enable them.`` -- and ``with`` passes the model gate
+    as the ``serve`` operand. A flag takes its first bare operand as its value;
+    a list flag's further operands (``--cuda-graph-bs 1 2 4``) are data, so a
+    plain word there, or a bare token before any flag, is prose.
+    """
+    operands = -1
+    for token in tokens:
+        if token.startswith("-"):
+            operands = 1 if "=" in token else 0
+        elif operands < 0 or (operands > 0 and _PROSE_WORD_RE.fullmatch(token)):
+            return False
+        else:
+            operands += 1
+    return True
+
+
 def launch_flag_setting_name(flag: str, framework: str) -> str:
     """The setting key a launch flag sets under ``framework``.
 
@@ -154,9 +178,13 @@ def launch_argv_from_log(path: str, framework: str) -> str:
                 # rather than by evidence.
                 if not _names_a_model(tail):
                     continue
-                flags = split_launch_flags(tail)
-                if flags:
-                    return flags
+                try:
+                    tokens = shlex.split(tail)
+                except ValueError:
+                    tokens = tail.split()
+                kept = _kept_launch_tokens(tokens)
+                if kept and _reads_as_argv(kept):
+                    return " ".join(kept)
     except OSError:
         return ""
     return ""
@@ -263,7 +291,7 @@ def observed_model_binding_from_log(path: str, framework: str) -> dict[str, Any]
                 except ValueError:
                     tokens = tail.split()
                 binding = _binding_from_tokens(tokens)
-                if binding:
+                if binding and _reads_as_argv(_kept_launch_tokens(tokens)):
                     return binding
     except OSError:
         return {}
