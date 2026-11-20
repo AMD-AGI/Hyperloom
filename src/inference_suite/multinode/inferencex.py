@@ -31,7 +31,7 @@ from inference_suite.recipe.inferencex import (
     RUNNERS,
     Scenario,
     concurrencies,
-    master_model,
+    org_models_named,
     runner_board,
 )
 from inference_suite.recipe.model import RecipeSourceError, boards_interchangeable
@@ -179,6 +179,22 @@ def expand_variants(raw: Mapping[str, Any], selector: str = "") -> list[tuple[st
 # --- matching -----------------------------------------------------------------------------------------------------
 
 
+def _master_model(model: str, masters: Sequence[Mapping[str, Any]]) -> tuple[str, str | None]:
+    """The id ``masters`` name ``model`` by, and a note when that is not ``model`` itself.
+
+    A bare repo name (no ``org/``) the masters do not name is taken for the one ``org/<name>`` they name, matched
+    case-insensitively; it stays itself when it names an org, the masters name it, or several orgs share the name.
+    """
+    if "/" in model or any(entry.get("model") == model for master in masters for entry in master.values()):
+        return model, None
+    hits = org_models_named(model, masters)
+    if len(hits) == 1:
+        return hits[0], f"InferenceX names {model} {hits[0]}"
+    if hits:
+        return model, f"InferenceX names several models {model}: {', '.join(hits)}; none is taken"
+    return model, None
+
+
 def _yaml(checkout: Checkout, path: str) -> Mapping[str, Any]:
     try:
         document = yaml.safe_load((checkout.root / path).read_text(encoding="utf-8"))
@@ -298,7 +314,7 @@ def _master_rows(query: PdQuery, master: Mapping[str, Any]) -> Iterator[_MasterR
     """Every row of the query's scenario in the multi-node disaggregated entries of its model and framework."""
     frameworks = {query.framework.value, f"{query.framework.value}-disagg"}
     scenario = _SCENARIO_OF[query.workload].value
-    model, _ = master_model(query.model_id, [master])
+    model, _ = _master_model(query.model_id, [master])
     for name, entry in master.items():
         if not (entry.get("multinode") and entry.get("disagg")):
             continue
@@ -347,7 +363,7 @@ def master_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
     """The master rows that serve ``query``, in entry then row order, on a board interchangeable with its own."""
     master = _yaml(checkout, MASTER)
     labels = _yaml(checkout, RUNNERS).get("labels") or {}
-    _, note = master_model(query.model_id, [master])
+    _, note = _master_model(query.model_id, [master])
     found: list[Candidate] = []
     misses: list[str] = [note] if note else []
     rows = list(_master_rows(query, master))
@@ -414,7 +430,7 @@ def _lookup_dirs(
     takes in its place): ``<board>-<precision>`` and its suffixed siblings (``-mtp``) for every model prefix and
     precision the master configs give the model; then the query board's ``<board>-<precision>`` directories of the
     prefixes and precisions no board has."""
-    model, _ = master_model(query.model_id, masters)
+    model, _ = _master_model(query.model_id, masters)
     labels = sorted(
         {
             (str(entry["model-prefix"]), str(entry["precision"]))
@@ -479,7 +495,7 @@ def lookup_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
     if (checkout.root / NVIDIA_MASTER).is_file():
         masters.append(_yaml(checkout, NVIDIA_MASTER))
     named = set().union(*(_named_recipes(master) for master in masters))
-    _, note = master_model(query.model_id, masters)
+    _, note = _master_model(query.model_id, masters)
     found: list[Candidate] = []
     misses: list[str] = [note] if note else []
     directories, absent = _lookup_dirs(query, checkout, masters)

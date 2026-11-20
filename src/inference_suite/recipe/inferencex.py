@@ -12,7 +12,6 @@ bound recipe becomes a command line by the rules of srtctl at the snapshot's srt
 from __future__ import annotations
 
 import copy
-import dataclasses
 import json
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -491,30 +490,7 @@ def model_prefixes(bundle: RepoBundle, model: str) -> list[str]:
     master = yaml.safe_load(bundle.text(MASTER))
     if not isinstance(master, Mapping):
         raise RecipeSourceError(f"{MASTER} is not a mapping")
-    model, _ = master_model(model, [master])
     return sorted({str(entry["model-prefix"]) for entry in master.values() if entry.get("model") == model})
-
-
-def master_model(model: str, masters: Sequence[Mapping[str, Any]]) -> tuple[str, str | None]:
-    """The id ``masters`` name ``model`` by, and a note when that is not ``model`` itself.
-
-    A bare repo name (no ``org/``) the masters do not name is taken for the one ``org/<name>`` they name, matched
-    case-insensitively; it stays itself when it names an org, the masters name it, or several orgs share the name.
-    """
-    names = {
-        str(entry["model"])
-        for master in masters
-        for entry in master.values()
-        if isinstance(entry, Mapping) and entry.get("model")
-    }
-    if "/" in model or model in names:
-        return model, None
-    hits = sorted(name for name in names if "/" in name and name.partition("/")[2].casefold() == model.casefold())
-    if len(hits) == 1:
-        return hits[0], f"InferenceX names {model} {hits[0]}"
-    if hits:
-        return model, f"InferenceX names several models {model}: {', '.join(hits)}; none is taken"
-    return model, None
 
 
 def agentx_trace(bundle: RepoBundle, models: Sequence[str]) -> str:
@@ -619,12 +595,10 @@ def _arm_point(points: Sequence[InferencexPoint], target: int) -> InferencexPoin
 
 @dataclass(frozen=True)
 class ServedPoints:
-    """The points that serve a query, why each entry of its model and framework that gives none cannot be read, and
-    how InferenceX names the query's model when it is not the query's own id."""
+    """The points that serve a query, and why each entry of its model and framework that gives none cannot be read."""
 
     points: tuple[InferencexPoint, ...]
     unread: Mapping[str, str]
-    model_note: str | None = None
 
 
 def inferencex_model_id(model_id: str, bundle: RepoBundle) -> str | None:
@@ -637,14 +611,22 @@ def inferencex_model_id(model_id: str, bundle: RepoBundle) -> str | None:
     """
     if "/" in model_id:
         return None
-    named = {
-        model
-        for entry in _yaml_mapping(bundle, MASTER).values()
-        if isinstance(model := entry.get("model"), str)
-        and "/" in model
-        and model.rpartition("/")[2].casefold() == model_id.casefold()
-    }
-    return next(iter(named)) if len(named) == 1 else None
+    named = org_models_named(model_id, [_yaml_mapping(bundle, MASTER)])
+    return named[0] if len(named) == 1 else None
+
+
+def org_models_named(name: str, masters: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The ``org/repo`` models of ``masters`` whose ``repo`` is ``name``, compared without case, sorted."""
+    return sorted(
+        {
+            model
+            for master in masters
+            for entry in master.values()
+            if isinstance(model := entry.get("model"), str)
+            and "/" in model
+            and model.rpartition("/")[2].casefold() == name.casefold()
+        }
+    )
 
 
 def served_points(query: LaunchQuery, bundle: RepoBundle) -> ServedPoints:
@@ -654,12 +636,10 @@ def served_points(query: LaunchQuery, bundle: RepoBundle) -> ServedPoints:
     Only the entries of that model and framework are read, so one InferenceX cannot place does not stop the others.
     """
     runners = _yaml_mapping(bundle, RUNNERS)
-    master = _yaml_mapping(bundle, MASTER)
-    model, note = master_model(query.model_id, [master])
     points: list[InferencexPoint] = []
     unread: dict[str, str] = {}
-    for name, entry in master.items():
-        if (entry.get("model"), entry.get("framework")) != (model, query.framework):
+    for name, entry in _yaml_mapping(bundle, MASTER).items():
+        if (entry.get("model"), entry.get("framework")) != (query.model_id, query.framework):
             continue
         try:
             placed = [point for arm in _arms({name: entry}) for point in _arm_points(arm, runners)]
@@ -667,15 +647,16 @@ def served_points(query: LaunchQuery, bundle: RepoBundle) -> ServedPoints:
             unread[name] = f"InferenceX's config does not place it: {error}"
             continue
         points += [point for point in placed if boards_interchangeable(query.board, point.board)]
-    return ServedPoints(tuple(points), unread, note)
+    return ServedPoints(tuple(points), unread)
 
 
 def inferencex_launches(query: LaunchQuery, snapshot: InferencexSnapshot) -> tuple[SourceLaunch, ...] | SourceMiss:
     """The launch each InferenceX arm that fits ``query`` binds at ``max(query.concurrencies)``, one per arm."""
     served = served_points(query, snapshot.bundle)
     if not served.points and not served.unread:
-        reason = f"no entry serves {query.model_id} with {query.framework} on a {query.board}"
-        return SourceMiss(SourceKind.INFERENCEX, f"{reason}; {served.model_note}" if served.model_note else reason)
+        return SourceMiss(
+            SourceKind.INFERENCEX, f"no entry serves {query.model_id} with {query.framework} on a {query.board}"
+        )
     target = max(query.concurrencies)
     arms: dict[str, list[InferencexPoint]] = {}
     reasons = dict(served.unread)
@@ -695,8 +676,6 @@ def inferencex_launches(query: LaunchQuery, snapshot: InferencexSnapshot) -> tup
         )
         if isinstance(launch, str):
             reasons[arm_key] = launch
-        elif served.model_note:
-            launches.append(dataclasses.replace(launch, warnings=(*launch.warnings, served.model_note)))
         else:
             launches.append(launch)
     if launches:
@@ -717,9 +696,9 @@ __all__ = [
     "agentx_trace",
     "concurrencies",
     "inferencex_launches",
-    "master_model",
     "inferencex_model_id",
     "model_prefixes",
+    "org_models_named",
     "runner_board",
     "served_points",
     "srtctl_cli_args",

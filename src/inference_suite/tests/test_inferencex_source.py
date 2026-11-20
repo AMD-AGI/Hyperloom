@@ -34,7 +34,6 @@ from inference_suite.recipe.inferencex import (
     agentx_trace,
     InferencexPoint,
     inferencex_launches,
-    master_model,
     served_points,
     srtctl_cli_args,
 )
@@ -156,18 +155,11 @@ def test_dsr1_fixed_launch_is_the_selected_variant_without_runner_owned_flags():
     assert tp8.warnings == ()
 
 
-def test_a_bare_repo_name_is_asked_by_the_one_id_inferencex_names_it():
-    [tp8] = _launches(_fixed("DeepSeek-R1-0528", tp=8))
+def test_a_bare_repo_name_is_read_as_given_by_the_single_node_source():
+    bundle = _main().bundle
 
-    assert tp8.source.entry == "dsr1-fp8-mi355x-sglang"
-    assert f"InferenceX names DeepSeek-R1-0528 {_DSR1}" in tp8.warnings
-
-
-def test_a_bare_repo_name_several_orgs_name_is_not_taken():
-    model, note = master_model("M", [{"a": {"model": "x/M"}, "b": {"model": "y/m"}}])
-
-    assert model == "M"
-    assert note is not None and "x/M" in note and "y/m" in note
+    assert served_points(_fixed("DeepSeek-R1-0528", tp=8), bundle).points == ()
+    assert agentx_trace(bundle, ("DeepSeek-R1-0528",)) == _FULL_CORPUS
 
 
 def test_dsr1_c64_is_served_by_both_tp_arms():

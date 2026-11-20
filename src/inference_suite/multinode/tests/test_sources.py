@@ -158,6 +158,15 @@ def test_a_bare_repo_name_finds_the_lookup_recipes(checkout):
     assert all("InferenceX names m org/M" in c.warnings for c in found.found)
 
 
+def test_a_bare_repo_name_several_orgs_name_is_not_taken():
+    from inference_suite.multinode import inferencex
+
+    model, note = inferencex._master_model("M", [{"a": {"model": "x/M"}, "b": {"model": "y/m"}}])
+
+    assert model == "M"
+    assert note is not None and "x/M" in note and "y/m" in note
+
+
 def test_resolve_prefers_master_and_strips_runner_owned(checkout):
     launch = resolve(_query(), ResolveInputs(inferencex=lambda: checkout))
     assert launch.source.kind is PdSourceKind.INFERENCEX_MASTER
