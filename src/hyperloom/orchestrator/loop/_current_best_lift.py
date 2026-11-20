@@ -12,6 +12,7 @@ from typing import Any, Mapping, NamedTuple
 
 from hyperloom_common.coerce import to_str_list
 from hyperloom.inference_optimizer.grid_server_args import (
+    compose_server_args,
     dedupe_extra_server_args,
     merge_cumulative_extra_server_args,
     strip_benchmark_harness_flags,
@@ -50,8 +51,11 @@ class _ResolvedLaunch(NamedTuple):
     replaces: bool
 
 
+_APPEND, _REPLACE = "append", "replace"
+
+
 def _args_mode(record: Mapping[str, Any]) -> str:
-    return str(record.get("args_mode") or "append").strip().lower()
+    return str(record.get("args_mode") or _APPEND).strip().lower()
 
 
 def _replaces(agentx: bool, previous: Mapping[str, Any], bv: Mapping[str, Any]) -> bool:
@@ -59,11 +63,24 @@ def _replaces(agentx: bool, previous: Mapping[str, Any], bv: Mapping[str, Any]) 
     from ..actions.executors._proposal_identity import keeps_effective_args
 
     removals, unsets = to_str_list(bv.get("remove_args")), to_str_list(bv.get("unset_envs"))
-    if _args_mode(bv) == "replace":
+    if _args_mode(bv) == _REPLACE:
         return True
     return bool(removals or unsets) and keeps_effective_args(
         agentx, _args_mode(previous), _args_mode(bv), removals, unsets
     )
+
+
+def _stacked_args(previous_args: str, candidate_args: str, full_args: str, removals: list[str]) -> str:
+    """The previous best's args with the winner stacked on: what it removes goes, then what it asserts is laid on.
+
+    A winner that removes a flag an earlier KEEP accepted is measured without it, so the previous args must not put
+    it back; a flag the winner removes and then asserts again keeps the winner's value.
+    """
+    if removals:
+        return dedupe_extra_server_args(
+            compose_server_args(inherited_args=previous_args, variant_extra_args=candidate_args, remove_args=removals)
+        )
+    return merge_cumulative_extra_server_args(previous_args, candidate_args, full_args)
 
 
 def _resolved_launch(previous: Mapping[str, Any], bv: Mapping[str, Any], *, agentx: bool) -> _ResolvedLaunch:
@@ -73,10 +90,11 @@ def _resolved_launch(previous: Mapping[str, Any], bv: Mapping[str, Any], *, agen
     if replaces:
         full_args = dedupe_extra_server_args(full_args)
     else:
-        full_args = merge_cumulative_extra_server_args(
+        full_args = _stacked_args(
             strip_benchmark_harness_flags(previous.get("extra_server_args")),
             candidate_args,
             full_args,
+            to_str_list(bv.get("remove_args")),
         )
     return _ResolvedLaunch(
         variant_name=bv.get("name"),
@@ -116,7 +134,7 @@ def _variant_fingerprint(bv: Mapping[str, Any], candidate_args: str, full_args: 
         dict(bv.get("extra_envs") or {}),
         remove_args=bv.get("remove_args"),
         unset_envs=bv.get("unset_envs"),
-        args_mode=str(bv.get("args_mode") or "append"),
+        args_mode=str(bv.get("args_mode") or _APPEND),
     )
 
 
@@ -153,7 +171,7 @@ def _variant_launch_controls(bv: Mapping[str, Any]) -> dict[str, Any]:
             "extra_envs": dict(recipe_delta.get("extra_envs") or {}),
             "remove_args": to_str_list(recipe_delta.get("remove_args")),
             "unset_envs": to_str_list(recipe_delta.get("unset_envs")),
-            "args_mode": str(recipe_delta.get("args_mode") or "append").strip().lower(),
+            "args_mode": _args_mode(recipe_delta),
         }
     if bv.get("effective_extra_server_args"):
         fields["effective_extra_server_args"] = dedupe_extra_server_args(
@@ -439,7 +457,7 @@ class CurrentBestLiftMixin:
                 strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
             )
         if launch.replaces and not current_best.get("args_mode"):
-            current_best["args_mode"] = "replace"
+            current_best["args_mode"] = _REPLACE
         self.shared_state.current_best = current_best
         self.shared_state.working_recipe_generation = int(self.shared_state.working_recipe_generation or 0) + 1
         self._stamp_current_best_measurement(bv)

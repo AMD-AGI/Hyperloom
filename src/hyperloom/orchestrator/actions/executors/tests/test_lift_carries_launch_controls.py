@@ -114,6 +114,28 @@ def test_an_agentx_removal_keep_stays_relative_to_the_recipe(tmp_path, agentx_ba
     assert launch["extra_server_args"].split() == ["--tp", "8", "--schedule-policy", "shortest-prefill-first"]
 
 
+def test_an_agentx_keep_that_only_removes_an_accepted_flag_keeps_it_removed(tmp_path):
+    """Explore records such a KEEP with no args of its own and the stack after its removal; stacking it on the
+    previous best must not put the removed flag back, nor drop the removal as one the args contradict."""
+    previous = {"workload_identity": "agentx:workload", "extra_server_args": "--max-cudagraph-capture-size 512 --tp 8"}
+    coord = _coord(tmp_path, previous, agentx_backend="inferencex")
+    winner = {
+        "name": "no_capture_cap",
+        "output_throughput": 1200.0,
+        "candidate_extra_server_args": "",
+        "extra_server_args": "--tp 8",
+        "remove_args": ["--max-cudagraph-capture-size"],
+        **AGENTX_MEASUREMENT,
+    }
+
+    assert coord.writeback.lift_to_current_best("explore", 1200.0, winner) is True
+
+    launch = coord.writeback.current_best_launch_config()
+    assert launch["extra_server_args"].split() == ["--tp", "8"]
+    assert launch["remove_args"] == ["--max-cudagraph-capture-size"]
+    assert launch["args_mode"] != "replace"
+
+
 def test_an_agentx_round_on_a_removal_keep_still_launches_the_recipe(tmp_path):
     """A round composes the session base, then the accepted launch: the recipe's TP must survive the KEEP's removal."""
     coord = _coord(tmp_path, {"workload_identity": "agentx:workload"}, agentx_backend="inferencex")
