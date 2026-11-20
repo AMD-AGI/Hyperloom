@@ -61,7 +61,7 @@ from hyperloom_common.fs_utils import (
     write_text_nofollow,
 )
 from hyperloom.common.env_safety import RunAsError
-from hyperloom_common.proctree import collect_tree, kill_tree
+from hyperloom_common.proctree import STOP_GATE_POLL_SECONDS, collect_tree, kill_tree
 
 from .agent_cli_config import (
     SpecialistAgentUnavailableError,
@@ -233,6 +233,18 @@ def _raise_if_cancelled(scope: CancelScope | None) -> None:
     """Raise ``CancelledError`` with the scope's reason once the action's cancel scope is cancelled."""
     if scope is not None and scope.cancelled:
         raise CancelledError(scope.reason)
+
+
+async def _sleep_unless_cancelled(scope: CancelScope | None, seconds: float) -> None:
+    """Sleep ``seconds``, raising within :data:`STOP_GATE_POLL_SECONDS` of ``scope`` being cancelled.
+
+    The dispatcher's cancel grace budgets that one poll for noticing a cancel, whatever interval the caller waits on.
+    """
+    until = time.monotonic() + seconds
+    while (left := until - time.monotonic()) > 0:
+        _raise_if_cancelled(scope)
+        await asyncio.sleep(min(left, STOP_GATE_POLL_SECONDS))
+    _raise_if_cancelled(scope)
 
 
 def _local_tree_pgid(proc: Any) -> int | None:
@@ -923,9 +935,7 @@ class SpecialistSubprocessDispatcher:
         scope = current_cancel_scope()
 
         while True:
-            _raise_if_cancelled(scope)
-            await asyncio.sleep(cfg.poll_interval_seconds)
-            _raise_if_cancelled(scope)
+            await _sleep_unless_cancelled(scope, cfg.poll_interval_seconds)
             now = time.monotonic()
             elapsed = now - started
             outcome["elapsed"] = elapsed
@@ -988,8 +998,7 @@ class SpecialistSubprocessDispatcher:
         """Give a process that wrote its done-file up to 30s from ``now`` to exit, then kill it."""
         grace_until = now + 30.0
         while time.monotonic() < grace_until and proc.poll() is None:
-            _raise_if_cancelled(scope)
-            await asyncio.sleep(2.0)
+            await _sleep_unless_cancelled(scope, 2.0)
         _raise_if_cancelled(scope)
         # Still alive after grace — reap it so no orphaned subprocess leaks.
         if proc.poll() is None:

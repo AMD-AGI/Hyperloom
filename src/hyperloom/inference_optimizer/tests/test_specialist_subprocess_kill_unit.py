@@ -369,3 +369,38 @@ async def test_reap_loop_kill_left_unconfirmed_raises_the_kills_error_carrying_t
     outcome = caught.value.outcome
     assert (outcome["timed_out"], outcome["stale_heartbeat"]) == (ending == "deadline", ending == "silence")
     assert ("at its deadline" if ending == "deadline" else "heartbeat stale") in outcome["error"]
+
+
+class _NeverExits:
+    pid = -1
+    returncode = None
+
+    def poll(self):
+        return None
+
+
+@pytest.mark.parametrize("done_file", [False, True])
+async def test_a_cancel_is_noticed_within_the_stop_gate_poll_not_the_reap_poll(tmp_path, done_file):
+    # The dispatcher's cancel grace budgets one STOP_GATE_POLL_SECONDS for noticing, so neither the reap poll nor the
+    # done-file grace may hold a cancelled specialist longer than that before its teardown starts.
+    from hyperloom_common.proctree import STOP_GATE_POLL_SECONDS
+    from hyperloom.orchestrator.specialists.reap_watch import ReapWatch
+
+    done = tmp_path / "done.json"
+    if done_file:
+        done.write_text("{}", encoding="utf-8")
+    # Without a done-file the loop sits in its reap poll; with one it sits in the done-file grace.
+    poll = 0.01 if done_file else 30.0
+    dispatcher = SpecialistSubprocessDispatcher(ss.SpecialistSubprocessConfig(poll_interval_seconds=poll))
+    scope = CancelScope()
+    watch = ReapWatch(workspace=tmp_path, done_files=(done,), task_id="t")
+    with use_cancel_scope(scope):
+        reaping = asyncio.create_task(
+            dispatcher._reap_loop(_NeverExits(), watch, deadline=None, started=time.monotonic())
+        )
+        await asyncio.sleep(0.2)
+        cancelled_at = time.monotonic()
+        scope.cancel(reason="coordinator_stop")
+        with pytest.raises(CancelledError):
+            await asyncio.wait_for(reaping, timeout=5.0)
+    assert time.monotonic() - cancelled_at <= STOP_GATE_POLL_SECONDS + 0.25

@@ -18,7 +18,14 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
-from hyperloom_common.proctree import REAP_MARK_ENV, TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
+from hyperloom_common.proctree import (
+    REAP_MARK_ENV,
+    STOP_GATE_POLL_SECONDS,
+    TERM_GRACE_SEC,
+    collect_tree,
+    kill_tree,
+    marked_pids,
+)
 
 
 from ..cancel_channel import CancelScope, cancel_scope_listener
@@ -31,10 +38,6 @@ _REAP_COLLECT_SECONDS: float = 1.0
 
 # How long draining a reaped child's capture threads is given.
 _CAPTURE_DRAIN_SECONDS: float = 2.0
-
-# How often the blocking side looks up from the child to check its stop gates -- the session deadline and the cancel
-# scope among them.
-STOP_GATE_POLL_SECONDS: float = 0.5
 
 # What stopping a running round costs, end to end, from the moment something asks it to: noticing at the poll,
 # SIGTERM'ing the tree, waiting out the grace before SIGKILL, collecting the child, and draining its pipes.

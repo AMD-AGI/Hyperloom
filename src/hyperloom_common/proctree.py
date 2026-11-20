@@ -20,6 +20,9 @@ log = logging.getLogger(__name__)
 #: that every window derived from it stays inside a round's stop budget.
 TERM_GRACE_SEC: float = 5.0
 
+#: How often blocking work that a cooperative stop can interrupt looks up to check whether it was asked to stop.
+STOP_GATE_POLL_SECONDS: float = 0.5
+
 #: How often a wait looks at what it is waiting for.
 _POLL_SEC: float = 0.05
 
@@ -30,6 +33,7 @@ REAP_MARK_ENV: str = "HYPERLOOM_REAP_MARK"
 
 __all__ = [
     "REAP_MARK_ENV",
+    "STOP_GATE_POLL_SECONDS",
     "TERM_GRACE_SEC",
     "ProcessId",
     "boot_unix",
