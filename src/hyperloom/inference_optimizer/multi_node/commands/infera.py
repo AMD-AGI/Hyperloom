@@ -68,7 +68,7 @@ def _infera_require_state() -> dict[str, Any]:
 
 # Env-var prefixes forwarded from the controller's os.environ to the SSH-launched framework child (sandbox-side tuning
 # vars not present in the pod container env and not recovered from pid1).
-_FORWARD_ENV_PREFIXES = ("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_")
+_FORWARD_ENV_PREFIXES = ("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_", "MC_")
 
 
 def _collect_forward_env() -> dict[str, str]:

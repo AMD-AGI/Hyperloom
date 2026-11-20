@@ -25,6 +25,17 @@ from .topology_file import PD_ROUTER_BACKENDS, normalize_mn_backend
 
 ENGINE_PORT = 8000
 PREFILL_BOOTSTRAP_PORT = 8998
+SGLANG_ROUTER_ARGS_ENV = "HYPERLOOM_MN_SGLANG_ROUTER_ARGS"
+# A long-context prefill under a concurrent burst can miss the default 5 s health probe and open the circuit.
+_SGLANG_ROUTER_DEFAULT_ARGS = (
+    "--disable-circuit-breaker --health-failure-threshold 100 --health-check-timeout-secs 600 "
+    "--health-check-interval-secs 30 --request-timeout-secs 14400"
+)
+#: Engine env defaults a launch keeps unless the forwarded env or the pod already sets them.
+_ENGINE_ENV_DEFAULTS = {
+    "SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT": "100000",
+    "SGLANG_DISAGGREGATION_WAITING_TIMEOUT": "100000",
+}
 DECODE_BOOTSTRAP_PORT = 9098
 # ``managed_by`` value of a pod whose process the platform owns; it is recorded, never restarted.
 PLATFORM_MANAGED = "platform"
@@ -202,7 +213,11 @@ def engine_command(role: str, spec: LaunchSpec) -> str:
 
 
 def router_command(spec: LaunchSpec) -> str:
-    """Router command. Atomesh for ``atomesh``, sglang_router for ``sglangrouter``."""
+    """Router command. Atomesh for ``atomesh``, sglang_router for ``sglangrouter``.
+
+    sglang_router takes its health, circuit-breaker and request-timeout args from ``HYPERLOOM_MN_SGLANG_ROUTER_ARGS``
+    when set, else a tolerant default set.
+    """
     if spec.backend == "sglangrouter":
         argv = [
             "python3",
@@ -218,6 +233,7 @@ def router_command(spec: LaunchSpec) -> str:
             "0.0.0.0",
             "--port",
             str(spec.router_port),
+            *shlex.split(os.environ.get(SGLANG_ROUTER_ARGS_ENV, "").strip() or _SGLANG_ROUTER_DEFAULT_ARGS),
         ]
     else:
         argv = [
@@ -630,7 +646,8 @@ def launch_script(
 ) -> str:
     """Bash script that execs ``command`` with the profile and tuning environment.
 
-    ``server_port`` is exported as ``ATOM_SERVER_PORT``. Engine roles tee their output to the shared
+    ``server_port`` is exported as ``ATOM_SERVER_PORT``. Engine roles keep the disaggregation timeout
+    defaults for any not in ``extra_env`` or the pod environment, tee their output to the shared
     server-log dir when one is set and ``log_ip`` names the pod, and start only after the previous
     engine released the GPU.
     """
@@ -642,6 +659,9 @@ def launch_script(
             continue
         lines.append(f"export {key}={shlex.quote(str(value))}")
     if role != "router":
+        lines.extend(
+            f'export {key}="${{{key}:-{value}}}"' for key, value in _ENGINE_ENV_DEFAULTS.items() if key not in extra_env
+        )
         lines.extend(_close_inherited_handle_lines())
         log_dir = str(extra_env.get("HYPERLOOM_MN_SERVER_LOG_DIR") or "")
         if log_dir.startswith("/") and log_ip:

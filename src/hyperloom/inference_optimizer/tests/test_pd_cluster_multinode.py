@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.multi_node._internal import topology_file as 
 from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import (
     drop_unsupported_baseline_flags,
     engine_command,
+    launch_script,
     pods_for,
     record_profile_paths,
     router_command,
@@ -74,6 +75,70 @@ def test_router_and_engine_commands_match_the_platform_entrypoints() -> None:
     sglang_router = router_command(_spec(backend="sglangrouter"))
     assert sglang_router.startswith("python3 -m sglang_router.launch_router ")
     assert "atomesh" not in sglang_router
+
+
+def test_sglang_router_tolerates_a_busy_prefill_unless_the_operator_sets_its_health_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shlex
+
+    monkeypatch.delenv("HYPERLOOM_MN_SGLANG_ROUTER_ARGS", raising=False)
+    words = shlex.split(router_command(_spec(backend="sglangrouter")))
+    assert "--disable-circuit-breaker" in words
+    assert words[words.index("--health-check-timeout-secs") + 1] == "600"
+    assert words[words.index("--health-failure-threshold") + 1] == "100"
+    assert words[words.index("--request-timeout-secs") + 1] == "14400"
+    assert "--health-check-timeout-secs" not in router_command(_spec())
+
+    monkeypatch.setenv("HYPERLOOM_MN_SGLANG_ROUTER_ARGS", "--health-check-timeout-secs 30")
+    words = shlex.split(router_command(_spec(backend="sglangrouter")))
+    assert "--disable-circuit-breaker" not in words
+    assert words[words.index("--health-check-timeout-secs") + 1] == "30"
+
+
+def test_engine_launch_defaults_the_disaggregation_timeouts_without_overriding_a_set_one() -> None:
+    script = launch_script("prefill", "true", {"SGLANG_DISAGGREGATION_WAITING_TIMEOUT": "5"})
+    assert 'SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT="${SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT:-100000}"' in script
+    assert "export SGLANG_DISAGGREGATION_WAITING_TIMEOUT=5" in script
+    assert "SGLANG_DISAGGREGATION_WAITING_TIMEOUT:-" not in script
+    assert "SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT" not in launch_script("router", "true", {})
+
+
+def test_mooncake_knobs_are_forwarded_to_the_engines(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer.multi_node.commands import infera
+
+    monkeypatch.setenv("MC_ENABLE_DEST_DEVICE_AFFINITY", "1")
+    assert infera._collect_forward_env()["MC_ENABLE_DEST_DEVICE_AFFINITY"] == "1"
+
+
+@pytest.mark.parametrize(
+    ("base_flags", "env", "disabled"),
+    [
+        ("--trust-remote-code", {}, True),
+        ("--trust-remote-code", {"HYPERLOOM_AGENTX": "1"}, False),
+        ("--trust-remote-code --enable-hierarchical-cache", {}, False),
+    ],
+    ids=["fixed-length", "agentic", "hicache"],
+)
+def test_an_inferencex_baseline_disables_the_prefill_prefix_cache_only_on_a_fixed_length_run_without_hicache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, base_flags: str, env: dict[str, str], disabled: bool
+) -> None:
+    import shlex
+
+    import yaml
+
+    from hyperloom.inference_optimizer.multi_node._internal import baseline_args as ba
+
+    models = tmp_path / ba._MODELS_YAML
+    models.parent.mkdir(parents=True)
+    entry = {"base_flags": base_flags, "prefill": {"disable_radix_cache": True}, "decode": {}}
+    models.write_text(yaml.safe_dump({"M": entry}), encoding="utf-8")
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+
+    choice = ba._inferencex({"MODEL_PATH": "/models/M", "INFERENCEX_PATH": str(tmp_path), **env})
+
+    assert choice is not None
+    assert ("--disable-radix-cache" in shlex.split(choice.prefill)) is disabled
 
 
 def test_engine_listens_on_the_port_of_its_role_url() -> None:

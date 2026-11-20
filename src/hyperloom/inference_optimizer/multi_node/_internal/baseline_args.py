@@ -24,12 +24,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.perf_metric import agentx_enabled
+
 SOURCE_MANUAL = "manual"
 SOURCE_MAGPIE = "magpie"
 SOURCE_INFERENCEX = "inferencex"
 
 _MODELS_YAML = Path("benchmarks") / "multi_node" / "amd_utils" / "models.yaml"
 _TRANSFER_FLAG = "--disaggregation-transfer-backend"
+_HICACHE_FLAG = "--enable-hierarchical-cache"
 
 
 @dataclass(frozen=True)
@@ -151,8 +154,9 @@ def _is_true(value: Any) -> bool:
     return str(value).strip().lower() == "true"
 
 
-def _prefill_flags(prefill: Mapping[str, Any]) -> tuple[list[str], str]:
-    """Prefill mode flags for the no-DP branch, plus its context length."""
+def _prefill_flags(prefill: Mapping[str, Any], keep_prefix_cache: bool) -> tuple[list[str], str]:
+    """Prefill mode flags for the no-DP branch, plus its context length; ``keep_prefix_cache`` drops
+    ``--disable-radix-cache``."""
     no_dp = prefill.get("no_dp") or {}
     flags = [
         "--mem-fraction-static",
@@ -166,7 +170,7 @@ def _prefill_flags(prefill: Mapping[str, Any]) -> tuple[list[str], str]:
         flags.append("--disable-cuda-graph")
     else:
         flags.extend(["--cuda-graph-bs", *_graph_bs(no_dp.get("cuda_graph_bs_range"), "1-128")])
-    if _is_true(prefill.get("disable_radix_cache", True)):
+    if _is_true(prefill.get("disable_radix_cache", True)) and not keep_prefix_cache:
         flags.append("--disable-radix-cache")
     context = str(no_dp.get("context_length") or "")
     if context:
@@ -234,7 +238,8 @@ def _inferencex(env: Mapping[str, str]) -> BaselineArgs | None:
     key, entry = match
     base, transfer = _split_transfer_backend(str(entry.get("base_flags") or ""))
     ep_flags = shlex.split(str(entry.get("ep_flags") or ""))
-    prefill_mode, prefill_context = _prefill_flags(entry.get("prefill") or {})
+    keep_prefix_cache = agentx_enabled(env) or _HICACHE_FLAG in base
+    prefill_mode, prefill_context = _prefill_flags(entry.get("prefill") or {}, keep_prefix_cache)
     prefill_ep = _role_ep(env, "prefill")
     decode_ep = _role_ep(env, "decode")
     prefill = base + (ep_flags if prefill_ep else []) + prefill_mode
