@@ -48,7 +48,12 @@ from hyperloom.orchestrator.actions.executors.tests.test_baseline_suite_round im
 from hyperloom.orchestrator.actions.executors.tests.test_baseline_suite_round import _play as baseline_play
 from hyperloom.orchestrator.actions.executors.tests.test_grid_suite_round import _play as grid_play
 from hyperloom.orchestrator.actions.executors.tests.test_grid_suite_round import suite as grid_suite  # noqa: F401
-from hyperloom.orchestrator.actions.executors.tests.test_suite_round import _grid_round, _rounds, _write_point
+from hyperloom.orchestrator.actions.executors.tests.test_suite_round import (
+    _grid_round,
+    _portless_point,
+    _rounds,
+    _write_point,
+)
 from hyperloom.orchestrator.actions.executors.tests.test_suite_round import session  # noqa: F401
 from hyperloom.orchestrator.rehearsal import DIED_SILENTLY, READY, LaunchAttempt, LaunchScenario, ScriptedRounds
 from hyperloom.orchestrator.rehearsal import VirtualClock
@@ -162,6 +167,18 @@ def test_a_leased_round_is_not_sized_by_the_hosts_gpu_mask(session, tmp_path, mo
 
     (leased,) = lease.leased
     assert _gpus(leased) == (0, 1)
+
+
+def test_a_leased_round_of_a_point_without_a_port_boots_on_a_free_one(session, tmp_path, monkeypatch) -> None:
+    # A session that serves through Ray runs its profile rounds leased; those named no PORT and took 8888 too.
+    monkeypatch.setattr(suite_rounds, "pick_server_port", lambda: 23003)
+    lease = _Lease(_rounds())
+    point = _portless_point(tmp_path / "slot" / "point.yaml")
+
+    run_suite_round(suite_route(session), _request(point, lease), on_poll=lambda: None)
+
+    (leased,) = lease.leased
+    assert SuiteConfig.from_document(yaml.safe_load(Path(leased.config_path).read_text())).server.port == 23003
 
 
 def _leased(tmp_path: Path, gpus: tuple[int, ...]) -> SuiteLeasedRound:

@@ -28,7 +28,8 @@ log = logging.getLogger(__name__)
 _GPU_FREE_POLL_SECONDS = 5.0
 
 
-# Default HTTP port for the persistent server when ``benchmark.envs.PORT`` is unset; pinned into the per-round YAML.
+# The port ``resolve_lifecycle_params`` reports for a point it does not hold a server for. No round boots on it: a
+# point naming no ``PORT`` gets a free one where its round reads it (``_suite.rounds._round_point``).
 REUSE_PORT_DEFAULT = 8888
 
 # Server-boot budget for the persistent server phase.
