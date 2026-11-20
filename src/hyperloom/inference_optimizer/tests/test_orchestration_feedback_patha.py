@@ -381,35 +381,22 @@ async def test_compose_prompt_orchestration_receives_failure_rows(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_compose_prompt_critic_does_not_receive_failure_rows(session_dir):
-    """Critic inbox must not include failure: rows — reviewers do not act on variant detail."""
+async def test_critic_inbox_carries_proposals_only(session_dir):
+    """Unrelated events cannot fill the Critic inbox ahead of a proposal."""
     c = _silent_coordinator(session_dir)
     try:
-        pvo = {
-            "variant_name": "fp8_kv",
-            "outcome": "FAILED",
-            "stage": "warmup",
-            "failure_id": "fail.t1.abc0000",
-            "error_class": "server_init_dead",
-            "error_excerpt": "AssertionError: batch_size=1",
-            "reason": "warmup_failed",
-        }
-        await c.bus.append_and_seq(
-            Message.new(
-                "coordinator",
-                "*",
-                "delegated_result",
-                {
-                    "task_id": "t1",
-                    "kind": "explore",
-                    "state": "succeeded",
-                    "result": {"status": "failed", "per_variant_outcomes": [pvo]},
-                    "error": None,
-                },
-            )
+        for topic in ("delegated_result", "observation", "review_verdict", "advice"):
+            await c.bus.append_and_seq(Message.new("coordinator", "*", topic, {"body_md": "unrelated"}))
+        proposal = Message.new(
+            "orchestration", "*", "proposal", {"action_name": "baseline", "params": {}, "needs_review": True}
         )
-        prompt = (await c.conversation.compose_prompt("critic")).text
-        assert "failure:" not in prompt
+        await c.bus.append_and_seq(proposal)
+        assert [message.msg_id for message in await c.bus.replay_for("critic", after_seq=0, limit=1)] == [
+            proposal.msg_id
+        ]
+        inbox = (await c.conversation.compose_prompt("critic")).turn.split("=== Inbox for critic", 1)[1]
+        assert "topic=proposal" in inbox
+        assert "unrelated" not in inbox
     finally:
         await c.stop()
 

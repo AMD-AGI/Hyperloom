@@ -48,6 +48,7 @@ from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from ._dispatch_helpers import pump_until_settled
+from .conftest import seed_pending_critic_proposal
 
 
 async def _immediately(payload: dict) -> dict:
@@ -453,11 +454,14 @@ async def test_sub_agent_runner_refuses_a_lane_holding_task_with_no_lease(tmp_pa
 async def test_coordinator_starts_with_silent_backends(session_dir):
     backends = _build_backends({})
     c = Coordinator(session_dir, backends=backends)
+    c.shared_state.agent_last_active["critic"] = 123.0
     try:
         await c.tick(2)
-        # 3 agents × 2 ticks × 1 idle message = 6 send_message events
         msgs = await c.bus.tail(n=20, topic="observation")
-        assert len(msgs) == 4
+        assert len(msgs) == 2
+        assert {m.from_agent for m in msgs} == {"orchestration"}
+        assert not backends["critic"].calls
+        assert c.shared_state.agent_last_active["critic"] == 123.0
     finally:
         await c.stop()
 
@@ -556,6 +560,7 @@ async def test_plain_backend_error_records_no_llm_error_row(session_dir):
     backends["critic"] = _AlwaysFailingBackend("critic")
     c = Coordinator(session_dir, backends=backends)
     try:
+        await seed_pending_critic_proposal(c)
         await c.tick(2)
         assert _llm_error_rows(session_dir) == []
     finally:
@@ -569,6 +574,7 @@ async def test_llm_call_failed_records_one_error_row_per_turn(session_dir, monke
     backends["critic"] = _LLMFailingBackend("critic")
     c = Coordinator(session_dir, backends=backends)
     try:
+        await seed_pending_critic_proposal(c)
         await c.tick(2)
         rows = _llm_error_rows(session_dir)
         assert len(rows) == 2
@@ -631,6 +637,7 @@ async def test_self_tracing_backend_failure_is_recorded_exactly_once(session_dir
     backends["critic"] = _SelfTracingLLMFailingBackend("critic", session_dir)
     c = Coordinator(session_dir, backends=backends)
     try:
+        await seed_pending_critic_proposal(c)
         await c.tick(2)
         rows = _llm_error_rows(session_dir)
         assert len(rows) == backends["critic"].calls
@@ -677,6 +684,7 @@ async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
     backends["critic"] = _AlwaysFailingBackend("critic")
     c = Coordinator(session_dir, backends=backends)
     try:
+        await seed_pending_critic_proposal(c)
         await c.tick(4)
         observations = await c.bus.tail(n=50, topic="observation")
         backend_errors = [
@@ -736,6 +744,7 @@ async def test_backend_error_streak_resets_after_successful_turn(
     backends["critic"] = failing
     c = Coordinator(session_dir, backends=backends)
     try:
+        await seed_pending_critic_proposal(c)
         await c.tick(2)
         assert c._backend_error_streak["critic"] == 2
         assert c._backend_error_alarm_armed["critic"] is False
@@ -766,6 +775,7 @@ async def test_run_does_not_call_a_failing_backend_before_its_retry(session_dir,
     backends["critic"] = failing
     c = Coordinator(session_dir, backends=backends)
     try:
+        await seed_pending_critic_proposal(c)
         assert await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=3)) == "max_ticks"
         assert failing.calls == 1
     finally:
@@ -778,6 +788,7 @@ async def test_run_waits_for_a_retry_when_every_backend_is_failing(session_dir, 
     backends = {name: _AlwaysFailingBackend(name) for name in ("orchestration", "critic")}
     c = Coordinator(session_dir, backends=backends)
     try:
+        await seed_pending_critic_proposal(c)
         assert await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=3)) == "max_ticks"
         assert backends["orchestration"].calls >= 2
     finally:
@@ -791,6 +802,7 @@ async def test_run_stops_once_a_backend_has_failed_for_the_unhealthy_window(sess
     backends["critic"] = _AlwaysFailingBackend("critic")
     c = Coordinator(session_dir, backends=backends)
     try:
+        await seed_pending_critic_proposal(c)
         assert await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=5)) == "backend_unhealthy"
         assert c.shared_state.stop_reason == "backend_unhealthy"
     finally:
@@ -853,6 +865,8 @@ async def test_coordinator_propose_action_creates_pending(session_dir):
         assert len(c.state.pending_proposals) == 1
         prop = next(iter(c.state.pending_proposals.values()))
         assert prop.action_name == "baseline"
+        assert len(c.backends["critic"].calls) == 1
+        assert prop.proposal_msg_id in c.backends["critic"].calls[0]["prompt"]
     finally:
         await c.stop()
 
@@ -922,6 +936,11 @@ async def test_coordinator_review_verdict_reject_no_task(session_dir):
         assert not any(m.payload.get("kind") == "approved_proposal" for m in decisions)
         verdicts = await c.bus.tail(topic="review_verdict")
         assert any(m.payload.get("verdict") == "reject" for m in verdicts)
+        assert not c.state.pending_proposals
+        last_active = c.shared_state.agent_last_active["critic"]
+        await c.tick(1)
+        assert len(c.backends["critic"].calls) == 1
+        assert c.shared_state.agent_last_active["critic"] == last_active
     finally:
         await c.stop()
 
@@ -1191,6 +1210,7 @@ async def test_coordinator_policy_denied_surfaces_as_observation(session_dir):
     plans = {"critic": ScriptedPlan(turns=[MockTurn(intents=[bad])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
+        await seed_pending_critic_proposal(c)
         await c.tick(1)
         denied = await c.bus.tail(topic="observation")
         hits = [m for m in denied if m.payload.get("kind") == "policy_denied"]

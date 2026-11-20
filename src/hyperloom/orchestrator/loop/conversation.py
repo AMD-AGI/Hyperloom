@@ -702,7 +702,9 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return ComposedPrompt(context="\n".join(context), turn="\n".join(turn))
 
     def admit_turn(self, agent_name: str, now_unix: float) -> bool:
-        """Whether ``agent_name`` takes a turn this tick; in KERNEL_AGENT, Orchestration waits for kernel progress or the heartbeat."""
+        """Whether ``agent_name`` takes a turn this tick; Critic runs only while a proposal awaits its verdict, and in KERNEL_AGENT, Orchestration waits for kernel progress or the heartbeat."""
+        if agent_name == "critic":
+            return bool(self.state.pending_proposals)
         state = self.shared_state
         if agent_name != "orchestration" or (state.phase or "").upper() != _phase_state.PHASE_KERNEL_AGENT:
             return True
