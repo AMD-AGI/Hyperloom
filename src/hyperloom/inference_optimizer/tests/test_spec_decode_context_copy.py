@@ -258,9 +258,10 @@ async def _integrate(
     *,
     benchmark_mode: str = "synthetic",
     stack_args: str = _STACK_ARGS,
+    enablement: bool = False,
 ):
-    """Run one integrate_patch round of a deliverable that only adds ``extra_server_args`` over a kept stack launching
-    ``stack_args``; return (result, benched)."""
+    """Run one integrate_patch round (an enablement round when ``enablement``) of a deliverable that only adds
+    ``extra_server_args`` over a kept stack launching ``stack_args``; return (result, benched)."""
     session_dir = tmp_path / "session"
     workspace = session_dir / "runs" / "specialist" / "t-spec"
     workspace.mkdir(parents=True)
@@ -290,6 +291,7 @@ async def _integrate(
         "base_tput": _BASE_TPUT,
         "base_extra_args": stack_args,
         "extra_server_args": extra_server_args,
+        **({"enablement": True} if enablement else {}),
     }
     task = Task(
         task_id="t-int",
@@ -301,7 +303,7 @@ async def _integrate(
     )
     ctx = RunnerContext(task=task, lease=None, extra=integrate_extra(params))
     ctx.extra["shared_state"] = SimpleNamespace(
-        phase="FRAMEWORK_AGENT",
+        phase="ENABLEMENT" if enablement else "FRAMEWORK_AGENT",
         enablement=EnablementRound(),
         framework="vllm",
         benchmark_mode=benchmark_mode,
@@ -313,14 +315,16 @@ async def _integrate(
 
 
 @pytest.mark.asyncio
-async def test_integrate_patch_refuses_a_copying_draft_on_the_synthetic_benchmark(tmp_path, monkeypatch):
-    result, benched = await _integrate(tmp_path, monkeypatch, _NGRAM_GPU)
+@pytest.mark.parametrize("enablement", [False, True], ids=["perf", "enablement"])
+async def test_integrate_patch_refuses_a_copying_draft_on_the_synthetic_benchmark(tmp_path, monkeypatch, enablement):
+    result, benched = await _integrate(tmp_path, monkeypatch, _NGRAM_GPU, enablement=enablement)
 
     assert benched == []
     assert result["status"] == "reverted"
     assert result["reason"].startswith(f"{CONTEXT_COPY_REFUSAL}: ")
     assert result["error_class"] == "filtered_before_bench"
     assert result["benched"] is False
+    assert result.get("enablement") is (True if enablement else None)
 
 
 @pytest.mark.asyncio

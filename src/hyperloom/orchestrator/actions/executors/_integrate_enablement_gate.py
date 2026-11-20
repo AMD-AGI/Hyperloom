@@ -48,10 +48,15 @@ def _attach_attempt_evidence(verdict: dict[str, Any], attempt: IntegrateAttempt)
         verdict["dropped_env_overrides"] = attempt.dropped_env_overrides
 
 
-def _filtered_verdict(attempt: IntegrateAttempt, bench_result: dict[str, Any]) -> dict[str, Any]:
-    """The revert of a variant a pre-bench filter refused, carrying the refusal as its reason; it was never launched."""
+def _filtered_verdict(
+    attempt: IntegrateAttempt, params: dict[str, Any], bench_result: dict[str, Any]
+) -> dict[str, Any]:
+    """The revert of a variant a pre-bench filter refused, carrying the refusal as its reason; it was never launched.
+
+    An enablement round's revert says so, as every other enablement result does, so the lane takes it back.
+    """
     refusal = str(bench_result.get("error") or "")
-    return {
+    verdict: dict[str, Any] = {
         "status": "reverted",
         "error_class": FILTERED_BEFORE_BENCH_CLASS,
         "error": refusal,
@@ -63,6 +68,9 @@ def _filtered_verdict(attempt: IntegrateAttempt, bench_result: dict[str, Any]) -
         "workspace": str(attempt.output_root),
         RESULT_BENCHED: False,
     }
+    if params.get("enablement"):
+        verdict["enablement"] = True
+    return verdict
 
 
 def _inert_round_evidence(
@@ -245,7 +253,7 @@ class EnablementGateMixin:
             }
 
         if bench_result.get("error_class") == FILTERED_BEFORE_BENCH_CLASS:
-            verdict = _filtered_verdict(attempt, bench_result)
+            verdict = _filtered_verdict(attempt, params, bench_result)
         elif params.get("enablement"):
             verdict = await self._gate_enablement(
                 attempt=attempt,
