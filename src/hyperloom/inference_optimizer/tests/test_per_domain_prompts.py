@@ -861,3 +861,22 @@ def test_enablement_ladder_rendered_exactly_once():
     _, user = build_specialist_prompts(inp)
     count = user.count("ENABLEMENT METHODOLOGY")
     assert count == 1, f"Expected 'ENABLEMENT METHODOLOGY' exactly once, found {count}"
+
+
+@pytest.mark.parametrize("no_source_changes", [True, False])
+def test_a_patch_mode_mandate_says_only_configuration_is_kept_exactly_under_no_source_changes(no_source_changes):
+    """A benching or enablement specialist still runs in patch mode under the flag; it is told what will be kept."""
+    domain = get_domain("serving_specialist")
+    inp = SpecialistPromptInputs(
+        domain=domain,
+        max_turns=4,
+        gap_canonical_id="gap.serving.example",
+        gap_symptom="example symptom",
+        framework="vllm",
+        workspace_path="/tmp/test/serving",
+        no_source_changes=no_source_changes,
+    )
+    system, user = build_specialist_prompts(inp)
+    text = system + "\n" + user
+    assert ("deliver configuration proposals" in text) is no_source_changes
+    assert ("Altitude — where the durable wins are" in text) is not no_source_changes

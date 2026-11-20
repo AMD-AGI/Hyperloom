@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer.cli import bootstrap
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -61,3 +62,48 @@ def test_removed_budget_spellings_are_rejected(flag):
 
 # --------------------------------------------------------------------------- # The eval toggle, which is orthogonal
 # and unchanged. --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- # --no-source-changes: keep only server
+# arguments and environment variables. --------------------------------------------------------------------------- #
+def test_source_changes_are_kept_by_default():
+    args = _parse_optimize([])
+    assert args.no_source_changes is False
+    assert SharedState(session_id="t").no_source_changes is False
+    assert bootstrap._phase_toggle_fields(args)["no_source_changes"] is False
+
+
+def test_no_source_changes_turns_on_no_other_flag():
+    """The kernel phase, warm replay, local explore and static recon keep their own switches."""
+    args = _parse_optimize(["--no-source-changes"])
+    assert args.no_source_changes is True
+    assert bootstrap._phase_toggle_fields(args)["no_source_changes"] is True
+    assert args.no_kernel is False
+    assert args.no_warm_replay is False
+    assert args.no_framework_local_explore is False
+    assert args.static_recon is True
+    assert args.no_framework_agent is False
+    assert args.enablement == "all"
+
+
+def test_a_resume_keeps_a_persisted_no_source_changes(tmp_path):
+    state = SharedState(session_id="t", no_source_changes=True)
+    args = _parse_optimize([])
+    cli._restore_phase_toggles(args, state, tmp_path)
+    assert state.no_source_changes is True
+    assert args.no_source_changes is True
+
+
+def test_a_resume_can_turn_no_source_changes_on_and_persists_it(tmp_path):
+    state = SharedState(session_id="t")
+    cli._restore_phase_toggles(_parse_optimize(["--no-source-changes"]), state, tmp_path)
+    assert state.no_source_changes is True
+    assert SharedState.load_or_init(tmp_path).no_source_changes is True
+
+
+def test_a_resume_without_the_flag_leaves_source_changes_kept(tmp_path):
+    state = SharedState(session_id="t")
+    args = _parse_optimize([])
+    cli._restore_phase_toggles(args, state, tmp_path)
+    assert state.no_source_changes is False
+    assert args.no_source_changes is False

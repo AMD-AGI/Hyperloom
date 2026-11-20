@@ -21,6 +21,13 @@ IDENTITY_MANDATE_LINES: tuple[str, ...] = (
 )
 
 
+#: Section 0 row for a patch-mode dispatch in a ``--no-source-changes`` session.
+KEPT_LAUNCH_CONFIG_ONLY_ROW = (
+    "- kept: only server arguments and environment variables. This session skips any patch, tuned file, "
+    "install or other runtime you deliver (`--no-source-changes`); deliver configuration proposals."
+)
+
+
 #: Section 8 field contract of what a patch-authoring round ships.
 PATCH_FIELD_LINES: tuple[str, ...] = (
     "- ``deliverable`` declares what the round produced and is",

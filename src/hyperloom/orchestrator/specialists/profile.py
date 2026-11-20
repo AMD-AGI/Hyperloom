@@ -104,6 +104,17 @@ def is_authoring_specialist(params: dict[str, Any] | None) -> bool:
     return bool(p.get("framework_agent_authoring")) or bool(p.get("enablement"))
 
 
+def apply_session_policy(params: dict[str, Any], *, no_source_changes: bool) -> None:
+    """Write the session's ``--no-source-changes`` onto ``params`` in place; the session decides it, never the caller.
+
+    :func:`resolve_specialist_profile` reads it, so admission, lanes, budgets and the runner agree on the mode.
+    """
+    if no_source_changes:
+        params["no_source_changes"] = True
+    else:
+        params.pop("no_source_changes", None)
+
+
 def uses_whole_machine_gpu_lane(params: dict[str, Any] | None) -> bool:
     """True when a GPU specialist should lease the *whole machine* (time-shared with serving via ``gpu_research_lane``) rather than the serving-disjoint ``gpu_specialist_pool``."""
     p = params or {}
@@ -116,7 +127,9 @@ def resolve_specialist_profile(
 ) -> SpecialistProfile:
     """Resolve scope/mode/bench from dispatch params, falling back to safe defaults.
 
-    The scope is re-inferred from the tags when it is unknown, or ``domains`` over fewer than two tags.
+    The scope is re-inferred from the tags when it is unknown, or ``domains`` over fewer than two tags. Under
+    ``no_source_changes`` a patch dispatch without ``bench`` runs as research, unless it is an authoring
+    (framework or enablement) round.
     """
     p = params or {}
 
@@ -136,6 +149,9 @@ def resolve_specialist_profile(
     bench = is_truthy(p.get("bench"), default=DEFAULT_BENCH)
     if mode != MODE_PATCH:
         bench = False
+    elif not bench and is_truthy(p.get("no_source_changes")) and not is_authoring_specialist(p):
+        # integrate_patch skips every patch this session; without a bench loop, patch mode buys nothing else.
+        mode = MODE_RESEARCH
 
     return SpecialistProfile(scope=scope, mode=mode, bench=bench)
 
@@ -153,6 +169,7 @@ __all__ = [
     "SCOPE_FREEFORM",
     "SCOPE_VALUES",
     "SpecialistProfile",
+    "apply_session_policy",
     "is_authoring_specialist",
     "requires_gpu",
     "resolve_specialist_profile",

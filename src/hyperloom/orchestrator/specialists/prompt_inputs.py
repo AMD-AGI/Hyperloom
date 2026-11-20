@@ -55,6 +55,9 @@ class SpecialistPromptInputs:
     agentx_grading: dict[str, Any] = field(default_factory=dict)
     agentx_backend: str = ""
 
+    # --no-source-changes: only server arguments and environment variables will be kept.
+    no_source_changes: bool = False
+
     # Gap statement
     gap_canonical_id: str = ""
     gap_symptom: str = ""
