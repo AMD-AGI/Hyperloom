@@ -10,6 +10,9 @@ import pytest
 from hyperloom.agents.critic.runtime.request_models import (
     CriticRequest,
     Proposal,
+    _optional_list,
+    _optional_str,
+    _require_str,
     parse_request,
 )
 from hyperloom.agents.critic.runtime.errors import RequestValidationError
@@ -121,3 +124,28 @@ def test_proposal_to_dict_carries_parse_defaults():
     assert d["msg_id"] == "m1"
     assert d["action_name"] == "baseline"
     assert d["predicted_gain_pct"] is None
+
+
+def test_require_and_optional_validators() -> None:
+    with pytest.raises(RequestValidationError):
+        _require_str({"k": 5}, "k", where="t")
+    with pytest.raises(RequestValidationError):
+        _optional_str({"k": 5}, "k", where="t")
+    with pytest.raises(RequestValidationError):
+        _optional_list({"k": 5}, "k", where="t")
+    assert _optional_str({}, "k", where="t") is None
+    assert _optional_list({}, "k", where="t") == []
+
+
+def test_parse_request_errors() -> None:
+    with pytest.raises(RequestValidationError):
+        parse_request("not a dict")  # type: ignore[arg-type]
+
+    with pytest.raises(RequestValidationError):
+        parse_request(
+            {
+                "session_id": "s1",
+                "raw_prompt": "do something",
+                "proposals": ["not-an-object"],
+            }
+        )

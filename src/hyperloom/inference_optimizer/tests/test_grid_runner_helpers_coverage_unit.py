@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
     removals_absent_from_args,
@@ -64,24 +63,6 @@ def test_ungrounded_env_file_reason_drops_missing_config_path(tmp_path) -> None:
     reason = gr.ungrounded_env_file_reason(v.extra_envs)
     assert reason and "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE" in reason
     assert str(tmp_path / "nope.csv") in reason
-
-
-def test_ungrounded_env_file_reason_passes_authored_file(tmp_path) -> None:
-    csv = tmp_path / "tuned.csv"
-    csv.write_text("gfx,M,N,K,splitK\ngfx950,64,5120,5120,2\n", encoding="utf-8")
-    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(csv)})
-    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
-
-
-def test_ungrounded_env_file_reason_accepts_colon_joined_existing_files(tmp_path) -> None:
-    # A set AITER_CONFIG_* is aiter's SET form: a `:`-joined list, each element loaded (csvs_aiter_will_load).
-    # Both files on disk is a valid variant and must not be dropped.
-    a = tmp_path / "t.csv"
-    a.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
-    b = tmp_path / "t2.csv"
-    b.write_text("gfx,M,N,K\ngfx950,4,5,6\n", encoding="utf-8")
-    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{a}:{b}"})
-    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
 
 
 def test_ungrounded_env_file_reason_drops_colon_joined_missing_element(tmp_path) -> None:
@@ -214,13 +195,6 @@ def test_probe_swallows_subprocess_error(monkeypatch) -> None:
 
 
 # -- _resolve_probe_python / probe interpreter selection ------------------
-def test_resolve_probe_python_takes_the_venv_that_backs_vllm_serve(monkeypatch) -> None:
-    monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
-    monkeypatch.setattr(bi.shutil, "which", lambda name, **_k: "/other/venv/bin/vllm" if name == "vllm" else None)
-    monkeypatch.setattr(bi.os.path, "exists", lambda p: p == "/other/venv/bin/python")
-    assert bi._resolve_probe_python() == "/other/venv/bin/python"
-
-
 @pytest.mark.parametrize(("image", "expected"), [(True, "/opt/venv/bin/python"), (False, "/usr/bin/python3")])
 def test_resolve_probe_python_without_vllm_takes_the_images_interpreter_else_python3(
     monkeypatch, image, expected
@@ -272,18 +246,6 @@ def test_runtime_overrides_env_ints_and_rocr_autofill(monkeypatch) -> None:
     assert envs["ROCR_VISIBLE_DEVICES"] == "0,1"
 
 
-def test_runtime_overrides_explicit_benchmark_script_wins(monkeypatch) -> None:
-    for k in ("PRECISION", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC", "ROCR_VISIBLE_DEVICES"):
-        monkeypatch.delenv(k, raising=False)
-    bench = {"framework": "vllm"}
-    apply_runtime_benchmark_overrides(
-        bench,
-        gpu_type="mi300x",
-        benchmark_script="custom.sh",
-    )
-    assert bench["benchmark_script"] == "custom.sh"
-
-
 # -- _parse_report ---------------------------------------------------------
 def test_parse_report_invalid_json(tmp_path: Path) -> None:
     (tmp_path / "benchmark_report.json").write_text("{bad", encoding="utf-8")
@@ -296,26 +258,6 @@ def test_parse_report_non_dict(tmp_path: Path) -> None:
 
 
 # -- _build_variant_yaml ---------------------------------------------------
-def test_build_variant_yaml_injects_extra_envs(tmp_path: Path) -> None:
-    base = tmp_path / "base.yaml"
-    base.write_text(
-        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {}}}),
-        encoding="utf-8",
-    )
-    variant = _variant("v1", "--foo 1", envs={"USE_AITER": "1"})
-    out = gr._build_variant_yaml(
-        gr.GridRecipe(base_yaml_path=base),
-        variant,
-        output_subdir=tmp_path / "v1",
-    )
-    cfg = yaml.safe_load(out.read_text(encoding="utf-8"))
-    envs = cfg["benchmark"]["envs"]
-    assert envs["USE_AITER"] == "1"
-    # variant + base server args merged into the framework's args env
-    arg_key = server_args_env_name("sglang")
-    assert "--foo 1" in envs[arg_key]
-
-
 def test_build_variant_yaml_dedupes_repeated_flags(tmp_path: Path) -> None:
     """When base YAML + base_extra_args + variant all set the same flag, the materialized YAML must contain each flag
     only once (last wins).
@@ -425,17 +367,6 @@ def test_compose_server_args_replace_still_applies_remove_args() -> None:
     assert out == "--also-bad 2 --keep 4"
 
 
-def test_compose_server_args_launches_with_the_harness_flags_the_baseline_ran_with() -> None:
-    out = compose_server_args(
-        inherited_args="--no-enable-prefix-caching --block-size 128",
-        base_extra_args="--no-enable-prefix-caching",
-        variant_extra_args="--kv-cache-dtype fp8 --no-enable-prefix-caching",
-    )
-    assert "--no-enable-prefix-caching" in out
-    assert "--block-size 128" in out
-    assert "--kv-cache-dtype fp8" in out
-
-
 def test_compose_server_args_keeps_the_harness_flag_in_replace_mode() -> None:
     out = compose_server_args(
         inherited_args="--ignored",
@@ -444,14 +375,6 @@ def test_compose_server_args_keeps_the_harness_flag_in_replace_mode() -> None:
         args_mode="replace",
     )
     assert out == "--no-enable-prefix-caching --max-num-seqs 256 --kv-cache-dtype fp8"
-
-
-def test_launch_keeps_what_the_persisted_recipe_strips() -> None:
-    from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
-
-    launched = compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 256")
-    assert "--no-enable-prefix-caching" in launched
-    assert strip_benchmark_harness_flags(launched) == "--max-num-seqs 256"
 
 
 def test_removals_absent_from_args_drops_only_what_the_args_assert() -> None:

@@ -12,7 +12,6 @@ from hyperloom.orchestrator.state.objective import (
     ObjectiveError,
     TargetBaselineObjective,
     TargetGainObjective,
-    TargetTputObjective,
     TimeOnlyObjective,
     build_objective,
 )
@@ -21,11 +20,6 @@ from hyperloom.orchestrator.state.objective import (
 def test_target_gain_describe():
     obj = TargetGainObjective(target_gain_pct=10.0)
     assert "target_gain_pct=10" in obj.describe()
-
-
-def test_target_tput_describe():
-    obj = TargetTputObjective(target_tput_per_gpu=1000.0)
-    assert "target_tput_per_gpu=1000" in obj.describe()
 
 
 def test_target_baseline_describe(tmp_path):

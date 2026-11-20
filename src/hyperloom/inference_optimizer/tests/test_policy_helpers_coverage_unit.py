@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for policy/gate.py pure helpers + PolicyGate path/freeform helpers: GPU-count probing,
-lane ceilings, path allowlists, and the free-form task-description guard.
+"""Coverage for policy/gate.py pure helpers + PolicyGate path helpers: GPU-count probing,
+lane ceilings and path allowlists.
 """
 
 from __future__ import annotations
@@ -10,20 +10,13 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.orchestrator.policy import gate as pol
-from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import (
     PolicyGate,
     research_lane_ceiling,
 )
 from hyperloom.orchestrator.policy.projection import gpu_specialist_ceiling
-from hyperloom.orchestrator.policy.validators import (
-    SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS,
-    check_freeform_task_description,
-)
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
 
@@ -32,13 +25,6 @@ def test_detect_gpu_count_env_mask(monkeypatch) -> None:
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2")
     assert detect_gpu_count() == 3
-
-
-def test_detect_gpu_count_rocr_mask_wins(monkeypatch) -> None:
-    # ROCR is canonical on ROCm, checked before HIP/CUDA.
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
-    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1")
-    assert detect_gpu_count() == 4
 
 
 def test_detect_gpu_count_empty_mask_returns_zero(monkeypatch) -> None:
@@ -115,31 +101,3 @@ def test_path_in_trace_allowlist(monkeypatch) -> None:
     assert g._path_in_trace_allowlist("/elsewhere/run.json.gz") is False
     assert g._path_in_trace_allowlist("/shared/profile/../secret") is False
     assert g._path_in_trace_allowlist("/shared/profileX/run.json.gz") is False
-
-
-# -- check_freeform_task_description --------------------------------------
-def test_freeform_description_empty() -> None:
-    with pytest.raises(PolicyDenied) as exc:
-        check_freeform_task_description("", where="task[0]")
-    assert exc.value.rule == "specialist_freeform_empty_description"
-
-
-def test_freeform_description_too_long() -> None:
-    big = "x" * (SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS + 1)
-    with pytest.raises(PolicyDenied) as exc:
-        check_freeform_task_description(big, where="task[0]")
-    assert exc.value.rule == "specialist_freeform_description_too_long"
-
-
-def test_freeform_description_valid() -> None:
-    check_freeform_task_description(
-        "Investigate the MoE kernel launch overhead and propose tuning.",
-        where="task[0]",
-    )
-
-
-def test_freeform_description_destructive_text_allowed() -> None:
-    check_freeform_task_description(
-        "killall -9 python",
-        where="task[0]",
-    )

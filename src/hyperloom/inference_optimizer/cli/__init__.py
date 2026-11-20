@@ -711,7 +711,6 @@ class _AgentLineup:
     no_framework_agent: bool
     critic_choice: str
     critic_agent_root: Path | None
-    critic_kb_mode: str
 
 
 def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
@@ -733,13 +732,6 @@ def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
             file=sys.stderr,
         )
     critic_agent_root: Path | None = None
-    critic_kb_mode = os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower()
-    if critic_kb_mode not in ("inmemory", "live"):
-        print(
-            f"ERROR: CRITIC_KB_CLIENT_MODE={critic_kb_mode!r} not in {{'inmemory','live'}}",
-            file=sys.stderr,
-        )
-        sys.exit(2)
     if critic_choice == "agent":
         critic_agent_root = _resolve_agent_root()
         if critic_agent_root is None:
@@ -754,14 +746,6 @@ def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
             )
             sys.exit(2)
         _validate_agent_runtime(critic_agent_root)
-        if critic_kb_mode == "live" and not os.environ.get("KB_BASE_URL"):
-            print(
-                "ERROR: CRITIC_KB_CLIENT_MODE=live but KB_BASE_URL is not "
-                "set. Either export KB_BASE_URL or unset "
-                "CRITIC_KB_CLIENT_MODE to fall back to inmemory.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
         # Default WORKSPACE_PATH for critic-agent runtime: SKILL static-asset root (repo root), not artefact dir.
         os.environ.setdefault("WORKSPACE_PATH", str(Path(__file__).resolve().parents[4]))
     return _AgentLineup(
@@ -769,7 +753,6 @@ def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
         no_framework_agent=no_framework_agent,
         critic_choice=critic_choice,
         critic_agent_root=critic_agent_root,
-        critic_kb_mode=critic_kb_mode,
     )
 
 
@@ -834,8 +817,7 @@ def _print_backend_banner(args: argparse.Namespace, backends: dict[str, Any], li
         _review_protocol = backends["critic"].protocol
         _review_model = args.claude_model if _review_protocol == "anthropic" else args.codex_model
         critic_str = (
-            f"critic-agent(kb={lineup.critic_kb_mode}, protocol={_review_protocol}, "
-            f"model={_review_model}, root={lineup.critic_agent_root})"
+            f"critic-agent(protocol={_review_protocol}, model={_review_model}, root={lineup.critic_agent_root})"
         )
     print(f"Backends        : orchestration={orchestration_str}, kernel={kernel_str}, critic={critic_str}")
     print(f"Max ticks       : {args.max_ticks or 'unlimited'} (budget = {args.max_hours}h)")

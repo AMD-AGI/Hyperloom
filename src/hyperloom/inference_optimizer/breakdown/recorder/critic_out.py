@@ -118,15 +118,10 @@ class CriticIteration:
     workdir: Path | str | None
     request: dict[str, Any] | None = None
     judge_bundle: dict[str, Any] | None = None
-    kb_priors: dict[str, Any] | None = None
 
 
 def record_critic_iteration(session_dir: Path | str | None, iteration: CriticIteration) -> None:
-    """Record one critic iteration under a session-unique identity.
-
-    A falsy ``session_dir`` is a no-op, and an empty ``kb_priors`` trace is
-    omitted from the row rather than recorded blank.
-    """
+    """Record one critic iteration under a session-unique identity; a falsy ``session_dir`` is a no-op."""
     if not session_dir:
         trace_skip(reason="no session_dir", section=ITERATION_SECTION)
         return
@@ -172,8 +167,6 @@ def record_critic_iteration(session_dir: Path | str | None, iteration: CriticIte
         )
         if framework_reviews:
             row["framework_reviews"] = framework_reviews
-        if _dict(iteration.kb_priors):
-            row["kb_priors"] = dict(iteration.kb_priors or {})
 
         # Content only: ``ts`` is author time and ``topic`` is read off the
         # emit, so neither may seed the identity -- a wall clock in the key

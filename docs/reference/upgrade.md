@@ -154,6 +154,24 @@ or the `bypass` route produced; read `ceiling_available` instead of
 Versioning in [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
 The trace certificate's `production_*` keys go with them; read `selected_role`.
 
+### Required: the Critic's knowledge-base client is removed
+
+`python -m hyperloom.agents.critic.runtime.cli replay-dead-letter` is removed
+and exits 2 as an unknown subcommand; there was never anything to replay.
+
+These are no longer read and are silently ignored, so drop them:
+
+* `CRITIC_KB_CLIENT_MODE` and `KB_BASE_URL`; `optimize` no longer exits 2 on
+  an unknown mode, or on `live` without a base URL.
+* `KB_READ_ENABLED`, `KB_WRITE_ENABLED`, `KB_TIMEOUT_MS`, `KB_RETRY_MAX`,
+  `KB_DEAD_LETTER_DIR` and `KB_SERVICE_TOKEN`.
+* `CRITIC_PRIOR_CACHE_TTL_SECONDS`, `CRITIC_KB_PRIOR_LIMIT`,
+  `CRITIC_KB_BREAKER_THRESHOLD` and `CRITIC_KB_BREAKER_COOLDOWN_SECONDS`.
+
+`session_breakdown.json` drops `kb_priors` from critic iteration rows and `kb`
+from `critic_review` on framework proposals. Consumers that read them should
+stop.
+
 ### Required: quantization failure exits 4
 
 A failed `--quantize` prelude now exits 4 instead of 3; exit 3 means only
@@ -174,7 +192,7 @@ only the optimizer-family commands moved under `hyperloom`):
 | `hyperloom-kb-serve`, `hyperloom-kb-collect`, `python -m hyperloom_kb` | Experience KB service and collect CLI |
 | `hyperloom-kb` / `python -m hyperloom_kb.cli` | Operate an Experience KB service: health, labels, restore, exclusions, list, export |
 | `python -m hyperloom.inference_optimizer.experience_kb_service {init-env,ensure,...}` | Per-workspace Experience KB sidecar, with every `hyperloom-kb` command (setup skill, optimizer SKILL) |
-| `python -m hyperloom.agents.critic.runtime.cli {prepare-review,commit-review,replay-dead-letter}` | Critic backend subprocess (not operator-facing) |
+| `python -m hyperloom.agents.critic.runtime.cli {prepare-review,commit-review}` | Critic backend subprocess (not operator-facing) |
 | Kernel agent tool modules (`tracelens_analysis`, …) | Orchestrator subprocess scripts with their own `__main__` |
 | `multi_node/scripts/*.py` on remote pods | Payload scripts SSH'd by `hyperloom multi-node`, not local `-m` entry points |
 
