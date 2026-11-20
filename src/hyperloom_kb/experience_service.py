@@ -33,7 +33,6 @@ from hyperloom_kb.observability import (
 from hyperloom_kb.local_state import LABEL_BEFORE_PULL, LABEL_MANUAL, LocalState, UnknownStateItem
 from hyperloom_kb.knowledge_read import (
     KnowledgeReadService,
-    LLMQueryPlanner,
     QueryExecutor,
     ReadResult,
     ReadStatus,
@@ -45,7 +44,7 @@ from hyperloom_kb.query_view import (
     QueryViewBuilder,
     RetrievalCapability,
 )
-from hyperloom_kb.remote import ReadQuery, RemoteClient
+from hyperloom_kb.remote import QuerySignal, ReadQuery, RemoteClient
 from hyperloom_kb.retrieval import LocalRetrievalService, render_complete_experience
 from hyperloom_kb.retrieval_policy import (
     LEXICAL_FUZZY_PROVIDER_REF,
@@ -205,7 +204,6 @@ class ExperienceHTTPService:
         self,
         config: HTTPServiceConfig,
         declaration: ExperienceDeclaration,
-        planner: LLMQueryPlanner | None,
         *,
         database: Database,
         global_kb: RemoteClient | None = None,
@@ -222,7 +220,6 @@ class ExperienceHTTPService:
         self._files = FileStore(config.home, self.kb_id)
         self._state = LocalState(self.kb_id)
         self._ledger = SyncLedger(database, self.kb_id)
-        self._planner = planner
         self._declarations: dict[str, ExperienceDeclaration] = {}
         self._views: dict[str, _ReadView] = {}
         self.metrics = Metrics()
@@ -359,6 +356,18 @@ class ExperienceHTTPService:
         if outcome not in allowed:
             raise HTTPServiceError(f"outcome must be one of: {', '.join(allowed)}")
         return outcome
+
+    @staticmethod
+    def _signals(signals: tuple[QuerySignal, ...], declaration: ExperienceDeclaration) -> tuple[QuerySignal, ...]:
+        """``signals`` once every exact one names a field ``declaration`` indexes; a read needs at least one."""
+
+        if not signals:
+            raise HTTPServiceError("signals must name at least one signal")
+        indexed = declaration.lookup_fields()
+        unknown = sorted({signal.field for signal in signals if signal.field and signal.field not in indexed})
+        if unknown:
+            raise HTTPServiceError(f"signal fields the schema does not index: {', '.join(unknown)}")
+        return signals
 
     def _missing_files_of(self, connection: Connection, refs: Iterable[FileRef]) -> tuple[str, ...]:
         """The sha256 of each of ``refs`` this KB does not hold; a ref of another size than the one held is invalid."""
@@ -585,13 +594,14 @@ class ExperienceHTTPService:
     def read(self, query: ReadQuery) -> dict[str, JsonValue]:
         """Search one schema's Experiences, this service's default schema unless ``query.schema_ref`` names another.
 
-        Each record renders whole; a file field renders as the path on this host its file is read from. With
+        An Experience is recalled by any of ``query.signals`` and ranked by the summed weight of those it matches. Each
+        record renders whole; a file field renders as the path on this host its file is read from. With
         ``query.render_budget_chars``, the block carries whole records while they fit and names only those in
         ``rendered_refs``.
         """
 
-        decision = _required_text(query.decision, "decision")
         declaration = self.declaration_for(query.schema_ref or self.declaration.schema_ref)
+        signals = self._signals(query.signals, declaration)
         selected_outcome = self._outcome(query.outcome, declaration)
         limit = _bounded_int(
             DEFAULT_READ_LIMIT if query.limit is None else query.limit, "limit", minimum=1, maximum=MAX_READ_LIMIT
@@ -639,13 +649,7 @@ class ExperienceHTTPService:
             provider_refs=provider_refs,
         )
         traces: list[ReadTrace] = []
-        result = KnowledgeReadService(
-            declaration,
-            executor,
-            configuration,
-            planner=self._planner,
-            trace_sink=traces.append,
-        ).read(decision, query.context)
+        result = KnowledgeReadService(executor, configuration, trace_sink=traces.append).read(signals)
         response.update(self._completed_fields(declaration, store, result, traces))
         return response
 

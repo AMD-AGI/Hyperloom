@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import TypeAlias
@@ -13,13 +13,14 @@ from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
 from hyperloom_kb.knowledge_read import ReadResult, ReadStatus
 from hyperloom_kb.remote import (
     ExperienceStart,
+    QuerySignal,
     RemoteClient,
     RemoteClientError,
     RemoteConfig,
     RemoteExperienceKB,
     SessionValue,
 )
-from hyperloom_kb.schema import ExperienceDeclaration, JsonValue, RenderedRef
+from hyperloom_kb.schema import ExperienceDeclaration, RenderedRef
 
 log = logging.getLogger(__name__)
 
@@ -68,11 +69,7 @@ class NoOpExperienceKB:
     def begin(self, _start: ExperienceStart) -> NoOpExperienceSession:
         return NoOpExperienceSession()
 
-    def read(
-        self,
-        decision: str,
-        context: Mapping[str, JsonValue],
-    ) -> ReadResult:
+    def read(self, signals: Sequence[QuerySignal]) -> ReadResult:
         return ReadResult(ReadStatus.DISABLED, "", ())
 
 

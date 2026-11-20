@@ -19,8 +19,6 @@ from hyperloom_kb import (
     ExperienceHTTPService,
     HTTPServiceConfig,
     ImmutableExperienceConflict,
-    LLMQueryPlanner,
-    PlannerConfiguration,
     ReadQuery,
     RemoteClient,
     RemoteClientError,
@@ -31,11 +29,9 @@ from hyperloom_kb.http_service import DATABASE_URL_ENV
 from hyperloom_kb.tests.conftest import fresh_database
 from hyperloom_kb.tests.database_fixtures import requires_postgres
 from hyperloom_kb.tests.test_http_service import (
-    DECISION,
-    FakePlannerBackend,
+    SIGNALS,
     _declaration,
     _experience,
-    _read_context,
 )
 
 TOKEN = "replica-token"
@@ -43,12 +39,11 @@ SCHEMA = _declaration()
 
 
 def _replica(home: Path, database: Database) -> ExperienceHTTPService:
-    planner = LLMQueryPlanner(FakePlannerBackend(), PlannerConfiguration.create("test-planner"))
-    return ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), SCHEMA, planner, database=database)
+    return ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), SCHEMA, database=database)
 
 
 def _read_ids(replica: ExperienceHTTPService) -> set[str]:
-    read = replica.read(ReadQuery(decision=DECISION, context=_read_context(), limit=100))
+    read = replica.read(ReadQuery(SIGNALS, limit=100))
     return {str(reference["id"]) for reference in read["rendered_refs"]}
 
 
@@ -106,7 +101,7 @@ def _free_port() -> int:
 def test_service_processes_sharing_a_database_and_a_home_serve_one_kb(tmp_path: Path, database_url: str) -> None:
     home = tmp_path / "home"
     env = {
-        **{key: value for key, value in os.environ.items() if not key.startswith(("ANTHROPIC_", "HYPERLOOM_"))},
+        **{key: value for key, value in os.environ.items() if not key.startswith("HYPERLOOM_")},
         DATABASE_URL_ENV: database_url,
         "HYPERLOOM_KB_TOKEN": TOKEN,
         "PYTHONPATH": str(Path(__file__).resolve().parents[2]),

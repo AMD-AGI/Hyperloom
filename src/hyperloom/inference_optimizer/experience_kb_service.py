@@ -16,7 +16,6 @@ import sys
 from pathlib import Path
 
 from hyperloom_common.env import EnvValueError, env_bool
-from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom_kb import (
     GLOBAL_URL_ENV,
@@ -38,9 +37,8 @@ log = logging.getLogger(__name__)
 
 # A workspace's service port is drawn from here, below the ephemeral range a later client socket could take.
 LOCAL_PORTS = range(20_000, 30_000)
-# What a run waits on the local service for one read, write, or health check: above the planner's 20 s default, so a
-# read fails only when the planner does. Push and pull keep the client default, since the service forwards a whole
-# batch to the global KB inside one request.
+# What a run waits on the local service for one read, write, or health check. Push and pull keep the client default,
+# since the service forwards a whole batch to the global KB inside one request.
 REQUEST_TIMEOUT_SECONDS = 30.0
 SERVICE_DIR = "experience-kb"
 # Names the service's data home instead of $USER_DATA_PATH/experience-kb. One home serves one service at a time, so
@@ -51,7 +49,6 @@ HOME_ENV = "HYPERLOOM_KB_HOME"
 MAPPING = "hyperloom-sbd-v6"
 AUTO_PUSH_ENV = "HYPERLOOM_KB_AUTO_PUSH"
 _PLACEHOLDER = "<PLEASE_FILL_IN>"
-_PLANNER_MODEL_KEYS = ("LOCAL_KB_PLANNER_MODEL", "CLAUDE_MODEL", "ANTHROPIC_MODEL")
 
 
 def mapping_schema_ref() -> str:
@@ -131,10 +128,7 @@ def ensure_service(*, restart: bool = True) -> LocalService | None:
     config = RemoteConfig.from_env(timeout_seconds=REQUEST_TIMEOUT_SECONDS)
     if config is None or not is_loopback(config.base_url):
         return None
-    env = dict(os.environ)
-    if not any(env.get(key) for key in _PLANNER_MODEL_KEYS):
-        env["LOCAL_KB_PLANNER_MODEL"] = DEFAULT_CLAUDE_MODEL
-    return ensure_local_service(config, service_home(), env=env, restart=restart)
+    return ensure_local_service(config, service_home(), restart=restart)
 
 
 def _workspace_client(command: str) -> RemoteClient:

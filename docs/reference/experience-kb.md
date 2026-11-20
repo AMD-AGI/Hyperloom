@@ -30,7 +30,6 @@ Experiences from other logs in [Experience collection](experience-kb-collect.md)
 | `HYPERLOOM_KB_AUTO_PUSH` | the user | `1` pushes each run's Experiences to the global KB after they are written locally. Default off. |
 | `USER_DATA_PATH` | `hyperloom-setup` | The local service keeps its data under `$USER_DATA_PATH/experience-kb` unless `HYPERLOOM_KB_HOME` is set. |
 | `HYPERLOOM_KB_HOME` | the user | The local service's data home instead of `$USER_DATA_PATH/experience-kb`. One home serves one service at a time, so runs on different hosts that share a `USER_DATA_PATH` each set their own. Optional. |
-| `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_MODEL` | `hyperloom-setup` | The gateway and model the service plans reads with; `LOCAL_KB_PLANNER_MODEL` overrides the model. Without a gateway the service still accepts writes and reads report `unavailable`. |
 
 All of these live in the workspace `.env`. The service reads them when it
 starts; see [the local service](#the-local-service) for how a change reaches a
@@ -97,8 +96,9 @@ It looks at what answers on `HYPERLOOM_KB_URL`:
   packaged declaration, and the settings in `.env`: it reuses it;
 - such a service started with other settings, serving another default
   declaration, or running other Experience KB code, such as one started before
-  an upgrade: it restarts it, keeping its data. Settings are compared by their
-  effect, so the same key under another variable name does not restart it;
+  an upgrade: it restarts it, keeping its data. The settings are the global
+  KB's URL and token and the database URL, compared by their effect, so no
+  other `.env` key and no respelling of a URL restarts it;
 - a service holding another workspace's data, as a copied `.env` would point
   at, or anything else on the port, such as another user's service: it refuses
   without stopping it, and the user picks another port in `HYPERLOOM_KB_URL`.
@@ -126,11 +126,11 @@ A read the service cannot answer, even one cut off mid-response, leaves the
 prompt as it would be without the Experience KB.
 
 A run waits on its local service at most 30 seconds per read, write, or health
-check, and the service gives its planner 20 seconds
-(`LOCAL_KB_PLANNER_TIMEOUT_SECONDS`); a read measured 4–6 seconds. After three
-reads in a row that do not complete, the session stops reading, so a hung
-service or gateway costs a run a few timeouts, not one per orchestration turn
-and specialist dispatch. The session breakdown writes its Experiences off the
+check. A read calls no model: it scans every record once per text signal, which
+measured about 1 second over 3000 records and a few milliseconds over a
+handful. After three reads in a row that do not complete, the session stops
+reading, so a hung or stopped service costs a run a few timeouts, not one per
+orchestration turn and specialist dispatch. The session breakdown writes its Experiences off the
 coordinator's event loop, and once one write spools, the rest of that
 collection spools without waiting on the service. Requests to a loopback service never go through an
 `HTTP_PROXY` or `HTTPS_PROXY` from the environment.
@@ -279,18 +279,41 @@ invalid.
 
 | Field | Required | Default | Meaning |
 |---|---|---|---|
-| `decision` | yes | | the decision the caller is about to make |
-| `context` | no | `{}` | workload context (`identity`, `workload`, `objective`, `observations`, ...) |
+| `signals` | yes | | what to look for, at least one: `{"field", "value", "weight"}` for an exact match, `{"text", "weight"}` for a fuzzy one |
 | `schema_ref` | no | the service's `--declaration` | the one schema to search |
 | `outcome` | no | `mixed` | one of the values the schema's decision field declares, or `mixed`; a schema without a decision field takes `mixed` only |
 | `limit` | no | `10` | maximum Experiences to return, 1–100 |
 | `render_budget_chars` | no | none (every record) | characters the rendered records may fill; records are rendered whole, in rank order, while they fit |
 
-The service's planner turns `decision` and `context` into weighted query
-signals, then ranks candidates by exact matches on the schema's
-[exact lookup fields](experience-kb-schema.md#field-attributes-and-roles) plus
-lexical fuzzy matches over each field by its declared `search` weight,
-[notes](experience-kb-schema.md#notes), and the objective. Experiences that
+```json
+{
+  "signals": [
+    {"field": "identity.model", "value": "Qwen3-14B-FP8", "weight": 1.0},
+    {"field": "identity.tp", "value": 2, "weight": 0.4},
+    {"text": "decode attention bandwidth", "weight": 0.6}
+  ],
+  "render_budget_chars": 40000
+}
+```
+
+The caller states the signals; the service plans nothing. In an exact signal,
+`field` is one of the schema's
+[exact lookup fields](experience-kb-schema.md#field-attributes-and-roles) and
+`value` a JSON string, number, or boolean, matched as the record holds it (the
+number `2` does not match the string `"2"`). A text signal is matched lexically
+over each field by its declared `search` weight,
+[notes](experience-kb-schema.md#notes), and the objective. Every `weight` is
+greater than 0 and at most 1. A request without signals, with a signal of
+another shape, with a field the schema does not index, or with the former
+`decision` and `context` fields is refused with 400.
+
+An Experience is a candidate when it matches any signal, and candidates rank by
+the sum over the signals they match: an exact match adds the signal's weight, a
+text match adds the weight times its match score between 0 and 1, which reaches
+1 only for a record whose most heavily weighted field holds every word of the
+text. Hyperloom sends its run's conditions, objective, and observations with
+the weights in `SIGNAL_WEIGHTS` of
+`hyperloom/inference_optimizer/experience_kb.py`. Experiences that
 repeat the same change under the same identity form one Repeat Group, which
 contributes at most one Experience; `outcome` filters by
 decision without hiding history, because the group annotations still count
@@ -304,16 +327,25 @@ every member.
   "limit": 10,
   "prompt_block": "=== Relevant Experience KB ===\n...",
   "rendered_refs": [{"id": "exp-a23def11a8b85add9f8cc4dfef6c8c7f", "purpose": "representative"}],
-  "experiences": [{"experience_id": "exp-a23def11a8b85add9f8cc4dfef6c8c7f", "score": 1.59, "why_matched": ["..."]}],
+  "experiences": [
+    {
+      "experience_id": "exp-a23def11a8b85add9f8cc4dfef6c8c7f",
+      "score": 1.59,
+      "why_matched": [
+        {"signal_id": 0, "capability": "exact", "experience_id": "exp-a23def11a8b85add9f8cc4dfef6c8c7f",
+         "raw_score": 1.0, "normalized_score": 1.0, "contribution": 1.0}
+      ]
+    }
+  ],
   "eligible_count": 1,
   "rendered_count": 1,
   "warnings": ["capability_unavailable:semantic"]
 }
 ```
 
-`status` is `completed`, `unavailable` (no planner gateway), or `failed`
-(planning or retrieval failed; `warnings` holds the reason); the HTTP status is
-200 either way. `prompt_block` holds each rendered Experience's knowledge
+`status` is `completed`, or `failed` when retrieval failed (`warnings` holds
+the reason); the HTTP status is 200 either way. In `why_matched`, `signal_id` is
+the position of the matched signal in the request's `signals`. `prompt_block` holds each rendered Experience's knowledge
 and Repeat Group annotations, never condensed, under an `Experience <id>`
 heading: a text field whole, and a file field as its name, size, and the path
 on this host to read it from (see [Files](#files)). Its metadata, such as

@@ -3,8 +3,8 @@
 
 """Recall what other sessions published to the Experience KB, sorted by whether it holds here.
 
-One read per branch, with the context the single-lineage Framework phase sends (identity, workload, objective,
-baseline, observations), so one planner serves both flows. A recalled Experience measured under every condition this
+One read per bottleneck, with the signals the single-lineage Framework phase sends (the session's conditions, its
+objective and the bottleneck), weighed as that phase weighs them. A recalled Experience measured under every condition this
 session queried with (model, GPU, framework, TP, concurrency, bottleneck, sequence lengths) is a prior; one measured
 under another condition is only a lead to re-verify, and the briefing names the conditions that differ. The mapping
 refuses Experiences without evidence, so nothing recalled lacks one.
@@ -25,13 +25,14 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Protocol, cast
 
 from hyperloom.common.perf_metric import TOTAL_TOKEN_THROUGHPUT
-from hyperloom_kb import ReadStatus, RemoteClientError
+from hyperloom.inference_optimizer.experience_kb import read_signals
+from hyperloom_kb import QuerySignal, ReadStatus, RemoteClientError
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import SessionProfile
 from hyperloom_multibranch.blackboard.knowledge.experience import (
@@ -51,8 +52,6 @@ THROUGHPUT_OBJECTIVE = "e2e_throughput@v1"
 INTERACTIVITY_OBJECTIVE = "e2e_interactivity@v1"
 TOTAL_THROUGHPUT_OBJECTIVE = "e2e_total_throughput@v1"
 EXPORT_PAGE = 100
-WORKLOAD_KEYS = frozenset({"tp", "ep", "conc", "isl", "osl", "max_model_len", "compute_partition_mode", "partitions"})
-DECISION = "Choose the next actions for one branch of a multi-branch inference optimization session."
 RECALL_LIMIT = 10
 
 
@@ -64,8 +63,8 @@ class RecallTier(str, Enum):
 class ExperienceReader(Protocol):
     """What recall needs of an Experience KB client, such as ``hyperloom_kb.RemoteExperienceKB``."""
 
-    def read(self, decision: str, context: Mapping[str, Any], *, limit: int | None = None) -> Any:
-        """Rank Experiences for ``decision``; the result has ``status``, ``read_id``, ``experiences``,
+    def read(self, signals: Sequence[QuerySignal], *, limit: int | None = None) -> Any:
+        """Rank Experiences by ``signals``; the result has ``status``, ``read_id``, ``experiences``,
         ``rendered_refs`` and ``warnings``."""
 
 
@@ -241,27 +240,13 @@ def recall_conditions(profile: SessionProfile, bottleneck: str) -> dict[str, obj
     return {key: merged[key] for key in CONDITION_KEYS if merged.get(key) not in (None, "")}
 
 
-def recall_context(
-    profile: SessionProfile, baseline_value: float | None, *, bottleneck: str, branch: str = "", metric: str = ""
-) -> dict[str, Any]:
-    """The read context, in the shape the Framework phase's reads use. An AgentX trace replay, which has no input
-    length, asks for the objective of ``metric``, the one it is graded on: total throughput, else interactivity."""
+def recall_objective(profile: SessionProfile, metric: str = "") -> str:
+    """The objective a read asks for. An AgentX trace replay, which has no input length, asks for the objective of
+    ``metric``, the one it is graded on: total throughput, else interactivity."""
 
-    identity = experience_identity(profile)
-    observations = {name: text for name, text in (("bottleneck", bottleneck), ("branch", branch)) if text}
     if profile.isl is not None:
-        objective, baseline_key = THROUGHPUT_OBJECTIVE, "throughput"
-    elif metric == TOTAL_TOKEN_THROUGHPUT:
-        objective, baseline_key = TOTAL_THROUGHPUT_OBJECTIVE, "total_throughput"
-    else:
-        objective, baseline_key = INTERACTIVITY_OBJECTIVE, "interactivity"
-    return {
-        "identity": {key: value for key, value in identity.items() if key not in WORKLOAD_KEYS},
-        "workload": {key: value for key, value in identity.items() if key in WORKLOAD_KEYS},
-        "objective": {"id": objective, "direction": "higher_is_better"},
-        "benchmark_baseline": {baseline_key: baseline_value, "source": "prelude_baseline"},
-        "observations": observations,
-    }
+        return THROUGHPUT_OBJECTIVE
+    return TOTAL_THROUGHPUT_OBJECTIVE if metric == TOTAL_TOKEN_THROUGHPUT else INTERACTIVITY_OBJECTIVE
 
 
 def _same(left: Any, right: Any) -> bool:
@@ -299,18 +284,16 @@ def classify(
 
 @dataclass(frozen=True)
 class RecallQuery:
-    """What one recall asks for: Experiences on ``bottleneck`` for ``branch``, at most :data:`RECALL_LIMIT`, on the
-    objective of ``metric``, the one the session is graded on (:func:`recall_context`)."""
+    """What one recall asks for: Experiences on ``bottleneck``, at most :data:`RECALL_LIMIT`, on the objective of
+    ``metric``, the one the session is graded on (:func:`recall_objective`)."""
 
     bottleneck: str
-    branch: str = ""
     metric: str = ""
 
 
 def recall_experiences(
     reader: ExperienceReader | None,
     profile: SessionProfile,
-    baseline_value: float | None,
     wanted: RecallQuery,
     *,
     identities: IdentityIndex | None = None,
@@ -324,12 +307,10 @@ def recall_experiences(
 
     if reader is None:
         return Recall(ReadStatus.DISABLED.value, "", (), (), ())
-    context = recall_context(
-        profile, baseline_value, bottleneck=wanted.bottleneck, branch=wanted.branch, metric=wanted.metric
-    )
-    result = reader.read(DECISION, context, limit=RECALL_LIMIT)
+    objective = recall_objective(profile, wanted.metric)
+    signals = read_signals(experience_identity(profile), objective, {"bottleneck": wanted.bottleneck})
+    result = reader.read(signals, limit=RECALL_LIMIT)
     query = recall_conditions(profile, wanted.bottleneck)
-    objective = str(context["objective"]["id"])
     recalled = [_on_objective(classify(item, query, identities), objective, identities) for item in result.experiences]
     return Recall(
         status=str(result.status),
@@ -349,7 +330,6 @@ def _on_objective(found: RecalledExperience, objective: str, identities: Identit
 
 __all__ = [
     "CONDITION_KEYS",
-    "DECISION",
     "INTERACTIVITY_OBJECTIVE",
     "LAYER_OF_FAMILY",
     "THROUGHPUT_OBJECTIVE",
@@ -363,6 +343,6 @@ __all__ = [
     "RecalledExperience",
     "classify",
     "recall_conditions",
-    "recall_context",
+    "recall_objective",
     "recall_experiences",
 ]

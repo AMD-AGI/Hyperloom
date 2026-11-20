@@ -6,12 +6,12 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hyperloom_kb import RemoteClientError, RemoteReadResult, RenderedRef
+from hyperloom_kb import QuerySignal, RemoteClientError, RemoteReadResult, RenderedRef
 
 SEARCH_PAGE = 2
 
@@ -47,10 +47,10 @@ class FakeExperienceReader:
 
     def __init__(self, result: RemoteReadResult) -> None:
         self.result = result
-        self.calls: list[tuple[str, Mapping[str, Any], int | None]] = []
+        self.calls: list[tuple[tuple[QuerySignal, ...], int | None]] = []
 
-    def read(self, decision: str, context: Mapping[str, Any], *, limit: int | None = None) -> RemoteReadResult:
-        self.calls.append((decision, context, limit))
+    def read(self, signals: Sequence[QuerySignal], *, limit: int | None = None) -> RemoteReadResult:
+        self.calls.append((tuple(signals), limit))
         return self.result
 
 
