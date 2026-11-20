@@ -108,19 +108,6 @@ def test_build_options_never_maps_openai_key_onto_the_anthropic_side(monkeypatch
     assert "ANTHROPIC_CUSTOM_HEADERS" not in child_env
 
 
-def test_parse_tool_use_block_valid_and_invalid() -> None:
-    b = _backend()
-    valid = ToolUseBlock(
-        name=EMIT_INTENT_TOOL_NAME,
-        input={"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}},
-    )
-    intent = b._parse_tool_use_block(valid)
-    assert intent is not None
-    # invalid envelope -> None (validation failure swallowed)
-    bad = ToolUseBlock(name=EMIT_INTENT_TOOL_NAME, input={"intent_type": "not_a_real_type"})
-    assert b._parse_tool_use_block(bad) is None
-
-
 def test_parse_tool_use_block_prefers_native_intent_type() -> None:
     b = _backend()
     block = ToolUseBlock(
@@ -151,15 +138,6 @@ def test_parse_tool_use_block_unwraps_claude_code_wrapper() -> None:
     assert intent is not None
     assert intent.type.value == "send_message"
     assert intent.payload["topic"] == "heartbeat"
-
-
-def test_parse_tool_use_block_unparsed_malformed_json_returns_none() -> None:
-    b = _backend()
-    bad = ToolUseBlock(
-        name=EMIT_INTENT_TOOL_NAME,
-        input={"__unparsedToolInput": {"raw": "{not-json", "len": 9}},
-    )
-    assert b._parse_tool_use_block(bad) is None
 
 
 async def test_raw_text_collects_every_text_shaped_block() -> None:

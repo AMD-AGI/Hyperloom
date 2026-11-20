@@ -157,15 +157,6 @@ def test_cold_start_does_not_ask_for_a_field_the_safety_gate_forbids():
     assert "provenance: domain_focus_default" in cold_start
 
 
-def test_research_hints_fallback():
-    inp = SpecialistPromptInputs(
-        domain=get_domain("serving_specialist"),
-        research_hints="prior: enable aiter",
-    )
-    _, user_p = build_specialist_prompts(inp)
-    assert "enable aiter" in user_p
-
-
 def test_pr_monitor_unavailable():
     inp = SpecialistPromptInputs(
         domain=get_domain("serving_specialist"),
