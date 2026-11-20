@@ -6,8 +6,7 @@
 from __future__ import annotations
 
 import math
-import time
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 
@@ -27,7 +26,7 @@ from hyperloom_kb.schema import (
 
 
 class QueryExecutionError(ValueError):
-    """Raised when a read cannot be executed as its configuration states."""
+    """Raised when a recall returns a score a read cannot rank by."""
 
 
 class ReadStatus(str, Enum):
@@ -76,7 +75,6 @@ class WeightedGroupResult:
 class WeightedQueryExecution:
     groups: tuple[WeightedGroupResult, ...]
     rendered: RenderedResult
-    latency_ms: float
 
 
 @dataclass(frozen=True)
@@ -93,7 +91,6 @@ class QueryExecutor:
         self._fuzzy = fuzzy
 
     def execute(self, signals: Sequence[QuerySignal], shape: ResultShape) -> WeightedQueryExecution:
-        started = time.perf_counter()
         recall = self._recall(signals)
         grouped = self._rank_groups(
             self._service.organize(recall.candidate_sets),
@@ -102,11 +99,7 @@ class QueryExecutor:
         )
         representative_ids = tuple(group.representative_ids[0] for group in grouped if group.representative_ids)
         rendered = self._service.render(representative_ids, budget_chars=shape.render_budget_chars)
-        return WeightedQueryExecution(
-            grouped,
-            rendered,
-            (time.perf_counter() - started) * 1000,
-        )
+        return WeightedQueryExecution(grouped, rendered)
 
     def _recall(self, signals: Sequence[QuerySignal]) -> _Recall:
         """Recall every signal, an exact one by its field and a text one fuzzily, weighting each hit by its signal."""
@@ -212,56 +205,8 @@ class ReadResult:
     warnings: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
-class ReadTrace:
-    execution: WeightedQueryExecution
-
-
-class KnowledgeReadService:
-    """High-level Local KB read API with explicit failure semantics."""
-
-    def __init__(
-        self,
-        executor: QueryExecutor,
-        shape: ResultShape,
-        *,
-        trace_sink: Callable[[ReadTrace], None] | None = None,
-    ) -> None:
-        self._executor = executor
-        self._shape = shape
-        self._trace_sink = trace_sink
-
-    def read(self, signals: Sequence[QuerySignal]) -> ReadResult:
-        try:
-            execution = self._executor.execute(signals, self._shape)
-            if self._trace_sink is not None:
-                self._trace_sink(ReadTrace(execution))
-        except (RuntimeError, ValueError) as exc:
-            return _empty_read(
-                ReadStatus.FAILED,
-                f"{type(exc).__name__}:{exc}",
-            )
-        return ReadResult(
-            ReadStatus.COMPLETED,
-            _prompt_block(execution),
-            execution.rendered.rendered_refs,
-            ("render_budget_reached",) if execution.rendered.truncated else (),
-        )
-
-
-def _empty_read(
-    status: ReadStatus,
-    warning: str = "",
-) -> ReadResult:
-    return ReadResult(
-        status,
-        "",
-        (),
-        (warning,) if warning else (),
-    )
-
-
-def _prompt_block(execution: WeightedQueryExecution) -> str:
+def prompt_block(execution: WeightedQueryExecution) -> str:
+    """What a prompt carries of a read: the rendered Experiences between markers, or nothing for none."""
     if not execution.groups or not execution.rendered.text:
         return ""
     return "\n".join(
@@ -276,13 +221,12 @@ def _prompt_block(execution: WeightedQueryExecution) -> str:
 
 
 __all__ = [
-    "KnowledgeReadService",
     "MatchContribution",
     "QueryExecutionError",
     "QueryExecutor",
     "ReadResult",
     "ReadStatus",
-    "ReadTrace",
     "WeightedGroupResult",
     "WeightedQueryExecution",
+    "prompt_block",
 ]

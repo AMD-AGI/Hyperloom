@@ -31,13 +31,7 @@ from hyperloom_kb.observability import (
     event,
 )
 from hyperloom_kb.local_state import LABEL_BEFORE_PULL, LABEL_MANUAL, LocalState, UnknownStateItem
-from hyperloom_kb.knowledge_read import (
-    KnowledgeReadService,
-    QueryExecutor,
-    ReadResult,
-    ReadStatus,
-    ReadTrace,
-)
+from hyperloom_kb.knowledge_read import QueryExecutor, ReadStatus, WeightedQueryExecution, prompt_block
 from hyperloom_kb.query_view import QueryView, QueryViewBuilder
 from hyperloom_kb.remote import QuerySignal, ReadQuery, RemoteClient
 from hyperloom_kb.retrieval import LocalRetrievalService, render_complete_experience
@@ -546,38 +540,30 @@ class ExperienceHTTPService:
         )
 
     def _completed_fields(
-        self,
-        declaration: ExperienceDeclaration,
-        store: InMemoryExperienceStore,
-        result: ReadResult,
-        traces: list[ReadTrace],
+        self, declaration: ExperienceDeclaration, store: InMemoryExperienceStore, execution: WeightedQueryExecution
     ) -> dict[str, JsonValue]:
         """The response fields of a completed read, each rendered Experience summarized with its score."""
 
-        groups = {
-            experience_id: group
-            for group in (traces[-1].execution.groups if traces else ())
-            for experience_id in group.representative_ids
-        }
+        groups = {experience_id: group for group in execution.groups for experience_id in group.representative_ids}
+        rendered_refs = execution.rendered.rendered_refs
         experiences: list[JsonValue] = []
-        for reference in result.rendered_refs:
+        for reference in rendered_refs:
             stored = store.get_experience(reference.id)
             item = _summary(declaration, stored.experience if stored is not None else self.held(reference.id))
-            group = groups.get(reference.id)
-            item["score"] = group.score if group is not None else 0.0
+            group = groups[reference.id]
+            item["score"] = group.score
             item["why_matched"] = [
                 contribution.to_dict()
-                for contribution in (group.contributions if group is not None else ())
+                for contribution in group.contributions
                 if contribution.experience_id == reference.id
             ]
             experiences.append(item)
         return {
-            "status": result.status.value,
-            "prompt_block": result.prompt_block,
-            "rendered_refs": [reference.to_dict() for reference in result.rendered_refs],
+            "prompt_block": prompt_block(execution),
+            "rendered_refs": [reference.to_dict() for reference in rendered_refs],
             "experiences": experiences,
-            "rendered_count": len(result.rendered_refs),
-            "warnings": list(result.warnings),
+            "rendered_count": len(rendered_refs),
+            "warnings": ["render_budget_reached"] if execution.rendered.truncated else [],
         }
 
     def read(self, query: ReadQuery) -> dict[str, JsonValue]:
@@ -622,10 +608,14 @@ class ExperienceHTTPService:
             LocalRetrievalService(store, view, renderer=partial(render_complete_experience, file_path=self.file_path)),
             LexicalFuzzyProvider(store, declaration),
         )
-        shape = ResultShape(max_groups=limit, render_budget_chars=render_budget_chars)
-        traces: list[ReadTrace] = []
-        result = KnowledgeReadService(executor, shape, trace_sink=traces.append).read(signals)
-        response.update(self._completed_fields(declaration, store, result, traces))
+        try:
+            execution = executor.execute(
+                signals, ResultShape(max_groups=limit, render_budget_chars=render_budget_chars)
+            )
+        except (RuntimeError, ValueError) as exc:
+            response.update(status=ReadStatus.FAILED.value, warnings=[f"{type(exc).__name__}:{exc}"])
+            return response
+        response.update(self._completed_fields(declaration, store, execution))
         return response
 
     def _listed(self, experience: Experience, include_excluded: bool) -> bool:

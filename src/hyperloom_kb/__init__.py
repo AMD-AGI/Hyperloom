@@ -18,13 +18,11 @@ from hyperloom_kb.identity import (
     derive_experience_id,
 )
 from hyperloom_kb.knowledge_read import (
-    KnowledgeReadService,
     MatchContribution,
     QueryExecutor,
     QueryExecutionError,
     ReadResult,
     ReadStatus,
-    ReadTrace,
     WeightedGroupResult,
     WeightedQueryExecution,
 )
@@ -171,7 +169,6 @@ __all__ = [
     "InMemoryExperienceStore",
     "InsertResult",
     "InsertStatus",
-    "KnowledgeReadService",
     "LexicalFuzzyProvider",
     "ListPage",
     "LocalFiles",
@@ -196,7 +193,6 @@ __all__ = [
     "ReadQuery",
     "ReadResult",
     "ReadStatus",
-    "ReadTrace",
     "RemoteClient",
     "RemoteClientError",
     "RemoteConfig",
