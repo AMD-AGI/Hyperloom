@@ -8,8 +8,8 @@ Sources, in priority order:
 1. ``manual``: operator-supplied ``--server-args`` / ``--pd-prefill-extra-args`` /
    ``--pd-decode-extra-args``. Used as given; no other source is mixed in.
 2. ``magpie``: a Magpie multi-node recipe. The pinned Magpie revision ships none.
-3. ``inferencex``: the model's entry in InferenceX
-   ``benchmarks/multi_node/amd_utils/models.yaml``, composed the way
+3. ``inferencex``: the model's entry in ``benchmarks/multi_node/amd_utils/models.yaml``
+   of the InferenceX checkout at ``INFERENCEX_PATH``, composed the way
    ``server_sglang.sh`` composes it (no DP attention, no MTP).
 
 No source is a configuration error: the run cannot reproduce a baseline.
@@ -92,31 +92,37 @@ def _magpie() -> BaselineArgs | None:
     return None
 
 
-def _inferencex_root(env: Mapping[str, str]) -> Path | None:
-    """The InferenceX checkout preflight selected, or None."""
-    explicit = env.get("INFERENCEX_PATH", "").strip()
-    if explicit:
-        return Path(explicit)
+def _inferencex_models(env: Mapping[str, str]) -> tuple[Path, Mapping[str, Any]] | str:
+    """The models.yaml path and entries of the InferenceX checkout at ``INFERENCEX_PATH``, or why they are missing."""
+    root = env.get("INFERENCEX_PATH", "").strip()
+    if not root:
+        return "INFERENCEX_PATH is unset"
+    path = Path(root) / _MODELS_YAML
+    if not path.is_file():
+        return f"{path} does not exist"
+    import yaml
+
     try:
-        from ...inferencex_checkout import detect
-    except ImportError:
-        return None
-    found = detect()
-    return Path(found) if found else None
+        models = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return f"cannot read {path}: {exc}"
+    if not isinstance(models, Mapping):
+        return f"{path} is not a mapping"
+    return path, models
 
 
-def _model_entry(models: Mapping[str, Any], model_path: str) -> tuple[str, Mapping[str, Any]] | None:
-    """The models.yaml entry whose key matches the model directory name."""
+def _model_entry(models: Mapping[str, Any], model_path: str, agentic: bool) -> tuple[str, Mapping[str, Any]] | None:
+    """The models.yaml entry for the model directory name, trying ``<name>-AgentX`` first on an agentic run, then
+    ``<name>``, then ``<name>-DI``; keys match case-insensitively when no exact key exists."""
     name = Path(model_path.rstrip("/")).name
     if not name:
         return None
-    entry = models.get(name)
-    if isinstance(entry, Mapping):
-        return name, entry
-    lowered = name.lower()
-    for key, value in models.items():
-        if isinstance(key, str) and key.lower() == lowered and isinstance(value, Mapping):
-            return key, value
+    candidates = ([f"{name}-AgentX"] if agentic else []) + [name, f"{name}-DI"]
+    lowered = {key.lower(): key for key in models if isinstance(key, str)}
+    for candidate in candidates:
+        key = candidate if candidate in models else lowered.get(candidate.lower())
+        if key is not None and isinstance(models[key], Mapping):
+            return key, models[key]
     return None
 
 
@@ -218,27 +224,18 @@ def _role_ep(env: Mapping[str, str], role: str) -> bool:
 def _inferencex(env: Mapping[str, str]) -> BaselineArgs | None:
     """Per-role args from the model's InferenceX multi-node entry, or None."""
     model_path = env.get("MODEL_PATH", "").strip()
-    root = _inferencex_root(env)
-    if not model_path or root is None:
+    found = _inferencex_models(env)
+    if not model_path or isinstance(found, str):
         return None
-    path = root / _MODELS_YAML
-    if not path.is_file():
-        return None
-    import yaml
-
-    try:
-        models = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
-        return None
-    if not isinstance(models, Mapping):
-        return None
-    match = _model_entry(models, model_path)
+    path, models = found
+    agentic = agentx_enabled(env)
+    match = _model_entry(models, model_path, agentic)
     if match is None:
         return None
     key, entry = match
     base, transfer = _split_transfer_backend(str(entry.get("base_flags") or ""))
     ep_flags = shlex.split(str(entry.get("ep_flags") or ""))
-    keep_prefix_cache = agentx_enabled(env) or _HICACHE_FLAG in base
+    keep_prefix_cache = agentic or _HICACHE_FLAG in base
     prefill_mode, prefill_context = _prefill_flags(entry.get("prefill") or {}, keep_prefix_cache)
     prefill_ep = _role_ep(env, "prefill")
     decode_ep = _role_ep(env, "decode")
@@ -255,6 +252,14 @@ def _inferencex(env: Mapping[str, str]) -> BaselineArgs | None:
     )
 
 
+def _inferencex_gap(env: Mapping[str, str], model: str) -> str:
+    """Why the InferenceX source supplied no args for ``model``."""
+    found = _inferencex_models(env)
+    if isinstance(found, str):
+        return found
+    return f"{found[0]} has no entry for MODEL_PATH={model}"
+
+
 def resolve_baseline_args(
     env: Mapping[str, str] | None = None,
     previous: Mapping[str, Any] | None = None,
@@ -268,8 +273,8 @@ def resolve_baseline_args(
     raise BaselineArgsMissing(
         "hyperloom cannot optimize this multi-node task: required launch arguments are missing. "
         "Pass --server-args / --pd-prefill-extra-args / --pd-decode-extra-args with the cluster's "
-        f"launch arguments, or use a model listed in InferenceX {_MODELS_YAML} "
-        f"(MODEL_PATH={model} has no entry; Magpie has no multi-node recipe)."
+        f"launch arguments, or set INFERENCEX_PATH to an InferenceX checkout whose {_MODELS_YAML} lists the model "
+        f"(InferenceX: {_inferencex_gap(lookup, model)}; Magpie has no multi-node recipe)."
     )
 
 

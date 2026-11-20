@@ -141,6 +141,60 @@ def test_an_inferencex_baseline_disables_the_prefill_prefix_cache_only_on_a_fixe
     assert ("--disable-radix-cache" in shlex.split(choice.prefill)) is disabled
 
 
+@pytest.mark.parametrize(
+    ("keys", "env", "picked"),
+    [
+        (["M", "M-AgentX", "M-DI"], {"HYPERLOOM_AGENTX": "1"}, "M-AgentX"),
+        (["M", "M-AgentX", "M-DI"], {}, "M"),
+        (["M", "M-DI"], {"HYPERLOOM_AGENTX": "1"}, "M"),
+        (["M-DI", "M-AgentX"], {}, "M-DI"),
+        (["m-di"], {"HYPERLOOM_AGENTX": "1"}, "m-di"),
+    ],
+)
+def test_inferencex_entry_lookup_prefers_the_agentx_then_bare_then_di_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, keys: list[str], env: dict[str, str], picked: str
+) -> None:
+    import yaml
+
+    from hyperloom.inference_optimizer.multi_node._internal import baseline_args as ba
+
+    models = tmp_path / ba._MODELS_YAML
+    models.parent.mkdir(parents=True)
+    models.write_text(yaml.safe_dump({key: {"base_flags": "", "prefill": {}, "decode": {}} for key in keys}))
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+
+    choice = ba._inferencex({"MODEL_PATH": "/models/M", "INFERENCEX_PATH": str(tmp_path), **env})
+
+    assert choice is not None and choice.detail == f"{models} entry {picked}"
+
+
+@pytest.mark.parametrize("layout", ["unset", "no_models_yaml", "no_entry"])
+def test_missing_inferencex_baseline_names_the_actual_gap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, layout: str
+) -> None:
+    import yaml
+
+    from hyperloom.inference_optimizer.multi_node._internal import baseline_args as ba
+
+    models = tmp_path / ba._MODELS_YAML
+    env = {"MODEL_PATH": "/models/M"}
+    if layout != "unset":
+        env["INFERENCEX_PATH"] = str(tmp_path)
+    if layout == "no_entry":
+        models.parent.mkdir(parents=True)
+        models.write_text(yaml.safe_dump({"Other": {}}))
+    expected = {
+        "unset": "INFERENCEX_PATH is unset",
+        "no_models_yaml": f"{models} does not exist",
+        "no_entry": f"{models} has no entry for MODEL_PATH=/models/M",
+    }[layout]
+
+    with pytest.raises(ba.BaselineArgsMissing) as info:
+        ba.resolve_baseline_args(env)
+
+    assert expected in str(info.value)
+
+
 def test_engine_listens_on_the_port_of_its_role_url() -> None:
     spec = _spec(
         prefill_url="http://w-prefill.ns.svc.cluster.local:8010",
@@ -214,7 +268,6 @@ def test_previous_baseline_args_are_reused_only_for_the_same_model_and_ep(monkey
     from hyperloom.inference_optimizer.multi_node._internal import baseline_args as ba
 
     recorded: dict[str, object] = {}
-    monkeypatch.setattr(ba, "_inferencex_root", lambda _env: None)
     monkeypatch.setenv("MODEL_PATH", "/models/DeepSeek-R1")
     monkeypatch.delenv("EP", raising=False)
     ba.record_baseline_args(recorded, ba.BaselineArgs(ba.SOURCE_INFERENCEX, "--context-length 8192", "--x"))
