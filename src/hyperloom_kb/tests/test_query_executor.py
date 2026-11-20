@@ -130,18 +130,6 @@ def test_provider_scores_are_normalized_before_weighting() -> None:
     assert QueryExecutor._normalized_score(RetrievalCapability.SEMANTIC, 3.0) == 1.0
 
 
-def test_group_key_policy_controls_executor_order() -> None:
-    schema, executor, _, _ = _stack()
-    result = executor.execute(
-        _signals(model_weight=1.0),
-        ResultShape(ranking_policy_ref="group-key@v1"),
-    )
-
-    assert tuple(group.group_key for group in result.groups) == tuple(
-        sorted(group.group_key for group in result.groups)
-    )
-
-
 def test_renderer_exposes_conditions_baseline_outcome_and_repeat_support() -> None:
     schema, executor, target, _ = _stack()
     result = executor.execute(

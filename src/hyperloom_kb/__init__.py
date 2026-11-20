@@ -77,7 +77,6 @@ from hyperloom_kb.retrieval import (
 from hyperloom_kb.retrieval_policy import (
     LEXICAL_FUZZY_PROVIDER_REF,
     LexicalFuzzyProvider,
-    RepresentativePolicy,
     ResultShape,
 )
 from hyperloom_kb.runtime import (
@@ -209,7 +208,6 @@ __all__ = [
     "RenderedResult",
     "RepeatAnnotations",
     "RepeatGroup",
-    "RepresentativePolicy",
     "ResultShape",
     "RetrievalCapability",
     "RetrievalError",

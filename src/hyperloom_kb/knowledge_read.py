@@ -10,7 +10,6 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
 
 from hyperloom_kb.query_view import RepeatAnnotations, RetrievalCapability
 from hyperloom_kb.remote import QuerySignal
@@ -21,7 +20,7 @@ from hyperloom_kb.retrieval import (
     LocalRetrievalService,
     RenderedResult,
 )
-from hyperloom_kb.retrieval_policy import RepresentativePolicy, ResultShape
+from hyperloom_kb.retrieval_policy import ResultShape
 from hyperloom_kb.schema import (
     JsonValue,
     RenderedRef,
@@ -104,8 +103,6 @@ class QueryExecutor:
             self._service.organize(recall.candidate_sets),
             recall.contributions,
             shape.max_groups,
-            shape.ranking_policy_ref,
-            shape.representative_policy,
         )
         representative_ids = tuple(group.representative_ids[0] for group in grouped if group.representative_ids)
         rendered = self._service.render(representative_ids, budget_chars=shape.render_budget_chars)
@@ -200,9 +197,10 @@ class QueryExecutor:
         groups: tuple[GroupCandidate, ...],
         contributions: tuple[MatchContribution, ...],
         limit: int,
-        ranking_policy_ref: str,
-        representative_policy: RepresentativePolicy,
     ) -> tuple[WeightedGroupResult, ...]:
+        """The ``limit`` groups scoring highest, each the sum over signals of its best member's contribution and
+        represented by its best-matching member."""
+
         by_experience: dict[str, list[MatchContribution]] = {}
         for contribution in contributions:
             by_experience.setdefault(
@@ -220,26 +218,14 @@ class QueryExecutor:
                     per_signal.get(item.signal_id, 0.0),
                     item.contribution,
                 )
-            score = sum(per_signal.values())
-            hits = sorted(
-                group.hits,
-                key=lambda hit: (
-                    -(hit.score or 0.0),
-                    hit.experience_id,
-                ),
-            )
-            representative = (
-                (group.member_ids[0],)
-                if representative_policy is RepresentativePolicy.FIRST_MEMBER
-                else ((hits[0].experience_id,) if hits else (group.member_ids[0],))
-            )
+            best = min(group.hits, key=lambda hit: (-(hit.score or 0.0), hit.experience_id))
             ranked.append(
                 WeightedGroupResult(
                     group.group_key,
-                    score,
+                    sum(per_signal.values()),
                     group.annotations,
                     group.member_ids,
-                    representative,
+                    (best.experience_id,),
                     tuple(
                         sorted(
                             group_contributions,
@@ -252,51 +238,7 @@ class QueryExecutor:
                     ),
                 )
             )
-        supported = {
-            "weighted-signal-sum@v1",
-            "max-hit-score@v1",
-            "capability-priority@v1",
-            "group-key@v1",
-        }
-        if ranking_policy_ref not in supported:
-            raise QueryExecutionError(f"unsupported ranking policy {ranking_policy_ref!r}")
-
-        def key(item: WeightedGroupResult) -> tuple[Any, ...]:
-            return QueryExecutor._ranking_key(item, ranking_policy_ref)
-
-        return tuple(sorted(ranked, key=key)[:limit])
-
-    @staticmethod
-    def _ranking_key(
-        item: WeightedGroupResult,
-        ranking_policy_ref: str,
-    ) -> tuple[Any, ...]:
-        if ranking_policy_ref == "weighted-signal-sum@v1":
-            return (-item.score, item.group_key)
-        if ranking_policy_ref == "max-hit-score@v1":
-            return (
-                -max(
-                    (contribution.contribution for contribution in item.contributions),
-                    default=0.0,
-                ),
-                item.group_key,
-            )
-        if ranking_policy_ref == "capability-priority@v1":
-            priority = {
-                RetrievalCapability.EXACT: 0,
-                RetrievalCapability.FILTER: 1,
-                RetrievalCapability.FUZZY: 2,
-                RetrievalCapability.SEMANTIC: 3,
-            }
-            return (
-                min(
-                    (priority[contribution.capability] for contribution in item.contributions),
-                    default=4,
-                ),
-                -item.score,
-                item.group_key,
-            )
-        return (item.group_key,)
+        return tuple(sorted(ranked, key=lambda item: (-item.score, item.group_key))[:limit])
 
 
 @dataclass(frozen=True)

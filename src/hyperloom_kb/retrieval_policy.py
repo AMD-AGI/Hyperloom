@@ -10,7 +10,6 @@ import re
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from enum import Enum
 from typing import cast
 
 from hyperloom_kb.query_view import QueryView, RetrievalCapability
@@ -31,17 +30,10 @@ from hyperloom_kb.storage import ExperienceStore
 LEXICAL_FUZZY_PROVIDER_REF = "hyperloom-kb.lexical-fuzzy@v3"
 
 
-class RepresentativePolicy(str, Enum):
-    MATCHED_FIRST = "matched_first"
-    FIRST_MEMBER = "first_member"
-
-
 @dataclass(frozen=True)
 class ResultShape:
-    """How a read ranks the groups it recalled, which member stands for each, and how many and how much it renders."""
+    """How many of the groups a read ranked it renders, and within how many characters."""
 
-    ranking_policy_ref: str = "weighted-signal-sum@v1"
-    representative_policy: RepresentativePolicy = RepresentativePolicy.MATCHED_FIRST
     max_groups: int = 20
     render_budget_chars: int | None = 4_000
 
@@ -233,6 +225,5 @@ def _identity_compatibility(
 __all__ = [
     "LEXICAL_FUZZY_PROVIDER_REF",
     "LexicalFuzzyProvider",
-    "RepresentativePolicy",
     "ResultShape",
 ]
