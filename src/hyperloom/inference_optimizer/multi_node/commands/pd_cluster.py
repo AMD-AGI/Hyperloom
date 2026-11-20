@@ -21,14 +21,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .._internal import process_image
 from .._internal.log import err, info, warn
 from .._internal.pd_cluster import (
     ENGINE_PORT,
     PD_ROUTER_BACKENDS,
     PLATFORM_MANAGED,
     LaunchSpec,
-    _close_inherited_handle_lines,
     cmdline_needle,
     drop_unsupported_baseline_flags,
     launch_script,
@@ -39,222 +37,15 @@ from .._internal.pd_cluster import (
     uses_split_role_flags,
 )
 from .._internal.baseline_args import SOURCE_INFERENCEX
+from .._internal.pd_remote import bash_payload, launch_path, pidfile_path
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
-
-_REMOTE_DRIVER = r"""
-import json
-
-# Output goes to the launch log and, when writable, to the console (the container's stdout).
-_SPAWN_SH = (
-    'log="$1.log"; '
-    'if [ -w "$2" ]; then exec > >(tee -a "$log" >> "$2") 2>&1; else exec >> "$log" 2>&1; fi; '
-    'exec /bin/bash "$1"'
-)
-
-
-def _spawn_detached(launch, env):
-    console = os.environ.get("HL_CONSOLE", "/proc/1/fd/1")
-    pid = os.fork()
-    if pid == 0:
-        os.setsid()
-        log_fd = os.open(launch + ".log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-        os.dup2(log_fd, 1)
-        os.dup2(log_fd, 2)
-        null_fd = os.open(os.devnull, os.O_RDONLY)
-        os.dup2(null_fd, 0)
-        environ = dict(item.split("=", 1) for item in env if "=" in item)
-        os.execve("/bin/bash", ["/bin/bash", "-c", _SPAWN_SH, "hl-spawn", launch, console], environ)
-    return pid
-
-
-def _spawn_env(pid, pidfile):
-    # The server's own environment, else the container's (PID 1): never the ssh session's.
-    # A server that rewrites its process title (sglang::router) can leave an empty environ behind.
-    env = baseline_environ(pid if pid > 0 else 1, pidfile + ".environ")
-    return env or read_environ(1)
-
-
-def _ppid(pid):
-    stat = open("/proc/%d/stat" % pid, encoding="utf-8").read()
-    return int(stat[stat.rfind(")") + 2 :].split()[1])
-
-
-def _sid(pid):
-    return os.getsid(pid)
-
-
-def _is_parked(pid, parent, cmd):
-    # The launcher's own child exec'd into `sleep infinity` (by this driver's stop or another tool).
-    argv = cmd.split()
-    if parent != 1 or len(argv) != 2 or os.path.basename(argv[0]) != "sleep" or argv[1] != "infinity":
-        return False
-    try:
-        return _sid(pid) == _sid(1)
-    except OSError:
-        return False
-
-
-def _held_by_launcher(pid):
-    # The process PID 1 waits on: ending it ends the container, so it is only ever exec'd in place.
-    try:
-        return _ppid(pid) == 1 and _sid(pid) == _sid(1)
-    except OSError:
-        return False
-
-
-def _runs_server(pid, needle):
-    '''Whether ``pid`` runs the server, its launch script, or the parked launcher child.'''
-    cmd = open("/proc/%d/cmdline" % pid, "rb").read().replace(b"\0", b" ").decode("utf-8", "replace")
-    launch = os.environ.get("HL_LAUNCH_PATH", "")
-    if any(part and part in cmd for part in needle.split("|")) or (launch and launch in cmd):
-        return True
-    return _is_parked(pid, _ppid(pid), cmd)
-
-
-def _find_server(pidfile, needle):
-    self_pid = os.getpid()
-    if os.path.exists(pidfile):
-        try:
-            cand = int(open(pidfile, encoding="utf-8").read().strip())
-            os.kill(cand, 0)
-            if cand != self_pid and _runs_server(cand, needle):
-                return cand
-        except (OSError, ValueError):
-            pass
-    fallback = 0
-    parked = 0
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
-        cand = int(entry)
-        if cand in (1, self_pid):
-            continue
-        try:
-            cmd = open("/proc/%d/cmdline" % cand, "rb").read().replace(b"\0", b" ").decode("utf-8", "replace")
-            parent = _ppid(cand)
-        except OSError:
-            continue
-        if not any(part in cmd for part in needle.split("|")):
-            if parked == 0 and _is_parked(cand, parent, cmd):
-                parked = cand
-            continue
-        if parent == 1:
-            return cand
-        if fallback == 0:
-            fallback = cand
-    return parked or fallback
-
-
-def restart_remote_main():
-    launch = os.environ.get("HL_LAUNCH_PATH", "")
-    needle = os.environ.get("HL_NEEDLE", "")
-    pidfile = os.environ["HL_PIDFILE"]
-    action = os.environ.get("HL_ACTION", "restart")
-    pid = _find_server(pidfile, needle)
-    if action == "ensure" and pid > 0:
-        print(json.dumps({"status": "ok", "action": "running", "pid": pid}))
-        return
-    if action == "stop":
-        if pid <= 0:
-            print(json.dumps({"status": "ok", "action": "stop", "pid": 0}))
-            return
-        if _held_by_launcher(pid):
-            park = os.environ.get("HL_PARK_SH") or "exec /bin/sleep infinity"
-            replace_process_image(pid, ["/bin/bash", "-c", park], env_snapshot=pidfile + ".environ")
-            open(pidfile, "w", encoding="utf-8").write(str(pid))
-            print(json.dumps({"status": "ok", "action": "stop-exec", "pid": pid}))
-            return
-        _spawn_env(pid, pidfile)
-        for victim in [pid] + descendant_pids(pid):
-            try:
-                os.kill(victim, 9)
-            except OSError:
-                pass
-        try:
-            os.remove(pidfile)
-        except OSError:
-            pass
-        print(json.dumps({"status": "ok", "action": "stop-kill", "pid": pid}))
-        return
-    if pid <= 0:
-        new_pid = _spawn_detached(launch, _spawn_env(pid, pidfile))
-        open(pidfile, "w", encoding="utf-8").write(str(new_pid))
-        print(json.dumps({"status": "ok", "action": "spawn", "pid": new_pid}))
-        return
-    if _held_by_launcher(pid):
-        replace_process_image(pid, ["/bin/bash", launch], env_snapshot=pidfile + ".environ")
-        open(pidfile, "w", encoding="utf-8").write(str(pid))
-        print(json.dumps({"status": "ok", "action": "exec", "pid": pid}))
-        return
-    env = _spawn_env(pid, pidfile)
-    for victim in [pid] + descendant_pids(pid):
-        try:
-            os.kill(victim, 9)
-        except OSError:
-            pass
-    new_pid = _spawn_detached(launch, env)
-    open(pidfile, "w", encoding="utf-8").write(str(new_pid))
-    print(json.dumps({"status": "ok", "action": "respawn", "pid": new_pid}))
-
-
-restart_remote_main()
-"""
 
 
 def _cli():
-    """The multi-node CLI, imported lazily to avoid an import cycle."""
-    from .. import cli as mn_cli
+    """The multi-node CLI, reached through the Infera commands' lazy proxy."""
+    from .infera import _mn_cli
 
-    return mn_cli
-
-
-def _remote_program() -> str:
-    """process_image helpers plus the pod-side restart driver."""
-    return Path(process_image.__file__).read_text(encoding="utf-8") + "\n" + _REMOTE_DRIVER
-
-
-def _pidfile(role: str) -> str:
-    """Pod-local file holding the pid of the server this restart launched."""
-    return f"/tmp/hyperloom-mn-{role}.pid"
-
-
-def _launch_path(role: str) -> str:
-    """Pod-local launch script the restart writes and execs for ``role``."""
-    return f"/tmp/hyperloom-mn-{role}.sh"
-
-
-def _park_script() -> str:
-    """Bash a stopped launcher-held pid execs: close inherited GPU handles and sockets, then sleep."""
-    return "\n".join([*_close_inherited_handle_lines(), "exec /bin/sleep infinity"])
-
-
-def _bash_payload(role: str, script_body: str, needle: str, action: str) -> str:
-    """Bash that writes the launch script and runs the in-place restart helper."""
-    marker = uuid.uuid4().hex
-    launch_end = f"HL_LAUNCH_{marker}"
-    py_end = f"HL_PY_{marker}"
-    return "\n".join(
-        [
-            f"launch={_launch_path(role)}",
-            f"cat > \"$launch\" << '{launch_end}'",
-            script_body.rstrip("\n"),
-            launch_end,
-            'chmod +x "$launch"',
-            'export HL_LAUNCH_PATH="$launch"',
-            f"export HL_NEEDLE={shlex.quote(needle)}",
-            f"export HL_PIDFILE={_pidfile(role)}",
-            f"export HL_ACTION={shlex.quote(action)}",
-            f"export HL_PARK_SH={shlex.quote(_park_script())}",
-            f"python3 - << '{py_end}'",
-            _remote_program().rstrip("\n"),
-            py_end,
-        ]
-    )
-
-
-def ensure_payload(role: str, command: str, needle: str) -> str:
-    """Bash that starts ``command`` detached on the pod unless a process matching ``needle`` already runs."""
-    return _bash_payload(role, f"exec {command}\n", needle, "ensure")
+    return _mn_cli
 
 
 def _require_state() -> dict[str, Any]:
@@ -332,7 +123,7 @@ def _ssh_pod(
         server_port=int(pod.get("routerPort") or ENGINE_PORT),
     )
     needle = cmdline_needle(role, str(state.get("backend") or "atomesh"))
-    payload = _bash_payload(role, body, needle, action)
+    payload = bash_payload(role, body, needle, action)
     info(f"{state.get('backend')} {action}: ssh -> {ip}:{port} role={role}")
     try:
         completed = _cli()._infera_ssh_bash_with_env(state, ip, payload, timeout=timeout, port=port)
@@ -455,10 +246,10 @@ def engines_not_running(state: dict[str, Any], *, timeout: int = 30) -> list[str
         needle = cmdline_needle(role, str(state.get("backend") or "atomesh"))
         patterns = " ".join(f"-e {shlex.quote(part)}" for part in needle.split("|"))
         script = (
-            f'cmd=""; pid=$(cat {shlex.quote(_pidfile(role))} 2>/dev/null) && kill -0 "$pid" 2>/dev/null '
+            f'cmd=""; pid=$(cat {shlex.quote(pidfile_path(role))} 2>/dev/null) && kill -0 "$pid" 2>/dev/null '
             f"&& cmd=$(tr '\\0' ' ' < /proc/\"$pid\"/cmdline 2>/dev/null); "
             f'if printf "%s" "$cmd" | grep -qF {patterns}; then echo HL_ALIVE; '
-            f'elif printf "%s" "$cmd" | grep -qF -e {shlex.quote(_launch_path(role))}; then echo HL_STARTING; '
+            f'elif printf "%s" "$cmd" | grep -qF -e {shlex.quote(launch_path(role))}; then echo HL_STARTING; '
             "else echo HL_GONE; fi"
         )
         try:

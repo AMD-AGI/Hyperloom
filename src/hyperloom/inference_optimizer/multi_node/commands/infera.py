@@ -387,7 +387,7 @@ def _infera_ensure_frontend(state: dict[str, Any], model: str, timeout: int) -> 
 
     Each frontend listens on its pod's :func:`router_port` for ``service_url``.
     """
-    from .pd_cluster import ensure_payload
+    from .._internal.pd_remote import ensure_payload
 
     service_url = str(state.get("service_url") or "")
     rc_total = 0

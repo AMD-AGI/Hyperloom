@@ -31,6 +31,7 @@ from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import (
 from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import LaunchSpec
 from hyperloom.inference_optimizer.multi_node._internal.process_image import replace_process_image
 from hyperloom.inference_optimizer.multi_node.commands import pd_cluster as pd_cmds
+from hyperloom.inference_optimizer.multi_node._internal import pd_remote
 from hyperloom.inference_optimizer.multi_node.state_paths import bind_state_file_to_session, multi_node_state_env
 
 
@@ -707,8 +708,8 @@ def test_engines_not_running_counts_an_engine_waiting_in_its_launch_script(
     launch.chmod(0o755)
     pidfile = tmp_path / "decode.pid"
     monkeypatch.setattr(pd_cmds, "_cli", lambda: _LocalCli())
-    monkeypatch.setattr(pd_cmds, "_pidfile", lambda role: str(pidfile))
-    monkeypatch.setattr(pd_cmds, "_launch_path", lambda role: str(launch))
+    monkeypatch.setattr(pd_cmds, "pidfile_path", lambda role: str(pidfile))
+    monkeypatch.setattr(pd_cmds, "launch_path", lambda role: str(launch))
     state = dict(_PD_STATE, prefill_pods=[])
     waiting = subprocess.Popen([str(launch)])
     other = subprocess.Popen(["sleep", "30"])
@@ -731,7 +732,7 @@ def test_sglangrouter_router_needle_matches_the_renamed_process() -> None:
 
 
 def test_remote_driver_finds_the_server_by_any_needle(tmp_path: Path) -> None:
-    driver = pd_cmds._REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
+    driver = pd_remote.REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
     scope: dict[str, object] = {"os": os}
     exec(driver, scope)
     token = f"hl-needle-{os.getpid()}-{time.monotonic_ns()}"
@@ -747,7 +748,7 @@ def test_remote_driver_finds_the_server_by_any_needle(tmp_path: Path) -> None:
 
 
 def test_remote_driver_ignores_a_pidfile_naming_an_unrelated_process(tmp_path: Path) -> None:
-    driver = pd_cmds._REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
+    driver = pd_remote.REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
     scope: dict[str, object] = {"os": os}
     exec(driver, scope)
     unrelated = subprocess.Popen(["sleep", "30"])
@@ -762,7 +763,7 @@ def test_remote_driver_ignores_a_pidfile_naming_an_unrelated_process(tmp_path: P
 
 
 def test_remote_driver_takes_over_a_parked_launcher_child(tmp_path: Path) -> None:
-    driver = pd_cmds._REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
+    driver = pd_remote.REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
     scope: dict[str, object] = {"os": os}
     exec(driver, scope)
     parked = subprocess.Popen(["sleep", "infinity"])
@@ -781,7 +782,7 @@ def test_remote_driver_takes_over_a_parked_launcher_child(tmp_path: Path) -> Non
 
 
 def _driver_scope(monkeypatch: pytest.MonkeyPatch, *, held: bool, calls: list) -> dict:
-    driver = pd_cmds._REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
+    driver = pd_remote.REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
     scope: dict = {"os": os}
     exec(driver, scope)
     scope["_find_server"] = lambda _pidfile, _needle: 4242
@@ -826,7 +827,7 @@ def test_stop_parks_the_launcher_pid_without_its_inherited_sockets() -> None:
     sock.bind(("127.0.0.1", 0))
     sock.listen()
     sock.set_inheritable(True)
-    parked = subprocess.Popen(["/bin/bash", "-c", pd_cmds._park_script()], pass_fds=(sock.fileno(),))
+    parked = subprocess.Popen(["/bin/bash", "-c", pd_remote.park_script()], pass_fds=(sock.fileno(),))
     try:
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -890,7 +891,7 @@ def test_ensure_starts_the_server_only_when_none_runs(
 
 
 def test_detached_spawn_runs_with_the_given_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    driver = pd_cmds._REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
+    driver = pd_remote.REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
     scope: dict = {"os": os}
     exec(driver, scope)
     monkeypatch.setenv("HL_CONSOLE", str(tmp_path / "none"))
@@ -903,7 +904,7 @@ def test_detached_spawn_runs_with_the_given_environment(monkeypatch: pytest.Monk
 
 
 def test_detached_spawn_logs_to_file_and_console(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    driver = pd_cmds._REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
+    driver = pd_remote.REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
     scope: dict = {"os": os}
     exec(driver, scope)
     console = tmp_path / "console"
