@@ -329,9 +329,7 @@ def write_run_config(
     """
     job = {"trace_path": str(trace_path.resolve()), "platform": platform}
     if capture_folder is not None:
-        job["capture_folder"] = str(
-            _rank_scoped_capture_folder(output_dir, trace_path, capture_folder, "capture").resolve()
-        )
+        job["capture_folder"] = str(capture_folder.resolve())
     config = {"analysis_mode": analysis_mode, "output_dir": str(output_dir.resolve()), "jobs": [job]}
     check_config(config, "standalone")
     config_path = output_dir / RUN_CONFIG_NAME

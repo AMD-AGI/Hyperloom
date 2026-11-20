@@ -307,7 +307,7 @@ def test_an_sglang_tp_trace_gets_the_captures_of_its_rank_only(tmp_path: Path) -
     assert len(list(capture.iterdir())) == 5
 
 
-def test_the_standalone_config_scopes_the_captures_to_the_trace_rank(tmp_path: Path) -> None:
+def test_the_standalone_config_keeps_every_rank_capture(tmp_path: Path) -> None:
     capture = _ranked_capture(tmp_path)
     trace = tmp_path / "1794831019.5-TP-0.trace.json.gz"
     trace.write_bytes(b"trace")
@@ -316,11 +316,7 @@ def test_the_standalone_config_scopes_the_captures_to_the_trace_rank(tmp_path: P
         output_dir=tmp_path, trace_path=trace, platform="MI300X", analysis_mode="inference", capture_folder=capture
     )
 
-    scoped = Path(yaml.safe_load(path.read_text())["jobs"][0]["capture_folder"])
-    assert {p.name for p in scoped.iterdir()} == {
-        "DecodeCudaGraphRunner_bs_8_rank0.json.gz",
-        "EAGLEDraftCudaGraphRunner_bs_32_rank0.json.gz",
-    }
+    assert yaml.safe_load(path.read_text())["jobs"][0]["capture_folder"] == str(capture.resolve())
 
 
 @pytest.mark.parametrize(
@@ -336,9 +332,14 @@ def test_the_capture_folder_is_kept_when_it_cannot_be_scoped(tmp_path: Path, tra
     trace = tmp_path / trace_name
     trace.write_bytes(b"trace")
 
-    path = tlr.write_run_config(
-        output_dir=tmp_path, trace_path=trace, platform="MI300X", analysis_mode="inference", capture_folder=capture
-    )
+    prefill = tmp_path / "p.trace.json.gz"
+    prefill.write_bytes(b"trace")
+    jobs = [
+        {"phase": "decode", "node": 0, "trace_path": str(trace), "platform": "MI300X", "capture_folder": str(capture)},
+        {"phase": "prefill", "node": 0, "trace_path": str(prefill), "platform": "MI300X"},
+    ]
+
+    path = tlr.write_multi_trace_run_config(output_dir=tmp_path, jobs=jobs, analysis_mode="inference")
 
     assert yaml.safe_load(path.read_text())["jobs"][0]["capture_folder"] == str(capture.resolve())
 
