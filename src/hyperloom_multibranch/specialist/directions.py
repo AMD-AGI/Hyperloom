@@ -58,10 +58,12 @@ DIRECTIONS = (
     "no reader on this model's path, this backend or this phase (decode or prefill) is dead, and its test measures "
     "nothing. Bound a scheduler setting (chunked or mixed prefill, prefill and decode interleaving, running-request or "
     "cache-pool caps) from server.log first: what the run loses to the steady decode rate, less the prefill tokens at "
-    "the prefill rate, is all scheduling can win, and under a closed-loop client a cap above the concurrency divided "
-    "by the DP size is never reached. On a multi-turn workload, compare each follow-up turn's computed prefill tokens "
-    "with its new tokens: the excess is a prefix the cache drops every turn (a trailing block a draft path discards, a "
-    "block alignment, an eviction), and recovering it beats any prefill kernel.",
+    "the prefill rate, is all scheduling can win. Under a closed-loop client a cap binds only when the server's "
+    "outstanding requests reach it; subagent fan-out can push them above the concurrency; vLLM and ATOM count the cap "
+    "per data-parallel rank, while SGLang splits it across attention data-parallel ranks. Read the running and "
+    "waiting counts in server.log before bounding it. On a multi-turn workload, compare each follow-up turn's computed "
+    "prefill tokens with its new tokens: the excess is a prefix the cache drops every turn (a trailing block a draft "
+    "path discards, a block alignment, an eviction), and recovering it beats any prefill kernel.",
     "MoE chain: on a model with experts, take the router GEMV, the softmax and top-k, the sort and the expert GEMMs as "
     "one chain, past the tuned tables and environment switches: together they can hold half of a decode step, and "
     "each launch between them is a boundary to remove. Write the fused kernel, Triton or HIP, that replaces several "
