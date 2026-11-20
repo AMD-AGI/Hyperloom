@@ -257,3 +257,11 @@ def test_a_localization_that_does_not_apply_is_dropped_and_the_rounds_patches_st
     assert attempt.pending["patches"] == ["round.patch"]
     assert attempt.localization_action is None
     assert attempt.localization_touched == []
+
+
+async def test_no_source_changes_backports_nothing(_executor):
+    """Under --no-source-changes a code gap gets no upstream diff; the round runs on its own launch config."""
+    attempt = _attempt(candidate_refs=("PR:1234",))
+    attempt.shared_state.no_source_changes = True
+    await _executor._stage_localize_source(attempt, _params())
+    assert attempt.localization_patches == []

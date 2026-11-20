@@ -333,6 +333,7 @@ class OrchestrationPromptContext:
     objective: Objective
     max_minutes: int
     no_framework_agent: bool = False
+    no_source_changes: bool = False
     transport: str = TRANSPORT_TOOLS
     benchmark_mode: str = ""
     agentx_corpus_shape: Mapping[str, Any] | None = None
@@ -358,6 +359,7 @@ def _build_orchestration_prompt(
         session=SessionContext(
             framework=framework,
             framework_agent_phase_enabled=not no_framework_agent,
+            no_source_changes=context.no_source_changes,
             objective_kind=kind,
             objective_value=value,
             max_minutes=int(context.max_minutes),
@@ -891,6 +893,13 @@ def _restore_phase_toggles(args: argparse.Namespace, state, session_dir: Path) -
     if not state.kernel_enabled:
         args.no_kernel = True
         print("  Kernel-agent          : DISABLED (persisted from original run)")
+    if state.no_source_changes:
+        args.no_source_changes = True
+        print("  source changes        : SKIPPED (persisted from original run)")
+    elif args.no_source_changes:
+        state.no_source_changes = True
+        state.save(session_dir)
+        print("  source changes        : SKIPPED from this resume on (--no-source-changes)")
     # Same persistence contract for the FRAMEWORK_AGENT phase toggle.
     if not bool(getattr(state, "framework_agent_phase_enabled", True)):
         args.no_framework_agent = True
@@ -1420,6 +1429,7 @@ def _install_system_prompts(
     prompt_context = OrchestrationPromptContext(
         no_kernel=lineup.no_kernel,
         no_framework_agent=lineup.no_framework_agent,
+        no_source_changes=state.no_source_changes,
         framework=state.framework,
         objective=objective,
         max_minutes=int(round(float(args.max_hours) * 60)),

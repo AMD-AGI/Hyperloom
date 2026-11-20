@@ -534,6 +534,14 @@ One phase, two levers worked in parallel:
   against this lever like an empty round, and explore benches the proposals
   for the configuration lever.
 
+`--no-source-changes` keeps the second lever to launch configuration: every
+route that can change a source tree or the installed environment lands through
+`integrate_patch`, which skips such a round (`skipped_reason=no_source_changes`)
+before anything is applied. Specialists still run and their configuration
+proposals are still benched. The kernel phase and the PRELUDE warm replay never
+reach that gate, so a run whose result holds only server arguments and
+environment variables also passes `--no-kernel` and `--no-warm-replay`.
+
 `specialist` serves both levers — investigation, patch authoring, and
 candidate discovery are all dispatches of the one specialist action. An
 operator can add one domain of their own, `custom_specialist`, whose focus is

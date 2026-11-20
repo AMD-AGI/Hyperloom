@@ -373,11 +373,11 @@ def add_run_mode_arguments(opt: argparse.ArgumentParser) -> None:
         "--no-kernel",
         action="store_true",
         default=False,
-        help="Disable the Kernel-agent entirely. The run will "
-        "only do baseline + explore + sweep (pure "
-        "parameter search). Useful when GEAK/GPU "
-        "compile env is unavailable or you just want the "
-        "quick-win parameter path. Default: kernel enabled.",
+        help="Disable the Kernel-agent entirely: the KERNEL_AGENT phase and "
+        "its actions are skipped. Useful when GEAK/GPU compile env is "
+        "unavailable. The framework phase can still land source patches; "
+        "pass --no-source-changes as well for a run that keeps only server "
+        "arguments and environment variables. Default: kernel enabled.",
     )
     opt.add_argument(
         "--launch-info-file",
@@ -432,6 +432,18 @@ def add_framework_agent_arguments(opt: argparse.ArgumentParser) -> None:
         "restores the historical behavior of exiting after "
         "DISCOVER_FAILURE_RETRY_LIMIT (3) empty/failed discoveries. Requires "
         "the authoring track (has no effect under diff-only mode).",
+    )
+    opt.add_argument(
+        "--no-source-changes",
+        dest="no_source_changes",
+        action="store_true",
+        default=False,
+        help="Keep no source, file or runtime change from the framework phase, "
+        "specialists, upstream PRs or enablement: a round that carries a patch, "
+        "a tuned artifact, a rewrite switch, an install or another runtime is "
+        "skipped, and only server arguments and environment variables are kept. "
+        "The kernel phase and the PRELUDE warm replay have their own switches "
+        "(--no-kernel, --no-warm-replay). Default: source changes are kept.",
     )
 
 

@@ -533,3 +533,15 @@ def test_a_role_with_no_constraints_gets_no_constraints_line():
     assert "Constraints" not in block
     assert "Constraints" not in payload_description
     assert "send_message:{topic}" in block
+
+
+@pytest.mark.parametrize("no_source_changes", [True, False])
+def test_the_phase_contract_states_launch_configuration_only_exactly_under_the_flag(registry, no_source_changes):
+    prompt = build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=default_enabled_actions(no_kernel=True),
+        session=SessionContext(framework="vllm", no_source_changes=no_source_changes, max_minutes=480),
+        cycle=PromptCycle(phase="FRAMEWORK_AGENT"),
+        assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
+    )
+    assert ("LAUNCH CONFIGURATION ONLY (--no-source-changes)" in prompt) is no_source_changes
