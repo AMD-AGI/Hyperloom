@@ -30,6 +30,17 @@ from inference_suite.multinode.recipe import OperatorArgs
 NODE_LIST_ENV = "HYPERLOOM_MN_NODE_LIST"
 _FRAMEWORKS = {Framework.SGLANG.value: Framework.SGLANG, Framework.ATOM.value: Framework.ATOM}
 _ROUTER = "router"
+ROUTER_PORT = 8000
+_SGLANG_ENGINE_PORT = 8000
+#: Engine HTTP ports when the node list names no engine URL.
+DEFAULT_ENGINE_PORTS = {
+    Framework.SGLANG: {Role.PREFILL: _SGLANG_ENGINE_PORT, Role.DECODE: _SGLANG_ENGINE_PORT},
+    Framework.ATOM: {Role.PREFILL: 8010, Role.DECODE: 8020},
+}
+#: The HTTP port of an aggregated worker, every framework alike.
+WORKER_PORT = _SGLANG_ENGINE_PORT
+#: The HTTP port, multi-host rendezvous port and PD bootstrap port of an Infera engine.
+INFERA_ENGINE_PORT = 30000
 _SSH_PORT = "ssh_port"
 _REQUIRED = ("framework", "model", "service_url", "gpus_per_node")
 _KEYS = (
@@ -294,6 +305,23 @@ def _role_hosts(fields: Mapping[str, Any], mode: PdMode) -> dict[Role, tuple[str
     return hosts
 
 
+def role_url(nodes: NodeList, role: Role) -> str:
+    """The service URL the node list names for a PD role; empty for a worker."""
+    return {Role.PREFILL: nodes.prefill_url, Role.DECODE: nodes.decode_url}.get(role, "")
+
+
+def engine_port(nodes: NodeList, role: Role) -> int:
+    """The port a role's engines serve on: Infera's engine port, else that of the node list's role URL, else the
+    framework's default."""
+    if nodes.frontend is FrontendType.INFERA:
+        return INFERA_ENGINE_PORT
+    if role is Role.WORKER:
+        return WORKER_PORT
+    url = role_url(nodes, role)
+    port = urlsplit(url).port if url else None
+    return port or DEFAULT_ENGINE_PORTS[nodes.framework][role]
+
+
 def parse_node_list(document: Any) -> NodeList:
     """The node list ``document`` states.
 
@@ -344,8 +372,6 @@ def _refuse_router_port_clash(nodes: NodeList) -> NodeList:
     Raises:
         NodeListError: a role's host is the router host and its engines serve on the router's port.
     """
-    from inference_suite.multinode.commands import ROUTER_PORT, engine_port
-
     if not nodes.router or nodes.frontend is FrontendType.INFERA:
         return nodes
     for role in nodes.roles:
@@ -371,12 +397,18 @@ def read_node_list(environ: Mapping[str, str]) -> NodeList:
 
 
 __all__ = [
+    "DEFAULT_ENGINE_PORTS",
+    "INFERA_ENGINE_PORT",
     "NODE_LIST_ENV",
+    "ROUTER_PORT",
+    "WORKER_PORT",
     "LaunchMode",
     "NodeList",
     "NodeListError",
     "RoleTopology",
     "SshAccess",
+    "engine_port",
     "parse_node_list",
     "read_node_list",
+    "role_url",
 ]

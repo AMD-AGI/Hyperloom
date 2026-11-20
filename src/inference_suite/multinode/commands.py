@@ -18,25 +18,22 @@ import json
 import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass
-from urllib.parse import urlsplit
 
 from inference_suite.argv import canonical_flag_name, is_flag
 from inference_suite.frameworks import Framework
-from inference_suite.multinode.nodes import LaunchMode, NodeList
+from inference_suite.multinode.nodes import (
+    INFERA_ENGINE_PORT,
+    ROUTER_PORT,
+    WORKER_PORT,
+    LaunchMode,
+    NodeList,
+    engine_port,
+    role_url,
+)
 from inference_suite.multinode.record import PD_ROLES, FrontendType, PdLaunch, PdMode, Role, RoleLaunch
 
 ROUTER = "router"
-ROUTER_PORT = 8000
-_SGLANG_ENGINE_PORT = 8000
-#: Engine HTTP ports when the node list names no engine URL.
-DEFAULT_ENGINE_PORTS = {
-    Framework.SGLANG: {Role.PREFILL: _SGLANG_ENGINE_PORT, Role.DECODE: _SGLANG_ENGINE_PORT},
-    Framework.ATOM: {Role.PREFILL: 8010, Role.DECODE: 8020},
-}
-#: The HTTP port of an aggregated worker, every framework alike.
-WORKER_PORT = _SGLANG_ENGINE_PORT
-#: The HTTP port, multi-host rendezvous port and PD bootstrap port of an Infera engine.
-INFERA_ENGINE_PORT = 30000
+#: The multi-host rendezvous port and PD bootstrap port of an Infera engine.
 INFERA_DIST_INIT_PORT = 5000
 INFERA_BOOTSTRAP_PORT = 30001
 INFERA_ENGINE = "infera.engine.sglang"
@@ -77,23 +74,6 @@ class HostCommand:
 
 def _join(argv: Sequence[str]) -> str:
     return " ".join(shlex.quote(part) for part in argv)
-
-
-def _role_url(nodes: NodeList, role: Role) -> str:
-    """The service URL the node list names for a PD role; empty for a worker."""
-    return {Role.PREFILL: nodes.prefill_url, Role.DECODE: nodes.decode_url}.get(role, "")
-
-
-def engine_port(nodes: NodeList, role: Role) -> int:
-    """The port a role's engines serve on: Infera's engine port, else that of the node list's role URL, else the
-    framework's default."""
-    if nodes.frontend is FrontendType.INFERA:
-        return INFERA_ENGINE_PORT
-    if role is Role.WORKER:
-        return WORKER_PORT
-    url = _role_url(nodes, role)
-    port = urlsplit(url).port if url else None
-    return port or DEFAULT_ENGINE_PORTS[nodes.framework][role]
 
 
 def worker_hosts(role: RoleLaunch) -> list[tuple[str, ...]]:
@@ -225,7 +205,7 @@ def engine_commands(launch: PdLaunch, nodes: NodeList, role: Role) -> list[HostC
 
 def _worker_urls(launch: PdLaunch, nodes: NodeList, role: Role) -> list[str]:
     """The URLs the router reaches a role at: the role's service URL in place, else each worker's first host."""
-    service = _role_url(nodes, role)
+    service = role_url(nodes, role)
     if nodes.launch_mode is LaunchMode.IN_PLACE and service:
         return [service]
     port = engine_port(nodes, role)
