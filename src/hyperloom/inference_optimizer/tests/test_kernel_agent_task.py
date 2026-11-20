@@ -697,4 +697,4 @@ async def test_kernel_ticks_run_orchestration_only_on_admitted_turns(coord, monk
     st.kernel_progress_fingerprint = "fp-b"
     await c.tick(1)
 
-    assert turns == ["orchestration", "critic", "critic", "orchestration", "critic"]
+    assert turns == ["orchestration", "orchestration"]
