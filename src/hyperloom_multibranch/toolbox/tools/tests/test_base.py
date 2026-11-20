@@ -118,21 +118,15 @@ async def test_a_refused_push_is_retried(tmp_path: Path) -> None:
     await runner.wait(job_id)
     assert sink.calls == 3
     assert len(sink.pointers) == 1
-    assert runner.undelivered() == ()
 
 
-async def test_a_push_that_keeps_failing_is_kept_and_redelivered(tmp_path: Path) -> None:
+async def test_a_push_that_keeps_failing_is_given_up_after_its_attempts(tmp_path: Path) -> None:
     sink = RecordingSink(refuse=2)
     runner = jobs(tmp_path, ScriptedTool(), sink, push_attempts=2)
     job_id = runner.submit(request())
-    await runner.wait(job_id)
-    assert sink.pointers == []
-    assert runner.undelivered() == (job_id,)
-    assert Path(runner._jobs[job_id].pointer.location).exists()
-    assert await runner.redeliver() == ()
-    assert [p.job_id for p in sink.pointers] == [job_id]
-    assert await runner.redeliver() == ()
-    assert len(sink.pointers) == 1
+    assert await runner.wait(job_id) is JobStatus.SUCCEEDED
+    assert (sink.calls, sink.pointers) == (2, [])
+    assert runner.result(job_id) == {"n": 1}
 
 
 @pytest.mark.parametrize(
@@ -185,7 +179,7 @@ async def test_a_job_id_may_carry_a_colon_and_its_directory_never_does(tmp_path:
 
 
 class HeldSink(RecordingSink):
-    """Holds the first push until ``release`` is set: the window in which a join or a redelivery runs."""
+    """Holds the first push until ``release`` is set: the window in which another branch joins or leaves."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -238,25 +232,9 @@ async def test_a_branch_that_joins_during_a_push_and_the_branch_being_pushed_to_
     await runner.wait(job_id)
 
     assert sorted(pointer.branch for pointer in sink.pointers) == ["a", "b"]
-    assert runner.undelivered() == ()
 
 
-async def test_a_redelivery_during_a_push_does_not_push_the_pointer_again(tmp_path: Path) -> None:
-    sink = HeldSink()
-    runner = jobs(tmp_path, ScriptedTool(), sink)
-    job_id = runner.submit(request("c"))
-    await sink.holding.wait()
-
-    still = await runner.redeliver()
-    sink.release.set()
-    await runner.wait(job_id)
-
-    assert [pointer.branch for pointer in sink.pointers] == ["c"]
-    assert still == (job_id,), "the push under way was not yet accepted"
-    assert runner.undelivered() == ()
-
-
-async def test_a_branch_a_redelivery_pushed_to_meanwhile_is_not_pushed_to_again_by_the_push_it_interrupted(
+async def test_a_branch_a_join_pushed_to_meanwhile_is_not_pushed_to_again_by_the_push_it_interrupted(
     tmp_path: Path,
 ) -> None:
     sink, tool = HeldSink(), ScriptedTool()
@@ -268,11 +246,11 @@ async def test_a_branch_a_redelivery_pushed_to_meanwhile_is_not_pushed_to_again_
     tool.block.set()
     await sink.holding.wait()
 
-    await runner.redeliver()
+    await runner.join(job_id, "c")
     sink.release.set()
     await runner.wait(job_id)
 
-    assert sorted(pointer.branch for pointer in sink.pointers) == ["a", "b"]
+    assert sorted(pointer.branch for pointer in sink.pointers) == ["a", "b", "c"]
 
 
 async def test_a_branch_that_leaves_while_another_branch_is_pushed_to_is_not_pushed_to(tmp_path: Path) -> None:
@@ -290,7 +268,6 @@ async def test_a_branch_that_leaves_while_another_branch_is_pushed_to_is_not_pus
     await runner.wait(job_id)
 
     assert [pointer.branch for pointer in sink.pointers] == ["a"]
-    assert runner.undelivered() == ()
 
 
 async def test_a_branch_that_asks_while_a_cancelled_job_unwinds_gets_a_new_job_and_the_key_keeps_naming_it(

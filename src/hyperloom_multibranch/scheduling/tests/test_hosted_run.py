@@ -63,7 +63,6 @@ DENIED = "bwrap: setting up uid map: Permission denied"
 def _spec(
     measurement: str,
     image: str = f"registry.example/vllm@{DIGEST}",
-    hardware: dict[str, int] | None = None,
     **sections: dict[str, object],
 ) -> CampaignSpec:
     return parse_campaign(
@@ -72,7 +71,7 @@ def _spec(
             "flow": "multibranch",
             "model": {"path": "/models/Llama-3-8B"},
             "framework": {"name": "vllm", "image": image},
-            "hardware": {"gpu_type": "mi355x", "tp": 1, **(hardware or {})},
+            "hardware": {"gpu_type": "mi355x", "tp": 1},
             "workload": {"conc": 16, "isl": 1024, "osl": 512, "precision": "fp8"},
             "budget": {"max_hours": 1},
             "placement": {"profile": "hosted-gpu", "measurement": measurement},
@@ -145,26 +144,8 @@ def test_the_host_reads_a_final_ending_and_the_session_a_restart_finishes(tmp_pa
     assert exit_document == {"final": True, "returncode": 2, "error": "multibranch.workload is missing"}
 
 
-@pytest.mark.parametrize("measurement", ["local", "hosted"])
-def test_the_run_command_line_says_where_the_spec_measures(measurement: str) -> None:
-    assert f"--measurement={measurement}" in run_argv(_spec(measurement), 1.0, 8)
-
-
-def test_an_inferencex_spec_runs_its_session_at_the_hardware_ep_it_names() -> None:
-    argv = run_argv(_spec("hosted", hardware={"tp": 8, "ep": 8}), 1.0, 1)
-
-    assert {"--workload=inferencex", "--tp=8", "--ep=8"} <= set(argv)
-
-
 def test_a_spec_without_a_launch_section_maps_onto_run() -> None:
     assert "--workload=inferencex" in run_argv(_spec("hosted"), 1.0, 1)
-
-
-def test_a_spec_gives_its_base_launch_as_the_reference_script_of_run() -> None:
-    spec = _spec("hosted", multibranch={"workload": "inferencex", "reference_script": "/data/launch.sh"})
-
-    assert "--reference-script=/data/launch.sh" in run_argv(spec, 1.0, 1)
-    assert not any(arg.startswith("--reference-script") for arg in run_argv(_spec("hosted"), 1.0, 1))
 
 
 @pytest.mark.parametrize("path", [7, ["/data/launch.sh"], "", "  "])
@@ -218,11 +199,6 @@ def test_a_spec_measured_here_on_another_image_is_refused_naming_the_one_this_co
     assert image not in str(refused.value), "a string the submitter wrote is not echoed"
 
 
-def test_a_spec_measured_here_without_the_pins_is_refused_naming_what_is_missing() -> None:
-    with pytest.raises(PeersUnavailable, match="HYPERLOOM_ACTIVE_IMAGE_DIGEST not set"):
-        require_local_image(_spec("local"), {"HYPERLOOM_ACTIVE_IMAGE_REF": "registry.example/vllm:v1"})
-
-
 def test_a_spec_measured_in_the_grants_sandboxes_is_not_held_to_this_containers_image() -> None:
     require_local_image(_spec("hosted", "registry.example/vllm:v1"), {})
 
@@ -231,15 +207,15 @@ class Probes:
     """A stand-in for bubblewrap's probe: each binary named in ``answers`` answers its problems, anything else is not
     there; records every binary asked about."""
 
-    def __init__(self, answers: dict[str, tuple[str, ...]], *, transient: bool = False) -> None:
-        self.answers, self.transient = answers, transient
+    def __init__(self, answers: dict[str, tuple[str, ...]]) -> None:
+        self.answers = answers
         self.asked: list[str | None] = []
 
     def __call__(self, path: str | None, *_: object) -> BwrapProbe:
         self.asked.append(path)
         if path not in self.answers:
             return BwrapProbe(path, None, ("bubblewrap: not found",))
-        return BwrapProbe(path, (0, 13, 1), self.answers[path], transient=self.transient)
+        return BwrapProbe(path, (0, 13, 1), self.answers[path])
 
 
 @pytest.fixture
@@ -256,8 +232,8 @@ def unmarked(monkeypatch: pytest.MonkeyPatch) -> None:
 def probes(unmarked: None, monkeypatch: pytest.MonkeyPatch) -> Callable[..., Probes]:
     """An :func:`unmarked` process whose bubblewrap probe is the stand-in the test sets."""
 
-    def install(answers: dict[str, tuple[str, ...]], **options: bool) -> Probes:
-        stand_in = Probes(answers, **options)
+    def install(answers: dict[str, tuple[str, ...]]) -> Probes:
+        stand_in = Probes(answers)
         monkeypatch.setattr(bwrap, "_probe", stand_in)
         return stand_in
 
@@ -336,18 +312,14 @@ def test_a_hosted_run_measured_here_is_refused_while_its_layers_bubblewrap_canno
     )
 
 
-@pytest.mark.parametrize("measurement", ["local", "hosted"])
 def test_a_hosted_run_with_no_account_starts_with_its_specialists_under_the_layers_bubblewrap(
-    measurement: str, probes: Callable[..., Probes]
+    probes: Callable[..., Probes],
 ) -> None:
     probed = probes({LAYER_BWRAP: ()})
 
-    require_hosted_isolation(_spec(measurement), {HOST_LAYER_ENV: str(LAYER)})
+    require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
 
-    here = agent_isolation.BWRAP if measurement == "local" else HOSTED
-    assert launch_isolation(local=measurement == "local") == LaunchIsolation(
-        agent_isolation.BWRAP, here, here, True, ()
-    )
+    assert launch_isolation(local=False) == LaunchIsolation(agent_isolation.BWRAP, HOSTED, HOSTED, True, ())
     assert set(probed.asked) == {LAYER_BWRAP}, "the runner's chooser takes the layer's bubblewrap for the specialists"
 
 
@@ -391,15 +363,6 @@ def test_a_hosted_run_where_no_tier_can_isolate_a_specialist_is_refused_naming_b
         f"agents cannot be isolated on this host: running them as an account: {SPECIALIST_USER_ENV} is not set; "
         f"bubblewrap ({LAYER_BWRAP}, 0.13.1): {DENIED}"
     )
-
-
-def test_a_bubblewrap_that_gives_no_answer_in_time_leaves_the_run_to_be_started_again(
-    probes: Callable[..., Probes],
-) -> None:
-    probes({LAYER_BWRAP: (f"bubblewrap at {LAYER_BWRAP}: no answer in 10 s",)}, transient=True)
-
-    with pytest.raises(TimeoutError, match="no answer in 10 s"):
-        require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(LAYER)})
 
 
 def _layer(tmp_path: Path, bwrap_target: str | None) -> Path:

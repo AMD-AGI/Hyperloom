@@ -611,10 +611,10 @@ def _flag_pair_at(tokens: list[str], i: int) -> tuple[list[str], int]:
     i += 1
     pair = [t]
     if t in _MULTI_VALUE_FLAGS:
-        while i < len(tokens) and not tokens[i].startswith("--"):
+        while i < len(tokens) and not (tokens[i].startswith("--") or _argv.is_flag(tokens[i])):
             pair.append(tokens[i])
             i += 1
-    elif i < len(tokens) and not tokens[i].startswith("--"):
+    elif i < len(tokens) and not (tokens[i].startswith("--") or _argv.is_flag(tokens[i])):
         pair.append(tokens[i])
         i += 1
     return pair, i
@@ -633,7 +633,7 @@ def dedupe_extra_server_args(args_str: str) -> str:
     i = 0
     while i < len(tokens):
         t = tokens[i]
-        if t.startswith("--"):
+        if t.startswith("--") or _argv.is_flag(t):
             pair, i = _flag_pair_at(tokens, i)
             flag = pair[0]
             if flag not in pair_by_flag:
