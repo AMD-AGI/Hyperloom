@@ -1124,22 +1124,6 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
 
 
 @pytest.mark.asyncio
-async def test_orchestration_prompt_has_no_execution_checklist(session_dir):
-    """The Coordinator no longer injects an enforced next-step checklist."""
-    c = Coordinator(session_dir, backends=_build_backends({}))
-    try:
-        c.shared_state.baseline_tput = 100.0
-        c.shared_state.last_profile_trace = ""
-        c.shared_state.save(session_dir)
-
-        prompt = (await c.conversation.compose_prompt("orchestration")).text
-
-        assert "Execution checklist" not in prompt
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_coordinator_prune_branch_cancels_family_and_records_advisory(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
     try:

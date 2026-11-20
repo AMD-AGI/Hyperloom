@@ -211,6 +211,11 @@ forbidden_modules =
     hyperloom.orchestrator
     hyperloom.inference_optimizer
     hyperloom.agents
+    hyperloom.contracts
+    hyperloom.hosted
+    hyperloom.measure
+    hyperloom.plugs
+    hyperloom.sandbox
     kernelforge
 ignore_imports =
     hyperloom.**.tests.** -> **

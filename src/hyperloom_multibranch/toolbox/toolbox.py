@@ -82,7 +82,7 @@ from hyperloom_multibranch.toolbox.pending_builds import (
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
 from hyperloom_multibranch.toolbox.long_context import with_root_reading
 from hyperloom_multibranch.toolbox.short_prompt_pool import ShortPromptPool, pooled_result
-from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, State, WorkQueue, sandbox_priority
+from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, State, WorkQueue
 from hyperloom_multibranch.toolbox.resume_guard import MeasuredOn
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
 from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolRequest
@@ -715,7 +715,7 @@ class RealToolbox:
     async def _execute(self, item: QueuedTest) -> TestResult:
         try:
             environment = self._builds.resolved(item.environment)
-            job = TestJob(item.request, 1, (), item.priority, sandbox_priority(item.priority), environment)
+            job = TestJob(item.request, 1, (), item.priority, environment)
             result = await self._runner.run(job)
         except Exception as error:
             logger.exception("test %s failed in the executor", item.request_id)
@@ -823,12 +823,6 @@ class RealToolbox:
         """
 
         return False
-
-    @property
-    def node_failures(self) -> dict[str, int]:
-        """The failures reported against each node this session, quarantined or not."""
-
-        return dict(self._quarantine.failures)
 
     async def _node_failed(self, node: str, reason: str, reproduced: bool) -> None:
         failures = self._quarantine.count_failure(node)

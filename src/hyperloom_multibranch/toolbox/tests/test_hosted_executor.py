@@ -449,7 +449,6 @@ def _job(point: Path) -> TestJob:
         1,
         (),
         2,
-        2,
         AcceptedMeasurement(None, (point,)),  # type: ignore[arg-type]
     )
 
@@ -504,7 +503,7 @@ async def test_an_end_with_no_class_and_no_success_is_refused_with_its_reason(tm
 
 async def test_a_job_without_the_accepted_measurement_is_refused(tmp_path: Path) -> None:
     executor = HostedExecutor(_Stub(_outcome()), tmp_path / "session")  # type: ignore[arg-type]
-    job = TestJob(req().accepted("b1-000001"), 1, (), 2, 2, {"env": "x"})
+    job = TestJob(req().accepted("b1-000001"), 1, (), 2, {"env": "x"})
     with pytest.raises(MeasurementRefused, match="accepted measurement"):
         await executor.run(job)
 

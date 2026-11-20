@@ -189,7 +189,6 @@ class TestJob:
     attempt: int
     avoid_nodes: tuple[str, ...]
     priority: int
-    sandbox_priority: int
     environment: object = None
 
 

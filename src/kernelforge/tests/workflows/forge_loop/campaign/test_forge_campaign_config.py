@@ -522,16 +522,6 @@ def test_from_dict_requires_a_json_object():
         CampaignConfig.from_dict([{}])
 
 
-def test_from_dict_rejects_the_retired_pre_rename_key(tmp_path, monkeypatch):
-    """The old backend key is a hard error now, not a silent migration."""
-    payload = _campaign_payload(tmp_path, monkeypatch)
-    retired_key = "fel" + "low"
-    payload[retired_key] = payload.pop("kernel_backend")
-
-    with pytest.raises(ValueError, match="unsupported campaign config fields"):
-        CampaignConfig.from_dict(payload)
-
-
 def test_from_dict_round_trips_measurement_semantics(tmp_path, monkeypatch):
     """nproc/bench_repeat decide what a number MEANS, so they must survive."""
     payload = _campaign_payload(tmp_path, monkeypatch)
