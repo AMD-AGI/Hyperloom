@@ -267,7 +267,6 @@ load_dotenv_no_clobber
 : "${USER_DATA_PATH:?USER_DATA_PATH missing}"
 export USER_DATA_PATH
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
-ulimit -Sn 65536 || true
 bash "$INSTALL_SH"
 ```
 

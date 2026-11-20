@@ -178,7 +178,6 @@ load_dotenv_no_clobber
 : "${USER_DATA_PATH:?USER_DATA_PATH missing}"
 export USER_DATA_PATH
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
-ulimit -Sn 65536 || true
 bash "$INSTALL_SH"
 ```
 
@@ -439,7 +438,6 @@ Use the ATOM execution-shell preamble and selected Python above, then run:
 ```bash
 : "${USER_DATA_PATH:?USER_DATA_PATH missing}" "${PYTHON:?Select the existing ATOM Python first}"
 export USER_DATA_PATH
-ulimit -Sn 65536 || true
 bash "$INSTALL_SH"
 ```
 
