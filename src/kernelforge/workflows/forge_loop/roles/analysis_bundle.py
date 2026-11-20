@@ -19,6 +19,7 @@ from kernelforge.workflows.forge_loop.roles.contracts import (
     EvidenceRef,
     OrchestrationContext,
 )
+from kernelforge.workflows.forge_loop.roles.analysis_session import _sha256
 
 
 # Artifacts every analysis bundle carries at its root, whatever its status.
@@ -208,14 +209,6 @@ def _analysis_cases(context: OrchestrationContext) -> tuple[AnalysisCase, ...]:
         AnalysisCase(case_id=case.case_id, directory=_case_directory(case.case_id), latency_ms=case.latency_ms)
         for case in context.cases
     )
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _source_digest(paths: tuple[Path, ...]) -> str:

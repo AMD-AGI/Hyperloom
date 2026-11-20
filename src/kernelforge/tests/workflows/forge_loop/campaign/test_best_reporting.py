@@ -538,24 +538,17 @@ class TestPublishedBestLoader:
     def test_no_campaign_has_no_published_best(self, tmp_path):
         assert load_published_best(str(tmp_path)) is None
 
-    def test_a_result_of_a_different_shape_is_not_published(self, tmp_path):
+    @pytest.mark.parametrize(
+        "content",
+        [
+            json.dumps({"correctness_passed": True, "iteration": 0, "commit_hash": "abc123"}),
+            '{"correctness_pass',
+        ],
+        ids=["different-shape", "truncated"],
+    )
+    def test_a_malformed_result_is_not_published(self, tmp_path, content):
         result = tmp_path / "forge_experiments" / "best_result.json"
         result.parent.mkdir(parents=True)
-        result.write_text(
-            json.dumps(
-                {
-                    "correctness_passed": True,
-                    "iteration": 0,
-                    "commit_hash": "abc123",
-                }
-            )
-        )
-
-        assert load_published_best(str(tmp_path)) is None
-
-    def test_a_truncated_result_is_not_published(self, tmp_path):
-        result = tmp_path / "forge_experiments" / "best_result.json"
-        result.parent.mkdir(parents=True)
-        result.write_text('{"correctness_pass')
+        result.write_text(content)
 
         assert load_published_best(str(tmp_path)) is None

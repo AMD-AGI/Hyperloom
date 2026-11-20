@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
-import subprocess
 import threading
 import uuid
 from collections.abc import Iterator
@@ -31,7 +29,6 @@ from hyperloom_common.llm.deepseek_session import (
     sdk_failures,
     start_harness,
 )
-from hyperloom_common.llm.llm_config import DEFAULT_DEEPSEEK_HARNESS_MODEL
 from hyperloom_common.llm.reasoning_effort import (
     DEFAULT_REASONING_EFFORT,
     REASONING_EFFORT_LEVELS,
@@ -46,9 +43,7 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
 )
 from kernelforge.agent_backends.structured_output import schema_instruction
-from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
-
-log = logging.getLogger(__name__)
+from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
 
 
 class DeepSeekHarnessBackendError(AgentProviderError):
@@ -171,22 +166,11 @@ class DeepSeekHarnessBackend:
     """Execute Forge sessions through the DeepSeek Harness Python SDK."""
 
     name = "deepseek"
-    capabilities = AgentCapabilities(
-        writable=True,
-        resumable=True,
-        sandbox=True,
-        probe=True,
-        requires_workspace_cwd=True,
-        session_env=True,
-        workspace_guard=True,
-    )
+    capabilities: AgentCapabilities
 
-    def __init__(self, runtime: AgentRuntimeConfig | None = None) -> None:
+    def __init__(self, runtime: AgentRuntimeConfig) -> None:
         """Capture runtime overrides while deferring checks until execution."""
-        self.runtime = runtime or AgentRuntimeConfig(
-            provider=self.name,
-            model=DEFAULT_DEEPSEEK_HARNESS_MODEL,
-        )
+        self.runtime = runtime
         self._preflight_done = False
         self._runtimes: dict[str, Any] = {}
         # Which runtime ran each session: only that process can resume it, whatever spec the resume carries.
@@ -397,17 +381,7 @@ class DeepSeekHarnessBackend:
         result = _normalize_run_result(sdk_result, session_id)
         if usage is not None:
             usage.add_usage(result.usage, role=spec.role)
-        try:
-            actual_changes = guard.verify()
-        except Exception:
-            # verify() restores the baseline itself before raising a rejection, so this second call only covers the
-            # paths that fail before it gets there.
-            try:
-                guard.rollback()
-            except (WorkspaceSafetyError, OSError, subprocess.SubprocessError):
-                log.warning("workspace rollback after a failed verify also failed", exc_info=True)
-            raise
-        result.file_changes = actual_changes
+        result.file_changes = guard.verify_or_rollback()
         result.target_edit_count = guard.count_target_edits()
         result.edit_count = max(result.edit_count, result.target_edit_count)
         return result

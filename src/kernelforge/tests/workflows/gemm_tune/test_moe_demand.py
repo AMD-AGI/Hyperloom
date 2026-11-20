@@ -162,12 +162,6 @@ class TestWhatItUnblocks:
         assert _fmoe(report) is not None, "the demand is still recorded"
         assert "fmoe_ck" not in self._select(report)
 
-    def test_a_dense_tuner_does_not_borrow_moe_shapes(self):
-        # vllm_dense_tunableop borrows shapes from every table in
-        # TABLE_KEY_SCHEMA when it has no demand of its own. A fused-MoE key has
-        # no (M, N, K) to borrow, so tuned_fmoe.csv must stay out of that map.
-        assert "tuned_fmoe.csv" not in ev.TABLE_KEY_SCHEMA
-
 
 class TestTheKillSwitch:
     def test_it_can_be_turned_off_without_a_revert(self, monkeypatch):

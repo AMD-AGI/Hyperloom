@@ -306,13 +306,15 @@ def test_codex_hands_the_session_environment_to_its_app_server(tmp_path):
         runtime=AgentRuntimeConfig(
             provider="codex",
             model="gpt-test",
-            options={"home": str(tmp_path / "codex-home")},
+            options={
+                "home": str(tmp_path / "codex-home"),
+                "gateway": {
+                    "base_url": "https://gateway.example.invalid/v1",
+                    "key_env": "FAKE_CODEX_API_KEY",
+                    "headers": {"user": "test-user"},
+                },
+            },
         ),
-        gateway={
-            "base_url": "https://gateway.example.invalid/v1",
-            "key_env": "FAKE_CODEX_API_KEY",
-            "headers": {"user": "test-user"},
-        },
     )
     sdk = SimpleNamespace(CodexConfig=lambda **kwargs: SimpleNamespace(**kwargs))
     spec = AgentRunSpec(

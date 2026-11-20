@@ -8,8 +8,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from functools import partial
-import importlib
-import inspect
 import json
 import logging
 import math
@@ -18,7 +16,7 @@ from pathlib import Path
 import time
 from typing import Any, Awaitable, Callable
 
-from kernelforge.evaluation.benchmark.runner import SWEEP_BENCH_ITERS, SWEEP_WARMUP_ITERS, BenchRun
+from kernelforge.evaluation.benchmark.runner import SWEEP_BENCH_ITERS, SWEEP_WARMUP_ITERS, BenchRun, sweep_case
 from kernelforge.utils.file_lock import locked_json_state, release_lock, try_lock_exclusive
 
 log = logging.getLogger(__name__)
@@ -38,18 +36,6 @@ ROUND_BUDGET_ENV = "FORGE_PROBE_ROUND_BUDGET"
 DEVICE_LOCK_ENV = "FORGE_PROBE_DEVICE_LOCK"
 # Unix timestamp at which the specialist session this probe serves is killed.
 SESSION_DEADLINE_ENV = "FORGE_PROBE_SESSION_DEADLINE"
-
-PRIMITIVE_MODULE = "kernelforge.evaluation.benchmark.runner"
-PRIMITIVE_ATTR = "sweep_case"
-PRIMITIVE_PATH = f"{PRIMITIVE_MODULE}.{PRIMITIVE_ATTR}"
-# The keywords the probe calls the primitive with.
-PRIMITIVE_KEYWORDS = (
-    "bench",
-    "case_id",
-    "constants",
-    "timeout_sec",
-    "prefix_constants",
-)
 
 # Ledger statuses.
 MEASURED = "measured"
@@ -190,46 +176,6 @@ class ProbeBudget:
             self.shared_error = (
                 f"the round's shared probe budget at {self.path} cannot be reached ({type(error).__name__}: {error})"
             )
-
-
-def resolve_probe_primitive() -> Any:
-    """Return PR-1's single-case sweep primitive, or None if absent."""
-    try:
-        module = importlib.import_module(PRIMITIVE_MODULE)
-    except ImportError:
-        return None
-    return getattr(module, PRIMITIVE_ATTR, None)
-
-
-def probe_primitive_status() -> tuple[Any, str]:
-    """Return the callable probe primitive, or None and why it is unusable."""
-    try:
-        primitive = resolve_probe_primitive()
-    except Exception as error:  # isolation boundary: the optional probe primitive; callers report it unusable
-        log.warning("probe primitive %s could not be imported: %s", PRIMITIVE_PATH, error, exc_info=True)
-        return None, (
-            f"the measurement primitive {PRIMITIVE_PATH} could not be imported: {type(error).__name__}: {error}"
-        )
-    if not callable(primitive):
-        return None, (f"the measurement primitive {PRIMITIVE_PATH} is absent from this build")
-    try:
-        signature = inspect.signature(primitive)
-    except (TypeError, ValueError) as error:
-        return None, (f"the measurement primitive {PRIMITIVE_PATH} is not introspectable: {error}")
-    accepted = {
-        name
-        for name, parameter in signature.parameters.items()
-        if parameter.kind in (parameter.KEYWORD_ONLY, parameter.POSITIONAL_OR_KEYWORD)
-    }
-    if any(parameter.kind is parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
-        return primitive, ""
-    missing = [name for name in PRIMITIVE_KEYWORDS if name not in accepted]
-    if missing:
-        return None, (
-            f"the measurement primitive {PRIMITIVE_PATH} does not accept "
-            f"{', '.join(missing)}, so the probe cannot call it"
-        )
-    return primitive, ""
 
 
 def _is_inside(child: Path, parent: Path) -> bool:
@@ -379,9 +325,6 @@ async def probe_variant(
             "probing and report the remaining questions as unmeasured"
         )
         return record({"status": BUDGET_EXHAUSTED, "detail": detail})
-    primitive, unusable = probe_primitive_status()
-    if primitive is None:
-        return record({"status": UNAVAILABLE, "detail": f"{unusable}; nothing was measured"})
 
     driver_raw = str(arguments.get("driver_script") or "").strip()
     if not driver_raw:
@@ -393,7 +336,7 @@ async def probe_variant(
         return record({"status": REFUSED, "driver_script": str(driver), "detail": detail})
     base["driver_script"] = str(driver)
     run = partial(
-        primitive,
+        sweep_case,
         bench=BenchRun(str(driver), warmup_iters=SWEEP_WARMUP_ITERS, bench_iters=SWEEP_BENCH_ITERS),
         case_id=case_id,
         constants=dict(constants),

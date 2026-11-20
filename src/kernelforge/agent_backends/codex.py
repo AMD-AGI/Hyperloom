@@ -36,7 +36,7 @@ from kernelforge.agent_backends.base import (
 )
 from kernelforge.agent_backends.gateway import LlmGateway, resolve_openai_gateway
 from kernelforge.agent_backends.structured_output import output_json_schema
-from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
+from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
 
 log = logging.getLogger(__name__)
 
@@ -383,46 +383,24 @@ class CodexBackend:
     """Execute Forge sessions through the Codex Python SDK."""
 
     name = "codex"
-    capabilities = AgentCapabilities(
-        writable=True,
-        resumable=True,
-        native_subagents=True,
-        mcp=True,
-        sandbox=True,
-        probe=True,
-        requires_workspace_cwd=True,
-        session_env=True,
-        workspace_guard=True,
-    )
+    capabilities: AgentCapabilities
 
-    def __init__(
-        self,
-        codex_bin: str = "",
-        gateway: LlmGateway | Mapping[str, object] | None = None,
-        bypass_sandbox: bool | None = None,
-        runtime: AgentRuntimeConfig | None = None,
-    ) -> None:
+    def __init__(self, runtime: AgentRuntimeConfig) -> None:
         """Capture transport overrides while deferring checks until execution."""
-        self.runtime = runtime or AgentRuntimeConfig(
-            provider=self.name,
-            model=DEFAULT_CODEX_MODEL,
-            executable=codex_bin,
-            sandbox_mode=("bypass" if bypass_sandbox is not False else "workspace-write"),
-        )
-        configured_gateway = self.runtime.options.get("gateway")
-        if gateway is None and isinstance(configured_gateway, Mapping):
-            gateway = configured_gateway
+        self.runtime = runtime
+        configured_gateway = runtime.options.get("gateway")
         # An empty override is "no override": converting it would yield a gateway object that reads as configured and
         # shadow the environment.
-        if isinstance(gateway, Mapping):
-            gateway = LlmGateway.from_mapping(gateway) if gateway else None
-        explicit_bin = codex_bin or self.runtime.executable
+        self.gateway = (
+            LlmGateway.from_mapping(configured_gateway)
+            if isinstance(configured_gateway, Mapping) and configured_gateway
+            else None
+        )
+        explicit_bin = runtime.executable
         self._configured_codex_bin = explicit_bin or os.environ.get("FORGE_AGENT_CLI", "").strip()
         # Only an explicit pin must be a Codex runtime; the variable may name another provider's CLI.
         self._codex_bin_from_env = bool(self._configured_codex_bin) and not explicit_bin
         self.codex_bin = str(Path(self._configured_codex_bin).expanduser()) if self._configured_codex_bin else ""
-        self.gateway = gateway
-        self.bypass_sandbox = self.runtime.sandbox_mode == "bypass" if bypass_sandbox is None else bypass_sandbox
         self._preflight_done = False
         self._codex_home_owner: Any = None
         self._codex_home = ""
@@ -607,7 +585,7 @@ class CodexBackend:
 
     def _sdk_sandbox(self, sdk: Any, spec: AgentRunSpec) -> Any:
         """Map the generic runtime sandbox into a Codex SDK preset."""
-        if self.runtime.sandbox_mode == "bypass" or self.bypass_sandbox:
+        if self.runtime.sandbox_mode == "bypass":
             return sdk.Sandbox.full_access
         if spec.writable and self.runtime.sandbox_mode != "read-only":
             return sdk.Sandbox.workspace_write
@@ -818,17 +796,7 @@ class CodexBackend:
                 total_cost_usd=result.usage.get("total_cost_usd"),
                 role=spec.role,
             )
-        try:
-            actual_changes = guard.verify()
-        except Exception:
-            # verify() restores the baseline itself before raising a rejection, so this second call only covers the
-            # paths that fail before it gets there.
-            try:
-                guard.rollback()
-            except (WorkspaceSafetyError, OSError, subprocess.SubprocessError):
-                log.warning("workspace rollback after a failed verify also failed", exc_info=True)
-            raise
-        result.file_changes = actual_changes
+        result.file_changes = guard.verify_or_rollback()
         result.target_edit_count = guard.count_target_edits()
         result.edit_count = max(result.edit_count, result.target_edit_count)
         return result
