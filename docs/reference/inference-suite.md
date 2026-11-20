@@ -259,6 +259,7 @@ One round writes one run directory and leaves it unchanged once the round ends.
 | `report.json` | What the round measured, or the step it failed at (`inference-suite-report/2`). Written last. |
 | `server.log` | The server's log. A `boot` or `reuse` round copies the bytes logged during the round and records their range. |
 | `server_ready_at` | `<ready unix time> <boot seconds>`; `0` boot seconds for a reused server. |
+| `server_boot_active_at` | `<unix time>`: when a booting server's processes were last seen using CPU while its log was quiet. A boot that neither logs nor uses a quarter of a CPU for `pre_ready_silence_sec` ends as `server_silent_before_ready`. |
 | `server.pid` | An `own` round's pidfile while its server runs; `boot` and `reuse` keep theirs in `pid_dir`. |
 | `phase_marks.json` | The instants the round passed from one phase to the next. |
 | `kv_metrics.json`, `agentx_timeline.jsonl` | KV-cache samples and the AgentX request timeline. |
