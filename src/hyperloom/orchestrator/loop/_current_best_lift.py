@@ -46,15 +46,31 @@ class _ResolvedLaunch(NamedTuple):
     candidate_args: str
     full_args: str
     overlay: str
+    #: The winner's args stand in for the previous best's (``args_mode=replace``) rather than stacking on them.
+    replaces: bool
 
 
-def _resolved_launch(previous: Mapping[str, Any], bv: Mapping[str, Any]) -> _ResolvedLaunch:
+def _args_mode(record: Mapping[str, Any]) -> str:
+    return str(record.get("args_mode") or "append").strip().lower()
+
+
+def _replaces(agentx: bool, previous: Mapping[str, Any], bv: Mapping[str, Any]) -> bool:
+    """Whether the winner ``bv`` persists as a replace snapshot, by the rule its explore or integrate round applied."""
+    from ..actions.executors._proposal_identity import keeps_effective_args
+
+    removals, unsets = to_str_list(bv.get("remove_args")), to_str_list(bv.get("unset_envs"))
+    if _args_mode(bv) == "replace":
+        return True
+    return bool(removals or unsets) and keeps_effective_args(
+        agentx, _args_mode(previous), _args_mode(bv), removals, unsets
+    )
+
+
+def _resolved_launch(previous: Mapping[str, Any], bv: Mapping[str, Any], *, agentx: bool) -> _ResolvedLaunch:
     candidate_args = strip_benchmark_harness_flags(bv.get("candidate_extra_server_args") or bv.get("extra_server_args"))
     full_args = strip_benchmark_harness_flags(bv.get("extra_server_args"))
-    controls_effective = bool(
-        bv.get("remove_args") or bv.get("unset_envs") or str(bv.get("args_mode") or "").strip().lower() == "replace"
-    )
-    if controls_effective:
+    replaces = _replaces(agentx, previous, bv)
+    if replaces:
         full_args = dedupe_extra_server_args(full_args)
     else:
         full_args = merge_cumulative_extra_server_args(
@@ -67,6 +83,7 @@ def _resolved_launch(previous: Mapping[str, Any], bv: Mapping[str, Any]) -> _Res
         candidate_args=candidate_args,
         full_args=full_args,
         overlay=str(bv.get("final_overlay") or "").strip() or str(previous.get("final_overlay") or "").strip(),
+        replaces=replaces,
     )
 
 
@@ -239,7 +256,9 @@ class CurrentBestLiftMixin:
         if graded is not None and self._refuses_graded_winner(task_kind, bv, graded):
             return False
         previous = self.shared_state.current_best
-        launch = _resolved_launch(previous, bv)
+        from hyperloom.common.perf_metric import agentx_active
+
+        launch = _resolved_launch(previous, bv, agentx=agentx_active(benchmark_mode=self.shared_state.benchmark_mode))
         request = _LiftRequest(
             task_kind=task_kind,
             tput=float(best_tput),
@@ -383,9 +402,7 @@ class CurrentBestLiftMixin:
         cand_source: Mapping[str, Any],
         previous: Mapping[str, Any],
     ) -> None:
-        from hyperloom.common.perf_metric import agentx_active, constraint_fields, graded_axes_of
-
-        from ..actions.executors._proposal_identity import keeps_effective_args
+        from hyperloom.common.perf_metric import constraint_fields, graded_axes_of
 
         bv = request.variant
         envs = dict(previous.get("extra_envs") or {})
@@ -421,13 +438,7 @@ class CurrentBestLiftMixin:
             current_best["effective_extra_server_args"] = dedupe_extra_server_args(
                 strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
             )
-        if not current_best.get("args_mode") and keeps_effective_args(
-            agentx_active(benchmark_mode=self.shared_state.benchmark_mode),
-            str(previous.get("args_mode") or "append"),
-            str(bv.get("args_mode") or "append"),
-            to_str_list(bv.get("remove_args")),
-            to_str_list(bv.get("unset_envs")),
-        ):
+        if launch.replaces and not current_best.get("args_mode"):
             current_best["args_mode"] = "replace"
         self.shared_state.current_best = current_best
         self.shared_state.working_recipe_generation = int(self.shared_state.working_recipe_generation or 0) + 1

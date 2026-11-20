@@ -26,8 +26,9 @@ it.
   KEEP's own flags: the recipe's `--tensor-parallel-size` and the rest were
   removed, servers started at TP1 and died in model init with an out-of-memory
   error, and the session ended on that KEEP. The KEEP now stays relative to the
-  recipe, as the explore and integrate executors already record it; outside
-  AgentX, and for a KEEP that is itself `replace`, nothing changes.
+  recipe and stacks on the flags earlier KEEPs accepted, as the explore and
+  integrate executors already record it; outside AgentX, and for a KEEP that is
+  itself `replace`, nothing changes.
 - **AgentX runs on ATOM.** `HYPERLOOM_AGENTX=1 hyperloom optimize --framework
   atom` now starts: the base comes from InferenceX's ATOM agentic entries, with their forced
   acceptance length (`--spec-decode-acceptance-length`) as the golden layer.

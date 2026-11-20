@@ -110,6 +110,8 @@ def test_an_agentx_removal_keep_stays_relative_to_the_recipe(tmp_path, agentx_ba
     launch = coord.writeback.current_best_launch_config()
     assert launch["args_mode"] != "replace"
     assert launch["remove_args"] == HICACHE_FLAGS
+    # An append KEEP stacks on the flags earlier KEEPs accepted rather than standing in for them.
+    assert launch["extra_server_args"].split() == ["--tp", "8", "--schedule-policy", "shortest-prefill-first"]
 
 
 def test_an_agentx_round_on_a_removal_keep_still_launches_the_recipe(tmp_path):
