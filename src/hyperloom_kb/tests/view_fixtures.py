@@ -15,18 +15,7 @@ def submit_complete(declaration: ExperienceDeclaration, experiences: ExperienceS
         experiences.insert_complete(item)
 
 
-def build_view(
-    declaration: ExperienceDeclaration,
-    experiences: ExperienceStore,
-    *,
-    fuzzy_ready: bool = False,
-    semantic_ready: bool = False,
-) -> QueryView:
+def build_view(declaration: ExperienceDeclaration, experiences: ExperienceStore) -> QueryView:
     """A view over every stored Experience of the declaration's schema."""
 
-    return QueryViewBuilder().build(
-        declaration,
-        experiences.list_experiences(declaration.schema_ref),
-        fuzzy_ready=fuzzy_ready,
-        semantic_ready=semantic_ready,
-    )
+    return QueryViewBuilder().build(declaration, experiences.list_experiences(declaration.schema_ref))

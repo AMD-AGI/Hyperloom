@@ -15,12 +15,11 @@ from hyperloom_kb.query_view import RepeatAnnotations, RetrievalCapability
 from hyperloom_kb.remote import QuerySignal
 from hyperloom_kb.retrieval import (
     CandidateHit,
-    CapabilityUnavailable,
     GroupCandidate,
     LocalRetrievalService,
     RenderedResult,
 )
-from hyperloom_kb.retrieval_policy import ResultShape
+from hyperloom_kb.retrieval_policy import LexicalFuzzyProvider, ResultShape
 from hyperloom_kb.schema import (
     JsonValue,
     RenderedRef,
@@ -77,15 +76,11 @@ class WeightedGroupResult:
 class WeightedQueryExecution:
     groups: tuple[WeightedGroupResult, ...]
     rendered: RenderedResult
-    executed_capabilities: tuple[RetrievalCapability, ...]
-    unavailable_capabilities: tuple[RetrievalCapability, ...]
     latency_ms: float
 
 
 @dataclass(frozen=True)
 class _Recall:
-    executed: tuple[RetrievalCapability, ...]
-    unavailable: tuple[RetrievalCapability, ...]
     contributions: tuple[MatchContribution, ...]
     candidate_sets: tuple[tuple[CandidateHit, ...], ...]
 
@@ -93,8 +88,9 @@ class _Recall:
 class QueryExecutor:
     """Recall, rank and render by weighted signals over one immutable Query View."""
 
-    def __init__(self, service: LocalRetrievalService) -> None:
+    def __init__(self, service: LocalRetrievalService, fuzzy: LexicalFuzzyProvider) -> None:
         self._service = service
+        self._fuzzy = fuzzy
 
     def execute(self, signals: Sequence[QuerySignal], shape: ResultShape) -> WeightedQueryExecution:
         started = time.perf_counter()
@@ -109,88 +105,55 @@ class QueryExecutor:
         return WeightedQueryExecution(
             grouped,
             rendered,
-            tuple(dict.fromkeys(recall.executed)),
-            tuple(dict.fromkeys(recall.unavailable)),
             (time.perf_counter() - started) * 1000,
         )
 
     def _recall(self, signals: Sequence[QuerySignal]) -> _Recall:
-        """Recall every signal through each capability that takes it, weighting each hit by its signal."""
-        executed: list[RetrievalCapability] = []
-        unavailable: list[RetrievalCapability] = []
+        """Recall every signal, an exact one by its field and a text one fuzzily, weighting each hit by its signal."""
         contributions: list[MatchContribution] = []
         candidate_sets: list[tuple[CandidateHit, ...]] = []
         for signal_id, signal in enumerate(signals):
-            capabilities = (
-                (RetrievalCapability.EXACT,)
-                if signal.field
-                else (
-                    RetrievalCapability.FUZZY,
-                    RetrievalCapability.SEMANTIC,
-                )
-            )
-            for capability in capabilities:
-                try:
-                    hits = self._recall_signal(signal, capability)
-                except CapabilityUnavailable:
-                    unavailable.append(capability)
-                    continue
-                executed.append(capability)
-                adjusted: list[CandidateHit] = []
-                for hit in hits:
-                    contribution = self._contribution(signal_id, signal, capability, hit)
-                    contributions.append(contribution)
-                    adjusted.append(
-                        CandidateHit(
-                            hit.experience_id,
-                            capability,
-                            contribution.contribution,
-                            {
-                                **hit.details,
-                                "signal_id": signal_id,
-                                "signal_weight": signal.weight,
-                                "raw_score": contribution.raw_score,
-                                "normalized_score": contribution.normalized_score,
-                            },
-                        )
+            if signal.field:
+                hits = self._service.exact({signal.field: signal.value})
+            else:
+                hits = self._fuzzy.recall({"text": signal.text}, self._service.view)
+            adjusted: list[CandidateHit] = []
+            for hit in hits:
+                contribution = self._contribution(signal_id, signal, hit)
+                contributions.append(contribution)
+                adjusted.append(
+                    CandidateHit(
+                        hit.experience_id,
+                        hit.capability,
+                        contribution.contribution,
+                        {
+                            **hit.details,
+                            "signal_id": signal_id,
+                            "signal_weight": signal.weight,
+                            "raw_score": contribution.raw_score,
+                            "normalized_score": contribution.normalized_score,
+                        },
                     )
-                candidate_sets.append(tuple(adjusted))
-        return _Recall(tuple(executed), tuple(unavailable), tuple(contributions), tuple(candidate_sets))
+                )
+            candidate_sets.append(tuple(adjusted))
+        return _Recall(tuple(contributions), tuple(candidate_sets))
 
-    def _contribution(
-        self, signal_id: int, signal: QuerySignal, capability: RetrievalCapability, hit: CandidateHit
-    ) -> MatchContribution:
-        """What ``hit`` recalled through ``capability`` contributes to its Experience's score under ``signal``."""
+    @staticmethod
+    def _contribution(signal_id: int, signal: QuerySignal, hit: CandidateHit) -> MatchContribution:
+        """What ``hit`` contributes to its Experience's score under ``signal``: the signal's weight for an exact hit,
+        and for a fuzzy one that weight times its score, held within 0 and 1."""
         raw_score = hit.score if hit.score is not None else 1.0
-        normalized_score = self._normalized_score(
-            capability,
-            raw_score,
-        )
-        contribution = normalized_score * signal.weight
+        if not math.isfinite(raw_score):
+            raise QueryExecutionError(f"{hit.capability.value} recall returned a non-finite score")
+        normalized_score = 1.0 if hit.capability is RetrievalCapability.EXACT else min(1.0, max(0.0, raw_score))
         return MatchContribution(
             signal_id,
-            capability,
+            hit.capability,
             hit.experience_id,
             raw_score,
             normalized_score,
-            contribution,
+            normalized_score * signal.weight,
         )
-
-    def _recall_signal(self, signal: QuerySignal, capability: RetrievalCapability) -> tuple[CandidateHit, ...]:
-        if capability is RetrievalCapability.EXACT:
-            return self._service.exact({signal.field: signal.value})
-        return self._service.recall(capability, {"text": signal.text})
-
-    @staticmethod
-    def _normalized_score(
-        capability: RetrievalCapability,
-        score: float,
-    ) -> float:
-        if not math.isfinite(score):
-            raise QueryExecutionError(f"{capability.value} provider returned a non-finite score")
-        if capability in {RetrievalCapability.EXACT, RetrievalCapability.FILTER}:
-            return 1.0
-        return min(1.0, max(0.0, score))
 
     @staticmethod
     def _rank_groups(
@@ -278,14 +241,11 @@ class KnowledgeReadService:
                 ReadStatus.FAILED,
                 f"{type(exc).__name__}:{exc}",
             )
-        warnings = tuple(f"capability_unavailable:{item.value}" for item in execution.unavailable_capabilities)
-        if execution.rendered.truncated:
-            warnings += ("render_budget_reached",)
         return ReadResult(
             ReadStatus.COMPLETED,
             _prompt_block(execution),
             execution.rendered.rendered_refs,
-            warnings,
+            ("render_budget_reached",) if execution.rendered.truncated else (),
         )
 
 

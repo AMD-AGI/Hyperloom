@@ -22,7 +22,6 @@ from hyperloom_kb import (
     QueryExecutor,
     QuerySignal,
     ResultShape,
-    RetrievalCapability,
     derive_experience_id,
 )
 from hyperloom_kb.tests.view_fixtures import build_view, submit_complete
@@ -98,9 +97,9 @@ def _stack():
         knob="fp8_kv_other",
     )
     submit_complete(schema, experiences, target, distractor)
-    fuzzy = LexicalFuzzyProvider(experiences, schema)
-    view = build_view(schema, experiences, fuzzy_ready=True)
-    executor = QueryExecutor(LocalRetrievalService(experiences, view, providers=(fuzzy,)))
+    executor = QueryExecutor(
+        LocalRetrievalService(experiences, build_view(schema, experiences)), LexicalFuzzyProvider(experiences, schema)
+    )
     return schema, executor, target, distractor
 
 
@@ -122,12 +121,6 @@ def test_weight_increase_changes_only_matching_group_contribution() -> None:
 
     assert high_scores[target.id] - low_scores[target.id] == 0.9
     assert high_scores[distractor.id] == low_scores[distractor.id]
-
-
-def test_provider_scores_are_normalized_before_weighting() -> None:
-    assert QueryExecutor._normalized_score(RetrievalCapability.EXACT, 0.2) == 1.0
-    assert QueryExecutor._normalized_score(RetrievalCapability.FUZZY, -0.5) == 0.0
-    assert QueryExecutor._normalized_score(RetrievalCapability.SEMANTIC, 3.0) == 1.0
 
 
 def test_renderer_exposes_conditions_baseline_outcome_and_repeat_support() -> None:

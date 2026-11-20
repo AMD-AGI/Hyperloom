@@ -34,7 +34,6 @@ from hyperloom_kb.local_service import (
     ensure_local_service,
 )
 from hyperloom_kb.query_view import (
-    CapabilityState,
     QueryView,
     QueryViewBuilder,
     QueryViewError,
@@ -63,8 +62,6 @@ from hyperloom_kb.remote import (
 )
 from hyperloom_kb.retrieval import (
     CandidateHit,
-    CandidateProvider,
-    CapabilityUnavailable,
     ExperienceRenderer,
     FilePath,
     GroupCandidate,
@@ -75,7 +72,6 @@ from hyperloom_kb.retrieval import (
     render_complete_experience,
 )
 from hyperloom_kb.retrieval_policy import (
-    LEXICAL_FUZZY_PROVIDER_REF,
     LexicalFuzzyProvider,
     ResultShape,
 )
@@ -139,9 +135,6 @@ __all__ = [
     "SCALAR_KINDS",
     "TEXT_MAX_BYTES",
     "CandidateHit",
-    "CandidateProvider",
-    "CapabilityState",
-    "CapabilityUnavailable",
     "ConfigurationError",
     "ConfiguredExperienceKB",
     "EXPERIENCE_ID_NAMESPACE",
@@ -171,7 +164,6 @@ __all__ = [
     "InsertResult",
     "InsertStatus",
     "KnowledgeReadService",
-    "LEXICAL_FUZZY_PROVIDER_REF",
     "LexicalFuzzyProvider",
     "ListPage",
     "LocalFiles",
