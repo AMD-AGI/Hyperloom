@@ -39,9 +39,9 @@ in the same process multiplies collection time and adds dispatches to the tables
 kernel's.
 
 - A driver that already has such a mode is the cheapest command; read the driver to find it.
-- Otherwise write a short script outside the workspace that builds that case's inputs the way the driver
-  does and calls the kernel. Do not add the mode to the driver: it is the measurement the loop scores
-  with.
+- Otherwise write a short script that builds that case's inputs the way the driver does and calls the
+  kernel. Keep it where your session's instructions put scratch files, and do not add the mode to the
+  driver: it is the measurement the loop scores with.
 - The script runs the command from its output directory (`--out`, default `./forge_profile`), so name
   the command's files by absolute path.
 

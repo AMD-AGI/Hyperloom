@@ -233,8 +233,10 @@ and the Implementer on long-horizon runs — chooses the command the profiler
 replays: one that launches the kernel under test on a scored case and little
 else, because hardware profilers replay the process once per counter group.
 The drivers in this directory offer a `--profile-run` mode that does exactly
-that, and an agent reading one may use it; a driver without one is profiled
-through a short adapter the agent writes outside the workspace.
+that, and an agent reading one may use it. A driver without one is profiled
+through a short adapter the agent writes itself: the Analysis Agent in its
+staging directory, the Implementer in a scratch directory outside the
+workspace.
 
 Notes:
 - Forge does not select shapes or cases. The driver owns the complete
