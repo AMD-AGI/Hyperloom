@@ -197,7 +197,7 @@ async def test_a_variant_whose_config_cannot_be_built_fails_as_yaml_build_error(
     def _boom(*_a, **_k):
         raise ValueError("bad yaml render")
 
-    monkeypatch.setattr(gr, "_build_variant_yaml", _boom)
+    monkeypatch.setattr(_grid_runner, "_build_variant_yaml", _boom)
     results = await run_grid(
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
