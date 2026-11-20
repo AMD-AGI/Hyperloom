@@ -20,6 +20,9 @@ LAUNCH_FILE = "launch.json"
 REPORT_FILE = "report.json"
 SERVER_LOG = "server.log"
 READY_STAMP = "server_ready_at"
+#: The wall-clock second a booting server's processes were last seen using at least a quarter of a CPU, for a watcher
+#: outside the round that sees only the run_dir.
+BOOT_ACTIVE_STAMP = "server_boot_active_at"
 SERVER_PID = "server.pid"
 PHASE_MARKS = "phase_marks.json"
 KV_METRICS = "kv_metrics.json"
@@ -117,6 +120,10 @@ class RunLayout:
     @property
     def ready_stamp(self) -> Path:
         return self.root / READY_STAMP
+
+    @property
+    def boot_active_stamp(self) -> Path:
+        return self.root / BOOT_ACTIVE_STAMP
 
     @property
     def server_pid(self) -> Path:
@@ -227,6 +234,13 @@ class RunLayout:
             return None
         return parse_ready_stamp(text)
 
+    def write_boot_active_stamp(self, active_unix: float) -> None:
+        """Replace the boot activity stamp whole with ``active_unix``."""
+
+        staging = self.boot_active_stamp.with_name(f".{BOOT_ACTIVE_STAMP}.{os.getpid()}")
+        staging.write_text(f"{active_unix:.3f}\n", encoding=_UTF8)
+        os.replace(staging, self.boot_active_stamp)
+
     def clear_ready_stamp(self) -> None:
         self.ready_stamp.unlink(missing_ok=True)
 
@@ -243,6 +257,7 @@ class RunLayout:
 
 __all__ = [
     "AGENTX_TIMELINE",
+    "BOOT_ACTIVE_STAMP",
     "CAPTURE_TRACES_DIR",
     "CAPTURE_TRACE_DIRS",
     "CLIENT_DIR",

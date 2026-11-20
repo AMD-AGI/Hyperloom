@@ -23,6 +23,12 @@ from inference_suite.contracts.base_launch import _ENV_NAME, _OPTION, BaseLaunch
 CONFIG_SCHEMA = "inference-suite-config/1"
 DEFAULT_MAX_TOKENS_CAP = 4096
 DEFAULT_PRE_READY_SILENCE_SEC = 1800
+#: The longest a booting server's log may stay silent while its processes keep using CPU. CPU use cannot tell a boot
+#: that works without a line from a collective that spins (an RCCL busy-wait burns CPU through a deadlock), so it
+#: extends the pre-ready silence limit only this far, never below that limit. The slowest healthy silent phase measured
+#: is about 1600 s for a boot alone and 2000 to 2300 s for two boots sharing a host; this sits above both and still stops
+#: a spin long before the boot budget.
+PRE_READY_BUSY_SILENCE_SEC = 3600
 #: The only client environment an AgentX round passes through, and the fast mode it must pin off.
 AGENTX_CLIENT_ENV_PREFIX = "AIPERF_"
 AGENTX_FAST_MODE_ENV = "AIPERF_EXPERIMENTAL_FAST"
@@ -848,6 +854,7 @@ __all__ = [
     "CONFIG_SCHEMA",
     "DEFAULT_MAX_TOKENS_CAP",
     "DEFAULT_PRE_READY_SILENCE_SEC",
+    "PRE_READY_BUSY_SILENCE_SEC",
     "AgentxWorkload",
     "BaseRef",
     "ConfigError",

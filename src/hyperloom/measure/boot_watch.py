@@ -23,7 +23,10 @@ use, until it times out or is cancelled by hand.
 
 The application reads the runner's ``progress.json`` on every poll. Each change of what it says the test did (its phase,
 the last output it saw, the newest live log's write time or last line) is activity; once the runner says a round's server
-is ready (:data:`SERVER_READY_KEY`), or the test is past running, the bound no longer applies. A test with no activity
+is ready (:data:`SERVER_READY_KEY`), or the test is past running, the bound no longer applies. A round whose booting
+server's processes are using CPU rewrites the ``server_boot_active_at`` stamp in its run directory, and the runner counts
+that write as output like any other below the test's files, so a boot that works without a line is not hung here; the
+round itself bounds how long such a boot may stay silent and reports the stop. A test with no activity
 for :data:`PRE_READY_SILENCE_SEC` before that ends as ``hung_before_ready``, an infrastructure failure a new sandbox
 retries. A server whose last line says aiter started building a JIT module is working, as aiter writes nothing until the
 module is built, and a CK-tile GEMM module such as ``module_gemm_a8w8_bpreshuffle_cktile`` can take many minutes to

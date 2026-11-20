@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import time
 from pathlib import Path
@@ -12,8 +13,9 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import FailureClass
+from hyperloom.measure import local
 from hyperloom.measure.failures import Disposition, classify_test_failure
-from inference_suite.contracts import DEFAULT_PRE_READY_SILENCE_SEC
+from inference_suite.contracts import DEFAULT_PRE_READY_SILENCE_SEC, RunLayout
 
 from hyperloom.measure.boot_watch import HUNG_BEFORE_READY, PRE_READY_SILENCE_SEC, SERVER_READY_KEY, PreReadySilence
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC
@@ -56,6 +58,39 @@ def test_each_new_sign_of_output_restarts_the_bound(change: dict) -> None:
     silence = _silence()
     silence.observe({**_RUNNING, **change}, 8.0)
     assert silence.silent_for(1.0 + _LIMIT) is None and silence.silent_for(8.0 + _LIMIT) is not None
+
+
+_WATCHED_LIMIT = 1.5
+
+
+@pytest.mark.parametrize("stamping", [True, False])
+def test_a_round_stamping_its_busy_boot_keeps_the_hosted_test_alive_through_the_runners_output_watch(
+    tmp_path, monkeypatch, stamping
+) -> None:
+    monkeypatch.setattr(local, "_OUTPUT_POLL_SEC", 0.05)
+    out, files = tmp_path / "out", tmp_path / "files"
+    out.mkdir()
+    layout = RunLayout(files / "round")
+    layout.root.mkdir(parents=True)
+    fired: float | None = None
+    with Progress(out, refresh_sec=0.05, files_dir=files) as progress:
+        progress.phase("running")
+        # As the runner wires a test: the output watch over its files directory touches its progress.
+        call = make_call(tmp_path, output_dir=files, on_output=progress.touch)
+        with local._watch_output(call):
+            started = time.monotonic()
+            silence = PreReadySilence(started, _WATCHED_LIMIT)
+            while (now := time.monotonic()) - started < 3 * _WATCHED_LIMIT:
+                if stamping:
+                    layout.write_boot_active_stamp(time.time())  # what the round writes while its server uses CPU
+                silence.observe(json.loads((out / "progress.json").read_text()), now)
+                if fired is None and silence.silent_for(now) is not None:
+                    fired = now - started
+                time.sleep(0.1)
+    if stamping:
+        assert fired is None, f"hung after {fired}s while the round kept stamping"
+    else:
+        assert fired is not None and _WATCHED_LIMIT <= fired < _WATCHED_LIMIT + 1.0, fired
 
 
 _TAG = "[aiter] [pid=7 pname=Process-1]"
