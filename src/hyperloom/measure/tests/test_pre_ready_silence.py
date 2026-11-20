@@ -50,12 +50,19 @@ def test_progress_that_cannot_be_read_is_no_activity() -> None:
         {"last_output_unix": 150.0},
         {"last_line": "[aiter] start build module_moe"},
         {"updated_unix": 260.0, "last_log_age_sec": 3.0},  # the log was written again 62 s later
+        {"boot_active_unix": 150.0},  # the booting server's processes used CPU at a new second
     ],
 )
 def test_each_new_sign_of_output_restarts_the_bound(change: dict) -> None:
     silence = _silence()
     silence.observe({**_RUNNING, **change}, 8.0)
     assert silence.silent_for(1.0 + _LIMIT) is None and silence.silent_for(8.0 + _LIMIT) is not None
+
+
+def test_the_same_cpu_activity_second_read_again_is_no_activity() -> None:
+    silence = _silence(boot_active_unix=150.0)
+    silence.observe({**_RUNNING, "boot_active_unix": 150.0}, 8.0)
+    assert silence.silent_for(1.0 + _LIMIT) == pytest.approx(_LIMIT)
 
 
 _TAG = "[aiter] [pid=7 pname=Process-1]"

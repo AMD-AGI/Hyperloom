@@ -24,7 +24,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom_common.proctree import proc_identity
+from hyperloom_common.proctree import proc_identity, tree_cpu_sec
 
 from inference_suite.contracts.config import LifecycleMode, ServerConfig, SuiteConfig
 from inference_suite.contracts.layout import SERVER_LOG, SERVER_PID, ReadyStamp, RunLayout
@@ -228,7 +228,8 @@ class ServerLifecycle:
             self._launch.argv, self._server_env(), self._log, cwd=self._layout.framework_cwd
         )
         self._record(spawned)
-        watch = ServerWatch(self._log, self._log_start, self._config.deadlines, started)
+        pid = spawned.proc.pid
+        watch = ServerWatch(self._log, self._log_start, self._config.deadlines, started, lambda: tree_cpu_sec(pid))
         stop = self._await_ready(spawned, watch)
         if stop is not None:
             self._teardown_stop = self._teardown()
@@ -260,12 +261,16 @@ class ServerLifecycle:
         ).write(self._pidfile)
 
     def _await_ready(self, spawned: Spawned, watch: ServerWatch) -> Stop | None:
+        stamped: float | None = None
         while True:
             now = time.monotonic()
             stop = self._gate.check(now)
             if stop is not None:
                 return stop
             watch.advance(now)
+            if watch.cpu_active_at is not None and watch.cpu_active_at != stamped:
+                stamped = watch.cpu_active_at
+                self._layout.write_boot_active_stamp(time.time())
             stop = watch.before_ready(now, spawned.proc.poll())
             if stop is not None:
                 return stop

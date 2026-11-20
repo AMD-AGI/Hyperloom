@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import time
 
+from inference_suite.contracts import ReadyStamp, RunLayout
+
 from hyperloom.measure.runner.service import (
     EXIT_CODES,
     Progress,
@@ -94,6 +96,21 @@ def test_progress_reports_the_last_line_of_the_newest_live_log_below_the_files_d
     assert document["last_line"] == "decode batch 8"
     assert 0.0 <= document["last_log_age_sec"] < 60.0
     assert document["phase"] == "running" and document["updated_unix"] > 0
+
+
+def test_progress_reports_when_a_booting_server_last_used_cpu_until_it_is_ready(tmp_path):
+    files = tmp_path / "files"
+    layout = RunLayout(files / "round")
+    layout.root.mkdir(parents=True)
+    with Progress(tmp_path, refresh_sec=3600, files_dir=files) as progress:
+        assert json.loads((tmp_path / "progress.json").read_text())["boot_active_unix"] is None
+        layout.write_boot_active_stamp(1234.5)
+        progress.phase("running")
+        assert json.loads((tmp_path / "progress.json").read_text())["boot_active_unix"] == 1234.5
+        layout.write_ready_stamp(ReadyStamp(2000.0, 10.0))
+        progress.phase("running")
+        document = json.loads((tmp_path / "progress.json").read_text())
+    assert document["server_ready"] is True and "boot_active_unix" not in document
 
 
 def test_progress_without_a_files_directory_reports_no_line(tmp_path):

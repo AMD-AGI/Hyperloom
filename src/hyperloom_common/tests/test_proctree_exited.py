@@ -175,3 +175,34 @@ def test_reap_exited_children_leaves_another_incarnation_and_a_live_child(
     assert proctree.reap_exited_children(named) == 0
     assert _state(zombie.pid) == "Z", "a zombie of another start time is not the one named"
     assert sleeper.poll() is None
+
+
+def test_tree_cpu_sec_sums_the_tree_and_skips_what_exited_or_was_replaced(monkeypatch):
+    # utime, stime, cutime, cstime are the stat fields at 11-14 after the comm; the start time is at 19.
+    def stat(ticks: int, start_time: int) -> list[str]:
+        return ["S", *["0"] * 10, str(ticks), "0", "0", "0", *["0"] * 4, str(start_time)]
+
+    fields = {1: ["S", *["0"] * 10, "1", "2", "3", "4", *["0"] * 4, "100"], 2: stat(10, 200), 4: stat(1000, 999)}
+
+    def read(pid: int) -> list[str]:
+        if pid not in fields:
+            raise FileNotFoundError(pid)  # exited between the listing and its read
+        return fields[pid]
+
+    monkeypatch.setattr(proctree, "_stat_fields", read)
+    monkeypatch.setattr(proctree, "descendants", lambda root: [(2, 200), (3, 300), (4, 400)])
+    clock_ticks = os.sysconf("SC_CLK_TCK")
+    # pid 4 is another process than the one listed (its start time differs): not the server's.
+    assert proctree.tree_cpu_sec(1) == pytest.approx(20 / clock_ticks)
+    assert proctree.tree_cpu_sec(5) is None, "a root that cannot be read is no reading"
+
+    def unlisted(root: int) -> list[tuple[int, int]]:
+        raise PermissionError(root)
+
+    monkeypatch.setattr(proctree, "descendants", unlisted)
+    assert proctree.tree_cpu_sec(1) is None, "a tree that cannot be listed is no reading"
+
+
+def test_tree_cpu_sec_reads_this_process(sleeper):
+    assert (proctree.tree_cpu_sec(os.getpid()) or 0.0) > 0.0
+    assert proctree.tree_cpu_sec(sleeper.pid) is not None
