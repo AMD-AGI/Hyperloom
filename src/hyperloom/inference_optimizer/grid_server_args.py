@@ -16,6 +16,7 @@ from typing import Any
 from hyperloom_common.coerce import optional_positive_int
 from inference_suite import argv as _argv
 from inference_suite.contracts import RunnerOwned
+from hyperloom.common.failure_signature import SERVE_FLAG
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 
@@ -90,6 +91,56 @@ _BENCHMARK_HARNESS_FLAG_DENYLIST: tuple[str, ...] = ("--no-enable-prefix-caching
 def strip_benchmark_harness_flags(server_args: str | None) -> str:
     """Drop every :data:`_BENCHMARK_HARNESS_FLAG_DENYLIST` entry from ``server_args``."""
     return _argv.remove_server_args(server_args, _BENCHMARK_HARNESS_FLAG_DENYLIST)
+
+
+class HarnessFlagChangeError(ValueError):
+    """A candidate runs a benchmark harness its reference does not."""
+
+    error_class = SERVE_FLAG
+
+
+def _harness_flags_in_effect(server_args: str | None) -> frozenset[str]:
+    """The :data:`_BENCHMARK_HARNESS_FLAG_DENYLIST` entries the server will run with, given ``server_args``.
+
+    ``server_args`` is the carrier exactly as the server reads it: callers dedupe where the launch does, before an env
+    layer can replace it. Each entry is the negative of an argparse boolean (``--no-X``), so the last of ``--no-X``
+    and ``--X`` decides it, in any spelling the engine accepts for the destination.
+    """
+    occurrences = [name for name, _value in _argv.flag_occurrences(server_args)]
+    in_effect = set()
+    for flag in _BENCHMARK_HARNESS_FLAG_DENYLIST:
+        negative = _argv.canonical_flag_name(flag)
+        decisive = [name for name in occurrences if name in (negative, negative.removeprefix("no-"))]
+        if decisive and decisive[-1] == negative:
+            in_effect.add(flag)
+    return frozenset(in_effect)
+
+
+def harness_flag_change_reason(reference_args: str | None, candidate_args: str | None) -> str | None:
+    """Why ``candidate_args`` is not comparable with ``reference_args`` for harness flags, else ``None``.
+
+    A candidate measured against a reference is only comparable when both run the same harness: a
+    :data:`_BENCHMARK_HARNESS_FLAG_DENYLIST` flag in effect for one of them alone changes the measurement without
+    being a lever, and stripping it from the persisted recipe hides that the comparison was ever made with it.
+    """
+    differing = _harness_flags_in_effect(reference_args) ^ _harness_flags_in_effect(candidate_args)
+    if not differing:
+        return None
+    return (
+        f"sets benchmark-harness flag(s) {', '.join(sorted(differing))} differently from the reference; "
+        "a harness flag is not a lever, so it must match the reference"
+    )
+
+
+def refuse_harness_flag_change(reference_args: str | None, candidate_args: str | None) -> None:
+    """Refuse a candidate whose harness flags differ from its reference's.
+
+    Raises:
+        HarnessFlagChangeError: When a harness flag is in effect for exactly one of the two launches.
+    """
+    reason = harness_flag_change_reason(reference_args, candidate_args)
+    if reason:
+        raise HarnessFlagChangeError(reason)
 
 
 def without_runner_owned(server_args: str | None, owned: RunnerOwned) -> str:
