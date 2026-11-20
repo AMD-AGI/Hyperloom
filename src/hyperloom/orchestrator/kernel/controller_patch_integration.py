@@ -298,10 +298,6 @@ async def _default_validator(
             # The patched bytes are read from ``repo`` and deployed at the same relative paths under ``kernel_repo``.
             "repo": str(publication.repo_root),
             "kernel_repo": str(deploy_root),
-            # The Controller's Git-derived scope when it has one; the optimizer's own manifest only as a fallback for
-            # a publication without it.
-            "patch_write_paths": list(publication.changed_files)
-            or list(publication.manifest.get("changed_files") or []),
         },
         session_dir=session_dir,
         preapplied_git_patch=True,

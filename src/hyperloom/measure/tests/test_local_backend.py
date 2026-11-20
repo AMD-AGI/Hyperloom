@@ -607,6 +607,53 @@ def test_a_server_that_stalled_with_its_profile_window_open_is_the_profilers_fai
     assert (outcome.failure_class, outcome.failure_reason) == (failure_class, reason)
 
 
+#: What vLLM's engine logs when the tracer killed a worker under it: a Python exception, which alone reads as unclear.
+_ENGINE_DIED = (
+    "ERROR EngineCore encountered a fatal error.\nRuntimeError: Engine core process EngineCore died unexpectedly.\n"
+)
+_ENGINE_DIED_REASON = "python_exception: RuntimeError: Engine core process EngineCore died unexpectedly."
+
+
+@pytest.mark.parametrize(
+    ("marks", "failure_class", "reason"),
+    [
+        # The AgentX window opened at 400, a worker died at 403 and the round ended at 411, closing the window.
+        (
+            {"ready": 0.0, "measured": 100.0, "profile_open": 400.0, "finished": 411.0, "profile_close": 411.0},
+            "infra",
+            "profiler_died: ERROR EngineCore encountered a fatal error.",
+        ),
+        # The server died at 311, before the window would have opened: no window mark.
+        ({"ready": 0.0, "measured": 100.0, "finished": 311.0}, "unclear", _ENGINE_DIED_REASON),
+        # The window ran 400-460 and closed; the server died at 511, after it.
+        (
+            {"ready": 0.0, "measured": 100.0, "profile_open": 400.0, "profile_close": 460.0, "finished": 511.0},
+            "unclear",
+            _ENGINE_DIED_REASON,
+        ),
+    ],
+    ids=["inside_the_window", "before_the_window", "after_the_window"],
+)
+def test_a_server_that_died_with_its_profile_window_open_is_the_profilers_failure(
+    grid, server, tmp_path, marks, failure_class, reason
+):
+    """A tracer that kills a worker kills it in every sandbox of the image; any other death stays with its logs."""
+    workspace = write_run_dir(
+        grid.tmp_path / "ws" / "warmup", failed_step=FailedStep.SERVER_DIED, failure_detail=_ENGINE_DIED.splitlines()[0]
+    )
+    layout = RunLayout(workspace)
+    document = {"phase_marks": [{"phase": phase, "ts": 1.7e9 + at, "mono": at} for phase, at in marks.items()]}
+    layout.phase_marks.write_text(json.dumps(document), encoding="utf-8")
+    layout.server_log.write_text(_ENGINE_DIED, encoding="utf-8")
+    grid.answers["warmup"] = grid.result(
+        "warmup", status="failed", returncode=1, error="server_died", server_log_path=str(workspace / "server.log")
+    )
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert (outcome.failure_class, outcome.failure_reason) == (failure_class, reason)
+
+
 @pytest.mark.parametrize(
     "detail",
     [

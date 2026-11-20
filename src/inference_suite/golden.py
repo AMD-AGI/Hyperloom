@@ -8,8 +8,8 @@ curve by model, method and draft length), so what is drafted and how acceptance 
 belong to the golden layer; how fast the draft runs stays open.
 
 :func:`real_acceptance` is the golden layer with only the simulation taken out (sglang's ``SGLANG_SIMULATE_ACC_*``
-environment, vLLM's synthetic rejection sampling in ``--speculative-config``): the same draft, accepting what the
-target model really accepts, so the server answers with the model's own text.
+environment, vLLM's synthetic rejection sampling in ``--speculative-config``, ATOM's forced acceptance flags): the
+same draft, accepting what the target model really accepts, so the server answers with the model's own text.
 """
 
 from __future__ import annotations
@@ -40,7 +40,9 @@ GOLDEN_OWNED_FLAGS = frozenset(
         "draft-model",
     }
 )
-GOLDEN_OWNED_FLAG_PREFIXES = ("spec-decode-acceptance", "speculative-acceptance")
+#: ATOM's forced acceptance, ``--spec-decode-acceptance-length`` or ``--spec-decode-acceptance-rate``.
+SIMULATED_FLAG_PREFIXES = ("spec-decode-acceptance",)
+GOLDEN_OWNED_FLAG_PREFIXES = (*SIMULATED_FLAG_PREFIXES, "speculative-acceptance")
 # InferenceX does not simulate acceptance once vLLM's adaptive verification is on, so turning it on
 # silently drops the golden acceptance length.
 _REJECTION_SAMPLER = "rejection_sample_method"
@@ -104,6 +106,8 @@ def _groups(args: Sequence[str]) -> list[tuple[str, list[str]]]:
 def _without_simulation(flag: str, values: list[str]) -> list[str] | None:
     """The values of the golden flag group ``flag`` with its simulation taken out; ``None`` drops the whole group."""
     name = canonical_flag_name(flag)
+    if name.startswith(SIMULATED_FLAG_PREFIXES):
+        return None
     if name.startswith(SPECULATIVE_CONFIG_KEY_PREFIX):
         key = name.removeprefix(SPECULATIVE_CONFIG_KEY_PREFIX).replace("-", "_")
         return None if _simulates(key, values[0] if values else "") else values
@@ -114,9 +118,9 @@ def _without_simulation(flag: str, values: list[str]) -> list[str] | None:
 
 def real_acceptance(args: Sequence[str], env: Mapping[str, str]) -> tuple[tuple[str, ...], dict[str, str]]:
     """The golden layer ``args`` and ``env`` less its acceptance simulation, every other key kept: no
-    ``SGLANG_SIMULATE_ACC_*`` variable, and in vLLM's ``--speculative-config`` (the JSON object, or its per-key flags)
-    no synthetic ``rejection_sample_method`` and no ``synthetic_acceptance_length``. The draft, its length and its
-    method stay as the golden layer names them."""
+    ``SGLANG_SIMULATE_ACC_*`` variable, in vLLM's ``--speculative-config`` (the JSON object, or its per-key flags)
+    no synthetic ``rejection_sample_method`` and no ``synthetic_acceptance_length``, and no ATOM
+    ``--spec-decode-acceptance-*`` flag. The draft, its length and its method stay as the golden layer names them."""
     kept: list[str] = []
     for flag, values in _groups(args):
         if not is_flag(flag):

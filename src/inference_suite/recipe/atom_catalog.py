@@ -9,7 +9,8 @@ an arm whose points are its scenarios' concurrencies inside its band. The recipe
 gives no launch, and only through shell blocks whose text alone fixes the launch: a block that expands a variable,
 branches or runs anything besides exports and the server is refused, never executed.
 
-ATOM's agentic catalogs are not read: an AgentX session does not run ATOM. Environment the catalog's harness reads
+ATOM's agentic catalogs are not read: they mix the replay client's settings into the server's environment, so an
+ATOM AgentX launch comes from InferenceX's agentic recipes instead. Environment the catalog's harness reads
 for the GPUs and the load is not the server's, so it is taken out and named in ``stripped``.
 """
 

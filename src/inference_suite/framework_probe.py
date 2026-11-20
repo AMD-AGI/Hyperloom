@@ -31,11 +31,18 @@ try:
     version = importlib.metadata.version(name)
 except importlib.metadata.PackageNotFoundError:
     version = None
+roots = {}
+for package in dict.fromkeys(sys.argv[1:]):
+    found = spec if package == name else importlib.util.find_spec(package)
+    where = [*(found.submodule_search_locations or ()), found.origin] if found is not None else []
+    if where and where[0]:
+        roots[package] = os.path.realpath(where[0])
 print(json.dumps({
     "executable": os.path.realpath(sys.executable),
     "python": ".".join(str(part) for part in sys.version_info[:3]),
     "origin": os.path.realpath(spec.origin) if spec is not None and spec.origin else None,
     "version": version,
+    "import_roots": roots,
 }))
 """
 
@@ -49,12 +56,15 @@ class FrameworkInstall:
     """The framework the serving interpreter imports.
 
     ``version`` is the installed distribution's version, ``None`` when the package carries no distribution metadata.
+    ``import_roots`` maps the framework's package and each requested package the interpreter can import to the
+    directory (a module's file) it imports it from.
     """
 
     executable: str
     python: str
     origin: str
     version: str | None
+    import_roots: Mapping[str, str]
 
 
 def run_probe(
@@ -87,12 +97,15 @@ def run_probe(
     return answer
 
 
-def probe_install(python: str, framework: Framework, env: Mapping[str, str], *, cwd: Path) -> FrameworkInstall:
-    """The install of ``framework`` that ``python`` imports in ``env``, started in ``cwd``."""
+def probe_install(
+    python: str, framework: Framework, env: Mapping[str, str], *, cwd: Path, packages: Sequence[str] = ()
+) -> FrameworkInstall:
+    """The install of ``framework`` that ``python`` imports in ``env``, started in ``cwd``, and where it imports
+    ``framework``'s package and each of ``packages`` from."""
     package = framework_facts(framework).python_package
     if package is None:
         raise FrameworkProbeError(f"{framework.value} ships no package to probe")
-    answer = run_probe(python, _INSTALL_PROGRAM, (package,), env, cwd=cwd)
+    answer = run_probe(python, _INSTALL_PROGRAM, (package, *packages), env, cwd=cwd)
     origin = answer.get("origin")
     if not origin:
         raise FrameworkProbeError(f"{python} cannot import {package}")
@@ -102,6 +115,7 @@ def probe_install(python: str, framework: Framework, env: Mapping[str, str], *, 
         python=str(answer["python"]),
         origin=str(origin),
         version=None if version is None else str(version),
+        import_roots={str(name): str(root) for name, root in dict(answer["import_roots"]).items()},
     )
 
 

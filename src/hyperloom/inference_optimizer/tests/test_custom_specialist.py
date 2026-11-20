@@ -691,6 +691,16 @@ async def test_the_general_bench_leaves_custom_proposals_out():
     assert "operator_priority" not in call["params"]
 
 
+async def test_a_closed_candidate_track_still_benches_what_specialists_proposed():
+    """The track closing ends the source arm's supply; a proposal already returned is still measured."""
+    fp = _framework(rounds=[_bench_round("spec-serving", "serving_specialist", "serving-a")], phase_done=True)
+
+    await fp._maybe_bench_untested_proposals()
+
+    (call,) = fp._coord.tasks.created
+    assert [v["name"] for v in call["params"]["grid"]] == ["serving-a"]
+
+
 @pytest.mark.parametrize(
     ("rounds", "queued", "expected"),
     [

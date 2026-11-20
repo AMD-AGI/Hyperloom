@@ -20,7 +20,9 @@ applies the patch.
 
 :func:`served_source_trees` answers a fourth question: which trees the server
 imports rewritable source from, and where an edit to each lands. A kernel
-rewrite is written against these only.
+rewrite is written against these only. Where the server imports from is the
+serving interpreter's answer, which each round records; :func:`head_import_roots`
+is this process's answer, for a server no round asked.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ import logging
 import os
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,7 +55,9 @@ _DEFAULT_SOURCE_ROOTS: tuple[str, ...] = (
     *(root for name in _reg.names() if (root := _reg.source_root(name))),
 )
 
-_KERNEL_LIBRARY_PACKAGES: tuple[str, ...] = (_KERNEL_LIBRARY, "aiter_meta", "sgl_kernel")
+#: The kernel libraries a server imports beside its framework: every round asks the serving interpreter where it
+#: imports them from, and a kernel rewrite is written against those trees.
+KERNEL_LIBRARY_PACKAGES: tuple[str, ...] = (_KERNEL_LIBRARY, "aiter_meta", "sgl_kernel")
 
 #: Every package whose installed tree counts as framework source: the kernel
 #: libraries, then each registered framework's ``python_package``. The single
@@ -64,7 +68,7 @@ _KERNEL_LIBRARY_PACKAGES: tuple[str, ...] = (_KERNEL_LIBRARY, "aiter_meta", "sgl
 #: greps for kernel source listed it -- and a root that is never searched reads
 #: downstream exactly like a kernel whose source is not on this host.
 FRAMEWORK_SOURCE_PACKAGES: tuple[str, ...] = (
-    *_KERNEL_LIBRARY_PACKAGES,
+    *KERNEL_LIBRARY_PACKAGES,
     *(package for name in _reg.names() if (package := _reg.python_package(name))),
 )
 
@@ -580,19 +584,23 @@ def framework_apply_tree(tree: str) -> FrameworkTree | None:
     return FrameworkTree(tree=path, root=path, checkout=False)
 
 
-def served_source_trees(framework: str) -> tuple[FrameworkTree, ...]:
-    """The trees the server imports rewritable source from: ``framework``'s own and each importable kernel library's.
+def head_import_roots(framework: str) -> tuple[str, ...]:
+    """Where this process would import ``framework``'s tree and each kernel library from."""
+    origins = (_find_spec_origin(package) for package in KERNEL_LIBRARY_PACKAGES)
+    return (resolve_framework_tree(framework), *(str(origin) for origin in origins if origin))
+
+
+def served_source_trees(roots: Iterable[str]) -> tuple[FrameworkTree, ...]:
+    """The trees the server imports rewritable source from, given where it imports each package from.
 
     Args:
-        framework: Registered framework name.
+        roots: The import roots, in no particular order.
 
     Returns:
-        tuple[FrameworkTree, ...]: One entry per distinct root, the framework's first.
+        tuple[FrameworkTree, ...]: One entry per distinct root.
     """
-    trees = [resolve_framework_tree(framework)]
-    trees += [str(origin) for package in _KERNEL_LIBRARY_PACKAGES if (origin := _find_spec_origin(package))]
     by_root: dict[Path, FrameworkTree] = {}
-    for tree in trees:
+    for tree in roots:
         applied = framework_apply_tree(tree)
         if applied is not None:
             by_root.setdefault(applied.root, applied)
@@ -757,9 +765,11 @@ def resolved_within(value: str, root: str) -> bool:
 
 __all__ = [
     "FRAMEWORK_SOURCE_PACKAGES",
+    "KERNEL_LIBRARY_PACKAGES",
     "OPERATOR_SCRIPTS_DIR_ENV",
     "FrameworkTree",
     "framework_apply_tree",
+    "head_import_roots",
     "operator_benchmark_script",
     "point_session_framework_root",
     "probe_framework_source_roots_for_env",

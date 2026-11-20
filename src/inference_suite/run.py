@@ -431,7 +431,7 @@ class _Round:
 
     def _hold_framework(self, launch: Launch, env: Mapping[str, str]) -> Launch | Stop:
         """``launch`` once the serving interpreter's install reaches the recipe's version (D6) and its parser accepts
-        every flag (D7).
+        every flag (D7), recording where that interpreter imports the probed packages from.
 
         An external round holds nothing: it never starts ``launch``, and the server it reaches may run on another host.
         A base whose image settles the check by itself (no recipe version, or an assumed one) keeps that verdict.
@@ -439,15 +439,23 @@ class _Round:
         if self.config.lifecycle.mode is LifecycleMode.EXTERNAL:
             check = framework_version.unheld(launch.base.image) or VersionCheck.NOT_HELD
             return replace(launch, framework=replace(launch.framework, version_check=check))
-        python = self.config.server.framework_python
+        server = self.config.server
+        python = server.framework_python
         try:
-            install = probe_install(python, launch.framework.name, env, cwd=self.layout.framework_cwd)
+            install = probe_install(
+                python, launch.framework.name, env, cwd=self.layout.framework_cwd, packages=server.import_packages
+            )
         except FrameworkProbeError as exc:
             return Stop(FailedStep.FRAMEWORK_VERSION_UNKNOWN, str(exc))
         verdict = framework_version.check(install.version, launch.base.image)
         if isinstance(verdict, VersionRefusal):
             return Stop(verdict.step, verdict.detail)
-        held = replace(launch.framework, installed_version=install.version or UNVERSIONED, version_check=verdict)
+        held = replace(
+            launch.framework,
+            installed_version=install.version or UNVERSIONED,
+            version_check=verdict,
+            import_roots=install.import_roots,
+        )
         launch = replace(launch, framework=held)
         try:
             refusal = parser_check.check(launch, python, env, cwd=self.layout.framework_cwd)

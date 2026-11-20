@@ -20,6 +20,30 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **AgentX runs on ATOM.** `HYPERLOOM_AGENTX=1 hyperloom optimize --framework
+  atom` now starts: the base comes from InferenceX's ATOM agentic entries, with their forced
+  acceptance length (`--spec-decode-acceptance-length`) as the golden layer.
+  Before, every AgentX entry point refused ATOM. Entries that offload KV cache
+  (`extra-kv-connectors`) are still refused as unported. ATOM's own catalog
+  still serves fixed workloads only.
+- **The runner names an ATOM server's model.** An ATOM round now passes
+  `--served-model-name`, as SGLang and vLLM rounds do, so ATOM needs v0.1.6 or
+  later: an older server is refused before launch as `flag_unknown`. A layer or
+  a frozen ATOM base whose own args set `--served-model-name` is refused as
+  setting a runner-owned flag; for a frozen base, start a new session.
+- **An ATOM AgentX baseline with its prefix cache on is kept.** The check that
+  refuses a cacheless AgentX baseline took ATOM's cache as off unless the launch
+  passed `--enable_prefix_caching`; ATOM caches by default. It now refuses only
+  a launch whose argv, as the round's `launch.json` records it, turns the cache
+  off: its last prefix-cache switch is `--no-enable_prefix_caching` (either
+  spelling).
+- **An ATOM profile round** sets `ATOM_PROFILER_TIMEOUT` to the 600 s the round
+  waits on `/stop_profile`, so a long capture is not cut off at ATOM's 300 s
+  default. An annotated ATOM AgentX capture turns on ATOM's own light knobs
+  (`ATOM_ENABLE_DETAILED_ANNOTATION`, `ATOM_PROFILER_RECORD_SHAPES`) instead of
+  SGLang's (v0.1.6 records no tensor shapes). Unless the point sets
+  `capture_timeout_seconds`, it records 30 s rather than 300 s: ATOM's profiler
+  takes no step bound, and a long capture slows the replay it runs inside.
 - **A multi-branch session runs on MI325X.** `hyperloom-multibranch run`
   accepts `--gpu-type mi325x`. Before, it refused MI325X, a limit left from
   Magpie, which had no benchmark script of MI325X's own; InferenceSuite
@@ -319,6 +343,16 @@ it.
   where before it was admitted and then failed as the launch was materialized,
   having already taken a variant slot. The refusal at materialization stays as
   the backstop for launches the filter does not compose.
+
+- **Bump validated vLLM stack to 0.34.0 (ROCm 10 docker and source build).**
+  Switches the recommended vLLM image to `docker.io/vllm/vllm-openai-rocm:v0.34.0-rocm100`
+  (docs, examples, `models.tsv`, installer hint) and bumps the bare-metal defaults
+  (`VLLM_VERSION=0.34.0`, `VLLM_SOURCE_REF` at the `v0.34.0` release commit). vLLM 0.34.0
+  publishes only a ROCm 10 wheel, so the ROCm 7.2.x wheel route now stops before any
+  change when the wheel index has no such release, instead of failing after the venv is
+  created. **Upgrade note:** move from `vllm/vllm-openai-rocm:v0.33.0-rocm100` to
+  `v0.34.0-rocm100`; on a ROCm 7.2.x bare-metal host use Docker, a ROCm 10 host, or
+  `VLLM_VERSION=0.33.0 VLLM_ROCM_VARIANT=rocm72`.
 
 - **Bump validated vLLM stack to 0.33.0 (ROCm 10 docker) and accept the relocated graph-capture marker.**
   Switches the recommended vLLM image to `docker.io/vllm/vllm-openai-rocm:v0.33.0-rocm100`

@@ -40,12 +40,6 @@ async def test_an_agentx_revert_reports_its_measured_p50_change(tmp_path: Path):
         task_id="t-int", specialist_task_id="t-spec", shared_state=state, output_root=tmp_path / "run"
     )
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    lessons = []
-
-    async def _record(lesson, **_kwargs):
-        lessons.append(lesson)
-
-    executor._maybe_write_framework_kb_record = _record
     out = await executor._gate_perf(
         attempt=attempt,
         params={"base_tput": 1000.0, "keep_threshold_pct": 1.0},
@@ -55,9 +49,6 @@ async def test_an_agentx_revert_reports_its_measured_p50_change(tmp_path: Path):
 
     assert out["status"] == "reverted"
     assert out["delta_pct"] == pytest.approx(-3.0)
-    assert [(lesson.outcome, lesson.tps_delta_pct) for lesson in lessons] == [
-        ("reverted_smoke_fail", pytest.approx(-3.0))
-    ]
     assert out["reason"] == "interactivity p50 100.0->97.0 did not clear the interactivity KEEP gate"
 
 
@@ -67,11 +58,6 @@ async def _recorded_gates(tmp_path: Path, state: SharedState, bench_result: dict
         task_id="t-int", specialist_task_id="t-spec", shared_state=state, output_root=tmp_path / "run"
     )
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-
-    async def _no_lesson(*_args, **_kwargs):
-        return None
-
-    executor._maybe_write_framework_kb_record = _no_lesson
     out = await executor._gate_perf(
         attempt=attempt,
         params={"base_tput": 1000.0, "keep_threshold_pct": 1.0},

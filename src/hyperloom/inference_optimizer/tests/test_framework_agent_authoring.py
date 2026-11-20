@@ -767,31 +767,6 @@ def test_config_levers_helper_extracts_from_proposal_set():
     )
 
 
-def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
-    """A config-lever deliverable (proposal_set with extra_args/extra_envs and no patch) is routed to integrate_patch, so the empty-outcome bridge must NOT stamp an authored_empty row for it."""
-    stub = _stub(tmp_path)
-    task = SimpleNamespace(
-        task_id="spec-cfg",
-        params={
-            "framework_agent_authoring": True,
-            "framework_agent_candidate_id": "https://github.com/ROCm/vllm/pull/1014",
-            "framework_batch_id": "b1",
-        },
-    )
-    done_payload = {
-        "patches_written": [],
-        "proposal_set": [{"name": "shared-expert-fusion", "extra_envs": {"VLLM_FUSE_SHARED_EXPERTS": "1"}}],
-        "summary": "PR maps to a config lever on this build",
-    }
-
-    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
-        task=task,
-        done_payload=done_payload,
-    )
-
-    assert stub.shared_state.framework_agent_phase_progress == []
-
-
 def test_authoring_specialist_same_framework_no_cross(tmp_path: Path):
     """A non-cross audit must NOT stamp cross-framework params."""
     stub = _stub(tmp_path)

@@ -72,7 +72,7 @@ def _launch(tmp_path, monkeypatch, *flags):
     return args, session / "benchmark.yaml"
 
 
-@pytest.mark.parametrize("framework", ["sglang", "vllm"])
+@pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
 def test_standard_cli_generates_native_yaml_and_candidate_controls(tmp_path, monkeypatch, framework):
     args, source = _launch(
         tmp_path,
@@ -216,7 +216,6 @@ def test_native_resume_does_not_regenerate_missing_snapshot(tmp_path):
     "flags",
     [
         ["--nodes", "2"],
-        ["--framework", "atom"],
         ["--isl", "1024"],
         ["--osl", "512"],
         ["--enable-conc-sweep"],
@@ -232,9 +231,9 @@ def test_unsupported_native_options_fail_before_session_creation(flags):
         configure_benchmark(args)
 
 
-def test_an_atom_agentx_session_is_refused_naming_the_frameworks_it_runs():
-    args = _build_parser().parse_args(["optimize", "--model", "/model", "--framework", "atom"])
-    with pytest.raises(ValueError, match="AgentX optimization supports SGLang or vLLM, not atom"):
+def test_an_agentx_session_on_a_framework_without_agentx_launches_is_refused_naming_the_ones_it_runs():
+    args = _build_parser().parse_args(["optimize", "--model", "/model", "--framework", "xdit"])
+    with pytest.raises(ValueError, match=r"AgentX optimization supports atom, sglang or vllm, not xdit"):
         configure_benchmark(args)
 
 

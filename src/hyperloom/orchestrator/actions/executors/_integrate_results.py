@@ -35,16 +35,6 @@ _now_iso = functools.partial(now_iso, "auto")
 
 
 @dataclass(frozen=True)
-class _KbLesson:
-    """The outcome and measured deltas one framework KB record stores."""
-
-    outcome: str
-    tps_delta_pct: float
-    accuracy_delta_pct: float | None = None
-    config_fingerprint: str = ""
-
-
-@dataclass(frozen=True)
 class _PatchBench:
     """What every bench leg of one integration shares: its params, workspace, specialist and session bounds."""
 
@@ -89,15 +79,9 @@ class _PatchMeasurement:
     base_tput: float
     keep_threshold_pct: float
     accuracy_pass: bool | None
-    acc_delta_pct: float | None
-    cfg_fingerprint: str
     measured_against: dict[str, Any]
     #: The graded verdict as the gate row an attempt records; empty when the bench produced no measurement.
     gates: tuple[dict[str, Any], ...] = ()
-
-    def lesson(self, outcome: str) -> _KbLesson:
-        """The KB record of this measurement under ``outcome``."""
-        return _KbLesson(outcome, float(self.delta_pct or 0.0), self.acc_delta_pct, self.cfg_fingerprint)
 
     def envelope(self) -> dict[str, Any]:
         """How every perf verdict reports the measurement behind it."""

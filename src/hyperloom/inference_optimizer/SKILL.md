@@ -441,19 +441,26 @@ bench and by which route. The pump takes that batch in the order given; it
 does not re-rank or re-audit. When discovery comes back empty its full retry
 budget, the local-exploration arm authors against profile evidence instead;
 with that off too, the source arm reports itself dry. An authoring round that
-comes back empty, or whose specialist never runs, counts against the source
-arm's no-KEEP streak like a reverted patch; once that streak marks the arm
-dry, the local-exploration arm stops dispatching for the cycle.
+lands no patch — it came back empty, returned only server-arg / env proposals,
+or its specialist never ran — counts against the source arm's no-KEEP streak
+like a reverted patch; once that streak marks the arm dry, the
+local-exploration arm stops dispatching for the cycle.
 
 Every diff lands through `integrate_patch`, with `patch_source` naming where
 it came from. KEEP commits to the live tree so the next candidate stacks on
 top; REVERT does `git reset --hard`. A candidate the tree already holds is not
 benchmarked: when every patch in the set reverse-applies cleanly and the round
 changes nothing else, it ends `already_present`, with that evidence on the
-result and, for a candidate with an upstream PR identity, an `already_present`
-row in the framework KB. Resume skips completed candidates by idempotency key.
+result. Resume skips completed candidates by idempotency key.
 
-The phase exits when both arms are dry or when its budget is spent.
+An authoring round whose deliverable is server-arg / env proposals only lands
+nothing, and its candidate ends `handed_to_explore`: explore benches those
+proposals with every other specialist's, and their verdicts count for the
+configuration arm. The Coordinator benches waiting proposals for as long as
+the phase is open, whether or not the source arm has run out of candidates.
+
+The phase exits when both arms are dry or when its budget is spent; a proposal
+still waiting then is left unbenched.
 
 ### IR-8 — `--framework atom` is single-node only
 
@@ -1022,11 +1029,12 @@ An AgentX baseline whose server ran with the prefix cache off fails with
 `stop_reason='baseline_failed'` on the first occurrence, whichever AgentX client
 replayed it. Each engine is read from its own launch account: SGLang's resolved
 `disable_radix_cache=True`, vLLM's launch record showing
-`enable_prefix_caching=False`, and, because ATOM keeps the cache off by default
-and prints no record, ATOM server args without `--enable_prefix_caching`. A
-launch whose account cannot be read is left alone. Do not propose
-`--disable-radix-cache` or `--no-enable-prefix-caching` for an AgentX baseline;
-on ATOM pass `--server-args "--enable_prefix_caching"`.
+`enable_prefix_caching=False`, and, because ATOM prints no record, the argv the
+round's `launch.json` records: ATOM caches by default, so it is refused only when
+its last prefix-cache switch is `--no-enable_prefix_caching` (either spelling).
+A launch whose account cannot be read is left alone. Do not propose
+`--disable-radix-cache` or `--no-enable-prefix-caching` for an AgentX baseline,
+nor `--no-enable_prefix_caching` on ATOM.
 
 Operator server flags have one supported CLI entry point:
 `optimize --server-args "<framework serve flags>"`. The CLI exports this as
@@ -1037,7 +1045,7 @@ wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is accepted for compatibility; baseline uses the first value.
 Use `--conc-sweep-concs` to override the synthetic ladder SWEEP measures (`256,128,64,32,16,8,4,2`). Native AgentX uses `HYPERLOOM_AGENTX=1` with the ordinary workload flags, or `--benchmark-config` for an AgentX workload YAML. Hyperloom archives the resolved workload as `benchmark.yaml`; CONC is fixed per session, so start a separate session to measure another concurrency.
 
-Native AgentX supports one node and SGLang/vLLM. It rejects `--enable-conc-sweep`,
+Native AgentX supports one node and SGLang, vLLM or ATOM; an ATOM session takes its base from InferenceX's ATOM agentic entries. It rejects `--enable-conc-sweep`,
 `--isl`, `--osl`, `--profile-osl`, `--max-model-len`, `--quantize` and
 `--quantize-scheme`. `--reference-script` is its base launch, ahead of the
 recipes; a session no recipe serves and given no script exits 2. Prepare quantized checkpoints before the run.
