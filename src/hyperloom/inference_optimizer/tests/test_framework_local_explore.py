@@ -268,6 +268,30 @@ def test_pump_falls_back_to_exit_when_arm_disabled(tmp_path: Path):
     assert stub.shared_state.framework_agent_phase_done is True
 
 
+def test_rounds_that_return_only_config_proposals_still_run_the_arm_dry(tmp_path: Path):
+    """A round that lands no patch is charged to the source lever whatever else it returned, so the streak bounds an
+    arm whose specialists keep answering with the same server flag."""
+    from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH
+
+    stub = _stub(tmp_path, local_explore=True)
+    state = stub.shared_state
+    state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
+    done = {"proposal_set": [{"name": "fp8-kv", "extra_args": "--kv-cache-dtype fp8"}]}
+
+    for _ in range(2 * _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK):
+        asyncio.run(stub.phase_framework._pump_framework_agent_phase())
+        if state.framework_agent_phase_done:
+            break
+        task = stub.tasks._queued[-1]
+        stub.tasks.settle_queued()
+        stub.phase_framework._record_framework_agent_authoring_empty_outcome(task=task, done_payload=done)
+
+    assert len(stub.tasks.created) == _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
+    assert state.framework_agent_phase_done is True
+    charged = [row["outcome"] for row in state.attempts if row["lever_kind"] == LEVER_SOURCE_PATCH]
+    assert charged == ["handed_to_explore"] * _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
+
+
 def test_forward_enablement_carriers_eval_origin():
     from hyperloom.orchestrator.phases.framework import _forward_enablement_carriers
 

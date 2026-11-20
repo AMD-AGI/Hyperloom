@@ -75,8 +75,12 @@ def test_a_vllm_suite_round_is_read_as_the_vllm_launch_it_recorded(tmp_path: Pat
 
 @pytest.mark.parametrize(
     ("args", "refused"),
-    [((("--level", "2"),), True), ((("--level", "2"), ("--enable_prefix_caching",)), False)],
-    ids=["cache_off", "cache_on"],
+    [
+        ((("--level", "2"), ("--no-enable_prefix_caching",)), True),
+        ((("--level", "2"),), False),
+        ((("--level", "2"), ("--enable_prefix_caching",)), False),
+    ],
+    ids=["cache_off", "cache_on_by_default", "cache_on"],
 )
 def test_an_atom_suite_round_is_read_from_the_argv_its_launch_recorded(
     tmp_path: Path, args: tuple[tuple[str, ...], ...], refused: bool

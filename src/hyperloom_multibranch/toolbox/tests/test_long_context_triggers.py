@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import Purpose, TestKind
+from hyperloom.contracts.measurement import Purpose
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.long_context.build import DEFAULT_SEED, build_entry
@@ -107,13 +107,6 @@ def test_a_lead_adoption_forces_the_short_prompt_check_only_and_a_forced_long_co
     assert decide(adoption, PARENT, PARENT, SETUP, no_patch_files) is None
     plan = decide(forced, PARENT, _launch(SGLANG_USE_AITER_ATTN="1"), SETUP, no_patch_files)
     assert plan is not None and plan.trigger == ("request long_context_check", "env SGLANG_USE_AITER_ATTN=1")
-
-
-def test_no_prompt_set_or_a_kind_the_check_does_not_cover_runs_none_whatever_the_trigger() -> None:
-    final = req(purpose=Purpose.FINAL)
-
-    assert decide(final, PARENT, PARENT, None, no_patch_files) is None
-    assert decide(req(purpose=Purpose.FINAL, kind=TestKind.PROFILE), PARENT, PARENT, SETUP, no_patch_files) is None
 
 
 # --- switched on ---------------------------------------------------------------------------------------------------

@@ -108,7 +108,9 @@ Requirements:
   ``VLLM_VERSION=0.27.1 VLLM_ROCM_VARIANT=rocm723``) or use Docker mode instead.
 - ROCm runtime and ROCm torch are already installed. ROCm 7.2.x and ROCm 10.0
   are the validated stacks; on ROCm 10.0, bare-metal vLLM is built from source.
-  See {doc}`Compatibility </compatibility>` for the combination the release is
+  vLLM 0.34.0 publishes no ROCm 7.2 wheel, so on ROCm 7.2.x the vLLM install
+  stops before any change: use Docker mode or a ROCm 10.0 host, or install 0.33.0
+  with ``VLLM_VERSION=0.33.0 VLLM_ROCM_VARIANT=rocm72``. See {doc}`Compatibility </compatibility>` for the combination the release is
   tested against. Other ROCm versions are not validated.
 - `git` is available for dependency checkouts.
 - A serving framework is either already installed, or setup might install one.
@@ -468,7 +470,7 @@ It is recommended that you use a ROCm image that already ships the serving
 framework, so nothing needs to be installed inside the container beyond
 Hyperloom's runtime deps. The following images are recommended:
 
-- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.33.0-rocm100`
+- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.34.0-rocm100`
 - `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.23-rocm10-mi30x-20261118`
 - `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.23-rocm10-mi35x-20261118`
 
@@ -476,7 +478,7 @@ Start a long-running container from the repo root, mounting it at the same path
 so `.env`, logs, and session artifacts stay valid:
 
 ```bash
-export HYPERLOOM_IMAGE=docker.io/vllm/vllm-openai-rocm:v0.33.0-rocm100
+export HYPERLOOM_IMAGE=docker.io/vllm/vllm-openai-rocm:v0.34.0-rocm100
 export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \

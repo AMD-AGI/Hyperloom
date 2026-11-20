@@ -125,12 +125,7 @@ def runner_owned(base: BaseLaunch) -> RunnerOwned:
     """What no user or candidate layer on ``base`` may set: the base's runner-owned keys, the guard's and the metrics
     flag. A launch a round composed spells them, so a layer replayed from it leaves them out."""
     spec = framework_facts(Framework(base.framework))
-    server_flags = spec.server_flags
-    guard = (
-        (server_flags.model, server_flags.host, server_flags.port, server_flags.served_model_name)
-        if server_flags is not None
-        else ()
-    )
+    guard = spec.server_flags.guarded() if spec.server_flags is not None else ()
     flags = {*base.runner_owned.args, *(flag for flag in (*guard, spec.metrics_flag) if flag)}
     return RunnerOwned(args=tuple(sorted(flags)), env=tuple(sorted({*base.runner_owned.env, *_DEVICE_MASK_ENVS})))
 

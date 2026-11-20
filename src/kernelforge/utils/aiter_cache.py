@@ -464,11 +464,7 @@ def cleanup_owned_aiter_locks(isolation: AiterCacheIsolation) -> dict[str, Any]:
         "skipped_live_pids": [],
         "owner_verified": False,
     }
-    try:
-        owner = json.loads(isolation.owner_file.read_text(encoding="utf-8"))
-        stats["owner_verified"] = int(owner.get("owner_pid", -1)) == isolation.owner_pid
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return stats
+    stats["owner_verified"] = _read_owner(isolation.owner_file).get("owner_pid") == isolation.owner_pid
     if not stats["owner_verified"]:
         return stats
 
@@ -509,11 +505,7 @@ def cleanup_owned_aiter_cache(isolation: AiterCacheIsolation) -> dict[str, Any]:
         "skipped_live_pids": [],
         "owner_verified": False,
     }
-    try:
-        owner = json.loads(isolation.owner_file.read_text(encoding="utf-8"))
-        stats["owner_verified"] = int(owner.get("owner_pid", -1)) == isolation.owner_pid
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return stats
+    stats["owner_verified"] = _read_owner(isolation.owner_file).get("owner_pid") == isolation.owner_pid
     if not stats["owner_verified"]:
         return stats
 

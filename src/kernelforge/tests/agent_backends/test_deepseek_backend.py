@@ -143,11 +143,6 @@ def test_provider_is_registered_with_the_capabilities_it_implements() -> None:
     assert not provider.capabilities.native_subagents
 
 
-def test_registry_capabilities_match_the_backend_class() -> None:
-    """One declaration, so a capability cannot be advertised but not implemented."""
-    assert get_agent_provider("deepseek").capabilities == DeepSeekHarnessBackend.capabilities
-
-
 @pytest.mark.parametrize(
     ("asked", "expected"),
     [

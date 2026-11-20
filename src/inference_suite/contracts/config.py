@@ -227,6 +227,7 @@ _SERVER_KEYS = (
     "framework_python",
     "source_files",
     "absent_source_files",
+    "import_packages",
     "env",
 )
 
@@ -238,7 +239,8 @@ class ServerConfig:
     ``user`` and ``candidate`` stay separate layers so a refused flag can be told apart: a candidate's is the
     candidate's failure, a user's or base's stops the line. ``source_files`` are re-hashed before launch;
     ``env_inherit`` names the host environment the server may see. ``framework_python`` is the one interpreter the
-    server runs in and the version probe and parser check read.
+    server runs in and the version probe and parser check read. ``import_packages`` are packages beside the
+    framework's own whose import roots the probe records.
     """
 
     base: BaseRef
@@ -254,6 +256,7 @@ class ServerConfig:
     runner: RunnerLayer = field(default_factory=RunnerLayer)
     source_files: Mapping[str, str] = field(default_factory=dict)
     absent_source_files: tuple[str, ...] = ()
+    import_packages: tuple[str, ...] = ()
     env_inherit: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -274,6 +277,7 @@ class ServerConfig:
         both = sorted(set(absent) & set(self.source_files))
         if both:
             raise ConfigError(f"source files both present and absent: {', '.join(both)}")
+        _FIELDS.string_tuple(self.import_packages, "the import packages")
         _env_names(self.env_inherit, "the inherited env")
 
     def to_document(self) -> dict[str, object]:
@@ -291,6 +295,7 @@ class ServerConfig:
             "framework_python": self.framework_python,
             "source_files": _sorted(self.source_files),
             "absent_source_files": list(self.absent_source_files),
+            "import_packages": list(self.import_packages),
             "env": {"inherit": list(self.env_inherit)},
         }
 
@@ -312,6 +317,7 @@ class ServerConfig:
             framework_python=fields.get("framework_python"),
             source_files=fields.get("source_files", {}),
             absent_source_files=_FIELDS.strings(fields.get("absent_source_files", ()), "the absent source files"),
+            import_packages=_FIELDS.strings(fields.get("import_packages", ()), "the import packages"),
             env_inherit=_FIELDS.strings(env.get("inherit", ()), "the inherited env"),
         )
 

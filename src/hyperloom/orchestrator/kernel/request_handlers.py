@@ -48,9 +48,9 @@ from ._integrate_rebaseline import (
     _multi_node_restart_failure,
     _run_integrate_rebaseline_with_lock_retry,
 )
-from ._source_import import _confirm_source_import
 from ._tuning_audit_trace import _trace_gemm_tuning_run
 from .keep_thresholds import STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
+from .served_imports import PATCH_OUTSIDE_SERVED_ROOTS, round_import_roots, unserved_writes
 
 HandlerFn = Callable[..., Awaitable[HandlerResult]]
 
@@ -270,6 +270,11 @@ async def _graded_integration(
     apply_result = measured.apply_result
     rebaseline = measured.rebaseline
     bench_result = measured.bench_result
+    written = apply_result.get("touched") or [str(apply_result.get("target_file") or "")]
+    unserved = unserved_writes(written, round_import_roots(bench_result.get("workspace")))
+    if unserved:
+        error = f"the measured server imports another copy of what the patch wrote: {', '.join(unserved)}"
+        return _integrate_failure(payload, apply_result, _FailureVerdict(PATCH_OUTSIDE_SERVED_ROOTS, error, "REVERT"))
     performance = assess_integrate_performance(state, bench_result, **performance_policy)
     if performance.graded.degrade_reason:
         log.info("integrate_handler: grading unavailable (%s)", performance.graded.degrade_reason)
@@ -288,20 +293,13 @@ async def _graded_integration(
             accuracy_gate=accuracy_gate,
         )
 
-    # Only the strict sub-flag enforces the confirmation; an unknown never penalizes.
-    confirmation = _confirm_source_import(
-        payload,
-        workspace=bench_result.get("workspace"),
-        decision=accuracy_decision,
-    )
     return _integrate_result(
         _IntegrateVerdict(
             payload=payload,
             bench_result=bench_result,
             performance=performance,
-            cleanup=_settled_patch(confirmation.decision, apply_result, caller_owns_durability=preapplied_git_patch),
+            cleanup=_settled_patch(accuracy_decision, apply_result, caller_owns_durability=preapplied_git_patch),
             accuracy_gate=accuracy_gate,
-            source_import=confirmation,
             rebuild_check=measured.rebuild_check,
             server_args=rebaseline.server_args,
         )

@@ -419,7 +419,7 @@ def aggregate_series(grouped: dict[str, dict[str, float]]) -> float | None:
 
 
 #: Each engine's gauge of the requests in its running batch.
-RUNNING_REQUEST_GAUGES = ("sglang:num_running_reqs", "vllm:num_requests_running")
+RUNNING_REQUEST_GAUGES = ("sglang:num_running_reqs", "vllm:num_requests_running", "atom:requests_running")
 
 
 def running_requests(families: ParsedFamilies) -> float | None:
@@ -470,7 +470,7 @@ class KvSample:
 
     ts: float  # wall clock, for lining up with externally collected data
     mono: float  # monotonic clock, for intervals within the run
-    engine: str = ""  # "sglang", "vllm", or "" when unrecognised
+    engine: str = ""  # "sglang", "vllm", "atom", or "" when unrecognised
     active_pool_usage: float | None = None
     physical_pool_usage: float | None = None  # SGLang only; vLLM cannot express it
     used_tokens: float | None = None
@@ -540,6 +540,8 @@ def _detect_engine(families: ParsedFamilies) -> str:
             return "sglang"
         if name.startswith("vllm:"):
             return "vllm"
+        if name.startswith("atom:"):
+            return "atom"
     return ""
 
 

@@ -64,7 +64,7 @@ def _installed(tmp_path: Path) -> Path:
 
 
 def _serve(monkeypatch: pytest.MonkeyPatch, *trees: FrameworkTree) -> None:
-    monkeypatch.setattr(campaign_baseline, "served_source_trees", lambda _framework: trees)
+    monkeypatch.setattr(campaign_baseline, "served_source_trees", lambda _roots: trees)
 
 
 def _checkout(repo: Path) -> FrameworkTree:
@@ -76,7 +76,7 @@ def _wheel(package: Path) -> FrameworkTree:
 
 
 def _seal(tmp_path: Path, *, session_id: str = "s1") -> dict[str, RepoBaseline]:
-    return seal_campaign_baseline("vllm", session_dir=tmp_path / "session", session_id=session_id, macro_cycle=0)
+    return seal_campaign_baseline((), session_dir=tmp_path / "session", session_id=session_id, macro_cycle=0)
 
 
 def test_a_clean_repository_is_pinned_without_a_new_commit(tmp_path: Path, monkeypatch) -> None:
@@ -186,7 +186,7 @@ def test_a_second_entry_snapshots_what_the_installed_package_serves_now(tmp_path
     (package / "ops" / "kernel.py").write_text("VALUE = 2\n", encoding="utf-8")
 
     ((again, _second),) = seal_campaign_baseline(
-        "vllm", session_dir=tmp_path / "session", session_id="s1", macro_cycle=1
+        (), session_dir=tmp_path / "session", session_id="s1", macro_cycle=1
     ).items()
 
     assert again == repository

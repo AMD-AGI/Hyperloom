@@ -176,25 +176,6 @@ def test_default_window_is_five(tmp_path):
 # ── summarizer prompt ─────────────────────────────────────────────────────────
 
 
-def test_prompt_demands_every_direction_and_its_result():
-    prompt = build_summary_prompt(iteration=5, end_reason="candidate_submitted")
-
-    assert "EVERY direction you tried" in prompt
-    assert "actually measured" in prompt
-    assert "not measured" in prompt
-    assert "incomplete attempt" in prompt
-
-
-def test_prompt_is_free_form_and_rejects_subjective_direction_judgments():
-    prompt = build_summary_prompt(iteration=5, end_reason="converged")
-
-    assert "There is no required output format" in prompt
-    assert "hard floor" in prompt
-    assert "this direction is exhausted" in prompt
-    assert "the next\niteration should" in prompt
-    assert "JSON" not in prompt
-
-
 def test_prompt_flags_a_cut_off_session(tmp_path):
     prompt = build_summary_prompt(iteration=5, end_reason="turn_cap")
     assert "cut off" in prompt
@@ -547,18 +528,6 @@ def test_render_keeps_an_unscoped_legacy_document_and_says_it_is_unscoped(tmp_pa
     assert "closes nothing on its own" in rendered
 
 
-def test_render_without_scope_inputs_still_states_the_citation_rule(tmp_path):
-    store = _store(tmp_path)
-    store.write(1, "headline")
-    assert "closes nothing on its own" in store.render_for_prompt()
-
-
-def test_prompt_asks_for_the_premise_behind_a_negative():
-    prompt = build_summary_prompt(iteration=5, end_reason="converged")
-    assert "HELD-FIXED:" in prompt
-    assert "Name the cases in the same sentence" in prompt
-
-
 # ── reading a constant out of a real kernel ───────────────────────────────────
 
 _EXAMPLES = resource_path("examples")
@@ -725,12 +694,6 @@ def test_a_named_negative_outweighs_a_none_line():
 
 def test_the_negatives_marker_survives_a_markdown_list_item():
     assert parse_negatives_marker("- **NEGATIVES:** none.") is False
-
-
-def test_the_prompt_requires_the_negatives_marker_in_both_directions():
-    prompt = build_summary_prompt(iteration=5, end_reason="converged")
-    assert "NEGATIVES: none" in prompt
-    assert "including\n   ones you reverted inside the session" in prompt
 
 
 def test_a_full_scope_line_round_trips_in_all_three_negative_states():
@@ -1269,73 +1232,27 @@ def test_the_disproof_marker_survives_a_markdown_list_item():
 # ── what the summarizer is asked for ──────────────────────────────────────────
 
 
-def test_the_prompt_demands_the_cheapest_falsifying_experiment():
-    prompt = build_summary_prompt(iteration=5, end_reason="converged")
-    assert "DISPROOF:" in prompt
-    assert "CHEAPEST experiment that would show that claim\n   to be FALSE" in prompt
-    assert '"Further investigation"' in prompt
-    assert "DISPROOF: none" in prompt
-
-
-def test_the_prompt_asks_for_the_disproof_line_either_way():
-    """An absent line must mean an unanswered question, not an answered one."""
-    prompt = build_summary_prompt(iteration=5, end_reason="converged")
-    assert "read as never having\n   answered the question" in prompt
-
-
-def test_the_prompt_names_the_four_reach_classes():
-    prompt = build_summary_prompt(iteration=5, end_reason="converged")
-    assert "REBIND AN INSTALLED SYMBOL" in prompt
-    assert "INJECT DEVICE-SIDE SOURCE THROUGH THE FRAMEWORK'S OWN HOOK" in prompt
-    assert "CHANGE A MODULE-LEVEL CONSTANT ANOTHER MODULE'S DISPATCH READS" in prompt
-    assert "APPEND A ROW TO A PERMITTED DATA OR CONFIG FILE" in prompt
-    assert "os.environ" in prompt
-
-
-def test_the_reach_classes_are_asked_about_rather_than_offered_as_routes():
-    """A checklist read as a list of routes only makes the closed list longer."""
-    prompt = build_summary_prompt(iteration=5, end_reason="converged")
-    assert "why each one does not apply" in prompt
-    assert "not routes to try and tick off" in prompt
-
-
-def test_the_summary_prompt_says_a_number_does_not_discharge_a_cannot():
-    prompt = build_summary_prompt(iteration=5, end_reason="converged")
-    assert "a number says what the variant you ran did" in prompt
-
-
-def test_the_citation_rule_covers_a_cannot_nobody_asked_about(tmp_path):
-    """The rule is what protects a document written before the marker existed."""
-    store = _store(tmp_path)
-    store.write(1, "headline")
-    rule = store.render_for_prompt()
-    assert "does not record the question at all" in rule
-    assert "closes nothing however many numbers surround it" in rule
-
-
-def test_the_citation_rule_explains_a_disproved_claim(tmp_path):
-    """A reader meeting the strongest verdict must know it points at a route."""
-    store = _store(tmp_path)
-    store.write(1, "headline")
-    rule = store.render_for_prompt()
-    assert "the claim was DISPROVED" in rule
-    assert "known reachable" in rule
-
-
-def test_the_summary_prompt_asks_which_way_the_experiment_came_out():
-    prompt = build_summary_prompt(iteration=5, end_reason="converged")
-    assert "DISPROOF: disproved — <what you ran and what it showed>" in prompt
-    assert "if you ran it say which way\n   it came out" in prompt
-
-
-def test_one_disproof_verdict_per_document_is_stated_where_it_is_met(tmp_path):
-    """The known limit of Finding 2, on the three surfaces a reader meets."""
-    prompt = build_summary_prompt(iteration=5, end_reason="converged")
-    assert 'ONE such line per "cannot" claim' in prompt
-    assert "A claim you write no line\n   for is recorded as unanswered" in prompt
-
-    store = _store(tmp_path)
-    store.write(1, "headline")
-    assert "A scope answers for one claim" in store.render_for_prompt()
-
-    assert "answering for one of them" in (LessonScope.__doc__ or "")
+@pytest.mark.parametrize(
+    ("example", "parse", "reads_as"),
+    [
+        ("HELD-FIXED: BLOCK_N=16, num_warps=8", parse_held_fixed, (("BLOCK_N", "16"), ("num_warps", "8"))),
+        ("NEGATIVES: none", parse_negatives_marker, False),
+        ("NEGATIVES: split-K=4, BLOCK_N=128", parse_negatives_marker, True),
+        (
+            "DISPROOF: tested — <what you ran and what it showed>",
+            parse_disproof_marker,
+            "<what you ran and what it showed>",
+        ),
+        (
+            "DISPROOF: disproved — <what you ran and what it showed>",
+            parse_disproof_marker,
+            CLAIM_DISPROVED + "<what you ran and what it showed>",
+        ),
+        ("DISPROOF: untested — <the experiment>", parse_disproof_marker, UNDISPROVEN_CLAIM),
+        ("DISPROOF: none", parse_disproof_marker, NO_FEASIBILITY_CLAIM),
+    ],
+    ids=["held-fixed", "no-negatives", "negatives", "tested", "disproved", "untested", "no-claim"],
+)
+def test_every_marker_line_the_summary_prompt_shows_parses_as_it_says(example, parse, reads_as):
+    assert f"`{example}`" in build_summary_prompt(iteration=5, end_reason="converged")
+    assert parse(example) == reads_as

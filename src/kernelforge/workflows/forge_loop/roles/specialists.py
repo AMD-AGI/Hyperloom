@@ -42,7 +42,6 @@ from kernelforge.workflows.forge_loop.roles.specialist_probe import (
     WORKSPACE_ENV,
     ProbeSandboxError,
     load_sandbox,
-    probe_primitive_status,
     probe_timeout_sec,
 )
 from kernelforge.workflows.forge_loop.roles.contracts import (
@@ -597,9 +596,6 @@ class SpecialistAgent:
         """Create this assignment's scratch root, or say why it has none."""
         if self.probe is None:
             return _ProbeSetup()
-        _, unusable = probe_primitive_status()
-        if unusable:
-            return self._no_probe(assignment, unusable)
         capabilities = getattr(self.backend, "capabilities", None)
         if not getattr(capabilities, "mcp", False):
             return self._no_probe(

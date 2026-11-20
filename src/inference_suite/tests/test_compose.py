@@ -303,6 +303,18 @@ def test_round_trip_through_json_keeps_the_launch_and_its_digest():
     assert document["tools"]["staging_manifest_sha256"] == _SHA
 
 
+def test_import_roots_round_trip_outside_the_digest_and_a_launch_recorded_before_them_reads_with_none():
+    launch = _launch()
+    roots = {"sglang": "/site/sglang", "aiter": "/site/aiter"}
+    probed = replace(launch, framework=replace(launch.framework, import_roots=roots))
+    document = json.loads(json.dumps(probed.to_document()))
+
+    assert Launch.from_document(document) == probed
+    assert probed.digest() == launch.digest()
+    del document["framework"]["import_roots"]
+    assert Launch.from_document(document).framework.import_roots == {}
+
+
 @pytest.mark.parametrize(
     "key, value",
     [("argv", ["python3"]), ("forced_acceptance", False), ("env", {}), ("digest", "sha256:" + "0" * 64)],

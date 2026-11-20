@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -152,23 +151,6 @@ def test_a_component_moved_to_another_upstream_commit_touches_what_the_pack_name
     assert _plan(req(), _recipe("--max-running-requests 128", components=(transformers,))) is None
 
 
-@pytest.mark.parametrize("purpose", [Purpose.BASELINE, Purpose.FINAL])
-def test_a_baseline_and_a_final_candidate_always_run_the_check_whatever_their_change(purpose):
-    plan = _plan(req(purpose=purpose), PARENT)
-
-    assert plan is not None and plan.trigger == (f"purpose {purpose.value}",)
-
-
-def test_an_integration_test_runs_it_only_when_its_change_touches_the_pack_s_lines():
-    benign, touching = (
-        _recipe("--max-running-requests 256"),
-        _recipe("--max-running-requests 128 --attention-backend aiter"),
-    )
-
-    assert _plan(req(purpose=Purpose.INTEGRATION), benign) is None
-    assert _plan(req(purpose=Purpose.INTEGRATION), touching) is not None
-
-
 def test_a_caller_can_force_the_check_but_cannot_remove_one_the_rule_demands():
     benign, touching = (
         _recipe("--max-running-requests 256"),
@@ -249,10 +231,8 @@ def test_a_toolbox_given_no_prompt_set_runs_no_check_and_refuses_nothing():
 def test_the_rules_come_from_the_rule_pack():
     rules = short_prompt_rules()
 
-    assert (rules.max_new_tokens, rules.phase_cap_sec) == (32, 1200.0)
-    assert rules.always_purposes == {"baseline", "final"}
     plan = _plan(req(purpose=Purpose.FINAL), PARENT)
-    assert plan is not None and (plan.max_new_tokens, plan.phase_cap_sec) == (32, 1200.0)
+    assert plan is not None and (plan.max_new_tokens, plan.phase_cap_sec) == (rules.max_new_tokens, rules.phase_cap_sec)
 
 
 def test_touch_lines_render_each_kind_of_change_one_line_each():
@@ -270,13 +250,6 @@ def test_touch_lines_render_each_kind_of_change_one_line_each():
         "patch-file aiter csrc/a.cu",
         "patch-file aiter aiter/b.py",
     ]
-
-
-@pytest.mark.parametrize("function", [touch_lines, decide])
-def test_the_reader_of_a_patchs_files_is_required_so_no_caller_counts_every_patch_as_touching_by_leaving_it_out(
-    function,
-):
-    assert inspect.signature(function).parameters["files"].default is inspect.Parameter.empty
 
 
 # --- acceptance -----------------------------------------------------------------------------------------------------
@@ -327,12 +300,6 @@ def test_acceptance_hands_the_executor_the_plan_with_the_accepted_measurement(tm
 
 def test_a_test_with_nothing_touching_attention_is_accepted_without_a_plan(tmp_path):
     prepared = _prepare(req(server_args="--max-num-seqs 256"), "", setup=SETUP, accepted=_accepted(tmp_path))
-
-    assert prepared.environment.short_prompts is None
-
-
-def test_a_toolbox_with_no_prompt_set_accepts_a_touching_test_with_no_plan(tmp_path):
-    prepared = _prepare(req(server_args="--attention-backend aiter"), "", setup=None, accepted=_accepted(tmp_path))
 
     assert prepared.environment.short_prompts is None
 

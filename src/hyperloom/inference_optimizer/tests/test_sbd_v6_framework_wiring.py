@@ -309,6 +309,48 @@ def test_terminal_row_settles_the_proposal(session_dir: Path):
     assert terminal["reason"] == "apply_failed"
 
 
+def test_a_config_only_authoring_round_is_handed_to_explore_and_charged_to_its_lever(session_dir: Path):
+    """Explore benches the round's proposals under their own rows; the candidate itself reached no measurement."""
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
+
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.phase_framework._open_framework_timeline()
+
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
+        task=SimpleNamespace(
+            task_id="spec-cfg",
+            params={
+                "framework_agent_authoring": True,
+                "framework_agent_candidate_id": "https://github.com/ROCm/vllm/pull/1014",
+                "framework_batch_id": "b1",
+            },
+        ),
+        done_payload={
+            "patches_written": [],
+            "proposal_set": [
+                {"name": "shared-expert-fusion", "extra_envs": {"VLLM_FUSE_SHARED_EXPERTS": "1"}},
+                {"name": "research-notes"},
+            ],
+        },
+    )
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
+
+    (row,) = coord.shared_state.framework_agent_phase_progress
+    assert row["status"] == "handed_to_explore"
+    assert row["rationale"] == "config proposals left to explore: shared-expert-fusion"
+    terminal = _events(session_dir)[0]["ext"]["proposals"][0]["terminal"]
+    assert (terminal["disposition"], terminal["reason"]) == ("dropped", "handed_to_explore")
+    (attempt,) = coord.shared_state.attempts
+    assert (attempt["lever_kind"], attempt["outcome"], attempt["adopted"]) == (
+        LEVER_UPSTREAM_PR,
+        "handed_to_explore",
+        False,
+    )
+
+
 def test_critic_denial_records_the_review_and_the_drop(session_dir: Path):
     import asyncio
     from types import SimpleNamespace

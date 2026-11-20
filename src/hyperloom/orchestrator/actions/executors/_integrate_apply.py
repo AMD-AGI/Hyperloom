@@ -22,7 +22,6 @@ from ._integrate_attempt import IntegrateAttempt
 from ._integrate_refusals import _preflight_missing_targets
 from ._integrate_results import (
     _Deliverable,
-    _KbLesson,
     _apply_failed,
     _no_patches_result,
     _pending_sentinel,
@@ -192,9 +191,8 @@ class ApplyStageMixin:
         deliverable = _Deliverable.resolve(attempt, params)
         attempt.switch_manifest = deliverable.switch_manifest
         if deliverable.artifact_runtime_errors:
-            return await self._refuse_apply(
+            return _apply_failed(
                 attempt,
-                params,
                 "artifact_not_runtime_ready",
                 deliverable.artifact_runtime_errors,
                 artifacts_applied=[],
@@ -267,9 +265,8 @@ class ApplyStageMixin:
                 backup_root=recovery_root / "artifact_backups",
             )
             if backup_errors:
-                return await self._refuse_apply(
+                return _apply_failed(
                     attempt,
-                    params,
                     "artifact_backup_failed",
                     deliverable.artifact_resolve_errors + backup_errors,
                     artifacts_applied=[],
@@ -285,7 +282,7 @@ class ApplyStageMixin:
             git_head=recovery["git_head"],
             backup_root=recovery_root / "patch_backups",
         )
-        ended = await self._end_patch_series(attempt, params, deliverable, series)
+        ended = self._end_patch_series(attempt, params, deliverable, series)
         if ended is not None:
             return ended
 
@@ -296,9 +293,8 @@ class ApplyStageMixin:
             )
             attempt.applied_artifacts = applied_artifacts
             if artifact_apply_errors:
-                return await self._refuse_apply(
+                return _apply_failed(
                     attempt,
-                    params,
                     "artifact_install_failed",
                     deliverable.artifact_resolve_errors + artifact_apply_errors,
                     artifacts_applied=[],
@@ -345,9 +341,8 @@ class ApplyStageMixin:
         if patch_paths:
             missing_records = _preflight_missing_targets(framework_root, patch_paths)
             if missing_records:
-                return framework_root, await self._refuse_apply(
+                return framework_root, _apply_failed(
                     attempt,
-                    params,
                     "patch_target_missing",
                     missing_records,
                     **_reauthor_fields(
@@ -426,7 +421,7 @@ class ApplyStageMixin:
             recovery["stash_oid"] = cp.stdout.strip()
         return None
 
-    async def _end_patch_series(
+    def _end_patch_series(
         self,
         attempt: IntegrateAttempt,
         params: dict[str, Any],
@@ -435,19 +430,18 @@ class ApplyStageMixin:
     ) -> dict[str, Any] | None:
         """End the round at its patch series when a patch did not land, or when it holds nothing left to measure."""
         if series.errors:
-            return await self._refuse_apply(
+            return _apply_failed(
                 attempt,
-                params,
                 "git_apply_failed",
                 series.errors,
                 workspace=str(attempt.output_root),
                 **_reauthor_fields(params, series.patches, feedback=series.feedback),
             )
         if series.changed_nothing and not _changes_beyond_patches(attempt, deliverable):
-            return await self._end_already_present(attempt, params, series.already_present)
+            return self._end_already_present(attempt, params, series.already_present)
         return None
 
-    async def _end_already_present(
+    def _end_already_present(
         self,
         attempt: IntegrateAttempt,
         params: dict[str, Any],
@@ -458,13 +452,8 @@ class ApplyStageMixin:
         The attempt's ``applied`` list is emptied, because :meth:`_finish_attempt` reports
         that list as reverted, and nothing was applied.
         """
-        from ...knowledge import kb_writeback as _kb
-
         log.info("integrate_patch: the framework tree already holds this candidate; not benchmarking: %s", evidence)
         attempt.applied.clear()
-        await self._maybe_write_framework_kb_record(
-            _KbLesson(_kb.OUTCOME_ALREADY_PRESENT, 0.0), attempt=attempt, params=params
-        )
         result: dict[str, Any] = {
             "status": "already_present",
             "specialist_task_id": attempt.specialist_task_id,
@@ -475,17 +464,3 @@ class ApplyStageMixin:
         if params.get("enablement"):
             result["enablement"] = True
         return result
-
-    async def _refuse_apply(
-        self,
-        attempt: IntegrateAttempt,
-        params: dict[str, Any],
-        error_class: str,
-        error: Any,
-        **fields: Any,
-    ) -> dict[str, Any]:
-        """Refuse the round at the apply stage, filing the lesson against the patch's PR identity."""
-        await self._maybe_write_framework_kb_record(
-            _KbLesson("rejected_apply_fail", 0.0), attempt=attempt, params=params
-        )
-        return _apply_failed(attempt, error_class, error, **fields)

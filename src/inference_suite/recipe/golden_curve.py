@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 
@@ -29,6 +30,7 @@ from inference_suite.argv import (
     without_speculative_config,
 )
 from inference_suite.contracts.base_launch import DEFAULT_THINKING_MODE, GoldenCurve, LaunchQuery
+from inference_suite.golden import SIMULATED_FLAG_PREFIXES
 from inference_suite.recipe.inferencex import GOLDEN_DIR, model_prefixes
 from inference_suite.recipe.model import (
     RecipeSourceError,
@@ -47,6 +49,8 @@ _SGLANG_SIMULATION = ("SGLANG_SIMULATE_ACC_LEN", "SGLANG_SIMULATE_ACC_METHOD", "
 _SIMULATION_METHOD = "match-expected"
 _SIMULATION_TOKEN_MODE = "real-draft-token"
 _SYNTHETIC = "synthetic"
+#: Hyperloom's own name for what ATOM streams under forced acceptance; ATOM has no token-mode setting to read.
+_ATOM_SIMULATION_TOKEN_MODE = "synthetic-text"
 
 
 @dataclass(frozen=True)
@@ -146,11 +150,22 @@ def _count(value: str | None) -> int | str | None:
     return int(value) if value is not None and value.isdigit() else value
 
 
-def _sglang_draft(occurrences: list[tuple[str, str]]) -> tuple[dict[str, Any], str]:
+@dataclass(frozen=True)
+class LaunchDraft:
+    """A launch's draft as InferenceX keys a curve by it (``spec``, ``verify``), and the acceptance simulation the
+    launch runs (``simulation``, ``token_mode``; ``None`` while it forces none)."""
+
+    spec: Mapping[str, Any]
+    verify: str | None
+    simulation: str | None = None
+    token_mode: str | None = None
+
+
+def _sglang_draft(occurrences: list[tuple[str, str]], env: Mapping[str, str]) -> LaunchDraft:
     values = dict(occurrences)
     algorithm = (last_alias_value(occurrences, _SGLANG_ALGORITHM) or "").lower()
     if not algorithm:
-        return {}, ""
+        return LaunchDraft({}, "")
     model = values.get("speculative-draft-model-path", "")
     if algorithm == "dflash":
         width = _count(values.get("speculative-num-draft-tokens"))
@@ -159,35 +174,95 @@ def _sglang_draft(occurrences: list[tuple[str, str]]) -> tuple[dict[str, Any], s
         steps = "speculative-dspark-block-size" if algorithm == "dspark" else "speculative-num-steps"
         tokens = _count(values.get(steps))
     verify = "block" if "speculative-use-block-verification" in values else "standard"
-    return {"method": algorithm, "num_speculative_tokens": tokens, "model": model}, verify
+    spec = {"method": algorithm, "num_speculative_tokens": tokens, "model": model}
+    return LaunchDraft(spec, verify, env.get(_SGLANG_SIMULATION[1]), env.get(_SGLANG_SIMULATION[2]))
 
 
-def _vllm_draft(occurrences: list[tuple[str, str]]) -> tuple[dict[str, Any], str]:
+def _vllm_draft(occurrences: list[tuple[str, str]], env: Mapping[str, str]) -> LaunchDraft:
     spec = speculative_config(occurrences)
     method = spec.get("rejection_sample_method")
-    return spec, "block" if method == _SYNTHETIC else str(method or "standard")
+    verify = "block" if method == _SYNTHETIC else str(method or "standard")
+    # vLLM's synthetic sampler streams the drafted tokens it accepts, as sglang's real-draft-token mode does.
+    return LaunchDraft(spec, verify, method, _SIMULATION_TOKEN_MODE)
+
+
+def _atom_draft(occurrences: list[tuple[str, str]], env: Mapping[str, str]) -> LaunchDraft:
+    values = dict(occurrences)
+    method = values.get("method", "")
+    if not method:
+        return LaunchDraft({}, None)
+    # ATOM drafts one token when the launch names no count. InferenceX keys no ATOM curve by its verifier.
+    tokens = _count(values.get("num-speculative-tokens")) or 1
+    spec = {"method": method, "num_speculative_tokens": tokens, "model": values.get("draft-model", "")}
+    # ATOM forces acceptance with one flag, by length or by rate, and the flag that does is the simulation. While it
+    # does, the server streams every output token's text as "synthetic ": counts and timing hold, the text does not.
+    forced = next((name for name, _ in reversed(occurrences) if name.startswith(SIMULATED_FLAG_PREFIXES)), None)
+    return LaunchDraft(spec, None, forced, _ATOM_SIMULATION_TOKEN_MODE)
+
+
+def _force_sglang(launch: SourceLaunch, request: GoldenRequest, value: float) -> SourceLaunch:
+    settings = (f"{value:g}", _SIMULATION_METHOD, _SIMULATION_TOKEN_MODE)
+    return dataclasses.replace(launch, env={**launch.env, **dict(zip(_SGLANG_SIMULATION, settings, strict=True))})
+
+
+def _force_vllm(launch: SourceLaunch, request: GoldenRequest, value: float) -> SourceLaunch:
+    spec = {**request.spec, "rejection_sample_method": _SYNTHETIC, "synthetic_acceptance_length": value}
+    args = (*without_speculative_config(launch.args), f"--{SPECULATIVE_CONFIG_FLAG}", json.dumps(spec))
+    return dataclasses.replace(launch, args=args)
+
+
+@dataclass(frozen=True)
+class _GoldenSpelling:
+    """How one framework's launch reads its draft, and how a cookbook launch of it is made to force its golden
+    acceptance length as InferenceX's ``build_overrides`` forces it (``None``: its cookbook serves no AgentX)."""
+
+    read: Callable[[list[tuple[str, str]], Mapping[str, str]], LaunchDraft]
+    force: Callable[[SourceLaunch, GoldenRequest, float], SourceLaunch] | None = None
+
+
+#: ATOM's catalog serves fixed workloads only, so no ATOM cookbook launch is forced.
+_SPELLINGS: Mapping[str, _GoldenSpelling] = MappingProxyType(
+    {
+        "sglang": _GoldenSpelling(_sglang_draft, _force_sglang),
+        "vllm": _GoldenSpelling(_vllm_draft, _force_vllm),
+        "atom": _GoldenSpelling(_atom_draft),
+    }
+)
+
+
+def _spelling(framework: str) -> _GoldenSpelling:
+    spelling = _SPELLINGS.get(framework)
+    if spelling is None:
+        raise RecipeSourceError(f"a {framework} launch drafts nothing InferenceX keys a golden curve by")
+    return spelling
+
+
+def launch_draft(framework: str, args: Sequence[str], env: Mapping[str, str]) -> LaunchDraft:
+    """The draft a ``framework`` launch of ``args`` and ``env`` runs, and the acceptance simulation it forces."""
+    return _spelling(framework).read(argv_flag_occurrences(args), env)
+
+
+def _force(framework: str) -> Callable[[SourceLaunch, GoldenRequest, float], SourceLaunch]:
+    force = _spelling(framework).force
+    if force is None:
+        raise RecipeSourceError(f"no golden acceptance is forced on a {framework} cookbook launch")
+    return force
 
 
 def _golden_plan(
     launch: SourceLaunch, query: LaunchQuery, bundle: RepoBundle, base_model: str | None
 ) -> GoldenRequest | SourceGolden | None:
     """What ``golden_length`` is asked for ``launch``; ``None`` when it drafts nothing, else why it is not asked."""
-    occurrences = argv_flag_occurrences(launch.args)
-    if launch.framework == "sglang":
-        spec, verify = _sglang_draft(occurrences)
-    elif launch.framework == "vllm":
-        spec, verify = _vllm_draft(occurrences)
-    else:
-        raise RecipeSourceError(f"a {launch.framework} launch serves no AgentX workload")
-    if not spec:
+    draft = launch_draft(launch.framework, launch.args, launch.env)
+    if not draft.spec:
         return None
-    adaptive = adaptive_verification_reason(spec)
+    adaptive = adaptive_verification_reason(draft.spec)
     if adaptive is not None:
         return SourceGolden(None, reason=adaptive)
     prefix = _model_prefix(bundle, query.model_id, base_model)
     if isinstance(prefix, SourceGolden):
         return prefix
-    return GoldenRequest(prefix, spec, DEFAULT_THINKING_MODE, verify)
+    return GoldenRequest(prefix, draft.spec, DEFAULT_THINKING_MODE, draft.verify)
 
 
 def golden_requests(
@@ -200,16 +275,6 @@ def golden_requests(
     plans = (_golden_plan(launch, query, bundle, base_model) for launch in launches)
     requests = {plan.key: plan for plan in plans if isinstance(plan, GoldenRequest)}
     return tuple(requests.values())
-
-
-def _simulated(launch: SourceLaunch, request: GoldenRequest, value: float) -> SourceLaunch:
-    """``launch`` forcing ``value`` as its acceptance length, as InferenceX's ``build_overrides`` forces it."""
-    if launch.framework == "sglang":
-        settings = (f"{value:g}", _SIMULATION_METHOD, _SIMULATION_TOKEN_MODE)
-        return dataclasses.replace(launch, env={**launch.env, **dict(zip(_SGLANG_SIMULATION, settings, strict=True))})
-    spec = {**request.spec, "rejection_sample_method": _SYNTHETIC, "synthetic_acceptance_length": value}
-    args = (*without_speculative_config(launch.args), f"--{SPECULATIVE_CONFIG_FLAG}", json.dumps(spec))
-    return dataclasses.replace(launch, args=args)
 
 
 def with_golden(launch: SourceLaunch, query: LaunchQuery, table: GoldenTable, base_model: str | None) -> SourceLaunch:
@@ -231,7 +296,16 @@ def with_golden(launch: SourceLaunch, query: LaunchQuery, table: GoldenTable, ba
         )
     path = f"{GOLDEN_DIR}/{answer.curve}.yaml"
     curve = GoldenCurve(repo=table.bundle.repo, commit=table.bundle.commit, path=path, sha256=table.bundle.sha256(path))
-    return dataclasses.replace(_simulated(launch, plan, answer.value), golden=SourceGolden(answer.value, curve=curve))
+    forced = _force(launch.framework)(launch, plan, answer.value)
+    return dataclasses.replace(forced, golden=SourceGolden(answer.value, curve=curve))
 
 
-__all__ = ["GoldenLength", "GoldenRequest", "GoldenTable", "golden_requests", "with_golden"]
+__all__ = [
+    "GoldenLength",
+    "GoldenRequest",
+    "GoldenTable",
+    "LaunchDraft",
+    "golden_requests",
+    "launch_draft",
+    "with_golden",
+]

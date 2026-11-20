@@ -228,16 +228,12 @@ def _enablement_round(tmp_path, monkeypatch, *, served=True, agentx=True, agentx
     async def bench_patch(*_args, **_kwargs):
         return _enablement_bench(slot, served=served), {"accuracy_pass": None, "enablement_accuracy": None}
 
-    async def no_kb(*_args, **_kwargs):
-        return None
-
     monkeypatch.setattr(_integrate_bench, "run_candidate_accuracy_round", run_round)
     monkeypatch.setattr(_integrate_bench, "_grade_bench_accuracy", lambda *args: None)
     monkeypatch.setattr(accuracy, "is_mlperf_backend", lambda: False)
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     executor = IntegratePatchExecutor(session_dir=session)
     monkeypatch.setattr(executor, "_bench_patch", bench_patch)
-    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", no_kb)
     params = {"specialist_task_id": _SPECIALIST, "framework_source_root": str(repo), "enablement": True}
     extra = integrate_extra(params)
     extra["shared_state"].benchmark_mode = _AGENTX if agentx else ""

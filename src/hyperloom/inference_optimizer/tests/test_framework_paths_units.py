@@ -727,7 +727,7 @@ class TestServedSourceTrees:
         for key in ("VLLM_REPO_PATH", "VLLM_DIR", "SGLANG_REPO_PATH", "SGLANG_DIR", "FRAMEWORK_REPO_PATH"):
             monkeypatch.delenv(key, raising=False)
 
-    def test_the_framework_and_each_kernel_library_it_imports_are_found_without_configuration(
+    def test_this_process_names_the_framework_and_each_kernel_library_it_imports_without_configuration(
         self, monkeypatch, tmp_path
     ):
         site = tmp_path / "site-packages"
@@ -736,22 +736,18 @@ class TestServedSourceTrees:
             directory.mkdir(parents=True)
         monkeypatch.setattr(fp, "_find_spec_origin", origins.get)
 
-        assert fp.served_source_trees("vllm") == (
+        assert fp.served_source_trees(fp.head_import_roots("vllm")) == (
             fp.FrameworkTree(tree=site / "vllm", root=site / "vllm", checkout=False),
             fp.FrameworkTree(tree=site / "aiter", root=site / "aiter", checkout=False),
         )
 
-    def test_one_checkout_serving_two_packages_is_named_once(self, monkeypatch, tmp_path):
+    def test_one_checkout_serving_two_packages_is_named_once(self, tmp_path):
         checkout = git_repo_tracking(
             tmp_path / "sglang", "python/sglang/__init__.py", "sgl-kernel/python/sgl_kernel/__init__.py"
         )
-        origins = {
-            "sglang": checkout / "python" / "sglang",
-            "sgl_kernel": checkout / "sgl-kernel" / "python" / "sgl_kernel",
-        }
-        monkeypatch.setattr(fp, "_find_spec_origin", origins.get)
+        roots = [checkout / "python" / "sglang", checkout / "sgl-kernel" / "python" / "sgl_kernel"]
 
-        (tree,) = fp.served_source_trees("sglang")
+        (tree,) = fp.served_source_trees([str(root) for root in roots])
 
         assert (tree.root, tree.checkout) == (checkout, True)
 

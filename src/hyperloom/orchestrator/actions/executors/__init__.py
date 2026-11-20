@@ -3,7 +3,7 @@
 
 """Concrete ActionRunner implementations."""
 
-from ._proposal_identity import content_fingerprint, controls_of, normalize_proposal
+from ._proposal_identity import content_fingerprint, controls_of, is_executable, normalize_proposal
 from .baseline import baseline_executor
 from .explore import explore_executor
 from .conc_sweep import conc_sweep_executor
@@ -90,6 +90,7 @@ __all__ = [
     "fixed_workload",
     "grid_run_dirs",
     "harvest_leaked_artifacts",
+    "is_executable",
     "is_round_folder",
     "materialize_benchmark_config",
     "normalize_proposal",

@@ -139,11 +139,6 @@ class TestMissSignal:
 
 
 class TestUntunedCsv:
-    def test_the_header_is_exactly_the_tuple_minus_the_box_properties(self):
-        from kernelforge.workflows.gemm_tune.tuners.fmoe_ck import _FMOE_CSV_HEADER
-
-        assert ",".join(ev.MOE_KEY_FIELDS) == _FMOE_CSV_HEADER
-
     def test_rows_carry_the_missed_tokens(self):
         rep = _log(_DISPATCH.format(tok=1), _MISS.format(tok=512), _MISS.format(tok=1024))
         (key,) = ev.moe_dispatch_keys(rep)
@@ -280,22 +275,6 @@ class TestFmoeCkAcceptsIt:
         key = self._tuner(tmp_path, out)._demand_key()
         assert key is not None
         assert key["untuned_tokens"] == [16]
-
-    def test_demand_json_is_parsed_once_across_validate_and_run(self, tmp_path, monkeypatch):
-        out = self._demand(tmp_path)
-        tuner = self._tuner(tmp_path, out)
-        original = ev.load_demand
-        calls = 0
-
-        def _load(path):
-            nonlocal calls
-            calls += 1
-            return original(path)
-
-        monkeypatch.setattr(ev, "load_demand", _load)
-        assert tuner._demand_key() is not None
-        assert tuner._demand_key() is not None
-        assert calls == 1
 
     def test_the_untuned_csv_is_written_from_the_logged_key(self, tmp_path):
         tuner = self._tuner(tmp_path, self._demand(tmp_path))

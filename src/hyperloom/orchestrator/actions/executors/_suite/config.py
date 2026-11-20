@@ -56,6 +56,7 @@ from hyperloom.common.outside_facts import (
     ENV_RUN_EVAL,
     ENV_TP,
 )
+from hyperloom.inference_optimizer.framework_paths import KERNEL_LIBRARY_PACKAGES
 from hyperloom.inference_optimizer.framework_registry import extra_args_env
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv, remove_server_args
 from inference_suite.contracts import (
@@ -355,6 +356,7 @@ def _server(
         gpus=_gpus(point, base.cards),
         framework_python=settings.framework_python,
         user=user,
+        import_packages=KERNEL_LIBRARY_PACKAGES,
         env_inherit=settings.env_inherit,
     )
 

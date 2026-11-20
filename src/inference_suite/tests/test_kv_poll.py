@@ -16,6 +16,7 @@ from inference_suite.telemetry.kv_poll import (
     aggregate_series,
     canonical_label_key,
     parse_prometheus_text,
+    running_requests,
     sample_from_families,
 )
 
@@ -308,6 +309,25 @@ def test_prefix_cache_only_sample_is_not_discarded():
     assert sample.has_readings()
     assert aggregate_series(sample.prefix_cache_queries) == 1000.0
     assert aggregate_series(sample.prefix_cache_hits) == 529.0
+
+
+# The gauges ATOM's exporter (atom/metrics/exporter.py at ROCm/ATOM 9cc9498b) serves: one running count, already
+# summed over its data-parallel ranks.
+ATOM_METRICS = """\
+# HELP atom:requests_running Number of requests currently running.
+# TYPE atom:requests_running gauge
+atom:requests_running 12.0
+# HELP atom:kv_cache_usage_ratio KV cache usage ratio.
+# TYPE atom:kv_cache_usage_ratio gauge
+atom:kv_cache_usage_ratio 0.42
+"""
+
+
+def test_atom_running_requests_are_read_from_its_own_gauge():
+    families = parse_prometheus_text(ATOM_METRICS)
+
+    assert running_requests(families) == 12.0
+    assert sample_from_families(families).engine == "atom"
 
 
 def test_canonical_label_key_is_order_independent():

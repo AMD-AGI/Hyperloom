@@ -186,6 +186,10 @@ def build_search_space(thorough: bool) -> list[dict[str, int]]:
     return space[: max(_thorough_cap(), len(_SEED_CONFIGS))]
 
 
+#: Every timed batch size's config -- winner or vLLM's default -- in the layout of a vLLM tuned MoE config file.
+_CONFIG_TABLE = "vllm_config_table.json"
+
+
 @dataclass(frozen=True)
 class SweepGrid:
     """What the MoE sweep measures: every config at every batch size, timed with these iterations."""
@@ -228,6 +232,13 @@ except ImportError:
     except ImportError:
         pass
 
+try:
+    # The config file vLLM loads is named, and its default config chosen, by these; asking them is what makes the
+    # written file one this vLLM on this device will actually read.
+    from vllm.model_executor.layers.fused_moe.fused_moe import get_config_file_name, try_get_optimal_moe_config
+except ImportError:
+    VLLM_AVAILABLE = False
+
 if VLLM_AVAILABLE:
     sig = inspect.signature(fused_experts)
     params = list(sig.parameters.keys())
@@ -258,8 +269,15 @@ CONFIGS = _config["configs"]
 def _call_fused_experts(hidden_states, w1, w2, topk_weights, topk_ids, config):
     """Call fused_experts with the appropriate API for this vLLM version."""
     if USE_CONTEXT_MANAGER:
-        with _override_config_fn(config):
+        # vLLM's override_config restores the previous config only on a clean exit. A config the device cannot run
+        # (e.g. one needing more LDS than a workgroup gets) raises, and would stay installed for every later call --
+        # the next shape's baseline included -- so the scope is always left as if the call had returned.
+        scope = _override_config_fn(config)
+        scope.__enter__()
+        try:
             return fused_experts(hidden_states, w1, w2, topk_weights, topk_ids)
+        finally:
+            scope.__exit__(None, None, None)
     else:
         return fused_experts(
             hidden_states, w1, w2, topk_weights, topk_ids,
@@ -327,6 +345,12 @@ def main():
     print(f"vLLM fused_experts API detected, context_manager={{USE_CONTEXT_MANAGER}}", file=sys.stderr)
 
     results = {{}}
+    # vLLM serves every batch size from the nearest key in the file, so a file holding only the winners would hand a
+    # small-batch winner to large batches too. Every timed batch size gets an entry: its winner, else the default it
+    # already runs.
+    config_table = {{}}
+    w1_shape = (NUM_EXPERTS, 2 * INTERMEDIATE_SIZE, HIDDEN_SIZE)
+    w2_shape = (NUM_EXPERTS, HIDDEN_SIZE, INTERMEDIATE_SIZE)
     shape_details = []
     errors = []
 
@@ -340,6 +364,7 @@ def main():
             torch.cuda.empty_cache()
             continue
         print(f"M={{M}}: baseline={{baseline_time:.1f}}us", file=sys.stderr)
+        config_table[str(M)] = dict(try_get_optimal_moe_config(w1_shape, w2_shape, TOPK, None, M))
 
         best_time = None
         best_config = None
@@ -365,6 +390,7 @@ def main():
             }})
             if speedup > 1.0:
                 results[str(M)] = best_config
+                config_table[str(M)] = best_config
                 print(f"M={{M}}: best={{best_time:.1f}}us speedup={{speedup:.3f}}x KEEP config={{best_config}}", file=sys.stderr)
             else:
                 print(f"M={{M}}: best={{best_time:.1f}}us speedup={{speedup:.3f}}x SKIP (not faster than default)", file=sys.stderr)
@@ -382,6 +408,9 @@ def main():
     with open(details_path, "w") as f:
         json.dump(shape_details, f, indent=2)
 
+    with open(_config["config_table_path"], "w") as f:
+        json.dump(config_table, f, indent=4)
+
     speedups = [d["speedup"] for d in shape_details if d["speedup"] > 0]
     best_speedup = max(speedups) if speedups else None
     avg_speedup = sum(speedups) / len(speedups) if speedups else None
@@ -389,6 +418,8 @@ def main():
     out = {{
         "status": "ok",
         "output": output_path,
+        # BF16 carries no dtype in vLLM's file name, hence None.
+        "config_file_name": get_config_file_name(NUM_EXPERTS, INTERMEDIATE_SIZE, None),
         "batch_sizes": len(results),
         "shape_details": shape_details,
         "best_speedup": None if best_speedup is None else round(best_speedup, 4),
@@ -408,13 +439,15 @@ if __name__ == "__main__":
 '''
 
 
-def _generate_sweep_script(work_dir: Path, profile: Any, grid: SweepGrid, gpu_id: str) -> Path:
+def _generate_sweep_script(work_dir: Path, profile: Any, grid: SweepGrid, gpu_id: str, tp: int) -> Path:
     """Generate a standalone Python script that performs the Triton MoE sweep."""
     script_path = work_dir / "vllm_moe_sweep.py"
     config_path = work_dir / "sweep_config.json"
 
     num_experts = profile.num_experts
-    inter_size = profile.effective_moe_intermediate
+    # Tensor parallelism splits every expert's intermediate dimension, so each rank runs, and vLLM looks its config up
+    # under, the per-rank share.
+    inter_size = profile.effective_moe_intermediate // tp
     hidden_size = profile.hidden_size
     topk = profile.num_experts_per_tok
 
@@ -430,6 +463,7 @@ def _generate_sweep_script(work_dir: Path, profile: Any, grid: SweepGrid, gpu_id
         "warmup": grid.warmup,
         "configs": grid.configs,
         "output_path": str(work_dir / "sweep_results.json"),
+        "config_table_path": str(work_dir / _CONFIG_TABLE),
     }
     config_path.write_text(json.dumps(sweep_config, indent=2), encoding="utf-8")
 
@@ -450,6 +484,8 @@ class VllmMoeTritonTuner(BaseTuner):
             return "Model is not MoE"
         if self.ctx.profile.num_experts < 1:
             return "num_experts < 1"
+        if self.ctx.profile.effective_moe_intermediate % max(self.ctx.tp, 1):
+            return f"MoE intermediate size does not split evenly over tp={self.ctx.tp}"
         return None
 
     def run(self) -> TuneResult:
@@ -475,6 +511,7 @@ class VllmMoeTritonTuner(BaseTuner):
             profile,
             SweepGrid(batch_sizes=batch_sizes, configs=configs, iters=self.ctx.iters, warmup=self.ctx.warmup),
             gpu_id,
+            max(self.ctx.tp, 1),
         )
 
         rc, stdout, stderr = run_subprocess(
@@ -517,15 +554,14 @@ class VllmMoeTritonTuner(BaseTuner):
         return self._tuned_result(script_result, batch_sizes)
 
     def _tuned_result(self, script_result: dict, batch_sizes: list[int]) -> TuneResult:
-        """Publish a successful sweep's winners as a vLLM tuned config folder and report its speedups."""
-        profile = self.ctx.profile
-        # Build tuned config folder (VLLM_TUNED_CONFIG_FOLDER format)
+        """Publish a successful sweep as a vLLM tuned config folder and report its speedups."""
         sweep_results_path = self.work_dir / "sweep_results.json"
-        if not sweep_results_path.is_file():
+        config_table_path = self.work_dir / _CONFIG_TABLE
+        if not sweep_results_path.is_file() or not config_table_path.is_file():
             return TuneResult(
                 tuner_name=self.name,
                 status="failed",
-                error="sweep_results.json not produced",
+                error=f"sweep_results.json or {_CONFIG_TABLE} not produced",
                 error_class="output_missing",
             )
 
@@ -533,20 +569,10 @@ class VllmMoeTritonTuner(BaseTuner):
         tuned_configs_dir.mkdir(exist_ok=True)
 
         sweep_data = json.loads(sweep_results_path.read_text(encoding="utf-8"))
-
-        # Write config file in vLLM expected format: E=<experts>,N=<N>,device_name=<gpu>,dtype=<dtype>.json
-        E = profile.num_experts
-        N = profile.effective_moe_intermediate
-        gpu_name = self.ctx.gpu_type.replace(" ", "_").upper()
-        if "mi300" in gpu_name.lower():
-            gpu_name = "AMD_Instinct_MI300X"
-        elif "mi355" in gpu_name.lower():
-            gpu_name = "AMD_Instinct_MI355X"
-
-        # The dtype in the name is what vLLM matches against, so it states the dtype the sweep benchmarked.
-        config_filename = f"E={E},N={N},device_name={gpu_name},dtype=bfloat16.json"
-        config_path = tuned_configs_dir / config_filename
-        config_path.write_text(json.dumps(sweep_data, indent=4), encoding="utf-8")
+        # The name comes from the serving vLLM itself (device name, per-rank N, dtype selector), so the server finds
+        # the file under VLLM_TUNED_CONFIG_FOLDER rather than logging "Config file not found" and running its default.
+        config_path = tuned_configs_dir / script_result["config_file_name"]
+        config_path.write_text(config_table_path.read_text(encoding="utf-8"), encoding="utf-8")
 
         # Extract speedup metrics from sweep script output
         shape_details = script_result.get("shape_details", [])

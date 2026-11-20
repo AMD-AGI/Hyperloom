@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The enablement gate: whether an applied switch is correct, what it keeps, and the record it leaves in the knowledge base."""
+"""The enablement gate: whether an applied switch is correct and what it keeps."""
 
 from __future__ import annotations
 
@@ -9,12 +9,10 @@ import asyncio
 import logging
 import os
 import subprocess
-from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.coerce import first_text, to_float, to_str_list
 from hyperloom.inference_optimizer import framework_paths
 
 from ...bringup import (
@@ -27,22 +25,15 @@ from ...bringup import (
 from ...bringup.persist import LoadedObservation
 from ...enablement.recipe import keep_probe, keep_records
 from ...enablement.recipe.projections import project_launch_evidence
-from ...knowledge.kb_writeback import OUTCOME_INTEGRATED, OUTCOME_REVERTED_SMOKE_FAIL
 from . import _framework_switch_manifest as _switch_manifest
 from ._accuracy_gate import enablement_correctness
-from ._enablement_config import _FRAMEWORK_KB_PROVENANCE_PREFIX
 from ._git import _git_head_sha
 from ._integrate_attempt import IntegrateAttempt
-from ._integrate_results import _KbLesson, _PatchBench
+from ._integrate_results import _PatchBench
 from ._nogit_patch import _is_git_tree
 from ._patch_git import _uncommitted_revert
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
-from ._integrate_vocabulary import (
-    FILTERED_BEFORE_BENCH_CLASS,
-    PATCH_SOURCE_UPSTREAM_PR,
-    RESULT_BENCHED,
-    resolve_patch_source,
-)
+from ._integrate_vocabulary import FILTERED_BEFORE_BENCH_CLASS, RESULT_BENCHED
 from ._patch_sources import _declared_stack_ops, _patch_stack_by_root, _read_patch_texts
 from ._server_argv import ConfigUnreadable
 from ._workload_envs import FrameworkScriptMismatchError
@@ -352,9 +343,6 @@ class EnablementGateMixin:
             evidence=evidence,
         )
         if not runs and not advanced:
-            await self._maybe_write_framework_kb_record(
-                _KbLesson(OUTCOME_REVERTED_SMOKE_FAIL, 0.0), attempt=attempt, params=params
-            )
             return _reverted_enablement_verdict(attempt, grade)
 
         # Accepted: the boot either runs or reached a deeper wall. Both keep the
@@ -372,9 +360,6 @@ class EnablementGateMixin:
             )
 
         if advanced:
-            await self._maybe_write_framework_kb_record(
-                _KbLesson(OUTCOME_INTEGRATED, 0.0), attempt=attempt, params=params
-            )
             return _advanced_enablement_verdict(attempt, grade)
         return await self._keep_enablement(attempt, params, grade)
 
@@ -389,7 +374,6 @@ class EnablementGateMixin:
         reason = f"enablement runnable: {grade.run_reason}"
         if provisional:
             reason += " (provisional: served but eval produced no accuracy; correctness not verified)"
-        await self._maybe_write_framework_kb_record(_KbLesson(OUTCOME_INTEGRATED, 0.0), attempt=attempt, params=params)
         kept_result: dict[str, Any] = {
             "status": "kept",
             "specialist_task_id": specialist_task_id,
@@ -635,125 +619,3 @@ class EnablementGateMixin:
         except (OSError, ValueError, TypeError):
             log.exception("integrate_patch: localization snapshot failed")
             return {}
-
-    # Helpers
-    @staticmethod
-    def _find_framework_proposal(
-        done_payload: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        """Return the first proposal whose provenance starts with
-        ``specialist:serving:framework`` (F2-5); ``None`` otherwise so
-        the KB writeback hook no-ops for legacy / kernel outputs.
-
-        Args:
-            done_payload: The parsed ``specialist_done.json`` payload, or
-                ``None``.
-
-        Returns:
-            The matching framework proposal dict, or ``None`` when absent.
-        """
-        if not isinstance(done_payload, dict):
-            return None
-        proposal_set = done_payload.get("proposal_set") or []
-        if not isinstance(proposal_set, list):
-            return None
-        for proposal in proposal_set:
-            if not isinstance(proposal, dict):
-                continue
-            provenance = str(proposal.get("provenance") or "")
-            if provenance.startswith(_FRAMEWORK_KB_PROVENANCE_PREFIX):
-                return proposal
-        return None
-
-    @staticmethod
-    def _upstream_pr_kb_proposal(params: Mapping[str, Any]) -> dict[str, Any] | None:
-        """Present an upstream-PR candidate in the shape the KB writer reads.
-
-        The KB writer reads the PR identity from ``fa_pr_url`` / ``fa_pr_sha``.
-        A candidate row carries it directly, so map rather than relay it through
-        a specialist's output.
-
-        Args:
-            params: Task params, read for ``candidate``.
-
-        Returns:
-            A proposal-shaped mapping, or ``None`` when this is not an
-            upstream-PR task or the candidate carries no dedup key.
-        """
-        if resolve_patch_source(params) != PATCH_SOURCE_UPSTREAM_PR:
-            return None
-        candidate = params.get("candidate")
-        if not isinstance(candidate, dict):
-            return None
-        pr_url = str(candidate.get("pr_url") or candidate.get("url") or "").strip()
-        pr_sha = str(candidate.get("head_sha") or "").strip()
-        if not pr_url and not pr_sha:
-            return None
-        return {
-            "fa_pr_url": pr_url,
-            "fa_pr_sha": pr_sha,
-            "framework": candidate.get("framework") or "",
-            "applicability": candidate.get("applicability") or "",
-        }
-
-    async def _maybe_write_framework_kb_record(
-        self,
-        lesson: _KbLesson,
-        *,
-        attempt: IntegrateAttempt,
-        params: Mapping[str, Any] | None = None,
-    ) -> None:
-        """Record this attempt's outcome against the patch's upstream PR identity.
-
-        A patch with no such identity leaves no lesson: the ledger files every
-        lesson under a PR URL or head SHA.
-        """
-        proposal = self._find_framework_proposal(attempt.done_payload)
-        if proposal is None:
-            # The upstream-PR lane carries the PR identity on the candidate
-            # rather than in a specialist's ``fa_*`` markers.
-            proposal = self._upstream_pr_kb_proposal(params or {})
-            if proposal is None:
-                return
-        # Never the payload's: a payload-level ``fa_pr_*`` belongs to whichever
-        # proposal put it there, so standing it in for one this proposal omits
-        # would file the lesson under another patch's PR.
-        pr_url = first_text(proposal.get("fa_pr_url"))
-        pr_sha = first_text(proposal.get("fa_pr_sha"))
-        if not pr_url and not pr_sha:
-            log.warning("integrate_patch: framework proposal lacks both fa_pr_url and fa_pr_sha; KB writeback skipped")
-            return
-        # The ``if v`` filter is what makes the merge mean "the proposal's value,
-        # or the payload's where the proposal left it empty".
-        fields = {**(attempt.done_payload or {}), **{k: v for k, v in proposal.items() if v}}
-        shared_state = attempt.shared_state
-        patches_written = to_str_list(proposal.get("patches_written"))
-        accuracy_delta_pct = lesson.accuracy_delta_pct
-        if accuracy_delta_pct is None:
-            accuracy_delta_pct = to_float(fields.get("accuracy_delta_pct"), 0.0)
-        try:
-            from ...knowledge.kb_writeback import FrameworkOutcome, write_framework_record
-
-            written = await write_framework_record(
-                FrameworkOutcome(
-                    pr_url=pr_url,
-                    pr_sha=pr_sha,
-                    patch_path=patches_written[0] if patches_written else "",
-                    outcome=lesson.outcome,
-                    tps_delta_pct=float(lesson.tps_delta_pct),
-                    session_id=str(getattr(shared_state, "recipe_kb_session_id", "") or ""),
-                    framework=first_text(fields.get("framework")).lower(),
-                    applicability=lesson.config_fingerprint or first_text(fields.get("applicability")),
-                    accuracy_delta_pct=accuracy_delta_pct,
-                )
-            )
-        except (OSError, ValueError, TypeError) as exc:
-            log.warning("integrate_patch: framework KB writeback failed: %r", exc)
-            return
-        log.info(
-            "integrate_patch: wrote framework KB record to %s (outcome=%s pr_url=%s tps_delta=%+.2f%%)",
-            written,
-            lesson.outcome,
-            pr_url,
-            float(lesson.tps_delta_pct),
-        )

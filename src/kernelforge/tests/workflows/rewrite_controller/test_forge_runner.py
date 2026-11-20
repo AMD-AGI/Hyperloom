@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from kernelforge.workflows.rewrite_controller import parse_task_payload
 from kernelforge.workflows.rewrite_controller.forge_runner import (
     ForgeLoopInvocation,
@@ -274,34 +276,25 @@ def test_a_checkpoint_probe_that_always_raises_is_reported_once(
     assert repr(probe_warnings[0].exc_info[1]) == "RuntimeError('recovery is broken')"
 
 
-def test_a_corrupt_result_file_falls_back_to_the_sentinel_in_stdout(tmp_path: Path) -> None:
-    """A truncated result file must not hide a result forge-loop already announced."""
+@pytest.mark.parametrize(
+    "result_text",
+    ['{"improved": tr', "[1, 2, 3]"],
+    ids=["truncated-json", "not-an-object"],
+)
+def test_a_corrupt_result_file_falls_back_to_the_sentinel_in_stdout(tmp_path: Path, result_text: str) -> None:
+    """A result file that is not a JSON object must not hide a result forge-loop already announced."""
     result_path = tmp_path / "result.json"
-    result_path.write_text('{"improved": tr', encoding="utf-8")
+    result_path.write_text(result_text, encoding="utf-8")
     stdout = f"log line\n{RESULT_SENTINEL}\n{json.dumps({'improved': True})}\n{RESULT_SENTINEL}\n"
 
     assert _read_result(result_path, stdout) == {"improved": True}
 
 
-def test_a_result_file_holding_a_non_object_falls_back_to_stdout(tmp_path: Path) -> None:
-    """The contract is an object; a bare list is not a result."""
-    result_path = tmp_path / "result.json"
-    result_path.write_text("[1, 2, 3]", encoding="utf-8")
-    stdout = f"{RESULT_SENTINEL}{json.dumps({'improved': False})}{RESULT_SENTINEL}"
-
-    assert _read_result(result_path, stdout) == {"improved": False}
-
-
-def test_a_sentinel_block_that_is_not_json_yields_no_result(tmp_path: Path) -> None:
-    """Garbage between the sentinels is reported as absent, not guessed at."""
-    assert _read_result(tmp_path / "absent.json", f"{RESULT_SENTINEL}not json{RESULT_SENTINEL}") is None
-
-
-def test_a_sentinel_block_holding_a_non_object_yields_no_result(tmp_path: Path) -> None:
-    """A scalar between the sentinels is not a result payload."""
-    assert _read_result(tmp_path / "absent.json", f"{RESULT_SENTINEL}42{RESULT_SENTINEL}") is None
-
-
-def test_stdout_without_a_sentinel_pair_yields_no_result(tmp_path: Path) -> None:
-    """A crash before the result is announced leaves nothing to read."""
-    assert _read_result(tmp_path / "absent.json", "forge-loop crashed\n") is None
+@pytest.mark.parametrize(
+    "stdout",
+    [f"{RESULT_SENTINEL}not json{RESULT_SENTINEL}", f"{RESULT_SENTINEL}42{RESULT_SENTINEL}", "forge-loop crashed\n"],
+    ids=["block-not-json", "block-not-an-object", "crashed-before-announcing"],
+)
+def test_stdout_without_a_result_object_yields_no_result(tmp_path: Path, stdout: str) -> None:
+    """Whatever stdout holds instead of a result object is reported as absent, not guessed at."""
+    assert _read_result(tmp_path / "absent.json", stdout) is None

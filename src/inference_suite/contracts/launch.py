@@ -185,13 +185,15 @@ class Removal:
 @dataclass(frozen=True)
 class FrameworkCheck:
     """The framework the round ran: the interpreter, its installed version, the recipe's version and how the install
-    was held to it (D6); the recipe's version is a floor only when the check passed."""
+    was held to it (D6); the recipe's version is a floor only when the check passed. ``import_roots`` is where the
+    interpreter imports each probed package from, empty for a round that probed nothing (``external``)."""
 
     name: Framework
     installed_version: str
     python: str
     recipe_min_version: str | None
     version_check: VersionCheck
+    import_roots: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _FIELDS.enum(Framework, self.name, "the framework"))
@@ -202,6 +204,7 @@ class FrameworkCheck:
         object.__setattr__(self, "version_check", check)
         if (check is VersionCheck.NOT_APPLICABLE) != (self.recipe_min_version is None):
             raise LaunchError("the version check is not_applicable exactly when there is no recipe version")
+        _FIELDS.string_map(self.import_roots, "the import roots")
 
     def to_document(self) -> dict[str, object]:
         return {
@@ -210,13 +213,20 @@ class FrameworkCheck:
             "python": self.python,
             "recipe_min_version": self.recipe_min_version,
             "version_check": self.version_check.value,
+            "import_roots": dict(self.import_roots),
         }
 
     @classmethod
     def from_document(cls, document: object) -> FrameworkCheck:
-        keys = field_names(cls)
-        fields = _FIELDS.known(document, keys, "the framework check")
-        return cls(*(fields.get(key) for key in keys))
+        fields = _FIELDS.known(document, field_names(cls), "the framework check")
+        return cls(
+            fields.get("name"),
+            fields.get("installed_version"),
+            fields.get("python"),
+            fields.get("recipe_min_version"),
+            fields.get("version_check"),
+            fields.get("import_roots", {}),
+        )
 
 
 @dataclass(frozen=True)

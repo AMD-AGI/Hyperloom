@@ -10,12 +10,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hyperloom_common.coerce import first_str, first_text, to_float, to_list, to_mapping
+from hyperloom_common.coerce import first_str, first_text, to_list, to_mapping
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args, merge_server_args
 from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
-from ..actions.executors import content_fingerprint, controls_of, normalize_proposal
-from ..specialists.profile import is_authoring_specialist
+from ..actions.executors import controls_of, normalize_proposal
 from ..state.task_registry import TaskSpec
 from ..state.task_states import TERMINAL_STATES
 from .framework_records import (
@@ -304,53 +303,42 @@ class _CandidateDiscoveryMixin:
             },
         )
 
-    async def maybe_autosubmit_framework_config(
+    async def maybe_autosubmit_enablement_config(
         self,
         *,
         task: "Task",
         done_payload: dict[str, Any],
     ) -> None:
-        """Route a FRAMEWORK config-lever deliverable through integrate_patch.
+        """Route an ENABLEMENT round that wrote no source patch through integrate_patch.
 
-        Companion to :meth:`maybe_autosubmit_specialist_patches`: fires when a
-        FRAMEWORK authoring or ENABLEMENT specialist returns NO source patch but a config-lever
-        ``proposal_set`` (extra_args / extra_envs). The levers go into
-        integrate_patch's ``config_changes`` channel (apply + bench + accuracy
-        gate + KEEP/REVERT), which owns the terminal FRAMEWORK row. Idempotent
-        per specialist.
+        Companion to :meth:`maybe_autosubmit_specialist_patches`. The round routes with its config lever
+        (extra_args / extra_envs) or with none: a round that does not reach integrate_patch never reports what its
+        boot did. A FRAMEWORK authoring round's config proposals are benched by explore with every other specialist
+        proposal, so they never reach this. Idempotent per specialist.
 
         Args:
-            task: The completed authoring specialist task.
+            task: The completed enablement specialist task.
             done_payload: Its ``specialist_done`` payload.
         """
         spec_params = getattr(task, "params", None) or {}
-        if not is_authoring_specialist(spec_params):
+        if not spec_params.get("enablement"):
             return
         # A patch deliverable is handled by the patch autosubmit bridge.
         patches = done_payload.get("patches_written") or []
         if isinstance(patches, list) and patches:
             return
         config_levers = _framework_config_levers_from_done(done_payload)
-        is_enablement = bool(spec_params.get("enablement"))
         build_request = done_payload.get("needs_targeted_build")
         if (
-            is_enablement
-            and isinstance(build_request, dict)
+            isinstance(build_request, dict)
             and build_request
             and not config_levers
             and not done_payload.get("setup_commands")
             and not done_payload.get("artifacts_written")
         ):
             return
-        # Route only when there are config levers to test, except for an
-        # ENABLEMENT round, which always routes: a round that does not reach
-        # integrate_patch never reports what its boot did.
-        if not config_levers and not is_enablement:
-            return
         sid = first_text(task.task_id)
         if not sid:
-            return
-        if config_levers and self._config_lever_known_bad(config_levers):
             return
         # Empty, or the str args and dict envs config_lever_from_proposal builds.
         extra_server_args = config_levers.get("extra_server_args", "")
@@ -370,36 +358,8 @@ class _CandidateDiscoveryMixin:
         )
         if pending is not None:
             log.info(
-                "FRAMEWORK: config-lever deliverable routed to integrate_patch candidate=%s args=%s env_keys=%s",
+                "ENABLEMENT: config deliverable routed to integrate_patch round=%s args=%s env_keys=%s",
                 candidate_id or sid,
                 extra_server_args,
                 sorted(extra_envs),
             )
-
-    def _config_lever_known_bad(self, config_levers: dict[str, Any]) -> bool:
-        """True when this exact config already lost an accuracy gate.
-
-        Different upstream PRs often reduce to the same server args / envs, so
-        the ledger is keyed by content fingerprint rather than by PR.
-        """
-        try:
-            from hyperloom.agents.framework.kb import read_pr_ledger
-
-            # The integrate record hashes the deliverable this lever is reviewed with.
-            fingerprint = content_fingerprint(_config_lever_deliverable(config_levers))
-            for rec in read_pr_ledger():
-                if str(rec.get("applicability") or "") != fingerprint:
-                    continue
-                if to_float(rec.get("accuracy_delta_pct"), default=0.0) < 0.0:
-                    log.info(
-                        "FRAMEWORK: skipping config lever %s — accuracy %.2f%% on %s",
-                        fingerprint,
-                        to_float(rec.get("accuracy_delta_pct"), default=0.0),
-                        rec.get("pr_url") or "a prior candidate",
-                    )
-                    return True
-        except OSError:
-            # Warning, not debug: swallowing this re-dispatches config levers
-            # that already lost an accuracy gate, so it must be visible.
-            log.warning("FRAMEWORK: config-lever ledger check failed", exc_info=True)
-        return False

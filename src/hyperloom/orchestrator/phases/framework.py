@@ -1757,7 +1757,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
 
     async def _maybe_bench_untested_proposals(self) -> None:
         """Enqueue explore grids from ``waiting_proposal_rows``: the custom specialist's alone, ahead of every gate;
-        the rest once no explore is queued or running and the framework candidate track is open."""
+        the rest once no explore is queued or running, whether or not the candidate track is still open."""
         state = self.shared_state
         if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
@@ -1768,7 +1768,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         if custom and not self._has_operator_work(explores):
             if await self._enqueue_bench_grid(custom, operator_priority=True):
                 return
-        if state.custom_specialist_only or state.framework_agent_phase_done or explores:
+        if state.custom_specialist_only or explores:
             return
         rows = [r for r in waiting_proposal_rows(state, self.tasks) if r["domain"] != CUSTOM_PROPOSAL_DOMAIN]
         if rows:

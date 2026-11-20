@@ -17,6 +17,7 @@ import yaml
 
 from hyperloom.common.agentx_workload import CANON_WARMUP_PER_LANE
 from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
+from hyperloom.orchestrator.actions.executors import _profile_setup
 from hyperloom.orchestrator.actions.executors._suite.config import MEASURED_SEED, WARMUP_SEED, suite_config
 from hyperloom.orchestrator.actions.executors._suite.rounds import (
     TOOL_CACHE_ENV,
@@ -285,6 +286,46 @@ def test_an_unannotated_or_unprofiled_sglang_round_adds_no_instrumentation() -> 
 
         assert not _SGLANG_ANNOTATION_ENV.keys() & user.env_set.keys()
         assert "--enable-profile-cuda-graph" not in user.args_add
+
+
+def _atom_profiled(monkeypatch, **settings):
+    monkeypatch.setattr(
+        _profile_setup, "_atom_tracelens_caps", lambda: _profile_setup._AtomTracelensCaps(True, True, True)
+    )
+    base = _base()
+    entrypoint = ("python3", "-m", "atom.entrypoints.openai_server")
+    base = replace(base, framework="atom", query=replace(base.query, framework="atom"), entrypoint=entrypoint)
+    point = _profiled("atom", **settings)
+    point["benchmark"]["agentx"]["launch_overrides"].update(append_args=list(base.args), env={})
+    return suite_config(point, base, _settings())
+
+
+def test_an_annotated_atom_agentx_profile_annotates_kernels_and_records_shapes_and_nothing_heavier(
+    monkeypatch,
+) -> None:
+    user = _atom_profiled(monkeypatch).server.user
+
+    assert {"ATOM_ENABLE_DETAILED_ANNOTATION": "1", "ATOM_PROFILER_RECORD_SHAPES": "1"}.items() <= user.env_set.items()
+    # Graph-capture traces for every captured batch size took the server two hours to boot, and stacks and memory
+    # stalled its replay for the whole window.
+    assert "--mark-trace" not in user.args_add
+    assert "ATOM_PROFILER_MORE" not in user.env_set
+    assert "--enable-profile-cuda-graph" not in user.args_add
+    assert not _SGLANG_ANNOTATION_ENV.keys() & user.env_set.keys()
+
+
+def test_an_unannotated_atom_agentx_profile_adds_no_trace_knobs(monkeypatch) -> None:
+    user = _atom_profiled(monkeypatch, detailed_annotations=False).server.user
+
+    assert not {"ATOM_ENABLE_DETAILED_ANNOTATION", "ATOM_PROFILER_RECORD_SHAPES"} & user.env_set.keys()
+
+
+def test_an_atom_agentx_capture_defaults_to_a_short_window_since_atom_bounds_no_steps(monkeypatch) -> None:
+    assert _atom_profiled(monkeypatch).profile.agentx_duration_sec == 30.0
+
+
+def test_an_atom_agentx_capture_keeps_the_window_the_point_names(monkeypatch) -> None:
+    assert _atom_profiled(monkeypatch, capture_timeout_seconds=120).profile.agentx_duration_sec == 120.0
 
 
 def test_a_vllm_agentx_profile_passes_the_profiler_fields_its_annotations_need() -> None:

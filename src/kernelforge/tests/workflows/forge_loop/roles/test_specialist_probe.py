@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import math
 from pathlib import Path
@@ -14,7 +15,7 @@ from kernelforge.utils.process_reaping import ReapReport
 
 from kernelforge.agent_backends import AgentCapabilities, AgentRunResult
 from kernelforge.config import Config
-from kernelforge.evaluation.benchmark.runner import BenchRun
+from kernelforge.evaluation.benchmark.runner import BenchRun, sweep_case
 from kernelforge.workflows.forge_loop.roles import specialist_probe
 from kernelforge.workflows.forge_loop.roles import specialist_probe_server as probe_server
 from kernelforge.workflows.forge_loop.roles.contracts import (
@@ -37,8 +38,8 @@ def _refusing_load_sandbox(env):
 
 
 def _patch_primitive(monkeypatch, primitive) -> None:
-    """Stand PR-1's seam in or out, strictly."""
-    monkeypatch.setattr(specialist_probe, "resolve_probe_primitive", lambda: primitive)
+    """Stand in for the runner's ``sweep_case`` where the probe calls it."""
+    monkeypatch.setattr(specialist_probe, "sweep_case", primitive)
 
 
 def _definition() -> SpecialistDefinition:
@@ -226,26 +227,6 @@ async def test_an_earlier_rounds_probes_are_not_reported_as_this_rounds(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_missing_measurement_primitive_is_reported_not_hidden(tmp_path, monkeypatch) -> None:
-    _patch_primitive(monkeypatch, None)
-    backend = _McpBackend()
-    agent = SpecialistAgent(
-        definition=_definition(),
-        backend=backend,
-        timeout_sec=1800,
-        max_turns=4,
-        probe=_probe(tmp_path),
-    )
-
-    outcome = await agent.run(_assignment(), _context(_workspace(tmp_path)))
-
-    assert backend.specs[0].mcp_servers == {}
-    assert backend.specs[0].tool_policy.extra_tools == ()
-    assert specialist_probe.PRIMITIVE_PATH in outcome.content
-    assert "argued, not measured" in outcome.content
-
-
-@pytest.mark.asyncio
 async def test_scratch_root_inside_the_canonical_tree_disables_the_probe(tmp_path, monkeypatch, caplog) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     workspace = _workspace(tmp_path)
@@ -315,30 +296,6 @@ async def test_specialist_without_probe_keeps_its_read_only_spec(tmp_path) -> No
     assert spec.tool_policy.extra_tools == ()
     assert "Bounded measurement" not in spec.system_prompt
     assert "probe" not in outcome.content.lower()
-
-
-@pytest.mark.asyncio
-async def test_a_primitive_the_probe_cannot_call_is_reported_not_offered(tmp_path, monkeypatch, caplog) -> None:
-    async def _wrong_signature(*, workspace, scratch_dir, case_id):
-        raise AssertionError("the probe must not call a primitive it cannot call")
-
-    _patch_primitive(monkeypatch, _wrong_signature)
-    backend = _McpBackend()
-    agent = SpecialistAgent(
-        definition=_definition(),
-        backend=backend,
-        timeout_sec=1800,
-        max_turns=4,
-        probe=_probe(tmp_path),
-    )
-
-    with caplog.at_level("WARNING"):
-        outcome = await agent.run(_assignment(), _context(_workspace(tmp_path)))
-
-    assert backend.specs[0].mcp_servers == {}
-    assert "does not accept bench" in outcome.content
-    assert "argued, not measured" in outcome.content
-    assert "does not accept bench" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -614,22 +571,6 @@ async def test_server_reports_an_exhausted_wallclock_budget(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_server_reports_the_missing_primitive(tmp_path, monkeypatch) -> None:
-    _patch_primitive(monkeypatch, None)
-    sandbox = _sandbox(tmp_path)
-
-    result = await specialist_probe.probe_variant(
-        {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
-        sandbox=sandbox,
-        budget=specialist_probe.ProbeBudget(),
-    )
-
-    assert result["status"] == specialist_probe.UNAVAILABLE
-    assert specialist_probe.PRIMITIVE_PATH in result["detail"]
-    assert _ledger(sandbox)[0]["status"] == specialist_probe.UNAVAILABLE
-
-
-@pytest.mark.asyncio
 async def test_a_refused_sandbox_reaches_the_ledger_the_parent_reads(tmp_path, monkeypatch) -> None:
     ledger = tmp_path / "scratch" / "memory-1" / "probe_ledger.jsonl"
     monkeypatch.setenv(specialist_probe.LEDGER_ENV, str(ledger))
@@ -764,15 +705,23 @@ async def test_a_probe_that_overruns_its_ceiling_is_a_failed_probe(tmp_path, mon
     assert _ledger(sandbox)[0]["status"] == specialist_probe.FAILED
 
 
-def test_the_seam_is_callable_the_way_the_probe_calls_it() -> None:
-    """Whatever this build provides under PR-1's name must take the probe's call."""
-    primitive, unusable = specialist_probe.probe_primitive_status()
+@pytest.mark.asyncio
+async def test_the_runner_primitive_takes_the_call_the_probe_makes(tmp_path, monkeypatch) -> None:
+    """Every other probe test stands a stub in for ``sweep_case``; the real one must accept what they are handed."""
+    seen: dict[str, object] = {}
 
-    assert specialist_probe.PRIMITIVE_PATH.endswith(".sweep_case")
-    if primitive is None:
-        assert specialist_probe.PRIMITIVE_PATH in unusable
-    else:
-        assert unusable == ""
+    async def _recording_primitive(**kwargs):
+        seen.update(kwargs)
+        return await _stub_primitive(**kwargs)
+
+    _patch_primitive(monkeypatch, _recording_primitive)
+    await specialist_probe.probe_variant(
+        {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
+        sandbox=_sandbox(tmp_path),
+        budget=specialist_probe.ProbeBudget(),
+    )
+
+    inspect.signature(sweep_case).bind(**seen)
 
 
 def test_load_sandbox_rejects_a_scratch_root_inside_the_canonical_tree(
@@ -1362,27 +1311,6 @@ async def test_a_refused_probe_costs_one_of_the_round_count(tmp_path, monkeypatc
     assert budget.attempts == 3
 
 
-@pytest.mark.asyncio
-async def test_an_unavailable_primitive_costs_one_of_the_round_count(tmp_path, monkeypatch) -> None:
-    _patch_primitive(monkeypatch, None)
-    sandbox = _sandbox(tmp_path, max_probes=1)
-    budget = specialist_probe.ProbeBudget()
-
-    first = await specialist_probe.probe_variant(
-        {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
-        sandbox=sandbox,
-        budget=budget,
-    )
-    second = await specialist_probe.probe_variant(
-        {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
-        sandbox=sandbox,
-        budget=budget,
-    )
-
-    assert first["status"] == specialist_probe.UNAVAILABLE
-    assert second["status"] == specialist_probe.BUDGET_EXHAUSTED
-
-
 def test_a_ledger_stops_growing_at_its_cap(tmp_path) -> None:
     """The parent reads this file back in full; refusals are unbounded in nothing."""
     ledger = tmp_path / "probe_ledger.jsonl"
@@ -1394,23 +1322,6 @@ def test_a_ledger_stops_growing_at_its_cap(tmp_path) -> None:
     assert len(lines) == specialist_probe.MAX_LEDGER_RECORDS + 1
     assert lines[-1]["label"] == "ledger-full"
     assert "dropped and unrecorded" in lines[-1]["detail"]
-
-
-def test_a_primitive_that_explodes_on_import_is_reported_unavailable(
-    monkeypatch,
-) -> None:
-    """Only ImportError was caught, so any other import-time error killed the server."""
-
-    def _explode():
-        raise RuntimeError("the ROCm runtime is not installed")
-
-    monkeypatch.setattr(specialist_probe, "resolve_probe_primitive", _explode)
-
-    primitive, unusable = specialist_probe.probe_primitive_status()
-
-    assert primitive is None
-    assert "could not be imported" in unusable
-    assert "the ROCm runtime is not installed" in unusable
 
 
 # --- round two: what the child inherits, and what the clocks really allow -----

@@ -202,15 +202,9 @@ class TestWithHipblasltFlag:
         _run(tmp_path)
         cmd = cap["cmd"]
         assert "--with-hipblaslt" in cmd
-        assert cmd[cmd.index("--libtype") + 1] == "hipblaslt,torch"
-
-    def test_fast_mode_asks_for_torch_so_the_run_has_a_baseline(self, tmp_path, monkeypatch):
         # torch is not a serious contender against hipblaslt; it is the kernel aiter falls back to when a shape is
         # untuned, so its profile row is the only baseline _parse_profile_defaults can read.
-        cap = _prep(tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
-        _run(tmp_path)
-        libtypes = cap["cmd"][cap["cmd"].index("--libtype") + 1].split(",")
-        assert "torch" in libtypes and "hipblaslt" in libtypes
+        assert cmd[cmd.index("--libtype") + 1] == "hipblaslt,torch"
 
     def test_thorough_mode_also_enables_hipblaslt(self, tmp_path, monkeypatch):
         # --libtype all is gated on --with-hipblaslt too: the `all` variants measured on MI355X left the large-M
@@ -270,8 +264,8 @@ class TestStaleArtifactsAreCleared:
 
         monkeypatch.setattr(sd, "probe_script", _permissive_surface)
         monkeypatch.setattr(sd, "resolve_aiter_root", lambda: _aiter_root(tmp_path))
-        monkeypatch.setattr(sd, "_compute_nk_shapes", lambda geometry, tp: list(_NK))
-        monkeypatch.setattr(sd, "_compute_m_values", lambda conc, thorough=False: list(_M))
+        monkeypatch.setattr(sd, "compute_dense_nk_shapes", lambda geometry, tp: list(_NK))
+        monkeypatch.setattr(sd, "compute_dense_m_values", lambda conc, thorough=False: list(_M))
         monkeypatch.setattr(sd, "run_subprocess", _writes_nothing)
 
         result = _run(tmp_path)
@@ -384,8 +378,8 @@ class TestDerivedShapesUnderACap:
         nk = [(4096, 4096), (4096, 14336), (14336, 4096), (6144, 4096)]
         ms = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
         _prep(tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
-        monkeypatch.setattr(sd, "_compute_nk_shapes", lambda geometry, tp: list(nk))
-        monkeypatch.setattr(sd, "_compute_m_values", lambda conc, thorough=False: list(ms))
+        monkeypatch.setattr(sd, "compute_dense_nk_shapes", lambda geometry, tp: list(nk))
+        monkeypatch.setattr(sd, "compute_dense_m_values", lambda conc, thorough=False: list(ms))
         monkeypatch.setenv(sd._MAX_SHAPES_ENV, "8")
 
         _run(tmp_path, timeout_s=1_800, thorough=True)
@@ -409,8 +403,8 @@ class TestDerivedShapesWithoutACap:
 
     def test_every_shape_is_listed(self, tmp_path, monkeypatch):
         _prep(tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
-        monkeypatch.setattr(sd, "_compute_nk_shapes", lambda geometry, tp: list(self.NK))
-        monkeypatch.setattr(sd, "_compute_m_values", lambda conc, thorough=False: list(self.MS))
+        monkeypatch.setattr(sd, "compute_dense_nk_shapes", lambda geometry, tp: list(self.NK))
+        monkeypatch.setattr(sd, "compute_dense_m_values", lambda conc, thorough=False: list(self.MS))
 
         _run(tmp_path, timeout_s=1_800, thorough=True)
 
@@ -491,16 +485,12 @@ class TestOuterTimeoutKeepsWhatWasWritten:
         assert res.to_dict()["missing_shapes"] == 1
         assert res.candidate is True  # still worth validating end to end
 
-    def test_timeout_with_no_rows_is_still_failed(self, tmp_path, monkeypatch):
-        _prep(tmp_path, monkeypatch, rc=124, tuned_rows=[])
+    @pytest.mark.parametrize("tuned_rows", [[], None], ids=["empty-csv", "no-csv"])
+    def test_timeout_with_no_rows_is_still_failed(self, tmp_path, monkeypatch, tuned_rows):
+        _prep(tmp_path, monkeypatch, rc=124, tuned_rows=tuned_rows)
         res = _run(tmp_path)
         assert res.status == "failed" and res.error_class == "timeout"
         assert res.expected_shapes == 2
-
-    def test_timeout_with_no_csv_at_all_is_failed(self, tmp_path, monkeypatch):
-        _prep(tmp_path, monkeypatch, rc=124, tuned_rows=None)
-        res = _run(tmp_path)
-        assert res.status == "failed" and res.error_class == "timeout"
 
 
 class TestHelpProbeGate:
@@ -579,10 +569,6 @@ class TestRejectedArgument:
         res = _run(tmp_path)
         assert res.status == "failed"
         assert res.error_class == "unsupported_argument"
-
-    def test_error_names_the_rejected_argument(self, tmp_path, monkeypatch):
-        _prep(tmp_path, monkeypatch, tuned_rows=None, rc=2, stderr=self._STDERR)
-        res = _run(tmp_path)
         assert "--with-hipblaslt" in res.error
         assert "gemm_a16w16_tune.py" in res.error
 

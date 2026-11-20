@@ -997,10 +997,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             task=task,
             done_payload=done_payload,
         )
-        # Relaxed FRAMEWORK rule: a config-lever deliverable (no source patch,
-        # but a proposal_set of serving flags / env vars) is routed through the
-        # same integrate_patch gate via its config_changes channel.
-        await self._coord.phase_framework.maybe_autosubmit_framework_config(
+        # An enablement round with no source patch still reaches integrate_patch, which reports what its boot did.
+        await self._coord.phase_framework.maybe_autosubmit_enablement_config(
             task=task,
             done_payload=done_payload,
         )

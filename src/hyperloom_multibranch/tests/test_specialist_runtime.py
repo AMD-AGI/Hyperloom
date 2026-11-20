@@ -43,8 +43,8 @@ from hyperloom_multibranch.specialist.runtime import (
     SpecialistRuntime,
     restart_notice,
 )
-from hyperloom_multibranch.specialist.scripted import ScriptedSession, ScriptedSetup
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, RecordingVerifier
+from hyperloom_multibranch.tests.scripted import ScriptedSession, ScriptedSetup
 from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.tests.fake_model import FakeToolboxConfig, NoiseModel
 

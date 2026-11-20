@@ -132,7 +132,7 @@ hash and `optimization_stack` is the authoritative ledger.
 |---|---|---|
 | strict `git apply` rejects, hunks only displaced | an earlier KEEP moved the patch's context or inserted at the same anchor | merged onto HEAD (`three_way` or `union_disjoint`), listed under `patches_merged`; benched and graded as usual |
 | strict `git apply` rejects, hunks overlap a kept change | an earlier KEEP changed the same lines | `apply_failed` with the merge steps in `error`, touched files restored to HEAD; `perf_framework` / `perf_explore` patches re-authored on the kept stack |
-| every patch is already in the tree | the change landed upstream or in an earlier round | `already_present`, with the reverse check per patch under `already_present`; framework KB row `already_present` when the candidate carries an upstream PR identity |
+| every patch is already in the tree | the change landed upstream or in an earlier round | `already_present`, with the reverse check per patch under `already_present` |
 | server fails to start | broken patch | `git checkout` + restart prior config, mark REVERT |
 | accuracy drops >0.05 absolute | semantic regression | REVERT, record into pitfalls KB |
 | throughput unchanged within keep_threshold | no-op patch | REVERT, log low-confidence specialist for the gap |

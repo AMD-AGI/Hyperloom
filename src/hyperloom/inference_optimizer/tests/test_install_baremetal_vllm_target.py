@@ -5,8 +5,14 @@
 
 from __future__ import annotations
 
+import contextlib
+import http.server
 import os
+import socket
 import subprocess
+import sys
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -287,7 +293,7 @@ def test_wheel_torch_index_resolution_failure_is_fatal(tmp_path: Path) -> None:
     body = f"""
 log() {{ :; }}; warn() {{ :; }}; die() {{ echo "$*" >&2; exit 1; }}
 resolve_python() {{ echo "{py}"; }}; route_vllm_install_method() {{ VLLM_INSTALL_METHOD=wheel; }}
-ensure_openmpi_runtime() {{ :; }}; assert_vllm_glibc_compatible() {{ :; }}
+ensure_openmpi_runtime() {{ :; }}; assert_vllm_glibc_compatible() {{ :; }}; assert_vllm_wheel_published() {{ :; }}
 verify_vllm_rocm() {{ return 0; }}; link_vllm_into_shared_bin() {{ :; }}
 FRAMEWORK_ENV=isolated; VLLM_VENV_ROOT="{venv}"; CHECK_ONLY=0; DRY_RUN=0
 VLLM_VERSION=0.29.0; VLLM_ROCM_VARIANT=rocm723; VLLM_ROCM_INDEX=https://example.invalid
@@ -296,3 +302,75 @@ install_vllm_framework
     result = _bash(("install_vllm_framework",), body)
     assert result.returncode != 0
     assert "resolve" in result.stderr.lower()
+
+
+class _WheelIndex(http.server.BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self.send_response(self.server.status)  # type: ignore[attr-defined]
+        self.end_headers()
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+@contextlib.contextmanager
+def _wheel_index(status: int) -> Iterator[str]:
+    server = http.server.HTTPServer(("127.0.0.1", 0), _WheelIndex)
+    server.status = status  # type: ignore[attr-defined]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+_GATE_STUBS = 'warn() { echo "WARN $*" >&2; }; die() { echo "$*" >&2; return 1; }'
+
+
+def test_wheel_gate_rejects_a_release_the_index_does_not_publish() -> None:
+    with _wheel_index(404) as index:
+        body = f'{_GATE_STUBS}\nVLLM_VERSION=0.34.0; VLLM_ROCM_VARIANT=rocm72; VLLM_ROCM_INDEX={index}\nassert_vllm_wheel_published "{sys.executable}"'
+        result = _bash(("assert_vllm_wheel_published",), body)
+    assert result.returncode != 0
+    assert "vllm==0.34.0+rocm72 is not published" in result.stderr
+    assert "VLLM_VERSION=0.33.0" in result.stderr
+
+
+def test_wheel_gate_accepts_a_published_release() -> None:
+    with _wheel_index(200) as index:
+        body = f'{_GATE_STUBS}\nVLLM_VERSION=0.33.0; VLLM_ROCM_VARIANT=rocm72; VLLM_ROCM_INDEX={index}\nassert_vllm_wheel_published "{sys.executable}"'
+        result = _bash(("assert_vllm_wheel_published",), body)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+
+
+def test_wheel_gate_does_not_block_on_an_unreachable_index() -> None:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    body = f'{_GATE_STUBS}\nVLLM_VERSION=0.33.0; VLLM_ROCM_VARIANT=rocm72; VLLM_ROCM_INDEX=http://127.0.0.1:{port}\nassert_vllm_wheel_published "{sys.executable}"'
+    result = _bash(("assert_vllm_wheel_published",), body)
+    assert result.returncode == 0
+    assert "could not check" in result.stderr
+
+
+@pytest.mark.parametrize("mode", ["dry", "check", "install"])
+def test_unpublished_wheel_stops_before_any_change(tmp_path: Path, mode: str) -> None:
+    dry, check = (1, 0) if mode == "dry" else (0, 1) if mode == "check" else (0, 0)
+    venv = tmp_path / "venv"
+    with _wheel_index(404) as index:
+        body = f"""
+log() {{ :; }}; warn() {{ :; }}; die() {{ echo "$*" >&2; exit 1; }}
+resolve_python() {{ echo "{sys.executable}"; }}; route_vllm_install_method() {{ VLLM_INSTALL_METHOD=wheel; }}
+ensure_openmpi_runtime() {{ echo MUTATION; }}; assert_vllm_glibc_compatible() {{ :; }}
+FRAMEWORK_ENV=isolated; VLLM_VENV_ROOT="{venv}"; CHECK_ONLY={check}; DRY_RUN={dry}
+VLLM_VERSION=0.34.0; VLLM_ROCM_VARIANT=rocm72; VLLM_ROCM_INDEX={index}
+install_vllm_framework
+"""
+        result = _bash(("install_vllm_framework", "assert_vllm_wheel_published"), body)
+    assert result.returncode != 0
+    assert "is not published" in result.stderr
+    assert "MUTATION" not in result.stdout
+    assert not venv.exists()

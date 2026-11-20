@@ -18,7 +18,6 @@ from ..actions.executors._kernel_agent_tool import (
 )
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ._integrate_payload import _integrate_mode, _is_paired_gemm_measurement, _preapplied_snapshot_payload
-from ._source_import import _SourceImport
 from .keep_thresholds import STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
 from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
 
@@ -103,7 +102,6 @@ class _IntegrateVerdict(NamedTuple):
     performance: Any
     cleanup: dict[str, Any]
     accuracy_gate: dict[str, Any] | None
-    source_import: _SourceImport
     rebuild_check: HandlerResult
     server_args: str
 
@@ -243,7 +241,6 @@ def _integrate_result(verdict: _IntegrateVerdict) -> HandlerResult:
 def _explain_integrate_decision(result: HandlerResult, verdict: _IntegrateVerdict) -> None:
     performance = verdict.performance
     graded = performance.graded
-    source_import = verdict.source_import
     refusal = graded.veto_reason or graded.refused_by
     if refusal:
         result["decision_reason"] = refusal
@@ -252,12 +249,6 @@ def _explain_integrate_decision(result: HandlerResult, verdict: _IntegrateVerdic
         result["decision_reason"] = "stack_positive_increment"
         result["stack_incremental_gain_pct"] = performance.stack_incremental_gain_pct
         result["stack_incremental_keep_threshold_pct"] = STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
-    if source_import.confirmed is not None:
-        result["source_import_confirmed"] = source_import.confirmed
-    if len(source_import.evidence) > 1:
-        result["source_import_evidence"] = source_import.evidence
-    if source_import.downgraded:
-        result["decision_reason"] = "source_not_confirmed_imported"
     gate = verdict.accuracy_gate
     if gate is not None:
         result["accuracy"] = gate["accuracy"]

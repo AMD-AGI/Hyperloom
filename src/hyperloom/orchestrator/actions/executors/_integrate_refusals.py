@@ -9,9 +9,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.coerce import to_float, to_str_list
+from hyperloom_common.coerce import to_str_list
 from hyperloom.common.agentx_objective import AgentXObjective
-from hyperloom.common.gain_math import incremental_gain_pct
 from hyperloom.common.perf_metric import (
     VERDICT_KEEP,
     constraint_veto_reason,
@@ -44,19 +43,6 @@ def _derive_lane(params: dict[str, Any]) -> str:
     if params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"):
         return "perf_framework"
     return "perf_explore"
-
-
-def _accuracy_delta_pct(measured: Any, baseline: Any) -> float | None:
-    """Percent accuracy change of ``measured`` against ``baseline``.
-
-    Returns ``None`` when either side is missing or the baseline is not
-    positive, so callers fall back to their existing value.
-    """
-    m = to_float(measured)
-    b = to_float(baseline)
-    if m is None or b is None:
-        return None
-    return incremental_gain_pct(m, b)
 
 
 def _measured_against(params: Mapping[str, Any], *, base_tput: float) -> dict[str, Any]:
