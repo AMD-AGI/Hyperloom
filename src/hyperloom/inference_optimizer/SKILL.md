@@ -839,7 +839,9 @@ python3 -m hyperloom optimize \
   truthy (`1`/`true`/`yes`/`on`). Without it `--quantize` and
   `--quantize-scheme` are **skipped**: the run prints a `QUANTIZATION_SKIPPED:`
   line, sets `$HYPERLOOM_QUANTIZATION_SKIPPED`, and continues on the
-  un-quantized model. Export it before launch when the user asked to quantize.
+  un-quantized model. The frontend or operator sets the switch on the sandbox;
+  do not export it yourself. When a run is skipped for it, report the line and
+  that setting `HYPERLOOM_QUANTIZE_ENABLED=1` enables quantization.
 - Behavior: one-shot, **never runs on a resume**. On a failed/unusable
   quantization the run **hard-stops (`SystemExit(4)`)** — it never silently
   optimizes the un-quantized source after an explicit `--quantize`.
