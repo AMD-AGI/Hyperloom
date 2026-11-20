@@ -396,12 +396,6 @@ class Config:
     @classmethod
     def from_env(cls, **overrides) -> Config:
         """Load config from environment variables with optional overrides."""
-        knowledge_config = overrides.get("knowledge_config")
-        if knowledge_config is None:
-            knowledge_config = KnowledgeConfig.from_env(
-                mode=overrides.get("knowledge_store_mode"),
-                local_root=overrides.get("knowledge_local_root"),
-            )
         # The platform's harness selection is the next rung below Forge's own, so a
         # run that names a harness once gets it in every Forge session too.
         platform_backend = llm_config.explicit_agent_backend()
@@ -447,7 +441,7 @@ class Config:
             else _env_json_object("FORGE_AGENT_OPTIONS_JSON"),
             max_turns=int(overrides.get("max_turns", 500)),
             **_specialist_probe_overrides(overrides),
-            knowledge_config=knowledge_config,
+            knowledge_config=overrides.get("knowledge_config"),
             include_mori_kb=overrides.get("include_mori_kb"),
             defer_knowledge_maps=overrides.get("defer_knowledge_maps"),
         )

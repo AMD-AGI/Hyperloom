@@ -11,7 +11,7 @@ import os
 import shutil
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -110,26 +110,6 @@ def _normalize_agent_task_payload(payload: dict) -> dict:
     return normalized
 
 
-def _repo_head(repo_root: Path) -> str:
-    """Pin the repository's live HEAD, refusing anything but its top level.
-
-    A refusal here names the path to use rather than only the rule, because the
-    agent revises from the reason alone: it has no shell to resolve a top level
-    with, and the answer is already in hand by the time the rule can fail.
-    """
-    try:
-        top = Path(git("rev-parse", "--show-toplevel", cwd=repo_root).stdout.strip()).resolve()
-        head = git("rev-parse", "HEAD", cwd=repo_root).stdout.strip().lower()
-    except GitError as error:
-        raise ValueError(
-            f"repo_root is not a Git checkout: {repo_root}: {error}. "
-            "Pass the Git top-level of the repository that holds kernel_path."
-        ) from error
-    if top != repo_root.resolve():
-        raise ValueError(f"repo_root must be the Git top-level directory: {repo_root} sits inside {top}; use {top}")
-    return head
-
-
 def _validate_task_sources_at_base(task: KernelRewriteTask) -> None:
     """Require every declared source to exist in this repository at the base.
 
@@ -209,11 +189,23 @@ def _install_task(layout: ControllerLayout, destination: Path, payload: dict, dr
         shutil.rmtree(temporary, ignore_errors=True)
 
 
+def _declared_repository(repo_root_raw: object, repositories: Collection[Path]) -> Path:
+    """The draft's ``repo_root``, which must be one of the repositories the host declared and deploys to the server."""
+    if not isinstance(repo_root_raw, str) or not Path(repo_root_raw).expanduser().is_absolute():
+        raise ValueError("repo_root must be an absolute path")
+    repo_root = Path(repo_root_raw).expanduser().resolve()
+    if repo_root not in repositories:
+        declared = ", ".join(str(path) for path in repositories)
+        raise ValueError(f"repo_root {repo_root} is not one of the host's source repositories; use one of: {declared}")
+    return repo_root
+
+
 def publish_staged_task(
     layout: ControllerLayout,
     staged_dir: str | Path,
+    repositories: Collection[Path],
 ) -> TaskPublicationResult:
-    """Validate one staged task, pin its repo HEAD, and publish it atomically."""
+    """Validate one staged task against the host's ``repositories``, pin its repo HEAD, and publish it atomically."""
     unresolved_source = Path(staged_dir).expanduser()
     if unresolved_source.is_symlink():
         return TaskPublicationResult(
@@ -235,10 +227,8 @@ def publish_staged_task(
         if not isinstance(payload, dict):
             raise ValueError("task.json must contain a JSON object")
         payload = _normalize_agent_task_payload(payload)
-        repo_root_raw = payload.get("repo_root")
-        if not isinstance(repo_root_raw, str) or not Path(repo_root_raw).expanduser().is_absolute():
-            raise ValueError("repo_root must be an absolute path")
-        payload["base_commit"] = _repo_head(Path(repo_root_raw).expanduser().resolve())
+        repo_root = _declared_repository(payload.get("repo_root"), repositories)
+        payload["base_commit"] = git("rev-parse", "HEAD", cwd=repo_root).stdout.strip().lower()
         payload["driver_path"] = "driver.py"
         task = parse_task_payload(
             payload,
@@ -333,6 +323,7 @@ def pending_rejections(staging_root: Path) -> dict[str, str]:
 
 def publish_complete_staged_tasks(
     layout: ControllerLayout,
+    repositories: Collection[Path],
     *,
     quiescent_sec: float = PUBLISH_QUIESCENT_SEC,
     now: Callable[[], float] = time.time,
@@ -362,7 +353,7 @@ def publish_complete_staged_tasks(
             if refused is not None:
                 refused[entry.name] = newest
             continue
-        result = publish_staged_task(layout, entry)
+        result = publish_staged_task(layout, entry, repositories)
         if result.published:
             log.info("published operator task %s from %s", result.operator_id, entry.name)
         else:

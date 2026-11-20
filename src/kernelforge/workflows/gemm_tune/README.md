@@ -260,9 +260,12 @@ output-dir/
     │   ├── chunks/                      # Each chunk's own input and output CSVs
     │   └── tune.<i>.log                 # Chunk i's stdout/stderr
     └── vllm_moe_triton/
-        ├── tuned_configs/       # VLLM_TUNED_CONFIG_FOLDER content
-        │   └── E=128,N=768,...,dtype=bfloat16.json
-        ├── sweep_results.json
+        ├── tuned_configs/           # VLLM_TUNED_CONFIG_FOLDER content
+        │   └── E=<experts>,N=<moe_intermediate/tp>,device_name=<vLLM device name>.json
+        │                            # named by the serving vLLM's get_config_file_name (BF16: no dtype part),
+        │                            # holding vllm_config_table.json
+        ├── sweep_results.json       # Winners only: the batch sizes a candidate beat vLLM's default at
+        ├── vllm_config_table.json   # Every timed batch size: its winner, else vLLM's default config
         └── tune.log
 ```
 

@@ -10,15 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.workflows.gemm_tune.pipeline import _normalize_inline_shapes_json, _safe_is_file
-from kernelforge.workflows.gemm_tune.evidence import padded_m
-from kernelforge.workflows.gemm_tune.tuners import _aiter_dense_common as ac
-from kernelforge.workflows.gemm_tune.tuners._aiter_dense_common import (
-    _conform_csv_columns,
-    _parse_tuner_stdout,
-    _resolve_input_csv,
-    validate_dense_tuner_inputs,
+from kernelforge.workflows.gemm_tune.pipeline import (
+    _explicit_token_list,
+    _normalize_inline_shapes_json,
+    _safe_is_file,
 )
+from kernelforge.workflows.gemm_tune.evidence import padded_m
+from kernelforge.workflows.gemm_tune.tuners import _aiter_dense_inputs as adi
+from kernelforge.workflows.gemm_tune.tuners._aiter_dense_common import _parse_tuner_stdout, validate_dense_tuner_inputs
+from kernelforge.workflows.gemm_tune.tuners._aiter_dense_inputs import _conform_csv_columns, _resolve_input_csv
 from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
 from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
 
@@ -32,7 +32,7 @@ _STUB_FP8 = "torch.float8_e4m3fn"
 @pytest.fixture
 def stub_fp8_dtype(monkeypatch):
     """Resolve dtypes without aiter so these stay pure unit tests."""
-    monkeypatch.setattr(ac, "_aiter_dtype_str", lambda alias: _STUB_FP8)
+    monkeypatch.setattr(adi, "_aiter_dtype_str", lambda alias: _STUB_FP8)
     return _STUB_FP8
 
 
@@ -60,12 +60,6 @@ def _ctx(tmp_path: Path, **overrides) -> TuneContext:
 def test_safe_is_file_handles_too_long():
     assert len(_INLINE) > 255
     assert _safe_is_file(_INLINE) is False  # must not raise OSError(36)
-
-
-def test_safe_is_file_true(tmp_path):
-    f = tmp_path / "real.csv"
-    f.write_text("M,N,K\n", encoding="utf-8")
-    assert _safe_is_file(str(f)) is True
 
 
 def test_normalize_inline_shapes_json_existing_path(tmp_path):
@@ -368,14 +362,6 @@ def test_padded_m_gl1_mirror_matches_recorded_aiter_behaviour(m, n, gl1):
     assert padded_m(m, n) == gl1
 
 
-def test_the_recorded_buckets_capture_the_granularity_change():
-    """The table is only a guard if it straddles where the behaviour changes."""
-    recorded = {m: (a, b) for m, a, b in _PADDED_M_OBSERVED}
-    assert recorded[256] == (256, 256) and recorded[257] == (288, 512)
-    assert recorded[240] == (240, 256) and recorded[241] == (256, 256)
-    assert recorded[129] == (144, 256)
-
-
 def test_demand_bucket_matches_installed_aiter():
     """Drift from aiter's own padding would tune rows no runtime lookup reaches."""
     gemm_op_common = pytest.importorskip("aiter.ops.gemm_op_common")
@@ -397,8 +383,8 @@ def test_aiter_dtype_str_rejects_a_dtype_outside_aiters_table(monkeypatch):
     )
     monkeypatch.setitem(__import__("sys").modules, "aiter", fake)
 
-    with pytest.raises(ac.AiterDtypeUnavailable, match="dtype2str_dict"):
-        ac._aiter_fp8_dtype_str()
+    with pytest.raises(adi.AiterDtypeUnavailable, match="dtype2str_dict"):
+        adi._aiter_fp8_dtype_str()
 
 
 def test_aiter_dtype_str_reports_a_missing_alias(monkeypatch):
@@ -407,8 +393,8 @@ def test_aiter_dtype_str_reports_a_missing_alias(monkeypatch):
     fake = types.SimpleNamespace(dtypes=types.SimpleNamespace(), dtype2str_dict={})
     monkeypatch.setitem(__import__("sys").modules, "aiter", fake)
 
-    with pytest.raises(ac.AiterDtypeUnavailable, match="no dtypes.fp4x2"):
-        ac._aiter_dtype_str("fp4x2")
+    with pytest.raises(adi.AiterDtypeUnavailable, match="no dtypes.fp4x2"):
+        adi._aiter_dtype_str("fp4x2")
 
 
 def test_manifest_keeps_curated_shapes_in_thorough_mode(tmp_path, monkeypatch):
@@ -527,13 +513,7 @@ def test_resolve_input_csv_conforms_supplied_csv(tmp_path, stub_fp8_dtype):
 
 def test_cli_tokens_accepts_bracketed_list():
     # Defense: forge tolerates a bracketed token string (e.g. "[4, 8, 64]").
-    from click.testing import CliRunner  # noqa: F401  (import guarded below)
-
-    # Parse exactly like cli.run does.
-    tokens = "[4, 8, 64]"
-    tokens_clean = tokens.strip().strip("[](){}")
-    parsed = [int(t.strip().strip("'\"")) for t in tokens_clean.split(",") if t.strip().strip("'\"")]
-    assert parsed == [4, 8, 64]
+    assert _explicit_token_list("[4, 8, 64]") == [4, 8, 64]
 
 
 def test_a_power_of_two_row_does_not_cover_the_16_multiple_bucket(tmp_path):

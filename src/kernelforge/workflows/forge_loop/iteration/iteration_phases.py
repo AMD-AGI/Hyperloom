@@ -31,7 +31,7 @@ from kernelforge.workflows.forge_loop.campaign.run_state import (
     make_event,
 )
 from kernelforge.workflows.forge_loop.iteration.fanout import lane_rationale
-from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationInfrastructureError
+from kernelforge.workflows.forge_loop.roles.orchestration_agent import OrchestrationInfrastructureError
 from kernelforge.utils.process_reaping import processes_under
 
 log = logging.getLogger(__name__)

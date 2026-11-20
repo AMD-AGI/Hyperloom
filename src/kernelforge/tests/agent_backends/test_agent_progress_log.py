@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.agent_backends import claude as claude_backend
-from kernelforge.workflows.forge_loop.preparation.task_preparer import summarize_agent_progress
+from kernelforge.workflows.forge_loop.preparation.task_preparer_prompts import summarize_agent_progress
 
 
 class _TextBlock:

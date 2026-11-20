@@ -21,7 +21,7 @@ from hyperloom.orchestrator.specialists import patch_safety as ps
 from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSubprocessConfig, SpecialistSubprocessDispatcher
 from hyperloom.orchestrator.specialists.worktrees import PinnedGit, _setup_worktree
-from hyperloom.orchestrator.specialists.tree_snapshot import snapshot_tree
+from hyperloom.inference_optimizer.tree_snapshot import snapshot_tree
 
 
 class _CP:

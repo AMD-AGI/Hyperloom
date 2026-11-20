@@ -21,6 +21,7 @@ ARG_REFUSED = "error: unrecognized arguments: --enable-foo"
 
 
 async def _gate(tmp_path: Path, bench_result: dict, *, switched: bool, patched: bool = True) -> tuple[dict, list[str]]:
+    """Gate one bench; also returns the parity legs it spent."""
     state = SharedState(baseline_tput=314.0, current_best={"tput": 314.0})
     attempt = IntegrateAttempt(
         task_id="t-int",
@@ -31,17 +32,12 @@ async def _gate(tmp_path: Path, bench_result: dict, *, switched: bool, patched: 
         applied=[tmp_path / "001.patch"] if patched else [],
     )
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    lessons: list[str] = []
     legs: list[str] = []
-
-    async def _record(lesson, **_kwargs):
-        lessons.append(lesson.outcome)
 
     async def _parity(*_args, **_kwargs):
         legs.append("parity")
         return {"ran": True, "ok": False, "inconclusive": True, "reason": "parity leg returned no throughput"}
 
-    executor._maybe_write_framework_kb_record = _record
     executor._switch_off_parity = _parity
     out = await executor._gate_perf(
         attempt=attempt,
@@ -49,12 +45,12 @@ async def _gate(tmp_path: Path, bench_result: dict, *, switched: bool, patched: 
         bench_result=bench_result,
         gate_evidence={"accuracy_pass": None},
     )
-    return out, lessons + legs
+    return out, legs
 
 
 @pytest.mark.asyncio
 async def test_a_bench_whose_server_port_was_taken_is_unmeasured_not_reverted(tmp_path):
-    out, recorded = await _gate(
+    out, legs = await _gate(
         tmp_path,
         {
             "status": "failed",
@@ -71,12 +67,12 @@ async def test_a_bench_whose_server_port_was_taken_is_unmeasured_not_reverted(tm
         "environment",
         "round_nonzero_invalid_measurement",
     )
-    assert recorded == []
+    assert legs == []
 
 
 @pytest.mark.asyncio
 async def test_a_bench_the_candidates_arguments_broke_is_still_reverted(tmp_path):
-    out, recorded = await _gate(
+    out, _legs = await _gate(
         tmp_path,
         {
             "status": "failed",
@@ -88,7 +84,6 @@ async def test_a_bench_the_candidates_arguments_broke_is_still_reverted(tmp_path
     )
 
     assert out["status"] == "reverted"
-    assert recorded == ["reverted_smoke_fail"]
 
 
 UNIMPORTABLE = {
@@ -101,15 +96,13 @@ UNIMPORTABLE = {
 
 @pytest.mark.asyncio
 async def test_a_framework_the_attempts_patch_left_unimportable_is_reverted(tmp_path):
-    out, recorded = await _gate(tmp_path, UNIMPORTABLE, switched=False)
+    out, _legs = await _gate(tmp_path, UNIMPORTABLE, switched=False)
 
     assert out["status"] == "reverted"
-    assert recorded == ["reverted_smoke_fail"]
 
 
 @pytest.mark.asyncio
 async def test_an_unimportable_framework_an_attempt_without_a_patch_left_alone_is_unmeasured(tmp_path):
-    out, recorded = await _gate(tmp_path, UNIMPORTABLE, switched=False, patched=False)
+    out, _legs = await _gate(tmp_path, UNIMPORTABLE, switched=False, patched=False)
 
     assert (out["error_class"], out["failure_attribution"]) == ("bench_unmeasured", "environment")
-    assert recorded == []

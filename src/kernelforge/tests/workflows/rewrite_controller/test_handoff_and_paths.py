@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from kernelforge.workflows.rewrite_controller import (
     read_handoff,
 )
 from kernelforge.workflows.rewrite_controller.contracts import (
+    REPOSITORIES_FILENAME,
     SERVING_CONTEXT_FILENAME,
     TRACE_EVIDENCE_FILENAME,
     WORKLOAD_FILENAME,
@@ -23,14 +25,31 @@ from kernelforge.workflows.rewrite_controller.paths import (
     safe_relative_path,
 )
 
+_DOCUMENTS = (WORKLOAD_FILENAME, SERVING_CONTEXT_FILENAME, TRACE_EVIDENCE_FILENAME)
 
-def test_read_handoff_returns_all_markdown_documents(tmp_path: Path) -> None:
+
+def _repositories(*roots: object) -> str:
+    return json.dumps({"repositories": [str(root) for root in roots]})
+
+
+def _handoff(tmp_path: Path, repositories: str) -> Path:
     handoff = tmp_path / "handoff"
     handoff.mkdir()
+    for name in _DOCUMENTS:
+        (handoff / name).write_text("", encoding="utf-8")
+    (handoff / REPOSITORIES_FILENAME).write_text(repositories, encoding="utf-8")
+    return handoff
+
+
+def test_read_handoff_returns_all_markdown_documents_and_the_declared_repositories(tmp_path: Path) -> None:
+    handoff = tmp_path / "handoff"
+    handoff.mkdir()
+    repository = tmp_path / "framework"
     documents = {
         WORKLOAD_FILENAME: "# Workload\n",
         SERVING_CONTEXT_FILENAME: "# Serving Context\n",
         TRACE_EVIDENCE_FILENAME: "# Trace Evidence\n",
+        REPOSITORIES_FILENAME: _repositories(repository),
     }
     for name, text in documents.items():
         (handoff / name).write_text(text, encoding="utf-8")
@@ -41,21 +60,27 @@ def test_read_handoff_returns_all_markdown_documents(tmp_path: Path) -> None:
     assert bundle.workload == documents[WORKLOAD_FILENAME]
     assert bundle.serving_context == documents[SERVING_CONTEXT_FILENAME]
     assert bundle.trace_evidence == documents[TRACE_EVIDENCE_FILENAME]
+    assert bundle.repositories == (repository.resolve(),)
 
 
-@pytest.mark.parametrize(
-    "missing",
-    [WORKLOAD_FILENAME, SERVING_CONTEXT_FILENAME, TRACE_EVIDENCE_FILENAME],
-)
+@pytest.mark.parametrize("missing", [*_DOCUMENTS, REPOSITORIES_FILENAME])
 def test_read_handoff_rejects_a_missing_required_document(tmp_path: Path, missing: str) -> None:
     handoff = tmp_path / "handoff"
     handoff.mkdir()
-    for name in (WORKLOAD_FILENAME, SERVING_CONTEXT_FILENAME, TRACE_EVIDENCE_FILENAME):
+    for name in _DOCUMENTS:
         if name != missing:
             (handoff / name).write_text("", encoding="utf-8")
+    if missing != REPOSITORIES_FILENAME:
+        (handoff / REPOSITORIES_FILENAME).write_text(_repositories(tmp_path), encoding="utf-8")
 
     with pytest.raises(HandoffContractError, match=missing):
         read_handoff(handoff)
+
+
+@pytest.mark.parametrize("entries", [[], ["relative/repo"], [7]])
+def test_repositories_must_list_at_least_one_absolute_path(tmp_path: Path, entries: list) -> None:
+    with pytest.raises(HandoffContractError, match=REPOSITORIES_FILENAME):
+        read_handoff(_handoff(tmp_path, json.dumps({"repositories": entries})))
 
 
 def test_controller_layout_anchors_all_paths_under_output_dir(

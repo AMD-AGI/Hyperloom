@@ -231,9 +231,10 @@ value.
       credential/runtime configuration or eligible ROCm hotfixes.
    2. `sglang`: install SGLang ROCm framework components (shared with the host torch).
    3. `vllm (isolated)`: install vLLM into a dedicated venv, leaving the host
-      torch/SGLang stack untouched. On ROCm 7.2.x the ROCm wheel brings its own
-      torch; on ROCm 10 vLLM is built from source in a venv that reuses the host
-      ROCm torch.
+      torch/SGLang stack untouched. On ROCm 10 vLLM is built from source in a
+      venv that reuses the host ROCm torch. On ROCm 7.2.x the ROCm wheel brings
+      its own torch, but vLLM 0.34.0 publishes no ROCm 7.2 wheel, so the default
+      install stops there.
    4. `atom`: install ATOM and its AITER dependency from source (shared with the
       host torch). The ATOM commit defaults to the one `rocm/atom-dev:v0.1.7-rc0`
       was built from.
@@ -254,10 +255,11 @@ value.
 
 8. Only when the user chose `baremetal` **and** `vllm (isolated)` in Step 7,
    briefly note that on ROCm 7.2.x the installer enforces the vLLM 0.28.0+
-   wheel's glibc floor (glibc >= 2.39); the ROCm 10 source build has no such
-   gate. If setup later fails with that error, explain it in plain
-   language and point the user to Docker mode or a pre-0.28 override — do not
-   implement a second version gate here.
+   wheel's glibc floor (glibc >= 2.39) and refuses the default vLLM 0.34.0
+   because upstream publishes no ROCm 7.2 wheel for it; the ROCm 10 source build
+   has neither gate. If setup later fails with either error, explain it in plain
+   language and point the user to Docker mode, a ROCm 10 host, or the matching
+   override below — do not implement a second version gate here.
 
 ## Step 3: Write `.env`
 
@@ -429,6 +431,16 @@ that failed the glibc check:
 export REPO_ROOT="$(pwd -P)"
 export VLLM_VERSION=0.27.1
 export VLLM_ROCM_VARIANT=rocm723
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework vllm --framework-env isolated --yes
+```
+
+Older-wheel path only when the user explicitly chooses vLLM 0.33.0 on a ROCm 7.2.x
+host that failed the wheel check:
+
+```bash
+export REPO_ROOT="$(pwd -P)"
+export VLLM_VERSION=0.33.0
+export VLLM_ROCM_VARIANT=rocm72
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework vllm --framework-env isolated --yes
 ```
 

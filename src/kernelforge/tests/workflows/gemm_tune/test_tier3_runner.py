@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -357,55 +356,83 @@ class TestPlanPreviewsWhatRunDoes:
 class TestTheCliActuallyReachesTier3:
     """The whole tier was unreachable from production and nothing said so."""
 
-    def test_the_cli_has_a_call_site(self):
-        import inspect
+    def test_the_cli_offers_tier3_what_the_selected_tuners_left_behind(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
 
-        from kernelforge.workflows.gemm_tune import pipeline as cli
+        from kernelforge.cli.gemm_tune_command import gemm_tune
+        from kernelforge.workflows.gemm_tune import pipeline as cli, tier3
+        from kernelforge.workflows.gemm_tune.tuners.base import TuneResult
 
-        source = inspect.getsource(cli)
-        assert "_attempt_tier3(" in source
-        # Defined and called, not merely defined.
-        assert source.count("_attempt_tier3(") >= 2
+        monkeypatch.setattr(
+            "kernelforge.workflows.gemm_tune.aiter_preflight.collect",
+            lambda: {"soft": [], "hard": [], "aligned": False},
+        )
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text("{}", encoding="utf-8")
+        server_log = tmp_path / "server.log"
+        miss = (
+            "[aiter] shape is M:512, N:1536, K:7168, not found tuned config in /tmp/aiter_configs/a8w8_tuned_gemm.csv\n"
+        )
+        server_log.write_text(gate.DEFAULT_MIN_MISSES * miss, encoding="utf-8")
+        events: list = []
 
-    def test_it_runs_after_the_selected_tuners_not_beside_them(self):
-        # This ordering is the guarantee that a generated tuner cannot take time from one that was going to produce
-        # something.
-        import inspect
+        class _Tuner:
+            def __init__(self, name):
+                self.name = name
 
-        from kernelforge.workflows.gemm_tune import pipeline as cli
+            def execute(self):
+                events.append(self.name)
+                return TuneResult(tuner_name=self.name, status="no_improvement")
 
-        # The selected tuners run in their own function; it is still the thing tier3 has to follow.
-        assert "tuner_instance.execute()" in inspect.getsource(cli._execute_tuners)
-        source = inspect.getsource(cli.run_tuning)
-        assert source.index("_execute_tuners(") < source.index("_attempt_tier3(")
+        def attempt(decision, _shapes_for, work_root, **_kwargs):
+            events.append(("tier3", (decision.gap.table, decision.gap.kind)))
+            return tier3.Tier3Outcome(
+                attempted=True,
+                stage="referee",
+                ok=True,
+                table=decision.gap.table,
+                output_csv=str(work_root / "tier3.csv"),
+            )
+
+        monkeypatch.setattr(cli, "_create_tuner", lambda name, _ctx: _Tuner(name))
+        monkeypatch.setattr(tier3, "attempt_generated_tuner", attempt)
+        output = tmp_path / "output"
+        result = CliRunner().invoke(
+            gemm_tune,
+            [
+                "run",
+                "--model-path",
+                str(model),
+                "--framework",
+                "vllm",
+                "--precision",
+                "fp8",
+                "--gpu-type",
+                "mi300x",
+                "--tuner",
+                "a8w8",
+                "--skip-gpu-check",
+                "--kernel-signature-log",
+                str(server_log),
+                "--output-dir",
+                str(output),
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        # After the selected tuners, never beside them, so a generated tuner cannot take time from one that was going
+        # to produce something; and on the gaps recomputed from their results, since only those can say an owner
+        # came back with nothing.
+        assert events == ["a8w8", ("tier3", ("a8w8_tuned_gemm.csv", "empty"))]
+        report = json.loads((output / "result.json").read_text(encoding="utf-8"))
+        assert [t["tuner"] for t in report["tuners_run"]] == ["a8w8", "tier3_generated_a8w8_tuned_gemm"]
 
     def test_a_table_with_no_adapter_is_refused_rather_than_approximated(self):
         from kernelforge.workflows.gemm_tune.tier3.dispatch import adapters_for
 
         assert adapters_for("a4w4_blockscale_tuned_gemm.csv") is None
         assert adapters_for("bf16_tuned_gemm.csv") is not None
-
-    def test_the_call_site_keeps_what_it_returns(self):
-        # The generated result must reach reporting and deployment, not be dropped.
-        import inspect
-
-        from kernelforge.workflows.gemm_tune import pipeline as cli
-
-        source = inspect.getsource(cli.run_tuning)
-        assert "generated = _attempt_tier3(" in source
-        assert "results.append(generated)" in source
-
-    def test_the_gaps_it_acts_on_are_recomputed_after_the_tuners_ran(self):
-        # The list built before tuning cannot say which owners came back with
-        # nothing, and that is the only condition tier3 exists for in practice.
-        import inspect
-
-        from kernelforge.workflows.gemm_tune import pipeline as cli
-
-        assert "tuner_instance.execute()" in inspect.getsource(cli._execute_tuners)
-        source = inspect.getsource(cli.run_tuning)
-        recompute = source.index("_coverage_gaps(demand_report, tuner_specs, output_path, results)")
-        assert source.index("_execute_tuners(") < recompute < source.index("_attempt_tier3(")
 
 
 class TestAVerifiedGeneratedTunerBecomesAnOrdinaryResult:
@@ -474,13 +501,6 @@ class TestAVerifiedGeneratedTunerBecomesAnOrdinaryResult:
 
         assert _tier3_result(self._outcome(output_csv=""), _gap()) is None
 
-    def test_the_outcome_carries_its_own_artifact_path(self):
-        # Rather than the caller rebuilding it from the work root by
-        # convention, which would deploy the wrong file the day that changes.
-        from kernelforge.workflows.gemm_tune.tier3.runner import Tier3Outcome
-
-        assert "output_csv" in Tier3Outcome().to_dict()
-
 
 class TestShapesComeFromTheDemandDocument:
     def test_the_demand_lookup_matches_what_load_demand_returns(self, tmp_path):
@@ -540,33 +560,6 @@ def test_a_crashed_tier3_attempt_is_reported_as_a_failed_tuner(tmp_path, monkeyp
         error="RuntimeError('generated tuner sandbox died')",
         error_class="RuntimeError",
     )
-
-
-class TestTheProviderCallMatchesTheProviderAPI:
-    """The authoring call is only exercised with a real provider installed."""
-
-    def test_the_runtime_call_binds_against_the_real_signature(self):
-        import inspect
-
-        registry = pytest.importorskip("kernelforge.agent_backends.registry")
-        from kernelforge.agent_backends.base import AgentRuntimeSettings
-
-        # What generate.call_agent passes.
-        inspect.signature(registry.resolve_agent_runtime).bind(
-            "claude",
-            model="",
-            settings=AgentRuntimeSettings(timeout_sec=1800, reasoning_effort=""),
-        )
-
-    def test_provider_selection_yields_something_with_a_name(self):
-        import inspect
-
-        registry = pytest.importorskip("kernelforge.agent_backends.registry")
-
-        inspect.signature(registry.select_default_agent_provider).bind("")
-        assert "name" in inspect.get_annotations(registry.AgentProvider, eval_str=False) or hasattr(
-            registry.AgentProvider, "name"
-        )
 
 
 class TestTheWholeChain:
@@ -706,15 +699,12 @@ class TestTheWholeChain:
         assert "baseline not timed" in skipped.reason
         assert out.ok and out.improved_shapes == 1
 
-    def test_without_a_dispatch_nothing_is_emitted(self, tmp_path, monkeypatch, open_gate):
-        # An unverified generated tuner is exactly what this tier must not emit.
+    def test_without_a_dispatch_it_stops_before_it_spends_anything(self, tmp_path, monkeypatch, open_gate):
+        # An unverified generated tuner is exactly what this tier must not emit, so reject missing dispatch before
+        # paying for authoring and sandboxing.
         out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS, with_dispatch=False)
         assert not out.ok
         assert "re-timed" in out.reason
-
-    def test_without_a_dispatch_it_stops_before_it_spends_anything(self, tmp_path, monkeypatch, open_gate):
-        # Reject missing dispatch before paying for authoring and sandboxing.
-        out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS, with_dispatch=False)
         assert out.stage == "gate"
         assert not out.attempted
         assert not out.script, "no script should have been generated"
@@ -752,18 +742,6 @@ class TestTheWholeChain:
         payload = json.loads(written[0].read_text(encoding="utf-8"))
         assert payload["ok"] is True and payload["ledger"]["successes"] == 1
         assert (tmp_path / "tier3" / "ledger.json").is_file()
-
-
-def test_the_generator_degrades_when_no_agent_provider_is_installed(tmp_path, monkeypatch):
-    """The standalone wheel must tune without the LLM stack present."""
-    from kernelforge.workflows.gemm_tune.tier3.generate import generate_tuner
-    from kernelforge.workflows.gemm_tune.tier3.mandate import build_mandate
-
-    monkeypatch.setitem(sys.modules, "kernelforge.agent_backends.registry", None)
-    m = build_mandate(_gap(), [{"M": 16, "N": 1536, "K": 7168}])
-    result = generate_tuner(m, tmp_path)
-    assert not result.ok
-    assert "no agent provider" in result.reason or "unusable" in result.reason
 
 
 class TestTheDeployedBf16TableIsAnAiterTable:

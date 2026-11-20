@@ -38,6 +38,9 @@ from inference_suite.recipe.inferencex import (
     srtctl_cli_args,
 )
 from inference_suite.recipe.model import (
+    ATOM_RUNNER_OWNED,
+    SGLANG_RUNNER_OWNED,
+    VLLM_RUNNER_OWNED,
     InferencexSnapshot,
     RepoBundle,
     RecipeSourceError,
@@ -126,6 +129,22 @@ def test_argv_renders_role_args_as_srtctl_does():
         engine = engine["type"] if isinstance(engine, dict) else engine
 
         assert list(srtctl_cli_args(engine, selection.recipe["roles"]["agg"]["args"])) == recorded[key], key
+
+
+@pytest.mark.parametrize(
+    ("owned", "own"),
+    [
+        (
+            SGLANG_RUNNER_OWNED,
+            {"model-path", "port", "enable-metrics", "nccl-port", "grpc-http-sidecar-port", "smg-http-sidecar-port"},
+        ),
+        (VLLM_RUNNER_OWNED, {"model", "port", "headless", "master-addr", "nnodes", "node-rank"}),
+        (ATOM_RUNNER_OWNED, {"model", "server-port"}),
+    ],
+    ids=("sglang", "vllm", "atom"),
+)
+def test_a_recipe_keeps_none_of_the_flags_the_runner_sets_on_every_round(owned, own):
+    assert owned == {"host", "served-model-name", *own}
 
 
 def test_dsr1_fixed_launch_is_the_selected_variant_without_runner_owned_flags():
@@ -220,15 +239,17 @@ def test_agentx_launch_carries_the_recorded_golden_acceptance():
     assert "CONC" not in c1.client_env
 
 
-def test_agentx_skips_atom_entries():
+def test_an_atom_agentic_entry_serves_agentx_and_its_replay_requires_atoms_metrics():
     points = [point for point in every_point(_main().bundle) if point.framework == "atom"]
     agentic = next(point for point in points if point.scenario.value == "agentic-coding")
     query = _agentx(agentic.model, concurrencies=(agentic.conc,), framework="atom", board=agentic.board)
 
-    miss = inferencex_launches(query, _main())
+    launches = inferencex_launches(query, _main())
 
-    assert isinstance(miss, SourceMiss)
-    assert "an AgentX launch runs ['sglang', 'vllm'], not atom" in miss.reason
+    assert not isinstance(launches, SourceMiss), launches
+    assert {launch.framework for launch in launches} == {"atom"}
+    assert all(launch.golden is not None and launch.golden.value for launch in launches)
+    assert all(launch.client_env["AIPERF_REQUIRED_SERVER_METRIC_PREFIX"] == "atom:" for launch in launches)
 
 
 def test_main_snapshot_does_not_see_an_unmerged_entry():

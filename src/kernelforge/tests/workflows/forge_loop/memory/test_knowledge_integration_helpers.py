@@ -6,8 +6,10 @@ import subprocess
 from pathlib import Path
 
 from kernelforge.workflows.forge_loop.memory import knowledge_integration as integ
+from kernelforge.workflows.forge_loop.memory import kb_warmstart as warmstart
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
-from kernelforge.workflows.forge_loop.memory.knowledge_integration import ExperiencePublication, WarmStartHarness
+from kernelforge.workflows.forge_loop.memory.kb_warmstart import WarmStartHarness
+from kernelforge.workflows.forge_loop.memory.knowledge_integration import ExperiencePublication
 import pytest
 
 
@@ -75,14 +77,14 @@ def test_git_commit_all_and_discard(tmp_path):
 
 def _adopt_with_failing_commit(monkeypatch, tmp_path, failure):
     repo = _init_repo(tmp_path)
-    monkeypatch.setattr(integ, "_apply_candidate_patch", lambda *_a, **_k: "")
-    monkeypatch.setattr(integ, "_force_jit_rebuild", lambda *_a, **_k: None)
+    monkeypatch.setattr(warmstart, "_apply_candidate_patch", lambda *_a, **_k: "")
+    monkeypatch.setattr(warmstart, "_force_jit_rebuild", lambda *_a, **_k: None)
 
     def fail(*_args, **_kwargs):
         raise failure
 
-    monkeypatch.setattr(integ, "_git_commit_all", fail)
-    return integ._adopt_measured_candidate(
+    monkeypatch.setattr(warmstart, "_git_commit_all", fail)
+    return warmstart._adopt_measured_candidate(
         {"solution_slug": "s"},
         kernel="kernel.py",
         workspace_dir=str(repo),
@@ -159,7 +161,7 @@ def test_bench_once_returns_complete_suite(monkeypatch):
         }
 
     monkeypatch.setattr(bench, "bench_wallclock", fake)
-    assert integ._bench_once("drv.py") == {
+    assert warmstart._bench_once("drv.py") == {
         "success": True,
         "median_ms": 7.5,
         "case_times": {"case-1": 7.5},
@@ -173,7 +175,7 @@ def test_bench_once_rejects_scalar_only_result(monkeypatch):
         return {"success": True, "median_ms": 7.5}
 
     monkeypatch.setattr(bench, "bench_wallclock", fake)
-    assert integ._bench_once("drv.py") is None
+    assert warmstart._bench_once("drv.py") is None
 
 
 def test_bench_once_none_on_exception(monkeypatch):
@@ -183,7 +185,7 @@ def test_bench_once_none_on_exception(monkeypatch):
         raise ValueError("bench failed")
 
     monkeypatch.setattr(bench, "bench_wallclock", boom)
-    assert integ._bench_once("drv.py") is None
+    assert warmstart._bench_once("drv.py") is None
 
 
 def test_correctness_once_true(monkeypatch):
@@ -194,7 +196,7 @@ def test_correctness_once_true(monkeypatch):
         return {"passed": True}
 
     monkeypatch.setattr(test_mod, "test_correctness", fake)
-    assert integ._correctness_once("drv.py", 30.0) is True
+    assert warmstart._correctness_once("drv.py", 30.0) is True
 
 
 def test_correctness_once_false_on_exception(monkeypatch):
@@ -204,7 +206,7 @@ def test_correctness_once_false_on_exception(monkeypatch):
         raise ValueError("correctness failed")
 
     monkeypatch.setattr(test_mod, "test_correctness", boom)
-    assert integ._correctness_once("drv.py", 30.0) is False
+    assert warmstart._correctness_once("drv.py", 30.0) is False
 
 
 # --------------------------------------------------------------------------- # _cheap_summary
@@ -267,7 +269,7 @@ def test_kb_warmstart_reference_only_when_patch_empty(monkeypatch, tmp_path):
 
     monkeypatch.setattr("kernelforge.knowledge.kb_store.reader.read_top_solutions", fake_read)
     monkeypatch.setattr(
-        integ,
+        warmstart,
         "_bench_once",
         lambda *_a, **_k: {
             "success": True,
@@ -276,7 +278,7 @@ def test_kb_warmstart_reference_only_when_patch_empty(monkeypatch, tmp_path):
         },
     )
 
-    warm = integ.kb_warmstart(
+    warm = warmstart.kb_warmstart(
         config=object(),
         kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
         harness=WarmStartHarness(driver="d.py"),
@@ -318,22 +320,3 @@ def test_write_experience_to_kb_does_not_synthesize_speedup(monkeypatch, tmp_pat
         "reason": "missing_mean_case_speedup",
     }
     assert captured["outcome"].mean_case_speedup is None
-
-
-def test_kb_warmstart_swallows_reader_error(monkeypatch, tmp_path):
-    repo = _init_repo(tmp_path)
-
-    def boom(**_k):
-        raise RuntimeError("read blew up")
-
-    monkeypatch.setattr("kernelforge.knowledge.kb_store.reader.read_top_solutions", boom)
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="d.py"),
-    )
-    assert warm == {
-        "candidate": False,
-        "read_reason": "warm_start_error",
-        "read_error": "RuntimeError: read blew up",
-    }

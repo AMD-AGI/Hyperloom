@@ -423,7 +423,7 @@ def test_the_payload_contract_lists_only_required_keys():
     """Required keys and value constraints are different claims."""
     from hyperloom.inference_optimizer.protocol.intent import IntentType
     from hyperloom.orchestrator.roles.mcp_emit_intent import (
-        _PAYLOAD_REQUIRED,
+        PAYLOAD_REQUIRED,
         payload_contract,
     )
 
@@ -432,7 +432,7 @@ def test_the_payload_contract_lists_only_required_keys():
     assert "alert:{severity,summary}" in rendered
     assert "severity ∈" not in rendered
     assert "scope" not in rendered
-    for intent_type, required in _PAYLOAD_REQUIRED.items():
+    for intent_type, required in PAYLOAD_REQUIRED.items():
         assert f"{intent_type.value}:{{{','.join(required)}}}" in rendered
 
 

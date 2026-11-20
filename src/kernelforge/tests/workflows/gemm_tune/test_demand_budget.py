@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from kernelforge.workflows.gemm_tune.dense_shapes import MGrid, compute_decode_m_values
-from kernelforge.workflows.gemm_tune.tuners import _aiter_dense_common as adc
+from kernelforge.workflows.gemm_tune.tuners import _aiter_dense_inputs as adi
 
 
 class _Ctx:
@@ -27,19 +27,19 @@ class _Ctx:
 
 def test_no_cap_by_default_in_either_mode():
     # The deadline decides how many shapes get tuned (the chunks measure the cost); a fixed per-shape cost does not.
-    assert adc._demand_budget(_Ctx(3_600)) is None
-    assert adc._demand_budget(_Ctx(1, thorough=True)) is None
+    assert adi._demand_budget(_Ctx(3_600)) is None
+    assert adi._demand_budget(_Ctx(1, thorough=True)) is None
 
 
 def test_override_wins_in_either_mode(monkeypatch):
-    monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, "5")
-    assert adc._demand_budget(_Ctx(3_600)) == 5
-    assert adc._demand_budget(_Ctx(3_600, thorough=True)) == 5
+    monkeypatch.setenv(adi._DEMAND_MAX_SHAPES_ENV, "5")
+    assert adi._demand_budget(_Ctx(3_600)) == 5
+    assert adi._demand_budget(_Ctx(3_600, thorough=True)) == 5
 
 
 def test_garbage_override_is_no_cap(monkeypatch):
-    monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, "not-a-number")
-    assert adc._demand_budget(_Ctx(3_600, thorough=True)) is None
+    monkeypatch.setenv(adi._DEMAND_MAX_SHAPES_ENV, "not-a-number")
+    assert adi._demand_budget(_Ctx(3_600, thorough=True)) is None
 
 
 def test_every_ranked_shape_is_listed_without_a_cap(tmp_path):
@@ -47,7 +47,7 @@ def test_every_ranked_shape_is_listed_without_a_cap(tmp_path):
     ctx = _Ctx(600)
     ctx.demand_json = _write_demand(tmp_path / "demand.json", keys)
 
-    out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+    out = adi._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
 
     assert out is not None
     prefill = [line for line in _rows(out)[1:] if int(line.split(",")[0]) > 64]
@@ -79,7 +79,7 @@ def test_quantized_demand_uses_the_runtime_lookup_buckets(tmp_path):
     ctx = _Ctx(3_600)
     ctx.demand_json = demand
 
-    out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+    out = adi._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
 
     assert out is not None
     # 512 is the bucket both observed M pad into; the rest is the decode-band
@@ -104,12 +104,12 @@ class TestDemandKeepsTheDecodeBand:
     def test_decode_band_survives_a_budget_that_only_funds_prefill(self, tmp_path, monkeypatch):
         # Six shapes is one band plus one prefill row; the ranking would have
         # spent all six on prefill.
-        monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, "6")
+        monkeypatch.setenv(adi._DEMAND_MAX_SHAPES_ENV, "6")
         demand = _write_demand(tmp_path / "demand.json", self.PREFILL_KEYS)
         ctx = _Ctx(3_600, conc=64)
         ctx.demand_json = demand
 
-        out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+        out = adi._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
 
         assert out is not None
         tuned_m = {int(line.split(",")[0]) for line in _rows(out)[1:]}
@@ -122,7 +122,7 @@ class TestDemandKeepsTheDecodeBand:
         ctx = _Ctx(3_600, conc=64)
         ctx.demand_json = demand
 
-        out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+        out = adi._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
 
         assert out is not None
         tuned_m = {int(line.split(",")[0]) for line in _rows(out)[1:]}
@@ -132,7 +132,7 @@ class TestDemandKeepsTheDecodeBand:
         # A row at (M, N1, K1) is never consulted for (N2, K2), so the guarantee
         # has to hold per (N,K) rather than once for the table. Two prefill
         # shapes plus two bands of five is what that costs.
-        monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, "12")
+        monkeypatch.setenv(adi._DEMAND_MAX_SHAPES_ENV, "12")
         keys = [
             {"M": 2048, "N": 4096, "K": 4096, "requests": 9},
             {"M": 2048, "N": 5120, "K": 17408, "requests": 9},
@@ -141,7 +141,7 @@ class TestDemandKeepsTheDecodeBand:
         ctx = _Ctx(3_600, conc=64)
         ctx.demand_json = demand
 
-        out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+        out = adi._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
 
         assert out is not None
         by_group: dict[tuple[int, int], set[int]] = {}
@@ -160,7 +160,7 @@ class TestTheBandIsPaidForOutOfTheBudget:
 
     @pytest.fixture(autouse=True)
     def _cap(self, monkeypatch):
-        monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, "14")
+        monkeypatch.setenv(adi._DEMAND_MAX_SHAPES_ENV, "14")
 
     #: Enough distinct prefill buckets per group that the budget, not the demand
     #: report, is what bounds the selection.
@@ -178,14 +178,14 @@ class TestTheBandIsPaidForOutOfTheBudget:
     @pytest.mark.parametrize("groups", [1, 2, 4, 6, 8])
     @pytest.mark.parametrize("cap", ["7", "14", "47"])
     def test_prefill_plus_band_fits(self, tmp_path, monkeypatch, groups, cap):
-        monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, cap)
+        monkeypatch.setenv(adi._DEMAND_MAX_SHAPES_ENV, cap)
         ctx = _Ctx(3_600, conc=64)
         ctx.demand_json = self._demand(tmp_path / "demand.json", groups)
 
-        out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+        out = adi._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
 
         assert out is not None
-        assert len(_rows(out)) - 1 <= adc._demand_budget(ctx)
+        assert len(_rows(out)) - 1 <= adi._demand_budget(ctx)
 
     @pytest.mark.parametrize("groups", [1, 2, 4, 6, 8])
     def test_every_group_it_tunes_gets_a_whole_band(self, tmp_path, groups):
@@ -194,7 +194,7 @@ class TestTheBandIsPaidForOutOfTheBudget:
         ctx = _Ctx(1_216, conc=64)
         ctx.demand_json = self._demand(tmp_path / "demand.json", groups)
 
-        out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+        out = adi._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
 
         assert out is not None
         by_group: dict[int, set[int]] = {}
@@ -212,7 +212,7 @@ class TestTheBandIsPaidForOutOfTheBudget:
             sub.mkdir()
             ctx = _Ctx(1_216, conc=64)
             ctx.demand_json = self._demand(sub / "demand.json", groups)
-            out = adc._demand_input_csv(ctx, sub, "a8w8_blockscale")
+            out = adi._demand_input_csv(ctx, sub, "a8w8_blockscale")
             assert out is not None
             return sum(int(line.split(",")[0]) > 64 for line in _rows(out)[1:])
 
@@ -226,25 +226,25 @@ class TestTheBandIsPaidForOutOfTheBudget:
         ctx = _Ctx(1_216, conc=64)
         ctx.demand_json = self._demand(tmp_path / "demand.json", 4, prefill_m=(1_025, 2_049, 4_097))
 
-        out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+        out = adi._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
 
         assert out is not None
         rows = _rows(out)[1:]
         groups = {int(line.split(",")[1]) for line in rows}
         prefill = [line for line in rows if int(line.split(",")[0]) > 64]
         assert len(groups) == 2
-        assert len(rows) == adc._demand_budget(ctx)
+        assert len(rows) == adi._demand_budget(ctx)
         assert len(prefill) > len(groups)
 
     def test_an_unaffordable_band_is_still_kept_whole(self, tmp_path, monkeypatch, caplog):
         # Not even one group fits, so there is no group left to trim. Shipping
         # a partial band would reintroduce the regression; overrun loudly.
-        monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, "1")
+        monkeypatch.setenv(adi._DEMAND_MAX_SHAPES_ENV, "1")
         ctx = _Ctx(1_216, conc=64)
         ctx.demand_json = self._demand(tmp_path / "demand.json", 1)
 
         with caplog.at_level("WARNING"):
-            out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+            out = adi._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
 
         assert out is not None
         tuned_m = {int(line.split(",")[0]) for line in _rows(out)[1:]}
@@ -262,7 +262,7 @@ def test_graph_batch_size_demand_keeps_its_own_rows(tmp_path, m_grid, expected):
     ctx.demand_json = _write_demand(tmp_path / "demand.json", keys)
     ctx.m_grid = MGrid(m_grid)
 
-    out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+    out = adi._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
 
     assert out is not None
     assert {int(line.split(",")[0]) for line in _rows(out)[1:]} == expected
@@ -281,7 +281,7 @@ def test_every_dispatch_group_keeps_its_rows_at_high_concurrency(tmp_path, conc)
     ctx = _Ctx(2_999, conc=conc)
     ctx.demand_json = _write_demand(tmp_path / "demand.json", keys)
 
-    out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+    out = adi._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
 
     assert out is not None
     tuned = {tuple(int(v) for v in line.split(",")[1:3]) for line in _rows(out)[1:]}
@@ -290,7 +290,7 @@ def test_every_dispatch_group_keeps_its_rows_at_high_concurrency(tmp_path, conc)
 
 def test_a_group_whose_decode_lookups_already_hit_pays_no_band(tmp_path, monkeypatch):
     # conc=10: N=7168 logged decode misses, so decode ran and was logged; N=128 and N=2624 logged none.
-    monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, "9")
+    monkeypatch.setenv(adi._DEMAND_MAX_SHAPES_ENV, "9")
     keys = [
         {"M": 16639, "N": 2624, "K": 6144, "requests": 71},
         {"M": 16639, "N": 128, "K": 6144, "requests": 70},
@@ -303,7 +303,7 @@ def test_a_group_whose_decode_lookups_already_hit_pays_no_band(tmp_path, monkeyp
     ctx = _Ctx(3_600, conc=10)
     ctx.demand_json = _write_demand(tmp_path / "demand.json", keys)
 
-    out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+    out = adi._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
 
     assert out is not None
     assert sorted(_rows(out)[1:]) == sorted(

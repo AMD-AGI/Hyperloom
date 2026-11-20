@@ -572,6 +572,55 @@ def test_a_profile_stall_named_beside_another_step_does_not_turn_it_into_the_pro
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, "port_in_use")
 
 
+#: What vLLM's engine logs when a worker died under it: a Python exception, which alone reads as an unclear failure.
+_ENGINE_DIED_LOG = (
+    "ERROR [core.py:1586] EngineCore encountered a fatal error.\n"
+    "ERROR [core.py:1586] RuntimeError: cancelled\n"
+    "RuntimeError: Engine core process EngineCore died unexpectedly.\n"
+)
+_ENGINE_DIED_DETAIL = "EngineCore encountered a fatal error.\nRuntimeError: cancelled"
+
+
+@pytest.mark.parametrize(
+    ("detail", "reason"),
+    [
+        (_ENGINE_DIED_DETAIL, "profiler_died: EngineCore encountered a fatal error. RuntimeError: cancelled"),
+        ("", "profiler_died"),
+    ],
+    ids=["quotes_the_detail", "no_detail"],
+)
+def test_a_server_that_died_with_its_profile_window_open_is_an_infrastructure_failure(detail: str, reason: str) -> None:
+    death = StepFailure(FailedStep.SERVER_DIED, detail, profile_death=True)
+
+    verdict = classify_test_failure(
+        returncode=1, evidence=FailureEvidence(logs=(_ENGINE_DIED_LOG,), step_failure=death)
+    )
+
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, reason)
+    assert not decides_test(verdict)
+
+
+def test_a_server_that_died_outside_its_profile_window_is_left_to_its_logs() -> None:
+    death = StepFailure(FailedStep.SERVER_DIED, _ENGINE_DIED_DETAIL)
+
+    verdict = classify_test_failure(
+        returncode=1, evidence=FailureEvidence(logs=(_ENGINE_DIED_LOG,), step_failure=death)
+    )
+
+    assert verdict.failure_class is FailureClass.UNCLEAR
+    assert verdict.failure_reason == "python_exception: RuntimeError: Engine core process EngineCore died unexpectedly."
+
+
+def test_a_known_candidate_failure_in_the_profile_window_stays_the_candidates() -> None:
+    death = StepFailure(FailedStep.SERVER_DIED, "worker died", profile_death=True)
+
+    verdict = classify_test_failure(
+        returncode=1, evidence=FailureEvidence(logs=(IMPORT_ERROR_LOG,), step_failure=death)
+    )
+
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, IMPORT_ERROR_REASON)
+
+
 def test_a_boot_timeout_step_yields_to_a_cause_its_log_names_as_its_return_code_does() -> None:
     verdict = classify_test_failure(
         returncode=1,

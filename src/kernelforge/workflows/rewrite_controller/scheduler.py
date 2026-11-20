@@ -18,6 +18,7 @@ from kernelforge.workflows.rewrite_controller.contracts import (
 )
 from kernelforge.workflows.rewrite_controller.dispatcher import (
     SingleTaskResult,
+    _skipped_result,
     dispatch_single_task,
 )
 from kernelforge.workflows.rewrite_controller.paths import ControllerLayout
@@ -50,17 +51,6 @@ class ScheduleResult:
     @property
     def skipped_count(self) -> int:
         return sum(result.status == TASK_STATUS_SKIPPED for result in self.results)
-
-
-def _skipped_result(task, reason: str) -> SingleTaskResult:
-    return SingleTaskResult(
-        task=task,
-        worktree=None,
-        forge_outcome=None,
-        patch_path=None,
-        status=TASK_STATUS_SKIPPED,
-        reason=reason,
-    )
 
 
 def _skip_task(task_dir: Path, task, reason: str) -> SingleTaskResult:

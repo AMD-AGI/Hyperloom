@@ -8,17 +8,6 @@ from __future__ import annotations
 import pytest
 
 
-# --------------------------------------------------------------------------- # orchestrator.knowledge.kb_writeback #
-# --------------------------------------------------------------------------- #
-async def test_kb_writeback_rejects_unknown_outcome() -> None:
-    from hyperloom.orchestrator.knowledge import kb_writeback
-
-    with pytest.raises(ValueError):
-        await kb_writeback.write_framework_record(
-            kb_writeback.FrameworkOutcome("u", "s", "p", "not_a_real_outcome", 1.0, "sess")
-        )
-
-
 # --------------------------------------------------------------------------- # recipe_kb.canonical_id #
 # --------------------------------------------------------------------------- #
 def test_canonical_id_roundtrip_and_errors() -> None:

@@ -184,7 +184,7 @@ class SuiteChatCompletion(LocalChatCompletion):
             self._gate = (loop, asyncio.Semaphore(max(1, self._concurrent)))
         return self._gate[1]
 
-    def parse_generations(self, outputs: Any, **kwargs: Any) -> list[str]:  # type: ignore[override]
+    def parse_generations(self, outputs: Any, **kwargs: Any) -> list[str]:
         batch = outputs if isinstance(outputs, list) else [outputs]
         if self._probe.observe(batch):
             print("INFERENCE_SUITE_EVAL_PROBE_TRIPPED " + json.dumps(self._probe.record()), file=sys.stderr, flush=True)

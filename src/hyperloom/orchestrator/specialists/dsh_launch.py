@@ -106,7 +106,7 @@ def resolve_dsh_executable(explicit: str = "") -> str:
         return on_path
     try:
         # Installed as the ``deepseek-harness-sdk`` package's own runtime dependency.
-        from deepseek_harness_runtime import resolve_bundled_launch_args  # type: ignore[import-not-found]
+        from deepseek_harness_runtime import resolve_bundled_launch_args
 
         launch = tuple(resolve_bundled_launch_args())
     except (ImportError, OSError):

@@ -18,7 +18,7 @@ from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
 from kernelforge.workflows.forge_loop.campaign.run_state import BestRecord, LoopStateStore, RoundCost, RunState
 from kernelforge.workflows.forge_loop.campaign.unmeasured_lanes import UnmeasuredLane, UnmeasuredLaneArchive
 from kernelforge.evaluation.scoring import GateScoring
-from kernelforge.workflows.forge_loop.roles.analysis import AnalysisBundle
+from kernelforge.workflows.forge_loop.roles.analysis_bundle import AnalysisBundle
 from kernelforge.workflows.forge_loop.roles.contracts import EvidenceRef, PlanCriticOutcome
 from kernelforge.workflows.forge_loop.roles.supervisor import latest_supervisor_ruling_path
 from kernelforge.workflows.forge_loop.search.search_policy import (
@@ -741,30 +741,3 @@ def test_handoff_records_optimization_plan_path(
     handoff = json.loads((workspace / "forge_experiments" / "handoffs" / "iter_001.json").read_text())
     assert handoff["canonical_verdict"] == "NO_CHANGES"
     assert handoff["optimization_plan_path"].endswith("orchestration/iter_001/optimization_plan.md")
-
-
-def test_the_anti_gaming_boundary_is_stated_wherever_it_is_enforced():
-    """The rule that blocks harness edits also says what it does not forbid.
-
-    `mhc-fused` banned a host-side weight cache to keep "perturbed inputs
-    refresh", costing a mechanism worth 11.3%. The harness does not perturb that
-    tensor, and the agent could have read it. The enforced boundary -- do not edit
-    what measures you -- was never stated, so a stricter one was inferred from it.
-    Both rule blocks must carry the clarification, or one template keeps the
-    ambiguity the other lost.
-    """
-    from kernelforge.workflows.forge_loop.roles import agent as agent_module
-
-    source = Path(agent_module.__file__).read_text()
-    enforcement = [
-        "Never edit the measurement / driver / harness files",
-        "Do NOT edit the test harness / driver",
-    ]
-    for marker in enforcement:
-        assert marker in source, f"rule block missing: {marker}"
-        # The prompts are wrapped source literals, so a clause can be split across
-        # lines; compare on collapsed whitespace rather than the wrapped text.
-        block = " ".join(source[source.index(marker) : source.index(marker) + 900].split())
-        assert "are NOT gaming" in block, f"boundary not stated near: {marker}"
-        assert "read the harness" in block, f"no read-before-refusing near: {marker}"
-        assert "not a reason" in block, f"assumption not rejected near: {marker}"

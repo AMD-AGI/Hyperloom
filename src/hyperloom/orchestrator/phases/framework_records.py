@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from hyperloom_common.coerce import dict_rows, first_str, first_text, to_list, to_mapping
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_lever_kind
-from ..actions.executors import _integrate_vocabulary
+from ..actions.executors import _integrate_vocabulary, is_executable, normalize_proposal
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 from ..state.task_registry import TaskNotFound
@@ -755,55 +755,53 @@ class _AuthoredOutcomeMixin:
             self._record_framework_agent_dispatch_failure(task=task, run_error=run_error)
             return
         inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
-        # A downstream integrate_patch (owned by the authored-outcome bridge that writes the terminal row) is created
-        # by ``maybe_autosubmit_specialist_patches`` when the deliverable is routable: ``patches_written`` (post
-        # safety-vetting) non-empty, OR a config-lever deliverable, OR a non-diff tuned artifact.
-        patches = inner.get("patches_written") or []
-        if isinstance(patches, list) and patches:
-            return
-        # Relaxed FRAMEWORK rule: a config-lever deliverable (proposal_set carrying extra_args / extra_envs) is a FULL
-        # result, not "empty".
-        if _framework_config_levers_from_done(inner):
-            return
-        # Relaxed FRAMEWORK rule (parity with autosubmit): a non-diff tuned artifact deliverable
-        # (``artifacts_written`` with a real source file) is a FULL result — autosubmit routes it to integrate_patch,
-        # which owns the terminal row.
         task_id = str(getattr(task, "task_id", "") or "")
-        try:
-            from hyperloom.inference_optimizer.session.session_paths import (
-                runs_dir as _runs_dir,
-            )
-            from pathlib import Path as _Path
-
-            if self.session_dir is not None and task_id:
-                _spec_root = _runs_dir(_Path(self.session_dir), "specialist", task_id)
-                if _resolvable_artifacts_from_done(inner, [_spec_root / "worktree", _spec_root]):
-                    return
-        except (OSError, ValueError, RuntimeError):
-            log.debug("FRAMEWORK: artifacts routable-check failed", exc_info=True)
+        if self._routed_to_integrate(inner, task_id):
+            return
         cand_id = str(params.get("framework_agent_candidate_id") or "")
         if not cand_id:
             return
         batch_id = str(params.get("framework_batch_id") or "")
-        reason = first_text(inner.get("summary"))[:500]
+        proposals = [normalize_proposal(e) for e in to_list(inner.get("proposal_set")) if isinstance(e, dict)]
+        handed = [str(row.get("name") or "") for row in proposals if is_executable(row)]
+        # Explore benches a round's server-arg / env proposals and owns their verdict. For the source lever a round
+        # with no patch delivered nothing either way, so both are charged to it alike.
+        if handed:
+            status, provenance = "handed_to_explore", "authored_config"
+            rationale = f"config proposals left to explore: {', '.join(handed)}"
+        else:
+            status, provenance, rationale = "author_empty", "authored_empty", first_text(inner.get("summary"))
         recorded = self._stamp_framework_progress(
             ProgressStamp(
                 candidate_id=cand_id,
                 batch_id=batch_id,
-                status="author_empty",
-                rationale=reason,
-                provenance="authored_empty",
+                status=status,
+                rationale=rationale[:500],
+                provenance=provenance,
                 gain_pct=0.0,
-                extra={
-                    "specialist_task_id": task_id,
-                    "reauthor_attempt": params.get("reauthor_attempt"),
-                },
+                extra={"specialist_task_id": task_id, "reauthor_attempt": params.get("reauthor_attempt")},
             )
         )
         if not recorded:
             return
-        self._record_undelivered_authoring_attempt(task=task, candidate_id=cand_id, status="author_empty")
-        log.info("FRAMEWORK: authoring specialist empty deliverable candidate=%s batch=%s", cand_id, batch_id)
+        self._record_undelivered_authoring_attempt(task=task, candidate_id=cand_id, status=status)
+        log.info("FRAMEWORK: authoring round landed no patch: %s candidate=%s batch=%s", status, cand_id, batch_id)
+
+    def _routed_to_integrate(self, inner: dict[str, Any], task_id: str) -> bool:
+        """Whether ``maybe_autosubmit_specialist_patches`` sent this deliverable to an integrate_patch, whose
+        authored-outcome bridge writes the terminal row: vetted ``patches_written``, or a non-diff tuned artifact."""
+        patches = inner.get("patches_written") or []
+        if isinstance(patches, list) and patches:
+            return True
+        try:
+            from hyperloom.inference_optimizer.session.session_paths import runs_dir
+
+            if self.session_dir is not None and task_id:
+                spec_root = runs_dir(Path(self.session_dir), "specialist", task_id)
+                return bool(_resolvable_artifacts_from_done(inner, [spec_root / "worktree", spec_root]))
+        except (OSError, ValueError, RuntimeError):
+            log.debug("FRAMEWORK: artifacts routable-check failed", exc_info=True)
+        return False
 
     def _record_undelivered_authoring_attempt(self, *, task: "Task", candidate_id: str, status: str) -> None:
         """Charge a newly stamped round that delivered nothing to its PR lead's lever, else to the source lever."""

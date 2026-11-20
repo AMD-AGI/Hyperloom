@@ -83,11 +83,7 @@ def test_empty_gateway_override_defers_to_the_environment(monkeypatch, override)
     monkeypatch.setenv("OPENAI_API_KEY", "openai")
 
     options = {} if override is None else {"gateway": override}
-    backend = CodexBackend(
-        codex_bin="/bin/true",
-        runtime=AgentRuntimeConfig(provider="codex", model="gpt-5.6", options=options),
-        bypass_sandbox=True,
-    )
+    backend = CodexBackend(runtime=AgentRuntimeConfig(provider="codex", model="gpt-5.6", options=options))
     gateway = backend._effective_gateway()
     assert gateway.base_url == "https://from-env/v1"
     assert gateway.key_env == "OPENAI_API_KEY"
@@ -100,13 +96,11 @@ def test_complete_gateway_override_wins(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "https://from-env/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "openai")
     backend = CodexBackend(
-        codex_bin="/bin/true",
         runtime=AgentRuntimeConfig(
             provider="codex",
             model="gpt-5.6",
             options={"gateway": {"base_url": "https://override/v1", "key_env": "OPENAI_API_KEY"}},
         ),
-        bypass_sandbox=True,
     )
     assert backend._effective_gateway().base_url == "https://override/v1"
 

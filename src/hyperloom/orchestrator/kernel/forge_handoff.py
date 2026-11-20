@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +14,6 @@ from hyperloom.common.env_safety import is_credential_name, redact_secret_values
 from hyperloom_common.io import WriteOptions, atomic_write_text
 from hyperloom.common.kernel_source_contract import SOURCE_RESOLUTION_FILENAME
 from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
-from hyperloom.orchestrator.kernel.campaign_baseline import campaign_repositories
 from hyperloom.orchestrator.kernel.gemm_shape_coverage import parse_aiter_shape_lookups, traced_gemm_shapes
 from hyperloom.orchestrator.measurement.runtime_findings import (
     AITER_TUNED_MISS,
@@ -23,6 +22,7 @@ from hyperloom.orchestrator.measurement.runtime_findings import (
 )
 from hyperloom.orchestrator.prompts.agentx_context import corpus_lines
 from kernelforge.workflows.rewrite_controller import (
+    REPOSITORIES_FILENAME,
     SERVING_CONTEXT_FILENAME,
     TRACE_EVIDENCE_FILENAME,
     WORKLOAD_FILENAME,
@@ -112,7 +112,6 @@ def _bullet_section(heading: str, *body: str) -> list[str]:
 def build_serving_context_md(
     state: Any,
     env_spec: Mapping[str, Any] | None = None,
-    baselines: Mapping[str, Any] | None = None,
 ) -> str:
     """Render the framework, serving arguments, and environment overrides."""
     context = _workload_context(state)
@@ -123,12 +122,6 @@ def build_serving_context_md(
     extra_sources = (config, getattr(state, "current_best", None) or {}, context.get("serving_config") or {})
     extra_args = str(next((s["extra_server_args"] for s in extra_sources if s.get("extra_server_args")), "")).strip()
     envs = _environment_overrides(context, spec)
-    # Taken from the seal that just ran rather than read back from Git: the
-    # commit it returned is the base every rewrite of that repository diffs
-    # from, and re-reading HEAD would both cost a subprocess per repository
-    # and leave a window in which the two could disagree.
-    sealed = {str(repo): getattr(baseline, "commit", "") for repo, baseline in (baselines or {}).items()}
-    source_roots = tuple(sorted(sealed)) or tuple(map(str, campaign_repositories(state)))
 
     lines = [
         "# Serving Context",
@@ -137,14 +130,6 @@ def build_serving_context_md(
         f"- **Framework version:** `{_display(getattr(state, 'framework_version', ''))}`",
         f"- **Launch record:** `{_display(_absolute_path(spec.get('launch_json')))}`",
         f"- **Overlay Python path:** `{_display(_absolute_path(spec.get('overlay_pythonpath')))}`",
-        # Reported with the commit each one currently sits at, which the caller
-        # sealed just before this was written. That object id is the base every
-        # rewrite of this repository diffs from, so a task naming a path Git does
-        # not carry there is answerable from this document alone.
-        *_bullet_section(
-            "## Source Repositories",
-            *(f"`{root}` @ `{sealed.get(root) or 'unknown'}`" for root in source_roots),
-        ),
         *_fenced_section("## Resolved Server Arguments", redact_secret_values(resolved_args)),
         *_fenced_section("## Additional Server Arguments", redact_secret_values(extra_args)),
         *_fenced_section(
@@ -250,15 +235,19 @@ def write_forge_handoff(
     state: Any,
     *,
     handoff_dir: Path,
+    repositories: Collection[str],
     env_spec: Mapping[str, Any] | None = None,
-    baselines: Mapping[str, Any] | None = None,
 ) -> Path:
-    """Atomically write one Forge handoff into ``handoff_dir`` and return it."""
+    """Atomically write one Forge handoff into ``handoff_dir`` and return it.
+
+    ``repositories`` are the sealed repositories, the only ones the controller accepts a task for.
+    """
     handoff_dir = Path(handoff_dir)
     documents = {
         WORKLOAD_FILENAME: build_workload_md(state),
-        SERVING_CONTEXT_FILENAME: build_serving_context_md(state, env_spec, baselines),
+        SERVING_CONTEXT_FILENAME: build_serving_context_md(state, env_spec),
         TRACE_EVIDENCE_FILENAME: build_trace_evidence_md(state),
+        REPOSITORIES_FILENAME: json.dumps({"repositories": sorted(repositories)}, indent=2) + "\n",
     }
     for filename, text in documents.items():
         atomic_write_text(

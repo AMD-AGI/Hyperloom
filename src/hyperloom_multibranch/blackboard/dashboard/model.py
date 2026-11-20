@@ -138,7 +138,7 @@ def _in_flight(snapshot: BlackboardSnapshot) -> dict[str, Any]:
                 "target": claim.intent.target,
                 "mechanism": claim.intent.mechanism,
                 "request_id": claim.request_id,
-                "expires_in_s": max(0.0, claim.expires_at - snapshot.taken_at),
+                "expires_in_s": None if claim.request_id else max(0.0, claim.expires_at - snapshot.taken_at),
             }
             for claim in snapshot.claims
             if claim.status is ClaimStatus.HELD

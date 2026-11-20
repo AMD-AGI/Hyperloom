@@ -15,16 +15,18 @@ from typing import Any, Optional, Sequence
 
 from .discover import (
     COMPUTE_CATEGORIES,
-    DiscoveryTarget,
     LlmFn,
-    _output_schema_block,
-    fusion_constraints,
     kernel_names_from_trace,
-    parse_discovered_recipes,
-    render_repo_scope_brief,
-    render_source_files,
     stream_ordered_kernels,
 )
+from .discovery_prompt import (
+    DiscoveryTarget,
+    _output_schema_block,
+    fusion_constraints,
+    render_repo_scope_brief,
+    render_source_files,
+)
+from .discovery_response import parse_discovered_recipes
 from .models import Recipe
 
 log = logging.getLogger("forge_fusion")

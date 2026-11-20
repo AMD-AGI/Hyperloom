@@ -25,7 +25,7 @@ def _persist_declared_spec(invocation_spec_file: str, driver: str) -> None:
     """Place the declared invocation spec beside the driver that reads it."""
     if not invocation_spec_file:
         return
-    from kernelforge.workflows.forge_loop.preparation.task_preparer import _materialize_invocation_spec
+    from kernelforge.workflows.forge_loop.preparation.task_scaffold import _materialize_invocation_spec
 
     destination, _ = _materialize_invocation_spec(
         invocation_spec_file,
@@ -96,6 +96,7 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
     """
     from kernelforge.workflows.forge_loop.preparation import task_preparer
     from kernelforge.workflows.forge_loop.preparation.task_preflight import DriverContract
+    from kernelforge.workflows.forge_loop.preparation.task_scaffold import declared_case_ids
 
     iter_config = run.iter_config
     invocation_spec_file = run.request.task_context.invocation_spec_file or ""
@@ -111,7 +112,7 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
     # conforming", it just measures less than the task asks for, and accepting it here skips the only step that
     # would have repaired it.
     try:
-        expected_case_ids = task_preparer.declared_case_ids(invocation_spec_file)
+        expected_case_ids = declared_case_ids(invocation_spec_file)
     except ValueError as exc:
         # Continuing would switch the driver's case check off and spend the whole run measuring a suite the
         # operator never got to state.

@@ -24,6 +24,7 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.local import claims as claims_module
 from hyperloom_multibranch.blackboard.local.claims import LeaseStore, LeaseTaken
 from hyperloom_multibranch.blackboard.local.blackboard import SEGMENTS_DIR
+from hyperloom_multibranch.blackboard.local.state import BlackboardState
 from hyperloom_multibranch.blackboard.local.segments import (
     Entry,
     EntryKind,
@@ -34,6 +35,7 @@ from hyperloom_multibranch.blackboard.local.segments import (
 from hyperloom_multibranch.blackboard.tests.factories import START, intent, request
 
 KEY = ClaimKey("c0", intent("s1", "c0").fingerprint)
+NO_TESTS = BlackboardState([])
 
 
 def _entry(writer: str, at: float) -> Callable[[int], Entry]:
@@ -51,7 +53,7 @@ def _claim(holder: str, expires_at: float = START + 60) -> Claim:
 
 def _try_acquire(claims_dir: str, holder: str) -> bool:
     try:
-        LeaseStore(Path(claims_dir)).acquire(_claim(holder), START)
+        LeaseStore(Path(claims_dir)).acquire(_claim(holder), START, NO_TESTS)
     except LeaseTaken:
         return False
     return True
@@ -187,11 +189,11 @@ def test_writer_ids_are_unique_per_handle_and_name_the_role() -> None:
 
 def test_a_live_claim_blocks_the_next_generation_until_it_expires(tmp_path: Path) -> None:
     store = LeaseStore(tmp_path)
-    held = store.acquire(_claim("s1"), START)
+    held = store.acquire(_claim("s1"), START, NO_TESTS)
 
     with pytest.raises(LeaseTaken) as blocked:
-        store.acquire(_claim("s2"), START)
-    taken = store.acquire(_claim("s2", expires_at=START + 200), START + 100)
+        store.acquire(_claim("s2"), START, NO_TESTS)
+    taken = store.acquire(_claim("s2", expires_at=START + 200), START + 100, NO_TESTS)
 
     assert blocked.value.claim.holder == "s1"
     assert (held.generation, taken.generation) == (1, 2)
@@ -215,7 +217,7 @@ def test_a_claim_generation_reaches_the_disk_before_it_is_linked(
     monkeypatch.setattr(os, "fsync", synced)
     monkeypatch.setattr(os, "link", linked)
 
-    LeaseStore(tmp_path).acquire(_claim("s1"), START)
+    LeaseStore(tmp_path).acquire(_claim("s1"), START, NO_TESTS)
 
     assert calls == ["fsync", "link"]
 
@@ -224,11 +226,11 @@ def test_the_claims_in_force_come_from_one_listing_of_the_folder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = LeaseStore(tmp_path)
-    store.acquire(_claim("s1"), START)
+    store.acquire(_claim("s1"), START, NO_TESTS)
     for request_id in ("r1", "r2"):
         store.change(KEY, lambda claim, request_id=request_id: replace(claim, request_id=request_id))
     other = replace(_claim("s2"), key=ClaimKey("c1", intent("s2", "c1").fingerprint))
-    store.acquire(other, START)
+    store.acquire(other, START, NO_TESTS)
     listings: list[str] = []
     for name in ("glob", "iterdir"):
         original = getattr(Path, name)
@@ -247,7 +249,7 @@ def test_the_claims_in_force_come_from_one_listing_of_the_folder(
 
 def test_a_change_beaten_by_another_writer_is_reapplied_to_the_newer_generation(tmp_path: Path) -> None:
     store = LeaseStore(tmp_path)
-    store.acquire(_claim("s1"), START)
+    store.acquire(_claim("s1"), START, NO_TESTS)
     calls = []
 
     def renew(claim: Claim) -> Claim:
@@ -269,7 +271,7 @@ def test_a_change_gives_up_when_it_never_wins_and_one_on_no_claim_is_lost(
 
     with pytest.raises(ClaimLost, match="nobody claimed"):
         store.change(KEY, lambda claim: claim)
-    store.acquire(_claim("s1"), START)
+    store.acquire(_claim("s1"), START, NO_TESTS)
     monkeypatch.setattr(claims_module, "publish_once", lambda path, data: False)
     with pytest.raises(ClaimLost, match="kept changing"):
         store.change(KEY, lambda claim: claim)

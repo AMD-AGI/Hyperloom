@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.agents.framework.kb import read_pr_ledger
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.orchestrator.actions.executors import _integrate_bench as integrate_bench
 from hyperloom.orchestrator.actions.executors import _patch_git as patch_git
@@ -248,7 +247,7 @@ def _approved_state() -> SharedState:
 
 @pytest.fixture
 def executor_env(tmp_path, monkeypatch):
-    """A session dir, a KB root, and an executor whose benchmark fails the test if it is reached."""
+    """An executor over a fresh session dir whose benchmark fails the test if it is reached."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env
 
     def no_bench(*_args, **_kwargs):
@@ -257,11 +256,9 @@ def executor_env(tmp_path, monkeypatch):
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
     monkeypatch.setattr(ip.IntegratePatchExecutor, "_bench_patch", no_bench)
     monkeypatch.setattr(integrate_bench, "run_grid", no_bench)
-    kb_root = tmp_path / "kb"
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(kb_root))
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    return ip.IntegratePatchExecutor(session_dir=session_dir), kb_root
+    return ip.IntegratePatchExecutor(session_dir=session_dir)
 
 
 def _repo_holding_the_superset(tmp_path: Path, git_tree: bool = True) -> Path:
@@ -274,17 +271,14 @@ def _repo_holding_the_superset(tmp_path: Path, git_tree: bool = True) -> Path:
 
 
 def _specialist_round(session_dir: Path, repo: Path) -> tuple[dict, list[Path]]:
-    """A specialist-authored round delivering the superset and its subset, with a PR identity."""
+    """A specialist-authored round delivering the superset and its subset."""
     sid = "spec-present"
     workspace = runs_dir(session_dir, "specialist", sid)
     patches = [
         _patch(_mkdir(workspace / "worktree"), "superset.patch", _SUPERSET),
         _patch(workspace / "worktree", "subset.patch", _SUBSET),
     ]
-    done = {
-        "patches_written": [p.name for p in patches],
-        "proposal_set": [{"provenance": "specialist:serving:framework", "fa_pr_url": _PR_URL}],
-    }
+    done = {"patches_written": [p.name for p in patches]}
     (workspace / "specialist_done.json").write_text(json.dumps(done), encoding="utf-8")
     return {"specialist_task_id": sid, "framework_source_root": str(repo)}, patches
 
@@ -318,8 +312,8 @@ def _mkdir(path: Path) -> Path:
     ],
 )
 async def test_executor_ends_an_all_noop_patch_set_as_already_present(tmp_path, executor_env, lane, git_tree, check):
-    """Every patch already in the tree: no benchmark, an ``already_present`` result and one KB row saying so."""
-    executor, kb_root = executor_env
+    """Every patch already in the tree: no benchmark and an ``already_present`` result."""
+    executor = executor_env
     repo = _repo_holding_the_superset(tmp_path, git_tree)
     before = {f: (repo / "mod" / f).read_text(encoding="utf-8") for f in ("alpha.py", "beta.py")}
     head = _git(repo, "rev-parse", "HEAD") if git_tree else ""
@@ -336,8 +330,6 @@ async def test_executor_ends_an_all_noop_patch_set_as_already_present(tmp_path, 
     assert result["already_present"] == [{"patch": str(p), "check": check.value} for p in patches]
     assert result["patches_applied"] == []
     assert result["patches_reverted"] == []
-    rows = read_pr_ledger()
-    assert [(row["outcome"], row["pr_url"]) for row in rows] == [("already_present", _PR_URL)]
     assert {f: (repo / "mod" / f).read_text(encoding="utf-8") for f in before} == before
     if git_tree:
         assert _git(repo, "rev-parse", "HEAD") == head
@@ -407,7 +399,7 @@ def _serve_superset(monkeypatch) -> None:
 async def test_executor_ends_a_merged_pr_fetched_by_diff_url_as_already_present(tmp_path, executor_env, monkeypatch):
     """An empty head diff defers to the diff_url, and the apply's reverse check finds the PR in the tree."""
     _serve_superset(monkeypatch)
-    executor, kb_root = executor_env
+    executor = executor_env
     repo, head = _repo_with_merged_pr_head(tmp_path, revert=False)
     params = _pr_head_round(repo, head, diff_url="https://example.invalid/pr.diff", prefer_checkout=True)
 
@@ -415,7 +407,6 @@ async def test_executor_ends_a_merged_pr_fetched_by_diff_url_as_already_present(
 
     assert result["status"] == "already_present"
     assert [row["check"] for row in result["already_present"]] == ["git_reverse_apply_check"]
-    assert [row["outcome"] for row in read_pr_ledger()] == ["already_present"]
 
 
 @pytest.mark.asyncio
@@ -423,7 +414,7 @@ async def test_executor_benchmarks_a_reverted_pr_head(tmp_path, executor_env, mo
     """A merged-then-reverted PR is still in the history but not in the tree, so it is applied and measured."""
     _serve_superset(monkeypatch)
     reached = _record_bench(monkeypatch)
-    executor, kb_root = executor_env
+    executor = executor_env
     repo, head = _repo_with_merged_pr_head(tmp_path, revert=True)
     params = _pr_head_round(repo, head, diff_url="https://example.invalid/pr.diff", prefer_checkout=True)
 
@@ -431,14 +422,13 @@ async def test_executor_benchmarks_a_reverted_pr_head(tmp_path, executor_env, mo
 
     assert reached == ["t-reverted"]
     assert result["status"] != "already_present"
-    assert "already_present" not in [row["outcome"] for row in read_pr_ledger()]
 
 
 @pytest.mark.asyncio
 async def test_executor_benchmarks_an_all_noop_set_that_changes_server_args(tmp_path, executor_env, monkeypatch):
     """Patches already in the tree do not end a round that also changes the server args: those still need measuring."""
     reached = _record_bench(monkeypatch)
-    executor, kb_root = executor_env
+    executor = executor_env
     repo = _repo_holding_the_superset(tmp_path)
     params, _patches = _upstream_round(executor.session_dir, "t-args", repo)
     params["extra_server_args"] = "--max-num-seqs 64"
@@ -447,13 +437,12 @@ async def test_executor_benchmarks_an_all_noop_set_that_changes_server_args(tmp_
 
     assert reached == ["t-args"]
     assert result["status"] != "already_present"
-    assert "already_present" not in [row["outcome"] for row in read_pr_ledger()]
 
 
 @pytest.mark.asyncio
 async def test_executor_lands_a_set_whose_noop_rides_with_a_real_change(tmp_path, executor_env):
     """Only a set that changes nothing ends early; a no-op beside a real change lands with it."""
-    executor, kb_root = executor_env
+    executor = executor_env
     repo = tmp_path / "framework"
     _tree(repo)
     _git_tree(repo)
@@ -464,4 +453,3 @@ async def test_executor_lands_a_set_whose_noop_rides_with_a_real_change(tmp_path
 
     assert result["status"] == "applied_no_bench"
     assert result["patches_applied"] == [str(p) for p in patches]
-    assert read_pr_ledger() == []

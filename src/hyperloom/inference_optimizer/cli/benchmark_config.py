@@ -25,6 +25,7 @@ from hyperloom_common.io import atomic_write_text
 from hyperloom_common.env import env_bool
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.speculative_capability import DraftLimits
+from inference_suite.contracts.base_launch import AGENTX_FRAMEWORKS
 
 
 _SESSION_CONFIG = "benchmark.yaml"
@@ -103,8 +104,11 @@ def _validate_agentx_options(args: argparse.Namespace) -> None:
     framework = (
         args.framework or pins.get("FRAMEWORK") or os.environ.get("FRAMEWORK") or framework_registry.DEFAULT_FRAMEWORK
     )
-    if framework not in {"sglang", "vllm"}:
-        raise ValueError(f"AgentX optimization supports SGLang or vLLM, not {framework}")
+    if framework not in AGENTX_FRAMEWORKS:
+        supported = sorted(AGENTX_FRAMEWORKS)
+        raise ValueError(
+            f"AgentX optimization supports {', '.join(supported[:-1])} or {supported[-1]}, not {framework}"
+        )
     if int(getattr(args, "nodes", 1)) != 1:
         raise ValueError("AgentX optimization requires one node")
     if any(getattr(args, key, None) is not None and int(getattr(args, key)) <= 0 for key in ("tp", "ep", "conc")):

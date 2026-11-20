@@ -323,6 +323,27 @@ def test_agentx_with_no_recipe_is_a_miss_naming_every_source():
     assert miss.reasons()[0] == "inferencex: no entry serves Qwen/Qwen3-8B with sglang on a mi355x"
 
 
+def test_an_atom_agentx_base_takes_its_forced_acceptance_as_the_golden_layer():
+    base = _base(_agentx("Qwen/Qwen3.5-397B-A17B-FP8", framework="atom", concurrencies=(8,)), gpus=4)
+
+    golden = base.golden_al
+    assert (base.framework, base.source.kind) == ("atom", SourceKind.INFERENCEX)
+    # ATOM streams "synthetic " for every token it forces, so the layer is not named for the draft's own text.
+    assert (golden.value, golden.method, golden.token_mode) == (3.39, "spec-decode-acceptance-length", "synthetic-text")
+    assert (golden.spec_method, golden.draft_length, golden.draft_model) == ("mtp", 3, None)
+    assert golden.args == (
+        "--method",
+        "mtp",
+        "--num-speculative-tokens",
+        "3",
+        "--spec-decode-acceptance-length",
+        "3.39",
+    )
+    assert not _drafts(base)
+    # The runner names the served model every round, as it does for sglang and vLLM.
+    assert "--served-model-name" not in base.args
+
+
 def test_agentx_on_atom_is_a_miss_not_a_default():
     miss = _miss(_agentx(_DSR1, framework="atom"))
 

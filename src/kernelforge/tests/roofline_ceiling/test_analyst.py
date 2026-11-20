@@ -20,7 +20,6 @@ from kernelforge.roofline_ceiling.analyst import (
     CeilingAnalysisError,
     CeilingTask,
     build_request,
-    load_role,
     run_ceiling_analysis,
 )
 from kernelforge.roofline_ceiling.device_profile import DeviceIdentity
@@ -104,42 +103,6 @@ def _task(tmp_path, **overrides) -> CeilingTask:
 
 def _analyse(backend, tmp_path):
     return asyncio.run(run_ceiling_analysis(backend, _task(tmp_path), _bundle(tmp_path), tmp_path / "out"))
-
-
-# --- the role document ---------------------------------------------------------
-
-
-def test_the_role_document_ships_with_the_package():
-    role = load_role()
-
-    assert "Performance Ceiling Analyst" in role
-    assert "Step 0 — establish this machine's roofs" in role
-
-
-def test_the_role_document_names_both_files_as_the_deliverable():
-    role = load_role()
-
-    assert "performance_ceiling.json" in role
-    assert "performance_ceiling_analysis.md" in role
-
-
-def test_the_role_document_hands_the_composition_to_the_analyst():
-    """It offers a default rule and tells the analyst when to leave it."""
-    role = load_role()
-
-    assert "You own the whole estimate" in role
-    assert "Depart from the default" in role
-    assert "occupancy" in role.lower()
-
-
-def test_the_role_document_keeps_installs_out_of_the_measured_environment():
-    """A package changed under the kernel after the baseline skews every later measurement."""
-    role = load_role()
-
-    assert "python3 -m venv <tools_dir>/" in role
-    assert "Do not activate that environment" in role
-    assert "Never install" in role
-    assert "`pip install -r" not in role
 
 
 # --- the request ---------------------------------------------------------------

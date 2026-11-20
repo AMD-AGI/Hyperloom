@@ -125,7 +125,7 @@ async def retry_with_backoff(
         attempt += 1
         try:
             return await fn()
-        except retry_on as exc:  # type: ignore[misc]
+        except retry_on as exc:
             if attempt >= policy.max_attempts:
                 raise
             delay = policy.delay_for(attempt)

@@ -25,11 +25,6 @@ from ..utils import resolve_aiter_root, run_subprocess, TUNER_ENV_VARS
 
 log = logging.getLogger(__name__)
 
-# Backwards-compatible aliases: shape derivation now lives in dense_shapes so the fp8 dense tuners can reuse the exact
-# same logic (single source of truth).
-_compute_nk_shapes = compute_dense_nk_shapes
-_compute_m_values = compute_dense_m_values
-
 # aiter moved the bf16 dense GEMM tuner out of gradlib/.
 _LEGACY_SCRIPT_RELPATH = ("gradlib", "gradlib", "gemm_tuner.py")
 
@@ -336,7 +331,7 @@ class SglangDenseBf16Tuner(BaseTuner):
         profile = self.ctx.profile
         num_heads = profile.raw_config.get("num_attention_heads", 32)
         num_kv_heads = profile.raw_config.get("num_key_value_heads", num_heads)
-        return _compute_nk_shapes(
+        return compute_dense_nk_shapes(
             DenseGeometry(
                 hidden_size=profile.hidden_size,
                 intermediate_size=profile.intermediate_size,
@@ -461,7 +456,7 @@ class SglangDenseBf16Tuner(BaseTuner):
         if demand:
             return _generate_untuned_csv_from_demand(demand, self.work_dir, dtype=dtype_str)
         nk_shapes = self._nk_shapes()
-        m_values = _compute_m_values(self.ctx.conc, thorough=self.ctx.thorough)
+        m_values = compute_dense_m_values(self.ctx.conc, thorough=self.ctx.thorough)
         cap = self._shape_cap()
         if cap:
             m_values = _fit_m_values_to_budget(m_values, len(nk_shapes), cap)

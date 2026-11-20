@@ -1525,7 +1525,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         """Mirror one settled integrate verdict onto the KERNEL timeline."""
         if not isinstance(entry, dict):
             return
-        from hyperloom.inference_optimizer.breakdown.recorder import kernel_event
+        from hyperloom.inference_optimizer.breakdown.recorder import kernel_event_rows
         from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import IntegrateVerdict
 
         last = (entry.get("attempts") or [{}])[-1]
@@ -1533,7 +1533,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         rejected = entry.get("rejected")
         cycle = int(getattr(self, "macro_cycle", 0) or 0)
         integration_id = str(entry.get("integration_id") or "")
-        kernel_event.record_integrate_verdict(
+        kernel_event_rows.record_integrate_verdict(
             macro_cycle=cycle,
             verdict=IntegrateVerdict(
                 integration_id=integration_id,
@@ -1558,7 +1558,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
                 gain_attributed=bool(entry.get("validated", True)),
             ),
         )
-        kernel_event.record_integrate_axis(
+        kernel_event_rows.record_integrate_axis(
             macro_cycle=cycle, integration_id=integration_id, graded_objective=str(last.get("graded_objective") or "")
         )
 

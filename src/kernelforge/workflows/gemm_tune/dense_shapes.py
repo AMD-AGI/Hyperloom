@@ -159,7 +159,7 @@ def write_mnk_untuned_csv(
     output_path.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", encoding="utf-8") as f:
         if needs_q_dtype_w:
-            from .tuners._aiter_dense_common import _aiter_fp8_dtype_str
+            from .tuners._aiter_dense_inputs import _aiter_fp8_dtype_str
 
             effective_q = _aiter_fp8_dtype_str()
             f.write("M,N,K,q_dtype_w\n")

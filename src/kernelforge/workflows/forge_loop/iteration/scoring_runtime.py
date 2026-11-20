@@ -145,23 +145,28 @@ class ScoringMixin:
             and measurement.get("best_mean_case_speedup") == self.best_mean_case_speedup
         )
 
+    async def _run_build(self, tail_limit: int) -> str | None:
+        """Run the configured build; the tail of its output when it fails, None when it passes or there is none."""
+        if not self.ic.build_command:
+            return None
+        proc = await asyncio.create_subprocess_exec(
+            *self.ic.build_command,
+            cwd=self.ic.build_dir or self.ic.workspace_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        stdout, stderr = await communicate_process_group(proc, timeout=self.ic.build_timeout_sec)
+        if proc.returncode == 0:
+            return None
+        return _build_failure_tail(stdout, stderr, tail_limit)
+
     async def _measure_baseline(self) -> float | None:
         """Bench the pristine kernel before any agent edit — the speedup anchor."""
-        if self.ic.build_command:
-            proc = await asyncio.create_subprocess_exec(
-                *self.ic.build_command,
-                cwd=self.ic.build_dir or self.ic.workspace_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
-            stdout, stderr = await communicate_process_group(
-                proc,
-                timeout=self.ic.build_timeout_sec,
-            )
-            if proc.returncode != 0:
-                print(f"  Baseline build FAILED: {_build_failure_tail(stdout, stderr, 300)}")
-                return None
+        build_failure = await self._run_build(tail_limit=300)
+        if build_failure is not None:
+            print(f"  Baseline build FAILED: {build_failure}")
+            return None
         bench_result = await measure_wallclock(
             BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
             measurements=KEEP_MEASUREMENT_COUNT,

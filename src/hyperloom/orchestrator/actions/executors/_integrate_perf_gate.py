@@ -16,13 +16,6 @@ from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero, graded_gate_r
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, GradingAnchor
 from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 
-from ...knowledge.kb_writeback import (
-    OUTCOME_INTEGRATED,
-    OUTCOME_KEPT_INERT,
-    OUTCOME_REVERTED_PARITY_INCONCLUSIVE,
-    OUTCOME_REVERTED_SMOKE_FAIL,
-    OUTCOME_REVERTED_SWITCH_OFF_PARITY,
-)
 from ...state.failure_evidence import FAILURE_ATTRIBUTION_ENVIRONMENT, classify_failure_attribution
 from ...state.shared_state import SharedState, resolve_anchor_with_drift, resolve_graded_comparison
 from ..stop_attribution import stopped_by_the_run_class
@@ -32,7 +25,6 @@ from ._enablement_config import DEFAULT_SWITCH_OFF_PARITY_BAND_PCT
 from ._git import _git_head_sha
 from ._integrate_attempt import IntegrateAttempt
 from ._integrate_refusals import (
-    _accuracy_delta_pct,
     _correctness_fix_refusals,
     _fix_accuracy_refusals,
     _fix_axis,
@@ -49,7 +41,6 @@ from ._integrate_results import (
 )
 from ._integrate_vocabulary import BENCH_UNMEASURED_CLASS
 from ._patch_git import _uncommitted_revert
-from ._proposal_identity import content_fingerprint
 from ._patch_sources import _done_field
 
 log = logging.getLogger(__name__)
@@ -128,9 +119,6 @@ class PerfGateMixin:
         # and that check now runs on this path too.
         if switch_manifest and attempt.applied:
             return await self._keep_inert_switches(attempt, measured, params=params, parity=parity)
-        await self._maybe_write_framework_kb_record(
-            measured.lesson(OUTCOME_REVERTED_SMOKE_FAIL), attempt=attempt, params=params
-        )
         fix_refusals = verdict.fix_refusals
         reasons = _gate_failure_reasons(
             verdict.graded,
@@ -165,7 +153,6 @@ class PerfGateMixin:
         measured = verdict.measured
         delta_pct = measured.delta_pct
         fix_finding = verdict.fix_finding
-        await self._maybe_write_framework_kb_record(measured.lesson(OUTCOME_INTEGRATED), attempt=attempt, params=params)
         commit_failure, keep_committed = self._commit_accepted_work(
             attempt, f"hyperloom KEEP {attempt.specialist_task_id} ({delta_pct:+.2f}%)"
         )
@@ -224,7 +211,7 @@ class PerfGateMixin:
         if parity.get("ok"):
             return parity, None
         # An unmeasurable parity leg reverts under its own verdict: the patch was
-        # never shown to break, so neither the log line nor the KB lesson may say
+        # never shown to break, so neither the log line nor the verdict may say
         # that it did.
         inconclusive = bool(parity.get("inconclusive"))
         log.warning(
@@ -232,13 +219,6 @@ class PerfGateMixin:
             "INCONCLUSIVE" if inconclusive else "FAILED",
             attempt.specialist_task_id,
             parity.get("reason"),
-        )
-        await self._maybe_write_framework_kb_record(
-            measured.lesson(
-                OUTCOME_REVERTED_PARITY_INCONCLUSIVE if inconclusive else OUTCOME_REVERTED_SWITCH_OFF_PARITY
-            ),
-            attempt=attempt,
-            params=params,
         )
         return parity, _perf_revert(
             attempt,
@@ -430,9 +410,8 @@ class PerfGateMixin:
             attempt: The attempt whose applied patches, artifacts and switch
                 manifest are kept.
             measured: The bench with the switches on against the comparison
-                base, the throughput threshold it did not meet, its accuracy
-                verdict, and the accuracy delta and config fingerprint for the
-                KB record.
+                base, the throughput threshold it did not meet, and its accuracy
+                verdict.
             params: The task params.
             parity: The switch-off parity verdict, the inert KEEP's evidence of being inert.
 
@@ -454,7 +433,6 @@ class PerfGateMixin:
                 bench_result=measured.bench_result,
             )
         enablers = [entry["switch"] for entry in switch_manifest if entry.get("enabler")]
-        await self._maybe_write_framework_kb_record(measured.lesson(OUTCOME_KEPT_INERT), attempt=attempt, params=params)
         log.info(
             "integrate_patch: KEEP_INERT task=%s delta=%s threshold=%.2f%% levers=%d enablers=%d",
             attempt.specialist_task_id,
@@ -555,12 +533,6 @@ def _weigh_gate(
     acc_block, acc_reason = _accuracy_block(
         params, accuracy_pass, bool(gate_evidence.get("accuracy_incomparable")), attempt.specialist_task_id
     )
-    # Only a score taken under the baseline's eval definition draws a verdict, and only it compares with the baseline.
-    acc_delta_pct = (
-        None
-        if accuracy_pass is None
-        else _accuracy_delta_pct(gate_evidence.get("accuracy"), params.get("accuracy_baseline"))
-    )
 
     perf_kept = throughput.cleared
     gate_pass = perf_kept and not acc_block
@@ -584,8 +556,6 @@ def _weigh_gate(
         base_tput=base_tput,
         keep_threshold_pct=keep_threshold_pct,
         accuracy_pass=accuracy_pass,
-        acc_delta_pct=acc_delta_pct,
-        cfg_fingerprint=content_fingerprint(params),
         measured_against=_measured_against(params, base_tput=base_tput),
         gates=(
             (graded_gate_row(graded, keep_threshold_pct, graded.veto_reason or graded.refused_by),)

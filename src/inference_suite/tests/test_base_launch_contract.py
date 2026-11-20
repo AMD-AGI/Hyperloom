@@ -342,7 +342,7 @@ def test_agentx_refuses_the_default_table_and_frameworks_without_agentx_recipes(
             image=ImageFacts(run=None, recipe=None, framework_version=None, version_basis=VersionBasis.NOT_APPLICABLE),
         )
     with pytest.raises(BaseLaunchError, match="AgentX base runs"):
-        _base(framework="atom")
+        _base(framework="xdit")
 
 
 def test_an_operator_topology_must_be_the_one_launched():

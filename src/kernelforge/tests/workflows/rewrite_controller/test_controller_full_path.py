@@ -39,11 +39,9 @@ def _handoff(tmp_path: Path, repo: Path) -> Path:
     root = tmp_path / "handoff"
     root.mkdir()
     (root / "workload.md").write_text("# Workload\n", encoding="utf-8")
-    (root / "serving-context.md").write_text(
-        f"# Serving Context\n\n## Source Repositories\n\n- `{repo.resolve()}`\n",
-        encoding="utf-8",
-    )
+    (root / "serving-context.md").write_text("# Serving Context\n", encoding="utf-8")
     (root / "trace-evidence.md").write_text("# Trace Evidence\n", encoding="utf-8")
+    (root / "repositories.json").write_text(json.dumps({"repositories": [str(repo.resolve())]}), encoding="utf-8")
     return root
 
 

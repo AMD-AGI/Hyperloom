@@ -529,8 +529,10 @@ One phase, two levers worked in parallel:
   serialise on the `workspace_mutation` lane: one landing at a time,
   independent of how fast proposals arrive. A candidate whose every patch
   reverse-applies cleanly, and that changes nothing else, is not benchmarked:
-  it ends `already_present`, and a candidate with an upstream PR identity is
-  recorded so in the framework KB.
+  it ends `already_present`. A round that returns only server-arg / env
+  proposals lands nothing: its candidate ends `handed_to_explore`, counted
+  against this lever like an empty round, and explore benches the proposals
+  for the configuration lever.
 
 `specialist` serves both levers — investigation, patch authoring, and
 candidate discovery are all dispatches of the one specialist action. An

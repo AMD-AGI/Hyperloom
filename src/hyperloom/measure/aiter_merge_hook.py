@@ -92,7 +92,7 @@ class _AiterCoreFinder:
     def __init__(self, directory: str) -> None:
         self._directory = directory
 
-    def find_spec(self, fullname, path=None, target=None):  # type: ignore[no-untyped-def]
+    def find_spec(self, fullname, path=None, target=None):
         if fullname != _MODULE:
             return None
         spec = None
@@ -111,7 +111,7 @@ class _AiterCoreFinder:
         if spec is None:
             return None
 
-        def exec_module(module):  # type: ignore[no-untyped-def]
+        def exec_module(module):
             execute(module)
             if self in sys.meta_path:
                 sys.meta_path.remove(self)

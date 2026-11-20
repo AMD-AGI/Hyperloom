@@ -75,7 +75,7 @@ class _Rig:
         candidate = request(request_id, of, change or delta())
         await self.toolbox.write_request(candidate)
         if claimed:
-            await self.toolbox.attach_request(ClaimKey(ROOT, of.fingerprint), request_id, ttl_seconds=60.0)
+            await self.toolbox.attach_request(ClaimKey(ROOT, of.fingerprint), request_id)
         await self.toolbox.write_result(result(request_id))
 
     async def block(self, request_id: str, **judged) -> None:

@@ -16,10 +16,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
-    ROUTE_FORGE,
-    make_kernel_recorder,
-)
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_FORGE
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_recorder import make_kernel_recorder
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelExit, KernelRewriteRun, LaneRunFields
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
