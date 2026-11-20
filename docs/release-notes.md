@@ -45,9 +45,11 @@ it.
   `capture_timeout_seconds`, it records 30 s rather than 300 s: ATOM's profiler
   takes no step bound, and a long capture slows the replay it runs inside.
 - **A multi-branch session reads and writes the workspace's Experience KB.**
-  With `HYPERLOOM_KB_URL` set, a session's briefs recall past sessions' tests
-  and its learnings tool their learnings, and CLOSE writes the session's tests
-  and learnings there. An InferenceX session reads both schemas its tests are
+  With `HYPERLOOM_KB_URL` and `HYPERLOOM_KB_TOKEN` exported (the values
+  `hyperloom-setup` writes into `.env`), a session's briefs recall past
+  sessions' tests and its learnings tool their learnings, and CLOSE writes the
+  session's tests and learnings there, spooling beside the service's data what
+  it does not take. An InferenceX session reads both schemas its tests are
   written under, so a kernel change is recalled too. A loopback service is
   started before the session, outside the session's process tree, and left
   serving; one serving with other settings is not restarted

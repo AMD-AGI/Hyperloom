@@ -6,7 +6,8 @@ and the dashboard.
 
 They read a blackboard that no longer changes. The write-back goes first, reading the patch and kernel files of the
 chosen commit's recipe from the session's blob store, then the blackboard's knowledge steps (the Experiences and the
-specialists' learnings to the Experience KB ``HYPERLOOM_KB_URL`` names, none without it, and the search tree to the
+specialists' learnings to the Experience KB ``HYPERLOOM_KB_URL`` names, none without it
+(:func:`~hyperloom_multibranch.scheduling.experience_kb.close_targets`), and the search tree to the
 archive, marking the replays of the champions PRELUDE prepared from another image), because the breakdown records both
 outcomes next to the chosen commit's recipe and how FINAL chose it; once the search tree is archived, the scheduler's
 LLM proposes one change to the scheduling playbook into the pool beside the archive (:func:`author_playbook`) and
@@ -53,8 +54,9 @@ from hyperloom_multibranch.blackboard.rsi.authoring import author_playbook
 from hyperloom_multibranch.blackboard.rsi.lesson_curation import curate_lessons
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVED, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.archive import SKIPPED as STEP_SKIPPED
-from hyperloom_multibranch.blackboard.rsi.session import CloseStep, CloseTargets, KnowledgeClose, close_knowledge
+from hyperloom_multibranch.blackboard.rsi.session import CloseStep, KnowledgeClose, close_knowledge
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
+from hyperloom_multibranch.scheduling.experience_kb import close_targets
 from hyperloom_multibranch.scheduling.final import FinalChoice
 from hyperloom_multibranch.scheduling.integrator import ConflictLoss
 from hyperloom_multibranch.scheduling.layout import SessionLayout
@@ -248,17 +250,7 @@ class SessionExports:
             knowledge = KnowledgeClose(**{step.name: skipped for step in fields(KnowledgeClose)})
             playbook = curation = skipped
         else:
-            targets = CloseTargets(
-                receipts=self._layout.reports, judge_transcript=self._layout.judge, blobs=self._layout.blobs
-            )
-            knowledge = await asyncio.to_thread(
-                close_knowledge,
-                snapshot,
-                self._metric,
-                budget_seconds=self._budget_seconds,
-                targets=targets,
-                cross_image=_cross_image(self._warm_leads),
-            )
+            knowledge = await asyncio.to_thread(self._close_knowledge, snapshot)
             if knowledge.archive.status == ARCHIVED:
                 playbook = await author_playbook(snapshot, self._ask_author, model=self._author.model)
                 curation = await self._curate(snapshot)
@@ -323,6 +315,15 @@ class SessionExports:
             return await asyncio.to_thread(publish_final_recipe, self._kb_client, snapshot, final_recipe, rule_pack)
         except (RecipeError, RemoteRecipeValidationError, KBStoreError, BlobError, OSError) as exc:
             return RemoteWriteResult(KB_FAILED, f"{type(exc).__name__}: {exc}")
+
+    def _close_knowledge(self, snapshot: BlackboardSnapshot) -> KnowledgeClose:
+        return close_knowledge(
+            snapshot,
+            self._metric,
+            budget_seconds=self._budget_seconds,
+            targets=close_targets(self._layout),
+            cross_image=_cross_image(self._warm_leads),
+        )
 
 
 __all__ = [

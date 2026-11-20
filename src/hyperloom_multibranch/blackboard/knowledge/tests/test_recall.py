@@ -222,6 +222,19 @@ def test_a_read_over_two_schemas_lists_both_schemas_experiences_and_keeps_every_
     assert recall.warnings == ("slow",) and len(shared.calls) == len(own.calls) == 1
 
 
+def test_a_read_over_two_schemas_takes_turns_by_schema_up_to_the_recall_limit() -> None:
+    shared = FakeExperienceReader(completed_read(*(experience_summary(f"cfg-{n}", SAME) for n in range(8))))
+    own = FakeExperienceReader(completed_read(*(experience_summary(f"krn-{n}", SAME) for n in range(3))))
+
+    recall = recall_experiences(SchemaReaders((shared, own)), profile(), 1000.0, ATTENTION)
+
+    assert [item.experience_id for item in recall.experiences] == [
+        "cfg-0", "krn-0", "cfg-1", "krn-1", "cfg-2", "krn-2", "cfg-3", "cfg-4", "cfg-5", "cfg-6",
+    ]  # fmt: skip
+    assert sorted(recall.rendered_refs) == sorted(item.experience_id for item in recall.experiences)
+    assert [limit for _, _, limit in (*shared.calls, *own.calls)] == [RECALL_LIMIT, RECALL_LIMIT]
+
+
 def test_a_schema_the_service_does_not_know_yet_leaves_the_others_experiences() -> None:
     unknown = FakeExperienceReader(RemoteReadResult("", "unavailable", "", (), ("unknown schema",)))
     known = FakeExperienceReader(completed_read(experience_summary("exp-kernel", SAME)))
