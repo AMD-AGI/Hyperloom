@@ -20,6 +20,14 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **An AgentX KEEP that removes a recipe flag no longer strips the recipe from
+  every later round.** Writeback turned such a KEEP (one with `remove_args` or
+  `unset_envs`) into `args_mode=replace`, so each later round launched only the
+  KEEP's own flags: the recipe's `--tensor-parallel-size` and the rest were
+  removed, servers started at TP1 and died in model init with an out-of-memory
+  error, and the session ended on that KEEP. The KEEP now stays relative to the
+  recipe, as the explore and integrate executors already record it; outside
+  AgentX, and for a KEEP that is itself `replace`, nothing changes.
 - **AgentX runs on ATOM.** `HYPERLOOM_AGENTX=1 hyperloom optimize --framework
   atom` now starts: the base comes from InferenceX's ATOM agentic entries, with their forced
   acceptance length (`--spec-decode-acceptance-length`) as the golden layer.

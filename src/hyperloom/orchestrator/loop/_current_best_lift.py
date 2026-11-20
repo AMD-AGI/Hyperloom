@@ -383,7 +383,9 @@ class CurrentBestLiftMixin:
         cand_source: Mapping[str, Any],
         previous: Mapping[str, Any],
     ) -> None:
-        from hyperloom.common.perf_metric import constraint_fields, graded_axes_of
+        from hyperloom.common.perf_metric import agentx_active, constraint_fields, graded_axes_of
+
+        from ..actions.executors._proposal_identity import keeps_effective_args
 
         bv = request.variant
         envs = dict(previous.get("extra_envs") or {})
@@ -419,7 +421,13 @@ class CurrentBestLiftMixin:
             current_best["effective_extra_server_args"] = dedupe_extra_server_args(
                 strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
             )
-        if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
+        if not current_best.get("args_mode") and keeps_effective_args(
+            agentx_active(benchmark_mode=self.shared_state.benchmark_mode),
+            str(previous.get("args_mode") or "append"),
+            str(bv.get("args_mode") or "append"),
+            to_str_list(bv.get("remove_args")),
+            to_str_list(bv.get("unset_envs")),
+        ):
             current_best["args_mode"] = "replace"
         self.shared_state.current_best = current_best
         self.shared_state.working_recipe_generation = int(self.shared_state.working_recipe_generation or 0) + 1

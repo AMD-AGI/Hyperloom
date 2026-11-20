@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 from hyperloom.orchestrator.actions.executors._workload_envs import _apply_caller_removals
+from hyperloom.orchestrator.actions.executors.agentx_point import LaunchChanges, apply_launch_changes
 from hyperloom.orchestrator.actions.executors.profile import _merge_profile_params
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState, inject_stack_base_params
@@ -31,6 +33,9 @@ def _coord(tmp_path: Path, previous: dict, *, agentx_backend: str = "") -> Coord
         current_best={"tput": 1100.0, "extra_server_args": "--tp 8", **previous},
         model_path="/models/m",
         agentx_backend=agentx_backend,
+        benchmark_mode="agentx" if agentx_backend else "",
+        # The winners here carry throughput only; the launch-control rules under test do not depend on the axis.
+        grading={"objective": GRADED_OUTPUT},
     )
     return coord
 
@@ -84,16 +89,56 @@ def _removal_winner() -> dict:
     }
 
 
-@pytest.mark.parametrize("agentx_backend", ["", "inferencex", "mlperf"])
-def test_a_removal_keep_replaces_the_inherited_args_on_every_backend(tmp_path, agentx_backend):
+def test_a_removal_keep_outside_agentx_replaces_the_inherited_args(tmp_path):
+    coord = _coord(tmp_path, {})
+
+    assert coord.writeback.lift_to_current_best("explore", 1200.0, _removal_winner()) is True
+
+    launch = coord.writeback.current_best_launch_config()
+    assert launch["args_mode"] == "replace"
+    assert launch["remove_args"] == HICACHE_FLAGS
+
+
+@pytest.mark.parametrize("agentx_backend", ["inferencex", "mlperf"])
+def test_an_agentx_removal_keep_stays_relative_to_the_recipe(tmp_path, agentx_backend):
+    """The KEEP holds only its delta; replace mode would make every later round drop the recipe's other flags."""
     coord = _coord(tmp_path, {"workload_identity": "agentx:workload"}, agentx_backend=agentx_backend)
     winner = {**_removal_winner(), **AGENTX_MEASUREMENT}
 
     assert coord.writeback.lift_to_current_best("explore", 1200.0, winner) is True
 
     launch = coord.writeback.current_best_launch_config()
-    assert launch["args_mode"] == "replace"
+    assert launch["args_mode"] != "replace"
     assert launch["remove_args"] == HICACHE_FLAGS
+
+
+def test_an_agentx_round_on_a_removal_keep_still_launches_the_recipe(tmp_path):
+    """A round composes the session base, then the accepted launch: the recipe's TP must survive the KEEP's removal."""
+    coord = _coord(tmp_path, {"workload_identity": "agentx:workload"}, agentx_backend="inferencex")
+    winner = {**_removal_winner(), **AGENTX_MEASUREMENT}
+    assert coord.writeback.lift_to_current_best("explore", 1200.0, winner) is True
+    launch = coord.writeback.current_best_launch_config()
+
+    benchmark: dict = {"agentx": {"enabled": True}}
+    recipe = "--tensor-parallel-size 4 --max-model-len 65536 --enable-hierarchical-cache --hicache-ratio 2"
+    apply_launch_changes(benchmark, LaunchChanges(recipe, {}, replace_args=True), accepted=True)
+    apply_launch_changes(
+        benchmark,
+        LaunchChanges(
+            launch["extra_server_args"],
+            launch["extra_envs"],
+            launch["remove_args"],
+            launch["unset_envs"],
+            launch["args_mode"] == "replace",
+        ),
+        accepted=True,
+    )
+
+    argv = benchmark["agentx"]["launch_overrides"]["append_args"]
+    assert argv[argv.index("--tensor-parallel-size") + 1] == "4"
+    assert "--max-model-len" in argv
+    assert not set(HICACHE_FLAGS) & set(argv)
+    assert "--schedule-policy" in argv
 
 
 def _eagle_retune_winner() -> dict:
