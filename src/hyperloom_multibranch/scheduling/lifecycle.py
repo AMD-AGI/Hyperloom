@@ -35,6 +35,7 @@ import asyncio
 import contextlib
 import logging
 import math
+import os
 from collections.abc import Awaitable
 from dataclasses import replace
 from functools import partial
@@ -96,6 +97,7 @@ from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog, downtime_until
 from hyperloom_multibranch.scheduling.events import IntegrationProfiler, SessionEvents
 from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering
+from hyperloom_multibranch.blackboard.knowledge.breakdown import claw_session_id
 from hyperloom_multibranch.scheduling.exports import CloseAuthoring, ExportServices, ExportSources, SessionExports
 from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalSelector, session_candidates
 from hyperloom_multibranch.scheduling.forks import ForkDesk
@@ -109,6 +111,7 @@ from hyperloom_multibranch.scheduling.manifest import (
     ImageCheckSummary,
     SessionManifest,
     code_version,
+    kept_claw_session_id,
     read_manifest,
 )
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup
@@ -429,7 +432,8 @@ class Session:
 
         manifest = read_manifest(self._layout.manifest)
         downtime = downtime_until(self._layout.decisions, self._clock.now())
-        replace(manifest, deadline=deadline).write(self._layout.manifest)
+        claw = kept_claw_session_id(manifest.claw_session_id, os.environ, str(self._layout.manifest))
+        replace(manifest, deadline=deadline, claw_session_id=claw).write(self._layout.manifest)
         self._phase("resume", ended=ended.value, downtime_seconds=downtime, deadline=deadline)
         return SessionBudget(manifest.started_at, deadline - manifest.started_at)
 
@@ -1055,6 +1059,7 @@ class Session:
             policy_versions=self._policy_versions(),
             image_check=ImageCheckSummary(image_check.summary()),
             agent_isolation=self._agent_isolation,
+            claw_session_id=claw_session_id(os.environ),
         ).write(self._layout.manifest)
 
 

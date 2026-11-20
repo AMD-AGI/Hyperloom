@@ -10,15 +10,19 @@ workload, on the cards one test runs on, InferenceX read at the operator's commi
 froze one, a resumed one, keeps it. The operator's ``--reference-script`` is the base as it is for ``hyperloom
 optimize``: a base launch record is frozen without reading any recipe source. The session's component agents are served
 the frozen base, the one the gate measures on, unless the operator gave them a launch file (:func:`served_launch`). The
-workload fixes the topology every test is sized by, so a base on another one is refused.
+workload fixes the topology every test is sized by, so a base on another one is refused. The toolbox's state records
+the Claw session that hosts the session as the manifest does (:func:`record_claw_session`).
 """
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hyperloom.common.model_paths import resolve_serving_model_path
+from hyperloom_multibranch.scheduling.manifest import kept_claw_session_id
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import Workload
 from inference_suite.contracts import BaseLaunchError
@@ -42,15 +46,30 @@ def freeze_session_base(
 
     try:
         frozen = frozen_base(toolbox)
-        if frozen is not None:
-            return frozen
     except (BaseLaunchMismatch, BaseLaunchError) as exc:
         raise PeersUnavailable(f"the session's frozen base launch cannot be read: {exc}") from exc
-    try:
-        base = resolve_server_base(_session_launch(workload, reference_script, inferencex_commit))
-    except BaseLaunchUnresolved as exc:
-        raise PeersUnavailable(str(exc)) from exc
-    return freeze_base(toolbox, base)
+    if frozen is None:
+        try:
+            base = resolve_server_base(_session_launch(workload, reference_script, inferencex_commit))
+        except BaseLaunchUnresolved as exc:
+            raise PeersUnavailable(str(exc)) from exc
+        frozen = freeze_base(toolbox, base)
+    record_claw_session(toolbox, os.environ)
+    return frozen
+
+
+def record_claw_session(toolbox: Path, environ: Mapping[str, str]) -> None:
+    """Record in the state of the toolbox's session at ``toolbox`` (``state.json``, and ``retest_view.json`` beside it)
+    the Claw session it keeps under ``environ`` (:func:`~hyperloom_multibranch.scheduling.manifest.kept_claw_session_id`):
+    the one it recorded, else the one ``environ`` names; the state is not written when that changes nothing."""
+
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState.load_or_init(toolbox)
+    kept = kept_claw_session_id(state.claw_session_id, environ, str(SharedState.state_path(toolbox)))
+    if kept is not None and kept != state.claw_session_id:
+        state.claw_session_id = kept
+        state.save(toolbox)
 
 
 def served_launch(frozen: FrozenBase, agent_launch: str) -> str:
@@ -82,4 +101,4 @@ def _session_launch(workload: Workload, reference_script: str, inferencex_commit
     )
 
 
-__all__ = ["freeze_session_base", "served_launch"]
+__all__ = ["freeze_session_base", "record_claw_session", "served_launch"]

@@ -129,6 +129,10 @@ the profile and the root commit are the ones the first PRELUDE recorded.
 - **What it continues:** the earlier run's unfinished tests are withdrawn and the branches it left open are stopped.
   The roster and the integration branch open again (a `reopen` lineage event), and EXPLORE opens new branches, new
   ids and worktrees, on the integration head. Specialist and agent branches alike start fresh.
+- **Claw session:** a session started with `CLAW_SESSION_ID` records it as the top-level `claw_session_id` of
+  `MB-manifest.json` (`null` without it), so a collector of running sessions can tell whose a directory is before
+  CLOSE writes `session_breakdown.json`. A resume keeps the recorded id; given another one it logs a warning and keeps
+  the original, and a session that recorded none takes the one the resume is given.
 - **Deadline:** the session's deadline moves by its downtime, the time between the last decision the earlier run
   recorded and the resume. The new deadline is written to the manifest and recorded as a `resume` phase in
   `MB-decisions.jsonl` with `ended`, `downtime_seconds` and `deadline`. GPU hours are not given back: the session
