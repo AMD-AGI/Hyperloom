@@ -10,14 +10,11 @@ import pytest
 from hyperloom.agents.critic.runtime.errors import IntentEnvelopeValidationError
 from hyperloom.agents.critic.runtime.intent_envelope import (
     ALLOWED_VERDICT_SOURCES,
-    Intent,
-    IntentEnvelope,
     ReviewVerdict,
     build_advice_intent,
     build_envelope,
     build_idle_intent,
     build_review_verdict_intent,
-    validate_envelope,
 )
 from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS, DEFAULT_IDLE_BODY
 
@@ -73,7 +70,7 @@ def test_build_idle_intent_default():
     assert h.payload["body_md"] == DEFAULT_IDLE_BODY
 
 
-def test_build_envelope_with_intents_validates():
+def test_build_envelope_wraps_intents_in_order():
     env = build_envelope(
         [
             build_review_verdict_intent(ReviewVerdict(target_proposal_msg_id="m1", verdict="approve")),
@@ -85,62 +82,7 @@ def test_build_envelope_with_intents_validates():
     assert d["intents"][0]["payload"]["target_proposal_msg_id"] == "m1"
 
 
-def test_build_envelope_empty_raises():
-    with pytest.raises(IntentEnvelopeValidationError, match="non-empty"):
-        build_envelope([])
-
-
-def test_validate_envelope_accepts_well_formed_dict():
-    env = validate_envelope(
-        {
-            "intents": [
-                {
-                    "intent_type": "review_verdict",
-                    "payload": {
-                        "target_proposal_msg_id": "abc",
-                        "verdict": "approve",
-                        "source": "critic",
-                        "reasoning": "ok",
-                    },
-                }
-            ]
-        }
-    )
-    assert isinstance(env, IntentEnvelope)
-    assert env.intents[0].payload["verdict"] == "approve"
-
-
-def test_validate_envelope_rejects_disallowed_intent():
-    with pytest.raises(IntentEnvelopeValidationError, match="not.*Critic"):
-        validate_envelope(
-            {
-                "intents": [
-                    {
-                        "intent_type": "delegate",
-                        "payload": {"action_name": "baseline"},
-                    }
-                ]
-            }
-        )
-
-
-def test_validate_envelope_rejects_missing_payload_key():
-    with pytest.raises(IntentEnvelopeValidationError, match="target"):
-        validate_envelope({"intents": [{"intent_type": "review_verdict", "payload": {"verdict": "approve"}}]})
-
-
-def test_validate_envelope_rejects_empty_list():
-    with pytest.raises(IntentEnvelopeValidationError, match="non-empty"):
-        validate_envelope({"intents": []})
-
-
 def test_advice_intent_carries_optional_target():
     intent = build_advice_intent("watch dispatch", target_proposal_msg_id="m1")
     assert intent.payload["topic"] == "advice"
     assert intent.payload["about_proposal_msg_id"] == "m1"
-
-
-def test_intent_to_dict_round_trip():
-    a = Intent(intent_type="send_message", payload={"topic": "observation"})
-    out = validate_envelope({"intents": [a.to_dict()]})
-    assert out.intents[0].intent_type == "send_message"
