@@ -151,3 +151,79 @@ def test_the_filter_reads_the_harness_the_launch_will_run(base, variant):
 
     assert kept == []
     assert dropped[0]["source"] == SERVE_FLAG and NO_PC in dropped[0]["reason"]
+
+
+def _vllm_recipe(tmp_path, operator_args: str):
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe
+
+    base_yaml = tmp_path / "base.yaml"
+    base_yaml.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "vllm", "envs": {"EXTRA_VLLM_ARGS": operator_args}}}),
+        encoding="utf-8",
+    )
+    return GridRecipe(base_yaml_path=base_yaml)
+
+
+def test_the_launch_refuses_a_variant_that_adds_a_harness_flag(tmp_path):
+    """The launch is the last point every path crosses, integrate_patch included, which skips the filter."""
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+
+    variant = GridVariant("patch_no_prefix_cache", f"--max-num-batched-tokens 16384 {NO_PC}")
+    with pytest.raises(HarnessFlagChangeError, match=NO_PC) as refused:
+        _build_variant_yaml(_vllm_recipe(tmp_path, "--max-num-seqs 256"), variant, output_subdir=tmp_path / "v")
+    assert refused.value.error_class == SERVE_FLAG
+
+
+def test_the_launch_keeps_a_variant_inheriting_the_operators_harness_flag(tmp_path):
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+
+    variant = GridVariant("mnbt_16k", "--max-num-batched-tokens 16384")
+    path = _build_variant_yaml(
+        _vllm_recipe(tmp_path, f"--max-num-seqs 256 {NO_PC}"), variant, output_subdir=tmp_path / "v"
+    )
+    assert NO_PC in yaml.safe_load(path.read_text(encoding="utf-8"))["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+
+
+def test_an_agentx_candidate_adding_a_harness_flag_is_refused():
+    from hyperloom.orchestrator.actions.executors.agentx_point import LaunchChanges, apply_launch_changes
+
+    benchmark = {"agentx": {"enabled": True, "launch_overrides": {"version": 1, "append_args": ["--max-num-seqs=256"]}}}
+    with pytest.raises(HarnessFlagChangeError, match=NO_PC):
+        apply_launch_changes(benchmark, LaunchChanges(args=NO_PC))
+
+
+def test_the_launch_refuses_a_harness_flag_set_through_the_variants_env(tmp_path):
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+
+    variant = GridVariant("env_sets_carrier", "", extra_envs={"EXTRA_VLLM_ARGS": f"--max-num-seqs 256 {NO_PC}"})
+    with pytest.raises(HarnessFlagChangeError, match=NO_PC):
+        _build_variant_yaml(_vllm_recipe(tmp_path, "--max-num-seqs 256"), variant, output_subdir=tmp_path / "v")
+
+
+def test_a_repeated_harness_flag_in_the_composed_args_is_read_where_the_launch_dedupe_keeps_it(tmp_path):
+    """The launch dedupes composed args to each flag's first position, so appending the negative again changes nothing."""
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+
+    reference = f"{NO_PC} --enable-prefix-caching"
+    variant = GridVariant("restates_negative", f"--max-num-batched-tokens 16384 {NO_PC}")
+
+    kept, dropped = _filter(variant, base=reference)
+    assert kept == [variant] and dropped == []
+    _build_variant_yaml(_vllm_recipe(tmp_path, reference), variant, output_subdir=tmp_path / "v")
+
+
+def test_an_env_override_of_the_args_carrier_is_read_undeduped(tmp_path):
+    """An env layer replaces the carrier after the launch's dedupe, so the server reads its last spelling as written."""
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+
+    carrier = f"{NO_PC} --enable-prefix-caching {NO_PC}"
+    variant = GridVariant("env_repeats_negative", "", extra_envs={"EXTRA_VLLM_ARGS": carrier})
+
+    kept, dropped = _filter(variant, base="")
+    assert kept == [] and dropped[0]["source"] == SERVE_FLAG
+    with pytest.raises(HarnessFlagChangeError, match=NO_PC):
+        _build_variant_yaml(_vllm_recipe(tmp_path, ""), variant, output_subdir=tmp_path / "v")

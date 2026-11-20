@@ -130,8 +130,14 @@ def apply_launch_changes(
         ServerArgvInvalidError: When the composed args cannot become an argv intact.
         SpeculativeDecodingPinnedError: When a candidate changes the draft or the simulated acceptance its accepted
             launch pins.
+        HarnessFlagChangeError: When a candidate runs a benchmark-harness flag its accepted launch does not, or
+            drops one it does.
     """
-    from hyperloom.inference_optimizer.grid_server_args import compose_server_args, dedupe_extra_server_args
+    from hyperloom.inference_optimizer.grid_server_args import (
+        compose_server_args,
+        dedupe_extra_server_args,
+        refuse_harness_flag_change,
+    )
 
     from ._spec_decode_pin import refuse_unpinned_speculative_change
 
@@ -171,6 +177,7 @@ def apply_launch_changes(
         refuse_unpinned_speculative_change(
             accepted_args, accepted_envs, _launch_server_args(launch), _launch_envs(benchmark, launch)
         )
+        refuse_harness_flag_change(accepted_args, _launch_server_args(launch))
 
 
 def seed_session_base(benchmark: dict[str, Any], base: ServerBase) -> None:

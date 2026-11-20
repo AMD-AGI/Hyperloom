@@ -98,6 +98,7 @@ from hyperloom.inference_optimizer.framework_registry import server_args_env_nam
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
     dedupe_extra_server_args,
+    refuse_harness_flag_change,
 )
 
 
@@ -1630,6 +1631,8 @@ def _build_variant_yaml(
     if _rt_override := getattr(variant, "runtime_override", None):
         apply_runtime_override(envs, _rt_override)
     refuse_unpinned_speculative_change(base_args, base_envs, combined, envs)
+    # The carrier as the server will read it: deduped at composition, then a variant's own env layer may replace it.
+    refuse_harness_flag_change(dedupe_extra_server_args(base_args), envs.get(extra_args_env, ""))
     # ``envs`` is the launch's environment, TP included; the AgentX branch meets it in ``materialize_variant``.
     speculative_capability.refuse_unrunnable_speculative_stack(combined, bench, envs=envs, model_path=target.model_path)
 
