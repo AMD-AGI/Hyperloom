@@ -45,6 +45,7 @@ __all__ = [
     "running",
     "signal_group",
     "signal_processes",
+    "tree_cpu_sec",
 ]
 
 #: A process, pinned to the incarnation that was observed: ``(pid, start_time)``.
@@ -77,6 +78,38 @@ def proc_identity(pid: int) -> tuple[int, int] | None:
         return int(fields[1]), int(fields[19])
     except (OSError, ValueError, IndexError):
         return None
+
+
+def _cpu_ticks(pid: int, start_time: int | None) -> int | None:
+    """The clock ticks ``pid`` has run in user and system mode, its own and those of the children it has waited for;
+    ``None`` when it is gone, unreadable, or (given ``start_time``) another incarnation."""
+    try:
+        fields = _stat_fields(pid)
+        if start_time is not None and int(fields[19]) != start_time:
+            return None
+        # utime, stime, cutime, cstime: fields 14-17 of the stat line, counted from ``state`` as field 3.
+        return sum(int(value) for value in fields[11:15])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def tree_cpu_sec(root_pid: int) -> float | None:
+    """The CPU seconds, user and system, that ``root_pid`` and its live descendants have used so far.
+
+    Each process counts the children it has already waited for, so a descendant that exits and is collected keeps its
+    time in its parent's count. The root is read last, so a child collected between the listing and its own read is
+    counted through the root rather than lost from this reading and found again in the next one; a total that still
+    falls is one a caller reads as no growth. ``None`` when ``root_pid`` or ``/proc`` cannot be read.
+    """
+    try:
+        below = descendants(root_pid)
+    except OSError:
+        return None
+    ticks = sum(_cpu_ticks(pid, start_time) or 0 for pid, start_time in below)
+    root = _cpu_ticks(root_pid, None)
+    if root is None:
+        return None
+    return (root + ticks) / os.sysconf("SC_CLK_TCK")
 
 
 def boot_unix() -> float:
