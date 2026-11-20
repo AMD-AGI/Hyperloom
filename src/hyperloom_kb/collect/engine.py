@@ -36,7 +36,6 @@ from hyperloom_kb.schema import (
     RenderedRef,
     SchemaValidationError,
 )
-from hyperloom_kb.transitions import ExperienceConflictError
 
 REPORT_FORMAT = "hyperloom-kb.collect-report.v1"
 
@@ -393,21 +392,13 @@ def _publish(target: CollectionTarget, projected: _Projected) -> str:
             created_at=experience.created_at,
         )
     )
-    record = session.record
-    if not isinstance(record, Experience):
+    if not isinstance(session.record, Experience):
         raise RuntimeError("collection target did not open an Experience session")
-    if record.status is ExperienceStatus.COMPLETE:
-        if record != experience:
-            raise ExperienceConflictError("a different complete Experience already has this id")
-        return "unchanged"
-    if not record.change:
-        session.decide(
-            change=_with_paths(experience.change, files),
-            rationale=_with_paths(experience.rationale, files),
-            rendered_refs=experience.rendered_refs,
-        )
-    elif record.change != experience.change or record.rationale != experience.rationale:
-        raise ExperienceConflictError("an in-progress Experience holds a different decision")
+    session.decide(
+        change=_with_paths(experience.change, files),
+        rationale=_with_paths(experience.rationale, files),
+        rendered_refs=experience.rendered_refs,
+    )
     session.complete(
         outcome=_with_paths(experience.outcome, files),
         reflection=_with_paths(experience.reflection, files),

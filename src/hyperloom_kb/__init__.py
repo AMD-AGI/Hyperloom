@@ -151,9 +151,6 @@ from hyperloom_kb.sync import (
     SyncUnavailable,
     global_config_from_env,
 )
-from hyperloom_kb.transitions import (
-    ExperienceConflictError,
-)
 
 __all__ = [
     "AnthropicPlannerBackend",
@@ -173,7 +170,6 @@ __all__ = [
     "ConfiguredExperienceKB",
     "EXPERIENCE_ID_NAMESPACE",
     "Experience",
-    "ExperienceConflictError",
     "ExperienceDeclaration",
     "ExperienceHTTPService",
     "ExperienceRenderer",
