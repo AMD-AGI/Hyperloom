@@ -65,6 +65,8 @@ SESSION_VARIABLES = {
     "image": "HYPERLOOM_IMAGE",
     "node_name": "NODE_NAME",
 }
+#: The :data:`SESSION_VARIABLES` key of the Claw session a hosted run belongs to, which the manifest records too.
+CLAW_SESSION_KEY = "claw_session_id"
 #: The records a hosted run appends in the session directory, by the ``metadata`` key the breakdown copies them under.
 HOSTED_RECORDS = {"measurement_sandboxes": Path("hosted/measurement_sandboxes.jsonl")}
 #: The documents a hosted run writes in the session directory, by the ``metadata`` key the breakdown copies them under.
@@ -140,6 +142,20 @@ def card_holds(snapshot: BlackboardSnapshot) -> dict[str, object]:
     return {"leases": leases, "card_hours_by_branch": by_branch, "card_hours_by_kind": by_kind}
 
 
+def session_variable(key: str, environ: Mapping[str, str]) -> str | None:
+    """What the variable :data:`SESSION_VARIABLES` names for ``key`` holds in ``environ``, stripped; ``None`` where it
+    is unset or blank. The one reader of those variables, so the breakdown, the manifest and the toolbox's state
+    cannot read them apart."""
+
+    return (environ.get(SESSION_VARIABLES[key]) or "").strip() or None
+
+
+def claw_session_id(environ: Mapping[str, str]) -> str | None:
+    """The Claw session ``environ`` names (:data:`CLAW_SESSION_KEY`); ``None`` for a run Claw did not host."""
+
+    return session_variable(CLAW_SESSION_KEY, environ)
+
+
 def session_metadata(
     snapshot: BlackboardSnapshot, environ: Mapping[str, str], code_revision: str | None = None
 ) -> dict[str, object]:
@@ -147,7 +163,7 @@ def session_metadata(
     start, and what :data:`SESSION_VARIABLES` name; null where unset."""
 
     session_id = snapshot.profile.session_id if snapshot.profile is not None else None
-    named = {key: environ.get(name) or None for key, name in SESSION_VARIABLES.items()}
+    named = {key: session_variable(key, environ) for key in SESSION_VARIABLES}
     return {"session_id": session_id, "code_revision": code_revision or None, **named}
 
 
@@ -323,6 +339,7 @@ def write_breakdown(directory: Path, breakdown: Mapping[str, object]) -> Path:
 
 
 __all__ = [
+    "CLAW_SESSION_KEY",
     "EXPORTER_VERSION",
     "FILENAME",
     "HOSTED_DOCUMENTS",
@@ -337,9 +354,11 @@ __all__ = [
     "build_breakdown",
     "build_usage",
     "card_holds",
+    "claw_session_id",
     "hosted_records",
     "measurement_usage",
     "session_metadata",
     "session_spend",
+    "session_variable",
     "write_breakdown",
 ]
