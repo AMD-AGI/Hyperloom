@@ -222,3 +222,38 @@ def test_tree_cpu_sec_counts_a_child_collected_between_the_listing_and_its_read_
 def test_tree_cpu_sec_reads_this_process(sleeper):
     assert (proctree.tree_cpu_sec(os.getpid()) or 0.0) > 0.0
     assert proctree.tree_cpu_sec(sleeper.pid) is not None
+
+
+def test_tree_rss_and_io_key_each_process_by_its_incarnation_and_skip_what_they_cannot_read(monkeypatch):
+    identities = {1: (0, 100), 2: (1, 200), 3: (1, 300), 4: (1, 999)}
+    rss = {1: 10, 2: 20, 4: 40}  # pid 3 is gone (or unreadable) by its read; pid 4 is another process than listed
+    monkeypatch.setattr(proctree, "proc_identity", identities.get)
+    monkeypatch.setattr(proctree, "descendants", lambda root: [(2, 200), (3, 300), (4, 400)])
+
+    def status(pid: int) -> str:
+        if pid not in rss:
+            raise FileNotFoundError(pid)
+        return f"Name:\tx\nVmRSS:\t   {rss[pid]} kB\n"
+
+    monkeypatch.setattr(proctree, "_status_text", status)
+    assert proctree.tree_rss_bytes(1) == {(1, 100): 10240, (2, 200): 20480}
+    io = {1: "rchar: 7\nwchar: 1\nread_bytes: 3\n", 2: "rchar: 5\nread_bytes: 0\n"}
+
+    def read_io(path: Path, encoding: str) -> str:
+        pid = int(path.parent.name)
+        if pid not in io:
+            raise PermissionError(13, "Permission denied", str(path))  # EACCES: unknown, never zero
+        return io[pid]
+
+    monkeypatch.setattr(Path, "read_text", read_io)
+    assert proctree.tree_io_bytes(1) == {(1, 100): 10, (2, 200): 5}
+    del io[1]
+    assert proctree.tree_io_bytes(1) is None, "a root whose counters cannot be read is no reading"
+    assert proctree.tree_rss_bytes(5) is None, "a root that is gone is no reading"
+
+
+def test_tree_rss_and_io_read_this_process():
+    me = (os.getpid(), proctree.proc_identity(os.getpid())[1])
+    assert (proctree.tree_rss_bytes(os.getpid()) or {}).get(me, 0) > 0
+    io = proctree.tree_io_bytes(os.getpid())
+    assert io is None or io.get(me, -1) >= 0
