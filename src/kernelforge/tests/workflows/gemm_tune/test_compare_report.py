@@ -11,6 +11,8 @@ import time
 import types
 from pathlib import Path
 
+import pytest
+
 import kernelforge.workflows.gemm_tune.tuners._aiter_dense_common as ac
 from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
 
@@ -78,29 +80,22 @@ def _run(tmp_path):
 
 
 class TestFindLatestCompareReport:
-    def test_rejects_stale_report(self, tmp_path):
+    @pytest.mark.parametrize(
+        ("name", "seconds_after_start"),
+        [
+            ("tuned_a8w8_blockscale.99999.compare.txt", -60),
+            ("tuned_a8w8_blockscale_bpreshuffle.12345.compare.txt", 1),
+            ("tuned_a4w4_blockscale.54321.compare.txt", 1),
+        ],
+        ids=["stale", "sibling-tuner", "concurrent-other-tuner"],
+    )
+    def test_rejects_a_report_this_run_did_not_write(self, tmp_path, name, seconds_after_start):
         compare_dir = tmp_path / "aiter_compare"
         compare_dir.mkdir()
-        stale = compare_dir / "tuned_a8w8_blockscale.99999.compare.txt"
-        stale.write_text(_COMPARE_TABLE)
-        os.utime(stale, (1000, 1000))
         start_time = time.time()
-        assert ac._find_latest_compare_report_impl("a8w8_blockscale", start_time, compare_dir) is None
-
-    def test_rejects_sibling_tuner(self, tmp_path):
-        compare_dir = tmp_path / "aiter_compare"
-        compare_dir.mkdir()
-        start_time = time.time() - 1
-        sibling = compare_dir / "tuned_a8w8_blockscale_bpreshuffle.12345.compare.txt"
-        sibling.write_text(_COMPARE_TABLE)
-        assert ac._find_latest_compare_report_impl("a8w8_blockscale", start_time, compare_dir) is None
-
-    def test_rejects_concurrent_wrong_stem(self, tmp_path):
-        compare_dir = tmp_path / "aiter_compare"
-        compare_dir.mkdir()
-        start_time = time.time() - 1
-        other = compare_dir / "tuned_a4w4_blockscale.54321.compare.txt"
-        other.write_text(_COMPARE_TABLE)
+        report = compare_dir / name
+        report.write_text(_COMPARE_TABLE)
+        os.utime(report, (start_time + seconds_after_start, start_time + seconds_after_start))
         assert ac._find_latest_compare_report_impl("a8w8_blockscale", start_time, compare_dir) is None
 
     def test_accepts_matching_report(self, tmp_path):

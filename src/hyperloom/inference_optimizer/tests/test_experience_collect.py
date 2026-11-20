@@ -538,9 +538,10 @@ def test_an_auto_benched_specialist_proposal_publishes_its_reasoning_citations_a
     assert experience["provenance"]["extra"]["kb_read_id"] == "read-specialist"
 
 
-def test_a_specialists_config_only_deliverable_is_published_as_a_config_experience(session_dir: Path) -> None:
-    import asyncio
-
+def test_a_source_attempt_that_delivered_only_configuration_is_published_as_a_config_experience(
+    session_dir: Path,
+) -> None:
+    """An integrate round with no patch, as an ENABLEMENT config round is, still records the levers it measured."""
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.phase_framework._open_framework_timeline()
@@ -561,34 +562,20 @@ def test_a_specialists_config_only_deliverable_is_published_as_a_config_experien
             ]
         },
     )
-    authoring = SimpleNamespace(
-        task_id="t-auth-7",
-        params={
-            "framework_agent_authoring": True,
-            "framework_agent_candidate_id": "https://x/pr/7",
-            "domain": "serving_specialist",
-            "kb_read_id": "read-authoring",
-            "kb_rendered_refs": [],
-        },
-    )
-    asyncio.run(
-        coord.phase_framework.maybe_autosubmit_framework_config(
-            task=authoring,
-            done_payload={
-                "proposal_set": [
-                    {
-                        "name": "fused-moe-routing",
-                        "extra_args": "--enable-fused-moe",
-                        "extra_envs": {"VLLM_FUSED_MOE": "1"},
-                        "reason": "The PR reduces to this server flag on the installed version.",
-                    }
-                ]
-            },
-        )
-    )
-    [pending] = coord.state.pending_proposals.values()
     coord.phase_framework._record_framework_agent_authored_outcome(
-        task=SimpleNamespace(task_id="t-int-7", kind="integrate_patch", params=dict(pending.payload["params"])),
+        task=SimpleNamespace(
+            task_id="t-int-7",
+            kind="integrate_patch",
+            params={
+                "framework_agent_authoring": True,
+                "specialist_task_id": "t-auth-7",
+                "framework_agent_candidate_id": "https://x/pr/7",
+                "extra_server_args": "--enable-fused-moe",
+                "extra_envs": {"VLLM_FUSED_MOE": "1"},
+                "kb_read_id": "read-authoring",
+                "kb_rendered_refs": [],
+            },
+        ),
         result={
             "status": "kept",
             "base_tput": 100.0,
@@ -605,6 +592,9 @@ def test_a_specialists_config_only_deliverable_is_published_as_a_config_experien
 
     report = kb_collect.collect(experience_kb_service.MAPPING, _document(timeline), dry_run=True).to_dict()
 
+    [attempt] = timeline[0]["ext"]["attempts"]
+    assert attempt["config_delta"]["extra_server_args"] == "--enable-fused-moe"
+    assert attempt["config_delta"]["extra_envs"] == {"VLLM_FUSED_MOE": "1"}
     assert report["skipped"] == []
     [row] = report["collected"]
     experience = row["experience"]

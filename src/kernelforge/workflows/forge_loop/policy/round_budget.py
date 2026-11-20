@@ -14,14 +14,15 @@ from kernelforge.workflows.forge_loop.roles.plan_critic import PLAN_CRITIC_TIMEO
 PLANNING_FLOOR_SEC = 750.0
 
 # What an Implementer session is priced at BEFORE planning, where the only question is whether a round could run at
-# all.
+# all: the p25 production session (8.0 min).
 ADMISSION_SESSION_SEC = 480.0
 
 # What an Implementer session is priced at AFTER planning, where the loop is about to start something it cannot
-# interrupt.
+# interrupt: the median production session (12.3 min).
 DISPATCH_SESSION_SEC = 738.0
 
-# The floor under the dispatch requirement, and the one number here that this campaign's own speed cannot lower.
+# The floor under the dispatch requirement, and the one number here that this campaign's own speed cannot lower: the
+# p90 production session (34.6 min) less the 15-minute grace a 10.75 h budget left before an 11 h external kill.
 DISPATCH_FLOOR_SEC = 1176.0
 
 # What the canonical validation and benchmark cost a round that has observed none of its own.

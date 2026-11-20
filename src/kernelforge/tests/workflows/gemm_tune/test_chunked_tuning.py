@@ -148,7 +148,7 @@ def _bf16_writes(cmd, shapes, _kwargs):
 
 def _run_bf16(tmp_path, monkeypatch, cards, m_values, **run_kwargs):
     _prep(tmp_path, monkeypatch, tuned_rows=[])
-    monkeypatch.setattr(sd, "_compute_m_values", lambda conc, thorough=False: list(m_values))
+    monkeypatch.setattr(sd, "compute_dense_m_values", lambda conc, thorough=False: list(m_values))
     clock = _Clock()
     monkeypatch.setattr(sd, "time", types.SimpleNamespace(monotonic=clock), raising=False)
     run = _deadline_run(clock, cards, _bf16_writes, **run_kwargs)

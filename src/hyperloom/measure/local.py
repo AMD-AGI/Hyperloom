@@ -109,7 +109,7 @@ from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC, SERVER_BOOT_T
 from hyperloom.measure import second_tracer
 from hyperloom.measure.second_tracer import SecondTracer as _Tracer
 from hyperloom.measure.round_marks import ROLE_BOOT, ROLE_EVAL, ROLE_MEASURE, ROLE_WARMUP, RoundShape
-from hyperloom.measure.round_marks import profile_stall, read_runs, round_boundaries
+from hyperloom.measure.round_marks import read_runs, round_boundaries, step_failure
 from hyperloom.sandbox.node import node_name
 from hyperloom.measure.short_prompts.rounds import Serving, write_answered
 from hyperloom.measure.short_prompts.staging import load_prompt_set
@@ -1233,7 +1233,7 @@ def _step_failure(failing: list[VariantResult]) -> StepFailure | None:
     folders = (Path(result.workspace) for result in failing if result.workspace)
     for round_ in (RoundFolder.read(folder) for folder in folders if is_round_folder(folder)):
         if (step := round_.report.failed_step) is not None:
-            return StepFailure(step, round_.report.failure_detail or "", profile_stall(round_.layout.root, step))
+            return step_failure(round_.layout.root, step, round_.report.failure_detail or "")
     return None
 
 

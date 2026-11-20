@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import os
 import signal
@@ -26,8 +25,7 @@ from kernelforge.workflows.forge_loop.iteration.iteration_types import (
 )
 from kernelforge.evaluation.jit_rebuild import force_jit_rebuild
 from kernelforge.workflows.forge_loop.campaign.run_state import make_event
-from kernelforge.workflows.forge_loop.iteration.scoring_runtime import _bench_failure_detail, _build_failure_tail
-from kernelforge.utils.process_group import communicate_process_group
+from kernelforge.workflows.forge_loop.iteration.scoring_runtime import _bench_failure_detail
 
 
 @contextlib.contextmanager
@@ -73,26 +71,15 @@ class AttemptVerdictMixin:
         iter_start = time.time()
         force_jit_rebuild(self._jit_source_files())
 
-        if self.ic.build_command:
-            proc = await asyncio.create_subprocess_exec(
-                *self.ic.build_command,
-                cwd=self.ic.build_dir or self.ic.workspace_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
+        build_failure = await self._run_build(tail_limit=500)
+        if build_failure is not None:
+            return IterationResult(
+                iteration=iteration,
+                duration_sec=time.time() - iter_start,
+                validation_passed=False,
+                validation_summary=f"BUILD FAILED: {build_failure}",
+                kept=False,
             )
-            stdout, stderr = await communicate_process_group(
-                proc,
-                timeout=self.ic.build_timeout_sec,
-            )
-            if proc.returncode != 0:
-                return IterationResult(
-                    iteration=iteration,
-                    duration_sec=time.time() - iter_start,
-                    validation_passed=False,
-                    validation_summary=f"BUILD FAILED: {_build_failure_tail(stdout, stderr, 500)}",
-                    kept=False,
-                )
 
         measurement_started = time.time()
         print("  [validate] Running full correctness suite...")

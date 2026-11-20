@@ -73,22 +73,14 @@ class UsageLedgerFile:
         with open(self._lock_path, "a") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
-                merged = combine_usage_totals(self._current(), delta)
+                # A ledger that was never written, or one a crash left unreadable, restarts from this process's own
+                # share rather than costing the run its accounting.
+                merged = combine_usage_totals(read_usage_ledger(self.path.parent), delta)
                 merged["updated_at"] = datetime.now().isoformat()
                 atomic_write_text(self.path, json.dumps(merged, indent=2), options=DURABLE)
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         self._published = dict(totals)
-
-    def _current(self) -> dict[str, Any]:
-        """The ledger as it stands, read inside the lock."""
-        try:
-            payload = json.loads(self.path.read_text())
-        except (OSError, ValueError):
-            # A ledger that was never written, or one a crash left unreadable, restarts from this process's own share
-            # rather than costing the run its accounting.
-            return {}
-        return payload if isinstance(payload, dict) else {}
 
     def _delta(self, totals: dict[str, Any]) -> dict[str, Any] | None:
         """What this process has spent since its last publish, or None when nothing moved.

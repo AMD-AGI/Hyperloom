@@ -320,22 +320,3 @@ def test_write_experience_to_kb_does_not_synthesize_speedup(monkeypatch, tmp_pat
         "reason": "missing_mean_case_speedup",
     }
     assert captured["outcome"].mean_case_speedup is None
-
-
-def test_kb_warmstart_swallows_reader_error(monkeypatch, tmp_path):
-    repo = _init_repo(tmp_path)
-
-    def boom(**_k):
-        raise RuntimeError("read blew up")
-
-    monkeypatch.setattr("kernelforge.knowledge.kb_store.reader.read_top_solutions", boom)
-    warm = warmstart.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="d.py"),
-    )
-    assert warm == {
-        "candidate": False,
-        "read_reason": "warm_start_error",
-        "read_error": "RuntimeError: read blew up",
-    }

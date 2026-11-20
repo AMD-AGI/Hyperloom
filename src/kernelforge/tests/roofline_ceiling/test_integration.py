@@ -26,7 +26,13 @@ from kernelforge.roofline_ceiling.contract import load_report
 from kernelforge.roofline_ceiling.estimate import estimate_ceiling as real_estimate_ceiling
 from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR
 from kernelforge.workflows.forge_loop.campaign.run_state import RunState
-from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop
+from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop, LoopAgents
+from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationInfrastructureError
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
+    _make_loop,
+    _no_change_agent,
+    _unused_supervisor,
+)
 
 
 def _report(cases=(("decode-t1", 12.8),)):
@@ -99,15 +105,13 @@ def test_an_unreadable_ceiling_costs_a_log_line_not_the_campaign(tmp_path, caplo
     assert "ceiling unavailable" in caplog.text
 
 
-def test_an_unreadable_ceiling_is_not_re_read_every_iteration(tmp_path):
-    missing = tmp_path / "absent.json"
-    loop = _loop(str(missing))
+def test_an_unreadable_ceiling_is_not_re_read_every_iteration(tmp_path, caplog):
+    loop = _loop(str(tmp_path / "absent.json"))
 
     loop._render_ceiling_advisory()
-    # A second call must not touch the filesystem again: the sentinel records
-    # that the lookup already happened and failed.
-    assert loop._ceiling_report is None
+
     assert loop._render_ceiling_advisory() == ""
+    assert caplog.text.count("ceiling unavailable") == 1
 
 
 def test_the_ceiling_never_reaches_the_keep_decision():
@@ -275,12 +279,27 @@ def test_without_a_ceiling_the_supervisor_sees_no_roofline():
     assert all("roofline" not in case for case in payload["cases"])
 
 
-def test_the_standing_is_attached_where_the_round_is_planned():
-    """Pinned at the call site: attaching it anywhere after planning reaches only the implementer."""
-    source = inspect.getsource(IterationLoop._run_orchestration)
-    planned_at = source.index("orchestration_service.run(")
+def test_the_standing_is_attached_where_the_round_is_planned(tmp_path):
+    """Attached anywhere after planning, the standing would reach only the implementer."""
+    path = _publish(_report((("a", 9.0), ("b", 4.0))), tmp_path)
+    loop = _loop(str(path), case_times={"a": 10.0, "b": 8.0})
+    loop._active_analysis_context = _planning_context("a", "b")
+    planned = []
 
-    assert -1 < source.index("self._with_ceiling_standing(") < planned_at
+    class Planner:
+        has_plan_critic = False
+
+        async def run(self, context, **_kwargs):
+            planned.append(context)
+            raise OrchestrationInfrastructureError("planning stops here")
+
+    asyncio.run(loop._run_orchestration(iteration=1, orchestration_service=Planner()))
+
+    (context,) = planned
+    assert {case.case_id: case.roofline.attainment for case in context.cases} == {
+        "a": pytest.approx(0.9),
+        "b": pytest.approx(0.5),
+    }
 
 
 def test_the_ceiling_is_off_unless_an_operator_turns_it_on():
@@ -457,11 +476,15 @@ def test_a_ceiling_with_no_usable_case_logs_that_instead_of_a_figure(tmp_path):
     assert loop._render_roofline_progress() == "  [roofline] attainment: no scored case has a usable ceiling"
 
 
-def test_the_progress_is_logged_with_each_iteration_header():
-    source = inspect.getsource(IterationLoop._open_iteration)
-    header_at = source.index("print(iteration_header(")
+def test_the_progress_is_logged_with_each_iteration_header(tmp_path, monkeypatch, capsys):
+    loop, _ = _make_loop(tmp_path, monkeypatch, baseline_case_times={"case": 1.0})
+    loop._ceiling_report_path = str(_publish(_report((("case", 0.5),)), tmp_path / "ceiling"))
 
-    assert header_at < source.index("self._render_roofline_progress()")
+    asyncio.run(loop.run(LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+
+    lines = capsys.readouterr().out.splitlines()
+    header = next(i for i, line in enumerate(lines) if line.startswith("--- Iteration 1 "))
+    assert lines[header + 1] == "  [roofline] attainment 50.0% of the estimated ceiling"
 
 
 def test_attainment_follows_the_incumbent_not_the_frozen_anchor(tmp_path):
@@ -624,10 +647,6 @@ def test_off_leaves_a_report_sitting_in_the_workspace_unread(tmp_path):
 
     assert loop._ceiling_report_path == ""
     assert loop._render_ceiling_advisory() == ""
-
-
-def test_the_ceiling_command_is_registered():
-    assert "roofline-ceiling" in cli_module.main.commands
 
 
 def test_the_ceiling_command_announces_the_collection_before_it_starts(monkeypatch, tmp_path):

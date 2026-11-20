@@ -205,12 +205,9 @@ class TestRejectPaths:
         assert not (hz.out / "fusion.patch").exists()
         hz.assert_config_restored()
 
-    def test_no_op_change_is_rejected(self, hz):
-        hz.arms = [(True, 100.0), (True, 100.4)]  # +0.4% < 3% target
-        self._assert_rejected(hz, hz.run(), "not faster")
-
-    def test_regression_is_rejected(self, hz):
-        hz.arms = [(True, 100.0), (True, 88.0)]
+    @pytest.mark.parametrize("enabled_tok_s", [100.4, 88.0], ids=["gain-below-3pct-target", "regression"])
+    def test_a_change_that_is_not_faster_is_rejected(self, hz, enabled_tok_s):
+        hz.arms = [(True, 100.0), (True, enabled_tok_s)]
         self._assert_rejected(hz, hz.run(), "not faster")
 
     def test_pass_that_matches_nothing_is_rejected(self, hz):

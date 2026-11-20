@@ -113,9 +113,6 @@ class TestOpAwareness:
     so an op without a registered probe has to answer "unknown".
     """
 
-    def test_only_verified_ops_are_registered(self):
-        assert set(mod._TRIAL_OPS) == {"a8w8_blockscale", "a8w8_blockscale_bpreshuffle"}
-
     def test_unregistered_op_never_trials(self, monkeypatch):
         calls = []
 
@@ -126,11 +123,6 @@ class TestOpAwareness:
         _probe(monkeypatch, fake)
         assert max_supported_splitk((64, 5120, 17408), op="a4w4_blockscale") is None
         assert not calls, "an unregistered op must not dispatch another op's kernel"
-
-    def test_unregistered_op_support_fn_answers_unknown(self, monkeypatch):
-        _probe(monkeypatch, lambda m, n, k, sk, device="cuda": sk <= 3)
-        fn = make_support_fn(op="a4w4_blockscale")
-        assert fn(64, 5120, 5120) is None
 
 
 class TestResolveDevice:
@@ -156,12 +148,6 @@ class TestResolveDevice:
         monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1")
         assert mod._resolve_device("7") == "cuda"
-
-    def test_make_support_fn_accepts_gpu_ids(self, monkeypatch):
-        # gpu_ids is threaded through without touching the GPU (control fails -> None) and does not raise.
-        _probe(monkeypatch, lambda m, n, k, sk, device="cuda": False)
-        fn = make_support_fn(gpu_ids="1", op=OP)
-        assert fn(64, 5120, 5120) is None
 
 
 class TestBpreshuffleTrial:

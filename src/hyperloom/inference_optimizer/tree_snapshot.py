@@ -9,6 +9,8 @@ import subprocess
 import threading
 from pathlib import Path
 
+from hyperloom.inference_optimizer.session.session_paths import fs_safe_id
+
 #: Build output and caches: the specialist edits source, and a worktree carrying
 #: a framework's shared objects would cost gigabytes on every dispatch.
 _EXCLUDES: tuple[str, ...] = ("__pycache__/", "*.pyc", "*.pyo", "*.so", "*.so.*")
@@ -57,6 +59,11 @@ def _git(repo: Path, tree: Path, *args: str) -> subprocess.CompletedProcess[str]
 def _failure(action: str, cp: subprocess.CompletedProcess[str]) -> str:
     """Describe a failed git step."""
     return f"git {action} rc={cp.returncode}: {(cp.stderr or cp.stdout).strip()[:400]}"
+
+
+def snapshot_repository(session_dir: Path, tree: Path) -> Path:
+    """The bare repository holding ``session_dir``'s history of ``tree``: one per directory, for every lane editing it."""
+    return session_dir / "tree_snapshots" / f"{fs_safe_id(str(tree))}.git"
 
 
 def snapshot_tree(tree: Path, repo: Path, *, refresh: bool) -> tuple[Path | None, str]:
@@ -115,4 +122,4 @@ def snapshot_tree(tree: Path, repo: Path, *, refresh: bool) -> tuple[Path | None
     return repo, ""
 
 
-__all__ = ["snapshot_tree"]
+__all__ = ["snapshot_repository", "snapshot_tree"]

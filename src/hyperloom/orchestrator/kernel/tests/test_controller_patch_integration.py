@@ -19,6 +19,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.actions.executors._patch_snapshot import _git_commit_kept
 from hyperloom.orchestrator.kernel import controller_patch_integration as integration
+from hyperloom.orchestrator.kernel.campaign_baseline import RepoBaseline
 from hyperloom.orchestrator.kernel.controller_patch_integration import (
     KeepSession,
     integrate_controller_patches,
@@ -194,6 +195,16 @@ def _coordinator(session_dir: Path, repo: Path) -> Coordinator:
     return coordinator
 
 
+def _sealed(patches_root: Path) -> dict[str, RepoBaseline]:
+    """The campaign's seal of every repository a publication names: each at its HEAD, deploying onto itself."""
+    repositories: dict[str, RepoBaseline] = {}
+    for publication in patches_root.glob("*/publication.json"):
+        repo = Path(json.loads(publication.read_text(encoding="utf-8"))["repo_root"]).resolve()
+        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True)
+        repositories[str(repo)] = RepoBaseline(commit=head.stdout.strip().lower(), deploy_root=repo)
+    return repositories
+
+
 async def _integrate(
     *,
     patches_root: Path,
@@ -209,6 +220,8 @@ async def _integrate(
     """
     coordinator = Coordinator(session_dir, backends=_silent_backends())
     coordinator.shared_state = shared_state
+    if "repositories" not in options:
+        options["repositories"] = _sealed(patches_root)
     return await integrate_controller_patches(
         patches_root=patches_root,
         session=KeepSession(
@@ -836,6 +849,7 @@ async def test_an_invalid_publication_is_skipped_and_the_next_one_still_lands(tm
         kernel_path="first.py",
         patch=_patch(repo, "first.py", "VALUE = 2\n"),
     )
+    sealed = _sealed(patches)
     (broken / "publication.json").write_text("{not json", encoding="utf-8")
     _publish(
         patches,
@@ -856,6 +870,7 @@ async def test_an_invalid_publication_is_skipped_and_the_next_one_still_lands(tm
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
         validator=_validate,
+        repositories=sealed,
     )
 
     statuses = {result.status for result in summary.results}
@@ -1214,6 +1229,86 @@ async def test_a_repo_root_git_cannot_read_is_skipped_not_applied(tmp_path: Path
     assert (plain / "first.py").read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
+@pytest.mark.asyncio
+async def test_a_repository_the_campaign_did_not_seal_is_refused_before_apply(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="elsewhere",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+
+    async def _must_not_validate(_publication):
+        raise AssertionError("an undeclared repository must never reach validation")
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_must_not_validate,
+        repositories={},
+    )
+
+    assert summary.results[0].status == "skipped_undeclared_repository"
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert int(_git(repo, "rev-list", "--count", "HEAD")) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_worktree_patch_is_validated_and_kept_against_the_tree_it_deploys_onto(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from hyperloom.orchestrator.kernel import request_handlers
+
+    worktree, base = _repo(tmp_path)
+    served = tmp_path / "site-packages" / "framework"
+    served.mkdir(parents=True)
+    for name in ("first.py", "second.py"):
+        (served / name).write_text((worktree / name).read_text(encoding="utf-8"), encoding="utf-8")
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        worktree,
+        base,
+        kernel_name="snapshot",
+        kernel_path="first.py",
+        patch=_patch(worktree, "first.py", "VALUE = 2\n"),
+    )
+    validated: list[dict] = []
+
+    async def _integrate_handler(payload, *, session_dir, preapplied_git_patch):
+        validated.append(payload)
+        (served / "first.py").write_text((worktree / "first.py").read_text(encoding="utf-8"), encoding="utf-8")
+        return {"status": "ok", "decision": "KEEP", "base_tput": 100.0, "new_tput": 120.0, "gain_pct": 20.0}
+
+    monkeypatch.setattr(request_handlers, "integrate_handler", _integrate_handler)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = _state(session_dir, worktree)
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=None,
+        repositories={str(worktree.resolve()): RepoBaseline(commit=base.lower(), deploy_root=served)},
+    )
+
+    assert summary.kept_count == 1
+    (payload,) = validated
+    assert payload["repo"] == str(worktree.resolve())
+    assert payload["kernel_repo"] == str(served)
+    assert payload["target_file"] == str(served / "first.py")
+    entry = state.optimization_stack[-1]
+    assert entry["target_file"] == str(served / "first.py")
+    assert entry["framework_root"] == str(served)
+
+
 def _patch_only_adding_a_file(repo: Path, created: str) -> str:
     """A diff that introduces a new file and touches nothing HEAD already has."""
     (repo / created).write_text("HELPER = True\n", encoding="utf-8")
@@ -1409,6 +1504,7 @@ async def test_synthetic_controller_keep_updates_state_and_stack_ledger(tmp_path
                 shared_state=state,
                 record_keep=coordinator.writeback.record_integrate_keep,
             ),
+            repositories=_sealed(patches),
             validator=_validate,
         )
         ledger, _status = stack_event.assemble_stack_ext(
@@ -1745,6 +1841,7 @@ async def test_a_controller_keep_is_reinstalled_on_a_fresh_tree(tmp_path: Path) 
             shared_state=coordinator.shared_state,
             record_keep=coordinator.writeback.record_integrate_keep,
         ),
+        repositories=_sealed(patches),
         validator=_validate,
     )
     assert summary.kept_count == 1

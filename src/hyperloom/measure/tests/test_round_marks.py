@@ -34,6 +34,8 @@ from hyperloom.measure.round_marks import (
     RunMarks,
     boot_parts,
     read_runs,
+    died_in_profile_window,
+    profile_death,
     profile_stall,
     round_boundaries,
     stalled_in_profile_window,
@@ -613,3 +615,104 @@ def test_a_round_whose_marks_or_config_cannot_be_read_is_not_known_to_have_stall
         (tmp_path / name).write_text(text, encoding="utf-8")
 
     assert not stalled_in_profile_window(tmp_path)
+
+
+def _marked_round(directory: Path, marks: dict[str, float], capture: dict[str, object] | None = None) -> Path:
+    document = {"phase_marks": [{"phase": phase, "ts": at, "mono": at} for phase, at in marks.items()]}
+    (directory / "phase_marks.json").write_text(json.dumps(document), encoding="utf-8")
+    if capture is not None:
+        (directory / "profile").mkdir()
+        (directory / "profile" / "capture.json").write_text(json.dumps(capture), encoding="utf-8")
+    return directory
+
+
+def _agentx_capture(error: str | None) -> dict[str, object]:
+    """An AgentX window's ``profile/capture.json``: opened 300 s into the profiling phase and closed, with ``error``."""
+    return {
+        "profiling_start_unix": 1_000.0,
+        "window_open_unix": 1_300.0,
+        "window_close_unix": 1_400.3,
+        "running_requests_in_window": 64,
+        "error": error,
+    }
+
+
+#: An AgentX round whose replay ended at 500 (``finished`` is back-dated to the replay's end), which closed the window
+#: at its next poll.
+_REPLAY_ENDED = {"measured": 100.0, "profile_open": 400.0, "finished": 500.0, "profile_close": 500.3}
+_STOP_UNANSWERED = "/stop_profile: <urlopen error [Errno 111] Connection refused>"
+
+
+@pytest.mark.parametrize(
+    ("marks", "capture", "died"),
+    [
+        # The AgentX window open when the round ended: closed at the same instant as the death ended it, and its
+        # /stop_profile went to a dead server.
+        ({"measured": 100.0, "profile_open": 400.0, "finished": 411.0, "profile_close": 411.0}, None, True),
+        (
+            {"measured": 100.0, "profile_open": 400.0, "finished": 411.0, "profile_close": 411.0},
+            _agentx_capture(_STOP_UNANSWERED),
+            True,
+        ),
+        # The replay's end closed the window, the server answered its /stop_profile, and died after that.
+        (_REPLAY_ENDED, _agentx_capture(None), False),
+        (_REPLAY_ENDED, _agentx_capture("/stop_profile: HTTP Error 400: Bad Request"), False),
+        # The replay's end closed the window and the server never answered its /stop_profile: it died in the window.
+        (_REPLAY_ENDED, _agentx_capture(_STOP_UNANSWERED), True),
+        # No capture to read the answer from: the marks decide.
+        (_REPLAY_ENDED, None, True),
+        # A fixed load's window closes after the finished mark and does not read the /stop_profile answer.
+        ({"profile_open": 400.0, "finished": 411.0, "profile_close": 411.5}, None, True),
+        (
+            {"profile_open": 400.0, "finished": 411.0, "profile_close": 411.5},
+            {**_agentx_capture(None), "profiling_start_unix": None},
+            True,
+        ),
+        ({"profile_open": 400.0, "finished": 411.0}, None, True),
+        # The server died before the window opened: no open mark (or one after the end, which the clock never writes).
+        ({"measured": 100.0, "finished": 350.0}, None, False),
+        ({"profile_open": 400.0, "finished": 350.0}, None, False),
+        # The window ran its whole duration and closed; the server died after that.
+        ({"measured": 100.0, "profile_open": 400.0, "profile_close": 700.0, "finished": 900.0}, None, False),
+        ({"profile_open": 400.0}, None, False),
+    ],
+    ids=[
+        "agentx_window_open_at_death",
+        "agentx_window_open_at_death_stop_unanswered",
+        "replay_end_closed_the_window_stop_answered_died_later",
+        "replay_end_closed_the_window_stop_refused_died_later",
+        "replay_end_closed_the_window_stop_unanswered",
+        "replay_end_closed_the_window_no_capture",
+        "fixed_window_open_at_death",
+        "fixed_window_answer_is_not_read",
+        "never_closed",
+        "died_before_the_window",
+        "open_after_the_end",
+        "died_after_the_window_ran_its_duration",
+        "no_finished_mark",
+    ],
+)
+def test_a_death_is_in_the_profile_window_when_the_window_was_open_when_the_round_ended(
+    tmp_path: Path, marks: dict[str, float], capture: dict[str, object] | None, died: bool
+) -> None:
+    assert died_in_profile_window(_marked_round(tmp_path, marks, capture)) is died
+
+
+def test_a_round_whose_marks_cannot_be_read_is_not_known_to_have_died_in_its_window(tmp_path: Path) -> None:
+    directory = _marked_round(tmp_path, {"profile_open": 400.0, "finished": 411.0, "profile_close": 411.0})
+    assert died_in_profile_window(directory), "the case is a death inside the window until its marks are broken"
+
+    (directory / "phase_marks.json").write_text("{not json", encoding="utf-8")
+
+    assert not died_in_profile_window(directory)
+
+
+@pytest.mark.parametrize(
+    ("step", "death"),
+    [(FailedStep.SERVER_DIED, True), (FailedStep.SERVER_STALLED, False), (FailedStep.CLIENT_FAILED, False)],
+    ids=["died", "stalled_is_no_death", "client_failed_is_no_death"],
+)
+def test_a_profile_death_is_a_died_round_in_its_window(tmp_path: Path, step: FailedStep, death: bool) -> None:
+    directory = _marked_round(tmp_path, {"profile_open": 400.0, "finished": 411.0, "profile_close": 411.0})
+
+    assert profile_death(directory, step) is death

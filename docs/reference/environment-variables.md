@@ -377,6 +377,13 @@ On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
   producer on its placeholder driver, which burns the whole budget and then
   exits non-zero.
 
+Two variables adjust the server a kernel integrate re-baselines on:
+
+| Variable | Default | Description |
+|---|---|---|
+| `HL_INTEGRATE_VRAM_GUARD` | on | On vLLM, the re-baseline server starts with `--gpu-memory-utilization` capped at `HL_INTEGRATE_VRAM_UTIL_CAP`, unless the integrate request sets that flag itself. `0` turns the cap off. |
+| `HL_INTEGRATE_VRAM_UTIL_CAP` | `0.90` | The cap, held between `0.10` and `0.99`. |
+
 ---
 
 ## Collective candidate extraction
@@ -1124,7 +1131,6 @@ The following variables configure the Critic and knowledge base components.
 |---------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
 | `KNOWLEDGE_STORE_MODE`                | `local`                | Exclusive Recipe backend: `local` or `remote`. Ambient KB Store or GBrain credentials do not select remote mode. |
 | `KNOWLEDGE_LOCAL_ROOT`                | `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` | Local Recipe/KG root. It is not used for Recipe data in remote mode. |
-| `INFERENCE_OPTIMIZER_`<br>`FA_KB_PATH` | `$USER_DATA_PATH/framework-kb`, otherwise `/workspace/hyperloom/framework-kb` | Framework KB root, holding the lessons ledger the FRAMEWORK phase reads and writes. The orchestrator's KB reader and writeback both resolve through it. |
 | `KB_STORE_URL`                        | Local Recipe mode: `https://global.primus-safe.amd.com/knowledge-base`; remote mode: unset | Unified KB Service endpoint. Local Recipe mode uses the default only for co-hosted PR Monitor access; IR-3 disables PR Monitor without disabling local Recipe storage when the endpoint is unreachable. Remote Recipe mode requires an explicit value, selects the current Recipe View, replays its Config, Patch, and Kernel columns, then writes one final session at CLOSE. PR Monitor is available at `${KB_STORE_URL}/pr-monitor/v1` (REST/IR-3/Framework/KernelForge) and `${KB_STORE_URL}/pr-monitor/mcp/` (specialist MCP). |
 | `KB_STORE_TOKEN`                      | Unset                  | KB Store bearer token. Required when `KNOWLEDGE_STORE_MODE=remote`; transport failures during the final write are non-fatal. |
 | `KB_DRAFT_DIR`                        | Runtime-generated      | Internal remote-mode handoff where each Recipe column (`config`, `patch`, `kernel`) stages its knowledge and files before CLOSE merges them. Hyperloom creates and exports it; operators must not set it. A Recipe cannot be built without it. |

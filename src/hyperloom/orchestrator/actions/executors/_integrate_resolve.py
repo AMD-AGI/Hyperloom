@@ -17,7 +17,7 @@ from hyperloom_common.coerce import to_float
 from hyperloom.inference_optimizer.session.session_paths import enablement_stacks_dir, runs_dir
 
 from ...state.shared_state import inject_stack_base_params
-from ._enablement_config import _enablement_gap, _stamp_framework_kb_provenance
+from ._enablement_config import _enablement_gap
 from ._integrate_attempt import IntegrateAttempt
 from ._integrate_refusals import _enablement_lane_closed_skip, _enforce_critic_gate
 from ._patch_git import _detect_p_level
@@ -178,13 +178,10 @@ class ResolveStageMixin:
         if critic_reject is not None:
             return critic_reject
 
-        done_payload = _read_done_payload(specialist_workspace)
-        _stamp_framework_kb_provenance(done_payload, params=params, shared_state=shared_state)
-
         attempt.specialist_task_id = specialist_task_id
         attempt.shared_state = shared_state
         attempt.specialist_workspace = specialist_workspace
-        attempt.done_payload = done_payload
+        attempt.done_payload = _read_done_payload(specialist_workspace)
         return None
 
     def _stage_resolve_upstream_pr(

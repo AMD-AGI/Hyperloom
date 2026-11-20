@@ -110,7 +110,7 @@ def _isolate_framework_trees(monkeypatch) -> None:
     """
     from hyperloom.orchestrator.kernel import campaign_baseline
 
-    monkeypatch.setattr(campaign_baseline, "_package_repository", lambda _name: None)
+    monkeypatch.setattr(campaign_baseline, "head_import_roots", lambda _framework: ())
     for name in ("FRAMEWORK", "FRAMEWORK_REPO_PATH", "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"):
         monkeypatch.delenv(name, raising=False)
 

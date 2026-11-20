@@ -99,6 +99,7 @@ def _config(base_digest: str | None = None, **changes) -> SuiteConfig:
             ),
             source_files={"patch.py": _SHA},
             absent_source_files=("gone.py",),
+            import_packages=("aiter",),
             env_inherit=("HF_HOME", "E2B_SANDBOX_ID"),
         ),
         workload=WorkloadKind.AGENTX,

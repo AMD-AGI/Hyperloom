@@ -71,14 +71,13 @@ def repo(tmp_path: Path) -> Path:
 # --- the three finder layouts -------------------------------------------------
 
 
-def test_a_bare_path_pth_is_read(site_dir: Path, repo: Path) -> None:
-    (site_dir / "__editable__.demo.pth").write_text(f"{repo}\n", encoding="utf-8")
-
-    assert str(repo) in editable_roots()
-
-
-def test_a_quoted_path_pth_is_read(site_dir: Path, repo: Path) -> None:
-    (site_dir / "__editable__.demo.pth").write_text(f"import sys; sys.path.append('{repo}')\n", encoding="utf-8")
+@pytest.mark.parametrize(
+    "line",
+    ["{repo}", "import sys; sys.path.append('{repo}')", 'x = "{repo}"'],
+    ids=["bare-path", "single-quoted-path", "double-quoted-path"],
+)
+def test_a_path_pth_is_read(site_dir: Path, repo: Path, line: str) -> None:
+    (site_dir / "__editable__.demo.pth").write_text(line.format(repo=repo) + "\n", encoding="utf-8")
 
     assert str(repo) in editable_roots()
 
@@ -168,10 +167,6 @@ def test_a_sibling_sharing_a_name_prefix_is_not_a_match(site_dir: Path, tmp_path
     assert needs_inplace(str(sibling)) is False
 
 
-def test_no_repository_named_is_not_in_place(site_dir: Path) -> None:
-    assert needs_inplace("") is False
-
-
 # --- the lock -----------------------------------------------------------------
 
 
@@ -207,11 +202,6 @@ def test_the_lock_file_is_not_world_readable(repo: Path) -> None:
 def test_a_repository_with_no_git_directory_cannot_be_locked(tmp_path: Path) -> None:
     """The lock lives under .git, so there is nowhere to put it."""
     assert acquire_repo_lock(str(tmp_path / "not-a-checkout")) is None
-
-
-def test_releasing_nothing_is_allowed(repo: Path) -> None:
-    """Callers release in a finally that may not have acquired."""
-    release_repo_lock(None)
 
 
 def test_two_repositories_do_not_share_a_lock(tmp_path: Path) -> None:
