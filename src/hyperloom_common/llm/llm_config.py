@@ -1073,52 +1073,6 @@ async def aanthropic_completion(
         )
 
 
-async def astream_chat_completion_text(
-    client: object,
-    *,
-    component: str = "",
-    operation: str = "",
-    **params: object,
-) -> "tuple[str, object | None]":
-    """Async streamed chat completion; returns ``(text, usage)``."""
-    params["stream"] = True
-    params["stream_options"] = {"include_usage": True}
-    parts: list[str] = []
-    usage_obj: object | None = None
-    with observed_request(
-        protocol=PROTOCOL_OPENAI_CHAT,
-        component=component,
-        operation=operation,
-        model=params.get("model"),
-        streamed=True,
-    ) as observation:
-        stream = await client.chat.completions.create(**_tag_request(params, component, operation))
-        async for chunk in stream:
-            _observe_stream_chunk(observation, chunk)
-            if getattr(chunk, "usage", None) is not None:
-                usage_obj = chunk.usage
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                if delta is not None and delta.content:
-                    parts.append(delta.content)
-        observation.update(usage=openai_usage_counts(usage_obj))
-    return "".join(parts), usage_obj
-
-
-def _observe_stream_chunk(observation: RequestObservation, chunk: object) -> None:
-    """Fold one streamed chunk's id, model, first content token and finish reason onto ``observation``."""
-    choices = sdk_field(chunk, "choices") or []
-    choice = choices[0] if isinstance(choices, list) and choices else None
-    delta = sdk_field(choice, "delta") if choice is not None else None
-    if delta is not None and sdk_field(delta, "content"):
-        observation.mark_first_token()
-    observation.update(
-        response_id=sdk_field(chunk, "id"),
-        model=sdk_field(chunk, "model"),
-        stop_reason=sdk_field(choice, "finish_reason") if choice is not None else None,
-    )
-
-
 __all__ = [
     "AGENT_BACKEND_CHOICES",
     "AGENT_BACKEND_CLAUDE",
@@ -1155,7 +1109,6 @@ __all__ = [
     "anthropic_transport",
     "anthropic_transport_ready",
     "apply_reasoning_effort",
-    "astream_chat_completion_text",
     "build_http_timeout",
     "chat_completion",
     "claude_agent_sdk_installed",
