@@ -253,7 +253,9 @@ def test_the_cli_and_the_orchestrator_read_one_set_of_workload_defaults():
     assert imported == ["__future__"], imported
 
     # And the orchestrator side must not import the CLI parser at any scope.
-    orchestrator_src = Path(we.__file__).read_text(encoding="utf-8")
+    orchestrator_src = "".join(
+        path.read_text(encoding="utf-8") for path in sorted(Path(we.__file__).parent.glob("*.py"))
+    )
     assert "inference_optimizer.cli import parser" not in orchestrator_src
     assert "inference_optimizer.cli.parser" not in orchestrator_src
 
