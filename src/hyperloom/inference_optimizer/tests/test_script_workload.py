@@ -175,7 +175,12 @@ def test_prepare_lays_out_the_scope_and_records_once(workspace):
     scope = json.loads((workspace / "benchmark" / "optimization_scope.json").read_text())
     assert scope == {"schema_version": 1, "file": str(workspace / "optimization" / "toy_opt.py"), "function": "apply"}
     store = workspace / "benchmark" / "reference"
-    assert sorted(p.name for p in store.iterdir()) == ["import_order.json", "inputs", "references"]
+    assert sorted(p.name for p in store.iterdir()) == [
+        "import_order.json",
+        "input_summary.json",
+        "inputs",
+        "references",
+    ]
     order = json.loads((store / "import_order.json").read_text())
     assert (order["torch_imported"], order["gpu_initialized"], order["compiler_imported"]) == (False, False, [])
     limits = json.loads((workspace / "benchmark" / "reference" / "references" / "limits.json").read_text())
@@ -318,3 +323,48 @@ def test_measure_refuses_an_edited_script(workspace, tmp_path):
             _measure(workspace, tmp_path)
     finally:
         script.write_text(original)
+
+
+def _harness():
+    """The asset as a module, so its pure helpers can be exercised without a child process."""
+    import importlib.util
+
+    from hyperloom.inference_optimizer.session.paths import asset_root
+
+    path = asset_root() / "assets" / "script_workload" / "harness.py"
+    spec = importlib.util.spec_from_file_location("hl_harness_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.torch = torch
+    return module
+
+
+def test_the_input_summary_names_kwargs_and_flags_the_axis_that_varied():
+    """--aoti prints this, so the names have to be the ones the script passes."""
+    harness = _harness()
+    calls = [
+        {"args": (), "kwargs": {"input_ids": torch.zeros(1, 310), "pixels": torch.zeros(1, 3, 224, 224)}},
+        {"args": (), "kwargs": {"input_ids": torch.zeros(1, 512), "pixels": torch.zeros(1, 3, 224, 224)}},
+    ]
+
+    summary = {entry["name"]: entry for entry in harness._input_summary(calls)}
+
+    assert summary["input_ids"]["varies"] == {"1": [310, 512]}
+    assert summary["pixels"]["varies"] == {}
+    assert summary["pixels"]["shape"] == [1, 3, 224, 224]
+
+
+def test_the_input_summary_names_a_positional_tensor_by_its_index():
+    harness = _harness()
+
+    summary = harness._input_summary([{"args": (torch.zeros(2, 2),), "kwargs": {}}])
+
+    assert summary[0]["name"] == "args[0]"
+
+
+def test_the_input_summary_reaches_tensors_inside_a_dict_argument():
+    """An observation dict is how these models are usually called."""
+    harness = _harness()
+    calls = [{"args": (), "kwargs": {"observation": {"state": torch.zeros(1, 14)}}}]
+
+    assert harness._input_summary(calls)[0]["name"] == "observation.state"
