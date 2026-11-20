@@ -48,12 +48,14 @@ from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role,
 from hyperloom_multibranch.contracts.blackboard.records import JudgementWrite, LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, InboxKind, LearningKind, LeaseKind, LineageKind
 from hyperloom_multibranch.blackboard import STALL_TESTS, LocalBlackboard
+from hyperloom_multibranch.blackboard.knowledge.recall import SchemaReaders
+from hyperloom_multibranch.blackboard.knowledge.tests.fakes import FakeExperienceReader, completed_read
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.lesson_recall import LessonRecall
 from hyperloom_multibranch.blackboard.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
 from hyperloom_multibranch.blackboard.rsi.similarity import task_conditions
 from hyperloom_multibranch.blackboard.tests.factories import START, delta, intent, judgement, profile, request, result
-from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
+from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, WorkloadKind
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, FixCase, read_case
 from hyperloom_multibranch.rulegate.gate import RuleGate
@@ -65,6 +67,7 @@ from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
+from hyperloom_multibranch.scheduling.experience_kb import ExperienceReaders
 from hyperloom_multibranch.scheduling.hosted_peers import HostedSandboxes
 from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, SessionLayout, create_session
 from hyperloom_multibranch.scheduling import launch_isolation as launch_isolation_module
@@ -529,16 +532,22 @@ async def _peers(
     reference_script: str = "",
     base: BaseLaunch | None = None,
     agent_launch: str = "/launches/agent.json",
+    kb_url: str = "",
 ) -> AsyncIterator[_Built]:
     """The real peers of a session of ``workload`` on ``host`` in ``tmp_path`` lending ``dev_leases`` dev sandboxes,
     with the wiring their specialist sessions were built on; a branch's worktree, holding no component, is served
     only when the session lends dev sandboxes. The session froze ``base`` (a fixed one by default) unless ``freeze``
-    is false, from the operator's ``reference_script`` when one is given. Every variable the build exports is restored afterwards."""
+    is false, from the operator's ``reference_script`` when one is given. The Experience KB is ``kb_url``'s, none
+    by default. Every variable the build exports is restored afterwards."""
 
     for name in (*workload_environment(workload), BENCHMARK_CONFIG_ENV):
         monkeypatch.setenv(name, "")
     monkeypatch.delenv("GPU_TYPE", raising=False)
-    monkeypatch.delenv("HYPERLOOM_KB_URL", raising=False)
+    if kb_url:
+        monkeypatch.setenv("HYPERLOOM_KB_URL", kb_url)
+        monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "workspace-token")
+    else:
+        monkeypatch.delenv("HYPERLOOM_KB_URL", raising=False)
     clock = Clock()
     layout = create_session(tmp_path, workload.model_basename, clock)
     if freeze:
@@ -691,15 +700,54 @@ async def test_an_agentx_test_may_outlast_its_trace_window_and_an_inferencex_tes
     assert inferencex.timeout_sec == DEFAULT_TEST_TIMEOUT_SEC
 
 
-def test_the_specialists_recall_no_past_learnings_whatever_experience_kb_the_environment_names(
+def test_the_specialists_recall_no_past_learnings_without_an_experience_kb(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("HYPERLOOM_KB_URL", "http://127.0.0.1:9/kb")
     monkeypatch.delenv(ARCHIVE_ENV, raising=False)
 
     past = specialist_recall(tmp_path).past(profile(), "kv cache", limit=5)
 
     assert (past.status, past.items) == (ReadStatus.DISABLED.value, ())
+
+
+def test_the_specialists_recall_past_learnings_from_the_experience_kb_they_are_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(ARCHIVE_ENV, raising=False)
+    reader = FakeExperienceReader(completed_read())
+
+    past = specialist_recall(tmp_path, reader).past(profile(), "kv cache", limit=5)
+
+    assert past.status == ReadStatus.COMPLETED.value and len(reader.calls) == 1
+
+
+async def test_the_briefs_of_an_inferencex_session_recall_tests_under_both_schemas_from_the_environments_kb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _peers(tmp_path / "run", monkeypatch, WORKLOAD, kb_url="http://127.0.0.1:9") as built:
+        briefs = built.peers.briefs
+
+    assert isinstance(briefs.experiences, SchemaReaders) and len(briefs.experiences.readers) == 2
+
+
+async def test_the_briefs_and_the_learnings_tool_read_the_readers_of_the_sessions_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tests, learnings = FakeExperienceReader(completed_read()), FakeExperienceReader(completed_read())
+    kinds: list[WorkloadKind] = []
+
+    def readers(kind: WorkloadKind) -> ExperienceReaders:
+        kinds.append(kind)
+        return ExperienceReaders(tests, learnings)
+
+    monkeypatch.setattr(local_peers_module, "experience_readers", readers)
+
+    async with _peers(tmp_path / "run", monkeypatch, WORKLOAD) as built:
+        briefs = built.peers.briefs
+
+    assert kinds == [WorkloadKind.INFERENCEX] and briefs.experiences is tests
+    assert briefs.learnings is not None and briefs.learnings.past(profile(), "kv cache", limit=5).status == "completed"
+    assert len(learnings.calls) == 1 and tests.calls == []
 
 
 def test_the_specialists_recall_past_sessions_lessons_from_the_pool_beside_the_archive(

@@ -169,6 +169,24 @@ def test_ensure_says_when_it_restarted_a_stale_service(monkeypatch, capsys) -> N
     assert "Experience KB service restarted at http://127.0.0.1:8787: 14 Experiences" in capsys.readouterr().out
 
 
+def test_ensure_without_restart_leaves_a_stale_service_serving_and_says_so(monkeypatch, capsys) -> None:
+    asked: list[bool] = []
+
+    def keep(*_args: Any, restart: bool, **_kwargs: Any) -> LocalService:
+        asked.append(restart)
+        return LocalService({"experience_count": 14}, stale="it was started with other settings")
+
+    monkeypatch.setattr(experience_kb_service, "ensure_local_service", keep)
+    monkeypatch.setenv("HYPERLOOM_KB_URL", "http://127.0.0.1:8787")
+    monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "workspace-token")
+
+    assert experience_kb_service.main(["ensure", "--no-restart"]) == 0
+    captured = capsys.readouterr()
+    assert asked == [False]
+    assert "Experience KB service already running at http://127.0.0.1:8787: 14 Experiences" in captured.out
+    assert "left serving with other settings: it was started with other settings" in captured.err
+
+
 def test_a_launch_continues_when_the_service_cannot_serve(monkeypatch, caplog) -> None:
     validated: list[bool] = []
 

@@ -44,6 +44,17 @@ it.
   SGLang's (v0.1.6 records no tensor shapes). Unless the point sets
   `capture_timeout_seconds`, it records 30 s rather than 300 s: ATOM's profiler
   takes no step bound, and a long capture slows the replay it runs inside.
+- **A multi-branch session reads and writes the workspace's Experience KB.**
+  With `HYPERLOOM_KB_URL` and `HYPERLOOM_KB_TOKEN` exported (the values
+  `hyperloom-setup` writes into `.env`), a session's briefs recall past
+  sessions' tests and its learnings tool their learnings, and CLOSE writes the
+  session's tests and learnings there, spooling beside the service's data what
+  it does not take. An InferenceX session reads both schemas its tests are
+  written under, so a kernel change is recalled too. A loopback service is
+  started before the session, outside the session's process tree, and left
+  serving; one serving with other settings is not restarted
+  (`experience_kb_service ensure --no-restart`). Before, a session read and
+  wrote no Experience KB, whatever the environment named.
 - **A multi-branch session runs on MI325X.** `hyperloom-multibranch run`
   accepts `--gpu-type mi325x`. Before, it refused MI325X, a limit left from
   Magpie, which had no benchmark script of MI325X's own; InferenceSuite
