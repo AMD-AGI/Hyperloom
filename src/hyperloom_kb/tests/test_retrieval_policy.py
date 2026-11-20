@@ -17,7 +17,6 @@ from hyperloom_kb import (
     FieldKind,
     FieldRole,
     InMemoryExperienceStore,
-    InMemoryQueryViewStore,
     LexicalFuzzyProvider,
     ObjectiveDeclaration,
     Provenance,
@@ -28,7 +27,7 @@ from hyperloom_kb import (
     RetrievalPolicyError,
     derive_experience_id,
 )
-from hyperloom_kb.tests.view_fixtures import publish_view, submit_complete
+from hyperloom_kb.tests.view_fixtures import build_view, submit_complete
 
 NOW = datetime(2026, 9, 21, tzinfo=timezone.utc)
 
@@ -81,10 +80,8 @@ def _experience(
 
 def _views(schema: ExperienceDeclaration, *records: Experience):
     experiences = InMemoryExperienceStore()
-    views = InMemoryQueryViewStore()
     submit_complete(schema, experiences, *records)
-    publish_view(schema, experiences, views, fuzzy_ready=True)
-    return experiences, views.current_view(schema.schema_ref)
+    return experiences, build_view(schema, experiences, fuzzy_ready=True)
 
 
 def test_configuration_is_content_addressed_and_round_trips() -> None:

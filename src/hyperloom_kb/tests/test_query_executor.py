@@ -17,7 +17,6 @@ from hyperloom_kb import (
     FieldKind,
     FieldRole,
     InMemoryExperienceStore,
-    InMemoryQueryViewStore,
     LexicalFuzzyProvider,
     LocalRetrievalService,
     ObjectiveDeclaration,
@@ -31,7 +30,7 @@ from hyperloom_kb import (
     RetrievalConfiguration,
     derive_experience_id,
 )
-from hyperloom_kb.tests.view_fixtures import publish_view, submit_complete
+from hyperloom_kb.tests.view_fixtures import build_view, submit_complete
 
 NOW = datetime(2026, 9, 23, tzinfo=timezone.utc)
 
@@ -89,7 +88,6 @@ def _experience(
 def _stack():
     schema = _declaration()
     experiences = InMemoryExperienceStore()
-    views = InMemoryQueryViewStore()
     target = _experience(
         schema,
         "target",
@@ -106,14 +104,14 @@ def _stack():
     )
     submit_complete(schema, experiences, target, distractor)
     fuzzy = LexicalFuzzyProvider(experiences, schema)
-    view = publish_view(schema, experiences, views, fuzzy_ready=True)
+    view = build_view(schema, experiences, fuzzy_ready=True)
     executor = QueryExecutor(
-        LocalRetrievalService(experiences, views, providers=(fuzzy,)),
+        LocalRetrievalService(experiences, view, providers=(fuzzy,)),
         provider_refs={
             RetrievalCapability.FUZZY: LEXICAL_FUZZY_PROVIDER_REF,
         },
     )
-    return schema, view, executor, target, distractor
+    return schema, executor, target, distractor
 
 
 def _configuration(
@@ -141,11 +139,11 @@ def _signals(*, model_weight: float, text_weight: float = 0.9) -> tuple[QuerySig
 
 
 def test_weight_increase_changes_only_matching_group_contribution() -> None:
-    schema, view, executor, target, distractor = _stack()
+    schema, executor, target, distractor = _stack()
     configuration = _configuration(schema.schema_ref)
 
-    low = executor.execute(_signals(model_weight=0.1), configuration, view=view)
-    high = executor.execute(_signals(model_weight=1.0), configuration, view=view)
+    low = executor.execute(_signals(model_weight=0.1), configuration)
+    high = executor.execute(_signals(model_weight=1.0), configuration)
     low_scores = {group.representative_ids[0]: group.score for group in low.groups}
     high_scores = {group.representative_ids[0]: group.score for group in high.groups}
 
@@ -154,7 +152,7 @@ def test_weight_increase_changes_only_matching_group_contribution() -> None:
 
 
 def test_executor_rejects_provider_version_drift() -> None:
-    schema, view, executor, _, _ = _stack()
+    schema, executor, _, _ = _stack()
     configuration = RetrievalConfiguration.create(
         schema.schema_ref,
         "pinned@v1",
@@ -162,7 +160,7 @@ def test_executor_rejects_provider_version_drift() -> None:
     )
 
     with pytest.raises(QueryExecutionError, match="provider does not match"):
-        executor.execute(_signals(model_weight=1.0), configuration, view=view)
+        executor.execute(_signals(model_weight=1.0), configuration)
 
 
 def test_provider_scores_are_normalized_before_weighting() -> None:
@@ -172,11 +170,10 @@ def test_provider_scores_are_normalized_before_weighting() -> None:
 
 
 def test_group_key_policy_controls_executor_order() -> None:
-    schema, view, executor, _, _ = _stack()
+    schema, executor, _, _ = _stack()
     result = executor.execute(
         _signals(model_weight=1.0),
         _configuration(schema.schema_ref, ranking="group-key@v1"),
-        view=view,
     )
 
     assert tuple(group.group_key for group in result.groups) == tuple(
@@ -185,11 +182,10 @@ def test_group_key_policy_controls_executor_order() -> None:
 
 
 def test_renderer_exposes_conditions_baseline_outcome_and_repeat_support() -> None:
-    schema, view, executor, target, _ = _stack()
+    schema, executor, target, _ = _stack()
     result = executor.execute(
         _signals(model_weight=1.0),
         _configuration(schema.schema_ref),
-        view=view,
     )
 
     section = result.rendered.text.split(f"Experience {target.id}\n", 1)[1]

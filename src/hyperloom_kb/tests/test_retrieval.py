@@ -21,21 +21,17 @@ from hyperloom_kb import (
     FieldRole,
     FileRef,
     InMemoryExperienceStore,
-    InMemoryQueryViewStore,
-    LeaseExpired,
     LocalRetrievalService,
     ObjectiveDeclaration,
     Provenance,
     QueryView,
     QueryViewBuilder,
-    ReadLeaseManager,
     RetrievalCapability,
-    RetrievalResult,
     derive_experience_id,
 )
 from hyperloom_kb.retrieval import render_complete_experience
 from hyperloom_kb.tests.logs import LOG
-from hyperloom_kb.tests.view_fixtures import publish_view, submit_complete
+from hyperloom_kb.tests.view_fixtures import build_view, submit_complete
 
 NOW = datetime(2026, 9, 17, tzinfo=timezone.utc)
 TRACE = FileRef("traces/decode.json", "b" * 64, 4096)
@@ -99,56 +95,22 @@ class StaticProvider:
 def setup(*, fuzzy_ready: bool = False, semantic_ready: bool = False):
     schema = declaration()
     experiences = InMemoryExperienceStore()
-    views = InMemoryQueryViewStore()
     first = experience(schema, "run-1", "page_size")
     repeated = experience(schema, "run-2", "page_size")
     other = experience(schema, "run-3", "chunk")
     submit_complete(schema, experiences, first, repeated, other)
-    ref = publish_view(schema, experiences, views, fuzzy_ready=fuzzy_ready, semantic_ready=semantic_ready)
-    return schema, experiences, views, ref, first, repeated, other
+    view = build_view(schema, experiences, fuzzy_ready=fuzzy_ready, semantic_ready=semantic_ready)
+    return experiences, view, first, repeated, other
 
 
 def test_exact_filter_organize_and_explicit_render() -> None:
-    schema, experiences, views, ref, first, repeated, other = setup()
-    read = LocalRetrievalService(experiences, views)
-    lease = read.acquire_view(schema.schema_ref)
+    experiences, view, first, repeated, other = setup()
+    read = LocalRetrievalService(experiences, view)
 
-    exact = read.exact(
-        {
-            "identity.model": "qwen3",
-            "baseline.config": "default",
-            "change.knob": "page_size",
-        },
-        view=ref,
-        lease_id=lease.lease_id,
-    )
-    filtered = read.query(
-        {"outcome.decision": "keep"},
-        view=ref,
-        lease_id=lease.lease_id,
-    )
-    groups = read.organize(
-        (exact, filtered),
-        view=ref,
-        lease_id=lease.lease_id,
-    )
-    rendered = read.render(
-        (first.id, other.id),
-        view=ref,
-        lease_id=lease.lease_id,
-    )
-    result = read.result(
-        RetrievalResult(
-            view=ref,
-            lease_id=lease.lease_id,
-            groups=groups,
-            rendered=rendered,
-            executed_capabilities=(
-                RetrievalCapability.EXACT,
-                RetrievalCapability.FILTER,
-            ),
-        )
-    )
+    exact = read.exact({"identity.model": "qwen3", "baseline.config": "default", "change.knob": "page_size"})
+    filtered = read.query({"outcome.decision": "keep"})
+    groups = read.organize((exact, filtered))
+    rendered = read.render((first.id, other.id))
 
     assert {hit.experience_id for hit in exact} == {first.id, repeated.id}
     assert {hit.experience_id for hit in filtered} == {
@@ -158,19 +120,12 @@ def test_exact_filter_organize_and_explicit_render() -> None:
     }
     assert len(groups) == 2
     assert groups[0].annotations.member_count in {1, 2}
-    assert "Annotations:" in result.rendered.text
-    assert result.rendered.rendered_refs[0].id == first.id
-    assert result.executed_capabilities == (
-        RetrievalCapability.EXACT,
-        RetrievalCapability.FILTER,
-    )
+    assert "Annotations:" in rendered.text
+    assert rendered.rendered_refs[0].id == first.id
 
 
 def test_fuzzy_and_semantic_are_independent_optional_capabilities() -> None:
-    schema, experiences, views, ref, first, _, _ = setup(
-        fuzzy_ready=True,
-        semantic_ready=False,
-    )
+    experiences, view, first, _, _ = setup(fuzzy_ready=True, semantic_ready=False)
     provider = StaticProvider(
         RetrievalCapability.FUZZY,
         (
@@ -178,75 +133,39 @@ def test_fuzzy_and_semantic_are_independent_optional_capabilities() -> None:
             CandidateHit("exp-00000000000000000000000000000000", RetrievalCapability.FUZZY, 1.0),
         ),
     )
-    read = LocalRetrievalService(experiences, views, providers=(provider,))
-    lease = read.acquire_view(schema.schema_ref)
+    read = LocalRetrievalService(experiences, view, providers=(provider,))
 
-    fuzzy = read.recall(
-        RetrievalCapability.FUZZY,
-        {"identity": {"model": "qwen"}},
-        view=ref,
-        lease_id=lease.lease_id,
-    )
+    fuzzy = read.recall(RetrievalCapability.FUZZY, {"identity": {"model": "qwen"}})
 
     assert fuzzy == (CandidateHit(first.id, RetrievalCapability.FUZZY, 0.8),)
     with pytest.raises(CapabilityUnavailable):
-        read.recall(
-            RetrievalCapability.SEMANTIC,
-            {"text": "scheduler"},
-            view=ref,
-            lease_id=lease.lease_id,
-        )
-    assert (
-        views.current_view(schema.schema_ref).capabilities[RetrievalCapability.SEMANTIC] is CapabilityState.UNAVAILABLE
-    )
+        read.recall(RetrievalCapability.SEMANTIC, {"text": "scheduler"})
+    assert view.capabilities[RetrievalCapability.SEMANTIC] is CapabilityState.UNAVAILABLE
 
 
-def test_read_lease_pins_old_view_while_current_advances() -> None:
-    schema, experiences, views, old_ref, first, _, _ = setup()
-    read = LocalRetrievalService(experiences, views)
-    lease = read.acquire_view(schema.schema_ref)
-    new = experience(schema, "run-4", "new-knob")
+def test_a_view_stays_as_built_while_its_store_takes_new_experiences() -> None:
+    experiences, view, first, _, _ = setup()
+    read = LocalRetrievalService(experiences, view)
+    new = experience(declaration(), "run-4", "new-knob")
     experiences.insert_complete(new)
-    current_ref = publish_view(schema, experiences, views)
 
-    old_hits = read.query({}, view=old_ref, lease_id=lease.lease_id)
+    hits = {hit.experience_id for hit in read.query({})}
 
-    assert current_ref != old_ref
-    assert new.id not in {hit.experience_id for hit in old_hits}
-    assert first.id in {hit.experience_id for hit in old_hits}
-
-
-def test_expired_or_released_lease_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    schema, experiences, views, ref, _, _, _ = setup()
-    clock = [100.0]
-    monkeypatch.setattr("hyperloom_kb.retrieval.time.monotonic", lambda: clock[0])
-    leases = ReadLeaseManager(max_ttl_seconds=5)
-    read = LocalRetrievalService(experiences, views, leases=leases)
-    lease = read.acquire_view(schema.schema_ref, ttl_seconds=2)
-    clock[0] = 103.0
-
-    with pytest.raises(LeaseExpired):
-        read.query({}, view=ref, lease_id=lease.lease_id)
-
-    current = read.acquire_view(schema.schema_ref)
-    leases.release(current.lease_id)
-    with pytest.raises(LeaseExpired):
-        read.query({}, view=ref, lease_id=current.lease_id)
+    assert new.id not in hits and first.id in hits
 
 
 def test_a_render_budget_keeps_whole_records_and_names_only_those_it_shows() -> None:
-    schema, experiences, views, ref, first, _, other = setup()
-    read = LocalRetrievalService(experiences, views)
-    lease = read.acquire_view(schema.schema_ref)
+    experiences, view, first, _, other = setup()
+    read = LocalRetrievalService(experiences, view)
     both = (first.id, other.id)
-    full = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=None)
-    first_only = read.render((first.id,), view=ref, lease_id=lease.lease_id, budget_chars=None)
-    other_only = read.render((other.id,), view=ref, lease_id=lease.lease_id, budget_chars=None)
+    full = read.render(both, budget_chars=None)
+    first_only = read.render((first.id,), budget_chars=None)
+    other_only = read.render((other.id,), budget_chars=None)
     smallest = min(len(first_only.text), len(other_only.text))
 
-    fits_one = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=len(full.text) - 1)
-    fits_none = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=smallest - 1)
-    fits_all = read.render(both, view=ref, lease_id=lease.lease_id, budget_chars=len(full.text))
+    fits_one = read.render(both, budget_chars=len(full.text) - 1)
+    fits_none = read.render(both, budget_chars=smallest - 1)
+    fits_all = read.render(both, budget_chars=len(full.text))
 
     assert (fits_one.text, [item.id for item in fits_one.rendered_refs], fits_one.truncated) == (
         first_only.text,
@@ -258,17 +177,13 @@ def test_a_render_budget_keeps_whole_records_and_names_only_those_it_shows() -> 
 
 
 def test_a_record_too_large_for_the_budget_does_not_keep_out_the_records_after_it() -> None:
-    schema, experiences, views, ref, first, _, other = setup()
-    read = LocalRetrievalService(experiences, views)
-    lease = read.acquire_view(schema.schema_ref)
-    alone = {
-        experience.id: read.render((experience.id,), view=ref, lease_id=lease.lease_id, budget_chars=None).text
-        for experience in (first, other)
-    }
+    experiences, view, first, _, other = setup()
+    read = LocalRetrievalService(experiences, view)
+    alone = {experience.id: read.render((experience.id,), budget_chars=None).text for experience in (first, other)}
     large, small = sorted(alone, key=lambda experience_id: len(alone[experience_id]), reverse=True)
     assert len(alone[large]) > len(alone[small])
 
-    shown = read.render((large, small), view=ref, lease_id=lease.lease_id, budget_chars=len(alone[small]))
+    shown = read.render((large, small), budget_chars=len(alone[small]))
 
     assert (shown.text, [item.id for item in shown.rendered_refs], shown.truncated) == (alone[small], [small], True)
 
@@ -276,7 +191,6 @@ def test_a_record_too_large_for_the_budget_does_not_keep_out_the_records_after_i
 def test_complete_renderer_without_budget_keeps_every_knowledge_field_and_no_metadata() -> None:
     schema = declaration()
     experiences = InMemoryExperienceStore()
-    views = InMemoryQueryViewStore()
     long_reasoning = "Measured decode stalls point at page size. " * 400
     record = replace(
         experience(schema, "run-long", "page_size"),
@@ -288,11 +202,9 @@ def test_complete_renderer_without_budget_keeps_every_knowledge_field_and_no_met
         change={"knob": "page_size", "summary": "Change page_size.", "content": "--page-size 32\n--max-num-seqs 256"},
     )
     submit_complete(schema, experiences, record)
-    ref = publish_view(schema, experiences, views)
-    read = LocalRetrievalService(experiences, views, renderer=render_complete_experience)
-    lease = read.acquire_view(schema.schema_ref)
+    read = LocalRetrievalService(experiences, build_view(schema, experiences), renderer=render_complete_experience)
 
-    rendered = read.render((record.id,), view=ref, lease_id=lease.lease_id, budget_chars=None)
+    rendered = read.render((record.id,), budget_chars=None)
 
     assert rendered.truncated is False
     assert rendered.text.startswith(f"Experience {record.id}\n")
@@ -352,11 +264,7 @@ def test_restricted_view_limits_recall_but_keeps_full_group_annotations() -> Non
     full = QueryViewBuilder().build(schema, experiences.list_experiences(schema.schema_ref))
 
     restricted = QueryViewBuilder().restrict(full, (kept.id,))
-    views = InMemoryQueryViewStore()
-    views.publish_view(restricted)
-    read = LocalRetrievalService(experiences, views)
-    lease = read.acquire_view(schema.schema_ref)
-    hits = read.query({"identity.model": "qwen3"}, view=restricted.ref, lease_id=lease.lease_id)
+    hits = LocalRetrievalService(experiences, restricted).query({"identity.model": "qwen3"})
 
     assert [hit.experience_id for hit in hits] == [kept.id]
     assert restricted.ref.view_id != full.ref.view_id

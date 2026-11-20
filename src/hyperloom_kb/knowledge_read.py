@@ -12,14 +12,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from hyperloom_kb.query_view import QueryViewRef, RepeatAnnotations, RetrievalCapability
+from hyperloom_kb.query_view import RepeatAnnotations, RetrievalCapability
 from hyperloom_kb.remote import QuerySignal
 from hyperloom_kb.retrieval import (
     CandidateHit,
     CapabilityUnavailable,
     GroupCandidate,
     LocalRetrievalService,
-    ReadLease,
     RenderedResult,
 )
 from hyperloom_kb.retrieval_policy import (
@@ -90,7 +89,6 @@ class WeightedGroupResult:
 
 @dataclass(frozen=True)
 class WeightedQueryExecution:
-    view: QueryViewRef
     groups: tuple[WeightedGroupResult, ...]
     rendered: RenderedResult
     executed_capabilities: tuple[RetrievalCapability, ...]
@@ -118,69 +116,30 @@ class QueryExecutor:
         self._service = service
         self._provider_refs = dict(provider_refs or {})
 
-    def acquire_view(
-        self,
-        schema_ref: str,
-        *,
-        view: QueryViewRef | None = None,
-    ) -> ReadLease:
-        return self._service.acquire_view(schema_ref, view=view)
-
-    def release_view(self, lease: ReadLease) -> None:
-        self._service.leases.release(lease.lease_id)
-
-    def execute(
-        self,
-        signals: Sequence[QuerySignal],
-        configuration: RetrievalConfiguration,
-        *,
-        view: QueryViewRef | None = None,
-        lease: ReadLease | None = None,
-    ) -> WeightedQueryExecution:
-        if view is not None and lease is not None:
-            raise QueryExecutionError("view and lease are mutually exclusive")
+    def execute(self, signals: Sequence[QuerySignal], configuration: RetrievalConfiguration) -> WeightedQueryExecution:
         for capability, expected in configuration.provider_refs.items():
             if self._provider_refs.get(capability) != expected:
                 raise QueryExecutionError(f"{capability.value} provider does not match pinned provider_ref")
         started = time.perf_counter()
-        owns_lease = lease is None
-        active_lease = lease or self.acquire_view(configuration.schema_ref, view=view)
-        try:
-            recall = self._recall(signals, configuration, active_lease)
-            organized = self._service.organize(
-                recall.candidate_sets,
-                view=active_lease.view,
-                lease_id=active_lease.lease_id,
-            )
-            grouped = self._rank_groups(
-                organized,
-                recall.contributions,
-                configuration.max_groups,
-                configuration.ranking_policy_ref,
-                configuration.representative_policy,
-            )
-            representative_ids = tuple(group.representative_ids[0] for group in grouped if group.representative_ids)
-            rendered = self._service.render(
-                representative_ids,
-                view=active_lease.view,
-                lease_id=active_lease.lease_id,
-                budget_chars=configuration.render_budget_chars,
-            )
-            return WeightedQueryExecution(
-                active_lease.view,
-                grouped,
-                rendered,
-                tuple(dict.fromkeys(recall.executed)),
-                tuple(dict.fromkeys(recall.unavailable)),
-                (time.perf_counter() - started) * 1000,
-            )
-        finally:
-            if owns_lease:
-                self.release_view(active_lease)
+        recall = self._recall(signals, configuration)
+        grouped = self._rank_groups(
+            self._service.organize(recall.candidate_sets),
+            recall.contributions,
+            configuration.max_groups,
+            configuration.ranking_policy_ref,
+            configuration.representative_policy,
+        )
+        representative_ids = tuple(group.representative_ids[0] for group in grouped if group.representative_ids)
+        rendered = self._service.render(representative_ids, budget_chars=configuration.render_budget_chars)
+        return WeightedQueryExecution(
+            grouped,
+            rendered,
+            tuple(dict.fromkeys(recall.executed)),
+            tuple(dict.fromkeys(recall.unavailable)),
+            (time.perf_counter() - started) * 1000,
+        )
 
-    def _recall(
-        self, signals: Sequence[QuerySignal], configuration: RetrievalConfiguration, lease: ReadLease
-    ) -> _Recall:
+    def _recall(self, signals: Sequence[QuerySignal], configuration: RetrievalConfiguration) -> _Recall:
         """Recall every signal through each configured capability, weighting each hit by its signal."""
         executed: list[RetrievalCapability] = []
         unavailable: list[RetrievalCapability] = []
@@ -199,13 +158,7 @@ class QueryExecutor:
                 if capability not in configuration.capabilities:
                     continue
                 try:
-                    hits = self._recall_signal(
-                        signal,
-                        capability,
-                        configuration,
-                        lease.view,
-                        lease.lease_id,
-                    )
+                    hits = self._recall_signal(signal, capability, configuration)
                 except CapabilityUnavailable:
                     unavailable.append(capability)
                     continue
@@ -255,24 +208,11 @@ class QueryExecutor:
         signal: QuerySignal,
         capability: RetrievalCapability,
         configuration: RetrievalConfiguration,
-        view: QueryViewRef,
-        lease_id: str,
     ) -> tuple[CandidateHit, ...]:
         limit = configuration.limits[capability]
         if capability is RetrievalCapability.EXACT:
-            return self._service.exact(
-                {signal.field: signal.value},
-                view=view,
-                lease_id=lease_id,
-                limit=limit,
-            )
-        return self._service.recall(
-            capability,
-            {"text": signal.text},
-            view=view,
-            lease_id=lease_id,
-            limit=limit,
-        )
+            return self._service.exact({signal.field: signal.value}, limit=limit)
+        return self._service.recall(capability, {"text": signal.text}, limit=limit)
 
     @staticmethod
     def _normalized_score(

@@ -1,8 +1,8 @@
-"""Load Experiences into an in-memory store and publish query views over them."""
+"""Load Experiences into an in-memory store and build query views over them."""
 
 from __future__ import annotations
 
-from hyperloom_kb.query_view import QueryViewBuilder, QueryViewRef, QueryViewStore
+from hyperloom_kb.query_view import QueryView, QueryViewBuilder
 from hyperloom_kb.schema import Experience, ExperienceDeclaration
 from hyperloom_kb.storage import ExperienceStore
 
@@ -15,21 +15,18 @@ def submit_complete(declaration: ExperienceDeclaration, experiences: ExperienceS
         experiences.insert_complete(item)
 
 
-def publish_view(
+def build_view(
     declaration: ExperienceDeclaration,
     experiences: ExperienceStore,
-    views: QueryViewStore,
     *,
     fuzzy_ready: bool = False,
     semantic_ready: bool = False,
-) -> QueryViewRef:
-    """Build a view over every stored Experience of the declaration's schema and make it current."""
+) -> QueryView:
+    """A view over every stored Experience of the declaration's schema."""
 
-    records = experiences.list_experiences(declaration.schema_ref)
-    view = QueryViewBuilder().build(
+    return QueryViewBuilder().build(
         declaration,
-        records,
+        experiences.list_experiences(declaration.schema_ref),
         fuzzy_ready=fuzzy_ready,
         semantic_ready=semantic_ready,
     )
-    return views.publish_view(view)
