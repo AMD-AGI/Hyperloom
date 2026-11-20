@@ -20,7 +20,7 @@ LAUNCH_FILE = "launch.json"
 REPORT_FILE = "report.json"
 SERVER_LOG = "server.log"
 READY_STAMP = "server_ready_at"
-#: The wall-clock second a booting server's processes were last seen using CPU while its log was quiet, for a watcher
+#: The wall-clock second a booting server's processes were last seen using at least a quarter of a CPU, for a watcher
 #: outside the round that sees only the run_dir.
 BOOT_ACTIVE_STAMP = "server_boot_active_at"
 SERVER_PID = "server.pid"
