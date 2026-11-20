@@ -383,9 +383,10 @@ def test_pd_engine_profile_with_stack_follows_env(
 def test_profiling_round_restart_enables_graph_capture_profiling(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import profile
+    from hyperloom.orchestrator.actions.executors import _multi_node_env, profile
 
     monkeypatch.setenv("FRAMEWORK", "sglang")
+    monkeypatch.setattr(_multi_node_env, "_read_state", lambda: {"backend": "sglangrouter"})
     shipped = yaml.safe_load(profile._default_profile_config().read_text(encoding="utf-8"))["benchmark"]["envs"]
     calls: list[tuple[life.RoundServer, dict]] = []
 
@@ -415,6 +416,28 @@ def test_profiling_round_restart_enables_graph_capture_profiling(monkeypatch: py
         )
     }
     assert eager[0].extra_server_args == "--disable-cuda-graph"
+
+
+def test_infera_round_restart_keeps_graph_capture_profiling_off(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from hyperloom.orchestrator.actions.executors import _multi_node_env, profile
+
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    monkeypatch.setattr(_multi_node_env, "_read_state", lambda: {"backend": "infera"})
+    calls: list[tuple[life.RoundServer, dict]] = []
+
+    async def _restart(server, **kwargs):
+        calls.append((server, kwargs))
+
+    monkeypatch.setattr(life, "restart_server_for_round", _restart)
+
+    assert (
+        asyncio.run(profile._restart_round_server({"extra_server_args": "--context-length 11264"}, str(tmp_path)))
+        is None
+    )
+
+    [(server, kwargs)] = calls
+    assert server.extra_server_args == "--context-length 11264"
+    assert kwargs["extra_env"] is None
 
 
 @pytest.mark.parametrize(

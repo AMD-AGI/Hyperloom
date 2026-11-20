@@ -951,6 +951,7 @@ class RooflineExecutor:
         if main_role:
             payload.setdefault("steady_state_mode", ROLE_STEADY_STATE_MODE[main_role])
             payload.setdefault("split_llm_inference", False)
+            payload["clamp_stream_overlaps"] = True
             pd_input = _pd_multi_trace_input(profiled.result)
             if pd_input:
                 payload["pd_node_traces"] = pd_input

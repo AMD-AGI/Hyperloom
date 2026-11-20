@@ -747,6 +747,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--clamp-stream-overlaps",
+        action="store_true",
+        help="Truncate same-stream overrunning GPU events in the steady-state chunk (set for PD profiles).",
+    )
+    parser.add_argument(
         "--route",
         choices=[route.value for route in AnalysisRoute],
         default=AnalysisRoute.AGENT.value,
@@ -969,7 +974,9 @@ def _use_unsplit_trace(run: AnalysisRun, trace_path: Path, split_dir: Path) -> P
 
 
 def _clamp_chunk_stream_overlaps(run: AnalysisRun, chunk_path: Path) -> None:
-    """Truncate same-stream overrunning GPU events in the steady-state chunk before TraceLens reads it."""
+    """Truncate same-stream overrunning GPU events in the steady-state chunk when ``--clamp-stream-overlaps`` is set."""
+    if not run.args.clamp_stream_overlaps:
+        return
     try:
         summary = clamp_stream_overlaps(chunk_path)
     except (OSError, ValueError) as exc:

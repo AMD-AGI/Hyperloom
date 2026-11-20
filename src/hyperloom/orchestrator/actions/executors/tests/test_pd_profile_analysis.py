@@ -71,6 +71,17 @@ def test_non_llm_route_analyses_only_the_main_trace() -> None:
     assert "--pd-node-traces" not in cmd
 
 
+@pytest.mark.parametrize(("clamp", "expected"), [(True, True), (False, False), (None, False)])
+def test_stream_overlap_clamp_flag_follows_the_payload(clamp, expected) -> None:
+    payload = {} if clamp is None else {"clamp_stream_overlaps": clamp}
+
+    cmd, _mode = trace_analyze._build_trace_analyze_cmd(
+        payload, _run(AnalysisRoute.AGENT), session_dir=Path("/s"), workload={}
+    )
+
+    assert ("--clamp-stream-overlaps" in cmd) is expected
+
+
 def test_roofline_no_longer_runs_the_per_role_or_csv_reports() -> None:
     assert not hasattr(rf, "report_pd_profile") and not hasattr(rf, "analyze_role_traces")
     assert not hasattr(rf.RooflineExecutor, "_record_role_analyses")
@@ -139,6 +150,7 @@ async def test_pd_profile_is_analysed_once_and_summarised_per_node(tmp_path: Pat
     assert len(payloads) == 1
     assert payloads[0]["pd_node_traces"] == _PD_INPUT
     assert payloads[0]["steady_state_mode"] == "decode_only_or_generic"
+    assert payloads[0]["clamp_stream_overlaps"] is True
     by_node = state.last_trace_analyze_by_role
     assert list(by_node) == ["decode_0", "prefill_0"]
     assert [k["name"] for k in by_node["decode_0"]["top"]] == ["d0", "d1", "d2", "d3", "d4"]

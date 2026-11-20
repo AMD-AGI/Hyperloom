@@ -468,3 +468,19 @@ def test_pd_entry_runs_the_agent_once_on_a_multi_trace_config(tmp_path: Path, mo
     assert [(job["phase"], job["node"]) for job in config["jobs"]] == [("decode", 0), ("prefill", 0)]
     assert result.candidates == []
     assert any(w["code"] == "pd_node_shares" for w in run.trace_health_warnings)
+
+
+@pytest.mark.parametrize(("argv", "clamped"), [([], False), (["--clamp-stream-overlaps"], True)])
+def test_single_trace_chunk_is_clamped_only_when_asked(tmp_path: Path, monkeypatch, argv, clamped) -> None:
+    seen: list[Path] = []
+    summary = {"clamped_events": 0, "removed_ms": 0.0, "worst_event": "", "worst_removed_ms": 0.0}
+    monkeypatch.setattr(tla, "clamp_stream_overlaps", lambda p: seen.append(p) or summary)
+    args = tla._build_parser().parse_args(
+        ["--trace-input", str(tmp_path / "t.json.gz"), "--workspace-path", str(tmp_path / "ws"), *argv]
+    )
+    run = start_run(args, AnalysisRoute.AGENT)
+    chunk = tmp_path / "chunk.json.gz"
+
+    tla._clamp_chunk_stream_overlaps(run, chunk)
+
+    assert seen == ([chunk] if clamped else [])

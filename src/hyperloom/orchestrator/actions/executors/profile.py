@@ -715,13 +715,20 @@ def _unshared_trace_dir_refusal(round_trace_root: str) -> dict[str, Any] | None:
     }
 
 
-# Restarts the multi-node server for this profiling round with graph-capture profiling on; returns the refusal
-# result when it failed.
+def _pd_cluster_session() -> bool:
+    """Whether the multi-node session serves an atomesh or sglangrouter PD cluster."""
+    from ._multi_node_env import _read_state
+
+    return str((_read_state() or {}).get("backend") or "").strip().lower() in multi_node.PD_ROUTER_BACKENDS
+
+
+# Restarts the multi-node server for this profiling round, with graph-capture profiling on for a PD cluster; returns
+# the refusal result when it failed.
 async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -> dict[str, Any] | None:
     from ._multi_node_env import round_server_env
     from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
-    extra_env, flag = _graph_capture_profile_settings(_default_profile_config())
+    extra_env, flag = _graph_capture_profile_settings(_default_profile_config()) if _pd_cluster_session() else ({}, "")
     extra_server_args = str(params.get("extra_server_args") or "")
     tokens = extra_server_args.split()
     if flag and flag not in tokens and "--disable-cuda-graph" not in tokens:
