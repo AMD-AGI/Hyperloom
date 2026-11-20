@@ -99,12 +99,27 @@ with others running right now. Timing two kernels on one device at once corrupts
 both numbers, including the ones this session is judged on.
 """
 
-_SELF_PROFILING_SECTION = """
+# What a profiler is pointed at is the session's to build: no driver is asked to carry a profiling mode.
+_PROFILED_COMMAND_NOTE = """\
+The profiler replays one command of your choosing, once per counter group, so choose one that launches the
+kernel under test on one case the driver scores and little else: no reference implementation, no correctness
+check, no timing loop. A mode of `{driver_run}` that already does this is the cheapest; otherwise write a
+short script in a scratch directory outside the workspace that builds that case's inputs the way the driver
+does and calls the kernel 1-3 times once JIT compilation has settled. The driver is protected: do not add
+such a mode to it.
+"""
+
+_SELF_PROFILING_SECTION = (
+    """
 ## Self-profiling (optional, on demand)
 If you need hardware profiling to decide the next change — which bottleneck (compute / bandwidth /
-latency-occupancy), cache hit rates, occupancy, arithmetic intensity — profile the kernel YOURSELF
-instead of guessing rocprof-compute's CLI:
-    python3 {profiling_dir}/rocpc_profile.py --driver {driver_run} [--roofline] [--kernel <index>]
+latency-occupancy), cache hit rates, occupancy, arithmetic intensity — profile the kernel YOURSELF.
+"""
+    + _PROFILED_COMMAND_NOTE
+    + """\
+Hand that command to the reference script instead of guessing rocprof-compute's CLI:
+    python3 {profiling_dir}/rocpc_profile.py [--roofline] [--kernel <index>] -- <command ...>
+The script runs the command from its own output directory, so name the command's files by absolute path.
 It prints rocprof-compute's Top-Stats + System Speed-of-Light tables (+ the Roofline section with
 --roofline) and keeps the raw workload. Find your kernel's index in the printed Top-Stats table and
 re-run with --kernel <index> to isolate its Speed-of-Light. Then classify the bottleneck (compute /
@@ -114,20 +129,26 @@ script rather than raw `rocprof-compute` (it finds a usable interpreter, runs pr
 prints the tables). If this environment lacks rocprof-compute's deps the script prints an
 "unavailable — skipping" notice and exits without data; just proceed without profiling (don't retry it).
 """
+)
 
-_ROCPROFV3_SELF_PROFILING_SECTION = """
+_ROCPROFV3_SELF_PROFILING_SECTION = (
+    """
 ## Self-profiling (optional, on demand)
 rocprof-compute does not support this GPU, so there is no Speed-of-Light report; profile with rocprofv3 directly.
-Start with a kernel trace, which times every kernel the driver launches:
-    rocprofv3 --kernel-trace --stats -d <scratch dir> -- python3 {driver_run} --profile-run
+"""
+    + _PROFILED_COMMAND_NOTE
+    + """\
+Start with a kernel trace, which times every kernel that command launches:
+    rocprofv3 --kernel-trace --stats -d <scratch dir> -- <command ...>
 Before naming a counter, list what this device and ROCm release expose (CDNA counter names often do not exist here):
     rocprofv3-avail info -d 0
 then collect only the ones you need:
-    rocprofv3 --pmc <COUNTER> [<COUNTER> ...] -d <scratch dir> -- python3 {driver_run} --profile-run
+    rocprofv3 --pmc <COUNTER> [<COUNTER> ...] -d <scratch dir> -- <command ...>
 Keep the output outside the workspace. Classify the bottleneck yourself with measure_triage.md and
 measure_roofline.md in {profiling_dir} and the target's hardware cards. If rocprofv3 is not installed, proceed
 without profiling (don't retry it).
 """
+)
 
 _SELF_PROFILING_SECTIONS = {
     Profiler.ROCPROF_COMPUTE: _SELF_PROFILING_SECTION,

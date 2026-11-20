@@ -2,7 +2,7 @@
 title: profiling — rocprof-compute workflow + the self-contained profiling script
 kind: technique
 gens: [gfx942, gfx950]
-updated: 2026-07-16
+updated: 2026-11-20
 ---
 
 # rocprof-compute workflow (how to actually get profiling data here)
@@ -17,7 +17,7 @@ application replay and derives a per-kernel **System Speed-of-Light** (every eng
 **Don't invoke `rocprof-compute` by hand — use the self-contained script in this folder:**
 
 ```bash
-python3 <this_folder>/rocpc_profile.py --driver <driver.py> [--roofline] [--kernel <index>]
+python3 <this_folder>/rocpc_profile.py [--roofline] [--kernel <index>] -- <command ...>
 ```
 
 It runs `profile` + `analyze` for you and prints rocprof-compute's own **Top-Stats + Speed-of-Light**
@@ -25,11 +25,25 @@ tables (and, with `--roofline`, the **Roofline** section). Then classify the bot
 [`measure_triage.md`](measure_triage.md) and
 [`measure_roofline.md`](measure_roofline.md). The script bakes in no kernel name or bottleneck rule — it
 just surfaces the profiler's tables; **you** interpret them.
-The script invokes the driver only as `<driver.py> --profile-run`; the driver
-owns representative-case selection.
+`<command ...>` is yours to choose; see [The command to profile](#the-command-to-profile).
 
 To isolate YOUR kernel: run once, find your kernel's row + index in the printed "Top Stats" table, then
 re-run with `--kernel <index>` for that kernel's isolated Speed-of-Light.
+
+## The command to profile
+The profiler replays `<command ...>` once per counter group, about 13 times, so what it runs decides both
+what the tables describe and how long collection takes. Choose a command that launches the kernel under
+test on one case the driver scores and little else: settle JIT compilation or autotuning, launch the
+kernel 1-3 times, synchronize and exit. A reference implementation, a correctness check or a timing loop
+in the same process multiplies collection time and adds dispatches to the tables that are not the
+kernel's.
+
+- A driver that already has such a mode is the cheapest command; read the driver to find it.
+- Otherwise write a short script outside the workspace that builds that case's inputs the way the driver
+  does and calls the kernel. Do not add the mode to the driver: it is the measurement the loop scores
+  with.
+- The script runs the command from its output directory (`--out`, default `./forge_profile`), so name
+  the command's files by absolute path.
 
 ## The dependency gate — why "unavailable" happens, and how to enable it
 A bare `rocprof-compute profile`/`analyze` aborts if its Python deps are missing:
@@ -75,7 +89,7 @@ the script probes — e.g. the system python, kept separate from your kernel/tor
 Do **not** patch `/opt/rocm`.
 
 ## What the two phases produce
-- **profile** — replays the driver ~13× to collect all counters into a workload dir
+- **profile** — replays the command ~13× to collect all counters into a workload dir
   (`<out>/workloads/run/<gpu>/`, incl. the raw `pmc_perf.csv`). `--roofline` adds a one-time ~70s
   microbench that measures the box's *empirical* peaks (a machine constant) into `roofline.csv`.
 - **analyze** — derives metrics; the script requests these blocks and prints them:
@@ -96,7 +110,7 @@ Do **not** patch `/opt/rocm`.
 
 ## Pitfalls
 - Calling `rocprof-compute` directly and hitting the dependency gate — use `rocpc_profile.py`.
-- Profiling a driver that also runs a torch/library reference, then reading the aggregate — isolate
+- Profiling a command that also runs a torch/library reference, then reading the aggregate — isolate
   YOUR kernel with `--kernel <index>` (find it in the Top Stats table) so the numbers are your kernel's.
 - Trusting a profiled run's *timing* — profiling perturbs time; measure speed separately
   ([`measure_protocol.md`](measure_protocol.md)).

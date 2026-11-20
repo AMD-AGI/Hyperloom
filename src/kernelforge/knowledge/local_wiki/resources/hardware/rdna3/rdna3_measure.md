@@ -22,8 +22,11 @@ rocprofv3 collects counters and traces on gfx1100 (rocprofiler-SDK docs show `ro
 ```bash
 rocprofv3-avail info -d 0                         # the counters THIS device and ROCm version expose
 rocprofv3 --kernel-trace --stats -d out -- python driver.py --bench
-rocprofv3 --pmc SQ_WAVES GRBM_GUI_ACTIVE -d out -- python driver.py --profile-run
+rocprofv3 --pmc SQ_WAVES GRBM_GUI_ACTIVE -d out -- <command ...>
 ```
+
+`<command ...>` launches the kernel under test and little else; choosing it is covered in
+`common_methodology/profiling/measure_rocpc_workflow.md` (*The command to profile*).
 
 - **List the counters before naming one.** Counter sets differ between CDNA and RDNA and between ROCm releases;
   a CDNA counter name copied from a methodology card may not exist here. Documented for gfx1100: `SQ_WAVES`,
