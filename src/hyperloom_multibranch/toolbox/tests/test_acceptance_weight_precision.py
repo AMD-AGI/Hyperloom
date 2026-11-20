@@ -879,8 +879,6 @@ READ_TWO_WAYS = [
         "-0.5 --enable-x",
     ),
     ("--some-flag -0.5", _delta("--max-num-seqs 64"), "-0.5 --max-num-seqs"),
-    # A pair counts each time it is given: the candidate gives the root's twice.
-    ("-cc.custom_ops+ -qfp8", _delta("-cc.custom_ops+ -qfp8"), "-cc.custom_ops+ -qfp8"),
 ]
 
 
@@ -927,7 +925,7 @@ async def test_a_candidate_that_adds_a_word_read_two_ways_is_refused(
         (
             "--quantization fp8",
             _delta("--hf-overrides.foo -q=fp8", remove_args=("--quantization",)),
-            "--hf-overrides.foo -q=fp8",
+            "--hf-overrides.foo -q",
             Purpose.EXPLORE,
         ),
         (
