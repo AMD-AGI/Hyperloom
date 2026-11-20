@@ -592,6 +592,10 @@ async def test_run_invalid_tool_use_input_drops_block_silently():
             ),
             ToolUseBlock(
                 name=EMIT_INTENT_TOOL_QUALIFIED,
+                input={"intent_type": "send_message"},  # no `payload` key at all
+            ),
+            ToolUseBlock(
+                name=EMIT_INTENT_TOOL_QUALIFIED,
                 input={
                     "intent_type": "send_message",
                     "payload": {"topic": "heartbeat"},
