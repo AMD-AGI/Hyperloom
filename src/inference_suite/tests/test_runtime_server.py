@@ -287,21 +287,34 @@ def test_a_silent_boot_is_working_while_its_processes_use_cpu(tmp_path, monkeypa
 
     monkeypatch.setattr(server, "tree_cpu_sec", cpu_sec)
     monkeypatch.setattr(watch, "CPU_SAMPLE_SEC", 0.05)
+    stamped: list[float] = []
+    write = RunLayout.write_boot_active_stamp
+
+    def record(layout: RunLayout, active_unix: float) -> None:
+        stamped.append(active_unix)
+        write(layout, active_unix)
+
+    monkeypatch.setattr(RunLayout, "write_boot_active_stamp", record)
     started = time.monotonic()
     config = rig.config("r1", pre_ready_silence_sec=0.5)
     lifecycle = rig.lifecycle(config, cancel=lambda: "enough" if time.monotonic() - started > 2.0 else "")
 
+    before = time.time()
     stopped = lifecycle.acquire()
+    after = time.time()
 
     layout = RunLayout(tmp_path / "r1")
     assert reads and len(set(reads)) == 1, "the CPU time read is the spawned server's"
     if busy:
         assert stopped == Stop(FailedStep.CANCELLED, "enough")
-        assert float(layout.boot_active_stamp.read_text()) > 0.0
+        # A watcher outside the round sees the boot only while the stamp keeps moving, in wall-clock seconds.
+        assert len(stamped) >= 2 and all(a < b for a, b in zip(stamped, stamped[1:])), stamped
+        assert before <= stamped[0] and stamped[-1] <= after, (before, stamped, after)
+        assert float(layout.boot_active_stamp.read_text()) == pytest.approx(stamped[-1], abs=1e-3)
     else:
         assert isinstance(stopped, Stop) and stopped.step is FailedStep.SERVER_SILENT_BEFORE_READY
         assert "its processes used under 0.25 of a CPU for" in stopped.detail
-        assert not layout.boot_active_stamp.exists()
+        assert not layout.boot_active_stamp.exists() and not stamped
     lifecycle.release()
 
 
