@@ -1191,8 +1191,9 @@ _AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "worklo
 class TestKernelE2EMeasurementPromotion:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("inherited_pythonpath", ["", "/base/one:/base/two"])
-    async def test_tunableop_hook_survives_integration_keep_and_paired_replay(
-        self, coord, tmp_path, monkeypatch, inherited_pythonpath
+    @pytest.mark.parametrize("tuner_name", ["vllm_dense_tunableop", "vllm_mxfp4_matmul_ogs"])
+    async def test_gemm_hook_survives_integration_keep_and_paired_replay(
+        self, coord, tmp_path, monkeypatch, inherited_pythonpath, tuner_name
     ):
         from kernelforge.workflows.gemm_tune.tuners.vllm_dense_tunableop import _candidate_pythonpath
 
@@ -1202,17 +1203,24 @@ class TestKernelE2EMeasurementPromotion:
         hook = tmp_path / "runtime_sitecustomize"
         hook.mkdir()
         (hook / "sitecustomize.py").write_text("HOOK_LOADED = True\n")
-        tuned = tmp_path / "tunableop.csv"
-        tuned.write_text("GemmTunableOp_BFloat16_TN,shape,solution,1.0\n")
+        tuned = tmp_path / ("flags.json" if tuner_name == "vllm_mxfp4_matmul_ogs" else "tunableop.csv")
+        tuned.write_text(
+            "{}" if tuner_name == "vllm_mxfp4_matmul_ogs" else "GemmTunableOp_BFloat16_TN,shape,solution,1.0\n"
+        )
         monkeypatch.setenv("PYTHONPATH", inherited_pythonpath)
         pythonpath = _candidate_pythonpath(hook)
         assert pythonpath.split(":") == [str(hook), *filter(None, inherited_pythonpath.split(":"))]
-        env = {
-            "PYTHONPATH": pythonpath,
-            "HL_TUNABLEOP_MODE": "candidate",
-            "HL_TUNABLEOP_FILE": str(tuned),
-            "PYTORCH_TUNABLEOP_FILENAME": str(tuned),
-        }
+        env = {"PYTHONPATH": pythonpath}
+        if tuner_name == "vllm_mxfp4_matmul_ogs":
+            env["HYPERLOOM_MATMUL_OGS_FLAGS"] = str(tuned)
+        else:
+            env.update(
+                {
+                    "HL_TUNABLEOP_MODE": "candidate",
+                    "HL_TUNABLEOP_FILE": str(tuned),
+                    "PYTORCH_TUNABLEOP_FILENAME": str(tuned),
+                }
+            )
         monkeypatch.setenv("HYPERLOOM_GEMM_PAIRED_PAIRS", "1")
         payloads = []
         native_params = []
@@ -1220,6 +1228,13 @@ class TestKernelE2EMeasurementPromotion:
 
         async def measure(payload, *, session_dir):
             payloads.append(deepcopy(payload))
+            if tuner_name == "vllm_mxfp4_matmul_ogs" and payload.get("source") == "forge_gemm_tuning":
+                import hashlib
+
+                digest = hashlib.sha256(tuned.read_bytes()).hexdigest()
+                server_log = session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}" / "server.log"
+                server_log.parent.mkdir(parents=True, exist_ok=True)
+                server_log.write_text(f"HL_MATMUL_OGS_FLAGS_APPLIED sha256={digest} m=4 n=6144 k=3072\n")
             attempt = integrate_rebaseline._integrate_rebaseline(
                 payload,
                 state,
@@ -1230,7 +1245,7 @@ class TestKernelE2EMeasurementPromotion:
             return {"status": "ok", "decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0, "bench_result": bench}
 
         monkeypatch.setattr(krh_mod, "integrate_handler", measure)
-        result = {"backend": "forge", "candidates": [{"tuner": "vllm_dense_tunableop", "env": env}]}
+        result = {"backend": "forge", "candidates": [{"tuner": tuner_name, "env": env, "artifact_path": str(tuned)}]}
 
         await KernelPhase(coord)._validate_gemm_tuning_e2e(result)
 
@@ -1248,7 +1263,9 @@ class TestKernelE2EMeasurementPromotion:
         restored = SharedState.load_or_init(tmp_path)
         assert restored.current_best["final_overlay"] == str(hook)
         assert restored.optimization_stack[-1]["final_overlay"] == str(hook)
-        assert restored.current_best["extra_envs"]["HL_TUNABLEOP_FILE"] == str(tuned)
+        artifact_env = "HYPERLOOM_MATMUL_OGS_FLAGS" if tuner_name == "vllm_mxfp4_matmul_ogs" else "HL_TUNABLEOP_FILE"
+        assert restored.current_best["extra_envs"][artifact_env] == str(tuned)
+        assert state.optimization_stack[-1]["tuned_file"] == str(tuned)
 
     @pytest.fixture
     def coord(self, tmp_path, monkeypatch):
