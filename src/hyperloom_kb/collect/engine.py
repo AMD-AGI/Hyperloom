@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -36,6 +34,7 @@ from hyperloom_kb.schema import (
     RenderedRef,
     SchemaValidationError,
 )
+from hyperloom_kb.storage import _atomic_write
 
 REPORT_FORMAT = "hyperloom-kb.collect-report.v1"
 
@@ -417,19 +416,7 @@ def _publish(target: CollectionTarget, projected: _Projected) -> str:
 def write_report(path: str | Path, report: CollectReport) -> None:
     """Atomically write a collection report as JSON."""
 
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    payload = (json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n").encode()
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
+    _atomic_write(Path(path), (json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n").encode())
 
 
 def collect(
