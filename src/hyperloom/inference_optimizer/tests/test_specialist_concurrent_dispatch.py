@@ -23,11 +23,7 @@ async def _build_coord_with_capacity(
 ):
     """Build a minimal Coordinator with the requested research_lane capacity."""
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
-    from hyperloom.orchestrator.roles.mock_backend import (
-        MockBackend,
-        MockTurn,
-        ScriptedPlan,
-    )
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.state.shared_state import SharedState
 
