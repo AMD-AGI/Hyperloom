@@ -22,11 +22,8 @@ from ._geak_helpers import stop_geak_before_launch
 
 def _coordinator(session_dir: Path):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import (
-        MockBackend,
-        MockCriticBackend,
-        ScriptedPlan,
-    )
+    from hyperloom.orchestrator.roles import MockCriticBackend
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     # Orchestration says nothing: what the phases do on their own is the point.
     silent = ScriptedPlan(

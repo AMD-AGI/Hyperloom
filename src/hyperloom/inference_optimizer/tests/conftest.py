@@ -184,7 +184,7 @@ def make_coordinator(session_dir: Path, *, shared_state_overrides: dict[str, Any
     """
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
-    from hyperloom.orchestrator.roles.mock_backend import MockBackend, ScriptedPlan
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
     def _idle_plan() -> ScriptedPlan:
@@ -851,7 +851,8 @@ def write_benchmark_yaml(
 def make_mock_critic_coordinator(session_dir: Path):
     """A real Coordinator whose orchestration plan is empty and whose critic is the mock critic."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+    from hyperloom.orchestrator.roles import MockCriticBackend
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
@@ -876,7 +877,7 @@ async def seed_pending_critic_proposal(coordinator):
 def silent_backends() -> dict[str, object]:
     """Orchestration and critic mock backends sharing one plan that only sends heartbeats."""
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-    from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     silent = ScriptedPlan(
         turns=[], default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
@@ -890,7 +891,8 @@ def silent_backends() -> dict[str, object]:
 def heartbeat_orchestration_with_mock_critic() -> dict[str, object]:
     """A heartbeat-only orchestration backend beside the default mock critic."""
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+    from hyperloom.orchestrator.roles import MockCriticBackend
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     silent = ScriptedPlan(
         turns=[],

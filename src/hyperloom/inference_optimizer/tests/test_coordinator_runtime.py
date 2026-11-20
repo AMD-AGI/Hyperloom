@@ -19,12 +19,8 @@ from hyperloom.orchestrator.actions.executors import (
     _multi_node_restart_settings,
     report_executor,
 )
-from hyperloom.orchestrator.roles import (
-    Backend,
-    MockBackend,
-    MockTurn,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.roles import Backend
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.loop._baseline_promotion import _BASELINE_FINGERPRINT_KEYS
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator

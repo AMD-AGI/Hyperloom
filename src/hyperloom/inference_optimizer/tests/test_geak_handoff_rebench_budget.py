@@ -31,8 +31,9 @@ SPARE = ONE_ROUND / 4
 @pytest.fixture
 def coordinator(session_dir, monkeypatch):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+    from hyperloom.orchestrator.roles import MockCriticBackend
     from hyperloom.orchestrator.state.shared_state import SharedState
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     for name in ("HYPERLOOM_AGENTX", "GEAK_BUDGET_MARGIN_S", "GEAK_E2E_TIMEOUT_S"):
         monkeypatch.delenv(name, raising=False)

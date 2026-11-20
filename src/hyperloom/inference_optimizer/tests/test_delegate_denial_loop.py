@@ -9,9 +9,9 @@ import re
 
 import pytest
 
-from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.task_registry import TaskSpec
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.inference_optimizer.protocol.action_surfaces import FULL_ENABLED_ACTIONS
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
