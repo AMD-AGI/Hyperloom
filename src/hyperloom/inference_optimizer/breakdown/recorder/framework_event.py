@@ -879,22 +879,18 @@ def record_review_evidence(
     macro_cycle: Any,
     proposal_id: str,
     artifacts: Mapping[str, Any] | None = None,
-    kb: Mapping[str, Any] | None = None,
 ) -> None:
     """Attach what a ruling was grounded in, onto the ruling.
 
     Called from the Critic's own turn rather than through the phase's recorder,
     because that is where these facts exist: the artifacts are written by the
-    review runtime and the KB write result only comes back on its emit. Silent
-    when there is no session or no such event, since the Critic also runs on
-    ticks in phases that record no framework event.
+    review runtime. Silent when there is no session or no such event, since the
+    Critic also runs on ticks in phases that record no framework event.
     """
     key = str(proposal_id or "")
     evidence: dict[str, Any] = {}
     if artifacts:
         evidence["artifacts"] = dict(artifacts)
-    if kb:
-        evidence["kb"] = dict(kb)
     if not key or not evidence:
         return
     sink = bound_sink(framework_event_id(macro_cycle), producer=PRODUCER)

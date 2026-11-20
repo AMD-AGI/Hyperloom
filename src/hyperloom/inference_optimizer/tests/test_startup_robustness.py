@@ -292,7 +292,6 @@ def test_anthropic_only_makes_codex_follow_claude(clean_creds_env):
 def test_critic_agent_without_a_runtime_root_refuses_to_start(monkeypatch, capsys):
     """No degraded critic: ``--critic-agent`` with no reachable runtime exits 2 before any backend is built."""
     monkeypatch.setattr(cli, "_resolve_agent_root", lambda: None)
-    monkeypatch.delenv("CRITIC_KB_CLIENT_MODE", raising=False)
     args = argparse.Namespace(
         no_kernel=False,
         no_framework_agent=False,

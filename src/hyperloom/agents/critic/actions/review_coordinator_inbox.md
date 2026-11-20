@@ -20,7 +20,6 @@ python -m hyperloom.agents.critic.runtime.cli prepare-review \
 - `required_context` — non-empty when critical keys (`model`,
   `framework`) are still missing; if so, see Step 2.
 - `proposals` — only proposals not yet reviewed in this session.
-- `kb_priors_by_proposal` — array per `msg_id` (cache-aware).
 - `review_constraints` — allowed verdicts, action-class-scoped approve
   checklists (`approve_requires_by_class`), and a `{msg_id: class}`
   map in `proposal_action_classes` so you can apply the right per-
@@ -41,10 +40,9 @@ For each proposal in `proposals`:
    when emitting verdicts.
 3. Cross-reference with
    [references/risk_rules.md](../references/risk_rules.md) for
-   blocker / major / minor categorisation,
+   blocker / major / minor categorisation and
    [references/verdict_schema.md](../references/verdict_schema.md) for
-   per-verdict required fields, and any
-   `kb_priors_by_proposal[<msg_id>]` returned in Step 1.
+   per-verdict required fields.
 
 Default behavior summary:
 
@@ -89,9 +87,7 @@ Write the result to `$CRITIC_WORKDIR/review.json`:
       "packet_evidence": ["benchmark.after.gain_pct", "accuracy_gate.status"],
       "risks": [],
       "required_evidence": [],
-      "notes": [],
-      "persist_to_kb": true,
-      "topic": "kernel-opt-active-dispatch"
+      "notes": []
     }
   ],
   "advice": [
@@ -102,10 +98,6 @@ Write the result to `$CRITIC_WORKDIR/review.json`:
   ]
 }
 ```
-
-`persist_to_kb` (optional) flags a verdict whose lesson is reusable and
-should be upserted into KB. `topic` should be the slug-friendly handle
-(the runtime calls `slugify_safe`).
 
 The concrete `advise` text may be written either inline on
 `review_verdicts[].advice_text` or as a separate `advice[].body_md`
@@ -133,7 +125,5 @@ python -m hyperloom.agents.critic.runtime.cli commit-review \
 - **Schema validation error** — runtime exits with code 2; the host
   should treat it as a Critic outage and fall back to an idle intent
   envelope.
-- **KB write dead-lettered** — `kb_writes[*].result.status` is
-  `dead_lettered`. The verdict is still emitted; cron will replay later.
 - **Missing critical context** — produce `needs_review` verdicts and
   set `source = "critic_unavailable"`.

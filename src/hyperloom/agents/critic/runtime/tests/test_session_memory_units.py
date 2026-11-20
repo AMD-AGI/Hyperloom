@@ -9,7 +9,6 @@ import json
 
 import pytest
 
-from hyperloom.agents.critic.runtime import session_memory as session_memory_module
 from hyperloom.agents.critic.runtime.errors import SessionMemoryError
 from hyperloom.agents.critic.runtime.session_memory import SessionMemory
 
@@ -57,31 +56,6 @@ def test_append_decision_writes_jsonl(sm):
 def test_append_decision_rejects_non_dict(sm):
     with pytest.raises(SessionMemoryError):
         sm.append_decision("s1", "nope")  # type: ignore[arg-type]
-
-
-def test_get_cached_priors_absent_and_malformed(sm):
-    assert sm.get_cached_priors("s1", "k") is None
-    sm.put_cached_priors("s1", "good", [{"id": "x"}])
-    assert sm.get_cached_priors("s1", "good") == [{"id": "x"}]
-
-    path = sm._priors_cache_path("s1")
-    cache = json.loads(path.read_text("utf-8"))
-    cache["bad_entry"] = "not-a-dict"
-    cache["bad_shape"] = {"ts": "not-a-number", "priors": "not-a-list"}
-    path.write_text(json.dumps(cache), encoding="utf-8")
-    assert sm.get_cached_priors("s1", "bad_entry") is None
-    assert sm.get_cached_priors("s1", "bad_shape") is None
-
-
-def test_get_cached_priors_expired(sm, monkeypatch):
-    sm.put_cached_priors("s1", "k", [{"id": "x"}])
-    monkeypatch.setattr(session_memory_module.time, "time", lambda: 1e18)
-    assert sm.get_cached_priors("s1", "k") is None
-
-
-def test_put_cached_priors_rejects_non_list(sm):
-    with pytest.raises(SessionMemoryError):
-        sm.put_cached_priors("s1", "k", {"nope": 1})  # type: ignore[arg-type]
 
 
 def test_reviewed_helpers_roundtrip(sm):

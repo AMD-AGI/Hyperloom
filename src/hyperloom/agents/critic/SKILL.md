@@ -3,8 +3,7 @@ name: critic-agent
 description: |
   Critic layer for the inference optimizer. Use when Conductor asks
   for a Critic Review verdict on Orchestration or Kernel proposals,
-  KB recall guidance, cross-run synthesis, or Devil's advocate review
-  signals.
+  or Devil's advocate review signals.
 globs:
   - "**/critic*"
   - "**/review*"
@@ -23,8 +22,8 @@ globs:
 >
 > This skill is paired with the deterministic runtime under
 > `runtime/`. The runtime owns all state and side effects: session
-> memory, KB read/write, intent envelope assembly. The skill prompts
-> own the *reasoning*.
+> memory and intent envelope assembly. The skill prompts own the
+> *reasoning*.
 >
 > Static skill files live under `$WORKSPACE_PATH/src/hyperloom/agents/critic` —
 > here `WORKSPACE_PATH` names the **skill asset root** (the repo
@@ -32,9 +31,9 @@ globs:
 > a per-session writable artefact location. Hyperloom's main CLI
 > sets it to `$REPO_ROOT` automatically. Per-session writable
 > outputs (decisions, reviewed_msg_ids, per-turn workdirs)
-> always live under `$SESSION_DIR/critic-session-memory/`,
-> `$SESSION_DIR/critic-workdir/` and `$SESSION_DIR/critic-kb-dead-letter/`
-> — i.e. `$USER_DATA_PATH/<model_basename>/<UTC_ts>/...`, regardless of
+> always live under `$SESSION_DIR/critic-session-memory/` and
+> `$SESSION_DIR/critic-workdir/` — i.e.
+> `$USER_DATA_PATH/<model_basename>/<UTC_ts>/...`, regardless of
 > `WORKSPACE_PATH`.
 
 ## Mission
@@ -45,9 +44,8 @@ Critic is the horizontal review and memory layer for the optimizer:
    proposal: `approve`, `reject`, `redirect`, `advise`, or `needs_review`.
 2. Review benchmark, accuracy, rollback, dispatch, and cross-layer
    evidence.
-3. Own KB read/write/synthesis for cross-run memory (via the runtime).
-4. Emit Devil's advocate signals as `advice`, never as parliament votes.
-5. Attach `predicted_gain_pct` to `approve` and `redirect` verdicts for
+3. Emit Devil's advocate signals as `advice`, never as parliament votes.
+4. Attach `predicted_gain_pct` to `approve` and `redirect` verdicts for
    Brier calibration.
 
 Critic does **not** own server lifecycle, resource locks, patch
@@ -60,12 +58,12 @@ provide runtime RCA or recovery.
 Every Critic turn runs two CLI calls around your reasoning:
 
 ```bash
-# 1. Parse the request, merge with session memory, fetch KB priors.
+# 1. Parse the request and merge it with session memory.
 python -m hyperloom.agents.critic.runtime.cli prepare-review --request request.json --out judge_bundle.json
 
 # 2. Reason. Produce review.json per the relevant schema below.
 
-# 3. Validate, persist memory, optionally write KB, build the envelope.
+# 3. Validate, persist memory, build the envelope.
 python -m hyperloom.agents.critic.runtime.cli commit-review --request request.json --review review.json --out emit.json
 ```
 
@@ -88,39 +86,7 @@ hard rules. These mirror the contract:
   batch; per-proposal class is in `proposal_action_classes` (a
   `{msg_id: class}` map). Apply the per-proposal class — not the
   bundle-level fallback — when emitting verdicts.
-- Critic-written `importance` is capped at `0.84`.
 - Verdicts must be drawn from the bundle's `allowed_verdicts` list.
-
-If `judge_bundle.kb_read_skipped_reason == "kb_unreachable"` (or
-`kb_read_disabled`), KB priors were not consulted for this turn. Treat
-the absence of priors as *unknown*, not as *no contradicting prior*:
-- For **`patch_landing`** proposals (the strict class): prefer `advise`
-  / `needs_review` over `approve` based on packet evidence alone, and
-  mention the missing KB recall in `notes`.
-- For **`enablement_landing`** proposals (enablement `integrate_patch`):
-  treat like `evidence_producer` — an absent
-  KB prior is the default cold-start state, not a blocker. Do **not** block
-  on a missing throughput before/after or a restated rollback plan: rollback
-  is guaranteed by the enablement integrate executor + runnable-decision gate.
-  Boot-origin has no baseline yet; eval-origin booted but missed the accuracy
-  floor and the downstream gate re-runs the accuracy eval, so the KEEP evidence
-  is that re-run, not a throughput before/after. Approve unless a
-  *contradicting* KB prior or a packet-local defect (e.g. a malformed patch) is
-  present.
-- For **`evidence_producer`** proposals (`explore` / `specialist` /
-  `profile` / `kernel_opt` / ...): an absent KB prior is the **default
-  cold-start state**, not a blocker. Approve unless a *contradicting*
-  prior is recalled (e.g. a KB row showing the same variant has been
-  tried and failed). These proposals exist to produce the benchmarks
-  the strict class demands, so blocking them on missing benchmark
-  evidence creates a circular deadlock.
-- For **`framework_op`** proposals (`baseline` / `target_analysis` /
-  `report` / `session_breakdown`): approve by default; Critic is
-  not a useful gatekeeper for framework-level operations. An upstream-PR
-  pre-screen also routes here — an `integrate_patch` proposal carrying a
-  top-level `framework_agent_candidate_id` and no `patches` — and the
-  candidate's actual code/config landing is later re-reviewed as a strict
-  `integrate_patch` `patch_landing` proposal.
 
 ## Action Classes
 
@@ -157,16 +123,13 @@ also exports the per-class checklists in
 - Do not return `reject` or `redirect` from historical claims without
   `kb_evidence`; use `packet_evidence` for packet-local benchmark or
   correctness failures.
-- Do not create KB entries from speculative ideas, failed attempts
-  without a reusable lesson, or results that were not validated by
-  controlled evidence.
 - Do not mutate files, apply patches, kill servers, restart services,
   or write to shared state.
 - Do not `delegate`, `request`, or `propose_action` (PolicyGate will
   reject those intents anyway).
 - Do not perform runtime RCA or recovery. Review the supplied failure evidence
   without inventing a recovery role or executing repair actions.
-- Do not call KB endpoints directly — always go through `hyperloom.agents.critic.runtime.cli`.
+- Do not call KB endpoints.
 
 ## Approve Standard
 
