@@ -32,10 +32,10 @@ from hyperloom_kb import (
     FileRef,
     HTTPServiceConfig,
     HTTPServiceError,
-    LLMQueryPlanner,
+    LexicalFuzzyProvider,
     ObjectiveDeclaration,
-    PlannerConfiguration,
     Provenance,
+    QuerySignal,
     ReadQuery,
     RemoteClient,
     RemoteClientError,
@@ -56,7 +56,6 @@ from hyperloom_kb.tests.conftest import fresh_database
 
 NOW = datetime(2026, 9, 28, tzinfo=timezone.utc)
 TOKEN = "service-secret"
-DECISION = "Select the next framework optimization to benchmark."
 
 
 def _declaration() -> ExperienceDeclaration:
@@ -114,37 +113,11 @@ def _experience(
     )
 
 
-class FakePlannerBackend:
-    model = "test-planner"
-
-    def complete(self, *, user_payload: str, **_kwargs: Any) -> str:
-        context = json.loads(user_payload)["request"]["context"]
-        return json.dumps(
-            {
-                "signals": [
-                    {
-                        "source_path": "context.identity.model",
-                        "field": "identity.model",
-                        "value": context["identity"]["model"],
-                        "weight": 1.0,
-                    },
-                    {
-                        "source_path": "context.observations.bottleneck",
-                        "text": context["observations"]["bottleneck"],
-                        "weight": 0.9,
-                    },
-                ]
-            }
-        )
-
-
-def _read_context() -> dict[str, Any]:
-    return {
-        "identity": {"model": "qwen3", "gpu": "mi325x"},
-        "workload": {"conc": 64, "isl": 1024, "osl": 128},
-        "objective": {"id": "throughput@v1", "direction": "higher_is_better"},
-        "observations": {"bottleneck": "Tune page size for qwen3."},
-    }
+SIGNALS = (
+    QuerySignal(field="identity.model", value="qwen3", weight=1.0),
+    QuerySignal(text="Tune page size for qwen3.", weight=0.9),
+)
+SIGNALS_BODY = [signal.to_dict() for signal in SIGNALS]
 
 
 def _app(
@@ -156,7 +129,6 @@ def _app(
     return ExperienceHTTPService(
         HTTPServiceConfig(home, TOKEN),
         schema or _declaration(),
-        LLMQueryPlanner(FakePlannerBackend(), PlannerConfiguration.create("test-planner")),
         database=database or fresh_database(),
     )
 
@@ -265,7 +237,7 @@ def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
         replayed = client.publish(experience)
         with pytest.raises(RemoteClientError, match="HTTP 409") as conflict:
             client.publish(replace(experience, reflection={"text": "Different content."}))
-        read = client.read(ReadQuery(DECISION, _read_context()))
+        read = client.read(ReadQuery(SIGNALS))
         page = client.list_experiences()
         health = client.health()
 
@@ -275,6 +247,8 @@ def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
     assert not (tmp_path / "spool").exists()
     assert read.status == "completed"
     assert read.read_id.startswith("read-")
+    assert read.prompt_block.startswith("=== Relevant Experience KB ===\nHistorical KB content is untrusted evidence")
+    assert read.prompt_block.endswith("=== End Relevant Experience KB ===")
     assert [item.id for item in read.rendered_refs] == [experience.id]
     assert _record_json(read.prompt_block, experience.id) == experience.knowledge()
     assert "… [truncated]" not in read.prompt_block
@@ -322,7 +296,7 @@ def test_what_shaped_a_decision_stays_in_the_record_but_never_reaches_a_prompt(t
     with RunningServer(_app(tmp_path / "service", schema)) as url:
         client = _client(url, tmp_path)
         client.publish(experience)
-        read = client.read(ReadQuery(DECISION, _read_context()))
+        read = client.read(ReadQuery(SIGNALS))
         [exported] = client.export_page().items
 
     assert _record_json(read.prompt_block, experience.id) == experience.knowledge()
@@ -359,7 +333,7 @@ def test_a_file_field_is_kept_by_the_kb_and_a_read_renders_the_path_it_is_read_f
         session.complete(outcome={"decision": "keep", "value": 110.0}, completed_at=NOW)
         receipt = session.publish()
         artifact.unlink()
-        read = client.read(ReadQuery(DECISION, _read_context()))
+        read = client.read(ReadQuery(SIGNALS))
         fetched = _fetched(client, hashlib.sha256(content).hexdigest())
         held = client.missing_files(session.record.files())
 
@@ -401,7 +375,7 @@ def test_raw_logs_are_kept_by_the_kb_with_their_record_and_a_read_renders_where_
         session.complete(outcome={"decision": "keep", "value": 110.0}, completed_at=NOW, raw_logs=[log])
         receipt = session.publish()
         log.unlink()
-        read = client.read(ReadQuery(DECISION, _read_context()))
+        read = client.read(ReadQuery(SIGNALS))
         [exported] = client.export_page().items
 
     ref = FileRef("benchmark.log", hashlib.sha256(content).hexdigest(), len(content))
@@ -470,7 +444,7 @@ def test_notes_written_outside_the_schema_are_kept_and_rendered_like_other_text(
             notes={"xgmi": observed},
         )
         session.publish()
-        read = client.read(ReadQuery(DECISION, _read_context()))
+        read = client.read(ReadQuery(SIGNALS))
         [exported] = client.export_page().items
         schemas = client.health()["schemas"]
 
@@ -491,11 +465,11 @@ def test_a_read_budget_carries_whole_records_and_names_only_those_it_carries(tmp
         client = _client(url, tmp_path)
         for record in records:
             client.publish(record)
-        full = client.read(ReadQuery(DECISION, _read_context()))
+        full = client.read(ReadQuery(SIGNALS))
         starts = [match.start() for match in re.finditer(r"^Experience exp-", full.prompt_block, re.MULTILINE)]
         one_record = starts[1] - starts[0] - len("\n\n")
-        budgeted = client.read(ReadQuery(DECISION, _read_context(), render_budget_chars=one_record))
-        nothing_fits = client.read(ReadQuery(DECISION, _read_context(), render_budget_chars=1))
+        budgeted = client.read(ReadQuery(SIGNALS, render_budget_chars=one_record))
+        nothing_fits = client.read(ReadQuery(SIGNALS, render_budget_chars=1))
 
     assert all(_record_json(full.prompt_block, record.id) == record.knowledge() for record in records)
     [shown] = budgeted.rendered_refs
@@ -519,26 +493,25 @@ def test_read_defaults_to_ten_mixed_and_filters_by_the_declared_decision(tmp_pat
         )
         for seq in range(14)
     )
-    context = _read_context()
 
     with RunningServer(app) as url:
         client = _client(url, tmp_path)
         for experience in experiences:
             client.publish(experience)
-        _, mixed = _http(url, "POST", "/v1/read", {"decision": DECISION, "context": context})
+        _, mixed = _http(url, "POST", "/v1/read", {"signals": SIGNALS_BODY})
         _, kept = _http(
             url,
             "POST",
             "/v1/read",
-            {"decision": DECISION, "context": context, "outcome": "keep"},
+            {"signals": SIGNALS_BODY, "outcome": "keep"},
         )
-        reverted = client.read(ReadQuery(DECISION, context, outcome="revert", limit=3))
-        invalid = client.read(ReadQuery(DECISION, context, outcome="maybe"))
+        reverted = client.read(ReadQuery(SIGNALS, outcome="revert", limit=3))
+        invalid = client.read(ReadQuery(SIGNALS, outcome="maybe"))
         too_many = _http(
             url,
             "POST",
             "/v1/read",
-            {"decision": DECISION, "context": context, "limit": 101},
+            {"signals": SIGNALS_BODY, "limit": 101},
         )
 
     decisions = {item.id: item.outcome["decision"] for item in experiences}
@@ -563,8 +536,8 @@ def test_a_schema_without_a_decision_field_reads_mixed_only(tmp_path: Path) -> N
     with RunningServer(_app(tmp_path / "service", schema)) as url:
         client = _client(url, tmp_path)
         client.publish(experience)
-        mixed = client.read(ReadQuery(DECISION, _read_context()))
-        restricted = client.read(ReadQuery(DECISION, _read_context(), outcome="keep"))
+        mixed = client.read(ReadQuery(SIGNALS))
+        restricted = client.read(ReadQuery(SIGNALS, outcome="keep"))
         [listed] = client.list_experiences().items
 
     assert [item.id for item in mixed.rendered_refs] == [experience.id]
@@ -582,7 +555,7 @@ def test_outcome_filter_keeps_full_repeat_group_annotations(tmp_path: Path) -> N
         client = _client(url, tmp_path)
         client.publish(kept)
         client.publish(reverted)
-        read = client.read(ReadQuery(DECISION, _read_context(), outcome="keep"))
+        read = client.read(ReadQuery(SIGNALS, outcome="keep"))
 
     assert [item.id for item in read.rendered_refs] == [kept.id]
     annotations = json.loads(read.prompt_block.split("Repeat Group Annotations:\n", 1)[1].split("\nRecord:\n", 1)[0])
@@ -591,14 +564,142 @@ def test_outcome_filter_keeps_full_repeat_group_annotations(tmp_path: Path) -> N
     assert annotations["measurement_median"] == 100.0
 
 
-def test_empty_service_reads_without_planning(tmp_path: Path) -> None:
+def test_an_empty_service_completes_a_read_with_nothing(tmp_path: Path) -> None:
     app = _app(tmp_path / "service")
 
     with RunningServer(app) as url:
-        status, read = _http(url, "POST", "/v1/read", {"decision": DECISION, "context": {}})
+        status, read = _http(url, "POST", "/v1/read", {"signals": SIGNALS_BODY})
 
     assert status == 200
     assert (read["status"], read["prompt_block"], read["eligible_count"]) == ("completed", "", 0)
+
+
+def test_a_read_ranks_by_the_summed_weight_of_the_signals_each_experience_matches(tmp_path: Path) -> None:
+    schema = _declaration()
+    same_model = _experience(schema, run_id="same-model", knob="chunk_size")
+    other_model = replace(
+        _experience(schema, run_id="other-model", knob="chunk_size"), identity={"model": "qwen3-14b", "gpu": "mi325x"}
+    )
+    neither = replace(
+        _experience(schema, run_id="neither", knob="chunk_size"), identity={"model": "glm", "gpu": "mi300x"}
+    )
+
+    def ranked(model: float, gpu: float) -> list[dict[str, Any]]:
+        signals = [
+            {"field": "identity.model", "value": "qwen3-14b", "weight": model},
+            {"field": "identity.gpu", "value": "mi325x", "weight": gpu},
+        ]
+        status, read = _http(url, "POST", "/v1/read", {"signals": signals})
+        assert (status, read["status"]) == (200, "completed")
+        return read["experiences"]
+
+    with RunningServer(_app(tmp_path / "service", schema)) as url:
+        client = _client(url, tmp_path)
+        for experience in (same_model, other_model, neither):
+            client.publish(experience)
+        model_first = ranked(1.0, 0.25)
+        equal = ranked(0.5, 0.5)
+
+    assert [(item["experience_id"], item["score"]) for item in model_first] == [
+        (other_model.id, 1.25),
+        (same_model.id, 0.25),
+    ]
+    assert model_first[0]["why_matched"] == [
+        {
+            "signal_id": 0,
+            "capability": "exact",
+            "experience_id": other_model.id,
+            "raw_score": 1.0,
+            "normalized_score": 1.0,
+            "contribution": 1.0,
+        },
+        {
+            "signal_id": 1,
+            "capability": "exact",
+            "experience_id": other_model.id,
+            "raw_score": 1.0,
+            "normalized_score": 1.0,
+            "contribution": 0.25,
+        },
+    ]
+    assert [(item["experience_id"], item["score"]) for item in equal] == [(other_model.id, 1.0), (same_model.id, 0.5)]
+
+
+def test_a_text_signal_adds_its_weight_times_how_well_the_text_matched(tmp_path: Path) -> None:
+    schema = _declaration()
+    page_size = _experience(schema, run_id="page", knob="page_size")
+    chunk_size = _experience(schema, run_id="chunk", knob="chunk_size")
+
+    with RunningServer(_app(tmp_path / "service", schema)) as url:
+        client = _client(url, tmp_path)
+        client.publish(page_size)
+        client.publish(chunk_size)
+        full = client.read(ReadQuery((QuerySignal(text="page_size", weight=1.0),)))
+        half = client.read(ReadQuery((QuerySignal(text="page_size", weight=0.5),)))
+
+    assert full.experiences[0]["experience_id"] == half.experiences[0]["experience_id"] == page_size.id
+    (matched,) = full.experiences[0]["why_matched"]
+    assert matched["capability"] == "fuzzy" and 0 < matched["normalized_score"] <= 1
+    assert full.experiences[0]["score"] == matched["normalized_score"]
+    assert half.experiences[0]["score"] == pytest.approx(full.experiences[0]["score"] / 2)
+
+
+@pytest.mark.parametrize(
+    ("signals", "detail"),
+    [
+        (None, "signals must be a list"),
+        ([], "signals must name at least one signal"),
+        (["identity.model"], "a signal is an object"),
+        ([{"field": "identity.model", "value": "qwen3", "weight": 1.0, "source_path": "context.model"}], "a signal is"),
+        ([{"field": "identity.model", "value": "qwen3"}], "weight must be a number in (0, 1]"),
+        ([{"field": "identity.model", "value": "qwen3", "weight": 0}], "weight must be a number in (0, 1]"),
+        ([{"field": "identity.model", "value": "qwen3", "weight": 1.5}], "weight must be a number in (0, 1]"),
+        ([{"text": "page size", "weight": True}], "weight must be a number in (0, 1]"),
+        ([{"field": "identity.model", "value": ["qwen3"], "weight": 1.0}], "needs a scalar value"),
+        ([{"field": "identity.model", "weight": 1.0}], "needs a scalar value"),
+        ([{"field": "identity.model", "value": "qwen3", "text": "page size", "weight": 1.0}], "either field and value"),
+        ([{"weight": 1.0}], "either field and value"),
+        ([{"text": "page size", "value": "qwen3", "weight": 1.0}], "a text signal holds no value"),
+        ([{"field": "identity.tp", "value": 2, "weight": 1.0}], "signal fields the schema does not index: identity.tp"),
+        ([{"field": "change.content", "value": "x", "weight": 1.0}], "does not index: change.content"),
+    ],
+)
+def test_a_read_with_invalid_signals_is_refused_before_it_searches(
+    tmp_path: Path, signals: object, detail: str
+) -> None:
+    body = {} if signals is None else {"signals": signals}
+
+    with RunningServer(_app(tmp_path / "service")) as url:
+        status, answer = _http(url, "POST", "/v1/read", body)
+
+    assert (status, answer["error"]) == (400, "invalid_request")
+    assert detail in answer["detail"]
+
+
+def test_a_read_the_service_cannot_execute_answers_failed_with_the_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("index unreadable")
+
+    monkeypatch.setattr(LexicalFuzzyProvider, "recall", broken)
+    schema = _declaration()
+
+    with RunningServer(_app(tmp_path / "service", schema)) as url:
+        client = _client(url, tmp_path)
+        client.publish(_experience(schema))
+        read = client.read(ReadQuery(SIGNALS))
+
+    assert (read.status, read.prompt_block, read.rendered_refs) == ("failed", "", ())
+    assert read.warnings == ("RuntimeError:index unreadable",)
+
+
+def test_a_read_in_the_decision_and_context_shape_is_refused(tmp_path: Path) -> None:
+    with RunningServer(_app(tmp_path / "service")) as url:
+        status, answer = _http(url, "POST", "/v1/read", {"decision": "Select the next change.", "context": {}})
+
+    assert (status, answer["error"]) == (400, "invalid_request")
+    assert "unknown request fields: context, decision" in answer["detail"]
 
 
 def test_list_pages_in_write_order_and_keeps_them_across_a_restart(tmp_path: Path) -> None:
@@ -648,10 +749,10 @@ def test_a_restarted_sqlite_service_exports_a_schema_it_has_not_read_since_witho
         identity=(FieldDeclaration("model", "Model."),),
     )
     pulled = _declaration()
-    ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), served, None, database=open_database(home)).write(
+    ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), served, database=open_database(home)).write(
         _experience(pulled), pulled
     )
-    restarted = ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), served, None, database=open_database(home))
+    restarted = ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), served, database=open_database(home))
 
     page = restarted.export(schema_ref=pulled.schema_ref)
 
@@ -689,9 +790,8 @@ def test_invalid_requests_are_rejected(tmp_path: Path) -> None:
             url,
             "POST",
             "/v1/read",
-            {"decision": DECISION, "context": {}, "content_inline_limit": 2048},
+            {"signals": SIGNALS_BODY, "content_inline_limit": 2048},
         )
-        missing_decision = _http(url, "POST", "/v1/read", {"context": {}})
         bad_file_check = _http(url, "POST", "/v1/files/missing", {"files": [{"sha256": "x"}]})
         unknown_path = _http(url, "GET", "/v1/events")
 
@@ -702,7 +802,6 @@ def test_invalid_requests_are_rejected(tmp_path: Path) -> None:
         wrong_schema,
         unknown_write_field,
         unknown_read_field,
-        missing_decision,
         bad_file_check,
     ):
         assert status == 400
@@ -751,7 +850,7 @@ def test_every_endpoint_requires_the_service_token(tmp_path: Path) -> None:
     requests: tuple[tuple[str, str, object], ...] = (
         ("GET", "/health", None),
         ("GET", "/v1/list", None),
-        ("POST", "/v1/read", {"decision": DECISION, "context": {}}),
+        ("POST", "/v1/read", {"signals": SIGNALS_BODY}),
         ("PUT", f"/v1/experiences/{experience.id}", {"experience": experience.to_dict()}),
         ("POST", "/v1/files/missing", {"files": []}),
         ("GET", f"/v1/files/{digest}", None),
@@ -780,7 +879,7 @@ def test_unavailable_service_fails_open_and_flushes_spool_idempotently(tmp_path:
         opener=unavailable,
     )
     experience = _experience(schema)
-    read = offline.read(ReadQuery(DECISION, _read_context()))
+    read = offline.read(ReadQuery(SIGNALS))
     spooled = offline.publish(experience)
     assert offline.flush_spool() == ()
 
@@ -837,7 +936,7 @@ def test_a_response_too_deeply_nested_to_decode_fails_open(tmp_path: Path) -> No
 
     client = RemoteClient(RemoteConfig("http://kb.invalid", TOKEN, spool_root=tmp_path / "spool"), opener=deep)
 
-    assert client.read(ReadQuery(DECISION, _read_context())).status == "unavailable"
+    assert client.read(ReadQuery(SIGNALS)).status == "unavailable"
     with pytest.raises(RemoteClientError, match="RecursionError"):
         client.health()
 
@@ -856,7 +955,7 @@ def test_an_error_response_cut_off_mid_body_is_still_a_client_error(tmp_path: Pa
     schema = _declaration()
     client = RemoteClient(RemoteConfig("http://kb.invalid", TOKEN, spool_root=tmp_path / "spool"), opener=proxy_error)
 
-    assert client.read(ReadQuery(DECISION, _read_context())).status == "unavailable"
+    assert client.read(ReadQuery(SIGNALS)).status == "unavailable"
     assert client.publish(_experience(schema)).status == "spooled"
     with pytest.raises(RemoteClientError, match="HTTP 502") as failed:
         client.write(_experience(schema, seq=1, knob="other"))
@@ -968,7 +1067,7 @@ def test_sdk_uses_only_url_and_token_with_packaged_declaration(
             completed_at=NOW,
         )
         receipt = session.publish()
-        read = kb.read(DECISION, _read_context(), outcome="keep")
+        read = kb.read(SIGNALS, outcome="keep")
 
     assert kb.declaration.schema_ref == app.declaration.schema_ref
     assert receipt.status == "created"

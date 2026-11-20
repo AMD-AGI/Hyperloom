@@ -33,6 +33,7 @@ from hyperloom_kb.schema import (
     ExperienceStatus,
     FieldValue,
     FileRef,
+    JsonScalar,
     JsonValue,
     Provenance,
     RenderedRef,
@@ -118,15 +119,54 @@ class RemoteConfig:
         return config if timeout_seconds is None else replace(config, timeout_seconds=timeout_seconds)
 
 
+@dataclass(frozen=True, kw_only=True)
+class QuerySignal:
+    """One thing a read looks for and how much it counts: a ``field`` holding exactly ``value``, or ``text`` matched
+    fuzzily. ``weight`` is in (0, 1]."""
+
+    weight: float
+    field: str = ""
+    value: JsonScalar = None
+    text: str = ""
+
+    def __post_init__(self) -> None:
+        weight = self.weight
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not 0 < weight <= 1:
+            raise ValueError("signal weight must be a number in (0, 1]")
+        if not isinstance(self.field, str) or not isinstance(self.text, str):
+            raise ValueError("signal field and text must be strings")
+        if bool(self.field.strip()) == bool(self.text.strip()):
+            raise ValueError("a signal holds either field and value, or text")
+        if self.field and not isinstance(self.value, (str, int, float, bool)):
+            raise ValueError(f"signal {self.field} needs a scalar value")
+        if self.text and self.value is not None:
+            raise ValueError("a text signal holds no value")
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        if self.field:
+            return {"field": self.field, "value": self.value, "weight": self.weight}
+        return {"text": self.text, "weight": self.weight}
+
+    @classmethod
+    def from_dict(cls, value: Any) -> QuerySignal:
+        if not isinstance(value, dict) or not set(value) <= {"field", "value", "text", "weight"}:
+            raise ValueError("a signal is an object of field, value and weight, or of text and weight")
+        return cls(
+            weight=value.get("weight", 0),
+            field=value.get("field", ""),
+            value=value.get("value"),
+            text=value.get("text", ""),
+        )
+
+
 @dataclass(frozen=True)
 class ReadQuery:
-    """One ``POST /v1/read``: the decision at hand, its context, and how to narrow and size the answer.
+    """One ``POST /v1/read``: the signals to look for, and how to narrow and size the answer.
 
     A ``None`` setting is left to the service: its default schema, both outcomes, its default limit, no budget.
     """
 
-    decision: str
-    context: Mapping[str, JsonValue]
+    signals: tuple[QuerySignal, ...]
     outcome: str | None = None
     limit: int | None = None
     schema_ref: str | None = None
@@ -338,7 +378,7 @@ class RemoteClient:
         return self._request(_GET, "/health")
 
     def read(self, query: ReadQuery) -> RemoteReadResult:
-        body: dict[str, JsonValue] = {"decision": query.decision, "context": dict(query.context)}
+        body: dict[str, JsonValue] = {"signals": [signal.to_dict() for signal in query.signals]}
         if query.outcome is not None:
             body["outcome"] = query.outcome
         if query.limit is not None:
@@ -803,19 +843,19 @@ class RemoteExperienceKB:
 
     def read(
         self,
-        decision: str,
-        context: Mapping[str, JsonValue],
+        signals: Sequence[QuerySignal],
         *,
         outcome: str | None = None,
         limit: int | None = None,
     ) -> RemoteReadResult:
-        return self.client.read(ReadQuery(decision, context, outcome=outcome, limit=limit, schema_ref=self.schema_ref))
+        return self.client.read(ReadQuery(tuple(signals), outcome=outcome, limit=limit, schema_ref=self.schema_ref))
 
 
 __all__ = [
     "ExperienceStart",
     "ListPage",
     "LocalFiles",
+    "QuerySignal",
     "ReadQuery",
     "RemoteClient",
     "RemoteClientError",

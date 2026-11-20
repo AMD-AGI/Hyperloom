@@ -163,16 +163,6 @@ it.
   serving; one serving with other settings is not restarted
   (`experience_kb_service ensure --no-restart`). Before, a session read and
   wrote no Experience KB, whatever the environment named.
-- **The Experience KB service plans reads through Hyperloom's gateway
-  clients.** Its planner calls the Anthropic gateway when it has a key, else
-  the OpenAI one, with the clients the rest of Hyperloom uses: their custom
-  headers (`ANTHROPIC_CUSTOM_HEADERS`, `OPENAI_CUSTOM_HEADERS`), connect
-  retries and usage ledger, and it asks for the plan as JSON text instead of
-  forcing a tool call. The model is `LOCAL_KB_PLANNER_MODEL`, else
-  `CLAUDE_MODEL` (or `CODEX_MODEL`), else the backend's default;
-  `ANTHROPIC_MODEL` no longer names it. Before, every read failed on an AMD
-  gateway, which refuses a call without its subscription header and a forced
-  tool choice, and an OpenAI-only workspace planned no reads.
 - **The EXPLORE screen pre-filter is removed.** The opt-in reduced-GPU probe
   that 1.2.0 added behind `HYPERLOOM_EXPLORE_SCREEN=1` is gone: on the one grid
   it was measured against, the order of variants did not transfer to fewer

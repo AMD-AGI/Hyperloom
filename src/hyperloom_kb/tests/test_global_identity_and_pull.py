@@ -65,7 +65,7 @@ def _service(home: Path, global_url: str | None = None, **options: Any) -> Exper
     database = options.pop("database", None) or fresh_database()
     name = options.pop("name", "")
     return ExperienceHTTPService(
-        HTTPServiceConfig(home, TOKEN, name=name), schema, None, database=database, global_kb=global_kb, **options
+        HTTPServiceConfig(home, TOKEN, name=name), schema, database=database, global_kb=global_kb, **options
     )
 
 

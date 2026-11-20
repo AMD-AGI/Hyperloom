@@ -16,7 +16,6 @@ from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
 from hyperloom_multibranch.blackboard.knowledge.learning_recall import (
     AGENTX_SESSION,
     INFERENCEX_SESSION,
-    LEARNING_DECISION,
     LearningRecall,
     read_past_learnings,
 )
@@ -66,13 +65,11 @@ def test_past_learnings_say_which_conditions_differ_and_leave_this_session_out()
         "- [sess-0, same conditions, measured] what exp-same learnt about the kv cache [exp-same]",
         "- [sess-0, tp differ, unmeasured] what exp-tp4 learnt about the kv cache [exp-tp4]",
     ]
-    ((decision, context, limit),) = reader.calls
-    assert (decision, limit, context["objective"], context["observations"]) == (
-        LEARNING_DECISION,
-        5,
-        {"id": "specialist_learning@v1"},
-        {"query": "kv cache"},
-    )
+    ((signals, limit),) = reader.calls
+    exact = {signal.field: signal.value for signal in signals if signal.field}
+    assert limit == 5 and exact["objective"] == "specialist_learning@v1"
+    assert {"identity.tp": 8, "identity.conc": 64, "identity.isl": 1024, "identity.osl": 1024}.items() <= exact.items()
+    assert [(signal.text, signal.weight) for signal in signals if signal.text] == [("kv cache", 1.0)]
 
 
 def test_a_learning_from_random_prompts_differs_in_the_dataset_for_a_session_that_sends_one() -> None:
@@ -81,17 +78,6 @@ def test_a_learning_from_random_prompts_differs_in_the_dataset_for_a_session_tha
     (item,) = read_past_learnings(reader, profile(dataset="/data/prompts.jsonl"), "kv cache", limit=5).items
 
     assert "dataset differ" in item.render()
-
-
-def test_the_read_context_holds_the_declared_identity_under_identity_and_the_workload_under_workload() -> None:
-    reader = FakeExperienceReader(completed_read())
-
-    read_past_learnings(reader, profile(), "kv cache", limit=5)
-
-    ((_, context, _),) = reader.calls
-    sizes = {"tp": 8, "conc": 64, "isl": 1024, "osl": 1024}
-    assert sizes.items() <= context["identity"].items()
-    assert sizes.items() <= context["workload"].items()
 
 
 def test_a_learning_of_the_other_kind_of_session_says_which_kind() -> None:

@@ -19,6 +19,7 @@ from hyperloom_kb import (
     ExperienceStatus,
     HTTPServiceConfig,
     Provenance,
+    QuerySignal,
     ReadQuery,
     RemoteClient,
     RemoteClientError,
@@ -62,7 +63,7 @@ def _id(seq: int) -> str:
 def _service(home: Path, global_url: str | None = None, *, database: Database | None = None) -> ExperienceHTTPService:
     global_kb = None if global_url is None else RemoteClient(RemoteConfig(global_url, TOKEN))
     return ExperienceHTTPService(
-        HTTPServiceConfig(home, TOKEN), SCHEMA, None, database=database or fresh_database(), global_kb=global_kb
+        HTTPServiceConfig(home, TOKEN), SCHEMA, database=database or fresh_database(), global_kb=global_kb
     )
 
 
@@ -84,7 +85,7 @@ def _listed(client: RemoteClient, *, include_excluded: bool = False) -> set[str]
 
 
 def _readable(app: ExperienceHTTPService) -> int:
-    return int(app.read(ReadQuery(decision="Pick the next change.", context={}))["eligible_count"])
+    return int(app.read(ReadQuery((QuerySignal(text="knob", weight=1.0),)))["eligible_count"])
 
 
 def test_a_restore_saves_the_unlabelled_state_and_later_writes_continue_from_the_restored_one(tmp_path: Path) -> None:

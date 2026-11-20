@@ -418,7 +418,7 @@ def test_an_auto_pushed_run_reaches_another_workspace_that_pulls(
         monkeypatch.delenv(key, raising=False)
     declaration = load_declaration(PACKAGED_DECLARATION)
     global_kb = ExperienceHTTPService(
-        HTTPServiceConfig(tmp_path / "global", "global-token"), declaration, None, database=new_database()
+        HTTPServiceConfig(tmp_path / "global", "global-token"), declaration, database=new_database()
     )
     server = create_http_server(global_kb, "127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})

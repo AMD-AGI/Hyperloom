@@ -10,9 +10,10 @@ import logging
 import sys
 from types import SimpleNamespace
 
-from hyperloom.inference_optimizer.experience_kb_service import mapping_schema_ref
+from hyperloom.inference_optimizer.experience_kb_service import MAPPING, REQUEST_TIMEOUT_SECONDS, mapping_schema_ref
 from hyperloom.inference_optimizer.experience_kb import (
     RENDER_BUDGET_CHARS,
+    SIGNAL_WEIGHTS,
     ExperienceKBEvidence,
     ExperienceKBIntegration,
     integration_for,
@@ -24,6 +25,7 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_speci
 from hyperloom.orchestrator.specialists.domains import get_domain
 from hyperloom.orchestrator.state.shared_state import _KB_INJECTIONS_CAP, KbInjection, SharedState
 from hyperloom_kb import RemoteClient, RemoteConfig
+from hyperloom_kb.collect import load_mapping
 
 _FIRST = "exp-00000000000000000000000000000001"
 _SECOND = "exp-00000000000000000000000000000002"
@@ -41,7 +43,7 @@ class FakeClient:
 
     def read(self, query):
         assert (query.schema_ref, query.render_budget_chars) == (_SCHEMA, RENDER_BUDGET_CHARS)
-        self.calls.append((query.decision, query.context))
+        self.calls.append(query.signals)
         return SimpleNamespace(
             read_id=f"read-{len(self.calls)}",
             status="completed",
@@ -73,7 +75,77 @@ def _state(tick: int = 7):
     )
 
 
-def test_kb_read_context_is_runtime_shaped_and_cached_per_decision(tmp_path) -> None:
+def _exact(signals) -> dict[str, tuple[object, float]]:
+    return {signal.field: (signal.value, signal.weight) for signal in signals if signal.field}
+
+
+def _texts(signals) -> list[tuple[str, float]]:
+    return [(signal.text, signal.weight) for signal in signals if signal.text]
+
+
+def test_a_framework_read_sends_the_runs_conditions_and_observations_as_weighted_signals(tmp_path) -> None:
+    client = FakeClient()
+    state = _state()
+    state.framework, state.precision, state.ep, state.max_model_len, state.framework_version = "vllm", "", 0, None, ""
+
+    ExperienceKBIntegration(client, _SCHEMA).read_for_framework(state, untested_proposals="fp8 KV cache")
+
+    (signals,) = client.calls
+    # Each condition is looked up under the schema's own field name; an unset one is not sent.
+    assert _exact(signals) == {
+        "identity.model": ("Qwen3-8B", 1.0),
+        "identity.gpu": ("mi355x", 0.6),
+        "identity.framework": ("vllm", 0.8),
+        "identity.tp": (8, 0.4),
+        "identity.conc": (64, 0.3),
+        "identity.isl": (1024, 0.3),
+        "identity.osl": (128, 0.3),
+        "objective": ("e2e_throughput@v1", 0.4),
+    }
+    assert _texts(signals) == [("decode bandwidth", 0.6), ("fp8 KV cache", 0.4)]
+
+
+def test_every_exact_signal_a_run_can_send_names_a_field_its_schema_indexes() -> None:
+    indexed = load_mapping(MAPPING).declaration.lookup_fields()
+    state = _state()
+    for name in ("framework", "model_type", "framework_version", "precision"):
+        setattr(state, name, "set")
+    state.ep, state.max_model_len = 2, 4096
+    client = FakeClient()
+
+    ExperienceKBIntegration(client, _SCHEMA).read_for_framework(state)
+
+    (signals,) = client.calls
+    sent = set(_exact(signals))
+    assert sent <= indexed
+    weighed = {name for names in SIGNAL_WEIGHTS.values() for name in names}
+    assert sent == {name for name in weighed if name == "objective" or name.startswith("identity.")}
+
+
+def test_a_specialist_read_adds_what_the_dispatch_investigates(tmp_path) -> None:
+    client = FakeClient()
+    integration = ExperienceKBIntegration(client, _SCHEMA)
+    params = {
+        "domain": "kernel_switch_specialist",
+        "gap_symptom": "VLLM_ROCM_USE_AITER defaults False",
+        "task_description": "  ",
+        "pr_lead": {"title": "Enable AITER linear on MI300X"},
+    }
+
+    evidence = integration.read_for_specialist(_state(), params)
+
+    assert evidence.read_id == "read-1"
+    (signals,) = client.calls
+    assert _exact(signals)["identity.model"] == ("Qwen3-8B", 1.0)
+    assert _texts(signals) == [
+        ("decode bandwidth", 0.6),
+        ("kernel_switch_specialist", 0.4),
+        ("VLLM_ROCM_USE_AITER defaults False", 0.6),
+        ("Enable AITER linear on MI300X", 0.4),
+    ]
+
+
+def test_a_read_is_answered_once_per_tick_for_the_same_signals(tmp_path) -> None:
     client = FakeClient()
     integration = ExperienceKBIntegration(client, _SCHEMA)
     state = _state()
@@ -86,48 +158,9 @@ def test_kb_read_context_is_runtime_shaped_and_cached_per_decision(tmp_path) -> 
 
     assert first == second
     assert first.experiences == ({"experience_id": _FIRST, "decision": "keep"},)
-    assert third.read_id != first.read_id
-    assert third.tick == 8
-    assert changed.read_id not in {first.read_id, third.read_id}
+    assert (third.tick, third.read_id) == (8, "read-2")
+    assert changed.read_id == "read-3"
     assert len(client.calls) == 3
-    decision, context = client.calls[0]
-    assert decision == "Select the next framework optimization to benchmark."
-    assert context["identity"]["model"] == "Qwen3-8B"
-    assert context["identity"]["gpu"] == "mi355x"
-    assert context["workload"] == {"tp": 8, "conc": 64, "isl": 1024, "osl": 128}
-    assert context["benchmark_baseline"]["throughput"] == 100.0
-    assert context["current_best"]["throughput"] == 112.0
-    assert context["observations"] == {"bottleneck": "decode bandwidth", "untested_directions": "fp8 KV cache"}
-    # The run's own history is already in its prompt; querying with it only steers retrieval back to it.
-    for own_history in ("recent_results", "already_tried"):
-        assert own_history not in context
-
-
-def test_specialist_read_context_describes_the_dispatch(tmp_path) -> None:
-    client = FakeClient()
-    integration = ExperienceKBIntegration(client, _SCHEMA)
-    params = {
-        "domain": "kernel_switch_specialist",
-        "gap_symptom": "VLLM_ROCM_USE_AITER defaults False",
-        "task_description": "bridge the AITER linear path",
-        "pr_lead": {"title": "Enable AITER linear on MI300X"},
-    }
-
-    evidence = integration.read_for_specialist(_state(), params)
-    integration.read_for_specialist(_state(), params)
-
-    assert evidence.read_id == "read-1"
-    assert len(client.calls) == 1
-    decision, context = client.calls[0]
-    assert decision == "Propose framework optimizations for this specialist investigation."
-    assert context["identity"]["model"] == "Qwen3-8B"
-    assert context["observations"] == {
-        "bottleneck": "decode bandwidth",
-        "specialist_domain": "kernel_switch_specialist",
-        "investigation": "VLLM_ROCM_USE_AITER defaults False",
-        "task": "bridge the AITER linear path",
-        "upstream_pr": "Enable AITER linear on MI300X",
-    }
 
 
 def test_reads_speak_the_service_read_contract_through_the_real_sdk(tmp_path) -> None:
@@ -142,7 +175,7 @@ def test_reads_speak_the_service_read_contract_through_the_real_sdk(tmp_path) ->
         "experiences": [{"experience_id": _FIRST, "decision": "keep", "score": 1.5, "why_matched": []}],
         "eligible_count": 1,
         "rendered_count": 1,
-        "warnings": ["capability_unavailable:semantic"],
+        "warnings": [],
     }
 
     class _Response:
@@ -168,7 +201,9 @@ def test_reads_speak_the_service_read_contract_through_the_real_sdk(tmp_path) ->
     assert request.full_url == "https://kb.example/v1/read"
     assert request.get_header("Authorization") == "Bearer service-token"
     body = json.loads(request.data)
-    assert set(body) == {"decision", "context", "schema_ref", "render_budget_chars"}
+    assert set(body) == {"signals", "schema_ref", "render_budget_chars"}
+    assert body["signals"][0] == {"field": "identity.model", "value": "Qwen3-8B", "weight": 1.0}
+    assert body["signals"][-1] == {"text": "serving_specialist", "weight": 0.4}
     assert (body["schema_ref"], body["render_budget_chars"]) == (_SCHEMA, RENDER_BUDGET_CHARS)
     assert evidence.status == "completed"
     assert evidence.read_id == response["read_id"]
@@ -217,8 +252,7 @@ def test_bootstrap_uses_only_service_url_and_token(tmp_path) -> None:
     assert isinstance(integration.client, RemoteClient)
     assert integration.client.config.base_url == "https://kb.example"
     assert integration.client.config.token == "service-token"
-    # A read waits on the service no longer than the planner it waits behind is allowed to take.
-    assert integration.client.config.timeout_seconds == 30.0
+    assert integration.client.config.timeout_seconds == REQUEST_TIMEOUT_SECONDS
     # A run reads the schema its packaged mapping writes.
     assert integration.schema_ref == mapping_schema_ref()
 
@@ -229,14 +263,14 @@ def test_a_service_that_keeps_failing_reads_stops_being_read_for_the_session(tmp
 
     class _Client:
         def read(self, query):
-            calls.append(query.decision)
+            calls.append(query.signals)
             status = next(statuses)
             return SimpleNamespace(
                 read_id=f"read-{len(calls)}",
                 status=status,
                 prompt_block="",
                 rendered_refs=(),
-                warnings=() if status == "completed" else ("planner gateway timed out",),
+                warnings=() if status == "completed" else ("timed out",),
                 experiences=(),
             )
 

@@ -261,7 +261,7 @@ class LessonRecall(LearningRecall):
     ) -> list[str]:
         """The :data:`~hyperloom_multibranch.blackboard.learning_search.NOTES` notes about a claimed direction, in one
         list, as one retrieval of the log; a lesson this launch of the branch was shown already by its gist alone. A
-        claim reads no Experience KB: each read is planned by an LLM."""
+        claim reads no Experience KB."""
 
         found = await asyncio.to_thread(self._pooled, snapshot, query, NOTES, family)
         with self._lock:

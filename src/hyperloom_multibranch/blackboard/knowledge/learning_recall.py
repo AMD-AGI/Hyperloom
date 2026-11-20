@@ -7,8 +7,8 @@
 (``blackboard.learning_search``), then a read of the Experience KB's ``multibranch-learning-v1`` schema with this
 session's conditions. Each past learning says whether it was learnt under every one of them (model, GPU, framework,
 TP, concurrency, sequence lengths), whether tests backed it, and whether it was learnt in the other kind of session:
-an AgentX session queries no sequence lengths, so only that label tells it an InferenceX session's learning apart. Each query is read once a session, since a read plans
-with an LLM; until some session has published learnings the service does not know the schema, and the read says it is
+an AgentX session queries no sequence lengths, so only that label tells it an InferenceX session's learning apart. Each query is read once a session;
+until some session has published learnings the service does not know the schema, and the read says it is
 unavailable. Given a ``RetrievalLog``, each retrieval is one line of it, this session's and past sessions' learnings
 together.
 """
@@ -22,10 +22,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom_kb import ReadStatus
+from hyperloom.inference_optimizer.experience_kb import read_signals
+from hyperloom_kb import QuerySignal, ReadStatus
 from hyperloom_multibranch.contracts.blackboard.records import LearningRecord, BlackboardSnapshot, SessionProfile
 from hyperloom_multibranch.blackboard.knowledge.experience import DATASET_KEY, experience_identity
-from hyperloom_multibranch.blackboard.knowledge.recall import WORKLOAD_KEYS, ExperienceReader, IdentityIndex, classify
+from hyperloom_multibranch.blackboard.knowledge.recall import ExperienceReader, IdentityIndex, classify
 from hyperloom_multibranch.blackboard.families import Family
 from hyperloom_multibranch.blackboard.learning_search import (
     SAME_FAMILY,
@@ -40,7 +41,6 @@ from hyperloom_multibranch.blackboard.learning_search import (
     words,
 )
 
-LEARNING_DECISION = "Choose the next step of one branch of a multi-branch LLM inference optimization session."
 LEARNING_OBJECTIVE = "specialist_learning@v1"
 LEARNING_CONDITIONS = ("model", "gpu", "framework", "tp", "conc", "isl", "osl", DATASET_KEY)
 PAST_HEADING = "Past sessions' learnings:"
@@ -100,17 +100,12 @@ def learning_conditions(profile: SessionProfile) -> dict[str, object]:
     return {key: identity[key] for key in LEARNING_CONDITIONS if key in identity}
 
 
-def learning_context(profile: SessionProfile, query: str) -> dict[str, Any]:
-    """The read context. ``multibranch-learning-v1`` declares the sizes under identity and the Framework phase's
-    shape keeps them under workload; the read planner may source them from either, so both hold them."""
+def learning_signals(profile: SessionProfile, query: str) -> tuple[QuerySignal, ...]:
+    """The read's signals: the session's conditions and the learning objective, weighed as the Framework phase's
+    reads weigh them, and ``query``, the read's whole question, at the weight of the heaviest condition."""
 
-    identity = experience_identity(profile)
-    return {
-        "identity": dict(identity),
-        "workload": {key: value for key, value in identity.items() if key in WORKLOAD_KEYS},
-        "objective": {"id": LEARNING_OBJECTIVE},
-        "observations": {"query": query} if query else {},
-    }
+    conditions = read_signals(experience_identity(profile), LEARNING_OBJECTIVE, {})
+    return (*conditions, QuerySignal(text=query, weight=1.0)) if query.strip() else conditions
 
 
 def read_past_learnings(
@@ -126,7 +121,7 @@ def read_past_learnings(
 
     if reader is None:
         return PastLearnings(ReadStatus.DISABLED.value)
-    result = reader.read(LEARNING_DECISION, learning_context(profile, query), limit=limit)
+    result = reader.read(learning_signals(profile, query), limit=limit)
     conditions = learning_conditions(profile)
     ours = _session_kind(experience_identity(profile))
     items = []
@@ -209,7 +204,7 @@ class LearningRecall(SessionLearnings):
 
     def past_revision(self) -> str:
         """A digest of the past sessions' learnings this recall reads as a whole, for the session to record; empty, as
-        an Experience KB read is planned query by query and holds no snapshot to name."""
+        an Experience KB read answers query by query and holds no snapshot to name."""
 
         return ""
 
@@ -278,7 +273,6 @@ __all__ = [
     "CACHE_SIZE",
     "INFERENCEX_SESSION",
     "LEARNING_CONDITIONS",
-    "LEARNING_DECISION",
     "LEARNING_OBJECTIVE",
     "PAST_HEADING",
     "LearningRecall",
@@ -286,6 +280,6 @@ __all__ = [
     "PastLearning",
     "PastLearnings",
     "learning_conditions",
-    "learning_context",
+    "learning_signals",
     "read_past_learnings",
 ]
