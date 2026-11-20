@@ -31,6 +31,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.kernel.patch_lifecycle import lifecycle_complete
 from hyperloom.orchestrator.phases import machine_state
+from hyperloom.orchestrator.phases import phase_transitions
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 from .conftest import seed_kernel_keep
@@ -489,7 +490,7 @@ async def test_stack_validation_preserves_actual_measurement(
 ):
     """The real stack verdict and its writeback envelope share one E2E measurement."""
     import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
-    from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
+    from hyperloom.orchestrator.kernel import apply_kernel_patch as akp, patch_restore
 
     agentx = grading_mode != "synthetic"
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1" if agentx else "0")
@@ -499,7 +500,8 @@ async def test_stack_validation_preserves_actual_measurement(
     monkeypatch.delenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", raising=False)
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
-    monkeypatch.setattr(akp, "_clear_python_kernel_caches", lambda target: {"status": "skipped"})
+    for module in (akp, patch_restore):
+        monkeypatch.setattr(module, "clear_python_kernel_caches", lambda target: {"status": "skipped"})
     c = _stack_validation_coordinator(tmp_path)
     c.shared_state.framework = "vllm"
     c.shared_state.benchmark_mode = "agentx" if agentx else "synthetic"
@@ -912,7 +914,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     assert coord.shared_state.last_conc_sweep["status"] == "failed"
     assert coord.shared_state.last_conc_sweep["skip_reason"] == "enqueue_failed"
     assert coord.shared_state.save_count >= 1
-    exit_reason, _ = machine_state._sweep_exit({"sweep_result": coord.shared_state.last_conc_sweep})
+    exit_reason, _ = phase_transitions._sweep_exit({"sweep_result": coord.shared_state.last_conc_sweep})
     assert exit_reason == "sweep_failed"
 
 
@@ -1764,9 +1766,10 @@ def _materialize_stack_sources(tmp_path: Path, stack: list[dict[str, Any]]) -> N
 
 def _stub_python_cache_clear(monkeypatch) -> None:
     """Keep the real apply away from this machine's Triton / inductor cache directories."""
-    from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
+    from hyperloom.orchestrator.kernel import apply_kernel_patch as akp, patch_restore
 
-    monkeypatch.setattr(akp, "_clear_python_kernel_caches", lambda target: {"status": "skipped"})
+    for module in (akp, patch_restore):
+        monkeypatch.setattr(module, "clear_python_kernel_caches", lambda target: {"status": "skipped"})
 
 
 def _stub_stack_benchmark(monkeypatch, *, new_tput: float) -> None:

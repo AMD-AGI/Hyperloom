@@ -183,6 +183,20 @@ def test_to_gaps_summary_caps_entries_at_max():
     assert "older gaps elided" in out
 
 
+def test_to_gaps_summary_lists_attempt_rows_only_when_asked():
+    s = SharedState()
+    s.upsert_gap({"canonical_id": "g1", "symptom": "test", "layer": "framework", "severity": "medium"})
+    s.append_gap_attempt("g1", {"action": "explore", "outcome": "FAILED", "error_class": "x", "failure_id": "fid1"})
+
+    count_only = s.to_gaps_summary(max_attempts=0)
+    assert "attempts=1" in count_only
+    assert "fid1" not in count_only
+
+    with_rows = s.to_gaps_summary(max_attempts=5)
+    assert "fid1" in with_rows
+    assert "attempt:" in with_rows
+
+
 # 5. Coordinator helpers (refresh_gaps / _extract_* / warm_specialist_params)
 @dataclass
 class _StubTask:

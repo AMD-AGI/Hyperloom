@@ -41,7 +41,6 @@ from hyperloom.orchestrator.specialists.launch_env import (
     prepare_launch,
 )
 from hyperloom.orchestrator.specialists.subprocess_ import (
-    SpecialistSpawn,
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
 )
@@ -53,6 +52,7 @@ from hyperloom.orchestrator.specialists.tests._agent_fixtures import (
     wait_finished,
 )
 from hyperloom.orchestrator.specialists.worktrees import _setup_worktree, link_worktree
+from hyperloom.orchestrator.specialists.subprocess_types import SpecialistSpawn
 from hyperloom.orchestrator.tests._helpers import init_git_repo
 
 pytestmark = pytest.mark.agent_isolation

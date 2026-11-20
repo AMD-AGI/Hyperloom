@@ -20,18 +20,21 @@ from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 
 
 @pytest.mark.asyncio
-async def test_preflight_requires_complete_profiling_contract(
+async def test_preflight_judges_a_driver_by_its_two_measurement_modes_alone(
     tmp_path,
     monkeypatch,
 ):
+    """A driver conforms on correctness, benchmark and graph timing; it is asked for no profiling mode."""
     driver = tmp_path / "driver.py"
     driver.write_text("# driver\n", encoding="utf-8")
-    captured = {}
+    stages = []
 
     async def fake_correctness(**_kwargs):
+        stages.append("correctness")
         return {"passed": True, "snr_db": 60.0, "message": "ok"}
 
     async def fake_bench(_run, **_kwargs):
+        stages.append("bench")
         return {
             "success": True,
             "median_ms": 1.0,
@@ -40,24 +43,24 @@ async def test_preflight_requires_complete_profiling_contract(
         }
 
     async def fake_graph(*_args, **_kwargs):
+        stages.append("graph")
         return 10, ""
 
-    async def fake_profile(path, **_kwargs):
-        captured["driver"] = path
-        return True, "verified"
+    async def refuse_any_other_driver_run(*argv, **_kwargs):
+        raise AssertionError(f"preflight ran the driver outside its three stages: {argv}")
 
     monkeypatch.setattr(task_preflight, "test_correctness", fake_correctness)
     monkeypatch.setattr(task_preflight, "bench_wallclock", fake_bench)
     monkeypatch.setattr(task_preflight, "_count_graph_replays", fake_graph)
-    monkeypatch.setattr(task_preflight, "_check_profile_contract", fake_profile)
+    monkeypatch.setattr(task_preflight.asyncio, "create_subprocess_exec", refuse_any_other_driver_run)
 
     result = await task_preflight._preflight_async(
-        str(driver), task_preflight.DriverContract(snr_threshold=30.0, require_graph=True, require_profile=True), 3, 10
+        str(driver), task_preflight.DriverContract(snr_threshold=30.0, require_graph=True), 3, 10
     )
 
     assert result.ok is True
-    assert result.profile_ok is True
-    assert captured == {"driver": str(driver)}
+    assert stages == ["correctness", "bench", "graph"]
+    assert set(result.details) == {"correctness", "bench", "graph"}
 
 
 def _passing_stages(monkeypatch, case_times: dict[str, float]):

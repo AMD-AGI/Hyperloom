@@ -50,6 +50,16 @@ def test_repeat_above_one_passes_the_flag(tmp_path):
     assert argv[argv.index("--repeat") + 1] == "3"
 
 
+def test_bench_case_times_remain_available_for_scoring(tmp_path):
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('mean_ms: 5.0')\nprint('case_ms: small 2.0')\nprint('case_ms: dominant 8.0')\n")
+
+    result = asyncio.run(bench_wallclock(BenchRun(str(driver))))
+
+    assert result["success"]
+    assert result["case_times"] == {"small": 2.0, "dominant": 8.0}
+
+
 def test_three_measurements_aggregate_diagnostics_by_per_case_median(monkeypatch):
     """Keep case medians while reporting only the final bandwidth snapshot."""
     results = iter(

@@ -55,6 +55,7 @@ from hyperloom.orchestrator.specialists.launch_env import (
     without_codex_sandbox,
 )
 from hyperloom.orchestrator.specialists.sandbox_network import RELAY
+from hyperloom.orchestrator.specialists.subprocess_types import SpecialistSpawn
 from hyperloom.orchestrator.specialists.tests._agent_fixtures import make_runner, make_spec, wait_finished
 
 FAKE_BWRAP = "/opt/fake/bwrap"
@@ -548,8 +549,8 @@ def _login_dispatcher(cli: Path) -> ss.SpecialistSubprocessDispatcher:
     )
 
 
-def _login_spawn(workspace: Path) -> ss.SpecialistSpawn:
-    return ss.SpecialistSpawn(
+def _login_spawn(workspace: Path) -> SpecialistSpawn:
+    return SpecialistSpawn(
         task_id=workspace.name,
         workspace=workspace,
         worktree=None,

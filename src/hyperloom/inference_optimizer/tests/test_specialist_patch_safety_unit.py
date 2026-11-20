@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.specialists import patch_safety as ps
-from hyperloom.orchestrator.specialists import runner
+from hyperloom.orchestrator.specialists import patch_claims
 
 
 _DIFF = "diff --git a/foo.py b/foo.py\nindex 111..222 100644\n--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n-old\n+new\n"
@@ -535,7 +535,7 @@ def test_vet_patches_grounds_on_the_worktree_base_when_a_copy_matches_too(tmp_pa
 
 # ---- grounding root selection ----------------------------------------------
 def test_grounding_root_uses_a_harvest_the_whole_set_agrees_on():
-    root = runner._grounding_explicit_root(
+    root = patch_claims.grounding_explicit_root(
         declared="",
         patches=["/wt/patches/_worktree_diff.patch"],
         patch_roots={"/wt/patches/_worktree_diff.patch": "/sgl-workspace/sglang"},
@@ -545,7 +545,7 @@ def test_grounding_root_uses_a_harvest_the_whole_set_agrees_on():
 
 def test_grounding_root_declines_when_a_hand_authored_patch_rides_along():
     """Its target tree is unknown; the harvest root would drop it as a mismatch."""
-    root = runner._grounding_explicit_root(
+    root = patch_claims.grounding_explicit_root(
         declared="",
         patches=["/wt/patches/_worktree_diff.patch", "/wt/patches/manual.patch"],
         patch_roots={"/wt/patches/_worktree_diff.patch": "/sgl-workspace/sglang"},
@@ -554,7 +554,7 @@ def test_grounding_root_declines_when_a_hand_authored_patch_rides_along():
 
 
 def test_grounding_root_declines_when_harvests_disagree():
-    root = runner._grounding_explicit_root(
+    root = patch_claims.grounding_explicit_root(
         declared="",
         patches=["/a.patch", "/b.patch"],
         patch_roots={"/a.patch": "/tree/one", "/b.patch": "/tree/two"},
@@ -563,7 +563,7 @@ def test_grounding_root_declines_when_harvests_disagree():
 
 
 def test_grounding_root_prefers_a_declared_source_root():
-    root = runner._grounding_explicit_root(
+    root = patch_claims.grounding_explicit_root(
         declared="/declared/tree",
         patches=["/a.patch"],
         patch_roots={"/a.patch": "/harvested/tree"},

@@ -27,8 +27,8 @@ from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.launch_env import PreparedLaunch
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessDispatcher,
-    SpecialistSpawn,
 )
+from hyperloom.orchestrator.specialists.subprocess_types import SpecialistSpawn
 
 
 @pytest.mark.asyncio
@@ -67,7 +67,7 @@ async def test_specialist_scope_cancel_stops_before_harvest(monkeypatch, tmp_pat
     entered = asyncio.Event()
     kill = Mock()
     harvest = Mock(side_effect=AssertionError("cancelled specialist must not harvest results"))
-    monkeypatch.setattr(dispatcher, "_collect_patches", harvest)
+    monkeypatch.setattr(ss, "collect_patches", harvest)
     monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
     child = subprocess.Popen(
         [sys.executable, "-c", "import sys; sys.stdin.readline()"],
@@ -206,7 +206,7 @@ async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path, dem
         ss.SpecialistSubprocessConfig(agent_backend="claude", poll_interval_seconds=0.05)
     )
     monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
-    monkeypatch.setattr(dispatcher, "_collect_patches", lambda *args, **kwargs: ([], {}))
+    monkeypatch.setattr(ss, "collect_patches", lambda *args, **kwargs: ([], {}))
     bystander = real_popen(
         [sys.executable, "-c", "import time; time.sleep(300)"],
         env={**os.environ, "HYPERLOOM_REAP_MARK": "another-run"},
@@ -260,7 +260,7 @@ async def test_a_sweep_that_never_returns_does_not_hold_back_the_done_file(monke
         ss.SpecialistSubprocessConfig(agent_backend="claude", poll_interval_seconds=0.05)
     )
     monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
-    monkeypatch.setattr(dispatcher, "_collect_patches", lambda *args, **kwargs: ([], {}))
+    monkeypatch.setattr(ss, "collect_patches", lambda *args, **kwargs: ([], {}))
     try:
         with caplog.at_level("WARNING", logger=launch_env.log.name):
             result = await asyncio.wait_for(

@@ -30,6 +30,7 @@ from hyperloom.inference_optimizer.cli import framework_probe as cli_framework_p
 from hyperloom.inference_optimizer.cli import model_catalog
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
 from hyperloom.inference_optimizer.cli import preflight_env as cli_preflight_env
+from hyperloom.inference_optimizer.cli import session_setup
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 
 
@@ -2636,7 +2637,7 @@ def test_cli_parser_exposes_degraded_flags():
 def test_expected_framework_guard_rejects_mismatch(monkeypatch, capsys):
     monkeypatch.setenv("EXPECTED_FRAMEWORK", "vllm")
     with pytest.raises(SystemExit) as exc:
-        cli._enforce_expected_framework("sglang")
+        session_setup._enforce_expected_framework("sglang")
     assert exc.value.code == 2
     err = capsys.readouterr().err
     assert "EXPECTED_FRAMEWORK" in err
@@ -2646,14 +2647,14 @@ def test_expected_framework_guard_rejects_mismatch(monkeypatch, capsys):
 
 def test_expected_framework_guard_accepts_match(monkeypatch):
     monkeypatch.setenv("EXPECTED_FRAMEWORK", "VLLM")
-    cli._enforce_expected_framework("vllm")
+    session_setup._enforce_expected_framework("vllm")
 
 
 def test_expected_framework_guard_namespaced_env_var(monkeypatch):
     monkeypatch.delenv("EXPECTED_FRAMEWORK", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPECTED_FRAMEWORK", "vllm")
     with pytest.raises(SystemExit) as exc:
-        cli._enforce_expected_framework("sglang")
+        session_setup._enforce_expected_framework("sglang")
     assert exc.value.code == 2
 
 
@@ -2662,26 +2663,26 @@ def test_expected_framework_guard_namespaced_takes_precedence(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPECTED_FRAMEWORK", "vllm")
     monkeypatch.setenv("EXPECTED_FRAMEWORK", "sglang")
     with pytest.raises(SystemExit):
-        cli._enforce_expected_framework("sglang")
+        session_setup._enforce_expected_framework("sglang")
 
 
 def test_expected_framework_guard_unset_is_noop(monkeypatch):
     monkeypatch.delenv("EXPECTED_FRAMEWORK", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_EXPECTED_FRAMEWORK", raising=False)
     # No env pins -> guard is a no-op.
-    cli._enforce_expected_framework("sglang")
-    cli._enforce_expected_framework("anything")
+    session_setup._enforce_expected_framework("sglang")
+    session_setup._enforce_expected_framework("anything")
 
 
 def test_session_framework_blank_resolves_to_the_default():
-    assert cli._registered_framework_or_exit("", hint="h") == "sglang"
-    assert cli._registered_framework_or_exit(" VLLM ", hint="h") == "vllm"
+    assert session_setup._registered_framework_or_exit("", hint="h") == "sglang"
+    assert session_setup._registered_framework_or_exit(" VLLM ", hint="h") == "vllm"
 
 
 def test_session_framework_unregistered_exits(capsys):
     """Fresh launch and resume both pass through here, so no unregistered name reaches $FRAMEWORK."""
     with pytest.raises(SystemExit) as exc:
-        cli._registered_framework_or_exit("tensorrt", hint="it comes from the resumed session")
+        session_setup._registered_framework_or_exit("tensorrt", hint="it comes from the resumed session")
     assert exc.value.code == 2
     err = capsys.readouterr().err
     assert "'tensorrt'" in err

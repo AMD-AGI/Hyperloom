@@ -77,7 +77,7 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
         external_has_server_control,
         external_has_ssh_control,
     )
-    from ..multi_node.cli import _save_state
+    from ..multi_node.cluster_access import _save_state
 
     if not _hand_off_service_url():
         print(
@@ -163,7 +163,8 @@ def _reject_unusable_backend(ext_state: dict[str, Any]) -> None:
 
 def _prepare_adopted_cluster(args: argparse.Namespace, backend: str, *, head_ip: str) -> None:
     """Make an adopted cluster usable by this session."""
-    from ..multi_node.cli import cmd_bootstrap, install_geak_on_pods_best_effort, resolve_poll_timeout_s
+    from ..multi_node.cli import cmd_bootstrap, install_geak_on_pods_best_effort
+    from ..multi_node.cluster_access import resolve_poll_timeout_s
 
     if backend == "rayjob":
         if not head_ip:

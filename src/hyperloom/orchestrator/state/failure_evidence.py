@@ -11,7 +11,6 @@ reads it back share these names from here, so a class is spelled once.
 
 from __future__ import annotations
 
-import hashlib
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -199,14 +198,6 @@ WORKER_DEATH_MARKERS: tuple[str, ...] = (
 # (torchrun prints ``exitcode: -6`` for SIGABRT), whichever signal it was.
 _SIGNAL_EXIT_RE = re.compile(r"exit\s*code\s*[:=]\s*-\d+")
 
-_SIGNATURE_VOLATILE_RE = re.compile(r"0x[0-9a-f]+|[0-9a-f]{8,}|\d+")
-# The classes whose failures are told apart by their output. Each is given to a process
-# whose exit Hyperloom cannot explain, so the output is all there is to compare; the other
-# classes carry a fixed sentence that two unrelated failures share.
-_SIGNED_FAILURE_CLASSES = frozenset(
-    {SUBPROCESS_NONZERO, ROUND_NONZERO_INVALID_MEASUREMENT, FailedStep.CLIENT_FAILED.value}
-)
-
 
 def server_death_class(detail: str) -> str:
     """The class of a server that died after it was ready, as the death excerpt in ``detail`` names it."""
@@ -326,36 +317,6 @@ def classify_root_cause_type(error_class: str, error_text: str) -> str:
     if classify_failure_attribution(error_class=error_class, framework_changed=False) == FAILURE_ATTRIBUTION_HARNESS:
         return "benchmark_harness"
     return "unknown"
-
-
-def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stderr: str | None) -> str:
-    """Identify an unexplained nonzero exit by the process's whole output, ignoring numbers.
-
-    The result's ``error`` is only the last 2000 characters of one stream, and two
-    different causes (a HIP OOM, an NCCL timeout) can end in the same engine-death
-    traceback that long, or differ only in the stream ``error`` leaves out, so the
-    signature is taken from both full, redacted streams instead. Numbers (pids,
-    ports, timestamps, durations) and hex ids differ between two attempts that failed
-    for the same reason, so they are folded away.
-
-    Args:
-        err_class: The class the failure was given; only a class in
-            :data:`_SIGNED_FAILURE_CLASSES` gets a signature, because other classes carry
-            a fixed sentence that unrelated failures share.
-        proc_stdout: The process's whole stdout.
-        proc_stderr: The process's whole stderr.
-
-    Returns:
-        ``"<class>|<sha256>"``, or ``""`` when there is no signature (another class, or
-        no output: two failures that said nothing are not known to be the same failure).
-    """
-    if err_class not in _SIGNED_FAILURE_CLASSES:
-        return ""
-    text = redact_secret_values(f"{proc_stderr or ''}\n{proc_stdout or ''}").strip().lower()
-    if not text:
-        return ""
-    text = " ".join(_SIGNATURE_VOLATILE_RE.sub("#", text).split())
-    return f"{err_class}|{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
 
 
 def failure_from_variant_outcome(

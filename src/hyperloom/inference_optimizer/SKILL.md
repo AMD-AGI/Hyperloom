@@ -465,7 +465,7 @@ still waiting then is left unbenched.
 ### IR-8 — `--framework atom` is single-node only
 
 `--framework atom` (`atom.entrypoints.openai_server`) reaches full parity with sglang/vllm
-EXCEPT multi-node: `_apply_atom_auto_tighten` in `cli.py` rejects
+EXCEPT multi-node: `_apply_atom_auto_tighten` in `cli/session_setup.py` rejects
 `--nodes >= 2` with `SystemExit(2)` (atom upstream has no multi-node TP
 wiring). No other flag is auto-flipped — kernel-agent, framework-agent,
 profile / roofline / TraceLens all run on atom. The atom-specific
@@ -834,10 +834,17 @@ python3 -m hyperloom optimize \
   benchmark configs, display names, and the optimization report carry the stale
   operator-supplied precision label (e.g. `fp8`/`bf16`) and **mislabel** an
   actually-quantized model. Never leave a conflicting precision when quantizing.
+- Master switch: quantization runs only when `$HYPERLOOM_QUANTIZE_ENABLED` is
+  truthy (`1`/`true`/`yes`/`on`). Without it `--quantize` and
+  `--quantize-scheme` are **skipped**: the run prints a `QUANTIZATION_SKIPPED:`
+  line, sets `$HYPERLOOM_QUANTIZATION_SKIPPED`, and continues on the
+  un-quantized model. The frontend or operator sets the switch on the sandbox;
+  do not export it yourself. When a run is skipped for it, report the line and
+  that setting `HYPERLOOM_QUANTIZE_ENABLED=1` enables quantization.
 - Behavior: one-shot, **never runs on a resume**. On a failed/unusable
   quantization the run **hard-stops (`SystemExit(4)`)** — it never silently
   optimizes the un-quantized source after an explicit `--quantize`.
-  The one exception is a **pre-flight scheme/GPU mismatch** via
+  With the switch on, the one exception is a **pre-flight scheme/GPU mismatch** via
   `--quantize-scheme` (e.g. `mxfp4` on a non-MI355X target): this is **skipped**
   (not a hard stop) and continues on the un-quantized model, emitting a
   `QUANTIZATION_SKIPPED:` line on stdout and setting
@@ -1083,7 +1090,7 @@ flag needed).
 
 | Flag | Backend class | Behaviour |
 |---|---|---|
-| (none) / `--critic-agent` | `CriticAgentBackend` | Drives the `hyperloom.agents.critic` skill runtime via `python -m hyperloom.agents.critic.runtime.cli prepare-review` → Codex chat completion → `python -m hyperloom.agents.critic.runtime.cli commit-review`. Adds KB priors lookup (with circuit-breaker for unreachable services), per-session memory + idempotent `reviewed_msg_ids` (no double-verdict), `judge_bundle.review_constraints` injected into the LLM prompt, and `needs_review` / `critic_unavailable` source when context is missing. |
+| (none) / `--critic-agent` | `CriticAgentBackend` | Drives the `hyperloom.agents.critic` skill runtime via `python -m hyperloom.agents.critic.runtime.cli prepare-review` → Codex chat completion → `python -m hyperloom.agents.critic.runtime.cli commit-review`. Adds per-session memory + idempotent `reviewed_msg_ids` (no double-verdict), `judge_bundle.review_constraints` injected into the LLM prompt, and `needs_review` / `critic_unavailable` source when context is missing. |
 | `--critic-mock` | `MockCriticBackend` | Always-approve adapter. Use for offline / smoke tests when Codex creds aren't available. |
 
 Default is overridable per pod via
@@ -1110,9 +1117,6 @@ so it is kept in one place.
 | Var | Purpose | Default |
 |---|---|---|
 | `CRITIC_AGENT_ROOT` | Path to the directory containing `runtime/cli.py`. | in-tree `$REPO_ROOT/src/hyperloom/agents/critic/` |
-| `CRITIC_KB_CLIENT_MODE` | `inmemory` keeps KB writes / reads off the wire. `live` requires `KB_BASE_URL`. | `inmemory` |
-| `KB_BASE_URL` | KB service URL when `CRITIC_KB_CLIENT_MODE=live`. | unset (live mode aborts at start if absent) |
-| `KB_TIMEOUT_MS` / `KB_RETRY_MAX` / `KB_DEAD_LETTER_DIR` | Forwarded to the runtime; see `src/hyperloom/agents/critic/README.md`. | runtime defaults |
 | `CRITIC_SESSION_MEMORY_DIR` | Where the runtime persists per-session decisions / reviewed_msg_ids. | `$SESSION_DIR/critic-session-memory` (auto-set by the optimizer; co-located with the Coordinator session and cleaned up alongside it). |
 | `WORKSPACE_PATH` | Skill root the critic-agent runtime resolves prompt assets against. | `$REPO_ROOT` (auto-set). |
 
@@ -1652,9 +1656,11 @@ Benchmark subprocesses use two finite, positive limits:
 
 Session `--max-hours` and cancellation remain effective independently of those
 limits. Session exhaustion is cooperative: it cannot guarantee termination of a
-frozen Coordinator. Busy logs are not proof of useful progress. Setting
-`PYTHONUNBUFFERED=1` only affects Python output; it does not force shell or native
-programs, or upstream subprocess capture, to stream output.
+frozen Coordinator. Busy logs are not proof of useful progress, and quiet logs
+are not proof of a hang: inspect the server and compiler logs and the cache
+artifacts before deciding a cold start was interrupted. Setting
+`PYTHONUNBUFFERED=1` only affects Python output; it does not force shell or
+native programs, or upstream subprocess capture, to stream output.
 
 Cold-start detection is diagnostic, not a separate benchmark timeout policy.
 Profile, KernelForge, GEAK, LLM-call, and framework-owned watchdog budgets retain
@@ -1727,8 +1733,8 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 |---|---|
 | `--critic-agent selected but critic-agent runtime not found` | `export CRITIC_AGENT_ROOT=/path/to/src/hyperloom/agents/critic`, or check the `src/hyperloom/agents/critic/` install. |
 | `hyperloom.agents.critic.runtime.cli prepare-review/commit-review exited rc=2` | Schema/validation bug (per `src/hyperloom/agents/critic/README.md` §Exit codes). Inspect workdir payload; retry with `--critic-mock` while fixing. |
-| `hyperloom.agents.critic.runtime.cli ... timed out after 30s` | KB stuck. If `CRITIC_KB_CLIENT_MODE=live`, drop to `inmemory`. Reproducing in `inmemory` is a bug — that path must not block on I/O. |
-| All verdicts `('needs_review','critic_unavailable')` + `kb_skipped=missing_critical_context` | Static context load failed. Check `manifest.json` has non-empty `model_name`/`framework`; grep `logs/cli.log` for `critic_agent_backend static_context`. |
+| `hyperloom.agents.critic.runtime.cli ... timed out after 30s` | Critic runtime is stuck. It does no remote I/O, so this is a bug: inspect the workdir payload; retry with `--critic-mock` while fixing. |
+| All verdicts `('needs_review','critic_unavailable')` + non-empty `required_context=[...]` | Static context load failed. Check `manifest.json` has non-empty `model_name`/`framework`; grep `logs/cli.log` for `critic_agent_backend static_context`. |
 
 ### Run-time signals
 

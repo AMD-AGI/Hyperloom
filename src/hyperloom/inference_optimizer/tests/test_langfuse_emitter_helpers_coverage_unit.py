@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """Coverage for langfuse_emitter SDK-version-tolerant helpers: ns conversion, the observation end shim, OTEL
-attribute coercion, trace-attr fallback, and JSON/JSONL loaders.
+attribute coercion, trace-attr fallback, and the JSON loader.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
-from hyperloom.inference_optimizer.trace.trajectory_trace import load_shard
 
 
 def test_to_ns_none_and_non_datetime() -> None:
@@ -144,20 +143,6 @@ def test_set_trace_attrs_v4_falls_back_to_otel_attributes() -> None:
     assert "langfuse.trace.metadata.skip_none" not in attrs
     # complex values are JSON-stringified.
     assert attrs["langfuse.trace.metadata.obj"] == '{"x": 1}'
-
-
-def test_load_shard_missing_file(tmp_path: Path) -> None:
-    assert load_shard(tmp_path / "absent.jsonl") == []
-
-
-def test_load_shard_skips_blank_and_malformed(tmp_path: Path) -> None:
-    p = tmp_path / "x.jsonl"
-    p.write_text(
-        '{"a": 1}\n\n  \nnot-json\n[1,2,3]\n{"b": 2}\n',
-        encoding="utf-8",
-    )
-    # blank / malformed / non-dict lines skipped
-    assert load_shard(p) == [{"a": 1}, {"b": 2}]
 
 
 def test_load_json_missing_and_malformed(tmp_path: Path) -> None:

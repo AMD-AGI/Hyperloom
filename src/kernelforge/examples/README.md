@@ -42,7 +42,7 @@ file in the scratch workspace.
 
 | Task | Backend | What it shows |
 |------|---------|---------------|
-| `triton-softmax-forge-loop/` | Triton | Complete driver contract: correctness, CUDA-graph benchmark, per-case timing, and kernel-only profiling. Eager ≈ graph because Triton's launch dispatch is light. |
+| `triton-softmax-forge-loop/` | Triton | Complete driver contract: correctness, CUDA-graph benchmark and per-case timing. Eager ≈ graph because Triton's launch dispatch is light. |
 | `gluon-softmax-forge-loop/` | Gluon | The same contract on Triton's low-level dialect, where the tile layout is explicit source rather than a compiler choice. The baseline is a deliberate v0 (`size_per_thread=1`, no vectorization), so the headroom is on the layout itself rather than on a Triton knob — measured 1.56× on the wide case, with the narrow case at the launch floor. Needs a Gluon-capable Triton on CDNA; the script preflights it and reports the per-generation `gl.amd` surface. |
 | `flydsl-softmax-forge-loop/` | FlyDSL | The same complete contract plus the stream-routing + capture-validity guard needed to benchmark a self-managed-stream DSL honestly (eager ≈ 1.4–1.7× graph). |
 | `triton_mixtral_dynamic_quant/` | Triton | Dynamic per-tensor FP8 quant from Mixtral-8x7B-Instruct-v0.1, shape `(64, 4096)` BF16 → FP8 E4M3FN. |
@@ -176,13 +176,12 @@ Either way the same rules hold:
 
 forge treats the driver as a **black box** invoked as `python driver.py <args>`
 and talks to it purely over **stdout**. It is the source of truth for
-correctness, speed, and the workload replayed by hardware profiling, so the loop
-**never edits it**. It must:
+correctness and speed, so the loop **never edits it**. It must:
 
 - Import the kernel by its stable public name and build inputs itself.
 - Be **deterministic** (fixed seed) across repeated full-suite invocations.
 - Exit `0` on success; any non-zero exit is treated as a crash.
-- Handle all three modes and print the agreed lines (nothing else needs to match):
+- Handle both modes and print the agreed lines (nothing else needs to match):
 
 **Correctness** — `python driver.py`
 
@@ -221,32 +220,27 @@ median_ms: 0.081920    # (or) mean_ms: 0.081920 — label it honestly
 case_ms: case_001 0.081920
 ```
 
-**Profiling** — `python driver.py --profile-run`
+Benchmark mode prints one `case_ms: <case_id> <ms>` line for every case it
+measured; `<case_id>` is an opaque, whitespace-free token owned by the driver.
 
-The driver selects one representative profile case and runs only its target
-kernel without the reference implementation, correctness checks, or timing
-output. Perform enough warmup to settle JIT compilation/autotuning, then 1-3
-target launches, synchronize, and exit `0`. Hardware profilers replay the
-process once per counter group, so a large loop in this mode multiplies
-collection time.
+With the default `--prepare-task`, preflight runs both modes and counts the
+graph replays of the benchmark. If task preparation cannot make correctness,
+benchmark output and graph timing all pass, forge-loop fails before
+optimization.
 
-Benchmark and profiling have separate responsibilities:
-
-- benchmark mode prints one `case_ms: <case_id> <ms>` line for every case it
-  measured;
-- `<case_id>` is an opaque, whitespace-free token owned by the driver;
-- profile mode owns its representative-case policy and never accepts a case
-  selector from Forge.
-
-With the default `--prepare-task`, this profiling interface is mandatory.
-Preflight executes `--profile-run` directly. If task preparation cannot make
-correctness, graph timing, benchmark output, and profiling all pass, forge-loop
-fails before optimization. A verified prepared driver is used directly by all
-baseline and post-KEEP profiling runs.
+**Profiling is not a driver mode.** An agent that profiles — the Analysis Agent
+and the Implementer on long-horizon runs — chooses the command the profiler
+replays: one that launches the kernel under test on a scored case and little
+else, because hardware profilers replay the process once per counter group.
+The drivers in this directory offer a `--profile-run` mode that does exactly
+that, and an agent reading one may use it. A driver without one is profiled
+through a short adapter the agent writes itself: the Analysis Agent in its
+staging directory, the Implementer in a scratch directory outside the
+workspace.
 
 Notes:
 - Forge does not select shapes or cases. The driver owns the complete
-  correctness suite, benchmark suite, and representative-case policy.
+  correctness suite and benchmark suite.
 - Once the baseline emits per-case timings, every candidate must emit all of
   those cases. Missing coverage is rejected rather than scored by raw mean.
 - The pristine baseline uses per-case medians from three measurements. Each of

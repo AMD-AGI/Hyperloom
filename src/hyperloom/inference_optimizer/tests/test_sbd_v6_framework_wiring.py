@@ -1388,11 +1388,6 @@ def test_the_review_carries_what_it_was_grounded_in(session_dir: Path):
         macro_cycle=0,
         proposal_id=msg_id,
         artifacts={"review_path": "critic-workdir/3/review.json"},
-        kb={
-            "persist_requested": True,
-            "priors": {"prior_count": 2, "referenced_in_verdict": True},
-            "write": {"trigger": "review_verdict", "status": "dead_lettered", "detail": "kb unreachable"},
-        },
     )
     coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
@@ -1400,9 +1395,6 @@ def test_the_review_carries_what_it_was_grounded_in(session_dir: Path):
     # Merged onto the ruling the verdict seam already wrote, not beside it.
     assert review["verdict"] == "reject"
     assert review["artifacts"]["review_path"].endswith("review.json")
-    assert review["kb"]["persist_requested"] is True
-    assert review["kb"]["priors"]["prior_count"] == 2
-    assert review["kb"]["write"]["status"] == "dead_lettered"
 
 
 def test_evidence_for_a_cycle_with_no_event_is_dropped_quietly(session_dir: Path):

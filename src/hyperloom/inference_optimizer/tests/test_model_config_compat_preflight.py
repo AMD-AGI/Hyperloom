@@ -14,7 +14,7 @@ import pytest
 
 from hyperloom.inference_optimizer.cli import model_gate as cli
 from hyperloom.inference_optimizer import gpu_types
-from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
+from hyperloom.inference_optimizer.cli import model_compat
 
 
 def _write_config(model_dir: Path, *, with_tokenizer: bool = True, **fields) -> None:
@@ -59,7 +59,7 @@ def test_detect_reports_the_first_matching_detector(tmp_path):
         architectures=["DeepseekV32ForCausalLM"],
         rope_scaling={"type": "yarn", "factor": 40.0},
     )
-    reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    reason = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
     assert reason is not None
     assert "AMD/ROCm" in reason
     assert "RoPE" not in reason
@@ -68,7 +68,7 @@ def test_detect_reports_the_first_matching_detector(tmp_path):
 def test_detect_healthy_config_returns_none(tmp_path):
     m = tmp_path / "ok"
     _write_config(m, model_type="llama", max_position_embeddings=4096)
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_diffusers_pipeline_blocks_without_config_json(tmp_path):
@@ -79,7 +79,7 @@ def test_detect_diffusers_pipeline_blocks_without_config_json(tmp_path):
         encoding="utf-8",
     )
 
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
 
     assert reason is not None
     assert "Diffusers pipeline" in reason
@@ -95,7 +95,7 @@ def test_detect_null_use_cache_blocks_strict_config_validation(tmp_path):
         use_cache=None,
     )
 
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
 
     assert reason is not None
     assert "use_cache" in reason
@@ -111,7 +111,7 @@ def test_detect_null_use_cache_in_text_config_blocks(tmp_path):
         text_config={"model_type": "qwen2", "use_cache": None},
     )
 
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
 
     assert reason is not None
     assert "text_config.use_cache" in reason
@@ -125,7 +125,7 @@ def test_detect_rope_with_maxpos_ok(tmp_path):
         max_position_embeddings=8192,
         rope_scaling={"type": "yarn", "factor": 4.0},
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_missing_tokenizer_blocks(tmp_path):
@@ -137,7 +137,7 @@ def test_detect_missing_tokenizer_blocks(tmp_path):
         model_type="qwen2",
         max_position_embeddings=32768,
     )
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None
     assert "tokenizer" in reason.lower()
 
@@ -151,7 +151,7 @@ def test_detect_missing_tokenizer_skipped_for_scriptable_xdit(tmp_path):
         model_type="qwen2",
         max_position_embeddings=32768,
     )
-    assert cli._detect_incompatible_model_config(str(m), framework="xdit") is None
+    assert model_compat._detect_incompatible_model_config(str(m), framework="xdit") is None
 
 
 def test_detect_missing_tokenizer_still_blocks_serving_framework(tmp_path):
@@ -163,7 +163,7 @@ def test_detect_missing_tokenizer_still_blocks_serving_framework(tmp_path):
         model_type="qwen2",
         max_position_embeddings=32768,
     )
-    reason = cli._detect_incompatible_model_config(str(m), framework="sglang")
+    reason = model_compat._detect_incompatible_model_config(str(m), framework="sglang")
     assert reason is not None
     assert "tokenizer" in reason.lower()
 
@@ -177,7 +177,7 @@ def test_detect_with_tokenizer_ok(tmp_path):
         max_position_embeddings=32768,
     )
     (m / "tokenizer.json").write_text("{}", encoding="utf-8")
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_mistral_tokenizer_json_without_common_files_blocks(tmp_path):
@@ -191,7 +191,7 @@ def test_detect_mistral_tokenizer_json_without_common_files_blocks(tmp_path):
     )
     (m / "tokenizer.json").write_text("{}", encoding="utf-8")
 
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
 
     assert reason is not None
     assert "MistralCommonBackend" in reason
@@ -210,7 +210,7 @@ def test_detect_mistral_tokenizer_model_file_ok(tmp_path):
     (m / "tokenizer.json").write_text("{}", encoding="utf-8")
     (m / "tokenizer.model").write_text("dummy", encoding="utf-8")
 
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_missing_tokenizer_but_auto_map_ok(tmp_path):
@@ -223,7 +223,7 @@ def test_detect_missing_tokenizer_but_auto_map_ok(tmp_path):
         max_position_embeddings=4096,
         auto_map={"AutoTokenizer": ["x.TokClass", None]},
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_minimax_m1_blocked_on_amd(tmp_path):
@@ -235,7 +235,7 @@ def test_detect_minimax_m1_blocked_on_amd(tmp_path):
         architectures=["MiniMaxM1ForCausalLM"],
         max_position_embeddings=80000,
     )
-    reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    reason = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
     assert reason is not None
     assert "AMD/ROCm" in reason
 
@@ -249,7 +249,7 @@ def test_detect_minimax_m1_not_blocked_off_amd(tmp_path):
         architectures=["MiniMaxM1ForCausalLM"],
         max_position_embeddings=80000,
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_unrecognized_arch_blocked_hardware_agnostic(tmp_path):
@@ -261,8 +261,8 @@ def test_detect_unrecognized_arch_blocked_hardware_agnostic(tmp_path):
         architectures=["Glm4MoeLiteForCausalLM"],
         max_position_embeddings=131072,
     )
-    reason_amd = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
-    reason_off = cli._detect_incompatible_model_config(str(m))
+    reason_amd = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    reason_off = model_compat._detect_incompatible_model_config(str(m))
     assert reason_amd is not None and "not recognized" in reason_amd
     assert reason_off is not None and "not recognized" in reason_off
 
@@ -276,7 +276,7 @@ def test_detect_mimo_v2_flash_unrecognized_blocked(tmp_path):
         architectures=["MiMoV2FlashForCausalLM"],
         max_position_embeddings=131072,
     )
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None and "not recognized" in reason
 
 
@@ -299,7 +299,7 @@ def test_detect_now_recognized_arch_not_blocked(tmp_path, model_type, arch, max_
         architectures=[arch],
         max_position_embeddings=max_position,
     )
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is None
 
 
@@ -321,7 +321,7 @@ def test_detect_arch_left_to_runtime_scope(tmp_path, model_type, arch):
         architectures=[arch],
         max_position_embeddings=32768,
     )
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is None
 
 
@@ -341,7 +341,7 @@ def test_detect_nested_ministral3_unrecognized_blocked(tmp_path):
             "num_hidden_layers": 40,
         },
     )
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None and "ministral3" in reason
 
 
@@ -358,7 +358,7 @@ def test_detect_pure_nested_ministral3_blocked(tmp_path):
             "vocab_size": 131072,
         },
     )
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None and "ministral3" in reason
 
 
@@ -376,7 +376,7 @@ def test_detect_nested_qwen3_5_moe_text_not_blocked(tmp_path):
             "vocab_size": 151936,
         },
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_top_level_qwen3_5_moe_not_blocked(tmp_path):
@@ -390,7 +390,7 @@ def test_detect_top_level_qwen3_5_moe_not_blocked(tmp_path):
         max_position_embeddings=262144,
         vocab_size=151936,
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_top_level_ministral3_not_blocked(tmp_path):
@@ -404,7 +404,7 @@ def test_detect_top_level_ministral3_not_blocked(tmp_path):
         max_position_embeddings=32768,
         vocab_size=131072,
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_glm4_moe_not_blocked(tmp_path):
@@ -417,7 +417,7 @@ def test_detect_glm4_moe_not_blocked(tmp_path):
         architectures=["Glm4MoeForCausalLM"],
         max_position_embeddings=131072,
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_amd_unsupported_arch_with_maxpos_blocks(tmp_path):
@@ -430,7 +430,7 @@ def test_detect_amd_unsupported_arch_with_maxpos_blocks(tmp_path):
         rope_scaling={"type": "yarn", "factor": 40.0},
     )
 
-    reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    reason = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
     assert reason is not None
     assert "AMD/ROCm" in reason
 
@@ -445,7 +445,7 @@ def test_detect_amd_unsupported_arch_not_blocked_off_amd(tmp_path):
         rope_scaling={"type": "yarn", "factor": 40.0},
     )
 
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_rope_without_maxpos_blocks(tmp_path):
@@ -455,7 +455,7 @@ def test_detect_rope_without_maxpos_blocks(tmp_path):
         model_type="deepseek_v32",
         rope_scaling={"factor": 4.0},
     )
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None
     assert "RoPE" in reason
 
@@ -476,7 +476,7 @@ def test_detect_phi3_su_canonical_three_fields_blocks(tmp_path):
             "long_factor": [1.03, 1.05],
         },
     )
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None
     assert "Phi-3" in reason
     assert "rope_scaling" in reason
@@ -495,7 +495,7 @@ def test_detect_phi3_longrope_blocks(tmp_path):
             "long_factor": [1.03, 1.05],
         },
     )
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None
     assert "Phi-3" in reason
 
@@ -509,7 +509,7 @@ def test_detect_phi3_yarn_rope_not_blocked(tmp_path):
         max_position_embeddings=131072,
         rope_scaling={"type": "yarn", "factor": 4.0},
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_phi3_longrope_without_rope_theta_not_blocked(tmp_path):
@@ -526,7 +526,7 @@ def test_detect_phi3_longrope_without_rope_theta_not_blocked(tmp_path):
             "long_factor": [1.03, 1.05],
         },
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_non_phi3_su_rope_not_blocked(tmp_path):
@@ -539,7 +539,7 @@ def test_detect_non_phi3_su_rope_not_blocked(tmp_path):
         max_position_embeddings=8192,
         rope_scaling={"type": "su", "short_factor": [1.05], "extra": 1},
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 # sglang's gemma2 runtime reads config.hidden_act unconditionally; checkpoints shipping only hidden_activation crash
@@ -553,7 +553,7 @@ def test_detect_gemma2_missing_hidden_act_blocks(tmp_path):
         max_position_embeddings=8192,
         hidden_activation="gelu_pytorch_tanh",
     )
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None
     assert "Gemma2" in reason
     assert "hidden_act" in reason
@@ -566,7 +566,7 @@ def test_detect_gemma2_arch_only_missing_hidden_act_blocks(tmp_path):
         architectures=["Gemma2ForCausalLM"],
         max_position_embeddings=8192,
     )
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None
     assert "Gemma2" in reason
 
@@ -580,7 +580,7 @@ def test_detect_gemma2_with_hidden_act_ok(tmp_path):
         max_position_embeddings=8192,
         hidden_act="gelu_pytorch_tanh",
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_gemma2_hidden_act_in_text_config_ok(tmp_path):
@@ -592,7 +592,7 @@ def test_detect_gemma2_hidden_act_in_text_config_ok(tmp_path):
         max_position_embeddings=8192,
         text_config={"hidden_act": "gelu_pytorch_tanh"},
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_non_gemma2_missing_hidden_act_not_blocked(tmp_path):
@@ -604,14 +604,14 @@ def test_detect_non_gemma2_missing_hidden_act_not_blocked(tmp_path):
         model_type="llama",
         max_position_embeddings=8192,
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_corrupt_config_blocks(tmp_path):
     m = tmp_path / "corrupt"
     m.mkdir(parents=True, exist_ok=True)
     (m / "config.json").write_text("{not valid json", encoding="utf-8")
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None
     assert "unparseable" in reason
 
@@ -619,7 +619,7 @@ def test_detect_corrupt_config_blocks(tmp_path):
 def test_detect_absent_config_not_blocked(tmp_path):
     m = tmp_path / "no_config"
     m.mkdir(parents=True, exist_ok=True)
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_rope_in_nested_text_config(tmp_path):
@@ -629,7 +629,7 @@ def test_detect_rope_in_nested_text_config(tmp_path):
         json.dumps({"text_config": {"rope_theta": 10000.0}}),
         encoding="utf-8",
     )
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None
 
 
@@ -641,7 +641,7 @@ def test_detect_dual_chunk_blocks_on_amd(tmp_path):
         max_position_embeddings=1010000,
         dual_chunk_attention_config={"chunk_size": 262144},
     )
-    reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    reason = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
     assert reason is not None
     assert "dual_chunk" in reason
 
@@ -654,7 +654,7 @@ def test_detect_dual_chunk_not_blocked_off_amd(tmp_path):
         max_position_embeddings=1010000,
         dual_chunk_attention_config={"chunk_size": 262144},
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def _write_quant_config(model_dir: Path, payload: dict) -> None:
@@ -676,7 +676,7 @@ def test_detect_modelopt_fp8_blocks_on_amd(tmp_path):
             "quantization": {"quant_algo": "FP8", "kv_cache_quant_algo": "FP8"},
         },
     )
-    reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    reason = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
     assert reason is not None
     assert "modelopt" in reason.lower() or "FP8" in reason
 
@@ -691,7 +691,7 @@ def test_detect_nvfp4_blocks_on_amd(tmp_path):
             "quantization": {"quant_algo": "NVFP4"},
         },
     )
-    reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    reason = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
     assert reason is not None
     assert "NVFP4" in reason or "nvfp4" in reason.lower()
 
@@ -705,7 +705,7 @@ def test_detect_bitsandbytes_blocks_on_amd(tmp_path):
         max_position_embeddings=8192,
         quantization_config={"quant_method": "bitsandbytes"},
     )
-    reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    reason = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
     assert reason is not None
     assert "bitsandbytes" in reason.lower()
 
@@ -721,7 +721,7 @@ def test_detect_modelopt_fp8_not_blocked_off_amd(tmp_path):
             "quantization": {"quant_algo": "FP8"},
         },
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_amd_native_fp8_not_blocked(tmp_path):
@@ -733,7 +733,7 @@ def test_detect_amd_native_fp8_not_blocked(tmp_path):
         max_position_embeddings=8192,
         quantization_config={"quant_method": "fp8"},
     )
-    assert cli._detect_incompatible_model_config(str(m), gpu_type="mi300x") is None
+    assert model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x") is None
 
 
 def _write_safetensors_header(model_dir: Path, tensors: dict) -> None:
@@ -767,7 +767,7 @@ def test_detect_vocab_shape_mismatch_blocks(tmp_path):
             },
         },
     )
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None
     assert "vocab_size=152064" in reason
     assert "151936" in reason
@@ -793,7 +793,7 @@ def test_detect_vocab_shape_match_not_blocked(tmp_path):
             },
         },
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_vocab_shape_padded_not_blocked(tmp_path):
@@ -822,22 +822,22 @@ def test_detect_vocab_shape_padded_not_blocked(tmp_path):
             },
         },
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_read_safetensors_header_parses_and_rejects(tmp_path):
     # Valid header round-trips; truncated / oversized headers return None.
     good = tmp_path / "model.safetensors"
     _write_safetensors_header(tmp_path, {"x.weight": {"shape": [4, 4]}})
-    assert cli._read_safetensors_header(good) == {"x.weight": {"shape": [4, 4]}}
+    assert model_compat._read_safetensors_header(good) == {"x.weight": {"shape": [4, 4]}}
 
     truncated = tmp_path / "trunc.safetensors"
     truncated.write_bytes(struct.pack("<Q", 999) + b"{")  # claims 999, has 1
-    assert cli._read_safetensors_header(truncated) is None
+    assert model_compat._read_safetensors_header(truncated) is None
 
     short = tmp_path / "short.safetensors"
     short.write_bytes(b"\x01\x02")  # < 8-byte length prefix
-    assert cli._read_safetensors_header(short) is None
+    assert model_compat._read_safetensors_header(short) is None
 
 
 # Gemma2 detection helpers (model_config_utils)
@@ -918,7 +918,7 @@ def test_detect_unregistered_custom_config_blocks(tmp_path):
         max_position_embeddings=131072,
         auto_map={"AutoConfig": "configuration_deepseek.DeepseekV3Config"},
     )
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None
     assert "kimi_k2" in reason
 
@@ -931,7 +931,7 @@ def test_detect_custom_automap_known_type_not_blocked(tmp_path):
         max_position_embeddings=8192,
         auto_map={"AutoConfig": "configuration_custom.CustomConfig"},
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 # _preflight_model_config_compat — persistence + return contract
@@ -1068,7 +1068,7 @@ def test_private_quant_blocks(tmp_path, config, files, expected):
     _write_config(m, **config)
     for name in files:
         (m / name).write_text("dummy", encoding="utf-8")
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None and expected in reason
 
 
@@ -1088,7 +1088,7 @@ def test_private_quant_mlx_weights_index_blocks(tmp_path):
         ),
         encoding="utf-8",
     )
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None and "MLX" in reason
 
 
@@ -1112,7 +1112,7 @@ def test_peft_adapter_only_checkpoint_blocks(tmp_path):
         encoding="utf-8",
     )
 
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
 
     assert reason is not None
     assert "PEFT/LoRA adapter" in reason
@@ -1135,7 +1135,7 @@ def test_merged_peft_like_checkpoint_with_base_weights_not_blocked(tmp_path):
         encoding="utf-8",
     )
 
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 @pytest.mark.parametrize("method", ["fp8", "awq", "gptq", "compressed-tensors"])
@@ -1147,7 +1147,7 @@ def test_standard_quant_not_blocked(tmp_path, method):
         max_position_embeddings=32768,
         quantization_config={"quant_method": method},
     )
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_gguf_with_safetensors_not_blocked(tmp_path):
@@ -1156,7 +1156,7 @@ def test_gguf_with_safetensors_not_blocked(tmp_path):
     _write_config(m, model_type="qwen3", max_position_embeddings=32768)
     (m / "model.gguf").write_text("dummy", encoding="utf-8")
     (m / "model.safetensors").write_text("dummy", encoding="utf-8")
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_gguf_with_auxiliary_bin_still_blocks(tmp_path):
@@ -1165,7 +1165,7 @@ def test_gguf_with_auxiliary_bin_still_blocks(tmp_path):
     _write_config(m, model_type="qwen3", max_position_embeddings=32768)
     (m / "model.gguf").write_text("dummy", encoding="utf-8")
     (m / "tokenizer_cache.bin").write_text("dummy", encoding="utf-8")
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None and "GGUF" in reason
 
 
@@ -1175,7 +1175,7 @@ def test_gguf_with_pytorch_model_bin_not_blocked(tmp_path):
     _write_config(m, model_type="qwen3", max_position_embeddings=32768)
     (m / "model.gguf").write_text("dummy", encoding="utf-8")
     (m / "pytorch_model.bin").write_text("dummy", encoding="utf-8")
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_llama_sentencepiece_without_metadata_blocks(tmp_path):
@@ -1189,7 +1189,7 @@ def test_llama_sentencepiece_without_metadata_blocks(tmp_path):
     )
     (m / "tokenizer.model").write_text("dummy", encoding="utf-8")
     (m / "pytorch_model.bin").write_text("dummy", encoding="utf-8")
-    reason = cli._detect_incompatible_model_config(str(m))
+    reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None
     assert "tokenizer_config.json" in reason
     assert "HFValidationError" in reason
@@ -1207,7 +1207,7 @@ def test_llama_sentencepiece_with_tokenizer_config_ok(tmp_path):
     (m / "tokenizer.model").write_text("dummy", encoding="utf-8")
     (m / "tokenizer_config.json").write_text("{}", encoding="utf-8")
     (m / "pytorch_model.bin").write_text("dummy", encoding="utf-8")
-    assert cli._detect_incompatible_model_config(str(m)) is None
+    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 # Langfuse parity on fail-fast — pre-flight gates exit before the normal Langfuse flush point, so each must push the
@@ -1325,7 +1325,7 @@ def test_declared_standard_quant_with_scales_index_not_blocked(tmp_path):
             ),
             encoding="utf-8",
         )
-        assert cli._detect_incompatible_model_config(str(m)) is None, method
+        assert model_compat._detect_incompatible_model_config(str(m)) is None, method
 
 
 def test_run_compat_detector_resolves_repo_id_before_dispatch(tmp_path, monkeypatch):
@@ -1333,7 +1333,7 @@ def test_run_compat_detector_resolves_repo_id_before_dispatch(tmp_path, monkeypa
     local_dir = tmp_path / "cache" / "models--org--repo"
     local_dir.mkdir(parents=True)
     monkeypatch.setattr(
-        cli_model_gate,
+        model_compat,
         "resolve_local_model_dir",
         lambda mp: local_dir if mp == "org/repo" else None,
     )
@@ -1343,20 +1343,20 @@ def test_run_compat_detector_resolves_repo_id_before_dispatch(tmp_path, monkeypa
         seen["model_path"] = model_path
         return
 
-    spec = cli_model_gate.DetectorSpec("t", _fake_detector, args=("model_path",))
-    cli_model_gate._run_compat_detector(spec, model_path="org/repo", data={})
+    spec = model_compat.DetectorSpec("t", _fake_detector, args=("model_path",))
+    model_compat._run_compat_detector(spec, model_path="org/repo", data={})
     assert seen["model_path"] == str(local_dir)
 
 
 def test_run_compat_detector_falls_back_to_raw_when_unresolvable(monkeypatch):
     """An unresolvable model path (e.g. an uncached repo-id) falls back to the raw string so behaviour is unchanged from before the resolver."""
-    monkeypatch.setattr(cli_model_gate, "resolve_local_model_dir", lambda mp: None)
+    monkeypatch.setattr(model_compat, "resolve_local_model_dir", lambda mp: None)
     seen: dict[str, str] = {}
 
     def _fake_detector(model_path):
         seen["model_path"] = model_path
         return
 
-    spec = cli_model_gate.DetectorSpec("t", _fake_detector, args=("model_path",))
-    cli_model_gate._run_compat_detector(spec, model_path="/raw/model/path", data={})
+    spec = model_compat.DetectorSpec("t", _fake_detector, args=("model_path",))
+    model_compat._run_compat_detector(spec, model_path="/raw/model/path", data={})
     assert seen["model_path"] == "/raw/model/path"

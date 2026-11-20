@@ -360,6 +360,6 @@ def test_the_prompt_states_the_per_gpu_limits():
 
 
 def test_the_stop_reason_is_in_the_closed_vocabulary():
-    from hyperloom.orchestrator.phases.machine_state import is_valid_stop_reason
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 
     assert is_valid_stop_reason("baseline_over_power_budget")

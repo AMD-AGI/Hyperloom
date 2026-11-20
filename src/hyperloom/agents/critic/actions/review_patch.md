@@ -20,7 +20,7 @@ The packet may contain:
 - Profile or dispatch evidence.
 - Build, install, cache, and restart notes.
 - Observed failures and session diagnostic logs.
-- KB evidence recalled by Critic or supplied by Conductor.
+- KB evidence supplied by Conductor.
 - Rollback plan.
 - Prior attempts and session history.
 

@@ -402,7 +402,7 @@ def test_gap_provenance_round_trips_through_serialization(tmp_path):
 
 def test_research_hints_suppress_cold_start():
     from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import _is_cold_start
+    from hyperloom.orchestrator.prompts.specialist_context_sections import _is_cold_start
 
     inp = SpecialistPromptInputs(
         domain="serving_specialist",
@@ -413,7 +413,7 @@ def test_research_hints_suppress_cold_start():
 
 def test_kb_section_renders_research_hints_when_kb_empty():
     from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import _section_kb_context
+    from hyperloom.orchestrator.prompts.specialist_context_sections import _section_kb_context
 
     inp = SpecialistPromptInputs(
         domain="serving_specialist",

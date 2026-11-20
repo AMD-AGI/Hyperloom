@@ -16,7 +16,7 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors import _geak_sweep
 from hyperloom.orchestrator.actions.executors._geak_sweep import GeakSweepSpec, sweep_via_geak
-from hyperloom.orchestrator.kernel.conc_sweep import _budget_limited_without_valid_pair
+from hyperloom.orchestrator.kernel.conc_sweep_report import budget_limited_without_valid_pair
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_suite.contracts import Topology
@@ -503,7 +503,7 @@ def test_budget_limited_without_valid_pair_paths() -> None:
     summary_no_pairs = {"successful_pairs": 0}
     # No points at all -> not attributable to budget gating.
     assert (
-        _budget_limited_without_valid_pair(
+        budget_limited_without_valid_pair(
             budget_exhausted=True,
             summary=summary_no_pairs,
             baseline_points=[],
@@ -513,7 +513,7 @@ def test_budget_limited_without_valid_pair_paths() -> None:
     )
     # A genuinely-failed (non budget) point -> not budget gating.
     assert (
-        _budget_limited_without_valid_pair(
+        budget_limited_without_valid_pair(
             budget_exhausted=True,
             summary=summary_no_pairs,
             baseline_points=[{"status": "failed", "error_class": "crash"}],
@@ -523,7 +523,7 @@ def test_budget_limited_without_valid_pair_paths() -> None:
     )
     # Every remaining point was a budget skip -> budget-limited.
     assert (
-        _budget_limited_without_valid_pair(
+        budget_limited_without_valid_pair(
             budget_exhausted=True,
             summary=summary_no_pairs,
             baseline_points=[{"status": "skipped", "error_class": "budget_exhausted"}],

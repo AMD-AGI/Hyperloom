@@ -276,6 +276,48 @@ def test_cancel_during_boot_reaps_the_whole_tree(tmp_path):
     assert lifecycle.release() == server.Released(None, None, -signal.SIGTERM)
 
 
+@pytest.mark.parametrize("busy", [True, False])
+def test_a_silent_boot_is_working_while_its_processes_use_cpu(tmp_path, monkeypatch, busy):
+    rig = _Rig(tmp_path, "silent")
+    reads: list[int] = []
+
+    def cpu_sec(pid: int) -> float:
+        reads.append(pid)
+        return 100.0 * len(reads) if busy else 1.0
+
+    monkeypatch.setattr(server, "tree_cpu_sec", cpu_sec)
+    monkeypatch.setattr(watch, "CPU_SAMPLE_SEC", 0.05)
+    stamped: list[float] = []
+    write = RunLayout.write_boot_active_stamp
+
+    def record(layout: RunLayout, active_unix: float) -> None:
+        stamped.append(active_unix)
+        write(layout, active_unix)
+
+    monkeypatch.setattr(RunLayout, "write_boot_active_stamp", record)
+    started = time.monotonic()
+    config = rig.config("r1", pre_ready_silence_sec=0.5)
+    lifecycle = rig.lifecycle(config, cancel=lambda: "enough" if time.monotonic() - started > 2.0 else "")
+
+    before = time.time()
+    stopped = lifecycle.acquire()
+    after = time.time()
+
+    layout = RunLayout(tmp_path / "r1")
+    assert reads and len(set(reads)) == 1, "the CPU time read is the spawned server's"
+    if busy:
+        assert stopped == Stop(FailedStep.CANCELLED, "enough")
+        # A watcher outside the round sees the boot only while the stamp keeps moving, in wall-clock seconds.
+        assert len(stamped) >= 2 and all(a < b for a, b in zip(stamped, stamped[1:])), stamped
+        assert before <= stamped[0] and stamped[-1] <= after, (before, stamped, after)
+        assert float(layout.boot_active_stamp.read_text()) == pytest.approx(stamped[-1], abs=1e-3)
+    else:
+        assert isinstance(stopped, Stop) and stopped.step is FailedStep.SERVER_SILENT_BEFORE_READY
+        assert "its processes used under 0.25 of a CPU for" in stopped.detail
+        assert not layout.boot_active_stamp.exists() and not stamped
+    lifecycle.release()
+
+
 def test_a_server_that_exits_before_ready_names_why(tmp_path):
     rig = _Rig(tmp_path, "exit")
     stopped = rig.lifecycle(rig.config("r1")).acquire()

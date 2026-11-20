@@ -22,6 +22,7 @@ from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSubprocessConfig, SpecialistSubprocessDispatcher
 from hyperloom.orchestrator.specialists.worktrees import PinnedGit, _setup_worktree
 from hyperloom.inference_optimizer.tree_snapshot import snapshot_tree
+from hyperloom.orchestrator.specialists import subprocess_harvest
 
 
 class _CP:
@@ -131,7 +132,7 @@ def test_build_claude_cmd_injects_leaf_agents_when_task_allowed(tmp_path: Path) 
     assert "Task" not in agents[LEAF_AGENT_NAME]["tools"]
 
 
-# -- _collect_patches ------------------------------------------------------
+# -- collect_patches --------------------------------------------------------
 def test_collect_patches(tmp_path: Path) -> None:
     wt = tmp_path / "wt"
     (wt / "patches").mkdir(parents=True)
@@ -139,14 +140,14 @@ def test_collect_patches(tmp_path: Path) -> None:
     (wt / "patches" / "b.diff").write_text("d", encoding="utf-8")
     (wt / "patches" / "ignore.txt").write_text("x", encoding="utf-8")
     ws = tmp_path / "ws"
-    out, roots = SpecialistSubprocessDispatcher._collect_patches(wt, ws, pinned=None)
+    out, roots = subprocess_harvest.collect_patches(wt, ws, pinned=None)
     names = sorted(Path(p).name for p in out)
     assert names == ["a.patch", "b.diff"]
     assert roots == {}
 
 
 def test_collect_patches_none_worktree(tmp_path: Path) -> None:
-    assert SpecialistSubprocessDispatcher._collect_patches(None, tmp_path, pinned=None) == ([], {})
+    assert subprocess_harvest.collect_patches(None, tmp_path, pinned=None) == ([], {})
 
 
 def _make_harvest_worktree(tmp_path: Path, *, with_source: bool = True) -> tuple[Path, Path]:
@@ -201,7 +202,7 @@ def test_collect_patches_excludes_work_artifacts_from_mixed_source_harvest(tmp_p
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, roots = subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     )
 
@@ -219,7 +220,7 @@ def test_collect_patches_work_artifacts_only_produces_no_delivery(tmp_path: Path
     base, wt = _make_harvest_worktree(tmp_path, with_source=False)
     artifacts = _write_harvest_work_artifacts(wt)
 
-    assert SpecialistSubprocessDispatcher._collect_patches(
+    assert subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     ) == ([], {})
     assert not (wt / "patches" / "_worktree_diff.patch").exists()
@@ -233,7 +234,7 @@ def test_collect_patches_heartbeat_in_worktree_produces_no_delivery(tmp_path: Pa
     heartbeat = wt / "heartbeat.json"
     heartbeat.write_text('{"ts": "2026-09-28T19:12:00Z", "status": "running"}\n', encoding="utf-8")
 
-    assert SpecialistSubprocessDispatcher._collect_patches(
+    assert subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     ) == ([], {})
     assert not (wt / "patches" / "_worktree_diff.patch").exists()
@@ -246,7 +247,7 @@ def test_collect_patches_annotation_only_produces_no_delivery(tmp_path: Path) ->
     base, wt = _make_harvest_worktree(tmp_path)
     (wt / "runtime.py").write_text("# Runtime selection, unchanged.\nBLOCK_SIZE = 64\n", encoding="utf-8")
 
-    assert SpecialistSubprocessDispatcher._collect_patches(
+    assert subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     ) == ([], {})
     assert not (wt / "patches" / "_worktree_diff.patch").exists()
@@ -264,7 +265,7 @@ def test_collect_patches_fallback_cannot_deliver_work_artifact_patch(tmp_path: P
     manual.write_text(diff, encoding="utf-8")
     assert ps._git_apply_check(base, diff) is True
 
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, roots = subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     )
     kept, _dropped, _grounding, _spans_roots = ps.vet_patches(patches, base_checkout=base, explicit_root=base)
@@ -301,7 +302,7 @@ def test_harvest_off_an_installed_package_snapshot_applies_to_the_package(tmp_pa
 
     (wt / "model_executor" / "models" / "qwen3.py").write_text("BLOCK = 128\n", encoding="utf-8")
     (wt / "envs.py").write_text("VLLM_USE_X = 1\n", encoding="utf-8")
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, roots = subprocess_harvest.collect_patches(
         wt,
         tmp_path / "ws",
         worktree_base=package,
@@ -346,7 +347,7 @@ def test_collect_patches_does_not_rediscover_an_obsolete_harvest(tmp_path: Path)
     base, wt = _make_harvest_worktree(tmp_path)
     before = (wt / "runtime.py").read_text(encoding="utf-8")
     (wt / "runtime.py").write_text("BLOCK_SIZE = 128\n", encoding="utf-8")
-    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, _roots = subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     )
     assert len(patches) == 1
@@ -354,7 +355,7 @@ def test_collect_patches_does_not_rediscover_an_obsolete_harvest(tmp_path: Path)
     evidence = harvested.read_bytes()
     (wt / "runtime.py").write_text(before, encoding="utf-8")
 
-    assert SpecialistSubprocessDispatcher._collect_patches(
+    assert subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     ) == ([], {})
     assert harvested.read_bytes() == evidence
@@ -376,7 +377,7 @@ def test_collect_patches_keeps_create_only_runtime_changes(tmp_path: Path, targe
     created.parent.mkdir(parents=True, exist_ok=True)
     created.write_text(content, encoding="utf-8")
 
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, roots = subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     )
 
@@ -393,33 +394,33 @@ def test_collect_patches_keeps_create_only_runtime_changes(tmp_path: Path, targe
     assert grounding == {patches[0]: ps.GROUND_APPLIES}
 
 
-# -- _read_done ------------------------------------------------------------
+# -- read_done --------------------------------------------------------------
 def test_read_done_missing(tmp_path: Path) -> None:
-    assert SpecialistSubprocessDispatcher._read_done(tmp_path / "absent.json") is None
+    assert subprocess_harvest.read_done(tmp_path / "absent.json") is None
 
 
 def test_read_done_bad_json(tmp_path: Path) -> None:
     p = tmp_path / "done.json"
     p.write_text("{bad", encoding="utf-8")
-    assert SpecialistSubprocessDispatcher._read_done(p) is None
+    assert subprocess_harvest.read_done(p) is None
 
 
 def test_read_done_not_utf8(tmp_path: Path) -> None:
     p = tmp_path / "done.json"
     p.write_bytes(b'{"summary": "\xff"}')
-    assert SpecialistSubprocessDispatcher._read_done(p) is None
+    assert subprocess_harvest.read_done(p) is None
 
 
 def test_read_done_non_dict(tmp_path: Path) -> None:
     p = tmp_path / "done.json"
     p.write_text("[1,2,3]", encoding="utf-8")
-    assert SpecialistSubprocessDispatcher._read_done(p) is None
+    assert subprocess_harvest.read_done(p) is None
 
 
 def test_read_done_flat_dict(tmp_path: Path) -> None:
     p = tmp_path / "done.json"
     p.write_text(json.dumps({"proposal_set": []}), encoding="utf-8")
-    assert SpecialistSubprocessDispatcher._read_done(p) == {"proposal_set": []}
+    assert subprocess_harvest.read_done(p) == {"proposal_set": []}
 
 
 def test_read_done_unwraps_intent_envelope(tmp_path: Path) -> None:
@@ -434,7 +435,7 @@ def test_read_done_unwraps_intent_envelope(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    out = SpecialistSubprocessDispatcher._read_done(p)
+    out = subprocess_harvest.read_done(p)
     assert out["domain"] == "kernel_switch_specialist"
     assert out["proposal_set"] == [{"name": "v1"}]
     assert "intent_type" not in out and "payload" not in out

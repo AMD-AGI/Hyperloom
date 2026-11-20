@@ -135,7 +135,6 @@ class V6FrameworkCriticReview(TypedDict, total=False):
     variants: list[V6FrameworkCriticVariantRuling]
     outcome: V6FrameworkCriticReviewOutcome
     artifacts: dict[str, Any]
-    kb: dict[str, Any]
 
 
 class V6FrameworkProposalTerminal(TypedDict, total=False):

@@ -100,9 +100,7 @@ Reply with EXACTLY ONE JSON object that matches this review schema:
       "risks": [{"severity": "blocker|major|minor", "summary": "..."}],
       "required_evidence": ["<key>", ...],
       "notes": ["..."],
-      "failure_reason_code": "<failure_reason_code of the review_constraints rule this verdict rests on, else \"\">",
-      "persist_to_kb": false,
-      "topic": "<slug>"
+      "failure_reason_code": "<failure_reason_code of the review_constraints rule this verdict rests on, else \"\">"
     }
   ],
   "advice": [
@@ -119,9 +117,6 @@ Rules (mirror SKILL.md Hard Rules + Approve Standard):
 - If `judge_bundle.required_context` is non-empty, every verdict MUST be
   `needs_review` with `source = "critic_unavailable"` and list the
   missing keys in `notes`.
-- If `judge_bundle.kb_read_skipped_reason == "kb_unreachable"`, prefer
-  `advise` / `needs_review` over `approve` and mention the missing KB
-  recall in `notes`.
 - If there are no proposals, return `{"review_verdicts": []}` — the
   runtime falls back to a heartbeat.
 - `approve` requires comparable before/after benchmark, accuracy gate
@@ -258,24 +253,6 @@ def _review_subjects(judge_bundle: dict[str, Any]) -> dict[str, str]:
     return out
 
 
-def _kb_writes_by_target(emit: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """What the commit emit reports about each KB write, keyed by the proposal the write was asked for."""
-    writes: dict[str, dict[str, Any]] = {}
-    for write in emit.get("kb_writes") or []:
-        if not isinstance(write, dict):
-            continue
-        target = str(write.get("target_proposal_msg_id") or "")
-        if not target:
-            continue
-        result = write.get("result") if isinstance(write.get("result"), dict) else {}
-        writes[target] = {
-            "trigger": str(write.get("trigger") or ""),
-            "status": str(result.get("status") or ""),
-            "detail": str(result.get("detail") or result.get("error") or ""),
-        }
-    return writes
-
-
 def _intents_from_emit(emit: dict[str, Any]) -> list[Intent]:
     """Validate the commit emit's intent envelope and return its intents."""
     envelope = emit.get("intent_envelope")
@@ -297,23 +274,10 @@ def _review_prompt(judge_bundle: dict[str, Any]) -> str:
         "missing_context": judge_bundle.get("missing_context"),
         "required_context": judge_bundle.get("required_context"),
         "proposals": judge_bundle.get("proposals"),
-        "kb_priors_by_proposal": judge_bundle.get("kb_priors_by_proposal"),
-        "kb_read_skipped_reason": judge_bundle.get("kb_read_skipped_reason"),
         "review_constraints": judge_bundle.get("review_constraints"),
-        "notes": judge_bundle.get("notes"),
     }
     bundle_text = json.dumps(bundle_view, ensure_ascii=False, separators=(",", ":"))
     return f"==== JUDGE BUNDLE ====\n{bundle_text}\n==== END JUDGE BUNDLE ====\n\n{_REVIEW_OUTPUT_INSTRUCTIONS}"
-
-
-def _verdict_references_kb(review: dict[str, Any] | None) -> bool:
-    """Whether any final review verdict cites KB evidence."""
-    if not isinstance(review, dict):
-        return False
-    for v in review.get("review_verdicts") or []:
-        if isinstance(v, dict) and v.get("kb_evidence"):
-            return True
-    return False
 
 
 @dataclass
@@ -496,8 +460,7 @@ class CriticAgentBackend:
         emit = await self._commit_review(request_path, review_path, emit_path, env)
         intents = _intents_from_emit(emit)
 
-        kb_priors_trace = self._build_kb_priors_trace(judge_bundle, review)
-        self._log_turn(turn_idx, judge_bundle, intents, llm_finish, kb_priors_trace)
+        self._log_turn(turn_idx, judge_bundle, intents, llm_finish)
         from hyperloom.inference_optimizer.breakdown.recorder import critic_out
 
         iteration = critic_out.CriticIteration(
@@ -507,22 +470,14 @@ class CriticAgentBackend:
             review=review,
             emit=emit,
             workdir=workdir,
-            kb_priors=kb_priors_trace,
         )
         # Record this critic iteration before the workdir can be pruned.
         critic_out.record_critic_iteration(self.session_dir, iteration)
 
         # Attach what each ruling was grounded in to the ruling itself, on the
-        # proposal it judged. Done here because these are the turn's own facts:
-        # the artifacts are this runtime's files, and a KB write's result only
-        # comes back on the emit.
+        # proposal it judged. Done here because the artifacts are this turn's
+        # own files.
         self._record_review_evidence(iteration)
-
-        # Mirror the KB integration trace into Langfuse (opt-in, best-effort).
-        self._mirror_kb_trace_to_langfuse(
-            turn_idx=turn_idx,
-            kb_priors=kb_priors_trace,
-        )
 
         return BackendTurnResult(
             intents=intents,
@@ -588,25 +543,20 @@ class CriticAgentBackend:
         judge_bundle: dict[str, Any],
         intents: list[Intent],
         llm_finish: str | None,
-        kb_priors_trace: dict[str, Any],
     ) -> None:
-        """Log one Critic turn's proposals, verdicts, KB context and finish."""
-        kb_skipped = judge_bundle.get("kb_read_skipped_reason")
+        """Log one Critic turn's proposals, verdicts, required context and finish."""
         required_context = list(judge_bundle.get("required_context") or [])
         verdicts_summary = [
             (i.payload.get("verdict"), i.payload.get("source")) for i in intents if i.type.value == "review_verdict"
         ]
         log.info(
-            "critic_agent_backend turn=%d session=%s proposals=%d "
-            "verdicts=%s kb_skipped=%s required_context=%s finish=%s kb_priors=%d",
+            "critic_agent_backend turn=%d session=%s proposals=%d verdicts=%s required_context=%s finish=%s",
             turn_idx,
             self.session_dir.name,
             len(judge_bundle.get("proposals") or []),
             verdicts_summary,
-            kb_skipped,
             required_context,
             llm_finish,
-            kb_priors_trace.get("prior_count") or 0,
         )
 
     def _write_review_request(self, request_path: Path, prompt: str) -> dict[str, Any]:
@@ -680,36 +630,7 @@ class CriticAgentBackend:
         memory_dir = self.session_dir / "critic-session-memory"
         memory_dir.mkdir(parents=True, exist_ok=True)
         env.setdefault("CRITIC_SESSION_MEMORY_DIR", str(memory_dir))
-
-        # Dead-letter dir under the session so cron replays don't cross sessions.
-        dlq_dir = self.session_dir / "critic-kb-dead-letter"
-        env.setdefault("KB_DEAD_LETTER_DIR", str(dlq_dir))
         return env
-
-    def _mirror_kb_trace_to_langfuse(
-        self,
-        *,
-        turn_idx: int,
-        kb_priors: dict[str, Any],
-    ) -> None:
-        """Mirror the per-iteration KB trace into Langfuse (best-effort)."""
-        from hyperloom.inference_optimizer.trace.langfuse_emitter import get_emitter
-
-        emitter = get_emitter(self.session_dir)
-        if not emitter.enabled:
-            return
-        if kb_priors:
-            emitter.record_kb_span(
-                name=f"kb_priors:iter_{turn_idx}",
-                agent="critic",
-                output=kb_priors,
-                metadata={
-                    "kind": "kb_priors",
-                    "iter": turn_idx,
-                    "prior_count": kb_priors.get("prior_count") or 0,
-                    "referenced_in_verdict": bool(kb_priors.get("referenced_in_verdict")),
-                },
-            )
 
     def _record_review_evidence(self, iteration: CriticIteration) -> None:
         """Record what each of this turn's rulings was grounded in.
@@ -719,16 +640,11 @@ class CriticAgentBackend:
         per-turn stream a reader has to join back to the proposals, keyed on a
         turn index that resume reuses.
 
-        The KB write is matched to its verdict by target, not spread across
-        them: the Critic asks for a lesson to be persisted per verdict, and a
-        turn that reviewed six proposals and wrote one lesson would otherwise
-        report the write six times.
-
         Args:
             iteration (CriticIteration): The turn's review request (read for
                 the cycle), reviewed bundle (read for the row each verdict's
-                target is recorded under), parsed review, commit emit (read for
-                the KB writes), workdir holding the artifacts, and priors trace.
+                target is recorded under), parsed review, and the workdir
+                holding the artifacts.
         """
         from hyperloom.inference_optimizer.breakdown.recorder.framework_event import record_review_evidence
 
@@ -737,7 +653,6 @@ class CriticAgentBackend:
         if macro_cycle is None:
             return
         subjects = _review_subjects(iteration.judge_bundle)
-        writes = _kb_writes_by_target(iteration.emit)
         artifacts = {
             name: str(iteration.workdir / filename)
             for name, filename in (
@@ -753,41 +668,11 @@ class CriticAgentBackend:
             target = str(verdict.get("target_proposal_msg_id") or "")
             if not target:
                 continue
-            kb: dict[str, Any] = {"persist_requested": bool(verdict.get("persist_to_kb"))}
-            if iteration.kb_priors:
-                kb["priors"] = iteration.kb_priors
-            if target in writes:
-                kb["write"] = writes[target]
             record_review_evidence(
                 macro_cycle=macro_cycle,
                 proposal_id=subjects.get(target) or target,
                 artifacts=artifacts,
-                kb=kb,
             )
-
-    @staticmethod
-    def _build_kb_priors_trace(
-        judge_bundle: dict[str, Any],
-        review: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        """Assemble the historical-priors KB trace for one critic iteration."""
-        trace = dict(judge_bundle.get("kb_priors_trace") or {})
-        by_proposal = judge_bundle.get("kb_priors_by_proposal") or {}
-        skipped = judge_bundle.get("kb_read_skipped_reason")
-        if not trace and not by_proposal and not skipped:
-            return {}
-        total = sum(len(v) for v in by_proposal.values() if isinstance(v, list))
-        return {
-            "configured": bool(trace.get("configured")),
-            "mode": trace.get("mode"),
-            "client_mode": trace.get("client_mode"),
-            "scope_filter": trace.get("scope_filter") or {},
-            "limit": trace.get("limit"),
-            "requests": trace.get("requests") or [],
-            "skipped_reason": skipped,
-            "prior_count": total,
-            "referenced_in_verdict": _verdict_references_kb(review),
-        }
 
     async def _reason(
         self,

@@ -425,7 +425,11 @@ omit = [
     "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/*",
     # CLI drivers.
     "src/hyperloom/inference_optimizer/cli/__init__.py",
+    "src/hyperloom/inference_optimizer/cli/session_resume.py",
+    "src/hyperloom/inference_optimizer/cli/session_setup.py",
     "src/hyperloom/inference_optimizer/multi_node/cli.py",
+    "src/hyperloom/inference_optimizer/multi_node/cluster_access.py",
+    "src/hyperloom/inference_optimizer/multi_node/pod_entrypoints.py",
     "src/hyperloom/inference_optimizer/multi_node/scripts/*",
     # Multi-node internals (SSH, probes, Ray dashboard, state hand-off).
     "src/hyperloom/inference_optimizer/multi_node/_internal/*",
@@ -439,6 +443,9 @@ omit = [
     "src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py",
     "src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py",
     "src/hyperloom/orchestrator/kernel/apply_kernel_patch.py",
+    "src/hyperloom/orchestrator/kernel/patch_restore.py",
+    "src/hyperloom/orchestrator/kernel/patch_snapshot.py",
+    "src/hyperloom/orchestrator/kernel/patch_source_check.py",
     "src/hyperloom/orchestrator/kernel/patch_jit_cache.py",
     "src/hyperloom/orchestrator/kernel/patch_rebuild.py",
     # GEAK runner (subprocess submit).

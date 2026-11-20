@@ -18,11 +18,11 @@ from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.orchestrator.rehearsal import VirtualClock, installed_clock
 from hyperloom.orchestrator.specialists import subprocess_ as subprocess_module
 from hyperloom.orchestrator.specialists.subprocess_ import (
-    UNBOUNDED_REAP_CAP_SEC,
     ReapWatch,
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
 )
+from hyperloom.orchestrator.specialists.subprocess_types import UNBOUNDED_REAP_CAP_SEC
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 #: Turn budget the old ceiling multiplied into a duration. Kept here because

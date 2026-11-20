@@ -74,11 +74,11 @@ def _repo_root() -> Path:
 def _load_script_module(unique_name: str, script_name: str):
     _install_min_ray_stub()
     if script_name == "launch_multinode.py":
-        from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+        from hyperloom.inference_optimizer.multi_node import pod_entrypoints
 
         mod = types.ModuleType(unique_name)
         sys.modules[unique_name] = mod
-        bundle = mn_cli._read_bundled_pod_python_script(script_name, mn_cli._LAUNCHER_DEPS)
+        bundle = pod_entrypoints.read_bundled_pod_python_script(script_name, pod_entrypoints.LAUNCHER_DEPS)
         exec(compile(bundle, f"{script_name}_bundle.py", "exec"), mod.__dict__)
         return mod
     path = _repo_root() / "multi_node" / "scripts" / script_name
@@ -1044,6 +1044,7 @@ def test_apply_patch_routes_to_infera_only_when_backend_infera(tmp_path, monkeyp
     # backend=infera -> _infera_apply_patch; backend=rayjob -> legacy head_pod_ip path (EXIT_CONFIG_ERROR without
     # head_pod_ip).
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import cluster_access
 
     sp = tmp_path / "s.json"
     sp.write_text('{"backend":"infera","nodes":2}', encoding="utf-8")
@@ -1067,7 +1068,7 @@ def test_apply_patch_routes_to_infera_only_when_backend_infera(tmp_path, monkeyp
 
     sp.write_text('{"backend":"rayjob","nodes":2}', encoding="utf-8")
     sp.chmod(0o600)
-    assert mn_cli.cmd_apply_patch(ns) == mn_cli.EXIT_CONFIG_ERROR  # legacy path
+    assert mn_cli.cmd_apply_patch(ns) == cluster_access.EXIT_CONFIG_ERROR  # legacy path
 
 
 def test_install_geak_best_effort_noop_for_rayjob(tmp_path, monkeypatch):
@@ -1121,19 +1122,20 @@ def test_kill_inference_for_kernel_agent_propagates_an_unexpected_error(monkeypa
 
 @pytest.mark.parametrize(("raw", "expected"), [(None, 42), (" ", 42), ("0", 1), ("1800", 1800)])
 def test_poll_timeout_is_the_env_value_floored_at_one_else_the_callers_default(monkeypatch, raw, expected):
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import cluster_access
 
     monkeypatch.delenv("HYPERLOOM_MN_POLL_TIMEOUT_S", raising=False)
     if raw is not None:
         monkeypatch.setenv("HYPERLOOM_MN_POLL_TIMEOUT_S", raw)
 
-    assert mn_cli.resolve_poll_timeout_s(42) == expected
+    assert cluster_access.resolve_poll_timeout_s(42) == expected
 
 
 def test_a_malformed_poll_timeout_is_a_config_error_not_a_retry(monkeypatch, capsys):
     """Re-running the subcommand cannot fix a typo, and the typo must not quietly become the default budget."""
     from hyperloom_common.env import EnvValueError
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import cluster_access
 
     class _Dashboard:
         def __enter__(self):
@@ -1150,8 +1152,8 @@ def test_a_malformed_poll_timeout_is_a_config_error_not_a_retry(monkeypatch, cap
     monkeypatch.setattr(mn_cli, "_ray_dashboard_client", lambda _state=None: _Dashboard())
 
     with pytest.raises(EnvValueError, match="HYPERLOOM_MN_POLL_TIMEOUT_S"):
-        mn_cli.resolve_poll_timeout_s()
-    assert mn_cli.main(["verify"]) == mn_cli.EXIT_CONFIG_ERROR
+        cluster_access.resolve_poll_timeout_s()
+    assert mn_cli.main(["verify"]) == cluster_access.EXIT_CONFIG_ERROR
     assert "HYPERLOOM_MN_POLL_TIMEOUT_S='30m' is not an integer" in capsys.readouterr().err
 
 
@@ -1264,7 +1266,7 @@ def _write_meta_kwargs(**overrides):
 
 def test_subcommand_state_refuses_multi_node_without_handoff(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A stale state file must not stand in for a cluster hand-off."""
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import cluster_access
     from hyperloom.inference_optimizer.multi_node._internal import external_state
 
     p = tmp_path / "state.json"
@@ -1276,13 +1278,13 @@ def test_subcommand_state_refuses_multi_node_without_handoff(monkeypatch: pytest
     # Triggered by the run declaring multi-node ...
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
     with pytest.raises(RuntimeError, match="without a cluster hand-off"):
-        mn_cli._load_state()
+        cluster_access._load_state()
 
     # ... and by the file itself claiming to describe a handed-over cluster, which is what a standalone subcommand
     # sees.
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     with pytest.raises(RuntimeError, match="describes a handed-over cluster"):
-        mn_cli._load_state()
+        cluster_access._load_state()
 
     # The raw read stays lenient so config-only callers keep working.
     assert external_state.load_multi_node_state()["head_pod_ip"] == "10.0.0.5"
@@ -1295,10 +1297,12 @@ def test_multinode_entrypoint_shlex_quotes_malicious_value():
     """A shell-metacharacter kernel_id must be shlex-quoted into the Ray Dashboard entrypoint (no command injection)."""
     import shlex
 
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import pod_entrypoints
 
     evil = "k'; touch /tmp/pwned #"
-    ep = mn_cli._build_multinode_apply_patch_entrypoint(mn_cli.KernelPatchApply("/t/x", "QUJD", "/bak", evil), 60)
+    ep = pod_entrypoints._build_multinode_apply_patch_entrypoint(
+        pod_entrypoints.KernelPatchApply("/t/x", "QUJD", "/bak", evil), 60
+    )
     # The value is carried, but only as a single shlex-quoted token.
     assert shlex.quote(evil) in ep
     # The raw ``--kernel-id k'; touch ...`` (unquoted) form must NOT appear.
@@ -1309,9 +1313,9 @@ def test_restart_entrypoint_shlex_quotes_model(monkeypatch):
     """SWSPLAT-42404: a shell-metacharacter model must be shlex-quoted into the head-pod launch entrypoint (single argv token, no command injection)."""
     import shlex
 
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import pod_entrypoints
 
-    monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
+    monkeypatch.setattr(pod_entrypoints, "read_pod_script", lambda name: f"# {name}\n")
     evil = "m'; touch /tmp/pwned #"
     ns = argparse.Namespace(
         framework="sglang",
@@ -1320,7 +1324,7 @@ def test_restart_entrypoint_shlex_quotes_model(monkeypatch):
         no_wait_health=False,
         extra_args="",
     )
-    ep = mn_cli._build_restart_entrypoint(ns, "/tmp/x.pid", "/tmp/x.log")
+    ep = pod_entrypoints._build_restart_entrypoint(ns, "/tmp/x.pid", "/tmp/x.log")
     assert shlex.quote(evil) in ep
     # The raw unquoted metacharacter model must NOT appear as a bare token.
     assert f"launch_server.sh sglang {evil}" not in ep
@@ -1328,9 +1332,9 @@ def test_restart_entrypoint_shlex_quotes_model(monkeypatch):
 
 def test_restart_entrypoint_neutralizes_malicious_extra_args(monkeypatch):
     """A shell-metacharacter extra_args must not inject a second command into the restart entrypoint; the `;` stays inside a quoted argv token."""
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import pod_entrypoints
 
-    monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
+    monkeypatch.setattr(pod_entrypoints, "read_pod_script", lambda name: f"# {name}\n")
     ns = argparse.Namespace(
         framework="sglang",
         model="m",
@@ -1338,7 +1342,7 @@ def test_restart_entrypoint_neutralizes_malicious_extra_args(monkeypatch):
         no_wait_health=False,
         extra_args="--foo 1; touch /tmp/pwned",
     )
-    ep = mn_cli._build_restart_entrypoint(ns, "/tmp/x.pid", "/tmp/x.log")
+    ep = pod_entrypoints._build_restart_entrypoint(ns, "/tmp/x.pid", "/tmp/x.log")
     # The raw injection form (a bare `; touch`) must NOT appear as shell syntax.
     assert "1; touch /tmp/pwned" not in ep
     # The metacharacter is confined to a single quoted token.
@@ -1347,9 +1351,9 @@ def test_restart_entrypoint_neutralizes_malicious_extra_args(monkeypatch):
 
 def test_restart_entrypoint_preserves_legit_multi_token_extra_args(monkeypatch):
     """Legitimate multi-token extra_args survive unchanged (no functional regression from the shell-safe re-quoting)."""
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import pod_entrypoints
 
-    monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
+    monkeypatch.setattr(pod_entrypoints, "read_pod_script", lambda name: f"# {name}\n")
     ns = argparse.Namespace(
         framework="sglang",
         model="m",
@@ -1357,15 +1361,15 @@ def test_restart_entrypoint_preserves_legit_multi_token_extra_args(monkeypatch):
         no_wait_health=False,
         extra_args="--mem-fraction-static 0.85 --enable-torch-compile",
     )
-    ep = mn_cli._build_restart_entrypoint(ns, "/tmp/x.pid", "/tmp/x.log")
+    ep = pod_entrypoints._build_restart_entrypoint(ns, "/tmp/x.pid", "/tmp/x.log")
     assert "-- --mem-fraction-static 0.85 --enable-torch-compile" in ep
 
 
 def test_multinode_launch_entrypoint_neutralizes_malicious_extra_args(monkeypatch):
     """Multi-node RayJob restart must shell-safe --extra-args like single-node."""
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import pod_entrypoints
 
-    monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
+    monkeypatch.setattr(pod_entrypoints, "read_pod_script", lambda name: f"# {name}\n")
     ns = argparse.Namespace(
         framework="sglang",
         model="m",
@@ -1375,7 +1379,7 @@ def test_multinode_launch_entrypoint_neutralizes_malicious_extra_args(monkeypatc
         ep=1,
         pd_mode="aggregated",
     )
-    ep = mn_cli._build_multinode_launch_entrypoint(ns, nnodes=2, pid_dir="/tmp/pids", log_dir="/tmp/logs")
+    ep = pod_entrypoints._build_multinode_launch_entrypoint(ns, nnodes=2, pid_dir="/tmp/pids", log_dir="/tmp/logs")
     assert "1; touch /tmp/pwned" not in ep
     assert "'1;'" in ep
 
@@ -1484,11 +1488,12 @@ def _run_isolated_pod(script, argv, env, *, ray_stub=None):
 
 @pytest.mark.parametrize("action", ["revert", "finalize"])
 def test_infera_bundle_executes_without_repository_pythonpath(tmp_path, action):
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import pod_entrypoints
 
     script = tmp_path / "kernel_node_ops_bundle.py"
     script.write_text(
-        mn_cli._read_bundled_pod_python_script("kernel_node_ops.py", mn_cli._KERNEL_NODE_OPS_DEPS), encoding="utf-8"
+        pod_entrypoints.read_bundled_pod_python_script("kernel_node_ops.py", pod_entrypoints.KERNEL_NODE_OPS_DEPS),
+        encoding="utf-8",
     )
     target, jit, backup, env = _isolated_patch_fixture(tmp_path)
     record, _ = _run_isolated_pod(
@@ -1612,7 +1617,7 @@ def _stage_ray_patch_entrypoint(entrypoint, destination):
 
 @pytest.mark.parametrize("action", ["revert", "finalize"])
 def test_ray_patch_siblings_reach_isolated_actor_through_runtime_env(tmp_path, action):
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import pod_entrypoints
 
     target, jit, backup, env = _isolated_patch_fixture(tmp_path)
     stub = tmp_path / "ray-dependency"
@@ -1626,8 +1631,8 @@ def test_ray_patch_siblings_reach_isolated_actor_through_runtime_env(tmp_path, a
         encoding="utf-8",
     )
     encoded = base64.b64encode(b"value = 2\n").decode()
-    entrypoint = mn_cli._build_multinode_apply_patch_entrypoint(
-        mn_cli.KernelPatchApply(str(target), encoded, str(backup), "gemm", str(jit / "build")), 20
+    entrypoint = pod_entrypoints._build_multinode_apply_patch_entrypoint(
+        pod_entrypoints.KernelPatchApply(str(target), encoded, str(backup), "gemm", str(jit / "build")), 20
     )
     script = _stage_ray_patch_entrypoint(entrypoint, tmp_path / "shipped")
     applied, log = _run_isolated_pod(
@@ -1657,9 +1662,9 @@ def test_ray_patch_siblings_reach_isolated_actor_through_runtime_env(tmp_path, a
     (jit / "build" / "candidate.o").write_bytes(b"candidate build")
     records = json.dumps({record["host"]: [record]})
     if action == "revert":
-        entrypoint = mn_cli._build_multinode_revert_patch_entrypoint(str(target), "{}", 20, records)
+        entrypoint = pod_entrypoints._build_multinode_revert_patch_entrypoint(str(target), "{}", 20, records)
     else:
-        entrypoint = mn_cli._build_multinode_finalize_patch_entrypoint(records, 20)
+        entrypoint = pod_entrypoints._build_multinode_finalize_patch_entrypoint(records, 20)
     script = _stage_ray_patch_entrypoint(entrypoint, tmp_path / "shipped")
 
     result, log = _run_isolated_pod(script, [action, "--records-json", records], env, ray_stub=stub)
@@ -1703,11 +1708,12 @@ def _stub_rayjob_state(monkeypatch, mn_cli) -> None:
 @pytest.mark.parametrize("field", sorted(_PER_ROLE_PD))
 def test_rayjob_restart_rejects_per_role_pd_flag(monkeypatch, capsys, field):
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import cluster_access
 
     _stub_rayjob_state(monkeypatch, mn_cli)
     flag, value = _PER_ROLE_PD[field]
     rc = mn_cli.cmd_restart_server(_rayjob_restart_ns("disaggregated", **{field: value}))
-    assert rc == mn_cli.EXIT_CONFIG_ERROR
+    assert rc == cluster_access.EXIT_CONFIG_ERROR
     assert flag in capsys.readouterr().err
 
 
@@ -1728,11 +1734,12 @@ def test_rayjob_restart_without_per_role_pd_reaches_the_cluster(monkeypatch, ns)
 
 def test_finalize_patch_prints_logs_when_pod_json_is_unparseable(monkeypatch, capsys):
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import cluster_access
 
     monkeypatch.setattr(mn_cli, "_load_state", lambda: {"backend": "rayjob", "head_pod_ip": "10.0.0.1"})
     monkeypatch.setattr(mn_cli, "_submit_and_collect_pod_json", lambda *a, **k: (0, None, "pod traceback"))
     args = mn_cli.build_parser().parse_args(["finalize-patch", "--records-json", '{"k": {}}', "--print-logs"])
-    assert mn_cli.cmd_finalize_patch(args) == mn_cli.EXIT_TRANSIENT
+    assert mn_cli.cmd_finalize_patch(args) == cluster_access.EXIT_TRANSIENT
     captured = capsys.readouterr()
     assert captured.out == "pod traceback\n"
     assert "finalize-patch: could not parse per-pod JSON from dashboard logs" in captured.err
@@ -1740,10 +1747,10 @@ def test_finalize_patch_prints_logs_when_pod_json_is_unparseable(monkeypatch, ca
 
 def test_launcher_summary_survives_a_closing_brace_inside_a_string_value():
     """A ``}`` inside a JSON string value must not cut the launcher summary short."""
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import pod_entrypoints
 
     logs = 'launch log line\n{"status": "ok", "prefill_url": "http://10.0.0.1:30000", "msg": "tail }"}\n'
-    assert mn_cli._extract_launcher_summary(logs) == {
+    assert pod_entrypoints._extract_launcher_summary(logs) == {
         "status": "ok",
         "prefill_url": "http://10.0.0.1:30000",
         "msg": "tail }",
@@ -1752,21 +1759,24 @@ def test_launcher_summary_survives_a_closing_brace_inside_a_string_value():
 
 def test_launcher_summary_skips_a_trailing_non_json_brace_block():
     """Server-log text after the summary (a Python dict repr) is skipped, not mistaken for the summary."""
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import pod_entrypoints
 
     logs = (
         '{"status": "ok", "decode_url": "http://10.0.0.2:30001"}\n'
         "INFO sampling {'max_tokens': 5}\n"
         "WARN health undetermined; see prefill_0.log\n"
     )
-    assert mn_cli._extract_launcher_summary(logs) == {"status": "ok", "decode_url": "http://10.0.0.2:30001"}
-    assert mn_cli._extract_launcher_summary("no json here") == {}
+    assert pod_entrypoints._extract_launcher_summary(logs) == {"status": "ok", "decode_url": "http://10.0.0.2:30001"}
+    assert pod_entrypoints._extract_launcher_summary("no json here") == {}
 
 
 def test_pod_json_is_the_last_document_and_honours_escaped_quotes():
     """The per-pod JSON parser returns the last document, reads escaped quotes, and gives up on a trailing non-JSON block."""
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node import pod_entrypoints
 
-    assert mn_cli._extract_pod_json('{"a": 1}\nlog\n{"msg": "a\\"}", "n": {"x": 2}}') == {"msg": 'a"}', "n": {"x": 2}}
-    assert mn_cli._extract_pod_json("{\"a\": 1}\nINFO {'b': 2}") is None
-    assert mn_cli._extract_pod_json("") is None
+    assert pod_entrypoints.extract_pod_json('{"a": 1}\nlog\n{"msg": "a\\"}", "n": {"x": 2}}') == {
+        "msg": 'a"}',
+        "n": {"x": 2},
+    }
+    assert pod_entrypoints.extract_pod_json("{\"a\": 1}\nINFO {'b': 2}") is None
+    assert pod_entrypoints.extract_pod_json("") is None

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping
+from typing import Any
 
 from inference_suite.contracts import STEPS_BEFORE_SPAWN, FailedStep
 
@@ -236,38 +236,20 @@ class BaselineFailureMixin:
             not bool(state.stop_reason),
         )
 
-    def _generic_baseline_failure_stops(
-        self,
-        result_payload: Mapping[str, Any],
-        *,
-        retries_suppressed: bool,
-    ) -> bool:
+    def _generic_baseline_failure_stops(self, *, retries_suppressed: bool) -> bool:
         """Count a baseline failure of no specially handled class; whether it ends the run.
 
         Args:
-            result_payload: The failed result.
             retries_suppressed: A pending eval or an open enablement lane owns the
                 retries, so the streak alone does not stop the run.
 
         Returns:
             ``True`` when the run should stop as ``baseline_failed``.
         """
-        # A process that exited with the same output as last time (modulo numbers)
-        # will do so again: stop at two instead of spending a third attempt. The
-        # executor decides which classes are worth signing and signs them from the
-        # process's whole output rather than the 2000-character ``error`` tail, so a
-        # signature is present exactly when it identifies the failure.
-        signature = str(result_payload.get("output_signature") or "")
-        repeated = bool(
-            signature
-            and self.shared_state.baseline_failure_streak >= 1
-            and signature == self.shared_state.baseline_last_failure_signature
-        )
         self.shared_state.baseline_failure_streak += 1
         self.shared_state.baseline_failures_this_leg += 1
-        self.shared_state.baseline_last_failure_signature = signature
         streak = self.shared_state.baseline_failure_streak
-        return not retries_suppressed and (streak >= 3 or (streak >= 2 and repeated))
+        return not retries_suppressed and streak >= 3
 
     def _arms_baseline_failure_gates(self, err_class: str) -> bool:
         """Whether a failed baseline goes through the streak and stop gates.
@@ -460,7 +442,7 @@ class BaselineFailureMixin:
                 result_payload.get("error") or err_class,
             )
             self.shared_state.set_stop_reason(AGENTX_PREFLIGHT_STOP_REASON)
-        elif self._generic_baseline_failure_stops(result_payload, retries_suppressed=retries_suppressed):
+        elif self._generic_baseline_failure_stops(retries_suppressed=retries_suppressed):
             self.shared_state.set_stop_reason(_BASELINE_FAILED_STOP_REASON)
 
     def _arm_eager_baseline_fallback(self, task: Task, err_class: str) -> None:

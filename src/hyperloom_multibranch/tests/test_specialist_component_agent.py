@@ -13,7 +13,7 @@ import types
 
 import pytest
 
-from hyperloom_multibranch import cli
+from hyperloom_multibranch import cli_options
 from hyperloom_multibranch.blackboard.local.agent_manifest import REDACTED
 from hyperloom_multibranch.scheduling.session_base import served_launch
 from hyperloom_multibranch.specialist import component_agent
@@ -147,16 +147,16 @@ def test_with_no_adapter_no_agent_is_run_as_a_component(declare: Declare, tmp_pa
     assert installed() == () and adapter_for(checkout) is None and eval_envs() == frozenset()
     (tmp_path / "INDEX.md").write_text("# a dossier\n", encoding="utf-8")
     with pytest.raises(ValueError, match="is no dossier: it has no index an installed component agent knows"):
-        cli._agent_dossier(tmp_path, tmp_path / "map.json")
+        cli_options._agent_dossier(tmp_path, tmp_path / "map.json")
 
 
 def test_a_dossier_is_one_an_installed_adapter_knows(declare: Declare, tmp_path: Path) -> None:
     declare(stand_in())
 
     with pytest.raises(ValueError, match="is no dossier: it has no INDEX.md"):
-        cli._agent_dossier(tmp_path, tmp_path / "map.json")
+        cli_options._agent_dossier(tmp_path, tmp_path / "map.json")
     (tmp_path / "INDEX.md").write_text("# a dossier\n", encoding="utf-8")
-    assert cli._agent_dossier(tmp_path, tmp_path / "map.json") == str(tmp_path.absolute())
+    assert cli_options._agent_dossier(tmp_path, tmp_path / "map.json") == str(tmp_path.absolute())
 
 
 # ---- the launch a component agent is served ------------------------------------------------------------------------

@@ -237,13 +237,17 @@ def test_an_invalid_v6_event_is_reported_without_disturbing_the_rest(tmp_path):
 
 
 def test_an_install_step_that_reports_no_status_is_recorded_applied():
-    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.cli import install_event
 
-    event = preflight._begin_install_event(argparse.Namespace(resume_from=None, no_kernel=True, enable_roofline=False))
-    preflight._run_install_step(
+    event = install_event._begin_install_event(
+        argparse.Namespace(resume_from=None, no_kernel=True, enable_roofline=False)
+    )
+    install_event._run_install_step(
         event, step_id="validate_credentials", category="check", action=lambda: None, detail={"exit_code": 0}
     )
-    preflight._run_install_step(event, step_id="check_gpu_visibility", category="check", action=lambda: {"status": ""})
+    install_event._run_install_step(
+        event, step_id="check_gpu_visibility", category="check", action=lambda: {"status": ""}
+    )
 
     assert event["ext"]["steps"] == [
         {
@@ -259,10 +263,11 @@ def test_an_install_step_that_reports_no_status_is_recorded_applied():
 
 def test_install_event_stays_pending_until_session_creation(tmp_path):
     from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.cli import install_event
 
     args = argparse.Namespace(resume_from=None, no_kernel=True, enable_roofline=False)
-    event = preflight._begin_install_event(args)
-    preflight._run_install_step(
+    event = install_event._begin_install_event(args)
+    install_event._run_install_step(
         event,
         step_id="load_dotenv",
         category="normalize",
@@ -272,7 +277,7 @@ def test_install_event_stays_pending_until_session_creation(tmp_path):
             "detail": {"vars_loaded": 0, "source": "/repo/.env"},
         },
     )
-    preflight._run_install_step(
+    install_event._run_install_step(
         event,
         step_id="check_shm_disk",
         category="check",
@@ -292,7 +297,7 @@ def test_install_event_stays_pending_until_session_creation(tmp_path):
     )
 
     assert not (tmp_path / "reports" / "sbd_v6" / "timeline").exists()
-    preflight._persist_install_event(args, tmp_path)
+    install_event._persist_install_event(args, tmp_path)
 
     persisted = read_timeline_event(tmp_path, "install")
     assert persisted is not None
@@ -307,7 +312,7 @@ def test_install_event_stays_pending_until_session_creation(tmp_path):
 @pytest.mark.parametrize("failure", [SystemExit(2), KeyboardInterrupt()])
 def test_expected_preflight_exit_does_not_create_session(tmp_path, monkeypatch, failure):
     import hyperloom.inference_optimizer.cli as optimizer_cli
-    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.cli import install_event
     from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 
     workspace = tmp_path / "sessions"
@@ -321,12 +326,12 @@ def test_expected_preflight_exit_does_not_create_session(tmp_path, monkeypatch, 
     )
 
     def fail_preflight(args):
-        event = preflight._begin_install_event(args)
+        event = install_event._begin_install_event(args)
 
         def reject_credentials():
             raise failure
 
-        preflight._run_install_step(
+        install_event._run_install_step(
             event,
             step_id="validate_credentials",
             category="check",
@@ -348,7 +353,7 @@ def test_expected_preflight_exit_does_not_create_session(tmp_path, monkeypatch, 
 @pytest.mark.parametrize("failure", [SystemExit(2), KeyboardInterrupt()])
 def test_expected_resume_preflight_exit_does_not_mutate_session(tmp_path, monkeypatch, failure):
     import hyperloom.inference_optimizer.cli as optimizer_cli
-    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.cli import install_event
     from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 
     workspace = tmp_path / "sessions"
@@ -366,12 +371,12 @@ def test_expected_resume_preflight_exit_does_not_mutate_session(tmp_path, monkey
     )
 
     def fail_preflight(args):
-        event = preflight._begin_install_event(args)
+        event = install_event._begin_install_event(args)
 
         def reject_environment():
             raise failure
 
-        preflight._run_install_step(
+        install_event._run_install_step(
             event,
             step_id="validate_environment",
             category="check",
@@ -436,7 +441,7 @@ def test_unwrapped_preflight_failure_is_persisted_as_failed(tmp_path, monkeypatc
 def _resume_into_a_failing_preflight(monkeypatch, resume_dir: Path) -> None:
     """Resume ``resume_dir`` through ``optimize`` with a preflight that opens its install event, then raises."""
     import hyperloom.inference_optimizer.cli as optimizer_cli
-    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.cli import install_event
 
     monkeypatch.setattr(
         optimizer_cli,
@@ -445,7 +450,7 @@ def _resume_into_a_failing_preflight(monkeypatch, resume_dir: Path) -> None:
     )
 
     def fail_preflight(args):
-        preflight._begin_install_event(args)
+        install_event._begin_install_event(args)
         raise RuntimeError("resume preflight failed")
 
     monkeypatch.setattr(optimizer_cli, "_preflight", fail_preflight)
@@ -538,7 +543,7 @@ def test_invalid_resume_preflight_failure_does_not_mutate_requested_directory(
     invalid_artifact,
 ):
     import hyperloom.inference_optimizer.cli as optimizer_cli
-    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.cli import install_event
     from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 
     workspace = tmp_path / "sessions"
@@ -568,7 +573,7 @@ def test_invalid_resume_preflight_failure_does_not_mutate_requested_directory(
     )
 
     def fail_preflight(args):
-        preflight._begin_install_event(args)
+        install_event._begin_install_event(args)
         raise RuntimeError("invalid resume preflight failed")
 
     monkeypatch.setattr(optimizer_cli, "_preflight", fail_preflight)
@@ -815,7 +820,7 @@ def test_preflight_propagates_install_event_finalize_failure(tmp_path, monkeypat
 
 
 def test_begin_install_event_propagates_pending_event_failure(monkeypatch):
-    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.cli import install_event
     from hyperloom.inference_optimizer.session import sbd_v6
 
     def attach_fails(*_args, **_kwargs):
@@ -824,11 +829,11 @@ def test_begin_install_event_propagates_pending_event_failure(monkeypatch):
     monkeypatch.setattr(sbd_v6, "set_pending_install_event", attach_fails)
 
     with pytest.raises(RuntimeError):
-        preflight._begin_install_event(argparse.Namespace(resume_from=None))
+        install_event._begin_install_event(argparse.Namespace(resume_from=None))
 
 
 def test_mark_pending_install_event_failed_propagates_lookup_failure(monkeypatch):
-    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.cli import install_event
     from hyperloom.inference_optimizer.session import sbd_v6
 
     def lookup_fails(*_args, **_kwargs):
@@ -837,7 +842,7 @@ def test_mark_pending_install_event_failed_propagates_lookup_failure(monkeypatch
     monkeypatch.setattr(sbd_v6, "pending_install_event", lookup_fails)
 
     with pytest.raises(RuntimeError):
-        preflight._mark_pending_install_event_failed(argparse.Namespace(resume_from=None), ValueError("boom"))
+        install_event._mark_pending_install_event_failed(argparse.Namespace(resume_from=None), ValueError("boom"))
 
 
 def test_ir3_unreachable_uses_v6_reason_without_changing_v5_state_reason(tmp_path, monkeypatch):
@@ -1094,27 +1099,27 @@ def test_model_gate_projection_failure_does_not_change_gate_result(tmp_path, mon
 
 
 def test_install_event_write_failure_is_exported_as_v6_warning(tmp_path, monkeypatch):
-    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.cli import install_event
     from hyperloom.inference_optimizer.session import sbd_v6
 
     args = argparse.Namespace(resume_from=None, no_kernel=True, enable_roofline=False)
-    preflight._begin_install_event(args)
+    install_event._begin_install_event(args)
     monkeypatch.setattr(
         sbd_v6,
         "write_timeline_event_at",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("install disk unavailable")),
     )
 
-    preflight._persist_install_event(args, tmp_path)
+    install_event._persist_install_event(args, tmp_path)
 
     breakdown = exporter.build(tmp_path)
     assert any("sbd_v6.write.install.event" in warning for warning in breakdown["metadata"]["warnings"])
 
 
 def test_missing_pending_install_event_is_exported_as_v6_warning(tmp_path):
-    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.cli import install_event
 
-    preflight._persist_install_event(argparse.Namespace(), tmp_path)
+    install_event._persist_install_event(argparse.Namespace(), tmp_path)
 
     breakdown = exporter.build(tmp_path)
     assert any("pending install event is unavailable" in warning for warning in breakdown["metadata"]["warnings"])

@@ -399,13 +399,6 @@ class TestTheSuitePathClasses:
                 == FAILURE_ATTRIBUTION_HARNESS
             )
 
-    def test_a_failed_client_is_signed_by_its_output_like_a_nonzero_round(self):
-        from hyperloom.orchestrator.state.failure_evidence import nonzero_output_signature
-
-        client = nonzero_output_signature("client_failed", "", "Traceback: boom at port 8001")
-        nonzero = nonzero_output_signature("round_nonzero_invalid_measurement", "", "Traceback: boom at port 8001")
-        assert client.startswith("client_failed|") and client.split("|")[1] == nonzero.split("|")[1]
-
 
 class TestAnUnknownFrameworkVersion:
     """A round the suite stopped at ``framework_version_unknown`` is the candidate's only when the attempt changed the

@@ -24,16 +24,15 @@ differ.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import sqlite3
 import subprocess
 import time
 from concurrent.futures import CancelledError
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 from hyperloom.common.agent_cli import resolve_codex_executable
 from hyperloom.common.codex_session import (
@@ -56,8 +55,6 @@ from hyperloom.common.env_safety import (
 )
 from hyperloom_common.fs_utils import (
     create_nofollow,
-    read_text_nofollow,
-    regular_files_nofollow,
     write_text_nofollow,
 )
 from hyperloom.common.env_safety import RunAsError
@@ -88,19 +85,16 @@ from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles,
 from .reap_watch import PROCESS_LOG_NAME, ReapWatch, cli_alive
 from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import CancelScope, cancel_scope_listener, current_cancel_scope
-from hyperloom_common.git_safety import app_git_diff
-from .worktrees import HeldWorktree, PinnedGit
+from .worktrees import HeldWorktree
+from .subprocess_harvest import collect_patches, read_done
+from .subprocess_types import UNBOUNDED_REAP_CAP_SEC, SpecialistSpawn, SpecialistSubprocessResult
 from ..delivery.deliverable import declared_targets
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 from .wall_budget import clear_wall_budget_extension, wall_budget_extension
-from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
 
 
 log = logging.getLogger(__name__)
 
-#: How long the reaper waits on a specialist nobody bounded, matching the
-#: largest deadline the dispatcher hands down.
-UNBOUNDED_REAP_CAP_SEC: float = 4 * 60 * 60.0
 _CODEX_BYPASS = "bypass"
 
 
@@ -160,69 +154,6 @@ class SpecialistSubprocessConfig:
     """
 
 
-# Result
-@dataclass
-class SpecialistSubprocessResult:
-    """Outcome of one specialist subprocess invocation.
-
-    The SpecialistRunner translates this into its own
-    :class:`SpecialistRunResult`.
-    """
-
-    done_payload: dict[str, Any] | None = None
-    """Parsed ``specialist_done.json`` content, or None when the file never
-    appeared (the runner then falls back to ``build_empty_specialist_done``)."""
-
-    exit_code: int | None = None
-    """Subprocess exit code (None when killed before exit)."""
-
-    elapsed_seconds: float = 0.0
-
-    timed_out: bool = False
-    """True when the dispatcher killed the subprocess at its deadline."""
-
-    stale_heartbeat: bool = False
-    """True when the heartbeat went stale and the dispatcher killed
-    the subprocess."""
-
-    process_log_path: str = ""
-    patches: list[str] = field(default_factory=list)
-    """Full filesystem paths of patch files discovered under
-    ``<worktree>/patches/`` and ``<workspace>/patches/`` (absolute, since both
-    roots are session-absolute). Consumers read and sandbox-check these
-    directly — do not join them onto a base."""
-
-    patch_roots: dict[str, str] = field(default_factory=dict)
-    """Apply root per patch path, for patches harvested from a worktree.
-
-    Empty for patches merely found on disk, whose target tree is not knowable at
-    collection time and must therefore still be resolved from their contents."""
-
-    trace: AgentTrace = field(default_factory=AgentTrace)
-    """What the agent CLI's own log recorded: token usage (re-entering the
-    unified ledger the production specialist's spend), the reply text, the
-    intel/tool calls and the per-turn usage. Empty when the log was missing or
-    truncated."""
-
-    worktree_refused: str = ""
-    """Why nothing was collected from the worktree, ``error`` saying it too: its path no longer named the directory
-    the specialist was given (:class:`~.worktrees.HeldWorktree`), so no patch, scanned or claimed, is taken from the
-    run. Empty when it did, or there was no worktree."""
-
-    error: str = ""
-
-    @property
-    def patch_claims_ignored(self) -> bool:
-        """Whether the patches the specialist's done payload claims are not read: a harvested diff is the whole round,
-        so a claim only restates it, and a refused worktree gives no patch at all."""
-        return bool(self.patch_roots or self.worktree_refused)
-
-
-#: Directories a specialist writes for its own use inside the worktree, never
-#: part of a deliverable.
-_SPECIALIST_SCRATCH_DIRS: tuple[str, ...] = ("patches", "artifacts", ".hyperloom")
-
-
 def _add_error(outcome: dict[str, Any], error: str) -> None:
     """Append ``error`` to the reaped outcome's error, ``; ``-separated."""
     prior = str(outcome.get("error") or "").strip()
@@ -273,54 +204,6 @@ def _local_tree_pgid(proc: Any) -> int | None:
         return None
     pid = getattr(proc, "pid", None)
     return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
-
-
-@dataclass(frozen=True)
-class SpecialistSpawn:
-    """One specialist subprocess to spawn and reap.
-
-    Attributes:
-        task_id: Task identifier used for logging / workspace layout.
-        workspace: ``runs/specialist/<task_id>/`` -- where prompt.md,
-            process.log, heartbeat.json, and specialist_done.json live.
-        worktree: Per-task git worktree (None when worktree setup failed; the
-            dispatcher still spawns the agent but it has no write-isolated
-            tree, only ``--add-dir <workspace>``).
-        worktree_base: Base checkout the worktree was branched off; the clean
-            base patch harvesting diffs against.
-        system_prompt: System prompt assembled by
-            :func:`specialist_prompt_builder.build_specialist_prompts`.
-        user_prompt: User prompt from the same builder.
-        disallowed_tools: Tool names to deny in the agent CLI subprocess.
-            Passed as ``--disallowedTools`` to the Claude CLI; has no Codex or
-            dsh equivalent (Codex containment uses ``--sandbox``).
-        gpu_ids: GPU ids to expose to the subprocess.
-        deadline: Absolute instant the reaper kills at. ``None`` means the
-            caller set no bound and the reaper falls back to
-            :data:`UNBOUNDED_REAP_CAP_SEC`. A deadline already in the past
-            kills on the first poll.
-        progress_cb: Optional async callback invoked with each new partial
-            checkpoint the specialist writes while it is still alive.
-            Exceptions from it never affect the run.
-        readable: Paths besides its toolchain the specialist reads (a local
-            model): bound read-only when it runs in a bubblewrap sandbox.
-        worktree_admin: The admin directory of ``worktree`` as its repository
-            records it (:mod:`.worktrees`): the app's git over the worktree goes
-            through it alone (``None``: no git, only ``patches/`` is scanned).
-    """
-
-    task_id: str
-    workspace: Path
-    worktree: Path | None
-    worktree_base: Path | None
-    system_prompt: str
-    user_prompt: str
-    disallowed_tools: frozenset[str] | set[str] | tuple[str, ...] = frozenset()
-    gpu_ids: tuple[int, ...] = ()
-    deadline: Deadline | None = None
-    progress_cb: Any = None
-    readable: tuple[Path, ...] = ()
-    worktree_admin: Path | None = None
 
 
 def _launch_failure(process_log: Path, error: str) -> SpecialistSubprocessResult:
@@ -511,7 +394,7 @@ class SpecialistSubprocessDispatcher:
         # Parse done.json (best-effort) — first existing candidate.
         done_payload = None
         for cand in watch.done_files:
-            done_payload = self._read_done(cand)
+            done_payload = read_done(cand)
             if done_payload is not None:
                 break
 
@@ -519,7 +402,7 @@ class SpecialistSubprocessDispatcher:
         # so a killed-but-productive specialist still surfaces its findings.
         if done_payload is None:
             for cand in watch.partial_files:
-                partial = self._read_done(cand)
+                partial = read_done(cand)
                 if partial is not None:
                     partial["_recovered_from_partial"] = True
                     done_payload = partial
@@ -532,7 +415,7 @@ class SpecialistSubprocessDispatcher:
         patches: list[str] = []
         collected_patch_roots: dict[str, str] = {}
         if not refused:
-            patches, collected_patch_roots = self._collect_patches(
+            patches, collected_patch_roots = collect_patches(
                 request.worktree,
                 request.workspace,
                 request.worktree_base,
@@ -878,7 +761,7 @@ class SpecialistSubprocessDispatcher:
                 continue
             if mtime <= since_mtime:
                 continue
-            payload = self._read_done(cand, held=held)
+            payload = read_done(cand, held=held)
             if payload is None:
                 continue
             newest = max(newest, mtime)
@@ -1033,180 +916,8 @@ class SpecialistSubprocessDispatcher:
             ) from exc
         return True
 
-    @staticmethod
-    def _harvest_pathspec(targets: Sequence[str] = ()) -> list[str]:
-        """Return the ``git diff`` / ``git add`` pathspec that scopes a harvest.
-
-        With no target declared the whole worktree is in scope, minus
-        :data:`_SPECIALIST_SCRATCH_DIRS`, whose whole-file copies would
-        otherwise be harvested as file creations, and minus the work artifacts
-        ``vet_patches`` refuses -- task-owned done files and bytecode caches.
-        Excluding exactly what vetting rejects keeps the harvest from authoring
-        a patch that is guaranteed to be dropped downstream.
-        """
-        from .patch_safety import SPECIALIST_WORK_ARTIFACT_PATHSPECS
-
-        declared = [str(t).strip().lstrip("/") for t in targets if str(t).strip()]
-        if declared:
-            return declared
-        return [
-            ".",
-            *(f":(exclude){name}" for name in _SPECIALIST_SCRATCH_DIRS),
-            *SPECIALIST_WORK_ARTIFACT_PATHSPECS,
-        ]
-
-    @staticmethod
-    def _harvest_worktree_diff(worktree: Path, *, admin: Path, base: str = "HEAD", targets: Sequence[str] = ()) -> str:
-        """Return the worktree's edits as one ``-p1`` diff, or ``""``.
-
-        The comparison is ``base``-against-working-tree, since a specialist is
-        not required to commit. ``app_git_diff`` marks untracked paths
-        intent-to-add so they render as creations, ``git diff`` being blind to
-        them otherwise, which keeps "edited a file and added one" from
-        harvesting a patch that silently omits the addition. Proven Python
-        comment-only edits produce no installable patch at all.
-
-        Args:
-            worktree: Per-task worktree.
-            admin: Its admin directory as its repository records it.
-            base: The recorded pre-round commit to diff against.
-            targets: Worktree-relative paths the round declared.
-
-        Returns:
-            str: The diff text, or ``""`` when there is nothing to harvest or
-                git could not be run.
-        """
-
-        from .patch_safety import patch_is_annotation_only
-
-        try:
-            diff = app_git_diff(worktree, base, SpecialistSubprocessDispatcher._harvest_pathspec(targets), admin=admin)
-        except (OSError, subprocess.SubprocessError) as exc:
-            log.warning("specialist: git diff in %s failed: %r", worktree, exc)
-            return ""
-        if diff.returncode != 0 or not diff.stdout.strip():
-            return ""
-        if patch_is_annotation_only(diff.stdout, worktree, reverse=True):
-            return ""
-        return diff.stdout
-
-    @staticmethod
-    def _collect_patches(
-        worktree: Path | None,
-        workspace: Path,
-        worktree_base: Path | None = None,
-        *,
-        pinned: PinnedGit | None,
-        targets: Sequence[str] = (),
-    ) -> tuple[list[str], dict[str, str]]:
-        """Harvest the specialist's edits, else collect the patch files it wrote.
-
-        Editing the worktree is the primary contract: ``git diff HEAD`` renders
-        those edits as one canonical ``-p1`` patch and names its apply root, so
-        nothing downstream has to infer which tree it belongs to. Scanning
-        ``patches/`` remains for dispatches that never got a worktree, and for
-        any git failure here -- a harvest that raises would otherwise discard
-        the whole specialist result, done-file included.
-
-        Args:
-            worktree: Per-task worktree, or None.
-            workspace: Task workspace.
-            worktree_base: The tree the worktree stands for -- the checkout it
-                was branched off, or the directory it holds a snapshot of --
-                which is the apply root of anything harvested from it.
-            pinned: The worktree's admin directory as its repository records
-                it, and the commit recorded before the round, so the harvest
-                stays anchored there even if the specialist committed; ``None``
-                harvests nothing by git.
-            targets: Worktree-relative paths the round declared, which scope the
-                harvest pathspec.
-
-        Returns:
-            ``(patch_paths, patch_roots)``; the latter is empty for scanned files.
-        """
-        if worktree is not None and pinned is not None:
-            harvested_diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(
-                worktree, admin=pinned.admin, base=pinned.start or "HEAD", targets=targets
-            )
-            if harvested_diff:
-                try:
-                    harvested = write_text_nofollow(worktree, ("patches", "_worktree_diff.patch"), harvested_diff)
-                except OSError as exc:
-                    log.warning("specialist: refusing to write the harvested patch under %s: %r", worktree, exc)
-                else:
-                    return [str(harvested)], {str(harvested): str(worktree_base or worktree)}
-
-        out: list[str] = []
-        for base in (worktree, workspace):
-            if base is None:
-                continue
-            for ext in (".patch", ".diff"):
-                out.extend(
-                    str(p) for p in regular_files_nofollow(base, "patches", (ext,)) if p.name != "_worktree_diff.patch"
-                )
-        return out, {}
-
-    @staticmethod
-    def _read_done(done_file: Path, *, held: HeldWorktree | None = None) -> dict[str, Any] | None:
-        """Parse a ``specialist_done.json`` file, unwrapping intent envelopes.
-
-        Tolerates missing files and parse errors (logged, returns None).
-        When the file holds a ``specialist_done`` intent envelope, the
-        inner ``payload`` is merged with the outer keys so callers always
-        see a flat dict.
-
-        Args:
-            done_file (Path): Path to the candidate done-file.
-            held (HeldWorktree | None): The worktree as recorded before the run; a file directly in it is read only
-                through that directory (:meth:`~.worktrees.HeldWorktree.read_text`).
-
-        Returns:
-            dict[str, Any] | None: The parsed (and possibly unwrapped)
-                payload, or None when missing / unparseable / not a dict.
-        """
-        if not done_file.exists():
-            return None
-        try:
-            if held is not None and done_file.parent == held.path:
-                text = held.read_text(done_file.name)
-            else:
-                text = read_text_nofollow(done_file)
-            data = json.loads(text)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            log.warning(
-                "specialist_done.json parse failed at %s: %r",
-                done_file,
-                exc,
-            )
-            return None
-        if not isinstance(data, dict):
-            log.warning(
-                "specialist_done.json at %s is not a dict (%r); ignoring",
-                done_file,
-                type(data).__name__,
-            )
-            return None
-        if str(data.get("intent_type") or "") == "specialist_done" and isinstance(data.get("payload"), dict):
-            inner = data["payload"]
-            merged: dict[str, Any] = {}
-            for k, v in data.items():
-                if k in ("intent_type", "payload"):
-                    continue
-                merged[k] = v
-            for k, v in inner.items():
-                merged[k] = v
-            log.info(
-                "_read_done: unwrapped specialist_done intent envelope at %s (proposal_set_len=%d)",
-                done_file,
-                len(inner.get("proposal_set") or []) if isinstance(inner.get("proposal_set"), list) else 0,
-            )
-            return merged
-        return data
-
 
 __all__ = [
-    "UNBOUNDED_REAP_CAP_SEC",
     "SpecialistSubprocessConfig",
     "SpecialistSubprocessDispatcher",
-    "SpecialistSubprocessResult",
 ]

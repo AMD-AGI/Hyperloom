@@ -297,7 +297,7 @@ written to.
 
 | Task | Backend | What it shows |
 |------|---------|---------------|
-| `examples/triton-softmax-forge-loop/` | Triton | Tutorial task — the complete driver contract: correctness, CUDA-graph benchmark, per-case timing, kernel-only profiling |
+| `examples/triton-softmax-forge-loop/` | Triton | Tutorial task — the complete driver contract: correctness, CUDA-graph benchmark, per-case timing |
 | `examples/flydsl-softmax-forge-loop/` | FlyDSL | The same contract plus the stream-routing guard a self-managed-stream DSL needs to be benchmarked honestly |
 | `examples/triton_mixtral_dynamic_quant/` | Triton | Production hot kernel — dynamic per-tensor FP8 quant, `(64, 4096)` BF16 → FP8 E4M3FN |
 | `examples/flydsl_gemma_rmsnorm/` | FlyDSL | Production hot kernel — Gemma RMSNorm, `(64, 2816)` BF16 |

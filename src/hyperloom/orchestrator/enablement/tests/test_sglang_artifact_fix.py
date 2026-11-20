@@ -11,7 +11,7 @@ from pathlib import Path
 from hyperloom.inference_optimizer.reference_script import LaunchSettings, ServingTarget, render_reference_script
 from hyperloom.orchestrator.enablement.artifacts import write_setting_script
 from hyperloom.orchestrator.specialists import patch_safety as _ps
-from hyperloom.orchestrator.specialists.runner import _sibling_checkouts
+from hyperloom.orchestrator.specialists.patch_claims import sibling_checkouts
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 
@@ -265,7 +265,7 @@ def test_sibling_checkouts_excludes_the_base_but_keeps_plain_trees(tmp_path):
     plain.mkdir()
     missing = tmp_path / "missing"
 
-    siblings = _sibling_checkouts((str(base), str(other), str(plain), str(missing)), base)
+    siblings = sibling_checkouts((str(base), str(other), str(plain), str(missing)), base)
     assert siblings == (other, plain)
 
 

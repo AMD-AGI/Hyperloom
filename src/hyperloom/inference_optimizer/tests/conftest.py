@@ -554,10 +554,10 @@ def cli_call_sequence(entry: str) -> list[str]:
     import pathlib
 
     from hyperloom.inference_optimizer import cli
-    from hyperloom.inference_optimizer.cli import launch_shape, model_catalog
+    from hyperloom.inference_optimizer.cli import launch_shape, model_catalog, session_resume, session_setup
 
     functions = {}
-    for module in (cli, model_catalog, launch_shape):
+    for module in (cli, model_catalog, launch_shape, session_resume, session_setup):
         tree = ast.parse(pathlib.Path(module.__file__).read_text(encoding="utf-8"))
         functions.update(
             {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}

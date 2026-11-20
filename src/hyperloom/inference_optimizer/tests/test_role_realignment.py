@@ -23,6 +23,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 )
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.state.task_registry import TaskSpec
+from hyperloom.orchestrator.phases import phase_transitions
 
 
 # fixtures
@@ -98,7 +99,7 @@ def test_shared_state_phase_status_summary_renders_compact_block():
         at=_ps.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=1_000_000.0),
     )
     s.phase_budget_pct = {phase: 0.5}
-    out = _ps.phase_status_summary(s, now_unix=1_000_120.0)
+    out = phase_transitions.phase_status_summary(s, now_unix=1_000_120.0)
     assert f"phase     : {phase}" in out
     assert "entered   : 1970-01-12T13:46:40Z" in out
     assert "elapsed_sec=120" in out
@@ -120,7 +121,7 @@ def test_shared_state_phase_status_summary_no_max_minutes_marks_unlimited():
         evidence={},
         at=_ps.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=1.0),
     )
-    out = _ps.phase_status_summary(s, now_unix=10.0)
+    out = phase_transitions.phase_status_summary(s, now_unix=10.0)
     assert "unlimited run" in out.lower()
 
 

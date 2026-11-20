@@ -29,7 +29,7 @@ import pytest
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import RecipeDelta
-from hyperloom_multibranch import cli
+from hyperloom_multibranch import cli_options
 from hyperloom_multibranch.contracts.llm import CompletionReply
 from hyperloom_multibranch.contracts.blackboard import Role
 from hyperloom_multibranch.contracts.blackboard.records import ToolResultPointer
@@ -316,8 +316,8 @@ async def test_a_challenger_the_command_line_asks_for_plays_until_its_judge_brea
     monkeypatch.setattr(frontier, "drawn_for_probation", lambda *_: True)
     pool = PlaybookPool.beside(archive)
     pool.register(Playbook("stall-4", replaced(H0, stall_tests=4).numbers, parent=H0.label, hypothesis="earlier stops"))
-    settings = cli.settings_from(
-        cli.build_parser().parse_args(["run", *WORKLOAD_ARGS, *SESSION_ARGS, "--playbook", "challenger"])
+    settings = cli_options.settings_from(
+        cli_options.build_parser().parse_args(["run", *WORKLOAD_ARGS, *SESSION_ARGS, "--playbook", "challenger"])
     )
     stage = _stage(tmp_path)
     stage.settings = settings

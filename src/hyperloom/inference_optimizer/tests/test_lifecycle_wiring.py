@@ -25,6 +25,7 @@ from hyperloom.inference_optimizer.session.session_paths import reports_dir
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 from .conftest import silent_backends
+from hyperloom.orchestrator.phases import phase_transitions
 
 
 @pytest.fixture
@@ -427,7 +428,7 @@ async def test_advance_phase_emits_enter_marker(session_dir, monkeypatch):
         c.shared_state.phase = _ps.PHASE_PRELUDE
         # Force a single PRELUDE -> KERNEL transition.
         monkeypatch.setattr(
-            _ps,
+            phase_transitions,
             "compute_next_phase",
             lambda *a, **k: (_ps.PHASE_KERNEL_AGENT, "kernel_ready", {"evidence": "test"}),
         )
