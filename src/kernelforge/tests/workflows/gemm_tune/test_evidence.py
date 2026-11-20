@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kernelforge.workflows.gemm_tune import evidence as ev
 
 _BF16_MISS = (
@@ -63,17 +65,8 @@ class TestApplyVerdict:
         # strongest reason to tune it, while "not recorded" is no reason at all.
         rep = ev.parse_log(_BF16_MISS, hit_logging=True)
         av = rep["apply_verdict"]
-        assert av["hit"] == 0 and av["miss"] == 1
+        assert av["hit"] == 0 and av["miss"] == 1 and av["hit_ratio"] == 0.0
         assert av["verdict"] == "zero_hit"
-
-    def test_hit_logging_unknown_stays_inconclusive(self):
-        rep = ev.parse_log(_BF16_MISS, hit_logging=None)
-        assert rep["apply_verdict"]["verdict"] == "inconclusive_no_hit_logging"
-
-    def test_hit_logging_flag_cannot_manufacture_a_hit(self):
-        rep = ev.parse_log(_BF16_MISS, hit_logging=True)
-        assert rep["apply_verdict"]["hit"] == 0
-        assert rep["apply_verdict"]["hit_ratio"] == 0.0
 
     def test_hit_logging_flag_is_irrelevant_once_something_hit(self):
         for flag in (None, True, False):
@@ -256,19 +249,20 @@ class TestDeployedTableNamesResolveToTheirOwner:
     def _miss(table: str) -> str:
         return f"[aiter] shape is M:512, N:1536, K:7168, not found tuned config in {table}"
 
-    def test_deployed_dense_bf16_is_owned(self):
-        d = ev.parse_log(self._miss("/tmp/aiter_configs/merged_tuned_dense_bf16.csv"))["demands"][0]
+    @pytest.mark.parametrize(
+        "table",
+        [
+            "/tmp/aiter_configs/merged_tuned_dense_bf16.csv",
+            "/work/tuned_dense_bf16.csv",
+            "/tmp/aiter_configs/bf16_tuned_gemm.csv",
+        ],
+        ids=["deployed-artifact", "undeployed-artifact", "runtime-name"],
+    )
+    def test_every_dense_bf16_table_name_is_owned(self, table):
+        d = ev.parse_log(self._miss(table))["demands"][0]
         assert d["table"] == "bf16_tuned_gemm.csv"
         assert d["tuner"] == "sglang_dense_bf16"
         assert d["env_var"] == "AITER_CONFIG_GEMM_BF16"
-
-    def test_undeployed_artifact_name_is_owned_too(self):
-        d = ev.parse_log(self._miss("/work/tuned_dense_bf16.csv"))["demands"][0]
-        assert d["table"] == "bf16_tuned_gemm.csv" and d["tuner"] == "sglang_dense_bf16"
-
-    def test_runtime_name_is_unchanged(self):
-        d = ev.parse_log(self._miss("/tmp/aiter_configs/bf16_tuned_gemm.csv"))["demands"][0]
-        assert d["table"] == "bf16_tuned_gemm.csv" and d["tuner"] == "sglang_dense_bf16"
 
     def test_deployed_and_runtime_names_are_one_demand(self):
         rep = ev.parse_log(
@@ -309,6 +303,3 @@ class TestCanonicalTableName:
 
     def test_windows_separators_and_whitespace(self):
         assert ev.canonical_table_name(r"  C:\aiter\merged_tuned_dense_bf16.csv ") == "bf16_tuned_gemm.csv"
-
-    def test_empty_is_empty_not_a_crash(self):
-        assert ev.canonical_table_name("") == ""

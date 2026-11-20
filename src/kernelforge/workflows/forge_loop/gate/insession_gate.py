@@ -10,12 +10,12 @@ from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
-import shutil
 import stat
 import sys
 import traceback
 from typing import Any
 
+from kernelforge.agent_backends.workspace_guard import remove_filesystem_path
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS, PROTECTED_GLOBS
 from kernelforge.utils.git import GitError, git, git_bytes
 from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement, GateScope
@@ -440,17 +440,6 @@ class InSessionGate:
                 self.findings.append(finding[:1200])
         return reason
 
-    @staticmethod
-    def _remove_filesystem_path(path: Path) -> None:
-        try:
-            metadata = path.lstat()
-        except FileNotFoundError:
-            return
-        if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
-            shutil.rmtree(path)
-        else:
-            path.unlink()
-
     def restore_protected_files(self) -> None:
         """Restore the complete protected inventory to its pre-session state."""
 
@@ -471,7 +460,7 @@ class InSessionGate:
         ):
             added = current[key]
             if added.kind != "missing":
-                self._remove_filesystem_path(added.path)
+                remove_filesystem_path(added.path)
 
         for key, state in baseline.items():
             if state.error:
@@ -481,9 +470,9 @@ class InSessionGate:
                 continue
             path = state.path
             if state.kind == "missing":
-                self._remove_filesystem_path(path)
+                remove_filesystem_path(path)
                 continue
-            self._remove_filesystem_path(path)
+            remove_filesystem_path(path)
             path.parent.mkdir(parents=True, exist_ok=True)
             if state.kind == "file":
                 path.write_bytes(state.content)

@@ -19,7 +19,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL
 from hyperloom_common.llm.llm_stability_env import apply_llm_stability_env
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
@@ -31,7 +30,7 @@ from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentRuntimeConfig,
 )
-from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
+from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
 from hyperloom_common.llm.llm_headers import format_custom_headers
 from kernelforge.agent_backends.gateway import (
     normalize_anthropic_base_url,
@@ -432,22 +431,6 @@ def _session_end_reason(*, timed_out: bool, stream_error: Exception | None, subt
     return subtype, "sdk_no_result", ""
 
 
-def _verified_file_changes(guard: WorkspaceGuard):
-    """What the guard says the session changed, rolling the workspace back when it cannot say.
-
-    ``verify()`` restores the baseline itself before raising, so this covers the
-    paths that fail earlier and must not mask them.
-    """
-    try:
-        return guard.verify()
-    except Exception:
-        try:
-            guard.rollback()
-        except (WorkspaceSafetyError, OSError, subprocess.SubprocessError):
-            log.warning("workspace rollback after a failed verify also failed", exc_info=True)
-        raise
-
-
 def _note_session_timeout(spec: AgentRunSpec, session_id: str) -> None:
     """Log and record a session that hit its deadline after it established ``session_id``."""
     log.warning(
@@ -508,7 +491,7 @@ def _session_result(
         workspace_contention=contention,
         structured_output=transcript.structured_output,
     )
-    result.file_changes = _verified_file_changes(guard)
+    result.file_changes = guard.verify_or_rollback()
     result.target_edit_count = guard.count_target_edits()
     result.edit_count = result.target_edit_count
     return result
@@ -518,27 +501,11 @@ class ClaudeBackend:
     """Execute Forge sessions through the Claude Agent SDK."""
 
     name = "claude"
-    capabilities = AgentCapabilities(
-        writable=True,
-        resumable=True,
-        stop_hooks=True,
-        native_subagents=True,
-        mcp=True,
-        probe=True,
-        session_env=True,
-        workspace_guard=True,
-        shared_prompt_cache=True,
-    )
+    capabilities: AgentCapabilities
 
-    def __init__(
-        self,
-        runtime: AgentRuntimeConfig | None = None,
-    ) -> None:
+    def __init__(self, runtime: AgentRuntimeConfig) -> None:
         """Resolve SDK symbols when the backend is selected."""
-        self.runtime = runtime or AgentRuntimeConfig(
-            provider=self.name,
-            model=DEFAULT_CLAUDE_MODEL,
-        )
+        self.runtime = runtime
         _prepare_claude_environment()
         self._query, self._options_type = _load_claude_sdk()
         self.fallback_reason = ""

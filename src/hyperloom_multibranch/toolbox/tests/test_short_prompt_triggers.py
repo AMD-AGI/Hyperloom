@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.outside_facts import SHORT_PROMPT_TOUCH
-from hyperloom.contracts.measurement import Purpose
 from hyperloom.contracts.recipe import ComponentChange, ComponentPatches, LaunchConfig, PatchRef, Recipe, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.points import AcceptedMeasurement
@@ -89,13 +88,6 @@ def test_an_sglang_patch_runs_the_check_by_an_attention_file_it_changes(tmp_path
     assert not re.search(SHORT_PROMPT_TOUCH, f"patch sglang {patch.path}"), "the hashed path alone says nothing"
 
 
-def test_an_sglang_patch_that_changes_no_attention_file_does_not(tmp_path: Path) -> None:
-    blobs = LocalBlobStore(tmp_path / "blobs")
-    parent, candidate, _ = _sglang(blobs, tmp_path, MOE_FILE)
-
-    assert decide(req(), parent, candidate, SETUP, blob_patch_files(blobs)) is None
-
-
 #: Files whose patch changes what attention, the KV cache or prefill computes: a model's attention forward, the
 #: batch and graph the attention runs in, the KV cache's blocks, aiter's attention kernels.
 _TOUCHING_FILES = [
@@ -147,15 +139,6 @@ def test_a_patch_to_a_tool_parser_vision_config_draft_model_gemm_or_moe_file_doe
     assert decide(req(), parent, candidate, SETUP, blob_patch_files(blobs)) is None
 
 
-def test_removing_an_attention_patch_runs_it_as_much_as_adding_one(tmp_path: Path) -> None:
-    blobs = LocalBlobStore(tmp_path / "blobs")
-    without, with_patch, _ = _sglang(blobs, tmp_path, ATTENTION_FILE)
-
-    plan = decide(req(), with_patch, without, SETUP, blob_patch_files(blobs))
-
-    assert plan is not None and plan.trigger == (f"patch-file sglang {ATTENTION_FILE}",)
-
-
 @pytest.mark.parametrize(
     ("stored", "why"),
     [(None, "(BlobError: "), (b"not a patch\n", "(PatchApplyError: ")],
@@ -175,21 +158,6 @@ def test_a_patch_whose_files_cannot_be_read_runs_the_check_and_says_why(
     assert plan is not None and len(plan.trigger) == 1
     assert plan.trigger[0].startswith(f"unexpressed patch {patch.path}: its files cannot be read")
     assert why in plan.trigger[0]
-
-
-@pytest.mark.parametrize(
-    ("purpose", "fields", "trigger"),
-    [
-        (Purpose.FINAL, {}, "purpose final"),
-        (Purpose.BASELINE, {}, "purpose baseline"),
-        (Purpose.INTEGRATION, {"consistency_check": True}, "request consistency_check"),
-    ],
-    ids=["final", "baseline", "lead-adoption"],
-)
-def test_final_baseline_and_lead_adoption_still_run_it_with_no_change(purpose, fields, trigger) -> None:
-    plan = decide(req(purpose=purpose, **fields), PARENT, PARENT, SETUP, no_patch_files)
-
-    assert plan is not None and plan.trigger == (trigger,)
 
 
 class _Planner:

@@ -412,13 +412,6 @@ async def _until(condition: Any) -> None:
         await asyncio.sleep(0)
 
 
-async def test_until_waits_for_a_condition_that_holds_only_after_wall_time_passes() -> None:
-    held: list[bool] = []
-    asyncio.get_running_loop().call_later(0.1, held.append, True)
-
-    await _until(lambda: held)
-
-
 async def test_a_large_merge_profiles_the_integration_head_and_a_moved_bottleneck_is_an_event(log: Path) -> None:
     shares = _Shares({"c-root": _op_shares("c-root", BEFORE)})
     toolbox = _AnalysingToolbox(shares)

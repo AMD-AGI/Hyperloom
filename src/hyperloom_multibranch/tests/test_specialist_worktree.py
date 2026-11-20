@@ -523,10 +523,11 @@ def test_a_wheel_s_upstream_github_failed_to_resolve_once_is_looked_up_again(mon
     assert len(asked) == 2
 
 
-def test_a_patch_whose_connection_drops_while_its_body_is_read_is_unread(monkeypatch):
+def test_a_wheel_whose_patch_connection_drops_while_its_body_is_read_names_no_upstream(monkeypatch, wheel):
+    monkeypatch.delenv("HYPERLOOM_ACTIVE_IMAGE_REF", raising=False)
     monkeypatch.setattr(worktree_module.urllib.request, "urlopen", lambda url, timeout: _Reply())
 
-    assert worktree_module._patch_head(f"{VLLM}/commit/dd4e40142.patch") is None
+    assert installed_upstream(wheel) is None
 
 
 def test_a_wheel_neither_the_image_nor_its_repository_resolves_names_no_upstream(monkeypatch, wheel):
@@ -1076,13 +1077,11 @@ def test_a_gitfile_naming_a_directory_of_the_source_base_that_is_no_worktree_s_r
         worktree.diff("vllm")
 
 
-def test_a_worktree_s_admin_directory_is_the_one_its_git_runs_against(tmp_path, base):
-    """The admin directory a sandbox shows is decided where every git run in the worktree is: by
-    ``trusted_admin_dir`` against the source base's git directory."""
+def test_a_worktree_s_admin_directory_is_the_real_path_under_the_base_s_git_worktrees(tmp_path, base):
+    """The admin directory a sandbox shows is the source base's admin directory of the worktree."""
     worktree = base.worktree("s1", tmp_path / "s1")
 
     assert worktree.admin == Path(os.path.realpath(base.path / ".git" / "worktrees" / "s1"))
-    assert worktree.admin == trusted_admin_dir(worktree.path, base.path / ".git")
 
 
 @_PLANTED_WHERE

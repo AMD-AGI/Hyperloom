@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind
+from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import (
     ComponentChange,
     ComponentPatches,
@@ -96,18 +96,19 @@ async def test_a_valid_request_is_accepted_and_written_to_the_blackboard(tmp_pat
     assert row.retest_of is not None
 
 
-async def test_a_profile_test_that_asks_for_accuracy_is_refused_and_never_queues(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("kind", "purpose", "attachments"),
+    [
+        (TestKind.PROFILE, Purpose.PROFILE, ()),
+        (TestKind.REPRO, Purpose.REPRO, (AttachmentRef("case-1", "dir", "a" * 64),)),
+    ],
+    ids=["profile", "repro"],
+)
+async def test_a_profile_or_repro_test_that_asks_for_accuracy_is_refused_and_never_queues(
+    tmp_path: Path, kind: TestKind, purpose: Purpose, attachments: tuple[AttachmentRef, ...]
+) -> None:
     rig = build(tmp_path)
-    await _rejected(rig, req(kind=TestKind.PROFILE, purpose=Purpose.PROFILE, accuracy=True), "invalid_request")
-    assert not list(rig.toolbox._log.entries())
-
-
-async def test_a_repro_test_that_asks_for_accuracy_is_refused_and_never_queues(tmp_path: Path) -> None:
-    rig = build(tmp_path)
-    case = AttachmentRef("case-1", "dir", "a" * 64)
-    request = req(kind=TestKind.REPRO, purpose=Purpose.REPRO, attachments=(case,), accuracy=True)
-    await _rejected(rig, request, "invalid_request")
-    assert not list(rig.toolbox._log.entries())
+    await _rejected(rig, req(kind=kind, purpose=purpose, attachments=attachments, accuracy=True), "invalid_request")
 
 
 async def test_a_repro_test_is_accepted_without_accuracy_whatever_the_workload(tmp_path: Path) -> None:
@@ -117,14 +118,6 @@ async def test_a_repro_test_is_accepted_without_accuracy_whatever_the_workload(t
     await rig.toolbox.drain()
     ran = next(j for j in rig.executor.jobs if j.request.request_id == request_id)
     assert ran.request.kind is TestKind.REPRO and ran.request.accuracy is False and ran.request.attachments == (case,)
-
-
-async def test_a_profile_test_is_accepted_without_accuracy_whatever_the_workload(tmp_path: Path) -> None:
-    rig = build(tmp_path)  # an InferenceX campaign: the gate-read purposes get accuracy, a profile does not
-    request_id = await rig.toolbox.submit_test(req(kind=TestKind.PROFILE, purpose=Purpose.PROFILE))
-    await rig.toolbox.drain()
-    ran = next(j for j in rig.executor.jobs if j.request.request_id == request_id)
-    assert ran.request.kind is TestKind.PROFILE and ran.request.accuracy is False
 
 
 # --- an InferenceX campaign runs the purposes the rule gate reads with accuracy ---------------------------------------
@@ -140,18 +133,13 @@ async def _accepted_accuracy(rig, request) -> tuple[bool, bool]:
     return bool(logged.request["accuracy"]), ran.request.accuracy
 
 
-async def test_an_inferencex_explore_is_accepted_with_accuracy(tmp_path: Path) -> None:
-    rig = build(tmp_path)
-    assert await _accepted_accuracy(rig, req(purpose=Purpose.EXPLORE)) == (True, True)
-
-
 async def test_an_inferencex_confirm_is_accepted_with_accuracy(tmp_path: Path) -> None:
     rig = build(tmp_path)
     first = await rig.toolbox.submit_test(req())
     assert await _accepted_accuracy(rig, req(purpose=Purpose.CONFIRM, retest_of=first)) == (True, True)
 
 
-@pytest.mark.parametrize("purpose", [Purpose.BASELINE, Purpose.INTEGRATION, Purpose.FINAL])
+@pytest.mark.parametrize("purpose", [Purpose.EXPLORE, Purpose.BASELINE, Purpose.INTEGRATION, Purpose.FINAL])
 async def test_an_inferencex_gate_read_purpose_is_accepted_with_accuracy(tmp_path: Path, purpose: Purpose) -> None:
     rig = build(tmp_path)
     assert await _accepted_accuracy(rig, req(purpose=purpose)) == (True, True)
@@ -317,17 +305,17 @@ def test_an_explore_that_adopts_a_lead_with_the_consistency_check_still_runs_acc
     assert _skipping_explore().with_required_accuracy(request).accuracy is True
 
 
-@pytest.mark.parametrize("purpose", [Purpose.BASELINE, Purpose.INTEGRATION, Purpose.FINAL])
-def test_with_explore_accuracy_off_every_other_purpose_the_gate_reads_still_runs_accuracy(purpose: Purpose) -> None:
-    assert _skipping_explore().with_required_accuracy(req(purpose=purpose)).accuracy is True
-
-
-def test_with_explore_accuracy_off_a_confirm_still_runs_accuracy() -> None:
-    request = req(purpose=Purpose.CONFIRM, retest_of="first")
-
-    assert _skipping_explore().with_required_accuracy(request).accuracy is True
-
-
-async def test_by_default_a_plain_explore_still_runs_accuracy_because_the_gate_reads_its_score(tmp_path: Path) -> None:
-    assert AcceptanceSetup(FakeRepo(), FakePlanner(), IMAGE).explore_accuracy is True
-    assert await _accepted_accuracy(build(tmp_path), req(purpose=Purpose.EXPLORE)) == (True, True)
+@pytest.mark.parametrize(
+    "gate_read",
+    [
+        req(purpose=Purpose.BASELINE),
+        req(purpose=Purpose.INTEGRATION),
+        req(purpose=Purpose.FINAL),
+        req(purpose=Purpose.CONFIRM, retest_of="first"),
+    ],
+    ids=["baseline", "integration", "final", "confirm"],
+)
+def test_with_explore_accuracy_off_every_other_purpose_the_gate_reads_still_runs_accuracy(
+    gate_read: TestRequest,
+) -> None:
+    assert _skipping_explore().with_required_accuracy(gate_read).accuracy is True

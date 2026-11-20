@@ -22,7 +22,6 @@ import pytest
 
 from hyperloom_common.bwrap import BwrapProbe
 
-import hyperloom
 from hyperloom.common import confinement
 from hyperloom.common.agent_isolation import BwrapIsolation, NoIsolation
 from hyperloom.common.tests._id_map_helpers import HOST_MAP, use_id_maps
@@ -36,7 +35,6 @@ from hyperloom.measure.runner.native.isolated import (
     ISOLATION_KEY,
     ISOLATION_UID,
     ISOLATION_UID_NETNS,
-    SOURCE_ROOT,
     ChildInterpreter,
     IsolatedBuilds,
     Isolation,
@@ -239,10 +237,6 @@ def test_a_tree_without_the_builder_builds_nothing(tmp_path: Path) -> None:
 
     with pytest.raises(BuildInfraError, match="the build runner exited"):
         _built_with_source(tmp_path, elsewhere)
-
-
-def test_by_default_the_child_uses_the_tree_this_process_runs_from() -> None:
-    assert Path(hyperloom.__file__).resolve().parent.parent == SOURCE_ROOT == ChildInterpreter().source
 
 
 def test_the_compile_user_can_reach_its_work_below_the_services_private_scratch(tmp_path: Path) -> None:

@@ -228,8 +228,14 @@ def test_explicit_backend_disables_cross_provider_fallback(
     assert captured["settings"].sandbox_mode == "workspace-write"
 
 
-def _assert_sandbox_mode_is_wired(monkeypatch, mode: str) -> None:
-    """An explicit sandbox ``mode`` reaches the runtime settings and the registered backend is returned."""
+@pytest.mark.parametrize("mode", ["workspace-write", "read-only", "bypass"])
+def test_explicit_sandbox_mode_is_wired(
+    clean_agent_env,
+    monkeypatch,
+    mode,
+):
+    """An explicit ``mode`` reaches the runtime settings, bypass included, with HYPERLOOM_CODEX_EXTERNAL_SANDBOX unset."""
+    monkeypatch.delenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", raising=False)
     captured = {}
 
     def fake_resolve(provider, **kwargs):
@@ -245,25 +251,6 @@ def _assert_sandbox_mode_is_wired(monkeypatch, mode: str) -> None:
 
     assert _create_agent_backend("codex", "gpt-explicit", mode) is backend
     assert captured["settings"].sandbox_mode == mode
-
-
-@pytest.mark.parametrize("mode", ["workspace-write", "read-only"])
-def test_explicit_secure_sandbox_mode_is_wired(
-    clean_agent_env,
-    monkeypatch,
-    mode,
-):
-    _assert_sandbox_mode_is_wired(monkeypatch, mode)
-
-
-def test_bypass_is_wired(clean_agent_env, monkeypatch):
-    _assert_sandbox_mode_is_wired(monkeypatch, "bypass")
-
-
-def test_bypass_is_wired_without_retired_external_sandbox_env(clean_agent_env, monkeypatch):
-    """forge-fuse bypass no longer gates on HYPERLOOM_CODEX_EXTERNAL_SANDBOX."""
-    monkeypatch.delenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", raising=False)
-    _assert_sandbox_mode_is_wired(monkeypatch, "bypass")
 
 
 def test_retired_external_sandbox_env_does_not_confirm_bypass(clean_agent_env, monkeypatch):
@@ -1102,43 +1089,33 @@ class TestNonGitRepoRoot:
 
 
 class TestResolveFrameworkSourceFile:
-    def test_sglang_editable_layout(self, tmp_path):
-        # editable checkout: <root>/python/sglang/srt/models/<mt>.py
-        mdir = tmp_path / "python" / "sglang" / "srt" / "models"
+    @pytest.mark.parametrize(
+        ("framework", "models_dir", "model_type"),
+        [
+            ("sglang", "python/sglang/srt/models", "lfm2"),
+            ("sglang", "sglang/srt/models", "zaya"),
+            ("vllm", "vllm/model_executor/models", "llama"),
+        ],
+        ids=["sglang-editable-checkout", "sglang-site-packages", "vllm"],
+    )
+    def test_each_layout_resolves_to_the_model_file(self, tmp_path, framework, models_dir, model_type):
+        mdir = tmp_path / models_dir
         mdir.mkdir(parents=True)
-        (mdir / "lfm2.py").write_text("# model", encoding="utf-8")
+        (mdir / f"{model_type}.py").write_text("# model", encoding="utf-8")
         path, note = resolve_framework_source_file(
-            str(tmp_path), "sglang", framework_root=str(tmp_path), model_type="lfm2"
+            str(tmp_path), framework, framework_root=str(tmp_path), model_type=model_type
         )
-        assert path == str(mdir / "lfm2.py")
+        assert path == str(mdir / f"{model_type}.py")
 
-    def test_sglang_site_packages_layout(self, tmp_path):
-        # site-packages: <root>/sglang/srt/models/<mt>.py (no python/ dir)
-        mdir = tmp_path / "sglang" / "srt" / "models"
-        mdir.mkdir(parents=True)
-        (mdir / "zaya.py").write_text("# model", encoding="utf-8")
+    @pytest.mark.parametrize(
+        ("framework", "model_type"),
+        [("sglang", "nope"), ("tensorrt", "x")],
+        ids=["model-not-found", "unsupported-framework"],
+    )
+    def test_unresolvable_returns_empty(self, tmp_path, framework, model_type):
         path, note = resolve_framework_source_file(
-            str(tmp_path), "sglang", framework_root=str(tmp_path), model_type="zaya"
+            str(tmp_path), framework, framework_root=str(tmp_path), model_type=model_type
         )
-        assert path == str(mdir / "zaya.py")
-
-    def test_vllm_layout(self, tmp_path):
-        mdir = tmp_path / "vllm" / "model_executor" / "models"
-        mdir.mkdir(parents=True)
-        (mdir / "llama.py").write_text("# model", encoding="utf-8")
-        path, note = resolve_framework_source_file(
-            str(tmp_path), "vllm", framework_root=str(tmp_path), model_type="llama"
-        )
-        assert path == str(mdir / "llama.py")
-
-    def test_unresolvable_returns_empty(self, tmp_path):
-        path, note = resolve_framework_source_file(
-            str(tmp_path), "sglang", framework_root=str(tmp_path), model_type="nope"
-        )
-        assert path == ""
-
-    def test_unknown_framework_returns_empty(self, tmp_path):
-        path, note = resolve_framework_source_file(str(tmp_path), "tensorrt", model_type="x")
         assert path == ""
 
 

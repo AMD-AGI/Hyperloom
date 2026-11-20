@@ -10,7 +10,14 @@ import pytest
 
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, UnknownTestRequest
 from hyperloom_multibranch.toolbox.tests.helpers import build, settle
-from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolOutput, ToolRequest, all_tools
+from hyperloom_multibranch.toolbox.tools import (
+    JobStatus,
+    ToolJobs,
+    ToolOutput,
+    ToolRequest,
+    UpstreamPrSearch,
+    tracelens_tool,
+)
 
 
 class Slow:
@@ -28,7 +35,9 @@ def _with_tools(tmp_path: Path, tool: Slow | None = None):
     made: list[ToolJobs] = []
 
     def make(blackboard):
-        made.append(ToolJobs([tool] if tool else list(all_tools()), blackboard, tmp_path / "tool-results"))
+        made.append(
+            ToolJobs([tool] if tool else [tracelens_tool(), UpstreamPrSearch()], blackboard, tmp_path / "tool-results")
+        )
         return made[0]
 
     return build(tmp_path, tools=make), made[0]
@@ -57,8 +66,8 @@ async def test_a_stopped_branch_has_its_running_tool_jobs_cancelled(tmp_path: Pa
 
 async def test_every_registered_tool_is_served_and_a_toolbox_without_tools_refuses(tmp_path: Path) -> None:
     rig, jobs = _with_tools(tmp_path)
-    assert {"profile", "upstream_pr_search"} <= set(jobs.tool_names)
+    assert {"tracelens", "upstream_pr_search"} <= set(jobs.tool_names)
     with pytest.raises(RequestRejected, match="no asynchronous tools"):
-        build(tmp_path / "other").toolbox.submit_tool(ToolRequest("profile", "b1"))
+        build(tmp_path / "other").toolbox.submit_tool(ToolRequest("tracelens", "b1"))
     with pytest.raises(UnknownTestRequest):
         build(tmp_path / "third").toolbox.tool_result("job-1")

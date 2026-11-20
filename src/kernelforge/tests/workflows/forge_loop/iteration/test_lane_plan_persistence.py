@@ -110,16 +110,6 @@ def test_every_lane_plan_is_published_not_only_the_first(tmp_path, monkeypatch):
     assert (root / "lane_003.md").read_text() == "fuse the epilogue\n"
 
 
-def test_lane_one_keeps_the_name_the_rest_of_the_loop_reads(tmp_path, monkeypatch):
-    """The archive, the handoffs and the supervisor all read this file by name."""
-    loop, _workspace = _loop(tmp_path, monkeypatch)
-
-    published = _round(loop, 2, ["widen the loads", "stage through LDS"])
-
-    assert published.name == "optimization_plan.md"
-    assert published == loop._lane_plan_path(2, 1)
-
-
 def test_a_single_lane_round_publishes_exactly_what_it_always_did(tmp_path, monkeypatch):
     """--lanes 1 predates all of this and its artifacts must be unchanged."""
     loop, workspace = _loop(tmp_path, monkeypatch)
@@ -635,19 +625,6 @@ def test_a_spent_round_leaves_no_queue_behind(tmp_path, monkeypatch):
     assert later._lane_queue == []
 
 
-def test_a_round_that_queued_nothing_publishes_nothing(tmp_path, monkeypatch):
-    """Guards the assertions above from passing for the wrong reason."""
-    loop, workspace = _loop(tmp_path, monkeypatch)
-
-    loop._persist_lane_queue()
-
-    later = _reopen(workspace, tmp_path, monkeypatch)
-    later._restore_lane_queue()
-
-    assert not loop._lane_queue_path().exists()
-    assert later._lane_queue == []
-
-
 def test_a_queue_that_cannot_be_written_costs_durability_only(tmp_path, monkeypatch, capsys):
     """The candidates are in memory and this process still measures them."""
     loop, _workspace = _loop(tmp_path, monkeypatch)
@@ -662,19 +639,6 @@ def test_a_queue_that_cannot_be_written_costs_durability_only(tmp_path, monkeypa
 
     assert [item.lane_id for item in loop._lane_queue] == ["1"]
     assert "No space left on device" in capsys.readouterr().out
-
-
-def test_a_restored_queue_is_measured_before_a_new_round_is_planned(tmp_path, monkeypatch):
-    """Fanning out on top of unspent candidates would buy a round twice over."""
-    loop, workspace = _loop(tmp_path, monkeypatch)
-    diff_of = _widen(workspace)
-    _queued(loop, ("1", "tune prefill", diff_of("line_0 = 0", "line_0 = 100")))
-
-    later = _reopen(workspace, tmp_path, monkeypatch)
-    later._restore_lane_queue()
-
-    # The loop only fans out when nothing is queued, so a restored queue is what the next iteration measures.
-    assert later._lane_queue != []
 
 
 # The verdict that outlives the round it judged

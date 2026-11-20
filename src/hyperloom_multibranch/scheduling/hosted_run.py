@@ -10,8 +10,8 @@ the legacy entry validated, a multi-branch session needs ``multibranch.workload`
 ``multibranch.reference_script`` ``--reference-script``, ``multibranch.max_branches`` ``--max-branches``,
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
 ``--autonomous-agent``, ``multibranch.make_before_break`` (``true`` by default) ``--make-before-break`` or
-``--no-make-before-break``, ``placement.measurement`` is ``--measurement``, and ``placement.max_parallel_tests`` is
-``--max-parallel-tests``, at most what runs at once where the session measures. The fields ``run`` has no option for --
+``--no-make-before-break``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what runs at once
+where the session measures. The fields ``run`` has no option for --
 ``objective``, ``options``, ``placement.profile`` and ``placement.specialist_capacity`` -- are not read. A spec that
 sets ``launch.server_args`` or ``launch.extra_env`` is refused rather than run without them: a multi-branch session's
 base launch, its flags and its environment, is the shell script ``multibranch.reference_script`` names.
@@ -192,7 +192,6 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         "max-branches": section.get("max_branches"),
         "dev-leases": section.get("dev_leases"),
         "max-parallel-tests": min(spec.max_parallel_tests, parallel_tests),
-        "measurement": spec.measurement,
     }
     agents = [f"--autonomous-agent={source}" for source in _agent_sources(section.get("autonomous_agents"))]
     switches = _switches(section)
