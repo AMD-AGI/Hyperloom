@@ -85,7 +85,7 @@ class IntegratePatchExecutor(
         try:
             result = await self._stage_apply(attempt, params, extra)
             if result is None:
-                result = {**await self._stage_gate(attempt, params), RESULT_BENCHED: True}
+                result = {RESULT_BENCHED: True, **await self._stage_gate(attempt, params)}
         except BaseException:
             try:
                 self._finish_attempt(attempt, {"status": "cancelled"})

@@ -33,6 +33,7 @@ from ._integrate_results import _PatchBench
 from ._nogit_patch import _is_git_tree
 from ._patch_git import _uncommitted_revert
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
+from ._integrate_vocabulary import FILTERED_BEFORE_BENCH_CLASS, RESULT_BENCHED
 from ._patch_sources import _declared_stack_ops, _patch_stack_by_root, _read_patch_texts
 from ._server_argv import ConfigUnreadable
 from ._workload_envs import FrameworkScriptMismatchError
@@ -45,6 +46,31 @@ def _attach_attempt_evidence(verdict: dict[str, Any], attempt: IntegrateAttempt)
     """Add to a verdict what the applied attempt holds and the gate itself cannot see."""
     if attempt.dropped_env_overrides:
         verdict["dropped_env_overrides"] = attempt.dropped_env_overrides
+
+
+def _filtered_verdict(
+    attempt: IntegrateAttempt, params: dict[str, Any], bench_result: dict[str, Any]
+) -> dict[str, Any]:
+    """The revert of a variant a pre-bench filter refused, carrying the refusal as its reason; it was never launched.
+
+    An enablement round's revert says so, as every other enablement result does, so the lane takes it back.
+    """
+    refusal = str(bench_result.get("error") or "")
+    verdict: dict[str, Any] = {
+        "status": "reverted",
+        "error_class": FILTERED_BEFORE_BENCH_CLASS,
+        "error": refusal,
+        "reason": refusal,
+        "specialist_task_id": attempt.specialist_task_id,
+        "patches_applied": [],
+        "patches_reverted": [],
+        "bench_result": bench_result,
+        "workspace": str(attempt.output_root),
+        RESULT_BENCHED: False,
+    }
+    if params.get("enablement"):
+        verdict["enablement"] = True
+    return verdict
 
 
 def _inert_round_evidence(
@@ -226,7 +252,9 @@ class EnablementGateMixin:
                 "workspace": str(output_root),
             }
 
-        if params.get("enablement"):
+        if bench_result.get("error_class") == FILTERED_BEFORE_BENCH_CLASS:
+            verdict = _filtered_verdict(attempt, params, bench_result)
+        elif params.get("enablement"):
             verdict = await self._gate_enablement(
                 attempt=attempt,
                 params=params,
