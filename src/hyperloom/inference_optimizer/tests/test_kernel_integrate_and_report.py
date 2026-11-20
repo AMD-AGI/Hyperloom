@@ -198,7 +198,6 @@ def graded_integrate_case(native_benchmark, session_dir, tmp_path, monkeypatch):
         assert target.read_text(encoding="utf-8") == patch_file.read_text(encoding="utf-8")
         workspace = Path(ctx.task.params["output_dir"]) / "benchmark_sglang_e2e"
         workspace.mkdir(parents=True, exist_ok=True)
-        (workspace / "server.log").write_text(f"INFO importing {target.name}\n", encoding="utf-8")
         if "input_throughput" in measurement and "total_token_throughput" in measurement:
             measurement["input_throughput"] = measurement["total_token_throughput"] - measurement["output_throughput"]
         measurement["workspace"] = str(workspace)
@@ -560,6 +559,25 @@ async def test_integrate_handler_grades_full_e2e_measurement(
         expected_source = "def kernel():\n    return 'original'\n"
         assert result["revert_result"]["status"] == "ok"
     assert target.read_text(encoding="utf-8") == expected_source
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_reverts_a_patch_into_a_copy_the_measured_server_does_not_import(
+    session_dir, graded_integrate_case, monkeypatch
+):
+    _, payload, _measurement, target = graded_integrate_case
+    (target.parent / "__init__.py").write_text("", encoding="utf-8")
+    served = {target.parent.name: str(target.parent.parent / "venv" / target.parent.name)}
+    monkeypatch.setattr(krh, "round_import_roots", lambda _workspace: served)
+
+    result = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert (result["status"], result["error_class"], result["decision"]) == (
+        "failed",
+        "patch_outside_served_roots",
+        "REVERT",
+    )
+    assert target.read_text(encoding="utf-8") == "def kernel():\n    return 'original'\n"
 
 
 @pytest.mark.asyncio

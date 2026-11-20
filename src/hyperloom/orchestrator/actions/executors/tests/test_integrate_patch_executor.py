@@ -1074,11 +1074,7 @@ async def _run_enablement_integrate(
             "timed_out": False,
         }
 
-    async def _noop_kb(*_args, **_kwargs):
-        return None
-
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
-    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
 
     params = {
         "specialist_task_id": "t-spec-en",
@@ -1395,11 +1391,6 @@ async def test_enablement_zero_patch_round_does_not_erase_prior_accepted_work(tm
 
     executor = IntegratePatchExecutor(session_dir=session_dir)
 
-    async def _noop_kb(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
-
     # Round 1: apply the patch and accept as advanced (not yet runnable).
     new_gap = "MissingKernelError: kernel not found\n"
 
@@ -1479,11 +1470,7 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
             "timed_out": False,
         }
 
-    async def _noop_kb(*_args, **_kwargs):
-        return None
-
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
-    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
 
     params = {
         "specialist_task_id": "t-spec-setup",
@@ -1654,12 +1641,8 @@ async def test_a_declared_switch_arms_its_gate_and_the_round_benches(tmp_path: P
             "timed_out": False,
         }
 
-    async def _noop_kb(*_args, **_kwargs):
-        return None
-
     monkeypatch.delenv("HL_TEST_FUSE", raising=False)
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
-    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
 
     params = {
         "specialist_task_id": "t-spec-armed",
@@ -2374,11 +2357,7 @@ async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monk
         # Simulate 3801 — below the explore winner 4616.
         return {"output_throughput": 3801.0, "error": ""}, {"accuracy_pass": None}
 
-    async def _noop_kb(*_args, **_kwargs):
-        return None
-
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
-    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
 
     live_state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",

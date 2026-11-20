@@ -297,7 +297,7 @@ def test_dispatch_pause_budget_remaining(coord: Coordinator, monkeypatch) -> Non
     assert coord.dispatcher.dispatch_paused_for_phase_budget() is False
 
 
-# maybe_autosubmit_framework_config
+# maybe_autosubmit_enablement_config
 def _authoring_task(task_id: str = "spec-1") -> types.SimpleNamespace:
     return types.SimpleNamespace(
         task_id=task_id,
@@ -310,26 +310,17 @@ def _authoring_task(task_id: str = "spec-1") -> types.SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_config_not_authoring_returns(coord: Coordinator) -> None:
-    task = types.SimpleNamespace(task_id="x", params={})
-    await coord.phase_framework.maybe_autosubmit_framework_config(task=task, done_payload={})
+async def test_a_framework_authoring_config_round_is_left_to_explore(coord: Coordinator) -> None:
+    done = {"proposal_set": [{"name": "mtp-toggle", "extra_envs": {"VLLM_MTP": "1"}, "extra_args": "--speculative 4"}]}
+    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_authoring_task(), done_payload=done)
     assert not coord.state.pending_proposals
 
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_patch_deliverable_returns(coord: Coordinator) -> None:
-    await coord.phase_framework.maybe_autosubmit_framework_config(
-        task=_authoring_task(),
+    await coord.phase_framework.maybe_autosubmit_enablement_config(
+        task=_enablement_authoring_task(),
         done_payload={"patches_written": ["p.patch"]},
-    )
-    assert not coord.state.pending_proposals
-
-
-@pytest.mark.asyncio
-async def test_autosubmit_config_no_levers_returns(coord: Coordinator) -> None:
-    await coord.phase_framework.maybe_autosubmit_framework_config(
-        task=_authoring_task(),
-        done_payload={"proposal_set": [{"name": "n"}]},  # no extra_args/envs -> no levers
     )
     assert not coord.state.pending_proposals
 
@@ -338,13 +329,11 @@ async def test_autosubmit_config_no_levers_returns(coord: Coordinator) -> None:
 async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -> None:
     done = {"proposal_set": [{"name": "mtp-toggle", "extra_envs": {"VLLM_MTP": "1"}, "extra_args": "--speculative 4"}]}
     before = len(coord.state.pending_proposals)
-    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
     prop = next(iter(coord.state.pending_proposals.values()))
     assert prop.action_name == "integrate_patch"
     params = (prop.payload or {}).get("params") or {}
-    assert params["framework_agent_authoring"] is True
-    assert params["framework_agent_candidate_id"] == "cand-1"
     assert params["extra_server_args"] == "--speculative 4"
     assert params["extra_envs"] == {"VLLM_MTP": "1"}
     assert "config_changes" not in params
@@ -358,7 +347,7 @@ async def test_autosubmit_config_names_the_round_after_the_lever_it_benches(coor
             {"name": "eagle-spec", "extra_args": "--speculative-algorithm EAGLE --speculative-num-steps 3"},
         ]
     }
-    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
     params = (next(iter(coord.state.pending_proposals.values())).payload or {}).get("params") or {}
     assert (params["patch_name"], params["extra_server_args"]) == (
         "eagle-spec",
@@ -372,50 +361,19 @@ async def test_autosubmit_config_names_the_round_after_the_lever_it_benches(coor
     [["--disable-cuda-graph"], ["--disable-cuda-graph", "--disable-cuda-graph"]],
     ids=["once", "repeated"],
 )
-async def test_a_removal_only_lever_is_benched_and_its_ledger_verdict_found_again(
-    coord: Coordinator, tmp_path, monkeypatch, removals
-) -> None:
-    from hyperloom.agents.framework.kb import KB_ROOT_ENV
-    from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
-    from hyperloom.orchestrator.actions.executors._integrate_perf_gate import _GateBasis, _grade_throughput, _weigh_gate
-    from hyperloom.orchestrator.knowledge.kb_writeback import (
-        OUTCOME_REVERTED_SMOKE_FAIL,
-        FrameworkOutcome,
-        write_framework_record,
-    )
-
-    monkeypatch.setenv(KB_ROOT_ENV, str(tmp_path / "kb"))
+async def test_a_removal_only_lever_reaches_integrate(coord: Coordinator, removals) -> None:
     done = {"proposal_set": [{"name": "no-cuda-graph-off", "remove_args": removals}]}
-    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
     (prop,) = coord.state.pending_proposals.values()
     params = prop.payload["params"]
     assert (params["patch_name"], params["remove_args"]) == ("no-cuda-graph-off", removals)
-
-    attempt = IntegrateAttempt(task_id="t-int", specialist_task_id="spec-1", shared_state=coord.shared_state)
-    throughput = _grade_throughput(coord.shared_state, {}, _GateBasis(100.0, 1.0))
-    measured = _weigh_gate(attempt, params, {}, {"accuracy": 0.5}, throughput).measured
-    await write_framework_record(
-        FrameworkOutcome(
-            pr_url="cand-1",
-            pr_sha="",
-            patch_path="",
-            outcome=OUTCOME_REVERTED_SMOKE_FAIL,
-            tps_delta_pct=0.0,
-            session_id="s",
-            applicability=measured.cfg_fingerprint,
-            accuracy_delta_pct=-2.0,
-        )
-    )
-    coord.state.pending_proposals.clear()
-    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task("spec-2"), done_payload=done)
-    assert not coord.state.pending_proposals
 
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_idempotent_on_existing_verdict(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setattr(coord.shared_state, "get_specialist_patch_verdict", lambda _sid: "approve", raising=False)
     done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
-    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
     assert not coord.state.pending_proposals
 
 
@@ -428,10 +386,10 @@ async def test_autosubmit_config_returns_when_review_in_flight(coord: Coordinato
         from_agent="coordinator",
         action_name="integrate_patch",
         predicted_gain_pct=0.0,
-        payload={"params": {"specialist_task_id": "spec-1"}},
+        payload={"params": {"specialist_task_id": "spec-enable-1"}},
     )
     done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
-    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == 1
 
 
@@ -448,7 +406,7 @@ async def test_autosubmit_config_proceeds_for_a_different_specialist(coord: Coor
         payload={"params": {"specialist_task_id": "spec-other"}},
     )
     done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
-    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == 2
 
 
@@ -472,7 +430,7 @@ async def test_autosubmit_config_enablement_propagates_marker_and_setup(coord: C
         "setup_commands": ["pip install -U aiter"],
     }
     before = len(coord.state.pending_proposals)
-    await coord.phase_framework.maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
     prop = next(iter(coord.state.pending_proposals.values()))
     params = (prop.payload or {}).get("params") or {}
@@ -488,7 +446,7 @@ async def test_autosubmit_config_enablement_setup_only_still_routes(coord: Coord
     """An enablement deliverable with NO config levers (setup-only stack upgrade) must still reach integrate_patch so the stall accounting can advance."""
     done = {"proposal_set": [], "setup_commands": ["pip install -U vllm==0.21.0"]}
     before = len(coord.state.pending_proposals)
-    await coord.phase_framework.maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
     prop = next(iter(coord.state.pending_proposals.values()))
     params = (prop.payload or {}).get("params") or {}
@@ -509,7 +467,7 @@ async def test_autosubmit_config_build_only_skips_integrate(coord: Coordinator) 
         },
     }
 
-    await coord.phase_framework.maybe_autosubmit_framework_config(
+    await coord.phase_framework.maybe_autosubmit_enablement_config(
         task=_enablement_authoring_task(),
         done_payload=done,
     )
@@ -593,11 +551,6 @@ def test_record_authoring_empty_guards(coord: Coordinator) -> None:
     coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=_authoring_task(),
         done_payload={"patches_written": ["p.patch"]},
-    )
-    # Config-lever deliverable -> no-op (config autosubmit owns the row).
-    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
-        task=_authoring_task(),
-        done_payload={"proposal_set": [{"extra_envs": {"X": "1"}}]},
     )
     assert not (coord.shared_state.framework_agent_phase_progress or [])
 

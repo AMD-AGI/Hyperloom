@@ -19,7 +19,7 @@ Only tracked changes are sealed. Untracked files -- tuned GEMM tables, JIT
 caches, an operator's own notes -- are not part of any patch and have no business
 in a commit this session created.
 
-The trees sealed are the ones the server imports
+The trees sealed are the ones the server imports, as its interpreter answered
 (:func:`~hyperloom.inference_optimizer.framework_paths.served_source_trees`). An
 installed package has no history of its own, so it is sealed into the session's
 snapshot of it -- the history its specialists branch off -- and the campaign
@@ -35,9 +35,10 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from kernelforge.workflows.rewrite_controller import (
     CAMPAIGN_BRANCH_PREFIX,
@@ -45,8 +46,10 @@ from kernelforge.workflows.rewrite_controller import (
     untracked_paths,
 )
 from kernelforge.utils import acquire_repo_lock, release_repo_lock
-from hyperloom.inference_optimizer.framework_paths import served_source_trees
+from hyperloom.inference_optimizer.framework_paths import head_import_roots, served_source_trees
 from hyperloom.inference_optimizer.tree_snapshot import snapshot_repository, snapshot_tree
+
+from .served_imports import round_import_roots
 
 
 @dataclass(frozen=True)
@@ -202,8 +205,15 @@ def _seal_snapshot(tree: Path, session_dir: Path, branch: str) -> tuple[Path, Re
     return worktree, RepoBaseline(commit=commit, deploy_root=tree, untracked=untracked_paths(worktree))
 
 
+def served_import_roots(state: Any) -> tuple[str, ...]:
+    """Where the server ``current_best`` was measured on imports its framework and kernel libraries from."""
+    roots = round_import_roots(state.current_best_measurement.get("benchmark_workspace"))
+    # A round against a server it did not start asks that server nothing; such a server serves this host's trees.
+    return tuple(roots.values()) or head_import_roots(state.framework)
+
+
 def seal_campaign_baseline(
-    framework: str,
+    import_roots: Iterable[str],
     *,
     session_dir: Path,
     session_id: str,
@@ -211,13 +221,14 @@ def seal_campaign_baseline(
 ) -> dict[str, RepoBaseline]:
     """Seal every tree the server imports rewritable source from, keyed by the repository it is rewritten in.
 
-    Best-effort per tree. One tree that cannot be sealed -- no write permission,
-    a broken checkout -- costs that repository's operators, which the controller
-    refuses individually; it must not cost the whole KERNEL phase.
+    ``import_roots`` is where the server imports each package from (:func:`served_import_roots`).
+    Best-effort per tree. One tree that cannot be sealed -- no write permission, a broken checkout
+    -- costs that repository's operators, which the controller refuses individually; it must not
+    cost the whole KERNEL phase.
     """
     branch = session_branch_name(session_id, macro_cycle)
     baselines: dict[str, RepoBaseline] = {}
-    for tree in served_source_trees(framework):
+    for tree in served_source_trees(import_roots):
         try:
             if tree.checkout:
                 repo, baseline = tree.root, _seal_repository(tree.root, branch)
@@ -272,5 +283,6 @@ __all__ = [
     "RepoBaseline",
     "reclaim_campaign_repositories",
     "seal_campaign_baseline",
+    "served_import_roots",
     "session_branch_name",
 ]
