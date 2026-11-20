@@ -10,8 +10,9 @@ says aiter started building a JIT module is working, for as long as a module of 
 time does not count against the boot budget.
 
 Before ready, a server whose processes keep using CPU is working too, however long its log stays quiet: a
-large-checkpoint load can spend half an hour filling host memory without a line. Only the boot budget bounds such a
-boot; a server that neither writes nor uses CPU for the pre-ready silence limit is hung.
+large-checkpoint load can spend half an hour filling host memory without a line. A collective that spins uses CPU as
+well, so CPU use extends the silence only up to :data:`PRE_READY_BUSY_SILENCE_SEC`; a server that neither writes nor
+uses CPU for the pre-ready silence limit is hung.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from inference_suite.contracts.config import Deadlines
+from inference_suite.contracts.config import PRE_READY_BUSY_SILENCE_SEC, Deadlines
 from inference_suite.contracts.report import FailedStep
 from inference_suite.runtime.process import Spawned
 from inference_suite.server_log import LogCursor, death_excerpt
@@ -179,6 +180,9 @@ class ServerWatch:
         limit = self._deadlines.pre_ready_silence_sec
         if quiet >= limit and cpu_quiet >= limit:
             detail = f"the server log was silent for {quiet:.1f}s and {self._cpu_evidence(cpu_quiet)}"
+            return Stop(FailedStep.SERVER_SILENT_BEFORE_READY, detail)
+        if quiet >= max(limit, PRE_READY_BUSY_SILENCE_SEC):
+            detail = f"the server log was silent for {quiet:.1f}s while its processes stayed busy, which may be a spin"
             return Stop(FailedStep.SERVER_SILENT_BEFORE_READY, detail)
         return None
 
