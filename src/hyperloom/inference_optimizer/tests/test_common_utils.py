@@ -1148,7 +1148,7 @@ def test_multi_node_state_paths_resolution_and_binding(monkeypatch: pytest.Monke
     assert bound == session / "runtime" / "multi_node_state.json"
     assert not bound.exists()
     assert state_paths.resolve_state_file() == bound
-    assert os.environ["MULTI_NODE_STATE"] == str(bound)
+    assert "MULTI_NODE_STATE" not in os.environ
     assert bound.parent.stat().st_mode & 0o777 == 0o700
 
 

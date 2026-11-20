@@ -391,6 +391,9 @@ def test_multi_node_state_env_names_the_bound_state_file(monkeypatch: pytest.Mon
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", raising=False)
     assert multi_node_state_env() == {}
     path = bind_state_file_to_session(tmp_path / "session")
+    assert "MULTI_NODE_STATE" not in os.environ
+    assert multi_node_state_env() == {}
+    path.write_text("{}", encoding="utf-8")
     assert multi_node_state_env() == {"MULTI_NODE_STATE": str(path), "MULTI_NODE_STATE_FILE": str(path)}
 
 
@@ -441,7 +444,6 @@ def test_atom_handoff_records_atomesh_and_uses_one_port(monkeypatch: pytest.Monk
 
     state = ext.build_external_state_from_env()
 
-    assert os.environ["MULTI_NODE_STATE"] == str(state_file)
     assert state["backend"] == "atomesh"
     assert state["external"] is True
     assert state["pd_mode"] == "disaggregated"
