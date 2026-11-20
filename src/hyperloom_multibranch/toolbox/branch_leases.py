@@ -251,12 +251,6 @@ class BranchLeases:
             name = f"hl-lease-drain-{lease_id}"
             threading.Thread(target=self._drain, args=(lease_id, busy), name=name, daemon=True).start()
 
-    def held_out(self) -> frozenset[int]:
-        """The cards of released leases not yet back in the pool, because memory is still listed on them."""
-
-        with self._guard:
-            return frozenset(self._held_out)
-
     def close(self) -> None:
         """Release every lease and refuse the waiting ones their cards."""
 

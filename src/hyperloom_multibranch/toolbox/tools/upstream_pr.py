@@ -7,8 +7,7 @@ The search runs in the process that hosts the toolbox, never in a measurement sa
 the rule pack names (``UPSTREAM_PR_REPOS``). The framework agent's own GitHub search is best-effort: an unreachable host, a
 refused token and an exhausted quota all come back as an empty list, which would read as "no pull request matches". The
 search made here asks GitHub the same question with the same query and fails instead, saying why
-(:class:`GitHubUnavailable`); an empty list means GitHub answered and found none. A search that also names a monitor service
-is the framework agent's own (host configuration only: a specialist cannot name one).
+(:class:`GitHubUnavailable`); an empty list means GitHub answered and found none.
 """
 
 from __future__ import annotations
@@ -24,8 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.agents.framework.models import Candidate, CandidateSearchRequest, PRMonitorConfig
-from hyperloom.agents.framework.sources import SourceConfigError, enumerate_candidates
+from hyperloom.agents.framework.models import Candidate, CandidateSearchRequest
 from hyperloom.agents.framework.sources.github import PERF_TERMS, auth_headers, build_query
 from hyperloom.common.github_urls import repo_slug
 from hyperloom.common.outside_facts import UPSTREAM_PR_REPOS
@@ -38,8 +36,8 @@ _OPEN = "open"
 _STATES = frozenset({_OPEN, "merged", "closed", "all"})
 #: What is searched when the caller names no state: open pull requests only.
 _OPEN_ONLY = (_OPEN,)
-#: The names the framework agent gives its two sources of candidates (its ``search_modes``).
-_MONITOR, _GITHUB = "pr_monitor", "github"
+#: The framework agent's name for its GitHub source of candidates (one of its ``search_modes``).
+_GITHUB = "github"
 _SEARCHED = frozenset(repo.lower() for repo in UPSTREAM_PR_REPOS)
 #: GitHub's search endpoint for issues and pull requests.
 _SEARCH_URL = "https://api.github.com/search/issues"
@@ -116,8 +114,6 @@ def search_github(search: UpstreamSearch) -> list[Candidate]:
     Raises:
         GitHubUnavailable: GitHub could not be asked or refused (never an empty list for that).
     """
-    if _MONITOR in search.request.search_modes:
-        return enumerate_candidates(search.request)
     found = []
     for item in _github_answer(search)["items"]:
         number = item.get("number") if isinstance(item, dict) else None
@@ -156,19 +152,17 @@ def build_search(params: Mapping[str, Any]) -> UpstreamSearch:
     states = _strings(params.get("states")) or _OPEN_ONLY
     if not set(states) <= _STATES:
         raise InvalidRequest(f"states must come from {sorted(_STATES)}")
-    monitor_url = str(params.get("pr_monitor_url") or "").strip()
     request = CandidateSearchRequest(
         repo_url=repo_url,
         max_search_candidates=limit,
-        pr_monitor=PRMonitorConfig(monitor_url) if monitor_url else None,
         keywords=_strings(params.get("keywords")),
-        search_modes=(_MONITOR, _GITHUB) if monitor_url else (_GITHUB,),
+        search_modes=(_GITHUB,),
     )
     return UpstreamSearch(request, states)
 
 
 class UpstreamPrSearch:
-    """Params: ``repo_url`` (required), ``keywords``, ``limit`` (default 5, at most 20), ``states``, ``pr_monitor_url``."""
+    """Params: ``repo_url`` (required), ``keywords``, ``limit`` (default 5, at most 20) and ``states``."""
 
     name = UPSTREAM_PR_TOOL
 
@@ -182,8 +176,6 @@ class UpstreamPrSearch:
         search = build_search(request.params)
         try:
             found = await asyncio.to_thread(self._enumerate, search)
-        except SourceConfigError as exc:
-            raise ToolFailure(f"upstream PR search is misconfigured: {exc}") from exc
         except GitHubUnavailable as exc:
             raise ToolFailure(f"upstream PR search cannot use GitHub: {exc}") from exc
         except Exception as exc:
