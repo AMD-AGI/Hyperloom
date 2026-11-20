@@ -724,8 +724,10 @@ async def test_warm_replay_skips_when_best_config_empty(tmp_path):
     assert coord.shared_state.warm_replay_outcome["reason"] == "best_config_empty"
 
 
-def _vllm_baseline(tmp_path: Path, coord: Coordinator) -> None:
-    """Point the stub at a real vLLM baseline config the replay would be appended to."""
+def _vllm_baseline(
+    tmp_path: Path, coord: Coordinator, args: str = "--kv-cache-dtype fp8 --enable-prefix-caching --max-num-seqs 64"
+) -> None:
+    """Point the stub at a real vLLM baseline config launching ``args``, which the replay would be appended to."""
     config = tmp_path / "baseline_config.with_envs.yaml"
     config.write_text(
         json.dumps(
@@ -734,7 +736,7 @@ def _vllm_baseline(tmp_path: Path, coord: Coordinator) -> None:
                     "framework": "vllm",
                     "envs": {
                         "VLLM_ROCM_USE_AITER": "1",
-                        "EXTRA_VLLM_ARGS": "--kv-cache-dtype fp8 --enable-prefix-caching --max-num-seqs 64",
+                        "EXTRA_VLLM_ARGS": args,
                     },
                 }
             }
@@ -805,6 +807,43 @@ async def test_warm_replay_runs_a_recipe_that_changes_the_baseline(tmp_path):
     assert [call["params"]["extra_server_args"] for call in coord.tasks.calls] == [
         "--kv-cache-dtype fp8 --max-num-seqs 128"
     ]
+
+
+_NGRAM_GPU_DRAFT = '--speculative-config {"method":"ngram_gpu","num_speculative_tokens":2,"prompt_lookup_max":5}'
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_skips_a_recipe_that_introduces_a_copying_draft(tmp_path):
+    """A recipe whose best config adds a context-copying draft would carry it into current_best on a synthetic run."""
+    recipe = _warm_recipe_t1(extra_server_args=f"--max-num-seqs 128 {_NGRAM_GPU_DRAFT}")
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
+    _vllm_baseline(tmp_path, coord)
+
+    assert await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0) is None
+
+    assert coord.tasks.calls == []
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == "skipped"
+    assert outcome["reason"].startswith("speculative_context_copy_on_synthetic: ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("benchmark_mode", "baseline_args"),
+    [
+        pytest.param("agentx", "--max-num-seqs 64", id="agentx"),
+        pytest.param("synthetic", f"--max-num-seqs 64 {_NGRAM_GPU_DRAFT}", id="draft-the-baseline-runs"),
+    ],
+)
+async def test_warm_replay_runs_a_copying_draft_the_rule_does_not_cover(tmp_path, benchmark_mode, baseline_args):
+    recipe = _warm_recipe_t1(extra_server_args=f"--max-num-seqs 128 {_NGRAM_GPU_DRAFT}")
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
+    _vllm_baseline(tmp_path, coord, baseline_args)
+    coord.shared_state.benchmark_mode = benchmark_mode
+
+    assert await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0) is not None
+
+    assert len(coord.tasks.calls) == 1
 
 
 @pytest.mark.asyncio

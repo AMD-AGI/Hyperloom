@@ -251,8 +251,16 @@ _NGRAM_GPU = (
 _MTP = '--speculative-config {"method":"mtp","num_speculative_tokens":1}'
 
 
-async def _integrate(tmp_path: Path, monkeypatch, extra_server_args: str, *, benchmark_mode: str = "synthetic"):
-    """Run one integrate_patch round of a deliverable that only adds ``extra_server_args``; return (result, benched)."""
+async def _integrate(
+    tmp_path: Path,
+    monkeypatch,
+    extra_server_args: str,
+    *,
+    benchmark_mode: str = "synthetic",
+    stack_args: str = _STACK_ARGS,
+):
+    """Run one integrate_patch round of a deliverable that only adds ``extra_server_args`` over a kept stack launching
+    ``stack_args``; return (result, benched)."""
     session_dir = tmp_path / "session"
     workspace = session_dir / "runs" / "specialist" / "t-spec"
     workspace.mkdir(parents=True)
@@ -280,7 +288,7 @@ async def _integrate(tmp_path: Path, monkeypatch, extra_server_args: str, *, ben
         "config_path": str(config_path),
         "framework": "vllm",
         "base_tput": _BASE_TPUT,
-        "base_extra_args": _STACK_ARGS,
+        "base_extra_args": stack_args,
         "extra_server_args": extra_server_args,
     }
     task = Task(
@@ -297,7 +305,7 @@ async def _integrate(tmp_path: Path, monkeypatch, extra_server_args: str, *, ben
         enablement=EnablementRound(),
         framework="vllm",
         benchmark_mode=benchmark_mode,
-        current_best={"tput": _BASE_TPUT, "extra_server_args": _STACK_ARGS},
+        current_best={"tput": _BASE_TPUT, "extra_server_args": stack_args},
         get_specialist_patch_verdict=lambda _sid: "approve",
         save=lambda _path: None,
     )
@@ -309,21 +317,26 @@ async def test_integrate_patch_refuses_a_copying_draft_on_the_synthetic_benchmar
     result, benched = await _integrate(tmp_path, monkeypatch, _NGRAM_GPU)
 
     assert benched == []
-    assert result["bench_result"]["error"].startswith(f"{CONTEXT_COPY_REFUSAL}: ")
-    assert result["status"] != "kept"
+    assert result["status"] == "reverted"
+    assert result["reason"].startswith(f"{CONTEXT_COPY_REFUSAL}: ")
+    assert result["error_class"] == "filtered_before_bench"
+    assert result["benched"] is False
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("extra_server_args", "benchmark_mode"),
+    ("extra_server_args", "benchmark_mode", "stack_args"),
     [
-        pytest.param(_MTP, "synthetic", id="model-based-draft"),
-        pytest.param(_NGRAM_GPU, "agentx", id="agentx"),
+        pytest.param(_MTP, "synthetic", _STACK_ARGS, id="model-based-draft"),
+        pytest.param(_NGRAM_GPU, "agentx", _STACK_ARGS, id="agentx"),
+        pytest.param(_NGRAM_GPU, "synthetic", f"{_STACK_ARGS} {_NGRAM_GPU}", id="draft-the-kept-stack-runs"),
     ],
 )
 async def test_integrate_patch_benches_a_draft_the_rule_does_not_cover(
-    tmp_path, monkeypatch, extra_server_args, benchmark_mode
+    tmp_path, monkeypatch, extra_server_args, benchmark_mode, stack_args
 ):
-    _, benched = await _integrate(tmp_path, monkeypatch, extra_server_args, benchmark_mode=benchmark_mode)
+    _, benched = await _integrate(
+        tmp_path, monkeypatch, extra_server_args, benchmark_mode=benchmark_mode, stack_args=stack_args
+    )
 
     assert benched

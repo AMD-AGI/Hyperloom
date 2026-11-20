@@ -48,6 +48,7 @@ from ._grid_variant_filter import (
 )
 from ._integrate_attempt import IntegrateAttempt
 from ._integrate_results import _PatchBench
+from ._integrate_vocabulary import FILTERED_BEFORE_BENCH_CLASS
 from ._patch_artifacts import _ArtifactSpec
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL
 from .benchmark_run.accuracy import record_accuracy_round, run_candidate_accuracy_round
@@ -404,7 +405,7 @@ def _filtered_before_bench(rejection: dict[str, Any], config_path: Path) -> dict
     """The bench result of a variant a pre-bench filter rejected."""
     return {
         "status": "skipped",
-        "error_class": "filtered_before_bench",
+        "error_class": FILTERED_BEFORE_BENCH_CLASS,
         "error": rejection["reason"],
         "workspace": "",
         "materialized_config": str(config_path),

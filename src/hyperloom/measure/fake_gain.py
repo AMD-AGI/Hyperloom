@@ -5,8 +5,9 @@
 
 Main refuses three gains that a measurement can show without the candidate being better: a context-copying
 speculative draft on a synthetic benchmark, a change of a draft whose acceptance length is simulated, and an AgentX
-baseline served with the prefix cache off. Its flow does that in the explore and baseline executors; a test launched
-through ``hyperloom.measure`` never reaches them. This module re-exports the checks without copying their logic.
+baseline served with the prefix cache off. Its flow does that in the explore and baseline executors, and refuses the
+context-copying draft in the integrate bench and the PRELUDE warm replay too; a test launched through
+``hyperloom.measure`` never reaches them. This module re-exports the checks without copying their logic.
 
 ``FAKE_GAINS`` is the catalog of the known fake gains. The rule: each newly found fake gain lands as a check, a row
 here and a test together; the test sends a minimal example through the real enforcement point named in the row.
