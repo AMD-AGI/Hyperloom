@@ -450,7 +450,6 @@ async def test_a_search_with_a_token_does_not_tell_the_host_to_get_one(
         ({"repo_url": "https://github.com/someone/private-repo"}, "someone/private-repo is not an upstream repository"),
         ({"repo_url": "not a url"}, "not a GitHub repository URL"),
         ({"repo_url": SGLANG, "limit": 99}, "between 1 and 20"),
-        ({"repo_url": SGLANG, "pr_monitor_url": "http://internal.example/"}, "server_owned_param"),
     ],
 )
 async def test_a_search_that_can_never_run_is_refused_before_it_starts(

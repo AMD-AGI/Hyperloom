@@ -246,7 +246,7 @@ _UPSTREAM_PR_GUIDE = (
     f"required, the GitHub URL of one of {', '.join(UPSTREAM_PR_REPOS)}; params.keywords (words to look for), "
     f"params.limit (default {DEFAULT_LIMIT}, at most {MAX_LIMIT}) and params.states (open by default; merged, closed or all "
     "search pull requests of every state) are optional. The search runs in the toolbox's host process, and its result arrives in poll_inbox: the "
-    "candidate pull requests with ref, title, url and score. A host that cannot reach GitHub fails the job and says why; "
+    "candidate pull requests with ref, title and url. A host that cannot reach GitHub fails the job and says why; "
     "that is not an empty answer."
 )
 

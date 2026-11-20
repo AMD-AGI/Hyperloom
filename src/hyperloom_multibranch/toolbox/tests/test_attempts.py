@@ -113,7 +113,7 @@ def _job() -> TestJob:
         parent_commit="c0",
         delta=RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256")),
     )
-    return TestJob(request=request, attempt=1, avoid_nodes=(), priority=0, sandbox_priority=0)
+    return TestJob(request=request, attempt=1, avoid_nodes=(), priority=0)
 
 
 def _backoff(time: _FakeTime, latest: float | None = None) -> InfraBackoff:

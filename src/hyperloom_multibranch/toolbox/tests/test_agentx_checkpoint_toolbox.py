@@ -144,7 +144,7 @@ class _Stopping:
 
 def _job(point: Path, plan: CheckpointPlan | None) -> TestJob:
     accepted = AcceptedMeasurement(None, (point,), checkpoint=plan)  # type: ignore[arg-type]
-    return TestJob(req().accepted("b1-000001"), 1, (), 2, 2, accepted)
+    return TestJob(req().accepted("b1-000001"), 1, (), 2, accepted)
 
 
 async def test_a_test_the_checkpoint_stopped_is_the_candidates_failure_and_carries_the_ruling(tmp_path: Path) -> None:
