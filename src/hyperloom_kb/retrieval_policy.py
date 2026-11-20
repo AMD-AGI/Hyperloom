@@ -27,8 +27,6 @@ from hyperloom_kb.schema import (
 )
 from hyperloom_kb.storage import ExperienceStore
 
-LEXICAL_FUZZY_PROVIDER_REF = "hyperloom-kb.lexical-fuzzy@v3"
-
 
 @dataclass(frozen=True)
 class ResultShape:
@@ -40,9 +38,6 @@ class ResultShape:
 
 class LexicalFuzzyProvider:
     """Deterministic dependency-free fuzzy recall over pinned Experiences."""
-
-    capability = RetrievalCapability.FUZZY
-    provider_ref = LEXICAL_FUZZY_PROVIDER_REF
 
     def __init__(self, experiences: ExperienceStore, declaration: ExperienceDeclaration) -> None:
         self._experiences = experiences
@@ -92,11 +87,9 @@ class LexicalFuzzyProvider:
             hits.append(
                 CandidateHit(
                     experience_id,
-                    self.capability,
+                    RetrievalCapability.FUZZY,
                     score,
                     {
-                        "provider_ref": self.provider_ref,
-                        "query_view_id": view.ref.view_id,
                         "identity_compatibility": identity_compatibility,
                         "matched_tokens": cast(list[JsonValue], sorted(matched)),
                     },
@@ -223,7 +216,6 @@ def _identity_compatibility(
 
 
 __all__ = [
-    "LEXICAL_FUZZY_PROVIDER_REF",
     "LexicalFuzzyProvider",
     "ResultShape",
 ]

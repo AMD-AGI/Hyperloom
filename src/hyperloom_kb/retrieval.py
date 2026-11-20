@@ -6,10 +6,9 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, TypeAlias, runtime_checkable
+from typing import TypeAlias
 
 from hyperloom_kb.query_view import (
-    CapabilityState,
     QueryView,
     RepeatAnnotations,
     RetrievalCapability,
@@ -34,28 +33,12 @@ class ViewUnavailable(RetrievalError):
     pass
 
 
-class CapabilityUnavailable(RetrievalError):
-    pass
-
-
 @dataclass(frozen=True)
 class CandidateHit:
     experience_id: str
     capability: RetrievalCapability
     score: float | None = None
     details: dict[str, JsonValue] = field(default_factory=dict)
-
-
-@runtime_checkable
-class CandidateProvider(Protocol):
-    capability: RetrievalCapability
-
-    def recall(
-        self,
-        request: dict[str, JsonValue],
-        view: QueryView,
-    ) -> tuple[CandidateHit, ...]:
-        """Return source-labelled candidate hits for one exact Query View."""
 
 
 @dataclass(frozen=True)
@@ -77,82 +60,47 @@ ExperienceRenderer: TypeAlias = Callable[[Experience, QueryView], str]
 
 
 class LocalRetrievalService:
-    """Recall, organize, and render over the one Query View it is built on."""
+    """Exact recall, grouping, and rendering over the one Query View it is built on."""
 
     def __init__(
         self,
         experiences: ExperienceStore,
         view: QueryView,
         *,
-        providers: tuple[CandidateProvider, ...] = (),
         renderer: ExperienceRenderer | None = None,
     ) -> None:
         self._experiences = experiences
-        self._view = view
+        self.view = view
         self._renderer = renderer or render_complete_experience
-        self._providers = {provider.capability: provider for provider in providers}
-        if any(
-            capability not in {RetrievalCapability.FUZZY, RetrievalCapability.SEMANTIC}
-            for capability in self._providers
-        ):
-            raise ValueError("external providers may implement only fuzzy or semantic recall")
-
-    def query(self, where: dict[str, JsonScalar]) -> tuple[CandidateHit, ...]:
-        return self._structured_query(where, RetrievalCapability.FILTER)
 
     def exact(self, where: dict[str, JsonScalar]) -> tuple[CandidateHit, ...]:
-        return self._structured_query(where, RetrievalCapability.EXACT)
+        """The visible Experiences holding every value of ``where`` under its lookup field."""
 
-    def _structured_query(
-        self, where: dict[str, JsonScalar], capability: RetrievalCapability
-    ) -> tuple[CandidateHit, ...]:
-        snapshot = self._view
-        candidate_ids = set(snapshot.visible_experience_ids)
+        candidate_ids = set(self.view.visible_experience_ids)
         for field_name, value in sorted(where.items()):
-            values = snapshot.field_lookup.get(field_name)
+            values = self.view.field_lookup.get(field_name)
             if values is None:
                 candidate_ids.clear()
                 break
             candidate_ids.intersection_update(values.get(_value_key(value), ()))
-        return tuple(CandidateHit(experience_id, capability) for experience_id in sorted(candidate_ids))
-
-    def recall(
-        self,
-        capability: RetrievalCapability,
-        request: dict[str, JsonValue],
-    ) -> tuple[CandidateHit, ...]:
-        if capability not in {RetrievalCapability.FUZZY, RetrievalCapability.SEMANTIC}:
-            raise ValueError("recall capability must be fuzzy or semantic")
-        snapshot = self._view
-        if snapshot.capabilities.get(capability) is not CapabilityState.READY:
-            raise CapabilityUnavailable(capability.value)
-        provider = self._providers.get(capability)
-        if provider is None:
-            raise CapabilityUnavailable(capability.value)
-        visible = set(snapshot.visible_experience_ids)
-        return tuple(
-            hit
-            for hit in provider.recall(request, snapshot)
-            if hit.experience_id in visible and hit.capability is capability
-        )
+        return tuple(CandidateHit(experience_id, RetrievalCapability.EXACT) for experience_id in sorted(candidate_ids))
 
     def organize(self, candidate_sets: tuple[tuple[CandidateHit, ...], ...]) -> tuple[GroupCandidate, ...]:
-        snapshot = self._view
         by_experience: dict[str, list[CandidateHit]] = {}
         for candidates in candidate_sets:
             for hit in candidates:
-                if hit.experience_id not in snapshot.experience_groups:
+                if hit.experience_id not in self.view.experience_groups:
                     continue
                 by_experience.setdefault(hit.experience_id, []).append(hit)
         grouped_hits: dict[str, list[CandidateHit]] = {}
         for experience_id, hits in by_experience.items():
-            group_key = snapshot.experience_groups[experience_id]
+            group_key = self.view.experience_groups[experience_id]
             grouped_hits.setdefault(group_key, []).extend(hits)
         return tuple(
             GroupCandidate(
                 group_key=group_key,
-                annotations=snapshot.groups[group_key].annotations,
-                member_ids=snapshot.groups[group_key].member_ids,
+                annotations=self.view.groups[group_key].annotations,
+                member_ids=self.view.groups[group_key].member_ids,
                 hits=tuple(
                     sorted(
                         hits,
@@ -180,25 +128,24 @@ class LocalRetrievalService:
         not carry.
         """
 
-        snapshot = self._view
         if budget_chars is not None and budget_chars <= 0:
             raise ValueError("budget_chars must be positive")
-        visible = set(snapshot.visible_experience_ids)
+        visible = set(self.view.visible_experience_ids)
         experiences: list[Experience] = []
         for experience_id in representatives:
             if experience_id not in visible:
-                raise ViewUnavailable(f"{experience_id} is not visible in {snapshot.ref.view_id}")
+                raise ViewUnavailable(f"{experience_id} is not visible in {self.view.ref.view_id}")
             record = self._experiences.get_experience(experience_id)
             if record is None:
                 raise ViewUnavailable(f"{experience_id} is missing from ExperienceStore")
-            if record.content_hash != snapshot.experience_hashes.get(experience_id):
+            if record.content_hash != self.view.experience_hashes.get(experience_id):
                 raise ViewUnavailable(f"{experience_id} content does not match pinned Query View")
             experiences.append(record.experience)
         blocks: list[str] = []
         shown: list[Experience] = []
         used = 0
         for experience in experiences:
-            block = self._renderer(experience, snapshot)
+            block = self._renderer(experience, self.view)
             size = len(block) + (len("\n\n") if blocks else 0)
             if budget_chars is not None and used + size > budget_chars:
                 continue
@@ -271,8 +218,6 @@ def render_complete_experience(
 
 __all__ = [
     "CandidateHit",
-    "CandidateProvider",
-    "CapabilityUnavailable",
     "ExperienceRenderer",
     "FilePath",
     "GroupCandidate",

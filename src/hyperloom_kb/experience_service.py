@@ -526,7 +526,7 @@ class ExperienceHTTPService:
         built = _ReadView(
             version,
             store,
-            QueryViewBuilder().build(declaration, store.list_experiences(schema_ref), fuzzy_ready=True),
+            QueryViewBuilder().build(declaration, store.list_experiences(schema_ref)),
         )
         self._views[schema_ref] = built
         return built
@@ -619,12 +619,8 @@ class ExperienceHTTPService:
             return response
 
         executor = QueryExecutor(
-            LocalRetrievalService(
-                store,
-                view,
-                providers=(LexicalFuzzyProvider(store, declaration),),
-                renderer=partial(render_complete_experience, file_path=self.file_path),
-            )
+            LocalRetrievalService(store, view, renderer=partial(render_complete_experience, file_path=self.file_path)),
+            LexicalFuzzyProvider(store, declaration),
         )
         shape = ResultShape(max_groups=limit, render_budget_chars=render_budget_chars)
         traces: list[ReadTrace] = []

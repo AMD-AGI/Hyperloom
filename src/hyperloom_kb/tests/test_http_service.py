@@ -638,6 +638,7 @@ def test_a_text_signal_adds_its_weight_times_how_well_the_text_matched(tmp_path:
         half = client.read(ReadQuery((QuerySignal(text="page_size", weight=0.5),)))
 
     assert full.experiences[0]["experience_id"] == half.experiences[0]["experience_id"] == page_size.id
+    assert (full.status, full.warnings) == ("completed", ())
     (matched,) = full.experiences[0]["why_matched"]
     assert matched["capability"] == "fuzzy" and 0 < matched["normalized_score"] <= 1
     assert full.experiences[0]["score"] == matched["normalized_score"]

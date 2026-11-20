@@ -339,7 +339,7 @@ every member.
   ],
   "eligible_count": 1,
   "rendered_count": 1,
-  "warnings": ["capability_unavailable:semantic"]
+  "warnings": []
 }
 ```
 

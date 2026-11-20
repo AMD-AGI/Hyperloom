@@ -75,7 +75,7 @@ def _experience(
 def _views(schema: ExperienceDeclaration, *records: Experience):
     experiences = InMemoryExperienceStore()
     submit_complete(schema, experiences, *records)
-    return experiences, build_view(schema, experiences, fuzzy_ready=True)
+    return experiences, build_view(schema, experiences)
 
 
 def test_fuzzy_finds_an_experience_by_its_notes() -> None:

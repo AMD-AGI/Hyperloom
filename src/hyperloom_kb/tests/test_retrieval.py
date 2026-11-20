@@ -6,13 +6,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import pytest
 
 from hyperloom_kb import (
     METADATA_FIELDS,
-    CandidateHit,
-    CapabilityState,
-    CapabilityUnavailable,
     Experience,
     ExperienceDeclaration,
     ExperienceStatus,
@@ -25,7 +21,6 @@ from hyperloom_kb import (
     ObjectiveDeclaration,
     Provenance,
     QueryViewBuilder,
-    RetrievalCapability,
     derive_experience_id,
 )
 from hyperloom_kb.retrieval import render_complete_experience
@@ -78,36 +73,23 @@ def experience(schema: ExperienceDeclaration, run_id: str, knob: str) -> Experie
     )
 
 
-class StaticProvider:
-    def __init__(
-        self,
-        capability: RetrievalCapability,
-        hits: tuple[CandidateHit, ...],
-    ) -> None:
-        self.capability = capability
-        self.hits = hits
-
-    def recall(self, request, view):
-        return self.hits
-
-
-def setup(*, fuzzy_ready: bool = False, semantic_ready: bool = False):
+def setup():
     schema = declaration()
     experiences = InMemoryExperienceStore()
     first = experience(schema, "run-1", "page_size")
     repeated = experience(schema, "run-2", "page_size")
     other = experience(schema, "run-3", "chunk")
     submit_complete(schema, experiences, first, repeated, other)
-    view = build_view(schema, experiences, fuzzy_ready=fuzzy_ready, semantic_ready=semantic_ready)
+    view = build_view(schema, experiences)
     return experiences, view, first, repeated, other
 
 
-def test_exact_filter_organize_and_explicit_render() -> None:
+def test_exact_organize_and_explicit_render() -> None:
     experiences, view, first, repeated, other = setup()
     read = LocalRetrievalService(experiences, view)
 
     exact = read.exact({"identity.model": "qwen3", "baseline.config": "default", "change.knob": "page_size"})
-    filtered = read.query({"outcome.decision": "keep"})
+    filtered = read.exact({"outcome.decision": "keep"})
     groups = read.organize((exact, filtered))
     rendered = read.render((first.id, other.id))
 
@@ -123,32 +105,13 @@ def test_exact_filter_organize_and_explicit_render() -> None:
     assert rendered.rendered_refs[0].id == first.id
 
 
-def test_fuzzy_and_semantic_are_independent_optional_capabilities() -> None:
-    experiences, view, first, _, _ = setup(fuzzy_ready=True, semantic_ready=False)
-    provider = StaticProvider(
-        RetrievalCapability.FUZZY,
-        (
-            CandidateHit(first.id, RetrievalCapability.FUZZY, 0.8),
-            CandidateHit("exp-00000000000000000000000000000000", RetrievalCapability.FUZZY, 1.0),
-        ),
-    )
-    read = LocalRetrievalService(experiences, view, providers=(provider,))
-
-    fuzzy = read.recall(RetrievalCapability.FUZZY, {"identity": {"model": "qwen"}})
-
-    assert fuzzy == (CandidateHit(first.id, RetrievalCapability.FUZZY, 0.8),)
-    with pytest.raises(CapabilityUnavailable):
-        read.recall(RetrievalCapability.SEMANTIC, {"text": "scheduler"})
-    assert view.capabilities[RetrievalCapability.SEMANTIC] is CapabilityState.UNAVAILABLE
-
-
 def test_a_view_stays_as_built_while_its_store_takes_new_experiences() -> None:
     experiences, view, first, _, _ = setup()
     read = LocalRetrievalService(experiences, view)
     new = experience(declaration(), "run-4", "new-knob")
     experiences.insert_complete(new)
 
-    hits = {hit.experience_id for hit in read.query({})}
+    hits = {hit.experience_id for hit in read.exact({})}
 
     assert new.id not in hits and first.id in hits
 
@@ -263,7 +226,7 @@ def test_restricted_view_limits_recall_but_keeps_full_group_annotations() -> Non
     full = QueryViewBuilder().build(schema, experiences.list_experiences(schema.schema_ref))
 
     restricted = QueryViewBuilder().restrict(full, (kept.id,))
-    hits = LocalRetrievalService(experiences, restricted).query({"identity.model": "qwen3"})
+    hits = LocalRetrievalService(experiences, restricted).exact({"identity.model": "qwen3"})
 
     assert [hit.experience_id for hit in hits] == [kept.id]
     assert restricted.ref.view_id != full.ref.view_id

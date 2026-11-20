@@ -33,14 +33,7 @@ class QueryViewError(RuntimeError):
 
 class RetrievalCapability(str, Enum):
     EXACT = "exact"
-    FILTER = "filter"
     FUZZY = "fuzzy"
-    SEMANTIC = "semantic"
-
-
-class CapabilityState(str, Enum):
-    READY = "ready"
-    UNAVAILABLE = "unavailable"
 
 
 def _canonical(value: Any) -> str:
@@ -138,7 +131,6 @@ class QueryView:
     field_lookup: dict[str, dict[str, tuple[str, ...]]]
     groups: dict[str, RepeatGroup]
     experience_groups: dict[str, str]
-    capabilities: dict[RetrievalCapability, CapabilityState]
     version: int = QUERY_VIEW_VERSION
 
     def to_manifest(self) -> dict[str, JsonValue]:
@@ -154,13 +146,6 @@ class QueryView:
             },
             "groups": {key: group.to_dict() for key, group in sorted(self.groups.items())},
             "experience_groups": dict(sorted(self.experience_groups.items())),
-            "capabilities": {
-                capability.value: state.value
-                for capability, state in sorted(
-                    self.capabilities.items(),
-                    key=lambda item: item[0].value,
-                )
-            },
         }
 
 
@@ -171,14 +156,7 @@ class QueryViewBuilder:
     def view_id(manifest: dict[str, JsonValue]) -> str:
         return f"view:sha256:{_digest('query-view', manifest)}"
 
-    def build(
-        self,
-        declaration: ExperienceDeclaration,
-        records: tuple[StoredExperience, ...],
-        *,
-        fuzzy_ready: bool = False,
-        semantic_ready: bool = False,
-    ) -> QueryView:
+    def build(self, declaration: ExperienceDeclaration, records: tuple[StoredExperience, ...]) -> QueryView:
         experiences = tuple(
             sorted(
                 (record.experience for record in records),
@@ -190,12 +168,6 @@ class QueryViewBuilder:
         experience_hashes = {record.experience.id: record.content_hash for record in records}
         lookup = _build_lookup(declaration, experiences)
         groups, experience_groups = _build_groups(declaration, experiences)
-        capabilities = {
-            RetrievalCapability.EXACT: CapabilityState.READY,
-            RetrievalCapability.FILTER: CapabilityState.READY,
-            RetrievalCapability.FUZZY: (CapabilityState.READY if fuzzy_ready else CapabilityState.UNAVAILABLE),
-            RetrievalCapability.SEMANTIC: (CapabilityState.READY if semantic_ready else CapabilityState.UNAVAILABLE),
-        }
         manifest: dict[str, JsonValue] = {
             "version": QUERY_VIEW_VERSION,
             "schema_ref": declaration.schema_ref,
@@ -208,13 +180,6 @@ class QueryViewBuilder:
             },
             "groups": {key: group.to_dict() for key, group in sorted(groups.items())},
             "experience_groups": dict(sorted(experience_groups.items())),
-            "capabilities": {
-                capability.value: state.value
-                for capability, state in sorted(
-                    capabilities.items(),
-                    key=lambda item: item[0].value,
-                )
-            },
         }
         ref = QueryViewRef(
             declaration.schema_ref,
@@ -228,7 +193,6 @@ class QueryViewBuilder:
             field_lookup=lookup,
             groups=groups,
             experience_groups=experience_groups,
-            capabilities=capabilities,
         )
 
     def restrict(self, view: QueryView, experience_ids: Iterable[str]) -> QueryView:
@@ -359,7 +323,6 @@ __all__ = [
     "ANNOTATION_BUILDER_VERSION",
     "GROUP_BUILDER_VERSION",
     "QUERY_VIEW_VERSION",
-    "CapabilityState",
     "QueryView",
     "QueryViewBuilder",
     "QueryViewError",
