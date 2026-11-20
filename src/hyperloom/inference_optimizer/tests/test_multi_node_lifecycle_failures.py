@@ -200,9 +200,11 @@ def test_a_crashed_worker_of_any_lws_rank_fails_fast(tmp_path, monkeypatch: pyte
 def test_profiling_round_restart_enables_graph_capture_profiling(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import profile
+    from hyperloom.orchestrator.actions.executors import _multi_node_env, profile
 
     monkeypatch.setenv("FRAMEWORK", "sglang")
+    monkeypatch.setattr(_multi_node_env, "_read_state", lambda: {"backend": "sglangrouter", "node_list": True})
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
     shipped = yaml.safe_load(profile._default_profile_config().read_text(encoding="utf-8"))["benchmark"]["envs"]
     calls: list[tuple[life.RoundServer, dict]] = []
 
@@ -232,6 +234,28 @@ def test_profiling_round_restart_enables_graph_capture_profiling(monkeypatch: py
         )
     }
     assert eager[0].extra_server_args == "--disable-cuda-graph"
+
+
+def test_infera_round_restart_keeps_graph_capture_profiling_off(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from hyperloom.orchestrator.actions.executors import _multi_node_env, profile
+
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    monkeypatch.setattr(_multi_node_env, "_read_state", lambda: {"backend": "infera", "nodes": 2})
+    calls: list[tuple[life.RoundServer, dict]] = []
+
+    async def _restart(server, **kwargs):
+        calls.append((server, kwargs))
+
+    monkeypatch.setattr(life, "restart_server_for_round", _restart)
+
+    assert (
+        asyncio.run(profile._restart_round_server({"extra_server_args": "--context-length 11264"}, str(tmp_path)))
+        is None
+    )
+
+    [(server, kwargs)] = calls
+    assert server.extra_server_args == "--context-length 11264"
+    assert kwargs["extra_env"] is None
 
 
 @pytest.mark.parametrize(
@@ -265,11 +289,11 @@ def test_profile_is_skipped_when_the_trace_dir_is_not_shared(
     [
         ({"backend": "rayjob", "nodes": 2}, False),
         ({"backend": "sglangrouter", "node_list": True, "pd_mode": "disaggregated"}, True),
-        ({"backend": "infera", "nodes": 2}, True),
+        ({"backend": "infera", "nodes": 2}, False),
     ],
     ids=["rayjob", "pd-node-list", "infera"],
 )
-def test_the_client_profiler_is_off_only_where_the_executor_profiles_the_engines(
+def test_the_client_profiler_is_off_only_in_a_pd_node_list_session(
     monkeypatch: pytest.MonkeyPatch, tmp_path, state: dict, engines_capture: bool
 ) -> None:
     import yaml

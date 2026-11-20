@@ -914,6 +914,7 @@ class RooflineExecutor:
         if main_role:
             payload.setdefault("steady_state_mode", ROLE_STEADY_STATE_MODE[main_role])
             payload.setdefault("split_llm_inference", False)
+            payload["clamp_stream_overlaps"] = True
 
         analysis = await self._analyze(ctx, recorder, payload)
         if not isinstance(analysis, _AnalysisOutcome):

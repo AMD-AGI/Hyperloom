@@ -159,7 +159,7 @@ def run_pd_combined_report(node_traces: dict[str, list[str]], run: PdReportRun) 
 
 
 async def report_pd_profile(profile_result: dict[str, Any], *, framework: str, platform: str) -> dict[str, Any]:
-    """Run the combined report for a PD profile's ``role_node_traces`` and record it as ``pd_combined_report``.
+    """Run the combined report for a PD profile's ``role_node_traces`` and return its summary.
 
     The report lands in ``<trace_dir parent>/tracelens/<UTC timestamp>/``; a profile without node traces is skipped.
     """
@@ -182,7 +182,6 @@ async def report_pd_profile(profile_result: dict[str, Any], *, framework: str, p
             tracelens_root=paths.tracelens_root(),
         ),
     )
-    profile_result["pd_combined_report"] = summary
     if summary.get("status") == "ok":
         log.info("pd combined report: %d job(s) -> %s", len(summary["jobs"]), summary["aggregated_csvs"])
     else:

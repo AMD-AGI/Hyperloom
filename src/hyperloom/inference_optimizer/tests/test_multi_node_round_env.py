@@ -82,12 +82,11 @@ _RESTARTS = pytest.mark.parametrize(
 _ROUND_ENV_RESTARTS = pytest.mark.parametrize(
     "restart", [_restart_profile, _restart_integrate], ids=["profile", "integrate"]
 )
-_PROFILE_GRAPH_ENV = profile._graph_capture_profile_settings(profile._default_profile_config())[0]
 
 
 def _expected(restart, env: dict[str, str]) -> list[dict[str, str]]:
-    """The forwarded env a restart should record: a profile round also carries the profile YAML's graph-capture env."""
-    return [{**env, **_PROFILE_GRAPH_ENV} if restart is _restart_profile else env]
+    """The forwarded env a restart outside a PD node-list session should record."""
+    return [env]
 
 
 @pytest.fixture(autouse=True)

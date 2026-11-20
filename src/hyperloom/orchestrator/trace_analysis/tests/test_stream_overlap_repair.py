@@ -11,7 +11,12 @@ import gzip
 import json
 from pathlib import Path
 
+import pytest
+
+from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
+from hyperloom.orchestrator.trace_analysis._analysis_run import start_run
 from hyperloom.orchestrator.trace_analysis._stream_overlap_repair import clamp_stream_overlaps
+from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
 
 
 def _kernel(name: str, ts: float, dur: float, tid: int = 6, cat: str = "kernel") -> dict:
@@ -71,3 +76,18 @@ def test_sub_microsecond_rounding_overlap_leaves_the_trace_untouched(tmp_path: P
 
     assert summary["clamped_events"] == 0
     assert trace.read_bytes() == before
+
+
+@pytest.mark.parametrize(("argv", "clamped"), [([], False), (["--clamp-stream-overlaps"], True)])
+def test_steady_state_chunk_is_clamped_only_when_asked(tmp_path: Path, monkeypatch, argv, clamped) -> None:
+    seen: list[Path] = []
+    summary = {"clamped_events": 0, "removed_ms": 0.0, "worst_event": "", "worst_removed_ms": 0.0}
+    monkeypatch.setattr(tla, "clamp_stream_overlaps", lambda p: seen.append(p) or summary)
+    args = tla._build_parser().parse_args(
+        ["--trace-input", str(tmp_path / "t.json.gz"), "--workspace-path", str(tmp_path / "ws"), *argv]
+    )
+    chunk = tmp_path / "chunk.json.gz"
+
+    tla._clamp_chunk_stream_overlaps(start_run(args, AnalysisRoute.AGENT), chunk)
+
+    assert seen == ([chunk] if clamped else [])

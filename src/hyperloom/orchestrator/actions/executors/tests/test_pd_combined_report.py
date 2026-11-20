@@ -36,6 +36,11 @@ def test_role_requests_split_decode_without_llm_flags_and_leave_prefill_unsplit(
     assert mode == "decode_only_or_generic"
     assert "--split-llm-inference" not in cmd
     assert "--split-conc" not in cmd
+    assert "--clamp-stream-overlaps" in cmd
+    plain, _mode = trace_analyze._build_trace_analyze_cmd(
+        {"trace_input": decode["trace_input"]}, run, session_dir=Path("/s"), workload={}
+    )
+    assert "--clamp-stream-overlaps" not in plain
 
 
 def test_capture_health_check_finds_a_role_capture_folder(tmp_path: Path) -> None:
@@ -173,3 +178,15 @@ def test_combined_report_splits_the_decode_nodes_concurrently_in_node_order(tmp_
         (node, str(out_dir / "trace_split" / f"decode_{node}" / f"{trace.name}.chunk"))
         for node, trace in enumerate(traces)
     ]
+
+
+def test_report_pd_profile_returns_the_summary_without_writing_it_to_the_profile(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+
+    monkeypatch.setattr(combined, "run_pd_combined_report", lambda node_traces, run: {"status": "failed"})
+    profile_result = {"role_node_traces": {"decode": ["/t/d.json.gz"]}, "trace_dir": str(tmp_path / "t")}
+
+    summary = asyncio.run(combined.report_pd_profile(profile_result, framework="sglang", platform="MI300X"))
+
+    assert summary == {"status": "failed"}
+    assert "pd_combined_report" not in profile_result

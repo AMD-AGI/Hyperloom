@@ -735,13 +735,23 @@ def _aggregated_node_list_refusal(round_trace_root: str) -> dict[str, Any] | Non
     }
 
 
-# Restarts the multi-node server for this profiling round with graph-capture profiling on; returns the refusal
-# result when it failed.
+def _pd_node_list_session() -> bool:
+    """Whether this multi-node session serves a node-list cluster the suite launches."""
+    from hyperloom.inference_optimizer.multi_node.pd_session import is_pd_state
+
+    from ._multi_node_env import _read_state, is_multi_node
+
+    return is_multi_node() and is_pd_state(_read_state() or {})
+
+
+# Restarts the multi-node server for this profiling round, with graph-capture profiling on for a PD node-list
+# session; returns the refusal result when it failed.
 async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -> dict[str, Any] | None:
     from ._multi_node_env import round_server_env
     from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
-    extra_env, flag = _graph_capture_profile_settings(_default_profile_config())
+    pd = _pd_node_list_session()
+    extra_env, flag = _graph_capture_profile_settings(_default_profile_config()) if pd else ({}, "")
     extra_server_args = str(params.get("extra_server_args") or "")
     tokens = extra_server_args.split()
     if flag and flag not in tokens and "--disable-cuda-graph" not in tokens:
@@ -768,12 +778,9 @@ async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -
 
 
 def _leave_capture_to_engines(config_path: Path) -> None:
-    """Turn the client-side profiler off in a multi-node point whose engines the executor starts and stops
+    """Turn the client-side profiler off in a PD node-list point, whose engines the executor starts and stops
     profiling on itself: the round loads a server it does not hold."""
-    from ._multi_node_env import _read_state, is_multi_node
-    from ._multi_node_server_lifecycle import executor_drives_engine_profile
-
-    if not is_multi_node() or not executor_drives_engine_profile(_read_state() or {}):
+    if not _pd_node_list_session():
         return
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     bench = cfg.get("benchmark") if isinstance(cfg, dict) else None

@@ -446,6 +446,8 @@ def _build_trace_analyze_cmd(
         ("--steady-state-mode", steady_state_mode),
         ("--roofline-output-name", roofline_output_name),
     )
+    if payload.get("clamp_stream_overlaps"):
+        cmd += ["--clamp-stream-overlaps"]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     return cmd, steady_state_mode

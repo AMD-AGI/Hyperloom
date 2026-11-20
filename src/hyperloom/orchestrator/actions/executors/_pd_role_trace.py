@@ -18,19 +18,17 @@ ROLE_STEADY_STATE_MODE = {"prefill": "unsplit", "decode": "decode_only_or_generi
 _TOP_KERNELS = 5
 
 
-def role_analysis_payload(role: str, trace_path: str, framework: str, workspace_path: str = "") -> dict[str, Any]:
+def role_analysis_payload(role: str, trace_path: str, framework: str) -> dict[str, Any]:
     """Build the non-LLM trace_analyze request for one role's trace; the splitter runs without LLM phase hints."""
-    payload: dict[str, Any] = {
+    return {
         "trace_input": trace_path,
         "framework": framework,
         "analysis_route": "non-llm",
         "steady_state_mode": ROLE_STEADY_STATE_MODE.get(role, "mixed"),
         "split_llm_inference": False,
         "roofline_output_name": f"kernel_roofline_{role}.json",
+        "clamp_stream_overlaps": True,
     }
-    if workspace_path:
-        payload["workspace_path"] = workspace_path
-    return payload
 
 
 def role_trace_summary(trace_path: str, result: dict[str, Any] | None) -> dict[str, Any]:
@@ -66,7 +64,6 @@ async def analyze_role_traces(
     *,
     session_dir: Path,
     framework: str,
-    workspace_path: str = "",
     known: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Run TraceLens (non-LLM) on each role's trace and return ``{role: summary}``.
@@ -82,7 +79,7 @@ async def analyze_role_traces(
         if known and role in known:
             summaries[role] = role_trace_summary(trace_path, known[role])
             continue
-        payload = role_analysis_payload(role, trace_path, framework, workspace_path)
+        payload = role_analysis_payload(role, trace_path, framework)
         try:
             result = await trace_analyze_handler(payload, session_dir=session_dir)
         except Exception as exc:  # isolation boundary: one role's analysis must not fail the round

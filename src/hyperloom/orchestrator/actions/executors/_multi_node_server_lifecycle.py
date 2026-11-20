@@ -624,15 +624,6 @@ async def _restart_with_reclaim_retry(restart_and_wait: Callable[..., Awaitable[
 # Infera frontend profiling API (infera.server --enable-profiling).
 
 
-def executor_drives_engine_profile(state: dict[str, Any]) -> bool:
-    """Whether the executor starts and stops torch profiling on the session's engines itself: a node-list session's
-    engines directly (:func:`trigger_pd_engine_profile`), any other Infera session's through its frontend
-    (:func:`trigger_infera_engine_profile`)."""
-    from hyperloom.inference_optimizer.multi_node.pd_session import INFERA, is_pd_state
-
-    return is_pd_state(state) or str(state.get("backend") or "").strip().lower() == INFERA
-
-
 async def trigger_infera_engine_profile(
     action: str,
     body: dict | None = None,
@@ -641,10 +632,10 @@ async def trigger_infera_engine_profile(
     its engines directly instead."""
     if not is_multi_node():
         return
-    from hyperloom.inference_optimizer.multi_node.pd_session import is_pd_state
+    from hyperloom.inference_optimizer.multi_node.pd_session import INFERA, is_pd_state
 
     state = _read_state() or {}
-    if not executor_drives_engine_profile(state) or is_pd_state(state):
+    if str(state.get("backend") or "").strip().lower() != INFERA or is_pd_state(state):
         return
     service_url = str(state.get("service_url") or "").strip().rstrip("/")
     if not service_url:
