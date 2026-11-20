@@ -90,10 +90,16 @@ from hyperloom_multibranch.scheduling.budget import (
 )
 from hyperloom_multibranch.scheduling.launch_isolation import launch_isolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run, persisted_session, recorded_baseline
 from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
-from hyperloom_multibranch.scheduling.resumption import ResumeRefused, require_resumable
+from hyperloom_multibranch.scheduling.resumption import (
+    PersistedRun,
+    ResumeRefused,
+    persisted_run,
+    persisted_session,
+    recorded_baseline,
+    require_resumable,
+)
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
@@ -569,7 +575,7 @@ class EarlierSession:
 
 def take_over_earlier_session(state_dir: Path) -> EarlierSession:
     """The session ``session.json`` names, read back and taken over from the earlier start; raises what :func:`recorded_session` and
-    :func:`~hyperloom_multibranch.scheduling.lifecycle.persisted_run` raise. Blocks.
+    :func:`~hyperloom_multibranch.scheduling.resumption.persisted_run` raise. Blocks.
 
     The host starts a run again only once its earlier start has ended, so a ``final-only`` lock that start left in the
     session is that start's, whose pid names a process of a machine that is gone: it is removed, or the finish would be

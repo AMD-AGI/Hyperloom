@@ -9,16 +9,13 @@ import argparse
 
 import pytest
 
-from hyperloom.inference_optimizer import cli
-from hyperloom.inference_optimizer.cli import (
-    _apply_default_budget,
-    _preflight_agentx_backend,
-)
+from hyperloom.inference_optimizer.cli import _preflight_agentx_backend, session_resume
 from hyperloom.inference_optimizer.cli.bootstrap import (
     MEASUREMENT_EPOCH,
     measurement_state_is_stale,
 )
 from hyperloom.inference_optimizer.cli.parser import DEFAULT_MAX_HOURS
+from hyperloom.inference_optimizer.cli.session_setup import _SessionStart, _apply_default_budget
 
 
 def _budget_args(**over) -> argparse.Namespace:
@@ -99,14 +96,14 @@ def test_a_bare_resume_notes_the_default_only_when_the_leg_runs_on_it(
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     _on(monkeypatch, native_benchmark)
-    monkeypatch.setattr(cli, "_record_resumed_model_gate", lambda *a, **k: None)
+    monkeypatch.setattr(session_resume, "_record_resumed_model_gate", lambda *a, **k: None)
     state = SharedState()
     state.max_minutes = persisted_minutes
     args = _budget_args(
         extend_hours=0.0, target_gain=None, target_tput=None, target_baseline_dir=None, target_roofline=None
     )
 
-    cli._open_next_leg(args, state, cli._SessionStart(session_dir=tmp_path, session_lock=None, manifest={}))
+    session_resume._open_next_leg(args, state, _SessionStart(session_dir=tmp_path, session_lock=None, manifest={}))
 
     assert args.max_hours == hours
     assert ("NOTE: AgentX replay is configured" in capsys.readouterr().err) is noted

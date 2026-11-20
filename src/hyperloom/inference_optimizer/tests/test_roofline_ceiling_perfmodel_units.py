@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.inference_optimizer import roofline_ceiling as rc
+from hyperloom.inference_optimizer import roofline_model_meta as rmm
 
 
 # ---- op formulas ----
@@ -74,7 +75,7 @@ def test_fused_moe_bytes_defaults_activations_to_the_weight_width():
 # ---- compute_roofline_from_perfmodel ----
 
 
-def _dense_meta(**over) -> rc.ModelMeta:
+def _dense_meta(**over) -> rmm.ModelMeta:
     """A small dense model whose every PerfModel input is populated."""
     base = dict(
         weight_bytes=16 * 1024**3,
@@ -89,7 +90,7 @@ def _dense_meta(**over) -> rc.ModelMeta:
     )
     base.update(over)
     base.setdefault("expert_weight_dtype_bytes", base["weight_dtype_bytes"])
-    return rc.ModelMeta(**base)
+    return rmm.ModelMeta(**base)
 
 
 def _perfmodel(meta=None, **over):
@@ -202,7 +203,7 @@ _DENSE_CFG = {
 
 
 def test_load_model_meta_reads_the_dense_shape(tmp_path):
-    meta = rc.load_model_meta(_write_model(tmp_path / "m", _DENSE_CFG, weight_bytes=8192))
+    meta = rmm.load_model_meta(_write_model(tmp_path / "m", _DENSE_CFG, weight_bytes=8192))
 
     assert meta.weight_bytes == 8192
     assert (meta.num_layers, meta.num_kv_heads, meta.hidden_size) == (4, 2, 512)
@@ -217,30 +218,30 @@ def test_load_model_meta_prefers_the_safetensors_index_over_the_shard_sizes(tmp_
     """The index records the byte-exact total; the shards on disk may be sparse."""
     d = _write_model(tmp_path / "m", _DENSE_CFG, weight_bytes=10)
     (d / "model.safetensors.index.json").write_text(json.dumps({"metadata": {"total_size": 123456}}), encoding="utf-8")
-    assert rc.load_model_meta(d).weight_bytes == 123456
+    assert rmm.load_model_meta(d).weight_bytes == 123456
 
 
 def test_load_model_meta_falls_back_when_the_index_is_unusable(tmp_path):
     d = _write_model(tmp_path / "m", _DENSE_CFG, weight_bytes=777)
     (d / "model.safetensors.index.json").write_text("{not json", encoding="utf-8")
-    assert rc.load_model_meta(d).weight_bytes == 777
+    assert rmm.load_model_meta(d).weight_bytes == 777
 
 
 def test_load_model_meta_takes_the_head_dim_the_config_states(tmp_path):
     """An explicit head_dim wins over hidden_size / heads, which need not divide."""
     cfg = {**_DENSE_CFG, "head_dim": 128}
-    assert rc.load_model_meta(_write_model(tmp_path / "m", cfg)).head_dim == 128
+    assert rmm.load_model_meta(_write_model(tmp_path / "m", cfg)).head_dim == 128
 
 
 def test_load_model_meta_treats_a_missing_kv_head_count_as_multi_head(tmp_path):
     cfg = {k: v for k, v in _DENSE_CFG.items() if k != "num_key_value_heads"}
-    assert rc.load_model_meta(_write_model(tmp_path / "m", cfg)).num_kv_heads == 8
+    assert rmm.load_model_meta(_write_model(tmp_path / "m", cfg)).num_kv_heads == 8
 
 
 def test_load_model_meta_sizes_weights_by_the_quantization_method(tmp_path):
     """quant_method outranks torch_dtype: the checkpoint is stored quantized."""
     cfg = {**_DENSE_CFG, "quantization_config": {"quant_method": "fp8"}}
-    assert rc.load_model_meta(_write_model(tmp_path / "m", cfg)).weight_dtype_bytes == 1.0
+    assert rmm.load_model_meta(_write_model(tmp_path / "m", cfg)).weight_dtype_bytes == 1.0
 
 
 def test_load_model_meta_decomposes_a_moe_checkpoint(tmp_path):
@@ -251,7 +252,7 @@ def test_load_model_meta_decomposes_a_moe_checkpoint(tmp_path):
         "num_experts_per_tok": 2,
         "moe_intermediate_size": 256,
     }
-    meta = rc.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=64 * 1024**2))
+    meta = rmm.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=64 * 1024**2))
 
     assert (meta.num_experts, meta.experts_per_tok) == (8, 2)
     assert 0 < meta.expert_weight_bytes < meta.weight_bytes
@@ -272,7 +273,7 @@ def test_load_model_meta_sizes_routed_experts_at_their_own_precision(tmp_path):
         "quantization_config": {"quant_method": "fp8"},
         "expert_dtype": "fp4",
     }
-    meta = rc.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=64 * 1024**2))
+    meta = rmm.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=64 * 1024**2))
 
     assert meta.weight_dtype_bytes == 1.0
     assert meta.expert_weight_dtype_bytes == 0.5
@@ -296,19 +297,19 @@ _QUARK_MXFP4_QUANT_CFG = {
 
 def test_quant_config_weight_bytes_reads_the_nested_quark_weight_spec():
     """quant_method says "quark"; only the nested weight spec names the precision."""
-    assert rc._resolve_quant_config_weight_bytes(_QUARK_MXFP4_QUANT_CFG) == 0.5
+    assert rmm._resolve_quant_config_weight_bytes(_QUARK_MXFP4_QUANT_CFG) == 0.5
 
 
 def test_quant_config_weight_bytes_still_takes_a_precision_named_method():
     """The flat HF form keeps working: the method itself is the precision."""
-    assert rc._resolve_quant_config_weight_bytes({"quant_method": "fp8"}) == 1.0
+    assert rmm._resolve_quant_config_weight_bytes({"quant_method": "fp8"}) == 1.0
     # ``awq``/``gptq`` name a 4-bit method the dtype table does not carry.
-    assert rc._resolve_quant_config_weight_bytes({"quant_method": "awq"}) == 0.5
+    assert rmm._resolve_quant_config_weight_bytes({"quant_method": "awq"}) == 0.5
 
 
 def test_quant_config_weight_bytes_reads_compressed_tensors_bit_widths():
     cfg = {"quant_method": "compressed-tensors", "config_groups": {"group_0": {"weights": {"num_bits": 4}}}}
-    assert rc._resolve_quant_config_weight_bytes(cfg) == 0.5
+    assert rmm._resolve_quant_config_weight_bytes(cfg) == 0.5
 
 
 def test_quant_config_weight_bytes_takes_the_precision_most_groups_agree_on():
@@ -321,11 +322,11 @@ def test_quant_config_weight_bytes_takes_the_precision_most_groups_agree_on():
             "*.mlp.experts.down_proj": {"weight": {"dtype": "fp4"}},
         },
     }
-    assert rc._resolve_quant_config_weight_bytes(cfg) == 0.5
+    assert rmm._resolve_quant_config_weight_bytes(cfg) == 0.5
     # Same groups, opposite majority -> opposite answer, from the counts alone.
     cfg["layer_quant_config"]["*.mlp.experts.*"] = {"weight": {"dtype": "fp8"}}
     cfg["layer_quant_config"]["*.mlp.experts.down_proj"] = {"weight": {"dtype": "fp8"}}
-    assert rc._resolve_quant_config_weight_bytes(cfg) == 1.0
+    assert rmm._resolve_quant_config_weight_bytes(cfg) == 1.0
 
 
 def test_quant_config_weight_bytes_breaks_a_tie_toward_the_wider_type():
@@ -338,7 +339,7 @@ def test_quant_config_weight_bytes_breaks_a_tie_toward_the_wider_type():
             "b": {"weight": {"dtype": "fp8"}},
         },
     }
-    assert rc._resolve_quant_config_weight_bytes(cfg) == 1.0
+    assert rmm._resolve_quant_config_weight_bytes(cfg) == 1.0
 
 
 def test_a_whole_checkpoint_scope_still_outranks_the_per_group_ones():
@@ -347,18 +348,18 @@ def test_a_whole_checkpoint_scope_still_outranks_the_per_group_ones():
         "global_quant_config": {"weight": {"dtype": "fp4"}},
         "layer_quant_config": {"a": {"weight": {"dtype": "fp8"}}, "b": {"weight": {"dtype": "fp8"}}},
     }
-    assert rc._resolve_quant_config_weight_bytes(cfg) == 0.5
+    assert rmm._resolve_quant_config_weight_bytes(cfg) == 0.5
 
 
 @pytest.mark.parametrize("quant_cfg", [None, {}, "fp8", {"quant_method": "unknown-toolkit"}])
 def test_quant_config_weight_bytes_is_silent_without_a_decisive_signal(quant_cfg):
     """No signal returns 0.0 so the caller falls back to the checkpoint dtype."""
-    assert rc._resolve_quant_config_weight_bytes(quant_cfg) == 0.0
+    assert rmm._resolve_quant_config_weight_bytes(quant_cfg) == 0.0
 
 
 def test_quant_config_weight_bytes_knows_mxfp8():
     """MiniMax-M3-MXFP8 names the method ``mxfp8`` with no nested weight spec."""
-    assert rc._resolve_quant_config_weight_bytes({"quant_method": "mxfp8"}) == 1.0
+    assert rmm._resolve_quant_config_weight_bytes({"quant_method": "mxfp8"}) == 1.0
 
 
 @pytest.mark.parametrize(
@@ -370,24 +371,24 @@ def test_quant_config_weight_bytes_knows_mxfp8():
     ],
 )
 def test_experts_per_tok_reads_every_alias_in_use(key, expected):
-    assert rc._derive_experts_per_tok({key: expected}) == expected
+    assert rmm._derive_experts_per_tok({key: expected}) == expected
 
 
 def test_experts_per_tok_prefers_the_canonical_spelling():
-    assert rc._derive_experts_per_tok({"num_experts_per_tok": 2, "top_k_experts": 9}) == 2
+    assert rmm._derive_experts_per_tok({"num_experts_per_tok": 2, "top_k_experts": 9}) == 2
 
 
 def test_experts_per_tok_is_zero_when_no_alias_is_present():
-    assert rc._derive_experts_per_tok({"num_experts": 8}) == 0
+    assert rmm._derive_experts_per_tok({"num_experts": 8}) == 0
 
 
 def test_moe_hidden_size_prefers_the_latent_expert_width():
     """Kimi-K3 runs its experts at ``routed_expert_hidden_size``, not ``hidden_size``."""
-    assert rc._derive_moe_hidden_size({"hidden_size": 7168, "routed_expert_hidden_size": 3584}) == 3584
+    assert rmm._derive_moe_hidden_size({"hidden_size": 7168, "routed_expert_hidden_size": 3584}) == 3584
 
 
 def test_moe_hidden_size_falls_back_to_the_residual_width():
-    assert rc._derive_moe_hidden_size({"hidden_size": 7168}) == 7168
+    assert rmm._derive_moe_hidden_size({"hidden_size": 7168}) == 7168
 
 
 def test_moe_decomposition_reads_a_gemma_style_topk_alias():
@@ -399,7 +400,7 @@ def test_moe_decomposition_reads_a_gemma_style_topk_alias():
         "num_hidden_layers": 30,
         "moe_intermediate_size": 704,
     }
-    _, total, experts, per_tok = rc._compute_expert_decomposition(cfg, weight_bytes=51_611_872_412, expert_bpe=2.0)
+    _, total, experts, per_tok = rmm._compute_expert_decomposition(cfg, weight_bytes=51_611_872_412, expert_bpe=2.0)
     assert (experts, per_tok) == (128, 8)
     assert total == 30 * 128 * 3 * 2816 * 704 * 2
 
@@ -415,19 +416,19 @@ def test_moe_decomposition_sizes_latent_experts_at_their_own_width():
         "moe_intermediate_size": 3072,
     }
     weight_bytes = 1_560_860_324_864
-    _, total, experts, _ = rc._compute_expert_decomposition(cfg, weight_bytes=weight_bytes, expert_bpe=0.5)
+    _, total, experts, _ = rmm._compute_expert_decomposition(cfg, weight_bytes=weight_bytes, expert_bpe=0.5)
     assert experts == 896
     assert total == int(93 * 896 * 3 * 3584 * 3072 * 0.5)
     # The residual width would overshoot the checkpoint and safe-degrade.
     wide = {k: v for k, v in cfg.items() if k != "routed_expert_hidden_size"}
-    assert rc._compute_expert_decomposition(wide, weight_bytes=weight_bytes, expert_bpe=0.5)[2] == 0
+    assert rmm._compute_expert_decomposition(wide, weight_bytes=weight_bytes, expert_bpe=0.5)[2] == 0
 
 
 def test_perfmodel_sizes_the_moe_op_at_the_latent_expert_width(tmp_path):
     """A narrower expert width must shrink the MoE op, not just the guard math."""
 
     def _breakdown(moe_hidden):
-        meta = rc.ModelMeta(
+        meta = rmm.ModelMeta(
             weight_bytes=1_000_000,
             num_layers=4,
             num_kv_heads=2,
@@ -466,14 +467,14 @@ def test_load_model_meta_keeps_a_quark_moe_checkpoint_decomposed(tmp_path):
     # Sized as the real checkpoint is: fp4 experts fit, bf16 experts would not.
     expert_elems = 4 * 512 * 3 * 512 * 2048  # layers * experts * 3 * hidden * moe_inter
     weight_bytes = int(expert_elems * 0.5 * 1.15)
-    meta = rc.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=weight_bytes))
+    meta = rmm.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=weight_bytes))
 
     assert meta.weight_dtype_bytes == 0.5
     assert (meta.num_experts, meta.experts_per_tok) == (512, 10)
     assert meta.moe_intermediate_size == 2048
     assert meta.expert_weight_bytes == int(expert_elems * 0.5)
     # At bf16 the same config degrades to dense, which is the bug being pinned.
-    assert rc._compute_expert_decomposition(cfg, weight_bytes=weight_bytes, expert_bpe=2.0) == (
+    assert rmm._compute_expert_decomposition(cfg, weight_bytes=weight_bytes, expert_bpe=2.0) == (
         weight_bytes,
         0,
         0,
@@ -491,7 +492,7 @@ def test_perfmodel_attributes_the_moe_ffn_for_a_quark_checkpoint(tmp_path):
         "quantization_config": _QUARK_MXFP4_QUANT_CFG,
     }
     expert_elems = 4 * 512 * 3 * 512 * 2048
-    meta = rc.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=int(expert_elems * 0.5 * 1.15)))
+    meta = rmm.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=int(expert_elems * 0.5 * 1.15)))
     breakdown = rc.compute_roofline_from_perfmodel(
         meta=meta,
         target=rc.ComputeTarget(gpu_type="mi355x", num_gpus=8, precision_tag="mxfp4"),
@@ -514,7 +515,7 @@ def test_moe_decomposition_degrades_when_the_experts_exceed_the_checkpoint():
         "num_hidden_layers": 4,
         "moe_intermediate_size": 256,
     }
-    active, total, experts, per_tok = rc._compute_expert_decomposition(cfg, weight_bytes=1024, expert_bpe=2.0)
+    active, total, experts, per_tok = rmm._compute_expert_decomposition(cfg, weight_bytes=1024, expert_bpe=2.0)
     assert (active, total, experts, per_tok) == (1024, 0, 0, 0)
 
 
@@ -527,21 +528,21 @@ def test_moe_decomposition_degrades_when_the_experts_exceed_the_checkpoint():
     ],
 )
 def test_moe_decomposition_needs_a_complete_config(cfg):
-    assert rc._compute_expert_decomposition(cfg, weight_bytes=999, expert_bpe=2.0) == (999, 0, 0, 0)
+    assert rmm._compute_expert_decomposition(cfg, weight_bytes=999, expert_bpe=2.0) == (999, 0, 0, 0)
 
 
 def test_load_model_meta_declines_an_unreadable_model(tmp_path):
-    assert rc.load_model_meta("") is None
+    assert rmm.load_model_meta("") is None
     # A dir with a config but no weights, and one with weights but no config.
     no_weights = tmp_path / "a"
     no_weights.mkdir()
     (no_weights / "config.json").write_text(json.dumps(_DENSE_CFG), encoding="utf-8")
-    assert rc.load_model_meta(no_weights) is None
+    assert rmm.load_model_meta(no_weights) is None
 
     no_config = tmp_path / "b"
     no_config.mkdir()
     (no_config / "model.safetensors").write_bytes(b"\0" * 16)
-    assert rc.load_model_meta(no_config) is None
+    assert rmm.load_model_meta(no_config) is None
 
 
 def test_load_model_meta_declines_a_config_that_is_not_a_mapping(tmp_path):
@@ -549,13 +550,13 @@ def test_load_model_meta_declines_a_config_that_is_not_a_mapping(tmp_path):
     d.mkdir()
     (d / "config.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")
     (d / "model.safetensors").write_bytes(b"\0" * 16)
-    assert rc.load_model_meta(d) is None
+    assert rmm.load_model_meta(d) is None
 
 
 # ---- runtime weight precision ----
 
 
-def _load_small_moe_meta(tmp_path: Path, **over) -> rc.ModelMeta:
+def _load_small_moe_meta(tmp_path: Path, **over) -> rmm.ModelMeta:
     cfg = {
         **_DENSE_CFG,
         "num_hidden_layers": 2,
@@ -568,7 +569,7 @@ def _load_small_moe_meta(tmp_path: Path, **over) -> rc.ModelMeta:
         "moe_intermediate_size": 8,
         **over,
     }
-    return rc.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=16384))
+    return rmm.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=16384))
 
 
 def _launched_with(tmp_path: Path, server_args: str):
@@ -994,9 +995,9 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
 def test_a_nested_spec_reads_the_quant_only_tags_too(tag, expected):
     """The nested path must consult both tables, exactly as the flat one does."""
     cfg = {"quant_method": "quark", "global_quant_config": {"weight": {"dtype": tag}}}
-    assert rc._resolve_quant_config_weight_bytes(cfg) == expected
+    assert rmm._resolve_quant_config_weight_bytes(cfg) == expected
 
 
 def test_num_bits_still_wins_when_the_tag_is_unknown():
     cfg = {"quant_method": "quark", "global_quant_config": {"weight": {"dtype": "some_new_format", "num_bits": 6}}}
-    assert rc._resolve_quant_config_weight_bytes(cfg) == 0.75
+    assert rmm._resolve_quant_config_weight_bytes(cfg) == 0.75

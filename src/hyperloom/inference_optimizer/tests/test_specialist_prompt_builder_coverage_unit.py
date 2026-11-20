@@ -9,11 +9,8 @@ import pytest
 
 from hyperloom.common.failure_signature import classify_failure
 from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    build_specialist_prompts,
-    _render_measured_impact,
-    _format_version_note,
-)
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
+from hyperloom.orchestrator.prompts.specialist_context_sections import _render_measured_impact, _format_version_note
 from hyperloom.orchestrator.specialists.domains import SPECIALIST_DOMAINS, get_domain
 
 

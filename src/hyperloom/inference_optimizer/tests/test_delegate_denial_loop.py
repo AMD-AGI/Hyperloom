@@ -142,7 +142,7 @@ async def test_policy_denial_records_target_proposal_message_id(session_dir):
     from hyperloom.inference_optimizer.breakdown.recorder import phase_event
     from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseEntry, PhaseExit
     from hyperloom.inference_optimizer.session.session_binding import session_scope
-    from hyperloom.orchestrator.phases.machine_state import workflow_predicate_inputs
+    from hyperloom.orchestrator.phases.phase_predicates import workflow_predicate_inputs
     from hyperloom.orchestrator.policy.denial import PolicyDenied
 
     coordinator = _silent_coordinator(session_dir)

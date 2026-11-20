@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.phases import phase_transitions
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -142,7 +143,7 @@ def test_a_macro_cycle_reentry_gets_budget_while_the_session_has_time_left():
 
     assert ps.session_remaining_seconds(state, now_unix=now) > 7 * 3600.0
     assert ps.phase_budget_remaining_seconds(state, now_unix=now) > 6 * 3600.0
-    assert ps.compute_next_phase(state, now_unix=now) is None
+    assert phase_transitions.compute_next_phase(state, now_unix=now) is None
 
 
 def test_totals_accumulate_for_every_phase_not_just_explore():
@@ -244,7 +245,7 @@ def test_budget_exit_evidence_reports_the_time_it_judged_on():
     state.phase = ps.PHASE_KERNEL_AGENT
     state.phase_started_unix = T0
 
-    out = ps.compute_next_phase(state, now_unix=T0 + ENTRY_SEC)
+    out = phase_transitions.compute_next_phase(state, now_unix=T0 + ENTRY_SEC)
 
     assert out is not None
     target, reason, evidence = out

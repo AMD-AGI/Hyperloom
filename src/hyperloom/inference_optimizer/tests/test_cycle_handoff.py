@@ -75,7 +75,10 @@ async def test_a_reply_without_intents_is_not_an_error(session_dir):
 async def test_the_handoff_turn_is_billed_like_any_reactor_turn(session_dir, monkeypatch):
     coord, _ = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
     billed: list[str] = []
-    monkeypatch.setattr(coord, "_trace_reactor_llm_call", lambda agent, result, **_: billed.append(agent))
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.loop.coordinator.trace_reactor_llm_call",
+        lambda _session_dir, _state, agent, result, **_: billed.append(agent),
+    )
 
     await coord.phase_sweep.pump()
 

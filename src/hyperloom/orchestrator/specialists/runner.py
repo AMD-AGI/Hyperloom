@@ -15,25 +15,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import logging
-import re
-import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
 from hyperloom_common.coerce import first_str, first_text
-from hyperloom_common.fs_utils import append_text_nofollow
-from hyperloom_common.io import JsonFormat, WriteOptions, atomic_write_json
 from hyperloom.common.deadline import Deadline, seconds_until
-from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, redact_secret_values
 from hyperloom_common.timeutil import now_iso
 
 from hyperloom.inference_optimizer.session.session_paths import runs_dir, specialist_intel_path
 from ..state.experience_citations import normalize_citations, shown_ids
-from ..state.retest_view import scrub
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
@@ -54,18 +47,22 @@ from .domains import (
     get_domain,
     normalize_dispatch_tags,
 )
-from .subprocess_ import (
-    UNBOUNDED_REAP_CAP_SEC,
-    SpecialistSpawn,
-    SpecialistSubprocessConfig,
-    SpecialistSubprocessDispatcher,
-    SpecialistSubprocessResult,
-)
+from .subprocess_ import SpecialistSubprocessConfig, SpecialistSubprocessDispatcher
+from .subprocess_types import UNBOUNDED_REAP_CAP_SEC, SpecialistSpawn, SpecialistSubprocessResult
 from .worktrees import link_worktree
+from .patch_claims import grounding_explicit_root, patch_path_within_bases, resolve_claimed_patch, sibling_checkouts
 from . import patch_safety as _patch_safety
 from .profile import MODE_PATCH, SpecialistProfile, resolve_specialist_profile
 from .prompt_inputs import SpecialistPromptInputs
 from hyperloom.inference_optimizer.tree_snapshot import snapshot_repository, snapshot_tree
+from .workspace_files import (
+    append_transcript,
+    done_path,
+    redact_transcript_value,
+    transcript_path,
+    write_heartbeat,
+    write_specialist_done,
+)
 from hyperloom.inference_optimizer.framework_paths import (
     FrameworkTree,
     framework_apply_tree,
@@ -268,172 +265,6 @@ SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(
 )
 
 
-_SECRET_ENV_NAMES: tuple[str, ...] = tuple(
-    sorted(
-        {
-            *BENCHMARK_SECRET_ENV_NAMES,
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_CUSTOM_HEADERS",
-            "AWS_ACCESS_KEY_ID",
-            "AWS_SECRET_ACCESS_KEY",
-            "AWS_SESSION_TOKEN",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "CLAW_API_KEY",
-            "GITHUB_TOKEN",
-            "HF_TOKEN",
-            "HF_TOKEN_2",
-            "HYPERLOOM_GIT_TOKEN",
-            "HYPERLOOM_PR_CI_GH_TOKEN",
-            "LLM_API_KEY",
-            "LLM_GATEWAY_KEY",
-            "OPENAI_API_KEY",
-            "OPENAI_CUSTOM_HEADERS",
-            "SAFE_API_KEY",
-        }
-    )
-)
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?P<key>\b(?:"
-    + "|".join(re.escape(name) for name in _SECRET_ENV_NAMES)
-    + r")\b)(?P<sep>\s*(?:=|:)\s*)(?P<quote>['\"]?)(?!\[REDACTED\])"
-    + r"(?P<value>[^\s,'\"\]}]+)(?P=quote)",
-    re.IGNORECASE,
-)
-
-
-def _sibling_checkouts(roots: tuple[str, ...], base: Path | None) -> tuple[Path, ...]:
-    """Return the configured source trees other than ``base``.
-
-    Grounding falls back to these when the worktree base does not hold a
-    patch's targets, which is the normal case for a specialist that patches a
-    framework other than the one its worktree was cut from.
-
-    A tree does not have to be a git checkout to be a candidate: target
-    matching only stats files, and ``git apply --check`` runs against a plain
-    directory. Requiring ``.git`` here left a pip-installed framework with no
-    candidate at all, so every patch it wrote was dropped for a target that was
-    on disk the whole time.
-
-    Args:
-        roots: The configured framework source roots.
-        base: The checkout the specialist worktree branched off, if any.
-
-    Returns:
-        The remaining roots that exist, in discovery order.
-    """
-    base_resolved = base.resolve() if base else None
-    out: list[Path] = []
-    for raw in roots:
-        root = Path(raw)
-        if not root.is_dir() or root.resolve() == base_resolved:
-            continue
-        out.append(root)
-    return tuple(out)
-
-
-def _grounding_explicit_root(
-    *,
-    declared: str,
-    patches: list[str],
-    patch_roots: dict[str, str],
-) -> Path | None:
-    """Return the root to ground the whole patch set against, or ``None``.
-
-    ``vet_patches`` grounds one set against one root, so a harvested root can
-    stand in only when every patch was harvested and they agree on it. A
-    hand-authored patch alongside a harvest has an unknown target tree, and
-    grounding it against the harvest root drops it as a mismatch rather than
-    matching it against the candidates.
-
-    Args:
-        declared: ``framework_source_root`` from the task params, if any.
-        patches: The deduplicated patch set about to be vetted.
-        patch_roots: Apply roots recorded for harvested patches.
-
-    Returns:
-        Path | None: The root, or None to fall back to candidate matching.
-    """
-    if declared:
-        return Path(declared)
-    if not patches or any(patch not in patch_roots for patch in patches):
-        return None
-    roots = set(patch_roots.values())
-    return Path(roots.pop()) if len(roots) == 1 else None
-
-
-def _resolve_claimed_patch(p: Any, bases: list[Path]) -> str | None:
-    """The first existing sandbox-internal file a claimed patch path names, absolute or under one of ``bases``."""
-    raw = Path(str(p))
-    candidates = [raw] if raw.is_absolute() else []
-    candidates += [base / raw for base in bases]
-    for c in candidates:
-        try:
-            if c.is_file() and _patch_path_within_bases(c, bases):
-                return str(c)
-        except OSError:
-            continue
-    return None
-
-
-def _patch_path_within_bases(path: Path, bases: list[Path]) -> bool:
-    """True when ``path`` resolves inside one of the specialist sandbox bases.
-
-    A claimed patch path (possibly absolute or ``..``-relative) must stay under
-    the specialist worktree/workspace before it is read back; only
-    sandbox-internal paths are legitimate, and none may pass through a symlink.
-    """
-    try:
-        rp = path.resolve()
-    except OSError:
-        return False
-    lexical = Path(os.path.normpath(path))
-    for base in bases:
-        try:
-            br = base.resolve()
-            rel = lexical.relative_to(os.path.normpath(base))
-        except (OSError, ValueError):
-            continue
-        # The sandbox is writable by a demoted child: a link on the way (a planted ``patches`` symlink) would make
-        # the path resolve somewhere else inside the base, so what is named must be what is read.
-        if rp == br / rel:
-            return True
-    return False
-
-
-def _safe_redact(s: str) -> str:
-    """Redact obvious secrets from a transcript line before writing to disk.
-
-    Scans for known environment-variable secret names, Authorization/Bearer
-    headers, and common token shapes, then masks the secret value while leaving
-    enough surrounding context for debugging.
-
-    Args:
-        s (str): The raw transcript line that may contain secret material.
-
-    Returns:
-        str: The line with recognised secret values replaced by
-            ``[REDACTED]``.
-    """
-    out = redact_secret_values(s)
-    return _SECRET_ASSIGNMENT_RE.sub(
-        lambda m: f"{m.group('key')}{m.group('sep')}{m.group('quote')}[REDACTED]{m.group('quote')}",
-        out,
-    )
-
-
-def _redact_transcript_value(value: Any) -> Any:
-    if isinstance(value, str):
-        return _safe_redact(value)
-    if isinstance(value, dict):
-        return {str(k): _redact_transcript_value(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redact_transcript_value(v) for v in value]
-    if isinstance(value, tuple):
-        return [_redact_transcript_value(v) for v in value]
-    return value
-
-
 @dataclass
 class _PreparedRun:
     """Shared setup-phase output threaded into both execution paths."""
@@ -619,7 +450,7 @@ class SpecialistRunner:
         prep.system_prompt, prep.user_prompt = build_specialist_prompts(
             self._prompt_inputs(ctx, prep, worktree_source, custom_specialist_prompt)
         )
-        self._write_heartbeat(
+        write_heartbeat(
             workspace,
             turn=0,
             max_turns=max_turns,
@@ -636,7 +467,7 @@ class SpecialistRunner:
             domain=domain_key,
             reason=f"unknown specialist domain={domain_key!r}",
         )
-        self._write_specialist_done(workspace, done)
+        write_specialist_done(workspace, done)
         return _PreparedRun(
             early_return=SpecialistRunResult(
                 task_id=ctx.task.task_id,
@@ -789,7 +620,7 @@ class SpecialistRunner:
                         "turn": turn,
                         "ts": ts,
                         "tool": str(call.get("tool") or "tool"),
-                        "query": _redact_transcript_value(call.get("query")),
+                        "query": redact_transcript_value(call.get("query")),
                     }
                     f.write(json.dumps(row, sort_keys=True) + "\n")
         except OSError:
@@ -878,7 +709,7 @@ class SpecialistRunner:
                 notes=prep.notes + ["no_workspace"],
             )
 
-        self._write_heartbeat(
+        write_heartbeat(
             workspace,
             turn=1,
             max_turns=prep.max_turns,
@@ -930,7 +761,7 @@ class SpecialistRunner:
     ) -> None:
         """Record what a reaped subprocess left for the session's ledgers, then mark its heartbeat finished."""
         trace = sub_result.trace
-        self._append_transcript(
+        append_transcript(
             prep.workspace,
             1,
             {
@@ -976,7 +807,7 @@ class SpecialistRunner:
                 tick=tick,
                 phase=phase,
             )
-        self._write_heartbeat(prep.workspace, turn=1, max_turns=prep.max_turns, status="finished")
+        write_heartbeat(prep.workspace, turn=1, max_turns=prep.max_turns, status="finished")
 
     # Finalize phase (shared)
     def _finalize(
@@ -1014,7 +845,7 @@ class SpecialistRunner:
             done_payload = build_empty_specialist_done(gap_canonical_id=gap, domain=domain.key, reason=reason)
             if gpu_ids:
                 done_payload["allocated_gpu_ids"] = list(gpu_ids)
-            self._write_specialist_done(workspace, done_payload)
+            write_specialist_done(workspace, done_payload)
             return SpecialistRunResult(
                 task_id=ctx.task.task_id,
                 domain=domain.key,
@@ -1043,7 +874,7 @@ class SpecialistRunner:
             notes.append("recovered_from_partial")
         if notes:
             done_payload["_specialist_notes"] = list(notes)
-        self._write_specialist_done(workspace, done_payload)
+        write_specialist_done(workspace, done_payload)
         return SpecialistRunResult(
             task_id=ctx.task.task_id,
             domain=domain.key,
@@ -1051,8 +882,8 @@ class SpecialistRunner:
             status=status,
             specialist_done=done_payload,
             workspace=str(workspace) if workspace else "",
-            transcript_path=str(self._transcript_path(workspace)) if workspace else "",
-            done_path=str(self._done_path(workspace)) if workspace else "",
+            transcript_path=str(transcript_path(workspace)) if workspace else "",
+            done_path=str(done_path(workspace)) if workspace else "",
             error=backend_error,
             notes=notes,
         )
@@ -1079,14 +910,14 @@ class SpecialistRunner:
         validated: list[str] = []
         missing: list[str] = []
         for p in claimed:
-            resolved = _resolve_claimed_patch(p, search_bases)
+            resolved = resolve_claimed_patch(p, search_bases)
             if resolved is not None:
                 validated.append(resolved)
             else:
                 missing.append(str(p))
         dropped_scanned_outside: list[str] = []
         for p in sub_result.patches:
-            if not _patch_path_within_bases(Path(p), search_bases):
+            if not patch_path_within_bases(Path(p), search_bases):
                 dropped_scanned_outside.append(p)
                 log.warning(
                     "specialist: scanned patch %r resolves outside the specialist worktree/workspace; dropping",
@@ -1120,8 +951,8 @@ class SpecialistRunner:
         vetted = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
-            candidate_roots=_sibling_checkouts(tuple(self.subprocess_config.framework_source_roots), base_checkout),
-            explicit_root=_grounding_explicit_root(
+            candidate_roots=sibling_checkouts(tuple(self.subprocess_config.framework_source_roots), base_checkout),
+            explicit_root=grounding_explicit_root(
                 declared=str((ctx.task.params or {}).get("framework_source_root") or "").strip(),
                 patches=deduped,
                 patch_roots=sub_result.patch_roots,
@@ -1222,118 +1053,6 @@ class SpecialistRunner:
         p = runs_dir(self.session_dir, "specialist", ctx.task.task_id)
         p.mkdir(parents=True, exist_ok=True)
         return p
-
-    def _transcript_path(self, workspace: Path | None) -> Path | None:
-        """Return the ``transcript.jsonl`` path within the workspace.
-
-        Args:
-            workspace (Path | None): The per-task workspace directory.
-
-        Returns:
-            Path | None: The transcript path, or ``None`` when no workspace.
-        """
-        return (workspace / "transcript.jsonl") if workspace else None
-
-    def _heartbeat_path(self, workspace: Path | None) -> Path | None:
-        """Return the ``heartbeat.json`` path within the workspace.
-
-        Args:
-            workspace (Path | None): The per-task workspace directory.
-
-        Returns:
-            Path | None: The heartbeat path, or ``None`` when no workspace.
-        """
-        return (workspace / "heartbeat.json") if workspace else None
-
-    def _done_path(self, workspace: Path | None) -> Path | None:
-        """Return the ``specialist_done.json`` path within the workspace.
-
-        Args:
-            workspace (Path | None): The per-task workspace directory.
-
-        Returns:
-            Path | None: The done-artifact path, or ``None`` when no workspace.
-        """
-        return (workspace / "specialist_done.json") if workspace else None
-
-    def _append_transcript(
-        self,
-        workspace: Path | None,
-        turn: int,
-        entry: dict[str, Any],
-    ) -> None:
-        """Append one JSON line to the workspace ``transcript.jsonl``.
-
-        No-ops when no workspace is configured.
-
-        Args:
-            workspace (Path | None): The per-task workspace directory.
-            turn (int): The turn index the entry belongs to.
-            entry (dict[str, Any]): The transcript record to serialise.
-        """
-        path = self._transcript_path(workspace)
-        if path is None:
-            return
-        safe_entry = _redact_transcript_value(entry)
-        line = json.dumps(
-            {
-                "turn": turn,
-                "ts": now_iso(),
-                **safe_entry,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        append_text_nofollow(path.parent, (path.name,), line + "\n")
-
-    def _write_heartbeat(
-        self,
-        workspace: Path | None,
-        *,
-        turn: int,
-        max_turns: int,
-        status: str,
-    ) -> None:
-        """Atomically write the workspace ``heartbeat.json``.
-
-        Writes to a temp file then ``os.replace``-s it into place so readers
-        never observe a partial write. No-ops when no workspace is configured.
-
-        Args:
-            workspace (Path | None): The per-task workspace directory.
-            turn (int): The current turn index.
-            max_turns (int): The configured turn budget.
-            status (str): A short lifecycle status string.
-        """
-        path = self._heartbeat_path(workspace)
-        if path is None:
-            return
-        payload = {
-            "ts": now_iso(),
-            "ts_unix": time.time(),
-            "turn": turn,
-            "max_turns": max_turns,
-            "status": status,
-        }
-        atomic_write_json(path, payload, fmt=JsonFormat(indent=None), options=WriteOptions())
-
-    def _write_specialist_done(
-        self,
-        workspace: Path | None,
-        payload: dict[str, Any],
-    ) -> None:
-        """Write the ``specialist_done.json`` artifact with a timestamp, group-readable (the retest runner reads it).
-
-        Atomic (temp + ``os.replace``); every string is scrubbed of credentials. No-ops when no workspace is set.
-
-        Args:
-            workspace (Path | None): The per-task workspace directory.
-            payload (dict[str, Any]): The ``specialist_done`` payload to persist.
-        """
-        path = self._done_path(workspace)
-        if path is None:
-            return
-        atomic_write_json(path, scrub({"ts": now_iso(), **payload}), options=WriteOptions(group_read=True))
 
 
 __all__ = [

@@ -15,7 +15,8 @@ from hyperloom.inference_optimizer.breakdown.exporter import build
 from hyperloom.inference_optimizer.breakdown.workflow_contract import workflow_schema
 from hyperloom.inference_optimizer.session.manifest import write_manifest
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.phases.machine_state import compute_next_phase, record_phase_transition
+from hyperloom.orchestrator.phases.phase_transitions import compute_next_phase
+from hyperloom.orchestrator.phases.machine_state import record_phase_transition
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 

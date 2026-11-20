@@ -465,7 +465,7 @@ still waiting then is left unbenched.
 ### IR-8 — `--framework atom` is single-node only
 
 `--framework atom` (`atom.entrypoints.openai_server`) reaches full parity with sglang/vllm
-EXCEPT multi-node: `_apply_atom_auto_tighten` in `cli.py` rejects
+EXCEPT multi-node: `_apply_atom_auto_tighten` in `cli/session_setup.py` rejects
 `--nodes >= 2` with `SystemExit(2)` (atom upstream has no multi-node TP
 wiring). No other flag is auto-flipped — kernel-agent, framework-agent,
 profile / roofline / TraceLens all run on atom. The atom-specific
@@ -835,10 +835,17 @@ python3 -m hyperloom optimize \
   benchmark configs, display names, and the optimization report carry the stale
   operator-supplied precision label (e.g. `fp8`/`bf16`) and **mislabel** an
   actually-quantized model. Never leave a conflicting precision when quantizing.
+- Master switch: quantization runs only when `$HYPERLOOM_QUANTIZE_ENABLED` is
+  truthy (`1`/`true`/`yes`/`on`). Without it `--quantize` and
+  `--quantize-scheme` are **skipped**: the run prints a `QUANTIZATION_SKIPPED:`
+  line, sets `$HYPERLOOM_QUANTIZATION_SKIPPED`, and continues on the
+  un-quantized model. The frontend or operator sets the switch on the sandbox;
+  do not export it yourself. When a run is skipped for it, report the line and
+  that setting `HYPERLOOM_QUANTIZE_ENABLED=1` enables quantization.
 - Behavior: one-shot, **never runs on a resume**. On a failed/unusable
   quantization the run **hard-stops (`SystemExit(4)`)** — it never silently
   optimizes the un-quantized source after an explicit `--quantize`.
-  The one exception is a **pre-flight scheme/GPU mismatch** via
+  With the switch on, the one exception is a **pre-flight scheme/GPU mismatch** via
   `--quantize-scheme` (e.g. `mxfp4` on a non-MI355X target): this is **skipped**
   (not a hard stop) and continues on the un-quantized model, emitting a
   `QUANTIZATION_SKIPPED:` line on stdout and setting
@@ -1652,9 +1659,11 @@ Benchmark subprocesses use two finite, positive limits:
 
 Session `--max-hours` and cancellation remain effective independently of those
 limits. Session exhaustion is cooperative: it cannot guarantee termination of a
-frozen Coordinator. Busy logs are not proof of useful progress. Setting
-`PYTHONUNBUFFERED=1` only affects Python output; it does not force shell or native
-programs, or upstream subprocess capture, to stream output.
+frozen Coordinator. Busy logs are not proof of useful progress, and quiet logs
+are not proof of a hang: inspect the server and compiler logs and the cache
+artifacts before deciding a cold start was interrupted. Setting
+`PYTHONUNBUFFERED=1` only affects Python output; it does not force shell or
+native programs, or upstream subprocess capture, to stream output.
 
 Cold-start detection is diagnostic, not a separate benchmark timeout policy.
 Profile, KernelForge, GEAK, LLM-call, and framework-owned watchdog budgets retain

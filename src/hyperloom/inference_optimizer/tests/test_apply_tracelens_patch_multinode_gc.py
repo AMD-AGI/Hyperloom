@@ -146,19 +146,21 @@ def test_controller_sitecustomize_past_the_gc_range_has_no_patch_set(monkeypatch
 
 
 def test_ray_entrypoint_forwards_patch_set(monkeypatch):
-    from hyperloom.inference_optimizer.multi_node import cli
+    from hyperloom.inference_optimizer.multi_node import pod_entrypoints
 
-    monkeypatch.setattr(cli, "_read_pod_script", lambda name: "")
-    with_set = cli._build_multinode_apply_tracelens_patch_entrypoint("/tl", "", "roofline")
+    monkeypatch.setattr(pod_entrypoints, "read_pod_script", lambda name: "")
+    with_set = pod_entrypoints._build_multinode_apply_tracelens_patch_entrypoint("/tl", "", "roofline")
     assert with_set.rstrip().endswith("--tracelens-root /tl --patch-set roofline")
-    assert "--patch-set" not in cli._build_multinode_apply_tracelens_patch_entrypoint("/tl", "", "")
+    assert "--patch-set" not in pod_entrypoints._build_multinode_apply_tracelens_patch_entrypoint("/tl", "", "")
 
 
 def test_cmd_apply_tracelens_patch_submits_patch_set(monkeypatch):
     from hyperloom.inference_optimizer.multi_node import cli
+    from hyperloom.inference_optimizer.multi_node import cluster_access
+    from hyperloom.inference_optimizer.multi_node import pod_entrypoints
 
     monkeypatch.setattr(cli, "_load_state", lambda: {"head_pod_ip": "10.0.0.1"})
-    monkeypatch.setattr(cli, "_read_pod_script", lambda name: "")
+    monkeypatch.setattr(pod_entrypoints, "read_pod_script", lambda name: "")
     monkeypatch.setattr(cli, "_poll_timeout_from_args", lambda args: 1)
     submitted: list[str] = []
 
@@ -174,7 +176,7 @@ def test_cmd_apply_tracelens_patch_submits_patch_set(monkeypatch):
         poll_interval=1,
         print_logs=False,
     )
-    assert cli.cmd_apply_tracelens_patch(ns) == cli.EXIT_OK
+    assert cli.cmd_apply_tracelens_patch(ns) == cluster_access.EXIT_OK
     assert "--patch-set graph-capture" in submitted[0]
 
 
@@ -185,7 +187,7 @@ def test_infera_forwards_patch_set(monkeypatch):
     monkeypatch.setattr(
         inf.infera_support, "gpu_ssh_targets_from_state", lambda state: [{"podIP": "10.0.1.0", "sshPort": 22}]
     )
-    monkeypatch.setattr(inf._mn_cli, "_read_pod_script", lambda name: "")
+    monkeypatch.setattr(inf, "read_pod_script", lambda name: "")
     monkeypatch.setattr(inf._mn_cli, "_poll_timeout_from_args", lambda args: 1)
     op_args: list[str] = []
 

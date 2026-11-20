@@ -1004,7 +1004,7 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         tmp_path,
         monkeypatch,
     ):
-        from hyperloom.inference_optimizer import roofline_ceiling
+        from hyperloom.inference_optimizer import roofline_ceiling, roofline_model_meta
         from hyperloom.orchestrator.state.shared_state import SharedState
 
         self._mock_breakdown(
@@ -1014,7 +1014,7 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
             peak=7900.0,
             kind="memory",
         )
-        meta = roofline_ceiling.ModelMeta(
+        meta = roofline_model_meta.ModelMeta(
             weight_bytes=1,
             num_layers=1,
             num_kv_heads=1,
@@ -1022,7 +1022,7 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
             weight_dtype_bytes=2.0,
             expert_weight_dtype_bytes=2.0,
         )
-        monkeypatch.setattr(roofline_ceiling, "load_model_meta", lambda *a, **kw: meta)
+        monkeypatch.setattr(roofline_model_meta, "load_model_meta", lambda *a, **kw: meta)
         monkeypatch.setattr(
             roofline_ceiling,
             "compute_roofline_from_perfmodel",

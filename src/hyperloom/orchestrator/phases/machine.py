@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import machine_state as _phase_state
+from . import phase_predicates, phase_transitions
 from ..bus.message_bus import Message
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
 from ..collaborator import CoordinatorCollaborator
@@ -107,7 +108,7 @@ class MachinePhase(CoordinatorCollaborator):
                 reason="phase_entered",
                 evidence={
                     "trigger": "fresh_session",
-                    "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
+                    "predicate_inputs": phase_predicates.initial_workflow_predicate_inputs(
                         state,
                         current_phase="",
                         flags=self.phase_flags(),
@@ -138,7 +139,7 @@ class MachinePhase(CoordinatorCollaborator):
             reason="phase_entered",
             evidence={
                 "trigger": "resumed_from_close",
-                "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
+                "predicate_inputs": phase_predicates.initial_workflow_predicate_inputs(
                     state,
                     current_phase=_phase_state.PHASE_CLOSE,
                     flags=self.phase_flags(),
@@ -179,10 +180,10 @@ class MachinePhase(CoordinatorCollaborator):
             session_dir=self.session_dir,
         )
 
-    def phase_flags(self) -> _phase_state.PhaseFlags:
+    def phase_flags(self) -> phase_predicates.PhaseFlags:
         """The run's phase toggles, as the transition predicates read them."""
         state = self.shared_state
-        return _phase_state.PhaseFlags(
+        return phase_predicates.PhaseFlags(
             kernel_enabled=state.kernel_enabled,
             optimize_enabled=state.framework_agent_phase_enabled,
             enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
@@ -209,10 +210,10 @@ class MachinePhase(CoordinatorCollaborator):
             for action in _phase_state.allowed_actions_for(_phase_state.PHASE_FRAMEWORK_AGENT)
         )
 
-    async def _next_phase(self, *, in_flight: _phase_state.WorkInFlight) -> tuple[str, str, dict[str, Any]] | None:
+    async def _next_phase(self, *, in_flight: phase_predicates.WorkInFlight) -> tuple[str, str, dict[str, Any]] | None:
         """The transition the predicates ask for, held while the operator-defined specialist's work is pending."""
         state = self.shared_state
-        next_phase = _phase_state.compute_next_phase(
+        next_phase = phase_transitions.compute_next_phase(
             state,
             in_flight=in_flight,
             framework_round_fits=await self._framework_round_fits(),
@@ -252,7 +253,7 @@ class MachinePhase(CoordinatorCollaborator):
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
         in_prelude = str(state.phase or "").upper() == _phase_state.PHASE_PRELUDE
         next_phase = await self._next_phase(
-            in_flight=_phase_state.WorkInFlight(
+            in_flight=phase_predicates.WorkInFlight(
                 enablement=in_enablement and await self._coord.enablement_lane.enablement_in_flight(),
                 kernel=await self._coord.phase_kernel.agent_in_flight(),
                 prelude=in_prelude and await self._prelude_work_in_flight(),
@@ -419,7 +420,7 @@ class MachinePhase(CoordinatorCollaborator):
         in_prelude = str(state.phase or "").upper() == _phase_state.PHASE_PRELUDE
         await self._release_holds_no_task_will_settle()
         next_phase = await self._next_phase(
-            in_flight=_phase_state.WorkInFlight(
+            in_flight=phase_predicates.WorkInFlight(
                 enablement=in_enablement and await self._coord.enablement_lane.enablement_in_flight(),
                 kernel=kernel_facts.agent_in_flight,
                 prelude=in_prelude and await self._prelude_work_in_flight(),

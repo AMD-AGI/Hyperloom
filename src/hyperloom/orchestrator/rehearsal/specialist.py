@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.orchestrator.rehearsal.clock import VirtualClock
-from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn, SpecialistSubprocessResult
+from hyperloom.orchestrator.specialists.subprocess_types import SpecialistSpawn, SpecialistSubprocessResult
 
 __all__ = ["CRASHED", "COMPLETED", "EMPTY", "HUNG", "ScriptedSpecialist", "SpecialistStep"]
 

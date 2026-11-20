@@ -38,6 +38,9 @@
 /src/hyperloom/agents/critic/                                   @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/trace_analysis/                     @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/kernel/apply_kernel_patch.py        @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/patch_restore.py             @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/patch_snapshot.py            @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/patch_source_check.py        @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/kernel/patch_jit_cache.py           @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/kernel/patch_rebuild.py             @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/kernel/forge_gemm_tuning.py         @AMD-AGI/SaFE
