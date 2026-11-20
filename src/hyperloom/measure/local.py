@@ -96,7 +96,6 @@ from hyperloom.measure.phases import (
     PhaseRecorder,
 )
 from hyperloom.measure.points import AMBIENT_SHAPE_ENVS, launch_carriers
-from hyperloom.common.ports import pick_server_port
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces, round_has_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
 from hyperloom.measure import second_tracer
@@ -543,41 +542,19 @@ def _booting(run: Run, point: int, round_args: dict[str, Any]) -> contextlib.Abs
 # --- running ------------------------------------------------------------------------------------------------------
 
 
-@contextlib.contextmanager
-def _free_port_for(point: Path, server_lifecycle: dict[str, Any] | None) -> Iterator[Path]:
-    """The point a round runs from: with a free port of its own in ``benchmark.envs.PORT``, unless a lifecycle pins one.
-
-    A round the server lifecycle does not hold (a profile round, a framework that cannot hold a server, a warmup that
-    is not planned) has no port assigned, and its server listens on the default: two of them on one machine collide on
-    it. The InferenceX script and the AgentX server both read the port from ``benchmark.envs.PORT``, so it goes
-    there, into a copy: the point itself is shared by every test that runs it. The port is picked where the server is
-    launched (:func:`~hyperloom.common.ports.pick_server_port`).
-    """
-    if server_lifecycle is not None:
-        yield point  # ``inject_lifecycle`` pins PORT in every round the lifecycle builds
-        return
-    config = _point_config(point)
-    benchmark = config.get("benchmark") or {}
-    benchmark["envs"] = {**(benchmark.get("envs") or {}), "PORT": pick_server_port()}
-    config["benchmark"] = benchmark
-    with tempfile.TemporaryDirectory(prefix="hl-port-") as work:
-        pinned = Path(work) / Path(point).name
-        pinned.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
-        yield pinned
-
-
 async def _grid(run: Run, point: int, name: str, *, watch_boot: bool = True, **launch: Any) -> VariantResult:
     """One ``run_grid`` call for the point at index ``point``: ``launch`` its GridLaunch, and its base_extra_envs. A boot
     not ``watch_boot`` is bounded by its round's own boot deadline alone, so its timeout never cancels the test."""
     call, envs = run.call, launch.pop("base_extra_envs", None)
     launch.setdefault("warmup_round", name == _WARMUP)  # the held warmup draws its own prompts (_held_rounds)
     watched = _booting(run, point, launch) if watch_boot else contextlib.nullcontext()
-    with _free_port_for(call.points[point], launch.get("server_lifecycle")) as base_yaml, watched:
+    # The round's server gets a free port where every round's point is read (``_suite.rounds._round_point``).
+    with watched:
         started = time.time()
         results = await run_grid(
             grid=[GridVariant(name, unset_envs=run.unset_envs)],
             output_root=Path(call.output_dir),
-            recipe=GridRecipe(base_yaml, base=LaunchLayer(extra_envs=envs)),
+            recipe=GridRecipe(call.points[point], base=LaunchLayer(extra_envs=envs)),
             launch=GridLaunch(call.result_dir, call.serving_lease, **launch),
             stop=GridStop(call.session_deadline_sec, checkpoint=call.checkpoint and call.checkpoint.on(name == _TEST)),
         )
