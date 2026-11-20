@@ -227,3 +227,71 @@ def test_an_env_override_of_the_args_carrier_is_read_undeduped(tmp_path):
     assert kept == [] and dropped[0]["source"] == SERVE_FLAG
     with pytest.raises(HarnessFlagChangeError, match=NO_PC):
         _build_variant_yaml(_vllm_recipe(tmp_path, ""), variant, output_subdir=tmp_path / "v")
+
+
+# A recorded vLLM campaign (MXFP4 hybrid model, MI355X, TP=1) whose kept stack measured prefix caching on and off in
+# turn: the explore variants added the harness flag to their delta and the integrate_patch rounds did not, while every
+# KEEP persisted its stack with the flag stripped. Each reference below is that persisted stack; each candidate is the
+# round's delta. vLLM serves with prefix caching on unless the flag is passed.
+_PROFILE = (
+    "--max-model-len -1 --max-num-seqs 256 --mamba-ssm-cache-dtype bfloat16 --reasoning-parser qwen3 "
+    "--tool-call-parser qwen3_coder --tensor-parallel-size 1"
+)
+_MTP1 = '--speculative-config {"method":"mtp","num_speculative_tokens":1}'
+_MTP2 = '--speculative-config {"method":"mtp","num_speculative_tokens":2}'
+_RECORDED_ROUNDS = [
+    pytest.param("explore", _PROFILE, f"{_MTP1} {NO_PC}", id="step1-explore-mtp_spec1_no_prefix_cache"),
+    pytest.param(
+        "explore", _PROFILE, f"--max-num-batched-tokens 16384 {NO_PC}", id="step2-explore-mbt16k_no_prefix_cache"
+    ),
+    pytest.param(
+        "integrate_patch",
+        f"{_PROFILE} {_MTP1} --max-num-batched-tokens 16384",
+        "--max-model-len 8192",
+        id="step3-integrate_patch-mml8192",
+    ),
+    pytest.param(
+        "explore",
+        f"{_PROFILE} {_MTP1} --max-num-batched-tokens 16384 --max-model-len 8192",
+        f"{NO_PC} --max-num-batched-tokens 16384 --max-model-len 20480",
+        id="step4-explore-noPC_mbt16k_mml20480",
+    ),
+    pytest.param(
+        "explore",
+        f"{_PROFILE} {_MTP1} --max-num-batched-tokens 16384 --max-model-len 20480",
+        f"{NO_PC} --max-num-batched-tokens 16384 --max-model-len 20480 --kv-cache-dtype fp8",
+        id="step5-explore-noPC_mbt16k_mml20480_kvfp8",
+    ),
+    pytest.param(
+        "integrate_patch",
+        f"{_PROFILE} {_MTP1} --max-num-batched-tokens 16384 --max-model-len 20480 --kv-cache-dtype fp8",
+        _MTP2,
+        id="step6-integrate_patch-mtp2",
+    ),
+]
+
+
+def _prefix_caching(args: str) -> bool:
+    return NO_PC not in args.split()
+
+
+@pytest.mark.parametrize(("action", "reference", "delta"), _RECORDED_ROUNDS)
+def test_no_recorded_round_measures_against_a_reference_with_another_prefix_caching_setting(
+    tmp_path, action, reference, delta
+):
+    """Every round of the recorded stack either launches with its reference's setting or does not launch at all."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.workload._workload_envs import LaunchLayer
+
+    variant = GridVariant(f"recorded_{action}", delta)
+    if action == "explore":
+        kept, dropped = _filter(variant, base=reference)
+        assert kept == [] and dropped[0]["source"] == SERVE_FLAG and NO_PC in dropped[0]["reason"]
+        return
+    recipe = _vllm_recipe(tmp_path, "")
+    recipe = type(recipe)(base_yaml_path=recipe.base_yaml_path, base=LaunchLayer(extra_server_args=reference))
+    path = _build_variant_yaml(recipe, variant, output_subdir=tmp_path / "v")
+    launched = yaml.safe_load(path.read_text(encoding="utf-8"))["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert _prefix_caching(launched) == _prefix_caching(reference) is True
