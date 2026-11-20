@@ -22,7 +22,7 @@ from hyperloom.orchestrator.lever import FRAMEWORK_STACK_ACTION, lever_kind_for_
 from hyperloom.plugs import progress as _progress
 
 from ..framework.artifacts import candidate_key
-from ..launch_controls import kept_launch_controls
+from ..launch_controls import LAUNCH_CONTROL_KEYS, kept_launch_controls
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 from ..source_snapshot import report_missing_source_snapshot
 from ..state.shared_state import resolve_graded_comparison
@@ -52,17 +52,18 @@ class _ResolvedLaunch(NamedTuple):
 
 
 _APPEND, _REPLACE = "append", "replace"
+_REMOVE_ARGS, _UNSET_ENVS, _ARGS_MODE = LAUNCH_CONTROL_KEYS
 
 
 def _args_mode(record: Mapping[str, Any]) -> str:
-    return str(record.get("args_mode") or _APPEND).strip().lower()
+    return str(record.get(_ARGS_MODE) or _APPEND).strip().lower()
 
 
 def _replaces(agentx: bool, previous: Mapping[str, Any], bv: Mapping[str, Any]) -> bool:
     """Whether the winner ``bv`` persists as a replace snapshot, by the rule its explore or integrate round applied."""
     from ..actions.executors._proposal_identity import keeps_effective_args
 
-    removals, unsets = to_str_list(bv.get("remove_args")), to_str_list(bv.get("unset_envs"))
+    removals, unsets = to_str_list(bv.get(_REMOVE_ARGS)), to_str_list(bv.get(_UNSET_ENVS))
     if _args_mode(bv) == _REPLACE:
         return True
     return bool(removals or unsets) and keeps_effective_args(
@@ -83,6 +84,19 @@ def _stacked_args(previous_args: str, candidate_args: str, full_args: str, remov
     return merge_cumulative_extra_server_args(previous_args, candidate_args, full_args)
 
 
+def _stacked_controls(previous: Mapping[str, Any], bv: Mapping[str, Any]) -> dict[str, Any]:
+    """The launch controls of a winner stacked on the previous best: both bests' removals and unsets, in order.
+
+    Explore hands the lift the removals its stack accumulated, integrate only its own round's, so the lift carries the
+    previous best's itself. One the winner reasserts is pruned afterwards, against the composed args and envs.
+    """
+
+    def _both(key: str) -> list[str]:
+        return list(dict.fromkeys([*to_str_list(previous.get(key)), *to_str_list(bv.get(key))]))
+
+    return {_REMOVE_ARGS: _both(_REMOVE_ARGS), _UNSET_ENVS: _both(_UNSET_ENVS), _ARGS_MODE: previous.get(_ARGS_MODE)}
+
+
 def _resolved_launch(previous: Mapping[str, Any], bv: Mapping[str, Any], *, agentx: bool) -> _ResolvedLaunch:
     candidate_args = strip_benchmark_harness_flags(bv.get("candidate_extra_server_args") or bv.get("extra_server_args"))
     full_args = strip_benchmark_harness_flags(bv.get("extra_server_args"))
@@ -94,7 +108,7 @@ def _resolved_launch(previous: Mapping[str, Any], bv: Mapping[str, Any], *, agen
             strip_benchmark_harness_flags(previous.get("extra_server_args")),
             candidate_args,
             full_args,
-            to_str_list(bv.get("remove_args")),
+            to_str_list(bv.get(_REMOVE_ARGS)),
         )
     return _ResolvedLaunch(
         variant_name=bv.get("name"),
@@ -161,7 +175,7 @@ def _variant_attribution(bv: Mapping[str, Any]) -> dict[str, Any]:
 
 def _variant_launch_controls(bv: Mapping[str, Any]) -> dict[str, Any]:
     fields: dict[str, Any] = {}
-    for key in ("remove_args", "unset_envs", "args_mode"):
+    for key in LAUNCH_CONTROL_KEYS:
         if bv.get(key):
             fields[key] = bv.get(key)
     recipe_delta = bv.get("recipe_delta")
@@ -424,7 +438,7 @@ class CurrentBestLiftMixin:
 
         bv = request.variant
         envs = dict(previous.get("extra_envs") or {})
-        for key in to_str_list(bv.get("unset_envs")):
+        for key in to_str_list(bv.get(_UNSET_ENVS)):
             envs.pop(key, None)
         envs.update(dict(bv.get("extra_envs") or {}))
         current_best: dict[str, Any] = {
@@ -446,7 +460,7 @@ class CurrentBestLiftMixin:
         }
         current_best.update(
             kept_launch_controls(
-                bv,
+                bv if launch.replaces else _stacked_controls(previous, bv),
                 previous,
                 extra_server_args=launch.full_args,
                 extra_envs=envs,
@@ -456,8 +470,8 @@ class CurrentBestLiftMixin:
             current_best["effective_extra_server_args"] = dedupe_extra_server_args(
                 strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
             )
-        if launch.replaces and not current_best.get("args_mode"):
-            current_best["args_mode"] = _REPLACE
+        if launch.replaces and not current_best.get(_ARGS_MODE):
+            current_best[_ARGS_MODE] = _REPLACE
         self.shared_state.current_best = current_best
         self.shared_state.working_recipe_generation = int(self.shared_state.working_recipe_generation or 0) + 1
         self._stamp_current_best_measurement(bv)
