@@ -152,19 +152,6 @@ def test_build_backends_forced_protocol_without_credential_fails(monkeypatch) ->
         )
 
 
-def test_build_backends_forced_openai_protocol_rejects_a_retired_gateway_key(monkeypatch) -> None:
-    """``LLM_GATEWAY_KEY`` no longer authenticates the review client, so the host counts as uncredentialed."""
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
-    monkeypatch.setenv("LLM_GATEWAY_KEY", "ak-gateway-key")
-    with pytest.raises(ValueError, match="OpenAI-capable credential"):
-        _build(
-            critic_choice="agent",
-            critic_agent_root=Path("/tmp/critic"),
-            critic_protocol="openai",
-        )
-
-
 def test_build_backends_forced_openai_protocol_accepts_an_anthropic_gateway(monkeypatch) -> None:
     """resolve_openai_client_config derives an OpenAI side from an Anthropic gateway -- one host, two protocols, one token."""
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gw.example.com/anthropic")

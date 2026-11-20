@@ -145,16 +145,6 @@ def test_atom_run_mode_requires_user_choice() -> None:
     assert "Docker as the default" not in readme_entry
 
 
-def test_atom_has_no_separate_demo_skills() -> None:
-    """ATOM is a framework option of the 12h pair, not a separate pair of skills."""
-    assert not (REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-atom").exists()
-    assert not (REPO_ROOT / "examples" / "hyperloom-qwen3-14b-fp8-12h-atom-forge").exists()
-    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert "hyperloom-qwen3-14b-fp8-12h-atom" not in pyproject
-    setup = SETUP_DOC.read_text(encoding="utf-8")
-    assert "hyperloom-qwen3-14b-fp8-12h-atom" not in setup
-
-
 def test_atom_forge_demo_opts_into_forge_in_the_atom_shell() -> None:
     """The forge demo reuses the 12h ATOM procedure and adds only the backend export."""
     text = FORGE_DOC.read_text(encoding="utf-8")

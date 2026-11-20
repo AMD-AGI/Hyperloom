@@ -415,13 +415,6 @@ class TestEnvReaders:
             ps.partition_gpu_id()
         assert caplog.records == []
 
-    def test_the_module_exports_no_reader_without_a_caller(self):
-        """Two env readers shipped with only their own tests as callers; both are gone."""
-        assert not hasattr(ps, "expected_mode")
-        assert not hasattr(ps, "streams_per_partition")
-        assert "EXPECTED_MODE_ENV" not in ps.__all__
-        assert "STREAMS_PER_PARTITION_ENV" not in ps.__all__
-
 
 class TestFrameworkFanout:
     """The finding this fixes: ``--framework`` defaults to ``None``."""

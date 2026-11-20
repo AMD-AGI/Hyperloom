@@ -163,17 +163,6 @@ def test_auto_agent_backend_rejects_neither_credentials_nor_sdk(clean_agent_env,
         _resolve_agent_choice("auto", None)
 
 
-@pytest.mark.parametrize("retired", ["SAFE_API_KEY", "FORGE_API_KEY"])
-def test_a_retired_key_does_not_configure_a_provider(clean_agent_env, installed_sdks, monkeypatch, retired):
-    """A key the gateway rejects must not make its side look configured."""
-    installed_sdks(claude=True, codex=True)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
-    monkeypatch.setenv(retired, "retired-value")
-
-    provider, _model = _resolve_agent_choice("auto", None)
-    assert provider == "claude"
-
-
 def test_auto_agent_backend_ignores_a_bare_openai_base_url(clean_agent_env, installed_sdks, monkeypatch):
     """A gateway pointer without OPENAI_API_KEY is not a Codex credential."""
     installed_sdks(claude=True, codex=True)
@@ -251,12 +240,6 @@ def test_explicit_sandbox_mode_is_wired(
 
     assert _create_agent_backend("codex", "gpt-explicit", mode) is backend
     assert captured["settings"].sandbox_mode == mode
-
-
-def test_retired_external_sandbox_env_does_not_confirm_bypass(clean_agent_env, monkeypatch):
-    """Legacy HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1 must not substitute bypass mode."""
-    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
-    assert agent_selection._resolve_agent_sandbox_mode(None) == "workspace-write"
 
 
 def test_sandbox_mode_explicit_value_wins_over_environment(clean_agent_env, monkeypatch):

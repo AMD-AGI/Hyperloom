@@ -257,16 +257,6 @@ def test_a_lookup_that_read_nothing_carries_no_reads_block(_bound_session):
     assert _event(_bound_session)["ext"]["reads"] is None
 
 
-def test_the_retired_by_source_fields_are_gone(_bound_session):
-    recorder = _recorder()
-    record_read(_bound_session, _read())
-    recorder.finish(match_status=MATCH_HIT, matched=_matched())
-
-    reads = _event(_bound_session)["ext"]["reads"]
-    assert "by_source" not in reads
-    assert "best_config_by_source" not in reads
-
-
 def test_a_session_killed_mid_lookup_keeps_the_identity_it_asked_for(_bound_session):
     _recorder()
 

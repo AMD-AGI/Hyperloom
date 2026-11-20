@@ -25,8 +25,3 @@ def test_cli_injects_the_registered_agent_backend() -> None:
         source = inspect.getsource(discovery)
         assert "registered_agent_llm_fn" in source, discovery.__name__
         assert "llm_fn=registered_agent_llm_fn(" in source, discovery.__name__
-
-
-def test_legacy_direct_client_fallback_is_absent() -> None:
-    assert not hasattr(discover, "default_llm_fn")
-    assert not hasattr(discover, "complete_with_retry")

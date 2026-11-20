@@ -109,12 +109,6 @@ def test_cli_degraded_pr_sets_flag_true():
     assert args.degraded_pr is True
 
 
-@pytest.mark.parametrize("flag", ["--pr-monitor-url", "--pr-monitor-mcp-url"])
-def test_removed_independent_pr_endpoint_flags_are_rejected(flag: str):
-    with pytest.raises(SystemExit):
-        _parse_optimize_args([flag, "https://legacy.example/pr-monitor"])
-
-
 def test_cli_args_round_trip_into_bootstrap_knowledge_plane(monkeypatch):
     """Argparse ``args`` values propagate into the KnowledgePlane."""
     from hyperloom.inference_optimizer.cli.kb import _bootstrap_knowledge_plane

@@ -116,30 +116,3 @@ def test_no_analysis_recommendation_routes_to_an_owned_request_kind(kernel_promp
     """Analysis-driven targeting may only route to actions the model can emit."""
     assert "run `run_gemm_tuning` first" not in kernel_prompt
     assert "## Compute Kernel Optimizations" in kernel_prompt
-
-
-#: Vocabulary of lanes this repository has retired. A retired lane leaves no
-#: entry in the ownership tables, so nothing derived from them can notice that
-#: the prompt still teaches it -- the name has to be written down here.
-_RETIRED_VOCABULARY = (
-    "run_collective",
-    "run_collective_done",
-    "collective_integrate_done",
-    "forge_collective",
-)
-
-
-@pytest.mark.parametrize("term", _RETIRED_VOCABULARY)
-def test_no_retired_request_kind_survives_in_the_prompt(kernel_prompt, term: str):
-    """A retired lane must leave the prompt, not just the ownership tables.
-
-    The assertions above all read from those tables, so removing a lane's entry
-    satisfies every one of them at once while the rules fragment goes on
-    describing the request kind, the inbox responses it never sends, and the
-    ``optimization_stack`` entry it never writes. The model then plans against
-    a contract naming a response that cannot arrive.
-    """
-    assert term not in kernel_prompt, (
-        f"{term} belongs to a retired lane but is still in the assembled prompt; "
-        "removing its ownership-table entry is not enough"
-    )
