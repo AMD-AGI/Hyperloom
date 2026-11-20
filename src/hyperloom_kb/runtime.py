@@ -62,9 +62,8 @@ class NoOpExperienceKB:
     enabled = False
     schema_ref = ""
 
-    def __init__(self, reason: str = "not_configured", *, degraded: bool = False) -> None:
+    def __init__(self, reason: str = "not_configured") -> None:
         self.reason = reason
-        self.degraded = degraded
 
     def begin(self, _start: ExperienceStart) -> NoOpExperienceSession:
         return NoOpExperienceSession()

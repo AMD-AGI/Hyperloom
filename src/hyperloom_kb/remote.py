@@ -797,7 +797,6 @@ class RemoteExperienceKB:
     """Write-SDK-compatible facade backed by the Experience HTTP service."""
 
     enabled = True
-    degraded = False
     reason = ""
 
     def __init__(
@@ -811,17 +810,6 @@ class RemoteExperienceKB:
     @property
     def schema_ref(self) -> str:
         return self.declaration.schema_ref
-
-    @classmethod
-    def from_env(
-        cls,
-        declaration: ExperienceDeclaration,
-        env: Mapping[str, str] | None = None,
-    ) -> RemoteExperienceKB | None:
-        config = RemoteConfig.from_env(env)
-        if config is None:
-            return None
-        return cls(RemoteClient(config), declaration)
 
     def begin(self, start: ExperienceStart) -> RemoteExperienceSession:
         files: dict[str, Path] = {}
