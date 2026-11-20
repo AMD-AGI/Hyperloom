@@ -38,19 +38,10 @@ from hyperloom_kb.knowledge_read import (
     ReadStatus,
     ReadTrace,
 )
-from hyperloom_kb.query_view import (
-    QueryView,
-    QueryViewBuilder,
-    RetrievalCapability,
-)
+from hyperloom_kb.query_view import QueryView, QueryViewBuilder
 from hyperloom_kb.remote import QuerySignal, ReadQuery, RemoteClient
 from hyperloom_kb.retrieval import LocalRetrievalService, render_complete_experience
-from hyperloom_kb.retrieval_policy import (
-    LEXICAL_FUZZY_PROVIDER_REF,
-    LexicalFuzzyProvider,
-    ResultShape,
-    RetrievalConfiguration,
-)
+from hyperloom_kb.retrieval_policy import LexicalFuzzyProvider, ResultShape
 from hyperloom_kb.records import RecordFiles
 from hyperloom_kb.schema import (
     MAX_FILE_BYTES,
@@ -79,7 +70,6 @@ MAX_READ_LIMIT = 100
 MAX_LIST_LIMIT = 500
 # Complete records carry patch content, so an export page stays far smaller than a summary page.
 MAX_EXPORT_LIMIT = 100
-READ_POLICY_VERSION = "shared-experience-read@v1"
 _CONFLICT = "conflict"
 _MISSING_FILES = "missing_files"
 _AUDIT = "audit"
@@ -628,25 +618,17 @@ class ExperienceHTTPService:
         if eligible_count == 0:
             return response
 
-        provider_refs = {RetrievalCapability.FUZZY: LEXICAL_FUZZY_PROVIDER_REF}
-        configuration = RetrievalConfiguration.create(
-            declaration.schema_ref,
-            READ_POLICY_VERSION,
-            limits=dict.fromkeys(RetrievalCapability, eligible_count),
-            provider_refs=provider_refs,
-            shape=ResultShape("weighted-signal-sum@v1", max_groups=limit, render_budget_chars=render_budget_chars),
-        )
         executor = QueryExecutor(
             LocalRetrievalService(
                 store,
                 view,
                 providers=(LexicalFuzzyProvider(store, declaration),),
                 renderer=partial(render_complete_experience, file_path=self.file_path),
-            ),
-            provider_refs=provider_refs,
+            )
         )
+        shape = ResultShape(max_groups=limit, render_budget_chars=render_budget_chars)
         traces: list[ReadTrace] = []
-        result = KnowledgeReadService(executor, configuration, trace_sink=traces.append).read(signals)
+        result = KnowledgeReadService(executor, shape, trace_sink=traces.append).read(signals)
         response.update(self._completed_fields(declaration, store, result, traces))
         return response
 

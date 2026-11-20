@@ -76,12 +76,9 @@ from hyperloom_kb.retrieval import (
 )
 from hyperloom_kb.retrieval_policy import (
     LEXICAL_FUZZY_PROVIDER_REF,
-    RETRIEVAL_POLICY_VERSION,
     LexicalFuzzyProvider,
     RepresentativePolicy,
     ResultShape,
-    RetrievalConfiguration,
-    RetrievalPolicyError,
 )
 from hyperloom_kb.runtime import (
     ConfiguredExperienceKB,
@@ -205,7 +202,6 @@ __all__ = [
     "QueryViewBuilder",
     "QueryViewError",
     "QueryViewRef",
-    "RETRIEVAL_POLICY_VERSION",
     "ReadQuery",
     "ReadResult",
     "ReadStatus",
@@ -224,9 +220,7 @@ __all__ = [
     "RepresentativePolicy",
     "ResultShape",
     "RetrievalCapability",
-    "RetrievalConfiguration",
     "RetrievalError",
-    "RetrievalPolicyError",
     "SchemaValidationError",
     "ServiceSettings",
     "SessionValue",

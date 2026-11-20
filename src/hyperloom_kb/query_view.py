@@ -75,21 +75,6 @@ class QueryViewRef:
         if not self.view_id.startswith("view:sha256:"):
             raise QueryViewError("view_id is invalid")
 
-    def to_dict(self) -> dict[str, JsonValue]:
-        return {
-            "schema_ref": self.schema_ref,
-            "local_page_sequence": self.local_page_sequence,
-            "view_id": self.view_id,
-        }
-
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> QueryViewRef:
-        return cls(
-            schema_ref=str(value.get("schema_ref") or ""),
-            local_page_sequence=int(value.get("local_page_sequence", -1)),
-            view_id=str(value.get("view_id") or ""),
-        )
-
 
 @dataclass(frozen=True)
 class RepeatAnnotations:
@@ -121,34 +106,6 @@ class RepeatAnnotations:
             "builder_version": self.builder_version,
         }
 
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> RepeatAnnotations:
-        decisions = value.get("decision_counts")
-        flags = value.get("flag_counts")
-        if not isinstance(decisions, dict) or not isinstance(flags, dict):
-            raise QueryViewError("Annotations contain invalid distributions")
-        return cls(
-            member_count=int(value.get("member_count", -1)),
-            distinct_run_count=int(value.get("distinct_run_count", -1)),
-            decision_counts={str(key): int(count) for key, count in decisions.items()},
-            measured_count=int(value.get("measured_count", -1)),
-            measurement_min=_optional_float(value.get("measurement_min")),
-            measurement_max=_optional_float(value.get("measurement_max")),
-            measurement_median=_optional_float(value.get("measurement_median")),
-            measurement_mean=_optional_float(value.get("measurement_mean")),
-            measurement_variance=_optional_float(value.get("measurement_variance")),
-            flag_counts={
-                str(name): {str(key): int(count) for key, count in dict(counts).items()}
-                for name, counts in flags.items()
-                if isinstance(counts, dict)
-            },
-            builder_version=str(value.get("builder_version") or ""),
-        )
-
-
-def _optional_float(value: Any) -> float | None:
-    return None if value is None else float(value)
-
 
 @dataclass(frozen=True)
 class RepeatGroup:
@@ -171,18 +128,6 @@ class RepeatGroup:
             "member_ids": list(self.member_ids),
             "annotations": self.annotations.to_dict(),
         }
-
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> RepeatGroup:
-        members = value.get("member_ids")
-        annotations = value.get("annotations")
-        if not isinstance(members, list) or not isinstance(annotations, dict):
-            raise QueryViewError("Repeat Group is invalid")
-        return cls(
-            group_key=str(value.get("group_key") or ""),
-            member_ids=tuple(str(item) for item in members),
-            annotations=RepeatAnnotations.from_dict(annotations),
-        )
 
 
 @dataclass(frozen=True)
@@ -217,57 +162,6 @@ class QueryView:
                 )
             },
         }
-
-    def to_dict(self) -> dict[str, JsonValue]:
-        return {**self.to_manifest(), "view_id": self.ref.view_id}
-
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> QueryView:
-        lookup = value.get("field_lookup")
-        groups = value.get("groups")
-        experience_groups = value.get("experience_groups")
-        experience_hashes = value.get("experience_hashes")
-        capabilities = value.get("capabilities")
-        visible = value.get("visible_experience_ids")
-        if (
-            not isinstance(lookup, dict)
-            or not isinstance(groups, dict)
-            or not isinstance(experience_groups, dict)
-            or not isinstance(experience_hashes, dict)
-            or not isinstance(capabilities, dict)
-            or not isinstance(visible, list)
-        ):
-            raise QueryViewError("Query View contains invalid structures")
-        ref = QueryViewRef.from_dict(value)
-        view = cls(
-            version=int(value.get("version", 0)),
-            ref=ref,
-            visible_experience_ids=tuple(str(item) for item in visible),
-            experience_hashes={
-                str(experience_id): str(content_hash) for experience_id, content_hash in experience_hashes.items()
-            },
-            field_lookup={
-                str(field): {
-                    str(encoded): tuple(str(item) for item in ids)
-                    for encoded, ids in values.items()
-                    if isinstance(ids, list)
-                }
-                for field, values in lookup.items()
-                if isinstance(values, dict)
-            },
-            groups={str(key): RepeatGroup.from_dict(group) for key, group in groups.items() if isinstance(group, dict)},
-            experience_groups={
-                str(experience_id): str(group_key) for experience_id, group_key in experience_groups.items()
-            },
-            capabilities={
-                RetrievalCapability(str(capability)): CapabilityState(str(state))
-                for capability, state in capabilities.items()
-            },
-        )
-        expected = QueryViewBuilder.view_id(view.to_manifest())
-        if expected != ref.view_id:
-            raise QueryViewError("Query View content does not match view_id")
-        return view
 
 
 class QueryViewBuilder:

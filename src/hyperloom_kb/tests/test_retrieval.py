@@ -24,7 +24,6 @@ from hyperloom_kb import (
     LocalRetrievalService,
     ObjectiveDeclaration,
     Provenance,
-    QueryView,
     QueryViewBuilder,
     RetrievalCapability,
     derive_experience_id,
@@ -88,8 +87,8 @@ class StaticProvider:
         self.capability = capability
         self.hits = hits
 
-    def recall(self, request, view, *, limit):
-        return self.hits[:limit]
+    def recall(self, request, view):
+        return self.hits
 
 
 def setup(*, fuzzy_ready: bool = False, semantic_ready: bool = False):
@@ -268,7 +267,6 @@ def test_restricted_view_limits_recall_but_keeps_full_group_annotations() -> Non
 
     assert [hit.experience_id for hit in hits] == [kept.id]
     assert restricted.ref.view_id != full.ref.view_id
-    assert QueryView.from_dict(restricted.to_dict()) == restricted
     group = restricted.groups[restricted.experience_groups[kept.id]]
     assert set(group.member_ids) == {kept.id, reverted.id}
     assert group.annotations.decision_counts == {"keep": 1, "revert": 1}

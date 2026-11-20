@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -21,10 +21,7 @@ from hyperloom_kb.retrieval import (
     LocalRetrievalService,
     RenderedResult,
 )
-from hyperloom_kb.retrieval_policy import (
-    RepresentativePolicy,
-    RetrievalConfiguration,
-)
+from hyperloom_kb.retrieval_policy import RepresentativePolicy, ResultShape
 from hyperloom_kb.schema import (
     JsonValue,
     RenderedRef,
@@ -76,16 +73,6 @@ class WeightedGroupResult:
     representative_ids: tuple[str, ...]
     contributions: tuple[MatchContribution, ...]
 
-    def to_dict(self) -> dict[str, JsonValue]:
-        return {
-            "group_key": self.group_key,
-            "score": self.score,
-            "annotations": self.annotations.to_dict(),
-            "member_ids": list(self.member_ids),
-            "representative_ids": list(self.representative_ids),
-            "contributions": [item.to_dict() for item in self.contributions],
-        }
-
 
 @dataclass(frozen=True)
 class WeightedQueryExecution:
@@ -107,30 +94,21 @@ class _Recall:
 class QueryExecutor:
     """Recall, rank and render by weighted signals over one immutable Query View."""
 
-    def __init__(
-        self,
-        service: LocalRetrievalService,
-        *,
-        provider_refs: Mapping[RetrievalCapability, str] | None = None,
-    ) -> None:
+    def __init__(self, service: LocalRetrievalService) -> None:
         self._service = service
-        self._provider_refs = dict(provider_refs or {})
 
-    def execute(self, signals: Sequence[QuerySignal], configuration: RetrievalConfiguration) -> WeightedQueryExecution:
-        for capability, expected in configuration.provider_refs.items():
-            if self._provider_refs.get(capability) != expected:
-                raise QueryExecutionError(f"{capability.value} provider does not match pinned provider_ref")
+    def execute(self, signals: Sequence[QuerySignal], shape: ResultShape) -> WeightedQueryExecution:
         started = time.perf_counter()
-        recall = self._recall(signals, configuration)
+        recall = self._recall(signals)
         grouped = self._rank_groups(
             self._service.organize(recall.candidate_sets),
             recall.contributions,
-            configuration.max_groups,
-            configuration.ranking_policy_ref,
-            configuration.representative_policy,
+            shape.max_groups,
+            shape.ranking_policy_ref,
+            shape.representative_policy,
         )
         representative_ids = tuple(group.representative_ids[0] for group in grouped if group.representative_ids)
-        rendered = self._service.render(representative_ids, budget_chars=configuration.render_budget_chars)
+        rendered = self._service.render(representative_ids, budget_chars=shape.render_budget_chars)
         return WeightedQueryExecution(
             grouped,
             rendered,
@@ -139,8 +117,8 @@ class QueryExecutor:
             (time.perf_counter() - started) * 1000,
         )
 
-    def _recall(self, signals: Sequence[QuerySignal], configuration: RetrievalConfiguration) -> _Recall:
-        """Recall every signal through each configured capability, weighting each hit by its signal."""
+    def _recall(self, signals: Sequence[QuerySignal]) -> _Recall:
+        """Recall every signal through each capability that takes it, weighting each hit by its signal."""
         executed: list[RetrievalCapability] = []
         unavailable: list[RetrievalCapability] = []
         contributions: list[MatchContribution] = []
@@ -155,10 +133,8 @@ class QueryExecutor:
                 )
             )
             for capability in capabilities:
-                if capability not in configuration.capabilities:
-                    continue
                 try:
-                    hits = self._recall_signal(signal, capability, configuration)
+                    hits = self._recall_signal(signal, capability)
                 except CapabilityUnavailable:
                     unavailable.append(capability)
                     continue
@@ -203,16 +179,10 @@ class QueryExecutor:
             contribution,
         )
 
-    def _recall_signal(
-        self,
-        signal: QuerySignal,
-        capability: RetrievalCapability,
-        configuration: RetrievalConfiguration,
-    ) -> tuple[CandidateHit, ...]:
-        limit = configuration.limits[capability]
+    def _recall_signal(self, signal: QuerySignal, capability: RetrievalCapability) -> tuple[CandidateHit, ...]:
         if capability is RetrievalCapability.EXACT:
-            return self._service.exact({signal.field: signal.value}, limit=limit)
-        return self._service.recall(capability, {"text": signal.text}, limit=limit)
+            return self._service.exact({signal.field: signal.value})
+        return self._service.recall(capability, {"text": signal.text})
 
     @staticmethod
     def _normalized_score(
@@ -348,17 +318,17 @@ class KnowledgeReadService:
     def __init__(
         self,
         executor: QueryExecutor,
-        configuration: RetrievalConfiguration,
+        shape: ResultShape,
         *,
         trace_sink: Callable[[ReadTrace], None] | None = None,
     ) -> None:
         self._executor = executor
-        self._configuration = configuration
+        self._shape = shape
         self._trace_sink = trace_sink
 
     def read(self, signals: Sequence[QuerySignal]) -> ReadResult:
         try:
-            execution = self._executor.execute(signals, self._configuration)
+            execution = self._executor.execute(signals, self._shape)
             if self._trace_sink is not None:
                 self._trace_sink(ReadTrace(execution))
         except (RuntimeError, ValueError) as exc:

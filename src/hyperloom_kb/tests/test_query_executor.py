@@ -6,10 +6,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-import pytest
 
 from hyperloom_kb import (
-    LEXICAL_FUZZY_PROVIDER_REF,
     Experience,
     ExperienceDeclaration,
     ExperienceStatus,
@@ -22,12 +20,9 @@ from hyperloom_kb import (
     ObjectiveDeclaration,
     Provenance,
     QueryExecutor,
-    QueryExecutionError,
     QuerySignal,
-    RepresentativePolicy,
     ResultShape,
     RetrievalCapability,
-    RetrievalConfiguration,
     derive_experience_id,
 )
 from hyperloom_kb.tests.view_fixtures import build_view, submit_complete
@@ -105,30 +100,8 @@ def _stack():
     submit_complete(schema, experiences, target, distractor)
     fuzzy = LexicalFuzzyProvider(experiences, schema)
     view = build_view(schema, experiences, fuzzy_ready=True)
-    executor = QueryExecutor(
-        LocalRetrievalService(experiences, view, providers=(fuzzy,)),
-        provider_refs={
-            RetrievalCapability.FUZZY: LEXICAL_FUZZY_PROVIDER_REF,
-        },
-    )
+    executor = QueryExecutor(LocalRetrievalService(experiences, view, providers=(fuzzy,)))
     return schema, executor, target, distractor
-
-
-def _configuration(
-    schema_ref: str,
-    *,
-    ranking: str = "weighted-signal-sum@v1",
-    representative: RepresentativePolicy = RepresentativePolicy.MATCHED_FIRST,
-) -> RetrievalConfiguration:
-    return RetrievalConfiguration.create(
-        schema_ref,
-        "executor-test-v1",
-        limits=dict.fromkeys(RetrievalCapability, 20),
-        provider_refs={
-            RetrievalCapability.FUZZY: LEXICAL_FUZZY_PROVIDER_REF,
-        },
-        shape=ResultShape(ranking_policy_ref=ranking, representative_policy=representative),
-    )
 
 
 def _signals(*, model_weight: float, text_weight: float = 0.9) -> tuple[QuerySignal, ...]:
@@ -140,7 +113,7 @@ def _signals(*, model_weight: float, text_weight: float = 0.9) -> tuple[QuerySig
 
 def test_weight_increase_changes_only_matching_group_contribution() -> None:
     schema, executor, target, distractor = _stack()
-    configuration = _configuration(schema.schema_ref)
+    configuration = ResultShape()
 
     low = executor.execute(_signals(model_weight=0.1), configuration)
     high = executor.execute(_signals(model_weight=1.0), configuration)
@@ -149,18 +122,6 @@ def test_weight_increase_changes_only_matching_group_contribution() -> None:
 
     assert high_scores[target.id] - low_scores[target.id] == 0.9
     assert high_scores[distractor.id] == low_scores[distractor.id]
-
-
-def test_executor_rejects_provider_version_drift() -> None:
-    schema, executor, _, _ = _stack()
-    configuration = RetrievalConfiguration.create(
-        schema.schema_ref,
-        "pinned@v1",
-        provider_refs={RetrievalCapability.FUZZY: "different-provider@v1"},
-    )
-
-    with pytest.raises(QueryExecutionError, match="provider does not match"):
-        executor.execute(_signals(model_weight=1.0), configuration)
 
 
 def test_provider_scores_are_normalized_before_weighting() -> None:
@@ -173,7 +134,7 @@ def test_group_key_policy_controls_executor_order() -> None:
     schema, executor, _, _ = _stack()
     result = executor.execute(
         _signals(model_weight=1.0),
-        _configuration(schema.schema_ref, ranking="group-key@v1"),
+        ResultShape(ranking_policy_ref="group-key@v1"),
     )
 
     assert tuple(group.group_key for group in result.groups) == tuple(
@@ -185,7 +146,7 @@ def test_renderer_exposes_conditions_baseline_outcome_and_repeat_support() -> No
     schema, executor, target, _ = _stack()
     result = executor.execute(
         _signals(model_weight=1.0),
-        _configuration(schema.schema_ref),
+        ResultShape(),
     )
 
     section = result.rendered.text.split(f"Experience {target.id}\n", 1)[1]
