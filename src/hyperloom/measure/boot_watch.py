@@ -25,7 +25,8 @@ The application reads the runner's ``progress.json`` on every poll. Each change 
 the last output it saw, the newest live log's write time or last line) is activity; once the runner says a round's server
 is ready (:data:`SERVER_READY_KEY`), or the test is past running, the bound no longer applies. A new second at which
 the runner saw the booting server's processes use CPU (:data:`BOOT_ACTIVE_KEY`) is activity too, as a boot can work
-for half an hour without a line. A test with no activity
+for half an hour without a line, but only until the log has been silent for :data:`PRE_READY_BUSY_SILENCE_SEC`, as a
+collective that spins uses CPU too. A test with no activity
 for :data:`PRE_READY_SILENCE_SEC` before that ends as ``hung_before_ready``, an infrastructure failure a new sandbox
 retries. A server whose last line says aiter started building a JIT module is working, as aiter writes nothing until the
 module is built, and a CK-tile GEMM module such as ``module_gemm_a8w8_bpreshuffle_cktile`` can take many minutes to
@@ -51,6 +52,7 @@ from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.measure.jit.modules import module_build_limit_sec
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 from inference_suite.contracts import DEFAULT_PRE_READY_SILENCE_SEC
+from inference_suite.contracts import PRE_READY_BUSY_SILENCE_SEC as _BUSY_SILENCE_SEC
 from inference_suite.contracts.layout import BOOT_ACTIVE_STAMP, READY_STAMP, SERVER_LOG
 
 __all__ = [
@@ -59,6 +61,7 @@ __all__ = [
     "BOOT_SHARE",
     "BuildTime",
     "HUNG_BEFORE_READY",
+    "PRE_READY_BUSY_SILENCE_SEC",
     "PRE_READY_SILENCE_SEC",
     "SERVER_READY_KEY",
     "BootGuard",
@@ -282,6 +285,8 @@ BOOT_ACTIVE_KEY = "boot_active_unix"
 HUNG_BEFORE_READY = "hung_before_ready"
 #: As long as the round's own bound, so the round reports its silence before the application calls the test hung.
 PRE_READY_SILENCE_SEC = float(DEFAULT_PRE_READY_SILENCE_SEC)
+#: The round's own bound on log silence its server's CPU use may extend; the application holds a test to it as well.
+PRE_READY_BUSY_SILENCE_SEC = float(_BUSY_SILENCE_SEC)
 #: The runner's phase once the measurement has ended; nothing after it is bounded here.
 _COLLECTING = "collecting"
 #: A log written within this many seconds of the last write seen is the same write, seen again through the clock jitter
@@ -308,13 +313,16 @@ class PreReadySilence:
 
     started: float
     limit_sec: float = PRE_READY_SILENCE_SEC
+    busy_limit_sec: float = PRE_READY_BUSY_SILENCE_SEC
     _active_at: float = field(init=False)
+    _output_at: float = field(init=False)
     _seen: tuple[object, ...] | None = field(default=None, init=False)
     _written_at: float | None = field(default=None, init=False)
     _armed: bool = field(default=True, init=False)
 
     def __post_init__(self) -> None:
         self._active_at = self.started
+        self._output_at = self.started
 
     def observe(self, progress: Mapping[str, Any] | None, now: float) -> None:
         """Take one reading of ``progress.json``; ``None`` for one that could not be read, which shows no activity."""
@@ -336,6 +344,10 @@ class PreReadySilence:
         building = _JIT_BUILD_STARTED.search(str(progress.get("last_line") or "")) is not None
         if seen != self._seen or rewritten or building:
             self._active_at = now
+        # A new CPU second alone is not output, so it does not restart the bound on busy silence.
+        wrote = self._seen is None or seen[:-1] != self._seen[:-1]
+        if wrote or rewritten or building:
+            self._output_at = now
         self._seen = seen
         if rewritten:
             self._written_at = written
@@ -344,3 +356,18 @@ class PreReadySilence:
         """Seconds without activity once that is over the limit before ready; ``None`` while it is not."""
         silent = now - self._active_at
         return silent if self._armed and silent >= self.limit_sec else None
+
+    def hung(self, now: float) -> str | None:
+        """Why the test is hung before ready: no activity for the limit, or no output for
+        :attr:`busy_limit_sec` (never below the limit) however busy its booting server's processes were, as a collective
+        that spins keeps them busy; ``None`` while neither holds."""
+        silent = self.silent_for(now)
+        if silent is not None:
+            return f"no output for {silent:.0f}s before the server was ready, nor CPU use of its booting server"
+        quiet = now - self._output_at
+        if self._armed and quiet >= max(self.limit_sec, self.busy_limit_sec):
+            return (
+                f"no output for {quiet:.0f}s before the server was ready while its processes stayed busy, "
+                "which may be a spin"
+            )
+        return None

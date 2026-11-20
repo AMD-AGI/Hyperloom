@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_common.proctree import running
-from inference_suite.contracts import Deadlines, FailedStep, RunLayout
+from inference_suite.contracts import PRE_READY_BUSY_SILENCE_SEC, Deadlines, FailedStep, RunLayout
 from inference_suite.frameworks import Framework
 from inference_suite.runtime import watch
 from inference_suite.runtime.phases import Phase, PhaseClock
@@ -78,15 +78,18 @@ class _Cpu:
         return self._totals.pop(0) if len(self._totals) > 1 else self._totals[0]
 
 
-def _boot(tmp_path: Path, cpu: _Cpu | None, until: float) -> Stop | None:
-    """Watch a boot whose log is silent from 0 to ``until``, advancing as a poll would, and the first stop."""
+def _boot(
+    tmp_path: Path, cpu: _Cpu | None, until: float, deadlines: Deadlines = _DEADLINES, step: float = 1.0
+) -> Stop | None:
+    """Watch a boot whose log is silent from 0 to ``until``, advancing every ``step`` as a poll would, and the first
+    stop."""
     log = tmp_path / "server.log"
     log.write_text("Finished streaming dequant\n", encoding="utf-8")
-    server_watch = ServerWatch(log, 0, _DEADLINES, now=0.0, cpu=cpu)
+    server_watch = ServerWatch(log, 0, deadlines, now=0.0, cpu=cpu)
     now = 0.0
     server_watch.advance(now)
     while now < until:
-        now += 1.0
+        now += step
         server_watch.advance(now)
         stop = server_watch.before_ready(now, None)
         if stop is not None:
@@ -134,6 +137,41 @@ def test_silence_counts_from_the_last_stretch_that_used_cpu(tmp_path):
     stop = _boot(tmp_path, _Cpu(0.0, 10.0, 20.0, 30.0, 40.0, 40.0), until=90.0)
     assert stop is not None and stop.detail.startswith("70 the server log was silent for 70.0s")
     assert stop.detail.endswith("for 30.0s")
+
+
+#: The release config's budgets: a boot budget well past the busy-silence bound, the default pre-ready silence limit.
+_LONG_BOOT = Deadlines(boot_sec=7200, round_sec=10000, eval_sec=60, silence_sec=50, pre_ready_silence_sec=1800)
+
+
+def _busy(share: float, reads: int = 400) -> list[float]:
+    return [share * watch.CPU_SAMPLE_SEC * index for index in range(reads)]
+
+
+def test_a_busy_silent_boot_is_working_below_the_busy_silence_bound(tmp_path):
+    bound = PRE_READY_BUSY_SILENCE_SEC
+    assert (
+        _boot(tmp_path, _Cpu(*_busy(2.0)), until=bound - watch.CPU_SAMPLE_SEC, deadlines=_LONG_BOOT, step=10.0) is None
+    )
+
+
+def test_a_busy_silent_boot_is_stopped_at_the_busy_silence_bound_as_a_possible_spin(tmp_path):
+    stop = _boot(tmp_path, _Cpu(*_busy(2.0)), until=5000.0, deadlines=_LONG_BOOT, step=10.0)
+    assert stop == Stop(
+        FailedStep.SERVER_SILENT_BEFORE_READY,
+        "3600 the server log was silent for 3600.0s while its processes stayed busy, which may be a spin",
+    )
+
+
+def test_a_flat_cpu_silent_boot_is_still_stopped_at_the_pre_ready_limit(tmp_path):
+    stop = _boot(tmp_path, _Cpu(*_busy(0.0)), until=5000.0, deadlines=_LONG_BOOT, step=10.0)
+    assert stop is not None and stop.step is FailedStep.SERVER_SILENT_BEFORE_READY
+    assert stop.detail.startswith("1800 the server log was silent for 1800.0s and its processes used under")
+
+
+def test_the_busy_silence_bound_never_cuts_below_the_pre_ready_limit(tmp_path):
+    above = Deadlines(boot_sec=20000, round_sec=30000, eval_sec=60, silence_sec=50, pre_ready_silence_sec=5000)
+    stop = _boot(tmp_path, _Cpu(*_busy(2.0, reads=700)), until=6000.0, deadlines=above, step=10.0)
+    assert stop is not None and stop.detail.startswith("5000 the server log was silent for 5000.0s while its processes")
 
 
 def test_a_boot_without_a_cpu_reader_says_so(tmp_path):

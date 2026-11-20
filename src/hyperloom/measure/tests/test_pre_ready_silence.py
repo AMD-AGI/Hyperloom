@@ -15,7 +15,13 @@ from hyperloom.contracts.measurement import FailureClass
 from hyperloom.measure.failures import Disposition, classify_test_failure
 from inference_suite.contracts import DEFAULT_PRE_READY_SILENCE_SEC
 
-from hyperloom.measure.boot_watch import HUNG_BEFORE_READY, PRE_READY_SILENCE_SEC, SERVER_READY_KEY, PreReadySilence
+from hyperloom.measure.boot_watch import (
+    HUNG_BEFORE_READY,
+    PRE_READY_BUSY_SILENCE_SEC,
+    PRE_READY_SILENCE_SEC,
+    SERVER_READY_KEY,
+    PreReadySilence,
+)
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC
 from hyperloom.measure.runner.service import Progress
 from hyperloom.measure.tests.hosted_fixtures import make_call, make_rig, point_yaml
@@ -63,6 +69,56 @@ def test_the_same_cpu_activity_second_read_again_is_no_activity() -> None:
     silence = _silence(boot_active_unix=150.0)
     silence.observe({**_RUNNING, "boot_active_unix": 150.0}, 8.0)
     assert silence.silent_for(1.0 + _LIMIT) == pytest.approx(_LIMIT)
+
+
+_BUSY_LIMIT = 30.0
+
+
+def _busy(silence: PreReadySilence, start: float, end: float, **output: object) -> None:
+    """Read progress every second after ``start`` up to ``end``, ``output`` unchanged and a new CPU second each time."""
+    now = start
+    while now < end:
+        now += 1.0
+        silence.observe({**_RUNNING, **output, "boot_active_unix": 1000.0 + now}, now)
+
+
+def test_cpu_activity_keeps_a_silent_test_alive_only_up_to_the_busy_bound() -> None:
+    silence = PreReadySilence(0.0, _LIMIT, _BUSY_LIMIT)
+    silence.observe(dict(_RUNNING), 1.0)
+    _busy(silence, 1.0, _BUSY_LIMIT)
+    assert silence.hung(_BUSY_LIMIT) is None, "busy for nearly three limits, below the busy bound"
+    _busy(silence, _BUSY_LIMIT, 1.0 + _BUSY_LIMIT)
+    assert silence.silent_for(1.0 + _BUSY_LIMIT) is None
+    assert silence.hung(1.0 + _BUSY_LIMIT) == (
+        "no output for 30s before the server was ready while its processes stayed busy, which may be a spin"
+    )
+
+
+def test_a_test_without_cpu_activity_is_still_hung_at_the_limit() -> None:
+    silence = PreReadySilence(0.0, _LIMIT, _BUSY_LIMIT)
+    silence.observe(dict(_RUNNING), 1.0)
+    assert silence.hung(1.0 + _LIMIT - 0.1) is None
+    assert silence.hung(1.0 + _LIMIT) == (
+        "no output for 10s before the server was ready, nor CPU use of its booting server"
+    )
+
+
+def test_output_restarts_the_busy_bound() -> None:
+    silence = PreReadySilence(0.0, _LIMIT, _BUSY_LIMIT)
+    silence.observe(dict(_RUNNING), 1.0)
+    _busy(silence, 1.0, 20.0)
+    _busy(silence, 20.0, 51.0, last_output_unix=160.0)  # the first reading at 21 s shows new output
+    assert silence.hung(50.0) is None and silence.hung(51.0) is not None
+
+
+def test_the_busy_bound_never_cuts_below_the_limit_and_defaults_to_the_rounds() -> None:
+    assert PreReadySilence(0.0).busy_limit_sec == PRE_READY_BUSY_SILENCE_SEC == 3600.0
+    silence = PreReadySilence(0.0, 3 * _BUSY_LIMIT, _BUSY_LIMIT)
+    silence.observe(dict(_RUNNING), 1.0)
+    _busy(silence, 1.0, 3 * _BUSY_LIMIT)
+    assert silence.hung(3 * _BUSY_LIMIT) is None
+    _busy(silence, 3 * _BUSY_LIMIT, 1.0 + 3 * _BUSY_LIMIT)
+    assert silence.hung(1.0 + 3 * _BUSY_LIMIT) is not None
 
 
 _TAG = "[aiter] [pid=7 pname=Process-1]"

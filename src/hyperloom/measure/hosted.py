@@ -670,10 +670,9 @@ class HostedMeasurementBackend:
             if config.should_stop() or attempt.stop.is_set():
                 self._save_logs(handle, Path(call.output_dir))
                 return _refusal(call, STOPPED_RETURNCODE, STOPPED_REASON, "the run is stopping")
-            silent = silence.silent_for(self._clock())
-            if silent is not None:
+            detail = silence.hung(self._clock())
+            if detail is not None:
                 self._save_logs(handle, Path(call.output_dir))
-                detail = f"no output for {silent:.0f}s before the server was ready, nor CPU use of its booting server"
                 return _infra(
                     call, HOSTED_INFRA_FAILURE_RC, HUNG_BEFORE_READY, detail, facts=_facts_of(attempt.runner, None)
                 )
