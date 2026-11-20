@@ -54,6 +54,13 @@ generic `FRAMEWORK_REPO_PATH`: a session is single-framework by construction
 (the CLI locks `$FRAMEWORK` for the run), so the prefix resolves no possible
 collision and only forces you to rename variables when you switch frameworks.
 
+`--framework-path` and `--benchmark-scripts-dir` set `FRAMEWORK_REPO_PATH` and
+`HYPERLOOM_BYPASS_SCRIPTS_DIR` only when those are not already exported: a
+non-empty exported value wins over the flag, so unset a stale one before
+launch. The same variable serves a shipped framework you build from source: an
+editable `vllm` or `sglang` checkout is as invisible to the source probe as a
+custom one, so point `FRAMEWORK_REPO_PATH` (or `--framework-path`) at it.
+
 ```{warning}
 Hyperloom **commits into this tree**. Each accepted candidate lands as a commit
 whose message looks like `hyperloom KEEP <id> (+12.34%)`. Point the flag at a

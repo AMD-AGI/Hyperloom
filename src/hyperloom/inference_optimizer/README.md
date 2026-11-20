@@ -64,7 +64,7 @@ Cursor and Claw.
 ```
 src/hyperloom/inference_optimizer/
 ├── SKILL.md                    # Agent instructions (Cursor / Claw entry point)
-├── references/                 # SKILL reference chapters (benchmark/cache/critic/…)
+├── references/                 # SKILL reference chapters (critic, troubleshooting, rewrite patterns)
 ├── cli/                        # `python -m hyperloom optimize` entry point
 │   ├── __init__.py             # main()/_run_optimize()
 │   ├── parser.py               # _build_parser()
