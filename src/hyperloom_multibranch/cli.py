@@ -78,8 +78,8 @@ the same way once the session directory exists. Before PRELUDE the session check
 projects against this environment as ``HYPERLOOM_IMAGE_CHECK`` says: ``warn`` (the default) logs a failing fact,
 ``strict`` fails the command the same way before any phase runs, ``off`` checks nothing, and any other value is a usage
 error. The manifest records the check's summary and CLOSE writes the whole report to ``MB-reports/image_check.json``.
-A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
-:data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
+The Experience KB ``HYPERLOOM_KB_URL`` names (none when unset) gives the briefs past sessions' tests and learnings and
+takes this session's at CLOSE; :mod:`~hyperloom_multibranch.scheduling.experience_kb` starts its loopback service.
 ``run --measurement hosted`` measures every test in the sandboxes of a grant handed to the session in the environment
 (:data:`HANDED_GRANT`, read by :mod:`hyperloom.hosted.host_info`) instead of this machine's cards: as many tests run at
 once as the grant has cards and sandboxes for, and the session stops before the grant ends as ``hosted run`` does. Its
@@ -180,10 +180,8 @@ from hyperloom_multibranch.scheduling.llm import (
     anthropic_completion,
     default_model,
 )
-from hyperloom_multibranch.scheduling.local_peers import (
-    load_peers,
-    machine_parallel_tests,
-)
+from hyperloom_multibranch.scheduling.experience_kb import start_experience_kb
+from hyperloom_multibranch.scheduling.local_peers import load_peers, machine_parallel_tests
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting_orphans
 from hyperloom_multibranch.scheduling.resumption import (
@@ -358,10 +356,11 @@ def hosted_ready_session(host: HostInfo, workload: Workload, *, local: bool = Fa
 
 def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory], **storage: Path) -> ReadySession:
     """The peers ``load`` has for ``workload`` and the services, the Recipe KB, the RSI archive and the directories of
-    ``storage`` checked first; raises :class:`EnvironmentIncomplete` or :class:`PeersUnavailable` naming the problem."""
+    ``storage`` checked and the Experience KB started first; raises EnvironmentIncomplete or PeersUnavailable."""
 
     recipe_kb = recipe_kb_from_env()
     require_writable_storage(os.environ, storage)
+    start_experience_kb()
     return ReadySession(load(workload), session_services(recipe_kb))
 
 
