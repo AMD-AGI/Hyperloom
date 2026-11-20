@@ -8,7 +8,7 @@ import statistics
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 from hyperloom_kb.schema import (
     CATEGORIES,
@@ -461,50 +461,15 @@ def _build_groups(
     return dict(sorted(groups.items())), dict(sorted(experience_groups.items()))
 
 
-@runtime_checkable
-class QueryViewStore(Protocol):
-    def publish_view(self, view: QueryView) -> QueryViewRef:
-        """Atomically publish an immutable view and advance current."""
-
-    def get_view(self, view_id: str) -> QueryView | None:
-        """Return one immutable view by id."""
-
-    def current_view(self, schema_ref: str) -> QueryView | None:
-        """Return the current view for one exact schema_ref."""
-
-
-class InMemoryQueryViewStore:
-    def __init__(self) -> None:
-        self._views: dict[str, QueryView] = {}
-        self._current: dict[str, str] = {}
-
-    def publish_view(self, view: QueryView) -> QueryViewRef:
-        existing = self._views.get(view.ref.view_id)
-        if existing is not None and existing != view:
-            raise QueryViewError("view_id collision")
-        self._views[view.ref.view_id] = view
-        self._current[view.ref.schema_ref] = view.ref.view_id
-        return view.ref
-
-    def get_view(self, view_id: str) -> QueryView | None:
-        return self._views.get(view_id)
-
-    def current_view(self, schema_ref: str) -> QueryView | None:
-        current = self._current.get(schema_ref)
-        return self._views.get(current) if current is not None else None
-
-
 __all__ = [
     "ANNOTATION_BUILDER_VERSION",
     "GROUP_BUILDER_VERSION",
     "QUERY_VIEW_VERSION",
     "CapabilityState",
-    "InMemoryQueryViewStore",
     "QueryView",
     "QueryViewBuilder",
     "QueryViewError",
     "QueryViewRef",
-    "QueryViewStore",
     "RepeatAnnotations",
     "RepeatGroup",
     "RetrievalCapability",

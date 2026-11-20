@@ -39,7 +39,6 @@ from hyperloom_kb.knowledge_read import (
     ReadTrace,
 )
 from hyperloom_kb.query_view import (
-    InMemoryQueryViewStore,
     QueryView,
     QueryViewBuilder,
     RetrievalCapability,
@@ -629,8 +628,6 @@ class ExperienceHTTPService:
         if eligible_count == 0:
             return response
 
-        views = InMemoryQueryViewStore()
-        views.publish_view(view)
         provider_refs = {RetrievalCapability.FUZZY: LEXICAL_FUZZY_PROVIDER_REF}
         configuration = RetrievalConfiguration.create(
             declaration.schema_ref,
@@ -642,7 +639,7 @@ class ExperienceHTTPService:
         executor = QueryExecutor(
             LocalRetrievalService(
                 store,
-                views,
+                view,
                 providers=(LexicalFuzzyProvider(store, declaration),),
                 renderer=partial(render_complete_experience, file_path=self.file_path),
             ),
