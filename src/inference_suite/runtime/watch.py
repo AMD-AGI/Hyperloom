@@ -56,7 +56,7 @@ CPU_ACTIVE_SHARE = 0.25
 _MIB = 1 << 20
 #: Reads a per-process counter of the server's processes (resident bytes, bytes read), keyed by process; ``None`` when
 #: it cannot be read.
-TreeReader = Callable[[], "Mapping[object, int] | None"]
+TreeReader = Callable[[], Mapping[object, int] | None]
 #: How much the server's processes must grow their resident memory, summed over the processes seen in both reads, for
 #: a :data:`CPU_SAMPLE_SEC` stretch to count as progress (scaled to the stretch's length). A process that waits holds
 #: its pages (allocator churn moves it by a few MiB), while a boot that fills host memory, even from a slow network
