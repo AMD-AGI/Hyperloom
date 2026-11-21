@@ -20,8 +20,9 @@ LAUNCH_FILE = "launch.json"
 REPORT_FILE = "report.json"
 SERVER_LOG = "server.log"
 READY_STAMP = "server_ready_at"
-#: The wall-clock second a booting server's processes were last seen using at least a quarter of a CPU, for a watcher
-#: outside the round that sees only the run_dir.
+#: The wall-clock second a booting server's processes were last seen making progress without a log line: using at least
+#: a quarter of a CPU, or growing their resident memory or the bytes they read by at least 64 MiB per 10 s. For a
+#: watcher outside the round that sees only the run_dir.
 BOOT_ACTIVE_STAMP = "server_boot_active_at"
 SERVER_PID = "server.pid"
 PHASE_MARKS = "phase_marks.json"
