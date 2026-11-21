@@ -29,8 +29,7 @@ the config before the round starts. :func:`inferencex_root` is the staged Infere
 :data:`CLIENT_FILE` its benchmark client under that root; a harness that runs its client as a file runs
 :data:`CLIENT_SCRIPT` with :data:`CLIENT_ROOT_ENV` naming that root. A round's ``launch.json`` names the GPUs its server ran
 on under :data:`GPU_MASK_ENV`; :func:`runner_owned` names the flags and environment a round sets itself, which no
-layer a host hands it may set, among them a serving framework's own ready timeout, set to :data:`READY_TIMEOUT_SEC`.
-The AgentX client staging installs is patched to export the output token count of a
+layer a host hands it may set. The AgentX client staging installs is patched to export the output token count of a
 reply it found nothing in under :data:`ERROR_OSL_METRIC` on that request's export line, and to log the error of a
 warmup request that aborts the replay after :data:`WARMUP_ERROR_PREFIX` on the line of its warmup abort.
 
@@ -42,7 +41,7 @@ from __future__ import annotations
 
 from inference_suite.aiperf_patch import ERROR_OSL_METRIC, WARMUP_ERROR_PREFIX
 from inference_suite.cli import EXIT_REFUSED
-from inference_suite.compose import GPU_MASK_ENV, READY_TIMEOUT_SEC, runner_owned
+from inference_suite.compose import GPU_MASK_ENV, runner_owned
 from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.contracts.layout import RunDirError
 from inference_suite.load.fixed import ClientPass, ClientTarget, ClientTool, client_argv, fixed_client_env, warmup_pass
@@ -89,7 +88,6 @@ __all__ = [
     "Miss",
     "NormalisedManifest",
     "PidfileError",
-    "READY_TIMEOUT_SEC",
     "RoundResult",
     "RunDirError",
     "SourceFetchError",

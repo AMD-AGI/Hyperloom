@@ -53,6 +53,7 @@ from .._multi_node_env import client_only_server_url
 from .._subprocess_kill import (
     AgentxCheckpointMissed,
     resolve_benchmark_timeouts,
+    resolve_boot_budget_sec,
     session_deadline_to_remaining_sec,
 )
 from .config import (
@@ -253,6 +254,10 @@ def _settings(
 ) -> RoundSettings:
     if route.manifest_sha256 is None:
         raise _refused_at(FailedStep.STAGING_MISSING, f"{route.tool_cache} holds no staging manifest")
+    try:
+        boot_budget = resolve_boot_budget_sec()
+    except ValueError as exc:
+        raise _refused_at(FailedStep.CONFIG_INVALID, str(exc)) from exc
     return RoundSettings(
         base_path=str(route.base_path),
         paths=RunPaths(str(run_dir), str(route.tool_cache), route.manifest_sha256),
@@ -263,6 +268,7 @@ def _settings(
         env_inherit=inherited_env_names({k: v for k, v in os.environ.items() if k not in env_drop}),
         deadline_unix=deadline,
         server_url=route.server_url,
+        boot_budget_sec=boot_budget,
     )
 
 

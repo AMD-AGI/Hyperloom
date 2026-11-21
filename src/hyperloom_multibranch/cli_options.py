@@ -144,8 +144,8 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "How long, at least, the server of a test may take to be ready, in seconds, at most"
-            f" {MAX_BOOT_BUDGET_SEC} (3 h): the ready timeout the round sets the server's own start to, so a longer"
-            " budget would buy nothing. It only lengthens: a test runs for its trace window, if any, plus 1800 s plus"
+            f" {MAX_BOOT_BUDGET_SEC} (6 h); the round raises the server's own start timeout above it."
+            " It only lengthens: a test runs for its trace window, if any, plus 1800 s plus"
             " this budget when that is longer than its default timeout, and a boot may take this budget when that is"
             " longer than half of the timeout. Not given, a boot may take half of a test's timeout, which is 3600 s"
             " for inferencex and the trace window plus 3600 s for agentx."
@@ -697,7 +697,7 @@ def _limit_errors(args: argparse.Namespace) -> list[str]:
 def _boot_budget_errors(budget: int | None) -> list[str]:
     if budget is None or 0 < budget <= MAX_BOOT_BUDGET_SEC:
         return []
-    return [f"--boot-budget-sec must be a positive number of seconds, at most {MAX_BOOT_BUDGET_SEC} (3 h)"]
+    return [f"--boot-budget-sec must be a positive number of seconds, at most {MAX_BOOT_BUDGET_SEC} (6 h)"]
 
 
 def _limit_error(option: str, value: float, in_range: bool, rule: str) -> list[str]:
