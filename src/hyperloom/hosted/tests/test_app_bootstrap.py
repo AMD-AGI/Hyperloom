@@ -407,3 +407,69 @@ def test_a_source_another_account_owns_is_fetched_and_no_other_repository_is_tru
     assert rev_parse(served).returncode == 0
     refused = rev_parse(other)
     assert refused.returncode != 0 and "dubious ownership" in refused.stderr
+
+
+# A stand-in for a system Python (no virtual environment) and its pip, in three shapes (FAKE_PIP):
+#   old    a pip before 23.0.1: `pip install --help` does not list --break-system-packages and an install given it fails,
+#          yet `pip install --break-system-packages --help` exits 0, as field images report for such a pip;
+#   23.0   pip 23.0.x: `pip install` lists and takes the option, `pip wheel` rejects it as "no such option";
+#   modern a current pip: the same split, listed with a different help line.
+# No pip's `wheel` knows the option. A rejected option exits 2, as a real pip does.
+_SYSTEM_STUB = """#!/bin/bash
+if [[ "$1" == "-c" ]]; then
+  case "$2" in *base_prefix*) echo 0 ;; *) echo "$FAKE_PREFIX" ;; esac
+  exit 0
+fi
+if [[ " $* " == *" --help "* ]]; then
+  if [[ " $* " == *" install "* ]]; then
+    echo "Install Options:"
+    case "$FAKE_PIP" in
+      23.0) echo "  --break-system-packages     Allow pip to modify an EXTERNALLY-MANAGED Python installation" ;;
+      modern) echo "  --break-system-packages   Allow pip to modify an EXTERNALLY-MANAGED Python installation" ;;
+    esac
+    echo "  --force-reinstall           Reinstall all packages even if they are already up-to-date."
+  fi
+  exit 0
+fi
+if [[ " $* " == *" --break-system-packages "* ]] && { [[ " $* " == *" wheel "* ]] || [[ "$FAKE_PIP" == old ]]; }; then
+  echo "no such option: --break-system-packages" >&2
+  exit 2
+fi
+echo "$*" >>"$FAKE_LOG"
+if [[ " $* " == *" wheel "* ]]; then
+  while [[ "$1" != "-w" ]]; do shift; done
+  : >"$2/hyperloom-0-py3-none-any.whl"
+fi
+"""
+
+
+@pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
+@pytest.mark.parametrize(
+    ("fake_pip", "install_gets_it"),
+    [("old", False), ("23.0", True), ("modern", True)],
+    ids=["pip-before-23.0.1", "pip-23.0.x", "modern-pip"],
+)
+def test_a_system_python_gets_break_system_packages_on_an_install_whose_help_lists_it(
+    tmp_path, source, fake_pip, install_gets_it
+):
+    stub = tmp_path / "framework" / "bin" / "python"
+    stub.parent.mkdir(parents=True)
+    stub.write_text(_SYSTEM_STUB)
+    stub.chmod(0o755)
+    log = tmp_path / "calls"
+    code, exit_file, stderr = _bootstrap(
+        tmp_path,
+        HYPERLOOM_SOURCE_REPO=str(source),
+        HYPERLOOM_SOURCE_SHA=_git(source, "rev-parse", "HEAD"),
+        PYTHON=str(stub),
+        FAKE_PREFIX=str(tmp_path / "framework"),
+        FAKE_LOG=str(log),
+        FAKE_PIP=fake_pip,
+    )
+    assert (code, exit_file) == (0, None), stderr
+    calls = log.read_text().splitlines()
+    (wheel,) = [c for c in calls if " wheel " in c]
+    (install,) = [c for c in calls if " install " in c]
+    assert "--break-system-packages" not in wheel.split()
+    assert ("--break-system-packages" in install.split()) is install_gets_it, install
+    assert calls[-1] == "-m hyperloom hosted run"

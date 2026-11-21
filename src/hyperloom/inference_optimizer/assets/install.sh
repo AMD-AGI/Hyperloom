@@ -860,16 +860,21 @@ fi
 
 # pip --break-system-packages when PYTHON is the system interpreter
 # (e.g. bare ubuntu/debian image without a venv). Detect by comparing
-# sys.prefix vs sys.base_prefix; equal == not in venv. The flag was added
-# in pip 23.0.1; older pips reject it as an unknown option, so we probe
-# `pip install --break-system-packages --help` before adopting it.
+# sys.prefix vs sys.base_prefix; equal == not in venv. The flag is an
+# option of `pip install` alone (pip >= 23.0.1; `pip wheel` never has it),
+# and PIP_EXTRA goes to `pip install` commands only. It is adopted when
+# `pip install --help` lists it: the exit code of
+# `pip install --break-system-packages --help` tells nothing on a pip that
+# answers --help before it parses the rest.
 PIP_EXTRA=()
-if "$PYTHON" - <<'PY' 2>/dev/null
+set_pip_extra() {
+  local install_help pip_ver
+  "$PYTHON" - <<'PY' 2>/dev/null || return 0
 import sys
 raise SystemExit(0 if sys.prefix == sys.base_prefix else 1)
 PY
-then
-  if "$PYTHON" -m pip install --break-system-packages --help >/dev/null 2>&1; then
+  install_help="$("$PYTHON" -m pip install --help 2>/dev/null)" || install_help=""
+  if [[ "$install_help" == *--break-system-packages* ]]; then
     PIP_EXTRA=(--break-system-packages)
     log "non-venv PYTHON; pip will use --break-system-packages"
   else
@@ -884,7 +889,8 @@ then
     warn "  * upgrade system pip:           \"\$PYTHON\" -m pip install --user -U 'pip>=23.0.1'"
     die "refusing to run pip without a working --break-system-packages on a non-venv interpreter"
   fi
-fi
+}
+set_pip_extra
 
 # --- 1. inference_optimizer + claude_agent_sdk via [test] ---
 ensure_inference_optimizer() {
