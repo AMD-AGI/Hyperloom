@@ -136,12 +136,19 @@ def _remote_program() -> str:
 CONTAINER_ENVIRON_PATH = "/proc/1/environ"
 
 
+def container_env_line(environ_path: str) -> str:
+    """Bash that exports the container's interpreter search paths read from ``environ_path``."""
+    return (
+        "while IFS= read -r -d '' kv; do case \"$kv\" in PATH=*|PYTHONPATH=*|VIRTUAL_ENV=*|LD_LIBRARY_PATH=*) "
+        f'export "$kv";; esac; done < {shlex.quote(environ_path)}\n'
+    )
+
+
 def container_script(text: str, interpreter: str, args: str) -> str:
     """Bash that writes ``text`` to a temp file and runs it with ``interpreter`` and ``args`` under the container environment."""
     encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
     return (
-        "while IFS= read -r -d '' kv; do case \"$kv\" in PATH=*|PYTHONPATH=*|VIRTUAL_ENV=*|LD_LIBRARY_PATH=*) "
-        f'export "$kv";; esac; done < {shlex.quote(CONTAINER_ENVIRON_PATH)}\n'
+        container_env_line(CONTAINER_ENVIRON_PATH)
         + 'script="$(mktemp)"\n'
         + f'echo {encoded} | base64 -d > "$script"\n'
         + f'{interpreter} "$script" {args}\n'

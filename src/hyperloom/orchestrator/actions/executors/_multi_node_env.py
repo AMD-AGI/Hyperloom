@@ -19,6 +19,7 @@ from hyperloom.inference_optimizer.multi_node._internal.external_state import (
     load_multi_node_state,
     reachable_service_url,
 )
+from hyperloom.inference_optimizer import multi_node
 from hyperloom.inference_optimizer.multi_node import SSH_FANOUT_BACKENDS
 from hyperloom.inference_optimizer.multi_node.state_paths import resolve_state_file
 from hyperloom.inference_optimizer.recipe_snapshot_constants import KbTopology
@@ -286,6 +287,21 @@ def log_mn_banner(
     target_log.info("[MN %s]", " ".join(pairs))
 
 
+def select_pd_node_traces(root: str, since_unix: float) -> dict[str, list[str]]:
+    """Per PD role, the first GPU's trace of each node of this session written under ``root`` since ``since_unix``."""
+    return multi_node.pd_node_traces(_read_state() or {}, root, since_unix)
+
+
+async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> list[str]:
+    """Send the profile ``action`` to every engine of this session's atomesh/sglangrouter cluster.
+
+    Returns the roles with an engine that accepted it; empty for a single-node run or another backend.
+    """
+    if not is_multi_node():
+        return []
+    return await multi_node.post_pd_engine_profile(_read_state() or {}, action, body)
+
+
 __all__ = [
     "client_only_server_url",
     "export_ray_address_to_os",
@@ -293,4 +309,6 @@ __all__ = [
     "log_mn_banner",
     "ray_gcs_address_from_state",
     "resolve_kb_topology",
+    "select_pd_node_traces",
+    "trigger_pd_engine_profile",
 ]

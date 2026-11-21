@@ -73,14 +73,23 @@ def _resolve_mn_backend(args: argparse.Namespace) -> str:
 
 
 def _stamp_pd_backend(ext_state: dict[str, Any]) -> None:
-    """Record the PD pods of an atomesh/sglangrouter hand-off; exit 2 without ``--pd-mode disaggregated``."""
+    """Record the PD pods and baseline args of an atomesh/sglangrouter hand-off; exit 2 without ``--pd-mode disaggregated``."""
     from ..multi_node._internal.external_state import handoff_lookup
     from ..multi_node._internal.pd_cluster import stamp_pd_cluster
+    from ..multi_node.commands.pd_cluster import record_profile_dir_share
 
     if os.environ.get("PD_MODE", "").strip().lower() != "disaggregated":
         print(f"ERROR: --mn-backend {ext_state['backend']} requires --pd-mode disaggregated.", file=sys.stderr)
         sys.exit(2)
+    _settle_pd_baseline_args(ext_state)
     stamp_pd_cluster(ext_state, handoff_lookup())
+    share_error = record_profile_dir_share(ext_state)
+    if share_error:
+        print(
+            f"WARNING: profile trace dir {ext_state.get('profile_trace') or '<unset>'} is not shared with the "
+            f"engine pods ({share_error}); profiling will be skipped for this session.",
+            file=sys.stderr,
+        )
 
 
 def _prepare_multi_node_state(args: argparse.Namespace) -> None:
@@ -150,6 +159,29 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
         args,
         str(ext_state["backend"]),
         head_ip=str(ext_state.get("head_pod_ip") or ""),
+    )
+
+
+def _settle_pd_baseline_args(ext_state: dict[str, Any]) -> None:
+    """Resolve atomesh/sglangrouter baseline args (manual > session record > InferenceX); exit 2 when none applies."""
+    from ..multi_node import (
+        BaselineArgsMissing,
+        export_baseline_args,
+        previous_cluster_state,
+        record_baseline_args,
+        resolve_baseline_args,
+    )
+
+    try:
+        choice = resolve_baseline_args(previous=previous_cluster_state(ext_state))
+    except BaselineArgsMissing as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+    export_baseline_args(choice)
+    record_baseline_args(ext_state, choice)
+    print(
+        f"multi-node: baseline args source={choice.source} ({choice.detail}) "
+        f"prefill={choice.prefill!r} decode={choice.decode!r}"
     )
 
 

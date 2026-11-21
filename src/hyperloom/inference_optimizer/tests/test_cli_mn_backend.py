@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.inference_optimizer.cli import multi_node as cli_mn
 from hyperloom.inference_optimizer.cli.multi_node import _resolve_mn_backend, _stamp_pd_backend
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 
@@ -75,6 +76,7 @@ def test_pd_router_backend_exits_2_without_pd_mode_disaggregated(monkeypatch):
 def test_pd_router_backend_records_the_handed_off_pods(monkeypatch):
     monkeypatch.setenv("PD_MODE", "disaggregated")
     monkeypatch.setenv("HYPERLOOM_MN_EXT_SSH_PORT", "29000")
+    monkeypatch.setattr(cli_mn, "_settle_pd_baseline_args", lambda _state: None)
     state = {
         "backend": "sglangrouter",
         "service_url": "",

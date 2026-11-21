@@ -11,16 +11,20 @@ every prefill and decode pod. Every pod uses the one SSH port from
 
 from __future__ import annotations
 
+import contextlib
 import functools
+import json
 import os
 import shlex
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from hyperloom_common.coerce import optional_positive_int
 
+from ..state_paths import resolve_state_file, state_file_safe_to_read
 from .topology_file import PD_ROUTER_BACKENDS, Lookup, normalize_mn_backend
 
 ENGINE_PORT = 8000
@@ -37,6 +41,8 @@ DECODE_BOOTSTRAP_PORT = 9098
 PLATFORM_MANAGED = "platform"
 # Substring of the engine command line that identifies the server process on a pod.
 ENGINE_NEEDLE = "sglang.launch_server"
+# Engine flags that newer SGLang splits into ``<flag>-decode`` and ``<flag>-prefill``.
+SPLIT_ROLE_FLAGS = ("--cuda-graph-bs", "--cuda-graph-max-bs")
 # Device files whose open handles mean a process still holds GPU memory.
 GPU_DEVICE_PATHS = ("/dev/kfd",)
 # Seconds an engine launch waits for the previous engine to release the GPU.
@@ -62,6 +68,8 @@ class LaunchSpec:
     decode_extra: str
     prefill_url: str
     decode_url: str
+    # Option strings the pod's ``sglang.launch_server --help`` lists; empty when not probed.
+    engine_flags: frozenset[str] = field(default_factory=frozenset)
 
 
 def engine_port(role: str, spec: LaunchSpec) -> int:
@@ -72,6 +80,72 @@ def engine_port(role: str, spec: LaunchSpec) -> int:
     except ValueError:
         port = None
     return port or ENGINE_PORT
+
+
+def _flag_end(words: list[str], i: int) -> int:
+    """Index just past the flag at ``i`` and its space-separated values."""
+    j = i + 1
+    if "=" not in words[i]:
+        while j < len(words) and not words[j].startswith("--"):
+            j += 1
+    return j
+
+
+def drop_unsupported_baseline_flags(
+    words: list[str], baseline_words: list[str], engine_flags: frozenset[str]
+) -> tuple[list[str], list[str]]:
+    """Remove flags that the baseline supplied and the engine does not list.
+
+    Returns the kept words and the dropped flag names. ``SPLIT_ROLE_FLAGS`` and
+    flags absent from the baseline are kept; nothing is dropped without
+    ``engine_flags``.
+    """
+    if not engine_flags:
+        return words, []
+    baseline = {word.split("=", 1)[0] for word in baseline_words if word.startswith("--")}
+    out: list[str] = []
+    dropped: list[str] = []
+    i = 0
+    while i < len(words):
+        name = words[i].split("=", 1)[0]
+        j = _flag_end(words, i) if name.startswith("--") else i + 1
+        if name in baseline and name not in engine_flags and name not in SPLIT_ROLE_FLAGS:
+            if name not in dropped:
+                dropped.append(name)
+        else:
+            out.extend(words[i:j])
+        i = j
+    return out, dropped
+
+
+def uses_split_role_flags(words: list[str]) -> bool:
+    """True when ``words`` carries a flag from ``SPLIT_ROLE_FLAGS``."""
+    return any(word.split("=", 1)[0] in SPLIT_ROLE_FLAGS for word in words)
+
+
+def adapt_split_role_flags(role: str, words: list[str], engine_flags: frozenset[str]) -> list[str]:
+    """Map ``SPLIT_ROLE_FLAGS`` onto an engine that only has the per-role variants.
+
+    Decode takes ``<flag>-decode`` with the same values. Prefill drops the flag:
+    its per-role variant counts tokens, not decode batch sizes.
+    """
+    split = {flag for flag in SPLIT_ROLE_FLAGS if flag not in engine_flags and f"{flag}-decode" in engine_flags}
+    if not split:
+        return words
+    out: list[str] = []
+    i = 0
+    while i < len(words):
+        name, sep, value = words[i].partition("=")
+        if name not in split:
+            out.append(words[i])
+            i += 1
+            continue
+        j = _flag_end(words, i)
+        if role == "decode":
+            out.append(f"{name}-decode{sep}{value}")
+            out.extend(words[i + 1 : j])
+        i = j
+    return out
 
 
 def engine_command(role: str, spec: LaunchSpec) -> str:
@@ -105,7 +179,7 @@ def engine_command(role: str, spec: LaunchSpec) -> str:
         argv.extend(["--disaggregation-ib-device", spec.ib.strip()])
     if ep > 1:
         argv.extend(["--ep-size", str(ep)])
-    argv.extend(extra)
+    argv.extend(adapt_split_role_flags(role, extra, spec.engine_flags))
     return shlex.join(argv)
 
 
@@ -196,6 +270,11 @@ def role_engine_pods(state: dict[str, Any], role: str) -> list[dict[str, Any]]:
     return [pod for pod in (state.get(f"{role}_pods") or []) if isinstance(pod, dict) and pod.get("podIP")]
 
 
+def pd_pod_trace_dir(root: str, role: str, pod_index: int) -> str:
+    """Torch trace dir of ``role``'s ``pod_index``-th engine under a profiling round's trace root."""
+    return os.path.join(root, role, str(pod_index))
+
+
 @functools.lru_cache(maxsize=None)
 def _resolve_host(host: str) -> str:
     """IP ``host`` resolves to, memoized per host for the process.
@@ -238,13 +317,83 @@ def set_pods(state: dict[str, Any], spec: LaunchSpec) -> None:
     state["router_pod_ips"] = [str(pod["podIP"]) for pod in state["router_pods"]]
 
 
+def _pin_profile_dir(state: dict[str, Any]) -> None:
+    """Point profile_trace at a stable directory under the session."""
+    explicit = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
+    session = os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").strip()
+    path = explicit or (os.path.join(session, "runs", "profile", "torch_trace") if session else "")
+    if path:
+        try:
+            os.makedirs(path, mode=0o755, exist_ok=True)
+        except OSError:
+            path = explicit
+    if path and not explicit:
+        os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = path
+    state["profile_trace"] = path
+    state.setdefault("steady_state_trace", "")
+
+
+def _read_state_file(path: Path) -> dict[str, Any]:
+    """Load the state file when it is present, safe to read and holds a JSON object."""
+    if not path.is_file() or not state_file_safe_to_read(path):
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def previous_cluster_state(state: dict[str, Any]) -> dict[str, Any]:
+    """The state file a prior launch wrote for the same cluster, or an empty dict."""
+    try:
+        disk = _read_state_file(resolve_state_file())
+    except RuntimeError:
+        return {}
+    return disk if disk.get("service_url") == state.get("service_url") else {}
+
+
 def stamp_pd_cluster(state: dict[str, Any], get: Lookup) -> None:
-    """Fill router/prefill/decode pods on an atomesh or sglangrouter state from its ``prefill/decode_pod_ips``."""
+    """Fill router/prefill/decode pods and profile paths on an atomesh or sglangrouter state.
+
+    TraceLens inputs a prior launch recorded for the same cluster are kept; ``profile_trace`` stays pinned.
+    """
     state["pd_mode"] = "disaggregated"
     state["ssh_port"] = _ssh_port(get)
     state["worker_pod_ips"] = []
     state["worker_pods"] = []
     set_pods(state, launch_spec(state, get=get))
+    _pin_profile_dir(state)
+    previous = previous_cluster_state(state)
+    for name in ("steady_state_trace", "decode_trace", "prefill_trace"):
+        if not state.get(name) and previous.get(name):
+            state[name] = previous[name]
+
+
+def record_profile_paths(
+    *,
+    profile_trace: str = "",
+    steady_state_trace: str = "",
+    role_traces: dict[str, str] | None = None,
+) -> None:
+    """Write TraceLens inputs (shared, steady-state and per-role ``<role>_trace``) back into the multi-node state file."""
+    try:
+        path = resolve_state_file()
+    except RuntimeError:
+        return
+    data = _read_state_file(path)
+    if str(data.get("backend") or "") not in PD_ROUTER_BACKENDS:
+        return
+    if profile_trace:
+        data["profile_trace"] = profile_trace
+    if steady_state_trace:
+        data["steady_state_trace"] = steady_state_trace
+    for role, trace in (role_traces or {}).items():
+        if trace:
+            data[f"{role}_trace"] = trace
+    path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    with contextlib.suppress(OSError):
+        path.chmod(0o600)
 
 
 def _engine_log_lines(log_dir: str, log_ip: str) -> list[str]:
