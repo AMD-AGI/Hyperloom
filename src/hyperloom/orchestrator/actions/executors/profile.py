@@ -22,7 +22,7 @@ from hyperloom_common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
-from hyperloom.inference_optimizer import framework_registry
+from hyperloom.inference_optimizer import framework_registry, multi_node
 from .benchmark_result import round_succeeded
 from inference_suite.contracts import RunLayout
 from inference_suite.contracts.layout import CAPTURE_TRACE_DIRS
@@ -31,6 +31,9 @@ from .baseline import BenchmarkRunExecutor
 
 log = logging.getLogger(__name__)
 
+#: ``error_class`` of a multi-node profile skipped because its trace dir is not shared with the engine pods.
+PROFILE_TRACE_NOT_SHARED = "profile_trace_not_shared"
+_STOP = "stop"
 
 # Leading bytes of a trace to sample for sentinel substrings.
 _TRACE_INSPECT_BYTES = 2_000_000
@@ -282,7 +285,10 @@ def _certify_trace_dir(trace_dir: Path, trace_input: Path, framework: str) -> di
 
 # A run_dir keeps the capture sidecars beside its ``torch_trace``.
 def _capture_trace_files(trace_dir: Path) -> tuple[Path | None, list[Path]]:
-    capture_dirs = [base / name for base in (trace_dir, trace_dir.parent) for name in CAPTURE_TRACE_DIRS]
+    """The graph-capture folder and its files under ``trace_dir``, a PD first-pod subdir, or its parent."""
+    pod_dirs = tuple(Path(multi_node.pd_pod_trace_dir(str(trace_dir), role, 0)) for role in ("decode", "prefill"))
+    bases = (trace_dir, *pod_dirs, trace_dir.parent)
+    capture_dirs = [base / name for base in bases for name in CAPTURE_TRACE_DIRS]
     capture = next((path for path in capture_dirs if path.is_dir()), None)
     if capture is None:
         return None, []
@@ -647,19 +653,40 @@ def _mn_round_trace_root() -> str:
     return str(scoped)
 
 
-# Restarts the multi-node server for this profiling round; returns the refusal result when it failed.
+def _unshared_trace_dir_refusal(round_trace_root: str) -> dict[str, Any] | None:
+    """The skip result when the startup probe found the trace dir not shared with the engine pods, else ``None``."""
+    from ._multi_node_env import _read_state
+
+    state = _read_state() or {}
+    if state.get("profile_trace_shared") is not False:
+        return None
+    reason = str(state.get("profile_trace_share_error") or "not shared with the engine pods")
+    log.warning("profile_executor: skipping multi-node profile; trace dir %s: %s", round_trace_root, reason)
+    return {
+        "status": "failed",
+        "error_class": PROFILE_TRACE_NOT_SHARED,
+        "error": f"multi-node profile trace dir {round_trace_root} is not shared with the engine pods: {reason}",
+        "trace_dir": round_trace_root,
+    }
+
+
+# Restarts the multi-node server for this profiling round, with graph-capture profiling on for a PD cluster; returns
+# the refusal result when it failed.
 async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -> dict[str, Any] | None:
-    from ._multi_node_env import round_server_env
+    from ._multi_node_env import _read_state, round_server_env
     from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
+    extra_server_args, extra_env = multi_node.pd_graph_capture_profiling(
+        _read_state() or {}, str(params.get("extra_server_args") or ""), _default_profile_config()
+    )
     unset_envs = list(params.get("unset_envs") or ())
     try:
         await restart_server_for_round(
             RoundServer.from_env(
-                str(params.get("extra_server_args") or ""),
+                extra_server_args,
                 str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None,
             ),
-            extra_env=round_server_env(params.get("extra_envs"), unset_envs) or None,
+            extra_env={**round_server_env(params.get("extra_envs"), unset_envs), **extra_env} or None,
             unset_env=unset_envs or None,
             torch_profiler_dir=round_trace_root,
         )
@@ -673,13 +700,16 @@ async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -
     return None
 
 
-# Runs the body with a warmup-then-bounded Infera engine profiling window around it.
+# Runs the body with a warmup-then-bounded Infera engine profiling window around it. PD engines share the window in
+# ``time`` mode; in ``steps`` mode each closes its own after its steps, and one safety stop follows their traces.
 @contextlib.asynccontextmanager
-async def _infera_profile_window(round_trace_root: str):
+async def _infera_profile_window(round_trace_root: str, since_unix: float = 0.0):
     import asyncio as _asyncio
 
+    from . import _multi_node_env as mn_env
     from ._multi_node_server_lifecycle import trigger_infera_engine_profile
 
+    pd_by_steps = multi_node.pd_profile_by_steps()
     prof_body: dict[str, Any] = {}
     try:
         parsed = json.loads(os.environ.get("PROFILE_EXTRA_BODY") or "{}")
@@ -692,18 +722,26 @@ async def _infera_profile_window(round_trace_root: str):
     warmup_s = float(os.environ.get("HYPERLOOM_MN_PROFILE_WARMUP_S", "60") or 60)
     window_s = float(os.environ.get("HYPERLOOM_MN_PROFILE_WINDOW_S", "8") or 8)
     started = {"v": False}
+    pd_open: list[str] = []
+    body_done = False
 
     async def _bounded_profile_window() -> None:
         await _asyncio.sleep(warmup_s)
         await trigger_infera_engine_profile("start", prof_body)
+        roles = await mn_env.trigger_pd_engine_profile("start", prof_body)
+        if pd_by_steps:
+            pd_open.extend(roles or [])
         started["v"] = True
         await _asyncio.sleep(window_s)
-        await trigger_infera_engine_profile("stop")
+        await trigger_infera_engine_profile(_STOP)
+        if not pd_by_steps:
+            await mn_env.trigger_pd_engine_profile(_STOP)
         started["v"] = False
 
     prof_task = _asyncio.create_task(_bounded_profile_window())
     try:
         yield
+        body_done = True
     finally:
         if not prof_task.done():
             prof_task.cancel()
@@ -712,11 +750,25 @@ async def _infera_profile_window(round_trace_root: str):
             except (_asyncio.CancelledError, OSError, RuntimeError, ValueError) as exc:
                 log.debug("profile_executor: bounded profile task ended during cleanup: %r", exc)
         if started.get("v"):
-            await trigger_infera_engine_profile("stop")
+            await trigger_infera_engine_profile(_STOP)
+            if not pd_by_steps:
+                await mn_env.trigger_pd_engine_profile(_STOP)
+        if pd_open:
+            try:
+                if body_done and prof_body.get("output_dir"):
+                    root = str(prof_body["output_dir"])
+                    await multi_node.await_pd_role_traces(
+                        lambda: mn_env.select_pd_node_traces(root, since_unix), pd_open, root
+                    )
+            finally:
+                await mn_env.trigger_pd_engine_profile(_STOP)
 
 
-# Attaches this round's multi-node trace files, selecting the heaviest as the main trace.
+# Attaches this round's multi-node trace files. A PD cluster's prefill and decode traces land in per-engine subdirs and
+# are recorded as ``role_traces``, decode's being the main trace; otherwise the heaviest file is the main trace.
 def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_started_unix: float) -> None:
+    from ._multi_node_env import select_pd_node_traces
+
     trace_dir = Path(round_trace_root)
     if not trace_dir.is_dir():
         result["trace_dir"] = None
@@ -726,11 +778,18 @@ def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_
             round_trace_root,
         )
         return
+    node_traces = select_pd_node_traces(str(trace_dir), task_started_unix)
+    role_traces = {role: paths[0] for role, paths in node_traces.items()}
     all_files = sorted(trace_dir.glob("*.trace.json.gz"))
     trace_files = [p for p in all_files if safe_mtime(p) >= task_started_unix]
     result["trace_dir"] = str(trace_dir)
-    result["trace_files"] = [str(p) for p in trace_files]
-    if trace_files:
+    result["trace_files"] = [str(p) for p in trace_files] + sorted(role_traces.values())
+    if role_traces:
+        result["role_traces"] = role_traces
+        result["role_node_traces"] = node_traces
+        result["main_trace_path"] = role_traces.get("decode") or role_traces["prefill"]
+        log.info("profile_executor: multi-node role traces selected: %s", role_traces)
+    elif trace_files:
         main_trace = max(trace_files, key=_trace_size_bytes)
         result["main_trace_path"] = str(main_trace)
         log.info(
@@ -750,6 +809,11 @@ def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_
             "profile_executor: multi-node trace dir %s exists but no .trace.json.gz files found yet (server pods may still be flushing)",
             trace_dir,
         )
+    multi_node.record_profile_paths(
+        profile_trace=str(trace_dir),
+        steady_state_trace=str(result.get("main_trace_path") or ""),
+        role_traces=role_traces,
+    )
 
 
 def _first_trace_dir_with(workspace: Path, finder: Any) -> tuple[Path | None, list[Path]]:
@@ -1082,11 +1146,15 @@ class ProfileExecutor(BenchmarkRunExecutor):
         round_trace_root = _mn_round_trace_root()
         log_mn_banner("profile_executor", log, trace_dir=round_trace_root)
         if round_trace_root:
+            unshared = _unshared_trace_dir_refusal(round_trace_root)
+            if unshared is not None:
+                return unshared
+            task_started_unix = multi_node.trace_fs_round_start(round_trace_root, task_started_unix)
             refusal = await _restart_round_server(params, round_trace_root)
             if refusal is not None:
                 return refusal
             extra["mn_round_restarted"] = True
-        async with _infera_profile_window(round_trace_root):
+        async with _infera_profile_window(round_trace_root, task_started_unix):
             result = await super().__call__(ctx)
         self._collect_rewrite_evidence(result)
         workspace_str = result.get("workspace")

@@ -27,6 +27,17 @@ def resolve_state_file() -> Path:
     )
 
 
+def multi_node_state_env() -> dict[str, str]:
+    """``MULTI_NODE_STATE`` and ``MULTI_NODE_STATE_FILE`` for a child process, or empty when no state file exists."""
+    try:
+        path = resolve_state_file()
+    except RuntimeError:
+        return {}
+    if not path.is_file():
+        return {}
+    return {"MULTI_NODE_STATE": str(path), "MULTI_NODE_STATE_FILE": str(path)}
+
+
 def state_file_safe_to_read(path: Path) -> bool:
     """Return True when ``path`` is owned by the current uid and not group/world-writable."""
     try:

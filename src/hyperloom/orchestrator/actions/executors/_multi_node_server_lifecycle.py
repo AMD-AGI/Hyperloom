@@ -98,12 +98,13 @@ _POLL_INTERVAL_S = 6
 _SGLANG_DEFAULT_TOKENS: tuple[tuple[str, str], ...] = (("--mem-fraction-static", "--mem-fraction-static=0.75"),)
 
 
-def _merge_sglang_defaults(extra_args: str) -> str:
-    """Append the sglang launcher's default args that the user did not already set."""
+def _merge_sglang_defaults(extra_args: str, pd: Mapping[str, Any] | None = None) -> str:
+    """Append sglang launcher defaults that neither the shared nor ``pd``'s per-role args set; vllm has its own."""
     user = (extra_args or "").strip()
+    role_args = f"{(pd or {}).get('pd_prefill_extra_args') or ''} {(pd or {}).get('pd_decode_extra_args') or ''}"
     parts = [user] if user else []
     for flag_name, default_token in _SGLANG_DEFAULT_TOKENS:
-        if flag_name in user:
+        if flag_name in user or flag_name in role_args:
             continue
         parts.append(default_token)
     return " ".join(p for p in parts if p)
@@ -436,8 +437,9 @@ async def restart_server_for_round(
             "lower --ep or raise the smaller per-group TP."
         )
 
-    # Apply the sglang launcher's default args only for sglang (vllm has its own).
-    extra_server_args = _merge_sglang_defaults(server.extra_server_args) if fw == "sglang" else server.extra_server_args
+    extra_server_args = (
+        _merge_sglang_defaults(server.extra_server_args, pd) if fw == "sglang" else server.extra_server_args
+    )
 
     # Compute-bound profile override (multi-node only; already gated by the is_multi_node() no-op above).
     if os.environ.get(_COMPUTE_BOUND_PROFILE_ENV, "").strip() == "1":
@@ -463,6 +465,7 @@ async def restart_server_for_round(
                 Path(torch_profiler_dir).mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 raise ServerRestartFailed(f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}") from exc
+            await asyncio.to_thread(multi_node.drop_graph_captures, torch_profiler_dir)
         with _restart_env_scope(extra_env, unset_env, torch_profiler_dir):
             from ._server_patcher import resolve_sglang_patch_set
 
@@ -602,10 +605,7 @@ async def trigger_infera_engine_profile(
     route = "start" if action == "start" else "stop"
     url = f"{service_url}/v1/admin/profile/{route}"
     payload = dict(body or {}) if action == "start" else {}
-    if action == "start":
-        client_timeout = 30.0
-    else:
-        client_timeout = float(os.environ.get("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", "600") or 600)
+    client_timeout = 30.0 if action == "start" else multi_node.stop_profile_timeout_s()
     async with _httpx.AsyncClient(timeout=client_timeout) as client:
         try:
             resp = await client.post(url, json=payload)

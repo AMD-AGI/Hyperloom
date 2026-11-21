@@ -201,6 +201,21 @@ The following variables are exported on the sandbox side before calling `optimiz
 | `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap and wait timeouts. atomesh and sglangrouter engines default both to `100000` when unset |
 | `MC_*` | Mooncake transfer settings, forwarded to the engine pods |
 
+### PD cluster variables
+
+The following variables apply to atomesh and sglangrouter sessions.
+
+| Variable | Meaning |
+|----------|---------|
+| `INFERENCEX_PATH` | InferenceX checkout whose `benchmarks/multi_node/amd_utils/models.yaml` supplies the baseline per-role args when no `--server-args` / `--pd-*-extra-args` are given and no previous launch of the session recorded args for the same model and EP. An agentic run looks up `<model>-AgentX`, then `<model>`, then `<model>-DI`; other runs look up `<model>`, then `<model>-DI` |
+| `HYPERLOOM_MN_PD_PROFILE_MODE` | Engine profiling window: `steps` (default) records a fixed step count per role; `time` records between one start and stop |
+| `HYPERLOOM_MN_PD_PREFILL_PROFILE_STEPS`, `HYPERLOOM_MN_PD_DECODE_PROFILE_STEPS` | Step count per role in `steps` mode (defaults `8` and `256`) |
+| `HYPERLOOM_MN_PROFILE_WITH_STACK` | `1`, `true`, `yes`, or `on` records Python stacks in engine traces (default off) |
+
+A PD profiling round starts its engines with graph-capture profiling
+(`--enable-profile-cuda-graph` and the profile config's graph-capture env). infera and
+rayjob rounds keep their own profiling path.
+
 Forge is not in that list and does not need to be: it ships inside the Hyperloom
 wheel, so there is no checkout to export. `FORGE_PATH` is removed. Set
 `KERNELFORGE_PROJECT_ROOT` only to point forge's writable state, or a resource

@@ -25,6 +25,7 @@ from inference_suite.contracts.layout import REPORT_FILE
 from ...phases.machine_state import LifecycleMark, record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
 from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
+from hyperloom.inference_optimizer import multi_node
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
 from .profile import profile_trace_path
@@ -69,12 +70,7 @@ _CAPTURE_DIAGNOSIS_SOURCE_BYTES = 32768
 _TRACE_SUFFIXES = (".pt.trace.json.gz", ".pt.trace.json", ".trace.json.gz", ".trace.json")
 #: Enough leftovers to establish the pattern; the preflight record is context, not an inventory.
 _PREFLIGHT_STALE_TRACE_LIMIT = 20
-_TERMINAL_PROFILE_ERRORS = frozenset(
-    {
-        ORCHESTRATOR_CANCELLED_CLASS,
-        "primary_rank_trace_missing",
-    }
-)
+_TERMINAL_PROFILE_ERRORS = frozenset({ORCHESTRATOR_CANCELLED_CLASS, "primary_rank_trace_missing"})
 _TERMINAL_CAPTURE_REASONS = frozenset(
     {
         "api_port_allocation_failed",
@@ -918,7 +914,7 @@ class RooflineExecutor:
 
         A failed profile is not re-run: the same configuration fails the same way, and the session degrades instead.
         """
-        from .profile import profile_executor
+        from .profile import PROFILE_TRACE_NOT_SHARED, profile_executor
 
         session_dir = Path(ctx.extra["session_dir"])
         run = recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL) if recorder is not None else 0
@@ -936,6 +932,8 @@ class RooflineExecutor:
                 recorder, run, session_dir, arm, _ProfileOutcome.of(returned, dict(profile_ctx.task.params or {}))
             )
         log.warning("roofline profile failed (%s): %s", unusable.error_class, unusable.message)
+        if unusable.error_class == PROFILE_TRACE_NOT_SHARED and not self.shared_state.gpu_trace_unsupported_reason:
+            self.shared_state.gpu_trace_unsupported_reason = unusable.message
         await _end_profile_run(recorder, run, session_dir, arm, _RunEnd("failed", unusable.result, unusable.failure))
         captured = await _fail_on_capture(recorder, ctx.task, session_dir, arm, unusable)
         if captured is not None:
@@ -1164,12 +1162,14 @@ class RooflineExecutor:
             detail=f"hot_kernels={len(hot)}",
             duration_s=time.monotonic() - started,
         )
+        steady = str(cached.get("steady_state_trace") or "")
+        multi_node.record_analysed_profile(trace_path, steady)
         result = {
             "status": status,
             "executed_at_iso": _now_iso(),
             "snapshot_id": cached.get("roofline_snapshot_id"),
             "last_profile_trace": trace_path,
-            "steady_state_trace": cached.get("steady_state_trace", ""),
+            "steady_state_trace": steady,
             "analysis_md_path": cached.get("analysis_md_path", ""),
             "kernel_roofline_path": cached.get("kernel_roofline_path", ""),
             "profile_workspace": profile.result.get("workspace"),
