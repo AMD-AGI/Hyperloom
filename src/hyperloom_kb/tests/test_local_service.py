@@ -21,6 +21,8 @@ import pytest
 import yaml
 
 from hyperloom_kb import (
+    GLOBAL_TOKEN_ENV,
+    GLOBAL_URL_ENV,
     PACKAGED_DECLARATION,
     ExperienceDeclaration,
     ExperienceHTTPService,
@@ -41,6 +43,7 @@ from hyperloom_kb import (
 from hyperloom_kb import local_service
 from hyperloom_kb.database import SQLITE_FILE
 from hyperloom_kb.experience_service import code_digest
+from hyperloom_kb.http_service import DATABASE_URL_ENV
 from hyperloom_kb.tests.conftest import fresh_database
 
 TOKEN = "local-service-token"
@@ -65,8 +68,18 @@ def _config(port: int, tmp_path: Path) -> RemoteConfig:
     return RemoteConfig(f"http://127.0.0.1:{port}", TOKEN, timeout_seconds=5, spool_root=tmp_path / "spool")
 
 
-def _env(tmp_path: Path) -> dict[str, str]:
-    return {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)}
+@pytest.fixture(autouse=True)
+def _launch_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Every service here starts with no global KB and a SQLite database, whatever the shell running the tests holds."""
+
+    for name in (GLOBAL_URL_ENV, GLOBAL_TOKEN_ENV, DATABASE_URL_ENV):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+
+def _set_global_kb(monkeypatch: pytest.MonkeyPatch, url: str, token: str) -> None:
+    monkeypatch.setenv(GLOBAL_URL_ENV, url)
+    monkeypatch.setenv(GLOBAL_TOKEN_ENV, token)
 
 
 @contextmanager
@@ -88,14 +101,14 @@ def _serving(tmp_path: Path, declaration: ExperienceDeclaration, token: str) -> 
 def test_a_missing_service_is_started_once_and_then_reused(tmp_path: Path) -> None:
     config = _config(_free_port(), tmp_path)
     home = tmp_path / "home"
-    started = ensure_local_service(config, home, env=_env(tmp_path))
+    started = ensure_local_service(config, home)
     assert started.process is not None
     try:
         assert started.health["status"] == "ok"
         assert started.health["schema_ref"] == load_declaration(PACKAGED_DECLARATION).schema_ref
         assert "listening" in (home / "service.log").read_text(encoding="utf-8")
 
-        reused = ensure_local_service(config, home, env=_env(tmp_path))
+        reused = ensure_local_service(config, home)
 
         assert reused.process is None
         assert reused.health["schema_ref"] == started.health["schema_ref"]
@@ -112,7 +125,7 @@ def test_a_log_past_its_size_is_kept_once_and_the_next_service_starts_a_new_one(
     home.mkdir()
     old = "an earlier service's log line\n" * 4
     (home / "service.log").write_text(old, encoding="utf-8")
-    started = ensure_local_service(_config(_free_port(), tmp_path), home, env=_env(tmp_path))
+    started = ensure_local_service(_config(_free_port(), tmp_path), home)
     assert started.process is not None
     try:
         kept = (home / "service.log.1").read_text(encoding="utf-8")
@@ -129,7 +142,7 @@ def test_a_listener_with_another_token_is_refused_without_starting_a_service(tmp
     home = tmp_path / "home"
     with _serving(tmp_path, load_declaration(PACKAGED_DECLARATION), "another-workspace") as port:
         with pytest.raises(LocalServiceError, match="did not answer as this Experience service"):
-            ensure_local_service(_config(port, tmp_path), home, env=_env(tmp_path))
+            ensure_local_service(_config(port, tmp_path), home)
     assert not home.exists()
 
 
@@ -158,25 +171,26 @@ def test_a_loopback_service_is_reached_directly_despite_an_environment_proxy(mon
 def test_a_stale_service_inside_this_process_is_refused_rather_than_signalled(tmp_path: Path) -> None:
     with _serving(tmp_path, _other_declaration(), TOKEN) as port:
         with pytest.raises(LocalServiceError, match="no process to restart"):
-            ensure_local_service(_config(port, tmp_path), tmp_path / "other-service", env=_env(tmp_path))
+            ensure_local_service(_config(port, tmp_path), tmp_path / "other-service")
 
 
 def test_a_service_holding_another_workspaces_data_is_refused_and_left_serving(tmp_path: Path) -> None:
     with _serving(tmp_path, load_declaration(PACKAGED_DECLARATION), TOKEN) as port:
         with pytest.raises(LocalServiceError, match="give this workspace its own port"):
-            ensure_local_service(_config(port, tmp_path), tmp_path / "home", env=_env(tmp_path))
+            ensure_local_service(_config(port, tmp_path), tmp_path / "home")
         assert RemoteClient(_config(port, tmp_path)).health()["status"] == "ok"
     assert not (tmp_path / "home").exists()
 
 
-def test_a_caller_that_must_not_restart_gets_the_stale_service_as_it_runs(tmp_path: Path) -> None:
+def test_a_caller_that_must_not_restart_gets_the_stale_service_as_it_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     config = _config(_free_port(), tmp_path)
     home = tmp_path / "home"
-    before = _env(tmp_path)
-    after = {**before, "HYPERLOOM_GLOBAL_KB_URL": "https://global.example", "HYPERLOOM_GLOBAL_KB_TOKEN": "global"}
-    first = ensure_local_service(config, home, env=before)
+    first = ensure_local_service(config, home)
     try:
-        kept = ensure_local_service(config, home, env=after, restart=False)
+        _set_global_kb(monkeypatch, "https://global.example", "global")
+        kept = ensure_local_service(config, home, restart=False)
 
         assert (kept.process, kept.restarted, kept.stale) == (None, False, "it was started with other settings")
         assert first.process is not None and first.process.poll() is None
@@ -191,20 +205,21 @@ def _stop(service: LocalService) -> None:
         service.process.wait(timeout=10)
 
 
-def test_a_service_started_with_other_settings_is_restarted_with_the_launch_settings(tmp_path: Path) -> None:
+def test_a_service_started_with_other_settings_is_restarted_with_the_launch_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     config = _config(_free_port(), tmp_path)
     home = tmp_path / "home"
-    before = _env(tmp_path)
-    after = {**before, "HYPERLOOM_GLOBAL_KB_URL": "https://global.example", "HYPERLOOM_GLOBAL_KB_TOKEN": "global"}
-    first = ensure_local_service(config, home, env=before)
+    first = ensure_local_service(config, home)
     second = LocalService({})
     try:
-        second = ensure_local_service(config, home, env=after)
+        _set_global_kb(monkeypatch, "https://global.example", "global")
+        second = ensure_local_service(config, home)
 
         assert first.process is not None and first.process.wait(timeout=10) is not None
         assert second.restarted and second.process is not None
         assert second.health["pid"] == second.process.pid != first.process.pid
-        assert second.health["config_digest"] == ServiceSettings.from_env(after).digest()
+        assert second.health["config_digest"] == ServiceSettings.from_env(os.environ).digest()
     finally:
         _stop(first)
         _stop(second)
@@ -256,7 +271,7 @@ def test_a_restart_waits_until_the_stopped_service_lets_go_of_the_home(tmp_path:
     try:
         while not _reachable(port):
             assert old.poll() is None
-        restarted = ensure_local_service(config, home, env=_env(tmp_path))
+        restarted = ensure_local_service(config, home)
 
         assert old.wait(timeout=10) == 0
         assert restarted.restarted and restarted.process is not None
@@ -268,13 +283,16 @@ def test_a_restart_waits_until_the_stopped_service_lets_go_of_the_home(tmp_path:
         _stop(restarted)
 
 
-def test_the_same_settings_spelled_differently_reuse_the_running_service(tmp_path: Path) -> None:
+def test_the_same_settings_spelled_differently_reuse_the_running_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     config = _config(_free_port(), tmp_path)
-    launched = {**_env(tmp_path), "HYPERLOOM_GLOBAL_KB_URL": "https://global.example", "HYPERLOOM_GLOBAL_KB_TOKEN": "g"}
-    aliased = {**launched, "HYPERLOOM_GLOBAL_KB_URL": "https://global.example/", "ANTHROPIC_API_KEY": "key"}
-    first = ensure_local_service(config, tmp_path / "home", env=launched)
+    _set_global_kb(monkeypatch, "https://global.example", "g")
+    first = ensure_local_service(config, tmp_path / "home")
     try:
-        assert ensure_local_service(config, tmp_path / "home", env=aliased).process is None
+        _set_global_kb(monkeypatch, "https://global.example/", "g")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+        assert ensure_local_service(config, tmp_path / "home").process is None
     finally:
         _stop(first)
 
@@ -283,11 +301,10 @@ def test_a_service_serving_an_older_declaration_is_restarted_with_the_packaged_o
     port = _free_port()
     declaration = tmp_path / "older.yaml"
     declaration.write_text(yaml.safe_dump(_other_declaration().to_dict(), sort_keys=False), encoding="utf-8")
-    env = _env(tmp_path)
     older = subprocess.Popen(
         [sys.executable, "-m", "hyperloom_kb", "--declaration", str(declaration)]
         + ["--home", str(tmp_path / "home"), "--port", str(port)],
-        env={**env, "HYPERLOOM_KB_TOKEN": TOKEN, "PYTHONPATH": str(Path(__file__).resolve().parents[2])},
+        env={**os.environ, "HYPERLOOM_KB_TOKEN": TOKEN, "PYTHONPATH": str(Path(__file__).resolve().parents[2])},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -295,7 +312,7 @@ def test_a_service_serving_an_older_declaration_is_restarted_with_the_packaged_o
     try:
         while not _reachable(port):
             assert older.poll() is None
-        current = ensure_local_service(_config(port, tmp_path), tmp_path / "home", env=env)
+        current = ensure_local_service(_config(port, tmp_path), tmp_path / "home")
 
         assert older.wait(timeout=10) is not None
         assert current.restarted
@@ -318,10 +335,9 @@ def test_a_service_started_from_other_code_is_restarted_by_a_launch_and_kept_by_
     with (older_code / "hyperloom_kb" / "remote.py").open("a", encoding="utf-8") as source:
         source.write("\n# as released before an upgrade\n")
     port = _free_port()
-    env = _env(tmp_path)
     older = subprocess.Popen(
         [sys.executable, "-m", "hyperloom_kb", "--home", str(tmp_path / "home"), "--port", str(port)],
-        env={**env, "HYPERLOOM_KB_TOKEN": TOKEN, "PYTHONPATH": str(older_code)},
+        env={**os.environ, "HYPERLOOM_KB_TOKEN": TOKEN, "PYTHONPATH": str(older_code)},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -329,10 +345,10 @@ def test_a_service_started_from_other_code_is_restarted_by_a_launch_and_kept_by_
     try:
         while not _reachable(port):
             assert older.poll() is None
-        kept = ensure_local_service(_config(port, tmp_path), tmp_path / "home", env=env, restart=False)
+        kept = ensure_local_service(_config(port, tmp_path), tmp_path / "home", restart=False)
         assert (kept.stale, older.poll()) == ("it runs other Experience KB code than this client", None)
 
-        current = ensure_local_service(_config(port, tmp_path), tmp_path / "home", env=env)
+        current = ensure_local_service(_config(port, tmp_path), tmp_path / "home")
 
         assert older.wait(timeout=10) is not None
         assert current.restarted and current.health["code_digest"] == code_digest()
@@ -344,15 +360,14 @@ def test_a_service_started_from_other_code_is_restarted_by_a_launch_and_kept_by_
 
 def test_a_data_home_another_service_serves_is_never_served_twice(tmp_path: Path) -> None:
     home = tmp_path / "shared-home"
-    env = _env(tmp_path)
     first_port = _free_port()
-    first = ensure_local_service(_config(first_port, tmp_path), home, env=env)
+    first = ensure_local_service(_config(first_port, tmp_path), home)
     try:
         other = RemoteConfig(f"http://127.0.0.1:{_free_port()}", "other-workspace", timeout_seconds=5)
         with pytest.raises(
             LocalServiceError, match=rf"another Experience service \(pid \d+, port {first_port}\) already"
         ):
-            ensure_local_service(other, home, env=env)
+            ensure_local_service(other, home)
 
         assert first.process is not None and first.process.poll() is None
         assert RemoteClient(_config(first_port, tmp_path)).health()["status"] == "ok"
@@ -365,7 +380,7 @@ def test_a_service_that_cannot_start_is_reported_with_its_log(tmp_path: Path) ->
     (home / SQLITE_FILE).mkdir(parents=True)
 
     with pytest.raises(LocalServiceError, match="exited with status"):
-        ensure_local_service(_config(_free_port(), tmp_path), home, env=_env(tmp_path))
+        ensure_local_service(_config(_free_port(), tmp_path), home)
 
     assert "cannot open the Experience KB database" in (home / "service.log").read_text(encoding="utf-8")
 
@@ -375,7 +390,7 @@ def test_a_home_that_cannot_hold_the_service_is_a_local_service_error(tmp_path: 
     home.write_text("not a directory", encoding="utf-8")
 
     with pytest.raises(LocalServiceError, match="cannot start the Experience service"):
-        ensure_local_service(_config(_free_port(), tmp_path), home, env=_env(tmp_path))
+        ensure_local_service(_config(_free_port(), tmp_path), home)
 
 
 @pytest.mark.parametrize("url", ["http://kb.example:8787", "https://127.0.0.1:8787"])
