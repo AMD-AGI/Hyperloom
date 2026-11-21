@@ -19,7 +19,7 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors._suite.config import RoundSettings, fixed_workload, suite_config
 from hyperloom.orchestrator.actions.executors._suite.rounds import point_server
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     BenchmarkTarget,
     LaunchLayer,
     materialize_config_with_envs,

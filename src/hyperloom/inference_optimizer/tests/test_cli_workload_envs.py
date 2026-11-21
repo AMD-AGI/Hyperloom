@@ -21,7 +21,7 @@ from hyperloom.inference_optimizer.cli.launch_shape import (
     _resolve_workload_knobs,
 )
 from hyperloom.inference_optimizer.cli.parser import _redact_unknown_args
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     FrameworkScriptMismatchError,
     materialize_config_with_envs,
     BenchmarkTarget,
@@ -169,7 +169,7 @@ def test_the_board_writes_no_runner_label_or_script(tmp_path):
 
 def test_r9700_materialized_config_is_lifecycle_eligible(tmp_path, monkeypatch):
     """An R9700 session's materialized config may hold one server across rounds (baseline, explore, conc sweep)."""
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+    from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle as sl
 
     monkeypatch.setattr(sl, "pick_server_port", lambda: 8888)
     src = tmp_path / "cfg.yaml"

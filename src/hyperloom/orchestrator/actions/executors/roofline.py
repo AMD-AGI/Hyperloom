@@ -90,7 +90,7 @@ _AUTO_COMPUTE_BOUND_ENV = "HYPERLOOM_PROFILE_AUTO_COMPUTE_BOUND"
 
 async def _reap_session_orphans(session_dir: Path | str) -> list[int]:
     """Reap this session's own orphaned serving processes."""
-    from ._server_lifecycle import reap_orphaned_servers
+    from .serving._server_lifecycle import reap_orphaned_servers
 
     return await asyncio.to_thread(reap_orphaned_servers, Path(session_dir))
 
@@ -944,7 +944,7 @@ class RooflineExecutor:
 
     def _record_profile_findings(self, profiled: _ProfileOutcome) -> None:
         """Record what the profile shows regardless of its analysis: Kineto backend, stack verdict, rewrite evidence."""
-        from ._framework_rewrite_evidence import promote_evidence_path
+        from .framework_change._framework_rewrite_evidence import promote_evidence_path
 
         state = self.shared_state
         backend = detect_kineto_backend(profiled.trace_path)
@@ -1084,7 +1084,7 @@ class RooflineExecutor:
         A re-profile or re-analysis that returns a failure leaves the original analysis standing; one that raises does
         not, and the action crashes with its attempt rows already written.
         """
-        from ._multi_node_server_lifecycle import _COMPUTE_BOUND_PROFILE_ENV, _scoped_env
+        from .serving._multi_node_server_lifecycle import _COMPUTE_BOUND_PROFILE_ENV, _scoped_env
 
         log.info(
             "roofline: host-bound trace (0 hot kernels + high GPU idle); "

@@ -16,17 +16,17 @@ from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
 from hyperloom.inference_optimizer.canonical_fingerprint import (
     canonical_fingerprint,
 )
-from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, GridVariant
-from hyperloom.orchestrator.actions.executors._grid_variant_filter import apply_compatibility_filter
-from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
-from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
-from hyperloom.orchestrator.actions.executors._grid_base import _atom_default_grid
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridRecipe, GridVariant
+from hyperloom.orchestrator.actions.executors.grid._grid_variant_filter import apply_compatibility_filter
+from hyperloom.orchestrator.actions.executors.grid._grid_variant_filter import ServingStack
+from hyperloom.orchestrator.actions.executors.workload._launch_evidence import RequestedLaunch, build_launch_evidence
+from hyperloom.orchestrator.actions.executors.grid._grid_base import _atom_default_grid
 from hyperloom.orchestrator.actions.executors.explore import (
     filter_baseline_noop_variants,
     observed_launch_from_state,
     restates_the_baseline_launch,
 )
-from hyperloom.orchestrator.actions.executors._launch_restatement import Launch, launch_change, named_settings
+from hyperloom.orchestrator.actions.executors.workload._launch_restatement import Launch, launch_change, named_settings
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.bus.resource_lock import (
     SqliteLeaseBackend,
@@ -36,7 +36,7 @@ from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
 from .conftest import write_benchmark_yaml
-from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import BenchmarkTarget, LaunchLayer
 
 
 @pytest.fixture(autouse=True)
@@ -641,7 +641,7 @@ def test_warm_history_rejected_rows_survive_the_first_round():
 
 
 def test_observed_launch_after_drops_only_what_the_stack_changed():
-    from hyperloom.orchestrator.actions.executors._launch_restatement import observed_launch_after
+    from hyperloom.orchestrator.actions.executors.workload._launch_restatement import observed_launch_after
 
     opening = {
         "extra_server_args": "--a 1",
@@ -881,7 +881,7 @@ async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
 
 def _lever_state() -> SharedState:
     """A session whose specialist has authored two dormant, dependency-chained rewrite levers."""
-    from hyperloom.orchestrator.actions.executors import _framework_switch_manifest as manifest
+    from hyperloom.orchestrator.actions.executors.framework_change import _framework_switch_manifest as manifest
 
     switches, problems = manifest.parse_manifest(
         [
@@ -1052,7 +1052,7 @@ def test_grid_variants_do_not_treat_provenance_as_reasoning():
 
 
 def test_on_disk_stderr_tail_reads_benchmark_stderr_log(tmp_path):
-    from hyperloom.orchestrator.actions.executors._grid_runner import (
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import (
         _on_disk_stderr_tail,
         _report_errors_summary,
     )

@@ -20,8 +20,8 @@ import yaml
 from hyperloom.orchestrator.actions.executors.explore_prefilter import _projection as ep
 from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_anchors as ia
 from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_bridge as ib
-from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
-from hyperloom.orchestrator.actions.executors._spec_decode_pin import SpeculativeDecodingPinnedError
+from hyperloom.orchestrator.actions.executors.grid._grid_base import GridVariant
+from hyperloom.orchestrator.actions.executors.framework_change._spec_decode_pin import SpeculativeDecodingPinnedError
 
 STACK_ENVS = {"TP": 8, "CONC": 64, "ISL": 1024, "OSL": 1024, "EXTRA_VLLM_ARGS": ""}
 

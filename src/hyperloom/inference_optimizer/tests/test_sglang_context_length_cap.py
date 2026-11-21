@@ -17,7 +17,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     resolve_sglang_context_cap,
     validate_warm_replay_context_length,
 )
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     materialize_config_with_envs,
     LaunchLayer,
 )

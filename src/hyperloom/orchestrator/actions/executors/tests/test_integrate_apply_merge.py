@@ -11,10 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors import patch_conflict_merge
-from hyperloom.orchestrator.actions.executors._integrate_apply import _apply_patch_series
+from hyperloom.orchestrator.actions.executors.patching import patch_conflict_merge
+from hyperloom.orchestrator.actions.executors.integrate._integrate_apply import _apply_patch_series
 from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
-from hyperloom.orchestrator.actions.executors.patch_conflict_merge import STRATEGY_THREE_WAY
+from hyperloom.orchestrator.actions.executors.patching.patch_conflict_merge import STRATEGY_THREE_WAY
 
 _GIT_IDENTITY = {
     "GIT_AUTHOR_NAME": "merge-test",

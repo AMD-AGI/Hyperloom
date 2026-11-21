@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from hyperloom.common.launch_log_evidence import observed_server_config_from_log
-from hyperloom.orchestrator.actions.executors import _agentx_prefix_cache as pc
+from hyperloom.orchestrator.actions.executors.workload import _agentx_prefix_cache as pc
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.state.shared_state import SharedState
 

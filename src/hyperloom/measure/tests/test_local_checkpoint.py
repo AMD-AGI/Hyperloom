@@ -18,8 +18,9 @@ from hyperloom.measure.spec import MeasurementSpec
 from hyperloom.measure.tests.bundle_factory import spec_document
 from hyperloom.measure.tests.test_local_backend import _call, _Grid, _point, _run, _Server, _agentx_point
 from hyperloom.measure.tests.test_spec import _validator
-from hyperloom.orchestrator.actions.executors import VariantResult, _agentx_checkpoint
-from hyperloom.orchestrator.actions.executors._agentx_checkpoint import CheckpointJudge
+from hyperloom.orchestrator.actions.executors import VariantResult
+from hyperloom.orchestrator.actions.executors.workload import _agentx_checkpoint
+from hyperloom.orchestrator.actions.executors.workload._agentx_checkpoint import CheckpointJudge
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     AGENTX_EARLY_STOP_ERROR_CLASS,
     AGENTX_EARLY_STOP_RETURNCODE,

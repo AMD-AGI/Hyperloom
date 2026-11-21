@@ -661,7 +661,9 @@ async def test_orphan_reap_failure_propagates(monkeypatch, tmp_path):
     def _boom(_session_dir):
         raise OSError("pidfile scan failed")
 
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._server_lifecycle.reap_orphaned_servers", _boom)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.serving._server_lifecycle.reap_orphaned_servers", _boom
+    )
 
     with pytest.raises(OSError, match="pidfile scan failed"):
         await rf._reap_session_orphans(tmp_path)

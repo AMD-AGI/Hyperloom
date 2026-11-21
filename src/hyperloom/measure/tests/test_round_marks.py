@@ -41,7 +41,7 @@ from hyperloom.measure.round_marks import (
     stalled_in_profile_window,
 )
 from hyperloom.orchestrator.actions.executors import grid_run_dirs, variant_slot
-from hyperloom.orchestrator.actions.executors._grid_base import MN_WARMUP_DIR, WARMUP_ROUND_DIR
+from hyperloom.orchestrator.actions.executors.grid._grid_base import MN_WARMUP_DIR, WARMUP_ROUND_DIR
 from hyperloom.orchestrator.actions.executors._suite.rounds import _next_run_dir
 from inference_suite.contracts import FailedStep, ReadyStamp, RunLayout
 from inference_suite.profile.inject import START_PROFILE_PATH, STOP_PROFILE_PATH

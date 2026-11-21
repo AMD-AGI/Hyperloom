@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Consolidated tests for ``orchestrator.actions.executors._grid_runner``."""
+"""Consolidated tests for ``orchestrator.actions.executors.grid._grid_runner``."""
 
 from __future__ import annotations
 
@@ -14,19 +14,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _grid_runner
-from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors.grid import _grid_runner
+from hyperloom.orchestrator.actions.executors.grid import _grid_runner as gr
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
     dedup_vllm_server_args,
 )
-from hyperloom.orchestrator.actions.executors._benchmark_runtime import apply_runtime_benchmark_overrides
-from hyperloom.orchestrator.actions.executors._grid_variant_filter import (
+from hyperloom.orchestrator.actions.executors.workload._benchmark_runtime import apply_runtime_benchmark_overrides
+from hyperloom.orchestrator.actions.executors.grid._grid_variant_filter import (
     apply_user_skip_list,
     reorder_grid_for_multi_node,
     resolve_skip_spec,
 )
-from hyperloom.orchestrator.actions.executors._grid_runner import (
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import (
     GridVariant,
     VariantResult,
     _build_variant_yaml,
@@ -34,7 +34,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     run_grid,
 )
 
-from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import BenchmarkTarget, LaunchLayer
 
 from .conftest import write_benchmark_yaml
 

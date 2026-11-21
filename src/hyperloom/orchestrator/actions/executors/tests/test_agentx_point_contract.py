@@ -13,8 +13,8 @@ from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom.inference_optimizer.cli.benchmark_config import bind_benchmark, configure_benchmark
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.orchestrator.actions.executors import _server_patcher
-from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml, GridRecipe
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridVariant, _build_variant_yaml, GridRecipe
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     materialize_benchmark_config,
     prepare_grid_benchmark_config,
     BenchmarkTarget,

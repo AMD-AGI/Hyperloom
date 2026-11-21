@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.round_measurement import round_measurement
-from hyperloom.orchestrator.actions.executors import _grid_runner
-from hyperloom.orchestrator.actions.executors._gpu_metrics import GPU_ARTIFACT_NAME
+from hyperloom.orchestrator.actions.executors.grid import _grid_runner
+from hyperloom.orchestrator.actions.executors.gpu._gpu_metrics import GPU_ARTIFACT_NAME
 from hyperloom.orchestrator.actions.executors._round_folder import RoundFolder, is_round_folder
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 from inference_suite.contracts import FailedStep, FixedMetrics, ReportError, RunLayout, RunStatus

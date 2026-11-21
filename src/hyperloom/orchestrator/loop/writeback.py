@@ -6,7 +6,7 @@
 from __future__ import annotations
 import logging as _logging
 import time
-from ..actions.executors._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS
+from ..actions.executors.workload._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS
 from ..actions.executors.benchmark_result import is_valid_measurement
 from ..phases.machine_state import LifecycleMark, record_lifecycle_event
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS

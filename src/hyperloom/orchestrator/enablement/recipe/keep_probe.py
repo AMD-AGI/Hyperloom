@@ -183,7 +183,7 @@ def graded_framework(params: Mapping[str, Any], materialized_config: str) -> str
     whose config declares no framework.
     """
     if materialized_config:
-        from ...actions.executors._server_argv import config_point
+        from ...actions.executors.serving._server_argv import config_point
 
         declared = config_point(materialized_config).framework.strip().lower()
         if declared:
@@ -205,7 +205,7 @@ def graded_launch_env(override: Mapping[str, Any] | None, materialized_config: s
     env = _keep_probe_env(override)
     if not materialized_config:
         return env
-    from ...actions.executors._server_argv import config_launch_env
+    from ...actions.executors.serving._server_argv import config_launch_env
 
     return config_launch_env(materialized_config, env)
 

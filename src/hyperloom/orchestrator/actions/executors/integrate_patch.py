@@ -10,16 +10,16 @@ from typing import Any
 
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 
-from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT
-from ._grid_runner import SessionDirField
-from ._integrate_apply import ApplyStageMixin
+from .grid._grid_base import DEFAULT_KEEP_THRESHOLD_PCT
+from .grid._grid_runner import SessionDirField
+from .integrate._integrate_apply import ApplyStageMixin
 from ._integrate_attempt import IntegrateAttempt
-from ._integrate_bench import BenchStageMixin
-from ._integrate_enablement_gate import EnablementGateMixin
-from ._integrate_perf_gate import PerfGateMixin
-from ._integrate_resolve import ResolveStageMixin
-from ._integrate_vocabulary import KEEP_STATUSES, RESULT_BENCHED, RESULT_FRAMEWORK_CHANGED
-from ._patch_git import restore_pending_integrate
+from .integrate._integrate_bench import BenchStageMixin
+from .integrate._integrate_enablement_gate import EnablementGateMixin
+from .integrate._integrate_perf_gate import PerfGateMixin
+from .integrate._integrate_resolve import ResolveStageMixin
+from .integrate._integrate_vocabulary import KEEP_STATUSES, RESULT_BENCHED, RESULT_FRAMEWORK_CHANGED
+from .patching._patch_git import restore_pending_integrate
 
 
 log = logging.getLogger(__name__)

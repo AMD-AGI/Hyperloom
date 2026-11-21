@@ -58,7 +58,7 @@ from typing import Any, Callable
 import yaml
 
 from hyperloom.common.benchmark_config import read_benchmark_point
-from .._grid_base import GridVariant
+from ..grid._grid_base import GridVariant
 
 log = logging.getLogger(__name__)
 

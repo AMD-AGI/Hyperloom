@@ -23,7 +23,7 @@ from typing import Any
 
 from ...delivery.ledger import file_digest, load_prepared_records, restore_records
 from ._git import _run_git_cp
-from ._nogit_patch import _P_LEVELS
+from .patching._nogit_patch import _P_LEVELS
 
 log = logging.getLogger(__name__)
 

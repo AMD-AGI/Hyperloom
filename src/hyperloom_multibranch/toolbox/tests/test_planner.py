@@ -26,7 +26,7 @@ from hyperloom.measure.compile import EnvironmentCompiler, LocalBlobStore, Packa
 from hyperloom.measure.farm import server_environment
 from hyperloom.measure.points import AcceptedMeasurement, default_canonical
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with
-from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import default_baseline_config
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.planner import HIT_LOGGING_ON, HostedPlanner
 from hyperloom_multibranch.toolbox.table_hits import read_table_hits

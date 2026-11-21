@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from .machine import Transition
 from ..state.pending_proposal import PendingProposal
 from ..loop.proposals import integrate_review_in_flight, record_proposal
-from ..actions.executors import _integrate_vocabulary
+from ..actions.executors.integrate import _integrate_vocabulary
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_owner_phase
 from .proposal_bench import CUSTOM_PROPOSAL_DOMAIN, ProposalBench, kb_exposure_of, waiting_proposal_rows
@@ -215,7 +215,7 @@ def _apply_failure_feedback_lines(retry: AuthoringRetry) -> list[str]:
         lines.append("Dropped targets: " + "; ".join(retry.vetting_drops[:4]))
         lines.append("")
     if retry.retry_feedback:
-        from ..actions.executors._apply_feedback import ApplyFeedback
+        from ..actions.executors.patching._apply_feedback import ApplyFeedback
 
         lines.append("")
         lines.append(
@@ -996,7 +996,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         try:
             import json as _json
 
-            from ..actions.executors._framework_rewrite_evidence import summarize_for_prompt
+            from ..actions.executors.framework_change._framework_rewrite_evidence import summarize_for_prompt
 
             document = _json.loads(Path(path).read_text(encoding="utf-8"))
             return summarize_for_prompt(document)
@@ -1037,7 +1037,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
     def _compose_framework_local_explore_gap(self) -> tuple[str, list[str]]:
         """Compose the ``(gap, keywords)`` steering the local-exploration arm."""
         state = self.shared_state
-        from ..actions.executors._framework_gap_composer import compose_gap
+        from ..actions.executors.framework_change._framework_gap_composer import compose_gap
 
         return compose_gap(
             framework=str(state.framework or ""),

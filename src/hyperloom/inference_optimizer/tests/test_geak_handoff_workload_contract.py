@@ -13,8 +13,11 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
-from hyperloom.orchestrator.actions.executors._workload_envs import build_agentx_workload_spec, geak_grading_fields
+from hyperloom.orchestrator.actions.executors.serving._server_lifecycle import GpuHandoff
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
+    build_agentx_workload_spec,
+    geak_grading_fields,
+)
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -169,7 +172,9 @@ def _gpus_at_handoff(
             raise answer
         return answer
 
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._server_lifecycle.free_gpus_for_handoff", _check)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.serving._server_lifecycle.free_gpus_for_handoff", _check
+    )
     return asked
 
 
@@ -439,7 +444,9 @@ def _gpu_checks(monkeypatch: pytest.MonkeyPatch, answers: list[GpuHandoff]) -> l
         asked.append(cards)
         return answers[min(len(asked), len(answers)) - 1]
 
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._server_lifecycle.free_gpus_for_handoff", _check)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.serving._server_lifecycle.free_gpus_for_handoff", _check
+    )
     return asked
 
 

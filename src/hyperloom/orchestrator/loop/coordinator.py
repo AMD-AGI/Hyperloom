@@ -106,7 +106,7 @@ def reap_orphaned_servers_best_effort(session_dir: Path, *, phase: str) -> None:
 
         if is_multi_node():
             return
-        from ..actions.executors._server_lifecycle import reap_orphaned_servers
+        from ..actions.executors.serving._server_lifecycle import reap_orphaned_servers
 
         reaped = reap_orphaned_servers(session_dir)
         if reaped:

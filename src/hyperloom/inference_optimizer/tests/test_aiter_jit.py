@@ -248,7 +248,7 @@ def test_benchmark_timeout_does_not_probe_or_expand_for_jit(monkeypatch):
 
 @pytest.fixture
 def baseline_launch(monkeypatch, tmp_path):
-    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle
+    from hyperloom.orchestrator.actions.executors.serving import _multi_node_server_lifecycle
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
 
     config = tmp_path / "baseline.yaml"

@@ -16,8 +16,8 @@ import httpx
 import pytest
 
 from hyperloom_common.env import EnvValueError
-from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as life
-from hyperloom.orchestrator.actions.executors._multi_node_restart_settings import RestartSettings
+from hyperloom.orchestrator.actions.executors.serving import _multi_node_server_lifecycle as life
+from hyperloom.orchestrator.actions.executors.serving._multi_node_restart_settings import RestartSettings
 
 
 class _FakeResp:

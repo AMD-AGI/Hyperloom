@@ -46,7 +46,7 @@ class TestEntrypointAndCheckout:
 
     def test_the_lone_script_in_the_directory_is_the_entrypoint(self, tmp_path, monkeypatch):
         """What an operator with one script for one machine actually has."""
-        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+        from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 
         scripts = tmp_path / "scripts"
         scripts.mkdir()
@@ -58,7 +58,7 @@ class TestEntrypointAndCheckout:
         assert bench["benchmark_script"] == str(scripts / "run_whatever.sh")
 
     def test_the_runner_suffixed_script_wins_over_a_sibling(self, tmp_path, monkeypatch):
-        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+        from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 
         scripts = tmp_path / "scripts"
         scripts.mkdir()
@@ -72,7 +72,7 @@ class TestEntrypointAndCheckout:
 
     def test_a_family_board_resolves_its_own_name_not_the_family_one(self, tmp_path, monkeypatch):
         """The suffix is the board itself: mi325x is not folded into mi300x."""
-        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+        from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 
         scripts = tmp_path / "scripts"
         scripts.mkdir()
@@ -86,7 +86,7 @@ class TestEntrypointAndCheckout:
 
     def test_an_ambiguous_directory_picks_nothing(self, tmp_path, monkeypatch):
         """Two unnamed scripts is a question, not a default; let it surface."""
-        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+        from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 
         scripts = tmp_path / "scripts"
         scripts.mkdir()
@@ -99,7 +99,7 @@ class TestEntrypointAndCheckout:
         assert "benchmark_script" not in bench
 
     def test_an_explicit_script_is_never_overwritten(self, tmp_path, monkeypatch):
-        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+        from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 
         scripts = tmp_path / "scripts"
         scripts.mkdir()
@@ -112,7 +112,7 @@ class TestEntrypointAndCheckout:
 
     def test_the_checkout_reaches_the_orchestrator_env(self, tmp_path, monkeypatch):
         """PolicyGate reads os.environ; a path only in the YAML is invisible."""
-        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+        from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 
         repo = tmp_path / "my-framework"
         repo.mkdir()
@@ -134,7 +134,7 @@ class TestEntrypointAndCheckout:
 
     def test_extra_env_pins_reach_the_benchmark_config(self, monkeypatch):
         """The operator's only channel for their own knobs has to land in envs."""
-        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+        from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 
         monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", '{"MYFW_STEPS": "50", "MYFW_CKPT": "/w/x.pt"}')
         bench, envs = self._bench(), {}
@@ -144,7 +144,7 @@ class TestEntrypointAndCheckout:
 
     def test_a_config_value_outranks_an_extra_env_pin(self, monkeypatch):
         """setdefault, not overwrite: a variant's override still has to win."""
-        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+        from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 
         monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", '{"MYFW_STEPS": "50"}')
         bench, envs = self._bench(), {"MYFW_STEPS": "4"}
@@ -152,7 +152,7 @@ class TestEntrypointAndCheckout:
         assert envs["MYFW_STEPS"] == "4"
 
     def test_an_unparseable_pin_does_not_take_the_run_down(self, monkeypatch):
-        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+        from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 
         monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "{not json")
         bench, envs = self._bench(), {}
@@ -160,7 +160,7 @@ class TestEntrypointAndCheckout:
         assert envs == {}
 
     def test_extra_env_pins_stay_out_of_other_frameworks(self, monkeypatch):
-        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+        from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 
         monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", '{"MYFW_STEPS": "50"}')
         envs: dict = {}
@@ -170,7 +170,7 @@ class TestEntrypointAndCheckout:
         assert "MYFW_STEPS" not in envs
 
     def test_the_helpers_stay_inert_for_other_frameworks(self, tmp_path, monkeypatch):
-        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+        from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 
         scripts = tmp_path / "scripts"
         scripts.mkdir()

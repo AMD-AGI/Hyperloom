@@ -47,7 +47,7 @@ from hyperloom.common.perf_metric import (
 )
 from hyperloom.orchestrator.actions.executors import _geak_sweep
 from hyperloom.orchestrator.actions.executors._geak_sweep import GeakSweepSpec, sweep_via_geak
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     GEAK_METRIC_INTVTY,
     GEAK_METRIC_OUTPUT,
     build_agentx_workload_spec,

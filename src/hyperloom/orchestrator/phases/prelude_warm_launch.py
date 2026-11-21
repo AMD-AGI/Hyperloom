@@ -16,8 +16,8 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     SKIP_RESTATES_BASELINE,
 )
 
-from ..actions.executors._grid_runner import GridRecipe, GridVariant
-from ..actions.executors._spec_decode_context_copy import context_copy_refusal
+from ..actions.executors.grid._grid_runner import GridRecipe, GridVariant
+from ..actions.executors.framework_change._spec_decode_context_copy import context_copy_refusal
 from ..actions.executors.explore import filter_context_copy_drafts, restates_the_baseline_launch
 from ..state.task_registry import TaskSpec
 

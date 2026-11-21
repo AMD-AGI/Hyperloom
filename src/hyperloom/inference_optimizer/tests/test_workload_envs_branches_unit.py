@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _workload_envs as we
+from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
 
 from ._workload_envs_helpers import clear_env, materialize, write_config
@@ -201,7 +201,7 @@ def test_profile_shape_tool_keeps_the_inherited_pythonpath(monkeypatch, tmp_path
     # inherited entries, or the profile server loses the operator's and the image's import paths.
     import os
 
-    from hyperloom.orchestrator.actions.executors import _framework_rewrite_evidence as evidence
+    from hyperloom.orchestrator.actions.executors.framework_change import _framework_rewrite_evidence as evidence
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
 
     tool_dir = _arm_sglang_shape_tool(monkeypatch, tmp_path)

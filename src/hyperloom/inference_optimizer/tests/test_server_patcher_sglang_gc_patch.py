@@ -14,7 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors import PatchedServer, _patch_laying, _server_patcher
+from hyperloom.orchestrator.actions.executors import PatchedServer, _server_patcher
+from hyperloom.orchestrator.actions.executors.patching import _patch_laying
 from hyperloom.orchestrator.actions.executors._server_patcher import (
     ensure_sglang_patched_for_tracelens,
 )

@@ -38,25 +38,25 @@ from ..stop_attribution import (
 from inference_suite import stop
 from inference_suite.contracts import FailedStep
 
-from . import _server_lifecycle as _lifecycle
-from ._grid_base import GridRound, run_grid_suite_round
+from .serving import _server_lifecycle as _lifecycle
+from .grid._grid_base import GridRound, run_grid_suite_round
 from ._suite.rounds import SuiteRoundRefused, SuiteRoute, suite_route
 
 # The grid module is the namespace the helpers both benching arms share ended up in: how a sentinel returncode reads
 # back, how a round's cap is clamped to the budget, how the two session bounds are resolved, and the hygiene every
 # launch needs.
-from ._grid_runner import SessionDirField, session_grid_bounds
-from ._grid_base import sync_benchmark_timeout
+from .grid._grid_runner import SessionDirField, session_grid_bounds
+from .grid._grid_base import sync_benchmark_timeout
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     resolve_benchmark_timeouts,
 )
 from ._accuracy_gate import materialized_run_eval_disabled
 
-from ._workload_envs import (
+from .workload._workload_envs import (
     default_baseline_config,
 )
-from ._agentx_prefix_cache import refuse_cacheless_agentx_baseline
+from .workload._agentx_prefix_cache import refuse_cacheless_agentx_baseline
 from .benchmark_config import prepare_agentx_runtime
 from .benchmark_result import (
     double_run_requested,

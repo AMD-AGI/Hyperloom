@@ -11,7 +11,7 @@ import pytest
 
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
-from hyperloom.orchestrator.actions.executors._workload_envs import _apply_caller_removals
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import _apply_caller_removals
 from hyperloom.orchestrator.actions.executors.agentx_point import LaunchChanges, apply_launch_changes
 from hyperloom.orchestrator.actions.executors.profile import _merge_profile_params
 from hyperloom.orchestrator.loop.coordinator import Coordinator

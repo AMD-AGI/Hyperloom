@@ -16,14 +16,14 @@ from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
     removals_absent_from_args,
 )
-from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
+from hyperloom.orchestrator.actions.executors.grid import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors.grid._grid_variant_filter import ServingStack
 from hyperloom.orchestrator.actions.executors import _benchmark_interpreter as bi
-from hyperloom.orchestrator.actions.executors._benchmark_runtime import apply_runtime_benchmark_overrides
+from hyperloom.orchestrator.actions.executors.workload._benchmark_runtime import apply_runtime_benchmark_overrides
 
 # Patch compatibility-filter helpers in the ``_grid_variant_filter`` sibling, where apply_compatibility_filter
 # resolves them (not via the re-export).
-from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
+from hyperloom.orchestrator.actions.executors.grid import _grid_variant_filter as vf
 
 
 def _variant(name: str, args: str = "", envs: dict | None = None) -> gr.GridVariant:

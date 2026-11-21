@@ -21,7 +21,7 @@ from hyperloom.common.perf_metric import (
     VERDICT_REVERT,
     latency_veto_reason,
 )
-from hyperloom.orchestrator.actions.executors._grid_base import VariantResult
+from hyperloom.orchestrator.actions.executors.grid._grid_base import VariantResult
 from hyperloom.orchestrator.state.shared_state import SharedState, resolve_graded_comparison
 
 

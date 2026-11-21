@@ -11,7 +11,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from hyperloom.orchestrator.actions.executors import _workload_envs as we
+from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 
 _INSTALL = Path(__file__).resolve().parents[1] / "assets" / "install.sh"
 _COMMIT = "f46a9dfe2c5f57bebbd29556cbbb25eabd874226"

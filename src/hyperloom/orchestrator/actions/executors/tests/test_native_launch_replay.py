@@ -12,16 +12,12 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import (
-    _grid_runner,
-    _integrate_bench,
-    _integrate_results,
-    explore,
-    integrate_patch,
-)
-from hyperloom.orchestrator.actions.executors._grid_base import GridVariant, VariantResult
-from hyperloom.orchestrator.actions.executors._launch_evidence import persist_launch_evidence
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.grid import _grid_runner
+from hyperloom.orchestrator.actions.executors.integrate import _integrate_bench, _integrate_results
+from hyperloom.orchestrator.actions.executors import explore, integrate_patch
+from hyperloom.orchestrator.actions.executors.grid._grid_base import GridVariant, VariantResult
+from hyperloom.orchestrator.actions.executors.workload._launch_evidence import persist_launch_evidence
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     materialize_benchmark_config,
     prepare_grid_benchmark_config,
     LaunchLayer,

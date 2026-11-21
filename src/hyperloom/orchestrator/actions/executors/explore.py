@@ -4,7 +4,7 @@
 """ExploreExecutor."""
 
 from __future__ import annotations
-from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import prepare_grid_benchmark_config
 from hyperloom.common.benchmark_config import BenchmarkPoint
 import functools
 import logging
@@ -56,7 +56,7 @@ from ...state.shared_state import (
 )
 from ..stop_attribution import StoppedByTheRun, stopped_by_the_run_class, variant_budget_stop
 from ._accuracy_gate import AccuracyReference, parse_eval_results
-from . import _framework_switch_manifest as _switch_manifest
+from .framework_change import _framework_switch_manifest as _switch_manifest
 from .explore_prefilter.declared_levers import declared_lever_payload
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import (
@@ -67,16 +67,16 @@ from ._proposal_identity import (
     normalize_proposal,
 )
 from .explore_prefilter.measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
-from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP, _default_grid_for_framework
-from ._grid_base import _safe, importable_overlay_dir, variant_config_of
-from ._grid_base import apply_base_env
-from ._agentx_checkpoint import round_checkpoint
+from .grid._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP, _default_grid_for_framework
+from .grid._grid_base import _safe, importable_overlay_dir, variant_config_of
+from .grid._grid_base import apply_base_env
+from .workload._agentx_checkpoint import round_checkpoint
 from ._subprocess_kill import AGENTX_EARLY_STOP_ERROR_CLASS
 from .benchmark_result import double_run_requested
 from .benchmark_run.accuracy import accuracy_round_due, record_accuracy_round, run_candidate_accuracy_round
 from .explore_prefilter._prefilter import prefilter_round, record_decision_round
 from .explore_prefilter._remeasure import STACK_REVALIDATE_SOURCE, _is_config_replay_variant, is_stack_revalidation
-from ._grid_runner import (
+from .grid._grid_runner import (
     GridLaunch,
     GridRecipe,
     GridStop,
@@ -89,7 +89,7 @@ from ._grid_runner import (
     session_grid_bounds,
     teardown_variant_server,
 )
-from ._grid_variant_filter import (
+from .grid._grid_variant_filter import (
     ServingStack,
     apply_aiter_moe_pin_filter,
     apply_compatibility_filter,
@@ -100,12 +100,12 @@ from ._grid_variant_filter import (
 )
 from hyperloom.inference_optimizer.framework_registry import is_scriptable, server_args_env_name
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
-from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
+from .framework_change._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 
-from ._launch_restatement import Launch, config_envs, launch_change, observed_launch_after, read_launch
-from ._server_argv import ConfigUnreadable, config_point, config_server_argv
-from ._server_lifecycle import resolve_lifecycle_params
-from ._workload_envs import (
+from .workload._launch_restatement import Launch, config_envs, launch_change, observed_launch_after, read_launch
+from .serving._server_argv import ConfigUnreadable, config_point, config_server_argv
+from .serving._server_lifecycle import resolve_lifecycle_params
+from .workload._workload_envs import (
     BenchmarkTarget,
     FrameworkScriptMismatchError,
     LaunchLayer,
