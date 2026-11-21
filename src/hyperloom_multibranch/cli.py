@@ -13,7 +13,7 @@ requests; either takes ``--ep``, the expert-parallel size its server runs at, 1 
 model in the image ``HYPERLOOM_ACTIVE_IMAGE_REF`` names, and a ``--model`` that is a directory is recorded by its
 resolved path, which its benchmark pins. An operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than
 ``--workload``, or that names a benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``, is refused.
-``--boot-budget-sec`` (at most 3 h, the ready timeout the round sets the server's own start to) is how long, at least,
+``--boot-budget-sec`` (at most 6 h; the round raises the server's own start timeout above it) is how long, at least,
 a test's server may take to be ready: it only lengthens, so a test runs for its trace window, if any, half an hour more
 and that budget when that is longer than its default timeout, and a boot may take the budget when that is longer than
 half of the timeout.

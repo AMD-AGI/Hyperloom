@@ -18,7 +18,6 @@ from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.scheduling.reference import ReferenceSource
 from hyperloom_multibranch.scheduling.roster import RosterCaps
-from inference_suite import READY_TIMEOUT_SEC
 
 #: FINAL's sweep concs as multiples of an InferenceX workload's conc; the primary operating point is one of them.
 SWEEP_FACTORS = (0.5, 1.0, 2.0)
@@ -35,10 +34,10 @@ SHARE_MINUTES = 63.0
 AGENT_PORT = 31100
 #: The axis an AgentX session is graded on unless the run names another.
 DEFAULT_AGENTX_OBJECTIVE = AgentXObjective.P50_INTERACTIVITY
-#: The longest boot budget a run may give its tests' servers: the ready timeout the round's guard sets every serving
-#: framework's own start to (``inference_suite.compose.READY_TIMEOUT_SEC``, 3 h), which no layer may raise. A longer
-#: budget would not buy the time it promises: the server gives up on its own start first.
-MAX_BOOT_BUDGET_SEC = READY_TIMEOUT_SEC
+#: The longest boot budget a run may give its tests' servers: six hours, past any checkpoint load a test would wait for.
+#: The round raises the serving framework's own ready timeout above the budget (``inference_suite.compose``), so the
+#: whole range buys the boot time it promises.
+MAX_BOOT_BUDGET_SEC = 6 * 3600
 
 
 def sweep_concs(conc: int) -> tuple[int, ...]:

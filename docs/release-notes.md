@@ -26,8 +26,9 @@ it.
   forwarded as `--agentx-duration-sec` and `--agentx-objective`; before, a
   hosted AgentX run always replayed the default 3600 s window. A new
   `--boot-budget-sec` on `hyperloom-multibranch run` (`boot_budget_sec` in the
-  spec, at most 10800, the server's own start timeout) is how long, at least,
-  a test's server may take to be ready. It only lengthens: a test runs for its
+  spec, at most 21600) is how long, at least, a test's server may take to be
+  ready; the round raises the framework's own ready timeout to the budget plus
+  3600 s when that is above 10800 s. It only lengthens: a test runs for its
   trace window, if any, plus 1800 s plus that budget when that is longer than
   its default timeout, and the boot limit is the budget when that is longer
   than half the test's timeout. The session manifest records it as

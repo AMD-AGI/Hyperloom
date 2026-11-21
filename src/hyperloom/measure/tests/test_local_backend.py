@@ -931,6 +931,24 @@ def test_the_per_round_cap_and_the_leak_scope_come_from_the_call(grid, tmp_path,
     }
 
 
+@pytest.mark.parametrize(("budget", "named"), [(None, None), (14400.0, "14400.0")])
+def test_the_boot_budget_of_the_call_is_named_to_its_rounds(grid, tmp_path, monkeypatch, budget, named):
+    """A round reads the test's boot budget from the environment and holds the framework's ready timeout past it."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC", raising=False)
+    captured: list[str | None] = []
+
+    async def look(**kwargs):
+        captured.append(os.environ.get("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC"))
+        return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
+
+    monkeypatch.setattr(local, "run_grid", look)
+
+    _run(_call(tmp_path, timeout_sec=20000, boot_budget_sec=budget))
+
+    assert captured == [named]
+    assert "INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC" not in os.environ, "the test puts the environment back"
+
+
 def test_two_tests_in_one_process_do_not_overlap(monkeypatch, tmp_path):
     active, peak = [0], [0]
     gate = threading.Lock()
