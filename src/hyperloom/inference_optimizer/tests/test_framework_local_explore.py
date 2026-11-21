@@ -326,7 +326,7 @@ def test_forward_enablement_carriers_boot_origin_noop():
 def test_dispatched_verdict_reaches_the_integrate_task():
     """The integrate task derives its rungs from the verdict, so a boot-origin round must carry it."""
     from hyperloom.common.failure_signature import classify_failure
-    from hyperloom.orchestrator.actions.executors._enablement_config import _enablement_gap
+    from hyperloom.orchestrator.actions.executors.framework_change._enablement_config import _enablement_gap
     from hyperloom.orchestrator.phases.framework import _forward_enablement_carriers
 
     signature = classify_failure("ValueError: Model architectures ['Glm5ForCausalLM'] are not supported for now.")
@@ -341,7 +341,7 @@ def test_dispatched_verdict_reaches_the_integrate_task():
 def test_a_resource_constraint_verdict_acquires_no_code():
     """An OOM is the host being too small, so the integrate task has no gap to acquire code for."""
     from hyperloom.common.failure_signature import RESOURCE_CONSTRAINT, classify_failure
-    from hyperloom.orchestrator.actions.executors._enablement_config import _enablement_gap
+    from hyperloom.orchestrator.actions.executors.framework_change._enablement_config import _enablement_gap
 
     signature = classify_failure("RuntimeError: Out of memory on GPU. Tried to allocate 80 GiB")
     assert signature.kind == RESOURCE_CONSTRAINT

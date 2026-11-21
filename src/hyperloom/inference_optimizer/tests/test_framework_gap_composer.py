@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``orchestrator.actions.executors._framework_gap_composer``."""
+"""Unit tests for ``orchestrator.actions.executors.framework_change._framework_gap_composer``."""
 
 from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._framework_gap_composer import (
+from hyperloom.orchestrator.actions.executors.framework_change._framework_gap_composer import (
     _model_class_to_search_token,
     _normalize_model_class,
     compose_gap,

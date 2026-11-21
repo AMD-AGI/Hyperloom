@@ -22,8 +22,8 @@ from hyperloom.inference_optimizer.speculative_capability import (
     speculative_capability_reason,
     speculative_descriptor,
 )
-from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant
-from hyperloom.orchestrator.actions.executors._grid_variant_filter import (
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridVariant
+from hyperloom.orchestrator.actions.executors.grid._grid_variant_filter import (
     ServingStack,
     apply_compatibility_filter,
 )

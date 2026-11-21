@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
-from hyperloom.orchestrator.actions.executors._grid_variant_filter import (
+from hyperloom.orchestrator.actions.executors.grid._grid_base import GridVariant
+from hyperloom.orchestrator.actions.executors.grid._grid_variant_filter import (
     apply_aiter_moe_pin_filter,
 )
 

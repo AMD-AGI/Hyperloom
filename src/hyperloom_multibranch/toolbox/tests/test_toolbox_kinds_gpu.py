@@ -40,7 +40,7 @@ from hyperloom.measure.points import default_canonical
 from hyperloom.measure.profile_traces import PROFILE_DIR
 from hyperloom.measure.spec import DEFAULT_MAX_TOTAL_BYTES
 from hyperloom.measure.tests._recipes import IMAGE, git_patch, put_patch, recipe_with
-from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import default_baseline_config
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import ToolResultPointer
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind

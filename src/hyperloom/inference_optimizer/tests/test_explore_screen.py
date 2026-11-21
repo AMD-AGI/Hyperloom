@@ -29,10 +29,10 @@ from hyperloom.orchestrator.actions.executors.explore_prefilter._screen import (
     screen_enabled,
     screen_variants,
 )
-from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
-from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, _build_variant_yaml
-from hyperloom.orchestrator.actions.executors._spec_decode_pin import SpeculativeDecodingPinnedError
-from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer
+from hyperloom.orchestrator.actions.executors.grid._grid_base import GridVariant
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridRecipe, _build_variant_yaml
+from hyperloom.orchestrator.actions.executors.framework_change._spec_decode_pin import SpeculativeDecodingPinnedError
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import LaunchLayer
 
 CONFIG = """
 benchmark:

@@ -133,7 +133,7 @@ def apply_launch_changes(
     """
     from hyperloom.inference_optimizer.grid_server_args import compose_server_args, dedupe_extra_server_args
 
-    from ._spec_decode_pin import refuse_unpinned_speculative_change
+    from .framework_change._spec_decode_pin import refuse_unpinned_speculative_change
 
     agentx = benchmark["agentx"]
     if not isinstance(agentx, dict):

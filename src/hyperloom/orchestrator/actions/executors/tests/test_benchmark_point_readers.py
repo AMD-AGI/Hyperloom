@@ -10,8 +10,8 @@ import yaml
 
 from hyperloom.common.benchmark_config import BenchmarkPointError
 from hyperloom.orchestrator.actions.executors._accuracy_gate import materialized_run_eval_disabled
-from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
-from hyperloom.orchestrator.actions.executors._launch_restatement import read_launch
+from hyperloom.orchestrator.actions.executors.workload._launch_evidence import RequestedLaunch, build_launch_evidence
+from hyperloom.orchestrator.actions.executors.workload._launch_restatement import read_launch
 
 _NO_BLOCK = {"other": {}}
 

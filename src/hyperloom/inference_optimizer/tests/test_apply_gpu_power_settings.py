@@ -735,7 +735,7 @@ class TestSessionWiring:
     def test_a_resume_stops_its_own_left_over_servers_before_it_applies(self, monkeypatch, tmp_path):
         """After a SIGKILL the session's server outlives it; the apply must not take it for another tenant's model."""
         from hyperloom.inference_optimizer import cli
-        from hyperloom.orchestrator.actions.executors import _server_lifecycle
+        from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle
 
         steps: list[str] = []
         monkeypatch.setattr(cli, "_restore_partition_shape_from_state", lambda args, state: None)

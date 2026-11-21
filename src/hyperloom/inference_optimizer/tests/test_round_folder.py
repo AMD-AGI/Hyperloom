@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.round_measurement import round_measurement
-from hyperloom.orchestrator.actions.executors import _grid_runner
-from hyperloom.orchestrator.actions.executors._gpu_metrics import GPU_ARTIFACT_NAME
+from hyperloom.orchestrator.actions.executors.grid import _round_report
+from hyperloom.orchestrator.actions.executors.gpu._gpu_metrics import GPU_ARTIFACT_NAME
 from hyperloom.orchestrator.actions.executors._round_folder import RoundFolder, is_round_folder
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 from inference_suite.contracts import FailedStep, FixedMetrics, ReportError, RunLayout, RunStatus
@@ -94,7 +94,7 @@ def test_gpu_metrics_are_written_from_the_report_into_the_round_dir_not_the_run_
 @pytest.mark.asyncio
 async def test_the_grid_reads_a_finished_run_dir_once_and_writes_its_gpu_artifact(tmp_path: Path) -> None:
     run_dir = _run_dir(tmp_path, fixed=FixedMetrics.of({}))
-    report, measurement = await _grid_runner._settled_measurement(
+    report, measurement = await _round_report._settled_measurement(
         run_dir, subprocess_started_unix=None, settle_seconds=60.0, poll_seconds=30.0
     )
     assert report is None

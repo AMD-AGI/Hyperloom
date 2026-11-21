@@ -24,7 +24,7 @@ from hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers 
     declared_lever_payload,
     load_declared_levers,
 )
-from hyperloom.orchestrator.actions.executors.explore import _lever_seeded_payload
+from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import _lever_seeded_payload
 
 _LEVERS = [
     {"name": "workers_1", "extra_envs": {"GPU_CHAIN_WORKERS": "1"}},

@@ -98,7 +98,7 @@ def test_resolve_pd_node_counts_infers_from_pod_lists() -> None:
 def test_server_lifecycle_remaining_resolution_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+    from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle as sl
 
     bad_yaml = tmp_path / "bad.yaml"
     bad_yaml.write_text("benchmark: [", encoding="utf-8")

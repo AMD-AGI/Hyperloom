@@ -724,7 +724,7 @@ class IntentRouter(CoordinatorCollaborator):
         """Refuse an explore grid that adds nothing new, recording the denial; report whether it was refused."""
         if action_name != "explore":
             return False
-        from ..actions.executors.explore import framework_lever_grid
+        from ..actions.executors.explore_prefilter.grid_payload import framework_lever_grid
         from ..actions.executors.explore_prefilter.measured_variants import explore_grid_already_covered
 
         if framework_lever_grid(self.shared_state):

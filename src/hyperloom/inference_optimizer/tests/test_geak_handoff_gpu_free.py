@@ -12,8 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.common.rocm_smi import GpuVram
-from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
-from hyperloom.orchestrator.actions.executors._gpu_pin import (
+from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle as sl
+from hyperloom.orchestrator.actions.executors.gpu._gpu_pin import (
     _resolve_handoff_gpu_ids,
     _resolve_handoff_gpu_ids_space,
     _resolve_handoff_physical_gpus,

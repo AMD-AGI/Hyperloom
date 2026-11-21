@@ -11,10 +11,13 @@ from pathlib import Path
 import pytest
 import yaml
 
+import hyperloom
 from hyperloom.inference_optimizer.framework_registry import names, server_args_env_name
-from hyperloom.orchestrator.actions.executors import _grid_runner, _profile_setup, _workload_envs
-from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
-from hyperloom.orchestrator.actions.executors._server_argv import (
+from hyperloom.orchestrator.actions.executors.grid import _grid_runner
+from hyperloom.orchestrator.actions.executors import _profile_setup
+from hyperloom.orchestrator.actions.executors.workload import _workload_envs
+from hyperloom.orchestrator.actions.executors.grid._grid_base import GridVariant
+from hyperloom.orchestrator.actions.executors.serving._server_argv import (
     ConfigUnreadable,
     ServerArgv,
     add_server_arg_unless_pinned,
@@ -23,7 +26,7 @@ from hyperloom.orchestrator.actions.executors._server_argv import (
     config_server_argv,
     seal_server_argv,
 )
-from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs, LaunchLayer
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import materialize_config_with_envs, LaunchLayer
 
 #: The name every composer ends on.
 SEAL = "seal_server_argv"
@@ -63,7 +66,7 @@ _WRITERS = frozenset(
 )
 
 #: Root of the package the census walks.
-_PACKAGE = Path(_workload_envs.__file__).parents[3]
+_PACKAGE = Path(hyperloom.__file__).parent
 
 
 def _function(module, name: str) -> ast.FunctionDef:

@@ -210,7 +210,7 @@ def _fan_out_calls(monkeypatch, tmp_path: Path, *, patch_set: str, torch_profile
     """Run ``restart_server_for_round`` up to the fan-out and return the patch sets it fanned out."""
     from hyperloom.inference_optimizer.multi_node import cli
     from hyperloom.inference_optimizer.multi_node._internal import external_state
-    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as lifecycle
+    from hyperloom.orchestrator.actions.executors.serving import _multi_node_server_lifecycle as lifecycle
     from hyperloom.orchestrator.actions.executors import _server_patcher
 
     monkeypatch.setattr(os, "environ", os.environ.copy())
@@ -260,7 +260,7 @@ def test_roofline_fan_out_still_runs_on_every_restart(monkeypatch, tmp_path):
 def test_a_failed_restart_restores_the_round_env(monkeypatch, tmp_path):
     """Everything after the mutation can raise; the next round's launcher must not inherit this round's forwarding."""
     from hyperloom.inference_optimizer.multi_node._internal import external_state
-    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as lifecycle
+    from hyperloom.orchestrator.actions.executors.serving import _multi_node_server_lifecycle as lifecycle
     from hyperloom.orchestrator.actions.executors import _server_patcher
 
     def _boom() -> str:

@@ -122,7 +122,7 @@ def test_every_board_falls_back_to_exactly_its_same_isa_siblings():
 
 def test_the_aiter_per_token_gate_is_every_gfx942_board():
     """The kernel ships per arch, so a new gfx942 board has to be gated in with its siblings."""
-    from hyperloom.orchestrator.actions.executors._workload_envs import _GFX942_GPU_TYPES
+    from hyperloom.orchestrator.actions.executors.workload._workload_envs import _GFX942_GPU_TYPES
 
     assert _GFX942_GPU_TYPES == frozenset(p for p, b in AMD_GPU_BOARDS.items() if b.gfx == "gfx942")
 

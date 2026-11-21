@@ -28,7 +28,7 @@ import pytest
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, locate_installed_package
 from hyperloom.measure.points import default_canonical
 from hyperloom.measure.tests.hosted_fixtures import spec_context
-from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import default_baseline_config
 from hyperloom_multibranch.toolbox.tests.gpu_session import freeze_gpu_session_base, gpu_inputs_missing
 from hyperloom_multibranch.toolbox.tests.integration_inputs import (
     IMAGE,
