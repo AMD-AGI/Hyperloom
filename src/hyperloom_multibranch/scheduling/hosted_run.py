@@ -18,9 +18,10 @@ base launch, its flags and its environment, is the shell script ``multibranch.re
 
 With ``placement.measurement`` ``hosted`` (the default), every test, PRELUDE's included, runs in a measurement sandbox
 of the grant, so the application's container needs no card: ``hosted-cpu`` serves as ``hosted-gpu`` does. Dev
-sandboxes and agents run in ``dev`` sandboxes of the grant, so they need its ``dev`` key and the session directory on
-the storage ``USER_DATA_PATH`` names, which the ``dev`` template mounts at the same path
-(:func:`refuse_unhosted_branches`). With ``local``, which the spec allows only for ``hosted-gpu``, the tests, the dev
+sandboxes and agents run in ``dev`` sandboxes of the grant, so they need its ``dev`` key, a ``dev`` template of the
+session's TP, a grant that fits one lease beside a test, and the session directory on the storage ``USER_DATA_PATH``
+names, which the ``dev`` template mounts at the same path (:func:`refuse_unhosted_branches`); a session with neither
+reads no ``dev`` template, whatever ``dev`` key the host gave. With ``local``, which the spec allows only for ``hosted-gpu``, the tests, the dev
 sandboxes and the agents run in the application's container on its own cards, as ``run`` does on a machine's, and the
 run needs no sandbox of the grant, nor a grant: its framework is the image this container runs, so ``framework.image``
 must name the image the measurement pins name, by its digest (:func:`require_local_image`).
@@ -102,7 +103,7 @@ from hyperloom_multibranch.scheduling.resumption import (
 )
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
-from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
+from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits, lease_shortfall
 from hyperloom_multibranch.toolbox.resume_guard import BaselineNotReusable, check_hosted_baseline_reusable
 
 # hyperloom/hosted/entry.py EXIT_FILE and SESSION_FILE
@@ -263,10 +264,13 @@ def _agent_sources(sources: object) -> list[str]:
 def refuse_unhosted_branches(settings: RunSettings, host: HostInfo, env: Mapping[str, str]) -> None:
     """Refuse a session whose dev sandboxes or autonomous agents could not run in ``dev`` sandboxes of ``host``'s
     grant: one the grant gives no ``dev`` key or no limits for, or whose session directory is not where ``env``'s
-    ``USER_DATA_PATH`` names, the storage the ``dev`` template mounts at the same path.
+    ``USER_DATA_PATH`` names, the storage the ``dev`` template mounts at the same path; one whose template list has no
+    ``dev`` template of the session's TP; or one whose grant cannot admit a single lease beside a test. Refused here,
+    before the session starts, the run ends for good instead of failing every start of the toolbox. A session that lends
+    no dev sandbox and runs no agent is not looked at.
 
     Raises:
-        HostedRefused: Naming every variable that is missing.
+        HostedRefused: Naming every variable that is missing, the missing template or the grant's shortfall.
     """
 
     if not settings.dev_leases and not settings.agents:
@@ -281,6 +285,26 @@ def refuse_unhosted_branches(settings: RunSettings, host: HostInfo, env: Mapping
         raise HostedRefused(
             f"dev sandboxes and autonomous agents run in the grant's dev sandboxes and need {', '.join(missing)}"
         )
+    _refuse_unlendable(host, settings.workload.tp)
+
+
+def _refuse_unlendable(host: HostInfo, tp: int) -> None:
+    # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
+    from hyperloom_multibranch.toolbox.hosted_toolbox import dev_templates
+
+    try:
+        templates = dev_templates(host.sandbox_templates or {})
+    except ValueError as exc:
+        raise HostedRefused(f"{Var.SANDBOX_TEMPLATES}: {exc}") from exc
+    if tp not in templates:
+        raise HostedRefused(
+            f"dev sandboxes and autonomous agents need a dev template of the session's {tp} cards in"
+            f" {Var.SANDBOX_TEMPLATES}; its dev templates serve {sorted(templates)}"
+        )
+    grant = toolbox_grant(host.grant_limits)
+    shortfall = None if grant is None else lease_shortfall(grant, tp)
+    if shortfall is not None:
+        raise HostedRefused(f"dev sandboxes and autonomous agents cannot run in this grant: {shortfall}")
 
 
 def require_local_image(spec: CampaignSpec, env: Mapping[str, str]) -> None:
