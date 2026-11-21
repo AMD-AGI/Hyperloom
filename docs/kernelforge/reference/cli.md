@@ -106,7 +106,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--deadline-unix <t>` | `0` | Absolute UNIX deadline shared by task preparation and optimization. |
 | `--session-timeout-sec <s>` | from `--max-hours` | Wall-clock budget for one implementer session. The claude backend cuts the session at this deadline and the session is told about it. Under `--roofline-ceiling on` it also bounds the ceiling analyst session. |
 | `--agent-timeout-sec <s>` | provider default | Timeout for one Agent session. |
-| `--profile-timeout-sec <s>` | `7200` | Ceiling for the single complete Analysis Agent session. Phase and case artifacts are persisted for resume when the deadline is reached. |
+| `--profile-timeout-sec <s>` | `7200` | Time box for the single complete Analysis Agent session. The session is told to treat it as its budget and to write its brief as soon as the first evidence supports it. Phase and case artifacts are persisted for resume when the deadline is reached. |
 
 ### Hardware and measurement
 

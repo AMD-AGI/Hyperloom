@@ -342,7 +342,10 @@ artifact from the current partial checkpoint.
 
 When a refresh is admitted, the Analysis Agent receives the cumulative diff and
 previous published bundle so it can update only affected profiling and analysis
-artifacts. The diff may span multiple accepted KEEP commits. Each canonical
+artifacts: it re-profiles only the cases whose measurements the change
+invalidates, once each, keeps the parent evidence for the rest, and rewrites
+`report.md` as the brief for the new canonical. The diff may span multiple
+accepted KEEP commits. Each canonical
 commit may start at most two Analysis sessions across resume; the
 `AnalysisSessionJournal` is the sole owner of that budget. The refresh policy
 prevents duplicate calls within one planning iteration, retries a failed

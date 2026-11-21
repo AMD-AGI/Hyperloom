@@ -21,7 +21,7 @@ decide whether a change survives.
 |:----------|:-----|
 | **Campaign** | The immutable inputs — kernel, driver, kernel backend, gates, branch — snapshotted so an interrupted run resumes on identical terms |
 | **Baseline** | Benchmarks the pristine kernel before any edit, so iteration 1 is never kept unconditionally |
-| **Analysis** | Read-only hardware profiling of the current best, producing the evidence bundle the planning stage reads |
+| **Analysis** | Read-only hardware profiling of the current best, producing a brief — where the time goes, the bottlenecks ranked, the directions expected to pay — and the evidence bundle behind it. It measures the canonical kernel only and leaves trying a change to the Implementer |
 | **Planning** | With more than one lane: read-only compute, memory and algorithm specialists analyze their assigned evidence, and their useful work is divided into one executable plan per lane. A single-lane campaign has no planning stage |
 | **Implementer** | The only writable agent: reads the plan, or at `--lanes 1` chooses its direction from the Analysis report, edits the kernel sources, compiles and exercises them through Bash. `--lanes` runs several concurrently, each in its own workspace copy |
 | **Validation** | The driver-owned complete correctness suite, run by the loop as an SNR pre-filter |

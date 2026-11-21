@@ -184,6 +184,19 @@ the current canonical. Until then, planning agents receive the previous bundle,
 current timings, and the cumulative diff between the evidence and canonical
 commits. That diff may span multiple accepted KEEP commits.
 
+What an Analysis session delivers is a brief. `report.md` holds, in order, where
+each scored case's time goes, the bottlenecks ranked by their effect on the
+score, and for each bottleneck the direction the session expects to pay with
+the gain it expects; raw evidence stays in the case directories and is cited by
+path. The session measures the canonical kernel only: it does not edit a copy,
+sweep a parameter or benchmark a variant, because testing an idea is the
+Implementer's work. One collection per profiled case is the default. A refresh
+re-profiles only the cases whose measurements the kept changes invalidate, once
+each, and rewrites the brief for the new canonical. `--profile-timeout-sec` is
+the session's time box: the session is told to treat it as a budget and to
+write the brief as soon as the first evidence supports it, so a session cut at
+the deadline still leaves one.
+
 Hardware profiling uses the same long-horizon gate: sessions at or below two
 hours keep Analysis static-only and omit Implementer self-profiling guidance.
 

@@ -153,9 +153,10 @@ ANALYSIS_TIMEOUT_SEC = 7200
             "--profile-timeout-sec",
             default=ANALYSIS_TIMEOUT_SEC,
             type=int,
-            help="Ceiling (seconds) for the single complete Analysis Agent "
-            "session. The Agent persists phase and case artifacts for "
-            "resume when the deadline is reached. Default 7200 (2 hours).",
+            help="Time box (seconds) for the single complete Analysis Agent "
+            "session. The Agent is told to treat it as its budget and to "
+            "write its brief early, and persists phase and case artifacts "
+            "for resume when the deadline is reached. Default 7200 (2 hours).",
         ),
         click.option(
             "--supervisor-backend",
