@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from hyperloom.common.env_safety import BLOCKED_UNTRUSTED_ENV_NAMES, valid_env_key
 
 log = logging.getLogger(__name__)
+
+
+def server_log_dir() -> str:
+    """Expanded ``HYPERLOOM_MN_SERVER_LOG_DIR`` (default ``$USER_DATA_PATH/server_logs``); empty unless absolute."""
+    shared = os.path.expandvars(
+        os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip() or "$USER_DATA_PATH/server_logs"
+    )
+    return shared if shared.startswith("/") and "$" not in shared else ""
 
 
 def is_forward_env_key_allowed(key: str) -> bool:

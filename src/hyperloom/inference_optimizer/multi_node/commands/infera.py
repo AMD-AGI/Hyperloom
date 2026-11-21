@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .._internal import infera_support
-from .._internal.env_safety import filter_forward_env
+from .._internal.env_safety import filter_forward_env, server_log_dir
 from .._internal.log import info, warn, err
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
 from .._internal.ssh_client import RemoteScript
@@ -58,7 +58,7 @@ def _infera_require_state() -> dict[str, Any]:
 
 # Env-var prefixes forwarded from the controller's os.environ to the SSH-launched framework child (sandbox-side tuning
 # vars not present in the pod container env and not recovered from pid1).
-_FORWARD_ENV_PREFIXES = ("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_")
+_FORWARD_ENV_PREFIXES = ("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_", "MC_")
 
 
 def _collect_forward_env() -> dict[str, str]:
@@ -92,10 +92,8 @@ def _collect_forward_env() -> dict[str, str]:
         fwd["SGLANG_TORCH_PROFILER_DIR"] = os.path.expandvars(fwd["SGLANG_TORCH_PROFILER_DIR"])
     # Forward a shared-FS (WekaFS) server-log dir so the SSH-launched sglang writes server.log to shared storage the
     # client can read, not pod-local /tmp.
-    _slog = os.path.expandvars(
-        os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip() or "$USER_DATA_PATH/server_logs"
-    )
-    if _slog.startswith("/") and "$" not in _slog:
+    _slog = server_log_dir()
+    if _slog:
         fwd["HYPERLOOM_MN_SERVER_LOG_DIR"] = _slog
     # aiter/cpp_itfs runtime-compiled kernels (GH #458): the integrate re-baseline sets AITER_REBUILD=1 (transiently)
     # so aiter wipes its build dir and recompiles the patched kernel on import.

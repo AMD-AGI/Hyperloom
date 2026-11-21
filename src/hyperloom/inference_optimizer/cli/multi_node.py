@@ -139,9 +139,11 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
         print(
             "WARNING: no server control -- per-round restarts will be skipped, so every "
             "candidate config measures the SAME unchanged server and the reported gains "
-            "are meaningless. Set HYPERLOOM_MN_EXT_HEAD_IP (rayjob) or "
+            "are meaningless. Set HYPERLOOM_MN_EXT_HEAD_IP (rayjob), "
             "HYPERLOOM_MN_EXT_SSH_KEY plus one of _PREFILL_IPS / _DECODE_IPS / _WORKER_IPS "
-            "(infera) to tune. Continuing in benchmark-only mode.",
+            "(infera), or HYPERLOOM_MN_EXT_SSH_KEY, _SSH_PORT, _PREFILL_IPS and "
+            "_DECODE_IPS (atomesh, sglangrouter) to tune. "
+            "Continuing in benchmark-only mode.",
             file=sys.stderr,
         )
     _prepare_adopted_cluster(

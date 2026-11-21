@@ -388,12 +388,10 @@ def _aggregate_gpu_samples_by_role(samples: list[dict[str, Any]]) -> dict[str, A
 
 def _pod_gpu_metric_csvs() -> list[Path]:
     """The per-pod GPU sampler CSVs sitting in the shared server-log dir the pods were told to write to."""
-    # Resolved exactly as cli.py forwards it to the pods (explicit env, else the $USER_DATA_PATH/server_logs
-    # default) so the client reads where the pod sampler wrote, without changing forwarding logic.
-    shared = os.path.expandvars(
-        os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip() or "$USER_DATA_PATH/server_logs"
-    )
-    if not shared.startswith("/") or "$" in shared:
+    from hyperloom.inference_optimizer.multi_node import server_log_dir
+
+    shared = server_log_dir()
+    if not shared:
         return []
     src_dir = Path(shared)
     try:
