@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import subprocess
 from typing import Any
 
@@ -26,8 +27,9 @@ from .._internal.pd_cluster import (
     role_engine_pods,
     set_pods,
 )
-from .._internal.pd_remote import bash_payload
+from .._internal.pd_remote import bash_payload, launch_path, pidfile_path
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
+from .._internal.topology_file import normalize_mn_backend
 from ..pod_entrypoints import extract_pod_json
 from .infera import _collect_forward_env, _record_last_restart
 
@@ -84,6 +86,48 @@ def _ssh_pod(
 def _engine_pods(state: dict[str, Any]) -> list[dict[str, Any]]:
     """Prefill then decode pod records that carry an IP."""
     return role_engine_pods(state, "prefill") + role_engine_pods(state, "decode")
+
+
+def engines_not_running(state: dict[str, Any]) -> list[str]:
+    """``"<role> <ip>"`` of each engine pod whose launched server is no longer running.
+
+    A pod whose container restarted has lost the pidfile and runs its platform
+    entrypoint instead of the launched command. A pid still running the launch
+    script (waiting for the GPU before it execs the server) counts as running.
+    Unreachable pods are not listed.
+    """
+    gone: list[str] = []
+    for pod in _engine_pods(state):
+        role = str(pod.get("role") or "")
+        ip = str(pod["podIP"])
+        port = int(pod.get("sshPort") or state.get("ssh_port") or 0)
+        script = (
+            f'cmd=""; pid=$(cat {shlex.quote(pidfile_path(role))} 2>/dev/null) && kill -0 "$pid" 2>/dev/null '
+            f"&& cmd=$(tr '\\0' ' ' < /proc/\"$pid\"/cmdline 2>/dev/null); "
+            f'if printf "%s" "$cmd" | grep -qF -e {ENGINE_NEEDLE}; then echo HL_ALIVE; '
+            f'elif printf "%s" "$cmd" | grep -qF -e {shlex.quote(launch_path(role))}; then echo HL_STARTING; '
+            "else echo HL_GONE; fi"
+        )
+        try:
+            completed = _mn_cli._infera_ssh_bash_with_env(state, ip, script, timeout=30, port=port)
+        except subprocess.TimeoutExpired:
+            continue
+        if "HL_GONE" in (completed.stdout or ""):
+            gone.append(f"{role} {ip}")
+    return gone
+
+
+def engines_lost_reason(state: dict[str, Any]) -> str | None:
+    """Failure reason naming the engine pods whose launched server is gone, or None; None for non-PD-router backends."""
+    if normalize_mn_backend(state.get("backend")) not in PD_ROUTER_BACKENDS:
+        return None
+    gone = engines_not_running(state)
+    if not gone:
+        return None
+    return (
+        f"launched engine exited on {gone}; the container restarted with its platform entrypoint, so /health no "
+        "longer reflects this round's launch args (the engine's error is in the pod's previous container log)"
+    )
 
 
 def restart_pd_cluster(args: argparse.Namespace) -> int:

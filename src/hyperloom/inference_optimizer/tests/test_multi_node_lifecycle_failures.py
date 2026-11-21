@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from hyperloom.inference_optimizer import multi_node
+from hyperloom.inference_optimizer.multi_node.commands import pd_cluster as pd_cmd
 from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as life
 from hyperloom.orchestrator.actions.executors._multi_node_restart_settings import RestartSettings
 
@@ -214,6 +215,7 @@ def test_pd_worker_health_dials_the_engine_port_of_each_role(serve, monkeypatch:
 
     serve({"health": [_OK]}, _PD_WORKERS)
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(pd_cmd, "engines_not_running", lambda _state: [])
     _workers()
     assert seen == ["10.0.0.1:8010", "10.0.0.2:8020"]
 
@@ -236,8 +238,16 @@ def test_pd_worker_wait_holds_until_every_engine_on_a_shared_ip_answers(serve, m
     }
     serve({"health": [_OK]}, shared)
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(pd_cmd, "engines_not_running", lambda _state: [])
     _workers()
     assert seen == [8010, 8020, 8020, 8020]
+
+
+def test_pd_worker_wait_fails_when_the_launched_engine_was_replaced(serve, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pd_cmd, "engines_not_running", lambda _state: ["decode 10.0.0.2"])
+    serve({"health": [_OK]}, _PD_WORKERS)
+    with pytest.raises(life.ServerRestartFailed, match="decode 10.0.0.2"):
+        _workers()
 
 
 def test_shared_server_log_dir_defaults_to_user_data_server_logs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -246,6 +256,32 @@ def test_shared_server_log_dir_defaults_to_user_data_server_logs(monkeypatch: py
     assert multi_node.server_log_dir() == "/shared/hl/server_logs"
     monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", "/elsewhere/logs")
     assert multi_node.server_log_dir() == "/elsewhere/logs"
+
+
+def test_pd_engines_lost_reason_names_engines_that_are_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pd_cmd, "engines_not_running", lambda _state: ["decode 10.0.0.2"])
+    reason = pd_cmd.engines_lost_reason(_PD_WORKERS)
+    assert reason is not None and "decode 10.0.0.2" in reason
+    monkeypatch.setattr(pd_cmd, "engines_not_running", lambda _state: [])
+    assert pd_cmd.engines_lost_reason(_PD_WORKERS) is None
+
+
+def test_engine_lost_gate_skips_a_handoff_without_server_control(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from hyperloom.inference_optimizer.multi_node._internal import topology_file
+    from hyperloom.orchestrator.actions.executors.benchmark_run.launch import _BenchmarkLaunchMixin
+
+    monkeypatch.delenv(topology_file.TOPOLOGY_FILE_ENV, raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SSH_KEY", raising=False)
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://10.0.0.9:8000")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "atomesh")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_PREFILL_IPS", "10.0.0.1")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_DECODE_IPS", "10.0.0.2")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_ROUTER_IPS", "10.0.0.9")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "3")
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", str(tmp_path))
+    assert life._read_state()["decode_pods"] and "ssh_key_path" not in life._read_state()
+
+    assert asyncio.run(_BenchmarkLaunchMixin._multi_node_engines_lost()) is None
 
 
 def test_the_multi_node_sglang_defaults_keep_the_prefix_cache_on() -> None:
