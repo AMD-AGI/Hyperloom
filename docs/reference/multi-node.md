@@ -227,7 +227,9 @@ same model and EP. With neither, the session exits 2.
 A pod hand-off's profiling round starts and stops torch profiling on each prefill and
 decode engine pod, one trace dir per pod under its role, with `HYPERLOOM_MN_PROFILE_WITH_STACK`
 and graph-capture profiling as in a node-list round; its trace analysis is the node-list
-round's multi-trace run. infera and rayjob rounds keep their own profiling path.
+round's multi-trace run. infera and rayjob rounds start their engines without graph-capture
+profiling; their PD rounds write each role's traces under `<trace dir>/<role>` and take the
+same multi-trace analysis.
 
 Forge is not in that list and does not need to be: it ships inside the Hyperloom
 wheel, so there is no checkout to export. `FORGE_PATH` is removed. Set

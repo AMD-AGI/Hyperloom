@@ -624,6 +624,25 @@ def test_a_pod_handoff_profiling_restart_matches_a_node_list_one(monkeypatch: py
     assert "--enable-profile-cuda-graph" in pod_handoff[0].split()
 
 
+def test_infera_pd_roles_are_read_from_their_role_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    root = tmp_path / "torch_trace"
+    for role, ranks in (("prefill", 8), ("decode", 16)):
+        (root / role).mkdir(parents=True)
+        for rank in range(ranks):
+            (root / role / f"5-TP-{rank}.trace.json.gz").write_bytes(b"x")
+    pods = [{"podIP": "10.0.0.1"}, {"podIP": "10.0.0.2"}]
+    monkeypatch.setattr(
+        life, "_read_state", lambda: {"backend": "infera", "decode_pods": pods, "prefill_pods": pods[:1]}
+    )
+
+    by_node = life.select_pd_node_traces(str(root), 0.0)
+
+    assert by_node == {
+        "prefill": [str(root / "prefill" / "5-TP-0.trace.json.gz")],
+        "decode": [str(root / "decode" / "5-TP-0.trace.json.gz"), str(root / "decode" / "5-TP-8.trace.json.gz")],
+    }
+
+
 def test_pd_role_traces_take_the_first_gpu_of_each_pod(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     import os
 

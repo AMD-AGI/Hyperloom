@@ -457,6 +457,31 @@ def test_infera_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls[0] == ("10.0.0.1", "--model /m")
 
 
+def test_infera_fanout_launch_nests_profiler_dir_under_subdir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fan-out with ``profiler_subdir`` points the pod's ``SGLANG_TORCH_PROFILER_DIR`` at that subdir."""
+    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
+
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", "/shared/traces")
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
+    envs: list[dict] = []
+
+    def _run(state, ip, script, **kw):
+        envs.append(script.env)
+        return _Completed(returncode=0, stdout='{"status":"ok"}', stderr="")
+
+    monkeypatch.setattr(inf._mn_cli, "_infera_ssh_run_script", _run)
+    rc, _results = inf._infera_fanout_launch(
+        {"ssh_port": 2222},
+        "--model /m",
+        [{"podIP": "10.0.0.1", "sshPort": 2222}],
+        label="restart-prefill",
+        options=inf._FanoutOptions(poll_timeout=5, print_logs=False, profiler_subdir="prefill"),
+    )
+    assert rc == 0
+    assert envs[0]["SGLANG_TORCH_PROFILER_DIR"] == "/shared/traces/prefill"
+
+
 def test_rayjob_forward_runtime_env_carries_extra_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """The RayJob launch must ship per-round env to every rank via runtime_env."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
@@ -794,6 +819,11 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
         pd_prefill_extra_args="",
         pd_decode_extra_args="",
     )
+    monkeypatch.delenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", raising=False)
+    assert inf._infera_restart_config_matches(pd_state, pd_args, "sglang", "disaggregated") is True
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", "/shared/torch_trace")
+    assert inf._infera_restart_config_matches(pd_state, pd_args, "sglang", "disaggregated") is False
+    pd_state["last_restart_profiler_dir"] = "/shared/torch_trace"
     assert inf._infera_restart_config_matches(pd_state, pd_args, "sglang", "disaggregated") is True
 
     assert inf._infera_servers_alive({}, [], timeout=5) is False

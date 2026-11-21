@@ -256,6 +256,12 @@ def _record_last_restart(state: dict[str, Any], args: argparse.Namespace, framew
     state["last_restart_pd_mode"] = pd_mode
     state["last_restart_extra_args"] = _normalize_extra_args(getattr(args, "extra_args", ""))
     state["last_restart_forward_env"] = per_round_forward_overrides()
+    state["last_restart_profiler_dir"] = _launch_profiler_dir()
+
+
+def _launch_profiler_dir() -> str:
+    """The SGLANG_TORCH_PROFILER_DIR a launch now would forward to the engines, or ''."""
+    return _collect_forward_env(POD_FORWARD_ENV_PREFIXES).get("SGLANG_TORCH_PROFILER_DIR", "")
 
 
 CONTAINER_ENVIRON_PATH = "/proc/1/environ"

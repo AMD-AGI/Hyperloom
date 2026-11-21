@@ -11,7 +11,7 @@ import json
 import os
 import shlex
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,7 @@ from .._internal.pod_ssh import (
     _collect_forward_env,
     _infera_default_ssh_port,
     _infera_ssh_bash_with_env,
+    _launch_profiler_dir,
     _record_last_restart,
     container_env_line,
 )
@@ -79,10 +80,12 @@ _POD_PYTHON3 = "python3"
 
 @dataclass(frozen=True)
 class _FanoutOptions:
-    """How one infera command runs its SSH fan-outs: the per-pod timeout and whether pod output is echoed."""
+    """How one infera command runs its SSH fan-outs: the per-pod timeout, whether pod output is echoed and the
+    ``SGLANG_TORCH_PROFILER_DIR`` subdir its engines write under."""
 
     poll_timeout: int
     print_logs: bool
+    profiler_subdir: str = ""
 
 
 def _infera_fanout_launch(
@@ -93,10 +96,13 @@ def _infera_fanout_launch(
     label: str,
     options: _FanoutOptions,
 ) -> tuple[int, list[dict]]:
-    """Ship + run launch_infera_node.py on each GPU pod over SSH."""
+    """Ship + run launch_infera_node.py on each GPU pod over SSH, under ``options.profiler_subdir`` when set."""
     poll_timeout = options.poll_timeout
     script = _mn_cli._read_bundled_pod_python_script("launch_infera_node.py", _mn_cli._LAUNCHER_DEPS)
     forward_env = _collect_forward_env(POD_FORWARD_ENV_PREFIXES)
+    if options.profiler_subdir and forward_env.get("SGLANG_TORCH_PROFILER_DIR"):
+        profiler_dir = Path(forward_env["SGLANG_TORCH_PROFILER_DIR"]) / options.profiler_subdir
+        forward_env["SGLANG_TORCH_PROFILER_DIR"] = str(profiler_dir)
     if forward_env:
         info(f"{label}: forwarding {len(forward_env)} tuning env vars to SSH child")
     results: list[dict] = []
@@ -208,18 +214,23 @@ def _infera_restart_config_matches(
     )
     if not base_match:
         return False
-    if pd_mode != "disaggregated":
-        return True
+    return pd_mode != "disaggregated" or _pd_launch_matches(state, args, kv_transfer_backend)
+
+
+def _pd_launch_matches(state: dict[str, Any], args: argparse.Namespace, kv_transfer_backend: str) -> bool:
+    """Whether the requested PD roles, topology, KV transfer backend and profiler dir match the last PD launch."""
     for name, unset in _PD_ROLE_OVERRIDES.items():
         if (state.get(f"last_restart_{name}") or unset) != getattr(args, name):
             return False
     # Compare effective PD topology (CLI explicit > pod-list inference), not raw CLI zeros left unset by the operator.
     prefill_n, decode_n = _pd_role_pod_counts(state)
     args_pn, args_dn = _resolve_pd_node_counts(args, state)
+    # PD profile starts carry no output_dir, so engines launched without this round's profiler dir cannot be resumed.
     return (
         args_pn == (state.get("last_restart_pd_prefill_nodes") or prefill_n)
         and args_dn == (state.get("last_restart_pd_decode_nodes") or decode_n)
         and kv_transfer_backend.strip() == (state.get("last_restart_pd_transfer_backend") or "").strip()
+        and (state.get("last_restart_profiler_dir") or "") == _launch_profiler_dir()
     )
 
 
@@ -290,7 +301,7 @@ def _infera_launch_pd_groups(
             f"nnodes={rnnodes} pods={len(targets)} kv={kv} extra={rextra!r}"
         )
         rc, all_results[role] = _infera_fanout_launch(
-            state, launch_args, list(targets), label=f"restart-{role}", options=fanout
+            state, launch_args, list(targets), label=f"restart-{role}", options=replace(fanout, profiler_subdir=role)
         )
         rc_total = rc_total or rc
     # Persist inferred PD topology so resume fast-path and KB keys match launch.

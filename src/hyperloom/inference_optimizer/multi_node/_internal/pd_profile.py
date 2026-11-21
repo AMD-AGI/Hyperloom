@@ -64,3 +64,16 @@ def record_analysed_profile(trace_path: str, steady_state_trace: str) -> None:
         record_profile_paths(profile_trace=profile_dir, steady_state_trace=steady_state_trace or trace_path)
     except (OSError, RuntimeError, ValueError, TypeError):
         log.debug("roofline: could not record profile paths into multi-node state", exc_info=True)
+
+
+def infera_profile_payload(state: dict[str, Any], action: str, body: dict | None) -> dict[str, Any]:
+    """The Infera admin profile request body for ``action``; ``stop`` sends none.
+
+    A PD-disaggregated launch drops ``output_dir``: each role's workers write under their own
+    ``SGLANG_TORCH_PROFILER_DIR``.
+    """
+    payload = dict(body or {}) if action == "start" else {}
+    mode = str(state.get("last_restart_pd_mode") or state.get("pd_mode") or "").strip().lower()
+    if mode == "disaggregated":
+        payload.pop("output_dir", None)
+    return payload

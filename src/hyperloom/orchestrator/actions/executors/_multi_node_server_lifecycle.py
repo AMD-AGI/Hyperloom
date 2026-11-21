@@ -643,7 +643,7 @@ async def trigger_infera_engine_profile(
 
     route = "start" if action == "start" else "stop"
     url = f"{service_url}/v1/admin/profile/{route}"
-    payload = dict(body or {}) if action == "start" else {}
+    payload = multi_node.infera_profile_payload(state, action, body)
     async with _httpx.AsyncClient(timeout=_profile_client_timeout(action)) as client:
         try:
             resp = await client.post(url, json=payload)
@@ -710,27 +710,41 @@ def _placed(place: Callable[[dict[str, Any]], dict], state: dict[str, Any]) -> d
         return {}
 
 
-def select_pd_node_traces(root: str, since_unix: float) -> dict[str, list[str]]:
-    """Return, per PD role, the first GPU's trace of each node written since ``since_unix``, worker by worker under
-    ``<root>/<role>/<worker>``; nodes are numbered across the role's workers in order. Each engine of a pod hand-off
-    is one single-node worker."""
+def _engine_trace_dirs(state: dict[str, Any], root: str) -> dict[str, list[tuple[str, int]]]:
+    """Trace dir and node count of each prefill and decode engine worker under ``root``, in worker order.
+
+    A node-list session's workers, and the single-node engine of each atomesh/sglangrouter pod, write under
+    ``<root>/<role>/<worker>``; any other backend's PD role runs one engine across its pods under ``<root>/<role>``.
+    """
     from hyperloom.inference_optimizer.multi_node.pd_session import session_worker_hosts
 
-    state = _read_state() or {}
     if is_pd_state(state):
         workers = _placed(session_worker_hosts, state)
-    else:
+    elif str(state.get("backend") or "") in multi_node.PD_BACKENDS:
         workers = {role: [(url,) for url in urls] for role, urls in multi_node.pod_engine_urls(state).items()}
+    else:
+        pods = {role: max(1, len(multi_node.role_engine_pods(state, role))) for role in PD_PROFILE_ROLES}
+        return {role: [(str(Path(root) / role), nodes)] for role, nodes in pods.items()}
+    return {
+        role: [(pd_worker_trace_dir(root, role, worker), len(hosts)) for worker, hosts in enumerate(engines)]
+        for role, engines in workers.items()
+    }
+
+
+def select_pd_node_traces(root: str, since_unix: float) -> dict[str, list[str]]:
+    """Return, per PD role, the first GPU's trace of each node written since ``since_unix``, worker by worker under
+    the dirs of :func:`_engine_trace_dirs`; nodes are numbered across the role's workers in order."""
+    engine_dirs = _engine_trace_dirs(_read_state() or {}, root)
     selected: dict[str, list[str]] = {}
     for role in PD_PROFILE_ROLES:
         picks: list[str] = []
-        for worker, hosts in enumerate(workers.get(role, [])):
+        for trace_dir, nodes in engine_dirs.get(role, []):
             fresh = [
                 path
-                for path in Path(pd_worker_trace_dir(root, role, worker)).glob("*.trace.json.gz")
+                for path in Path(trace_dir).glob("*.trace.json.gz")
                 if path.is_file() and safe_mtime(path) >= since_unix
             ]
-            picks += _first_gpu_traces(fresh, role, len(hosts))
+            picks += _first_gpu_traces(fresh, role, nodes)
         if picks:
             selected[role] = picks
     return selected
