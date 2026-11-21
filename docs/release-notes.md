@@ -146,9 +146,8 @@ Defaults and gates that move, so the same command behaves differently:
   `the round's ROCR_VISIBLE_DEVICES is not a list of GPU indices`.
 - **A launch needs `install.sh` in its own container.** The kernel-agent env
   file is container-local, so `optimize` in a new container that skipped
-  `install.sh` exits `2` at preflight. Source it with the new line in
-  [Upgrade Hyperloom version](reference/upgrade.md):
-  `kernel_agent_env_file="$(. "$REPO_ROOT/hyperloom/inference_optimizer/assets/runtime_env.sh"; runtime_env_kernel_agent_env_path)" && . "$kernel_agent_env_file"`.
+  `install.sh` exits `2` at preflight. Source the kernel-agent env file with
+  the line given in [Upgrade Hyperloom version](reference/upgrade.md).
 - **A session that holds a credential keeps its database outside the session
   directory.** When `--extra-env` or `--server-args` carry a credential, the
   coordinator database lives below `${TMPDIR:-/tmp}/hyperloom-ledger-<uid>/`,
