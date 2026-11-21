@@ -30,6 +30,15 @@ TOPOLOGY_FILE_ENV = "TOPOLOGY_HANDOFF_FILE"
 _SCHEMA_RE = re.compile(r"^topology-handoff/v(\d+)(?:\.\d+)*$")
 _SUPPORTED_MAJOR = 1
 _BACKENDS = ("rayjob", "infera")
+MN_BACKENDS = ("rayjob", "infera", "atomesh", "sglangrouter")
+# Backends that run a router in front of sglang prefill/decode engines started over SSH.
+PD_ROUTER_BACKENDS = ("atomesh", "sglangrouter")
+
+
+def normalize_mn_backend(raw: object) -> str:
+    """Canonical multi-node backend name (lower-case, stripped)."""
+    return str(raw or "").strip().lower()
+
 
 # Every legacy variable the file describes. When a file is in force these are read
 # from it only (empty when the file omits them), never from the process env, except

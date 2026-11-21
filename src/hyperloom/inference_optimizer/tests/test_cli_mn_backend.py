@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.inference_optimizer.cli.multi_node import _resolve_mn_backend
+from hyperloom.inference_optimizer.cli.multi_node import _resolve_mn_backend, _stamp_pd_backend
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 
 
@@ -50,6 +50,41 @@ def test_mn_backend_env_used_when_flag_absent(monkeypatch):
     ns = parser.parse_args(_args())
     assert ns.mn_backend is None
     assert _resolve_mn_backend(ns) == "infera"
+
+
+@pytest.mark.parametrize("value", ["atomesh", "ATOMESH"])
+def test_mn_backend_flag_names_atomesh(value):
+    ns = _build_parser().parse_args(_args("--mn-backend", value))
+    assert ns.mn_backend == "atomesh"
+    assert _resolve_mn_backend(ns) == "atomesh"
+
+
+def test_mn_backend_env_names_atomesh(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "atomesh")
+    ns = _build_parser().parse_args(_args())
+    assert _resolve_mn_backend(ns) == "atomesh"
+
+
+def test_pd_router_backend_exits_2_without_pd_mode_disaggregated(monkeypatch):
+    monkeypatch.delenv("PD_MODE", raising=False)
+    with pytest.raises(SystemExit) as ei:
+        _stamp_pd_backend({"backend": "atomesh"})
+    assert ei.value.code == 2
+
+
+def test_pd_router_backend_records_the_handed_off_pods(monkeypatch):
+    monkeypatch.setenv("PD_MODE", "disaggregated")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SSH_PORT", "29000")
+    state = {
+        "backend": "sglangrouter",
+        "service_url": "",
+        "prefill_pod_ips": ["10.0.0.1"],
+        "decode_pod_ips": ["10.0.0.2"],
+    }
+    _stamp_pd_backend(state)
+    pods = state["router_pods"] + state["prefill_pods"] + state["decode_pods"]
+    assert [pod["role"] for pod in pods] == ["prefill", "decode"]
+    assert {pod["sshPort"] for pod in pods} == {29000}
 
 
 def test_mn_backend_rejects_invalid_choice():
