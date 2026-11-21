@@ -212,8 +212,9 @@ class HostedOptions:
 
     ``policy`` is the quota and priority policy; its ``global_concurrency`` is lowered to what the grant runs at once
     when higher. ``archive`` is the result archive, a directory archive below ``session_dir`` when omitted.
-    ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the infrastructure retries per test before it
-    ends as ``measurement_failed``, ``infra_backoff_seconds`` the wait before each
+    ``timeout_sec`` is the timeout of one attempt, ``boot_budget_sec`` how long, at least, its server may take to be ready
+    (``TestCall.boot_budget_sec``; ``None`` for the default share of the timeout), ``max_infra_retries`` the
+    infrastructure retries per test before it ends as ``measurement_failed``, ``infra_backoff_seconds`` the wait before each
     one after a failure that is not the node's (:class:`~.attempts.InfraBackoff`) and ``poll_interval_sec`` how often
     the backend polls a runner sandbox for its result.
     ``tools`` are the asynchronous tools ``start_analysis`` may reach; ``None`` is the hosted set, TraceLens: it reads the
@@ -250,6 +251,7 @@ class HostedOptions:
     policy: QueuePolicy | None = None
     archive: ResultArchive | None = None
     timeout_sec: int = DEFAULT_TEST_TIMEOUT_SEC
+    boot_budget_sec: int | None = None
     max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
     infra_backoff_seconds: tuple[float, ...] = INFRA_BACKOFF_SECONDS
     poll_interval_sec: float = 5.0
@@ -582,7 +584,11 @@ def build_hosted_toolbox(
     )
     backend = started_backend(provider, config)
     executor = HostedExecutor(
-        backend, directory, timeout_sec=options.timeout_sec, workload_kind=acceptance.workload_kind
+        backend,
+        directory,
+        timeout_sec=options.timeout_sec,
+        boot_budget_sec=options.boot_budget_sec,
+        workload_kind=acceptance.workload_kind,
     )
     executor.smoke = merge_smoke_from(os.environ)
     toolbox = HostedToolbox(

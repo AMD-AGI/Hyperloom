@@ -466,6 +466,8 @@ def _test_environment(call: TestCall) -> Iterator[list[str]]:
     }
     if call.silence_timeout_sec is not None:
         settings["INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC"] = str(call.silence_timeout_sec)
+    if call.boot_budget_sec is not None:
+        settings["INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC"] = str(call.boot_budget_sec)
     if facts is not None and facts.inferencex_path:
         settings["INFERENCEX_PATH"] = facts.inferencex_path
     if call.kind == _PROFILE and (body := _point(call.points[0]).envs.get(_PROFILE_BODY_ENV)):
@@ -535,7 +537,7 @@ def _booting(run: Run, point: int, round_args: dict[str, Any]) -> contextlib.Abs
     call = run.call
     if run.boot is None or round_args.get("server_already_ready"):
         return contextlib.nullcontext()
-    limit = boot_limit_sec(_point(call.points[point]), call.timeout_sec)
+    limit = boot_limit_sec(_point(call.points[point]), call.timeout_sec, call.boot_budget_sec)
     return contextlib.nullcontext() if limit is None else run.boot.watching(limit)
 
 
