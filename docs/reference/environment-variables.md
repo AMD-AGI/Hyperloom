@@ -30,7 +30,7 @@ provider-side combinations and what each one enables.
 |------------------------|----------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `ANTHROPIC_BASE_URL`   | Conditional | —    | Anthropic-side endpoint. Required together with `ANTHROPIC_API_KEY` to enable Claude.                                                                                                        |
 | `ANTHROPIC_API_KEY`    | Conditional | —    | Anthropic-side key. Pairs with `ANTHROPIC_BASE_URL`.                                                                                                                               |
-| `ANTHROPIC_AUTH_TOKEN` | No       | —    | Claude CLI auth token alias, accepted in place of `ANTHROPIC_API_KEY`. Preflight never fills it; the Ray / e2e / forge-fusion env builders default it from the Anthropic-side key when they hand credentials to a subprocess.                                                                        |
+| `ANTHROPIC_AUTH_TOKEN` | No       | —    | Claude CLI auth token alias, accepted in place of `ANTHROPIC_API_KEY`. Preflight never fills it; the e2e / forge-fusion env builders default it from the Anthropic-side key when they hand credentials to a subprocess.                                                                        |
 | `ANTHROPIC`<br>`_CUSTOM_HEADERS` | No | —    | Extra request headers for the Anthropic side, for gateways that authenticate on a header of their own (for example Azure API Management). Newline-delimited `Name: value` as in the Anthropic SDK; a JSON object is accepted too. `${VAR}` references are expanded from the same environment, so a gateway header can reuse `ANTHROPIC_API_KEY` instead of duplicating the secret. |
 | `CLAUDE_CODE`<br>`_OAUTH_TOKEN` | No | — | Claude Max/Pro subscription token from `claude setup-token`. Lowest-priority Anthropic credential: either API-key variable outranks it. On its own it implies `https://api.anthropic.com`. Passed to subprocesses verbatim and never copied into `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `~/.claude/config.json`, which would switch the run to API-credits billing. |
 | `CLAUDE_CODE`<br>`_USE_BEDROCK` | No | — | Route the Claude runtime through AWS Bedrock, which carries the credential itself. Holds the Anthropic side for **agent backend selection only**, so a Bedrock box is not read as unconfigured and redirected to Codex. It names no key, so it does not satisfy `--critic-protocol=anthropic` or the credential preflight, and it never derives an `ANTHROPIC_BASE_URL`. |
@@ -415,16 +415,6 @@ consumers and triage read a contract rather than candidate internals.
 
 ---
 
-## Single-node Ray execution
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `INFERENCE_OPTIMIZER_RAY_EXEC` | Unset (`on` for single-node) | Controls whether single-node serving benchmarks and `needs_gpu` specialists run through Ray actors. When unset, single-node runs are routed through Ray-managed leases while multi-node stays on the multi-node backend. Set to `0` / `false` / `no` / `off` to force the local subprocess path, or `1` / `true` / `yes` / `on` to force Ray. |
-| `HYPERLOOM_RAY_READY_TIMEOUT_SEC` | `30` | How long, in seconds, a Ray head is given to answer `ray status` when a single probe (bounded by `HYPERLOOM_RAY_STATUS_TIMEOUT_SEC`, 5 s) timed out, and after `ray start --head` before the new head is reported unreachable. Each probe while waiting is bounded by the time left, so a healthy head that is slower than the single-probe bound still answers. A head that times out is not stopped or restarted: `ensure_ray_cluster()` raises once the time is up, and only a head that definitely is not there (`ray status` exits non-zero) is stopped and replaced. A non-positive or unparsable value keeps the default. |
-| `HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC` | `60` | Bound, in seconds, on the driver connect (`ray.init`) a process tries in a child process before it connects to a running Ray head in-process: first when work is routed to Ray, and again before every in-process reconnect (after a Ray actor dies, after the process starts or restarts a local head, and before the retry after a version mismatch). In-process, Ray 2.44 waits for the raylet's registration reply with the GIL held and no timeout, so a head that never answers would freeze the whole process. When the probe times out (its process group is killed) or exits non-zero, the process does not connect, takes the local subprocess path from then on, as with `INFERENCE_OPTIMIZER_RAY_EXEC=0`, and logs one WARNING. The installer bounds its own `serving_slot` check of a running head by the same value and replaces a head that does not answer in time. A non-positive or unparsable value keeps the default. |
-
----
-
 ## Codex (OpenAI) agent sandbox
 
 Selects how a Codex agent session (TraceLens analysis and every future
@@ -452,20 +442,6 @@ immediately.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HYPERLOOM_`<br>`CODEX_SANDBOX_MODE` | `workspace-write` | `workspace-write` restricts writes to the session directory plus declared output roots; `read-only` forbids writes; `bypass` selects Codex full access when an external sandbox already enforces isolation. |
-
----
-
-## Single-node Ray GPU scheduling
-
-These variables tune the single-node Ray execution path (active when
-`INFERENCE_OPTIMIZER_RAY_EXEC=1` and `--nodes=1`). They have no effect on
-multi-node runs or when the Ray backend is disabled.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT` | `4` | Maximum number of GPU specialists that can be simultaneously in-flight (pending Ray scheduling + running) on the single-node Ray path. Ray still serializes execution on the physical GPU(s) using `num_gpus`; this limit caps how many actors can queue behind the current one. Floored at `1`. **Reduce to `1` or `2` when GPU memory or per-process overhead is a concern** (each queued actor holds a Ray worker slot even while it waits). |
-| `INFERENCE_OPTIMIZER_RAY_ROUND_WAIT_SEC` | Unset (the round's own timeout + 3600s) | Wall-clock ceiling on blocking for one Ray round to return. Without it a round Ray never schedules parks the waiting thread forever, leaving its task `running` and its lane lease never released — the 2026-09-21 stall. Set a number of seconds to override; `<= 0` disables the ceiling, which is also what a round with no cap of its own gets. A non-finite value (`nan`, `inf`) is **rejected**, not tolerated, because `nan > 0` is false and would silently switch the ceiling off. On timeout the round is abandoned and its actor is kept alive on purpose, so its GPUs stay reserved rather than being handed back while its server tree may live. |
-| `INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY` | On | When enabled (default), the dispatcher defers admitting new GPU research specialists while a serving benchmark holds the whole-machine `serving_slot`, preventing research work from starving serving. The slot is probed immediately before each specialist is admitted so a serving start that races the dispatch pass is caught. Set to `0`, `false`, `no`, or `off` to disable. |
 
 ---
 
@@ -881,7 +857,7 @@ deployments.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `OPENAI_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed; a specialist in a bubblewrap sandbox cannot read that config, so where bubblewrap would sandbox it the launch runs unconfined, or is refused where it must be isolated (see [Agent isolation](#agent-isolation)). Unrelated secrets such as GitHub and KB tokens remain blocked. |
-| `HYPERLOOM_SPECIALIST_USER` | Unset (no change) | Account name to run specialist subprocesses as (the `claude`, `codex` and `dsh` CLIs), so they cannot read the app's files, `/proc/<pid>/environ` or key files. Needs a Hyperloom process that can start a child as another user and later stop it: root, or all of `CAP_SETUID`, `CAP_SETGID` and `CAP_KILL` (`CAP_KILL` is what lets the deadline, stale-heartbeat, done-file and cancel reaps signal the child; without it none of them could be confirmed). The launch fails with a clear error, and no specialist runs, if one of those is missing, the account does not exist, is uid 0, is the app's own user, or belongs to group 0, or its uid, its group or a supplementary group is not mapped in the app's user namespace (`/proc/self/uid_map`, `/proc/self/gid_map`: in a container that maps only its root, a switch to any other id fails with `EINVAL`, or under a fakeroot `LD_PRELOAD` appears to succeed while the child stays root); so does a GPU specialist on the Ray actor path, which cannot be demoted, unless bubblewrap isolates it (see [Agent isolation](#agent-isolation)). The child gets that account's `HOME`, `USER` and `LOGNAME`, supplementary groups, and `umask 007` (group full access, others none); the Hyperloom process's own umask is left alone, and each launch re-shares the workspace and worktree, so files the app rebuilt in between become group-writable again. The child starts through `setpriv` (util-linux, required), which clears its inheritable and ambient capabilities and sets `no_new_privs`, so a non-root app that holds `CAP_SETUID` as an ambient capability does not hand it to the child. Each task's workspace and worktree stay owned by the app but get the account's group with group read-write (setgid directories); the app must be root or a member of that group to do so, and the account must be able to traverse every parent directory of the session directory (the app never changes the modes of those parents), read the checkout the worktree is branched from, and execute the agent CLI. The worktree's `.git` file and its admin directory under the repository's `.git/worktrees` are shared read-only (git inside the worktree works for status, diff and log, not for writes), and a copy of the `--mcp-config` file is staged in the workspace. The app reads and writes the paths the child can rewrite (`specialist_done.json`, `patches/`, the harvested patch, the Codex config, `prompt.md`, `process.log` and its redaction copy, the `dsh` home and session logs) without following symlinks. The agent runner (`LocalAgentRunner`, `orchestrator/specialists/agent_runner.py`) demotes the same way, sharing the session's working directory as the worktree; there an unusable account fails the launch with `AgentConfigError`. For the isolation chooser below, setting the variable also makes a specialist's isolation required (see [Agent isolation](#agent-isolation)). |
+| `HYPERLOOM_SPECIALIST_USER` | Unset (no change) | Account name to run specialist subprocesses as (the `claude`, `codex` and `dsh` CLIs), so they cannot read the app's files, `/proc/<pid>/environ` or key files. Needs a Hyperloom process that can start a child as another user and later stop it: root, or all of `CAP_SETUID`, `CAP_SETGID` and `CAP_KILL` (`CAP_KILL` is what lets the deadline, stale-heartbeat, done-file and cancel reaps signal the child; without it none of them could be confirmed). The launch fails with a clear error, and no specialist runs, if one of those is missing, the account does not exist, is uid 0, is the app's own user, or belongs to group 0, or its uid, its group or a supplementary group is not mapped in the app's user namespace (`/proc/self/uid_map`, `/proc/self/gid_map`: in a container that maps only its root, a switch to any other id fails with `EINVAL`, or under a fakeroot `LD_PRELOAD` appears to succeed while the child stays root). The child gets that account's `HOME`, `USER` and `LOGNAME`, supplementary groups, and `umask 007` (group full access, others none); the Hyperloom process's own umask is left alone, and each launch re-shares the workspace and worktree, so files the app rebuilt in between become group-writable again. The child starts through `setpriv` (util-linux, required), which clears its inheritable and ambient capabilities and sets `no_new_privs`, so a non-root app that holds `CAP_SETUID` as an ambient capability does not hand it to the child. Each task's workspace and worktree stay owned by the app but get the account's group with group read-write (setgid directories); the app must be root or a member of that group to do so, and the account must be able to traverse every parent directory of the session directory (the app never changes the modes of those parents), read the checkout the worktree is branched from, and execute the agent CLI. The worktree's `.git` file and its admin directory under the repository's `.git/worktrees` are shared read-only (git inside the worktree works for status, diff and log, not for writes), and a copy of the `--mcp-config` file is staged in the workspace. The app reads and writes the paths the child can rewrite (`specialist_done.json`, `patches/`, the harvested patch, the Codex config, `prompt.md`, `process.log` and its redaction copy, the `dsh` home and session logs) without following symlinks. The agent runner (`LocalAgentRunner`, `orchestrator/specialists/agent_runner.py`) demotes the same way, sharing the session's working directory as the worktree; there an unusable account fails the launch with `AgentConfigError`. For the isolation chooser below, setting the variable also makes a specialist's isolation required (see [Agent isolation](#agent-isolation)). |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ### Agent isolation
@@ -890,7 +866,7 @@ deployments.
 `choose_agent_isolation()` (a specialist) takes the first tier that works:
 
 1. **Account**: `HYPERLOOM_SPECIALIST_USER` names an account that resolves and passes the checks in the table above,
-   and the process holds `CAP_SETUID`, `CAP_SETGID` and `CAP_KILL`. Never on the Ray GPU actor path, and never for an
+   and the process holds `CAP_SETUID`, `CAP_SETGID` and `CAP_KILL`. Never for an
    agent sandbox's commands (`choose_sandbox_isolation()`), which run as the app's own account.
 2. **bubblewrap**: the agent runs in a sandbox that starts from an empty root (`hyperloom_common/bwrap.py`): only the
    paths its confinement binds exist inside, read-only unless they are its work trees, and the root takes no new name;
@@ -911,7 +887,7 @@ deployments.
    counts as a tree the agent writes. The masks come from the app's own environment and home as well as the child's. Everything under the readable
    system roots (`/etc`, `/opt`, `/usr`) is readable: an image must not keep a credential there.
 
-Only an agent launched through the chooser is isolated: every specialist (the dispatcher, its Ray GPU actor path and the
+Only an agent launched through the chooser is isolated: every specialist (the dispatcher and the
 agent runner). Agents started elsewhere run as the app and can read what it can, in a hosted run too:
 
 - the orchestration role (`inference_optimizer/cli/backends.py`, `_build_orchestration_backend`), on whichever agent
@@ -935,8 +911,8 @@ is handed to `hyperloom-multibranch` before the entry's isolation check (below);
 makes the same check at its start, with the same layer bubblewrap, and also ends the run, naming which and why, when
 the agent runner would start its specialists unconfined or refuse them.
 
-**Specialists in a bubblewrap sandbox** (`orchestrator/specialists/launch_env.py`; the dispatcher, its Ray GPU actor
-path and the agent runner) write their workspace and worktree, and a private `/tmp` and `/dev/shm` (directories of
+**Specialists in a bubblewrap sandbox** (`orchestrator/specialists/launch_env.py`; the dispatcher and the agent
+runner) write their workspace and worktree, and a private `/tmp` and `/dev/shm` (directories of
 mode 0700 on the host's `/tmp` and `/dev/shm`; with a bubblewrap older than 0.12, a fresh tmpfs where the workspace
 lies below `/tmp`). `HOME`, and `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CACHE_HOME` and the compiler caches
 (`TRITON_CACHE_DIR`, `TORCHINDUCTOR_CACHE_DIR`, `AITER_JIT_DIR`, `FLYDSL_RUNTIME_CACHE_DIR`) when they name a
@@ -968,15 +944,10 @@ cannot map a user namespace inside. bubblewrap ends a sandbox on a SIGTERM of it
 deadline, stale-heartbeat, done-file or cancel kill first TERMs the sandbox's processes that carry the launch's reap
 mark and waits for them, then kills what is left. A sandbox bubblewrap could not set up fails the task with
 bubblewrap's line (`specialist sandbox could not be set up: bwrap: ...`) rather than as the agent's exit, read from
-its `--json-status-fd`; an agent killed by signal `n` exits `128 + n`. A Ray GPU actor's sandbox is built from the
-driver's probe and paths, so it is for a single-node Ray cluster only, and its status goes to a file a shell in the
-actor opens for bubblewrap; the sandbox has `--die-with-parent` there, so it ends when the actor dies (an OOM kill,
-say). The app creates the launch's `process.log` fresh, as for a local launch, and the actor only appends to that
-file: a link or anything else put at the name is refused, never written through.
+its `--json-status-fd`; an agent killed by signal `n` exits `128 + n`.
 
 A specialist's sandbox has a network of its own (`--unshare-net`): nothing that listens on this host or beyond is
-reachable from it, the run's Ray head included (its dashboard Jobs API, client server and workers run what they are
-sent as the app). What it needs is relayed in over Unix sockets in its scratch `/tmp` by the app
+reachable from it. What it needs is relayed in over Unix sockets in its scratch `/tmp` by the app
 (`orchestrator/specialists/sandbox_network.py`): each loopback endpoint its launch names (an HTTP MCP server, an LLM
 gateway on this host) at the same port on the sandbox's own loopback, and an HTTP proxy, which the sandbox's
 `HTTPS_PROXY` and `HTTP_PROXY` name (loopback exempt), that connects only to the other LLM endpoints and MCP
@@ -1070,11 +1041,7 @@ framework image may carry its own); a local run uses the `bwrap` on `PATH`. `hyp
 ignored), which the layer's `start.sh` sets to its own; with the variable unset, blank or relative, no launch of the run
 uses bubblewrap. `hyperloom hosted run` checks before its installer or `optimize` runs: where neither tier
 works, the run ends with a final `exit.json` (return code 2) whose `error` names both reasons; a probe that gave no
-answer in time ends the leg without one, so the host starts it again. Where the account is chosen, it probes the layer's
-bubblewrap too: the Ray GPU actor path never starts a specialist as an account, so where that bubblewrap cannot confine
-one, one WARNING says so (`specialists run as the account <name>, but the Ray GPU actor path cannot run the specialist
-as another user and bubblewrap cannot confine one here, so that path refuses its specialists: <reason>`), and the run
-goes on. The probe (`python -I -m
+answer in time ends the leg without one, so the host starts it again. The probe (`python -I -m
 hyperloom_common.bwrap probe [--bwrap PATH]`) refuses a setuid bubblewrap and one older than 0.5.0, then runs a canary
 sandbox and checks from inside that its masks, read-only binds, pid namespace, capabilities and `no_new_privs` hold. It
 runs once per process for each binary, interpreter, ids, namespaces and user-namespace sysctls; one that gives no
@@ -1494,7 +1461,7 @@ stay, because other code reads them. The sandbox keys, the MCP token and the arc
 `hyperloom hosted run` (`src/hyperloom/hosted/entry.py`) reads the variables above and the campaign spec in
 `HYPERLOOM_INPUT_FILE` (`hyperloom.campaign-spec/v1`, schema `src/hyperloom/contracts/campaign_spec.v1.schema.json`), runs the
 packaged `src/hyperloom/inference_optimizer/assets/install.sh` (no flags; the installer of the legacy launchers, from the same
-wheel as the running code; it provisions TraceLens, GEAK, ray and the container-local `kernel-agent.env.sh`, see `KERNEL_AGENT_ENV`) on every leg, fresh or resumed, into the interpreter that runs the entry (`PYTHON`, `VIRTUAL_ENV` and `INFERENCE_OPTIMIZER_FORCE_PYTHON=1` are set for it, and that interpreter's `bin` directory leads `PATH` for the installer and `optimize`), with its
+wheel as the running code; it provisions TraceLens, GEAK and the container-local `kernel-agent.env.sh`, see `KERNEL_AGENT_ENV`) on every leg, fresh or resumed, into the interpreter that runs the entry (`PYTHON`, `VIRTUAL_ENV` and `INFERENCE_OPTIMIZER_FORCE_PYTHON=1` are set for it, and that interpreter's `bin` directory leads `PATH` for the installer and `optimize`), with its
 output in `$HYPERLOOM_STATE_DIR/install.log` (a new file of each leg's, mode 0664, renamed over the previous leg's before the script starts: never opened in place), then runs `optimize` in the same process. An installer that exits non-zero ends the run
 with `{"final": true, "returncode": 2, "error": ...}` naming `install.sh` and the log. Before the installer, the entry checks that
 the run's specialists can be isolated, and ends the run the same way, naming why, where they cannot (see [Agent isolation](#agent-isolation)). The session directory is

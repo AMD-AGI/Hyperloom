@@ -465,7 +465,7 @@ class _Spawned:
 def _launch_isolation() -> AgentIsolation:
     """How to isolate the CLI; a launch that must be isolated and cannot be is refused."""
     try:
-        return resolve_launch_isolation(None)
+        return resolve_launch_isolation()
     except RunAsError as exc:
         raise AgentConfigError(f"specialist isolation refused: {exc}") from exc
 

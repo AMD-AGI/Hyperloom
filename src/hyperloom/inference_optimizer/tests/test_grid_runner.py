@@ -619,7 +619,7 @@ def test_agentx_removals_reach_the_launch_as_bare_names_without_losing_the_re_ad
 
 
 def test_build_variant_yaml_refuses_to_unset_pinned_envs(tmp_path):
-    """A variant that unsets TP would silently shrink the Ray lease to one GPU."""
+    """A variant that unsets TP would silently shrink the server to one GPU."""
     base = tmp_path / "base.yaml"
     _write_baseline_yaml_overrides(base)
     cfg = yaml.safe_load(base.read_text())

@@ -51,7 +51,6 @@ def eligible(monkeypatch: pytest.MonkeyPatch) -> None:
         "resolve_lifecycle_params",
         lambda _path: {"eligible": True, "framework": "sglang", "port": _PORT, "reason": ""},
     )
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_k: None)
 
 
 def _rounds(monkeypatch: pytest.MonkeyPatch, count: int) -> ScriptedRounds:

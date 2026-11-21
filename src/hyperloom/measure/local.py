@@ -533,7 +533,7 @@ def _guard_boot(run: Run) -> Iterator[None]:
 def _booting(run: Run, point: int, round_args: dict[str, Any]) -> contextlib.AbstractContextManager[None]:
     """Watch the boot of the round about to run, unless it reuses a ready server or no ready stamp can be expected."""
     call = run.call
-    if run.boot is None or round_args.get("server_already_ready") or call.serving_lease is not None:
+    if run.boot is None or round_args.get("server_already_ready"):
         return contextlib.nullcontext()
     limit = boot_limit_sec(_point(call.points[point]), call.timeout_sec)
     return contextlib.nullcontext() if limit is None else run.boot.watching(limit)
@@ -555,7 +555,7 @@ async def _grid(run: Run, point: int, name: str, *, watch_boot: bool = True, **l
             grid=[GridVariant(name, unset_envs=run.unset_envs)],
             output_root=Path(call.output_dir),
             recipe=GridRecipe(call.points[point], base=LaunchLayer(extra_envs=envs)),
-            launch=GridLaunch(call.result_dir, call.serving_lease, **launch),
+            launch=GridLaunch(call.result_dir, **launch),
             stop=GridStop(call.session_deadline_sec, checkpoint=call.checkpoint and call.checkpoint.on(name == _TEST)),
         )
         ended = time.time()

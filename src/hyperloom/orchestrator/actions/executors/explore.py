@@ -83,7 +83,6 @@ from ._grid_runner import (
     GridVariant,
     SessionDirField,
     _build_variant_yaml,
-    lease_cards,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
@@ -101,7 +100,6 @@ from ._grid_variant_filter import (
 )
 from hyperloom.inference_optimizer.framework_registry import is_scriptable, server_args_env_name
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
-from ._ray_serving import maybe_serving_lease
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 
 from ._launch_restatement import Launch, config_envs, launch_change, observed_launch_after, read_launch
@@ -750,7 +748,6 @@ class _ExploreRound:
         self.run_stop: StoppedByTheRun | None = None
         self.run_stop_detail = ""
         self.untested = 0
-        self.lease: Any = None
 
     async def run(self, session_dir: Path | None = None) -> dict[str, Any]:
         self.session_dir = session_dir
@@ -758,32 +755,25 @@ class _ExploreRound:
         self._shape_runnable()
         self._open_schedule()
         round_ctx = await prefilter_round(self, session_dir)
-        # One Ray serving lease (actor) spans the WHOLE round; every variant reuses it.
-        self.lease = maybe_serving_lease(num_gpus=lease_cards(self.config_path, session_dir)) if self.runnable else None
-        try:
-            for idx, gv in enumerate(self.runnable):
-                if self._refused(gv, idx):
-                    if self.run_stop is not None:
-                        break
-                    continue
-                slot = self.output_root / f"v{idx:02d}_{_safe(gv.name)}"
-                slot.mkdir(parents=True, exist_ok=True)
-                run_gv = self._staged(gv)
-                try:
-                    measurement = await self._measure(gv, run_gv, idx, slot)
-                    if self.run_stop is not None:
-                        break
-                    if measurement is not None:
-                        row = await self._settle(gv, run_gv, measurement, slot)
-                        await record_decision_round(round_ctx, gv, measurement, row)
-                finally:
-                    # The warmup and decision rounds share this slot's server; reap it on every exit path.
-                    if self.lifecycle_eligible:
-                        self._reap_variant_server(slot)
-        finally:
-            # One lease spans the round; a per-variant ``ray.kill`` churns raylet workers on a single-node cluster.
-            if self.lease is not None:
-                self.lease.close()
+        for idx, gv in enumerate(self.runnable):
+            if self._refused(gv, idx):
+                if self.run_stop is not None:
+                    break
+                continue
+            slot = self.output_root / f"v{idx:02d}_{_safe(gv.name)}"
+            slot.mkdir(parents=True, exist_ok=True)
+            run_gv = self._staged(gv)
+            try:
+                measurement = await self._measure(gv, run_gv, idx, slot)
+                if self.run_stop is not None:
+                    break
+                if measurement is not None:
+                    row = await self._settle(gv, run_gv, measurement, slot)
+                    await record_decision_round(round_ctx, gv, measurement, row)
+            finally:
+                # The warmup and decision rounds share this slot's server; reap it on every exit path.
+                if self.lifecycle_eligible:
+                    self._reap_variant_server(slot)
         return self._result()
 
     def _reap_variant_server(self, slot: Path) -> None:
@@ -919,8 +909,8 @@ class _ExploreRound:
     def _drop_leading_noops(self) -> None:
         # Drop the variants ahead of every other one that only restate the stack's observed launch.
         #
-        # They change nothing while the stack stays as observed, and can only launch on it, so they go before a
-        # serving lease is taken; any other is judged at its turn, against the stack a KEEP has moved.
+        # They change nothing while the stack stays as observed, and can only launch on it, so they go before any
+        # variant runs; any other is judged at its turn, against the stack a KEEP has moved.
         before = len(self.runnable)
         if self.runnable and not is_stack_revalidation(self.params):
             kept, dropped = filter_baseline_noop_variants(
@@ -1146,8 +1136,7 @@ class _ExploreRound:
     async def _measure(self, gv: GridVariant, run_gv: GridVariant, idx: int, slot: Path) -> Any:
         self.launched[self._launch_identity(gv)] = _variant_fingerprint(gv)
         # The warmup and decision rounds share this slot as the lifecycle pid_dir so the decision round
-        # re-attaches to the server the warmup left hot. Ray-managed GPU execution (12 T1): both reuse the
-        # round-level lease, and one persistent server, so no GPU process outlives it.
+        # re-attaches to the server the warmup left hot.
         lifecycle = (
             {"cleanup": False, "pid_dir": str(slot), "port": self.lifecycle_port} if self.lifecycle_eligible else None
         )
@@ -1164,7 +1153,6 @@ class _ExploreRound:
             recipe=self._recipe(),
             launch=GridLaunch(
                 result_dir=self.result_dir,
-                serving_lease=self.lease,
                 server_lifecycle=lifecycle,
                 server_already_ready=self.use_warm_decision,
                 ready_server_log=warmup.server_log_path if warmup is not None else None,
@@ -1186,7 +1174,6 @@ class _ExploreRound:
             recipe=self._recipe(),
             launch=GridLaunch(
                 result_dir=self.result_dir,
-                serving_lease=self.lease,
                 server_lifecycle=lifecycle,
                 warmup_round=True,
             ),
@@ -1359,7 +1346,7 @@ class _ExploreRound:
         if self.lifecycle_eligible:  # the round boots a server of its own on the variant's GPUs
             self._reap_variant_server(slot)
         launch = variant_config_of(workspace)
-        outcome = await run_candidate_accuracy_round(slot, launch, self.ss, session=self.session_dir, lease=self.lease)
+        outcome = await run_candidate_accuracy_round(slot, launch, self.ss, session=self.session_dir)
         record_accuracy_round(row, outcome)
 
     def _apply_accuracy_gate(self, row: dict[str, Any], slot: Path) -> None:

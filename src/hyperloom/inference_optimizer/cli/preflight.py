@@ -66,7 +66,6 @@ from .preflight_env import (
     _provider_only_mode,
     _restore_provider_only_mode,
 )
-from .ray_provision import _ensure_ray
 from .server_args import validate_server_args
 
 from .credentials import (
@@ -95,7 +94,7 @@ _HEADER_REF_ALLOWLIST = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", 
 def _expand_custom_header_env_refs() -> None:
     """Resolve the credential ``${VAR}`` references in the ``*_CUSTOM_HEADERS`` settings in place.
 
-    Child processes (specialists, the Critic, GEAK on Ray) forward these verbatim, and an agent CLI sends them
+    Child processes (specialists, the Critic, GEAK) forward these verbatim, and an agent CLI sends them
     verbatim, so an unexpanded ``${ANTHROPIC_API_KEY}`` reaches the gateway as literal text and is rejected.
     References resolve against the same view ``claude_sdk_env_options`` uses, so a key it would fill in from the
     other Anthropic credential is not erased here. A reference outside ``_HEADER_REF_ALLOWLIST`` is left as
@@ -909,7 +908,7 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
 
     from hyperloom.orchestrator.actions.executors._benchmark_interpreter import _resolve_probe_python
 
-    # The load client runs on the server's interpreter, so the client and Ray installs go there.
+    # The load client runs on the server's interpreter, so the client installs go there.
     benchmark_python = _resolve_probe_python(_selected_framework(args))
 
     # Outside a venv, add --break-system-packages so pip installs on bare-metal Debian/Ubuntu.
@@ -932,13 +931,6 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
     _check_host_runtime(install_event)
 
     # --- Runtime dep install ---
-    _run_install_step(
-        install_event,
-        step_id="ensure_ray",
-        category="install",
-        action=lambda: _ensure_ray(benchmark_python, pip_extra),
-    )
-
     _run_install_step(
         install_event,
         step_id="ensure_bench_serving_deps",

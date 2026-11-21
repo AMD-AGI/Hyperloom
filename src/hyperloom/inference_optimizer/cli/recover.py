@@ -33,7 +33,7 @@ def add_cleanup_confirmation_arguments(rec: argparse.ArgumentParser) -> None:
     rec.add_argument(
         "--confirm-stopped",
         metavar="TASK_ID",
-        help="Attest that one task's complete process tree, remote workers and Ray actor have stopped, "
+        help="Attest that one task's complete process tree and remote workers have stopped, "
         "then cancel unfinished work and release only its unattributed execution/GPU ownership records. Requires POSIX session locking "
         "and --confirmation-reason; rejects recorded nonempty owner scopes. Does not stop processes, "
         "accept old results, rebuild reports or resume execution.",

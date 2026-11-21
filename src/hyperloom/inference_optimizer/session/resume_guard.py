@@ -232,7 +232,7 @@ def require_own_ledger(session_dir: Path, state: Mapping[str, Any]) -> None:
     """Refuse the resume of a credential session that has run before when there is no coordinator database for this
     account to inspect: not its own ledger (it is below the container's ``TMPDIR`` unless ``HYPERLOOM_LEDGER_DIR`` keeps
     it, so a new container has none, and another account's is its own). The earlier legs' leases and tasks cannot be
-    read, so work they left running (Ray workers, servers on other nodes) would go unseen, which the guard exists to
+    read, so work they left running (remote workers, servers on other nodes) would go unseen, which the guard exists to
     prevent.
 
     A session is a credential session when the pins hold a credential now, or an earlier leg held one and ran on a ledger
@@ -306,7 +306,7 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
             "If the environment of another owner scope is gone, record that with hyperloom recover "
             "--session-dir <session> --confirm-scope-gone <owner-scope> --confirmation-reason <reason>. "
             "For a listed task that names no owner scope (such as a lane-less CLOSE-phase step), after "
-            "verifying its entire process tree and any remote workers/Ray actors have stopped, record that "
+            "verifying its entire process tree and any remote workers have stopped, record that "
             "confirmation with hyperloom recover --session-dir <session> --confirm-stopped <task-id> "
             "--confirmation-reason <reason>; it refuses, changing nothing, a task recorded under an owner scope."
         )
@@ -452,7 +452,7 @@ def _confirmation_entry(target: _ConfirmTarget, confirmation: _Confirmation) -> 
             "task_id": target.task_id,
             "state": "cancelled",
             "result": {},
-            "error": "Operator confirmed the entire task process tree and remote workers/Ray actors stopped.",
+            "error": "Operator confirmed the entire task process tree and remote workers stopped.",
             "error_class": "operator_confirmed_stopped",
         },
     }
@@ -636,7 +636,7 @@ def _in_locked_ledger(session_dir: Path, update: Callable[[sqlite3.Connection, s
 def confirm_task_stopped(session_dir: Path, *, task_id: str, reason: str) -> dict:
     """Record an operator's explicit physical-cleanup confirmation for one task that names no owner scope.
 
-    This does not stop or inspect processes or Ray actors. The operator must first
+    This does not stop or inspect processes or remote workers. The operator must first
     verify their exit. Only empty-scope execution ownership is eligible.
     """
     if not isinstance(task_id, str) or not task_id.strip() or task_id != task_id.strip():

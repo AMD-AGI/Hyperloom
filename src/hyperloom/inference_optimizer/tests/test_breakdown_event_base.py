@@ -530,7 +530,7 @@ def test_finalize_binds_the_session_itself_so_a_re_export_can_run_it(tmp_path):
 
 
 def test_recording_without_a_bound_session_fails_instead_of_guessing_a_path():
-    # This is also the backstop for a subprocess: the ContextVar is unset inside a Ray actor, and two processes
+    # This is also the backstop for a subprocess: the ContextVar is unset inside a child process, and two processes
     # upserting one fragment lose writes.
     assert not session_is_bound()
     with pytest.raises(SessionNotBoundError):

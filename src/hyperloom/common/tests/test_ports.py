@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A long-lived server's port is below the ephemeral range and off the blocks Ray and the dev sandboxes bind."""
+"""A long-lived server's port is below the ephemeral range and off the block the dev sandboxes bind."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common import ports
-from hyperloom.common.ports import DEV_SANDBOX_PORTS, RAY_WORKER_PORTS, pick_server_port
+from hyperloom.common.ports import DEV_SANDBOX_PORTS, pick_server_port
 
 
 def _ephemeral_from(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, start: int) -> None:
@@ -19,18 +19,17 @@ def _ephemeral_from(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, start: int)
     monkeypatch.setattr(ports, "_EPHEMERAL_RANGE", path)
 
 
-def test_the_reserved_blocks_are_the_dev_sandbox_slots_and_rays_default_worker_ports() -> None:
+def test_the_reserved_block_is_the_dev_sandbox_slots() -> None:
     assert (DEV_SANDBOX_PORTS.start, DEV_SANDBOX_PORTS[-1]) == (32100, 33099)
-    assert (RAY_WORKER_PORTS.start, RAY_WORKER_PORTS[-1]) == (10002, 19999)
 
 
 @pytest.mark.parametrize("start", [32768, 28240])
-def test_a_picked_port_is_below_the_ephemeral_range_and_off_the_reserved_blocks(monkeypatch, tmp_path, start) -> None:
+def test_a_picked_port_is_below_the_ephemeral_range_and_off_the_reserved_block(monkeypatch, tmp_path, start) -> None:
     _ephemeral_from(monkeypatch, tmp_path, start)
 
     for _ in range(20):
         port = pick_server_port()
-        assert port < start and port not in DEV_SANDBOX_PORTS and port not in RAY_WORKER_PORTS
+        assert port < start and port not in DEV_SANDBOX_PORTS
 
 
 def test_the_hosts_own_ephemeral_range_is_the_one_read() -> None:

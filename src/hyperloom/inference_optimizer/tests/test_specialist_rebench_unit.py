@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import pytest
 
-from hyperloom.common.ports import DEV_SANDBOX_PORTS, RAY_WORKER_PORTS
+from hyperloom.common.ports import DEV_SANDBOX_PORTS
 from hyperloom.orchestrator.actions.executors._grid_base import VariantResult
 from hyperloom.orchestrator.specialists import rebench as sr
 
@@ -35,7 +35,7 @@ def test_resolve_port_auto_and_explicit() -> None:
     ephemeral_start = int(Path("/proc/sys/net/ipv4/ip_local_port_range").read_text(encoding="utf-8").split()[0])
     for auto in (None, 0):
         port = sr._resolve_port(auto)
-        assert port < ephemeral_start and port not in DEV_SANDBOX_PORTS and port not in RAY_WORKER_PORTS
+        assert port < ephemeral_start and port not in DEV_SANDBOX_PORTS
     assert sr._resolve_port(12345) == 12345
     assert sr._resolve_port(8888) == 8888
 

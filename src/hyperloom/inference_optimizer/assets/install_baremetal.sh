@@ -15,7 +15,7 @@
 # Phase 5  runtime env     — persist bare-metal runtime vars into .env
 #
 # Scope: bare-metal base setup only. Open-source deps and the optimizer runtime
-# (io pkg, InferenceX, kernel-agent Ray/GEAK/TraceLens, fa) are installed
+# (io pkg, InferenceX, kernel-agent GEAK/TraceLens, fa) are installed
 # by the inference_optimizer skill, not here. It STOPS before launching.
 
 set -euo pipefail

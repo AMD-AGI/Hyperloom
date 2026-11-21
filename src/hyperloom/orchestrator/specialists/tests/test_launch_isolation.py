@@ -15,7 +15,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -35,7 +34,6 @@ from hyperloom.common.agent_isolation import (
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.env_safety import RunAs
 from hyperloom_common.proctree import REAP_MARK_ENV, running
-from hyperloom.orchestrator.actions.executors._ray_serving import CreatedLog, ManagedServerProcess
 from hyperloom.orchestrator.specialists import launch_env
 from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.agent_cli_config import SpecialistAgentUnavailableError
@@ -77,16 +75,6 @@ def _place(tmp_path: Path, **overrides: Any) -> LaunchPlace:
 
 def _env(**extra: str) -> dict[str, str]:
     return {"PATH": "/usr/bin:/bin", REAP_MARK_ENV: "mark-1", **extra}
-
-
-def test_every_launch_is_isolated_as_the_chooser_says_and_a_ray_actor_never_as_an_account(monkeypatch):
-    asked: list[bool] = []
-    monkeypatch.setattr(launch_env, "choose_agent_isolation", lambda *, allow_account: asked.append(allow_account))
-
-    launch_env.resolve_launch_isolation(None)
-    launch_env.resolve_launch_isolation(object())
-
-    assert asked == [True, False]
 
 
 def test_an_unconfined_launch_runs_the_command_as_it_is(tmp_path):
@@ -164,7 +152,7 @@ def test_a_sandboxed_gpu_task_gets_its_jit_caches_in_its_workspace_not_in_the_re
     had them set (``apply_gpu_env``)."""
     place = _place(tmp_path, gpu=True)
     env = _env()
-    launch_env.apply_gpu_env(env, place.workspace, (0,), None)
+    launch_env.apply_gpu_env(env, place.workspace, (0,))
     prepare_launch(_bwrap(), place, ["claude"], env).release()
 
     cache = place.workspace / ".cache"
@@ -326,8 +314,6 @@ def test_a_sandbox_launch_with_no_policy_is_refused_never_run_unconfined(tmp_pat
 
     with pytest.raises(IsolationRefused, match="no sandbox policy"):
         prepared.local(["claude"], _env())
-    with pytest.raises(IsolationRefused, match="no sandbox policy"):
-        prepared.actor(["claude"], _env())
     assert prepared.status is None
 
 
@@ -771,28 +757,6 @@ def test_a_sandbox_whose_agent_carries_no_mark_is_not_waited_on(tmp_path):
         child.wait(timeout=5)
 
 
-def test_a_ray_actor_launch_opens_its_status_file_in_a_shell_and_dies_with_the_actor(tmp_path):
-    """``--die-with-parent`` stays whatever thread here builds the launch: the actor's thread starts bubblewrap."""
-    place = _place(tmp_path)
-    env = _env()
-    prepared = prepare_launch(_bwrap(), place, ["claude"], env)
-    try:
-        built: list = []
-        worker = threading.Thread(target=lambda: built.append(prepared.actor(["claude"], env)))
-        worker.start()
-        worker.join()
-        [spawn] = built
-        status_path = Path(spawn.argv[3])
-        assert spawn.argv[:3] == ["/bin/sh", "-c", 'exec 3>>"$0" && exec "$@"'] and spawn.argv[4] == FAKE_BWRAP
-        assert spawn.argv[spawn.argv.index("--json-status-fd") + 1] == "3"
-        assert "--die-with-parent" in spawn.argv and spawn.kwargs == {} and REAP_MARK_ENV not in spawn.env
-        assert status_path.parent.stat().st_mode & 0o777 == 0o700 and not status_path.exists()
-        assert isinstance(prepared.started(object()), SandboxedProcess)
-    finally:
-        prepared.release()
-    assert not status_path.parent.exists()
-
-
 def test_the_reap_reads_each_tiers_marks_its_own_way(monkeypatch):
     seen: list[str] = []
     monkeypatch.setattr(launch_env, "marked_pids", lambda key, value: seen.append(f"app:{value}") or [])
@@ -803,79 +767,6 @@ def test_the_reap_reads_each_tiers_marks_its_own_way(monkeypatch):
     PreparedLaunch(AccountIsolation(RunAs("u", 1, 1, (1,), "/h"))).marked_pids("c")
 
     assert seen == ["app:a", "app:b", "as:c"]
-
-
-class _ActorHere:
-    """A Ray GPU lease whose actor is this process: the actor's process manager starts the launch it is given, after
-    ``before`` (given the log's path) has run."""
-
-    def __init__(self, before: Any = None) -> None:
-        self.manager = ManagedServerProcess()
-        self.before = before
-        self.pid: int | None = None
-
-    def start_async(self, launch: Any) -> None:
-        if self.before is not None:
-            self.before(Path(launch.log_path))
-        self.pid = self.manager.start(
-            launch.cmd,
-            env=launch.env,
-            cwd=launch.cwd,
-            log_path=CreatedLog(launch.log_path, launch.log_identity),
-            stdin_path=launch.stdin_path,
-        )
-
-    def poll_started(self) -> int | None:
-        return self.pid
-
-    def is_alive(self) -> bool:
-        return self.manager.is_alive()
-
-    def exit_code(self) -> int | None:
-        return self.manager.exit_code()
-
-    def stop(self) -> bool:
-        return self.manager.stop()
-
-    def close(self) -> bool:
-        return self.manager.stop()
-
-
-_SAYS = """#!/bin/sh
-cat > /dev/null
-echo agent-output
-echo '{"summary": "ran", "proposal_set": []}' > specialist_done.json
-"""
-
-
-async def test_a_ray_actor_writes_the_agents_output_to_a_log_made_fresh_and_never_through_a_link_left_there(
-    tmp_path: Path,
-) -> None:
-    """A retry of a task finds its workspace as the last agent left it: a link at ``process.log`` is replaced, not
-    followed, and one put there after the app made the log, before the actor opens it, is refused."""
-    victim = tmp_path / "victim.txt"
-    victim.write_text("the app's own\n", encoding="utf-8")
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    (workspace / "process.log").symlink_to(victim)
-    cli = tmp_path / "cli" / "claude"
-    cli.parent.mkdir()
-    cli.write_text(_SAYS, encoding="utf-8")
-    cli.chmod(0o755)
-
-    ran = await _login_dispatcher(cli).run(replace(_login_spawn(workspace), gpu_lease=_ActorHere()))
-
-    def swap(log: Path) -> None:
-        log.unlink()
-        log.symlink_to(victim)
-
-    raced = await _login_dispatcher(cli).run(replace(_login_spawn(tmp_path / "ws2"), gpu_lease=_ActorHere(swap)))
-
-    assert ran.error == "" and ran.exit_code == 0 and ran.done_payload["summary"] == "ran"
-    log = workspace / "process.log"
-    assert not log.is_symlink() and "agent-output" in log.read_text(encoding="utf-8")
-    assert raced.error == "failed to submit specialist GPU actor: OSError(40, 'Too many levels of symbolic links')"
-    assert victim.read_text(encoding="utf-8") == "the app's own\n"
 
 
 def test_a_sandbox_gets_the_relay_of_its_own_network_and_never_the_apps_proxy_or_its_login(tmp_path):

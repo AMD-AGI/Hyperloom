@@ -607,7 +607,6 @@ class _ArmServer:
     port: int
     framework: str
     lifecycle: bool
-    lease: Any = None
     attempted: list[GridVariant] = field(default_factory=list)
     failed: list[VariantResult] = field(default_factory=list)
     booted: GridVariant | None = None
@@ -618,7 +617,6 @@ class _ArmServer:
     def boot_round(self) -> _ArmRound:
         return _ArmRound(
             GridLaunch(
-                serving_lease=self.lease,
                 server_lifecycle=self._server_lifecycle(cleanup=False),
                 server_already_ready=False,
                 warmup_before_measure=False,
@@ -629,7 +627,6 @@ class _ArmServer:
     def reuse_round(self, *, cleanup: bool) -> _ArmRound:
         return _ArmRound(
             GridLaunch(
-                serving_lease=self.lease,
                 server_lifecycle=self._server_lifecycle(cleanup=cleanup),
                 server_already_ready=True,
                 warmup_before_measure=False,
@@ -638,7 +635,7 @@ class _ArmServer:
         )
 
     def restart_round(self) -> _ArmRound:
-        return _ArmRound(GridLaunch(serving_lease=self.lease), label="server_restart")
+        return _ArmRound(GridLaunch(), label="server_restart")
 
     def teardown(self) -> None:
         if survivors := teardown_variant_server(self.pid_dir):
@@ -650,7 +647,7 @@ class _ArmServer:
             )
 
     def close(self, run: _SweepRun, exc: BaseException | None) -> None:
-        """Take the arm's server down, release its lease and close its row, however its ladder ended."""
+        """Take the arm's server down and close its row, however its ladder ended."""
         if self.lifecycle:
             try:
                 self.teardown()
@@ -662,8 +659,6 @@ class _ArmServer:
                     run.recorder.record_fault(stage=f"teardown_variant_server:{self.arm_name}", exc=teardown_exc)
             if self.attempted:
                 run.record_boot(self.arm_name, self.attempted, self.failed, self.booted)
-        if self.lease is not None:
-            self.lease.close()
         run.close_arm(self.arm_name, exc)
 
 
@@ -685,7 +680,7 @@ class _RungRun:
         )
 
 
-def _resolve_arm_strategy(run: _SweepRun, arm_name: str, *, serving_lease_held: bool) -> ArmStrategy:
+def _resolve_arm_strategy(run: _SweepRun, arm_name: str) -> ArmStrategy:
     """How one arm runs its ladder: on one persistent server when its framework is lifecycle-eligible."""
     from ..actions.executors._server_lifecycle import resolve_lifecycle_params
 
@@ -704,7 +699,6 @@ def _resolve_arm_strategy(run: _SweepRun, arm_name: str, *, serving_lease_held: 
         lifecycle_reason=lc_reason,
         port=port,
         framework=framework,
-        serving_lease_held=serving_lease_held,
     )
     if recorder is not None:
         recorder.record_arm_strategy(arm_name, arm_strategy)
@@ -718,9 +712,6 @@ async def _sweep_arm(
 
     The ladder's other rungs are recorded as never run under ``unpaired``, the stop that kept the first arm from them.
     """
-    from ..actions.executors._grid_runner import lease_cards
-    from ..actions.executors._ray_serving import maybe_serving_lease
-
     grid = run.arm_grid(arm)
     if run.refuse_arm(arm, grid):
         return
@@ -744,10 +735,7 @@ async def _sweep_arm(
         run.close_arm(arm.name, None)
         return
 
-    # Ray-managed GPU execution: one held Ray lease (as many GPUs as the launch occupies) spans the arm's whole ladder -- its persistent
-    # server's boot and every reuse round, or each per-rung restart -- so no GPU process outlives it.
-    lease = maybe_serving_lease(num_gpus=lease_cards(run.base_yaml_path, run.session_dir))
-    strategy = _resolve_arm_strategy(run, arm.name, serving_lease_held=lease is not None)
+    strategy = _resolve_arm_strategy(run, arm.name)
     pid_dir = run.workspace / f"server_{arm.name}"
     pid_dir.mkdir(parents=True, exist_ok=True)
     server = _ArmServer(
@@ -756,7 +744,6 @@ async def _sweep_arm(
         port=strategy.port,
         framework=strategy.framework,
         lifecycle=strategy.lifecycle_eligible,
-        lease=lease,
     )
     failure: BaseException | None = None
     try:

@@ -87,7 +87,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.state.shared_state
     hyperloom.inference_optimizer.cli.model_gate -> hyperloom.orchestrator.actions.executors.report
     hyperloom.inference_optimizer.cli.model_gate -> hyperloom.orchestrator.state.shared_state
-    hyperloom.inference_optimizer.cli.multi_node -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.phases.quantization_schemes
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.policy.gate
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
@@ -448,7 +447,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.state.shared_state
     hyperloom.inference_optimizer.cli.model_gate -> hyperloom.orchestrator.actions.executors.report
     hyperloom.inference_optimizer.cli.model_gate -> hyperloom.orchestrator.state.shared_state
-    hyperloom.inference_optimizer.cli.multi_node -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.phases.quantization_schemes
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.policy.gate
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
@@ -526,7 +524,6 @@ ignore_imports =
     hyperloom.orchestrator.specialists.runner -> hyperloom.orchestrator.prompts.specialist_prompt_builder
     hyperloom.orchestrator.specialists.selfcheck -> hyperloom.orchestrator.enablement.runtime.build_utils
     hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.actions.cancel_channel
-    hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.actions.executors._ray_serving
     hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.loop.sub_agent_runner
     hyperloom.orchestrator.state._shared_state.phase_state -> hyperloom.orchestrator.specialists.domains
     hyperloom.orchestrator.state._shared_state.render -> hyperloom.orchestrator.actions.executors._proposal_identity

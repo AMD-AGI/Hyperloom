@@ -63,7 +63,6 @@ from .benchmark_result import (
 from ._gpu_metrics import write_gpu_metrics_from_report
 from ._round_folder import RoundFolder, is_round_folder, round_report_path
 from ._suite.rounds import SuiteRoundRefused, suite_route
-from hyperloom.orchestrator.state.base_launch import session_cards
 from .benchmark_config import composed_benchmark_timeout_sec
 from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
 from ._spec_decode_pin import SpeculativeDecodingPinnedError, refuse_unpinned_speculative_change
@@ -357,7 +356,6 @@ class GridLaunch:
     """How each round of a grid is launched: its result dir, and the server it runs on."""
 
     result_dir: str | None = None
-    serving_lease: Any = None
     server_lifecycle: dict[str, Any] | None = None
     server_already_ready: bool = False
     ready_server_log: str | None = None
@@ -390,16 +388,6 @@ class GridStop:
         return replace(
             self, session_deadline_sec=phase.at, deadline_stop=STOPPED_BY_THE_RUN[PHASE_TIME_EXHAUSTED_CLASS]
         )
-
-
-def lease_cards(config_path: Path, session: Path) -> int:
-    """The GPUs a serving lease holds for the point at ``config_path``: as many as its launch occupies in the session
-    at ``session`` (:func:`session_cards`)."""
-    try:
-        tp = int(read_benchmark_point(Path(config_path)).envs.get("TP", 1) or 1)
-    except (OSError, ValueError, TypeError, yaml.YAMLError):  # best-effort; default to 1 GPU
-        tp = 1
-    return session_cards(session, tp)
 
 
 def _resolve_mn_effective_server_args(cfg_path: Path) -> str:
@@ -721,11 +709,11 @@ async def _reported_round(run: _GridRun, at: _VariantSlot, label: str, bench_rou
         index=at.idx + 1,
         total=len(run.grid),
     ) as activity:
-        unset, lease = frozenset(at.variant.unset_envs), run.launch.serving_lease
+        unset = frozenset(at.variant.unset_envs)
         try:
             route = await asyncio.to_thread(suite_route, _resolve_session_dir())
             ended = await asyncio.to_thread(
-                run_grid_suite_round, route, bench_round, env_drop=unset, serving_lease=lease, on_poll=activity.note
+                run_grid_suite_round, route, bench_round, env_drop=unset, on_poll=activity.note
             )
         except SuiteRoundRefused as exc:
             log.warning(

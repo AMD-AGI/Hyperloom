@@ -1110,26 +1110,6 @@ async def test_unpromotable_baseline_failures_stop_the_run_at_the_third(coord: C
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["", "ENABLEMENT"], ids=["outside_enablement", "in_enablement"])
-async def test_unpromotable_baseline_infeasible_ray_cluster_stops_on_the_first(coord: Coordinator, phase: str) -> None:
-    """A Ray cluster that cannot place the round fails the same way every time, and no patch changes that."""
-    from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
-
-    coord.shared_state.phase = phase
-    result = {
-        "status": "failed",
-        "error_class": "subprocess_nonzero",
-        "error": f"ray_ensure_error: {RAY_INFEASIBLE_MARKER}: existing Ray head has no serving_slot resource",
-    }
-
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-ray-1"), result)
-
-    assert coord.shared_state.stop_reason == "baseline_failed"
-    # Not handed to the enablement lane as something to author a patch against.
-    assert not (coord.shared_state.enablement.launch_log or "").strip()
-
-
-@pytest.mark.asyncio
 async def test_unpromotable_baseline_failures_in_enablement_do_not_stop_the_run(coord: Coordinator) -> None:
     """An ordinary boot failure is enablement's input; while the lane owns the retries, three do not stop the run."""
     from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
