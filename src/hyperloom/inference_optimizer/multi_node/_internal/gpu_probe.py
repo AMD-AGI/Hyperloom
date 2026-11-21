@@ -18,7 +18,7 @@ import httpx
 from ...gpu_types import parse_gpu_type
 from . import ray_dashboard, ssh_client, ssh_known_hosts
 from .external_state import build_external_state_from_env, external_service_url
-from .topology_file import PD_ROUTER_BACKENDS
+from .topology_file import SSH_FANOUT_BACKENDS
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def remote_autodetect_gpu_type(*, timeout_s: int = 60) -> str | None:
     try:
         if backend == "rayjob":
             return _probe_via_ray_head(state, timeout_s=timeout_s)
-        if backend in ("infera", *PD_ROUTER_BACKENDS):
+        if backend in SSH_FANOUT_BACKENDS:
             return _probe_via_infera_ssh(state, timeout_s=timeout_s)
         log.warning("remote GPU probe: unsupported backend %r", backend)
     except (httpx.HTTPError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:

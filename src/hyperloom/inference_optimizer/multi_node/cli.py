@@ -59,7 +59,7 @@ from .pod_entrypoints import (
 from .restart_pd_args import add_restart_pd_role_arguments, add_restart_pd_shape_arguments
 from ._internal.env_safety import filter_forward_env
 from ._internal.serving_probe import cluster_is_serving
-from ._internal.topology_file import PD_ROUTER_BACKENDS
+from ._internal.topology_file import PD_ROUTER_BACKENDS, SSH_FANOUT_BACKENDS
 
 
 # Overall budget for the HTTP serving probe, spanning every request it makes: one /health per leg, /v1/models, then a
@@ -72,8 +72,8 @@ _DEFAULT_RESUME_PROBE_TIMEOUT_S = 30
 
 
 def install_geak_on_pods_best_effort() -> int:
-    """Install GEAK on the Infera GPU pods (provisioner hook); raised errors propagate, the return code is the caller's."""
-    if _load_state().get("backend") != "infera":
+    """Install GEAK on the Infera or PD engine pods (provisioner hook); raised errors propagate, the return code is the caller's."""
+    if _load_state().get("backend") not in SSH_FANOUT_BACKENDS:
         return 0
     ns = argparse.Namespace(
         geak_src=None,
@@ -255,7 +255,7 @@ from .commands.infera import (
 
 def cmd_apply_patch(args: argparse.Namespace) -> int:
     """Fan out a kernel patch to every pod (head + workers)."""
-    if _load_state().get("backend") == "infera":
+    if _load_state().get("backend") in SSH_FANOUT_BACKENDS:
         return _infera_apply_patch(args)
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
@@ -305,7 +305,7 @@ def cmd_apply_patch(args: argparse.Namespace) -> int:
 
 def cmd_revert_patch(args: argparse.Namespace) -> int:
     """Fan out a kernel patch revert across the pods that originally received it."""
-    if _load_state().get("backend") == "infera":
+    if _load_state().get("backend") in SSH_FANOUT_BACKENDS:
         return _infera_revert_patch(args)
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
@@ -350,7 +350,7 @@ def cmd_revert_patch(args: argparse.Namespace) -> int:
 
 def cmd_finalize_patch(args: argparse.Namespace) -> int:
     """Delete backups after a patch becomes the accepted baseline."""
-    if _load_state().get("backend") == "infera":
+    if _load_state().get("backend") in SSH_FANOUT_BACKENDS:
         return _infera_finalize_patch(args)
     state = _load_state()
     if not (state.get("head_pod_ip") or "").strip():
@@ -383,7 +383,7 @@ def cmd_finalize_patch(args: argparse.Namespace) -> int:
 
 def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
     """Fan out the TraceLens SGLang patch set to every pod via apply_tracelens_patch_multinode.py; multi-node only."""
-    if _load_state().get("backend") == "infera":
+    if _load_state().get("backend") in SSH_FANOUT_BACKENDS:
         return _infera_apply_tracelens_patch(args)
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()

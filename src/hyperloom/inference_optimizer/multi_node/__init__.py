@@ -17,6 +17,7 @@ from ._internal.ssh_client import SshTarget, ssh_run
 from ._internal.topology_file import (
     MN_BACKENDS,
     PD_ROUTER_BACKENDS,
+    SSH_FANOUT_BACKENDS,
     TopologyHandoffError,
     normalize_mn_backend,
     topology_file_overlay,
@@ -26,6 +27,7 @@ __all__ = [
     "INFERA_POD_LOG_FILE",
     "MN_BACKENDS",
     "PD_ROUTER_BACKENDS",
+    "SSH_FANOUT_BACKENDS",
     "SshTarget",
     "TopologyHandoffError",
     "completion_probe_min_tokens",

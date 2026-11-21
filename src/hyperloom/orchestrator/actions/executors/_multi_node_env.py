@@ -19,6 +19,7 @@ from hyperloom.inference_optimizer.multi_node._internal.external_state import (
     load_multi_node_state,
     reachable_service_url,
 )
+from hyperloom.inference_optimizer.multi_node import SSH_FANOUT_BACKENDS
 from hyperloom.inference_optimizer.multi_node.state_paths import resolve_state_file
 from hyperloom.inference_optimizer.recipe_snapshot_constants import KbTopology
 
@@ -200,7 +201,7 @@ def infera_ssh_env_from_state() -> dict[str, str]:
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
 
     state = _read_state()
-    if state.get("backend") != "infera":
+    if state.get("backend") not in SSH_FANOUT_BACKENDS:
         return {}
     targets = infera_support.gpu_ssh_targets_from_state(state)
     key = str(state.get("ssh_key_path") or "").strip()
