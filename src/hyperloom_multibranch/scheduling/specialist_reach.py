@@ -35,7 +35,6 @@ log = logging.getLogger(__name__)
 
 #: The name a probe directory starts with below the branch directory; it is removed once the probe ends.
 PROBE_PREFIX = ".MB-reach-"
-PROBE_FILE = "probe"
 PROBE_TIMEOUT_SEC = 60.0
 #: Searches each directory after the first argument, then writes and reads a file in the first; says which failed.
 PROBE_SCRIPT = """\
