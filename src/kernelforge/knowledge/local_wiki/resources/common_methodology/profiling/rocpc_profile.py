@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import glob
 import importlib.util
 import os
@@ -51,16 +52,44 @@ def _python_can_run_rocpc(python: str, libexec: str) -> bool:
         return False
 
 
+# Prints the ROCm tree the interpreter's torch has mapped its HIP runtime from, or nothing without one.
+_LOADED_ROCM_ROOT_PROBE = """
+import os, torch
+for line in open("/proc/self/maps"):
+    path = line.split()[-1]
+    if os.path.basename(path).startswith("libamdhip64"):
+        print(os.path.dirname(os.path.dirname(path)))
+        break
+"""
+
+
+@functools.lru_cache(maxsize=None)
+def _loaded_rocm_root(python: str) -> str | None:
+    """ROCm tree ``python``'s torch loads its HIP runtime from, or None when it has none to name.
+
+    Pip-packaged ROCm can install the same libraries twice, in _rocm_sdk_core and in _rocm_sdk_devel, and torch loads
+    one of them. A profiler taken from the other maps a second copy of LLVM into the profiled process, and the two
+    registering the same options abort it before any kernel runs.
+    """
+    try:
+        probe = subprocess.run([python, "-c", _LOADED_ROCM_ROOT_PROBE], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    lines = probe.stdout.split() if probe.returncode == 0 else []
+    return lines[-1] if lines else None
+
+
 def _rocm_profiler_runtime_root() -> str | None:
     """ROCm tree holding the profiler's own rocprofiler-sdk libraries.
 
-    Pip-packaged ROCm splits these across wheels: the runtime-only stack ships
-    only _rocm_sdk_core and leaves ROCM_PATH unset, and rocprof-compute then
-    cannot resolve its sdk tool and aborts before profiling anything.
+    The tree the profiled interpreter's torch already loads comes first, so the profiler joins the libraries in the
+    process instead of adding a second copy of them. Pip-packaged ROCm also splits these across wheels: the
+    runtime-only stack ships only _rocm_sdk_core and leaves ROCM_PATH unset, and rocprof-compute then cannot resolve
+    its sdk tool and aborts before profiling anything.
     """
-    current = os.environ.get("ROCM_PATH", "").strip()
-    if current and os.path.isdir(os.path.join(current, "lib", "rocprofiler-sdk")):
-        return current
+    for current in (_loaded_rocm_root(sys.executable), os.environ.get("ROCM_PATH", "").strip()):
+        if current and os.path.isdir(os.path.join(current, "lib", "rocprofiler-sdk")):
+            return current
     for pkg in ("_rocm_sdk_devel", "_rocm_sdk_core"):
         try:
             spec = importlib.util.find_spec(pkg)
@@ -79,6 +108,8 @@ def _profiler_env() -> dict:
     if not root:
         return env
     env["ROCM_PATH"] = root
+    # rocprofv3 is taken from the same tree as the libraries it loads, ahead of whichever one PATH names first.
+    env["PATH"] = os.pathsep.join(p for p in (os.path.join(root, "bin"), env.get("PATH", "")) if p)
     # amdsmi ships inside the SDK wheel rather than on sys.path. The PyPI build
     # cannot stand in: it is ROCm 7 era and resolves libamd_smi.so under
     # /opt/rocm, which does not exist on this layout.

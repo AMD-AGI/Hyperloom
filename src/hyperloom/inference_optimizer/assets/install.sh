@@ -1170,12 +1170,13 @@ print(importlib.metadata.version("rocm"))
 PY
 }
 
-# Echo the ROCm tree carrying rocprofiler-sdk, or non-zero when there is none.
-# Pip-packaged ROCm splits this across wheels and $ROCM_PATH does not always
-# point at the one that has it.
-_rocm_sdk_runtime_root() {
-  local root
-  root="$("$PYTHON" - <<'PY' 2>/dev/null
+# Echo every ROCm tree carrying rocprofiler-sdk, one per line, or non-zero when
+# there is none. Pip-packaged ROCm splits this across wheels, can ship it in more
+# than one of them, and $ROCM_PATH does not always point at the one a profiled
+# process loads.
+_rocm_sdk_runtime_roots() {
+  local roots
+  roots="$("$PYTHON" - <<'PY' 2>/dev/null
 import importlib.util, os
 for pkg in ("_rocm_sdk_devel", "_rocm_sdk_core"):
     try:
@@ -1185,32 +1186,36 @@ for pkg in ("_rocm_sdk_devel", "_rocm_sdk_core"):
     for root in list(getattr(spec, "submodule_search_locations", None) or []):
         if os.path.isdir(os.path.join(root, "lib", "rocprofiler-sdk")):
             print(root)
-            raise SystemExit(0)
 PY
-  )" || root=""
-  [ -n "$root" ] || return 1
-  printf '%s\n' "$root"
+  )" || roots=""
+  [ -n "$roots" ] || return 1
+  printf '%s\n' "$roots"
 }
 
 # rocprofiler-sdk dlopens aqlprofile by its unversioned soname, which the
 # rocm-sdk-core wheel omits while shipping the versioned file. Without the link
-# the sdk aborts on SIGABRT mid-profile and hangs instead of reporting. Images
-# that do ship the soname are left alone.
+# the sdk aborts on SIGABRT mid-profile and hangs instead of reporting. Every
+# tree is covered, not the first: rocpc_profile.py profiles through the one the
+# workload's torch loads, which on an image carrying both wheels is the one
+# that lacks the soname. Trees that do ship it are left alone.
 _ensure_aqlprofile_soname() {
-  local root lib
-  root="$(_rocm_sdk_runtime_root)" || return 0
-  lib="${root%/}/lib"
-  [ -e "${lib}/libhsa-amd-aqlprofile64.so" ] && return 0
-  [ -f "${lib}/libhsa-amd-aqlprofile64.so.1" ] || return 0
-  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    log "would link libhsa-amd-aqlprofile64.so -> libhsa-amd-aqlprofile64.so.1 in ${lib}"
-    return 0
-  fi
-  if ln -s libhsa-amd-aqlprofile64.so.1 "${lib}/libhsa-amd-aqlprofile64.so" 2>/dev/null; then
-    log "rocprof-compute: linked the missing libhsa-amd-aqlprofile64.so soname in ${lib}"
-  else
-    warn "rocprof-compute: could not link libhsa-amd-aqlprofile64.so in ${lib}; profiling will abort in rocprofiler-sdk"
-  fi
+  local roots root lib
+  roots="$(_rocm_sdk_runtime_roots)" || return 0
+  while IFS= read -r root; do
+    lib="${root%/}/lib"
+    [ -e "${lib}/libhsa-amd-aqlprofile64.so" ] && continue
+    [ -f "${lib}/libhsa-amd-aqlprofile64.so.1" ] || continue
+    if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+      log "would link libhsa-amd-aqlprofile64.so -> libhsa-amd-aqlprofile64.so.1 in ${lib}"
+      continue
+    fi
+    if ln -s libhsa-amd-aqlprofile64.so.1 "${lib}/libhsa-amd-aqlprofile64.so" 2>/dev/null; then
+      log "rocprof-compute: linked the missing libhsa-amd-aqlprofile64.so soname in ${lib}"
+    else
+      warn "rocprof-compute: could not link libhsa-amd-aqlprofile64.so in ${lib}; profiling will abort in rocprofiler-sdk"
+    fi
+  done <<< "$roots"
+  return 0
 }
 
 # Home of the private venv analyze mode runs in. rocpc_profile.py derives the

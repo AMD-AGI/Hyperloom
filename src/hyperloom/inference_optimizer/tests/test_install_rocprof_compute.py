@@ -248,7 +248,7 @@ export ROCPC_WHEEL_LIBEXEC="{wheel_libexec if wheel_tool_present else ""}"
 
 {_extract_fn_optional("_ensure_rocpc_analyze_venv")}
 
-{_extract_fn_optional("_rocm_sdk_runtime_root")}
+{_extract_fn_optional("_rocm_sdk_runtime_roots")}
 
 {_extract_fn_optional("_ensure_aqlprofile_soname")}
 
@@ -601,6 +601,35 @@ def test_dry_run_creates_no_aqlprofile_link(tmp_path: Path) -> None:
         r = _run(tmp_path / mode, tool_present=True, pandas_state="v2", aqlprofile="versioned-only", **flags)
         assert r["rc"] == 0 and r["reached_end"], r["out"]
         assert not (r["sdk_lib"] / "libhsa-amd-aqlprofile64.so").exists(), f"{mode} must touch nothing:\n{r['out']}"
+
+
+def test_restores_the_soname_in_every_tree_that_carries_the_sdk(tmp_path: Path) -> None:
+    """An image with both ROCm wheels ships the soname in _rocm_sdk_devel only, while a torch workload is profiled
+    through _rocm_sdk_core, the tree torch itself loads."""
+    devel, core = (tmp_path / name / "lib" for name in ("_rocm_sdk_devel", "_rocm_sdk_core"))
+    for lib in (devel, core):
+        (lib / "rocprofiler-sdk").mkdir(parents=True)
+        (lib / "libhsa-amd-aqlprofile64.so.1").write_text("", encoding="utf-8")
+    (devel / "libhsa-amd-aqlprofile64.so").write_text("", encoding="utf-8")
+    python = tmp_path / "python"
+    python.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "{devel.parent}" "{core.parent}"\n', encoding="utf-8")
+    python.chmod(0o755)
+    script = tmp_path / "harness.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        'log() { echo "[log] $*"; }\nwarn() { echo "[warn] $*"; }\n'
+        f'CHECK_ONLY=0\nDRY_RUN=0\nPYTHON="{python}"\n'
+        f"{_extract_fn('_rocm_sdk_runtime_roots')}\n{_extract_fn('_ensure_aqlprofile_soname')}\n"
+        "_ensure_aqlprofile_soname\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(["bash", str(script)], text=True, capture_output=True, check=False)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    link = core / "libhsa-amd-aqlprofile64.so"
+    assert link.is_symlink() and link.resolve().name == "libhsa-amd-aqlprofile64.so.1", proc.stdout
+    assert not (devel / "libhsa-amd-aqlprofile64.so").is_symlink(), "a tree that ships the soname must be untouched"
 
 
 def test_static_aqlprofile_link_is_relative() -> None:
