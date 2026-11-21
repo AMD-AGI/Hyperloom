@@ -301,6 +301,66 @@ def test_cstr_table_writes_undecodable_environment_bytes_back_unchanged(monkeypa
     assert written[0] == raw + b"\0"
 
 
+class _FakeCli:
+    """Records SSH scripts per IP and answers with a scripted stdout."""
+
+    def __init__(self, replies: dict[str, str]) -> None:
+        self.replies = replies
+        self.calls: list[tuple[str, str]] = []
+
+    def _infera_ssh_bash_with_env(self, state, ip, script, *, timeout, port=None):
+        self.calls.append((ip, script))
+        return subprocess.CompletedProcess(["ssh"], 0, stdout=self.replies.get(ip, ""), stderr="")
+
+
+_PD_STATE = {
+    "backend": "sglangrouter",
+    "ssh_port": 29000,
+    "prefill_pods": [{"role": "prefill", "podIP": "10.0.0.1", "sshPort": 29000}],
+    "decode_pods": [{"role": "decode", "podIP": "10.0.0.2", "sshPort": 29000}],
+}
+
+
+def test_engines_not_running_names_pods_whose_launch_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeCli({"10.0.0.1": "HL_ALIVE\n", "10.0.0.2": "HL_GONE\n"})
+    monkeypatch.setattr(pd_cmds, "_mn_cli", fake)
+    assert pd_cmds.engines_not_running(dict(_PD_STATE)) == ["decode 10.0.0.2"]
+    assert "/tmp/hyperloom-mn-decode.pid" in dict(fake.calls)["10.0.0.2"]
+
+
+class _LocalCli:
+    """Runs the SSH script on this host instead of a pod."""
+
+    def _infera_ssh_bash_with_env(self, state, ip, script, *, timeout, port=None):
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=timeout)
+
+
+def test_engines_not_running_counts_an_engine_waiting_in_its_launch_script(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The launch script holds the pid while it waits for the GPU; that engine is starting, not gone."""
+    launch = tmp_path / "hyperloom-mn-decode.sh"
+    launch.write_text("#!/bin/bash\nsleep 30\n", encoding="utf-8")
+    launch.chmod(0o755)
+    pidfile = tmp_path / "decode.pid"
+    monkeypatch.setattr(pd_cmds, "_mn_cli", _LocalCli())
+    monkeypatch.setattr(pd_cmds, "pidfile_path", lambda role: str(pidfile))
+    monkeypatch.setattr(pd_cmds, "launch_path", lambda role: str(launch))
+    state = dict(_PD_STATE, prefill_pods=[])
+    waiting = subprocess.Popen([str(launch)])
+    other = subprocess.Popen(["sleep", "30"])
+    try:
+        time.sleep(0.2)
+        pidfile.write_text(str(waiting.pid), encoding="utf-8")
+        assert pd_cmds.engines_not_running(state) == []
+        pidfile.write_text(str(other.pid), encoding="utf-8")
+        assert pd_cmds.engines_not_running(state) == ["decode 10.0.0.2"]
+    finally:
+        for proc in (waiting, other):
+            proc.kill()
+            proc.wait()
+
+
 def test_remote_driver_finds_the_server_by_its_needle(tmp_path: Path) -> None:
     driver = pd_remote._remote_program().replace("\nrestart_remote_main()\n", "\n")
     scope: dict[str, object] = {"os": os}
@@ -430,6 +490,14 @@ def test_detached_spawn_logs_to_file_and_console(monkeypatch: pytest.MonkeyPatch
         time.sleep(0.05)
     assert f"hl-spawned-{pid}" in log_file.read_text(encoding="utf-8")
     assert f"hl-spawned-{pid}" in console.read_text(encoding="utf-8")
+
+
+def test_liveness_probe_greps_the_engine_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeCli({"10.0.0.1": "HL_ALIVE\n", "10.0.0.2": "HL_ALIVE\n"})
+    monkeypatch.setattr(pd_cmds, "_mn_cli", fake)
+    assert pd_cmds.engines_not_running(dict(_PD_STATE)) == []
+    script = dict(fake.calls)["10.0.0.1"]
+    assert "grep -qF -e sglang.launch_server" in script
 
 
 def _run_launch(tmp_path: Path, command: str, env: dict[str, str], *, log_ip: str = "") -> subprocess.CompletedProcess:
