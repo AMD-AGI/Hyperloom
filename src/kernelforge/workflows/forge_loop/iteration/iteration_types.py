@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, CaseAggregate
 from kernelforge.workflows.forge_loop.campaign.decision_labels import DecisionLabel
 from kernelforge.workflows.forge_loop.memory.lessons import SummaryOutcome
 from kernelforge.utils.new_path_allowlist import normalize_commit_new_paths
@@ -112,6 +112,8 @@ class IterationConfig:
     # How many times each bench repeats its measurement in-process, reporting the per-case median. 1 selects
     # single-shot behavior (and omits the --repeat flag entirely, so drivers that don't accept it are unaffected).
     bench_repeat: int = 1
+    # How one measurement's per-case speedups combine into the score every KEEP, gate and report is judged on.
+    case_aggregate: CaseAggregate = CaseAggregate.ARITHMETIC
     # Implementer lanes run concurrently from one round's analysis, each in its own workspace copy, and each candidate
     # is measured on its own. 1 keeps the single fused plan and single session this loop has always run; fan-out also
     # needs an ``agent_factory``, because a session is bound to its workspace.

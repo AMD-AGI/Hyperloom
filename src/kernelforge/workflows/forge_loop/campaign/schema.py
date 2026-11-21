@@ -30,7 +30,7 @@ class Iteration:
     # but it withdraws the published improvement badge when it contradicts the
     # score (see BestResultPublisher.publish).
     wall_ms: float | None = None
-    # Equal-weight arithmetic mean of per-case speedups.
+    # Equal-weight mean of per-case speedups, under the campaign's case aggregate.
     mean_case_speedup: float | None = None
 
     # Register info

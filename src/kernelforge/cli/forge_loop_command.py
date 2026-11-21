@@ -17,7 +17,7 @@ from kernelforge.cli.options import (
     _validate_max_hours,
     _validate_optional_agent_provider,
 )
-from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, CaseAggregate
 from kernelforge.workflows.forge_loop.api import (
     ForgeLoopError,
     ForgeLoopUsageError,
@@ -224,6 +224,18 @@ ANALYSIS_TIMEOUT_SEC = 7200
             "reporting the per-case median. Default 1 (single shot). >1 "
             "shrinks run-to-run spread. Requires a driver that accepts "
             "--repeat; the flag is omitted entirely when this is 1.",
+        ),
+        click.option(
+            "--case-aggregate",
+            default=CaseAggregate.ARITHMETIC.value,
+            type=click.Choice([aggregate.value for aggregate in CaseAggregate]),
+            help="How one measurement's per-case speedups combine into the score "
+            "every KEEP, in-session gate and report is judged on. Every case "
+            "weighs the same under both; 'arithmetic' (default) counts a large "
+            "gain on one case in full, 'geometric' counts its ratio. Choose the "
+            "one whoever consumes the result scores by. Immutable per campaign: "
+            "it is snapshotted into campaign_config.json and read back on "
+            "--resume.",
         ),
         click.option(
             "--commit-new-path",

@@ -32,6 +32,7 @@ from kernelforge.workflows.forge_loop.memory.lessons import SessionEnd
 from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,
+    CaseAggregate,
     GateScoring,
     keep_t_critical,
 )
@@ -237,8 +238,8 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
     `python3 {driver_run} --warmup 3 --iters 20 --bench-mode`
   prints per-case `case_ms: <case> <ms>` plus one `mean_ms: <ms>` aggregate
   (the arithmetic mean across cases). `mean_ms` is diagnostic only. The score is
-  the equal-weight arithmetic mean of per-case speedups:
-  `mean(pristine_case_ms / candidate_case_ms)`. Run this before you stop; the
+  the equal-weight {case_aggregate} mean of per-case speedups:
+  `{score_formula}`. Run this before you stop; the
   gate reports the resulting mean case speedup.
 - You may run these (and read the driver) as often as you like — executing the
   driver is always allowed. What is HARD-DENIED is any EDIT or shell write to it
@@ -318,9 +319,9 @@ _PERFORMANCE_WORKING_METHOD = """\
      from that scratch directory before trying the next one. Do not save or
      restore work with git (`stash`, `add`, `commit`, `reset`): the loop owns
      the repository state and rejects a session that changes it.
-   - Judge a change by the score — the mean of per-case speedups — not by raw
-     `mean_ms` and not by a single case. A difference inside the spread of your
-     own repeated measurements is not a gain.
+   - Judge a change by the score defined above, not by raw `mean_ms` and not
+     by a single case. A difference inside the spread of your own repeated
+     measurements is not a gain.
 5. A first improvement is where the session starts, not where it ends. It shows
    the direction is real, so push it: tune the parameters it introduced, carry
    it to the cases it has not reached, remove the overhead it exposed. Keep
@@ -386,12 +387,12 @@ def _deadline_section(deadline_sec: int) -> str:
     )
 
 
-def _gate_scoring_context(scoring: GateScoring) -> str:
+def _gate_scoring_context(scoring: GateScoring, aggregate: CaseAggregate) -> str:
     """Tell the session the exact rule its candidate will be judged by."""
     return (
         "\n\n## Authoritative mean case scoring state\n"
         "Each of three independent measurements is scored as "
-        "`mean(pristine_case_ms / candidate_case_ms)` with equal case "
+        f"`{aggregate.formula}` with equal case "
         "weight. The mean of those three scores must beat the "
         "current best by at least "
         f"{keep_t_critical(KEEP_MEASUREMENT_COUNT):g} standard "
@@ -863,6 +864,8 @@ def make_agent_fn(
         **prompt_sections,
         driver_base=driver_base,
         driver_run=driver_run,
+        case_aggregate=measurement.case_aggregate.value,
+        score_formula=measurement.case_aggregate.formula,
         working_method=working_method.format(driver_run=driver_run, max_blocks=measurement.max_blocks),
         backend_rule=(
             "Optimize only the selected assembly; keep the frontend, launcher and ABI frozen."
@@ -917,7 +920,7 @@ def make_agent_fn(
                     best_mean_case_speedup=gate_scoring.best_mean_case_speedup,
                 )
                 if gate_stop_check:
-                    system_prompt = gate_system_prompt + _gate_scoring_context(gate_scoring)
+                    system_prompt = gate_system_prompt + _gate_scoring_context(gate_scoring, measurement.case_aggregate)
                 # Built only for a provider that runs them. A backend which ignores
                 # ``AgentRunSpec.hooks`` drops the whole group without a word, so
                 # attaching one anyway makes this call site read as protection the

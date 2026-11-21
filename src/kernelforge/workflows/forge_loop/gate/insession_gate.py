@@ -91,6 +91,7 @@ class InSessionGate:
         self.interposed_driver_path = measurement.interposed_driver_path or ""
         self.snr_threshold = measurement.snr_threshold
         self.bench_repeat = measurement.bench_repeat
+        self.case_aggregate = measurement.case_aggregate
         self.baseline_case_times = dict(baseline_case_times or {})
         self.best_mean_case_speedup = best_mean_case_speedup
         # Correctness-only phase (e.g. PORT): the gate requires ONLY correctness and never runs the perf gate (no
@@ -796,6 +797,7 @@ class InSessionGate:
                 bench,
                 self.baseline_case_times,
                 expected_measurements=KEEP_MEASUREMENT_COUNT,
+                aggregate=self.case_aggregate,
             )
         except CaseCoverageError as error:
             self._log(f"BLOCK (case coverage failed: {error})")

@@ -25,6 +25,7 @@ import kernelforge.workflows.forge_loop.roles.supervisor as supervisor_module
 from kernelforge.cli import main
 from kernelforge.workflows.forge_loop.bootstrap.session_budget import _forge_session_timeout_sec
 from kernelforge.config import Config
+from kernelforge.evaluation.scoring import CaseAggregate
 from kernelforge.workflows.forge_loop.campaign.campaign_config import (
     CampaignConfigStore,
     CampaignInputs,
@@ -907,6 +908,29 @@ def test_a_single_lane_campaign_builds_no_planning_service(tmp_path, monkeypatch
         result.output
     )
     assert "Plan Critic" not in result.output
+
+
+def test_the_case_aggregate_belongs_to_the_campaign_and_reaches_the_loop_its_gate_and_the_result(tmp_path, monkeypatch):
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, workspace = _invoke_forge_loop(tmp_path, ["--case-aggregate", "geometric"])
+
+    assert result.exit_code == 0, result.output
+    assert CampaignConfigStore(str(workspace)).load().case_aggregate is CaseAggregate.GEOMETRIC
+    assert captured["loops"][0].ic.case_aggregate is CaseAggregate.GEOMETRIC
+    assert captured["agent_fn_setup"].measurement.case_aggregate is CaseAggregate.GEOMETRIC
+    assert _result_payload(result.output)["case_aggregate"] == "geometric"
+
+
+def test_a_campaign_that_names_no_case_aggregate_is_scored_arithmetically(tmp_path, monkeypatch):
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, workspace = _invoke_forge_loop(tmp_path, [])
+
+    assert result.exit_code == 0, result.output
+    assert CampaignConfigStore(str(workspace)).load().case_aggregate is CaseAggregate.ARITHMETIC
+    assert captured["loops"][0].ic.case_aggregate is CaseAggregate.ARITHMETIC
+    assert _result_payload(result.output)["case_aggregate"] == "arithmetic"
 
 
 def test_forge_loop_can_disable_all_experience_kb_io(tmp_path, monkeypatch):

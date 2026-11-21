@@ -34,6 +34,7 @@ from kernelforge.workflows.forge_loop.bootstrap.session_budget import _forge_ses
 from kernelforge.workflows.forge_loop.bootstrap.warm_start import _read_kb_warm_start, _WarmStart
 from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config, KnowledgeConfig, agent_runtime_overrides
+from kernelforge.evaluation.scoring import CaseAggregate
 from kernelforge.workflows.forge_loop.memory.knowledge_integration import kb_reference_program_md
 from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 from kernelforge.utils.git import git_head
@@ -270,6 +271,7 @@ def _resolve_campaign(request: ForgeLoopRequest, workspace: Path, agent_relay) -
                 framework=request.identity.framework,
                 nproc_per_node=request.loop_shape.nproc_per_node,
                 bench_repeat=request.loop_shape.bench_repeat,
+                case_aggregate=CaseAggregate(request.loop_shape.case_aggregate),
                 commit_new_paths=tuple(request.loop_shape.commit_new_paths),
                 agent_relay=agent_relay,
             ),
@@ -636,6 +638,7 @@ def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig) -> Iteration
         nproc_per_node=campaign.nproc_per_node,
         # Measurement fidelity: in-process repeats within each independent bench.
         bench_repeat=campaign.bench_repeat,
+        case_aggregate=campaign.case_aggregate,
         lanes=request.loop_shape.lanes,
         merge_stacking=request.loop_shape.merge_stacking,
         # New files a KEEP may carry; a REVERT removes exactly the same set. From the campaign, so a resumed session
@@ -750,6 +753,7 @@ def _implementer_setup(
             stage_timeout_sec=iter_config.validate_stage_timeout_sec,
             bench_timeout_sec=iter_config.bench_timeout_sec,
             bench_repeat=iter_config.bench_repeat,
+            case_aggregate=iter_config.case_aggregate,
         ),
         SessionOptions(
             session_timeout_sec=session_timeout_sec,

@@ -403,11 +403,22 @@ historical lesson records.
 
 The pristine baseline uses per-case medians from three independent measurements
 and never changes. Every candidate is measured three times; each run is scored
-independently with the equal-weight arithmetic mean:
+independently with the equal-weight mean of its per-case speedups. Which mean is
+the campaign's `--case-aggregate`, fixed when the campaign is created:
 
 ```text
-mean(pristine_case_ms / candidate_run_case_ms)
+arithmetic (default): mean(pristine_case_ms / candidate_run_case_ms)
+geometric:            geomean(pristine_case_ms / candidate_run_case_ms)
 ```
+
+Every case weighs the same under both. The arithmetic mean counts a large gain
+on one case in full; the geometric mean counts its ratio, so a 4x on one case
+and a 0.25x on another cancel. The in-session gate, the KEEP decision, the
+Implementer's instructions, the planning objective and every published score
+use the campaign's aggregate, and the result names it as `case_aggregate`.
+Choose the one whoever consumes the result scores by: a campaign that
+optimizes one mean and is graded on the other keeps candidates its grader
+scores lower.
 
 Drivers must emit complete, unique `case_ms` coverage for every scored case.
 The mean of the three run scores must be at least
@@ -422,7 +433,9 @@ current best, both so three near-identical measurements cannot drive it to zero
 and because a gain under 0.1% is not worth the KEEP even when it is real.
 
 `sigma` is the sample standard deviation of the three scores, except when one
-case supplies the majority of the objective's variance while carrying less than
+case supplies the majority of the objective's variance (under the geometric
+aggregate, of the variance of its logarithm, which splits between cases the
+same way) while carrying less than
 its equal share of the suite's wall time. Three aggregate scores estimate that
 case's spread to within 50% of itself, and the margin then charges the draw to
 every candidate: on one campaign a 10 us case holding 87% of the variance drew a
