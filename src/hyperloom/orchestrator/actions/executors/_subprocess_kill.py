@@ -149,7 +149,8 @@ AGENTX_EARLY_STOP_ERROR_CLASS: str = "agentx_early_stop"
 # validated there once by preflight, so nothing re-reads them from an env a variant composed.
 BENCHMARK_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"
 BENCHMARK_SILENCE_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC"
-# The boot budget of the test the invocation runs, which the measurement backend sets from ``TestCall.boot_budget_sec``.
+# The boot budget of the test the invocation runs. It is private to the measurement backend, which sets it from
+# ``TestCall.boot_budget_sec`` and removes it from a test that has none, so an exported value never reaches such a test.
 BOOT_BUDGET_ENV = "INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC"
 
 
@@ -212,13 +213,13 @@ def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[fl
     )
 
 
-def resolve_boot_budget_sec(env: Mapping[str, str] | None = None) -> float | None:
+def resolve_boot_budget_sec() -> float | None:
     """The boot budget :data:`BOOT_BUDGET_ENV` names, ``None`` when it is unset or empty.
 
     Raises:
         ValueError: When it is set to something other than a finite, positive number of seconds.
     """
-    raw = (os.environ if env is None else env).get(BOOT_BUDGET_ENV, "").strip()
+    raw = os.environ.get(BOOT_BUDGET_ENV, "").strip()
     if not raw:
         return None
     try:

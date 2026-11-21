@@ -109,6 +109,7 @@ from hyperloom.measure.short_prompts.prompts import PromptSetError
 from hyperloom.measure.socket import MeasurementTimeout, TestCall, TestOutcome
 from hyperloom.measure.spec import Attachment, EnvRoot as SpecEnvRoot
 from hyperloom.orchestrator.actions.executors import (
+    BOOT_BUDGET_ENV,
     CHECK_SERVER_ENVS,
     GridLaunch,
     GridRecipe,
@@ -466,15 +467,19 @@ def _test_environment(call: TestCall) -> Iterator[list[str]]:
     }
     if call.silence_timeout_sec is not None:
         settings["INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC"] = str(call.silence_timeout_sec)
-    if call.boot_budget_sec is not None:
-        settings["INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC"] = str(call.boot_budget_sec)
     if facts is not None and facts.inferencex_path:
         settings["INFERENCEX_PATH"] = facts.inferencex_path
     if call.kind == _PROFILE and (body := _point(call.points[0]).envs.get(_PROFILE_BODY_ENV)):
         settings[_PROFILE_BODY_ENV] = str(body)
     settings.update({str(key): str(value) for key, value in call.env_overrides.items()})
-    saved = {key: os.environ.get(key) for key in (*AMBIENT_SHAPE_ENVS, *settings)}
-    for key in AMBIENT_SHAPE_ENVS:
+    # The boot budget is the backend's own: only the call sets it, and a test without one runs with it removed, so a
+    # value the operator or the sheet exported never reaches its rounds.
+    settings.pop(BOOT_BUDGET_ENV, None)
+    if call.boot_budget_sec is not None:
+        settings[BOOT_BUDGET_ENV] = str(call.boot_budget_sec)
+    cleared = (*AMBIENT_SHAPE_ENVS, BOOT_BUDGET_ENV)
+    saved = {key: os.environ.get(key) for key in (*cleared, *settings)}
+    for key in cleared:
         os.environ.pop(key, None)
     os.environ.update(settings)
     try:
