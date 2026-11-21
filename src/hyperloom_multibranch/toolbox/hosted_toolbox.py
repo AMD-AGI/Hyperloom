@@ -212,7 +212,7 @@ class HostedOptions:
 
     ``policy`` is the quota and priority policy; its ``global_concurrency`` is lowered to what the grant runs at once
     when higher. ``archive`` is the result archive, a directory archive below ``session_dir`` when omitted.
-    ``timeout_sec`` is the timeout of one attempt, ``boot_budget_sec`` how long its server may take to be ready
+    ``timeout_sec`` is the timeout of one attempt, ``boot_budget_sec`` how long, at least, its server may take to be ready
     (``TestCall.boot_budget_sec``; ``None`` for the default share of the timeout), ``max_infra_retries`` the
     infrastructure retries per test before it ends as ``measurement_failed``, ``infra_backoff_seconds`` the wait before each
     one after a failure that is not the node's (:class:`~.attempts.InfraBackoff`) and ``poll_interval_sec`` how often

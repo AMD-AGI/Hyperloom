@@ -13,8 +13,10 @@ requests; either takes ``--ep``, the expert-parallel size its server runs at, 1 
 model in the image ``HYPERLOOM_ACTIVE_IMAGE_REF`` names, and a ``--model`` that is a directory is recorded by its
 resolved path, which its benchmark pins. An operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than
 ``--workload``, or that names a benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``, is refused.
-``--boot-budget-sec`` (at most 6 h) is how long a test's server may take to be ready: a test then runs for its trace
-window, if any, half an hour more and that budget, rather than half of the default timeout going to the boot.
+``--boot-budget-sec`` (at most 3 h, the ready timeout the round sets the server's own start to) is how long, at least,
+a test's server may take to be ready: it only lengthens, so a test runs for its trace window, if any, half an hour more
+and that budget when that is longer than its default timeout, and a boot may take the budget when that is longer than
+half of the timeout.
 ``--max-gpu-hours`` caps the GPU hours the session uses, tests' GPU time plus card time any lease holds: EXPLORE ends
 with ``gpu_hours_exhausted`` once only FINAL's share is left, and FINAL still runs.
 ``--max-llm-usd`` caps the dollars the session's LLM calls cost: EXPLORE
@@ -331,10 +333,12 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         help=(
-            "How long the server of a test may take to be ready, in seconds, at most"
-            f" {MAX_BOOT_BUDGET_SEC} (6 h); a test then runs for its workload's own time plus this budget. Not given,"
-            " a boot may take half of a test's timeout, which is 3600 s for inferencex and the trace window plus"
-            " 3600 s for agentx."
+            "How long, at least, the server of a test may take to be ready, in seconds, at most"
+            f" {MAX_BOOT_BUDGET_SEC} (3 h): the ready timeout the round sets the server's own start to, so a longer"
+            " budget would buy nothing. It only lengthens: a test runs for its trace window, if any, plus 1800 s plus"
+            " this budget when that is longer than its default timeout, and a boot may take this budget when that is"
+            " longer than half of the timeout. Not given, a boot may take half of a test's timeout, which is 3600 s"
+            " for inferencex and the trace window plus 3600 s for agentx."
         ),
     )
     run.add_argument(
@@ -883,7 +887,7 @@ def _limit_errors(args: argparse.Namespace) -> list[str]:
 def _boot_budget_errors(budget: int | None) -> list[str]:
     if budget is None or 0 < budget <= MAX_BOOT_BUDGET_SEC:
         return []
-    return [f"--boot-budget-sec must be a positive number of seconds, at most {MAX_BOOT_BUDGET_SEC} (6 h)"]
+    return [f"--boot-budget-sec must be a positive number of seconds, at most {MAX_BOOT_BUDGET_SEC} (3 h)"]
 
 
 def _limit_error(option: str, value: float, in_range: bool, rule: str) -> list[str]:

@@ -487,7 +487,8 @@ class Procedure:
     short_prompts: ShortPromptPlan | None = None
     long_context: LongContextPlan | None = None
     checkpoint: CheckpointPlan | None = None
-    #: How long each round's server may take to be ready (``TestCall.boot_budget_sec``); ``None``: the default share.
+    #: How long, at least, each round's server may take to be ready (``TestCall.boot_budget_sec``); ``None``: the default
+    #: share.
     boot_budget_sec: float | None = None
 
     @classmethod

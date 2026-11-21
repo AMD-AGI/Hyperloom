@@ -149,7 +149,7 @@ class HostedExecutor:
         session_dir: The session directory; test output lands below ``<session_dir>/tests`` and a result's
             ``output_dir`` is relative to it.
         timeout_sec: The timeout of one attempt.
-        boot_budget_sec: How long the server of each round of an attempt may take to be ready
+        boot_budget_sec: How long, at least, the server of each round of an attempt may take to be ready
             (``TestCall.boot_budget_sec``); ``None`` gives it the backend's default share of ``timeout_sec``.
         workload_kind: The campaign's workload; an AgentX baseline served with the prefix cache off does not end
             ``succeeded``.

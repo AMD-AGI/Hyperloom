@@ -140,6 +140,8 @@ from hyperloom.sandbox.e2b import E2BSandboxProvider
 from hyperloom.sandbox.socket import Role as SandboxRole, SandboxInfo
 from hyperloom_multibranch.toolbox import hosted_toolbox
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC
+from hyperloom.common.benchmark_config import BenchmarkPoint
+from hyperloom.measure.boot_watch import BOOT_SHARE, boot_limit_sec
 from hyperloom_multibranch.toolbox.hosted_toolbox import HostedToolbox, HostedToolboxInputs
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
@@ -670,15 +672,40 @@ async def test_an_agentx_session_replays_the_trace_window_it_names_and_its_tests
     ],
     ids=["inferencex", "inferencex-budget", "agentx", "agentx-budget", "agentx-window-budget"],
 )
-def test_a_boot_budget_replaces_the_default_margin_of_an_attempt_and_none_keeps_the_defaults(
+def test_a_boot_budget_longer_than_the_default_margin_lengthens_an_attempt_and_none_keeps_the_defaults(
     workload: Workload, timeout: int
 ) -> None:
     assert attempt_timeout_sec(workload) == timeout
 
 
-def test_a_boot_budget_of_half_an_hour_keeps_the_default_attempt_timeouts() -> None:
-    for workload in (WORKLOAD, AGENTX):
-        assert attempt_timeout_sec(replace(workload, boot_budget_sec=1800)) == attempt_timeout_sec(workload)
+@pytest.mark.parametrize("budget", [1, 60, 1799, OUTSIDE_BOOT_SEC])
+@pytest.mark.parametrize("workload", [WORKLOAD, AGENTX, replace(AGENTX, agentx_duration_sec=600)])
+def test_a_boot_budget_of_half_an_hour_or_less_never_shortens_an_attempt(workload: Workload, budget: int) -> None:
+    assert attempt_timeout_sec(replace(workload, boot_budget_sec=budget)) == attempt_timeout_sec(workload)
+
+
+def test_an_inferencex_budget_under_half_an_hour_keeps_the_hour_and_its_half_hour_boot() -> None:
+    timeout = attempt_timeout_sec(replace(WORKLOAD, boot_budget_sec=60))
+
+    assert timeout == DEFAULT_TEST_TIMEOUT_SEC, "not 1800 + 60 s"
+    assert boot_limit_sec(_serving_point(timeout), timeout, 60) == DEFAULT_TEST_TIMEOUT_SEC * BOOT_SHARE
+
+
+def test_an_agentx_budget_of_half_an_hour_keeps_the_window_s_timeout_and_its_hour_long_boot() -> None:
+    timeout = attempt_timeout_sec(replace(AGENTX, boot_budget_sec=1800))
+
+    assert timeout == AGENTX_TRACE_SEC + AGENTX_OUTSIDE_TRACE_SEC
+    assert boot_limit_sec(_serving_point(timeout), timeout, 1800) == timeout * BOOT_SHARE, (
+        "not halved to the 1800 s budget"
+    )
+
+
+def _serving_point(timeout_sec: int) -> BenchmarkPoint:
+    """A point of a serving framework whose ready timeout is the attempt's, as every round sets it
+    (``sync_benchmark_timeout``)."""
+
+    lifecycle = {"server_ready_timeout_s": timeout_sec}
+    return BenchmarkPoint.from_document({"benchmark": {"framework": "sglang", "server_lifecycle": lifecycle}})
 
 
 async def test_the_boot_budget_and_the_timeout_it_sets_reach_the_local_toolbox(
