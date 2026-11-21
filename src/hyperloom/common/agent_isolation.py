@@ -23,6 +23,13 @@ A hosted run launches only its hosting layer's bubblewrap, by the path its entry
 refuses a setuid one. The probe is :func:`hyperloom_common.bwrap.bwrap_probe`: once per process for each binary,
 interpreter, ids, namespaces and user-namespace sysctls, and an answer that did not come in time is not kept.
 
+Where the root mount cannot be bound, the probe picks the first ``unshare`` tier its canary holds under: ``unshare
+--mount`` (root), else ``unshare --user --map-current-user --mount --propagation private`` (an app that is not root,
+on a node that lets it make user namespaces); a hosted run takes only the ``unshare`` beside the layer's bubblewrap
+(``bin/unshare``, static, util-linux 2.38 or newer). Under the second tier every launch has a user namespace of its
+own, so a sandbox whose commands join a holder's namespaces (agent and dev sandboxes, local tests) cannot use it: they
+are refused in a hosted run, as without bubblewrap, while specialists run under it.
+
 Under bubblewrap the agent is the app's own kernel uid, confined by its namespaces and an empty root: no app-side trust
 may derive from the ownership, mode, mtime or content of a path the agent can write.
 """
@@ -37,7 +44,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hyperloom_common.bwrap import BwrapPolicy, BwrapPolicyError, BwrapProbe, bwrap_probe
+from hyperloom_common.bwrap import NO_JOIN, BwrapPolicy, BwrapPolicyError, BwrapProbe, bwrap_probe
 from hyperloom_common.env import env_str
 
 from hyperloom.common.env_safety import (
@@ -295,11 +302,15 @@ def _bwrap_reasons(found: BwrapProbe) -> tuple[str, ...]:
 
 
 def _unaccounted(
-    account_reason: str, *, required: bool, warn: bool, known: BwrapProbe | None = None
+    account_reason: str, *, required: bool, warn: bool, known: BwrapProbe | None = None, joins: bool = False
 ) -> BwrapIsolation | NoIsolation:
-    """Bubblewrap, else a refusal (``required``) or unconfined; ``warn`` logs once that an account was asked for."""
+    """Bubblewrap, else a refusal (``required``) or unconfined; ``warn`` logs once that an account was asked for;
+    ``joins``: the launches join a :class:`~hyperloom_common.bwrap.Holder`'s namespaces, which a bubblewrap that runs
+    each launch in a user namespace of its own (:attr:`~hyperloom_common.bwrap.BwrapProbe.joins`) cannot."""
     note = f"running them as an account: {account_reason}"
     found = _bwrap(known)
+    if joins and found.ok and not found.joins:
+        found = dataclasses.replace(found, problems=(NO_JOIN,))
     if found.ok:
         if warn:
             _log_once(logging.WARNING, f"agents run under bubblewrap: {note}")
@@ -332,7 +343,7 @@ def choose_sandbox_isolation(*, known: BwrapProbe | None = None) -> BwrapIsolati
     Raises:
         IsolationRefused: In a hosted run, where bubblewrap cannot run a sandbox.
     """
-    return _unaccounted(SANDBOX_ACCOUNT, required=_STATE.hosted, warn=False, known=known)
+    return _unaccounted(SANDBOX_ACCOUNT, required=_STATE.hosted, warn=False, known=known, joins=True)
 
 
 def choose_test_isolation(*, known: BwrapProbe | None = None) -> BwrapIsolation | NoIsolation:
@@ -345,7 +356,7 @@ def choose_test_isolation(*, known: BwrapProbe | None = None) -> BwrapIsolation 
     Raises:
         IsolationRefused: In a hosted run, where bubblewrap cannot sandbox a test.
     """
-    return _unaccounted(TEST_ACCOUNT, required=_STATE.hosted, warn=False, known=known)
+    return _unaccounted(TEST_ACCOUNT, required=_STATE.hosted, warn=False, known=known, joins=True)
 
 
 def bwrap_isolation() -> BwrapIsolation | NoIsolation:

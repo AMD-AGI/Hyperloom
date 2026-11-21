@@ -200,8 +200,11 @@ if [ -f "$ca" ]; then
 fi
 
 # apptainer marks the root mount unbindable, and bwrap's bind of / then fails with EINVAL: make it private once. Not
-# fatal: without CAP_SYS_ADMIN (plain docker) a launch retries only under the unshare beside the layer's bwrap, and
-# agents are refused without one (an unshare from PATH is never taken for the layer's bwrap).
+# fatal: without CAP_SYS_ADMIN (plain docker, or a start that is not root) a launch retries only under the unshare
+# beside the layer's bwrap ($layer/bin/unshare: static, util-linux 2.38 or newer), and agents are refused without one
+# (an unshare from PATH is never taken for the layer's bwrap). Root retries under unshare --mount; any other uid under
+# unshare --user --map-current-user --mount --propagation private, which needs the node to let it make user namespaces
+# (as the layer's bwrap does anyway).
 if ! command -v mount >/dev/null 2>&1; then
   echo "hosted layer: the image has no mount (util-linux), so the root mount stays as it is; where bubblewrap cannot bind it, agents run only under an unshare beside the layer's bwrap, and are refused without one" >&2
 elif ! why="$(mount --make-rprivate / 2>&1)"; then

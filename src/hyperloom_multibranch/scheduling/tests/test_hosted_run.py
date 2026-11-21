@@ -365,6 +365,50 @@ def test_a_hosted_run_where_no_tier_can_isolate_a_specialist_is_refused_naming_b
     )
 
 
+def _in_own_user_namespace(monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
+    """The layer's bubblewrap probed as for an app that is not root: it holds only under the layer's ``unshare
+    --user``; records every binary asked about."""
+
+    asked: list[str | None] = []
+    prefix = (str(LAYER / "bin" / "unshare"), "--user", "--map-current-user", "--mount", "--propagation", "private")
+
+    def probe(path: str | None, *_: object) -> BwrapProbe:
+        asked.append(path)
+        return BwrapProbe(path, (0, 13, 1), (), prefix=(*prefix, "--"), joins=False)
+
+    monkeypatch.setattr(bwrap, "_probe", probe)
+    return asked
+
+
+@pytest.mark.usefixtures("unmarked")
+def test_an_app_that_is_not_root_confines_its_specialists_in_a_user_namespace_of_their_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked = _in_own_user_namespace(monkeypatch)
+
+    require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
+
+    assert launch_isolation(local=False) == LaunchIsolation(agent_isolation.BWRAP, HOSTED, HOSTED, True, ())
+    assert set(asked) == {LAYER_BWRAP}
+
+
+@pytest.mark.usefixtures("unmarked")
+def test_an_app_that_is_not_root_measured_here_is_refused_since_its_sandboxes_join_a_holder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _in_own_user_namespace(monkeypatch)
+
+    with pytest.raises(PeersUnavailable) as refused:
+        require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(LAYER)})
+
+    assert str(refused.value) == (
+        "a hosted run launches nothing unconfined beside its credentials, and here agent and dev sandboxes and tests"
+        f" will be refused (running them as an account: {agent_isolation.SANDBOX_ACCOUNT};"
+        f" bubblewrap ({LAYER_BWRAP}, 0.13.1): {bwrap.NO_JOIN}; running them as an account:"
+        f" {agent_isolation.TEST_ACCOUNT})"
+    )
+
+
 def _layer(tmp_path: Path, bwrap_target: str | None) -> Path:
     """A hosting layer directory whose ``bin/bwrap`` links to ``bwrap_target`` (none when ``None``), and a directory
     ``image-bin`` whose ``bwrap`` cannot run a sandbox, as a framework image's own might be."""

@@ -6,6 +6,7 @@ against a stand-in ``bwrap`` (real sandboxes: ``test_bwrap_launch.py``)."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
@@ -71,10 +72,17 @@ def _fresh_probe_cache():
     bwrap._PROBES.clear()
 
 
+UNSHARE_DENIED = "unshare: unshare failed: Operation not permitted"
+UNSHARE_HELP = "Options:\n -m, --mount\n -U, --user\n -c, --map-current-user\n --propagation slave|shared|private\n"
+USER_MOUNTS = ("--user", "--map-current-user", "--mount", "--propagation", "private", "--")
+
+
 class FakeBwrap:
     """A ``bwrap`` stand-in in its own directory: answers ``--version``, and for a launch records its argv, writes
     ``stdout``/``stderr`` and exits ``code``. With ``unbindable`` it fails every launch that is not under the fake
-    ``unshare --mount`` beside it."""
+    ``unshare`` beside it, which runs it under ``--mount`` (marked ``1`` in :attr:`runs`) or ``--user
+    --map-current-user --mount --propagation private`` (``user``) only where :meth:`configure_unshare` allows that
+    tier, and fails as ``unshare`` does without the privilege otherwise."""
 
     def __init__(self, directory: Path, *, version: str = "0.13.1", unshare: bool = True) -> None:
         self.directory = directory
@@ -83,11 +91,27 @@ class FakeBwrap:
         self.version = version
         self.configure()
         if unshare:
+            self.configure_unshare()
             script = directory / "unshare"
             script.write_text(
-                '#!/bin/sh\n[ "$1" = --mount ] || exit 9\nshift\n[ "$1" = -- ] && shift\nFAKE_PRIVATE=1 exec "$@"\n'
+                "#!/bin/sh\n"
+                f'if [ "$1" = --help ]; then /bin/cat "{directory}/unshare-help"; exit 0; fi\n'
+                'if [ "$1" = --mount ]; then mode=1; shift\n'
+                'elif [ "$1 $2 $3 $4 $5" = "--user --map-current-user --mount --propagation private" ]; then\n'
+                "  mode=user; shift 5\n"
+                "else exit 9; fi\n"
+                '[ "$1" = -- ] && shift\n'
+                f'case " $(/bin/cat "{directory}/unshare-allows") " in\n'
+                f'  *" $mode "*) FAKE_PRIVATE=$mode exec "$@" ;;\n'
+                f'  *) echo "{UNSHARE_DENIED}" >&2; exit 1 ;;\n'
+                "esac\n"
             )
             script.chmod(0o755)
+
+    def configure_unshare(self, *, allows: tuple[str, ...] = ("1",), help_text: str = UNSHARE_HELP) -> None:
+        """Which tiers the fake ``unshare`` runs: ``1`` (``--mount``, as root) and ``user`` (``--user ...``)."""
+        (self.directory / "unshare-allows").write_text(" ".join(allows) + "\n")
+        (self.directory / "unshare-help").write_text(help_text)
 
     def configure(
         self,
@@ -638,12 +662,104 @@ def test_an_unbindable_root_that_unshare_does_not_fix_is_refused(
     fake: FakeBwrap, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake.configure(unbindable=UNBINDABLE, stderr=UID_MAP_DENIED, code=1)
-    assert probe_bwrap().problems == (UNBINDABLE, f"under unshare --mount: {UID_MAP_DENIED}")
+    fake.configure_unshare(allows=("1", "user"))
+    assert probe_bwrap().problems == (
+        UNBINDABLE,
+        f"under unshare --mount: {UID_MAP_DENIED}",
+        f"under unshare --user --mount: {UID_MAP_DENIED}",
+    )
+    assert fake.runs == ["plain", "1", "user"]
 
     bare = FakeBwrap(tmp_path / "bare", unshare=False)
     bare.configure(unbindable=UNBINDABLE)
     monkeypatch.setenv("PATH", str(bare.directory))
     assert probe_bwrap().problems == (UNBINDABLE, "unshare (util-linux) is not on PATH to give a launch its own mounts")
+
+
+def test_root_keeps_unshare_mount_where_both_tiers_hold(fake: FakeBwrap) -> None:
+    fake.configure(unbindable=UNBINDABLE)
+    fake.configure_unshare(allows=("1", "user"))
+
+    found = probe_bwrap()
+
+    assert found.ok and found.joins and fake.runs == ["plain", "1"]
+    assert found.prefix == (str(fake.directory / "unshare"), "--mount", "--")
+
+
+def test_a_uid_without_cap_sys_admin_runs_every_launch_under_unshare_user(
+    fake: FakeBwrap, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # As any uid but root: unshare --mount is refused, a user namespace of its own is not.
+    fake.configure(unbindable=UNBINDABLE)
+    fake.configure_unshare(allows=("user",))
+
+    found = probe_bwrap()
+
+    unshare = str(fake.directory / "unshare")
+    assert found.ok and fake.runs == ["plain", "user"], "unshare --mount never started bubblewrap"
+    assert found.prefix == (unshare, *USER_MOUNTS)
+    assert found.launcher == (unshare, *USER_MOUNTS, str(fake.path))
+    assert not found.joins, "each launch has a user namespace of its own, from which no other can be joined"
+    assert found.notes == (
+        f"binds from the root mount fail here ({UNBINDABLE}) and unshare --mount does not run (under unshare --mount: "
+        f"{UNSHARE_DENIED}): every launch runs under unshare --user --map-current-user --mount --propagation private, "
+        "which gives it a private copy of the mount tree in a user namespace of its own, so no launch joins another "
+        "sandbox's namespaces",
+    )
+    assert main(["probe"]) == 0
+    assert "unshare --user --map-current-user" in capsys.readouterr().out
+
+
+def test_a_launch_that_joins_a_holder_is_refused_under_unshare_user(tmp_path: Path) -> None:
+    alone = BwrapProbe("/opt/bin/bwrap", (0, 13, 1), (), prefix=("/opt/bin/unshare", *USER_MOUNTS), joins=False)
+    policy = BwrapPolicy(read_only=("/usr",))
+
+    assert policy.argv(alone, ["true"])[: len(USER_MOUNTS) + 2] == ["/opt/bin/unshare", *USER_MOUNTS, "/opt/bin/bwrap"]
+    with pytest.raises(BwrapPolicyError) as refused:
+        dataclasses.replace(policy, join=(7, 8)).argv(alone, ["true"])
+    assert refused.value.problems == (bwrap.NO_JOIN,)
+    assert dataclasses.replace(policy, join=(7, 8)).argv(probed("/opt/bin/bwrap"), ["true"])[1:3] == ["--userns", "7"]
+
+
+def test_an_unshare_without_the_user_namespace_flags_is_not_tried(fake: FakeBwrap) -> None:
+    # util-linux before 2.38 (or busybox) has no --map-current-user: the tier is refused before any launch under it.
+    fake.configure(unbindable=UNBINDABLE)
+    fake.configure_unshare(allows=("user",), help_text="Options:\n -m, --mount\n -U, --user\n --propagation x\n")
+    unshare = fake.directory / "unshare"
+
+    found = probe_bwrap()
+
+    assert found.problems == (
+        UNBINDABLE,
+        f"under unshare --mount: {UNSHARE_DENIED}",
+        f"unshare at {unshare} has no --map-current-user (util-linux 2.38 or newer has them)",
+    )
+    assert fake.runs == ["plain"]
+
+
+def test_an_unbindable_root_where_neither_unshare_tier_runs_is_refused(fake: FakeBwrap) -> None:
+    # A node that lets this uid make no user namespace: both tiers fail, and the run is refused, never unconfined.
+    fake.configure(unbindable=UNBINDABLE)
+    fake.configure_unshare(allows=())
+
+    assert probe_bwrap().problems == (
+        UNBINDABLE,
+        f"under unshare --mount: {UNSHARE_DENIED}",
+        f"under unshare --user --mount: {UNSHARE_DENIED}",
+    )
+    assert fake.runs == ["plain"]
+
+
+def test_a_layer_bubblewrap_takes_unshare_user_only_from_beside_it(fake: FakeBwrap, tmp_path: Path) -> None:
+    layer = FakeBwrap(tmp_path / "layer")
+    layer.configure(unbindable=UNBINDABLE)
+    layer.configure_unshare(allows=("user",))
+    fake.configure_unshare(allows=("1", "user"))
+
+    found = bwrap_probe(str(layer.path))
+
+    assert found.ok and found.prefix == (str(layer.directory / "unshare"), *USER_MOUNTS) and not found.joins
+    assert layer.runs == ["plain", "user"] and fake.runs == []
 
 
 def test_a_bubblewrap_given_by_path_retries_only_with_the_unshare_beside_it(
@@ -664,7 +780,8 @@ def test_a_bubblewrap_given_by_path_retries_only_with_the_unshare_beside_it(
     assert refused.problems == (
         UNBINDABLE,
         f"no unshare beside {bare.path} to give a launch its own mounts, and none is taken from PATH for a bubblewrap "
-        "named by path: the host must make the root mount private first (mount --make-rprivate /)",
+        "named by path: the host must make the root mount private first (mount --make-rprivate /), or the layer "
+        "must carry a static unshare (util-linux 2.38 or newer) as bin/unshare",
     )
     assert bare.runs == ["plain"] and fake.runs == []
     assert main(["probe", "--bwrap", str(bare.path)]) == 1
