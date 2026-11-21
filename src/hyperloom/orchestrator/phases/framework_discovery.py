@@ -363,3 +363,28 @@ class _CandidateDiscoveryMixin:
                 extra_server_args,
                 sorted(extra_envs),
             )
+
+    def _framework_known_candidate_ids(self) -> set[str]:
+        """All candidate ids already discovered into any prior batch (dedup for new batches)."""
+        state = self.shared_state
+        ids: set[str] = set()
+        batches = state.framework_agent_batches or []
+        if not isinstance(batches, list):
+            return ids
+        for batch in batches:
+            if not isinstance(batch, dict):
+                continue
+            for cand in batch.get("candidates") or []:
+                if not isinstance(cand, dict):
+                    continue
+                # Canonical key (candidate_id/pr_url/ref); synthetic repo-PR fallback only when the candidate carries
+                # no identity field.
+                cid = self._framework_candidate_key(cand) or f"{cand.get('repo', '')}-{cand.get('pr_number', '')}"
+                if cid:
+                    ids.add(cid)
+        # Fold in PR ids the research scout already mined so the two mechanisms never re-process a PR.
+        for pid in state.research_scout_seen_pr_ids or []:
+            pid = str(pid or "").strip()
+            if pid:
+                ids.add(pid)
+        return ids
