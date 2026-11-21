@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import subprocess
 import sys
 from pathlib import Path
@@ -16,7 +17,9 @@ import yaml
 from hyperloom.common.benchmark_config import BenchmarkPointError
 from hyperloom.measure.farm import (
     FarmError,
+    FrameworkVersionMismatch,
     build_farm,
+    check_framework_versions,
     launch_environment,
     place_farm,
     prepend_pythonpath,
@@ -28,14 +31,16 @@ from hyperloom.measure.spec import EnvEntry, EnvRoot
 
 INSTALLED = Path(yaml.__file__).parent
 MARKER = b"MARKER = 'rebuilt'\nfrom yaml import *  # noqa\n"
+#: The installed PyYAML's version: what a compile on this interpreter records for a root over it.
+VERSION = importlib.metadata.version("PyYAML")
 
 
 def _address(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
-def _root(*entries: EnvEntry, kind: str = "package") -> EnvRoot:
-    return EnvRoot("yaml", kind, "yaml", "PyYAML", "0", tuple(entries))
+def _root(*entries: EnvEntry, kind: str = "package", version: str = VERSION, dist: str = "PyYAML") -> EnvRoot:
+    return EnvRoot("yaml", kind, "yaml", dist, version, tuple(entries))
 
 
 def _blobs(*datas: bytes):
@@ -93,6 +98,29 @@ def test_a_blob_that_does_not_hash_to_its_address_is_refused(tmp_path):
 def test_deleting_a_file_the_image_does_not_have_is_refused(tmp_path):
     with pytest.raises(FarmError, match="has no such file"):
         _build(tmp_path, EnvEntry("no_such.py", "delete"))
+
+
+def test_files_compiled_against_another_version_are_refused_naming_both_and_nothing_is_laid(tmp_path):
+    root = _root(EnvEntry("error.py", "delete"), version="0.0.1")
+
+    with pytest.raises(FrameworkVersionMismatch, match=f"against PyYAML 0.0.1, .* has PyYAML {VERSION}"):
+        build_farm([root], tmp_path / "farm", python=sys.executable, read_blob=_blobs())
+
+    assert not (tmp_path / "farm").exists()
+
+
+@pytest.mark.parametrize(
+    "root",
+    [
+        _root(EnvEntry("error.py", "delete")),
+        _root(version="0.0.1"),
+        _root(EnvEntry("error.py", "delete"), version=""),
+        _root(EnvEntry("error.py", "delete"), dist="no-such-distribution-hl", version="0.0.1"),
+    ],
+    ids=["same_version", "changes_nothing", "no_recorded_version", "no_installed_metadata"],
+)
+def test_a_root_is_compared_only_when_it_changes_files_and_both_versions_are_known(root, tmp_path):
+    check_framework_versions([root], python=sys.executable, cwd=tmp_path)
 
 
 def test_a_runtime_root_is_refused_not_ignored(tmp_path):

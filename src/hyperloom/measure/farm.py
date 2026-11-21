@@ -63,10 +63,12 @@ __all__ = [
     "BuiltRoot",
     "Farm",
     "FarmError",
+    "FrameworkVersionMismatch",
     "NativeModule",
     "PATCH_NOT_LAID",
     "build_farm",
     "built_roots",
+    "check_framework_versions",
     "inherited_environment",
     "lay_profile_patch",
     "locate_package",
@@ -92,6 +94,14 @@ _UTF8 = "utf-8"
 _CONFIGS_DIR = "configs"
 _RUNTIME_KIND = "runtime"
 _DELETE = "delete"
+#: Prints the version of the distribution ``sys.argv[1]`` the interpreter has installed, or nothing when it has none.
+_DIST_VERSION = (
+    "import importlib.metadata as metadata, sys\n"
+    "try:\n"
+    "    print(metadata.version(sys.argv[1]))\n"
+    "except metadata.PackageNotFoundError:\n"
+    "    pass\n"
+)
 _IMPORT_FILE = "import importlib, sys\nprint(importlib.import_module(sys.argv[1]).__file__)\n"
 _PYTHONPATH = "PYTHONPATH"
 #: Where the render of a vLLM point names the image checkout it put on the server's path (``_apply_vllm_source_runtime``).
@@ -116,6 +126,17 @@ _RUNTIME_WRITTEN: Mapping[str, Mapping[str, str]] = {
 
 class FarmError(Exception):
     """The environment cannot be rebuilt as the sheet describes, or the rebuilt one is not what is imported."""
+
+
+class FrameworkVersionMismatch(FarmError):
+    """A root's files were compiled against one version of its distribution, and the server's interpreter has another.
+
+    The files of a root are whole files of the version the compile read (``EnvRoot.dist_version``). Laid over another
+    version, they would mix two releases of the framework in one package: what the server then runs is neither the
+    candidate's patch nor either release, so the test is refused before anything is laid. The candidate is not to blame
+    and a fresh sandbox of the same image has the same version, so the runner reports it as
+    ``framework_version_mismatch``, an infrastructure failure that is not retried.
+    """
 
 
 @dataclass(frozen=True)
@@ -160,6 +181,49 @@ def locate_package(import_name: str, python: str, cwd: Path) -> Path:
     if done.returncode != 0 or not locations:
         raise FarmError(f"{python} cannot import {import_name}: {done.stderr.strip()[-300:]}")
     return Path(locations[0])
+
+
+def _installed_version(dist_name: str, python: str, cwd: Path) -> str:
+    """The version of ``dist_name`` that ``python`` has installed (``-I``, as :func:`locate_package` looks), ``""`` when
+    it has none."""
+    try:
+        done = subprocess.run(
+            [python, "-I", "-c", _DIST_VERSION, dist_name],
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT_SEC,
+            cwd=cwd,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise FarmError(f"cannot ask {python} which {dist_name} it has: {exc}") from exc
+    if done.returncode != 0:
+        raise FarmError(f"{python} cannot say which {dist_name} it has: {done.stderr.strip()[-300:]}")
+    return done.stdout.strip()
+
+
+def check_framework_versions(roots: Iterable[EnvRoot], *, python: str, cwd: Path) -> None:
+    """Refuse ``roots`` when one that changes files was compiled against another version of its distribution than the
+    one ``python`` has installed.
+
+    A root that changes nothing, or that names no version, or whose distribution ``python`` has no metadata for, is not
+    compared: there is nothing to lay, or nothing to compare against.
+
+    Raises:
+        FrameworkVersionMismatch: The versions differ; the message names both.
+    """
+    seen: dict[str, str] = {}
+    for root in roots:
+        if not (root.entries and root.dist_name and root.dist_version):
+            continue
+        if root.dist_name not in seen:
+            seen[root.dist_name] = _installed_version(root.dist_name, python, cwd)
+        installed = seen[root.dist_name]
+        if installed and installed != root.dist_version:
+            raise FrameworkVersionMismatch(
+                f"{root.id}: its files were compiled against {root.dist_name} {root.dist_version}, but the server's "
+                f"interpreter {python} has {root.dist_name} {installed}; laying them over it would mix two versions of "
+                "the framework, so the test is not measured"
+            )
 
 
 def patches_aiter_sources(roots: Iterable[Any]) -> bool:
@@ -304,9 +368,14 @@ def build_farm(
     server's process inherits (:func:`inherited_environment`), this process's environment when not given: a rebuilt aiter
     gets the farm's mirror of the image's meta directory only when it inherits none. A ``runtime`` root is laid like a
     package root once :func:`built_roots` bound it to its proven build, whose native outputs are copied onto local disk.
+
+    Raises:
+        FrameworkVersionMismatch: A root that changes files was compiled against another version of its distribution
+            than ``python`` has (:func:`check_framework_versions`); nothing is laid.
     """
     site = farm_dir / "site"
     roots = list(roots)
+    check_framework_versions((_plain(root) for root in roots), python=python, cwd=farm_dir.parent)
     meta_root = next((root for root in roots if root.import_name == AITER_META_WHEEL_DIR), None)
     packages = [root for root in roots if root is not meta_root]
     native: list[NativeModule] = []
