@@ -148,6 +148,17 @@ Each iteration of a campaign with more than one lane:
 9. A measured improvement is committed and becomes the new best; every other
    candidate is discarded back to the last validated commit.
 
+Nothing a session started outlives it. On the Claude backend the session's CLI
+is started with a mark in its environment that every process it starts
+inherits, and when the session ends — on its own, on an error, or at its
+deadline — everything carrying that mark is terminated, wherever it is working:
+a benchmark detached from its shell, a profiler run from a scratch directory
+outside the workspace. Sessions that share a directory do not share a mark, so
+one ending leaves the others' processes alone. A leftover that survives is
+reported as workspace contention and the candidate is not measured. A session
+cut off at its deadline additionally has its workspace checked for anything
+else holding the device, as before.
+
 The plan file is the Implementer's planning source of truth for that iteration.
 Dispatch inputs and specialist analyses are retained beside it.
 `draft_plan.md` and `critic_review.md` are added when Critic review actually

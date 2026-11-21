@@ -27,6 +27,7 @@ from kernelforge.workflows.forge_loop.roles.agent import ImplementerSetup, Imple
 from kernelforge.utils import aiter_cache
 from kernelforge.workflows.forge_loop.iteration.fanout import SERIALIZED_DRIVER_NAME
 from kernelforge.utils.git import git
+from kernelforge.utils.process_reaping import SessionMark
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 
 
@@ -239,6 +240,14 @@ async def test_a_lane_denied_its_own_cache_is_refused_rather_than_shared(tmp_pat
         factory(str(lane_dir), str(lane_dir / SERIALIZED_DRIVER_NAME))
 
 
+def _overlay(options) -> dict[str, str]:
+    """What a session's CLI is started with, less the mark every session carries to have its leftovers found."""
+    env = dict(options.kwargs["env"])
+    for name in SessionMark().environment:
+        assert env.pop(name)
+    return env
+
+
 async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path, monkeypatch):
     """Pin the single-lane path: an ordinary session carries no overlay beyond the backend's own defaults."""
     for key in _stability_env():
@@ -267,7 +276,7 @@ async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path, 
         )
     )
 
-    assert captured["options"].kwargs["env"] == _session_defaults()
+    assert _overlay(captured["options"]) == _session_defaults()
 
 
 async def test_claude_hands_the_session_environment_to_its_cli(tmp_path, monkeypatch):
@@ -297,7 +306,7 @@ async def test_claude_hands_the_session_environment_to_its_cli(tmp_path, monkeyp
         )
     )
 
-    assert captured["options"].kwargs["env"] == {**_session_defaults(), "AITER_JIT_DIR": "/lane/1/jit"}
+    assert _overlay(captured["options"]) == {**_session_defaults(), "AITER_JIT_DIR": "/lane/1/jit"}
 
 
 def test_codex_hands_the_session_environment_to_its_app_server(tmp_path):

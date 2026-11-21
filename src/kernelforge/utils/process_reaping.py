@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Kill whatever an ended agent session left running inside a directory."""
+"""Kill whatever an ended agent session left running: everything it started, or everything of ours inside a directory."""
 
 from __future__ import annotations
 
@@ -13,8 +13,9 @@ import os
 import signal
 import subprocess
 import threading
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+import uuid
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -31,6 +32,11 @@ _PR_SET_CHILD_SUBREAPER = 36
 
 # Stamped into every child's environment and read back out of ``/proc/<pid>/environ``.
 _OWNER_ENV = "FORGE_CAMPAIGN_OWNER"
+
+# Stamped into one agent session's environment and read back the same way. The campaign's tag says a process is this
+# campaign's; this one says which session started it, which its working directory and its parent stop saying the
+# moment it changes directory or its shell exits.
+_SESSION_ENV = "FORGE_SESSION_OWNER"
 
 # An open fd on one of these is the difference between a leftover process that merely exists and one holding the
 # device the next measurement needs.
@@ -79,6 +85,18 @@ class ReapReport:
         if self.holding_device:
             parts.append(f"pid(s) {list(self.holding_device)} hold a device node")
         return f"{self.directory}: " + "; ".join(parts) if parts else ""
+
+
+@dataclass(frozen=True)
+class SessionMark:
+    """What every process one agent session starts carries in its environment."""
+
+    token: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    @property
+    def environment(self) -> dict[str, str]:
+        """The variable to start the session's first process with; whatever that process starts inherits it."""
+        return {_SESSION_ENV: self.token}
 
 
 def _read_proc(pid: int) -> _Proc | None:
@@ -439,16 +457,16 @@ def _current_owner_tag() -> str:
     return _owner_tag if _owner_pid == os.getpid() else ""
 
 
-def _carries_owner_tag(pid: int, owner: str) -> bool:
-    """Whether a process was exec'd carrying this campaign's tag."""
-    if not owner:
+def _carries(pid: int, name: str, value: str) -> bool:
+    """Whether a process was exec'd with ``name=value`` in its environment; never for an empty value."""
+    if not value:
         return False
     try:
         with open(f"/proc/{pid}/environ", "rb") as handle:
             entries = handle.read().split(b"\0")
     except OSError:
         return False
-    return f"{_OWNER_ENV}={owner}".encode() in entries
+    return f"{name}={value}".encode() in entries
 
 
 def _cwd_under(pid: int, resolved: str) -> bool:
@@ -532,7 +550,7 @@ def _survey(resolved: str) -> _Survey:
         # A process older than the campaign cannot have descended from it, so no reading of the parent chain makes it
         # ours.
         older = proc.starttime + 1 < own.starttime
-        if not older and (proc.pid in ours or _carries_owner_tag(proc.pid, owner)):
+        if not older and (proc.pid in ours or _carries(proc.pid, _OWNER_ENV, owner)):
             seeds[proc.pid] = proc.starttime
         else:
             foreign.append(proc.pid)
@@ -552,6 +570,29 @@ def _survey(resolved: str) -> _Survey:
     return _Survey(targets, left)
 
 
+def _session_processes(mark: SessionMark) -> dict[int, int]:
+    """The live processes one session started, pid -> start time: those carrying its mark and whatever they started.
+
+    Unlike the survey of a directory, this reaches into this process's own group: the mark already says a process is
+    the session's, which is what staying out of the group is there to guarantee where only a directory is known.
+    """
+    table = _process_table()
+    own_pid = os.getpid()
+    own = table.get(own_pid)
+    if own is None:
+        return {}
+    kids = _children_by_parent(table)
+    found: set[int] = set()
+    for proc in table.values():
+        # A process older than this one cannot carry a mark made after it started.
+        if proc.starttime + 1 < own.starttime or not _carries(proc.pid, _SESSION_ENV, mark.token):
+            continue
+        found.add(proc.pid)
+        found |= _descendants(kids, proc.pid)
+    found.discard(own_pid)
+    return {pid: table[pid].starttime for pid in found if table[pid].state != "Z"}
+
+
 def _signal(pid: int, starttime: int, sig: signal.Signals) -> None:
     """Signal one process, and only while it is still the one identified."""
     proc = _read_proc(pid)
@@ -563,14 +604,14 @@ def _signal(pid: int, starttime: int, sig: signal.Signals) -> None:
         log.debug("could not signal pid %s", pid, exc_info=True)
 
 
-async def _escalate(resolved: str) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    """SIGTERM then SIGKILL until nothing of ours is left under ``resolved``."""
+async def _escalate(find_live: Callable[[], dict[int, int]]) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """SIGTERM then SIGKILL until ``find_live`` reports nothing left; returns what went and what would not."""
     loop = asyncio.get_running_loop()
     grace_end = loop.time() + _TERM_GRACE_SEC
     kill_end = grace_end + _KILL_CONFIRM_SEC
     signalled: dict[int, int] = {}
     while True:
-        live = _survey(resolved).owned
+        live = find_live()
         if not live:
             return tuple(sorted(signalled)), ()
         now = loop.time()
@@ -622,7 +663,7 @@ async def reap_processes_under(directory: str | os.PathLike[str], *, description
     unkillable: tuple[int, ...] = ()
     if survey.owned:
         log.info("reaping %d process(es) %s", len(survey.owned), description)
-        reaped, unkillable = await _escalate(resolved)
+        reaped, unkillable = await _escalate(lambda: _survey(resolved).owned)
     foreign = _survey(resolved).foreign
     report = ReapReport(
         directory=str(directory),
@@ -638,11 +679,32 @@ async def reap_processes_under(directory: str | os.PathLike[str], *, description
     return report
 
 
+async def reap_session_processes(mark: SessionMark, *, directory: str, description: str) -> ReapReport:
+    """Terminate whatever one agent session started that is still alive, wherever it is working.
+
+    ``directory`` is where the session ran, named in the report; it does not bound what is found.
+    """
+    if _session_processes(mark):
+        log.info("reaping process(es) %s", description)
+    reaped, unkillable = await _escalate(lambda: _session_processes(mark))
+    report = ReapReport(
+        directory=directory,
+        reaped=reaped,
+        unkillable=unkillable,
+        holding_device=tuple(sorted(pid for pid in unkillable if _holds_device(pid))),
+    )
+    if report.contended:
+        log.warning("%s is still contended: %s", description, report.describe())
+    return report
+
+
 __all__ = [
     "ReapReport",
+    "SessionMark",
     "device_holders",
     "install_child_subreaper",
     "processes_under",
     "reap_processes_under",
+    "reap_session_processes",
     "still_holding_device",
 ]
