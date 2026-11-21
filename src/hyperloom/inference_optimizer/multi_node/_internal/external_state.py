@@ -228,12 +228,14 @@ def external_has_ssh_control() -> bool:
 
 
 def external_has_server_control() -> bool:
-    """True when external mode can restart servers (SSH for infera, head IP for rayjob; never atomesh/sglangrouter)."""
+    """True when external mode can restart servers (SSH for infera/atomesh/sglangrouter, head IP for rayjob)."""
     if not external_service_url():
         return False
     get = handoff_lookup()
     if normalize_mn_backend(get("INFERENCE_OPTIMIZER_MN_BACKEND")) in PD_ROUTER_BACKENDS:
-        return False
+        from .pd_cluster import pd_cluster_has_control
+
+        return pd_cluster_has_control(get)
     if external_has_ssh_control():
         return True
     return bool(get("HYPERLOOM_MN_EXT_HEAD_IP").strip())

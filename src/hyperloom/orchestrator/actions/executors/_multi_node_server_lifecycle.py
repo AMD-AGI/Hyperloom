@@ -730,21 +730,6 @@ def _worker_startup_crashed(tail: str) -> str | None:
     return None
 
 
-def _worker_health_targets(state: dict) -> list[tuple[str, str, str]]:
-    seen: set[str] = set()
-    targets: list[tuple[str, str, str]] = []
-    for role_key in ("prefill_pods", "decode_pods", "worker_pods"):
-        for pod in state.get(role_key) or []:
-            if not isinstance(pod, dict):
-                continue
-            ip = str(pod.get("podIP") or "").strip()
-            if not ip or ip in seen:
-                continue
-            seen.add(ip)
-            targets.append((role_key.replace("_pods", ""), ip, str(pod.get("podId") or ip)))
-    return targets
-
-
 def _worker_fastfail_reason(
     pending: list[str], *, elapsed: int, crash_grace: int, wedge_grace: int, timeout_s: int
 ) -> str | None:
@@ -789,11 +774,11 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
     import httpx as _httpx
 
     port = settings.worker_port
-    targets = _worker_health_targets(_read_state())
+    targets = multi_node.worker_health_targets(_read_state(), port)
     if not targets:
         return
     started = _t.monotonic()
-    ready: set[str] = set()
+    ready: set[tuple[str, int]] = set()
     # Detokenizer-wedge fast-fail: bail early on a wedged worker instead of burning the full timeout.
     wedge_grace = settings.worker_wedge_grace_s
     fastfail = env_flag("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", default=True)
@@ -804,17 +789,8 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
     async with _httpx.AsyncClient(timeout=10.0) as client:
         while True:
             elapsed = int(_t.monotonic() - started)
-            for role, ip, _pid in targets:
-                if ip in ready:
-                    continue
-                try:
-                    resp = await client.get("http://" + ip + ":" + str(port) + "/health")
-                except _httpx.HTTPError:
-                    continue
-                if resp.status_code == 200:
-                    ready.add(ip)
-                    log.info("worker /health OK (%s %s) after %ds [%d/%d]", role, ip, elapsed, len(ready), len(targets))
-            pending = [ip for _r, ip, _p in targets if ip not in ready]
+            await multi_node.poll_worker_health(client, targets, ready, elapsed)
+            pending = list(dict.fromkeys(ip for _r, ip, p in targets if (ip, p) not in ready))
             if not pending:
                 log.info(
                     "all %d worker(s) /health-ready after %ds; proceeding to frontend probe", len(targets), elapsed
@@ -841,16 +817,11 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
             await asyncio.sleep(settings.health_poll_s)
 
 
-def _shared_server_log_dir() -> str:
-    shared = os.path.expandvars(os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip())
-    return shared if shared.startswith("/") and "$" not in shared else ""
-
-
 def _shared_worker_log_tail(ip: str, max_bytes: int = 2_000_000) -> str | None:
     """Best-effort tail of a worker's shared-FS sglang server log."""
     import glob as _glob
 
-    shared = _shared_server_log_dir()
+    shared = multi_node.server_log_dir()
     if not shared:
         return None
     matches = _glob.glob(os.path.join(shared, "mn_infera_server_" + str(ip) + "_r*.log"))

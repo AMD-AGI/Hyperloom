@@ -638,15 +638,16 @@ that tells the optimizer a cluster is ready; the rest describe how to reach it.
 | `HYPERLOOM_MN_EXT_SSH_KEY` | infera, atomesh, sglangrouter | **yes** | Private SSH key already authorized on the pods (the platform installs the public half at create time). |
 | `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` | infera, atomesh, sglangrouter | PD | Prefill / decode pod IPs (comma-separated) for PD-disaggregated runs. |
 | `HYPERLOOM_MN_EXT_WORKER_IPS` | infera | aggregated | Worker pod IPs (comma-separated) for aggregated (non-PD) runs. At least one of `_PREFILL_IPS` / `_DECODE_IPS` / `_WORKER_IPS` is required. |
-| `HYPERLOOM_MN_EXT_SSH_PORT` | infera, atomesh, sglangrouter | No (default `2233`) | SSH base port; on infera the decode role is offset `+10`, on atomesh and sglangrouter every pod uses the port as given. |
+| `HYPERLOOM_MN_EXT_SSH_PORT` | infera, atomesh, sglangrouter | No (default `2233`; required for atomesh and sglangrouter restarts) | SSH base port; on infera the decode role is offset `+10`, on atomesh and sglangrouter every pod uses the port as given. |
 | `HYPERLOOM_MN_EXT_PREFILL_URL` / `_DECODE_URL` | atomesh, sglangrouter | No | Engine URL of each role (default `http://<first role IP>:8000`). The engine listens on the URL's port. |
 | `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | infera, atomesh, sglangrouter | No | `known_hosts` path; else a relaxed host-key check is used. |
 | `HYPERLOOM_MN_EXT_HEAD_IP` | rayjob | No (recommended) | Ray head IP (Dashboard `:8265`, GCS `:6379`). Enables per-round restarts; omit for benchmark-only. |
 | `HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN` | rayjob | No | Ray Dashboard auth token, only if the dashboard is authenticated. |
 
 Infera external mode requires `HYPERLOOM_MN_EXT_SSH_KEY` plus at least one
-`*_IPS` list, or the run fails fast at startup. The platform runs the atomesh
-and sglangrouter router at `HYPERLOOM_MN_EXT_SERVICE_URL`. RayJob external mode ignores
+`*_IPS` list, or the run fails fast at startup. atomesh and sglangrouter need
+`HYPERLOOM_MN_EXT_SSH_KEY`, `_SSH_PORT`, `_PREFILL_IPS`, and `_DECODE_IPS` for
+per-round restarts; the platform runs their router at `HYPERLOOM_MN_EXT_SERVICE_URL`. RayJob external mode ignores
 the SSH / IP vars and uses `HYPERLOOM_MN_EXT_HEAD_IP` for restarts.
 
 ---

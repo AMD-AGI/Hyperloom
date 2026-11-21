@@ -32,7 +32,7 @@ re-provisioned cluster rewrites them).
 | Action         | Use               | Never                                     |
 |----------------|-------------------|-------------------------------------------|
 | Restart server | `restart-server`  | `kubectl exec … sglang.launch_server`     |
-| Kill server    | `kill-inference`  | `pkill -f sglang`                         |
+| Kill server    | `kill-inference` (no-op on atomesh / sglangrouter) | `pkill -f sglang` |
 
 Bypassing loses the stable exit codes, cross-subcommand state, and the
 service URL every benchmark round measures.
@@ -65,9 +65,10 @@ frontend `:8000`** (`state.service_url`), never sglang rank-0.
 GCS); no SSH. Uses `bootstrap` → `verify` → `restart-server` (below).
 
 **atomesh / sglangrouter** — PD-disaggregated SGLang engines behind a router
-the platform runs at `state.service_url`. Every prefill and decode pod is
-reached on `HYPERLOOM_MN_EXT_SSH_PORT`, with no role offset. The hand-off is
-adopted for benchmarking only: per-round restarts are not available.
+the platform runs at `state.service_url`. `restart-server` SSHes to each
+prefill and decode pod (every pod on `HYPERLOOM_MN_EXT_SSH_PORT`, no role
+offset) and restarts only the engines in place. `kill-inference` stops
+nothing: the engines stay on their GPUs until the next `restart-server`.
 
 The topology (aggregated vs PD, per-role TP/EP, image, RDMA) is fixed by the
 platform at provision time; the flags here only describe what `restart-server`

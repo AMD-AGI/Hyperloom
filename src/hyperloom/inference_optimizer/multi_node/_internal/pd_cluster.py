@@ -21,15 +21,26 @@ from urllib.parse import urlsplit
 
 from hyperloom_common.coerce import optional_positive_int
 
-from .topology_file import Lookup
+from .topology_file import PD_ROUTER_BACKENDS, Lookup, normalize_mn_backend
 
 ENGINE_PORT = 8000
 PREFILL = "prefill"
 DECODE = "decode"
 PREFILL_BOOTSTRAP_PORT = 8998
+#: Engine env defaults a launch keeps unless the forwarded env or the pod already sets them.
+_ENGINE_ENV_DEFAULTS = {
+    "SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT": "100000",
+    "SGLANG_DISAGGREGATION_WAITING_TIMEOUT": "100000",
+}
 DECODE_BOOTSTRAP_PORT = 9098
 # ``managed_by`` value of a pod whose process the platform owns; it is recorded, never restarted.
 PLATFORM_MANAGED = "platform"
+# Substring of the engine command line that identifies the server process on a pod.
+ENGINE_NEEDLE = "sglang.launch_server"
+# Device files whose open handles mean a process still holds GPU memory.
+GPU_DEVICE_PATHS = ("/dev/kfd",)
+# Seconds an engine launch waits for the previous engine to release the GPU.
+GPU_RELEASE_WAIT_S = 120
 
 
 @dataclass(frozen=True)
@@ -102,6 +113,22 @@ def _ssh_port(get: Lookup) -> int | None:
     """``HYPERLOOM_MN_EXT_SSH_PORT``, the port on every pod; None when unset or invalid (no default, no stride)."""
     port = optional_positive_int(get("HYPERLOOM_MN_EXT_SSH_PORT"))
     return port if port and port <= 65535 else None
+
+
+def _csv(get: Lookup, name: str) -> list[str]:
+    """Comma-separated ``name`` as a list of trimmed, non-empty parts."""
+    return [part.strip() for part in get(name).split(",") if part.strip()]
+
+
+def pd_cluster_has_control(get: Lookup) -> bool:
+    """True when this hand-off can SSH-restart an atomesh or sglangrouter cluster."""
+    if normalize_mn_backend(get("INFERENCE_OPTIMIZER_MN_BACKEND")) not in PD_ROUTER_BACKENDS:
+        return False
+    if not get("HYPERLOOM_MN_EXT_SSH_KEY").strip():
+        return False
+    if _ssh_port(get) is None:
+        return False
+    return bool(_csv(get, "HYPERLOOM_MN_EXT_PREFILL_IPS") and _csv(get, "HYPERLOOM_MN_EXT_DECODE_IPS"))
 
 
 def _endpoint(explicit: str, ips: list[Any]) -> str:
@@ -218,3 +245,75 @@ def stamp_pd_cluster(state: dict[str, Any], get: Lookup) -> None:
     state["worker_pod_ips"] = []
     state["worker_pods"] = []
     set_pods(state, launch_spec(state, get=get))
+
+
+def _engine_log_lines(log_dir: str, log_ip: str) -> list[str]:
+    """Bash that appends the engine's output to ``<log_dir>/mn_infera_server_<ip>_r0.log`` beside the container log."""
+    log_file = shlex.quote(f"{log_dir}/mn_infera_server_{log_ip}_r0.log")
+    return [
+        f"if mkdir -p {shlex.quote(log_dir)} 2>/dev/null; then",
+        f"  exec > >(tee -ai {log_file}) 2>&1",
+        "fi",
+        'echo "[hyperloom] engine launch $(date -u +%Y-%m-%dT%H:%M:%SZ)"',
+    ]
+
+
+def _close_inherited_handle_lines() -> list[str]:
+    """Bash that closes GPU device handles and sockets this process inherited from the image it replaced."""
+    patterns = "|".join(shlex.quote(path) for path in GPU_DEVICE_PATHS)
+    return [
+        "for hl_fd in /proc/$$/fd/*; do",
+        '  [ "${hl_fd##*/}" -gt 2 ] || continue',
+        f'  case "$(readlink "$hl_fd" 2>/dev/null || true)" in {patterns}|socket:*)'
+        ' eval "exec ${hl_fd##*/}>&-" ;; esac',
+        "done",
+    ]
+
+
+def _gpu_release_wait_lines() -> list[str]:
+    """Bash that waits until no other process holds a GPU device, up to ``GPU_RELEASE_WAIT_S``."""
+    listing = "|".join("*" + shlex.quote(" -> " + path) + "*" for path in GPU_DEVICE_PATHS)
+    return [
+        "hl_gpu_holders() {",
+        "  local p",
+        "  for p in /proc/[0-9]*; do",
+        '    [ "${p#/proc/}" = "$$" ] && continue',
+        f'    case "$(ls -l "$p"/fd 2>/dev/null || true)" in {listing}) echo "${{p#/proc/}}" ;; esac',
+        "  done",
+        "}",
+        f"hl_wait_end=$((SECONDS + {GPU_RELEASE_WAIT_S}))",
+        'while hl_held="$(hl_gpu_holders | tr "\\n" " ")" && [ -n "${hl_held// /}" ]; do',
+        '  if [ "$SECONDS" -ge "$hl_wait_end" ]; then',
+        f'    echo "[hyperloom] WARN GPU still held by pid(s) ${{hl_held% }} after {GPU_RELEASE_WAIT_S}s;'
+        ' launching anyway" >&2',
+        "    break",
+        "  fi",
+        "  sleep 1",
+        "done",
+    ]
+
+
+def launch_script(command: str, extra_env: dict[str, str], *, log_ip: str = "") -> str:
+    """Bash script that execs an engine ``command`` with the profile and tuning environment.
+
+    The disaggregation timeout defaults apply to any not in ``extra_env`` or the pod environment. Output is teed to
+    the shared server-log dir when one is set and ``log_ip`` names the pod. The command starts only after the
+    previous engine released the GPU.
+    """
+    lines = [
+        "#!/bin/bash",
+        "set -euo pipefail",
+        f"export ATOM_SERVER_PORT={ENGINE_PORT}",
+        "export SGLANG_HOST_IP=\"${SGLANG_HOST_IP:-$(hostname -i | awk '{print $1}')}\"",
+    ]
+    lines.extend(f"export {key}={shlex.quote(str(value))}" for key, value in extra_env.items())
+    lines.extend(
+        f'export {key}="${{{key}:-{value}}}"' for key, value in _ENGINE_ENV_DEFAULTS.items() if key not in extra_env
+    )
+    lines.extend(_close_inherited_handle_lines())
+    log_dir = str(extra_env.get("HYPERLOOM_MN_SERVER_LOG_DIR") or "")
+    if log_dir.startswith("/") and log_ip:
+        lines.extend(_engine_log_lines(log_dir, log_ip))
+    lines.extend(_gpu_release_wait_lines())
+    lines.append(f"exec {command}")
+    return "\n".join(lines) + "\n"

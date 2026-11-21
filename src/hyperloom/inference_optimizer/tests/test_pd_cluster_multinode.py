@@ -1,11 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Atomesh and sglangrouter multi-node state and launch commands."""
+"""Atomesh and sglangrouter multi-node state, launch commands, and in-place exec."""
 
 from __future__ import annotations
 
+import errno
+import json
+import os
 import socket
+import subprocess
+import sys
+import time
 import types
 from pathlib import Path
 
@@ -13,9 +19,16 @@ import pytest
 
 from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
 from hyperloom.inference_optimizer.multi_node._internal import pd_cluster as pd_internal
+from hyperloom.inference_optimizer.multi_node._internal import process_image
 from hyperloom.inference_optimizer.multi_node._internal import topology_file as topo
-from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import engine_command
+from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import (
+    engine_command,
+    launch_script,
+)
 from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import LaunchSpec
+from hyperloom.inference_optimizer.multi_node._internal.process_image import replace_process_image
+from hyperloom.inference_optimizer.multi_node.commands import pd_cluster as pd_cmds
+from hyperloom.inference_optimizer.multi_node._internal import pd_remote
 from hyperloom.inference_optimizer.multi_node.state_paths import bind_state_file_to_session
 
 
@@ -49,6 +62,20 @@ def test_engine_commands_match_the_platform_entrypoints() -> None:
     assert "--disaggregation-bootstrap-port 8998" in prefill
     assert "--disaggregation-mode decode" in decode
     assert "--disaggregation-bootstrap-port 9098" in decode
+
+
+def test_engine_launch_defaults_the_disaggregation_timeouts_without_overriding_a_set_one() -> None:
+    script = launch_script("true", {"SGLANG_DISAGGREGATION_WAITING_TIMEOUT": "5"})
+    assert 'SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT="${SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT:-100000}"' in script
+    assert "export SGLANG_DISAGGREGATION_WAITING_TIMEOUT=5" in script
+    assert "SGLANG_DISAGGREGATION_WAITING_TIMEOUT:-" not in script
+
+
+def test_mooncake_knobs_are_forwarded_to_the_engines(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer.multi_node.commands import infera
+
+    monkeypatch.setenv("MC_ENABLE_DEST_DEVICE_AFFINITY", "1")
+    assert infera._collect_forward_env()["MC_ENABLE_DEST_DEVICE_AFFINITY"] == "1"
 
 
 def test_engine_listens_on_the_port_of_its_role_url() -> None:
@@ -121,7 +148,7 @@ def test_platform_router_ip_is_listed_and_stays_platform_managed(monkeypatch: py
     pd_internal.set_pods(state, _spec())
     assert state["router_pod_ips"] == ["192.168.0.5"]
     assert [pod.get("managed_by") for pod in state["router_pods"]] == ["platform"]
-    assert [pod["role"] for pod in pd_internal.role_engine_pods(state, "decode")] == ["decode"]
+    assert [pod["role"] for pod in pd_cmds._engine_pods(state)] == ["prefill", "decode"]
 
 
 def test_atomesh_handoff_records_the_cluster_and_uses_one_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -161,3 +188,459 @@ def test_atomesh_handoff_records_the_cluster_and_uses_one_port(monkeypatch: pyte
     assert "--disaggregation-mode decode" in state["decode_pods"][0]["launch_command"]
     # Infera's decode stride must not apply.
     assert all(pod["sshPort"] == 2222 for pod in state["decode_pods"])
+
+
+def test_replace_process_image_keeps_the_pid(tmp_path: Path) -> None:
+    marker = tmp_path / "marker"
+    pid = os.fork()
+    if pid == 0:
+        time.sleep(30)
+        os._exit(0)
+    try:
+        replace_process_image(pid, ["/bin/sh", "-c", f"printf kept > {marker}"])
+        os.waitpid(pid, 0)
+    finally:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+    assert marker.read_text(encoding="utf-8") == "kept"
+
+
+def _wait_for_cmdline(pid: int, prefix: bytes) -> None:
+    """Poll until ``pid`` runs a command line starting with ``prefix``."""
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if Path(f"/proc/{pid}/cmdline").read_bytes().startswith(prefix):
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"pid {pid} never ran {prefix!r}")
+
+
+def test_replace_process_image_drops_env_exported_by_the_previous_image(tmp_path: Path) -> None:
+    marker = tmp_path / "marker"
+    snapshot = str(tmp_path / "engine.environ")
+    pid = os.fork()
+    if pid == 0:
+        os.execve("/bin/sleep", ["/bin/sleep", "30"], {**os.environ, "HL_ORIGINAL": "orig"})
+    try:
+        _wait_for_cmdline(pid, b"/bin/sleep\x0030")
+        replace_process_image(pid, ["/bin/sh", "-c", "export HL_LEAKED=1; exec /bin/sleep 30"], env_snapshot=snapshot)
+        _wait_for_cmdline(pid, b"/bin/sleep\x0030")
+        replace_process_image(
+            pid,
+            ["/bin/sh", "-c", f'printf "%s|%s" "${{HL_ORIGINAL:-}}" "${{HL_LEAKED:-}}" > {marker}'],
+            env_snapshot=snapshot,
+        )
+        os.waitpid(pid, 0)
+    finally:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+    assert marker.read_text(encoding="utf-8") == "orig|"
+
+
+def test_replace_process_image_refuses_a_missing_executable_and_leaves_the_process_running() -> None:
+    server = subprocess.Popen(["/bin/sh", "-c", "/bin/sleep 30 & wait"])
+    try:
+        deadline = time.monotonic() + 10
+        while not process_image.descendant_pids(server.pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        children = process_image.descendant_pids(server.pid)
+        assert children
+        with pytest.raises(OSError, match="not an executable"):
+            replace_process_image(server.pid, ["/nonexistent/hl-no-such-binary"])
+        time.sleep(0.3)
+        assert server.poll() is None
+        assert process_image.descendant_pids(server.pid) == children
+    finally:
+        for child in process_image.descendant_pids(server.pid):
+            os.kill(child, 9)
+        server.kill()
+        server.wait()
+
+
+@pytest.mark.parametrize(
+    ("failing", "killed"),
+    [("_syscall_gadget", False), ("_stack_slot", False), ("_check_exec", True)],
+)
+def test_replace_process_image_kills_only_once_the_exec_is_under_way(
+    monkeypatch: pytest.MonkeyPatch, failing: str, killed: bool
+) -> None:
+    kills: list[tuple[int, int]] = []
+    stopped_by_trap = (5 << 8) | 0x7F
+
+    def _fail(*_args: object, **_kwargs: object) -> int:
+        raise OSError(errno.ENOENT, "boom")
+
+    monkeypatch.setattr(process_image, "_ptrace", lambda *_args: 0)
+    monkeypatch.setattr(process_image, "_libc", types.SimpleNamespace(ptrace=lambda *_args: 0))
+    monkeypatch.setattr(process_image, "_syscall_gadget", lambda _pid: 0x1000)
+    monkeypatch.setattr(process_image, "_stack_slot", lambda _pid, _rsp, _nbytes: 0x2000)
+    monkeypatch.setattr(process_image, "_check_exec", lambda *_args: None)
+    monkeypatch.setattr(process_image, "read_environ", lambda _pid: [])
+    monkeypatch.setattr(process_image, "descendant_pids", lambda _pid: [4243])
+    monkeypatch.setattr(process_image, failing, _fail)
+    monkeypatch.setattr(os, "waitpid", lambda pid, _flags: (pid, stopped_by_trap))
+    monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    with pytest.raises(OSError):
+        process_image.replace_process_image(4242, ["/bin/true"])
+
+    assert kills == ([(4243, 9), (4242, 9)] if killed else [])
+
+
+def test_cstr_table_writes_undecodable_environment_bytes_back_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    written: list[bytes] = []
+    monkeypatch.setattr(process_image, "_poke", lambda _pid, _addr, blob: written.append(blob))
+    raw = b"HL_RAW=\xff\xfe"
+
+    process_image._write_cstr_table(4242, 0x1000, [raw.decode("utf-8", "surrogateescape")])
+
+    assert written[0] == raw + b"\0"
+
+
+def test_remote_driver_finds_the_server_by_its_needle(tmp_path: Path) -> None:
+    driver = pd_remote._remote_program().replace("\nrestart_remote_main()\n", "\n")
+    scope: dict[str, object] = {"os": os}
+    exec(driver, scope)
+    token = f"hl-needle-{os.getpid()}-{time.monotonic_ns()}"
+    named = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", token])
+    try:
+        time.sleep(0.2)
+        find = scope["_find_server"]
+        assert find(str(tmp_path / "none.pid"), token) == named.pid
+        assert find(str(tmp_path / "none.pid"), f"absent-{token}") == 0
+    finally:
+        named.kill()
+        named.wait()
+
+
+def test_remote_driver_ignores_a_pidfile_naming_an_unrelated_process(tmp_path: Path) -> None:
+    driver = pd_remote._remote_program().replace("\nrestart_remote_main()\n", "\n")
+    scope: dict[str, object] = {"os": os}
+    exec(driver, scope)
+    unrelated = subprocess.Popen(["sleep", "30"])
+    pidfile = tmp_path / "decode.pid"
+    pidfile.write_text(str(unrelated.pid), encoding="utf-8")
+    try:
+        time.sleep(0.2)
+        assert scope["_find_server"](str(pidfile), "sglang.launch_server") != unrelated.pid
+    finally:
+        unrelated.kill()
+        unrelated.wait()
+
+
+def _driver_scope(monkeypatch: pytest.MonkeyPatch, *, held: bool, calls: list) -> dict:
+    driver = pd_remote._remote_program().replace("\nrestart_remote_main()\n", "\n")
+    scope: dict = {"os": os}
+    exec(driver, scope)
+    scope["_find_server"] = lambda _pidfile, _needle: 4242
+    scope["_held_by_launcher"] = lambda pid: held
+    scope["replace_process_image"] = lambda pid, argv, env_snapshot="": calls.append(("exec", pid, argv[0]))
+    scope["descendant_pids"] = lambda pid: [4243]
+    scope["baseline_environ"] = lambda pid, snapshot: calls.append(("env", pid, snapshot)) or [f"FROM={pid}"]
+    scope["_spawn_detached"] = lambda launch, env: calls.append(("spawn", launch, tuple(env))) or 5151
+    monkeypatch.setattr(os, "kill", lambda pid, sig: calls.append(("kill", pid, sig)))
+    return scope
+
+
+@pytest.mark.parametrize("held", [True, False])
+def test_remote_driver_execs_in_place_only_for_the_launcher_waited_pid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], held: bool
+) -> None:
+    calls: list = []
+    scope = _driver_scope(monkeypatch, held=held, calls=calls)
+    monkeypatch.setenv("HL_PIDFILE", str(tmp_path / "role.pid"))
+    monkeypatch.setenv("HL_LAUNCH_PATH", str(tmp_path / "launch.sh"))
+    monkeypatch.setenv("HL_ACTION", "restart")
+    scope["restart_remote_main"]()
+    result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    if held:
+        assert result["action"] == "exec"
+        assert [c[0] for c in calls] == ["exec"]
+    else:
+        assert result["action"] == "respawn"
+        assert ("kill", 4242, 9) in calls and ("kill", 4243, 9) in calls
+        assert not [c for c in calls if c[0] == "exec"]
+        assert calls.index(("env", 4242, str(tmp_path / "role.pid") + ".environ")) < calls.index(("kill", 4242, 9))
+        assert [c[2] for c in calls if c[0] == "spawn"] == [("FROM=4242",)]
+
+
+def test_spawn_without_a_server_takes_the_container_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list = []
+    scope = _driver_scope(monkeypatch, held=False, calls=calls)
+    scope["_find_server"] = lambda _pidfile, _needle: 0
+    monkeypatch.setenv("HL_PIDFILE", str(tmp_path / "role.pid"))
+    monkeypatch.setenv("HL_LAUNCH_PATH", str(tmp_path / "launch.sh"))
+    monkeypatch.setenv("HL_ACTION", "restart")
+    scope["restart_remote_main"]()
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["action"] == "spawn"
+    assert ("env", 1, str(tmp_path / "role.pid") + ".environ") in calls
+    assert [c[2] for c in calls if c[0] == "spawn"] == [("FROM=1",)]
+
+
+def test_respawn_takes_the_container_environment_when_the_server_environment_is_gone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list = []
+    scope = _driver_scope(monkeypatch, held=False, calls=calls)
+    scope["baseline_environ"] = lambda pid, snapshot: calls.append(("env", pid, snapshot)) or []
+    scope["read_environ"] = lambda pid: ["PATH=/opt/venv/bin:/usr/bin", f"FROM={pid}"]
+    monkeypatch.setenv("HL_PIDFILE", str(tmp_path / "role.pid"))
+    monkeypatch.setenv("HL_LAUNCH_PATH", str(tmp_path / "launch.sh"))
+    monkeypatch.setenv("HL_ACTION", "restart")
+    scope["restart_remote_main"]()
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["action"] == "respawn"
+    assert [c[2] for c in calls if c[0] == "spawn"] == [("PATH=/opt/venv/bin:/usr/bin", "FROM=1")]
+
+
+def test_detached_spawn_runs_with_the_given_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    driver = pd_remote.REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
+    scope: dict = {"os": os}
+    exec(driver, scope)
+    monkeypatch.setenv("HL_CONSOLE", str(tmp_path / "none"))
+    launch = tmp_path / "launch.sh"
+    launch.write_text('#!/bin/bash\necho "hl-env-$HL_TEST_MARK"\n', encoding="utf-8")
+    env = [f"PATH={os.environ['PATH']}", "HL_TEST_MARK=from-container"]
+    pid = scope["_spawn_detached"](str(launch), env)
+    os.waitpid(pid, 0)
+    assert "hl-env-from-container" in (tmp_path / "launch.sh.log").read_text(encoding="utf-8")
+
+
+def test_detached_spawn_logs_to_file_and_console(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    driver = pd_remote.REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
+    scope: dict = {"os": os}
+    exec(driver, scope)
+    console = tmp_path / "console"
+    console.write_text("", encoding="utf-8")
+    monkeypatch.setenv("HL_CONSOLE", str(console))
+    launch = tmp_path / "launch.sh"
+    launch.write_text("#!/bin/bash\necho hl-spawned-$$\n", encoding="utf-8")
+    pid = scope["_spawn_detached"](str(launch), [f"PATH={os.environ['PATH']}"])
+    os.waitpid(pid, 0)
+    log_file = tmp_path / "launch.sh.log"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not all(
+        path.exists() and f"hl-spawned-{pid}" in path.read_text(encoding="utf-8") for path in (log_file, console)
+    ):
+        time.sleep(0.05)
+    assert f"hl-spawned-{pid}" in log_file.read_text(encoding="utf-8")
+    assert f"hl-spawned-{pid}" in console.read_text(encoding="utf-8")
+
+
+def _run_launch(tmp_path: Path, command: str, env: dict[str, str], *, log_ip: str = "") -> subprocess.CompletedProcess:
+    script = tmp_path / "launch.sh"
+    script.write_text(pd_internal.launch_script(command, env, log_ip=log_ip), encoding="utf-8")
+    return subprocess.run(
+        ["bash", str(script)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=dict(os.environ, SGLANG_HOST_IP="127.0.0.1"),
+    )
+
+
+def test_engine_launch_tees_its_output_to_the_shared_log_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pd_internal, "GPU_DEVICE_PATHS", (str(tmp_path / "no-gpu"),))
+    logs = tmp_path / "logs"
+    done = _run_launch(tmp_path, "echo engine-says-hi", {"HYPERLOOM_MN_SERVER_LOG_DIR": str(logs)}, log_ip="10.0.0.2")
+    assert done.returncode == 0, done.stderr
+    assert "engine-says-hi" in done.stdout
+    log_file = logs / "mn_infera_server_10.0.0.2_r0.log"
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and "engine-says-hi" not in (log_file.read_text() if log_file.exists() else ""):
+        time.sleep(0.05)
+    assert "engine-says-hi" in log_file.read_text()
+
+
+def test_engine_launch_waits_for_the_gpu_to_be_released(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    device = tmp_path / "kfd"
+    device.write_text("")
+    monkeypatch.setattr(pd_internal, "GPU_DEVICE_PATHS", (str(device),))
+    marker = tmp_path / "holder-exited"
+    holder = subprocess.Popen(
+        ["python3", "-c", f"import time; f = open({str(device)!r}); time.sleep(1.5); open({str(marker)!r}, 'w')"]
+    )
+    try:
+        time.sleep(0.3)
+        done = _run_launch(tmp_path, f"test -f {marker}", {})
+    finally:
+        holder.wait(timeout=10)
+    assert done.returncode == 0, done.stderr
+
+
+def test_engine_launch_gives_up_waiting_on_a_held_gpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    device = tmp_path / "kfd"
+    device.write_text("")
+    monkeypatch.setattr(pd_internal, "GPU_DEVICE_PATHS", (str(device),))
+    monkeypatch.setattr(pd_internal, "GPU_RELEASE_WAIT_S", 1)
+    holder = subprocess.Popen(["python3", "-c", f"import time; f = open({str(device)!r}); time.sleep(30)"])
+    try:
+        time.sleep(0.3)
+        done = _run_launch(tmp_path, "echo launched", {})
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)
+    assert done.returncode == 0
+    assert "launched" in done.stdout
+    assert f"GPU still held by pid(s) {holder.pid}" in done.stderr
+
+
+def test_engine_launch_ignores_gpu_handles_it_inherited(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A GPU handle the replaced engine left open in this process is not another holder."""
+    device = tmp_path / "kfd"
+    device.write_text("")
+    monkeypatch.setattr(pd_internal, "GPU_DEVICE_PATHS", (str(device),))
+    monkeypatch.setattr(pd_internal, "GPU_RELEASE_WAIT_S", 3)
+    script = tmp_path / "launch.sh"
+    logs = tmp_path / "logs"
+    script.write_text(
+        pd_internal.launch_script("echo launched", {"HYPERLOOM_MN_SERVER_LOG_DIR": str(logs)}, log_ip="ip"),
+        encoding="utf-8",
+    )
+    with open(device, encoding="utf-8") as held:
+        proc = subprocess.Popen(
+            ["bash", str(script)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            pass_fds=(held.fileno(),),
+            env=dict(os.environ, SGLANG_HOST_IP="127.0.0.1"),
+        )
+    out, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert "GPU still held" not in out + err
+
+
+def test_engine_launch_closes_listening_sockets_it_inherited(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine can bind its port when the replaced engine left that port's listening socket open in this process."""
+    monkeypatch.setattr(pd_internal, "GPU_DEVICE_PATHS", (str(tmp_path / "no-gpu"),))
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    port = listener.getsockname()[1]
+    script = tmp_path / "launch.sh"
+    bind = f"python3 -c \"import socket; socket.socket().bind(('127.0.0.1', {port})); print('bound')\""
+    script.write_text(pd_internal.launch_script(bind, {}), encoding="utf-8")
+    with listener:
+        proc = subprocess.Popen(
+            ["bash", str(script)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            pass_fds=(listener.fileno(),),
+            env=dict(os.environ, SGLANG_HOST_IP="127.0.0.1"),
+        )
+    out, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert "bound" in out
+
+
+class _RestartCli:
+    """Multi-node CLI stand-in that records restart SSH calls and the saved state."""
+
+    EXIT_CONFIG_ERROR = 3
+    ConfigurationError = RuntimeError
+
+    def __init__(self, state: dict, replies: dict | None = None) -> None:
+        self.state = state
+        self.replies = replies or {}
+        self.calls: list[tuple[str, int, str]] = []
+        self.saved: dict | None = None
+
+    def _load_state(self) -> dict:
+        return dict(self.state)
+
+    def _save_state(self, state: dict) -> None:
+        self.saved = state
+
+    def _normalize_extra_args(self, raw: str) -> str:
+        return str(raw or "").strip()
+
+    def _infera_ssh_bash_with_env(self, state, ip, script, *, timeout, port=None):
+        self.calls.append((ip, port, script))
+        reply = self.replies.get(ip, 0)
+        if reply == "timeout":
+            raise subprocess.TimeoutExpired("ssh", timeout)
+        return subprocess.CompletedProcess(["ssh"], reply, stdout="", stderr="engine failed" if reply else "")
+
+
+_RESTART_STATE = {
+    "backend": "atomesh",
+    "ssh_key_path": "/keys/id",
+    "ssh_port": 29000,
+    "prefill_pod_ips": ["10.0.0.1"],
+    "decode_pod_ips": ["10.0.0.2"],
+    "gpus_per_node": 8,
+}
+
+
+def _restart_args(**overrides: object) -> types.SimpleNamespace:
+    base = dict(
+        model="/models/m",
+        framework="sglang",
+        tp=8,
+        ep=1,
+        extra_args="--mem-fraction-static 0.8",
+        pd_prefill_extra_args="",
+        pd_decode_extra_args="",
+        poll_timeout=60,
+    )
+    base.update(overrides)
+    return types.SimpleNamespace(**base)
+
+
+def test_restart_relaunches_every_engine_pod_and_records_the_round(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    cli = _RestartCli(_RESTART_STATE)
+    monkeypatch.setattr(pd_cmds, "_mn_cli", cli)
+
+    assert pd_cmds.restart_pd_cluster(_restart_args()) == 0
+
+    assert [(ip, port) for ip, port, _script in cli.calls] == [("10.0.0.1", 29000), ("10.0.0.2", 29000)]
+    assert "--disaggregation-mode prefill" in cli.calls[0][2]
+    assert "--disaggregation-mode decode" in cli.calls[1][2]
+    assert cli.saved is not None
+    assert cli.saved["last_restart_model"] == "/models/m"
+    assert cli.saved["last_restart_extra_args"] == "--mem-fraction-static 0.8"
+    assert json.loads(capsys.readouterr().out)["rc"] == 0
+
+
+def test_restart_reports_failed_and_timed_out_pods(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    cli = _RestartCli(_RESTART_STATE, replies={"10.0.0.1": "timeout", "10.0.0.2": 1})
+    monkeypatch.setattr(pd_cmds, "_mn_cli", cli)
+
+    assert pd_cmds.restart_pd_cluster(_restart_args()) == 1
+
+    results = {item["podIP"]: item for item in json.loads(capsys.readouterr().out)["results"]}
+    assert results["10.0.0.1"]["rc"] == 124
+    assert results["10.0.0.2"]["stderr"] == "engine failed"
+
+
+def test_restart_refuses_denied_server_args_and_an_empty_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    cli = _RestartCli(_RESTART_STATE)
+    monkeypatch.setattr(pd_cmds, "_mn_cli", cli)
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+
+    assert pd_cmds.restart_pd_cluster(_restart_args(extra_args="--model-path /other")) == cli.EXIT_CONFIG_ERROR
+    assert pd_cmds.restart_pd_cluster(_restart_args(model="")) == cli.EXIT_CONFIG_ERROR
+    assert cli.calls == []
+
+
+@pytest.mark.parametrize(
+    ("missing", "message"),
+    [
+        ({"backend": "infera"}, "not atomesh or sglangrouter"),
+        ({"ssh_key_path": ""}, "HYPERLOOM_MN_EXT_SSH_KEY"),
+        ({"ssh_port": 0}, "HYPERLOOM_MN_EXT_SSH_PORT"),
+        ({"decode_pod_ips": []}, "HYPERLOOM_MN_EXT_DECODE_IPS"),
+    ],
+)
+def test_restart_requires_a_complete_pd_handoff(monkeypatch: pytest.MonkeyPatch, missing: dict, message: str) -> None:
+    cli = _RestartCli({**_RESTART_STATE, **missing})
+    monkeypatch.setattr(pd_cmds, "_mn_cli", cli)
+    with pytest.raises(RuntimeError, match=message):
+        pd_cmds.restart_pd_cluster(_restart_args())
