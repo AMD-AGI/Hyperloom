@@ -65,6 +65,8 @@ SESSION_VARIABLES = {
     "image": "HYPERLOOM_IMAGE",
     "node_name": "NODE_NAME",
 }
+#: The :data:`SESSION_VARIABLES` key of the Claw session a hosted run belongs to, which the manifest records too.
+CLAW_SESSION_KEY = "claw_session_id"
 #: The records a hosted run appends in the session directory, by the ``metadata`` key the breakdown copies them under.
 HOSTED_RECORDS = {"measurement_sandboxes": Path("hosted/measurement_sandboxes.jsonl")}
 #: The documents a hosted run writes in the session directory, by the ``metadata`` key the breakdown copies them under.
@@ -140,14 +142,42 @@ def card_holds(snapshot: BlackboardSnapshot) -> dict[str, object]:
     return {"leases": leases, "card_hours_by_branch": by_branch, "card_hours_by_kind": by_kind}
 
 
+def session_variable(key: str, environ: Mapping[str, str]) -> str | None:
+    """What the variable :data:`SESSION_VARIABLES` names for ``key`` holds in ``environ``, stripped; ``None`` where it
+    is unset or blank. The one reader of those variables, so the breakdown, the manifest and the toolbox's state
+    cannot read them apart."""
+
+    return (environ.get(SESSION_VARIABLES[key]) or "").strip() or None
+
+
+def claw_session_id(environ: Mapping[str, str]) -> str | None:
+    """The Claw session ``environ`` names (:data:`CLAW_SESSION_KEY`); ``None`` for a run Claw did not host."""
+
+    return session_variable(CLAW_SESSION_KEY, environ)
+
+
+def leg_claw_session_id(recorded: str | None, environ: Mapping[str, str]) -> str | None:
+    """The Claw session a session records once a leg runs under ``environ``: the one ``environ`` gives
+    (:func:`claw_session_id`), as the id follows the leg that runs, and ``recorded`` when it gives none. The one rule
+    the manifest, the toolbox's state and the breakdown apply, so the three cannot name different Claw sessions."""
+
+    return claw_session_id(environ) or recorded
+
+
 def session_metadata(
-    snapshot: BlackboardSnapshot, environ: Mapping[str, str], code_revision: str | None = None
+    snapshot: BlackboardSnapshot,
+    environ: Mapping[str, str],
+    code_revision: str | None = None,
+    claw_session: str | None = None,
 ) -> dict[str, object]:
     """The ``metadata.session`` block: the session id, the source revision the session ran on as it recorded it at
-    start, and what :data:`SESSION_VARIABLES` name; null where unset."""
+    start, and what :data:`SESSION_VARIABLES` name; null where unset. ``claw_session`` is the Claw session the
+    session recorded (:data:`CLAW_SESSION_KEY`); the block names the one :func:`leg_claw_session_id` gives, the
+    exporting process's when it has one. The other variables are the exporting process's."""
 
     session_id = snapshot.profile.session_id if snapshot.profile is not None else None
-    named = {key: environ.get(name) or None for key, name in SESSION_VARIABLES.items()}
+    named = {key: session_variable(key, environ) for key in SESSION_VARIABLES}
+    named[CLAW_SESSION_KEY] = leg_claw_session_id(claw_session, environ)
     return {"session_id": session_id, "code_revision": code_revision or None, **named}
 
 
@@ -226,12 +256,14 @@ class SessionPlace:
 
     ``session_dir`` is where a hosted run's records are read from and ``runner_dir`` the agent runner's session
     directory; ``code_revision`` is the source revision the session's manifest recorded at start, which a process that
-    exports another run's session, such as ``final-only``, does not have in its environment.
+    exports another run's session, such as ``final-only``, does not have in its environment, and ``claw_session_id``
+    the Claw session the manifest records, which the breakdown names when the exporting process is given none.
     """
 
     session_dir: Path | None = None
     runner_dir: Path | None = None
     code_revision: str | None = None
+    claw_session_id: str | None = None
 
 
 def build_breakdown(
@@ -259,7 +291,7 @@ def build_breakdown(
         "metadata": {
             "session_profile": encode(snapshot.profile),
             "manifest_fingerprints": encode(snapshot.fingerprints),
-            "session": session_metadata(snapshot, os.environ, place.code_revision),
+            "session": session_metadata(snapshot, os.environ, place.code_revision, place.claw_session_id),
             **hosted_records(place.session_dir),
             **agent_resources(place.runner_dir),
         },
@@ -323,6 +355,7 @@ def write_breakdown(directory: Path, breakdown: Mapping[str, object]) -> Path:
 
 
 __all__ = [
+    "CLAW_SESSION_KEY",
     "EXPORTER_VERSION",
     "FILENAME",
     "HOSTED_DOCUMENTS",
@@ -337,9 +370,12 @@ __all__ = [
     "build_breakdown",
     "build_usage",
     "card_holds",
+    "claw_session_id",
     "hosted_records",
+    "leg_claw_session_id",
     "measurement_usage",
     "session_metadata",
     "session_spend",
+    "session_variable",
     "write_breakdown",
 ]

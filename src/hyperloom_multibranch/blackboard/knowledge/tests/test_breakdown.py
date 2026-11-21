@@ -217,3 +217,18 @@ def test_the_breakdown_is_written_as_sorted_indented_json(snapshot: BlackboardSn
     assert path == tmp_path / "export" / FILENAME
     assert json.loads(path.read_text(encoding="utf-8")) == breakdown
     assert path.read_text(encoding="utf-8").startswith('{\n  "agent_manifests"')
+
+
+@pytest.mark.parametrize(
+    ("given", "named"), [("claw-other", "claw-other"), (None, "claw-first")], ids=["another", "none"]
+)
+def test_the_breakdown_names_the_claw_session_of_the_exporting_leg_else_the_recorded_one(
+    snapshot: BlackboardSnapshot, monkeypatch: pytest.MonkeyPatch, given: str | None, named: str
+) -> None:
+    monkeypatch.delenv("CLAW_SESSION_ID", raising=False)
+    if given is not None:
+        monkeypatch.setenv("CLAW_SESSION_ID", given)
+
+    metadata = build_breakdown(snapshot, place=SessionPlace(claw_session_id="claw-first"))["metadata"]
+
+    assert metadata["session"]["claw_session_id"] == named
