@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 from collections.abc import Callable, Iterator
 from dataclasses import replace
@@ -255,3 +256,14 @@ def _record_last_restart(state: dict[str, Any], args: argparse.Namespace, framew
     state["last_restart_pd_mode"] = pd_mode
     state["last_restart_extra_args"] = _normalize_extra_args(getattr(args, "extra_args", ""))
     state["last_restart_forward_env"] = per_round_forward_overrides()
+
+
+CONTAINER_ENVIRON_PATH = "/proc/1/environ"
+
+
+def container_env_line(environ_path: str) -> str:
+    """Bash that exports the container's interpreter search paths read from ``environ_path``."""
+    return (
+        "while IFS= read -r -d '' kv; do case \"$kv\" in PATH=*|PYTHONPATH=*|VIRTUAL_ENV=*|LD_LIBRARY_PATH=*) "
+        f'export "$kv";; esac; done < {shlex.quote(environ_path)}\n'
+    )

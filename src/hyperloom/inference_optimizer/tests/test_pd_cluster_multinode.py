@@ -25,11 +25,12 @@ from hyperloom.inference_optimizer.multi_node._internal import topology_file as 
 from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import (
     engine_command,
     launch_script,
+    record_profile_paths,
 )
 from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import LaunchSpec
 from hyperloom.inference_optimizer.multi_node.commands import infera
 from hyperloom.inference_optimizer.multi_node.commands import pd_cluster as pd_cmds
-from hyperloom.inference_optimizer.multi_node.state_paths import bind_state_file_to_session
+from hyperloom.inference_optimizer.multi_node.state_paths import bind_state_file_to_session, multi_node_state_env
 
 
 def _spec(**overrides: object) -> LaunchSpec:
@@ -78,6 +79,18 @@ def test_mooncake_knobs_are_forwarded_to_the_engines(monkeypatch: pytest.MonkeyP
     assert infera._collect_forward_env(infera.POD_FORWARD_ENV_PREFIXES)["MC_ENABLE_DEST_DEVICE_AFFINITY"] == "1"
 
 
+def test_missing_baseline_names_the_manual_args_and_the_session_record() -> None:
+    from hyperloom.inference_optimizer.multi_node._internal import baseline_args as ba
+
+    with pytest.raises(ba.BaselineArgsMissing) as info:
+        ba.resolve_baseline_args({"MODEL_PATH": "/models/M", "INFERENCEX_PATH": "/ix"})
+
+    message = str(info.value)
+    assert "--server-args / --pd-prefill-extra-args / --pd-decode-extra-args" in message
+    assert "previous launch recorded them" in message
+    assert "INFERENCEX" not in message and "Magpie" not in message
+
+
 def test_engine_listens_on_the_port_of_its_role_url() -> None:
     spec = _spec(
         prefill_url="http://w-prefill.ns.svc.cluster.local:8010",
@@ -116,11 +129,52 @@ def test_engine_ep_size_follows_the_role_ep(monkeypatch: pytest.MonkeyPatch) -> 
     assert "--ep-size 8" in engine_command("decode", handed_off)
 
 
+_SPLIT_FLAGS = frozenset(
+    {"--cuda-graph-bs-decode", "--cuda-graph-bs-prefill", "--cuda-graph-max-bs-decode", "--cuda-graph-max-bs-prefill"}
+)
+
+
+def test_engine_uses_split_cuda_graph_flags_when_the_engine_has_no_legacy_flag() -> None:
+    spec = _spec(
+        prefill_extra="--cuda-graph-bs 1 2 4 --mem-fraction-static 0.8",
+        decode_extra="--cuda-graph-bs 1 2 --cuda-graph-max-bs=64",
+        engine_flags=_SPLIT_FLAGS,
+    )
+    prefill = engine_command("prefill", spec)
+    decode = engine_command("decode", spec)
+    assert "--cuda-graph-bs" not in prefill
+    assert "--cuda-graph-max-bs" not in prefill
+    assert "--mem-fraction-static 0.8" in prefill
+    assert "--cuda-graph-bs-decode 1 2 " in decode
+    assert "--cuda-graph-max-bs-decode=64" in decode
+    for flags in (frozenset(), _SPLIT_FLAGS | {"--cuda-graph-bs", "--cuda-graph-max-bs"}):
+        legacy = _spec(decode_extra="--cuda-graph-bs 1 2", prefill_extra="--cuda-graph-bs 1 2", engine_flags=flags)
+        assert "--cuda-graph-bs 1 2" in engine_command("prefill", legacy)
+        assert "--cuda-graph-bs 1 2" in engine_command("decode", legacy)
+
+
 def test_pods_record_the_engine_port_of_their_role() -> None:
     state = {"prefill_pod_ips": ["10.0.0.1"], "decode_pod_ips": ["10.0.0.2"], "ssh_port": 29000}
     pd_internal.set_pods(state, _spec(prefill_url="http://p-svc:8010", decode_url="http://d-svc:8020"))
     ports = {pod["role"]: pod.get("enginePort") for pod in state["prefill_pods"] + state["decode_pods"]}
     assert ports == {"prefill": 8010, "decode": 8020}
+
+
+def test_previous_baseline_args_are_reused_only_for_the_same_model_and_ep(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer.multi_node._internal import baseline_args as ba
+
+    recorded: dict[str, object] = {}
+    monkeypatch.setenv("MODEL_PATH", "/models/DeepSeek-R1")
+    monkeypatch.delenv("EP", raising=False)
+    ba.record_baseline_args(recorded, ba.BaselineArgs(ba.SOURCE_MANUAL, "--context-length 8192", "--x"))
+    same = {"MODEL_PATH": "/models/DeepSeek-R1"}
+    assert ba.resolve_baseline_args(env=same, previous=recorded).prefill == "--context-length 8192"
+    for env in ({"MODEL_PATH": "/models/Qwen3"}, {"MODEL_PATH": "/models/DeepSeek-R1", "EP": "8"}):
+        with pytest.raises(ba.BaselineArgsMissing):
+            ba.resolve_baseline_args(env=env, previous=recorded)
+    legacy = {k: v for k, v in recorded.items() if k != "baseline_identity"}
+    with pytest.raises(ba.BaselineArgsMissing):
+        ba.resolve_baseline_args(env=same, previous=legacy)
 
 
 def test_platform_router_is_recorded_from_the_service_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -162,6 +216,57 @@ def test_platform_router_ip_is_listed_and_stays_platform_managed(monkeypatch: py
     assert [pod["role"] for pod in pd_cmds._engine_pods(state)] == ["prefill", "decode"]
 
 
+def test_stamp_keeps_the_pinned_profile_dir_and_restores_recorded_traces(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The pinned dir is where this session's engines write; a recorded dir from disk must not replace it."""
+    pinned = tmp_path / "new" / "torch_trace"
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", str(pinned))
+    path = bind_state_file_to_session(tmp_path / "session")
+    path.write_text(
+        json.dumps(
+            {
+                "backend": "sglangrouter",
+                "service_url": "http://router-svc.ns:8000",
+                "prefill_pod_ips": ["10.0.0.1"],
+                "profile_trace": str(tmp_path / "old" / "torch_trace"),
+                "decode_trace": "/old/decode/rank0.trace.json.gz",
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    monkeypatch.setattr(pd_internal.socket, "gethostbyname", lambda host: "192.168.0.5")
+    env = {"HYPERLOOM_MN_EXT_PREFILL_IPS": "10.0.0.1", "HYPERLOOM_MN_EXT_DECODE_IPS": "10.0.0.2"}
+    state = {"backend": "sglangrouter", "service_url": "http://router-svc.ns:8000"}
+    pd_internal.stamp_pd_cluster(state, lambda name: env.get(name, ""))
+    assert state["profile_trace"] == str(pinned)
+    assert state["decode_trace"] == "/old/decode/rank0.trace.json.gz"
+
+
+def test_state_records_the_user_data_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from hyperloom.inference_optimizer.session.paths import default_workspace_root
+
+    monkeypatch.delenv(topo.TOPOLOGY_FILE_ENV, raising=False)
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://10.0.0.10:8000")
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "user"))
+    assert ext.build_external_state_from_env()["user_data_path"] == str(tmp_path / "user")
+    monkeypatch.delenv("USER_DATA_PATH")
+    assert ext.build_external_state_from_env()["user_data_path"] == str(default_workspace_root())
+
+
+def test_multi_node_state_env_names_the_bound_state_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("MULTI_NODE_STATE", raising=False)
+    monkeypatch.delenv("MULTI_NODE_STATE_FILE", raising=False)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", raising=False)
+    assert multi_node_state_env() == {}
+    path = bind_state_file_to_session(tmp_path / "session")
+    assert "MULTI_NODE_STATE" not in os.environ
+    assert multi_node_state_env() == {}
+    path.write_text("{}", encoding="utf-8")
+    assert multi_node_state_env() == {"MULTI_NODE_STATE": str(path), "MULTI_NODE_STATE_FILE": str(path)}
+
+
 def test_atomesh_handoff_records_the_cluster_and_uses_one_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     session = tmp_path / "session"
     monkeypatch.delenv(topo.TOPOLOGY_FILE_ENV, raising=False)
@@ -191,6 +296,8 @@ def test_atomesh_handoff_records_the_cluster_and_uses_one_port(monkeypatch: pyte
     assert state["ssh_port"] == 2222
     assert state["ssh_key_path"].endswith("id_ed25519")
     assert state["service_url"] == "http://10.0.0.10:8000"
+    assert state["profile_trace"] == str(session / "runs" / "profile" / "torch_trace")
+    assert state["steady_state_trace"] == ""
     assert [len(state[f"{role}_pods"]) for role in ("router", "prefill", "decode")] == [1, 2, 2]
     assert {pod["sshPort"] for pod in state["prefill_pods"] + state["decode_pods"]} == {2222}
     assert state["router_pods"][0]["managed_by"] == "platform"
@@ -199,6 +306,28 @@ def test_atomesh_handoff_records_the_cluster_and_uses_one_port(monkeypatch: pyte
     assert "--disaggregation-mode decode" in state["decode_pods"][0]["launch_command"]
     # Infera's decode stride must not apply.
     assert all(pod["sshPort"] == 2222 for pod in state["decode_pods"])
+
+
+def test_record_profile_paths_updates_the_state_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    path = bind_state_file_to_session(session)
+    path.write_text(
+        json.dumps({"backend": "atomesh", "profile_trace": "", "steady_state_trace": ""}),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    decode = str(session / "runs" / "profile" / "torch_trace" / "decode" / "rank0.trace.json.gz")
+    prefill = str(session / "runs" / "profile" / "torch_trace" / "prefill" / "rank0.trace.json.gz")
+    record_profile_paths(
+        profile_trace=str(session / "runs" / "profile" / "torch_trace"),
+        steady_state_trace=decode,
+        role_traces={"decode": decode, "prefill": prefill},
+    )
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["profile_trace"].endswith("torch_trace")
+    assert saved["steady_state_trace"] == decode
+    assert saved["decode_trace"] == decode
+    assert saved["prefill_trace"] == prefill
 
 
 def test_replace_process_image_keeps_the_pid(tmp_path: Path) -> None:
@@ -269,12 +398,15 @@ class _FakeCli:
         self.calls.append((ip, script))
         return subprocess.CompletedProcess(["ssh"], 0, stdout=self.replies.get(ip, ""), stderr="")
 
+    def _extract_pod_json(self, logs: str) -> dict | None:
+        return None
+
 
 _PD_STATE = {
     "backend": "sglangrouter",
     "ssh_port": 29000,
-    "prefill_pods": [{"role": "prefill", "podIP": "10.0.0.1", "sshPort": 29000}],
-    "decode_pods": [{"role": "decode", "podIP": "10.0.0.2", "sshPort": 29000}],
+    "prefill_pods": [{"role": "prefill", "podIP": "10.0.0.1", "sshPort": 29000, "launch_command": "true"}],
+    "decode_pods": [{"role": "decode", "podIP": "10.0.0.2", "sshPort": 29000, "launch_command": "true"}],
 }
 
 
@@ -308,6 +440,75 @@ def test_tracelens_patch_failure_reports_the_pod_error(monkeypatch: pytest.Monke
     out = capsys.readouterr().out
     report = json.loads(out[out.index("{") :])
     assert [failure["error"] for failure in report["failures"]] == [pod_error, pod_error]
+
+
+def _probe_state(tmp_path: Path) -> dict:
+    return {**_PD_STATE, "ssh_key_path": "/key", "profile_trace": str(tmp_path)}
+
+
+def _probe_cli(reply) -> object:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(_infera_ssh_bash_with_env=lambda state, ip, script, *, timeout, port=None: reply(ip, script))
+
+
+def _run_here(_ip: str, script: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+
+def _decode_unreachable(ip: str, script: str) -> subprocess.CompletedProcess:
+    if ip == "10.0.0.2":
+        raise subprocess.TimeoutExpired("ssh", 30)
+    return _run_here(ip, script)
+
+
+def test_profile_dir_probe_passes_when_every_engine_reads_the_sentinel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _route_pod_ssh(monkeypatch, _probe_cli(_run_here))
+    state = _probe_state(tmp_path)
+
+    assert pd_cmds.record_profile_dir_share(state) == ""
+    assert state["profile_trace_shared"] is True
+    assert "profile_trace_share_error" not in state
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_an_explicit_profile_dir_not_created_yet_is_probed_as_shared(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    trace_dir = tmp_path / "traces-run42"
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", str(trace_dir))
+    _route_pod_ssh(monkeypatch, _probe_cli(_run_here))
+    state = {**_PD_STATE, "ssh_key_path": "/key"}
+
+    pd_internal._pin_profile_dir(state)
+
+    assert state["profile_trace"] == str(trace_dir)
+    assert pd_cmds.record_profile_dir_share(state) == ""
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        lambda ip, _s: subprocess.CompletedProcess(["ssh"], 1, stdout="", stderr="No such file or directory"),
+        lambda ip, _s: subprocess.CompletedProcess(["ssh"], 0, stdout="other-token\n", stderr=""),
+        _decode_unreachable,
+    ],
+    ids=["missing", "different-file", "ssh-timeout"],
+)
+def test_profile_dir_probe_records_why_the_dir_is_not_shared(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reply
+) -> None:
+    _route_pod_ssh(monkeypatch, _probe_cli(reply))
+    state = _probe_state(tmp_path)
+
+    reason = pd_cmds.record_profile_dir_share(state)
+
+    assert reason and "pod 10.0.0." in reason
+    assert state["profile_trace_shared"] is False
+    assert state["profile_trace_share_error"] == reason
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_tracelens_patch_runs_under_the_container_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -368,6 +569,21 @@ def test_kernel_patch_and_geak_install_reach_every_engine_pod(monkeypatch: pytes
     mn_cli.install_geak_on_pods_best_effort()
     assert [ip for ip, _ in calls] == ["10.0.0.1", "10.0.0.2", "10.0.0.1", "10.0.0.2"]
     assert all(infera.CONTAINER_ENVIRON_PATH in script for _, script in calls)
+
+
+def test_engine_restart_gives_each_pod_its_roles_profiler_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeCli({})
+    _route_pod_ssh(monkeypatch, fake)
+    env = {"SGLANG_TORCH_PROFILER_DIR": "/shared/torch_trace"}
+    second_decode = {"role": "decode", "podIP": "10.0.0.4", "sshPort": 29000, "launch_command": "true"}
+    state = dict(_PD_STATE, decode_pods=[*_PD_STATE["decode_pods"], second_decode])
+    for pod in [*state["prefill_pods"], *state["decode_pods"]]:
+        pd_cmds._ssh_pod(state, pod, extra_env=env, timeout=5)
+    scripts = dict(fake.calls)
+    assert "export SGLANG_TORCH_PROFILER_DIR=/shared/torch_trace/prefill\n" in scripts["10.0.0.1"]
+    assert "export SGLANG_TORCH_PROFILER_DIR=/shared/torch_trace/decode\n" in scripts["10.0.0.2"]
+    assert "export SGLANG_TORCH_PROFILER_DIR=/shared/torch_trace/decode\n" in scripts["10.0.0.4"]
+    assert env == {"SGLANG_TORCH_PROFILER_DIR": "/shared/torch_trace"}
 
 
 def test_engines_not_running_names_pods_whose_launch_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -482,6 +698,33 @@ def test_liveness_probe_greps_the_engine_command(monkeypatch: pytest.MonkeyPatch
     assert pd_cmds.engines_not_running(dict(_PD_STATE)) == []
     script = dict(fake.calls)["10.0.0.1"]
     assert "grep -qF -e sglang.launch_server" in script
+
+
+def test_engine_flags_are_probed_once_and_only_for_legacy_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeCli({"10.0.0.1": "--cuda-graph-bs-decode\n--cuda-graph-bs-prefill\n--port\n"})
+    _route_pod_ssh(monkeypatch, fake)
+    state = dict(_PD_STATE)
+    assert pd_cmds.probe_engine_flags(state, _spec(), timeout=30) == frozenset()
+    assert fake.calls == []
+    spec = _spec(decode_extra="--cuda-graph-bs 1 2")
+    flags = pd_cmds.probe_engine_flags(state, spec, timeout=30)
+    assert flags == frozenset({"--cuda-graph-bs-decode", "--cuda-graph-bs-prefill", "--port"})
+    assert pd_cmds.probe_engine_flags(state, spec, timeout=30) == flags
+    assert len(fake.calls) == 1
+
+
+def test_engine_flag_probe_runs_with_the_container_environment(tmp_path: Path) -> None:
+    """The probe resolves python3 from PID 1's PATH, not the SSH session's."""
+    bin_dir = tmp_path / "venv-bin"
+    bin_dir.mkdir()
+    fake_python = bin_dir / "python3"
+    fake_python.write_text("#!/bin/sh\necho 'usage: [--from-container-env]'\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+    environ = tmp_path / "environ"
+    environ.write_bytes(f"PATH={bin_dir}:/usr/bin:/bin\0HOME=/root\0".encode())
+    script = pd_cmds._flag_probe_script(str(environ))
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
+    assert out.stdout.split() == ["--from-container-env"]
 
 
 def _run_launch(tmp_path: Path, command: str, env: dict[str, str], *, log_ip: str = "") -> subprocess.CompletedProcess:

@@ -22,7 +22,7 @@ from hyperloom_common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
-from hyperloom.inference_optimizer import framework_registry
+from hyperloom.inference_optimizer import framework_registry, multi_node
 from .benchmark_result import round_succeeded
 from inference_suite.contracts import RunLayout
 from inference_suite.contracts.layout import CAPTURE_TRACE_DIRS
@@ -717,12 +717,13 @@ def _mn_profile_refusal(round_trace_root: str) -> dict[str, Any] | None:
 
 
 # Restarts the multi-node server for this profiling round, with graph-capture profiling on for a PD node-list
-# session; returns the refusal result when it failed.
+# session or an atomesh/sglangrouter pod hand-off; returns the refusal result when it failed.
 async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -> dict[str, Any] | None:
-    from ._multi_node_env import is_pd_session, round_server_env
+    from ._multi_node_env import _read_state, is_pd_session, round_server_env
     from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
-    extra_env, flag = _graph_capture_profile_settings(_default_profile_config()) if is_pd_session() else ({}, "")
+    pd_engines = is_pd_session() or str((_read_state() or {}).get("backend") or "") in multi_node.PD_BACKENDS
+    extra_env, flag = _graph_capture_profile_settings(_default_profile_config()) if pd_engines else ({}, "")
     extra_server_args = str(params.get("extra_server_args") or "")
     tokens = extra_server_args.split()
     if flag and flag not in tokens and "--disable-cuda-graph" not in tokens:
@@ -862,6 +863,11 @@ def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_
             "profile_executor: multi-node trace dir %s exists but no .trace.json.gz files found yet (server pods may still be flushing)",
             trace_dir,
         )
+    multi_node.record_profile_paths(
+        profile_trace=str(trace_dir),
+        steady_state_trace=str(result.get("main_trace_path") or ""),
+        role_traces=role_traces,
+    )
 
 
 def _first_trace_dir_with(workspace: Path, finder: Any) -> tuple[Path | None, list[Path]]:

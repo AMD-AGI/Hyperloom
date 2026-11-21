@@ -101,12 +101,13 @@ _POLL_INTERVAL_S = 6
 _SGLANG_DEFAULT_TOKENS: tuple[tuple[str, str], ...] = (("--mem-fraction-static", "--mem-fraction-static=0.75"),)
 
 
-def _merge_sglang_defaults(extra_args: str) -> str:
-    """Append the sglang launcher's default args that the user did not already set."""
+def _merge_sglang_defaults(extra_args: str, pd: Mapping[str, Any] | None = None) -> str:
+    """Append sglang launcher defaults that neither the shared nor ``pd``'s per-role args set; vllm has its own."""
     user = (extra_args or "").strip()
+    role_args = f"{(pd or {}).get('pd_prefill_extra_args') or ''} {(pd or {}).get('pd_decode_extra_args') or ''}"
     parts = [user] if user else []
     for flag_name, default_token in _SGLANG_DEFAULT_TOKENS:
-        if flag_name in user:
+        if flag_name in user or flag_name in role_args:
             continue
         parts.append(default_token)
     return " ".join(p for p in parts if p)
@@ -442,10 +443,9 @@ async def restart_server_for_round(
             "lower --ep or raise the smaller per-group TP."
         )
 
-    # Apply the sglang launcher's default args only for sglang (vllm has its own). A pod hand-off's engines keep their
-    # own per-role args, so only the round's args reach them.
+    # A pod hand-off's engines keep their own per-role args, so only the round's args reach them.
     extra_server_args = (
-        _merge_sglang_defaults(server.extra_server_args)
+        _merge_sglang_defaults(server.extra_server_args, pd)
         if fw == "sglang" and not is_pod_handoff_session()
         else server.extra_server_args
     )
@@ -466,6 +466,8 @@ async def restart_server_for_round(
 
     async with _get_restart_lock():
         _ensure_profiler_dir(torch_profiler_dir)
+        if torch_profiler_dir:
+            await asyncio.to_thread(multi_node.drop_graph_captures, torch_profiler_dir)
         with _restart_env_scope(extra_env, unset_env, torch_profiler_dir):
             from ._server_patcher import resolve_sglang_patch_set
 
@@ -710,11 +712,15 @@ def _placed(place: Callable[[dict[str, Any]], dict], state: dict[str, Any]) -> d
 
 def select_pd_node_traces(root: str, since_unix: float) -> dict[str, list[str]]:
     """Return, per PD role, the first GPU's trace of each node written since ``since_unix``, worker by worker under
-    ``<root>/<role>/<worker>``; nodes are numbered across the role's workers in order."""
+    ``<root>/<role>/<worker>``; nodes are numbered across the role's workers in order. Each engine of a pod hand-off
+    is one single-node worker."""
     from hyperloom.inference_optimizer.multi_node.pd_session import session_worker_hosts
 
     state = _read_state() or {}
-    workers = _placed(session_worker_hosts, state) if is_pd_state(state) else {}
+    if is_pd_state(state):
+        workers = _placed(session_worker_hosts, state)
+    else:
+        workers = {role: [(url,) for url in urls] for role, urls in multi_node.pod_engine_urls(state).items()}
     selected: dict[str, list[str]] = {}
     for role in PD_PROFILE_ROLES:
         picks: list[str] = []
@@ -731,19 +737,22 @@ def select_pd_node_traces(root: str, since_unix: float) -> dict[str, list[str]]:
 
 
 async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> None:
-    """POST /start_profile or /stop_profile to every prefill and decode engine of a PD session.
+    """POST /start_profile or /stop_profile to every prefill and decode engine of a PD session or pod hand-off.
 
     Each engine worker is reached at its first host on its role's engine port, as the frozen launch is placed on the
-    node list; the router writes no GPU traces. A start sends ``output_dir`` narrowed to
-    ``<output_dir>/<role>/<worker>`` and ``with_stack`` (``HYPERLOOM_MN_PROFILE_WITH_STACK``, default off); step-window
-    fields crash disaggregated SGLang.
+    node list; a pod hand-off's engines at their pods (:func:`multi_node.pod_engine_urls`). The router writes no GPU
+    traces. A start sends ``output_dir`` narrowed to ``<output_dir>/<role>/<worker>`` and ``with_stack``
+    (``HYPERLOOM_MN_PROFILE_WITH_STACK``, default off); step-window fields crash disaggregated SGLang.
     """
     if not is_multi_node():
         return
     state = _read_state() or {}
-    if not is_pd_state(state):
+    if is_pd_state(state):
+        urls = _placed(session_engine_urls, state)
+    elif str(state.get("backend") or "") in multi_node.PD_BACKENDS:
+        urls = multi_node.pod_engine_urls(state)
+    else:
         return
-    urls = _placed(session_engine_urls, state)
     targets = [(role, worker, url) for role in PD_PROFILE_ROLES for worker, url in enumerate(urls.get(role, []))]
     if not targets:
         log.warning("trigger_pd_engine_profile(%s): no prefill/decode engines to profile", action)

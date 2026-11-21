@@ -19,11 +19,13 @@ from .._internal import infera_support
 from .._internal.log import info, warn, err
 from .._internal.pd_handoff import PD_BACKENDS, SSH_BACKENDS, is_pd_state
 from .._internal.pod_ssh import (
+    CONTAINER_ENVIRON_PATH,
     POD_FORWARD_ENV_PREFIXES,
     _collect_forward_env,
     _infera_default_ssh_port,
     _infera_ssh_bash_with_env,
     _record_last_restart,
+    container_env_line,
 )
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
 from .._internal.ssh_client import RemoteScript
@@ -421,15 +423,11 @@ def _infera_kill_inference(args: argparse.Namespace) -> int:
     return 0 if rc == 0 else 1
 
 
-CONTAINER_ENVIRON_PATH = "/proc/1/environ"
-
-
 def container_script(text: str, interpreter: str, args: str) -> str:
     """Bash that writes ``text`` to a temp file and runs it with ``interpreter`` and ``args`` under the container environment."""
     encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
     return (
-        "while IFS= read -r -d '' kv; do case \"$kv\" in PATH=*|PYTHONPATH=*|VIRTUAL_ENV=*|LD_LIBRARY_PATH=*) "
-        f'export "$kv";; esac; done < {shlex.quote(CONTAINER_ENVIRON_PATH)}\n'
+        container_env_line(CONTAINER_ENVIRON_PATH)
         + 'script="$(mktemp)"\n'
         + f'echo {encoded} | base64 -d > "$script"\n'
         + f'{interpreter} "$script" {args}\n'

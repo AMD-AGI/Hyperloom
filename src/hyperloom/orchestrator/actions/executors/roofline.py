@@ -25,6 +25,7 @@ from inference_suite.contracts.layout import REPORT_FILE
 from ...phases.machine_state import LifecycleMark, record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
 from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
+from hyperloom.inference_optimizer import multi_node
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
 from ._pd_role_trace import ROLE_STEADY_STATE_MODE, pd_multi_trace_input
@@ -1184,12 +1185,14 @@ class RooflineExecutor:
             detail=f"hot_kernels={len(hot)}",
             duration_s=time.monotonic() - started,
         )
+        steady = str(cached.get("steady_state_trace") or "")
+        multi_node.record_analysed_profile(trace_path, steady)
         result = {
             "status": status,
             "executed_at_iso": _now_iso(),
             "snapshot_id": cached.get("roofline_snapshot_id"),
             "last_profile_trace": trace_path,
-            "steady_state_trace": cached.get("steady_state_trace", ""),
+            "steady_state_trace": steady,
             "analysis_md_path": cached.get("analysis_md_path", ""),
             "kernel_roofline_path": cached.get("kernel_roofline_path", ""),
             "profile_workspace": profile.result.get("workspace"),

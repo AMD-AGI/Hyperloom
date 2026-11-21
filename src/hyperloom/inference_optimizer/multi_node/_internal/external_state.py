@@ -15,6 +15,7 @@ from typing import Any
 
 from inference_suite.multinode import NODE_LIST_ENV
 
+from ...session.paths import workspace_root
 from ..state_paths import resolve_state_file, state_file_safe_to_read
 from .infera_support import ssh_role_port_offset
 from . import pd_handoff
@@ -36,6 +37,17 @@ _HANDOFF_CARRIED_KEYS = (
     pd_handoff.PD_DIGEST_KEY,
     pd_handoff.TRACE_SHARED_KEY,
     pd_handoff.TRACE_SHARE_ERROR_KEY,
+    "baseline_args_source",
+    "baseline_identity",
+    "baseline_prefill_args",
+    "baseline_decode_args",
+    "engine_cli_flags",
+    # TraceLens inputs ``record_profile_paths`` stamps; without these a same-hand-off
+    # reload drops the paths and GEAK falls back to profiling on its own.
+    "profile_trace",
+    "steady_state_trace",
+    "decode_trace",
+    "prefill_trace",
 )
 
 # The fields that identify *which* cluster a state describes.
@@ -188,12 +200,7 @@ def build_external_state_from_env() -> dict[str, Any]:
         _ips("HYPERLOOM_MN_EXT_WORKER_IPS"),
     )
     head_ip = get("HYPERLOOM_MN_EXT_HEAD_IP").strip()
-    backend = _handoff_backend(
-        get,
-        ssh_key=ssh_key,
-        has_pod_ips=bool(prefill or decode or worker),
-        head_ip=head_ip,
-    )
+    backend = _handoff_backend(get, ssh_key=ssh_key, has_pod_ips=bool(prefill or decode or worker), head_ip=head_ip)
     count_mode = "disaggregated" if backend in pd_handoff.PD_BACKENDS else pd_mode
     pod_count = _handoff_pod_count(count_mode, prefill=prefill, decode=decode, worker=worker)
     nodes = _handoff_nodes(get, pod_count)
@@ -217,6 +224,7 @@ def build_external_state_from_env() -> dict[str, Any]:
         "decode_pods": _external_pods(decode, "decode", ssh_port),
         "worker_pod_ips": worker,
         "worker_pods": _external_pods(worker, "worker", ssh_port),
+        "user_data_path": str(workspace_root()),
     }
     if ssh_key:
         state["ssh_key_path"] = ssh_key

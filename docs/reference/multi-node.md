@@ -217,6 +217,18 @@ one TraceLens `multi_trace` agent run: one job per node (the first GPU's trace),
 decode nodes first, aggregated with `combine_by_node`, each node gated on its own
 idle and compute shares. Other multi-node sessions profile as before.
 
+### PD pod hand-off baseline and profiling
+
+An atomesh or sglangrouter pod hand-off takes its baseline engine args from
+`--server-args` / `--pd-prefill-extra-args` / `--pd-decode-extra-args`; without them
+it reuses the per-role args a previous launch of the same session recorded for the
+same model and EP. With neither, the session exits 2.
+
+A pod hand-off's profiling round starts and stops torch profiling on each prefill and
+decode engine pod, one trace dir per pod under its role, with `HYPERLOOM_MN_PROFILE_WITH_STACK`
+and graph-capture profiling as in a node-list round; its trace analysis is the node-list
+round's multi-trace run. infera and rayjob rounds keep their own profiling path.
+
 Forge is not in that list and does not need to be: it ships inside the Hyperloom
 wheel, so there is no checkout to export. `FORGE_PATH` is removed. Set
 `KERNELFORGE_PROJECT_ROOT` only to point forge's writable state, or a resource

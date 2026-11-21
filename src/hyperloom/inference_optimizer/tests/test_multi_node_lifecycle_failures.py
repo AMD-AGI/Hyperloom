@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 
 import httpx
@@ -474,6 +475,50 @@ def test_pd_worker_wait_fails_when_the_launched_engine_was_replaced(serve, monke
         _workers()
 
 
+def test_pd_engine_profile_dials_the_engine_port_of_each_pod(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200)
+
+    monkeypatch.setattr(life, "is_multi_node", lambda: True)
+    monkeypatch.setattr(life, "_read_state", lambda: _PD_WORKERS)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+
+    asyncio.run(life.trigger_pd_engine_profile("stop"))
+
+    assert seen == ["http://10.0.0.1:8010/stop_profile", "http://10.0.0.2:8020/stop_profile"]
+
+
+def test_pd_engine_profile_stops_every_role_without_waiting_on_another(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A slow trace export on prefill must not keep decode recording."""
+    real_client = httpx.AsyncClient
+    decode_seen = asyncio.Event()
+    order: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.port == 8010:
+            try:
+                await asyncio.wait_for(decode_seen.wait(), timeout=2)
+                order.append("prefill-after-decode")
+            except asyncio.TimeoutError:
+                order.append("prefill-alone")
+        else:
+            decode_seen.set()
+            order.append("decode")
+        return httpx.Response(200)
+
+    monkeypatch.setattr(life, "is_multi_node", lambda: True)
+    monkeypatch.setattr(life, "_read_state", lambda: _PD_WORKERS)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+
+    asyncio.run(life.trigger_pd_engine_profile("stop"))
+
+    assert order == ["decode", "prefill-after-decode"]
+
+
 def test_shared_server_log_dir_defaults_to_user_data_server_logs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HYPERLOOM_MN_SERVER_LOG_DIR", raising=False)
     monkeypatch.setenv("USER_DATA_PATH", "/shared/hl")
@@ -506,6 +551,107 @@ def test_engine_lost_gate_skips_a_handoff_without_server_control(monkeypatch: py
     assert life._read_state()["decode_pods"] and "ssh_key_path" not in life._read_state()
 
     assert asyncio.run(_BenchmarkLaunchMixin._multi_node_engines_lost()) == ""
+
+
+def test_pd_engine_profile_uses_engine_urls_without_pods(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    seen: list[tuple[str, dict]] = []
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((str(request.url), json.loads(request.content or b"{}")))
+        return httpx.Response(200)
+
+    monkeypatch.setattr(life, "is_multi_node", lambda: True)
+    monkeypatch.setattr(life, "_read_state", lambda: {"backend": "sglangrouter", "prefill_pods": [], "decode_pods": []})
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_PREFILL_URL", "http://p-svc:8010/")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_DECODE_URL", "http://d-svc:8020")
+
+    asyncio.run(life.trigger_pd_engine_profile("start", {"output_dir": str(tmp_path)}))
+
+    assert seen == [
+        ("http://p-svc:8010/start_profile", {"output_dir": str(tmp_path / "prefill" / "0"), "with_stack": False}),
+        ("http://d-svc:8020/start_profile", {"output_dir": str(tmp_path / "decode" / "0"), "with_stack": False}),
+    ]
+
+
+@pytest.mark.parametrize(("env_value", "expected"), [(None, False), ("1", True), ("true", True), ("0", False)])
+def test_pd_engine_profile_with_stack_follows_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, env_value: str | None, expected: bool
+) -> None:
+    seen: list[tuple[str, dict]] = []
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, json.loads(request.content or b"{}")))
+        return httpx.Response(200)
+
+    monkeypatch.setattr(life, "is_multi_node", lambda: True)
+    monkeypatch.setattr(life, "_read_state", lambda: _PD_WORKERS)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+    if env_value is None:
+        monkeypatch.delenv("HYPERLOOM_MN_PROFILE_WITH_STACK", raising=False)
+    else:
+        monkeypatch.setenv("HYPERLOOM_MN_PROFILE_WITH_STACK", env_value)
+
+    asyncio.run(life.trigger_pd_engine_profile("start", {"output_dir": str(tmp_path)}))
+    asyncio.run(life.trigger_pd_engine_profile("stop"))
+
+    starts = [body for path, body in seen if path == "/start_profile"]
+    stops = [body for path, body in seen if path == "/stop_profile"]
+    assert len(starts) == 2 and all(body["with_stack"] is expected for body in starts)
+    assert stops == [{}, {}]
+
+
+def test_a_pod_handoff_profiling_restart_matches_a_node_list_one(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A pod hand-off's profiling restart takes the node-list round's graph-capture args, profiler dir and env."""
+    from hyperloom.orchestrator.actions.executors import _multi_node_env, profile
+
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
+    calls: list[tuple[str, dict]] = []
+
+    async def _restart(server, **kwargs):
+        calls.append((server.extra_server_args, kwargs))
+
+    monkeypatch.setattr(life, "restart_server_for_round", _restart)
+    for state in ({"backend": "sglangrouter", "node_list": True}, {"backend": "sglangrouter"}):
+        monkeypatch.setattr(_multi_node_env, "_read_state", lambda state=state: state)
+        asyncio.run(profile._restart_round_server({"extra_server_args": "--context-length 11264"}, str(tmp_path)))
+
+    node_list, pod_handoff = calls
+    assert pod_handoff == node_list
+    assert "--enable-profile-cuda-graph" in pod_handoff[0].split()
+
+
+def test_pd_role_traces_take_the_first_gpu_of_each_pod(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import os
+
+    root = tmp_path / "torch_trace"
+    decode_dirs = [root / "decode" / "0", root / "decode" / "1"]
+    prefill_dir = root / "prefill" / "0"
+    for pod_dir in [*decode_dirs, prefill_dir]:
+        pod_dir.mkdir(parents=True)
+    for rank in range(8):
+        for batch, pod_dir in zip(("5", "6"), decode_dirs):
+            (pod_dir / f"{batch}-TP-{rank}.trace.json.gz").write_bytes(b"x" * (100 if rank == 3 else 10))
+        stale = decode_dirs[1] / f"9-TP-{rank}.trace.json.gz"
+        stale.write_bytes(b"x")
+        os.utime(stale, (stale.stat().st_mtime - 60, stale.stat().st_mtime - 60))
+        (prefill_dir / f"7-TP-{rank}-DECODE.trace.json.gz").write_bytes(b"x" * 50)
+        (prefill_dir / f"7-TP-{rank}-EXTEND.trace.json.gz").write_bytes(b"x")
+    pods = [{"podIP": "10.0.0.1"}, {"podIP": "10.0.0.2"}]
+    monkeypatch.setattr(
+        life, "_read_state", lambda: {"backend": "sglangrouter", "decode_pods": pods, "prefill_pods": pods[:1]}
+    )
+
+    since = min(p.stat().st_mtime for p in decode_dirs[0].iterdir()) - 1
+    by_node = life.select_pd_node_traces(str(root), since)
+
+    assert by_node == {
+        "prefill": [str(prefill_dir / "7-TP-0-EXTEND.trace.json.gz")],
+        "decode": [str(decode_dirs[0] / "5-TP-0.trace.json.gz"), str(decode_dirs[1] / "6-TP-0.trace.json.gz")],
+    }
 
 
 def test_the_multi_node_sglang_defaults_keep_the_prefix_cache_on() -> None:

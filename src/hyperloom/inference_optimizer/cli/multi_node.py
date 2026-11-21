@@ -174,9 +174,20 @@ def _record_trace_share(ext_state: dict[str, Any]) -> None:
 
 
 def _adopt_pd_backend(ext_state: dict[str, Any]) -> None:
-    """Exit 2 when an atomesh/sglangrouter pod hand-off runs without ``--pd-mode disaggregated``."""
+    """Record the baseline args of an atomesh/sglangrouter pod hand-off and whether its profile dir is shared; exit 2
+    without ``--pd-mode disaggregated``."""
+    from ..multi_node.commands.pd_cluster import record_profile_dir_share
+
     if os.environ.get("PD_MODE", "").strip().lower() != "disaggregated":
         _exit_refused(f"--mn-backend {ext_state['backend']} requires --pd-mode disaggregated.")
+    _settle_pd_baseline_args(ext_state)
+    share_error = record_profile_dir_share(ext_state)
+    if share_error:
+        print(
+            f"WARNING: profile trace dir {ext_state.get('profile_trace') or '<unset>'} is not shared with the "
+            f"engine pods ({share_error}); profiling will be skipped for this session.",
+            file=sys.stderr,
+        )
 
 
 def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path | None = None) -> None:
@@ -246,6 +257,28 @@ def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path | None
         args,
         str(ext_state["backend"]),
         head_ip=str(ext_state.get("head_pod_ip") or ""),
+    )
+
+
+def _settle_pd_baseline_args(ext_state: dict[str, Any]) -> None:
+    """Resolve atomesh/sglangrouter baseline args (manual > session record); exit 2 when none applies."""
+    from ..multi_node import (
+        BaselineArgsMissing,
+        export_baseline_args,
+        previous_cluster_state,
+        record_baseline_args,
+        resolve_baseline_args,
+    )
+
+    try:
+        choice = resolve_baseline_args(previous=previous_cluster_state(ext_state))
+    except BaselineArgsMissing as exc:
+        _exit_refused(str(exc))
+    export_baseline_args(choice)
+    record_baseline_args(ext_state, choice)
+    print(
+        f"multi-node: baseline args source={choice.source} ({choice.detail}) "
+        f"prefill={choice.prefill!r} decode={choice.decode!r}"
     )
 
 
