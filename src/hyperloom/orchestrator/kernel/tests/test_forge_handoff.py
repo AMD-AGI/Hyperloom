@@ -10,6 +10,7 @@ from hyperloom.inference_optimizer.session.session_paths import (
     forge_cycle_dir,
     next_forge_attempt_dir,
 )
+from hyperloom.orchestrator.kernel.campaign_baseline import RepoBaseline
 from hyperloom.orchestrator.kernel.forge_handoff import build_workload_md, write_forge_handoff
 from kernelforge.workflows.rewrite_controller import read_handoff
 
@@ -336,7 +337,10 @@ def test_the_handoff_names_the_installed_package_a_snapshot_is_served_from(tmp_p
     handoff_dir = write_forge_handoff(
         _state(),
         handoff_dir=tmp_path / "handoff",
-        repositories={str(checkout): checkout, str(snapshot): installed},
+        repositories={
+            str(checkout): RepoBaseline(commit="a" * 40, deploy_root=checkout),
+            str(snapshot): RepoBaseline(commit="b" * 40, deploy_root=installed),
+        },
     )
 
     bundle = read_handoff(handoff_dir)
