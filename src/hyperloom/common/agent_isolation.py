@@ -26,7 +26,8 @@ interpreter, ids, namespaces and user-namespace sysctls, and an answer that did 
 Where the root mount cannot be bound, the probe picks the first ``unshare`` tier its canary holds under: ``unshare
 --mount`` (root), else ``unshare --user --map-current-user --mount --propagation private`` (an app that is not root,
 on a node that lets it make user namespaces); a hosted run takes only the ``unshare`` beside the layer's bubblewrap
-(``bin/unshare``, static, util-linux 2.38 or newer). Under the second tier every launch has a user namespace of its
+(``bin/unshare``, static util-linux whose ``--help`` lists ``--user``, ``--map-current-user``, ``--mount`` and
+``--propagation``; the options are read, not a version). Under the second tier every launch has a user namespace of its
 own, so a sandbox whose commands join a holder's namespaces (agent and dev sandboxes, local tests) cannot use it: they
 are refused in a hosted run, as without bubblewrap, while specialists run under it.
 

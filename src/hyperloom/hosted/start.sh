@@ -201,7 +201,8 @@ fi
 
 # apptainer marks the root mount unbindable, and bwrap's bind of / then fails with EINVAL: make it private once. Not
 # fatal: without CAP_SYS_ADMIN (plain docker, or a start that is not root) a launch retries only under the unshare
-# beside the layer's bwrap ($layer/bin/unshare: static, util-linux 2.38 or newer), and agents are refused without one
+# beside the layer's bwrap ($layer/bin/unshare: static util-linux whose --help lists --user, --map-current-user, --mount
+# and --propagation, as 2.37.2 does), and agents are refused without one
 # (an unshare from PATH is never taken for the layer's bwrap). Root retries under unshare --mount; any other uid under
 # unshare --user --map-current-user --mount --propagation private, which needs the node to let it make user namespaces
 # (as the layer's bwrap does anyway).
