@@ -84,7 +84,9 @@ class HostedSandboxes:
 
         inputs = self.inputs(setup.layout, setup.workload.tp)
         options = HostedOptions(
-            timeout_sec=attempt_timeout_sec(setup.workload), make_before_break=setup.make_before_break
+            timeout_sec=attempt_timeout_sec(setup.workload),
+            make_before_break=setup.make_before_break,
+            dev_leases=setup.dev_leases > 0 or bool(setup.agents),
         )
         return build_hosted_toolbox(inputs, blackboard, acceptance, spec, options=options)
 

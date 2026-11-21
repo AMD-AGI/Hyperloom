@@ -45,6 +45,7 @@ from hyperloom_multibranch.toolbox.hosted_leases import (
     GrantLimits,
     HostedBranchLeases,
     LeaseTuning,
+    lease_shortfall,
 )
 
 #: The ``dev`` templates by card count; the names are opaque, the cards are the keys.
@@ -539,6 +540,24 @@ def test_a_sandbox_lives_its_holders_term_and_a_margin_within_the_grants_runtime
     assert leases.lifetime_sec(None) == 7200 - LIFETIME_MARGIN_SEC
     assert leases.lifetime_sec(1799.5) == 1800 + LIFETIME_MARGIN_SEC
     assert leases.lifetime_sec(6 * 3600) == 7200 - LIFETIME_MARGIN_SEC
+
+
+@pytest.mark.parametrize("tp", [1, 2, 4, 8])
+@pytest.mark.parametrize("sandboxes", [1, 2, 3])
+def test_the_shortfall_of_a_grant_is_what_refuses_its_first_lease(tp: int, sandboxes: int) -> None:
+    """``lease_shortfall`` says a grant can admit a lease exactly where the leases themselves admit the first one."""
+    for gpus in range(tp, 3 * tp + 1):
+        grant = GrantLimits(sandboxes, gpus, 10.0, 7200)
+        leases = HostedBranchLeases(object(), grant, DevSession("run-1", tp, _BY_CARDS))  # type: ignore[arg-type]
+        shortfall = lease_shortfall(grant, tp)
+        try:
+            leases._promise("b1", tp)
+        except RequestRejected as refused:
+            assert refused.code == "lease_leaves_no_measurement"
+            assert shortfall is not None, (gpus, sandboxes, tp)
+        else:
+            assert shortfall is None, (gpus, sandboxes, tp, shortfall)
+        assert (shortfall is None) == (gpus >= 2 * tp and sandboxes >= 2)
 
 
 def test_the_session_needs_a_template_of_its_own_card_count_and_a_run() -> None:
