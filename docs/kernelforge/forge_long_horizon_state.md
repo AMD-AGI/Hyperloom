@@ -115,12 +115,14 @@ campaign identity and cumulative state.
 
 ## Planning artifacts
 
-Each iteration runs:
+A campaign at `--lanes 1` has no planning stage and writes none of these
+artifacts. Each iteration of a campaign with more than one lane runs:
 
 1. Evidence-scoped specialist dispatch.
 2. Parallel read-only specialist analysis.
-3. Orchestration synthesis: one plan per lane at `--lanes N`, one fused plan at
-   `--lanes 1`.
+3. Orchestration synthesis: one plan per lane, or one fused plan when the
+   evidence supports a single direction or the budget narrowed the round to one
+   lane.
 4. For sessions longer than two hours, one same-model, independent Critic
    review. `REVISE`/`REPLACE` permits one Orchestration revision without
    rerunning specialists. The revision resumes the original synthesis session

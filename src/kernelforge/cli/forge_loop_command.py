@@ -191,7 +191,9 @@ ANALYSIS_TIMEOUT_SEC = 7200
             "--lanes",
             default=3,
             type=click.IntRange(min=1, max=8),
-            help="Implementer lanes per round. Above 1 the round's analysis is "
+            help="Implementer lanes per round. At 1 there is no planning stage: "
+            "the one Implementer session chooses its direction from the "
+            "Analysis report. Above 1 the round's analysis is "
             "partitioned into that many non-overlapping plans, each run "
             "concurrently in its own workspace copy, and each candidate is "
             "measured on its own. Default 3: the lanes of a round run "

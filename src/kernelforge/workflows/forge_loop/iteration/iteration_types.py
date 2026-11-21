@@ -174,7 +174,7 @@ def _with_search_actor(agents: LoopAgents, bundle) -> LoopAgents:
 
 @dataclass(frozen=True)
 class _RoundPlan:
-    """The plan an orchestrated round synthesized, and whether it is executable."""
+    """The plan file an orchestrated round synthesized, if any, and whether the round has a direction to execute."""
 
     path: str = ""
     executable: bool = False

@@ -890,6 +890,25 @@ def test_multi_lane_long_horizon_reports_the_critic_it_enabled(
     )
 
 
+def test_a_single_lane_campaign_builds_no_planning_service(tmp_path, monkeypatch):
+    """One lane has nothing to divide, so no round buys a dispatch, a specialist, a synthesis or a critic."""
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, _workspace = _invoke_forge_loop(
+        tmp_path,
+        ["--profiling", "--max-hours", "2.0001", "--lanes", "1"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["run_kwargs"]["agents"].orchestration_service is None
+    assert "orchestration_service_kwargs" not in captured
+    assert captured["run_kwargs"]["agents"].analysis_service is captured["analysis_service"]
+    assert "Orchestration: off (one lane; the Implementer chooses its direction from the Analysis evidence)" in (
+        result.output
+    )
+    assert "Plan Critic" not in result.output
+
+
 def test_forge_loop_can_disable_all_experience_kb_io(tmp_path, monkeypatch):
     captured = _install_cli_fakes(monkeypatch, tmp_path)
 

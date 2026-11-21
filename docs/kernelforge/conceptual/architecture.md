@@ -22,8 +22,8 @@ decide whether a change survives.
 | **Campaign** | The immutable inputs — kernel, driver, kernel backend, gates, branch — snapshotted so an interrupted run resumes on identical terms |
 | **Baseline** | Benchmarks the pristine kernel before any edit, so iteration 1 is never kept unconditionally |
 | **Analysis** | Read-only hardware profiling of the current best, producing the evidence bundle the planning stage reads |
-| **Planning** | Read-only compute, memory and algorithm specialists analyze their assigned evidence; their useful work is fused into one executable plan per iteration |
-| **Implementer** | The only writable agent: reads the plan, edits the kernel sources, compiles and exercises them through Bash. `--lanes` runs several concurrently, each in its own workspace copy |
+| **Planning** | With more than one lane: read-only compute, memory and algorithm specialists analyze their assigned evidence, and their useful work is divided into one executable plan per lane. A single-lane campaign has no planning stage |
+| **Implementer** | The only writable agent: reads the plan, or at `--lanes 1` chooses its direction from the Analysis report, edits the kernel sources, compiles and exercises them through Bash. `--lanes` runs several concurrently, each in its own workspace copy |
 | **Validation** | The driver-owned complete correctness suite, run by the loop as an SNR pre-filter |
 | **Benchmark** | The canonical benchmark, scored per case against the current best |
 | **Acceptance** | For the assembly backend only: the task's own verdict — its `compile_command`, then its `correctness_command` — re-run on a candidate about to become the incumbent, carrying the `numerical_validation` evidence that backend requires. Every other backend is judged by the driver above and measured through it, so it is not asked a second time |

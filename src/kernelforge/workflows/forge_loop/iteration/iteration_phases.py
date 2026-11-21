@@ -221,7 +221,8 @@ class IterationPhasesMixin:
         iteration, session_sink = frame.iteration, frame.session_sink
         print("  [agent] Querying agent for kernel modification...")
         self._bind_session_producer(session_sink, self.run_state.agent_relay.active_profile_id)
-        plan = _RoundPlan()
+        # Without a planning service the session chooses its own direction, so the round's plan is the session.
+        plan = _RoundPlan(executable=True)
         if agents.orchestration_service is not None:
             plan = await self._orchestrated_plan(
                 frame,

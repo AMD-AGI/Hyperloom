@@ -151,7 +151,7 @@ class LockedRunMixin:
             actors = _with_search_actor(actors, self._iteration_bundle(iteration))
             agent_fn, agent_factory, supervisor_fn = actors.agent_fn, actors.agent_factory, actors.supervisor_fn
             orchestration_service = actors.orchestration_service
-            round_lanes = self._price_round(iteration)
+            round_lanes = self._price_round(iteration, orchestration_service)
             if round_lanes is None:
                 break
             await self._open_iteration(

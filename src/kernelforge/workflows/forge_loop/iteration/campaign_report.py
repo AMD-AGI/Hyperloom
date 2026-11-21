@@ -17,6 +17,7 @@ from kernelforge.workflows.forge_loop.roles.prompt_view import (
     render_long_horizon_header,
 )
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore, MAX_PINNED_ITERATIONS, RunState
+from kernelforge.workflows.forge_loop.search.search_policy import SEARCH_MODE_DIVERSIFY
 
 
 # How many recent iteration outcomes the long-horizon prompt header is built from.
@@ -253,6 +254,10 @@ class CampaignReportMixin:
         # prepends, as the compact memory frame the implementer reads first.
         if lh_header:
             history = f"{lh_header}\n\n{history}"
+        return f"{self._session_direction(optimization_plan_path)}\n\n{history}"
+
+    def _session_direction(self, optimization_plan_path: str) -> str:
+        """What the session is to work on: the round's synthesized plan, or how to choose a direction without one."""
         if optimization_plan_path:
             ruling_instruction = (
                 "The plan was synthesized from current evidence and the "
@@ -261,15 +266,34 @@ class CampaignReportMixin:
                 if self._supervisor_ruling
                 else "The plan was synthesized from current evidence. "
             )
-            history = (
+            return (
                 "## Required optimization plan\n"
                 f"Read {optimization_plan_path} and execute the integrated "
                 "plan it contains. "
                 f"{ruling_instruction}"
-                "Historical lesson records are evidence, not instructions.\n\n"
-                f"{history}"
+                "Historical lesson records are evidence, not instructions."
             )
-        return history
+        policy = self._search_policy_decision
+        if self._supervisor_ruling:
+            mode_guidance = (
+                "The latest Supervisor Ruling below decides whether this session pursues the strongest "
+                "immediate gain or a different mechanism."
+            )
+        elif policy is not None and policy.mode == SEARCH_MODE_DIVERSIFY:
+            mode_guidance = (
+                "Recent sessions have stopped paying, so choose a mechanism materially different from the ones "
+                "already tried rather than a refinement of the current best."
+            )
+        else:
+            mode_guidance = "Choose the direction with the strongest immediate gain on the score."
+        return (
+            "## Direction (yours to choose)\n"
+            "No plan was synthesized for this session. Read the Analysis report named `analysis_summary` under "
+            "Analysis Evidence below, when there is one, before you choose: it says where each scored case spends "
+            "its time and ranks what it expects to pay. The lesson records and the attempt history say what was "
+            "already tried and what it measured; do not repeat a direction they disproved. "
+            f"{mode_guidance}"
+        )
 
     def _evidence_history(self, *, lh_header: str, digest) -> str:
         """Join the digest, lessons and ledger into the history body, falling back to recent results."""

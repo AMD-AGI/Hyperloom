@@ -29,6 +29,7 @@ from kernelforge.workflows.forge_loop.campaign.run_state import (
     begin_orchestration_probe,
     finish_session,
     make_event,
+    retire_orchestration_circuit,
     should_resume,
 )
 
@@ -265,18 +266,7 @@ class CampaignMixin:
                 self._reconcile_best_publication()
             self.run_state.next_iteration = self._reconciled_next_iteration()
             if self.run_state.termination_reason == "orchestration_failed":
-                if self.run_state.orchestration_circuit_state != ORCHESTRATION_CIRCUIT_OPEN:
-                    raise ValueError("orchestration_failed resume requires an open circuit")
-                if agent_fn is None or orchestration_service is None:
-                    raise ValueError("orchestration_failed resume requires one orchestration probe")
-                begin_orchestration_probe(self.run_state)
-                self.state_store.append_event(
-                    make_event(
-                        "orchestration_circuit_half_open",
-                        self.run_state.iteration,
-                    )
-                )
-                self.state_store.save(self.run_state)
+                self._reopen_after_failed_orchestration(agent_fn, orchestration_service)
         else:
             self._validate_driver_integrity(self.run_state)
             if (
@@ -295,6 +285,25 @@ class CampaignMixin:
             if current_branch != self.ic.git_branch:
                 raise ValueError(f"failed to switch workspace to branch {self.ic.git_branch}")
             self.run_state = RunState()
+
+    def _reopen_after_failed_orchestration(self, agent_fn, orchestration_service) -> None:
+        """Let a campaign that stopped on repeated orchestration errors run again.
+
+        A session that plans is allowed one half-open probe. A session without a planning service has no planner
+        left for the circuit to guard, so the circuit is closed outright.
+        """
+        if self.run_state.orchestration_circuit_state != ORCHESTRATION_CIRCUIT_OPEN:
+            raise ValueError("orchestration_failed resume requires an open circuit")
+        if agent_fn is None:
+            raise ValueError("orchestration_failed resume requires one orchestration probe")
+        if orchestration_service is None:
+            retire_orchestration_circuit(self.run_state)
+            transition = "orchestration_circuit_retired"
+        else:
+            begin_orchestration_probe(self.run_state)
+            transition = "orchestration_circuit_half_open"
+        self.state_store.append_event(make_event(transition, self.run_state.iteration))
+        self.state_store.save(self.run_state)
 
     def _reconciled_next_iteration(self) -> int:
         """The next iteration number that neither the archive nor the event log has used."""

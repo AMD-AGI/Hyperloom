@@ -791,6 +791,19 @@ def _start_actors(
         raise ForgeLoopError(f"Agent startup availability check failed: {error}") from error
 
 
+def _announce_planning(plan: _SearchPlan) -> None:
+    """Print the planning roles a multi-lane campaign runs."""
+    print(f"  Orchestration: enabled with parallel specialists ({', '.join(sorted(plan.specialist_definitions))})")
+    print(
+        "  Plan Critic: "
+        + (
+            "enabled (long-horizon, same backend/model; skips rounds that continue a kept route)"
+            if plan.critic_enabled
+            else "disabled (requires --max-hours > 2)"
+        )
+    )
+
+
 def _search(
     run: _ForgeRun, loop_runner: IterationLoop, session: _AgentSession, actors: SearchActorStartup, plan: _SearchPlan
 ) -> _RunReporter:
@@ -806,15 +819,10 @@ def _search(
         profiling_enabled=plan.profiling_enabled,
     )
     print("  Analysis Agent: " + ("profiled" if plan.profiling_enabled else "static-only"))
-    print(f"  Orchestration: enabled with parallel specialists ({', '.join(sorted(plan.specialist_definitions))})")
-    print(
-        "  Plan Critic: "
-        + (
-            "enabled (long-horizon, same backend/model; skips rounds that continue a kept route)"
-            if plan.critic_enabled
-            else "disabled (requires --max-hours > 2)"
-        )
-    )
+    if start_bundle.orchestration_service is None:
+        print("  Orchestration: off (one lane; the Implementer chooses its direction from the Analysis evidence)")
+    else:
+        _announce_planning(plan)
 
     reporter = _RunReporter(
         run=run,

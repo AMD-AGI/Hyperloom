@@ -56,7 +56,7 @@ class SearchActorBuildContext:
     relay: AgentRelayConfig | None = None
 
     def build(self, profile: AgentProfile) -> SearchActorBundle:
-        """Build and probe all profile-bound planning and implementation services."""
+        """Build and probe the profile-bound implementation services, and the planning service a multi-lane round needs."""
         from kernelforge.workflows.forge_loop.bootstrap.lanes import (
             _make_lane_agent_factory,
             _require_lane_provider_capabilities,
@@ -77,11 +77,17 @@ class SearchActorBuildContext:
             setup=setup,
             usage=self.usage,
         )
-        orchestration = make_orchestration_service(
-            config=actor_config,
-            usage=self.usage,
-            definitions=self.specialist_definitions,
-            enable_plan_critic=self.critic_enabled,
+        # Planning divides a round's evidence among lanes. One lane has nothing to divide: its session reads the
+        # Analysis evidence and chooses its own direction.
+        orchestration = (
+            make_orchestration_service(
+                config=actor_config,
+                usage=self.usage,
+                definitions=self.specialist_definitions,
+                enable_plan_critic=self.critic_enabled,
+            )
+            if self.lanes > 1
+            else None
         )
         supervisor_provider = self.supervisor_backend or profile.provider
         supervisor = make_supervisor_fn(

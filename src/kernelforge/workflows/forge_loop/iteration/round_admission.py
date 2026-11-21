@@ -211,11 +211,15 @@ class RoundAdmissionMixin:
         """The stall and orchestration-error thresholds this campaign was configured with."""
         return StallPolicy(self.ic.supervise_after, self.ic.max_consecutive_orchestration_errors)
 
-    def _price_round(self, iteration: int) -> int | None:
-        """Price the round before anything is spent on it: the lanes it may plan, or ``None`` if none fit."""
+    def _price_round(self, iteration: int, orchestration_service) -> int | None:
+        """Price the round before anything is spent on it: the lanes it may plan, or ``None`` if none fit.
+
+        A loop without a planning service buys no round, so nothing is priced here: the one session it starts is
+        priced when it is dispatched.
+        """
         self._close_round()
         round_lanes: int | None = self.ic.lanes
-        if not self._lane_queue:
+        if orchestration_service is not None and not self._lane_queue:
             round_lanes = self._admit_next_round(iteration, requested_lanes=self.ic.lanes)
             if round_lanes is not None:
                 self._open_round(iteration, lanes=round_lanes)

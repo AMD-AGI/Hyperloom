@@ -552,6 +552,15 @@ def begin_orchestration_probe(state: "RunState") -> "RunState":
     return state
 
 
+def retire_orchestration_circuit(state: "RunState") -> "RunState":
+    """Close an open circuit for a session that runs no orchestration, which leaves it nothing to guard."""
+    if state.orchestration_circuit_state != ORCHESTRATION_CIRCUIT_OPEN:
+        raise ValueError("only an open orchestration circuit can be retired")
+    state.orchestration_error_streak = 0
+    state.orchestration_circuit_state = ORCHESTRATION_CIRCUIT_CLOSED
+    return state
+
+
 def complete_orchestration_probe(state: "RunState") -> "RunState":
     """Close the circuit after one successful orchestration call."""
     if state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN:

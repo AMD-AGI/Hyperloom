@@ -39,7 +39,20 @@ kernel path under `aiter`, `vllm`, or `sglang` is also recognized. If no owner
 can be identified, the campaign records `unknown`. An explicit `--framework`
 value is authoritative, and resume reuses the value stored in the campaign.
 
-Each iteration:
+A campaign at `--lanes 1` runs no planning stage. Planning divides a round's
+evidence among lanes, and one lane has nothing to divide, so steps 1 to 6 below
+do not run: no dispatch, specialist, synthesis or Critic session is bought, and
+no plan file is written. The Implementer is told so at the top of its prompt,
+reads the Analysis report itself, and chooses the session's direction from it
+and from the lesson records. The search mode still reaches it there: while the
+search is exploiting it is asked for the strongest immediate gain, once the
+search has stalled it is asked for a mechanism materially different from the
+ones already tried, and an active Supervisor ruling decides between the two.
+Having run a session in the diversifying mode is what returns the search to
+exploiting, as publishing a diversified plan does when there is a planning
+stage.
+
+Each iteration of a campaign with more than one lane:
 
 1. Orchestration dispatches evidence-scoped work to read-only compute, memory,
    and algorithm specialists.
@@ -49,8 +62,9 @@ Each iteration:
    functions and mechanisms — and each lane synthesizes its own plan from that
    ground and the whole round's evidence. The lanes are implemented
    concurrently, each in its own workspace copy, and their candidates are
-   measured one per iteration. `--lanes 1`, or evidence that supports only one
-   direction, fuses the analyses into a single plan instead: Orchestration
+   measured one per iteration. Evidence that supports only one direction, or a
+   round the budget narrowed to one lane, fuses the analyses into a single plan
+   instead: Orchestration
    compares their expected value, evidence, feasibility, cost, dependencies and
    risks, and synthesizes one. Concurrent lanes need an agent provider that
    declares `session_env`; one that does not is refused by name and must be
@@ -110,8 +124,9 @@ Each iteration:
    A round of several lanes publishes lane 1's there and the rest beside it as
    `lane_002.md`, `lane_003.md` and so on, with `lane_plans.json` written last
    to mark the round complete.
-7. The writable Implementer reads that plan, edits the kernel sources, and
-   exercises its in-session correctness and performance gate. Each Implementer
+7. The writable Implementer reads that plan (at `--lanes 1`, the Analysis
+   report), edits the kernel sources, and exercises its in-session correctness
+   and performance gate. Each Implementer
    session runs under a wall-clock budget sized from `--max-hours`
    (`min(210, max(90, 0.15 * campaign_minutes))` minutes, overridable with
    `--session-timeout-sec`); the session is told this deadline and asked to hand
@@ -194,7 +209,9 @@ A round is what the loop buys when it plans: orchestration, the lane sessions it
 fans out to, and the canonical validation and benchmark that judge the first
 candidate. Planning is the dominant part of that and the most variable — 12.5 to
 31.6 minutes across 75 measured production rounds — so the decision is taken
-twice, for two different questions.
+twice, for two different questions. A campaign at `--lanes 1` plans nothing, so
+only the second question is asked of it: its session is priced at dispatch, and
+no round cost is recorded.
 
 **Before planning**, the loop refuses only a round that could not run even if
 planning were as fast as any campaign has ever seen it: the cheapest planning
@@ -369,7 +386,8 @@ kernelforge forge-loop --workspace /work/aiter-amd --resume \
 `--supervisor-backend` can override the provider of the active Agent profile
 for this review; under relay it runs on that provider's profile.
 The Supervisor inspects the stalled run and writes a free-form ruling for the
-next fresh orchestration plan. Every interaction is archived under
+next fresh orchestration plan, or at `--lanes 1` for the next Implementer
+session, which reads it directly. Every interaction is archived under
 `forge_experiments/supervisor/intervention_iter_NNN.md`; the latest non-empty
 ruling is also stored verbatim at `forge_experiments/supervisor/latest.md` and
 restored on resume. It remains active only for the current stall episode: a KEEP
