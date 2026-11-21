@@ -578,6 +578,43 @@ def test_infera_restart_and_kill_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     assert fanout_calls[-1] == ("kill", ["10.0.1.0", "10.0.1.1"])
 
 
+@pytest.mark.parametrize("resumed", [False, True])
+def test_infera_restart_ensures_the_frontend(monkeypatch: pytest.MonkeyPatch, resumed: bool) -> None:
+    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
+
+    state = {
+        "backend": "infera",
+        "framework": "sglang",
+        "nodes": 1,
+        "service_url": "http://wl.ns.svc.cluster.local:21234",
+        "worker_pod_ips": ["10.0.1.0"],
+        "router_pod_ips": ["10.0.0.9"],
+        "router_pods": [{"podIP": "10.0.0.9", "role": "router", "sshPort": 2242}],
+        "ssh_key_path": "/tmp/k",
+        "ssh_port": 2222,
+    }
+    monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
+    monkeypatch.setattr(inf._mn_cli, "_save_state", lambda payload: None)
+    monkeypatch.setattr(inf, "_infera_fanout_launch", lambda *a, **kw: (0, [{"ok": True}]))
+    monkeypatch.setattr(inf, "_infera_restart_config_matches", lambda *a, **kw: resumed)
+    monkeypatch.setattr(inf, "_infera_servers_alive", lambda *a, **kw: resumed)
+    sent: list = []
+    monkeypatch.setattr(
+        inf._mn_cli,
+        "_infera_ssh_bash_with_env",
+        lambda st, ip, script, timeout, port: (
+            sent.append((ip, port, script))
+            or subprocess.CompletedProcess([], 0, stdout='{"status": "ok", "action": "running"}', stderr="")
+        ),
+    )
+
+    assert inf._infera_restart_server(_restart_args()) == 0
+    assert [(ip, port) for ip, port, _ in sent] == [("10.0.0.9", 2242)]
+    script = sent[0][2]
+    assert "export HL_ACTION=ensure" in script
+    assert "python3 -m infera.server --host 0.0.0.0 --port 8000 --router-tokenizer-path /models/m" in script
+
+
 def test_infera_node_ops_apply_and_revert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
@@ -795,6 +832,11 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
         pd_prefill_extra_args="",
         pd_decode_extra_args="",
     )
+    monkeypatch.delenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", raising=False)
+    assert inf._infera_restart_config_matches(pd_state, pd_args, "sglang", "disaggregated") is True
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", "/shared/torch_trace")
+    assert inf._infera_restart_config_matches(pd_state, pd_args, "sglang", "disaggregated") is False
+    pd_state["last_restart_profiler_dir"] = "/shared/torch_trace"
     assert inf._infera_restart_config_matches(pd_state, pd_args, "sglang", "disaggregated") is True
 
     assert inf._infera_servers_alive({}, [], timeout=5) is False

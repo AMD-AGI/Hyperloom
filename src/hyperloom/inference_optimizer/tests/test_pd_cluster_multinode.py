@@ -715,6 +715,29 @@ def test_engine_restart_gives_each_pod_its_own_profiler_dir(monkeypatch: pytest.
     assert env == {"SGLANG_TORCH_PROFILER_DIR": "/shared/torch_trace"}
 
 
+@pytest.mark.parametrize(
+    ("service_url", "port"), [("http://svc.ns.svc.cluster.local:80", 8000), ("http://10.0.0.9:9000", 9000)]
+)
+def test_infera_frontend_listens_on_the_router_pod_port(
+    monkeypatch: pytest.MonkeyPatch, service_url: str, port: int
+) -> None:
+    from hyperloom.inference_optimizer.multi_node.commands import infera
+
+    fake = _FakeCli({})
+    fake._extract_pod_json = lambda _stdout: {}
+    monkeypatch.setattr(infera, "_mn_cli", fake)
+    state = {
+        "service_url": service_url,
+        "ssh_port": 29000,
+        "router_pods": [{"role": "router", "podIP": "10.0.0.9", "sshPort": 29000}],
+    }
+
+    infera._infera_ensure_frontend(state, "/m", 5)
+
+    [(_ip, script)] = fake.calls
+    assert f"--port {port} --router-tokenizer-path" in script
+
+
 def test_engines_not_running_names_pods_whose_launch_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeCli({"10.0.0.1": "HL_ALIVE\n", "10.0.0.2": "HL_GONE\n"})
     monkeypatch.setattr(pd_cmds, "_mn_cli", fake)
@@ -850,6 +873,22 @@ def test_respawn_takes_the_container_environment_when_the_server_environment_is_
     scope["restart_remote_main"]()
     assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["action"] == "respawn"
     assert [c[2] for c in calls if c[0] == "spawn"] == [("PATH=/opt/venv/bin:/usr/bin", "FROM=1")]
+
+
+@pytest.mark.parametrize(("found", "expected"), [(4242, "running"), (0, "spawn")])
+def test_ensure_starts_the_server_only_when_none_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], found: int, expected: str
+) -> None:
+    calls: list = []
+    scope = _driver_scope(monkeypatch, held=False, calls=calls)
+    scope["_find_server"] = lambda _pidfile, _needle: found
+    monkeypatch.setenv("HL_PIDFILE", str(tmp_path / "role.pid"))
+    monkeypatch.setenv("HL_LAUNCH_PATH", str(tmp_path / "launch.sh"))
+    monkeypatch.setenv("HL_ACTION", "ensure")
+    scope["restart_remote_main"]()
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["action"] == expected
+    assert not [c for c in calls if c[0] in ("kill", "exec")]
+    assert [c[2] for c in calls if c[0] == "spawn"] == ([("FROM=1",)] if found == 0 else [])
 
 
 def test_detached_spawn_runs_with_the_given_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

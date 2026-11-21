@@ -19,6 +19,7 @@ import os
 import shutil
 import sys
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -54,7 +55,7 @@ from hyperloom.inference_optimizer.framework_registry import (
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import perf_report_csv_dir
 from TraceLens.Agent.Analysis.post_processing import render_analysis_json
 
-from ._analysis_json import load_report_tasks
+from ._analysis_json import load_report_tasks, poor_quality_reasons, trace_quality_warnings
 from ._capture_shapes import is_capture_fragment
 from ._io_utils import append_log
 from ._analysis_reports import OrchestratorOutcome, write_reports
@@ -65,6 +66,9 @@ from ._candidate_assembly import _finalize_candidates, source_resolution_warning
 from ._collective_candidates_inject import _inject_collective_candidates
 from ._kernel_roofline import default_roofline_fields
 from ._kernel_search import refresh_kernel_search_roots
+from ._multi_trace_config import write_multi_trace_run_config
+from ._pd_gates import pd_route_candidates
+from ._pd_jobs import add_pd_args, clamp_chunk_stream_overlaps, plan_pd_analysis, use_unsplit_trace
 from ._perf_report_analysis import analyze_perf_report
 from ._trace_gates import WorkloadShares, _evaluate_idle_gate_with_graph_guard, _evaluate_low_compute_gate
 from ._trace_inputs import (
@@ -74,7 +78,7 @@ from ._trace_inputs import (
     _trace_file_size,
     discover_trace_inputs,
 )
-from ._trace_split import TraceSplitJob, _run_trace_split
+from ._trace_split import STEADY_STATE_MODES, UNSPLIT_MODE, TraceSplitJob, _run_trace_split
 
 # trace_analyze heals a vanished checkout through this module's _ensure_tracelens_checkout.
 from ._tracelens_checkout import (
@@ -110,6 +114,8 @@ DEFAULT_TRACELENS_INTERNAL_ROOT = ""
 
 # The analysis-orchestrator skill entry point, relative to the TraceLens root.
 _ORCHESTRATOR_SKILL = "TraceLens/Agent/Analysis/skills/analysis-orchestrator/SKILL.md"
+_POPULATE_GPU_ARCH_STEP = "populate_gpu_arch_json"
+_SPLIT_TRACE_STEP = "split_trace"
 
 
 def _trajectory_scope(args: argparse.Namespace) -> contextlib.AbstractContextManager[Any]:
@@ -405,23 +411,6 @@ def _run_agent_skill(
         )
 
 
-def _trace_quality_warnings(texts: list[str], source: Path) -> list[dict[str, Any]]:
-    """One ``trace_quality_poor`` warning per reason the report gives for a poor-quality trace."""
-    return [
-        {"code": "trace_quality_poor", "severity": "warning", "message": text, "source": str(source)} for text in texts
-    ]
-
-
-def _poor_quality_reasons(analysis_json: Path) -> list[str]:
-    """Why ``report_info`` rates the trace poor: its warnings, else its mode; empty when the quality is not poor."""
-    report_info = json.loads(analysis_json.read_text(encoding="utf-8")).get("report_info") or {}
-    if report_info.get("trace_quality") != "poor":
-        return []
-    return [str(text) for text in report_info.get("warnings") or []] or [
-        f"TraceLens analysis mode is {report_info.get('mode')}"
-    ]
-
-
 def _agent_route_outcome(
     skill_result: TraceLensSkillRunResult,
     args: argparse.Namespace,
@@ -433,7 +422,7 @@ def _agent_route_outcome(
     report_path = skill_result.report_path
     # TraceLens owns the parse/group/prose/impact/order; render its structured analysis.json beside the md.
     analysis_json = render_analysis_json(report_path)
-    warnings.extend(_trace_quality_warnings(_poor_quality_reasons(analysis_json), analysis_json))
+    warnings.extend(trace_quality_warnings(poor_quality_reasons(analysis_json), analysis_json))
     shares = WorkloadShares(
         idle_pct=extract_idle_pct_from_analysis_md(report_path),
         compute_pct=extract_compute_pct_from_analysis_md(report_path),
@@ -471,7 +460,7 @@ def _run_non_llm_route(
     """
     analysis = analyze_perf_report(run_config_path)
     report_path = analysis.report_path
-    warnings.extend(_trace_quality_warnings(analysis.warnings, report_path))
+    warnings.extend(trace_quality_warnings(analysis.warnings, report_path))
     gates = _evaluate_report_gates(analysis.shares, report_path, raw_trace_path, warnings, log_path)
     raw_candidates: list[dict[str, Any]] = []
     if gates.suppressed:
@@ -613,7 +602,7 @@ def _add_chunk_selection_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--steady-state-mode",
-        choices=("mixed", "decode_only", "prefilldecode", "generic"),
+        choices=STEADY_STATE_MODES,
         default=(os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "").strip() or "mixed"),
         help=(
             "Which steady-state chunk to consume for the perf report. "
@@ -634,6 +623,9 @@ def _add_chunk_selection_args(parser: argparse.ArgumentParser) -> None:
             "chunk carries the real GEMM / attention kernels. "
             "Switch to 'decode_only' when you specifically want the "
             "longest pure-decode region (decode-perf comparison runs). "
+            "'decode_only_or_generic' takes the decode-only chunk, else the "
+            "generic one (PD decode servers); 'unsplit' analyses the whole "
+            "trace without splitting it (PD prefill servers). "
             "May also be set via env "
             "INFERENCE_OPTIMIZER_STEADY_STATE_MODE so the coordinator "
             "can re-issue roofline with a different mode after a "
@@ -692,6 +684,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trajectory-task-id", default="")
     parser.add_argument("--trajectory-parent-span-id", default="")
     parser.add_argument("--dry-run", action="store_true")
+    add_pd_args(parser)
     parser.add_argument(
         "--route",
         choices=[route.value for route in AnalysisRoute],
@@ -966,6 +959,13 @@ def _run_route(
             outcome = _agent_route_outcome(skill_result, args, raw_trace_path, run.trace_health_warnings, log_path)
         else:
             outcome = _run_non_llm_route(run_config_path, raw_trace_path, run.trace_health_warnings, log_path)
+    return _finalize_route(run, outcome, tracelens_dir)
+
+
+def _finalize_route(run: AnalysisRun, outcome: RouteOutcome, tracelens_dir: Path) -> _RouteResult:
+    """Finalize the candidates a route kept and record their source resolution."""
+    args = run.args
+    log_path = run.log_path
     route_candidates = []
     if outcome.raw_candidates:
         route_candidates = _finalize_candidates(
@@ -989,26 +989,8 @@ def _analyse_trace(run: AnalysisRun, trace_input: Path, trace_files: list[Path])
     """Preflight the discovered traces, split out the steady-state chunk and run the route on it."""
     args = run.args
     analysis_trace_path = _preflight_trace_input(run, trace_input, trace_files)
-    run.run_status.write(
-        state="running",
-        current_step="check_tracelens_dependencies",
-    )
-    tl_root, tl_internal_root, skill = _check_tracelens_checkout(args, run.log_path)
-    # Fail before the arch microbenchmark, which can run up to its timeout.
-    if run.route is AnalysisRoute.AGENT:
-        require_claude_sdk()
-
-    tracelens_dir = run.run_dir / "tracelens"
-    tracelens_dir.mkdir(parents=True, exist_ok=True)
-
-    # Backfill MAF for the open-source TraceLens path: measure the
-    # missing arch/MAF spec on an idle GPU before report generation,
-    # unless the internal extension (which backfills MAF) is enabled.
-    run.run_status.write(
-        state="running",
-        current_step="populate_gpu_arch_json",
-    )
-    gpu_arch_path = _record_gpu_arch(run, _gpu_arch_json(run, tl_root=tl_root, tl_internal_root=tl_internal_root))
+    base_request, gpu_arch_path = _prepare_tracelens(run)
+    tracelens_dir = base_request.output_dir
 
     # Split the full-window filtered trace into steady-state chunks via
     # TraceLens's own splitter, since the perf report expects a single
@@ -1023,23 +1005,61 @@ def _analyse_trace(run: AnalysisRun, trace_input: Path, trace_files: list[Path])
     # whole-run property and must be read from the original trace -- the
     # chunk may drop the graph-launch runtime events the detector needs.
     raw_trace_path = analysis_trace_path
-    run.run_status.write(
-        state="running",
-        current_step="split_trace",
-    )
+    run.run_status.write(state="running", current_step=_SPLIT_TRACE_STEP)
     split_dir = tracelens_dir / "trace_split"
-    cli_trace_path = _split_steady_state(run, TraceSplitJob(analysis_trace_path, split_dir, tl_root))
+    if args.steady_state_mode == UNSPLIT_MODE:
+        cli_trace_path = use_unsplit_trace(run, analysis_trace_path, split_dir)
+    else:
+        cli_trace_path = _split_steady_state(
+            run, TraceSplitJob(analysis_trace_path, split_dir, base_request.tracelens_root)
+        )
+    clamp_chunk_stream_overlaps(run, cli_trace_path)
 
     # Graph-capture folder for TraceLens inference graph replay analysis.
     capture_folder = _resolve_capture_folder(run, trace_input, analysis_trace_path)
-    request = TraceLensSkillRequest(
-        skill_path=skill,
-        output_dir=tracelens_dir,
-        tracelens_root=tl_root,
-        tracelens_internal_root=tl_internal_root,
-        capture_folder=capture_folder,
-    )
+    request = replace(base_request, capture_folder=capture_folder)
     return _run_route(run, request, gpu_arch_path, cli_trace_path, raw_trace_path)
+
+
+def _prepare_tracelens(run: AnalysisRun) -> tuple[TraceLensSkillRequest, Path | None]:
+    """Check the TraceLens checkout, create the output dir and record the GPU arch JSON.
+
+    Returns the skill request without a capture folder, and the arch JSON path.
+    """
+    run.run_status.write(state="running", current_step="check_tracelens_dependencies")
+    tl_root, tl_internal_root, skill = _check_tracelens_checkout(run.args, run.log_path)
+    # Fail before the arch microbenchmark, which can run up to its timeout.
+    if run.route is AnalysisRoute.AGENT:
+        require_claude_sdk()
+    tracelens_dir = run.run_dir / "tracelens"
+    tracelens_dir.mkdir(parents=True, exist_ok=True)
+    # Backfill MAF for the open-source TraceLens path: measure the
+    # missing arch/MAF spec on an idle GPU before report generation,
+    # unless the internal extension (which backfills MAF) is enabled.
+    run.run_status.write(state="running", current_step=_POPULATE_GPU_ARCH_STEP)
+    gpu_arch_path = _record_gpu_arch(run, _gpu_arch_json(run, tl_root=tl_root, tl_internal_root=tl_internal_root))
+    return TraceLensSkillRequest(skill, tracelens_dir, tl_root, tl_internal_root, None), gpu_arch_path
+
+
+def _analyse_pd_traces(run: AnalysisRun, pd_input: dict[str, Any]) -> _RouteResult:
+    """Run the agent skill once on the ``combine_by_node`` config of every PD node; each node is gated on its column."""
+    args = run.args
+    if run.route is not AnalysisRoute.AGENT:
+        raise RuntimeError("pd_multi_trace_requires_agent_route: a PD multi-trace analysis runs the TraceLens agent")
+    base_request, gpu_arch_path = _prepare_tracelens(run)
+    tracelens_dir = base_request.output_dir
+    run.run_status.write(state="running", current_step=_SPLIT_TRACE_STEP)
+    plan = plan_pd_analysis(run, pd_input, base_request)
+    run.run_status.write(state="running", current_step="run_trace_analysis")
+    with _tracelens_knows_arch(gpu_arch_path, args.target_platform, tracelens_dir):
+        write_multi_trace_run_config(
+            output_dir=tracelens_dir, jobs=plan.jobs, analysis_mode=tracelens_analysis_mode(args.framework)
+        )
+        skill_result = _run_agent_skill(plan.request, args, run.log_path)
+        run.artifacts.update(skill_result.artifact_paths)
+        raw_candidates = pd_route_candidates(skill_result, plan.raw_traces, run.trace_health_warnings, run.log_path)
+    outcome = RouteOutcome(skill_result.report_path, skill_result.runner, raw_candidates)
+    return _finalize_route(run, outcome, tracelens_dir)
 
 
 def _hot_kernel_candidates(run: AnalysisRun, route_candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1147,7 +1167,10 @@ def main() -> int:
             trace_file_count=len(trace_files),
         )
         if not args.dry_run:
-            analysed = _analyse_trace(run, trace_input, trace_files)
+            if args.pd_node_traces:
+                analysed = _analyse_pd_traces(run, json.loads(args.pd_node_traces))
+            else:
+                analysed = _analyse_trace(run, trace_input, trace_files)
             route_report_path = analysed.report_path
             orchestrator_mode = analysed.orchestrator_mode
             route_candidates = analysed.candidates

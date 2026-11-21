@@ -285,9 +285,9 @@ def _certify_trace_dir(trace_dir: Path, trace_input: Path, framework: str) -> di
 
 # A run_dir keeps the capture sidecars beside its ``torch_trace``.
 def _capture_trace_files(trace_dir: Path) -> tuple[Path | None, list[Path]]:
-    """The graph-capture folder and its files under ``trace_dir``, a PD first-pod subdir, or its parent."""
+    """The graph-capture folder and its files under ``trace_dir``, a PD first-pod or role subdir, or its parent."""
     pod_dirs = tuple(Path(multi_node.pd_pod_trace_dir(str(trace_dir), role, 0)) for role in ("decode", "prefill"))
-    bases = (trace_dir, *pod_dirs, trace_dir.parent)
+    bases = (trace_dir, *pod_dirs, trace_dir / "decode", trace_dir / "prefill", trace_dir.parent)
     capture_dirs = [base / name for base in bases for name in CAPTURE_TRACE_DIRS]
     capture = next((path for path in capture_dirs if path.is_dir()), None)
     if capture is None:

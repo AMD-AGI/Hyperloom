@@ -604,7 +604,7 @@ async def trigger_infera_engine_profile(
         return
     route = "start" if action == "start" else "stop"
     url = f"{service_url}/v1/admin/profile/{route}"
-    payload = dict(body or {}) if action == "start" else {}
+    payload = multi_node.infera_profile_payload(state, action, body)
     client_timeout = 30.0 if action == "start" else multi_node.stop_profile_timeout_s()
     async with _httpx.AsyncClient(timeout=client_timeout) as client:
         try:

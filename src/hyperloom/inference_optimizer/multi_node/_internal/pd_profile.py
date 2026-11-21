@@ -70,13 +70,13 @@ def drop_graph_captures(torch_profiler_dir: str) -> None:
 def _engine_trace_dirs(state: dict[str, Any], root: str, role: str) -> dict[str, int]:
     """Trace dir and node count of each ``role`` engine under ``root``, in pod order.
 
-    An atomesh/sglangrouter pod runs its own engine under :func:`pd_pod_trace_dir`; a role with no pods in state
-    counts as one engine. Other backends have none.
+    An atomesh/sglangrouter pod runs its own engine under :func:`pd_pod_trace_dir`; an Infera role runs one engine
+    across all its pods under ``<root>/<role>``. A role with no pods in state counts as one engine on one node.
     """
-    if not _is_pd_cluster(state):
-        return {}
     pods = max(1, len(role_engine_pods(state, role)))
-    return {pd_pod_trace_dir(root, role, index): 1 for index in range(pods)}
+    if _is_pd_cluster(state):
+        return {pd_pod_trace_dir(root, role, index): 1 for index in range(pods)}
+    return {str(Path(root) / role): pods}
 
 
 def _first_gpu_traces(paths: list[Path], role: str, nodes: int) -> list[str]:
@@ -304,3 +304,56 @@ def record_analysed_profile(trace_path: str, steady_state_trace: str) -> None:
         record_profile_paths(profile_trace=profile_dir, steady_state_trace=steady_state_trace or trace_path)
     except (OSError, RuntimeError, ValueError, TypeError):
         log.debug("roofline: could not record profile paths into multi-node state", exc_info=True)
+
+
+def infera_profile_payload(state: dict[str, Any], action: str, body: dict | None) -> dict[str, Any]:
+    """The Infera admin profile request body for ``action``; ``stop`` sends none.
+
+    A PD-disaggregated launch drops ``output_dir``: each role's workers write under their own
+    ``SGLANG_TORCH_PROFILER_DIR``.
+    """
+    payload = dict(body or {}) if action == "start" else {}
+    mode = str(state.get("last_restart_pd_mode") or state.get("pd_mode") or "").strip().lower()
+    if mode == "disaggregated":
+        payload.pop("output_dir", None)
+    return payload
+
+
+# The TraceLens input each PD role's trace yields: a decode engine's trace holds decode steps only, so its steady-state
+# chunk is taken with or without the decode-only label; a prefill engine's few steps are analysed whole.
+_ROLE_STEADY_STATE_MODE = {"prefill": "unsplit", "decode": "decode_only_or_generic"}
+
+
+def _pd_main_role(profile_result: Any, trace_path: str) -> str:
+    """The PD role whose trace the profile adopted as its main trace, or '' outside a PD cluster."""
+    role_traces = profile_result.get("role_traces") if isinstance(profile_result, dict) else None
+    if not isinstance(role_traces, dict):
+        return ""
+    return next((role for role, path in role_traces.items() if path and path == trace_path), "")
+
+
+def _pd_multi_trace_input(profile_result: dict[str, Any]) -> dict[str, Any] | None:
+    """The multi-trace analysis input of a PD profile with decode nodes and two or more nodes in all, else ``None``."""
+    node_traces = profile_result.get("role_node_traces")
+    if not isinstance(node_traces, dict) or not node_traces.get("decode"):
+        return None
+    if sum(len(paths or []) for paths in node_traces.values()) < 2:
+        return None
+    return {"role_node_traces": node_traces}
+
+
+def add_pd_analysis(payload: dict[str, Any], profile_result: Any, trace_path: str) -> None:
+    """Add the PD analysis settings of a PD profile's main role to a trace_analyze payload; no-op outside PD.
+
+    An operator-set ``INFERENCE_OPTIMIZER_STEADY_STATE_MODE`` replaces the role's default steady-state mode.
+    """
+    main_role = _pd_main_role(profile_result, trace_path)
+    if not main_role:
+        return
+    if not os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "").strip():
+        payload.setdefault("steady_state_mode", _ROLE_STEADY_STATE_MODE[main_role])
+    payload.setdefault("split_llm_inference", False)
+    payload["clamp_stream_overlaps"] = True
+    pd_input = _pd_multi_trace_input(profile_result)
+    if pd_input:
+        payload["pd_node_traces"] = pd_input

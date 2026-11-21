@@ -14,8 +14,11 @@ from ._internal.external_state import external_has_server_control
 from ._internal.infera_support import INFERA_POD_LOG_FILE
 from ._internal.pd_cluster import pd_pod_trace_dir, previous_cluster_state, record_profile_paths
 from ._internal.pd_profile import (
+    add_pd_analysis,
     await_pd_role_traces,
     drop_graph_captures,
+    graph_capture_profile_settings,
+    infera_profile_payload,
     pd_graph_capture_profiling,
     pd_node_traces,
     pd_profile_by_steps,
@@ -49,6 +52,7 @@ __all__ = [
     "SSH_FANOUT_BACKENDS",
     "SshTarget",
     "TopologyHandoffError",
+    "add_pd_analysis",
     "await_pd_role_traces",
     "completion_probe_min_tokens",
     "completion_probe_tokens",
@@ -56,6 +60,8 @@ __all__ = [
     "export_baseline_args",
     "external_has_server_control",
     "generated_tokens",
+    "graph_capture_profile_settings",
+    "infera_profile_payload",
     "normalize_mn_backend",
     "pd_graph_capture_profiling",
     "pd_node_traces",

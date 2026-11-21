@@ -11,9 +11,10 @@ import json
 import os
 import shlex
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .._internal import infera_support
 from .._internal.env_safety import filter_forward_env, server_log_dir
@@ -108,12 +109,31 @@ def _collect_forward_env() -> dict[str, str]:
     return filter_forward_env(fwd)
 
 
+_SSH_TIMEOUT_RC = 124
+_TIMEOUT = "timeout"
+
+
+def _timeout_record(ip: str, port: int) -> dict:
+    """The fan-out result of a pod whose SSH call timed out."""
+    return {"podIP": ip, "sshPort": port, "rc": _SSH_TIMEOUT_RC, "error": _TIMEOUT}
+
+
+def _pod_record(ip: str, port: int, cp: subprocess.CompletedProcess) -> dict:
+    """The fan-out result of a pod's finished SSH call; a failed call keeps its stderr tail."""
+    rec = {"podIP": ip, "sshPort": port, "rc": cp.returncode, "summary": extract_pod_json(cp.stdout or "")}
+    if cp.returncode != 0:
+        rec["stderr"] = (cp.stderr or "")[-1500:]
+    return rec
+
+
 @dataclass(frozen=True)
 class _FanoutOptions:
-    """How one infera command runs its SSH fan-outs: the per-pod timeout and whether pod output is echoed."""
+    """How one infera command runs its SSH fan-outs: the per-pod timeout, whether pod output is echoed and the
+    ``SGLANG_TORCH_PROFILER_DIR`` subdir its engines write under."""
 
     poll_timeout: int
     print_logs: bool
+    profiler_subdir: str = ""
 
 
 def _infera_fanout_launch(
@@ -124,14 +144,16 @@ def _infera_fanout_launch(
     label: str,
     options: _FanoutOptions,
 ) -> tuple[int, list[dict]]:
-    """Ship + run launch_infera_node.py on each GPU pod over SSH."""
+    """Ship + run launch_infera_node.py on each GPU pod over SSH, under ``options.profiler_subdir`` when set."""
     poll_timeout = options.poll_timeout
     script = read_bundled_pod_python_script("launch_infera_node.py", LAUNCHER_DEPS)
     forward_env = _collect_forward_env()
+    if options.profiler_subdir and forward_env.get("SGLANG_TORCH_PROFILER_DIR"):
+        profiler_dir = Path(forward_env["SGLANG_TORCH_PROFILER_DIR"]) / options.profiler_subdir
+        forward_env["SGLANG_TORCH_PROFILER_DIR"] = str(profiler_dir)
     if forward_env:
         info(f"{label}: forwarding {len(forward_env)} tuning env vars to SSH child")
     results: list[dict] = []
-    rc_total = 0
     for target in targets:
         ip = target["podIP"]
         port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
@@ -146,20 +168,15 @@ def _infera_fanout_launch(
             )
         except subprocess.TimeoutExpired:
             warn(f"{label}: {ip}:{port} timed out after {poll_timeout}s")
-            results.append({"podIP": ip, "sshPort": port, "rc": 124, "error": "timeout"})
-            rc_total = 1
+            results.append(_timeout_record(ip, port))
             continue
-        parsed = extract_pod_json(cp.stdout or "")
-        rec = {"podIP": ip, "sshPort": port, "rc": cp.returncode, "summary": parsed}
+        rec = _pod_record(ip, port, cp)
         if target.get("podId"):
             rec["podId"] = target["podId"]
-        if cp.returncode != 0:
-            rec["stderr"] = (cp.stderr or "")[-1500:]
-            rc_total = 1
         results.append(rec)
         if options.print_logs:
             print(f"--- {ip}:{port} stdout ---\n{cp.stdout}\n--- {ip}:{port} stderr ---\n{cp.stderr}")
-    return rc_total, results
+    return int(any(rec["rc"] for rec in results)), results
 
 
 # Pod-side one-liner: is the recorded server PID still alive?
@@ -239,19 +256,29 @@ def _infera_restart_config_matches(
     )
     if not base_match:
         return False
-    if pd_mode != "disaggregated":
-        return True
+    return pd_mode != "disaggregated" or _pd_launch_matches(state, args, kv_transfer_backend)
+
+
+def _pd_launch_matches(state: dict[str, Any], args: argparse.Namespace, kv_transfer_backend: str) -> bool:
+    """Whether the requested PD roles, topology, KV transfer backend and profiler dir match the last PD launch."""
     for name, unset in _PD_ROLE_OVERRIDES.items():
         if (state.get(f"last_restart_{name}") or unset) != getattr(args, name):
             return False
     # Compare effective PD topology (CLI explicit > pod-list inference), not raw CLI zeros left unset by the operator.
     prefill_n, decode_n = _pd_role_pod_counts(state)
     args_pn, args_dn = _resolve_pd_node_counts(args, state)
+    # PD profile starts carry no output_dir, so engines launched without this round's profiler dir cannot be resumed.
     return (
         args_pn == (state.get("last_restart_pd_prefill_nodes") or prefill_n)
         and args_dn == (state.get("last_restart_pd_decode_nodes") or decode_n)
         and kv_transfer_backend.strip() == (state.get("last_restart_pd_transfer_backend") or "").strip()
+        and (state.get("last_restart_profiler_dir") or "") == _launch_profiler_dir()
     )
+
+
+def _launch_profiler_dir() -> str:
+    """The SGLANG_TORCH_PROFILER_DIR a launch now would forward to the engines, or ''."""
+    return _collect_forward_env().get("SGLANG_TORCH_PROFILER_DIR", "")
 
 
 def _infera_servers_alive(
@@ -321,7 +348,7 @@ def _infera_launch_pd_groups(
             f"nnodes={rnnodes} pods={len(targets)} kv={kv} extra={rextra!r}"
         )
         rc, all_results[role] = _infera_fanout_launch(
-            state, launch_args, list(targets), label=f"restart-{role}", options=fanout
+            state, launch_args, list(targets), label=f"restart-{role}", options=replace(fanout, profiler_subdir=role)
         )
         rc_total = rc_total or rc
     # Persist inferred PD topology so resume fast-path and KB keys match launch.
@@ -370,6 +397,47 @@ def _record_last_restart(state: dict[str, Any], args: argparse.Namespace, framew
     state["last_restart_pd_mode"] = pd_mode
     state["last_restart_extra_args"] = _mn_cli._normalize_extra_args(getattr(args, "extra_args", ""))
     state["last_restart_forward_env"] = _mn_cli.per_round_forward_overrides()
+    state["last_restart_profiler_dir"] = _launch_profiler_dir()
+
+
+def _frontend_port(ip: str, service_url: str) -> int:
+    """Listen port of the frontend on ``ip``: the ``service_url`` port when the URL names that pod, else 8000.
+
+    A service name in the URL maps its own port onto the pod, so only a URL naming the pod's IP fixes the port.
+    """
+    try:
+        parts = urlsplit((service_url or "").strip())
+        port = parts.port
+    except ValueError:
+        return 8000
+    return port if port and parts.hostname == ip else 8000
+
+
+def _infera_ensure_frontend(state: dict[str, Any], model: str, timeout: int) -> tuple[int, list[dict]]:
+    """Start the frontend on each router pod that has none running; a running frontend is left as is.
+
+    Each frontend listens on its pod's :func:`_frontend_port` for ``service_url``.
+    """
+    from .._internal.pd_remote import ensure_payload
+
+    service_url = str(state.get("service_url") or "")
+    results: list[dict] = []
+    for target in infera_support.role_ssh_targets(state, "router"):
+        ip = str(target["podIP"])
+        ssh_port = int(target.get("sshPort") or 0)
+        command = (
+            f"python3 -m {infera_support.INFERA_FRONTEND_NEEDLE} --host 0.0.0.0 --port {_frontend_port(ip, service_url)} "
+            f"--router-tokenizer-path {shlex.quote(model)}"
+        )
+        payload = ensure_payload("router", command, infera_support.INFERA_FRONTEND_NEEDLE)
+        info(f"ensure-frontend: ssh -> {ip}:{ssh_port}")
+        try:
+            cp = _mn_cli._infera_ssh_bash_with_env(state, ip, payload, timeout=timeout, port=ssh_port)
+        except subprocess.TimeoutExpired:
+            results.append(_timeout_record(ip, ssh_port))
+            continue
+        results.append(_pod_record(ip, ssh_port, cp))
+    return int(any(rec["rc"] for rec in results)), results
 
 
 def _infera_restart_server(args: argparse.Namespace) -> int:
@@ -414,18 +482,21 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
                 f"infera resume: same config (framework={framework} model={args.model} "
                 f"tp={args.tp} pd_mode={pd_mode}) and all pods alive; skipping kill+launch"
             )
+            rc, frontend = _infera_ensure_frontend(state, args.model, probe_timeout)
             print(
                 json.dumps(
-                    {"backend": "infera", "pd_mode": pd_mode, "rc": 0, "resumed": True},
+                    {"backend": "infera", "pd_mode": pd_mode, "rc": rc, "resumed": True, "router": frontend},
                     indent=2,
                 )
             )
-            return 0
+            return 0 if rc == 0 else 1
 
     if pd_mode == "disaggregated":
         rc_total, all_results = _infera_launch_pd_groups(state, args, framework, kv, fanout)
     else:
         rc_total, all_results = _infera_launch_workers(state, args, framework, fanout)
+    rc, all_results["router"] = _infera_ensure_frontend(state, args.model, fanout.poll_timeout)
+    rc_total = rc_total or rc
 
     _record_last_restart(state, args, framework, pd_mode)
     _mn_cli._save_state(state)
@@ -499,7 +570,7 @@ def _infera_ssh_node_op(
     try:
         cp = _ssh_run_pod_script(state, ip, RemoteScript(script, _POD_PYTHON3, op_args), timeout=timeout, port=port)
     except subprocess.TimeoutExpired:
-        return None, {"rc": 124, "stderr": f"timeout after {timeout}s", "podIP": ip, "sshPort": port}
+        return None, {"rc": _SSH_TIMEOUT_RC, "stderr": f"timeout after {timeout}s", "podIP": ip, "sshPort": port}
     return extract_pod_json(cp.stdout or ""), {
         "rc": cp.returncode,
         "stderr": (cp.stderr or "")[-1500:],

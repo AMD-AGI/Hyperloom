@@ -152,3 +152,20 @@ def _shapes_with_dtypes(shapes: Any, dtypes: Any) -> list[str]:
         text = str(shape).strip()
         out.append(f"{text} {dtype}".strip() if dtype else text)
     return out
+
+
+def trace_quality_warnings(texts: list[str], source: Path) -> list[dict[str, Any]]:
+    """One ``trace_quality_poor`` warning per reason the report gives for a poor-quality trace."""
+    return [
+        {"code": "trace_quality_poor", "severity": "warning", "message": text, "source": str(source)} for text in texts
+    ]
+
+
+def poor_quality_reasons(analysis_json: Path) -> list[str]:
+    """Why ``report_info`` rates the trace poor: its warnings, else its mode; empty when the quality is not poor."""
+    report_info = json.loads(analysis_json.read_text(encoding="utf-8")).get("report_info") or {}
+    if report_info.get("trace_quality") != "poor":
+        return []
+    return [str(text) for text in report_info.get("warnings") or []] or [
+        f"TraceLens analysis mode is {report_info.get('mode')}"
+    ]
