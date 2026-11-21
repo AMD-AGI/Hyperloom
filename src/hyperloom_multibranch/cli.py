@@ -13,6 +13,8 @@ requests; either takes ``--ep``, the expert-parallel size its server runs at, 1 
 model in the image ``HYPERLOOM_ACTIVE_IMAGE_REF`` names, and a ``--model`` that is a directory is recorded by its
 resolved path, which its benchmark pins. An operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than
 ``--workload``, or that names a benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``, is refused.
+``--boot-budget-sec`` (at most 6 h) is how long a test's server may take to be ready: a test then runs for its trace
+window, if any, half an hour more and that budget, rather than half of the default timeout going to the boot.
 ``--max-gpu-hours`` caps the GPU hours the session uses, tests' GPU time plus card time any lease holds: EXPLORE ends
 with ``gpu_hours_exhausted`` once only FINAL's share is left, and FINAL still runs.
 ``--max-llm-usd`` caps the dollars the session's LLM calls cost: EXPLORE
@@ -205,6 +207,7 @@ from hyperloom_multibranch.scheduling.settings import (
     AGENT_PORT,
     DEFAULT_AGENTX_OBJECTIVE,
     DOSSIER_MINUTES,
+    MAX_BOOT_BUDGET_SEC,
     SHARE_MINUTES,
     InferenceXShape,
     KernelOptimizer,
@@ -323,6 +326,17 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
         run.add_argument(f"--{name}", type=int, default=None, help="Required for inferencex; refused for agentx.")
     _add_agentx_options(run)
     run.add_argument("--precision", help="Model precision, as hyperloom optimize spells it.")
+    run.add_argument(
+        "--boot-budget-sec",
+        type=int,
+        default=None,
+        help=(
+            "How long the server of a test may take to be ready, in seconds, at most"
+            f" {MAX_BOOT_BUDGET_SEC} (6 h); a test then runs for its workload's own time plus this budget. Not given,"
+            " a boot may take half of a test's timeout, which is 3600 s for inferencex and the trace window plus"
+            " 3600 s for agentx."
+        ),
+    )
     run.add_argument(
         "--kernel-optimizer",
         choices=[optimizer.value for optimizer in KernelOptimizer],
@@ -816,6 +830,7 @@ def settings_from(
         DEFAULT_EP if args.ep is None else args.ep,
         args.agentx_duration_sec,
         AgentXObjective(args.agentx_objective or DEFAULT_AGENTX_OBJECTIVE),
+        args.boot_budget_sec,
     )
     caps = RosterCaps(args.max_branches, args.max_k_per_branch, parallel)
     prompts, agents = args.specialist_prompts or [], args.agents or []
@@ -848,8 +863,8 @@ def settings_from(
 
 
 def _limit_errors(args: argparse.Namespace) -> list[str]:
-    """What is wrong with the session's limits: its hours, GPU hours, LLM dollars, judge interval, agent minutes and
-    dev sandboxes."""
+    """What is wrong with the session's limits: its hours, GPU hours, LLM dollars, judge interval, agent minutes, dev
+    sandboxes and boot budget."""
 
     hours, gpu_hours, usd = args.max_hours, args.max_gpu_hours, args.max_llm_usd
     judge, dossier, share = args.judge_interval_sec, args.agent_dossier_minutes, args.agent_share_minutes
@@ -861,7 +876,14 @@ def _limit_errors(args: argparse.Namespace) -> list[str]:
         *_limit_error("--agent-dossier-minutes", dossier, dossier >= 0, "0 (runs no dossier pass) or positive"),
         *_limit_error("--agent-share-minutes", share, share >= 0, "0 (always opens the shares) or positive"),
         *_limit_error("--dev-leases", args.dev_leases, args.dev_leases >= 0, "0 (none) or a positive number"),
+        *_boot_budget_errors(args.boot_budget_sec),
     ]
+
+
+def _boot_budget_errors(budget: int | None) -> list[str]:
+    if budget is None or 0 < budget <= MAX_BOOT_BUDGET_SEC:
+        return []
+    return [f"--boot-budget-sec must be a positive number of seconds, at most {MAX_BOOT_BUDGET_SEC} (6 h)"]
 
 
 def _limit_error(option: str, value: float, in_range: bool, rule: str) -> list[str]:

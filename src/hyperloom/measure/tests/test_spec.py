@@ -114,6 +114,8 @@ NEGATIVES: dict[str, Callable[[dict[str, Any]], None]] = {
     "absolute result_dir": lambda d: d["outputs"].update(result_dir="/tmp/out"),
     "zero measure rounds": lambda d: d["procedure"]["rounds"].update(measure=0),
     "unknown prep": lambda d: d["procedure"].update(prep="sweep"),
+    "zero boot budget": lambda d: d["procedure"].update(boot_budget_sec=0),
+    "boot budget not a number": lambda d: d["procedure"].update(boot_budget_sec="3600"),
     "accuracy kind without accuracy": lambda d: d.update(kind="accuracy"),
 }
 

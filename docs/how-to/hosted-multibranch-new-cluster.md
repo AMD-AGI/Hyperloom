@@ -82,6 +82,32 @@ sandbox and runs every test it fits. A dev sandbox a branch is promised takes th
 `multibranch.make_before_break: false` in the campaign spec (`--no-make-before-break` on `run --measurement hosted`) to
 run every test the grant fits and close each sandbox when its test ends.
 
+### AgentX window and boot budget
+
+The `multibranch` block of the campaign spec carries the options of `run` that set how long a test runs:
+
+```json
+"workload": {"conc": 16, "precision": "fp8"},
+"multibranch": {
+  "workload": "agentx",
+  "agentx_duration_sec": 3600,
+  "agentx_objective": "p50_interactivity",
+  "boot_budget_sec": 5400
+}
+```
+
+- `agentx_duration_sec` (`--agentx-duration-sec`), a positive whole number of seconds: the trace window each test
+  replays; the harness's default (3600 s) when not given.
+- `agentx_objective` (`--agentx-objective`), `p50_interactivity` (the default) or `total_token_throughput`: the axis
+  the session is graded on.
+- `boot_budget_sec` (`--boot-budget-sec`), a positive whole number of seconds, at most 21600: how long the server of
+  a test may take to be ready; see [Boot budget](run-multibranch.md#options-of-run).
+
+The two AgentX fields are taken with `multibranch.workload: agentx` only; with another workload, or a value of the
+wrong type, the run ends for good (exit code 2), naming the field. A `boot_budget_sec` raises only the limits the
+session sets; a measurement template that sets `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` must allow at least as
+long, or the server's own lifecycle ends the boot first.
+
 ### Starting the runner from the cache
 
 Start the runner with the step that `hyperloom.measure.runner.bootstrap.runner_template_step(...)` returns. It needs

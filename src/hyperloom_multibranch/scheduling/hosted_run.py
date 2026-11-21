@@ -10,7 +10,9 @@ the legacy entry validated, a multi-branch session needs ``multibranch.workload`
 ``multibranch.reference_script`` ``--reference-script``, ``multibranch.max_branches`` ``--max-branches``,
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
 ``--autonomous-agent``, ``multibranch.make_before_break`` (``true`` by default) ``--make-before-break`` or
-``--no-make-before-break``, ``placement.measurement`` is ``--measurement``, and ``placement.max_parallel_tests`` is
+``--no-make-before-break``, ``multibranch.agentx_duration_sec`` ``--agentx-duration-sec`` and
+``multibranch.agentx_objective`` ``--agentx-objective`` (an ``agentx`` workload only), ``multibranch.boot_budget_sec``
+``--boot-budget-sec``, ``placement.measurement`` is ``--measurement``, and ``placement.max_parallel_tests`` is
 ``--max-parallel-tests``, at most what runs at once where the session measures. The fields ``run`` has no option for --
 ``objective``, ``options``, ``placement.profile`` and ``placement.specialist_capacity`` -- are not read. A spec that
 sets ``launch.server_args`` or ``launch.extra_env`` is refused rather than run without them: a multi-branch session's
@@ -82,6 +84,8 @@ from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_EN
 from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.toolbox import WorkloadKind
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.scheduling.budget import (
     MB_CLOSE_GRACE_CAP_SECONDS,
     MB_SECONDS_PER_HOUR,
@@ -120,6 +124,8 @@ RESTART_READER = "restart"
 #: ``exit.json`` and ``session.json`` reach the disk before their names, and are ``664``: the run's next leg, maybe
 #: another account of the group, reads ``session.json`` to take over the session it names.
 _DURABLE = WriteOptions(fsync=True, shared=True)
+#: The values ``multibranch.agentx_objective`` takes, as ``run --agentx-objective`` does.
+_AGENTX_OBJECTIVES = tuple(objective.value for objective in AgentXObjective)
 _ENCODING = "utf-8"
 
 log = logging.getLogger(__name__)
@@ -187,6 +193,8 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         "dev-leases": section.get("dev_leases"),
         "max-parallel-tests": min(spec.max_parallel_tests, parallel_tests),
         "measurement": spec.measurement,
+        **_agentx_values(section),
+        "boot-budget-sec": _whole_seconds(section, "boot_budget_sec"),
     }
     agents = [f"--autonomous-agent={source}" for source in _agent_sources(section.get("autonomous_agents"))]
     switches = _switches(section)
@@ -196,6 +204,35 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         *agents,
         *switches,
     ]
+
+
+def _agentx_values(section: Mapping[str, Any]) -> dict[str, Any]:
+    """``multibranch.agentx_duration_sec`` and ``multibranch.agentx_objective`` as ``run``'s options; refused when
+    either is not of its type, or is given for a workload other than ``agentx``, as ``run`` refuses its options."""
+
+    duration = _whole_seconds(section, "agentx_duration_sec")
+    objective = section.get("agentx_objective")
+    if objective is not None and objective not in _AGENTX_OBJECTIVES:
+        raise HostedRefused(f"multibranch.agentx_objective must be one of {', '.join(_AGENTX_OBJECTIVES)}")
+    given = [
+        field
+        for field, value in (("agentx_duration_sec", duration), ("agentx_objective", objective))
+        if value is not None
+    ]
+    if given and section.get("workload") != WorkloadKind.AGENTX.value:
+        raise HostedRefused(
+            f"multibranch.{' and multibranch.'.join(given)} are taken by multibranch.workload 'agentx' only"
+        )
+    return {"agentx-duration-sec": duration, "agentx-objective": objective}
+
+
+def _whole_seconds(section: Mapping[str, Any], field: str) -> int | None:
+    """``multibranch.<field>``, a positive whole number of seconds when given; ``run`` checks its range."""
+
+    seconds = section.get(field)
+    if seconds is not None and (isinstance(seconds, bool) or not isinstance(seconds, int) or seconds <= 0):
+        raise HostedRefused(f"multibranch.{field} must be a positive whole number of seconds")
+    return seconds
 
 
 def _switches(section: Mapping[str, Any]) -> list[str]:

@@ -377,6 +377,7 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         accuracy=p.accuracy,
         result_dir=str(ctx.files / spec.outputs.result_dir),
         silence_timeout_sec=p.silence_timeout_sec,
+        boot_budget_sec=p.boot_budget_sec,
         on_output=progress.touch,
         env_overrides=dict(spec.process_env),
         unset_envs=spec.unset_envs,

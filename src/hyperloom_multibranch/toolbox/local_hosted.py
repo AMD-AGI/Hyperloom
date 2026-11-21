@@ -350,7 +350,9 @@ class LocalOptions:
     ``runner_envs`` add to the image's variables the runner template carries (for example ``INFERENCEX_REPO``) and win
     over the same name in the host's ``INFERENCEX_REPO``, which the template carries when set.
     ``archive`` is the result archive, a directory archive below ``session_dir`` when omitted. ``python`` is the interpreter the
-    runner and the measurement run with. ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the
+    runner and the measurement run with. ``timeout_sec`` is the timeout of one attempt, ``boot_budget_sec`` how long its
+    server may take to be ready (``TestCall.boot_budget_sec``; ``None`` for the default share of the timeout),
+    ``max_infra_retries`` the
     infrastructure retries per test before it ends as ``measurement_failed``, ``infra_backoff_seconds`` the wait before
     each one after a failure that is not the node's (:class:`~.attempts.InfraBackoff`) and ``poll_interval_sec`` how
     often the backend polls a runner for its result. ``tools`` are the asynchronous tools ``start_analysis``
@@ -395,6 +397,7 @@ class LocalOptions:
     archive: ResultArchive | None = None
     python: str = sys.executable
     timeout_sec: int = DEFAULT_TEST_TIMEOUT_SEC
+    boot_budget_sec: int | None = None
     max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
     infra_backoff_seconds: tuple[float, ...] = INFRA_BACKOFF_SECONDS
     poll_interval_sec: float = _POLL_INTERVAL_SEC
@@ -798,6 +801,7 @@ def build_local_toolbox(
         backend,
         directory,
         timeout_sec=options.timeout_sec,
+        boot_budget_sec=options.boot_budget_sec,
         workload_kind=acceptance.workload_kind,
     )
     executor.smoke = merge_smoke_from(os.environ)

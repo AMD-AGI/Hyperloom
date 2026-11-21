@@ -594,7 +594,7 @@ def _booting(run: _Run, point: int, round_args: dict[str, Any]) -> contextlib.Ab
     call = run.call
     if run.boot is None or round_args.get("server_already_ready") or call.serving_lease is not None:
         return contextlib.nullcontext()
-    limit = boot_limit_sec(_point(call.points[point]), call.timeout_sec)
+    limit = boot_limit_sec(_point(call.points[point]), call.timeout_sec, call.boot_budget_sec)
     return contextlib.nullcontext() if limit is None else run.boot.watching(limit)
 
 

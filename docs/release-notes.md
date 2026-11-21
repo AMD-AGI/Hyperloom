@@ -20,6 +20,16 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A hosted multi-branch run sets the AgentX window and the server boot
+  budget.** The campaign spec's `multibranch` block takes
+  `agentx_duration_sec` and `agentx_objective` (for `workload: agentx` only),
+  forwarded as `--agentx-duration-sec` and `--agentx-objective`; before, a
+  hosted AgentX run always replayed the default 3600 s window. A new
+  `--boot-budget-sec` on `hyperloom-multibranch run` (`boot_budget_sec` in the
+  spec, at most 21600) is how long a test's server may take to be ready: a
+  test then runs for its trace window, if any, plus 1800 s plus that budget,
+  and the boot limit is the budget instead of half the test's timeout. Without
+  it nothing changes.
 - **A multi-branch session runs on MI325X.** `hyperloom-multibranch run`
   accepts `--gpu-type mi325x`. Before, it refused MI325X, a limit left from
   Magpie, which had no benchmark script of MI325X's own; InferenceSuite
