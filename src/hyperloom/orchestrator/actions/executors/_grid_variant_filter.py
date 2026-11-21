@@ -26,7 +26,12 @@ from ._grid_base import (
     apply_variant_env,
 )
 from ._spec_decode_pin import speculative_pin_reason
-from hyperloom.inference_optimizer.grid_server_args import compose_server_args
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from hyperloom.inference_optimizer.grid_server_args import (
+    compose_server_args,
+    dedupe_extra_server_args,
+    harness_flag_change_reason,
+)
 from hyperloom.inference_optimizer.speculative_capability import (
     CAPABILITY_UNSUPPORTED,
     DraftLimits,
@@ -401,6 +406,23 @@ def _speculative_pin_reason(
     )
 
 
+def _harness_flag_reason(variant: "GridVariant", *, base_server_args: str, args_env: str) -> str | None:
+    """Why this variant would run a different benchmark harness than its reference, else ``None``.
+
+    Composed and deduped the way the launch would be, so a removal or a replacing snapshot counts as the launch counts
+    it, then read from ``args_env`` after the variant's own env layer, which can replace that carrier undeduped.
+    """
+    composed = compose_server_args(
+        base_extra_args=base_server_args,
+        variant_extra_args=variant.extra_server_args,
+        remove_args=variant.remove_args,
+        args_mode=variant.args_mode,
+    )
+    launch_envs = {args_env: dedupe_extra_server_args(composed)}
+    apply_variant_env(launch_envs, variant, None, None)
+    return harness_flag_change_reason(dedupe_extra_server_args(base_server_args), launch_envs.get(args_env, ""))
+
+
 def _model_class_flag_reason(args: str, *, model_path: str, is_mla: bool, is_moe: bool) -> str | None:
     """Why a flag in ``args`` asks for a model class this model is not recognised as, else ``None``."""
     for flag, required_class in _COMPATIBILITY_FLAG_RULES:
@@ -455,8 +477,13 @@ def apply_compatibility_filter(
             dropped.append({"name": v.name, "source": CAPABILITY_UNSUPPORTED, "reason": skip_reason})
             continue
         # A lever the base launch pins: the round would score it against an acceptance length that no longer
-        # describes it, so it is not a variant this base can own.
-        skip_reason = _speculative_pin_reason(v, base_server_args=base_server_args, base_envs=base_envs or {})
+        # describes it, so it is not a variant this base can own. Likewise a variant that runs a harness the
+        # reference does not: its uplift would be partly the harness flag's.
+        skip_reason = _speculative_pin_reason(
+            v, base_server_args=base_server_args, base_envs=base_envs or {}
+        ) or _harness_flag_reason(
+            v, base_server_args=base_server_args, args_env=server_args_env_name(serving.framework)
+        )
         if skip_reason:
             dropped.append({"name": v.name, "source": SERVE_FLAG, "reason": skip_reason})
             continue
