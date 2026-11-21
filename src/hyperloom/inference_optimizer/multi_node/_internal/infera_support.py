@@ -9,15 +9,21 @@ from typing import Any
 from .server_args_safety import prepare_shell_safe_extra_args
 from .ssh_client import DEFAULT_SSH_PORT
 
-# SSH control plane: hostNetwork pods on the same node share one IP, so each GPU role binds a distinct MN_SSH_PORT
-# (decode offset by ROLE_STRIDE).
+# SSH control plane: hostNetwork pods on the same node share one IP, so each role binds a distinct MN_SSH_PORT
+# (decode offset by ROLE_STRIDE, the frontend by twice that).
 INFERA_SSH_PORT_ROLE_STRIDE = 10
+
+# Process the frontend pod serves the cluster with.
+INFERA_FRONTEND_NEEDLE = "infera.server"
 
 
 def ssh_role_port_offset(role: str) -> int:
-    """Return the SSH port offset for a GPU service role."""
-    if (role or "").lower() == "decode":
+    """Return the SSH port offset for a service role; ``router`` is the frontend."""
+    r = (role or "").lower()
+    if r == "decode":
         return INFERA_SSH_PORT_ROLE_STRIDE
+    if r == "router":
+        return 2 * INFERA_SSH_PORT_ROLE_STRIDE
     return 0
 
 
@@ -49,7 +55,7 @@ def pod_targets_from_lists(
 
 
 def role_ssh_targets(state: dict[str, Any], role: str) -> list[dict[str, Any]]:
-    """SSH targets of one GPU service role (``prefill``, ``decode`` or ``worker``) from multi_node state."""
+    """SSH targets of one service role (``router``, ``prefill``, ``decode`` or ``worker``) from multi_node state."""
     return pod_targets_from_lists(
         state.get(f"{role}_pods"),
         state.get(f"{role}_pod_ips"),

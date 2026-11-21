@@ -14,6 +14,7 @@ import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .._internal import infera_support
 from .._internal.log import info, warn, err
@@ -78,6 +79,23 @@ def _infera_require_state() -> dict[str, Any]:
 _POD_PYTHON3 = "python3"
 
 
+_SSH_TIMEOUT_RC = 124
+_TIMEOUT = "timeout"
+
+
+def _timeout_record(ip: str, port: int) -> dict:
+    """The fan-out result of a pod whose SSH call timed out."""
+    return {"podIP": ip, "sshPort": port, "rc": _SSH_TIMEOUT_RC, "error": _TIMEOUT}
+
+
+def _pod_record(ip: str, port: int, cp: subprocess.CompletedProcess) -> dict:
+    """The fan-out result of a pod's finished SSH call; a failed call keeps its stderr tail."""
+    rec = {"podIP": ip, "sshPort": port, "rc": cp.returncode, "summary": _mn_cli._extract_pod_json(cp.stdout or "")}
+    if cp.returncode != 0:
+        rec["stderr"] = (cp.stderr or "")[-1500:]
+    return rec
+
+
 @dataclass(frozen=True)
 class _FanoutOptions:
     """How one infera command runs its SSH fan-outs: the per-pod timeout, whether pod output is echoed and the
@@ -106,7 +124,6 @@ def _infera_fanout_launch(
     if forward_env:
         info(f"{label}: forwarding {len(forward_env)} tuning env vars to SSH child")
     results: list[dict] = []
-    rc_total = 0
     for target in targets:
         ip = target["podIP"]
         port = int(target.get("sshPort") or _infera_default_ssh_port(state))
@@ -121,20 +138,15 @@ def _infera_fanout_launch(
             )
         except subprocess.TimeoutExpired:
             warn(f"{label}: {ip}:{port} timed out after {poll_timeout}s")
-            results.append({"podIP": ip, "sshPort": port, "rc": 124, "error": "timeout"})
-            rc_total = 1
+            results.append(_timeout_record(ip, port))
             continue
-        parsed = _mn_cli._extract_pod_json(cp.stdout or "")
-        rec = {"podIP": ip, "sshPort": port, "rc": cp.returncode, "summary": parsed}
+        rec = _pod_record(ip, port, cp)
         if target.get("podId"):
             rec["podId"] = target["podId"]
-        if cp.returncode != 0:
-            rec["stderr"] = (cp.stderr or "")[-1500:]
-            rc_total = 1
         results.append(rec)
         if options.print_logs:
             print(f"--- {ip}:{port} stdout ---\n{cp.stdout}\n--- {ip}:{port} stderr ---\n{cp.stderr}")
-    return rc_total, results
+    return int(any(rec["rc"] for rec in results)), results
 
 
 # Pod-side one-liner: is the recorded server PID still alive?
@@ -341,6 +353,57 @@ def _infera_launch_workers(
     return rc, {"worker": results}
 
 
+def _frontend_port(ip: str, service_url: str) -> int:
+    """Listen port of the frontend on ``ip``: the ``service_url`` port when the URL names that pod, else 8000.
+
+    A service name in the URL maps its own port onto the pod, so only a URL naming the pod's IP fixes the port.
+    """
+    try:
+        parts = urlsplit((service_url or "").strip())
+        port = parts.port
+    except ValueError:
+        return 8000
+    return port if port and parts.hostname == ip else 8000
+
+
+# Bash that ends the payload with a ``running`` report when a process's cmdline holds the frontend module; the
+# bracketed pattern does not match grep's own cmdline.
+_FRONTEND_RUNNING_GUARD = (
+    "if grep -qa 'infera[.]server' /proc/[0-9]*/cmdline 2>/dev/null; then "
+    """echo '{"status": "ok", "action": "running"}'; exit 0; fi"""
+)
+
+
+def _infera_ensure_frontend(state: dict[str, Any], model: str, timeout: int) -> tuple[int, list[dict]]:
+    """Start the frontend on each router pod that has none running; a running frontend is left as is.
+
+    Each frontend listens on its pod's :func:`_frontend_port` for ``service_url``.
+    """
+    from inference_suite.multinode import in_place_restart_payload
+
+    service_url = str(state.get("service_url") or "")
+    results: list[dict] = []
+    for target in infera_support.role_ssh_targets(state, "router"):
+        ip = str(target["podIP"])
+        ssh_port = int(target.get("sshPort") or 0)
+        command = (
+            f"python3 -m {infera_support.INFERA_FRONTEND_NEEDLE} --host 0.0.0.0 --port {_frontend_port(ip, service_url)} "
+            f"--router-tokenizer-path {shlex.quote(model)}"
+        )
+        launch = f"#!/bin/bash\nexec {command}\n"
+        payload = "\n".join(
+            [_FRONTEND_RUNNING_GUARD, in_place_restart_payload("router", launch, infera_support.INFERA_FRONTEND_NEEDLE)]
+        )
+        info(f"ensure-frontend: ssh -> {ip}:{ssh_port}")
+        try:
+            cp = _infera_ssh_bash_with_env(state, ip, payload, timeout=timeout, port=ssh_port)
+        except subprocess.TimeoutExpired:
+            results.append(_timeout_record(ip, ssh_port))
+            continue
+        results.append(_pod_record(ip, ssh_port, cp))
+    return int(any(rec["rc"] for rec in results)), results
+
+
 def _infera_restart_server(args: argparse.Namespace) -> int:
     """Infera restart: SSH fan-out launch_infera_node.py to every worker pod."""
     state = _infera_require_state()
@@ -383,18 +446,21 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
                 f"infera resume: same config (framework={framework} model={args.model} "
                 f"tp={args.tp} pd_mode={pd_mode}) and all pods alive; skipping kill+launch"
             )
+            rc, frontend = _infera_ensure_frontend(state, args.model, probe_timeout)
             print(
                 json.dumps(
-                    {"backend": "infera", "pd_mode": pd_mode, "rc": 0, "resumed": True},
+                    {"backend": "infera", "pd_mode": pd_mode, "rc": rc, "resumed": True, "router": frontend},
                     indent=2,
                 )
             )
-            return 0
+            return 0 if rc == 0 else 1
 
     if pd_mode == "disaggregated":
         rc_total, all_results = _infera_launch_pd_groups(state, args, framework, kv, fanout)
     else:
         rc_total, all_results = _infera_launch_workers(state, args, framework, fanout)
+    rc, all_results["router"] = _infera_ensure_frontend(state, args.model, fanout.poll_timeout)
+    rc_total = rc_total or rc
 
     _record_last_restart(state, args, framework, pd_mode)
     _mn_cli._save_state(state)
@@ -485,7 +551,7 @@ def _infera_ssh_node_op(
     try:
         cp = _ssh_run_pod_script(state, ip, RemoteScript(script, _POD_PYTHON3, op_args), timeout=timeout, port=port)
     except subprocess.TimeoutExpired:
-        return None, {"rc": 124, "stderr": f"timeout after {timeout}s", "podIP": ip, "sshPort": port}
+        return None, {"rc": _SSH_TIMEOUT_RC, "stderr": f"timeout after {timeout}s", "podIP": ip, "sshPort": port}
     return _mn_cli._extract_pod_json(cp.stdout or ""), {
         "rc": cp.returncode,
         "stderr": (cp.stderr or "")[-1500:],

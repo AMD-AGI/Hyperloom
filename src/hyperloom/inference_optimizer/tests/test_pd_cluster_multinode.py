@@ -586,6 +586,30 @@ def test_engine_restart_gives_each_pod_its_roles_profiler_dir(monkeypatch: pytes
     assert env == {"SGLANG_TORCH_PROFILER_DIR": "/shared/torch_trace"}
 
 
+@pytest.mark.parametrize(
+    ("service_url", "port"), [("http://svc.ns.svc.cluster.local:80", 8000), ("http://10.0.0.9:9000", 9000)]
+)
+def test_infera_frontend_listens_on_the_router_pod_port(
+    monkeypatch: pytest.MonkeyPatch, service_url: str, port: int
+) -> None:
+    from hyperloom.inference_optimizer.multi_node.commands import infera
+
+    fake = _FakeCli({})
+    fake._extract_pod_json = lambda _stdout: {}
+    monkeypatch.setattr(infera, "_mn_cli", fake)
+    monkeypatch.setattr(infera, "_infera_ssh_bash_with_env", fake._infera_ssh_bash_with_env)
+    state = {
+        "service_url": service_url,
+        "ssh_port": 29000,
+        "router_pods": [{"role": "router", "podIP": "10.0.0.9", "sshPort": 29000}],
+    }
+
+    infera._infera_ensure_frontend(state, "/m", 5)
+
+    [(_ip, script)] = fake.calls
+    assert f"--port {port} --router-tokenizer-path" in script
+
+
 def test_engines_not_running_names_pods_whose_launch_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeCli({"10.0.0.1": "HL_ALIVE\n", "10.0.0.2": "HL_GONE\n"})
     _route_pod_ssh(monkeypatch, fake)

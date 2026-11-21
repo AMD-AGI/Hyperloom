@@ -611,8 +611,8 @@ over through the variables below; without a hand-off `--nodes >= 2` exits 2.
 `TOPOLOGY_HANDOFF_FILE` is read first. The file carries `backend` (`rayjob` or
 `infera`), `nodes`, `gpus_per_node`, `service_url`, and the block of that
 backend: `ray` (`head_ip`, `dashboard_token_file`) or `infera` (`ssh_key_file`,
-`ssh_port_base`, `known_hosts_file`, `prefill_ips`, `decode_ips`, `worker_ips`).
-Credentials are file paths; the Ray Dashboard token is read from its file. A set
+`ssh_port_base`, `known_hosts_file`, `prefill_ips`, `decode_ips`, `worker_ips`,
+`router_ips`). Credentials are file paths; the Ray Dashboard token is read from its file. A set
 variable naming a file that is unreadable, not valid JSON, of an unsupported
 schema major, or missing a required field is an error that names the file and
 the problem; Hyperloom does not fall back to the legacy variables. If legacy
@@ -631,6 +631,7 @@ that tells the optimizer a cluster is ready; the rest describe how to reach it.
 | `HYPERLOOM_MN_EXT_SSH_KEY` | infera, atomesh, sglangrouter | **yes** | Private SSH key already authorized on the pods (the platform installs the public half at create time). |
 | `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` | infera, atomesh, sglangrouter | PD | Prefill / decode pod IPs (comma-separated) for PD-disaggregated runs. |
 | `HYPERLOOM_MN_EXT_WORKER_IPS` | infera | aggregated | Worker pod IPs (comma-separated) for aggregated (non-PD) runs. At least one of `_PREFILL_IPS` / `_DECODE_IPS` / `_WORKER_IPS` is required. |
+| `HYPERLOOM_MN_EXT_ROUTER_IPS` | infera | No | Frontend (router) pod IPs (comma-separated). When set, `restart-server` SSHes to each at SSH base port `+20` and starts `infera.server` when none runs; an unreachable router fails the restart. |
 | `HYPERLOOM_MN_EXT_SSH_PORT` | infera, atomesh, sglangrouter | No (default `2233`; required for atomesh and sglangrouter restarts) | SSH base port; on infera the decode role is offset `+10`, on atomesh and sglangrouter every pod uses the port as given. |
 | `HYPERLOOM_MN_EXT_PREFILL_URL` / `_DECODE_URL` | atomesh, sglangrouter | No | Engine URL of each role (default `http://<first role IP>:8000`). The engine listens on the URL's port. |
 | `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | infera, atomesh, sglangrouter | No | `known_hosts` path; else a relaxed host-key check is used. |

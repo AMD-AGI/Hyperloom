@@ -41,8 +41,8 @@ If the platform wrote a TopologyHandoff v1 file, it sets `TOPOLOGY_HANDOFF_FILE`
 its path and Hyperloom reads that file instead of the variables below: `backend`,
 `nodes`, `gpus_per_node`, `service_url`, plus the `ray` block (`head_ip`,
 `dashboard_token_file`) for rayjob or the `infera` block (`ssh_key_file`,
-`ssh_port_base`, `known_hosts_file`, `prefill_ips`, `decode_ips`, `worker_ips`)
-for infera. A file that cannot be used (unreadable, not JSON, unsupported schema
+`ssh_port_base`, `known_hosts_file`, `prefill_ips`, `decode_ips`, `worker_ips`,
+`router_ips`) for infera. A file that cannot be used (unreadable, not JSON, unsupported schema
 major, missing or malformed field) stops the run with an error naming the file;
 there is no silent fallback to the variables. If both are present the file wins
 and a warning names the fields that differ. The launch flags win over the file:
@@ -62,6 +62,7 @@ The following table lists all hand-off variables.
 | `HYPERLOOM_MN_EXT_PREFILL_IPS` | infera, atomesh, sglangrouter | PD only | Prefill pod IPs, comma-separated, in rank order. |
 | `HYPERLOOM_MN_EXT_DECODE_IPS` | infera, atomesh, sglangrouter | PD only | Decode pod IPs, comma-separated, in rank order. |
 | `HYPERLOOM_MN_EXT_WORKER_IPS` | infera | aggregated | Worker pod IPs, comma-separated, leader first. At least one of `_PREFILL_IPS`, `_DECODE_IPS`, or `_WORKER_IPS` is required for infera. |
+| `HYPERLOOM_MN_EXT_ROUTER_IPS` | infera | no | Frontend (router) pod IPs, comma-separated. When set, `restart-server` SSHes to each at SSH base port `+20` and starts `infera.server` on the `HYPERLOOM_MN_EXT_SERVICE_URL` port (else `8000`) when none runs; a router it cannot reach fails the restart. |
 | `HYPERLOOM_MN_EXT_SSH_PORT` | infera, atomesh, sglangrouter | no | SSH base port (default `2233`). On infera the decode role adds offset `+10` and each pod in a multi-node role adds its rank; atomesh and sglangrouter use the port as given on every pod. |
 | `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | infera, atomesh, sglangrouter | no | `known_hosts` path. Omit to use a relaxed host-key check. |
 | `HYPERLOOM_MN_EXT_HEAD_IP` | rayjob | no | Ray head IP — Dashboard on `:8265`, GCS on `:6379` (KubeRay's `<rayCluster>-head-svc`). Omit for benchmark-only mode with no per-round restarts. |
