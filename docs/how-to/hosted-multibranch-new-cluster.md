@@ -90,6 +90,12 @@ Start the runner with the step that `hyperloom.measure.runner.bootstrap.runner_t
 `sh <cache>/<HYPERLOOM_SOURCE_SHA>/bootstrap.sh` step is safe only when no account but the builder can write the cache:
 the script is what checks the manifest, so it cannot check itself.
 
+The step makes `/in`, `/out` and `/scratch` (or the directories the template names) and needs to write each of them. On
+an image whose root is read-only the platform must bind them writable into the sandbox; the step otherwise ends the
+start with a `runner_start_failed` status that names the directory it could not make or write. The runner's boot log
+goes to `HYPERLOOM_RUNNER_BOOT_LOG` when the sandbox sets it, else to `/runner-boot.log`, or, when the image root is
+read-only, to `runner-boot.log` in the out directory or in `TMPDIR`.
+
 The script reads the entry's `source.tar` once and unpacks it into the sandbox's scratch directory only when those bytes
 are the archive the manifest records. It copies the wheels there, checking each against the manifest as it copies,
 installs only those copies (`pip --no-index`), then runs the runner from the unpacked source; the scratch directory
