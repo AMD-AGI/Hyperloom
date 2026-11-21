@@ -119,6 +119,19 @@ def _profiler_env() -> dict:
     return env
 
 
+def _interpreter_env(python: str) -> dict:
+    """Environment rocprof-compute runs in under ``python``.
+
+    The private analyze venv exists to hold exactly the packages the tool pins. A module path inherited from the
+    caller puts the caller's packages ahead of them, and the tool then refuses to analyze over the first pin that
+    differs, so that interpreter is started without one.
+    """
+    env = _profiler_env()
+    if python == _rocpc_venv_python():
+        env.pop("PYTHONPATH", None)
+    return env
+
+
 def _rocpc_venv_python() -> str:
     """Interpreter of the private venv install.sh builds for analyze mode."""
     return os.path.join(os.environ.get("ROCPC_VENV", "").strip() or "/opt/rocprof-compute-venv", "bin", "python")
@@ -249,7 +262,7 @@ def _run(rocpc_python: str, libexec: str, native: list[str], cwd=None, timeout=1
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
-        env=_profiler_env(),
+        env=_interpreter_env(rocpc_python),
     )
     _CURRENT_PROC = proc
     try:

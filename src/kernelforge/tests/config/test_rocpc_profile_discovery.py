@@ -98,6 +98,26 @@ def test_analyze_prefers_the_dedicated_venv(rocpc_profile, tmp_path, monkeypatch
     assert rocpc_profile._analyze_python("/nonexistent/libexec") == str(python)
 
 
+def test_the_analyze_venv_is_started_without_the_callers_module_path(rocpc_profile, tmp_path, monkeypatch) -> None:
+    """A caller that carries its own packages on PYTHONPATH would put them ahead of the venv's pins: the tool then
+    refuses to analyze with ``the 'pyyaml==6.0.3' distribution does not meet version requirements``."""
+    venv = tmp_path / "rocpc-venv"
+    python = _make_venv_python(venv)
+    monkeypatch.setenv("ROCPC_VENV", str(venv))
+    monkeypatch.setenv("PYTHONPATH", "/engine/site-packages")
+
+    assert "PYTHONPATH" not in rocpc_profile._interpreter_env(str(python))
+
+
+def test_any_other_interpreter_keeps_the_callers_module_path(rocpc_profile, tmp_path, monkeypatch) -> None:
+    """Profile mode runs under the caller's interpreter, where that path is how the workload is found."""
+    monkeypatch.setenv("ROCPC_VENV", str(tmp_path / "rocpc-venv"))
+    monkeypatch.setenv("PYTHONPATH", "/engine/site-packages")
+    monkeypatch.setattr(rocpc_profile, "_rocm_profiler_runtime_root", lambda: None)
+
+    assert rocpc_profile._interpreter_env(sys.executable)["PYTHONPATH"] == "/engine/site-packages"
+
+
 def test_analyze_falls_back_when_the_venv_is_absent(rocpc_profile, tmp_path, monkeypatch) -> None:
     """No venv means the old behaviour, not a hard failure."""
     monkeypatch.setenv("ROCPC_VENV", str(tmp_path / "never-created"))
