@@ -618,7 +618,7 @@ confirm the test still passes:
 **The rule:** every whole-object save that can run between a field refresh and its persistence overwrites the refresh, because `SharedState.save` is a whole-object overwrite -- the merge must run before the terminal lifecycle save, and list-valued fields must be unioned rather than overwritten. The mirror case: a spec handed to another component is constructed after the last write to every field it copies, or it ships defaults while the system runs on operator values, and nothing downstream notices because the identity fields still look right.
 **Seen in:** PR #1030 -- `_emit_lifecycle(status="END")` unconditionally saved the live `shared_state` and overwrote the refreshed fields, surfacing only as a skipped-merge warning. PR #1365 -- `build_agentx_workload_spec` had to be written into the recipe at the end of `apply_agentx_switch`, after all derived values landed in `envs`.
 **Not a finding when:** no save can be reached between the refresh and the persistence (trace the call graph, not just the file), or the field is already unioned by the save path.
-**Evidence:** `$WORK/diff.txt` for the placement relative to the save/emit call; `$WORK/files.txt` for `state/shared_state.py` and `executors/workload/_workload_envs.py` in scope.
+**Evidence:** `$WORK/diff.txt` for the placement relative to the save/emit call; `$WORK/files.txt` for `state/shared_state.py` and `executors/workload/_agentx_switch.py` in scope.
 **Report as:** `P5: <file>:<line> <refresh> is overwritten by <whole-object save> at <line>` / `<spec> is built before <field> is written`
 
 ### P6 -- Work added after a budget cut is not charged against that budget
