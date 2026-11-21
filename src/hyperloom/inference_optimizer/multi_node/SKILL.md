@@ -12,7 +12,7 @@ globs:
   - "**/multi-node/**"
 ---
 
-# Multi-Node Skill (infera + rayjob backends)
+# Multi-Node Skill (infera, rayjob, atomesh, sglangrouter backends)
 
 **The cluster is not created here.** The platform provisions it (an
 `InferaDeployment` or a `RayJob`) before the optimizer starts and hands it over
@@ -39,7 +39,7 @@ service URL every benchmark round measures.
 
 ## Backends
 
-Select via `optimize --mn-backend {infera|rayjob}` (default `rayjob`) or
+Select via `optimize --mn-backend {infera|rayjob|atomesh|sglangrouter}` (default `rayjob`) or
 `$INFERENCE_OPTIMIZER_MN_BACKEND`. Only active when `--nodes >= 2`; single-node
 runs are unaffected. `restart-server` / `kill-inference` auto-route by
 `state.backend`.
@@ -63,6 +63,11 @@ frontend `:8000`** (`state.service_url`), never sglang rank-0.
 
 **rayjob** — `RayJob` driven via the **Ray Dashboard** (`:8265` submit, `:6379`
 GCS); no SSH. Uses `bootstrap` → `verify` → `restart-server` (below).
+
+**atomesh / sglangrouter** — PD-disaggregated SGLang engines behind a router
+the platform runs at `state.service_url`. Every prefill and decode pod is
+reached on `HYPERLOOM_MN_EXT_SSH_PORT`, with no role offset. The hand-off is
+adopted for benchmarking only: per-round restarts are not available.
 
 The topology (aggregated vs PD, per-role TP/EP, image, RDMA) is fixed by the
 platform at provision time; the flags here only describe what `restart-server`
@@ -170,8 +175,8 @@ TP / flag change — the CLI fans out across all pods; never per-pod invocations
 | `PD_MODE=disaggregated` | `optimize --pd-mode disaggregated` — **must be a flag**; `$PD_MODE` env is ignored (stale-env guard). Omit ⇒ aggregated |
 | `PD_PREFILL_NODES` / `PD_DECODE_NODES` | `--pd-prefill-nodes` / `--pd-decode-nodes` (or export) |
 | `PD_PREFILL_TP` / `PD_DECODE_TP` | `--pd-prefill-tp` / `--pd-decode-tp` (default = `--tp`) |
-| `PD_PREFILL_EP` / `PD_DECODE_EP` | **infera PD only**, export as `restart-server` defaults; `0` ⇒ shared `--ep` |
-| `PD_PREFILL_EXTRA_ARGS` / `PD_DECODE_EXTRA_ARGS` | **infera PD only**, export; appended per-role AFTER shared `--extra-args` (role wins on dup keys) |
+| `PD_PREFILL_EP` / `PD_DECODE_EP` | **infera, atomesh, sglangrouter PD only**, export as `restart-server` defaults; `0` ⇒ shared `--ep` |
+| `PD_PREFILL_EXTRA_ARGS` / `PD_DECODE_EXTRA_ARGS` | **infera, atomesh, sglangrouter PD only**, export; appended per-role AFTER shared `--extra-args` (role wins on dup keys) |
 | `PD_TRANSFER_BACKEND` | `--pd-transfer-backend {nixl\|mori\|mooncake}`. **Use `mooncake` for sglang** (see below) |
 | `ISL`/`OSL`/`CONC`/`PRECISION` | `optimize --isl/--osl/--conc/--precision` |
 | `--mn-image …` / `RayJob image:` / `Infera image:` | **Not an `optimize` flag** — the image is the platform's input; pods already exist by the time the optimizer runs |

@@ -158,6 +158,23 @@ def test_load_multi_node_state_falls_back_to_env(
     assert ext.load_multi_node_state()["service_url"] == "http://frontend:8000"
 
 
+def test_repeated_pd_router_state_loads_resolve_the_service_host_once(
+    _external_env: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from hyperloom.inference_optimizer.multi_node._internal import pd_cluster
+
+    lookups: list[str] = []
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "sglangrouter")
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", str(tmp_path / "torch_trace"))
+    monkeypatch.setattr(pd_cluster.socket, "gethostbyname", lambda host: lookups.append(host) or "192.168.0.5")
+    pd_cluster._resolve_host.cache_clear()
+
+    states = [ext.load_multi_node_state() for _ in range(5)]
+
+    assert [state["router_pod_ips"] for state in states] == [["192.168.0.5"]] * 5
+    assert lookups == ["frontend"]
+
+
 def test_load_multi_node_state_prefers_env_over_stale_disk(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,

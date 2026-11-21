@@ -17,13 +17,15 @@ For the corresponding single-node flow, see
 
 ## Backends
 
-Hyperloom supports two multi-node control planes. Both serve the same model and
+Hyperloom supports four multi-node control planes. All serve the same model and
 differ only in how Hyperloom restarts the inference server each optimization round.
 
 | Backend | Control plane | Notes |
 |---------|--------------|-------|
 | `infera` | SSH | Hyperloom SSHes into each pod to launch or restart SGLang. Supports prefill/decode (PD) disaggregation. |
 | `rayjob` | Ray Dashboard REST API | Pods form a KubeRay cluster. Restarts go through the Ray Dashboard; no SSH required. |
+| `atomesh` | SSH | PD-disaggregated SGLang prefill and decode engines behind an atomesh router. The platform runs the router. |
+| `sglangrouter` | SSH | The same PD engines behind a platform-run `sglang_router`. |
 
 ## Cluster hand-off
 
@@ -55,15 +57,19 @@ The following table lists all hand-off variables.
 
 | Variable | Backend | Required | Meaning |
 |----------|---------|----------|---------|
-| `HYPERLOOM_MN_EXT_SERVICE_URL` | both | **yes** | Benchmark frontend URL (`http(s)://…`). Use the port the platform assigns — it is not always `:8000`. |
-| `HYPERLOOM_MN_EXT_SSH_KEY` | infera | **yes** | Path to a private key authorized on the pods. |
-| `HYPERLOOM_MN_EXT_PREFILL_IPS` | infera | PD only | Prefill pod IPs, comma-separated, in rank order. |
-| `HYPERLOOM_MN_EXT_DECODE_IPS` | infera | PD only | Decode pod IPs, comma-separated, in rank order. |
+| `HYPERLOOM_MN_EXT_SERVICE_URL` | all | **yes** | Benchmark frontend URL (`http(s)://…`). Use the port the platform assigns — it is not always `:8000`. |
+| `HYPERLOOM_MN_EXT_SSH_KEY` | infera, atomesh, sglangrouter | **yes** | Path to a private key authorized on the pods. |
+| `HYPERLOOM_MN_EXT_PREFILL_IPS` | infera, atomesh, sglangrouter | PD only | Prefill pod IPs, comma-separated, in rank order. |
+| `HYPERLOOM_MN_EXT_DECODE_IPS` | infera, atomesh, sglangrouter | PD only | Decode pod IPs, comma-separated, in rank order. |
 | `HYPERLOOM_MN_EXT_WORKER_IPS` | infera | aggregated | Worker pod IPs, comma-separated, leader first. At least one of `_PREFILL_IPS`, `_DECODE_IPS`, or `_WORKER_IPS` is required for infera. |
-| `HYPERLOOM_MN_EXT_SSH_PORT` | infera | no | SSH base port (default `2233`). The decode role adds offset `+10`; each pod in a multi-node role adds its rank. |
-| `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | infera | no | `known_hosts` path. Omit to use a relaxed host-key check. |
+| `HYPERLOOM_MN_EXT_SSH_PORT` | infera, atomesh, sglangrouter | no | SSH base port (default `2233`). On infera the decode role adds offset `+10` and each pod in a multi-node role adds its rank; atomesh and sglangrouter use the port as given on every pod. |
+| `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | infera, atomesh, sglangrouter | no | `known_hosts` path. Omit to use a relaxed host-key check. |
 | `HYPERLOOM_MN_EXT_HEAD_IP` | rayjob | no | Ray head IP — Dashboard on `:8265`, GCS on `:6379` (KubeRay's `<rayCluster>-head-svc`). Omit for benchmark-only mode with no per-round restarts. |
 | `HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN` | rayjob | no | Ray Dashboard auth token, if the dashboard requires authentication. |
+| `HYPERLOOM_MN_EXT_PREFILL_URL`, `HYPERLOOM_MN_EXT_DECODE_URL` | atomesh, sglangrouter | no | Engine URL of each role (default `http://<first role IP>:8000`). The engine listens on the URL's port. |
+
+For atomesh and sglangrouter, `HYPERLOOM_MN_EXT_SSH_PORT` is the SSH port on every pod, with no
+per-role offset. The router is recorded from `HYPERLOOM_MN_EXT_SERVICE_URL`.
 
 The container image and per-pod CPU or memory are the provisioning platform's
 inputs, not `optimize` flags.
@@ -157,7 +163,7 @@ The following flags are used in multi-node workload skill blocks.
 |------|---------|
 | `--model` | Model path under `${NFS_SHARED_ROOT}/models/...` or a HuggingFace repo ID |
 | `--nodes` | Node count; must be `>= 2` and match the cluster handed over |
-| `--mn-backend` | `infera` or `rayjob` |
+| `--mn-backend` | `infera`, `rayjob`, `atomesh`, or `sglangrouter` |
 | `--gpus-per-node` | GPUs per pod (default 8); feeds the TP feasibility check |
 | `--tp` | Tensor parallelism degree |
 | `--ep` | Expert parallelism degree (MoE; often `ep == tp`) |
@@ -165,10 +171,10 @@ The following flags are used in multi-node workload skill blocks.
 | `--gpu-type`, `--precision` | Target GPU (for example `mi325x`) and dtype (`bf16`). `--precision` has its own ladder on both branches: the flag, then `$PRECISION`, then the session's recorded value, then the checkpoint's dtype, then the default. `--gpu-type` is a hint: on a fresh launch the hardware probe wins and a disagreeing flag only warns; a resume takes the GPU type from the session and ignores the flag |
 | `--framework` | `sglang` |
 | `--target-gain`, `--max-hours` | Optimization goal and time budget |
-| `--pd-mode disaggregated` | Enable PD disaggregation (infera and rayjob) |
+| `--pd-mode disaggregated` | Enable PD disaggregation (infera and rayjob); required for atomesh and sglangrouter, which exit with code 2 without it |
 | `--pd-prefill-nodes`, `--pd-prefill-tp` | Prefill topology |
 | `--pd-decode-nodes`, `--pd-decode-tp` | Decode topology |
-| `--pd-prefill-ep`, `--pd-prefill-extra-args`, `--pd-decode-ep`, `--pd-decode-extra-args` | Per-role EP and server args (infera only; rayjob rejects them) |
+| `--pd-prefill-ep`, `--pd-prefill-extra-args`, `--pd-decode-ep`, `--pd-decode-extra-args` | Per-role EP and server args (infera, atomesh, and sglangrouter; rayjob rejects them) |
 | `--pd-transfer-backend` | KV transfer plane for PD. Use `mooncake`; `nixl` can produce 0 output tokens |
 | `--server-args "..."` | Extra sglang args applied on every server restart |
 | `--no-framework-agent` | Skip the framework-tuning agent phase |

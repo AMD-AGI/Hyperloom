@@ -10,7 +10,13 @@ import os
 import sys
 from typing import Any
 
-from ..multi_node import TopologyHandoffError, topology_file_overlay
+from ..multi_node import (
+    MN_BACKENDS,
+    PD_ROUTER_BACKENDS,
+    TopologyHandoffError,
+    normalize_mn_backend,
+    topology_file_overlay,
+)
 
 
 def _topology_file_overlay() -> dict[str, str] | None:
@@ -50,20 +56,31 @@ def _resolve_gpus_per_node(args: argparse.Namespace) -> int:
 def _resolve_mn_backend(args: argparse.Namespace) -> str:
     """Multi-node backend selector: --mn-backend > $TOPOLOGY_HANDOFF_FILE backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob."""
     from_file = (_topology_file_overlay() or {}).get("INFERENCE_OPTIMIZER_MN_BACKEND", "")
-    backend = (
+    backend = normalize_mn_backend(
         (getattr(args, "mn_backend", None) or "").strip()
         or from_file
         or os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "").strip()
         or os.environ.get("MN_BACKEND", "").strip()
         or "rayjob"
-    ).lower()
-    if backend not in ("rayjob", "infera"):
+    )
+    if backend not in MN_BACKENDS:
         print(
-            f"ERROR: --mn-backend must be 'rayjob' or 'infera', got {backend!r}",
+            f"ERROR: --mn-backend must be 'rayjob', 'infera', 'atomesh', or 'sglangrouter', got {backend!r}",
             file=sys.stderr,
         )
         sys.exit(2)
     return backend
+
+
+def _stamp_pd_backend(ext_state: dict[str, Any]) -> None:
+    """Record the PD pods of an atomesh/sglangrouter hand-off; exit 2 without ``--pd-mode disaggregated``."""
+    from ..multi_node._internal.external_state import handoff_lookup
+    from ..multi_node._internal.pd_cluster import stamp_pd_cluster
+
+    if os.environ.get("PD_MODE", "").strip().lower() != "disaggregated":
+        print(f"ERROR: --mn-backend {ext_state['backend']} requires --pd-mode disaggregated.", file=sys.stderr)
+        sys.exit(2)
+    stamp_pd_cluster(ext_state, handoff_lookup())
 
 
 def _prepare_multi_node_state(args: argparse.Namespace) -> None:
@@ -92,6 +109,8 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
 
     ext_state = build_external_state_from_env()
     ext_state["backend"] = _resolve_mn_backend(args)
+    if ext_state["backend"] in PD_ROUTER_BACKENDS:
+        _stamp_pd_backend(ext_state)
     _reject_unusable_backend(ext_state)
     try:
         _save_state(ext_state)
@@ -106,7 +125,8 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
     has_control = external_has_server_control()
     print(
         "multi-node: adopted the platform-provisioned cluster. "
-        f"url={ext_state['service_url']} prefill={ext_state['prefill_pod_ips']} "
+        f"url={ext_state['service_url']} router={ext_state.get('router_pod_ips') or []} "
+        f"prefill={ext_state['prefill_pod_ips']} "
         f"decode={ext_state['decode_pod_ips']} worker={ext_state['worker_pod_ips']} "
         f"server_control={'yes' if has_control else 'no (benchmark-only)'} "
         f"ssh_control={'yes' if external_has_ssh_control() else 'no'}"
