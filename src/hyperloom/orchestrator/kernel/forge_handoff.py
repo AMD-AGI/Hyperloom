@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -231,23 +231,36 @@ def _tuned_miss_lines(candidates_path: str, profiled: Mapping[str, Any]) -> list
     return lines
 
 
+def _repositories_json(repositories: Mapping[str, Path]) -> str:
+    """``repositories.json``: the sealed repositories, and the tree a snapshot of an installed package is served from."""
+    served_trees = {
+        repository: str(tree)
+        for repository, tree in sorted(repositories.items())
+        if Path(tree).resolve() != Path(repository).resolve()
+    }
+    return json.dumps({"repositories": sorted(repositories), "served_trees": served_trees}, indent=2) + "\n"
+
+
 def write_forge_handoff(
     state: Any,
     *,
     handoff_dir: Path,
-    repositories: Collection[str],
+    repositories: Mapping[str, Path],
     env_spec: Mapping[str, Any] | None = None,
 ) -> Path:
     """Atomically write one Forge handoff into ``handoff_dir`` and return it.
 
-    ``repositories`` are the sealed repositories, the only ones the controller accepts a task for.
+    ``repositories`` are the sealed repositories, the only ones the controller accepts a task for, each with the tree
+    the server imports its files from: itself for a checkout, the installed package for a snapshot of one. The
+    controller makes its checkout of a snapshot the package a campaign imports, so the campaign measures what it
+    edits.
     """
     handoff_dir = Path(handoff_dir)
     documents = {
         WORKLOAD_FILENAME: build_workload_md(state),
         SERVING_CONTEXT_FILENAME: build_serving_context_md(state, env_spec),
         TRACE_EVIDENCE_FILENAME: build_trace_evidence_md(state),
-        REPOSITORIES_FILENAME: json.dumps({"repositories": sorted(repositories)}, indent=2) + "\n",
+        REPOSITORIES_FILENAME: _repositories_json(repositories),
     }
     for filename, text in documents.items():
         atomic_write_text(

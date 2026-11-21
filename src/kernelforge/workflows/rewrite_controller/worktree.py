@@ -19,6 +19,7 @@ from pathlib import Path
 from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.workflows.rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.workflows.rewrite_controller.paths import ControllerLayout
+from kernelforge.workflows.rewrite_controller.served_package import shadow_served_package
 from kernelforge.utils.git import GitError, git
 from kernelforge.config.edit_policy import FORGE_LOOP_OUTPUT_DIRNAME
 from kernelforge.workflows.forge_loop.api import hide_forge_loop_output
@@ -61,6 +62,11 @@ class OperatorWorktree:
     never loaded, and the campaign would measure the unmodified original. Such a
     task borrows the live repository instead, which is why it also carries the
     lock that makes the borrow exclusive.
+
+    A private checkout of a repository the host snapshot from an installed
+    package is not loaded either unless it is put ahead of that package:
+    ``import_root`` is the directory that does so once it is first on the
+    ``PYTHONPATH`` of what the campaign runs.
     """
 
     repo_root: Path
@@ -84,6 +90,7 @@ class OperatorWorktree:
     #: the repository: every in-place task in one repository is handed the same
     #: experiments directory, so the next would inherit this one's state.
     archive_dir: Path | None = None
+    import_root: Path | None = None
 
 
 def _git_toplevel(repo_root: Path) -> Path:
@@ -562,8 +569,13 @@ def release_operator_worktree(worktree: OperatorWorktree | None) -> None:
 def create_operator_worktree(
     task: KernelRewriteTask,
     layout: ControllerLayout,
+    served_tree: Path | None = None,
 ) -> OperatorWorktree:
-    """Create one fresh branch/worktree from the task's pinned base commit."""
+    """Create one fresh branch/worktree from the task's pinned base commit.
+
+    ``served_tree`` is the installed package directory the server imports the repository's files from, when the
+    repository is a snapshot of one: the checkout is then made the package the campaign imports.
+    """
     repo_root = task.repo_root.resolve()
     if _git_toplevel(repo_root) != repo_root:
         raise WorktreeError(f"repo_root must be the Git top-level directory: {repo_root}")
@@ -592,6 +604,11 @@ def create_operator_worktree(
             raise WorktreeError(f"worktree HEAD mismatch: created {actual_head}, expected {task.base_commit}")
         kernel_path, source_files = _validate_declared_sources(workspace, task)
         hide_forge_loop_output(workspace)
+        import_root = (
+            shadow_served_package(workspace, served_tree, layout.import_dir(task.operator_id))
+            if served_tree is not None
+            else None
+        )
         return OperatorWorktree(
             repo_root=repo_root,
             workspace=workspace,
@@ -599,6 +616,7 @@ def create_operator_worktree(
             base_commit=task.base_commit,
             kernel_path=kernel_path,
             source_files=source_files,
+            import_root=import_root,
         )
     except Exception:
         _remove_partial_worktree(repo_root, workspace, branch)

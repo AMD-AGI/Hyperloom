@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -57,13 +58,18 @@ class TaskStateError(ValueError):
 
 @dataclass(frozen=True)
 class HandoffBundle:
-    """The three Markdown documents supplied by Hyperloom, and the repositories a task may name as its ``repo_root``."""
+    """The three Markdown documents supplied by Hyperloom, and the repositories a task may name as its ``repo_root``.
+
+    ``served_trees`` names, for a repository the server does not import from directly, the installed package directory
+    it does import those files from; a repository absent from it is itself what the server imports.
+    """
 
     root: Path
     workload: str
     serving_context: str
     trace_evidence: str
     repositories: tuple[Path, ...]
+    served_trees: Mapping[Path, Path] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -59,6 +59,15 @@ source evidence but cannot run shell commands, profiling, or serving benchmarks.
 top-levels the host deploys onto the server, at least one. A task's `repo_root`
 must be one of them; a draft naming any other checkout is refused.
 
+A repository the host snapshot from an installed package holds that package's
+files at its root, so nothing imports it by the package's name. The optional
+`"served_trees": {"<repository>": "<installed package directory>"}` names the
+package each such repository is served from. The controller then puts its
+checkout of the repository first on the import path of the campaign under that
+package's name, and links the package's compiled extension modules into it, so
+a driver that imports the package measures the checkout. A task whose checkout
+the name still does not resolve to fails before its campaign starts.
+
 ## forge-loop
 
 Runs one measurement-driven optimization campaign over a single kernel:

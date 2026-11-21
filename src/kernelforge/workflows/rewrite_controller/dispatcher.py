@@ -230,8 +230,12 @@ def dispatch_single_task(
     layout: ControllerLayout,
     deadline_unix: float,
     expected_base_commit: str | None = None,
+    served_tree: Path | None = None,
 ) -> SingleTaskResult:
-    """Validate and run one task without affecting sibling task failures."""
+    """Validate and run one task without affecting sibling task failures.
+
+    ``served_tree`` is the installed package the server imports the task's repository from, when it is a snapshot.
+    """
     task_path = Path(task_dir).expanduser().resolve()
     parsed = load_task(
         task_path,
@@ -256,7 +260,7 @@ def dispatch_single_task(
     worktree: OperatorWorktree | None = None
     outcome: ForgeLoopOutcome | None = None
     try:
-        worktree = create_operator_worktree(task, layout)
+        worktree = create_operator_worktree(task, layout, served_tree)
         invocation = build_forge_loop_invocation(
             task,
             task_dir=task_path,

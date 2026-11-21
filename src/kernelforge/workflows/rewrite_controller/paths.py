@@ -125,6 +125,10 @@ class ControllerLayout:
         """
         return self.controller_root / "preparation" / operator_directory_name(operator_id)
 
+    def import_dir(self, operator_id: str) -> Path:
+        """Where one task's checkout stands under the import name of the package it is served as."""
+        return self.controller_root / "imports" / operator_directory_name(operator_id)
+
     @staticmethod
     def is_published_task_dir(path: Path) -> bool:
         """Return whether an entry is a complete, non-temporary task directory."""

@@ -787,7 +787,10 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
 
         env_spec = self._coord.writeback.build_env_spec()
         handoff_dir = write_forge_handoff(
-            self.shared_state, env_spec=env_spec, handoff_dir=handoff_dir, repositories=baselines
+            self.shared_state,
+            env_spec=env_spec,
+            handoff_dir=handoff_dir,
+            repositories={repo: baseline.deploy_root for repo, baseline in baselines.items()},
         )
         log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
         await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)

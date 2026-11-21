@@ -26,8 +26,12 @@ def _read_document(root: Path, filename: str) -> str:
         raise HandoffContractError(f"could not read handoff document {path}: {error}") from error
 
 
-def _read_repositories(root: Path) -> tuple[Path, ...]:
-    """The repositories the host declares: ``{"repositories": ["<absolute path>", ...]}``, at least one."""
+def _read_repositories(root: Path) -> tuple[tuple[Path, ...], dict[Path, Path]]:
+    """The repositories the host declares, at least one, and the tree each is served from when it is not itself.
+
+    ``{"repositories": ["<absolute path>", ...], "served_trees": {"<repository>": "<absolute path>", ...}}``;
+    ``served_trees`` is optional and names declared repositories only.
+    """
     path = root / REPOSITORIES_FILENAME
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -38,7 +42,14 @@ def _read_repositories(root: Path) -> tuple[Path, ...]:
         raise HandoffContractError(f"{path} must list at least one source repository under 'repositories'")
     if not all(isinstance(entry, str) and Path(entry).is_absolute() for entry in entries):
         raise HandoffContractError(f"every repository in {path} must be an absolute path")
-    return tuple(Path(entry).resolve() for entry in entries)
+    served = payload.get("served_trees", {})
+    if not isinstance(served, dict) or not all(
+        repository in entries and isinstance(tree, str) and Path(tree).is_absolute()
+        for repository, tree in served.items()
+    ):
+        raise HandoffContractError(f"'served_trees' in {path} must map declared repositories to absolute paths")
+    repositories = tuple(Path(entry).resolve() for entry in entries)
+    return repositories, {Path(repository).resolve(): Path(tree) for repository, tree in served.items()}
 
 
 def read_handoff(handoff_dir: str | Path) -> HandoffBundle:
@@ -46,12 +57,14 @@ def read_handoff(handoff_dir: str | Path) -> HandoffBundle:
     root = Path(handoff_dir).expanduser().resolve()
     if not root.is_dir():
         raise HandoffContractError(f"handoff directory does not exist: {root}")
+    repositories, served_trees = _read_repositories(root)
     return HandoffBundle(
         root=root,
         workload=_read_document(root, WORKLOAD_FILENAME),
         serving_context=_read_document(root, SERVING_CONTEXT_FILENAME),
         trace_evidence=_read_document(root, TRACE_EVIDENCE_FILENAME),
-        repositories=_read_repositories(root),
+        repositories=repositories,
+        served_trees=served_trees,
     )
 
 

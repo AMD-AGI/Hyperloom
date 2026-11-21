@@ -11,6 +11,7 @@ from hyperloom.inference_optimizer.session.session_paths import (
     next_forge_attempt_dir,
 )
 from hyperloom.orchestrator.kernel.forge_handoff import build_workload_md, write_forge_handoff
+from kernelforge.workflows.rewrite_controller import read_handoff
 
 
 class _State(SimpleNamespace):
@@ -78,7 +79,7 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
     handoff_dir = write_forge_handoff(
         state,
         handoff_dir=tmp_path / "handoff",
-        repositories=(),
+        repositories={},
         env_spec={
             "config": {
                 "server_launch_flags": "--tp 8 --mem-fraction-static 0.9",
@@ -290,7 +291,7 @@ def test_write_forge_handoff_survives_missing_trace_artifacts(tmp_path: Path) ->
         },
     )
 
-    handoff_dir = write_forge_handoff(state, handoff_dir=tmp_path / "handoff", repositories=())
+    handoff_dir = write_forge_handoff(state, handoff_dir=tmp_path / "handoff", repositories={})
 
     assert (handoff_dir / "workload.md").is_file()
     assert (handoff_dir / "serving-context.md").is_file()
@@ -321,3 +322,23 @@ def test_a_foreign_directory_does_not_disturb_attempt_numbering(tmp_path: Path) 
     (cycle / "attempt-not-a-number").mkdir()
 
     assert next_forge_attempt_dir(session, 0) == cycle / "attempt-1"
+
+
+def test_the_handoff_names_the_installed_package_a_snapshot_is_served_from(tmp_path: Path) -> None:
+    """A checkout is served from itself; a snapshot of an installed package from that package, which the controller
+    reads back as the tree its campaign checkout has to stand in for."""
+    checkout = tmp_path / "aiter"
+    snapshot = tmp_path / "tree_snapshots" / "vllm.campaign"
+    installed = tmp_path / "site-packages" / "vllm"
+    for directory in (checkout, snapshot, installed):
+        directory.mkdir(parents=True)
+
+    handoff_dir = write_forge_handoff(
+        _state(),
+        handoff_dir=tmp_path / "handoff",
+        repositories={str(checkout): checkout, str(snapshot): installed},
+    )
+
+    bundle = read_handoff(handoff_dir)
+    assert bundle.repositories == (checkout.resolve(), snapshot.resolve())
+    assert bundle.served_trees == {snapshot.resolve(): installed}

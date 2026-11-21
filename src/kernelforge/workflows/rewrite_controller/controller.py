@@ -305,6 +305,7 @@ def run_controller(
         schedule = dispatch_prepared_tasks(
             layout,
             controller_deadline_unix=running.deadline_unix,
+            served_trees=handoff.served_trees,
             on_progress=lambda partial: _publish_running(
                 task_count=partial.task_count,
                 patch_count=len(published_operator_dirs(layout)),

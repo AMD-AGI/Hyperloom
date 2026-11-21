@@ -16,7 +16,7 @@ from kernelforge.workflows.rewrite_controller.recovery import RecoveryResult
 from kernelforge.workflows.rewrite_controller.worktree import OperatorWorktree
 
 
-def _fake_worktree(task, layout: ControllerLayout) -> OperatorWorktree:
+def _fake_worktree(task, layout: ControllerLayout, served_tree: Path | None = None) -> OperatorWorktree:
     workspace = layout.workspace_dir(task.operator_id)
     kernel = workspace / task.kernel_path
     kernel.parent.mkdir(parents=True)
@@ -29,6 +29,44 @@ def _fake_worktree(task, layout: ControllerLayout) -> OperatorWorktree:
         kernel_path=kernel,
         source_files=(kernel,),
     )
+
+
+def test_the_campaign_runs_with_its_checkout_first_on_the_import_path(
+    tmp_path: Path,
+    task_dir: Path,
+    monkeypatch,
+) -> None:
+    """A snapshot's checkout is what the campaign imports: the served tree reaches the worktree, its import root the run."""
+    layout = ControllerLayout(tmp_path / "output")
+    installed = tmp_path / "site-packages" / "vllm"
+    import_root = tmp_path / "imports"
+    seen: dict[str, Path | None] = {}
+
+    def _shadowed_worktree(task, layout: ControllerLayout, served_tree: Path | None = None) -> OperatorWorktree:
+        seen["served_tree"] = served_tree
+        return replace(_fake_worktree(task, layout), import_root=import_root)
+
+    def _run(invocation, **_kwargs) -> ForgeLoopOutcome:
+        seen["import_root"] = invocation.import_root
+        return ForgeLoopOutcome(returncode=1, stdout="", stderr="stop", result=None, timed_out=False, command=())
+
+    monkeypatch.setattr(dispatcher, "create_operator_worktree", _shadowed_worktree)
+    monkeypatch.setattr(dispatcher, "run_forge_loop", _run)
+    monkeypatch.setattr(
+        dispatcher,
+        "recover_task_result",
+        lambda *_args, **_kwargs: RecoveryResult(operator_id="none", published=False, patch_dir=None, best_commit=""),
+    )
+
+    dispatcher.dispatch_single_task(
+        task_dir,
+        layout=layout,
+        deadline_unix=10**12,
+        expected_base_commit="a" * 40,
+        served_tree=installed,
+    )
+
+    assert seen == {"served_tree": installed, "import_root": import_root}
 
 
 def test_dispatch_single_task_records_success_and_controller_base_patch(
@@ -135,7 +173,7 @@ def test_a_recovery_defect_on_a_borrowed_tree_still_releases_the_tree(
     borrowed: list[OperatorWorktree] = []
     released: list[OperatorWorktree | None] = []
 
-    def _borrowed_worktree(task, layout: ControllerLayout) -> OperatorWorktree:
+    def _borrowed_worktree(task, layout: ControllerLayout, _served_tree: Path | None = None) -> OperatorWorktree:
         borrowed.append(replace(_fake_worktree(task, layout), inplace=True))
         return borrowed[0]
 
@@ -173,7 +211,7 @@ def test_a_git_failure_in_the_last_recovery_keeps_the_result_and_releases_the_tr
     borrowed: list[OperatorWorktree] = []
     released: list[OperatorWorktree | None] = []
 
-    def _borrowed_worktree(task, layout: ControllerLayout) -> OperatorWorktree:
+    def _borrowed_worktree(task, layout: ControllerLayout, _served_tree: Path | None = None) -> OperatorWorktree:
         borrowed.append(replace(_fake_worktree(task, layout), inplace=True))
         return borrowed[0]
 
