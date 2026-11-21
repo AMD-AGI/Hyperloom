@@ -22,7 +22,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.inference_optimizer.experience_kb import read_signals
+from hyperloom.inference_optimizer.experience_kb import SIGNAL_WEIGHTS, read_signals
 from hyperloom_kb import QuerySignal, ReadStatus
 from hyperloom_multibranch.contracts.blackboard.records import LearningRecord, BlackboardSnapshot, SessionProfile
 from hyperloom_multibranch.blackboard.knowledge.experience import DATASET_KEY, experience_identity
@@ -102,10 +102,10 @@ def learning_conditions(profile: SessionProfile) -> dict[str, object]:
 
 def learning_signals(profile: SessionProfile, query: str) -> tuple[QuerySignal, ...]:
     """The read's signals: the session's conditions and the learning objective, weighed as the Framework phase's
-    reads weigh them, and ``query``, the read's whole question, at the weight of the heaviest condition."""
+    reads weigh them, and ``query``, the read's whole question, at the heaviest weight ``SIGNAL_WEIGHTS`` gives."""
 
     conditions = read_signals(experience_identity(profile), LEARNING_OBJECTIVE, {})
-    return (*conditions, QuerySignal(text=query, weight=1.0)) if query.strip() else conditions
+    return (*conditions, QuerySignal(text=query, weight=max(SIGNAL_WEIGHTS))) if query.strip() else conditions
 
 
 def read_past_learnings(
