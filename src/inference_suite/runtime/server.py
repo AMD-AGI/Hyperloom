@@ -24,7 +24,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom_common.proctree import proc_identity, tree_cpu_sec
+from hyperloom_common.proctree import proc_identity, tree_cpu_sec, tree_io_bytes, tree_rss_bytes
 
 from inference_suite.contracts.config import LifecycleMode, ServerConfig, SuiteConfig
 from inference_suite.contracts.layout import SERVER_LOG, SERVER_PID, ReadyStamp, RunLayout
@@ -41,7 +41,7 @@ from inference_suite.runtime.process import (
     reap,
     spawn,
 )
-from inference_suite.runtime.watch import POLL_SEC, Cancel, RoundGate, ServerWatch, Stop
+from inference_suite.runtime.watch import POLL_SEC, Cancel, RoundGate, BootReaders, ServerWatch, Stop
 
 _HEALTH_PATH = "/health"
 _HEALTH_TIMEOUT_SEC = 5.0
@@ -229,7 +229,13 @@ class ServerLifecycle:
         )
         self._record(spawned)
         pid = spawned.proc.pid
-        watch = ServerWatch(self._log, self._log_start, self._config.deadlines, started, lambda: tree_cpu_sec(pid))
+        watch = ServerWatch(
+            self._log,
+            self._log_start,
+            self._config.deadlines,
+            started,
+            BootReaders(cpu=lambda: tree_cpu_sec(pid), rss=lambda: tree_rss_bytes(pid), io=lambda: tree_io_bytes(pid)),
+        )
         stop = self._await_ready(spawned, watch)
         if stop is not None:
             self._teardown_stop = self._teardown()
@@ -268,8 +274,8 @@ class ServerLifecycle:
             if stop is not None:
                 return stop
             watch.advance(now)
-            if watch.cpu_active_at is not None and watch.cpu_active_at != stamped:
-                stamped = watch.cpu_active_at
+            if watch.boot_active_at is not None and watch.boot_active_at != stamped:
+                stamped = watch.boot_active_at
                 self._layout.write_boot_active_stamp(time.time())
             stop = watch.before_ready(now, spawned.proc.poll())
             if stop is not None:
