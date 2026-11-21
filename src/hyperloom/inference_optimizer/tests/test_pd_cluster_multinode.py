@@ -27,6 +27,7 @@ from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import (
     launch_script,
 )
 from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import LaunchSpec
+from hyperloom.inference_optimizer.multi_node.commands import infera
 from hyperloom.inference_optimizer.multi_node.commands import pd_cluster as pd_cmds
 from hyperloom.inference_optimizer.multi_node.state_paths import bind_state_file_to_session
 
@@ -275,6 +276,98 @@ _PD_STATE = {
     "prefill_pods": [{"role": "prefill", "podIP": "10.0.0.1", "sshPort": 29000}],
     "decode_pods": [{"role": "decode", "podIP": "10.0.0.2", "sshPort": 29000}],
 }
+
+
+def _route_pd_ssh(monkeypatch: pytest.MonkeyPatch, bash_with_env) -> None:
+    """Point the multi-node CLI at a PD state whose engine-pod SSH goes to ``bash_with_env``."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    state = {**_PD_STATE, "pd_mode": "disaggregated", "ssh_key_path": "/key"}
+    for target in (mn_cli, infera._mn_cli):
+        monkeypatch.setattr(target, "_load_state", lambda: dict(state))
+        monkeypatch.setattr(target, "_read_bundled_pod_python_script", lambda *_args: "print('patched')")
+    monkeypatch.setattr(infera, "_infera_ssh_bash_with_env", bash_with_env)
+
+
+def test_tracelens_patch_failure_reports_the_pod_error(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    import argparse
+
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    pod_error = "cannot derive per-version patches subdir from version '0.5.23.dev1+g1'"
+    stdout = json.dumps({"status": "failed", "per_pod": [{"status": "failed", "error": pod_error}]})
+    _route_pd_ssh(
+        monkeypatch,
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["ssh"], 1, stdout=stdout, stderr="bash: warning: setlocale: LC_ALL: cannot change locale\n"
+        ),
+    )
+
+    ns = argparse.Namespace(tracelens_root="/tl", sglang_version_pin=None, patch_set="roofline")
+    assert mn_cli.cmd_apply_tracelens_patch(ns) == 1
+    out = capsys.readouterr().out
+    report = json.loads(out[out.index("{") :])
+    assert [failure["error"] for failure in report["failures"]] == [pod_error, pod_error]
+
+
+def test_tracelens_patch_runs_under_the_container_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import argparse
+
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python3").write_text('#!/bin/sh\necho "venv-python $*"\n', encoding="utf-8")
+    (venv_bin / "python3").chmod(0o755)
+    environ = tmp_path / "environ"
+    environ.write_bytes(f"PATH={venv_bin}:/usr/bin:/bin\0HOME=/root\0".encode())
+    scripts: list[str] = []
+
+    def _bash_with_env(state, ip, script, *, timeout, port=None):
+        scripts.append(script)
+        return subprocess.CompletedProcess(["ssh"], 0, stdout='{"status": "applied", "per_pod": [{}]}', stderr="")
+
+    _route_pd_ssh(monkeypatch, _bash_with_env)
+    monkeypatch.delenv("HYPERLOOM_MN_POD_PYTHON", raising=False)
+    monkeypatch.setattr(infera, "CONTAINER_ENVIRON_PATH", str(environ))
+
+    ns = argparse.Namespace(tracelens_root="/tl", sglang_version_pin=None, patch_set="roofline")
+    assert mn_cli.cmd_apply_tracelens_patch(ns) == 0
+    assert len(scripts) == 2
+    ran = subprocess.run(
+        ["bash", "-c", scripts[0]], env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True, check=True
+    )
+    assert ran.stdout.startswith("venv-python ")
+    assert "--local --tracelens-root /tl --patch-set roofline" in ran.stdout
+
+
+def test_kernel_patch_and_geak_install_reach_every_engine_pod(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import argparse
+
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.setenv("HYPERLOOM_GEAK_SRC", str(tmp_path / "geak"))
+    calls: list[tuple[str, str]] = []
+
+    def _bash_with_env(_state, ip, script, *, timeout, port=None):
+        calls.append((ip, script))
+        return subprocess.CompletedProcess(["ssh"], 0, stdout='{"status": "ok"}', stderr="")
+
+    _route_pd_ssh(monkeypatch, _bash_with_env)
+    patch_file = tmp_path / "kernel.patch"
+    patch_file.write_text("--- a\n+++ b\n", encoding="utf-8")
+    ns = argparse.Namespace(
+        patch_file=str(patch_file),
+        target_path="/opt/sglang/k.py",
+        backup_dir="/tmp/bk",
+        kernel_id="k0",
+        jit_build_dir="",
+        timeout_sec=30,
+    )
+    assert mn_cli.cmd_apply_patch(ns) == 0
+    mn_cli.install_geak_on_pods_best_effort()
+    assert [ip for ip, _ in calls] == ["10.0.0.1", "10.0.0.2", "10.0.0.1", "10.0.0.2"]
+    assert all(infera.CONTAINER_ENVIRON_PATH in script for _, script in calls)
 
 
 def test_engines_not_running_names_pods_whose_launch_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:

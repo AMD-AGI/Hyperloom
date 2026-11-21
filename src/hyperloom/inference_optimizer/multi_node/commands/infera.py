@@ -17,6 +17,7 @@ from typing import Any
 
 from .._internal import infera_support
 from .._internal.log import info, warn, err
+from .._internal.pd_handoff import PD_BACKENDS, SSH_BACKENDS, is_pd_state
 from .._internal.pod_ssh import (
     POD_FORWARD_ENV_PREFIXES,
     _collect_forward_env,
@@ -50,11 +51,11 @@ def _infera_target_for_host(state: dict[str, Any], ip: str) -> dict[str, Any]:
 
 
 def _infera_require_state() -> dict[str, Any]:
-    """Load infera state; require an ssh key + at least one GPU pod IP."""
+    """Load infera or PD engine-pod state; require an ssh key + at least one GPU pod IP."""
     state = _mn_cli._load_state()
-    if state.get("backend") != "infera":
+    if state.get("backend") not in SSH_BACKENDS:
         raise _mn_cli.ConfigurationError(
-            "state backend is not 'infera'; the platform selects the backend, check "
+            "state backend is not 'infera', 'atomesh' or 'sglangrouter'; the platform selects the backend, check "
             "INFERENCE_OPTIMIZER_MN_BACKEND and the HYPERLOOM_MN_EXT_* hand-off"
         )
     has_gpu_pods = bool(infera_support.gpu_ssh_targets_from_state(state))
@@ -69,6 +70,9 @@ def _infera_require_state() -> dict[str, Any]:
     if not state.get("ssh_key_path"):
         raise _mn_cli.ConfigurationError("no ssh_key_path in state; check HYPERLOOM_MN_EXT_SSH_KEY")
     return state
+
+
+_POD_PYTHON3 = "python3"
 
 
 @dataclass(frozen=True)
@@ -417,6 +421,47 @@ def _infera_kill_inference(args: argparse.Namespace) -> int:
     return 0 if rc == 0 else 1
 
 
+CONTAINER_ENVIRON_PATH = "/proc/1/environ"
+
+
+def container_script(text: str, interpreter: str, args: str) -> str:
+    """Bash that writes ``text`` to a temp file and runs it with ``interpreter`` and ``args`` under the container environment."""
+    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    return (
+        "while IFS= read -r -d '' kv; do case \"$kv\" in PATH=*|PYTHONPATH=*|VIRTUAL_ENV=*|LD_LIBRARY_PATH=*) "
+        f'export "$kv";; esac; done < {shlex.quote(CONTAINER_ENVIRON_PATH)}\n'
+        + 'script="$(mktemp)"\n'
+        + f'echo {encoded} | base64 -d > "$script"\n'
+        + f'{interpreter} "$script" {args}\n'
+        + 'rc=$?\nrm -f "$script"\nexit $rc'
+    )
+
+
+def _is_engine_pod_handoff(state: dict[str, Any]) -> bool:
+    """Whether ``state`` is an atomesh or sglangrouter pod hand-off rather than a node-list session."""
+    return state.get("backend") in PD_BACKENDS and not is_pd_state(state)
+
+
+def _ssh_run_pod_script(
+    state: dict[str, Any],
+    ip: str,
+    script: RemoteScript,
+    *,
+    timeout: int,
+    port: int,
+) -> subprocess.CompletedProcess:
+    """Run a shipped script on one GPU pod; PD engine pods of a hand-off run it under their container environment."""
+    if _is_engine_pod_handoff(state):
+        interpreter = (
+            os.environ.get("HYPERLOOM_MN_POD_PYTHON", _POD_PYTHON3)
+            if script.interpreter == _POD_PYTHON3
+            else script.interpreter
+        )
+        pod_script = container_script(script.text, interpreter, script.args)
+        return _infera_ssh_bash_with_env(state, ip, pod_script, timeout=timeout, port=port)
+    return _mn_cli._infera_ssh_run_script(state, ip, script, timeout=timeout, port=port)
+
+
 def _infera_ssh_node_op(
     state: dict[str, Any],
     target: dict[str, Any],
@@ -429,13 +474,7 @@ def _infera_ssh_node_op(
     port = int(target.get("sshPort") or _infera_default_ssh_port(state))
     script = _mn_cli._read_bundled_pod_python_script("kernel_node_ops.py", _mn_cli._KERNEL_NODE_OPS_DEPS)
     try:
-        cp = _mn_cli._infera_ssh_run_script(
-            state,
-            ip,
-            RemoteScript(script, "python3", op_args),
-            timeout=timeout,
-            port=port,
-        )
+        cp = _ssh_run_pod_script(state, ip, RemoteScript(script, _POD_PYTHON3, op_args), timeout=timeout, port=port)
     except subprocess.TimeoutExpired:
         return None, {"rc": 124, "stderr": f"timeout after {timeout}s", "podIP": ip, "sshPort": port}
     return _mn_cli._extract_pod_json(cp.stdout or ""), {
@@ -446,7 +485,7 @@ def _infera_ssh_node_op(
     }
 
 
-def _report_tracelens_patch(per_pod: list[dict], failures: list[dict]) -> int:
+def _report_tracelens_patch(per_pod: list[dict], failures: list[dict], backend: str) -> int:
     """Print the apply-tracelens-patch fan-out result as JSON and return its exit code."""
     overall = "applied" if not failures else "failed"
     if overall == "applied" and all(r.get("status") == "skipped" for r in per_pod):
@@ -455,7 +494,7 @@ def _report_tracelens_patch(per_pod: list[dict], failures: list[dict]) -> int:
         json.dumps(
             {
                 "command": "apply-tracelens-patch",
-                "backend": "infera",
+                "backend": backend,
                 "status": overall,
                 "per_pod": per_pod,
                 "failures": failures,
@@ -468,12 +507,13 @@ def _report_tracelens_patch(per_pod: list[dict], failures: list[dict]) -> int:
 
 
 def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
-    """Infera apply-tracelens-patch: SSH fan-out the TraceLens SGLang patch set to every GPU pod via ``apply_tracelens_patch_multinode.py --local``."""
+    """SSH fan-out the TraceLens SGLang patch set to every GPU pod via ``apply_tracelens_patch_multinode.py --local``."""
     state = _infera_require_state()
+    backend = str(state["backend"])
     tracelens_root = args.tracelens_root or os.environ.get("TRACELENS_ROOT", "").strip()
     if not tracelens_root:
         err(
-            "apply-tracelens-patch (infera) requires --tracelens-root or "
+            f"apply-tracelens-patch ({backend}) requires --tracelens-root or "
             "$TRACELENS_ROOT (an NFS path visible from every GPU pod)"
         )
         return _mn_cli.EXIT_CONFIG_ERROR
@@ -490,38 +530,44 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
     failures: list[dict] = []
     # Pod-side interpreter: sglang lives in /opt/venv on the canonical ROCm sglang-infera images; /usr/bin/python3
     # lacks sglang so _apply_on_pod's `import sglang` fails with "No module named 'sglang'".
-    pod_python = os.environ.get("HYPERLOOM_MN_POD_PYTHON", "/opt/venv/bin/python")
+    pod_python = (
+        _POD_PYTHON3
+        if _is_engine_pod_handoff(state)
+        else os.environ.get("HYPERLOOM_MN_POD_PYTHON", "/opt/venv/bin/python")
+    )
     for target in gpu_targets:
         ip = target["podIP"]
         port = int(target.get("sshPort") or _infera_default_ssh_port(state))
-        info(f"apply-tracelens-patch (infera): ssh -> {ip}:{port}")
+        info(f"apply-tracelens-patch ({backend}): ssh -> {ip}:{port}")
         try:
-            cp = _mn_cli._infera_ssh_run_script(
-                state,
-                ip,
-                RemoteScript(script, pod_python, op_args),
-                timeout=timeout,
-                port=port,
-            )
+            cp = _ssh_run_pod_script(state, ip, RemoteScript(script, pod_python, op_args), timeout=timeout, port=port)
         except subprocess.TimeoutExpired:
             failures.append({"host": ip, "sshPort": port, "error": f"timeout after {timeout}s"})
             continue
-        parsed = _mn_cli._extract_pod_json(cp.stdout) or {}
-        pods = parsed.get("per_pod")
-        if str(parsed.get("status")) in ("applied", "skipped") and pods:
-            for r in pods:
-                r["host"] = ip
-                per_pod.append(r)
-        else:
-            failures.append(
-                {
-                    "host": ip,
-                    "sshPort": port,
-                    "error": parsed.get("error") or cp.stderr[-800:] or "unknown",
-                    "rc": cp.returncode,
-                }
-            )
-    return _report_tracelens_patch(per_pod, failures)
+        _collect_tracelens_patch_result(ip, port, cp, per_pod, failures)
+    return _report_tracelens_patch(per_pod, failures, backend)
+
+
+def _collect_tracelens_patch_result(
+    ip: str, port: int, cp: subprocess.CompletedProcess, per_pod: list[dict], failures: list[dict]
+) -> None:
+    """Append one pod's patch rows to ``per_pod``, or its failure to ``failures``."""
+    parsed = _mn_cli._extract_pod_json(cp.stdout or "") or {}
+    pods = parsed.get("per_pod")
+    if str(parsed.get("status")) in ("applied", "skipped") and pods:
+        for r in pods:
+            r["host"] = ip
+            per_pod.append(r)
+        return
+    pod_errors = "; ".join(str(r["error"]) for r in pods or [] if isinstance(r, dict) and r.get("error"))
+    failures.append(
+        {
+            "host": ip,
+            "sshPort": port,
+            "error": parsed.get("error") or pod_errors or (cp.stderr or "")[-800:] or "unknown",
+            "rc": cp.returncode,
+        }
+    )
 
 
 def _infera_apply_patch(args: argparse.Namespace) -> int:
@@ -709,7 +755,7 @@ def cmd_install_geak(args: argparse.Namespace) -> int:
         port = int(target.get("sshPort") or _infera_default_ssh_port(state))
         info(f"install-geak: ssh -> {ip}:{port}")
         try:
-            cp = _mn_cli._infera_ssh_run_script(
+            cp = _ssh_run_pod_script(
                 state,
                 ip,
                 RemoteScript(script, "bash", shlex.quote(str(geak_src))),

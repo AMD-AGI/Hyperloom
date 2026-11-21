@@ -1097,6 +1097,30 @@ def test_adopting_an_infera_cluster_skips_bootstrap_but_installs_geak(
     assert calls == ["geak"]
 
 
+def test_adopting_a_pd_router_handoff_without_an_ssh_key_skips_the_geak_install(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A PD router hand-off without an SSH key is benchmark-only, so adoption does not reach for its pods."""
+    from hyperloom.inference_optimizer.multi_node._internal import pd_cluster
+
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SSH_KEY", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "sglangrouter")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SSH_PORT", "29000")
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", str(tmp_path / "torch_trace"))
+    monkeypatch.setenv("PD_PREFILL_EXTRA_ARGS", "--chunked-prefill-size 8192")
+    monkeypatch.setenv("PD_DECODE_EXTRA_ARGS", "--mem-fraction-static 0.85")
+    monkeypatch.setattr(pd_cluster.socket, "gethostbyname", lambda _host: "192.168.0.5")
+    pd_cluster._resolve_host.cache_clear()
+
+    args = argparse.Namespace(nodes=2, mn_backend="sglangrouter", model="/models/test", no_kernel=False)
+    _prepare_multi_node_state(args)
+
+    assert "server_control=no (benchmark-only)" in capsys.readouterr().out
+
+
 def test_adopting_with_no_kernel_skips_the_geak_install(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
