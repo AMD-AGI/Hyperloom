@@ -9,6 +9,7 @@ from hyperloom_kb import (
     ExperienceStart,
     NoOpExperienceKB,
     Provenance,
+    QuerySignal,
     ReadStatus,
     RemoteClient,
     RemoteClientError,
@@ -22,7 +23,6 @@ def test_no_configuration_returns_true_noop() -> None:
     kb = experience_kb_from_env({})
     assert isinstance(kb, NoOpExperienceKB)
     assert kb.enabled is False
-    assert kb.degraded is False
 
     session = kb.begin(
         ExperienceStart(run_id="run", seq=0, objective="ignored", provenance=Provenance("noop-test", "1"))
@@ -31,7 +31,7 @@ def test_no_configuration_returns_true_noop() -> None:
     assert session.decide(change={"knob": "x"}, rationale={"reasoning": "ignored"}) is None
     assert session.complete(outcome={"decision": "failed"}, reflection={"text": "ignored"}) is None
     assert session.publish() is None
-    assert kb.read("Select the next action.", {}).status is ReadStatus.DISABLED
+    assert kb.read((QuerySignal(text="next action", weight=1.0),)).status is ReadStatus.DISABLED
 
 
 def test_a_service_url_and_token_build_the_remote_collector(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

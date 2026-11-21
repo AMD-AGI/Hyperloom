@@ -6,10 +6,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-import pytest
 
 from hyperloom_kb import (
-    LEXICAL_FUZZY_PROVIDER_REF,
     Experience,
     ExperienceDeclaration,
     ExperienceStatus,
@@ -17,26 +15,18 @@ from hyperloom_kb import (
     FieldKind,
     FieldRole,
     InMemoryExperienceStore,
-    InMemoryQueryViewStore,
     LexicalFuzzyProvider,
     LocalRetrievalService,
     ObjectiveDeclaration,
-    PlannerProvenance,
     Provenance,
     QueryExecutor,
-    QueryPlanValidationError,
     QuerySignal,
-    RepresentativePolicy,
     ResultShape,
-    RetrievalCapability,
-    RetrievalConfiguration,
-    WeightedQueryPlan,
     derive_experience_id,
 )
-from hyperloom_kb.tests.view_fixtures import publish_view, submit_complete
+from hyperloom_kb.tests.view_fixtures import build_view, submit_complete
 
 NOW = datetime(2026, 9, 23, tzinfo=timezone.utc)
-FROZEN = PlannerProvenance("frozen-case", "none", "none", "frozen-input")
 
 
 def _declaration() -> ExperienceDeclaration:
@@ -92,7 +82,6 @@ def _experience(
 def _stack():
     schema = _declaration()
     experiences = InMemoryExperienceStore()
-    views = InMemoryQueryViewStore()
     target = _experience(
         schema,
         "target",
@@ -108,73 +97,25 @@ def _stack():
         knob="fp8_kv_other",
     )
     submit_complete(schema, experiences, target, distractor)
-    fuzzy = LexicalFuzzyProvider(experiences, schema)
-    view = publish_view(schema, experiences, views, fuzzy_ready=True)
     executor = QueryExecutor(
-        LocalRetrievalService(experiences, views, providers=(fuzzy,)),
-        provider_refs={
-            RetrievalCapability.FUZZY: LEXICAL_FUZZY_PROVIDER_REF,
-        },
+        LocalRetrievalService(experiences, build_view(schema, experiences)), LexicalFuzzyProvider(experiences, schema)
     )
-    return schema, view, executor, target, distractor
+    return schema, executor, target, distractor
 
 
-def _configuration(
-    schema_ref: str,
-    *,
-    ranking: str = "weighted-signal-sum@v1",
-    representative: RepresentativePolicy = RepresentativePolicy.MATCHED_FIRST,
-) -> RetrievalConfiguration:
-    return RetrievalConfiguration.create(
-        schema_ref,
-        "executor-test-v1",
-        limits=dict.fromkeys(RetrievalCapability, 20),
-        provider_refs={
-            RetrievalCapability.FUZZY: LEXICAL_FUZZY_PROVIDER_REF,
-        },
-        shape=ResultShape(ranking_policy_ref=ranking, representative_policy=representative),
-    )
-
-
-def _plan(
-    schema_ref: str,
-    *,
-    model_weight: float,
-    text_weight: float = 0.9,
-) -> WeightedQueryPlan:
-    return WeightedQueryPlan.create(
-        schema_ref,
-        (
-            QuerySignal.create(
-                source_path="context.model",
-                field="identity.model",
-                value="Qwen3-8B",
-                weight=model_weight,
-            ),
-            QuerySignal.create(
-                source_path="context.observation",
-                text="KV bandwidth decode",
-                weight=text_weight,
-            ),
-        ),
-        FROZEN,
+def _signals(*, model_weight: float, text_weight: float = 0.9) -> tuple[QuerySignal, ...]:
+    return (
+        QuerySignal(field="identity.model", value="Qwen3-8B", weight=model_weight),
+        QuerySignal(text="KV bandwidth decode", weight=text_weight),
     )
 
 
 def test_weight_increase_changes_only_matching_group_contribution() -> None:
-    schema, view, executor, target, distractor = _stack()
-    configuration = _configuration(schema.schema_ref)
+    schema, executor, target, distractor = _stack()
+    configuration = ResultShape()
 
-    low = executor.execute(
-        _plan(schema.schema_ref, model_weight=0.1),
-        configuration,
-        view=view,
-    )
-    high = executor.execute(
-        _plan(schema.schema_ref, model_weight=1.0),
-        configuration,
-        view=view,
-    )
+    low = executor.execute(_signals(model_weight=0.1), configuration)
+    high = executor.execute(_signals(model_weight=1.0), configuration)
     low_scores = {group.representative_ids[0]: group.score for group in low.groups}
     high_scores = {group.representative_ids[0]: group.score for group in high.groups}
 
@@ -182,43 +123,11 @@ def test_weight_increase_changes_only_matching_group_contribution() -> None:
     assert high_scores[distractor.id] == low_scores[distractor.id]
 
 
-def test_executor_rejects_provider_version_drift() -> None:
-    schema, view, executor, _, _ = _stack()
-    configuration = RetrievalConfiguration.create(
-        schema.schema_ref,
-        "pinned@v1",
-        provider_refs={RetrievalCapability.FUZZY: "different-provider@v1"},
-    )
-
-    with pytest.raises(QueryPlanValidationError, match="provider does not match"):
-        executor.execute(_plan(schema.schema_ref, model_weight=1.0), configuration, view=view)
-
-
-def test_provider_scores_are_normalized_before_weighting() -> None:
-    assert QueryExecutor._normalized_score(RetrievalCapability.EXACT, 0.2) == 1.0
-    assert QueryExecutor._normalized_score(RetrievalCapability.FUZZY, -0.5) == 0.0
-    assert QueryExecutor._normalized_score(RetrievalCapability.SEMANTIC, 3.0) == 1.0
-
-
-def test_group_key_policy_controls_executor_order() -> None:
-    schema, view, executor, _, _ = _stack()
-    result = executor.execute(
-        _plan(schema.schema_ref, model_weight=1.0),
-        _configuration(schema.schema_ref, ranking="group-key@v1"),
-        view=view,
-    )
-
-    assert tuple(group.group_key for group in result.groups) == tuple(
-        sorted(group.group_key for group in result.groups)
-    )
-
-
 def test_renderer_exposes_conditions_baseline_outcome_and_repeat_support() -> None:
-    schema, view, executor, target, _ = _stack()
+    schema, executor, target, _ = _stack()
     result = executor.execute(
-        _plan(schema.schema_ref, model_weight=1.0),
-        _configuration(schema.schema_ref),
-        view=view,
+        _signals(model_weight=1.0),
+        ResultShape(),
     )
 
     section = result.rendered.text.split(f"Experience {target.id}\n", 1)[1]

@@ -11,7 +11,6 @@ from hyperloom_kb import (
     FieldKind,
     FieldRole,
     InMemoryExperienceStore,
-    InMemoryQueryViewStore,
     ObjectiveDeclaration,
     Provenance,
     QueryViewBuilder,
@@ -20,7 +19,7 @@ from hyperloom_kb import (
     repeat_group_key,
 )
 from hyperloom_kb.storage import StoredExperience
-from hyperloom_kb.tests.view_fixtures import publish_view
+from hyperloom_kb.tests.view_fixtures import build_view
 
 NOW = datetime(2026, 9, 17, tzinfo=timezone.utc)
 
@@ -166,15 +165,10 @@ def test_notes_neither_split_a_repeat_group_nor_enter_exact_lookup() -> None:
     assert not [field for field in view.field_lookup if field.startswith("notes")]
 
 
-def test_empty_query_view_is_a_valid_current_snapshot() -> None:
-    schema = declaration()
-    experiences = InMemoryExperienceStore()
-    views = InMemoryQueryViewStore()
+def test_a_query_view_over_no_experience_is_valid() -> None:
+    view = build_view(declaration(), InMemoryExperienceStore())
 
-    ref = publish_view(schema, experiences, views)
-
-    assert ref.local_page_sequence == 0
-    assert views.current_view(schema.schema_ref).visible_experience_ids == ()
+    assert (view.ref.local_page_sequence, view.visible_experience_ids) == (0, ())
 
 
 def test_view_changes_when_an_immutable_experience_changes() -> None:

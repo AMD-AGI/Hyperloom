@@ -30,6 +30,7 @@ from hyperloom_kb import (
     HTTPServiceConfig,
     ObjectiveDeclaration,
     Provenance,
+    QuerySignal,
     ReadQuery,
     RemoteClient,
     RemoteClientError,
@@ -97,7 +98,7 @@ def _service(
 ) -> ExperienceHTTPService:
     global_kb = None if global_url is None else RemoteClient(RemoteConfig(global_url, GLOBAL_TOKEN), **client_options)
     return ExperienceHTTPService(
-        HTTPServiceConfig(home, token), schema, None, database=database or fresh_database(), global_kb=global_kb
+        HTTPServiceConfig(home, token), schema, database=database or fresh_database(), global_kb=global_kb
     )
 
 
@@ -449,13 +450,12 @@ def test_reads_search_the_schema_they_name(tmp_path: Path) -> None:
     with _serving(_service(tmp_path / "local", _declaration(), LOCAL_TOKEN)) as local_url:
         local = _client(local_url, LOCAL_TOKEN, tmp_path)
         local.write(_experience(other, 0), declaration=other)
-        default = local.read(ReadQuery("Pick a knob.", {}))
-        named = local.read(ReadQuery("Pick a knob.", {}, schema_ref=other.schema_ref))
+        objective = (QuerySignal(field="objective", value="other@v1", weight=1.0),)
+        default = local.read(ReadQuery(objective))
+        named = local.read(ReadQuery(objective, schema_ref=other.schema_ref))
 
-    # The default schema holds nothing; the named one holds an Experience, and reads plan through a planner.
-    assert (default.status, default.warnings) == ("completed", ())
-    assert named.status == "unavailable"
-    assert "read_service_unconfigured" in named.warnings
+    assert (default.status, default.rendered_refs) == ("completed", ())
+    assert (named.status, [ref.id for ref in named.rendered_refs]) == ("completed", [_experience(other, 0).id])
 
 
 def test_export_pages_complete_records_in_write_order(tmp_path: Path) -> None:
@@ -476,12 +476,11 @@ def test_export_pages_complete_records_in_write_order(tmp_path: Path) -> None:
 
 
 def test_settings_digest_changes_with_what_the_service_does_not_with_spelling() -> None:
-    gateway = {"ANTHROPIC_BASE_URL": "https://gateway.example", "ANTHROPIC_API_KEY": "key", "CLAUDE_MODEL": "m"}
-    aliased = {**gateway, "ANTHROPIC_AUTH_TOKEN": "key", "ANTHROPIC_MODEL": "m"}
-    shared = {**gateway, "HYPERLOOM_GLOBAL_KB_URL": "https://global.example", "HYPERLOOM_GLOBAL_KB_TOKEN": "t"}
-    half = {**gateway, "HYPERLOOM_GLOBAL_KB_URL": "https://global.example"}
+    shared = {"HYPERLOOM_GLOBAL_KB_URL": "https://global.example", "HYPERLOOM_GLOBAL_KB_TOKEN": "t"}
+    aliased = {**shared, "HYPERLOOM_GLOBAL_KB_URL": "https://global.example/", "ANTHROPIC_API_KEY": "key"}
+    half = {"HYPERLOOM_GLOBAL_KB_URL": "https://global.example"}
 
-    assert ServiceSettings.from_env(aliased).digest() == ServiceSettings.from_env(gateway).digest()
-    assert ServiceSettings.from_env(shared).digest() != ServiceSettings.from_env(gateway).digest()
+    assert ServiceSettings.from_env(aliased).digest() == ServiceSettings.from_env(shared).digest()
+    assert ServiceSettings.from_env(shared).digest() != ServiceSettings.from_env({}).digest()
     assert ServiceSettings.from_env(half).global_kb is None
     assert "HYPERLOOM_GLOBAL_KB_TOKEN must be set" in ServiceSettings.from_env(half).global_problem

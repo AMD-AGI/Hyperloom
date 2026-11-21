@@ -60,7 +60,7 @@ def _lose(database: Database) -> None:
 def _service(home: Path, *, global_url: str | None = None, name: str = "") -> ExperienceHTTPService:
     global_kb = None if global_url is None else RemoteClient(RemoteConfig(global_url, TOKEN))
     return ExperienceHTTPService(
-        HTTPServiceConfig(home, TOKEN, name=name), SCHEMA, None, database=fresh_database(), global_kb=global_kb
+        HTTPServiceConfig(home, TOKEN, name=name), SCHEMA, database=fresh_database(), global_kb=global_kb
     )
 
 
@@ -103,7 +103,7 @@ def test_probes_answer_without_a_token_and_name_only_their_checks(tmp_path: Path
 
 def test_probes_and_metrics_answer_promptly_while_the_database_is_gone(tmp_path: Path) -> None:
     database = fresh_database()
-    app = ExperienceHTTPService(HTTPServiceConfig(tmp_path / "home", TOKEN), SCHEMA, None, database=database)
+    app = ExperienceHTTPService(HTTPServiceConfig(tmp_path / "home", TOKEN), SCHEMA, database=database)
     app.write(_experience(SCHEMA))
     with RunningServer(app) as url:
         before = _metrics(_get(url, "/metrics")[2].decode())
@@ -125,12 +125,12 @@ def test_probes_and_metrics_answer_promptly_while_the_database_is_gone(tmp_path:
 
 def test_a_record_file_lost_since_the_last_start_makes_the_next_start_unready(tmp_path: Path) -> None:
     home, database = tmp_path / "home", fresh_database()
-    first = ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), SCHEMA, None, database=database)
+    first = ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), SCHEMA, database=database)
     experience = _experience(SCHEMA)
     first.write(experience)
     (home / first.kb_id / "records" / f"{experience.id}.json").unlink()
 
-    restarted = ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), SCHEMA, None, database=database)
+    restarted = ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), SCHEMA, database=database)
     with RunningServer(restarted) as url:
         status, _, body = _get(url, "/readyz")
         metrics = _metrics(_get(url, "/metrics")[2].decode())
@@ -141,7 +141,7 @@ def test_a_record_file_lost_since_the_last_start_makes_the_next_start_unready(tm
 
 def test_a_file_lost_since_the_last_start_makes_the_next_start_unready(tmp_path: Path) -> None:
     home, database = tmp_path / "home", fresh_database()
-    first = ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), SCHEMA, None, database=database)
+    first = ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), SCHEMA, database=database)
     artifact = tmp_path / "trace.json"
     artifact.write_bytes(b"[0.41]\n")
     ref = file_ref(artifact)
@@ -150,7 +150,7 @@ def test_a_file_lost_since_the_last_start_makes_the_next_start_unready(tmp_path:
     first.write(replace(_experience(SCHEMA), change={**_experience(SCHEMA).change, "artifact": ref}))
     first.file_path(ref).unlink()
 
-    restarted = ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), SCHEMA, None, database=database)
+    restarted = ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), SCHEMA, database=database)
     with RunningServer(restarted) as url:
         status, _, body = _get(url, "/readyz")
         metrics = _metrics(_get(url, "/metrics")[2].decode())
@@ -317,7 +317,7 @@ def test_a_stopped_service_finishes_the_request_in_flight(tmp_path: Path) -> Non
 
 def test_sigterm_stops_the_service_once_it_drained(tmp_path: Path) -> None:
     home, port = tmp_path / "home", _free_port()
-    env = {key: value for key, value in os.environ.items() if not key.startswith(("ANTHROPIC_", "HYPERLOOM_"))} | {
+    env = {key: value for key, value in os.environ.items() if not key.startswith("HYPERLOOM_")} | {
         "HYPERLOOM_KB_TOKEN": TOKEN,
         "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
     }

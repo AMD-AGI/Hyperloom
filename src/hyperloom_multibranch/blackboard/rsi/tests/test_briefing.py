@@ -351,15 +351,12 @@ async def test_an_experience_of_the_other_kind_of_session_is_only_a_lesson_to_re
     )
 
 
-async def test_an_agentx_briefing_graded_on_total_throughput_reads_that_objective_and_its_baseline(
+async def test_an_agentx_briefing_graded_on_total_throughput_reads_that_objective(
     tmp_path: Path,
 ) -> None:
     class _AgentX(_WithExtraFailure):
         async def snapshot(self) -> BlackboardSnapshot:
-            snapshot = await self.blackboard.snapshot()
-            assert snapshot.baseline is not None
-            baseline = dataclasses.replace(snapshot.baseline, values={TOTAL_TOKEN_THROUGHPUT: 9000.0})
-            return dataclasses.replace(snapshot, profile=profile(isl=None, osl=None), baselines=(baseline,))
+            return dataclasses.replace(await self.blackboard.snapshot(), profile=profile(isl=None, osl=None))
 
     blackboard = _AgentX(await scripted_session(tmp_path / "blackboard", FakeClock()))
     reader = _reader()
@@ -373,11 +370,8 @@ async def test_an_agentx_briefing_graded_on_total_throughput_reads_that_objectiv
         metric=TOTAL_TOKEN_THROUGHPUT,
     ).startup_brief("c0")
 
-    ((_, context, _),) = reader.calls
-    assert (context["objective"]["id"], context["benchmark_baseline"]["total_throughput"]) == (
-        TOTAL_THROUGHPUT_OBJECTIVE,
-        9000.0,
-    )
+    ((signals, _),) = reader.calls
+    assert [signal.value for signal in signals if signal.field == "objective"] == [TOTAL_THROUGHPUT_OBJECTIVE]
 
 
 async def test_a_lead_with_a_replay_says_how_to_replay_it_and_the_briefing_replays_it_on_the_branch_head(
@@ -721,7 +715,7 @@ async def test_the_brief_logs_the_leads_it_kept_under_its_cap_with_the_change_ea
 
 async def test_without_a_kb_or_a_profile_or_a_completed_read_nothing_is_recalled(tmp_path: Path) -> None:
     blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
-    failed = FakeExperienceReader(RemoteReadResult("", "unavailable", "", (), ("planner_timeout",)))
+    failed = FakeExperienceReader(RemoteReadResult("", "unavailable", "", (), ("timed out",)))
 
     class _NoProfile(_WithExtraFailure):
         async def snapshot(self) -> BlackboardSnapshot:
@@ -760,13 +754,13 @@ async def test_a_brief_built_again_shows_the_blackboard_then_and_reads_the_kb_on
 
     assert repeated not in first and repeated in later
     assert "prior: --block-size 16: keep +10.00% [exp-faster]" in later
-    ((_, context, _),) = reader.calls
-    assert (context["observations"]["bottleneck"], context["observations"]["branch"]) == ("attention", "s3")
+    ((signals, _),) = reader.calls
+    assert [signal.text for signal in signals if signal.text] == ["attention"]
 
 
 async def test_a_read_that_did_not_complete_is_read_again_at_the_next_brief(tmp_path: Path) -> None:
     blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
-    failed = FakeExperienceReader(RemoteReadResult("", "unavailable", "", (), ("planner_timeout",)))
+    failed = FakeExperienceReader(RemoteReadResult("", "unavailable", "", (), ("timed out",)))
     briefs = SessionBriefs(blackboard, experiences=failed)
 
     await briefs.text("s3", "c1")

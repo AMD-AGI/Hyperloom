@@ -55,13 +55,7 @@ from hyperloom_kb.observability import (
     route_of,
 )
 from hyperloom_kb.local_state import UnknownStateItem
-from hyperloom_kb.knowledge_read import (
-    AnthropicPlannerBackend,
-    LLMQueryPlanner,
-    PlannerConfiguration,
-    PlannerGatewayConfig,
-)
-from hyperloom_kb.remote import ReadQuery, RemoteClient, RemoteConfig
+from hyperloom_kb.remote import QuerySignal, ReadQuery, RemoteClient, RemoteConfig
 from hyperloom_kb.schema import (
     MAX_FILE_BYTES,
     Experience,
@@ -86,7 +80,7 @@ DRAIN_SECONDS = 25.0
 # A transport guard, not a data policy: a record's text fields and the size of each file it names are bounded by its
 # schema.
 _MAX_REQUEST_BYTES = 256 * 1024**2
-_READ_FIELDS = frozenset({"decision", "context", "outcome", "limit", "schema_ref", "render_budget_chars"})
+_READ_FIELDS = frozenset({"signals", "outcome", "limit", "schema_ref", "render_budget_chars"})
 _WRITE_FIELDS = frozenset({"experience", "declaration"})
 _FILES_PREFIX = "/v1/files/"
 _FILES_MISSING = "/v1/files/missing"
@@ -97,8 +91,6 @@ _GET, _POST, _PUT, _DELETE = "GET", "POST", "PUT", "DELETE"
 class ServiceSettings:
     """What the service takes from its environment at start, besides its token."""
 
-    planner: PlannerGatewayConfig | None
-    planner_problem: str
     global_kb: RemoteConfig | None
     global_problem: str
     # Empty keeps the database in a SQLite file in the home.
@@ -106,30 +98,21 @@ class ServiceSettings:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> ServiceSettings:
-        planner: PlannerGatewayConfig | None = None
         global_kb: RemoteConfig | None = None
-        planner_problem = global_problem = ""
-        try:
-            planner = PlannerGatewayConfig.from_env(env)
-        except ValueError as exc:
-            planner_problem = str(exc)
+        global_problem = ""
         try:
             global_kb = global_config_from_env(env)
         except SyncUnavailable as exc:
             global_problem = str(exc)
         database_url = str(env.get(DATABASE_URL_ENV) or "").strip()
-        return cls(planner, planner_problem, global_kb, global_problem, database_url)
+        return cls(global_kb, global_problem, database_url)
 
     def digest(self) -> str:
         """Equal digests mean two environments start behaviorally identical services, whatever their spelling."""
 
-        planner = self.planner
         values = {
-            "planner": None
-            if planner is None
-            else [planner.base_url, planner.api_key, planner.model, planner.timeout_seconds, planner.max_output_tokens],
             "global": None if self.global_kb is None else [self.global_kb.base_url, self.global_kb.token],
-            "problems": [self.planner_problem, self.global_problem],
+            "problem": self.global_problem,
             "database": self.database_url,
         }
         return hashlib.sha256(_canonical(values).encode()).hexdigest()
@@ -146,10 +129,11 @@ def _json_object(value: Any, name: str) -> dict[str, JsonValue]:
 
 def _read_query(body: dict[str, JsonValue]) -> ReadQuery:
     _reject_unknown(body, _READ_FIELDS)
-    outcome, schema_ref = body.get("outcome"), body.get("schema_ref")
+    signals, outcome, schema_ref = body.get("signals"), body.get("outcome"), body.get("schema_ref")
+    if not isinstance(signals, list):
+        raise HTTPServiceError("signals must be a list")
     return ReadQuery(
-        decision=_required_text(body.get("decision"), "decision"),
-        context=_json_object(body.get("context", {}), "context"),
+        signals=tuple(QuerySignal.from_dict(item) for item in signals),
         outcome=None if outcome is None else _required_text(outcome, "outcome"),
         limit=_bounded_int(body.get("limit", DEFAULT_READ_LIMIT), "limit", minimum=1, maximum=MAX_READ_LIMIT),
         schema_ref=None if schema_ref is None else _required_text(schema_ref, "schema_ref"),
@@ -539,15 +523,6 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, handlers=[handler])
 
     settings = ServiceSettings.from_env(os.environ)
-    planner: LLMQueryPlanner | None = None
-    if settings.planner is None:
-        log.warning(
-            "Experience reads are unavailable until a planner gateway is configured: %s", settings.planner_problem
-        )
-    else:
-        planner = LLMQueryPlanner(
-            AnthropicPlannerBackend(settings.planner), PlannerConfiguration.create(settings.planner.model)
-        )
     if settings.global_problem:
         log.warning("Push and pull are unavailable: %s", settings.global_problem)
     # A service manager stops the service with SIGTERM: it stops taking requests and lets the ones in flight finish.
@@ -566,7 +541,6 @@ def main(argv: list[str] | None = None) -> int:
                 home, os.environ.get("HYPERLOOM_KB_TOKEN", ""), name=args.name, config_digest=settings.digest()
             ),
             load_declaration(args.declaration),
-            planner,
             database=database,
             global_kb=None if settings.global_kb is None else RemoteClient(settings.global_kb),
         )
