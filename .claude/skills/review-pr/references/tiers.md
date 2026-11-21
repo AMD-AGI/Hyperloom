@@ -7,17 +7,17 @@ a failure surfaces, not by file size or churn.
 |---|---|---|
 | 1 | `inference_optimizer/cli/__init__.py` | Eagerly imports Coordinator, executors, `_workload_envs`, `ACTION_CATALOGUE`. Any ImportError in that chain kills the run before a session dir exists |
 | 1 | `orchestrator/loop/coordinator.py` | Coordinator wires 23 collaborator properties. A missing property or wrong factory is an `AttributeError` hours in, not at import |
-| 1 | `orchestrator/state/shared_state.py` | Sole writer of `state.json` and the only owner of its field set. A dropped field silently changes what every phase reads, and what `--resume-from` can interpret |
+| 1 | `orchestrator/state/shared_state.py`, `state/_shared_state/persistence.py`, `state/_shared_state/profile_workload.py`, `state/_shared_state/action_records.py`, `state/_shared_state/run_signals.py`, `state/_shared_state/roofline.py` | Sole writer of `state.json` and the only owner of its field set. A dropped field silently changes what every phase reads, and what `--resume-from` can interpret |
 | 1 | `orchestrator/loop/writeback.py` | The one path turning a measurement into KEEP/REVERT + KB record. A win recorded as a regression, or nothing persisted and no error |
 | 1 | `orchestrator/phases/machine_state.py` | Phase identifiers, ordering, budget redistribution, exit scan. Stall in a phase forever, or wrong budget math for all phases at once |
-| 1 | `orchestrator/loop/dispatcher.py` | In-flight table, deadlines, cancellation. Actions never retire, GPU lanes never free, subprocesses leak past session end |
+| 1 | `orchestrator/loop/dispatcher.py`, `loop/_admission.py` | In-flight table, deadlines, cancellation. Actions never retire, GPU lanes never free, subprocesses leak past session end |
 | 1 | `orchestrator/policy/gate.py` | The single chokepoint every Intent crosses before a side effect. A denied action executes, or everything is denied |
 | 2 | `orchestrator/kernel/request_handlers.py` | `KERNEL_REQUEST_HANDLERS` dispatch table. A renamed kind dead-ends the lane; the agent waits out its budget |
 | 2 | `actions/executors/baseline.py`, `actions/executors/benchmark_run/` | The anchor every gain % is measured against |
 | 2 | `actions/executors/integrate_patch.py` | Patches live framework trees. A failed revert contaminates every later measurement |
 | 2 | `actions/executors/workload/_workload_envs.py`, `workload/_agentx_switch.py`, `workload/_framework_runtime.py` | Single source of the rendered point YAML that `_suite/config.py` turns into the round's inference_suite launch (`launch.json`, layered on the session's frozen `base_launch.json`); `seal_server_argv` settles the arg string. Divergence invalidates the A/B while both runs look healthy |
 | 2 | `actions/executors/grid/_grid_runner.py`, `grid/_capability_probe.py`, `grid/_round_report.py`, `grid/_grid_inputs.py`, `grid/_variant_rows.py` | Shared by explore and sweep |
-| 2 | `orchestrator/phases/framework.py`, `phases/framework_records.py`, `phases/framework_discovery.py`, `phases/kernel.py`, `phases/kernel_geak_dispatch.py`, `phases/kernel_geak_promotion.py`, `phases/kernel_gemm_tuning.py` | One phase produces nothing or loops |
+| 2 | `orchestrator/phases/framework.py`, `phases/framework_reauthor.py`, `phases/framework_local_explore.py`, `phases/framework_proposals.py`, `phases/framework_records.py`, `phases/framework_discovery.py`, `phases/kernel.py`, `phases/kernel_geak_dispatch.py`, `phases/kernel_geak_promotion.py`, `phases/kernel_gemm_tuning.py` | One phase produces nothing or loops |
 | 2 | `protocol/action_surfaces.py` | Consumed by the CLI catalogue, the gate, the phase machine and the dispatcher. An action here but not in the owning role's set is unroutable |
 | 2 | `protocol/intent.py` | Severity/verdict frozensets deliberately duplicated from `agents/critic/runtime/intent_envelope.py`. Change one copy and the emitter produces intents the transport rejects |
 | 2 | `hyperloom_common/llm/llm_config.py`, `common/perf_metric.py` | Gateway env resolution and client construction for every role; `graded_axes_of` is what the phase handlers and writeback grade against |
