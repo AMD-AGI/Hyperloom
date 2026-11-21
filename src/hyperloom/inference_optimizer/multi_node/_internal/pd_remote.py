@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import shlex
 import uuid
 from pathlib import Path
@@ -130,6 +131,22 @@ restart_remote_main()
 def _remote_program() -> str:
     """process_image helpers plus the pod-side restart driver."""
     return Path(process_image.__file__).read_text(encoding="utf-8") + "\n" + REMOTE_DRIVER
+
+
+CONTAINER_ENVIRON_PATH = "/proc/1/environ"
+
+
+def container_script(text: str, interpreter: str, args: str) -> str:
+    """Bash that writes ``text`` to a temp file and runs it with ``interpreter`` and ``args`` under the container environment."""
+    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    return (
+        "while IFS= read -r -d '' kv; do case \"$kv\" in PATH=*|PYTHONPATH=*|VIRTUAL_ENV=*|LD_LIBRARY_PATH=*) "
+        f'export "$kv";; esac; done < {shlex.quote(CONTAINER_ENVIRON_PATH)}\n'
+        + 'script="$(mktemp)"\n'
+        + f'echo {encoded} | base64 -d > "$script"\n'
+        + f'{interpreter} "$script" {args}\n'
+        + 'rc=$?\nrm -f "$script"\nexit $rc'
+    )
 
 
 def pidfile_path(role: str) -> str:

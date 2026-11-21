@@ -33,6 +33,8 @@ _BACKENDS = ("rayjob", "infera")
 MN_BACKENDS = ("rayjob", "infera", "atomesh", "sglangrouter")
 # Backends that run a router in front of sglang prefill/decode engines started over SSH.
 PD_ROUTER_BACKENDS = ("atomesh", "sglangrouter")
+# Backends whose GPU pods take kernel patches, TraceLens patches and GEAK installs over the SSH fan-out.
+SSH_FANOUT_BACKENDS = ("infera", *PD_ROUTER_BACKENDS)
 
 
 def normalize_mn_backend(raw: object) -> str:
