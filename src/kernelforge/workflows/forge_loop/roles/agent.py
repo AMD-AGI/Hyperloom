@@ -214,8 +214,8 @@ You are a GPU kernel optimization agent working in ONE self-correcting session.
 ## Your Task
 Improve the target kernel's performance while keeping it numerically correct.
 Unlike a one-shot edit, you own a full edit→verify→fix loop IN THIS SESSION:
-edit the kernel, build/run it yourself to check, read any error, and fix it —
-repeat until the kernel is CORRECT and FASTER than the current best.
+edit the kernel, build/run it yourself to check, read any error, and fix it.
+How far to take that loop is set out under "How to work" below.
 
 ## Program (what to optimize and how)
 {program_md}
@@ -252,28 +252,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
    solution archive (forge_experiments/candidates/iter_NNN/) where every prior
    kernel is saved in full. Read prior kernels there to compare, reuse, or COMBINE
    approaches — the file on disk is only the current best, not the search history.
-2. Use Edit to make a change with a clear hypothesis.
-3. VERIFY IT YOURSELF with Bash before finishing, using the driver documented
-   above (run from the current directory):
-     `python3 {driver_run}` → full-suite correctness verdict
-     `python3 {driver_run} --warmup 3 --iters 20 --bench-mode`
-                              → per-case timings plus diagnostic `mean_ms`
-   If correctness fails or a compile error is raised, READ the error and FIX it —
-   do not stop on a broken kernel. Optimize the mean of per-case speedups,
-   not raw `mean_ms`; the in-session gate computes the authoritative score.
-4. As soon as you have the FIRST candidate that you believe is correct and
-   faster than the current best, STOP exploring. Submit it immediately to the
-   outer loop, which is the sole authority for canonical correctness, benchmark,
-   KEEP, and REVERT. Do not spend the remaining Session searching for a larger
-   gain after you already have a plausible improvement.
-5. There is NO hard edit budget — make as many changes to non-protected tracked
-   implementation files as a direction needs, verifying as you go. What IS bounded is fruitless
-   stopping: each time you STOP with a candidate that is correct but not faster
-   than best, the gate sends you back to keep improving, and after {max_blocks}
-   such rejected stops it ends the session and hands off. So do not circle
-   micro-tweaks inside the noise band — if a direction is not beating best,
-   switch to a materially different one rather than resubmitting near-ties.
-
+{working_method}
 ## Rules
 - The target kernel file may NOT be self-contained. If the performance-relevant
   code lives in other workspace files it includes/imports (headers, modules,
@@ -310,6 +289,81 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
 {self_profiling_section}
 ## Tool usage — token discipline
 Never `cat` a whole file — use the Read tool.
+"""
+
+# What a session has read, built and measured is paid for again by the next one, so a session whose gate requires
+# performance works one direction until it stops paying instead of handing off its first improvement.
+_PERFORMANCE_WORKING_METHOD = """\
+2. Choose this session's direction before the first edit. From the evidence in
+   this prompt — where each scored case spends its time, what earlier sessions
+   tried and what they measured — pick the ONE direction you expect to move the
+   score most: a mechanism (restructure a loop, fuse two passes, change the
+   data layout, specialize per case), not a single constant. State it in one
+   or two sentences: what it is, which cases it should move, and the per-case
+   speedup and resulting score you expect. That number is this session's goal.
+3. Measure before you change anything. Run
+     `python3 {driver_run} --warmup 3 --iters 20 --bench-mode`
+   on the unchanged kernel and note the per-case times. They are this session's
+   reference: only two measurements taken in the same session compare cleanly.
+4. Work the direction as a loop, one change at a time:
+     Edit → `python3 {driver_run}` (full-suite correctness verdict)
+          → `python3 {driver_run} --warmup 3 --iters 20 --bench-mode`
+          → compare the per-case times with the best version this session measured.
+   - A change that fails correctness or raises a compile error is not finished:
+     READ the error and FIX it.
+   - A change that measurably helps becomes the session's best. Copy every file
+     it touches to a scratch directory outside the workspace, with its per-case
+     numbers beside it.
+   - A change that does not help is undone: restore the best version's files
+     from that scratch directory before trying the next one. Do not save or
+     restore work with git (`stash`, `add`, `commit`, `reset`): the loop owns
+     the repository state and rejects a session that changes it.
+   - Judge a change by the score — the mean of per-case speedups — not by raw
+     `mean_ms` and not by a single case. A difference inside the spread of your
+     own repeated measurements is not a gain.
+5. A first improvement is where the session starts, not where it ends. It shows
+   the direction is real, so push it: tune the parameters it introduced, carry
+   it to the cases it has not reached, remove the overhead it exposed. Keep
+   going while changes still move the score. Leave a direction when it has
+   reached its goal and two further changes in a row moved nothing, or when
+   measurement has disproved it; then take the next most valuable direction if
+   time remains.
+6. Mind the clock. Note the time when you start (`date`) and check it as you
+   work. Your own runs tell you how long correctness plus a benchmark takes;
+   the gate that judges your stop repeats correctness and takes three
+   benchmark measurements. Stop changing things while that much time, and
+   room for one fix, is still left.
+7. Submit the best version, not the last one. Before you finish, make sure the
+   workspace holds exactly the best version you measured, and run correctness
+   and the benchmark on it once more. If nothing you measured beats the current
+   best, restore every file to how the session found it and say so in the
+   `PLAN:` line: no candidate costs the campaign less than one the gate rejects.
+8. There is NO hard edit budget — make as many changes to non-protected tracked
+   implementation files as a direction needs. What IS bounded is fruitless
+   stopping: each time you STOP with a candidate that is correct but not faster
+   than best, the gate sends you back to keep improving, and after {max_blocks}
+   such rejected stops it ends the session and hands off. So do not circle
+   micro-tweaks inside the noise band — if a direction is not beating best,
+   switch to a materially different one rather than resubmitting near-ties.
+"""
+
+# A correctness-only gate (the PORT phase) has no performance to search for: the first correct kernel is the result.
+_CORRECTNESS_ONLY_WORKING_METHOD = """\
+2. Use Edit to make a change with a clear hypothesis.
+3. VERIFY IT YOURSELF with Bash before finishing, using the driver documented
+   above (run from the current directory):
+     `python3 {driver_run}` → full-suite correctness verdict
+   If correctness fails or a compile error is raised, READ the error and FIX it —
+   do not stop on a broken kernel.
+4. This phase is judged on correctness alone. As soon as the kernel passes the
+   driver's correctness verdict, stop and submit it to the outer loop, which is
+   the sole authority for canonical correctness. Do not spend the rest of the
+   Session tuning performance.
+5. There is NO hard edit budget — make as many changes to non-protected tracked
+   implementation files as the kernel needs, verifying as you go. What IS
+   bounded is fruitless stopping: each time you STOP with a kernel that fails
+   correctness, the gate sends you back to fix it, and after {max_blocks} such
+   rejected stops it ends the session and hands off.
 """
 
 
@@ -804,11 +858,12 @@ def make_agent_fn(
     # surface while the session runs, and nothing decides when the session may end.
     gate_stop_check = gate_enabled and session.insession_gate_stop_check
     gate_scope = _gate_scope(source_files, surface.is_repo_task, task.extra_protected_globs, extra_protected_paths)
+    working_method = _CORRECTNESS_ONLY_WORKING_METHOD if measurement.correctness_only else _PERFORMANCE_WORKING_METHOD
     gate_system_prompt = _GATE_SYSTEM_PROMPT.format(
         **prompt_sections,
         driver_base=driver_base,
         driver_run=driver_run,
-        max_blocks=measurement.max_blocks,
+        working_method=working_method.format(driver_run=driver_run, max_blocks=measurement.max_blocks),
         backend_rule=(
             "Optimize only the selected assembly; keep the frontend, launcher and ABI frozen."
             if task.kernel_backend_name == "assembly"

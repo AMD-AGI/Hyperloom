@@ -118,6 +118,16 @@ Each iteration:
    off its best candidate before it, and the backend cuts the session at the
    deadline if it does not. A high fixed turn ceiling remains only as a runaway
    backstop -- it does not bound a session's time.
+   A session that runs the in-session gate works one direction for as long as
+   it pays, rather than handing off its first improvement: it states the
+   direction and the score it expects before editing, measures the kernel it
+   starts from, then repeats edit, correctness and benchmark, keeping a copy of
+   the best version it has measured and undoing every change that does not
+   help. It leaves a direction once the goal is reached and two further changes
+   in a row move nothing, or once measurement disproves it, and it hands off the
+   best version it measured -- or no candidate at all when nothing beat the
+   current best. Lane sessions, which run without that gate, make their change
+   and hand it off.
 8. The outer loop runs the driver-owned full correctness suite and canonical
    benchmark.
 9. A measured improvement is committed and becomes the new best; every other
