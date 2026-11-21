@@ -435,7 +435,8 @@ def _build_trace_analyze_cmd(
     if scriptable:
         steady_state_mode = "generic"
     else:
-        cmd += _split_llm_flags(payload, workload)
+        if payload.get("split_llm_inference", True):
+            cmd += _split_llm_flags(payload, workload)
         steady_state_mode = str(
             payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
         ).strip()
@@ -445,6 +446,8 @@ def _build_trace_analyze_cmd(
         ("--steady-state-mode", steady_state_mode),
         ("--roofline-output-name", roofline_output_name),
     )
+    if payload.get("clamp_stream_overlaps"):
+        cmd += ["--clamp-stream-overlaps"]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     return cmd, steady_state_mode

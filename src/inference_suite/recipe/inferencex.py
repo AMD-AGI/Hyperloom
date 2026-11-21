@@ -193,7 +193,7 @@ def _yaml_mapping(bundle: RepoBundle, path: str) -> Mapping[str, Any]:
     return document
 
 
-def _runner_board(runner: str, labels: Mapping[str, Sequence[str]]) -> str:
+def runner_board(runner: str, labels: Mapping[str, Sequence[str]]) -> str:
     """The board a runner label stands for: the label itself, or for a cluster label the one board label whose
     nodes include all of the cluster's."""
     if not runner.startswith(_CLUSTER):
@@ -209,7 +209,7 @@ def _runner_board(runner: str, labels: Mapping[str, Sequence[str]]) -> str:
     return boards[0]
 
 
-def _concurrencies(benchmark: Mapping[str, Any]) -> list[int]:
+def concurrencies(benchmark: Mapping[str, Any]) -> list[int]:
     """``conc-list``, else ``conc-start`` doubled up to ``conc-end``, the last step capped at it."""
     if benchmark.get("conc-list"):
         return list(benchmark["conc-list"])
@@ -271,7 +271,7 @@ def _arm_points(arm: _Arm, runners: Mapping[str, Any]) -> Iterator[InferencexPoi
     fixed = arm.scenario is Scenario.FIXED
     runner = entry["runner"]
     power_from = block if fixed else benchmark
-    for conc in _concurrencies(benchmark):
+    for conc in concurrencies(benchmark):
         yield InferencexPoint(
             entry=arm.entry_name,
             scenario=arm.scenario,
@@ -284,7 +284,7 @@ def _arm_points(arm: _Arm, runners: Mapping[str, Any]) -> Iterator[InferencexPoi
             precision=entry["precision"],
             image=entry["image"],
             runner=runner,
-            board=_runner_board(runner, runners["labels"]),
+            board=runner_board(runner, runners["labels"]),
             recipe=f"{_SINGLE_NODE_RECIPES}/{entry['srt-recipe-dir']}/{benchmark['srt-recipe']}",
             tp=benchmark["tp"],
             ep=benchmark.get("ep") or 1,
@@ -611,14 +611,22 @@ def inferencex_model_id(model_id: str, bundle: RepoBundle) -> str | None:
     """
     if "/" in model_id:
         return None
-    named = {
-        model
-        for entry in _yaml_mapping(bundle, MASTER).values()
-        if isinstance(model := entry.get("model"), str)
-        and "/" in model
-        and model.rpartition("/")[2].casefold() == model_id.casefold()
-    }
-    return next(iter(named)) if len(named) == 1 else None
+    named = org_models_named(model_id, [_yaml_mapping(bundle, MASTER)])
+    return named[0] if len(named) == 1 else None
+
+
+def org_models_named(name: str, masters: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The ``org/repo`` models of ``masters`` whose ``repo`` is ``name``, compared without case, sorted."""
+    return sorted(
+        {
+            model
+            for master in masters
+            for entry in master.values()
+            if isinstance(model := entry.get("model"), str)
+            and "/" in model
+            and model.rpartition("/")[2].casefold() == name.casefold()
+        }
+    )
 
 
 def served_points(query: LaunchQuery, bundle: RepoBundle) -> ServedPoints:
@@ -686,9 +694,12 @@ __all__ = [
     "Scenario",
     "ServedPoints",
     "agentx_trace",
+    "concurrencies",
     "inferencex_launches",
     "inferencex_model_id",
     "model_prefixes",
+    "org_models_named",
+    "runner_board",
     "served_points",
     "srtctl_cli_args",
 ]

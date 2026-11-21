@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from inference_suite.multinode import NODE_LIST_ENV
+
 from ..state_paths import resolve_state_file, state_file_safe_to_read
 from .infera_support import ssh_role_port_offset
 from .ssh_client import DEFAULT_SSH_PORT
@@ -29,6 +31,10 @@ _SESSION_KEY_PREFIX = "last_"
 _HANDOFF_CARRIED_KEYS = (
     "pd_prefill_url",
     "pd_decode_url",
+    "pd_launch",
+    "pd_launch_digest",
+    "profile_trace_shared",
+    "profile_trace_share_error",
 )
 
 # The fields that identify *which* cluster a state describes.
@@ -105,8 +111,26 @@ def _service_url(get: Lookup) -> str:
     return u if u.startswith(("http://", "https://")) else ""
 
 
+def _pd_node_list() -> Any:
+    """The PD node list the platform hands over, or ``None`` when it hands over none."""
+    from .pd_handoff import handed_node_list
+
+    return handed_node_list()
+
+
+def _pd_backend(nodes: Any) -> str:
+    """The PD backend the operator names, else the one the node list's frontend names."""
+    from .pd_handoff import PD_BACKENDS, node_list_backend
+
+    explicit = handoff_lookup()("INFERENCE_OPTIMIZER_MN_BACKEND").strip().lower()
+    return explicit if explicit in PD_BACKENDS else node_list_backend(nodes)
+
+
 def external_service_url() -> str:
     """Return the handed-over cluster's benchmark URL, or empty when there is none."""
+    nodes = _pd_node_list()
+    if nodes is not None:
+        return str(nodes.service_url)
     return _service_url(handoff_lookup())
 
 
@@ -137,6 +161,11 @@ def _record_pd_split(state: dict[str, Any], pd_mode: str, pn: int, dn: int) -> N
 
 def build_external_state_from_env() -> dict[str, Any]:
     """Synthesize multi-node state from ``TOPOLOGY_HANDOFF_FILE`` or, without it, ``HYPERLOOM_MN_EXT_*`` env vars."""
+    nodes = _pd_node_list()
+    if nodes is not None:
+        from .pd_handoff import pd_state
+
+        return pd_state(nodes, _pd_backend(nodes))
     get = handoff_lookup()
     url = _service_url(get)
     if not url:
@@ -207,6 +236,9 @@ def build_external_state_from_env() -> dict[str, Any]:
 
 def external_has_ssh_control() -> bool:
     """True when the hand-off supplies an SSH key plus at least one GPU pod IP."""
+    nodes = _pd_node_list()
+    if nodes is not None:
+        return nodes.ssh is not None
     get = handoff_lookup()
     if not _service_url(get):
         return False
@@ -226,9 +258,12 @@ def external_has_server_control() -> bool:
     """True when external mode can restart servers (SSH for infera, head IP for rayjob)."""
     if not external_service_url():
         return False
+    get = handoff_lookup()
+    if get(NODE_LIST_ENV).strip():
+        return external_has_ssh_control()
     if external_has_ssh_control():
         return True
-    return bool(handoff_lookup()("HYPERLOOM_MN_EXT_HEAD_IP").strip())
+    return bool(get("HYPERLOOM_MN_EXT_HEAD_IP").strip())
 
 
 def _read_state_file(path: Path) -> dict[str, Any]:
@@ -267,6 +302,11 @@ def _carry_disk_bookkeeping(disk: dict[str, Any], ext_state: dict[str, Any]) -> 
         carried = key.startswith(_SESSION_KEY_PREFIX) or key in _HANDOFF_CARRIED_KEYS
         if carried and key not in ext_state:
             ext_state[key] = value
+    from .pd_handoff import LAUNCH_POD_KEYS, NODE_LIST_KEY, PODS_KEY
+
+    # A node-list cluster's pods carry the commands of its launch, which the hand-off alone does not give.
+    if ext_state.get(NODE_LIST_KEY) is True and disk.get(PODS_KEY):
+        ext_state.update({key: disk[key] for key in LAUNCH_POD_KEYS if key in disk})
 
 
 def load_multi_node_state() -> dict[str, Any]:

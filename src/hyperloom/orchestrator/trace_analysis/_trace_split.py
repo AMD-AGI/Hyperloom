@@ -16,6 +16,23 @@ from ._trace_gates import _check_chunk_quality
 from ._tracelens_checkout import run_command
 
 
+#: Steady-state mode that takes the decode-only chunk, else the generic ``steady_state_*`` chunk.
+DECODE_ONLY_OR_GENERIC_MODE = "decode_only_or_generic"
+#: Steady-state mode that analyses the trace as captured, without splitting it.
+UNSPLIT_MODE = "unsplit"
+STEADY_STATE_MODES = ("mixed", "decode_only", "prefilldecode", "generic", DECODE_ONLY_OR_GENERIC_MODE, UNSPLIT_MODE)
+
+
+def copy_unsplit_trace(trace_path: Path, split_dir: Path) -> Path:
+    """Copy ``trace_path`` into ``split_dir`` so later in-place repairs leave the captured trace untouched."""
+    import shutil
+
+    split_dir.mkdir(parents=True, exist_ok=True)
+    target = split_dir / trace_path.name
+    shutil.copyfile(trace_path, target)
+    return target
+
+
 def _build_split_cmd(
     args,
     split_input_path: "Path",
@@ -85,7 +102,7 @@ def _refuse_missing_steady_state_mode(
     )
 
 
-def _collect_split_chunks(
+def collect_split_chunks(
     split_dir: "Path",
     steady_state_mode: str,
     analysis_trace_path: "Path",
@@ -136,6 +153,11 @@ def _collect_split_chunks(
         "decode_only": ("decode_only_steady_state", decode_chunks),
         "prefilldecode": ("prefilldecode_steady_state", prefill_chunks),
         "generic": ("steady_state", generic_chunks),
+        # A PD decode server's trace holds decode steps only, so its generic chunk is a decode chunk.
+        DECODE_ONLY_OR_GENERIC_MODE: (
+            "decode_only_steady_state" if decode_chunks else "steady_state",
+            decode_chunks or generic_chunks,
+        ),
     }
     chunk_label, selected_chunks = mode_to_chunks[steady_state_mode]
     if not selected_chunks:
@@ -289,7 +311,7 @@ def _run_trace_split(
             f"trace_split_failed: TraceLens splitter exited with code {split_rc}; see {log_path} for subprocess output."
         )
 
-    selected_chunk, split_meta, mode_to_chunks = _collect_split_chunks(
+    selected_chunk, split_meta, mode_to_chunks = collect_split_chunks(
         split_dir,
         args.steady_state_mode,
         analysis_trace_path,
