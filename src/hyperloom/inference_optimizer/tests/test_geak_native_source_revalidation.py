@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""GEAK source products require real review and canonical transactional measurement."""
+"""GEAK source products are staged, then kept or reverted by a canonical transactional measurement."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.phases.geak_native_revalidation import ORIGIN, source_rebench_params
-from hyperloom.orchestrator.loop.verdicts import CriticRuling
 from .test_geak_revalidation_dispatch import coordinator as coordinator
 
 
@@ -38,18 +37,16 @@ def _candidate(c, tmp_path):
     return patch
 
 
-async def _actual_verdict(c, verdict):
-    async def ready():
-        while not c.state.pending_proposals:
-            await asyncio.sleep(0.01)
+def _changed_after_staging(c, monkeypatch, change):
+    """Run ``change(params)`` on the product once it is staged, before the revalidation reads it."""
+    stage = c.writeback.geak_rebench_params
 
-    await asyncio.wait_for(ready(), 2.0)
-    pending = next(iter(c.state.pending_proposals.values()))
-    assert pending.action_name == "integrate"
-    assert pending.payload["params"]["covered_executor"] == "integrate_patch"
-    await c.router._handle_single_verdict(
-        source="critic", pending=pending, ruling=CriticRuling(verdict=verdict, reasoning="reviewed the staged patch")
-    )
+    def staged_then_changed(*, reason):
+        params = stage(reason=reason)
+        change(params)
+        return params
+
+    monkeypatch.setattr(c.writeback, "geak_rebench_params", staged_then_changed)
 
 
 def test_source_route_retains_configuration_and_stages_exact_patches(coordinator, tmp_path):
@@ -73,34 +70,16 @@ def test_only_an_inferencex_agentx_session_takes_the_source_route(coordinator, t
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("verdict", ["reject", "needs_review"])
-async def test_declined_review_never_runs_or_promotes_proxy(coordinator, tmp_path, monkeypatch, verdict):
+async def test_source_candidate_is_measured_as_a_covered_step_with_no_critic_proposal(
+    coordinator, tmp_path, monkeypatch
+):
     _candidate(coordinator, tmp_path)
-    before = dict(coordinator.shared_state.current_best)
-
-    async def forbidden(task):
-        raise AssertionError("unapproved source integration must not execute")
-
-    monkeypatch.setattr(coordinator.sub, "execute_covered", forbidden)
-    run = asyncio.create_task(coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None))
-    await _actual_verdict(coordinator, verdict)
-    await asyncio.wait_for(run, 2.0)
-    assert coordinator.shared_state.geak_pending == {}
-    assert coordinator.shared_state.current_best == before
-    assert coordinator.shared_state.geak_result["revalidation_status"] == "no_promote"
-    assert not coordinator.shared_state.optimization_stack
-
-
-@pytest.mark.asyncio
-async def test_approved_source_uses_covered_integrator_and_canonical_measurement(coordinator, tmp_path, monkeypatch):
-    _candidate(coordinator, tmp_path)
-    executed = []
+    measured = []
     adopted = []
     canonical = {"output_throughput": 120.0, "agentx_epoch": 3}
 
-    async def execute(task):
-        assert coordinator.shared_state.get_specialist_patch_verdict(task.params["specialist_task_id"]) == "approve"
-        executed.append(task)
+    async def integrate(ctx):
+        measured.append(ctx)
         return {"status": "kept", "bench_result": canonical}
 
     async def promote(kind, result, *, task):
@@ -108,7 +87,7 @@ async def test_approved_source_uses_covered_integrator_and_canonical_measurement
         assert result["bench_result"] == canonical
         coordinator.shared_state.optimization_stack.append({"task_id": task.task_id, "action": kind})
 
-    monkeypatch.setattr(coordinator.sub, "execute_covered", execute)
+    coordinator.sub.register_executor("integrate_patch", integrate)
     monkeypatch.setattr(coordinator.writeback, "promote_to_shared_state", promote)
     monkeypatch.setattr(
         coordinator.phase_kernel, "record_geak_adopted_kernels", lambda *args, **kwargs: adopted.append(kwargs)
@@ -117,11 +96,13 @@ async def test_approved_source_uses_covered_integrator_and_canonical_measurement
         "hyperloom.orchestrator.state.shared_state.resolve_graded_comparison",
         lambda *args, **kwargs: SimpleNamespace(comparable=True, candidate=120.0, reference=100.0),
     )
-    run = asyncio.create_task(coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None))
-    await _actual_verdict(coordinator, "approve")
-    await asyncio.wait_for(run, 2.0)
-    assert len(executed) == 1
-    assert executed[0].kind == "integrate_patch"
+    await coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None)
+    assert len(measured) == 1
+    assert measured[0].task.kind == "integrate_patch"
+    # No registry row carries this marker; it is what lets the integration run with no Critic verdict on record.
+    assert measured[0].extra["covered_step"] is True
+    assert await coordinator.bus.tail(topic="proposal") == []
+    assert not coordinator.state.pending_proposals
     assert adopted[0]["measured_tput"] == 120.0
     assert adopted[0]["overlay_loaded"] is False
     assert coordinator.shared_state.geak_result["canonical_revalidation"] == canonical
@@ -129,7 +110,23 @@ async def test_approved_source_uses_covered_integrator_and_canonical_measurement
 
 
 @pytest.mark.asyncio
-async def test_cancelled_covered_run_reuses_review_and_task_identity(coordinator, tmp_path, monkeypatch):
+async def test_unkept_measurement_settles_no_promote_without_promotion(coordinator, tmp_path):
+    _candidate(coordinator, tmp_path)
+    before = dict(coordinator.shared_state.current_best)
+
+    async def integrate(ctx):
+        return {"status": "reverted", "reason": "canonical replay did not improve"}
+
+    coordinator.sub.register_executor("integrate_patch", integrate)
+    await coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None)
+    assert coordinator.shared_state.geak_pending == {}
+    assert coordinator.shared_state.current_best == before
+    assert coordinator.shared_state.geak_result["revalidation_status"] == "no_promote"
+    assert not coordinator.shared_state.optimization_stack
+
+
+@pytest.mark.asyncio
+async def test_cancelled_covered_run_reuses_its_task_identity(coordinator, tmp_path, monkeypatch):
     _candidate(coordinator, tmp_path)
     tasks = []
 
@@ -144,17 +141,13 @@ async def test_cancelled_covered_run_reuses_review_and_task_identity(coordinator
 
     monkeypatch.setattr(coordinator.sub, "execute_covered", execute)
     monkeypatch.setattr(coordinator.writeback, "promote_to_shared_state", promote)
-    run = asyncio.create_task(coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None))
-    await _actual_verdict(coordinator, "approve")
     with pytest.raises(asyncio.CancelledError):
-        await run
-    saved_review = dict(coordinator.shared_state.geak_pending["native_review"])
+        await coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None)
+    saved = dict(coordinator.shared_state.geak_pending["native_review"])
     await coordinator.phase_kernel._revalidate_geak_candidate(reason="resume", handoff_cards=None)
     assert len(tasks) == 2
-    assert tasks[0].task_id == tasks[1].task_id == saved_review["task_id"]
-    proposals = await coordinator.bus.tail(topic="proposal")
-    assert [proposal.msg_id for proposal in proposals] == [saved_review["proposal_msg_id"]]
-    assert not coordinator.state.pending_proposals
+    assert tasks[0].task_id == tasks[1].task_id == saved["task_id"]
+    assert await coordinator.bus.tail(topic="proposal") == []
     assert coordinator.shared_state.geak_pending == {}
     assert not coordinator.shared_state.optimization_stack
 
@@ -188,25 +181,17 @@ def test_source_artifacts_are_required_even_with_accepted_config(coordinator, tm
 
 
 @pytest.mark.asyncio
-async def test_reviewed_patch_mutation_is_rejected_before_execution(coordinator, tmp_path, monkeypatch):
+async def test_patch_changed_after_staging_is_refused_before_execution(coordinator, tmp_path, monkeypatch):
     _candidate(coordinator, tmp_path)
-    from hyperloom.orchestrator.phases import geak_native_revalidation as native
-
-    review = native._review
-
-    async def mutate_after_review(c, params):
-        outcome = await review(c, params)
-        Path(params["patches"][0]).write_text("unreviewed patch contents")
-        return outcome
 
     async def forbidden(task):
         raise AssertionError("changed source must not execute")
 
-    monkeypatch.setattr(native, "_review", mutate_after_review)
+    _changed_after_staging(
+        coordinator, monkeypatch, lambda params: Path(params["patches"][0]).write_text("patch contents nobody staged")
+    )
     monkeypatch.setattr(coordinator.sub, "execute_covered", forbidden)
-    run = asyncio.create_task(coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None))
-    await _actual_verdict(coordinator, "approve")
-    await asyncio.wait_for(run, 2.0)
+    await coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None)
     assert coordinator.shared_state.geak_pending == {}
     assert coordinator.shared_state.geak_result["revalidation_status"] == "fallback_failed"
     assert "changed or disappeared" in coordinator.shared_state.geak_result["revalidation_error"]
@@ -214,9 +199,8 @@ async def test_reviewed_patch_mutation_is_rejected_before_execution(coordinator,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["sitecustomize", "imported_module", "new_file", "deleted_module", "unchanged"])
-async def test_source_review_binds_entire_overlay_without_manifest(coordinator, tmp_path, monkeypatch, change):
+async def test_staging_binds_entire_overlay_without_manifest(coordinator, tmp_path, monkeypatch, change):
     _candidate(coordinator, tmp_path)
-    from hyperloom.orchestrator.phases import geak_native_revalidation as native
 
     overlay = tmp_path / "overlay"
     overlay.mkdir()
@@ -225,57 +209,42 @@ async def test_source_review_binds_entire_overlay_without_manifest(coordinator, 
     module.write_text("VALUE = 1\n")
     coordinator.shared_state.geak_result["final_overlay"] = str(overlay)
     executed = []
-    review = native._review
 
-    async def mutate_after_review(c, params):
-        outcome = await review(c, params)
+    def change_overlay(params):
         assert set(params["native_geak_overlay_files"]) == {str(overlay / "sitecustomize.py"), str(module)}
         if change == "sitecustomize":
-            (overlay / "sitecustomize.py").write_text("import unreviewed_impl\n")
+            (overlay / "sitecustomize.py").write_text("import unstaged_impl\n")
         elif change == "imported_module":
             module.write_text("VALUE = 2\n")
         elif change == "new_file":
-            (overlay / "unreviewed_impl.py").write_text("VALUE = 3\n")
+            (overlay / "unstaged_impl.py").write_text("VALUE = 3\n")
         elif change == "deleted_module":
             module.unlink()
         else:
             cache = overlay / "__pycache__"
             cache.mkdir()
             (cache / "kernel_impl.cpython-311.pyc").write_bytes(b"interpreter cache")
-        return outcome
 
     async def execute(task):
         executed.append(task)
         return {"status": "reverted", "reason": "canonical candidate did not improve"}
 
-    monkeypatch.setattr(native, "_review", mutate_after_review)
+    _changed_after_staging(coordinator, monkeypatch, change_overlay)
     monkeypatch.setattr(coordinator.sub, "execute_covered", execute)
-    run = asyncio.create_task(coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None))
-    await _actual_verdict(coordinator, "approve")
-    await asyncio.wait_for(run, 2.0)
+    await coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None)
     assert coordinator.shared_state.geak_pending == {}
     if change == "unchanged":
         assert len(executed) == 1
     else:
         assert executed == []
         assert coordinator.shared_state.geak_result["revalidation_status"] == "fallback_failed"
-        assert "reviewed GEAK overlay changed" in coordinator.shared_state.geak_result["revalidation_error"]
+        assert "staged GEAK overlay changed" in coordinator.shared_state.geak_result["revalidation_error"]
 
 
-@pytest.mark.asyncio
-async def test_expired_review_budget_clears_pending_without_promotion(coordinator, tmp_path, monkeypatch):
-    _candidate(coordinator, tmp_path)
-    monkeypatch.setattr(coordinator.shared_state, "remaining_minutes", lambda: 0.0)
-    await coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None)
-    assert coordinator.shared_state.geak_pending == {}
-    assert coordinator.shared_state.geak_result["native_source_revalidation"]["verdict"] == "timeout"
-    assert not coordinator.shared_state.optimization_stack
-
-
-def test_native_review_recovery_retains_identity_only_for_same_candidate(coordinator, tmp_path):
+def test_recovery_retains_revalidation_identity_only_for_same_candidate(coordinator, tmp_path):
     _candidate(coordinator, tmp_path)
     result = coordinator.shared_state.geak_result
-    saved = {"artifact_digest": "reviewed", "candidate": dict(result), "verdict": "approve", "task_id": "covered-task"}
+    saved = {"artifact_digest": "staged", "candidate": dict(result), "task_id": "covered-task"}
     coordinator.shared_state.geak_pending = {
         "native_review": saved,
         "status": "source_rebench_running",

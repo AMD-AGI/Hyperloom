@@ -1,14 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Review GEAK source products and measure them inside the kernel task's lease."""
+"""Stage GEAK source products and measure them inside the kernel task's lease."""
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
-import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -21,7 +19,6 @@ from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
 
 from hyperloom_common.io import atomic_write_json
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.common.overlay import overlay_is_loadable
 from hyperloom.common.perf_metric import agentx_replay_session
 from hyperloom.orchestrator.kernel.geak_config import geak_spec_is_env
@@ -29,8 +26,6 @@ from hyperloom.orchestrator.state.task_registry import Task
 from .geak_rebench import source_digest, overlay_source_files, verify_source_artifacts
 
 _INTEGRATE_PATCH = "integrate_patch"
-_APPROVE = "approve"
-_ADVISE = "advise"
 
 
 ORIGIN = "geak_native_revalidation"
@@ -144,69 +139,26 @@ def prepare_source_revalidation(
     return params
 
 
-def record_review(coord: Any, pending: Any, *, verdict: str, reasoning: str) -> bool:
-    """Persist only an actual Critic verdict for the covered GEAK review in flight."""
-    params = (pending.payload or {}).get("params") or {}
-    if params.get("origin") != ORIGIN:
-        return False
-    saved = dict((coord.shared_state.geak_pending or {}).get("native_review") or {})
-    if saved.get("proposal_msg_id") != pending.proposal_msg_id or saved.get("artifact_digest") != params.get(
-        "native_geak_artifact_digest"
-    ):
-        return True
-    saved.update(verdict=verdict, reasoning=reasoning)
-    coord.shared_state.geak_pending = {**coord.shared_state.geak_pending, "native_review": saved}
-    if verdict in {_APPROVE, _ADVISE}:
-        coord.shared_state.record_specialist_patch_verdict(str(params["specialist_task_id"]), verdict)
-    coord.shared_state.save(coord.session_dir)
-    return True
-
-
-async def _review(coord: Any, params: dict[str, Any]) -> dict[str, Any]:
+def _revalidation_record(coord: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """The identity a source product is measured under; a product whose run was cut short keeps the one it had."""
     digest = params["native_geak_artifact_digest"]
     saved = dict((coord.shared_state.geak_pending or {}).get("native_review") or {})
-    if saved.get("artifact_digest") == digest and saved.get("verdict") in {_APPROVE, _ADVISE}:
+    if saved.get("artifact_digest") == digest:
         return saved
-    payload = {
-        "action_name": "integrate",
-        "predicted_gain_pct": 0.0,
-        "params": {**params, "covered_executor": _INTEGRATE_PATCH},
-        "rationale": "Review GEAK source patches and their complete serving configuration before canonical native AgentX validation; GEAK proxy scores are not acceptance evidence.",
-    }
-    message = Message.new("coordinator", "*", "proposal", {**payload, "needs_review": True})
-    saved = {
+    return {
         "artifact_digest": digest,
-        "proposal_msg_id": message.msg_id,
-        "verdict": "pending",
         "task_id": uuid.uuid4().hex,
         "params": params,
         "candidate": dict(coord.shared_state.geak_result),
     }
-    coord.shared_state.geak_pending = {
-        **(coord.shared_state.geak_pending or {}),
-        "status": "awaiting_source_review",
-        "native_review": saved,
-    }
-    coord.shared_state.save(coord.session_dir)
-    coord.proposals.register_review_proposal(message, payload)
-    await coord.bus.append_and_seq(message)
-    remaining = coord.shared_state.remaining_minutes()
-    deadline = time.monotonic() + min(300.0, remaining * 60.0 if remaining is not None else 300.0)
-    while time.monotonic() < deadline:
-        saved = dict((coord.shared_state.geak_pending or {}).get("native_review") or {})
-        if saved.get("verdict") != "pending":
-            return saved
-        await asyncio.sleep(0.25)
-    saved.update(verdict="timeout", reasoning="Critic review did not complete within the revalidation window")
-    return saved
 
 
-def _finish(coord: Any, review: dict[str, Any], *, status: str, error: str = "", measurement: Any = None) -> None:
+def _finish(coord: Any, record: dict[str, Any], *, status: str, error: str = "", measurement: Any = None) -> None:
     coord.shared_state.geak_result = {
         **coord.shared_state.geak_result,
         "revalidation_status": status,
         "revalidation_error": error,
-        "native_source_revalidation": dict(review, status=status),
+        "native_source_revalidation": dict(record, status=status),
         "canonical_revalidation": measurement,
     }
     coord.shared_state.geak_pending = {}
@@ -233,24 +185,19 @@ def _record_canonical_adoption(coord: Any, params: dict[str, Any], measurement: 
 
 
 async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
-    """Use real review and the existing transactional integration and promotion paths."""
+    """Measure a staged source product through the transactional integration and promotion paths.
+
+    The measurement is the gate: the integration keeps the product on measured throughput and accuracy and reverts
+    it otherwise, so only a product that cannot be deployed as staged ends here unmeasured.
+    """
     try:
-        verify_source_artifacts(params)
-        review = await _review(coord, params)
-        if review.get("verdict") not in {_APPROVE, _ADVISE}:
-            _finish(
-                coord,
-                review,
-                status=REBENCH_NO_PROMOTE,
-                error=str(review.get("reasoning") or "Critic declined source integration"),
-            )
-            return
         verify_source_artifacts(params)
     except (OSError, ValueError) as exc:
         _finish(coord, {}, status=REBENCH_FALLBACK_FAILED, error=str(exc))
         return
+    record = _revalidation_record(coord, params)
     task = Task(
-        task_id=review["task_id"],
+        task_id=record["task_id"],
         kind=_INTEGRATE_PATCH,
         state="running",
         params=params,
@@ -264,11 +211,12 @@ async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
         stack = coord.shared_state.optimization_stack
         if stack[-1].get("task_id") == task.task_id:
             _record_canonical_adoption(coord, params, coord.shared_state.current_best)
-        _finish(coord, review, status=REBENCH_VALIDATED, measurement=coord.shared_state.current_best)
+        _finish(coord, record, status=REBENCH_VALIDATED, measurement=coord.shared_state.current_best)
         return
     coord.shared_state.geak_pending = {
-        **coord.shared_state.geak_pending,
+        **(coord.shared_state.geak_pending or {}),
         "status": "source_rebench_running",
+        "native_review": record,
         "revalidation_task_id": task.task_id,
     }
     coord.shared_state.save(coord.session_dir)
@@ -284,7 +232,7 @@ async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
         _record_canonical_adoption(coord, params, measurement)
     _finish(
         coord,
-        review,
+        record,
         status=REBENCH_VALIDATED if kept else REBENCH_NO_PROMOTE,
         error=str(result.get("reason") or ""),
         measurement=measurement,
@@ -299,7 +247,7 @@ def source_rebench_params(
     launch: dict[str, Any],
     overlay: str,
 ) -> dict[str, Any] | None:
-    """Route native source products through the existing reviewed patch executor."""
+    """Route native source products through the transactional patch executor."""
     from .geak_rebench import geak_candidate_matches
     from hyperloom.orchestrator.state.shared_state import stack_base_params
 
@@ -325,7 +273,7 @@ def source_rebench_params(
 
 
 def matching_review(state: Any, result: dict[str, Any]) -> dict[str, Any]:
-    """Retain an approved source product only while GEAK still reports that product."""
+    """Retain a source product's revalidation identity only while GEAK still reports that product."""
     from .geak_rebench import geak_candidate_matches
 
     pending = state.geak_pending or {}
