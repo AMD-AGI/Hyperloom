@@ -10,10 +10,10 @@ says aiter started building a JIT module is working, for as long as a module of 
 time does not count against the boot budget.
 
 Before ready, a server whose processes keep using CPU is working too, however long its log stays quiet: a
-large-checkpoint load can spend half an hour filling host memory without a line. A collective that spins uses CPU as
-well, so CPU use extends the silence only up to :data:`PRE_READY_BUSY_SILENCE_SEC`; a server that neither writes nor
-uses CPU for the pre-ready silence limit is hung. A server whose resident memory or reads keep growing is making
-progress, which a spin does not: that restarts the silence like a log line, and only the boot budget bounds it.
+large-checkpoint load can spend half an hour without a line, CPU-busy or IO-bound. A collective that spins uses CPU as
+well, so CPU use extends the silence only up to :data:`PRE_READY_BUSY_SILENCE_SEC`. A server whose resident memory or
+reads keep growing is making progress, which a spin does not: that restarts the silence like a log line, and only the
+boot budget bounds it. A server that neither writes, grows nor uses CPU for the pre-ready silence limit is hung.
 """
 
 from __future__ import annotations
@@ -49,8 +49,10 @@ CpuReader = Callable[[], "float | None"]
 CPU_SAMPLE_SEC = 10.0
 #: The share of one CPU a boot's processes must use, averaged between two reads, for the stretch to count as work.
 #: A server rank that only waits (its event loop, heartbeat and watchdog threads polling) uses a few percent of a CPU,
-#: and a boot runs one to a few dozen such processes, the larger counts mostly helpers that sleep; a phase that loads a
-#: checkpoint keeps at least one CPU per rank busy. A quarter of a CPU sits above the one and well below the other.
+#: and a boot runs one to a few dozen such processes, the larger counts mostly helpers that sleep, so a quarter of a CPU
+#: sits above a waiting boot. A checkpoint load may be CPU-busy or IO-bound: pre-faulting a file mapped from a network
+#: filesystem was measured at about 0.06 of a CPU per rank, and shows only in resident memory, which
+#: :data:`RSS_GROWTH_BYTES` reads.
 CPU_ACTIVE_SHARE = 0.25
 
 _MIB = 1 << 20
