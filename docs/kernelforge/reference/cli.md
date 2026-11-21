@@ -68,6 +68,12 @@ package's name, and links the package's compiled extension modules into it, so
 a driver that imports the package measures the checkout. A task whose checkout
 the name still does not resolve to fails before its campaign starts.
 
+The checkout is imported from the controller's own directory, not from where the
+package is installed, so a package that finds files beside itself by its own
+location does not find them there and stops importing. Name no served tree for
+such a package: a campaign on its repository then runs as it did without one,
+against the installed copy. Hyperloom names none for `aiter` and `aiter_meta`.
+
 ## forge-loop
 
 Runs one measurement-driven optimization campaign over a single kernel:

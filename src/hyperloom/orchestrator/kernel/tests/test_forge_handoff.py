@@ -346,3 +346,25 @@ def test_the_handoff_names_the_installed_package_a_snapshot_is_served_from(tmp_p
     bundle = read_handoff(handoff_dir)
     assert bundle.repositories == (checkout.resolve(), snapshot.resolve())
     assert bundle.served_trees == {snapshot.resolve(): installed}
+
+
+def test_an_aiter_snapshot_is_declared_without_the_tree_it_is_served_from(tmp_path: Path) -> None:
+    """aiter finds its device sources from where its own files are, so a checkout imported from another directory
+    stops at ``csrc``: its snapshots stay repositories a task may target, and their campaigns run the installed copy."""
+    site = tmp_path / "site-packages"
+    snapshots = {name: tmp_path / "tree_snapshots" / f"{name}.campaign" for name in ("aiter", "aiter_meta", "vllm")}
+    for directory in (*snapshots.values(), *(site / name for name in snapshots)):
+        directory.mkdir(parents=True)
+
+    handoff_dir = write_forge_handoff(
+        _state(),
+        handoff_dir=tmp_path / "handoff",
+        repositories={
+            str(snapshot): RepoBaseline(commit="a" * 40, deploy_root=site / name)
+            for name, snapshot in snapshots.items()
+        },
+    )
+
+    bundle = read_handoff(handoff_dir)
+    assert set(bundle.repositories) == {snapshot.resolve() for snapshot in snapshots.values()}
+    assert bundle.served_trees == {snapshots["vllm"].resolve(): site / "vllm"}
