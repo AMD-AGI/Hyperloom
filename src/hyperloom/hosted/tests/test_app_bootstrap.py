@@ -407,3 +407,52 @@ def test_a_source_another_account_owns_is_fetched_and_no_other_repository_is_tru
     assert rev_parse(served).returncode == 0
     refused = rev_parse(other)
     assert refused.returncode != 0 and "dubious ownership" in refused.stderr
+
+
+# A stand-in for a system Python (no virtual environment) whose pip handles --break-system-packages as a real pip does:
+# no `pip wheel` knows it, and `pip install` knows it from pip 23.0.1 on (FAKE_PIP_NEW=1). An option a pip does not know
+# is refused with "no such option" and exit 2 even with --help, which the probe reads.
+_SYSTEM_STUB = """#!/bin/bash
+if [[ "$1" == "-c" ]]; then
+  case "$2" in *base_prefix*) echo 0 ;; *) echo "$FAKE_PREFIX" ;; esac
+  exit 0
+fi
+if [[ " $* " == *" --break-system-packages "* ]] && { [[ " $* " == *" wheel "* ]] || [[ "$FAKE_PIP_NEW" != 1 ]]; }; then
+  echo "no such option: --break-system-packages" >&2
+  exit 2
+fi
+if [[ " $* " == *" --help "* ]]; then
+  exit 0
+fi
+echo "$*" >>"$FAKE_LOG"
+if [[ " $* " == *" wheel "* ]]; then
+  while [[ "$1" != "-w" ]]; do shift; done
+  : >"$2/hyperloom-0-py3-none-any.whl"
+fi
+"""
+
+
+@pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
+@pytest.mark.parametrize("new_pip", [True, False], ids=["pip-knows-the-option", "pip-before-23.0.1"])
+def test_a_system_python_gets_break_system_packages_on_its_install_alone(tmp_path, source, new_pip):
+    stub = tmp_path / "framework" / "bin" / "python"
+    stub.parent.mkdir(parents=True)
+    stub.write_text(_SYSTEM_STUB)
+    stub.chmod(0o755)
+    log = tmp_path / "calls"
+    code, exit_file, stderr = _bootstrap(
+        tmp_path,
+        HYPERLOOM_SOURCE_REPO=str(source),
+        HYPERLOOM_SOURCE_SHA=_git(source, "rev-parse", "HEAD"),
+        PYTHON=str(stub),
+        FAKE_PREFIX=str(tmp_path / "framework"),
+        FAKE_LOG=str(log),
+        FAKE_PIP_NEW="1" if new_pip else "0",
+    )
+    assert (code, exit_file) == (0, None), stderr
+    calls = log.read_text().splitlines()
+    (wheel,) = [c for c in calls if " wheel " in c]
+    (install,) = [c for c in calls if " install " in c]
+    assert "--break-system-packages" not in wheel
+    assert ("--break-system-packages" in install.split()) is new_pip, install
+    assert calls[-1] == "-m hyperloom hosted run"
