@@ -119,8 +119,6 @@ Rules (mirror SKILL.md Hard Rules + Approve Standard):
   missing keys in `notes`.
 - If there are no proposals, return `{"review_verdicts": []}` — the
   runtime falls back to a heartbeat.
-- `approve` requires comparable before/after benchmark, accuracy gate
-  (or waiver), active-path proof when relevant, and a clear rollback.
 - Omit `alternative_action`.
 - When a verdict rests on a rule from `review_constraints`, copy that
   rule's `failure_reason_code` verbatim into the verdict's own
@@ -268,10 +266,8 @@ def _review_prompt(judge_bundle: dict[str, Any]) -> str:
     """The review prompt: the judge-bundle fields the reviewer reads, then the output instructions."""
     bundle_view: dict[str, Any] = {
         "session_id": judge_bundle.get("session_id"),
-        "decision_id": judge_bundle.get("decision_id"),
         "phase": judge_bundle.get("phase"),
-        "merged_context": judge_bundle.get("merged_context"),
-        "missing_context": judge_bundle.get("missing_context"),
+        "context": judge_bundle.get("context"),
         "required_context": judge_bundle.get("required_context"),
         "proposals": judge_bundle.get("proposals"),
         "review_constraints": judge_bundle.get("review_constraints"),

@@ -24,6 +24,7 @@ def _coordinator_request(prompt: str, session_id: str = "sess_a") -> dict:
     return {
         "session_id": session_id,
         "raw_prompt": prompt,
+        "context": {"model": "Qwen3-14B", "framework": "sglang"},
     }
 
 
@@ -40,9 +41,7 @@ def test_prepare_review_for_coordinator_inbox_extracts_proposals(reviewer):
     rev, sm = reviewer
     bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS))
     assert sorted(p["msg_id"] for p in bundle.proposals) == ["aaa1", "bbb2"]
-    # Context merged from shared_state.
-    assert bundle.merged_context["model"] == "Qwen3-14B"
-    assert bundle.merged_context["framework"] == "sglang"
+    assert bundle.context == {"model": "Qwen3-14B", "framework": "sglang"}
     assert bundle.required_context == []
     # Mixed batch: strictest class wins at bundle level (evidence_producer).
     constraints = bundle.review_constraints
@@ -58,28 +57,6 @@ def test_prepare_review_for_coordinator_inbox_extracts_proposals(reviewer):
     assert "evidence_producer" in by_cls
     assert "framework_op" in by_cls
     assert by_cls["framework_op"] == []
-
-
-def test_prepare_review_propagates_known_actions(reviewer):
-    rev, sm = reviewer
-    bundle = rev.prepare_review(
-        {
-            "session_id": "sess_known",
-            "raw_prompt": _PROMPT_WITH_TWO_PROPOSALS,
-            "options": {"known_actions": ["sweep", "baseline", "validate_stack"]},
-        }
-    )
-    assert bundle.review_constraints["known_actions"] == [
-        "baseline",
-        "sweep",
-        "validate_stack",
-    ]
-
-
-def test_prepare_review_omits_known_actions_when_absent(reviewer):
-    rev, sm = reviewer
-    bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS))
-    assert "known_actions" not in bundle.review_constraints
 
 
 # Per-action review_constraints (action-class taxonomy)
@@ -301,7 +278,9 @@ def test_prepare_review_asks_for_missing_critical_context(reviewer):
         "=== Inbox for critic ===\n"
         "  seq=1 msg_id=aaa from=orchestration topic=proposal payload={'action_name': 'kernel_opt'}\n"
     )
-    bundle = rev.prepare_review(_coordinator_request(prompt, "sess_b"))
+    request = _coordinator_request(prompt, "sess_b")
+    request["context"] = {}
+    bundle = rev.prepare_review(request)
     assert bundle.required_context == ["model", "framework"]
 
 
@@ -389,13 +368,6 @@ def test_commit_review_carries_the_cited_rule_into_the_intent(reviewer):
     assert cited["failure_reason_code"] == "specialist_quantitative_claim_violation"
     uncited = _verdict_intent_for(intents, "bbb2")["payload"]
     assert uncited["failure_reason_code"] == ""
-    logged = [
-        json.loads(line)["decision_review"]
-        for line in (sm.session_dir("sess_code") / "decisions.jsonl").read_text("utf-8").splitlines()
-        if line.strip()
-    ]
-    codes = {d["target_proposal_msg_id"]: d["failure_reason_code"] for d in logged}
-    assert codes["aaa1"] == "specialist_quantitative_claim_violation"
 
 
 def test_commit_review_backfills_advice_text_from_advice_entry(reviewer):
