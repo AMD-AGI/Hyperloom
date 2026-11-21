@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hyperloom.common.model_paths import resolve_serving_model_path
-from hyperloom_multibranch.scheduling.manifest import kept_claw_session_id
+from hyperloom_multibranch.blackboard.knowledge.breakdown import leg_claw_session_id
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import Workload
 from inference_suite.contracts import BaseLaunchError
@@ -60,15 +60,16 @@ def freeze_session_base(
 
 def record_claw_session(toolbox: Path, environ: Mapping[str, str]) -> None:
     """Record in the state of the toolbox's session at ``toolbox`` (``state.json``, and ``retest_view.json`` beside it)
-    the Claw session it keeps under ``environ`` (:func:`~hyperloom_multibranch.scheduling.manifest.kept_claw_session_id`):
-    the one it recorded, else the one ``environ`` names; the state is not written when that changes nothing."""
+    the Claw session the leg that runs under ``environ`` runs under
+    (:func:`~hyperloom_multibranch.blackboard.knowledge.breakdown.leg_claw_session_id`): the one ``environ`` names,
+    else the one it recorded; the state is not written when that changes nothing."""
 
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(toolbox)
-    kept = kept_claw_session_id(state.claw_session_id, environ, str(SharedState.state_path(toolbox)))
-    if kept is not None and kept != state.claw_session_id:
-        state.claw_session_id = kept
+    claw = leg_claw_session_id(state.claw_session_id or None, environ)
+    if claw is not None and claw != state.claw_session_id:
+        state.claw_session_id = claw
         state.save(toolbox)
 
 

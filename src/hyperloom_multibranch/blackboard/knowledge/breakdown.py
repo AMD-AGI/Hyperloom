@@ -156,6 +156,14 @@ def claw_session_id(environ: Mapping[str, str]) -> str | None:
     return session_variable(CLAW_SESSION_KEY, environ)
 
 
+def leg_claw_session_id(recorded: str | None, environ: Mapping[str, str]) -> str | None:
+    """The Claw session a session records once a leg runs under ``environ``: the one ``environ`` gives
+    (:func:`claw_session_id`), as the id follows the leg that runs, and ``recorded`` when it gives none. The one rule
+    the manifest, the toolbox's state and the breakdown apply, so the three cannot name different Claw sessions."""
+
+    return claw_session_id(environ) or recorded
+
+
 def session_metadata(
     snapshot: BlackboardSnapshot,
     environ: Mapping[str, str],
@@ -164,12 +172,12 @@ def session_metadata(
 ) -> dict[str, object]:
     """The ``metadata.session`` block: the session id, the source revision the session ran on as it recorded it at
     start, and what :data:`SESSION_VARIABLES` name; null where unset. ``claw_session`` is the Claw session the
-    session recorded (:data:`CLAW_SESSION_KEY`), which a process that resumes or exports it under another id keeps;
-    ``environ``'s where it recorded none. The other variables are the exporting process's."""
+    session recorded (:data:`CLAW_SESSION_KEY`); the block names the one :func:`leg_claw_session_id` gives, the
+    exporting process's when it has one. The other variables are the exporting process's."""
 
     session_id = snapshot.profile.session_id if snapshot.profile is not None else None
     named = {key: session_variable(key, environ) for key in SESSION_VARIABLES}
-    named[CLAW_SESSION_KEY] = claw_session or named[CLAW_SESSION_KEY]
+    named[CLAW_SESSION_KEY] = leg_claw_session_id(claw_session, environ)
     return {"session_id": session_id, "code_revision": code_revision or None, **named}
 
 
@@ -249,7 +257,7 @@ class SessionPlace:
     ``session_dir`` is where a hosted run's records are read from and ``runner_dir`` the agent runner's session
     directory; ``code_revision`` is the source revision the session's manifest recorded at start, which a process that
     exports another run's session, such as ``final-only``, does not have in its environment, and ``claw_session_id``
-    the Claw session the manifest keeps, which a resumed or ``final-only`` process may run under another id than.
+    the Claw session the manifest records, which the breakdown names when the exporting process is given none.
     """
 
     session_dir: Path | None = None
@@ -364,6 +372,7 @@ __all__ = [
     "card_holds",
     "claw_session_id",
     "hosted_records",
+    "leg_claw_session_id",
     "measurement_usage",
     "session_metadata",
     "session_spend",

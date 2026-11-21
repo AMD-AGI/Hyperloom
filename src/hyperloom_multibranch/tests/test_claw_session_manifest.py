@@ -2,19 +2,24 @@
 # SPDX-License-Identifier: MIT
 
 """A session records the Claw session that hosts it in ``MB-manifest.json`` as it starts, so a collector of running
-sessions can tell whose a directory is before CLOSE; a run Claw did not host records none, and a resumed session keeps
-the id it recorded."""
+sessions can tell whose a directory is before CLOSE; a run Claw did not host records none. The id follows the leg that
+runs: a ``run --resume`` or ``final-only`` writes the id it is given to the manifest and the breakdown, and one given
+none keeps the recorded id."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from pathlib import Path
 
 import pytest
 
-from hyperloom_multibranch.blackboard.knowledge.breakdown import FILENAME, SESSION_VARIABLES, claw_session_id
+from hyperloom_multibranch.blackboard.knowledge.breakdown import (
+    FILENAME,
+    SESSION_VARIABLES,
+    claw_session_id,
+    leg_claw_session_id,
+)
 from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.resumption import deadline_after_downtime, persisted_run, resumable_run
@@ -78,50 +83,6 @@ async def test_a_session_claw_did_not_host_records_no_claw_session(
     assert json.loads(stage.layout.manifest.read_text())["claw_session_id"] is None
 
 
-async def test_a_resumed_session_keeps_the_claw_session_it_recorded_and_warns_when_given_another(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    monkeypatch.setenv(CLAW, "claw-first")
-    stage = _stage(tmp_path)
-    stage.steps = _signalling(stage)
-    await stage.run()
-    monkeypatch.setenv(CLAW, "claw-other")
-
-    with caplog.at_level(logging.WARNING, logger="hyperloom_multibranch.scheduling.manifest"):
-        await _resume(stage)
-
-    assert read_manifest(stage.layout.manifest).claw_session_id == "claw-first"
-    assert any("'claw-other'" in record.getMessage() for record in caplog.records)
-
-
-async def test_a_resumed_session_given_no_claw_session_keeps_the_one_it_recorded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(CLAW, "claw-first")
-    stage = _stage(tmp_path)
-    stage.steps = _signalling(stage)
-    await stage.run()
-    monkeypatch.delenv(CLAW)
-
-    await _resume(stage)
-
-    assert read_manifest(stage.layout.manifest).claw_session_id == "claw-first"
-
-
-async def test_a_resumed_session_that_recorded_no_claw_session_takes_the_one_it_is_given(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv(CLAW, raising=False)
-    stage = _stage(tmp_path)
-    stage.steps = _signalling(stage)
-    await stage.run()
-    monkeypatch.setenv(CLAW, "claw-late")
-
-    await _resume(stage)
-
-    assert read_manifest(stage.layout.manifest).claw_session_id == "claw-late"
-
-
 async def test_a_manifest_an_earlier_build_wrote_reads_with_no_claw_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -142,23 +103,6 @@ def test_the_claw_session_is_read_from_the_variable_the_breakdown_reads() -> Non
     assert claw_session_id({CLAW: ""}) is None and claw_session_id({}) is None
 
 
-@pytest.mark.parametrize("given", ["claw-other", None], ids=["another", "none"])
-async def test_the_breakdown_of_a_resumed_session_names_the_claw_session_its_manifest_keeps(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, given: str | None
-) -> None:
-    monkeypatch.setenv(CLAW, "claw-first")
-    stage = _stage(tmp_path)
-    stage.steps = _signalling(stage)
-    await stage.run()
-    (stage.layout.reports / FILENAME).unlink()
-    _given(monkeypatch, given)
-
-    await _resume(stage)
-
-    assert read_manifest(stage.layout.manifest).claw_session_id == "claw-first"
-    assert _breakdown_claw_session(stage) == "claw-first"
-
-
 def _given(monkeypatch: pytest.MonkeyPatch, claw: str | None) -> None:
     """Run what follows under the Claw session ``claw``, or under none."""
 
@@ -168,12 +112,37 @@ def _given(monkeypatch: pytest.MonkeyPatch, claw: str | None) -> None:
         monkeypatch.setenv(CLAW, claw)
 
 
-@pytest.mark.parametrize(
-    ("started", "given", "named"),
-    [("claw-first", "claw-other", "claw-first"), ("claw-first", None, "claw-first"), (None, "claw-late", "claw-late")],
-    ids=["another", "none", "none-recorded"],
-)
-async def test_the_breakdown_of_a_final_only_names_the_claw_session_the_manifest_keeps(
+#: (the id the session started under, the id the next leg is given, the id that leg records): the id follows the leg
+#: that runs, and a leg given none keeps the recorded one.
+LEGS = [
+    ("claw-first", "claw-other", "claw-other"),
+    ("claw-first", None, "claw-first"),
+    (None, "claw-late", "claw-late"),
+    ("claw-first", "claw-first", "claw-first"),
+]
+LEG_IDS = ["another", "none", "none-recorded", "same"]
+
+
+@pytest.mark.parametrize(("started", "given", "named"), LEGS, ids=LEG_IDS)
+async def test_a_resumed_session_records_the_claw_session_of_the_leg_that_runs_in_the_manifest_and_the_breakdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, started: str | None, given: str | None, named: str
+) -> None:
+    _given(monkeypatch, started)
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    await stage.run()
+    assert read_manifest(stage.layout.manifest).claw_session_id == started
+    (stage.layout.reports / FILENAME).unlink()
+    _given(monkeypatch, given)
+
+    await _resume(stage)
+
+    assert json.loads(stage.layout.manifest.read_text())["claw_session_id"] == named
+    assert _breakdown_claw_session(stage) == named
+
+
+@pytest.mark.parametrize(("started", "given", "named"), LEGS, ids=LEG_IDS)
+async def test_a_final_only_records_the_claw_session_of_the_leg_that_runs_in_the_manifest_and_the_breakdown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, started: str | None, given: str | None, named: str
 ) -> None:
     _given(monkeypatch, started)
@@ -181,11 +150,35 @@ async def test_the_breakdown_of_a_final_only_names_the_claw_session_the_manifest
     stage.scripts = SCRIPTS
     stage.toolbox_type = StuckStopToolbox
     await stage.run()
+    assert read_manifest(stage.layout.manifest).claw_session_id == started
     (stage.layout.reports / FILENAME).unlink()
     persisted = persisted_run(stage.layout.root)
     _given(monkeypatch, given)
 
     await _recovery(stage, persisted.settings).finish(persisted.ended)
 
-    assert read_manifest(stage.layout.manifest).claw_session_id == started
+    assert json.loads(stage.layout.manifest.read_text())["claw_session_id"] == named
     assert _breakdown_claw_session(stage) == named
+
+
+async def test_a_resumed_session_run_by_no_claw_session_records_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _given(monkeypatch, None)
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    await stage.run()
+
+    await _resume(stage)
+
+    assert json.loads(stage.layout.manifest.read_text())["claw_session_id"] is None
+    assert _breakdown_claw_session(stage) is None
+
+
+@pytest.mark.parametrize(("recorded", "given", "named"), LEGS, ids=LEG_IDS)
+def test_the_leg_rule_takes_the_given_claw_session_else_the_recorded_one(
+    recorded: str | None, given: str | None, named: str
+) -> None:
+    environ = {} if given is None else {CLAW: f" {given} "}
+    assert leg_claw_session_id(recorded, environ) == named
+    assert leg_claw_session_id(recorded, {CLAW: "  "}) == recorded

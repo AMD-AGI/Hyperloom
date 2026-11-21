@@ -97,7 +97,7 @@ from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog, downtime_until
 from hyperloom_multibranch.scheduling.events import IntegrationProfiler, SessionEvents
 from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering
-from hyperloom_multibranch.blackboard.knowledge.breakdown import claw_session_id
+from hyperloom_multibranch.blackboard.knowledge.breakdown import claw_session_id, leg_claw_session_id
 from hyperloom_multibranch.scheduling.exports import CloseAuthoring, ExportServices, ExportSources, SessionExports
 from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalSelector, session_candidates
 from hyperloom_multibranch.scheduling.forks import ForkDesk
@@ -111,7 +111,6 @@ from hyperloom_multibranch.scheduling.manifest import (
     ImageCheckSummary,
     SessionManifest,
     code_version,
-    kept_claw_session_id,
     read_manifest,
 )
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup
@@ -383,7 +382,8 @@ class Session:
     async def finish(self, ended: SessionStopReason, *, restart: bool = False) -> SessionOutcome:
         """Run FINAL and CLOSE over the directory a session that ended for ``ended`` before FINAL left behind, and
         report as that session would have; the manifest and the blackboard that session wrote are this one's input, so
-        this opens no session of its own and only its report, dashboard and breakdown are written again. It ends for
+        this opens no session of its own and only its report, dashboard and breakdown are written again, and the
+        manifest, which names the Claw session this leg runs under (:meth:`_write_leg_manifest`). It ends for
         ``ended`` however FINAL goes: the session did not run its course, and a FINAL run after the fact does not
         make it so; except that for the ``restart`` of a hosted run, which its host starts again after a preemption, a
         FINAL that chose ends it for ``finished_after_restart`` when ``ended`` is not in :data:`COMPLETED_REASONS`.
@@ -398,7 +398,9 @@ class Session:
 
         landed = await recorded_baseline(self._blackboard) is not None
         candidates = await self._final_candidates() if landed else None
-        self._agent_isolation = read_manifest(self._layout.manifest).agent_isolation
+        manifest = read_manifest(self._layout.manifest)
+        self._agent_isolation = manifest.agent_isolation
+        self._write_leg_manifest(manifest)
         total = budget_seconds(self._settings.max_hours)
         budget = SessionBudget(self._clock.now() - total, total)
         self._in_final = True
@@ -432,10 +434,17 @@ class Session:
 
         manifest = read_manifest(self._layout.manifest)
         downtime = downtime_until(self._layout.decisions, self._clock.now())
-        claw = kept_claw_session_id(manifest.claw_session_id, os.environ, str(self._layout.manifest))
-        replace(manifest, deadline=deadline, claw_session_id=claw).write(self._layout.manifest)
+        self._write_leg_manifest(replace(manifest, deadline=deadline))
         self._phase("resume", ended=ended.value, downtime_seconds=downtime, deadline=deadline)
         return SessionBudget(manifest.started_at, deadline - manifest.started_at)
+
+    def _write_leg_manifest(self, manifest: SessionManifest) -> None:
+        """Write ``manifest`` for the leg this process runs over the session, a ``run --resume`` or a ``final-only``,
+        naming the Claw session that leg runs under (:func:`leg_claw_session_id`), the recorded one when it is given
+        none."""
+
+        claw = leg_claw_session_id(manifest.claw_session_id, os.environ)
+        replace(manifest, claw_session_id=claw).write(self._layout.manifest)
 
     async def _run_and_close(
         self, work: Awaitable[SessionOutcome], ending: SessionOutcome, budget: SessionBudget, hard_stop: HardStop

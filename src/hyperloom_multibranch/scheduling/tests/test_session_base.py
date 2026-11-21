@@ -285,16 +285,22 @@ def test_a_session_claw_did_not_host_records_no_claw_session_in_the_toolbox_stat
     assert _claw(tmp_path) == ("", "")
 
 
-def test_a_resumed_session_keeps_the_claw_session_its_toolbox_state_recorded(
-    tmp_path: Path, asked: list, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("given", "named"), [("claw-other", "claw-other"), (None, "claw-first")], ids=["another", "none"]
+)
+def test_a_resumed_session_records_the_claw_session_of_the_leg_that_runs_in_its_toolbox_state(
+    tmp_path: Path, asked: list, monkeypatch: pytest.MonkeyPatch, given: str | None, named: str
 ) -> None:
     monkeypatch.setenv("CLAW_SESSION_ID", "claw-first")
     freeze_session_base(tmp_path, WORKLOAD, "")
-    monkeypatch.setenv("CLAW_SESSION_ID", "claw-other")
+    if given is None:
+        monkeypatch.delenv("CLAW_SESSION_ID")
+    else:
+        monkeypatch.setenv("CLAW_SESSION_ID", given)
 
     freeze_session_base(tmp_path, WORKLOAD, "")
 
-    assert _claw(tmp_path) == ("claw-first", "claw-first")
+    assert _claw(tmp_path) == (named, named)
 
 
 def test_a_resumed_session_whose_toolbox_state_recorded_none_takes_the_claw_session_it_is_given(
