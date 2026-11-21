@@ -543,12 +543,15 @@ def build_hosted_toolbox(
     """Build a :class:`RealToolbox` whose tests run in sandboxes of the sandbox service; call ``await toolbox.start()``
     before use and ``await toolbox.close()`` after.
 
-    The grant's GPUs are the cards: ``measurement_capacity`` reports them, with the cards of the branch sandboxes
-    leased as ``leased_cards``, and at most ``min(max_gpus // tp, max_sandboxes)`` tests run at once, one fewer where a
-    finished test's sandbox is kept for the next (:attr:`HostedOptions.make_before_break`, where at least three fit). Without grant
-    limits the toolbox cannot count the cards: the capacity is unknown, ``lease_branch_sandbox`` refuses with
-    ``unsupported_kind``, and at most as many tests run at once as the sandbox pool's default; the service's own quota
-    still bounds them (a refused create waits). Sandboxes of other runs are never touched.
+    At most ``min(max_gpus // tp, max_sandboxes)`` tests run at once, one fewer where a finished test's sandbox is kept
+    for the next (:attr:`HostedOptions.make_before_break`, where at least three fit). The cards are counted only for a
+    session that lends ``dev`` sandboxes (:attr:`HostedOptions.dev_leases`) and was given grant limits and a ``dev``
+    key: the grant's GPUs are the cards, ``measurement_capacity`` reports them, with the cards of the branch sandboxes
+    leased as ``leased_cards``, and ``lease_branch_sandbox`` leases them. Any other session -- one that lends none,
+    whatever limits the grant has, included -- reports its capacity as unknown and ``lease_branch_sandbox`` refuses
+    with ``unsupported_kind``. Without grant limits at most as many tests run at once as the sandbox pool's default;
+    the service's own quota still bounds them (a refused create waits).
+    Sandboxes of other runs are never touched.
 
     A session that reads another rule pack than the runner's has its results refused as ``rule_pack_mismatch``: the
     runner reads the pack of the commit it installs, and the backend takes only results that read the session's.
