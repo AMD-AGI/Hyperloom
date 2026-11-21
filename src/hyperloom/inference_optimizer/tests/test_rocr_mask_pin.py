@@ -10,8 +10,8 @@ import dataclasses
 import pytest
 
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
-from hyperloom.orchestrator.actions.executors._benchmark_runtime import apply_runtime_benchmark_overrides
-from hyperloom.orchestrator.actions.executors._gpu_pin import resolve_gpu_pin
+from hyperloom.orchestrator.actions.executors.workload._benchmark_runtime import apply_runtime_benchmark_overrides
+from hyperloom.orchestrator.actions.executors.gpu._gpu_pin import resolve_gpu_pin
 from hyperloom.orchestrator.state.tests._session_base import freeze_base, session_base
 from inference_suite.contracts import Topology
 

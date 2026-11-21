@@ -22,7 +22,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.common.visible_devices import parse_device_list
-from hyperloom.orchestrator.actions.executors._gpu_pin import (
+from hyperloom.orchestrator.actions.executors.gpu._gpu_pin import (
     coerce_tp,
     _is_autofilled_rocr,
     resolve_gpu_pin,

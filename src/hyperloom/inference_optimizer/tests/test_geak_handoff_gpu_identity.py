@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.actions.executors._gpu_pin import _resolve_handoff_gpu_identity
+from hyperloom.orchestrator.actions.executors.gpu._gpu_pin import _resolve_handoff_gpu_identity
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 

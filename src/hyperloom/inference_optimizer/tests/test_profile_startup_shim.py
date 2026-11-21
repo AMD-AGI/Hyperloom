@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from hyperloom.orchestrator.actions.executors import _framework_rewrite_evidence as evidence
+from hyperloom.orchestrator.actions.executors.framework_change import _framework_rewrite_evidence as evidence
 
 _REPORT = (
     "import os, hl_host_probe; "

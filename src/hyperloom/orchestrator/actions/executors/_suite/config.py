@@ -89,8 +89,8 @@ from inference_suite.contracts import (
 )
 from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 
-from .._gpu_pin import ROCR_AUTOFILL_ENV
-from .._workload_envs import QUALITY_REF_ENVS
+from ..gpu._gpu_pin import ROCR_AUTOFILL_ENV
+from ..workload._workload_envs import QUALITY_REF_ENVS
 from .._profile_setup import (
     _DELAY_ITERATIONS,
     _MAX_ITERATIONS,

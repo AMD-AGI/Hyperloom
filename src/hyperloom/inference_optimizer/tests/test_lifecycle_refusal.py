@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _multi_node_env
-from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle as sl
 
 _PORT = 8888
 

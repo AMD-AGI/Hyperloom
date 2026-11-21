@@ -19,7 +19,7 @@ from hyperloom.inference_optimizer.cli.benchmark_config import (
     write_agentx_benchmark,
 )
 from hyperloom.inference_optimizer.cli.parser import _build_parser
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     default_baseline_config,
     materialize_benchmark_config,
     LaunchLayer,

@@ -155,9 +155,13 @@ def test_an_integrate_patch_that_wins_on_throughput_is_not_kept_on_a_score_the_b
     """A collapsed score blocks the KEEP whether it is a measured drop or was taken under another eval definition."""
     from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
     from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
-    from hyperloom.orchestrator.actions.executors._integrate_bench import _grade_bench_accuracy
-    from hyperloom.orchestrator.actions.executors._integrate_perf_gate import _GateBasis, _ThroughputGrade, _weigh_gate
-    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
+    from hyperloom.orchestrator.actions.executors.integrate._integrate_bench import _grade_bench_accuracy
+    from hyperloom.orchestrator.actions.executors.integrate._integrate_perf_gate import (
+        _GateBasis,
+        _ThroughputGrade,
+        _weigh_gate,
+    )
+    from hyperloom.orchestrator.actions.executors.integrate._integrate_results import _PatchBench
 
     slot = tmp_path / "variant_00"
     suite_eval(slot / ag.ACCURACY_DIR, 0.0, digest)

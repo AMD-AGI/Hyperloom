@@ -44,11 +44,11 @@ from inference_suite.contracts import (
 
 from ...cancel_channel import cancel_scope_listener
 from .._accuracy_gate import ACCURACY_DIR
-from .._agentx_checkpoint import AgentxCheckpoint, SuiteRoundCheckpoint
+from ..workload._agentx_checkpoint import AgentxCheckpoint, SuiteRoundCheckpoint
 from .._benchmark_interpreter import _resolve_probe_python
 from .._failed_step import failed_step_error_class
-from .._gpu_pin import session_cards_mask
-from .._gpu_power import round_gpu_telemetry
+from ..gpu._gpu_pin import session_cards_mask
+from ..gpu._gpu_power import round_gpu_telemetry
 from .._multi_node_env import client_only_server_url
 from .._subprocess_kill import (
     AgentxCheckpointMissed,

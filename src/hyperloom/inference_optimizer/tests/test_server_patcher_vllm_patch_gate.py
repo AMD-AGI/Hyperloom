@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hyperloom.orchestrator.actions.executors import PatchedServer
-from hyperloom.orchestrator.actions.executors import _patch_laying as laying
+from hyperloom.orchestrator.actions.executors.patching import _patch_laying as laying
 from hyperloom.orchestrator.actions.executors import _server_patcher as sp
 
 

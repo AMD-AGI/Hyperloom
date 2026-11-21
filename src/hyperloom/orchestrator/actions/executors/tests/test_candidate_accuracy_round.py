@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._grid_base import VARIANT_CONFIG_FILE, variant_config_of
+from hyperloom.orchestrator.actions.executors.grid._grid_base import VARIANT_CONFIG_FILE, variant_config_of
 from hyperloom.orchestrator.actions.executors._accuracy_gate import ACCURACY_DIR, AccuracyReference
 from hyperloom.orchestrator.actions.executors._suite.rounds import AccuracyRound
 from hyperloom.orchestrator.actions.executors.benchmark_run import accuracy
@@ -100,7 +100,7 @@ def test_a_grid_rounds_point_is_the_variant_config_beside_its_workspace(tmp_path
 async def _integrate_gate(tmp_path, monkeypatch, *, tput: float, regraded_pass: bool | None = True):
     """Weigh an integrate bench at ``tput`` against a base of 1000 tok/s, the round regrading accuracy to
     ``regraded_pass``."""
-    from hyperloom.orchestrator.actions.executors import _integrate_bench, _integrate_perf_gate
+    from hyperloom.orchestrator.actions.executors.integrate import _integrate_bench, _integrate_perf_gate
     from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
     from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 
@@ -178,7 +178,7 @@ def _enablement_bench(slot: Path, *, served: bool) -> dict:
 
 def _enablement_round(tmp_path, monkeypatch, *, served=True, agentx=True, agentx_accuracy=True, ended=""):
     """Gate one enablement round whose bench served or not; the gated result, the rounds it ran, and its slot."""
-    from hyperloom.orchestrator.actions.executors import _integrate_bench
+    from hyperloom.orchestrator.actions.executors.integrate import _integrate_bench
 
     session = tmp_path / "session"
     specialist = session / "runs" / "specialist" / _SPECIALIST

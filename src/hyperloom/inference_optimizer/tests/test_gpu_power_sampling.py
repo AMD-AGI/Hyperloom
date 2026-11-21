@@ -18,7 +18,7 @@ from hyperloom_common.power_sources import SysfsNode
 from hyperloom_common.tests.test_gpu_telemetry import _AmdSmi, _sysfs
 from inference_suite.contracts.layout import POWER
 from inference_suite.server_log import LogCursor
-from hyperloom.orchestrator.actions.executors._gpu_power import (
+from hyperloom.orchestrator.actions.executors.gpu._gpu_power import (
     POWER_FIELDS,
     build_gpu_power_recorder,
     round_power_summary,
@@ -109,7 +109,7 @@ def test_the_measurement_falls_back_to_the_report_when_no_recorder_ran(tmp_path)
 
 def test_the_builder_follows_amd_smi_and_the_switch(tmp_path, monkeypatch):
     """On wherever amd-smi exists, unless the operator turns it off; nothing to sample without amd-smi."""
-    from hyperloom.orchestrator.actions.executors import _gpu_power
+    from hyperloom.orchestrator.actions.executors.gpu import _gpu_power
 
     log_path = str(tmp_path / "server.log")
     monkeypatch.delenv("HYPERLOOM_GPU_POWER_SAMPLING", raising=False)
@@ -134,7 +134,7 @@ def test_an_interval_too_long_for_the_sample_gap_limit_is_refused_where_it_is_se
 ):
     """A round sampled at an interval whose gaps could reach the 3 s limit would be invalid every time, so the
     setting is refused and the round samples nothing; below the floor it is raised to the floor."""
-    from hyperloom.orchestrator.actions.executors._gpu_power import round_gpu_telemetry
+    from hyperloom.orchestrator.actions.executors.gpu._gpu_power import round_gpu_telemetry
 
     monkeypatch.delenv("HYPERLOOM_GPU_POWER_SAMPLING", raising=False)
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/amd-smi")
@@ -171,7 +171,7 @@ def _ready_line() -> str:
 def test_replay_logs_drive_boot_and_measured_per_replica(tmp_path):
     """Each replica boots its own server: a new log is a boot, its ready marker opens the measured phase."""
     from hyperloom.orchestrator.actions.executors._geak_sweep import _replay_server_logs
-    from hyperloom.orchestrator.actions.executors._gpu_power import ServerLogPhaseDriver
+    from hyperloom.orchestrator.actions.executors.gpu._gpu_power import ServerLogPhaseDriver
 
     phases = _PhaseLog()
     driver = ServerLogPhaseDriver(phases, lambda: _replay_server_logs(tmp_path), cursor=LogCursor())
@@ -203,7 +203,8 @@ def test_replay_logs_drive_boot_and_measured_per_replica(tmp_path):
 def test_a_geak_replay_is_recorded_over_its_measured_phase(tmp_path, monkeypatch, env, serving, configured):
     """TP4 on cards 0-3 of an eight-card host: power.json lands in the replay's output directory, and only the four
     cards holding the model, or the four its mask names while another server holds cards 4-7, are its energy."""
-    from hyperloom.orchestrator.actions.executors import _geak_sweep, _gpu_power
+    from hyperloom.orchestrator.actions.executors import _geak_sweep
+    from hyperloom.orchestrator.actions.executors.gpu import _gpu_power
 
     monkeypatch.setenv("HYPERLOOM_GPU_POWER_SAMPLING", "1")
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/amd-smi")
@@ -254,10 +255,10 @@ def _unlistable_logs() -> list[str]:
 
 
 def test_an_unreadable_replay_log_is_warned_once_and_polling_continues(caplog):
-    from hyperloom.orchestrator.actions.executors._gpu_power import ServerLogPhaseDriver
+    from hyperloom.orchestrator.actions.executors.gpu._gpu_power import ServerLogPhaseDriver
 
     driver = ServerLogPhaseDriver(_PhaseLog(), _unlistable_logs, cursor=LogCursor())
-    with caplog.at_level("DEBUG", logger="hyperloom.orchestrator.actions.executors._gpu_power"):
+    with caplog.at_level("DEBUG", logger="hyperloom.orchestrator.actions.executors.gpu._gpu_power"):
         driver._poll_logs()
         driver._poll_logs()
     levels = [record.levelname for record in caplog.records if "cannot read the replay" in record.getMessage()]
@@ -265,7 +266,7 @@ def test_an_unreadable_replay_log_is_warned_once_and_polling_continues(caplog):
 
 
 def test_a_phase_driver_bug_is_not_swallowed():
-    from hyperloom.orchestrator.actions.executors._gpu_power import ServerLogPhaseDriver
+    from hyperloom.orchestrator.actions.executors.gpu._gpu_power import ServerLogPhaseDriver
 
     class _BrokenCursor(LogCursor):
         def advance(self, server_log_path):
@@ -308,7 +309,7 @@ def test_the_replay_recorder_is_finished_even_when_the_driver_fails(tmp_path, mo
 def test_the_gpu_monitor_block_is_read_whole_by_the_gpu_metrics_reader(tmp_path):
     from hyperloom_common.gpu_telemetry import gpu_monitor
     from hyperloom_common.power_recording import PowerRecording, RecorderScope
-    from hyperloom.orchestrator.actions.executors._gpu_metrics import gpu_metrics_from_report
+    from hyperloom.orchestrator.actions.executors.gpu._gpu_metrics import gpu_metrics_from_report
 
     fast = [(float(t), 0.0, 4, 700.0, 62.0, 50.0, 1730.0, 2000.0, 52790.0, 98.0, 30.0, 2.5e11, 1e7) for t in range(3)]
     recording = PowerRecording(

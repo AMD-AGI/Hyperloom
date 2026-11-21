@@ -19,7 +19,7 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors._suite.config import RoundSettings, fixed_workload, suite_config
 from hyperloom.orchestrator.actions.executors._suite.rounds import point_server
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     BenchmarkTarget,
     LaunchLayer,
     materialize_config_with_envs,
@@ -410,7 +410,7 @@ def test_a_round_without_an_external_server_keeps_its_own_lifecycle_and_telemetr
     assert (config.server.host, config.telemetry.gpu.enabled) == ("127.0.0.1", True)
 
 
-#: What the AgentX switch writes into an MLPerf point (``_workload_envs.apply_agentx_switch``).
+#: What the AgentX switch writes into an MLPerf point (``_agentx_switch.apply_agentx_switch``).
 _MLPERF_ENVS = {
     "HYPERLOOM_AGENTIC_BACKEND": "mlperf",
     "MLPERF_AGENTIC_MODEL": "kimi-k3",

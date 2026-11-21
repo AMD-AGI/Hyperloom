@@ -22,12 +22,12 @@ import yaml
 
 from hyperloom.common.deadline import Deadline
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
-from hyperloom.orchestrator.actions.executors import _grid_base, _grid_runner
+from hyperloom.orchestrator.actions.executors.grid import _grid_base, _grid_runner
 from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
 from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
 from hyperloom.orchestrator.actions.executors.tests.test_baseline_suite_round import _CAPACITY_SERVER_LOG
-from hyperloom.orchestrator.actions.executors._grid_runner import GridLaunch, GridRecipe, GridStop, GridVariant
-from hyperloom.orchestrator.actions.executors._grid_runner import run_grid
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridLaunch, GridRecipe, GridStop, GridVariant
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import run_grid
 from hyperloom.orchestrator.actions.executors._suite.config import MEASURED_SEED
 from hyperloom.orchestrator.actions.executors._suite.rounds import RUN_DIR_PREFIX, TOOL_CACHE_ENV
 from hyperloom.orchestrator.actions.executors._suite.config import WARMUP_SEED

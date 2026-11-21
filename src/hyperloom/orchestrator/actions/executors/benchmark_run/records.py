@@ -15,8 +15,8 @@ import yaml
 
 from ...stop_attribution import StoppedByTheRun
 from .._accuracy_gate import ACCURACY_DEFINITION_DIGEST_KEY, EVAL_DEFINITION_DIGEST_KEY
-from .._grid_runner import stopped_by_the_run
-from .._server_argv import ConfigUnreadable, config_point
+from ..grid._grid_runner import stopped_by_the_run
+from ..serving._server_argv import ConfigUnreadable, config_point
 from .._suite.rounds import SuiteRoute
 from inference_suite.contracts import RunLayout
 

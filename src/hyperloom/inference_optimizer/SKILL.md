@@ -1161,7 +1161,7 @@ What this controls:
   back to when no `params.grid` is supplied. atom and xdit are the
   frameworks with programmatic seeds today
   (`_default_grid_for_framework` in
-  `src/hyperloom/orchestrator/actions/executors/_grid_base.py` dispatches to
+  `src/hyperloom/orchestrator/actions/executors/grid/_grid_base.py` dispatches to
   `_atom_default_grid()` / `_xdit_default_grid()`); sglang and vllm continue to rely on
   the orchestration LLM emitting `provenance='default_grid'`
   variants. On those two an `explore` that carries no usable

@@ -15,7 +15,7 @@ from typing import Any, Iterable, Mapping, NamedTuple
 
 from hyperloom_common.git_safety import safe_directory_args
 from .._git import _git_head_sha
-from .._patch_snapshot import (
+from ..patching._patch_snapshot import (
     _create_patch_snapshot,
     _patch_touched_paths_from_text,
     _restore_patch_snapshot,
@@ -298,7 +298,7 @@ def _refused_warm_replay(patches: list[Any], failure: str) -> dict[str, Any]:
 
 
 def _warm_patch_trees(roots: list[str]) -> dict[str, dict[str, Any]]:
-    from .._nogit_patch import _is_git_tree
+    from ..patching._nogit_patch import _is_git_tree
 
     # Two recorded roots inside one checkout are one tree: a git diff's paths are work-tree-root relative, so both
     # resolve there and applying them separately would ignore whatever falls outside the narrower one.
@@ -502,7 +502,7 @@ def _apply_warm_patch_sequence(
         patch_path.write_text(overlay.content, encoding="utf-8")
         try:
             if tree["use_nogit"]:
-                from .._nogit_patch import _apply_patch_no_git
+                from ..patching._nogit_patch import _apply_patch_no_git
 
                 backups_so_far = tree["nogit_backups"]
                 nogit_apply = _apply_patch_no_git(

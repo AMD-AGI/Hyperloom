@@ -13,11 +13,11 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors._grid_runner import (
+from hyperloom.orchestrator.actions.executors.grid._grid_inputs import (
     sanitize_result_dir,
     sanitize_script_name,
 )
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     materialize_config_with_envs,
     BenchmarkTarget,
     LaunchLayer,
