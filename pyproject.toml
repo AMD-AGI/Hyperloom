@@ -290,7 +290,6 @@ hyperloom = [
 "hyperloom.inference_optimizer" = [
     "SKILL.md",
     "README.md",
-    "actions/*.md",
     # Release-contract shell installers + configs.
     "assets/*.sh",
     "assets/*.example",

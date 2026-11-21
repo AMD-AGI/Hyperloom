@@ -1267,8 +1267,7 @@ where a draft/MTP path exists, benchmarked with chat-formatted prompts.
 To override shipped configs without editing them, materialize a per-run asset
 root and `export INFERENCE_OPTIMIZER_ASSET_ROOT="$ASSET_ROOT"` (env var, not a
 CLI flag; `asset_root()` raises `AssetRootNotFound` if the dir is missing).
-`mkdir -p "$ASSET_ROOT/assets/configs"`, `ln -sfn` `actions/` from
-`$REPO_ROOT/src/hyperloom/inference_optimizer/` and `orchestrator/` from
+`mkdir -p "$ASSET_ROOT/assets/configs"`, `ln -sfn` `orchestrator/` from
 `$REPO_ROOT/src/hyperloom/`, then
 copy + edit the relevant `baseline_*.yaml` / `profile_*.yaml`. Reach for this
 only when `_workload_envs.materialize_config_with_envs` defaults don't fit

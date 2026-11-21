@@ -97,6 +97,7 @@ code_functions_guidance_v2
 .gen_funcdocs_reboot.wf.js
 evaluation_analysis
 code-clean-ref
+code-audit-reference
 
 
 # Operator runtime env (contains real API keys — never commit)
