@@ -446,8 +446,6 @@ class FrameworkEventRecorder:
         for name in ("confidence_avg", "confidence"):
             if name in fields:
                 row[name] = _float_or_none(fields.get(name))
-        if fields.get("ensemble_scores"):
-            row["ensemble_scores"] = dict(fields.get("ensemble_scores") or {})
         self._sink.record(SECTION_RUN, row, row_type=ROW_RUN, natural_ids=_key(key))
 
     # ---- proposals -------------------------------------------------------

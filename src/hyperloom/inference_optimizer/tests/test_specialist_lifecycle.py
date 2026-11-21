@@ -82,7 +82,6 @@ def coord(tmp_path: Path):
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
     c.knowledge_plane = KnowledgePlane(recipe_kb=None)
-    c.proposal_scorer = None
     c.bus = SimpleNamespace(record_observation=AsyncMock())
     return c
 

@@ -29,7 +29,6 @@ from .backends import (
     CriticSetup,
     ModelRouting,
     _build_backends,
-    _build_proposal_scorer,
     _orchestration_banner,
     _resolve_orchestration_backend,
 )
@@ -983,8 +982,6 @@ def _build_coordinator(
         advisory=AdvisoryServices(
             # KnowledgePlane facade (None when --degraded-pr).
             knowledge_plane=knowledge_plane,
-            # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
-            proposal_scorer=_build_proposal_scorer(args, session_dir),
         ),
     )
 

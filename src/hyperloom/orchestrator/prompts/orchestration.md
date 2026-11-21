@@ -291,13 +291,6 @@ that never starts a serving server.
 with `"atomic": true` is a coupled set that only works together; it is
 benched as one variant — never split, drop, or re-author it into a grid.
 
-**Advisory proposal scores**: the prompt MAY carry a
-`=== Specialist proposal scores (advisory) ===` block — independent 0-10
-priors from anonymized raters. Weigh alongside `gaps[]`, KB sub-graph,
-recent winners, and `analysis.md` 🔴/🟡/🟢 markers with no extra
-authority. Rater identities are hidden; do NOT speculate which model a
-`rater_N` is. Cross-rater disagreement is an uncertainty signal.
-
 **Plateau**: the `Plateau advisory` reports each arm separately. Both arms
 dry advances OPTIMIZE → KERNEL_AGENT (`reason=optimize_no_more_leverage`)
 at the next phase-compute — drain / hand off first. One arm dry means work
