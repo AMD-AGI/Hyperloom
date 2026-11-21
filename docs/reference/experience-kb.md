@@ -218,7 +218,7 @@ reads see unless `include_excluded` asks for the rest.
 | `POST /v1/files/missing` | which of the files a record names the service lacks | `missing_files()` |
 | `PUT /v1/files/{sha256}` | store one file | `put_file()` |
 | `GET /v1/files/{sha256}` | fetch one file | `fetch_file()` |
-| `POST /v1/read` | rank one schema's Experiences for a decision and render them | `read()` |
+| `POST /v1/read` | rank one schema's Experiences by the caller's weighted signals and render them | `read()` |
 | `GET /v1/list` | page through Experience summaries in write order | `list_experiences()` |
 | `GET /v1/export` | page through complete Experiences in write order | `export_page()` |
 | `GET /v1/labels` | a schema's labels, current label, and whether its state changed since | `labels()` |
