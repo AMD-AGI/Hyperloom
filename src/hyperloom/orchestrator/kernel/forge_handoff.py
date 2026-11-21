@@ -6,14 +6,16 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import is_credential_name, redact_secret_values
 from hyperloom_common.io import WriteOptions, atomic_write_text
 from hyperloom.common.kernel_source_contract import SOURCE_RESOLUTION_FILENAME
+from hyperloom.common.outside_facts import AITER_META_WHEEL_DIR
 from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
+from hyperloom.orchestrator.kernel.campaign_baseline import RepoBaseline
 from hyperloom.orchestrator.kernel.gemm_shape_coverage import parse_aiter_shape_lookups, traced_gemm_shapes
 from hyperloom.orchestrator.measurement.runtime_findings import (
     AITER_TUNED_MISS,
@@ -231,23 +233,45 @@ def _tuned_miss_lines(candidates_path: str, profiled: Mapping[str, Any]) -> list
     return lines
 
 
+#: Installed packages whose snapshot is not named as served. aiter finds its device sources from where its own files
+#: are -- ``aiter/jit/core.py`` beside the package, ``aiter/utility/aiter_types.py`` beside what a link to it resolves
+#: to -- so a checkout standing in for it from another directory stops importing; ``aiter_meta`` is reached only
+#: through aiter, never by name.
+_SERVED_WHERE_INSTALLED = frozenset({"aiter", AITER_META_WHEEL_DIR})
+
+
+def _repositories_json(repositories: Mapping[str, RepoBaseline]) -> str:
+    """``repositories.json``: the sealed repositories, and the installed package a snapshot's checkout stands in for."""
+    served_trees = {
+        repository: str(baseline.deploy_root)
+        for repository, baseline in sorted(repositories.items())
+        if baseline.deploy_root.resolve() != Path(repository).resolve()
+        and baseline.deploy_root.name not in _SERVED_WHERE_INSTALLED
+    }
+    return json.dumps({"repositories": sorted(repositories), "served_trees": served_trees}, indent=2) + "\n"
+
+
 def write_forge_handoff(
     state: Any,
     *,
     handoff_dir: Path,
-    repositories: Collection[str],
+    repositories: Mapping[str, RepoBaseline],
     env_spec: Mapping[str, Any] | None = None,
 ) -> Path:
     """Atomically write one Forge handoff into ``handoff_dir`` and return it.
 
-    ``repositories`` are the sealed repositories, the only ones the controller accepts a task for.
+    ``repositories`` are the sealed repositories, the only ones the controller accepts a task for. Each baseline names
+    the tree the server imports that repository from: itself for a checkout, the installed package for a snapshot. The
+    controller makes its checkout of a snapshot the package a campaign imports, so the campaign measures what it
+    edits. A snapshot of aiter or of its ``aiter_meta`` is declared without that tree: a campaign on it runs the
+    installed copy, as every snapshot campaign did before.
     """
     handoff_dir = Path(handoff_dir)
     documents = {
         WORKLOAD_FILENAME: build_workload_md(state),
         SERVING_CONTEXT_FILENAME: build_serving_context_md(state, env_spec),
         TRACE_EVIDENCE_FILENAME: build_trace_evidence_md(state),
-        REPOSITORIES_FILENAME: json.dumps({"repositories": sorted(repositories)}, indent=2) + "\n",
+        REPOSITORIES_FILENAME: _repositories_json(repositories),
     }
     for filename, text in documents.items():
         atomic_write_text(

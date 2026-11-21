@@ -63,6 +63,36 @@ def test_read_handoff_returns_all_markdown_documents_and_the_declared_repositori
     assert bundle.repositories == (repository.resolve(),)
 
 
+def test_a_snapshot_repository_names_the_tree_the_server_imports_it_from(tmp_path: Path) -> None:
+    snapshot = tmp_path / "vllm-snapshot"
+    checkout = tmp_path / "aiter"
+    installed = tmp_path / "site-packages" / "vllm"
+    payload = {"repositories": [str(snapshot), str(checkout)], "served_trees": {str(snapshot): str(installed)}}
+
+    bundle = read_handoff(_handoff(tmp_path, json.dumps(payload)))
+
+    assert bundle.repositories == (snapshot.resolve(), checkout.resolve())
+    assert bundle.served_trees == {snapshot.resolve(): installed}
+
+
+def test_a_handoff_without_served_trees_gives_no_repository_a_tree_to_stand_in_for(tmp_path: Path) -> None:
+    assert read_handoff(_handoff(tmp_path, _repositories(tmp_path / "framework"))).served_trees == {}
+
+
+@pytest.mark.parametrize(
+    "served_trees",
+    [["/site-packages/vllm"], {"/undeclared": "/site-packages/vllm"}, {"REPOSITORY": "site-packages/vllm"}],
+    ids=["not_a_mapping", "undeclared_repository", "relative_tree"],
+)
+def test_served_trees_must_map_declared_repositories_to_absolute_paths(tmp_path: Path, served_trees: object) -> None:
+    repository = str(tmp_path / "framework")
+    if isinstance(served_trees, dict):
+        served_trees = {repository if key == "REPOSITORY" else key: tree for key, tree in served_trees.items()}
+
+    with pytest.raises(HandoffContractError, match="served_trees"):
+        read_handoff(_handoff(tmp_path, json.dumps({"repositories": [repository], "served_trees": served_trees})))
+
+
 @pytest.mark.parametrize("missing", [*_DOCUMENTS, REPOSITORIES_FILENAME])
 def test_read_handoff_rejects_a_missing_required_document(tmp_path: Path, missing: str) -> None:
     handoff = tmp_path / "handoff"

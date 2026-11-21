@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
@@ -18,6 +19,37 @@ if TYPE_CHECKING:
 
 # Suffix naming one lane's private AITER build cache, placed beside the lane copy rather than inside it.
 _LANE_AITER_CACHE_SUFFIX = ".aiter-cache"
+
+# Suffix naming the directory one lane imports itself through, placed beside the lane copy as its build cache is.
+_LANE_IMPORTS_SUFFIX = ".imports"
+
+
+def _lane_import_environment(*, workspace_dir: str, lane_root: Path) -> dict[str, str]:
+    """The ``PYTHONPATH`` that makes a lane the package its campaign workspace is imported as; empty when it is not.
+
+    A workspace that is a package's own directory is imported through a link named after the package, in a directory
+    on ``PYTHONPATH``. A lane inherits that path, so by the package's name its session would import the canonical
+    workspace and time a kernel the lane did not write. The lane gets the same links, naming itself, in a directory
+    that goes first.
+    """
+    workspace = Path(workspace_dir).resolve()
+    inherited = os.environ.get("PYTHONPATH", "")
+    names = sorted(
+        {
+            link.name
+            for entry in filter(None, inherited.split(os.pathsep))
+            if Path(entry).is_dir()
+            for link in Path(entry).iterdir()
+            if link.is_symlink() and link.resolve() == workspace
+        }
+    )
+    if not names:
+        return {}
+    imports = lane_root.with_name(lane_root.name + _LANE_IMPORTS_SUFFIX)
+    imports.mkdir()
+    for name in names:
+        (imports / name).symlink_to(lane_root, target_is_directory=True)
+    return {"PYTHONPATH": os.pathsep.join((str(imports), inherited))}
 
 
 def _lane_workspace_path(value: str, *, lane_dir: str, workspace_dir: str, label: str) -> str:
@@ -182,7 +214,10 @@ def _make_lane_agent_factory(
         # Each lane compiles a different edit of the same kernel. aiter imports a JIT module by name and never checks
         # the .so against the source it was built from, so lanes sharing one build cache load each other's binaries
         # and each one measures a kernel it did not write.
-        lane_env = child_cache_environment(lane_root.with_name(lane_root.name + _LANE_AITER_CACHE_SUFFIX))
+        lane_env = {
+            **child_cache_environment(lane_root.with_name(lane_root.name + _LANE_AITER_CACHE_SUFFIX)),
+            **_lane_import_environment(workspace_dir=binding.workspace_dir, lane_root=lane_root),
+        }
 
         async def session(kernel_path: str, plan: str, *, session_sink: dict | None = None) -> str:
             _assert_lane_session_cwd(
