@@ -20,7 +20,7 @@ from hyperloom.orchestrator.state.task_registry import TaskNotFound
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from ._optimize_fixtures import optimize_state
 from .conftest import make_coordinator
-from hyperloom.orchestrator.phases.framework import AuthoringRetry
+from hyperloom.orchestrator.phases.framework_reauthor import AuthoringRetry
 
 
 def test_the_capped_phases_spend_the_session_on_the_work_phases():
@@ -180,7 +180,7 @@ def test_a_failed_local_explore_specialist_is_retried(tmp_path: Path):
 
 def test_a_repeatedly_failing_local_explore_specialist_stops(tmp_path: Path):
     """Retrying is bounded: exhausting all attempts stops dispatching."""
-    from hyperloom.orchestrator.phases.framework import _LOCAL_EXPLORE_MAX_ATTEMPTS
+    from hyperloom.orchestrator.phases.framework_local_explore import _LOCAL_EXPLORE_MAX_ATTEMPTS
 
     stub = _stub(tmp_path, local_explore=True)
     stub.shared_state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
@@ -293,7 +293,7 @@ def test_rounds_that_return_only_config_proposals_still_run_the_arm_dry(tmp_path
 
 
 def test_forward_enablement_carriers_eval_origin():
-    from hyperloom.orchestrator.phases.framework import _forward_enablement_carriers
+    from hyperloom.orchestrator.phases.framework_proposals import _forward_enablement_carriers
 
     src = {
         "enablement_origin": "eval",
@@ -312,7 +312,7 @@ def test_forward_enablement_carriers_eval_origin():
 
 
 def test_forward_enablement_carriers_boot_origin_noop():
-    from hyperloom.orchestrator.phases.framework import _forward_enablement_carriers
+    from hyperloom.orchestrator.phases.framework_proposals import _forward_enablement_carriers
 
     dst: dict[str, Any] = {}
     _forward_enablement_carriers({}, dst)
@@ -327,7 +327,7 @@ def test_dispatched_verdict_reaches_the_integrate_task():
     """The integrate task derives its rungs from the verdict, so a boot-origin round must carry it."""
     from hyperloom.common.failure_signature import classify_failure
     from hyperloom.orchestrator.actions.executors.framework_change._enablement_config import _enablement_gap
-    from hyperloom.orchestrator.phases.framework import _forward_enablement_carriers
+    from hyperloom.orchestrator.phases.framework_proposals import _forward_enablement_carriers
 
     signature = classify_failure("ValueError: Model architectures ['Glm5ForCausalLM'] are not supported for now.")
     dst: dict[str, Any] = {"enablement": True}

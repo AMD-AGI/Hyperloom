@@ -505,7 +505,7 @@ ignore_imports =
     hyperloom.orchestrator.measurement.integrate_performance -> hyperloom.orchestrator.state.shared_state
     hyperloom.orchestrator.measurement.runtime_findings -> hyperloom.orchestrator.kernel.gemm_shape_coverage
     hyperloom.orchestrator.phases.close -> hyperloom.orchestrator.loop.time_budget
-    hyperloom.orchestrator.phases.framework -> hyperloom.orchestrator.loop.proposals
+    hyperloom.orchestrator.phases.framework_proposals -> hyperloom.orchestrator.loop.proposals
     hyperloom.orchestrator.phases.kernel_stack -> hyperloom.orchestrator.loop.sub_agent_runner
     hyperloom.orchestrator.phases.macro_cycle -> hyperloom.orchestrator.loop.maintenance
     hyperloom.orchestrator.phases.prelude -> hyperloom.orchestrator.loop.time_budget

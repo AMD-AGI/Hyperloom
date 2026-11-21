@@ -20,7 +20,7 @@ from hyperloom.orchestrator.state.task_registry import TaskNotFound
 
 from ._optimize_fixtures import optimize_state
 from .conftest import make_coordinator
-from hyperloom.orchestrator.phases.framework import AuthoringRetry
+from hyperloom.orchestrator.phases.framework_reauthor import AuthoringRetry
 
 
 @pytest.fixture(autouse=True)
@@ -215,7 +215,7 @@ def test_materialize_unknown_route_dispatches_both_tracks(
 
 
 def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_path: Path):
-    from hyperloom.orchestrator.phases.framework import _forward_integrate_source
+    from hyperloom.orchestrator.phases.framework_proposals import _forward_integrate_source
 
     stub = _stub(tmp_path)
 
