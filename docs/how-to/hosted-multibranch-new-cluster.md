@@ -133,9 +133,12 @@ script that cannot serve as the base ends the run the same way, naming why.
 ## Dev sandbox template
 
 Only a session that lends dev sandboxes (`multibranch.dev_leases`, `--dev-leases`) or runs autonomous agents
-(`multibranch.autonomous_agents`, `--autonomous-agent`) uses the `dev` template; it then also needs the grant's `dev` key
-(`HYPERLOOM_SANDBOX_KEY_DEV`) and its limits (`HYPERLOOM_GRANT_LIMITS`), and refuses to start without them, and a `dev`
-template of the session's TP in `HYPERLOOM_SANDBOX_TEMPLATES`. The session runs only processes in a `dev` sandbox: their
+(`multibranch.autonomous_agents`, `--autonomous-agent`) uses the `dev` template; a session with neither reads no `dev`
+template and starts whether or not the host gives it a `dev` key. A session that lends needs the grant's `dev` key
+(`HYPERLOOM_SANDBOX_KEY_DEV`), its limits (`HYPERLOOM_GRANT_LIMITS`), a `dev` template of the session's TP in
+`HYPERLOOM_SANDBOX_TEMPLATES`, and a grant that fits one dev sandbox beside one test (`max_gpus` at least twice the TP,
+`max_sandboxes` at least 2); without any of them the run ends before it starts (exit code 2), naming what is missing,
+instead of being restarted. The session runs only processes in a `dev` sandbox: their
 files stay in the session directory, so the template must mount the storage `USER_DATA_PATH` is on at the same path, read
 and write, and the model at the path the campaign spec names. The sandbox's commands run as root and are given the app
 host's LLM gateway variables (`ANTHROPIC_*`, `OPENAI_*`) and its CA bundle variables (`SSL_CERT_FILE` and the like), whose
