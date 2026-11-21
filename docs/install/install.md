@@ -43,7 +43,7 @@ Before installing Hyperloom, ensure the following requirements are met.
 From the agent terminal in that workspace, install the published release wheel:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.1.5 --target .
+pip install hyperloom-inference-optimizer==1.2.0 --target .
 ```
 
 It is normal for the current directory to contain many Python package directories
@@ -471,8 +471,8 @@ framework, so nothing needs to be installed inside the container beyond
 Hyperloom's runtime deps. The following images are recommended:
 
 - `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.34.0-rocm100`
-- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.23-rocm10-mi30x-20261118`
-- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.23-rocm10-mi35x-20261118`
+- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.23-rocm10-mi30x-20261111`
+- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.23-rocm10-mi35x-20261111`
 
 Start a long-running container from the repo root, mounting it at the same path
 so `.env`, logs, and session artifacts stay valid:
