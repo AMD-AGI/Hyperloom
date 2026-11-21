@@ -157,13 +157,19 @@ def claw_session_id(environ: Mapping[str, str]) -> str | None:
 
 
 def session_metadata(
-    snapshot: BlackboardSnapshot, environ: Mapping[str, str], code_revision: str | None = None
+    snapshot: BlackboardSnapshot,
+    environ: Mapping[str, str],
+    code_revision: str | None = None,
+    claw_session: str | None = None,
 ) -> dict[str, object]:
     """The ``metadata.session`` block: the session id, the source revision the session ran on as it recorded it at
-    start, and what :data:`SESSION_VARIABLES` name; null where unset."""
+    start, and what :data:`SESSION_VARIABLES` name; null where unset. ``claw_session`` is the Claw session the
+    session recorded (:data:`CLAW_SESSION_KEY`), which a process that resumes or exports it under another id keeps;
+    ``environ``'s where it recorded none. The other variables are the exporting process's."""
 
     session_id = snapshot.profile.session_id if snapshot.profile is not None else None
     named = {key: session_variable(key, environ) for key in SESSION_VARIABLES}
+    named[CLAW_SESSION_KEY] = claw_session or named[CLAW_SESSION_KEY]
     return {"session_id": session_id, "code_revision": code_revision or None, **named}
 
 
@@ -242,12 +248,14 @@ class SessionPlace:
 
     ``session_dir`` is where a hosted run's records are read from and ``runner_dir`` the agent runner's session
     directory; ``code_revision`` is the source revision the session's manifest recorded at start, which a process that
-    exports another run's session, such as ``final-only``, does not have in its environment.
+    exports another run's session, such as ``final-only``, does not have in its environment, and ``claw_session_id``
+    the Claw session the manifest keeps, which a resumed or ``final-only`` process may run under another id than.
     """
 
     session_dir: Path | None = None
     runner_dir: Path | None = None
     code_revision: str | None = None
+    claw_session_id: str | None = None
 
 
 def build_breakdown(
@@ -275,7 +283,7 @@ def build_breakdown(
         "metadata": {
             "session_profile": encode(snapshot.profile),
             "manifest_fingerprints": encode(snapshot.fingerprints),
-            "session": session_metadata(snapshot, os.environ, place.code_revision),
+            "session": session_metadata(snapshot, os.environ, place.code_revision, place.claw_session_id),
             **hosted_records(place.session_dir),
             **agent_resources(place.runner_dir),
         },
