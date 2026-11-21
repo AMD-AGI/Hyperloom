@@ -87,7 +87,7 @@ def _ssh_pod(
     ip = str(pod.get("podIP") or "")
     port = pod["sshPort"]
     body = launch_script(pod["launch_command"], _pod_env(extra_env, state, pod), log_ip=ip)
-    payload = bash_payload(role, body, ENGINE_NEEDLE)
+    payload = bash_payload(role, body, ENGINE_NEEDLE, "restart")
     info(f"{state.get('backend')} restart: ssh -> {ip}:{port} role={role}")
     try:
         completed = _mn_cli._infera_ssh_bash_with_env(state, ip, payload, timeout=timeout, port=port)

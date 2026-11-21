@@ -11,7 +11,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ...session.paths import workspace_root
 from ..state_paths import resolve_state_file, state_file_safe_to_read
@@ -149,6 +149,14 @@ def _record_pd_split(state: dict[str, Any], pd_mode: str, pn: int, dn: int) -> N
         state["last_restart_pd_mode"] = "disaggregated"
 
 
+def _record_router_pods(state: dict[str, Any], get: Callable[[str], str], ssh_port: int) -> None:
+    """Record in an Infera ``state`` the frontend pods ``HYPERLOOM_MN_EXT_ROUTER_IPS`` names; other backends get none."""
+    router = [ip.strip() for ip in get("HYPERLOOM_MN_EXT_ROUTER_IPS").split(",") if ip.strip()]
+    if state.get("backend") == "infera" and router:
+        state["router_pod_ips"] = router
+        state["router_pods"] = _external_pods(router, "router", ssh_port)
+
+
 def build_external_state_from_env() -> dict[str, Any]:
     """Synthesize multi-node state from ``TOPOLOGY_HANDOFF_FILE`` or, without it, ``HYPERLOOM_MN_EXT_*`` env vars."""
     get = handoff_lookup()
@@ -209,6 +217,7 @@ def build_external_state_from_env() -> dict[str, Any]:
         "worker_pods": _external_pods(worker, "worker", ssh_port),
         "user_data_path": str(workspace_root()),
     }
+    _record_router_pods(state, get, ssh_port)
     if ssh_key:
         state["ssh_key_path"] = ssh_key
     if known_hosts:

@@ -178,12 +178,7 @@ def _extract_steady_state_retry_mode(
     return None
 
 
-def _fail(
-    recorder: Any,
-    phase: str,
-    error: str,
-    sub_result: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+def _fail(recorder: Any, phase: str, error: str, sub_result: dict[str, Any] | None = None) -> dict[str, Any]:
     """Close the timeline event as failed, then build the canonical failure result.
 
     Every failure exit goes through this, so one added later cannot be the one that leaves the event dangling.
@@ -896,6 +891,7 @@ class RooflineExecutor:
             return profiled
         self._record_profile_findings(profiled)
         payload = _analysis_payload(ctx.task.params or {}, trace_path=profiled.trace_path, framework=arm.framework)
+        multi_node.add_pd_analysis(payload, profiled.result, profiled.trace_path)
 
         analysis = await self._analyze(ctx, recorder, payload)
         if not isinstance(analysis, _AnalysisOutcome):
@@ -1109,6 +1105,7 @@ class RooflineExecutor:
             "framework": payload["framework"],
             **{key: payload[key] for key in ("roofline_arm", "roofline_output_name") if key in payload},
         }
+        multi_node.add_pd_analysis(cb_payload, cb_profile, cb_trace)
         analysis = await _compute_bound_analysis(recorder, session_dir, cb_payload)
         if analysis is None:
             return None, "re-profile produced no usable trace"

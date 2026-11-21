@@ -102,7 +102,11 @@ def restart_remote_main():
     launch = os.environ.get("HL_LAUNCH_PATH", "")
     needle = os.environ.get("HL_NEEDLE", "")
     pidfile = os.environ["HL_PIDFILE"]
+    action = os.environ.get("HL_ACTION", "restart")
     pid = _find_server(pidfile, needle)
+    if action == "ensure" and pid > 0:
+        print(json.dumps({"status": "ok", "action": "running", "pid": pid}))
+        return
     if pid <= 0:
         new_pid = _spawn_detached(launch, _spawn_env(pid, pidfile))
         open(pidfile, "w", encoding="utf-8").write(str(new_pid))
@@ -166,7 +170,7 @@ def launch_path(role: str) -> str:
     return f"/tmp/hyperloom-mn-{role}.sh"
 
 
-def bash_payload(role: str, script_body: str, needle: str) -> str:
+def bash_payload(role: str, script_body: str, needle: str, action: str) -> str:
     """Bash that writes the launch script and runs the in-place restart helper."""
     marker = uuid.uuid4().hex
     launch_end = f"HL_LAUNCH_{marker}"
@@ -181,8 +185,14 @@ def bash_payload(role: str, script_body: str, needle: str) -> str:
             'export HL_LAUNCH_PATH="$launch"',
             f"export HL_NEEDLE={shlex.quote(needle)}",
             f"export HL_PIDFILE={pidfile_path(role)}",
+            f"export HL_ACTION={shlex.quote(action)}",
             f"python3 - << '{py_end}'",
             _remote_program().rstrip("\n"),
             py_end,
         ]
     )
+
+
+def ensure_payload(role: str, command: str, needle: str) -> str:
+    """Bash that starts ``command`` detached on the pod unless a process matching ``needle`` already runs."""
+    return bash_payload(role, f"exec {command}\n", needle, "ensure")
