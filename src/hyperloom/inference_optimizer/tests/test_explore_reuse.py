@@ -13,7 +13,7 @@ import pytest
 from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.orchestrator.actions.executors.explore_prefilter import _prefilter as prefilter
 from hyperloom.orchestrator.actions.executors.explore_prefilter import _reuse as reuse
-from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
+from hyperloom.orchestrator.actions.executors.grid._grid_base import GridVariant
 
 _SESSION = {
     "model": "/models/Qwen3-8B",

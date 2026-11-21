@@ -29,7 +29,7 @@ from hyperloom.contracts.recipe import RecipeDelta, apply
 from hyperloom.measure.compile import BlobStore, LocalBlobStore, PackageBase
 from hyperloom.measure.points import AcceptedMeasurement, default_canonical
 from hyperloom.measure.tests.hosted_fixtures import spec_context
-from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import default_baseline_config
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, Conclusion
 from hyperloom_multibranch.rulegate.decision import Action

@@ -12,18 +12,18 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors.tests.test_native_launch_replay import native_receipt
-from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
-from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, _build_variant_yaml, run_grid
-from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack, apply_compatibility_filter
-from hyperloom.orchestrator.actions.executors._launch_evidence import persist_launch_evidence
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.grid import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors.grid._grid_base import GridVariant
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridRecipe, _build_variant_yaml, run_grid
+from hyperloom.orchestrator.actions.executors.grid._grid_variant_filter import ServingStack, apply_compatibility_filter
+from hyperloom.orchestrator.actions.executors.workload._launch_evidence import persist_launch_evidence
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     BenchmarkTarget,
     LaunchLayer,
     materialize_benchmark_config,
 )
 from hyperloom.common.failure_signature import SERVE_FLAG
-from hyperloom.orchestrator.actions.executors._spec_decode_pin import (
+from hyperloom.orchestrator.actions.executors.framework_change._spec_decode_pin import (
     SpeculativeDecodingPinnedError,
     refuse_unpinned_speculative_change,
     speculative_pin_reason,

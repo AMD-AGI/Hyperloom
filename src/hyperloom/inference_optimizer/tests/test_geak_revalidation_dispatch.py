@@ -15,9 +15,9 @@ import pytest
 
 from inference_suite.argv import flag_occurrences
 
-from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, GridRecipe
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridVariant, GridRecipe
 from hyperloom.orchestrator.actions.executors._proposal_identity import BaseControls, effective_fingerprint
-from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
+from hyperloom.orchestrator.actions.executors.serving._server_lifecycle import GpuHandoff
 from hyperloom_common.proctree import REAP_MARK_ENV
 from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
 from hyperloom.orchestrator.phases import machine_state as ps
@@ -29,7 +29,7 @@ from inference_suite import runner_owned
 from .conftest import make_mock_critic_coordinator
 from ._geak_helpers import forbid_geak_launch, measured_in_suite_round, stop_geak_before_launch
 from hyperloom.orchestrator.state.task_registry import TaskSpec
-from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import BenchmarkTarget, LaunchLayer
 
 
 @pytest.fixture
@@ -269,7 +269,7 @@ async def test_geak_launch_controls_reach_materialized_rebench(
 
     from hyperloom.orchestrator.actions.executors import explore
     from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
-    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult, _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import VariantResult, _build_variant_yaml
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     baseline = tmp_path / "baseline.yaml"
@@ -1010,7 +1010,7 @@ def _stub_geak_runner_call(monkeypatch, outcome) -> list[str]:
     phase reached the runner rather than returning at an earlier gate.
     """
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._server_lifecycle.free_gpus_for_handoff",
+        "hyperloom.orchestrator.actions.executors.serving._server_lifecycle.free_gpus_for_handoff",
         lambda *_args, **_kwargs: GpuHandoff(reaped=[], busy=[], holders=[], unverified=""),
     )
     original_to_thread = asyncio.to_thread
@@ -1270,7 +1270,7 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     import yaml
 
     from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
-    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult, _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import VariantResult, _build_variant_yaml
 
     baseline = tmp_path / "baseline.yaml"
     baseline.write_text(

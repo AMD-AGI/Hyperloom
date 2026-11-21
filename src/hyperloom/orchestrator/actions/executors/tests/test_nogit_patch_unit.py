@@ -14,8 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors import _apply_feedback as af
-from hyperloom.orchestrator.actions.executors import _nogit_patch as ng
+from hyperloom.orchestrator.actions.executors.patching import _apply_feedback as af
+from hyperloom.orchestrator.actions.executors.patching import _nogit_patch as ng
 from hyperloom.orchestrator.delivery import ledger
 
 

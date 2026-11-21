@@ -107,12 +107,18 @@ def test_the_shared_reader_lives_in_a_module_every_arm_can_import():
     executors = _Path(_accuracy_gate.__file__).parent
 
     def siblings(module: str) -> set[str]:
-        tree = ast.parse((executors / f"{module}.py").read_text(encoding="utf-8"))
-        return {
-            node.module.split(".")[0]
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module
-        }
+        tree = ast.parse((executors / f"{module.replace('.', '/')}.py").read_text(encoding="utf-8"))
+        package = module.split(".")[:-1]
+        found = set()
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.ImportFrom) and node.level and node.module):
+                continue
+            if node.level - 1 > len(package):
+                continue
+            target = ".".join([*package[: len(package) - node.level + 1], *node.module.split(".")])
+            if (executors / f"{target.replace('.', '/')}.py").is_file():
+                found.add(target)
+        return found
 
     reached, frontier = set(), siblings("_accuracy_gate")
     while frontier:

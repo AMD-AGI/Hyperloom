@@ -42,7 +42,7 @@ from hyperloom.measure.tests.bundle_factory import (
     stage_into,
 )
 from hyperloom.contracts.measurement import SandboxFacts
-from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import default_baseline_config
 from inference_suite import staging_key
 
 SHEET_IMAGE = spec_document()["image"]["digest"]

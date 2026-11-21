@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._patch_snapshot import (
+from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import (
     _create_patch_snapshot,
     _restore_patch_snapshot,
 )
@@ -281,7 +281,7 @@ def test_no_root_is_ever_probed_for(tmp_path, output_dir, monkeypatch):
         raise AssertionError("warm replay must not probe for an apply root")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._patch_sources._resolve_framework_root",
+        "hyperloom.orchestrator.actions.executors.patching._patch_sources._resolve_framework_root",
         _fail,
     )
     _git_repo(tmp_path / "sglang", "vllm/fp8.py", "# fp8 module\noriginal = True\n")

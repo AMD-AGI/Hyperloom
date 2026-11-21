@@ -1919,7 +1919,7 @@ def test_a_worktree_made_under_umask_007_is_readable_to_git_once_prepared(tmp_pa
 
 
 def test_the_done_file_the_integrator_reads_is_not_followed_through_a_link(tmp_path: Path):
-    from hyperloom.orchestrator.actions.executors._patch_sources import _read_done_payload
+    from hyperloom.orchestrator.actions.executors.patching._patch_sources import _read_done_payload
 
     app_only = tmp_path / "app_only.json"
     app_only.write_text('{"app_secret": 1}', encoding="utf-8")

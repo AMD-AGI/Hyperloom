@@ -14,15 +14,15 @@ import yaml
 
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
-from hyperloom.orchestrator.actions.executors import _agentx_checkpoint
+from hyperloom.orchestrator.actions.executors.workload import _agentx_checkpoint
 from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
-from hyperloom.orchestrator.actions.executors._agentx_checkpoint import (
+from hyperloom.orchestrator.actions.executors.workload._agentx_checkpoint import (
     CHECKPOINT_ARTIFACT_NAME,
     AgentxCheckpoint,
     checkpoint_summary,
     read_checkpoint,
 )
-from hyperloom.orchestrator.actions.executors._grid_base import GridRound, run_grid_suite_round
+from hyperloom.orchestrator.actions.executors.grid._grid_base import GridRound, run_grid_suite_round
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     AGENTX_EARLY_STOP_RETURNCODE,
     BOOT_BUDGET_ENV,

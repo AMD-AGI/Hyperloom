@@ -45,7 +45,7 @@ class ResumeRecoveryMixin:
         Returns:
             A summary ``{"reversed": [...], "failed": [...]}``.
         """
-        from ..actions.executors._patch_git import restore_pending_integrate
+        from ..actions.executors.patching._patch_git import restore_pending_integrate
         from ..actions.executors.source_tree_identity import settle_replaced_tree, tree_replaced
 
         if tree_replaced(pending, gone_scope):

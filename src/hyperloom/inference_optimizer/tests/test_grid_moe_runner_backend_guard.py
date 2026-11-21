@@ -11,9 +11,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
-from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml, GridRecipe
-from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
+from hyperloom.orchestrator.actions.executors.grid._grid_base import GridVariant
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import _build_variant_yaml, GridRecipe
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import BenchmarkTarget, LaunchLayer
 
 from ._baseline_fakes import write_sglang_yaml
 

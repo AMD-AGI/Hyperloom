@@ -37,7 +37,7 @@ from hyperloom.measure.framework.merge import PRIVATE
 from hyperloom.measure.points import default_canonical
 from hyperloom.measure.runner.own_tmp import OWN_TMP_PREFIX
 from hyperloom.measure.tests.hosted_fixtures import spec_context
-from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import default_baseline_config
 from hyperloom_multibranch.toolbox.table_hits import _copied, _logs
 from hyperloom_multibranch.toolbox.tests.gpu_session import freeze_gpu_session_base
 from hyperloom_multibranch.toolbox.tests.integration_inputs import IMAGE, baseline_recipe

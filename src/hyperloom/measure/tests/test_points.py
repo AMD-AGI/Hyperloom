@@ -40,7 +40,7 @@ from hyperloom.measure.points import (
 from hyperloom.measure.points import _limit_agentx_capture, _seeded
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with, sha
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     BenchmarkTarget,
     LaunchLayer,
     default_baseline_config,

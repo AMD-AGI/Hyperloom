@@ -15,7 +15,7 @@ from hyperloom.common.env_safety import OPERATOR_EXTRA_ENV_VAR
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.inference_optimizer.recipe_snapshot_constants import KbTopology
 from hyperloom.orchestrator.actions.executors import _profile_setup as profile_setup
-from hyperloom.orchestrator.actions.executors import _workload_envs as we
+from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 from hyperloom.orchestrator.state.base_launch import ServerBase
 from inference_suite.recipe.defaults import default_table
 
@@ -700,20 +700,20 @@ def _hf_mapping(monkeypatch):
 
 def test_a_model_type_transformers_cannot_map_names_its_tokenizer(tmp_path, _hf_mapping):
     """DeepSeek-V4 is the live case: HF raises KeyError before the first request."""
-    from hyperloom.orchestrator.actions.executors._workload_envs import _client_tokenizer_mode
+    from hyperloom.orchestrator.actions.executors.workload._workload_envs import _client_tokenizer_mode
 
     assert _client_tokenizer_mode(_write_model(tmp_path, "deepseek_v4")) == "deepseek_v4"
 
 
 def test_a_model_type_transformers_knows_names_nothing(tmp_path, _hf_mapping):
     """The rule is model-agnostic: a resolvable model leaves the client argv alone."""
-    from hyperloom.orchestrator.actions.executors._workload_envs import _client_tokenizer_mode
+    from hyperloom.orchestrator.actions.executors.workload._workload_envs import _client_tokenizer_mode
 
     assert _client_tokenizer_mode(_write_model(tmp_path, "llama")) == ""
 
 
 def test_an_unreadable_model_names_nothing(tmp_path):
-    from hyperloom.orchestrator.actions.executors._workload_envs import _client_tokenizer_mode
+    from hyperloom.orchestrator.actions.executors.workload._workload_envs import _client_tokenizer_mode
 
     assert _client_tokenizer_mode(str(tmp_path / "absent")) == ""
     assert _client_tokenizer_mode("") == ""
@@ -727,7 +727,7 @@ def test_an_unknown_model_type_is_not_assumed_to_be_a_tokenizer_mode(tmp_path):
     exactly the way the unnamed tokenizer did. Those models are served by the
     trust-remote-code path instead.
     """
-    from hyperloom.orchestrator.actions.executors._workload_envs import _client_tokenizer_mode
+    from hyperloom.orchestrator.actions.executors.workload._workload_envs import _client_tokenizer_mode
 
     assert _client_tokenizer_mode(_write_model(tmp_path, "kimi_k25")) == ""
     assert _client_tokenizer_mode(_write_model(tmp_path, "some_future_model")) == ""

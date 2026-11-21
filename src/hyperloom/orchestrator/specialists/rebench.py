@@ -4,7 +4,7 @@
 """Optional gate-comparable rebench helper for GPU specialists."""
 
 from __future__ import annotations
-from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import prepare_grid_benchmark_config
 
 
 import argparse
@@ -19,8 +19,8 @@ from typing import Any
 
 from hyperloom.common.perf_metric import constraint_fields
 from hyperloom.common.ports import pick_server_port
-from ..actions.executors._grid_runner import GridLaunch, GridRecipe, GridStop, GridVariant, VariantResult, run_grid
-from ..actions.executors._workload_envs import (
+from ..actions.executors.grid._grid_runner import GridLaunch, GridRecipe, GridStop, GridVariant, VariantResult, run_grid
+from ..actions.executors.workload._workload_envs import (
     BenchmarkTarget,
     LaunchLayer,
     MaterializeOptions,

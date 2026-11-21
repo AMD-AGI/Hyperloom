@@ -17,16 +17,16 @@ from hyperloom.common.perf_metric import (
     perf_snapshot_from_mapping,
 )
 from hyperloom.common.agentx_early_stop import EARLY_STOP_ENV
-from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-from hyperloom.orchestrator.actions.executors._agentx_checkpoint import (
+from hyperloom.orchestrator.actions.executors.grid import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors.workload._agentx_checkpoint import (
     CHECKPOINT_ARTIFACT_NAME,
     AgentxCheckpoint,
     CheckpointJudge,
     round_checkpoint,
     workspace_checkpoint_p50,
 )
-from hyperloom.orchestrator.actions.executors._grid_base import SuiteRoundExit
-from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, GridStop, GridVariant, run_grid
+from hyperloom.orchestrator.actions.executors.grid._grid_base import SuiteRoundExit
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridRecipe, GridStop, GridVariant, run_grid
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     AGENTX_EARLY_STOP_ERROR_CLASS,
     AGENTX_EARLY_STOP_RETURNCODE,

@@ -27,7 +27,7 @@ from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_bac
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ....measurement.integrate_performance import assess_integrate_performance
 from ...stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
-from .. import _server_lifecycle as _lifecycle
+from ..serving import _server_lifecycle as _lifecycle
 from .bringup import _disable_cuda_graph_flag, _with_cuda_graph_disabled
 from .records import (
     _ACCURACY_ROUND_DIR,

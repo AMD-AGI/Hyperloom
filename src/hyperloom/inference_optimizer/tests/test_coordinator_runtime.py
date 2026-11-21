@@ -15,10 +15,8 @@ from typing import Any
 import pytest
 
 
-from hyperloom.orchestrator.actions.executors import (
-    _multi_node_restart_settings,
-    report_executor,
-)
+from hyperloom.orchestrator.actions.executors.serving import _multi_node_restart_settings
+from hyperloom.orchestrator.actions.executors import report_executor
 from hyperloom.orchestrator.roles import (
     Backend,
     MockBackend,

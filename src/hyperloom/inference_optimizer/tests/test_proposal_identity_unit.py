@@ -155,18 +155,15 @@ def test_mapping_form_args_pass_the_grid_argv_gate():
 
 
 def test_a_variants_experience_citations_survive_its_rebuild_into_a_derived_variant():
-    from hyperloom.orchestrator.actions.executors.explore import (
-        _decision_fields,
-        _grid_variants_from_payload,
-        _variant_with_eval_off,
-    )
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import grid_variants_from_payload
+    from hyperloom.orchestrator.actions.executors.grid._explore_variants import decision_fields, variant_with_eval_off
 
     citation = {"id": "exp-" + "1" * 32, "stance": "adopt", "claim": "Kept on the same model."}
-    [variant] = _grid_variants_from_payload(
+    [variant] = grid_variants_from_payload(
         [{"name": "v", "extra_args": "--x 1", "reasoning": "why", "experience_citations": [citation]}]
     )
 
-    assert _decision_fields(_variant_with_eval_off(variant)) == {
+    assert decision_fields(variant_with_eval_off(variant)) == {
         "note": "why",
         "reasoning_origin": "action_payload.reasoning",
         "experience_citations": [citation],
@@ -174,10 +171,10 @@ def test_a_variants_experience_citations_survive_its_rebuild_into_a_derived_vari
 
 
 def test_the_queue_and_the_grid_parser_agree_on_a_list_form_variant():
-    from hyperloom.orchestrator.actions.executors.explore import _grid_variants_from_payload
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import grid_variants_from_payload
 
     payload = {"name": "v", "extra_args": ["--max-num-seqs", "128"], "extra_envs": {"E": "1"}}
-    parsed = _grid_variants_from_payload([payload])[0]
+    parsed = grid_variants_from_payload([payload])[0]
     fields = normalize_proposal(payload)
     assert fields["extra_args"] == parsed.extra_server_args
     assert effective_fingerprint(

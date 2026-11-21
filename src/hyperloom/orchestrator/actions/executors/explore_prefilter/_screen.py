@@ -62,7 +62,7 @@ import yaml
 from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
-from .._grid_base import GridVariant
+from ..grid._grid_base import GridVariant
 from ._reuse import HARNESS_ENVS
 
 log = logging.getLogger(__name__)

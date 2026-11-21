@@ -992,7 +992,7 @@ BOOT_ENVS = {"RUN_EVAL": "false", "NUM_PROMPTS": "1"}
 def _envs_handed_to_the_round(grid: _Grid, tmp_path: Path, call: dict[str, Any]) -> dict[str, Any]:
     """The ``benchmark.envs`` ``run_grid`` makes of one recorded call: its own layering of the point and the recipe's
     base variables over the round's shape the process environment held while the call ran."""
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import _build_variant_yaml
 
     shape = grid.shapes[next(index for index, recorded in enumerate(grid.calls) if recorded is call)]
     with mock.patch.dict(os.environ):
@@ -1431,7 +1431,7 @@ def _agentx_launch(monkeypatch, tmp_path, python) -> dict[str, Any]:
     """What ``run_grid`` hands the round for the point, and what the server it launches then imports from ``a.f()``."""
     import subprocess
 
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import _build_variant_yaml
 
     launched: dict[str, Any] = {}
 

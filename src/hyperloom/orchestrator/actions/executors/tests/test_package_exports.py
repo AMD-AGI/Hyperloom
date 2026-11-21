@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 from hyperloom.orchestrator.actions import executors
-from hyperloom.orchestrator.actions.executors import _grid_runner, _profile_setup, _server_patcher
+from hyperloom.orchestrator.actions.executors.grid import _grid_runner
+from hyperloom.orchestrator.actions.executors import _profile_setup, _server_patcher
 
 
 def test_every_exported_name_resolves():

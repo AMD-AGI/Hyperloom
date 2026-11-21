@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.ports import DEV_SANDBOX_PORTS
-from hyperloom.orchestrator.actions.executors._grid_base import VariantResult
+from hyperloom.orchestrator.actions.executors.grid._grid_base import VariantResult
 from hyperloom.orchestrator.specialists import rebench as sr
 
 
