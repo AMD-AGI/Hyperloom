@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
+from types import SimpleNamespace
 
 from kernelforge.workflows.forge_loop.campaign.run_state import (
     ORCHESTRATION_CIRCUIT_CLOSED,
@@ -13,7 +16,7 @@ from kernelforge.workflows.forge_loop.campaign.run_state import (
     LoopStateStore,
 )
 from kernelforge.workflows.forge_loop.iteration import runner as runner_module
-from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop
+from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop, IterationResult
 from kernelforge.workflows.forge_loop.policy.round_budget import (
     ADMISSION_SESSION_SEC,
     DISPATCH_FLOOR_SEC,
@@ -92,6 +95,51 @@ def test_a_session_under_a_supervisor_ruling_takes_its_search_mode_from_the_ruli
 
     assert "The latest Supervisor Ruling below decides" in direction
     assert "strongest immediate gain on the score" not in direction
+
+
+def test_a_stalled_search_without_planning_hands_the_supervisors_ruling_to_the_next_session(tmp_path, monkeypatch):
+    """With no plan to write the ruling into, the session that follows reads it and is told it decides the mode."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch, supervise_after=1, session_count=3)
+    loop.ic.supervise_cooldown = 2
+    loop.config = SimpleNamespace(experiments_dir=workspace / "forge_experiments", gpu_target="gfx942")
+    histories: list[str] = []
+    evidence: list[dict] = []
+    ruling = "\n# Supervisor Ruling\n\nStop tuning tile sizes; restructure the K loop.\n"
+
+    async def supervisor(**kwargs):
+        evidence.append(json.loads(kwargs["evidence_context"]))
+        return ruling
+
+    async def editing_agent(kernel_path, history, session_sink):
+        histories.append(history)
+        session_sink["plan"] = "tune tiles"
+        Path(kernel_path).write_text("def kernel():\n    return 2\n")
+        return "another tile sweep"
+
+    async def reverted_iteration(iteration, plan=""):
+        return IterationResult(
+            iteration=iteration,
+            duration_sec=0.01,
+            validation_passed=True,
+            validation_summary="passed",
+            wall_ms=1.1,
+            mean_case_speedup=0.9,
+            kept=False,
+            bench_detail={"case_times": {"case": 1.1}},
+        )
+
+    monkeypatch.setattr(loop, "run_one_iteration", reverted_iteration)
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent, supervisor_fn=supervisor)))
+
+    assert len(histories) == 3
+    assert len(evidence) == 1
+    # The Supervisor is shown that there is no plan rather than a stale path to one.
+    assert evidence[0]["latest_optimization_plan"] is None
+    for later in histories[1:]:
+        assert later.startswith("## Direction (yours to choose)")
+        assert "The latest Supervisor Ruling below decides" in later
+        assert "## Latest Supervisor Ruling" in later
+        assert "restructure the K loop" in later
 
 
 def test_a_loop_without_planning_is_not_refused_for_the_price_of_a_plan(tmp_path, monkeypatch):
