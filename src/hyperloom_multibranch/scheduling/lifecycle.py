@@ -441,9 +441,12 @@ class Session:
     def _write_leg_manifest(self, manifest: SessionManifest) -> None:
         """Write ``manifest`` for the leg this process runs over the session, a ``run --resume`` or a ``final-only``,
         naming the Claw session that leg runs under (:func:`leg_claw_session_id`), the recorded one when it is given
-        none."""
+        none. A leg that relabels the session, a ``final-only`` over a closed one included, logs the old and the new
+        id."""
 
         claw = leg_claw_session_id(manifest.claw_session_id, os.environ)
+        if claw != manifest.claw_session_id:
+            logger.info("the session's Claw session id changes from %s to %s", manifest.claw_session_id, claw)
         replace(manifest, claw_session_id=claw).write(self._layout.manifest)
 
     async def _run_and_close(

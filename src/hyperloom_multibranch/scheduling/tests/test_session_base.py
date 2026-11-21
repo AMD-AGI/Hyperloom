@@ -19,7 +19,6 @@ from hyperloom.inference_optimizer.cli import base_launch as cli_base_launch
 from hyperloom.measure.tests.bundle_factory import base_launch
 from hyperloom.inference_optimizer.session.base_launch import write_base_launch
 from hyperloom.orchestrator.state.base_launch import FrozenBase, freeze_base, frozen_base
-from hyperloom.orchestrator.state.retest_view import RETEST_VIEW
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.scheduling.session_base import freeze_session_base, served_launch
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
@@ -255,61 +254,3 @@ def test_a_refused_inferencex_commit_leaves_the_session_unavailable(
     with pytest.raises(PeersUnavailable, match="8a76a78e41 lacks infx.srt_slurm.x.verifier"):
         freeze_session_base(tmp_path, WORKLOAD, "", "8a76a78e41")
     assert frozen_base(tmp_path) is None
-
-
-def _claw(toolbox: Path) -> tuple[str, str]:
-    """The Claw session the toolbox's ``state.json`` and its ``retest_view.json`` record."""
-
-    state = json.loads((toolbox / "state.json").read_text())
-    view = json.loads((toolbox / RETEST_VIEW).read_text())
-    return state["claw_session_id"], view["claw_session_id"]
-
-
-def test_a_fresh_session_claw_hosts_records_its_claw_session_in_the_toolbox_state(
-    tmp_path: Path, asked: list, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("CLAW_SESSION_ID", "claw-sess-1")
-
-    freeze_session_base(tmp_path, WORKLOAD, "")
-
-    assert _claw(tmp_path) == ("claw-sess-1", "claw-sess-1")
-
-
-def test_a_session_claw_did_not_host_records_no_claw_session_in_the_toolbox_state(
-    tmp_path: Path, asked: list, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("CLAW_SESSION_ID", raising=False)
-
-    freeze_session_base(tmp_path, WORKLOAD, "")
-
-    assert _claw(tmp_path) == ("", "")
-
-
-@pytest.mark.parametrize(
-    ("given", "named"), [("claw-other", "claw-other"), (None, "claw-first")], ids=["another", "none"]
-)
-def test_a_resumed_session_records_the_claw_session_of_the_leg_that_runs_in_its_toolbox_state(
-    tmp_path: Path, asked: list, monkeypatch: pytest.MonkeyPatch, given: str | None, named: str
-) -> None:
-    monkeypatch.setenv("CLAW_SESSION_ID", "claw-first")
-    freeze_session_base(tmp_path, WORKLOAD, "")
-    if given is None:
-        monkeypatch.delenv("CLAW_SESSION_ID")
-    else:
-        monkeypatch.setenv("CLAW_SESSION_ID", given)
-
-    freeze_session_base(tmp_path, WORKLOAD, "")
-
-    assert _claw(tmp_path) == (named, named)
-
-
-def test_a_resumed_session_whose_toolbox_state_recorded_none_takes_the_claw_session_it_is_given(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("CLAW_SESSION_ID", raising=False)
-    freeze_base(tmp_path, base_launch())
-    monkeypatch.setenv("CLAW_SESSION_ID", "claw-late")
-
-    freeze_session_base(tmp_path, WORKLOAD, "")
-
-    assert _claw(tmp_path) == ("claw-late", "claw-late")

@@ -4,16 +4,21 @@
 """A session records the Claw session that hosts it in ``MB-manifest.json`` as it starts, so a collector of running
 sessions can tell whose a directory is before CLOSE; a run Claw did not host records none. The id follows the leg that
 runs: a ``run --resume`` or ``final-only`` writes the id it is given to the manifest and the breakdown, and one given
-none keeps the recorded id."""
+none keeps the recorded id. The manifest is the one record of the id: the toolbox's ``state.json`` and
+``retest_view.json`` do not carry it."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 
 import pytest
 
+from hyperloom.measure.tests.bundle_factory import base_launch
+from hyperloom.orchestrator.state.base_launch import freeze_base, frozen_base
+from hyperloom.orchestrator.state.retest_view import RETEST_VIEW
 from hyperloom_multibranch.blackboard.knowledge.breakdown import (
     FILENAME,
     SESSION_VARIABLES,
@@ -22,7 +27,9 @@ from hyperloom_multibranch.blackboard.knowledge.breakdown import (
 )
 from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.manifest import read_manifest
+from hyperloom_multibranch.scheduling.peers import PeerSetup, Peers, PeersUnavailable
 from hyperloom_multibranch.scheduling.resumption import deadline_after_downtime, persisted_run, resumable_run
+from hyperloom_multibranch.scheduling.session_base import freeze_session_base
 from hyperloom_multibranch.tests.test_skeleton import (
     SCRIPTS,
     Stage,
@@ -182,3 +189,69 @@ def test_the_leg_rule_takes_the_given_claw_session_else_the_recorded_one(
     environ = {} if given is None else {CLAW: f" {given} "}
     assert leg_claw_session_id(recorded, environ) == named
     assert leg_claw_session_id(recorded, {CLAW: "  "}) == recorded
+
+
+def _toolbox_claw_sessions(stage: Stage) -> tuple[object, object]:
+    """The Claw session the toolbox's ``state.json`` and its ``retest_view.json`` in ``stage``'s directory name."""
+
+    toolbox = stage.layout.toolbox
+    state = json.loads((toolbox / "state.json").read_text())
+    view = json.loads((toolbox / RETEST_VIEW).read_text())
+    return state["claw_session_id"], view["claw_session_id"]
+
+
+def _freeze_base(setup: PeerSetup) -> None:
+    """Freeze the session's base as the local peers do on every leg (:func:`freeze_session_base`), its launch record
+    written first so that nothing is resolved."""
+
+    toolbox = setup.layout.toolbox
+    if frozen_base(toolbox) is None:
+        freeze_base(toolbox, base_launch())
+    freeze_session_base(toolbox, setup.workload, "")
+
+
+def _refused_after_the_freeze(setup: PeerSetup) -> Peers:
+    """Peers that freeze the session's base and are then refused, as the local peers are when the staging cannot be
+    published."""
+
+    _freeze_base(setup)
+    raise PeersUnavailable("the inference_suite staging the runners read cannot be published")
+
+
+async def test_a_leg_refused_after_the_base_freeze_and_a_later_final_only_leave_one_record_of_the_claw_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _given(monkeypatch, "claw-first")
+    stage = _stage(tmp_path)
+    stage.scripts = SCRIPTS
+    stage.toolbox_type = StuckStopToolbox
+    await stage.run()
+    persisted = persisted_run(stage.layout.root)
+    _given(monkeypatch, "claw-refused")
+    refused = _recovery(stage, persisted.settings)
+    refused.factory = _refused_after_the_freeze  # type: ignore[method-assign]
+
+    with pytest.raises(PeersUnavailable):
+        await refused.finish(persisted.ended)
+
+    assert read_manifest(stage.layout.manifest).claw_session_id == "claw-first"
+    assert _breakdown_claw_session(stage) == "claw-first"
+    assert _toolbox_claw_sessions(stage) == ("", "")
+    (stage.layout.reports / FILENAME).unlink()
+    _given(monkeypatch, "claw-other")
+    closing = _recovery(stage, persisted.settings)
+    build = closing.factory
+
+    def freezing(setup: PeerSetup) -> Peers:
+        _freeze_base(setup)
+        return build(setup)
+
+    closing.factory = freezing  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.INFO, logger=lifecycle.__name__):
+        await closing.finish(persisted.ended)
+
+    assert read_manifest(stage.layout.manifest).claw_session_id == "claw-other"
+    assert _breakdown_claw_session(stage) == "claw-other"
+    assert _toolbox_claw_sessions(stage) == ("", "")
+    assert "changes from claw-first to claw-other" in caplog.text

@@ -144,8 +144,7 @@ def card_holds(snapshot: BlackboardSnapshot) -> dict[str, object]:
 
 def session_variable(key: str, environ: Mapping[str, str]) -> str | None:
     """What the variable :data:`SESSION_VARIABLES` names for ``key`` holds in ``environ``, stripped; ``None`` where it
-    is unset or blank. The one reader of those variables, so the breakdown, the manifest and the toolbox's state
-    cannot read them apart."""
+    is unset or blank. The one reader of those variables, so the breakdown and the manifest cannot read them apart."""
 
     return (environ.get(SESSION_VARIABLES[key]) or "").strip() or None
 
@@ -159,7 +158,7 @@ def claw_session_id(environ: Mapping[str, str]) -> str | None:
 def leg_claw_session_id(recorded: str | None, environ: Mapping[str, str]) -> str | None:
     """The Claw session a session records once a leg runs under ``environ``: the one ``environ`` gives
     (:func:`claw_session_id`), as the id follows the leg that runs, and ``recorded`` when it gives none. The one rule
-    the manifest, the toolbox's state and the breakdown apply, so the three cannot name different Claw sessions."""
+    the manifest and the breakdown apply, so the two cannot name different Claw sessions."""
 
     return claw_session_id(environ) or recorded
 
