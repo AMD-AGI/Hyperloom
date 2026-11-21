@@ -13,6 +13,8 @@ requests; either takes ``--ep``, the expert-parallel size its server runs at, 1 
 model in the image ``HYPERLOOM_ACTIVE_IMAGE_REF`` names, and a ``--model`` that is a directory is recorded by its
 resolved path, which its benchmark pins. An operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than
 ``--workload``, or that names a benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``, is refused.
+``--boot-budget-sec`` (at most 6 h) is how long a test's server may take to be ready: a test then runs for its trace
+window, if any, half an hour more and that budget, rather than half of the default timeout going to the boot.
 ``--max-gpu-hours`` caps the GPU hours the session uses, tests' GPU time plus card time any lease holds: EXPLORE ends
 with ``gpu_hours_exhausted`` once only FINAL's share is left, and FINAL still runs.
 ``--max-llm-usd`` caps the dollars the session's LLM calls cost: EXPLORE

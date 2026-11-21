@@ -20,6 +20,16 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A hosted multi-branch run sets the AgentX window and the server boot
+  budget.** The campaign spec's `multibranch` block takes
+  `agentx_duration_sec` and `agentx_objective` (for `workload: agentx` only),
+  forwarded as `--agentx-duration-sec` and `--agentx-objective`; before, a
+  hosted AgentX run always replayed the default 3600 s window. A new
+  `--boot-budget-sec` on `hyperloom-multibranch run` (`boot_budget_sec` in the
+  spec, at most 21600) is how long a test's server may take to be ready: a
+  test then runs for its trace window, if any, plus 1800 s plus that budget,
+  and the boot limit is the budget instead of half the test's timeout. Without
+  it nothing changes.
 - **A single-node session no longer uses Ray.** Serving rounds run in the
   Coordinator's process, one at a time behind the resource lanes, and GPU
   specialists take their cards from the session's GPU pool only. The installer

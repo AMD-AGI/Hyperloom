@@ -394,6 +394,8 @@ def _procedure_section(call: TestCall, first: BenchmarkPoint, deadline_unix: flo
         "silence_timeout_sec": float(call.silence_timeout_sec or call.timeout_sec),
         "deadline_unix": float(deadline_unix),
     }
+    if call.boot_budget_sec is not None:
+        section["boot_budget_sec"] = float(call.boot_budget_sec)
     if call.short_prompts is not None:
         section["short_prompts"] = call.short_prompts.to_document()
     if call.long_context is not None:
