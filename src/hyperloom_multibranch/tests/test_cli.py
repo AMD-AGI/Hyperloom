@@ -45,6 +45,7 @@ from hyperloom_common import bwrap as bwrap_module
 from hyperloom_common.bwrap import BwrapProbe
 from hyperloom_common.shared_storage import current_umask
 from hyperloom.common import agent_isolation, visible_devices
+from hyperloom.common.env_safety import RunAs
 from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
@@ -125,6 +126,8 @@ from hyperloom_multibranch.scheduling.settings import (
 from hyperloom_multibranch.scheduling.session_base import freeze_session_base
 from hyperloom_multibranch.scheduling.session_environment import hosted_runner_cache, require_writable_storage
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
+from hyperloom_multibranch.scheduling import specialist_reach
+from hyperloom_multibranch.scheduling.specialist_reach import ProbeResult
 from hyperloom_multibranch.tests.agent_rig import install_stand_in
 from hyperloom_multibranch.tests.base_records import write_record
 from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
@@ -2101,6 +2104,33 @@ def test_a_leg_that_cannot_open_a_file_of_the_run_ends_it_for_good_naming_the_fi
     document = host.exit_document()
     assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
     assert document["error"] == f"[Errno 13] Permission denied: '{roster}'"
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_binaries", "isolated_launches")
+def test_a_hosted_session_whose_specialists_account_cannot_reach_it_ends_the_run_before_it_runs(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    account = RunAs("hl-specialist", os.getuid(), os.getgid(), (), "/")
+    monkeypatch.setattr(specialist_reach, "resolve_launch_isolation", lambda: agent_isolation.AccountIsolation(account))
+    monkeypatch.setattr(specialist_reach, "run_as_account", lambda *_: ProbeResult(3, f"search\t{host.workspace}\n"))
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+    monkeypatch.setattr(cli, "Session", _never_built)
+    handlers = list(logging.getLogger().handlers)
+
+    try:
+        assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+    finally:  # the session's own log, which the session adds as it is created
+        for handler in set(logging.getLogger().handlers) - set(handlers):
+            logging.getLogger().removeHandler(handler)
+            handler.close()
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
+    assert f"cannot search {host.workspace}" in str(document["error"])
+
+
+def _never_built(*_: object) -> NoReturn:
+    raise AssertionError("the session was built")
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")

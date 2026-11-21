@@ -200,6 +200,7 @@ from hyperloom_multibranch.scheduling.session_environment import (
     require_writable_storage,
 )
 from hyperloom_multibranch.scheduling.session_types import SessionHost, SessionOutcome, SessionServices
+from hyperloom_multibranch.scheduling.specialist_reach import require_specialist_reach
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.scheduling.settings import (
     RunSettings,
@@ -246,6 +247,9 @@ def run_session(
 ) -> int:
     """Create the session directory, hand it to ``report_root`` -- by default printed on one stdout line -- before
     anything else is built in it, run the session (:meth:`Session.run`, given ``explore_cap``) and return its exit code.
+    A session whose specialists run as an account that cannot reach its directory is refused before it runs
+    (:func:`~hyperloom_multibranch.scheduling.specialist_reach.require_specialist_reach`, raising
+    :class:`EnvironmentIncomplete`).
 
     The session and its peers are built on the event loop they run on, which the specialist tools of the MCP service
     hand every toolbox call to. Whatever the session's processes orphan is reparented to this process, so the session
@@ -266,6 +270,7 @@ async def _run_session(
     layout = create_session(workspace_root(), settings.workload.model_basename, clock)
     report_root(layout.root)
     logging.getLogger().addHandler(_file_handler(layout.scheduler_log))
+    require_specialist_reach(layout.branches)
     host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
     session = Session(settings, peer_factory, host, services)
     return (await session.run(explore_cap)).exit_code
@@ -284,8 +289,11 @@ def final_only(
 def resume(
     persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, until: float, cap: ExploreCap | None
 ) -> int:
-    """:func:`final_only` running :meth:`Session.resume` up to the deadline ``until`` with EXPLORE capped by ``cap``."""
+    """:func:`final_only` running :meth:`Session.resume` up to the deadline ``until`` with EXPLORE capped by ``cap``,
+    refused first, as a new session is, when the specialists' account cannot reach the session
+    (:func:`~hyperloom_multibranch.scheduling.specialist_reach.require_specialist_reach`)."""
 
+    require_specialist_reach(persisted.layout.branches)
     return _over_session(persisted, peer_factory, services, lambda session, ended: session.resume(ended, until, cap))
 
 
@@ -390,7 +398,14 @@ def hosted_run() -> int:
     _stop_before_grant_ends(host)
     try:
         returncode = start.run()
-    except (PeersUnavailable, ImageCheckFailed, CacheBuildError, ToolboxInputsError, PermissionError) as exc:
+    except (
+        EnvironmentIncomplete,
+        PeersUnavailable,
+        ImageCheckFailed,
+        CacheBuildError,
+        ToolboxInputsError,
+        PermissionError,
+    ) as exc:
         return _not_run(host.state_dir, EXIT_FAILED, exc)
     root = recorded_session(host.state_dir)
     stop_reason = None if root is None else reported_stop_reason(root)
