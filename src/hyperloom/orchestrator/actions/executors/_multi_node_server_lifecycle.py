@@ -934,11 +934,13 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
     import httpx as _httpx
 
     port = settings.worker_port
-    targets = multi_node.worker_health_targets(_read_state(), port)
+    state = _read_state()
+    targets = multi_node.worker_health_targets(state, port)
     if not targets:
         return
     started = _t.monotonic()
     ready: set[tuple[str, int]] = set()
+    launch_checked = False
     # Detokenizer-wedge fast-fail: bail early on a wedged worker instead of burning the full timeout.
     wedge_grace = settings.worker_wedge_grace_s
     fastfail = env_flag("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", default=True)
@@ -951,6 +953,14 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
             elapsed = int(_t.monotonic() - started)
             await multi_node.poll_worker_health(client, targets, ready, elapsed)
             pending = list(dict.fromkeys(ip for _r, ip, p in targets if (ip, p) not in ready))
+            # A restarted container serves its platform entrypoint: check past the crash grace and once more at the end.
+            if not pending or (not launch_checked and elapsed > crash_grace):
+                launch_checked = True
+                from hyperloom.inference_optimizer.multi_node.commands.pd_cluster import engines_lost_reason
+
+                lost = await asyncio.to_thread(engines_lost_reason, state)
+                if lost:
+                    raise ServerRestartFailed(lost)
             if not pending:
                 log.info(
                     "all %d worker(s) /health-ready after %ds; proceeding to frontend probe", len(targets), elapsed
@@ -1182,11 +1192,13 @@ async def _wait_for_server_health_async(settings: RestartSettings, timeout_s: in
         timeout_s,
         settings.health_poll_s,
     )
-    # Infera-ONLY serving-readiness extension. When it is on, also do a 1-token completion probe to confirm workers
-    # actually serve traffic (Infera registers models in /v1/models before the worker is ready to accept requests;
-    # this causes the first benchmark to get 503 "Model temporarily unavailable" for every request, surfacing as
-    # `completed=0` -> `baseline_failed`).
-    wait_model_ready = str(state.get("backend") or "").strip().lower() == "infera"
+    # Serving-readiness extension for Infera and the atomesh/sglangrouter PD routers: wait for a non-empty /v1/models,
+    # then run a 1-token completion probe to confirm the workers actually serve traffic. Infera registers models in
+    # /v1/models before the worker is ready to accept requests, so the first benchmark gets 503 "Model temporarily
+    # unavailable" for every request (`completed=0` -> `baseline_failed`). A PD router keeps running while its engines
+    # restart, so its /health passes before the restarted prefill and decode engines are registered and serving.
+    backend = multi_node.normalize_mn_backend(state.get("backend"))
+    wait_model_ready = backend in (INFERA, *multi_node.PD_BACKENDS)
     wait = _ServingWait(settings, base, timeout_s)
     async with _httpx.AsyncClient(timeout=15.0) as client:
         while True:

@@ -15,7 +15,7 @@ import json
 import subprocess
 from typing import Any
 
-from inference_suite.multinode import in_place_restart_payload
+from inference_suite.multinode import engine_liveness_script, in_place_restart_payload
 
 from .._internal.log import err, info
 from .._internal.pd_cluster import (
@@ -104,6 +104,42 @@ def _ssh_pod(
 def _engine_pods(state: dict[str, Any]) -> list[dict[str, Any]]:
     """Prefill then decode pod records that carry an IP."""
     return role_engine_pods(state, "prefill") + role_engine_pods(state, "decode")
+
+
+def engines_not_running(state: dict[str, Any]) -> list[str]:
+    """``"<role> <ip>"`` of each engine pod whose launched server is no longer running.
+
+    A pod whose container restarted has lost the pidfile and runs its platform
+    entrypoint instead of the launched command. A pid still running the launch
+    script (waiting for the GPU before it execs the server) counts as running.
+    Unreachable pods are not listed.
+    """
+    gone: list[str] = []
+    for pod in _engine_pods(state):
+        role = str(pod.get("role") or "")
+        ip = str(pod["podIP"])
+        port = int(pod.get("sshPort") or state.get("ssh_port") or 0)
+        script = engine_liveness_script(role, ENGINE_NEEDLE)
+        try:
+            completed = _infera_ssh_bash_with_env(state, ip, script, timeout=30, port=port)
+        except subprocess.TimeoutExpired:
+            continue
+        if "HL_GONE" in (completed.stdout or ""):
+            gone.append(f"{role} {ip}")
+    return gone
+
+
+def engines_lost_reason(state: dict[str, Any]) -> str | None:
+    """Failure reason naming the engine pods whose launched server is gone, or None; None unless a pod hand-off."""
+    if not is_pod_handoff(state):
+        return None
+    gone = engines_not_running(state)
+    if not gone:
+        return None
+    return (
+        f"launched engine exited on {gone}; the container restarted with its platform entrypoint, so /health no "
+        "longer reflects this round's launch args (the engine's error is in the pod's previous container log)"
+    )
 
 
 def restart_pd_cluster(args: argparse.Namespace) -> int:

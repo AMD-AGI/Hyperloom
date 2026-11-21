@@ -400,13 +400,19 @@ class _BenchmarkLaunchMixin:
     @staticmethod
     async def _multi_node_engines_lost() -> str:
         """Why a multi-node round's engines are gone (replaced or exited), or ``""`` when they run."""
-        from .._multi_node_env import _read_state, is_pd_session
+        from hyperloom.inference_optimizer.multi_node import external_has_server_control
 
-        if not is_pd_session():
+        from .._multi_node_env import _read_state, is_multi_node, is_pd_session
+
+        if is_pd_session():
+            from hyperloom.inference_optimizer.multi_node.pd_session import engines_lost
+
+            return await asyncio.to_thread(engines_lost, _read_state())
+        if not is_multi_node() or not external_has_server_control():
             return ""
-        from hyperloom.inference_optimizer.multi_node.pd_session import engines_lost
+        from hyperloom.inference_optimizer.multi_node.commands.pd_cluster import engines_lost_reason
 
-        return await asyncio.to_thread(engines_lost, _read_state())
+        return await asyncio.to_thread(engines_lost_reason, _read_state()) or ""
 
     def _record_argv_refusal(self, round_: _BenchmarkRound, attempt_index: int, detail: str) -> None:
         """Record the parser's refusal at the parse rung, where enablement reads it as a terminal no patch repairs."""

@@ -257,6 +257,33 @@ def test_exec_strings_write_undecodable_environment_bytes_back_unchanged(monkeyp
     assert written[0] == raw + b"\0"
 
 
+class _FakeCli:
+    """Records SSH scripts per IP and answers with a scripted stdout."""
+
+    def __init__(self, replies: dict[str, str]) -> None:
+        self.replies = replies
+        self.calls: list[tuple[str, str]] = []
+
+    def _infera_ssh_bash_with_env(self, state, ip, script, *, timeout, port=None):
+        self.calls.append((ip, script))
+        return subprocess.CompletedProcess(["ssh"], 0, stdout=self.replies.get(ip, ""), stderr="")
+
+
+_PD_STATE = {
+    "backend": "sglangrouter",
+    "ssh_port": 29000,
+    "prefill_pods": [{"role": "prefill", "podIP": "10.0.0.1", "sshPort": 29000}],
+    "decode_pods": [{"role": "decode", "podIP": "10.0.0.2", "sshPort": 29000}],
+}
+
+
+def test_engines_not_running_names_pods_whose_launch_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeCli({"10.0.0.1": "HL_ALIVE\n", "10.0.0.2": "HL_GONE\n"})
+    _route_pod_ssh(monkeypatch, fake)
+    assert pd_cmds.engines_not_running(dict(_PD_STATE)) == ["decode 10.0.0.2"]
+    assert "/tmp/hyperloom-mn-decode.pid" in dict(fake.calls)["10.0.0.2"]
+
+
 def test_remote_driver_finds_the_server_by_its_needle(tmp_path: Path) -> None:
     token = f"hl-needle-{os.getpid()}-{time.monotonic_ns()}"
     named = subprocess.Popen(["python3", "-c", "import time; time.sleep(30)", token])
@@ -354,6 +381,14 @@ def test_detached_spawn_logs_to_file_and_console(monkeypatch: pytest.MonkeyPatch
         time.sleep(0.05)
     assert f"hl-spawned-{pid}" in log_file.read_text(encoding="utf-8")
     assert f"hl-spawned-{pid}" in console.read_text(encoding="utf-8")
+
+
+def test_liveness_probe_greps_the_engine_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeCli({"10.0.0.1": "HL_ALIVE\n", "10.0.0.2": "HL_ALIVE\n"})
+    _route_pod_ssh(monkeypatch, fake)
+    assert pd_cmds.engines_not_running(dict(_PD_STATE)) == []
+    script = dict(fake.calls)["10.0.0.1"]
+    assert "grep -qF -e sglang.launch_server" in script
 
 
 def _run_launch(tmp_path: Path, command: str, env: dict[str, str], *, log_ip: str = "") -> subprocess.CompletedProcess:
