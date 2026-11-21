@@ -241,7 +241,7 @@ _SERVED_WHERE_INSTALLED = frozenset({"aiter", AITER_META_WHEEL_DIR})
 
 
 def _repositories_json(repositories: Mapping[str, RepoBaseline]) -> str:
-    """``repositories.json``: the sealed repositories, and the tree a snapshot of an installed package is served from."""
+    """``repositories.json``: the sealed repositories, and the installed package a snapshot's checkout stands in for."""
     served_trees = {
         repository: str(baseline.deploy_root)
         for repository, baseline in sorted(repositories.items())

@@ -60,8 +60,10 @@ class TaskStateError(ValueError):
 class HandoffBundle:
     """The three Markdown documents supplied by Hyperloom, and the repositories a task may name as its ``repo_root``.
 
-    ``served_trees`` names, for a repository the server does not import from directly, the installed package directory
-    it does import those files from; a repository absent from it is itself what the server imports.
+    ``served_trees`` names, for a repository whose checkout is to stand in for an installed package, that package's
+    directory: the server imports the repository's files from there, and the controller makes its checkout the package
+    a campaign imports. A repository absent from it is given no tree to stand in for, because it is itself what the
+    server imports or because its package cannot be imported from another directory; its checkout is left as it is.
     """
 
     root: Path

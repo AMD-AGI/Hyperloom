@@ -75,7 +75,7 @@ def test_a_snapshot_repository_names_the_tree_the_server_imports_it_from(tmp_pat
     assert bundle.served_trees == {snapshot.resolve(): installed}
 
 
-def test_a_handoff_without_served_trees_serves_every_repository_itself(tmp_path: Path) -> None:
+def test_a_handoff_without_served_trees_gives_no_repository_a_tree_to_stand_in_for(tmp_path: Path) -> None:
     assert read_handoff(_handoff(tmp_path, _repositories(tmp_path / "framework"))).served_trees == {}
 
 

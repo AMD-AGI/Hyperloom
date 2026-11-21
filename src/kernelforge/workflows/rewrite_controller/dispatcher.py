@@ -234,7 +234,7 @@ def dispatch_single_task(
 ) -> SingleTaskResult:
     """Validate and run one task without affecting sibling task failures.
 
-    ``served_tree`` is the installed package the server imports the task's repository from, when it is a snapshot.
+    ``served_tree`` is the installed package the task's checkout stands in for, when the handoff names one.
     """
     task_path = Path(task_dir).expanduser().resolve()
     parsed = load_task(

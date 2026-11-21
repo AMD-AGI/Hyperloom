@@ -106,7 +106,7 @@ def dispatch_prepared_tasks(
 ) -> ScheduleResult:
     """Validate and run all published tasks sequentially by priority.
 
-    ``served_trees`` is the handoff's: the installed package each snapshot repository is served from.
+    ``served_trees`` is the handoff's: the installed package a repository's checkout stands in for, where it names one.
     """
     task_dirs = discover_task_dirs(layout)
     parsed_by_id, results = _parse_unique_tasks(task_dirs)

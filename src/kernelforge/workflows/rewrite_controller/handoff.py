@@ -27,10 +27,10 @@ def _read_document(root: Path, filename: str) -> str:
 
 
 def _read_repositories(root: Path) -> tuple[tuple[Path, ...], dict[Path, Path]]:
-    """The repositories the host declares, at least one, and the tree each is served from when it is not itself.
+    """The repositories the host declares, at least one, and the installed package each one's checkout stands in for.
 
     ``{"repositories": ["<absolute path>", ...], "served_trees": {"<repository>": "<absolute path>", ...}}``;
-    ``served_trees`` is optional and names declared repositories only.
+    ``served_trees`` is optional, names declared repositories only, and need not name every one of them.
     """
     path = root / REPOSITORIES_FILENAME
     try:

@@ -573,8 +573,8 @@ def create_operator_worktree(
 ) -> OperatorWorktree:
     """Create one fresh branch/worktree from the task's pinned base commit.
 
-    ``served_tree`` is the installed package directory the server imports the repository's files from, when the
-    repository is a snapshot of one: the checkout is then made the package the campaign imports.
+    ``served_tree`` is the installed package directory the checkout stands in for, when the handoff names one for the
+    repository: the checkout is then made the package the campaign imports.
     """
     repo_root = task.repo_root.resolve()
     if _git_toplevel(repo_root) != repo_root:
