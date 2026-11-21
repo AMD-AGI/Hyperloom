@@ -93,7 +93,7 @@ settings that do stop the run are marked below.
 | `MAGPIE_EVAL_LIMIT`, `MAGPIE_EVAL_TASKS`, `MAGPIE_EVAL_TOKENIZED_REQUESTS` | Rename them to `HYPERLOOM_EVAL_LIMIT`, `HYPERLOOM_EVAL_TASKS` and `HYPERLOOM_EVAL_TOKENIZED_REQUESTS`. The old names are ignored, so a smoke box that capped the eval with `MAGPIE_EVAL_LIMIT` now runs the full GSM8K. |
 | `MAGPIE_PATH`, `MAGPIE_REF`, `MAGPIE_REPO`, `MAGPIE_PACKAGE_SPEC`, `MAGPIE_INFERENCEX_PATH`, `MAGPIE_EVAL_FLAG_STRICT`, `PATCH_MAGPIE` and every other `MAGPIE_*` name | Delete them; Magpie is no longer installed or imported (see *Installation prerequisites*). |
 | `HYPERLOOM_BENCHMARK_BACKEND` | Delete it; every round runs through InferenceSuite. `--framework custom` no longer needs `HYPERLOOM_BENCHMARK_BACKEND=bypass`; `--benchmark-scripts-dir` (`HYPERLOOM_BYPASS_SCRIPTS_DIR`) still names the script directory. |
-| `INFERENCEX_REF`, `INFERENCEX_DEFAULT_DIR` | Delete them; nothing clones InferenceX. The client is staged at the commit `inference_suite.pins` pins, and the base launch is read from InferenceX `main` unless `--inferencex-commit` names one. `INFERENCEX_PATH` is optional and no longer set by `install.sh`; the research scout reads reference launch scripts under it. |
+| `INFERENCEX_REF`, `INFERENCEX_DEFAULT_DIR` | Delete them; no InferenceX checkout is configured any more. The client is staged at the commit `inference_suite.pins` pins, and the base launch is read from InferenceX `main` unless `--inferencex-commit` names one. `INFERENCEX_PATH` is optional and no longer set by `install.sh`; the research scout reads reference launch scripts under it. |
 | `HYPERLOOM_EVAL_DERIVE_STOP`, `HYPERLOOM_EVAL_STOP_STRINGS` | Delete them; nothing reads them. `HYPERLOOM_EVAL_MAX_TOKENS` is still read. |
 | `HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass`, or `analysis_route: bypass` in a `trace_analyze` request | **Fails** the request with `invalid_analysis_route`. Set `non-llm`, which needs a TraceLens checkout and writes `analysis.json` instead of `analysis.md`. `HYPERLOOM_BYPASS_STEADY_STATE`, `HYPERLOOM_BYPASS_CORR_WARN_PCT`, `HYPERLOOM_BYPASS_OTHERS_WARN_PCT`, `HYPERLOOM_TRACE_SHAPE_MANIFEST`, `HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES`, `HYPERLOOM_NUM_DENOISE_STEPS` and `KERNEL_AGENT_USE_LLM_ORCHESTRATOR` are ignored. |
 | `HYPERLOOM_SPECIALIST_PERMISSION_MODE` | Delete it; a Claude specialist always runs with `--permission-mode bypassPermissions`. |
@@ -170,7 +170,7 @@ Defaults and gates that move, so the same command behaves differently:
 
 Installation prerequisites move:
 
-- Magpie is no longer installed and nothing clones InferenceX. `install.sh`
+- Magpie is no longer installed and no InferenceX checkout is configured. `install.sh`
   stages the InferenceX client at the pinned commit, the GSM8K task and the
   AgentX harness into `INFERENCE_SUITE_TOOL_CACHE` (default
   `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/inference-suite-tools`) and
@@ -204,9 +204,8 @@ Installation prerequisites move:
   on a checkout with unmerged paths or more than 256 MiB of untracked files.
 - `install.sh` stops writing `TRACELENS_ROOT`, `GEAK_ROOT`, `GEAK_E2E_RUNNER`,
   `KERNEL_AGENT_ENV`, `HYPERLOOM_RUNTIME_DIR` and `HYPERLOOM_ROOT` into `.env`,
-  removes the installer-written copies, and removes `MAGPIE_PATH` and
-  `INFERENCEX_PATH` even when written by hand; export them in the shell to keep
-  an override. On a checkout another account can write, it keeps the
+  removes the installer-written copies, and removes `INFERENCEX_PATH` even
+  when written by hand; export them in the shell to keep an override. On a checkout another account can write, it keeps the
   Anthropic-side credentials out of `.env`, rebuilds the file (mode `0600`,
   comments dropped) from the assignments such a file may lend, and leaves
   `HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env`; export credentials in the
@@ -277,8 +276,8 @@ Session and report consumers have to follow these changes:
   `multibranch.inferencex_commit` in a hosted run's campaign spec, read
   InferenceX at that commit (a full sha, or a prefix of 7 or more hex digits; a pull request's
   head commit included) instead of the head of `main`, so a session can match
-  a CI run; `base_launch.json` records the full sha. Before, InferenceX was
-  always read at `main`. The cookbooks, vLLM recipes and ATOM catalog are
+  a CI run; `base_launch.json` records the full sha. The cookbooks, vLLM
+  recipes and ATOM catalog are
   still read at `main`, and a resumed session keeps its frozen base. A commit
   InferenceX does not have, or one that lacks the functions the resolver runs
   (such as `acceptance_length`), is refused before the session starts,
@@ -286,8 +285,7 @@ Session and report consumers have to follow these changes:
   base elsewhere and pass the frozen `base_launch.json` as
   `--reference-script`. A hosted run whose spec value is no commit ends for
   good with exit 2, and one whose commit is refused with exit 1, as `run`
-  does; before, a hosted session that could not resolve its base crashed and
-  was started again. While a commit is pinned, a fixed session never falls
+  does. While a commit is pinned, a fixed session never falls
   back to the default table: a source that cannot be read (InferenceX, the
   model card, a release list, a cookbook) refuses it, naming the source and its
   error, and so does no recipe serving it, naming why each source missed. See
@@ -329,7 +327,7 @@ Session and report consumers have to follow these changes:
 
 - **A single-lineage AgentX decision round that trails its reference at 1800 s is stopped.** Every AgentX measurement now records `e2e_norm_intvty_p50_1800s`, the median interactivity over the requests finished in the first 1800 s of profiling, and writes the ruling to `agentx_checkpoint.json` in the round's slot. Under `HYPERLOOM_AGENTX_EARLY_STOP=enforce`, the single-lineage default, an explore decision round that trails its reference by more than 2% there is stopped and recorded as REVERT; `shadow` only writes the ruling and `off` skips it. Replayed over 808 graded rounds, the rule stopped 196, all of them REVERT or NO_PROMOTE, and saved 99 of 812 measured hours. Before, every decision round measured for its full hour.
 
-- **Hyperloom recognises the MI350X, the Radeon AI PRO R9600D and the Radeon PRO W7900 and W7900D.** `--gpu-type mi350x`, `r9600d`, `w7900` and `w7900d` are accepted, and each board is identified from its device id or product name at its own roofline figures; a multi-branch session also takes `mi350x`. R9600D, W7900 and W7900D run with `--framework vllm` only, as R9700 does, and a vLLM session on gfx1100 resolves its base launch from the default table. KernelForge runs forge-loop campaigns on gfx1100 with RDNA 3 hardware notes, refuses `aiter`, `flydsl`, `assembly`, `gluon`, `fusion` and `ave` campaigns there, and files gfx1100 experience-KB records under `w7900`. A bare gfx1201 target is no longer keyed as `r9700`, and on gfx1201 the automatic AITER FP4/MXFP4 tuners are skipped.
+- **Hyperloom recognises the MI350X, the Radeon AI PRO R9600D and the Radeon PRO W7900 and W7900D.** `--gpu-type mi350x`, `r9600d`, `w7900` and `w7900d` are accepted, and each board is identified from its device id or product name at its own roofline figures; a multi-branch session also takes `mi350x`. R9600D, W7900 and W7900D run with `--framework vllm` only, as R9700 does, and a vLLM session on gfx1100 resolves its base launch from the default table. KernelForge runs forge-loop campaigns on gfx1100 with RDNA 3 hardware notes, refuses `aiter`, `flydsl`, `assembly`, `gluon`, `fusion` and `ave` campaigns there, and files gfx1100 experience-KB records under `w7900`. On gfx1201 the automatic AITER FP4/MXFP4 tuners are skipped.
 
 - **KernelForge has an AveLang backend.** `--kernel-backend ave` selects it and backend inference recognises AveLang imports after the existing checks, so Hyperloom dispatches Ave tasks through its Forge path.
 
@@ -349,7 +347,7 @@ Session and report consumers have to follow these changes:
   concurrency, the running-batch cap, sequence lengths, dtypes) and drops those
   decisively behind. A dropped variant is a `SKIPPED_DEDUP` row naming its
   reason. The projection needs the `inferasim` extra
-  (`pip install 'hyperloom[inferasim]'`, which pins
+  (`pip install 'hyperloom-inference-optimizer[inferasim]'`, which pins
   `amd-infera[projection]==0.3.3`) and Origami, installed separately;
   `HYPERLOOM_INFERASIM_ROOT`, an Infera checkout, takes precedence over the
   package.
@@ -370,9 +368,10 @@ Session and report consumers have to follow these changes:
   mirror applies to them too.
 
 - **The agent roles can run on the DeepSeek Harness.**
-  `INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek` runs orchestration, the critic,
-  specialists (as `dsh` CLI subprocesses), TraceLens and quantization on the
-  harness, and Forge takes `--agent-backend deepseek` /
+  `INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek` runs orchestration, specialists
+  (as `dsh` CLI subprocesses), TraceLens and quantization on the harness, while
+  the critic stays on the side the credentials rank first, and Forge takes
+  `--agent-backend deepseek` /
   `FORGE_AGENT_BACKEND=deepseek`. It needs the `deepseek` extra and the
   `OPENAI_BASE_URL` / `OPENAI_API_KEY` gateway; `DSH_MODEL` (also read from
   `.env`) picks the model, and the credential ranking never selects the
@@ -413,17 +412,21 @@ Session and report consumers have to follow these changes:
 - **Multi-node hand-off reads a topology file.** `TOPOLOGY_HANDOFF_FILE`
   names a `topology-handoff/v1` JSON file (`rayjob` or `infera` backend, nodes,
   GPUs per node, service URL and the active backend's block, with credentials
-  as file paths) that is read instead of `INFERENCE_OPTIMIZER_MN_BACKEND`,
-  `INFERENCE_OPTIMIZER_NODES` and `HYPERLOOM_MN_EXT_*`; when both are set and
-  differ, the file wins with a warning. A named file that cannot be used fails
-  closed, naming the problem, with no fallback to the variables.
+  as file paths) that is read instead of `INFERENCE_OPTIMIZER_MN_BACKEND` and
+  `HYPERLOOM_MN_EXT_*`; when both are set and differ, the file wins with a
+  warning. `INFERENCE_OPTIMIZER_NODES` and `INFERENCE_OPTIMIZER_GPUS_PER_NODE`,
+  which `optimize` exports from `--nodes` and `--gpus-per-node`, win over the
+  file, which fills them only when they are unset. A named file that cannot be
+  used fails closed, naming the problem, with no fallback to the variables.
 
 - **Specialists can run as a separate non-root account.**
   `HYPERLOOM_SPECIALIST_USER=<account>` runs the `claude`, `codex` and `dsh`
   specialist CLIs as that account, so they cannot read the app's files or
   credentials. Hyperloom then needs root, or `CAP_SETUID`, `CAP_SETGID` and
-  `CAP_KILL`; a misconfigured account fails each specialist task with a
-  specific error instead of running with full access. Unset, nothing changes.
+  `CAP_KILL`. When the account cannot be used, a specialist runs under
+  bubblewrap with a warning where bubblewrap works, and fails with a specific
+  error where it does not, instead of running with full access. Unset, nothing
+  changes.
 
 - **An xDiT roofline profile works on a stock xDiT image.** The profile
   round lays TraceLens's xDiT patch, chosen by the checkout's version, into the
@@ -483,7 +486,7 @@ not 1.1.5.
 
 - **`hyperloom-multibranch` runs one optimization session as several branches at once.** The new command (also `python -m hyperloom_multibranch`) is installed with Hyperloom. `run` takes a fixed workload (`--workload inferencex` or `agentx`, `--model`, `--framework`, `--gpu-type` of `mi300x`, `mi325x`, `mi350x` or `mi355x`, `--tp`, `--ep`, `--conc`) and runs PRELUDE (baseline and profile), EXPLORE, FINAL and CLOSE. In EXPLORE up to `--max-branches` (default 4) specialist branches each work in a worktree of their own, a judge opens, holds and stops them, and an integration branch merges what they keep; every test is measured through InferenceSuite on cards the session leases (`--measurement local`, or `hosted` in a grant's sandboxes) and kept or refused by a fixed rule. Before a test gets a card, the Python its patches change is compiled and imported on CPU (`merge_smoke`; `HYPERLOOM_MERGE_SMOKE=off` skips it). `--autonomous-agent SOURCE` adds a third-party agent; an adapter package declared under the `hyperloom_multibranch.component_agents` entry-point group makes it a component agent, and Hyperloom ships none. `run --resume SESSION_DIR` continues a session that stopped before FINAL without a second PRELUDE, and `final-only SESSION_DIR` finishes one that cannot be resumed. A session needs `HYPERLOOM_RSI_ARCHIVE`, the shared archive it reads earlier sessions from and archives its search tree into; `python -m hyperloom_multibranch.blackboard.rsi.lessons` lists and edits that archive's lessons. The image check runs before PRELUDE as `HYPERLOOM_IMAGE_CHECK` says (`warn`, the default, `strict` or `off`). The session writes `MB-manifest.json`, `MB-decisions.jsonl` and `MB-report.md`, stops at `--max-hours` (default 2), `--max-gpu-hours` or `--max-llm-usd`, and exits 0, 1 or 2. See [Running a multi-branch session](how-to/run-multibranch.md).
 
-- **A hosting platform can run a multi-branch session.** `hyperloom-multibranch hosted run` reads the campaign spec and host inputs, runs the packaged `install.sh` first (`install.log` in `$HYPERLOOM_STATE_DIR`; a failing installer ends the run for good with exit 2), and measures in the grant's sandboxes or, with `placement.measurement: local`, on the app container's own cards. `multibranch.reference_script` becomes the session's `--reference-script` and `hardware.ep` its `--ep`. A restart resumes a session past its baseline, up to the deadline its first start set, or finishes it; a restart that finishes a preempted session whose FINAL chose ends with exit 0 and `stop_reason: finished_after_restart`. EXPLORE ends early enough for FINAL's validation to finish inside the grant. The run refuses a spec that sets `launch.server_args` or `launch.extra_env` (exit 2), a host where its specialists cannot be isolated (exit 1, `agents cannot be isolated on this host`), and a leg whose account cannot write the runner cache or the RSI archive. The hosting layer image now ships a static, non-setuid bubblewrap as `/layer/bin/bwrap`. See [Run hosted multi-branch on a new cluster](how-to/hosted-multibranch-new-cluster.md).
+- **A hosting platform can run a multi-branch session.** `hyperloom hosted run` on a multi-branch campaign spec runs the packaged `install.sh` first (`install.log` in `$HYPERLOOM_STATE_DIR`; a failing installer ends the run for good with exit 2) and then hands the run to `hyperloom-multibranch hosted run`, which reads the campaign spec and host inputs and measures in the grant's sandboxes or, with `placement.measurement: local`, on the app container's own cards. `multibranch.reference_script` becomes the session's `--reference-script` and `hardware.ep` its `--ep`. A restart resumes a session past its baseline, up to the deadline its first start set, or finishes it; a restart that finishes a preempted session whose FINAL chose ends with exit 0 and `stop_reason: finished_after_restart`. EXPLORE ends early enough for FINAL's validation to finish inside the grant. The run refuses a spec that sets `launch.server_args` or `launch.extra_env` (exit 2), a host where its specialists cannot be isolated (exit 1, `agents cannot be isolated on this host`), and a leg whose account cannot write the runner cache or the RSI archive. The hosting layer image now ships a static, non-setuid bubblewrap as `/layer/bin/bwrap`. See [Run hosted multi-branch on a new cluster](how-to/hosted-multibranch-new-cluster.md).
 
 - **A multi-branch session runs on MI325X.** `hyperloom-multibranch run`
   accepts `--gpu-type mi325x`. Before, it refused MI325X, a limit left from
@@ -640,11 +643,13 @@ not 1.1.5.
   custom specialist is not.
 
 - **Every round runs through InferenceSuite; Magpie and the `bypass` backend
-  are removed.** Baseline, explore, grid, KEEP, profile and GEAK-replay rounds
-  are inference_suite run directories with a `report.json`, and `failed_step`
-  follows the step it names. Magpie is no longer installed or imported, and
-  nothing clones InferenceX: `install.sh` stages the pinned client into
-  `INFERENCE_SUITE_TOOL_CACHE`. `MAGPIE_*`, `HYPERLOOM_BENCHMARK_BACKEND` and
+  are removed.** Baseline, explore, grid, KEEP and profile rounds are
+  inference_suite run directories with a `report.json`, and `failed_step`
+  follows the step it names; a GEAK replay runs its own script and is not one.
+  Magpie is no longer installed or imported, and no InferenceX checkout is
+  configured any more: `install.sh` fetches the pinned client commit into
+  `INFERENCE_SUITE_TOOL_CACHE`, and base-launch resolution reads InferenceX
+  itself. `MAGPIE_*`, `HYPERLOOM_BENCHMARK_BACKEND` and
   `INFERENCEX_REF` are no longer read; `MAGPIE_EVAL_LIMIT` is now
   `HYPERLOOM_EVAL_LIMIT`. **Upgrade note:** hosted measurement sheets and
   result manifests are v2 and nothing reads v1 ones any more: a session
@@ -767,26 +772,26 @@ not 1.1.5.
   introduced it; `RAY_VERSION` is still honoured verbatim.
 
 - **Code Hyperloom and KernelForge share lives in the `hyperloom_common`
-  package.** `aiter_jit_cache`, `checkpoint_quant`, `coerce`, `entry_points`,
-  `env`, `fs_utils`, `git_safety`, `gpu_identity`, `io`, `jsonio`,
+  package.** `aiter_jit_cache`, `checkpoint_quant`, `coerce`, `env`,
+  `fs_utils`, `git_safety`, `gpu_identity`, `io`, `jsonio`,
   `pr_monitor_urls`, `proctree`, `timeutil` and `unified_diff` move from `hyperloom.common`
   to `hyperloom_common`; `llm_config`, `llm_headers`, `llm_attribution`,
   `llm_request_hooks`, `llm_stability_env`, `token_usage`,
-  `reasoning_effort`, `claude_oneshot` and `deepseek_session` to
-  `hyperloom_common.llm`. `kernelforge.tools.durable_io` is removed:
+  `reasoning_effort` and `claude_oneshot` to `hyperloom_common.llm`. `kernelforge.tools.durable_io` is removed:
   `hyperloom_common.io` writes with `options=DURABLE` and provides
   `fsync_directory`, `fsync_tree` and `fsync_tree_directories`. Code that
   imports one of these modules must import it from its new place; no aliases
   are kept. An atomic write that asks for `fsync` or `fsync_dir` now fails
   when the flush fails instead of continuing without it. KernelForge
-  recognises R9700 (gfx1201) and Radeon 8060S (gfx1151), and keys their
-  experience-KB records under `r9700` and `radeon8060s`.
+  recognises Radeon 8060S (gfx1151) and keys its experience-KB records under
+  `radeon8060s`; gfx1201 records stay under the ISA name, which more than one
+  board shares.
 
 - **Specialists run in a bubblewrap sandbox where the host allows it.** On such a host a specialist can no longer read the app's home, credentials or state, nor reach anything but the LLM endpoints and MCP servers its launch names; in a multi-branch session agent and dev sandboxes are confined too. A native build that cannot run as user 65534 compiles under bubblewrap (`bwrap+netns`). The start-up log says once how agents are isolated and the session report carries an `agent isolation:` line. Where neither the specialist account nor bubblewrap works, a run logs one WARNING and agents run unconfined, unless isolation is required (a hosted run, or `HYPERLOOM_SPECIALIST_USER` set), which refuses; a hosted container that maps only its root now starts, with its specialists under the layer's bubblewrap. A specialist that swaps its worktree for a link gets no patch collected (`worktree_refused`), and a host whose user namespace does not map the specialist account refuses the switch (`RunAsError`) instead of running it as root. `python -I -m hyperloom_common.bwrap probe` says whether a host can sandbox agents and why not. **Upgrade note:** a sandboxed `claude` CLI cannot read a login kept only in the app's home: such a launch runs unconfined with a WARNING, or is refused where isolation is required, until its environment carries `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` or Bedrock credentials.
 
-- **The kernel-agent env file and a shared `.env` no longer hand out credentials.** `install.sh` writes `kernel-agent.env.sh` to `${TMPDIR:-/tmp}/hyperloom-<uid>-<key>/` instead of `$USER_DATA_PATH/runtime/`, removes a copy left there, and stops when `KERNEL_AGENT_ENV` points into a directory other accounts can write; preflight, the documented source line and the slurm job refuse such a file too. A `.env` that is not private to the account, or that sets `HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env`, lends no credential and exports only listed non-credential settings with listed values. Before, every pod of the user could read the credentials in that file and replace what the next launch sourced. **Upgrade note:** run `install.sh` in every new container before `optimize`; one that did not now fails preflight with exit 2 instead of sourcing a file another container wrote.
+- **The kernel-agent env file and a shared `.env` no longer hand out credentials.** `install.sh` writes `kernel-agent.env.sh` to `${TMPDIR:-/tmp}/hyperloom-<uid>-<key>/` instead of `$USER_DATA_PATH/runtime/`, removes a copy left there, and stops when `KERNEL_AGENT_ENV` points into a directory other accounts can write; preflight, the documented source line and the slurm job refuse such a file too. A `.env` that is not private to the account, or that sets `HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env`, lends no credential; one that another account can write also exports only listed non-credential settings with listed values. Before, every pod of the user could read the credentials in that file and replace what the next launch sourced. **Upgrade note:** run `install.sh` in every new container before `optimize`; one that did not now fails preflight with exit 2 instead of sourcing a file another container wrote.
 
-- **A session on shared storage can be continued by another account of its group.** Below a setgid, group-writable directory closed to others (`2775`), the session's state, database, lock, logs, blackboard, git objects and refs, runner cache and archive are written group-writable, so `--resume-from` or a hosted restart as another account of the group reads and continues what an earlier leg left; git's own config, `HEAD` and hooks stay the creating account's. A session whose `--extra-env` or `--server-args` hold a credential keeps `state.json`, `manifest.json` and its journal owner-only, and a resume by another account is refused naming the file. A directory a leg cannot write is named up front with its owner and mode. Elsewhere modes are unchanged. **Upgrade note:** create the shared directories group-owned with mode `2775` once; a runner-cache entry without a manifest is now refused as `CacheConflict` instead of being rebuilt, so remove it.
+- **A session on shared storage can be continued by another account of its group.** Below a setgid, group-writable directory closed to others (`2775`), the session's state, database, lock, logs, blackboard, git objects and refs, runner cache and archive are written group-writable, so `--resume-from` or a hosted restart as another account of the group reads and continues what an earlier leg left; git's own config, `HEAD` and hooks stay the creating account's. A session whose `--extra-env` or `--server-args` hold a credential keeps `state.json`, `manifest.json` and its journal owner-only, and a resume by another account is refused naming the file. A directory a leg cannot write is named up front with its owner and mode. Elsewhere modes are unchanged. **Upgrade note:** create the shared directories group-owned with mode `2775` once.
 
 - **The orchestration role no longer stalls inside its own turn.** On the Claude backend an orchestration call may run 32 Claude Code turns instead of 12, so a model that talks between tool calls reaches its intent. On Codex the orchestration session runs without Codex's shell, so it cannot `sleep` in its turn while nothing is dispatched, and a timed-out turn is not retried. On DeepSeek every round opens a fresh conversation, and every DeepSeek Harness runtime compacts at a quarter of the model's window instead of 80%; a 12-hour run had spent about 403M input tokens against 167M on Claude. Codex runs no longer offer the hosted `web_search` tool, whose result a gateway fronting Claude rejected with a 400.
 
@@ -923,9 +928,9 @@ not 1.1.5.
 - **Install keeps installer-managed paths out of `.env`, and runtime paths follow `USER_DATA_PATH`.**
   After the next install, `.env` no longer holds installer-written
   `TRACELENS_ROOT`, `GEAK_ROOT`, `GEAK_E2E_RUNNER`, `HYPERLOOM_RUNTIME_DIR`,
-  `KERNEL_AGENT_ENV` or `HYPERLOOM_ROOT`; sessions read them from
-  `$USER_DATA_PATH/runtime/kernel-agent.env.sh`, so several sessions can
-  install and run from one checkout by exporting their own `USER_DATA_PATH`. A
+  `KERNEL_AGENT_ENV` or `HYPERLOOM_ROOT`; sessions read them from the
+  kernel-agent env file, so several sessions can install and run from one
+  checkout by exporting their own `USER_DATA_PATH`. A
   path the operator set in `.env` is kept, and a `.env` written by
   `hyperloom setup` stays authoritative. `install.sh --check-only` exits
   non-zero with `behind the pinned revisions: <keys>` when a pinned checkout
@@ -993,22 +998,19 @@ not 1.1.5.
   result unsetting one was rejected. Credentials (`HF_TOKEN`,
   `AWS_SECRET_ACCESS_KEY`) are still never written into these artifacts.
 
-- **A recipe image whose tag names no framework version no longer refuses an
-  older install.** For an untagged image such as
+- **A recipe image whose tag names no framework version holds no minimum
+  version.** For an untagged image such as
   `lmsysorg/sglang-rocm:muse-spark-open`, the version InferenceSuite assumes
-  (the framework's latest release at resolve time) is recorded but no longer
-  held as a minimum, and `launch.json` reports `version_check:
-  assumed_not_held` with the installed version. Before, such a round stopped
-  with `framework_version_too_old` even when the server ran exactly the recipe's
-  image. A version read from the image tag is still held.
+  (the framework's latest release at resolve time) is recorded but not held
+  as a minimum, and `launch.json` reports `version_check: assumed_not_held`
+  with the installed version. A version read from the image tag is held.
 
-- **A card that another process only opened no longer stops the session
-  with `host_gpus_unavailable`.** Every ROCm process opens all cards and
-  keeps up to a few MiB on each; the pre-boot GPU check now counts a
-  process as holding a card only above 1 GiB of VRAM there (or when
-  `amd-smi` reports none). It used to refuse any card with a nonzero
-  reading, so a scheduler or an idle server elsewhere on the host blocked
-  every card. See [inference-suite](reference/inference-suite.md).
+- **The pre-boot GPU check ignores a card another process only opened.**
+  Every ROCm process opens all cards and keeps up to a few MiB on each, so the
+  check counts a process as holding a card only above 1 GiB of VRAM there (or
+  when `amd-smi` reports none); a scheduler or an idle server elsewhere on the
+  host does not block every card. See
+  [inference-suite](reference/inference-suite.md).
 
 - **Single-lineage warm start replays a recipe that only removes launch
   options.** `hyperloom optimize` now replays a Recipe KB record whose only
@@ -1023,16 +1025,15 @@ not 1.1.5.
   run_e2e's chance to flush `result.json` is the `GEAK_FLUSH_GRACE_S` window
   geak_runner already gives it before that kill.
 
-- **Ray 2.44.1 installs on images whose `click` is 8.3 or newer.** A fresh
-  `pip install ray[default]==2.44.1` on Python 3.10 resolves `click` 8.5, and Ray's
-  CLI then fails to import (`ValueError: ... is not a valid Sentinel`), which
-  ended the install. Preflight and the kernel-tools installer now hold
-  `click<8.3` once, for that failure on the default 2.44.1 pin only, and certify
-  the CLI again. Every other failure, and any Ray set through `RAY_VERSION`,
-  leaves `click` untouched; this narrows the no-downgrade rule of the entry above
-  and has no setting.
+- **`click` is held below 8.3 only where Ray 2.44.1 needs it.** 1.1.5
+  installed `click<8.3.0` with Ray every time. Preflight and the kernel-tools
+  installer now leave `click` as installed, and hold `click<8.3` once, then
+  certify the CLI again, only when the default Ray 2.44.1 CLI fails to import
+  with `click` 8.3 or newer (`ValueError: ... is not a valid Sentinel`). Every
+  other failure, and any Ray set through `RAY_VERSION`, leaves `click`
+  untouched. There is no setting.
 
-- **A baseline the host has no idle GPUs for stops the run.** It fails with `host_gpus_unavailable`, naming each GPU turned down and why, and the run stops on that first refusal whatever `--enablement` says. Before, the run spent its enablement budget authoring patches for a baseline it could never measure.
+- **A baseline the host has no idle GPUs for stops the run.** It fails with `host_gpus_unavailable`, naming each GPU turned down and why, and the run stops on that first refusal whatever `--enablement` says.
 
 - **Ray no longer freezes the optimizer or tears down a working head.** Before connecting in-process, the optimizer probes the Ray head from a subprocess; a head that does not answer within `HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC` (60 s) is logged and serving and GPU work run locally, where the process used to freeze until its hard stop. A `ray status` that times out no longer stops a healthy head: the optimizer waits up to `HYPERLOOM_RAY_READY_TIMEOUT_SEC` (30 s) and restarts only a head that is down. `kill -TERM` on an optimizer that has used Ray now runs the whole CLOSE sequence and reaps the run's processes, instead of leaving servers on the GPUs and no close artifacts.
 
@@ -1054,7 +1055,7 @@ not 1.1.5.
 
 - **forge-fuse and forge-loop keep work that was correct.** A forge_loop candidate whose import made the interpreter write bytecode under a protected directory is no longer rejected as `harness_tampered`, and Forge sessions that import benchmark helpers no longer abort as workspace violations. A timed-out fusion run no longer leaves a fused hook in the serving framework, a short fusion share ends with an exported keeper, and a salvaged fusion KEEP keeps its patch for integrate. FlyDSL assembly campaigns start on FlyDSL 0.3.4.1 and later.
 
-- **A slow boot is not taken for a hung one.** Before ready, a server whose log is silent but whose process tree still uses CPU, grows its resident memory or reads its checkpoint counts as active, so a large-checkpoint boot is no longer stopped as `server_silent_before_ready` at the 1800 s silence bound. The launch holds the framework's own ready timeout (`VLLM_ENGINE_READY_TIMEOUT_S`, `SGLANG_WARMUP_TIMEOUT`) at the suite's. An AgentX round in which aiperf skipped requests as a context overflow is invalid, and a warmup refused for its length fails the candidate as `agentx_context_overflow`.
+- **A slow boot is not taken for a hung one.** Before ready, a server whose log is silent but whose process tree still uses CPU, grows its resident memory or reads its checkpoint counts as active, so a large-checkpoint boot is not stopped as `server_silent_before_ready` at the 1800 s silence bound. The launch holds the framework's own ready timeout (`VLLM_ENGINE_READY_TIMEOUT_S`, `SGLANG_WARMUP_TIMEOUT`) at the suite's. An AgentX round in which aiperf skipped requests as a context overflow is invalid, and a warmup refused for its length fails the candidate as `agentx_context_overflow`.
 
 - **Smaller fixes.** A Codex session on a host where its sandbox cannot write the working roots fails at start naming them. A dsh session log of any schema version is read, so specialist token spend is not lost. Installer archives unpack as the installing account, so a one-id user namespace can install. An HSA queue abort is classified as a GPU fault (`hip_runtime_error`) instead of a missing kernel, and an `ImportError` quoted inside another message no longer files a crash as the candidate's `import_error`.
 
