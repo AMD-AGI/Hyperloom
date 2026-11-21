@@ -7,10 +7,13 @@
 profiled, with the largest Amdahl ceilings, leaving out the ops a running branch works on (its focus, an op a direction
 of the agent map it holds names, or an op of the family of a claim it holds or of its last explore test, which is all a
 branch opened without a focus shows) and the spent ones: those the playbook's ``failed_op_limit`` branches opened on
-the integration head as it stands were focused on and stopped without a commit, and those a branch focused on them
-gave up on at that head, its give-up quoting an EXHAUSTED record that finds no ceiling above the bar or every idea
-tested or claimed there; a commit of the integration head's recipe counts as that head. A record alone is about one of the session's directions, not the op, and spends nothing; nor
-does a branch the judge or the session's end stopped, nor a record that waits on a tool or a capability. A spent op
+the integration head as it stands were focused on and stopped without a commit, whoever stopped them, and those a
+branch focused on them gave up on at that head, its give-up quoting an EXHAUSTED record that finds no ceiling above the
+bar or every idea tested or claimed there; a commit of the integration head's recipe counts as that head. A branch whose
+specialist gave up after crashes before any test of it was judged explored nothing of its op and does not count toward
+the limit. A record alone is about one of the session's directions, not the op, and spends nothing, nor does one that
+waits on a tool or a capability, nor one of a branch the judge or the session's end stopped: only a give-up quoting it
+does. A spent op
 opens again once the integration head moves, and an op of a direction of the map once its agent branch stops. With too
 little of EXPLORE left for a new branch's first commit, the playbook's ``last_open_minutes`` or else the median time a
 new branch took to it, it says that no branch should open. Shares taken from a commit the head builds on are named as that commit's, beside
@@ -260,7 +263,8 @@ def _spent(
     snapshot: BlackboardSnapshot, op: str, focused: Sequence[BranchNode], head: str, limit: int
 ) -> FocusHistory | None:
     """The history of the ``focused`` branches of ``op`` when one gave up on it on a commit of ``head``'s recipe, or
-    ``limit`` of those opened on one stopped without a commit, else ``None``."""
+    ``limit`` of those opened on one stopped without a commit, else ``None``. A branch whose specialist only crashed,
+    giving up before any test of it was judged, is not one that stopped without a commit: it never explored ``op``."""
 
     lineage = snapshot.lineage
     record = next(
@@ -274,7 +278,14 @@ def _spent(
         None,
     )
     committed = {commit.branch for commit in snapshot.committed}
-    bare = [node for node in focused if node.stopped_at is not None and node.branch not in committed]
+    judged = {record.request.branch for record in snapshot.records if record.judged}
+    bare = [
+        node
+        for node in focused
+        if node.stopped_at is not None
+        and node.branch not in committed
+        and not (node.crashed_out and node.branch not in judged)
+    ]
     if record is None and sum(1 for node in bare if lineage.same_recipe(node.start_commit, head)) < limit:
         return None
     branches = {node.branch for node in focused}
