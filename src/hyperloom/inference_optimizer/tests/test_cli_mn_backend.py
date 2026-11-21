@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.inference_optimizer.cli.multi_node import _resolve_mn_backend
+from hyperloom.inference_optimizer.cli.multi_node import _adopt_pd_backend, _resolve_mn_backend
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 
 
@@ -50,6 +50,26 @@ def test_mn_backend_env_used_when_flag_absent(monkeypatch):
     ns = parser.parse_args(_args())
     assert ns.mn_backend is None
     assert _resolve_mn_backend(ns) == "infera"
+
+
+@pytest.mark.parametrize("value", ["atomesh", "ATOMESH"])
+def test_mn_backend_flag_names_atomesh(value):
+    ns = _build_parser().parse_args(_args("--mn-backend", value))
+    assert ns.mn_backend == "atomesh"
+    assert _resolve_mn_backend(ns) == "atomesh"
+
+
+def test_mn_backend_env_names_atomesh(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "atomesh")
+    ns = _build_parser().parse_args(_args())
+    assert _resolve_mn_backend(ns) == "atomesh"
+
+
+def test_pd_router_backend_exits_2_without_pd_mode_disaggregated(monkeypatch):
+    monkeypatch.delenv("PD_MODE", raising=False)
+    with pytest.raises(SystemExit) as ei:
+        _adopt_pd_backend({"backend": "atomesh"})
+    assert ei.value.code == 2
 
 
 def test_mn_backend_rejects_invalid_choice():

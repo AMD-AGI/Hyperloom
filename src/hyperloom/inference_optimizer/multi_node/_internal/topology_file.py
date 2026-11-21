@@ -31,6 +31,12 @@ _SCHEMA_RE = re.compile(r"^topology-handoff/v(\d+)(?:\.\d+)*$")
 _SUPPORTED_MAJOR = 1
 _BACKENDS = ("rayjob", "infera")
 
+
+def normalize_mn_backend(raw: object) -> str:
+    """Canonical multi-node backend name (lower-case, stripped)."""
+    return str(raw or "").strip().lower()
+
+
 # Every legacy variable the file describes. When a file is in force these are read
 # from it only (empty when the file omits them), never from the process env, except
 # the two in FLAG_OWNED_NAMES.

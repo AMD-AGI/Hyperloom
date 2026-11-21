@@ -63,10 +63,9 @@ def node_list_backend(nodes: NodeList) -> str:
 
 
 def is_pd_state(state: dict[str, Any]) -> bool:
-    """Whether a multi-node state describes a node-list cluster the suite launches: an atomesh or sglangrouter one,
-    or an Infera one handed over as a node list."""
-    backend = str(state.get("backend") or "")
-    return backend in PD_BACKENDS or (backend == INFERA and state.get(NODE_LIST_KEY) is True)
+    """Whether a multi-node state describes a node-list cluster the suite launches: an atomesh, sglangrouter, or
+    Infera one handed over as a node list."""
+    return str(state.get("backend") or "") in SSH_BACKENDS and state.get(NODE_LIST_KEY) is True
 
 
 def ssh_pod(nodes: NodeList, host: str, role: str, index: int) -> dict[str, Any]:

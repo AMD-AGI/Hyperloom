@@ -14,9 +14,8 @@ from typing import Any, NoReturn
 from inference_suite.contracts.base_launch import BaseLaunch, LaunchQuery
 from inference_suite.multinode import NODE_LIST_ENV, RECORD_NAME, client_base
 
-from ..multi_node import TopologyHandoffError, topology_file_overlay
+from ..multi_node import TopologyHandoffError, normalize_mn_backend, topology_file_overlay
 from ..multi_node.pd_session import (
-    INFERA,
     PD_BACKENDS,
     PD_DIGEST_KEY,
     PD_LAUNCH_KEY,
@@ -24,6 +23,7 @@ from ..multi_node.pd_session import (
     PdSessionError,
     freeze_launch,
     handed_node_list,
+    is_pd_state,
     node_list_backend,
     record_trace_share,
     stamp_launch_pods,
@@ -83,13 +83,13 @@ def _resolve_mn_backend(args: argparse.Namespace) -> str:
     """Multi-node backend selector: --mn-backend > $TOPOLOGY_HANDOFF_FILE backend > $INFERENCE_OPTIMIZER_MN_BACKEND >
     the node list's frontend > rayjob."""
     from_file = (_topology_file_overlay() or {}).get("INFERENCE_OPTIMIZER_MN_BACKEND", "")
-    backend = (
+    backend = normalize_mn_backend(
         (getattr(args, "mn_backend", None) or "").strip()
         or from_file
         or os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "").strip()
         or os.environ.get("MN_BACKEND", "").strip()
         or _default_mn_backend()
-    ).lower()
+    )
     choices = ("rayjob", *SSH_BACKENDS)
     if backend not in choices:
         _exit_refused(f"--mn-backend must be one of {', '.join(choices)}, got {backend!r}")
@@ -97,12 +97,12 @@ def _resolve_mn_backend(args: argparse.Namespace) -> str:
 
 
 def is_pd_session(args: argparse.Namespace) -> bool:
-    """Whether a ``--nodes >= 2`` run serves a node-list cluster the suite launches: an atomesh or sglangrouter one,
-    or an Infera one handed over as a node list."""
+    """Whether a ``--nodes >= 2`` run serves a node-list cluster the suite launches: an atomesh, sglangrouter, or
+    Infera one handed over as a node list."""
     if int(getattr(args, "nodes", 1) or 1) < 2:
         return False
     backend = _resolve_mn_backend(args)
-    return backend in PD_BACKENDS or (backend == INFERA and _hand_off_node_list() is not None)
+    return backend in SSH_BACKENDS and _hand_off_node_list() is not None
 
 
 def freeze_pd_session_launch(
@@ -173,6 +173,12 @@ def _record_trace_share(ext_state: dict[str, Any]) -> None:
         )
 
 
+def _adopt_pd_backend(ext_state: dict[str, Any]) -> None:
+    """Exit 2 when an atomesh/sglangrouter pod hand-off runs without ``--pd-mode disaggregated``."""
+    if os.environ.get("PD_MODE", "").strip().lower() != "disaggregated":
+        _exit_refused(f"--mn-backend {ext_state['backend']} requires --pd-mode disaggregated.")
+
+
 def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path | None = None) -> None:
     """Adopt the platform-provisioned cluster for a ``--nodes >= 2`` run."""
     nodes = max(1, int(args.nodes))
@@ -198,6 +204,8 @@ def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path | None
 
     ext_state = build_external_state_from_env()
     ext_state["backend"] = _resolve_mn_backend(args)
+    if ext_state["backend"] in PD_BACKENDS and not is_pd_state(ext_state):
+        _adopt_pd_backend(ext_state)
     _reject_unusable_backend(ext_state)
     if is_pd_session(args):
         _bind_pd_launch(ext_state, session_dir)
@@ -215,7 +223,8 @@ def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path | None
     has_control = external_has_server_control()
     print(
         "multi-node: adopted the platform-provisioned cluster. "
-        f"url={ext_state['service_url']} prefill={ext_state['prefill_pod_ips']} "
+        f"url={ext_state['service_url']} router={ext_state.get('router_pod_ips') or []} "
+        f"prefill={ext_state['prefill_pod_ips']} "
         f"decode={ext_state['decode_pod_ips']} worker={ext_state['worker_pod_ips']} "
         f"server_control={'yes' if has_control else 'no (benchmark-only)'} "
         f"ssh_control={'yes' if external_has_ssh_control() else 'no'}"
@@ -242,7 +251,7 @@ def _reject_unusable_backend(ext_state: dict[str, Any]) -> None:
     """Exit 2 when the selected backend cannot control this hand-off; flag a benchmark-only rayjob."""
     from ..multi_node._internal.external_state import external_has_ssh_control
 
-    if ext_state["backend"] in PD_BACKENDS and not ext_state.get("router_pod_ip"):
+    if is_pd_state(ext_state) and ext_state["backend"] in PD_BACKENDS and not ext_state.get("router_pod_ip"):
         _exit_refused(f"--mn-backend {ext_state['backend']} needs the {NODE_LIST_ENV} hand-off of a PD cluster")
     if ext_state["backend"] == "infera" and not external_has_ssh_control():
         _exit_refused(

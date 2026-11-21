@@ -136,11 +136,11 @@ when `--gpu-type` is omitted.
   out is refused; `--allow-shared-npm-node` (on every launch and resume)
   measures anyway and records the cards left out.
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
-  `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).
+  `--gpu-type`, `--mn-backend` (`rayjob` / `infera` / `atomesh` / `sglangrouter`), `--server-args` (rayjob).
   Per-pod sizing, the pod image and pod-side env are the provisioning
   platform's inputs, not `optimize` flags — the cluster already exists by the
   time the optimizer runs.
-- **PD disaggregation (infera):** `--pd-mode disaggregated`,
+- **PD disaggregation (infera, atomesh, sglangrouter; atomesh and sglangrouter require it):** `--pd-mode disaggregated`,
   `--pd-prefill-nodes` / `--pd-prefill-tp` / `--pd-prefill-ep` /
   `--pd-prefill-extra-args`, `--pd-decode-nodes` / `--pd-decode-tp` /
   `--pd-decode-ep` / `--pd-decode-extra-args`, `--pd-transfer-backend`,
@@ -628,16 +628,18 @@ that tells the optimizer a cluster is ready; the rest describe how to reach it.
 |----------|---------|----------|-------------|
 | `TOPOLOGY_HANDOFF_FILE` | both | No | Path to a TopologyHandoff v1 JSON file (`"schema": "topology-handoff/v1"`) the platform wrote. When set (non-empty) it is the hand-off and the `HYPERLOOM_MN_EXT_*` and `INFERENCE_OPTIMIZER_MN_BACKEND` variables are not read for the fields it carries. The launch flags win over it: `--mn-backend` over `backend`, `--gpus-per-node` over `gpus_per_node`, and `--nodes` over `nodes` (`optimize` exports `INFERENCE_OPTIMIZER_NODES` and `INFERENCE_OPTIMIZER_GPUS_PER_NODE` from the flags, and a value set there is never replaced by the file's); the file fills in `backend` and `gpus_per_node` when their flag is omitted. When unset, the variables below apply unchanged. |
 | `HYPERLOOM_MN_EXT_SERVICE_URL` | both | **yes** | Benchmark frontend URL (`http(s)://…`; infera frontend typically `:8000`). Its presence triggers external mode. |
-| `HYPERLOOM_MN_EXT_SSH_KEY` | infera | **yes** | Private SSH key already authorized on the pods (the platform installs the public half at create time). |
-| `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` | infera | PD | Prefill / decode pod IPs (comma-separated) for PD-disaggregated runs. |
+| `HYPERLOOM_MN_EXT_SSH_KEY` | infera, atomesh, sglangrouter | **yes** | Private SSH key already authorized on the pods (the platform installs the public half at create time). |
+| `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` | infera, atomesh, sglangrouter | PD | Prefill / decode pod IPs (comma-separated) for PD-disaggregated runs. |
 | `HYPERLOOM_MN_EXT_WORKER_IPS` | infera | aggregated | Worker pod IPs (comma-separated) for aggregated (non-PD) runs. At least one of `_PREFILL_IPS` / `_DECODE_IPS` / `_WORKER_IPS` is required. |
-| `HYPERLOOM_MN_EXT_SSH_PORT` | infera | No (default `2233`) | SSH base port; decode role is offset `+10`. |
-| `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | infera | No | `known_hosts` path; else a relaxed host-key check is used. |
+| `HYPERLOOM_MN_EXT_SSH_PORT` | infera, atomesh, sglangrouter | No (default `2233`) | SSH base port; on infera the decode role is offset `+10`, on atomesh and sglangrouter every pod uses the port as given. |
+| `HYPERLOOM_MN_EXT_PREFILL_URL` / `_DECODE_URL` | atomesh, sglangrouter | No | Engine URL of each role (default `http://<first role IP>:8000`). The engine listens on the URL's port. |
+| `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | infera, atomesh, sglangrouter | No | `known_hosts` path; else a relaxed host-key check is used. |
 | `HYPERLOOM_MN_EXT_HEAD_IP` | rayjob | No (recommended) | Ray head IP (Dashboard `:8265`, GCS `:6379`). Enables per-round restarts; omit for benchmark-only. |
 | `HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN` | rayjob | No | Ray Dashboard auth token, only if the dashboard is authenticated. |
 
 Infera external mode requires `HYPERLOOM_MN_EXT_SSH_KEY` plus at least one
-`*_IPS` list, or the run fails fast at startup. RayJob external mode ignores
+`*_IPS` list, or the run fails fast at startup. The platform runs the atomesh
+and sglangrouter router at `HYPERLOOM_MN_EXT_SERVICE_URL`. RayJob external mode ignores
 the SSH / IP vars and uses `HYPERLOOM_MN_EXT_HEAD_IP` for restarts.
 
 ---
