@@ -98,6 +98,7 @@ from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV, harvest_leaked_artifacts
 from hyperloom.orchestrator.actions.executors._aiter_serving_once import build_image_own_once
 from hyperloom.sandbox.card_occupancy import card_guard, own_sandbox_processes
+from hyperloom_common.weight_prefetch import WEIGHT_PREFETCH_ENV
 from inference_suite.contracts import NormalisedManifest
 from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 
@@ -704,6 +705,9 @@ def run(
 ) -> int:
     """Run one test from ``in_dir/spec.json`` and leave the signed result in ``out_dir``; returns the exit code."""
     environ = os.environ if environ is None else environ
+    # A sandbox reads its checkpoint from a network file system: the round reads it ahead of the server's page faults
+    # unless the sandbox's environment already says otherwise (hyperloom_common.weight_prefetch).
+    environ.setdefault(WEIGHT_PREFETCH_ENV, "1")
     out_dir.mkdir(parents=True, exist_ok=True)
     work = scratch / "test"
     for sub in ("farm", "attach", "pids"):
