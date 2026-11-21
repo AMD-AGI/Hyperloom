@@ -447,7 +447,8 @@ class SubAgentRunner:
         The caller's lease, cancel scope and progress sink cover the step.
         ``task`` is never written to the registry: a queued row would be visible
         to the pump in the await gaps, and a lane claim of its own would
-        conflict with the lanes the caller already holds.
+        conflict with the lanes the caller already holds. The executor is told
+        so through ``covered_step`` in its extras, which no registry row carries.
 
         Args:
             task: An unpersisted task naming the executor and its params.
@@ -455,7 +456,7 @@ class SubAgentRunner:
         Returns:
             The executor's result payload.
         """
-        ctx = self._context_for(task, lease=None, extra_context=None)
+        ctx = self._context_for(task, lease=None, extra_context={"covered_step": True})
         return await self.executor_registry[task.kind](ctx)
 
     def _progress_reporter(self, task_id: str) -> ProgressReporter:

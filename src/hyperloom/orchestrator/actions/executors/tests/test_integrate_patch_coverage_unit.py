@@ -183,6 +183,45 @@ async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_covered_step_integrates_without_a_critic_verdict(tmp_path, monkeypatch):
+    """A step the Coordinator runs itself is never a registry row, so its bench decides, not a recorded verdict."""
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    class _SS:
+        phase = "KERNEL_AGENT"
+        enablement = EnablementRound()
+
+        def get_specialist_patch_verdict(self, tid):
+            return ""  # no verdict on record
+
+        def grid_session_deadline_sec(self, **_kwargs):
+            return None
+
+        def save(self, _path):
+            pass
+
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": None}),
+    )
+    res = await IntegratePatchExecutor(session_dir=session)(
+        _make_ctx(
+            "t",
+            {"specialist_task_id": "spec", "framework_source_root": str(repo), "base_tput": 100.0},
+            extra={"shared_state": _SS(), "covered_step": True},
+        )
+    )
+
+    assert res["status"] == "kept"
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
 async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch):
     # SWSPLAT-42420 (all-or-nothing): the Critic gate must fire BEFORE setup
     # replay / patch apply, so a forged enablement task never runs its

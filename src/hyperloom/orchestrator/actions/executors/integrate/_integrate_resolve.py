@@ -125,18 +125,24 @@ class ResolveStageMixin:
         if params.get("enablement_launch_only"):
             return self._stage_resolve_launch_only(attempt, params, shared_state)
 
+        # A covered step is run by Coordinator code and is never a registry row, so the forged row the Critic gate
+        # refuses cannot be one; the bench it runs decides its KEEP.
+        covered = bool(extra.get("covered_step"))
+
         # Upstream-PR mode has no specialist to look up and no specialist
         # verdict to enforce: the Critic verdict on this proposal is the gate.
         if resolve_patch_source(params) == PATCH_SOURCE_UPSTREAM_PR:
-            return self._stage_resolve_upstream_pr(attempt, params, shared_state)
+            return self._stage_resolve_upstream_pr(attempt, params, shared_state, covered=covered)
 
-        return self._stage_resolve_specialist(attempt, params, shared_state)
+        return self._stage_resolve_specialist(attempt, params, shared_state, covered=covered)
 
     def _stage_resolve_specialist(
         self,
         attempt: IntegrateAttempt,
         params: dict[str, Any],
         shared_state: Any,
+        *,
+        covered: bool = False,
     ) -> dict[str, Any] | None:
         """Resolve a completed specialist's workspace and done payload onto the attempt."""
         specialist_task_id = str(params.get("specialist_task_id") or "").strip()
@@ -174,7 +180,7 @@ class ResolveStageMixin:
         # integrate_patch always has its verdict persisted before the queued task
         # is created (see intent_router._handle_single_verdict), so a genuine
         # task is unaffected. No-op when SharedState is absent.
-        critic_reject = _enforce_critic_gate(shared_state, specialist_task_id)
+        critic_reject = None if covered else _enforce_critic_gate(shared_state, specialist_task_id)
         if critic_reject is not None:
             return critic_reject
 
@@ -189,6 +195,8 @@ class ResolveStageMixin:
         attempt: IntegrateAttempt,
         params: dict[str, Any],
         shared_state: Any,
+        *,
+        covered: bool = False,
     ) -> dict[str, Any] | None:
         """Resolve an upstream-PR candidate into patches on the task's own scratch.
 
@@ -200,10 +208,11 @@ class ResolveStageMixin:
             attempt: The integration attempt receiving the resolved inputs.
             params: Task params, mutated with the resolved patch paths.
             shared_state: SharedState, or ``None``.
+            covered: Whether the Coordinator runs this as a covered step.
 
         Returns:
-            A terminal result when the candidate has no permissive Critic
-            verdict or could not be materialised, else ``None``.
+            A terminal result when a queued candidate has no permissive Critic
+            verdict or the candidate could not be materialised, else ``None``.
         """
         candidate = params.get("candidate") or {}
         if not isinstance(candidate, dict) or not candidate:
@@ -221,9 +230,10 @@ class ResolveStageMixin:
 
         # A queued or resume-dispatched task is not re-validated by PolicyGate,
         # and this lane fetches a remote diff into the live framework tree.
-        critic_reject = _enforce_critic_gate(
-            shared_state,
-            str(params.get("framework_agent_candidate_id") or "").strip(),
+        critic_reject = (
+            None
+            if covered
+            else _enforce_critic_gate(shared_state, str(params.get("framework_agent_candidate_id") or "").strip())
         )
         if critic_reject is not None:
             return critic_reject

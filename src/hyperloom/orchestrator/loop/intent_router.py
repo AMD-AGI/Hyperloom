@@ -630,11 +630,7 @@ class IntentRouter(CoordinatorCollaborator):
         sid_candidate: str,
     ) -> None:
         """Materialise, deny, or send back a proposal according to its collapsed verdict."""
-        from ..phases.geak_native_revalidation import record_review
-
         verdict = ruling.verdict
-        if record_review(self, pending, verdict=verdict, reasoning=ruling.reasoning):
-            return
         if verdict in ("approve", "advise"):
             await self._coord.proposals.materialize_approved_proposal(
                 pending,
