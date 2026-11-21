@@ -96,11 +96,10 @@ def launch_isolation(*, local: bool) -> LaunchIsolation:
 
 
 def _specialist_isolation() -> tuple[str, tuple[str, ...]]:
-    """How the agent runner launches a specialist now, and why it is not isolated; a session's specialists are never
-    launched on the Ray actor path."""
+    """How the agent runner launches a specialist now, and why it is not isolated."""
 
     try:
-        found = resolve_launch_isolation(None)
+        found = resolve_launch_isolation()
     except IsolationRefused as refused:
         return REFUSED, refused.reasons
     except RunAsError as refused:

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping
+from typing import Any
 
 from inference_suite.contracts import STEPS_BEFORE_SPAWN, FailedStep
 
@@ -23,7 +23,6 @@ from ..actions.executors._accuracy_gate import (
 )
 from ..actions.executors._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS
 from ..actions.executors import failed_step_error_class
-from ..actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
@@ -71,18 +70,13 @@ _STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
 }
 
 
-def _is_ray_cluster_infeasible(result_payload: Mapping[str, Any]) -> bool:
-    """Whether a baseline failed because the Ray cluster can never place its round."""
-    return RAY_INFEASIBLE_MARKER in str(result_payload.get("error") or "")
-
-
 def _authorable_launch_log(result_payload: dict[str, Any] | None, *, err_class: str) -> str:
     """The failed boot's text the next enablement round authors against, or ``""``.
 
     A failure that never reached a framework error is no wall: as
     integrate_patch's "before" boot it passes any patch that starts the server.
     """
-    if not isinstance(result_payload, dict) or _is_ray_cluster_infeasible(result_payload):
+    if not isinstance(result_payload, dict):
         return ""
     if (
         err_class in (AGENTX_PREFLIGHT_ERROR_CLASS, PREFIX_CACHE_OFF_ERROR_CLASS)
@@ -242,20 +236,10 @@ class BaselineFailureMixin:
             not bool(state.stop_reason),
         )
 
-    def _generic_baseline_failure_stops(
-        self,
-        task: Task,
-        err_class: str,
-        result_payload: Mapping[str, Any],
-        *,
-        retries_suppressed: bool,
-    ) -> bool:
+    def _generic_baseline_failure_stops(self, *, retries_suppressed: bool) -> bool:
         """Count a baseline failure of no specially handled class; whether it ends the run.
 
         Args:
-            task: The failed baseline task.
-            err_class: The failure's ``error_class``.
-            result_payload: The failed result.
             retries_suppressed: A pending eval or an open enablement lane owns the
                 retries, so the streak alone does not stop the run.
 
@@ -265,20 +249,6 @@ class BaselineFailureMixin:
         self.shared_state.baseline_failure_streak += 1
         self.shared_state.baseline_failures_this_leg += 1
         streak = self.shared_state.baseline_failure_streak
-        if _is_ray_cluster_infeasible(result_payload):
-            # The Ray cluster cannot place the round, and the runtime has already
-            # repaired what it safely could (a lone local head without
-            # serving_slot). A retry meets the same cluster and no framework patch
-            # changes it, so stop on the first one, like the AgentX preflight.
-            # Waiting for a second would not be bounded: with no launch log to
-            # author against, the enablement lane this failure opens never
-            # schedules another baseline.
-            log.error(
-                "baseline %s failed because the Ray cluster cannot place it; stopping the run: %s",
-                task.task_id,
-                result_payload.get("error") or err_class,
-            )
-            return True
         return not retries_suppressed and streak >= 3
 
     def _arms_baseline_failure_gates(self, err_class: str) -> bool:
@@ -472,9 +442,7 @@ class BaselineFailureMixin:
                 result_payload.get("error") or err_class,
             )
             self.shared_state.set_stop_reason(AGENTX_PREFLIGHT_STOP_REASON)
-        elif self._generic_baseline_failure_stops(
-            task, err_class, result_payload, retries_suppressed=retries_suppressed
-        ):
+        elif self._generic_baseline_failure_stops(retries_suppressed=retries_suppressed):
             self.shared_state.set_stop_reason(_BASELINE_FAILED_STOP_REASON)
 
     def _arm_eager_baseline_fallback(self, task: Task, err_class: str) -> None:

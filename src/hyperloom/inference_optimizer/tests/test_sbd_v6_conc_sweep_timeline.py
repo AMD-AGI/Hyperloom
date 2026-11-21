@@ -310,7 +310,6 @@ def test_an_arm_says_how_it_ran_its_ladder(_bound_session):
             lifecycle_reason="supported",
             port=8888,
             framework="sglang",
-            serving_lease_held=True,
         ),
     )
     recorder.finish_arm(ARM_OPTIMIZED, status="succeeded")
@@ -319,7 +318,6 @@ def test_an_arm_says_how_it_ran_its_ladder(_bound_session):
     arm = _ext(_bound_session)["arms"][ARM_OPTIMIZED]
     assert arm["strategy"] == STRATEGY_SINGLE_SERVER
     assert arm["lifecycle"] == {"eligible": True, "reason": "supported", "port": 8888, "framework": "sglang"}
-    assert arm["serving_lease_held"] is True
     assert arm["status"] == "succeeded"
     # The load each rung carries is derived from its concurrency and was never
     # written down, so the run could not be reproduced from the report alone.
@@ -341,7 +339,6 @@ def test_an_arm_that_restarted_per_rung_says_why(_bound_session):
             lifecycle_reason="no_server_lifecycle",
             port=8888,
             framework="vllm",
-            serving_lease_held=False,
         ),
     )
     recorder.finish_arm(ARM_BASELINE, status="succeeded")
@@ -881,7 +878,6 @@ def test_every_recorded_block_is_the_block_the_schema_declares(_bound_session):
             lifecycle_reason="sglang keeps a server across rungs",
             port=30000,
             framework="sglang",
-            serving_lease_held=True,
         ),
     )
     recorder.record_variant(

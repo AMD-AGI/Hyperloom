@@ -22,7 +22,6 @@ from ._profile_setup import VLLM_PATCH_PROFILER_FIELDS
 from ._server_patcher import ensure_vllm_patched_for_tracelens
 from ._grid_runner import _run_grid_warmup_enabled as run_grid_warmup_enabled
 from ._grid_runner import GridLaunch, GridRecipe, GridStop, run_grid, teardown_variant_server
-from ._ray_backend import strip_visible_devices_from_config
 from ._server_lifecycle import resolve_lifecycle_params
 from ._subprocess_kill import (
     COOPERATIVE_REAP_BUDGET_SEC,
@@ -105,7 +104,6 @@ __all__ = [
     "session_breakdown_executor",
     "staged_tool_cache",
     "speculative_pin_reason",
-    "strip_visible_devices_from_config",
     "teardown_variant_server",
     "variant_slot",
 ]

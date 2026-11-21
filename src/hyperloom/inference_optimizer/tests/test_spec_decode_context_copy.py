@@ -19,7 +19,6 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _integrate_bench as integrate_bench
-from hyperloom.orchestrator.actions.executors import _ray_serving
 from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult, _build_variant_yaml
 from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
@@ -283,7 +282,6 @@ async def _integrate(
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setattr(integrate_bench, "run_grid", fake_run_grid)
     monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
-    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     params = {
         "specialist_task_id": "t-spec",
         "config_path": str(config_path),

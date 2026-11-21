@@ -356,7 +356,6 @@ class _BenchmarkLaunchMixin:
             lifecycle=round_lifecycle(round_.output_dir, mode),
             warmup=warmup,
             deadline_unix=deadline_unix(round_.session_deadline_sec),
-            serving_lease=round_.serving_lease,
         )
         attempt_index = open_bringup_attempt(round_.output_dir)
         started_unix = time.time()

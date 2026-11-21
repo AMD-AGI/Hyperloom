@@ -3,7 +3,7 @@
 
 """A candidate whose throughput cleared the KEEP threshold runs the D9 accuracy round into ``<slot>/accuracy``.
 
-These tests pin that the round runs, where, under which lease and cap, that its failure never turns into a verdict of
+These tests pin that the round runs, where, under which cap, that its failure never turns into a verdict of
 its own, and that the gate reads the score it wrote.
 """
 
@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,26 +25,15 @@ from hyperloom.orchestrator.actions.executors.benchmark_run.accuracy import (
     AccuracyRoundOutcome,
     accuracy_round_due,
     record_accuracy_round,
-    run_accuracy_round,
     run_candidate_accuracy_round,
 )
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
-from hyperloom.orchestrator.state.tests._session_base import freeze_base, session_base
 from hyperloom.orchestrator.tests._helpers import init_git_repo, integrate_extra
-from inference_suite.contracts import Topology
 
 _AGENTX = "agentx"
-
-
-class _Lease:
-    def __init__(self) -> None:
-        self.closed = False
-
-    def close(self) -> None:
-        self.closed = True
 
 
 @pytest.fixture
@@ -80,32 +68,15 @@ def test_only_a_native_agentx_session_that_kept_the_switch_runs_the_round(monkey
     assert bool(accuracy_round_due(SharedState(benchmark_mode=mode, agentx_accuracy=switch))) is due
 
 
-def test_a_candidate_round_runs_on_the_lease_its_gate_holds_and_leaves_it_open(tmp_path, suite_rounds, monkeypatch):
-    lease = _Lease()
+def test_a_candidate_round_runs_its_point_in_its_slot_capped_as_a_benchmark_round(tmp_path, suite_rounds, monkeypatch):
     monkeypatch.setattr(accuracy, "resolve_benchmark_timeouts", lambda: (60.0, 1800.0))
-    monkeypatch.setattr(accuracy, "maybe_serving_lease", lambda num_gpus: pytest.fail("took a second lease"))
     slot = tmp_path / "v00"
 
-    outcome = asyncio.run(
-        run_candidate_accuracy_round(slot, slot / "point.yaml", SharedState(), session=tmp_path, lease=lease)
-    )
+    outcome = asyncio.run(run_candidate_accuracy_round(slot, slot / "point.yaml", SharedState(), session=tmp_path))
 
     (request,) = suite_rounds
     assert (request.slot, request.config_path, request.timeout_sec) == (slot, slot / "point.yaml", 1800.0)
-    assert request.serving_lease is lease and not lease.closed
     assert outcome == AccuracyRoundOutcome(slot, "")
-
-
-def test_a_round_without_a_lease_runs_on_one_of_its_own_and_releases_it(tmp_path, suite_rounds, monkeypatch):
-    owned, asked = _Lease(), []
-    monkeypatch.setattr(accuracy, "maybe_serving_lease", lambda num_gpus: asked.append(num_gpus) or owned)
-    freeze_base(tmp_path, replace(session_base(("--dp-size", "2")), topology=Topology(tp=2)))
-    slot = tmp_path / "slot"
-
-    asyncio.run(run_accuracy_round(AccuracyRound(slot / "point.yaml", slot, 900.0), session=tmp_path))
-
-    assert suite_rounds[0].serving_lease is owned and owned.closed
-    assert asked == [4]
 
 
 def test_a_failed_round_is_recorded_with_a_warning_and_no_verdict(tmp_path) -> None:

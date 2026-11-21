@@ -25,10 +25,6 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope
 from ..actions.cancel_channel import CancelScope, use_cancel_scope
-from ..actions.executors._ray_serving import (
-    CANCEL_ROUND_GRACE_SEC,
-    CLOSE_STOP_TIMEOUT_SEC,
-)
 from ..actions.executors._subprocess_kill import (
     COOPERATIVE_REAP_BUDGET_SEC,
     STOP_GATE_POLL_SECONDS,
@@ -68,46 +64,14 @@ import logging as _logging
 log = _logging.getLogger(__name__)
 
 # How long a cancel waits for work that is listening on its cancel scope to stop
-# itself, composed from the two things an action still has to do after it is
-# asked:
-#
-# * stop the round in flight -- locally that is
-#   :data:`COOPERATIVE_REAP_BUDGET_SEC`, through a Ray actor it is
-#   :data:`CANCEL_ROUND_GRACE_SEC`, and whichever path this action took, only the
-#   longer of the two bounds it;
-# * release what the round held -- the driver-side teardown of the server it left
-#   behind (:data:`TERM_GRACE_SEC`) and then the release of the Ray lease it
-#   ran in (:data:`CLOSE_STOP_TIMEOUT_SEC`). A sequence, not alternatives: the
-#   server is reaped BEFORE the lease is dropped so that no GPU process outlives
-#   it (§4.2), and on the Ray path a single unwind pays both -- in the explore
-#   executor the per-variant ``finally`` tears the server down and the enclosing
-#   one then closes the round's lease; the baseline executor does the same two
-#   calls in one ``finally``.
-#
-# Derived rather than picked, because these three windows only mean anything
-# together. Each was plausible on its own at ten, eight and five seconds, and
-# composed they said the dispatcher gives up a good five seconds before the work
-# it is waiting for can finish -- so the honest sentinel the round was about to
-# return was discarded for a hard ``CancelledError`` every time, which is exactly
-# what the cooperative channel exists to avoid. Taking the longer of the two
-# release terms instead of both reproduced that shortfall exactly, on the path
-# that pays the most: the teardown a Ray round owes is not an alternative to
-# closing its lease, it is what it does first.
-#
-# The enumeration above has to stay exhaustive, so a serial step the unwind takes
-# and this sum does not name has to be removed from the unwind instead.
-#
-# Past this window the coroutine is cancelled anyway, and the window is only ever
-# spent when work is still unwinding: the wait ends the moment the last victim is
-# done, so covering the teardown term costs a round that stops promptly nothing.
-# What the budget case pays for it is five more seconds before the run crosses its
-# deadline, because this wait runs inside the reserve the admission gate holds
-# back. It does not come out of the closing phase, whose grace window is measured
-# from the moment it starts, and five seconds of overshoot is cheaper than the
-# attributed sentinel a hard cancel destroys.
-_COOPERATIVE_CANCEL_GRACE_SEC: float = (
-    max(COOPERATIVE_REAP_BUDGET_SEC, CANCEL_ROUND_GRACE_SEC) + TERM_GRACE_SEC + CLOSE_STOP_TIMEOUT_SEC
-)
+# itself: stopping the round in flight (:data:`COOPERATIVE_REAP_BUDGET_SEC`) and
+# then tearing down the server it left behind (:data:`TERM_GRACE_SEC`). A sequence,
+# not alternatives -- one unwind pays both, so a serial step the unwind takes and
+# this sum does not name has to be removed from the unwind instead. Falling short
+# discards the sentinel the round was about to return for a hard
+# ``CancelledError``; the wait ends the moment the last victim is done, so a round
+# that stops promptly pays nothing for it.
+_COOPERATIVE_CANCEL_GRACE_SEC: float = COOPERATIVE_REAP_BUDGET_SEC + TERM_GRACE_SEC
 
 # How long a cancel waits for anything to start listening before deciding
 # nothing will. Work that is already blocking is listening before the cancel is
@@ -127,13 +91,11 @@ _REPLAY_WARM_RECIPE = "replay_warm_recipe"
 class HeldLeases(NamedTuple):
     """Leases a caller already holds for a task, released when the task's run ends.
 
-    ``prebound_lease`` is the lanes; ``gpu_lease`` the SQLite GPU-specialist accounting lease; ``gpu_specialist_lease``
-    the Ray ``GpuSpecialistLease`` to close.
+    ``prebound_lease`` is the lanes; ``gpu_lease`` the SQLite GPU-specialist lease.
     """
 
     prebound_lease: Any = None
     gpu_lease: Any = None
-    gpu_specialist_lease: Any = None
 
 
 class _InflightAction(NamedTuple):
@@ -554,11 +516,7 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
         return created
 
     async def _admit_lanes(self, task: Task, holders: dict[str, int], capacities: dict[str, int]) -> Any:
-        """Take the lane lease a queued task needs, bumping ``holders`` for the rest of this pass.
-
-        Under single-node Ray execution the authoritative GPU mutex is Ray's custom resources, not
-        this SQLite gate, which is kept as a resume-safe view feeding the lane timeline.
-        """
+        """Take the lane lease a queued task needs, bumping ``holders`` for the rest of this pass."""
         lanes_needed = task.requires_lanes
         if not lanes_needed:
             return None
@@ -589,24 +547,12 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
 
     async def _admit_gpu_specialist(self, task: Task, lease: Any, extra_context: dict[str, Any]) -> HeldLeases | None:
         """Take the GPU leases a specialist needs, recording the devices it may use in ``extra_context``."""
-        from ..actions.executors._ray_backend import (
-            ray_gpu_pending_limit,
-            ray_exec_enabled,
-            ray_serving_priority_enabled,
-            serving_slot_busy,
-        )
-        from ..actions.executors._ray_serving import maybe_gpu_specialist_lease
-        from ..specialists.profile import is_authoring_specialist, requires_gpu, resolve_specialist_profile
+        from ..specialists.profile import is_authoring_specialist, requires_gpu
         from ..specialists.profile import uses_whole_machine_gpu_lane
 
         params = task.params
         if not requires_gpu(params):
             return HeldLeases(prebound_lease=lease)
-        # Probed immediately before admitting this GPU specialist, not once per pass, so a serving
-        # start that races the pass does not slip through.
-        if ray_serving_priority_enabled() and serving_slot_busy():
-            # Serving is active — keep the task queued rather than piling onto the contended GPU.
-            return None
         serving_tp = serving_tp_for_policy(self.shared_state)
         gpu_pool = self.framework_gpu_pool
         if not uses_whole_machine_gpu_lane(params):
@@ -627,37 +573,15 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
                 serving_tp,
             )
             gpu_count = serving_tp
-        # Under single-node Ray the physical GPU mutex is Ray's ``num_gpus``, not this SQLite pool, so
-        # admission there is a count-based pending limit and several specialists may share one GPU.
-        if ray_exec := ray_exec_enabled():
-            gpu_lease = await gpu_pool.try_acquire_ray_observation(
-                holder_id=task.task_id,
-                task_id=task.task_id,
-                pending_limit=ray_gpu_pending_limit(),
-            )
-        else:
-            gpu_lease = await gpu_pool.try_acquire(
-                count=gpu_count,
-                holder_id=task.task_id,
-                task_id=task.task_id,
-            )
+        gpu_lease = await gpu_pool.try_acquire(
+            count=gpu_count,
+            holder_id=task.task_id,
+            task_id=task.task_id,
+        )
         if gpu_lease is None:
             return None
         extra_context["gpu_ids"] = list(gpu_lease.gpu_ids)
-        # Only bench-capable specialists that start their OWN serving loop hold the whole-machine serving_slot mutex;
-        # every other GPU specialist takes ``num_gpus`` only, which keeps it off serving's cards. The lease follows the
-        # route the ids were taken on: asked again after the ``await``, a failed re-probe would leave them leaseless.
-        gpu_specialist_lease = maybe_gpu_specialist_lease(
-            ray_exec=ray_exec,
-            num_gpus=gpu_count,
-            serving_slot=resolve_specialist_profile(params).reserves_benchmark_lane,
-        )
-        if gpu_specialist_lease is not None:
-            # Ray assigns and masks the physical cards, so the specialist sees a logical 0..N-1 view and the SQLite ids
-            # are capacity accounting only. ``None`` off the Ray path keeps the SQLite-gpu-id device path.
-            extra_context["gpu_ids"] = list(range(gpu_count))
-            extra_context["gpu_specialist_lease"] = gpu_specialist_lease
-        return HeldLeases(lease, gpu_lease, gpu_specialist_lease)
+        return HeldLeases(lease, gpu_lease)
 
     async def _spawn_fitting_queued(self) -> None:
         """Spawn every currently lane-fitting queued task not already in flight.
@@ -737,15 +661,14 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
         return _report
 
     async def _record_dispatch_evidence(
-        self, task: Task, lease: Any, release_resources: Callable[[], Awaitable[bool]]
+        self, task: Task, lease: Any, release_resources: Callable[[], Awaitable[None]]
     ) -> None:
         """Record a task's dispatch evidence, or give back what it holds and refuse.
 
         Args:
             task: The task row about to run.
             lease: The lane lease the dispatch holds, if any.
-            release_resources: The execution's slot release, which reports
-                whether the worker confirmed its physical cleanup.
+            release_resources: The execution's GPU slot release.
 
         Raises:
             RuntimeError: The evidence was not durably recorded, in which case
@@ -759,8 +682,7 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
             # Nothing ran under this lease and the row stays queued, so its
             # lanes go back whatever cleanup says: holding them would make
             # the task's own next dispatch find them busy, for good.
-            if not await release_resources():
-                log.warning("dispatcher: task=%s refused with cleanup unconfirmed", task.task_id)
+            await release_resources()
             if lease is not None:
                 await self.locks.release(lease)
             self._inflight_actions.pop(task.task_id, None)
@@ -821,12 +743,9 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
             if handle is not None:
                 self._inflight_actions[task.task_id] = _InflightAction(task.kind, handle, cancel_scope)
 
-        async def release_resources() -> bool:
-            if held.gpu_lease is None and held.gpu_specialist_lease is None:
-                return True
-            return await self.gpu_specialist_pool.release_execution(
-                held.gpu_lease, held.gpu_specialist_lease, task.task_id
-            )
+        async def release_resources() -> None:
+            if held.gpu_lease is not None:
+                await self.gpu_specialist_pool.release(held.gpu_lease)
 
         await self._record_dispatch_evidence(task, lease, release_resources)
 

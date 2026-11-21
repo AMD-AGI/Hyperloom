@@ -248,8 +248,7 @@ flowchart LR
     A[Container start] --> B[Install complete]
     B --> C["Framework root discovery\n(sglang=ok aiter=ok)"]
     C --> D[Model gate passed]
-    D --> E["Ray head\n(--num-gpus=8)"]
-    E --> F[Model load]
+    D --> F[Model load]
     F --> G[Baseline throughput]
     G --> H[Optimization iterations]
 ```

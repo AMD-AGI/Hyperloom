@@ -293,7 +293,6 @@ hyperloom = [
     "actions/*.md",
     # Release-contract shell installers + configs.
     "assets/*.sh",
-    "assets/*.py",
     "assets/*.example",
     "assets/configs/*.yaml",
     # Workload template for the InferaSim projection EXPLORE pre-filters with.
@@ -449,9 +448,8 @@ omit = [
     "src/hyperloom/orchestrator/kernel/patch_source_check.py",
     "src/hyperloom/orchestrator/kernel/patch_jit_cache.py",
     "src/hyperloom/orchestrator/kernel/patch_rebuild.py",
-    # GEAK runner and Ray cluster lifecycle (subprocess submit).
+    # GEAK runner (subprocess submit).
     "src/hyperloom/orchestrator/kernel/geak_runner.py",
-    "src/hyperloom/orchestrator/actions/executors/_ray_runtime.py",
     # quantization_agent CLI driver (argparse entrypoint).
     "src/hyperloom/agents/quantization/cli.py",
     # OOB server-side runtime (CLI, HTTP server, scheduler, auth proxy, agent
@@ -461,7 +459,6 @@ omit = [
     "OOB/scheduler.py",
     "OOB/auth_proxy.py",
     "OOB/backends/*",
-    # Local-host metrics probes (rocm-smi / nvidia-smi / ps / df / ray status).
     # lm-eval model class, imported only inside the eval process; CI does not install lm-eval.
     "src/inference_suite/eval/model.py",
     # TraceLens server patcher (git apply / patch --fuzz subprocess pipeline).

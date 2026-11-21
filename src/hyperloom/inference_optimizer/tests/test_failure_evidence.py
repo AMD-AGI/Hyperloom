@@ -113,7 +113,6 @@ class TestClassifyFailureAttribution:
             "AgentX server exited before becoming healthy (-9)",
             "AgentX server exited during its health check (1)",
             "Memory access fault by GPU node-2 (Agent handle: 0x5d0) on address 0x7f00. Reason: Unknown.",
-            "ray_actor_error: The actor died unexpectedly before finishing this task.",
         ],
     )
     def test_a_server_that_died_is_not_the_harnesss(self, excerpt):

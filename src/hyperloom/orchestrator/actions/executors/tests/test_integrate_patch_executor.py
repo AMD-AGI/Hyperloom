@@ -127,7 +127,7 @@ def _stub_external_integrate_operations(monkeypatch):
     from types import SimpleNamespace
 
     from hyperloom.agents.framework.sources import github
-    from hyperloom.orchestrator.actions.executors import _multi_node_env, _ray_serving
+    from hyperloom.orchestrator.actions.executors import _multi_node_env
     from hyperloom.orchestrator.enablement.recipe import keep_probe
     from hyperloom.orchestrator.enablement.runtime import adapters
 
@@ -135,7 +135,6 @@ def _stub_external_integrate_operations(monkeypatch):
         pytest.fail("external integration operations must be stubbed by the test")
 
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
-    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     monkeypatch.setattr(integrate_bench, "run_grid", forbidden)
     monkeypatch.setattr(integrate_resolve, "materialize_candidate_patches", forbidden)
     monkeypatch.setattr(github, "pr_patches", forbidden)
@@ -2043,52 +2042,8 @@ def test_derive_lane(params, lane):
 
 
 @pytest.mark.asyncio
-async def test_bench_patch_holds_and_closes_serving_lease(tmp_path: Path):
-    """phase-3 §3.1: the patch benchmark forwards a serving lease to run_grid
-    and closes it, so it serializes on the whole-machine serving_slot instead
-    of colliding with a concurrent GPU-specialist server (the observed
-    ``reverted_smoke_fail`` root cause)."""
-    from unittest.mock import MagicMock, patch
-
-    from hyperloom.orchestrator.actions.executors import _ray_serving
-    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
-
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    config_path = tmp_path / "baseline.yaml"
-    config_path.write_text("benchmark: {}\n", encoding="utf-8")
-
-    executor = IntegratePatchExecutor(session_dir=session_dir)
-    captured: dict[str, Any] = {}
-
-    async def fake_run_grid(*args, **kwargs):
-        captured["serving_lease"] = kwargs["launch"].serving_lease
-        return [VariantResult(name="v", extra_server_args="", extra_envs={}, status="succeeded")]
-
-    lease = MagicMock()
-    with (
-        patch.object(integrate_bench, "run_grid", new=fake_run_grid),
-        patch.object(integrate_bench, "prepare_grid_benchmark_config", return_value=config_path),
-        patch.object(_ray_serving, "maybe_serving_lease", return_value=lease),
-    ):
-        await executor._bench_patch(
-            _PatchBench(
-                params={"config_path": str(config_path)},
-                output_root=tmp_path / "out",
-                specialist_task_id="task-abcd1234",
-            ),
-            extra_server_args_applied="",
-            extra_envs_applied={},
-        )
-
-    assert captured["serving_lease"] is lease
-    lease.close.assert_called_once()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["succeeded", "failed"])
 async def test_bench_patch_preserves_measurement_and_protocol(tmp_path: Path, monkeypatch, status: str):
-    from hyperloom.orchestrator.actions.executors import _ray_serving
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
 
     config_path = tmp_path / "baseline.yaml"
@@ -2131,7 +2086,6 @@ async def test_bench_patch_preserves_measurement_and_protocol(tmp_path: Path, mo
 
     monkeypatch.setattr(integrate_bench, "run_grid", fake_run_grid)
     monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
-    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     executor = IntegratePatchExecutor(session_dir=tmp_path)
     bench, gate = await executor._bench_patch(
         _PatchBench(
@@ -2210,7 +2164,6 @@ async def test_executor_grades_real_patch_bench(
 ):
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.actions.executors import _ray_serving
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
@@ -2260,7 +2213,6 @@ async def test_executor_grades_real_patch_bench(
 
     monkeypatch.setattr(integrate_bench, "run_grid", fake_run_grid)
     monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
-    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
         enablement=EnablementRound(),
@@ -2595,7 +2547,6 @@ async def test_mlperf_integrate_patch_is_gated_on_inline_accuracy(tmp_path: Path
     """
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.actions.executors import _ray_serving
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
 
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
@@ -2629,7 +2580,6 @@ async def test_mlperf_integrate_patch_is_gated_on_inline_accuracy(tmp_path: Path
 
     monkeypatch.setattr(integrate_bench, "run_grid", fake_run_grid)
     monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
-    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
         enablement=EnablementRound(),
@@ -2710,7 +2660,6 @@ async def test_a_scriptable_source_patch_over_the_latency_budget_is_reverted(
     """The lane decides; leaving an over-budget patch for the lift to refuse would keep it live on disk."""
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.actions.executors import _ray_serving
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
@@ -2738,7 +2687,6 @@ async def test_a_scriptable_source_patch_over_the_latency_budget_is_reverted(
 
     monkeypatch.setattr(integrate_bench, "run_grid", fake_run_grid)
     monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
-    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
         enablement=EnablementRound(),
@@ -2840,7 +2788,6 @@ async def test_a_source_patch_over_the_power_budget_is_reverted(
 ):
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.actions.executors import _ray_serving
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
@@ -2868,7 +2815,6 @@ async def test_a_source_patch_over_the_power_budget_is_reverted(
 
     monkeypatch.setattr(integrate_bench, "run_grid", fake_run_grid)
     monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
-    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
         enablement=EnablementRound(),

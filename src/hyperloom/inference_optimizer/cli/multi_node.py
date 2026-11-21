@@ -78,7 +78,6 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
         external_has_ssh_control,
     )
     from ..multi_node.cluster_access import _save_state
-    from hyperloom.orchestrator.actions.executors._multi_node_env import export_ray_address_to_os
 
     if not _hand_off_service_url():
         print(
@@ -100,7 +99,6 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
         print(f"ERROR: cannot write multi-node state: {exc}", file=sys.stderr)
         sys.exit(2)
     os.environ["BENCHMARK_BASE_URL"] = ext_state["service_url"]
-    export_ray_address_to_os()
     # Report server *control*, not SSH specifically: rayjob restarts through the Ray dashboard with no SSH at all, so
     # keying this on SSH labelled a fully controllable rayjob cluster "benchmark-only" and gave the genuinely
     # uncontrollable one the same words -- exactly backwards on the one line an operator reads to find out whether the

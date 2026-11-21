@@ -13,7 +13,6 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _integrate_bench as integrate_bench
-from hyperloom.orchestrator.actions.executors import _ray_serving
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridRecipe,
     GridVariant,
@@ -72,7 +71,6 @@ def _fake_grid(monkeypatch, config_path: Path, *, tput: float | None = None) -> 
 
     monkeypatch.setattr(integrate_bench, "run_grid", fake_run_grid)
     monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
-    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     return grids
 
 

@@ -340,7 +340,6 @@ async def test_geak_launch_controls_reach_materialized_rebench(
 
     monkeypatch.setattr(explore, "run_grid", capture_grid)
     monkeypatch.setattr(explore, "effective_fingerprint", observe_fingerprint)
-    monkeypatch.setattr(explore, "maybe_serving_lease", lambda **_kwargs: None)
     monkeypatch.setattr(explore, "teardown_variant_server", lambda *_args: [])
     # One cold decision round, so the single capture is the materialized rebench.
     monkeypatch.setattr(explore, "resolve_lifecycle_params", lambda _path: {"eligible": False})
@@ -1243,7 +1242,6 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
         return []
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", capture_grid)
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease", lambda **_kwargs: None)
     executor = ExploreExecutor(session_dir=coordinator.session_dir)
     started = time.monotonic()
     await executor(SimpleNamespace(task=task, extra={"shared_state": state}))
@@ -1339,7 +1337,6 @@ async def test_internal_stack_rebench_preserves_baseline_script(
         return [VariantResult(variant.name, variant.extra_server_args, dict(variant.extra_envs), status="failed")]
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", capture_grid)
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease", lambda **_kwargs: None)
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.teardown_variant_server", lambda *_args: [])
     await ExploreExecutor(session_dir=coordinator.session_dir)(
         SimpleNamespace(task=task, extra={"shared_state": state})

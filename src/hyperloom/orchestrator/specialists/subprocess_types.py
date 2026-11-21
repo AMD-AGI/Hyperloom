@@ -99,12 +99,6 @@ class SpecialistSpawn:
             caller set no bound and the reaper falls back to
             :data:`UNBOUNDED_REAP_CAP_SEC`. A deadline already in the past
             kills on the first poll.
-        gpu_lease: When set (Ray-managed GPU execution), a started-on-demand
-            ``GpuSpecialistLease``; the whole subprocess runs inside its actor
-            holding ``num_gpus`` (Ray sets the visible devices, so any GPU
-            command the specialist issues stays within its lease). ``None``
-            keeps the local ``Popen`` path, with ``gpu_ids`` pinned into
-            ``*_VISIBLE_DEVICES`` as before.
         progress_cb: Optional async callback invoked with each new partial
             checkpoint the specialist writes while it is still alive.
             Exceptions from it never affect the run.
@@ -124,7 +118,6 @@ class SpecialistSpawn:
     disallowed_tools: frozenset[str] | set[str] | tuple[str, ...] = frozenset()
     gpu_ids: tuple[int, ...] = ()
     deadline: Deadline | None = None
-    gpu_lease: Any = None
     progress_cb: Any = None
     readable: tuple[Path, ...] = ()
     worktree_admin: Path | None = None

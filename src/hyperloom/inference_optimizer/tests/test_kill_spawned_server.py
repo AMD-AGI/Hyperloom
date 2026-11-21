@@ -492,8 +492,8 @@ class TestAnOrchestratorCancelReachesTheChild:
 class TestSessionDeadlineCrossesAProcessBoundary:
     """A ``time.monotonic()`` instant is only meaningful in the process that read it.
 
-    Handing the absolute deadline to a Ray worker would name an instant on the
-    worker's own clock, whose origin is unrelated -- an immediate kill or one
+    Handing the absolute deadline to another process would name an instant on its
+    own clock, whose origin is unrelated -- an immediate kill or one
     that never fires, both silently. Only a duration survives the trip.
     """
 
@@ -524,28 +524,23 @@ class TestSessionDeadlineCrossesAProcessBoundary:
 
 def _sentinel_returncodes() -> dict[int, set[str]]:
     """Map every sentinel returncode to the qualified names that claim it."""
-    from hyperloom.orchestrator.actions.executors import _ray_serving, _subprocess_kill
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill
 
     assigned: dict[int, set[str]] = {}
-    for module in (_subprocess_kill, _ray_serving):
-        short = module.__name__.rsplit(".", 1)[-1]
-        for name, value in vars(module).items():
-            if not isinstance(value, int) or isinstance(value, bool):
-                continue
-            if not (name.endswith(("_RETURNCODE", "_RC"))):
-                continue
-            assigned.setdefault(value, set()).add(f"{short}.{name}")
+    for name, value in vars(_subprocess_kill).items():
+        if not isinstance(value, int) or isinstance(value, bool):
+            continue
+        if not (name.endswith(("_RETURNCODE", "_RC"))):
+            continue
+        assigned.setdefault(value, set()).add(f"_subprocess_kill.{name}")
     return assigned
 
 
 def test_every_sentinel_returncode_names_exactly_one_cause():
     """A sentinel shared by two causes makes attribution a coin flip.
 
-    The codes are handed out in more than one module and all arrive at their
-    consumer as a plain ``returncode``, so a new one can quietly reuse a number
-    already taken. That is how the session-budget code first landed on the Ray
-    actor-died number, which would have had every actor death read as a spent
-    budget and taught the ledger the wrong thing about both.
+    The codes all arrive at their consumer as a plain ``returncode``, so a new
+    one can quietly reuse a number already taken.
     """
     assigned = _sentinel_returncodes()
 

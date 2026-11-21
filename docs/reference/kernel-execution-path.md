@@ -227,7 +227,7 @@ export USER_DATA_PATH="${USER_DATA_PATH:-$REPO_ROOT/session}"
 bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
 ```
 
-`install.sh` is idempotent. It sets up TraceLens, GEAK, Ray, and writes the
+`install.sh` is idempotent. It sets up TraceLens and GEAK and writes the
 env file. Optimizer preflight loads that file in process; do not source it over
 the launching shell's selections. Re-run installation after a venv rebuild or
 when the prepared runtime is no longer valid.

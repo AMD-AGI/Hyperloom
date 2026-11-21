@@ -1161,7 +1161,7 @@ def lost_execution_integrate(coord: Coordinator, pending_candidate, tmp_path: Pa
                 "task_id": candidate.task.task_id,
                 "state": "cancelled",
                 "result": {},
-                "error": "Operator confirmed the entire task process tree and remote workers/Ray actors stopped.",
+                "error": "Operator confirmed the entire task process tree and remote workers stopped.",
                 "error_class": "operator_confirmed_stopped",
             },
         }

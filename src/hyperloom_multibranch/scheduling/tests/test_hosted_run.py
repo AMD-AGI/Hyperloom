@@ -260,7 +260,7 @@ def test_a_hosted_run_marks_its_process_with_the_layers_bubblewrap_and_no_other(
         require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
 
     assert caplog.records == [], "the session says how it launches its agents once, when its peers are built"
-    assert probed.asked == [LAYER_BWRAP], "the account is chosen, and the layer's bubblewrap probed for the Ray path"
+    assert probed.asked == [], "the account is chosen, and no bubblewrap is probed for it"
     assert agent_isolation.isolation_required(), "every later launch of this process must be isolated"
     later = agent_isolation.choose_sandbox_isolation()
     assert isinstance(later, agent_isolation.BwrapIsolation) and set(probed.asked) == {LAYER_BWRAP}, (

@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-# Kernel-tool steps of install.sh: Ray + the Ray head, TraceLens, GEAK, the
-# Claude CLI and the kernel-agent env file. install.sh sources this file in a
+# Kernel-tool steps of install.sh: TraceLens, GEAK, the Claude CLI and the
+# kernel-agent env file. install.sh sources this file in a
 # subshell after its own setup (paths, .env, credentials, install lock) and
 # calls install_kernel_tools; the file has no entry point of its own.
 
@@ -11,7 +11,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   exit 2
 fi
 
-# Ray/K8s subprocesses may inherit a minimal PATH; prepend the standard system
+# K8s subprocesses may inherit a minimal PATH; prepend the standard system
 # bins, then the interpreter install.sh selected, so the bare python3 calls
 # below install into its environment.
 export PATH="$(dirname -- "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
@@ -177,13 +177,6 @@ _ANTHROPIC_CUSTOM_HEADERS_VAL="${ANTHROPIC_CUSTOM_HEADERS:-}"
 # on the Anthropic side via GEAK_CLAUDE_MODEL + Claude Code auth, and an operator
 # value reaches it from the environment. write_env_file removes both from the
 # shared .env so a stale entry cannot outlive this install.
-# Optional build-time escape hatch: skip Ray daemon startup while still
-# installing Ray itself and all downstream dependencies (TraceLens/GEAK).
-# Useful in Docker image builds where launching background daemons is fragile.
-case "${SKIP_RAY_START:-0}" in
-  1|true|TRUE|yes|YES|on|ON) SKIP_RAY_START=1 ;;
-  *) SKIP_RAY_START=0 ;;
-esac
 upsert_dotenv_var() {
   local key="$1" value="$2" tmp found=0 line stripped
   [ -n "$key" ] || return 0
@@ -364,338 +357,6 @@ ensure_moreutils() {
     return 0
   fi
   command -v ts >/dev/null 2>&1 || warn "ts still missing after apt-get install moreutils"
-}
-
-_RAY_VERSION_WAS_SET="${RAY_VERSION+x}"
-RAY_VERSION="${RAY_VERSION:-2.44.1}"
-RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
-# A representative `ray start` argv of the one this script runs on the head below:
-# every option, with values of its kind (probed ports, the node's GPU count, the
-# head's custom resources). ensure_ray certifies the CLI by handing this argv to
-# Ray's own parser rather than by checking the version of click it is built on, so
-# a click release that leaves the CLI working is never a reason to refuse or
-# downgrade the install. Quoted the way a shell quotes it: the probe uses shlex.
-RAY_START_ARGV="--head --disable-usage-stats --port=6379 --ray-client-server-port=10001 --num-gpus=1 --include-dashboard=false --resources='{\"serving_slot\": 1}'"
-
-# The default Ray pin predates newer CPython ABIs (no cp314 wheels before
-# 2.55.0), so on such interpreters the exact pin cannot resolve at all. Print
-# the lowest published version that does ship a wheel here, or nothing when
-# the pin itself is installable. Only consulted for the built-in default; an
-# operator-supplied RAY_VERSION is always honoured as-is.
-lowest_ray_version_for_interpreter() {
-  local pinned="$1"
-  RAY_PINNED_VERSION="$pinned" python3 - <<'PY' 2>/dev/null
-import os
-import re
-import subprocess
-import sys
-
-pinned = os.environ["RAY_PINNED_VERSION"]
-
-
-def as_tuple(version):
-    parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
-    parts.extend([0] * (3 - len(parts)))
-    return tuple(parts[:3])
-
-
-try:
-    out = subprocess.run(
-        [sys.executable, "-m", "pip", "index", "versions", "ray"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    ).stdout
-except Exception:
-    raise SystemExit(0)
-
-match = re.search(r"Available versions:\s*(.+)", out)
-if not match:
-    raise SystemExit(0)
-# pip filters this list by the running interpreter, so anything listed has a
-# usable wheel here.
-available = [v.strip() for v in match.group(1).split(",") if v.strip()]
-if pinned in available:
-    raise SystemExit(0)
-newer = sorted((v for v in available if as_tuple(v) >= as_tuple(pinned)), key=as_tuple)
-if newer:
-    print(newer[0])
-PY
-}
-
-# Relax the pin only when the default is genuinely uninstallable on this
-# interpreter, and say so loudly: the kernel-agent runtime version is part of
-# what a release gate certifies.
-resolve_ray_version() {
-  [ -n "$_RAY_VERSION_WAS_SET" ] && return 0
-  local resolved
-  resolved="$(lowest_ray_version_for_interpreter "$RAY_VERSION")"
-  [ -n "$resolved" ] || return 0
-  warn "ray ${RAY_VERSION} has no wheel for this interpreter ($(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)); using ray ${resolved} instead"
-  RAY_VERSION="$resolved"
-  RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
-}
-
-# Exit code of ray_cli_probe for the one failure a click hold can fix: Ray 2.44.1's
-# CLI fails to import under click 8.3+ (`ValueError: ... is not a valid Sentinel`).
-RAY_CLI_PROBE_CLICK_RC=75
-# That hold is fixed, not an operator knob, and only for the default pin.
-RAY_CLICK_HOLD_VERSION="2.44.1"
-RAY_CLICK_HOLD_SPEC="click<8.3"
-
-# Certify the installed Ray CLI with Ray's own parser (see RAY_START_ARGV above).
-ray_cli_probe() {
-  RAY_VERSION="$RAY_VERSION" RAY_START_ARGV="$RAY_START_ARGV" RAY_CLICK_HOLD_VERSION="$RAY_CLICK_HOLD_VERSION" \
-    RAY_CLI_PROBE_CLICK_RC="$RAY_CLI_PROBE_CLICK_RC" python3 - <<'PY'
-import os
-import shlex
-import sys
-
-import ray
-
-RAY_VERSION = os.environ["RAY_VERSION"]
-RAY_START_ARGV = shlex.split(os.environ["RAY_START_ARGV"])
-
-if ray.__version__ != RAY_VERSION:
-    raise SystemExit(f"ray version mismatch: {ray.__version__} != {RAY_VERSION}")
-try:
-    import click
-    from ray.scripts.scripts import cli as _ray_cli  # `main` only wraps this group
-except Exception as exc:
-    print(f"ray CLI import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-    # Only this failure, on the pinned Ray, is one a click hold can fix.
-    sentinel = "is not a valid Sentinel" in str(exc) and ray.__version__ == os.environ["RAY_CLICK_HOLD_VERSION"]
-    raise SystemExit(int(os.environ["RAY_CLI_PROBE_CLICK_RC"]) if sentinel else 1) from exc
-try:
-    _ray_start = _ray_cli.commands["start"]
-    _ray_start.make_context("start", list(RAY_START_ARGV), resilient_parsing=False).close()
-except click.UsageError as exc:
-    raise SystemExit(f"ray start does not accept {' '.join(RAY_START_ARGV)}: {exc.format_message()}") from exc
-except Exception as exc:
-    raise SystemExit(f"ray CLI has no usable start command: {type(exc).__name__}: {exc}") from exc
-print(f"[kernel-agent] ray version: {ray.__version__}, ray start accepts {' '.join(RAY_START_ARGV)}")
-PY
-}
-
-ensure_ray() {
-  resolve_ray_version
-  log "ensuring ${RAY_INSTALL_SPEC}"
-  if [ "$CHECK_ONLY" -eq 0 ]; then
-    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_INSTALL_SPEC"
-  fi
-  [ "$DRY_RUN" -eq 0 ] || return 0
-  local rc=0
-  ray_cli_probe || rc=$?
-  [ "$rc" -ne 0 ] || return 0
-  # Every other failure (version mismatch, other import error, a rejected argv,
-  # a missing start command) ends the install without touching click.
-  if [ "$rc" -eq "$RAY_CLI_PROBE_CLICK_RC" ] && [ "$CHECK_ONLY" -eq 0 ] && [ "$RAY_VERSION" = "$RAY_CLICK_HOLD_VERSION" ]; then
-    warn "the ray ${RAY_VERSION} CLI cannot import under this environment's click (is not a valid Sentinel); holding ${RAY_CLICK_HOLD_SPEC}"
-    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_CLICK_HOLD_SPEC"
-    ray_cli_probe
-    return
-  fi
-  return "$rc"
-}
-
-# Minimum soft `ulimit -n` the Ray raylet needs to stay up (issue #433).
-# The raylet opens a large number of fds (sockets, plasma store, per-worker
-# pipes); at the container default soft limit (1024) it aborts on startup /
-# lingers as a zombie that only `ray stop --force` clears. Operators can
-# override via RAY_MIN_NOFILE.
-RAY_MIN_NOFILE="${RAY_MIN_NOFILE:-65536}"
-
-# Raise this shell's soft open-files limit before `ray start` so the raylet
-# child inherits a high enough ceiling (issue #433). Raising the soft limit
-# up to the hard cap needs no privileges; only `docker run --ulimit
-# nofile=...` at container launch can lift the hard cap, so when the hard cap
-# is itself below the target we raise soft as high as allowed and warn.
-ensure_fd_limit_for_ray() {
-  local soft hard target
-  soft="$(ulimit -Sn 2>/dev/null || echo unknown)"
-  hard="$(ulimit -Hn 2>/dev/null || echo unknown)"
-  case "$soft" in
-    ''|*[!0-9]*)
-      log "fd-limit: soft nofile unknown ('$soft'); skipping raylet fd preflight (issue #433)"
-      return 0
-      ;;
-  esac
-  if [ "$soft" -ge "$RAY_MIN_NOFILE" ]; then
-    log "fd-limit: soft nofile=$soft already >= $RAY_MIN_NOFILE"
-    return 0
-  fi
-  target="$RAY_MIN_NOFILE"
-  case "$hard" in
-    unlimited|''|*[!0-9]*) : ;;
-    *) [ "$hard" -lt "$RAY_MIN_NOFILE" ] && target="$hard" ;;
-  esac
-  if ulimit -Sn "$target" 2>/dev/null; then
-    log "fd-limit: raised soft nofile $soft -> $(ulimit -Sn) before 'ray start' (issue #433)"
-  else
-    warn "fd-limit: could not raise soft nofile to $target (soft=$soft hard=$hard); Ray raylet may be unstable. Launch container with --ulimit nofile=1048576 (issue #433)."
-  fi
-  case "$hard" in
-    unlimited|''|*[!0-9]*) : ;;
-    *)
-      if [ "$hard" -lt "$RAY_MIN_NOFILE" ]; then
-        warn "fd-limit: hard nofile cap=$hard < $RAY_MIN_NOFILE; only 'docker run --ulimit nofile=1048576' lifts the hard cap (issue #433)."
-      fi
-      ;;
-  esac
-  # Never leak a non-zero status to the caller: under `set -e` the healthy path
-  # (hard cap >= target) left the trailing test as the function's exit status,
-  # which aborted the whole installer (issue #433).
-  return 0
-}
-
-# Whether the running head declares serving_slot, asked through a driver
-# connect. A raylet that accepts a driver and never registers it holds ray.init
-# forever, with the GIL held, so the connect is bounded from outside: `timeout`
-# signals the child's whole process group, SIGKILL 5 s after SIGTERM. The bound is
-# HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC, the one the optimizer puts on its own
-# connect probe (default 60 s). Returns 0 with the slot, 124 (timeout's own
-# status) when the head did not answer in time, saying so, and 1 otherwise.
-ray_head_has_serving_slot() {
-  local bound="${HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC:-}" rc=0
-  if ! [[ "$bound" =~ ^[0-9]+([.][0-9]+)?$ && "$bound" =~ [1-9] ]]; then
-    bound=60
-  fi
-  timeout -k 5 "$bound" python3 - <<'PY' >/dev/null 2>&1 || rc=$?
-import ray
-
-ray.init(address="auto", ignore_reinit_error=True, log_to_driver=False, logging_level="error")
-try:
-    resources = ray.cluster_resources()
-finally:
-    ray.shutdown()
-raise SystemExit(0 if "serving_slot" in resources else 1)
-PY
-  case "$rc" in
-    0) return 0 ;;
-    124 | 137)
-      warn "ray head did not answer a driver within ${bound}s (HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC); restarting local Ray head"
-      return 124
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-# Idempotently bring up a Ray head node. Kernel backends submit Ray tasks with
-# `num_gpus>=1`; if no head is running (or one is running with --num-gpus=0)
-# kernel optimization will hang forever even when GPUs are idle. We:
-#   1. detect a live Ray head via `ray status`
-#   2. reuse it only when it declares the Hyperloom `serving_slot` resource
-#   3. otherwise force-stop stale/incompatible local Ray and start a fresh head
-#      with all visible GPUs advertised
-#   4. tolerate the no-GPU case (CPU-only dev box) so `--check-only` stays
-#      non-fatal in environments without ROCm
-_free_tcp_port() {
-  # Print a currently-free loopback TCP port (probe via an ephemeral bind).
-  # Echoes 0 on failure so callers fall back to Ray's default port.
-  python3 - <<'PY' 2>/dev/null || echo 0
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-try:
-    s.bind(("127.0.0.1", 0))
-    print(s.getsockname()[1])
-finally:
-    s.close()
-PY
-}
-
-# Run ``ray start`` so the daemons it leaves behind (gcs_server, raylet,
-# dashboard, ...) are detached from this installer: a new session (so they are
-# not in the caller's process group) and no stdio of the caller's. A shell that
-# tracks a background job by its process group (an agent's sandbox bash) would
-# otherwise see the installer as running for as long as Ray lives, and an
-# inherited stderr pipe keeps that shell's output stream open. ray start's own
-# stderr is relayed to ours after it exits; its stdout is discarded as before.
-_ray_start_detached() {
-  local err_file rc=0
-  err_file="$(mktemp "${TMPDIR:-/tmp}/hl-ray-start.XXXXXX")" || err_file=/dev/null
-  if command -v setsid >/dev/null 2>&1 && setsid -w true </dev/null >/dev/null 2>&1; then
-    setsid -w ray start "$@" </dev/null >/dev/null 2>"$err_file" || rc=$?
-  else
-    warn "setsid -w unavailable; Ray daemons stay in this shell's process group"
-    ray start "$@" </dev/null >/dev/null 2>"$err_file" || rc=$?
-  fi
-  if [ "$err_file" != /dev/null ]; then
-    cat "$err_file" >&2 || true
-    rm -f "$err_file"
-  fi
-  return "$rc"
-}
-
-ensure_ray_started() {
-  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    return 0
-  fi
-  if [ "$SKIP_RAY_START" -eq 1 ]; then
-    log "skipping ray head startup (SKIP_RAY_START=1)"
-    return 0
-  fi
-  if ! command -v ray >/dev/null 2>&1; then
-    warn "ray CLI missing; cannot start ray head"
-    return 0
-  fi
-  if ray status >/dev/null 2>&1; then
-    local slot_rc=0
-    ray_head_has_serving_slot || slot_rc=$?
-    if [ "$slot_rc" -eq 0 ]; then
-      log "ray head already running with serving_slot"
-      return 0
-    fi
-    # 124: the head did not answer at all, which ray_head_has_serving_slot reported.
-    if [ "$slot_rc" -ne 124 ]; then
-      warn "ray head already running without serving_slot; restarting local Ray head"
-    fi
-  else
-    log "no live ray head detected; starting one"
-  fi
-  # issue #433: raise fd limit BEFORE starting the head so the raylet inherits
-  # a ceiling high enough to stay up (container default 1024 makes it abort).
-  ensure_fd_limit_for_ray
-  ray stop --force >/dev/null 2>&1 || true
-  local num_gpus
-  num_gpus="$(python3 - <<'PY' 2>/dev/null || echo 0
-try:
-    import torch
-    print(torch.cuda.device_count() or 0)
-except Exception:
-    print(0)
-PY
-)"
-  if [ "${RAY_NUM_GPUS:-}" != "" ]; then
-    num_gpus="$RAY_NUM_GPUS"
-  fi
-  # Bind the head to FREE, probed ports instead of Ray's fixed defaults (GCS
-  # 6379, client 10001). On spur many sessions share a node's host network, so
-  # the fixed ports collide: a later head attaches to an earlier/leftover head's
-  # GCS and aborts with a session-name mismatch (ray-session-isolation). No
-  # rendezvous is needed -- Ray records the chosen address in the container-
-  # private /tmp/ray/ray_current_cluster, which ``ray status`` /
-  # ``ray.init(address="auto")`` read. HL_RAY_HEAD_PORT pins the GCS port.
-  local ray_port_args=()
-  local ray_gcs_port ray_client_port
-  ray_gcs_port="${HL_RAY_HEAD_PORT:-$(_free_tcp_port)}"
-  ray_client_port="$(_free_tcp_port)"
-  [ -n "$ray_gcs_port" ] && [ "$ray_gcs_port" != "0" ] && ray_port_args+=(--port="$ray_gcs_port")
-  [ -n "$ray_client_port" ] && [ "$ray_client_port" != "0" ] && ray_port_args+=(--ray-client-server-port="$ray_client_port")
-  log "starting ray head with --num-gpus=${num_gpus} port=${ray_gcs_port}"
-  # Declare the ``serving_slot`` custom resource so serving-family GPU work
-  # (baseline / profile / explore / sweep / gpu_research) routed through the
-  # Ray execution backend can hold the whole-machine mutex serialising
-  # GPU work. Without it those tasks request an undeclared resource and deadlock
-  # PENDING forever, since ensure_ray_cluster connects to this existing head
-  # instead of starting its own with the resource.
-  if ! _ray_start_detached --head --disable-usage-stats \
-       "${ray_port_args[@]}" \
-       --num-gpus="$num_gpus" --include-dashboard=false \
-       --resources='{"serving_slot": 1}'; then
-    warn "ray start failed; kernel optimization will hang. Check ROCm visibility."
-    return 0
-  fi
-  ray status >/dev/null 2>&1 || warn "ray status reports no live head after start"
 }
 
 _pip_install_editable() {
@@ -903,7 +564,7 @@ ensure_tracelens() {
 }
 
 # Write the container-local kernel-agent env file users should source so subsequent CLI calls
-# (and Ray workers via runtime_env) pick up the upstream gateway URLs.
+# pick up the upstream gateway URLs.
 write_env_file() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
@@ -916,7 +577,7 @@ write_env_file() {
   # first install runs install.sh -- so a credential re-exported unconditionally
   # outranks a key the operator just rotated, on every later launch, with nothing
   # to show for it (#1169). Assigning only when unset keeps the snapshot useful
-  # for the slurm/Ray paths that source the env file alone, and announces a
+  # for the slurm path that sources the env file alone, and announces a
   # mismatch (never a value) so a rotation that has not reached this file stays
   # visible at launch. Defined here so the emitted block travels with the
   # function body.
@@ -999,10 +660,10 @@ write_env_file() {
     # GEAK_API_KEY / GEAK_BASE_URL are intentionally NOT emitted: they derive
     # from Anthropic/DeepSeek values and would reintroduce
     # cross-provider leakage into the sourced runtime env.
-    # GEAK scoring / profiler / shape knobs. These are read by GEAK itself (the
-    # Ray actor), but the optimize CLI sources THIS file and its env replaces the
-    # launcher's exports -- so any knob not persisted here is silently dropped
-    # before reaching the actor (e.g. GEAK_SCORE_TARGET=kernel fell back to wall).
+    # GEAK scoring / profiler / shape knobs. These are read by GEAK itself, but
+    # the optimize CLI sources THIS file and its env replaces the launcher's
+    # exports -- so any knob not persisted here is silently dropped before
+    # reaching GEAK (e.g. GEAK_SCORE_TARGET=kernel fell back to wall).
     # Passthrough-if-set (no hardcoded defaults):
     #   GEAK_SCORE_TARGET         -> score best-patch on kernel_ms vs wall (E2E-transferable)
     #   GEAK_SKIP_PROFILE         -> skip the advisory profiler-mcp roofline pass
@@ -1328,14 +989,6 @@ ensure_geak_node() {
 }
 
 report_status() {
-  log "ray: $(python3 - <<'PY' 2>/dev/null || echo missing
-try:
-    import ray
-    print(ray.__version__)
-except Exception:
-    raise SystemExit(1)
-PY
-)"
   # The analysis agent's report step runs through this config-driven CLI.
   if command -v TraceLens_generate_perf_report_from_config >/dev/null 2>&1; then
     log "found TraceLens_generate_perf_report_from_config: $(command -v TraceLens_generate_perf_report_from_config)"
@@ -1365,8 +1018,6 @@ install_kernel_tools() {
   ensure_python
   ensure_patch_tools
   ensure_moreutils
-  ensure_ray
-  ensure_ray_started
   # TraceLens / GEAK clones run under the install lock install.sh holds.
   ensure_tracelens
   ensure_claude_cli

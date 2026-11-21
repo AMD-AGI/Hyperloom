@@ -490,7 +490,7 @@ def _recover_args(tmp_path, **changes):
         session_dir=tmp_path,
         force=False,
         confirm_stopped="task-1",
-        confirmation_reason="Verified process tree and Ray actors stopped; secret-ticket",
+        confirmation_reason="Verified process tree and remote workers stopped; secret-ticket",
     )
     values.update(changes)
     return argparse.Namespace(**values)
@@ -566,7 +566,7 @@ def test_confirmation_parser_accepts_only_explicit_task_arguments(tmp_path):
 
 
 _CONFIRMED_AT = "2026-09-18T12:00:00+00:00"
-_CONFIRMATION_REASON = "Verified the entire process tree and every Ray actor stopped"
+_CONFIRMATION_REASON = "Verified the entire process tree and every remote worker stopped"
 
 
 def _confirm_in_sqlite(path, *, task_id="task-1", reason=_CONFIRMATION_REASON):

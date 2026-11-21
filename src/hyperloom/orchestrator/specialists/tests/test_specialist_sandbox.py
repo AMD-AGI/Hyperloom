@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Specialists launched in a real bubblewrap sandbox, through the dispatcher, the agent runner and the Ray actor's
-process manager: what the agent reaches, how it is stopped, and how a sandbox that could not be set up reads."""
+"""Specialists launched in a real bubblewrap sandbox, through the dispatcher and the agent runner: what the agent
+reaches, how it is stopped, and how a sandbox that could not be set up reads."""
 
 from __future__ import annotations
 
@@ -12,13 +12,11 @@ import ipaddress
 import json
 import logging
 import os
-import signal
 import socket
 import sys
 import subprocess
 import tempfile
 import threading
-import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Iterator
@@ -30,8 +28,7 @@ from hyperloom_common.tests._bwrap_host import unavailable, usable_bwrap
 from hyperloom.common import agent_isolation, confinement
 from hyperloom.common.agent_isolation import BwrapIsolation, session_isolation_lines
 from hyperloom.common.deadline import Deadline
-from hyperloom_common.proctree import REAP_MARK_ENV, marked_pids, proc_identity, signal_processes
-from hyperloom.orchestrator.actions.executors._ray_serving import ManagedServerProcess
+from hyperloom_common.proctree import REAP_MARK_ENV
 from hyperloom.orchestrator.specialists import agent_runner, launch_env
 from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.agent_runner import AgentConfigError, McpEndpoint
@@ -445,32 +442,6 @@ async def test_a_claude_cli_with_only_its_login_file_runs_unconfined_here_and_is
     assert not any((tmp_path / name / "login_seen").exists() for name in ("ws-hosted", "w-hosted"))
 
 
-def test_a_ray_actors_process_manager_runs_the_sandbox_and_its_status_reaches_this_host(
-    tmp_path: Path, sandboxed: BwrapIsolation
-) -> None:
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    for code, failure in ((5, ""), (0, "bwrap: Can't find source path")):
-        env = {"PATH": "/usr/bin:/bin", REAP_MARK_ENV: f"ray-{code}"}
-        prepared = prepare_launch(sandboxed, LaunchPlace(workspace), ["/bin/sh", "-c", f"exit {code}"], env)
-        if failure:
-            prepared.policy = replace(prepared.policy, writable=(*prepared.policy.writable, str(tmp_path / "gone")))
-        spawn = prepared.actor(["/bin/sh", "-c", f"exit {code}"], env)
-        log = workspace / f"process-{code}.log"
-        manager = ManagedServerProcess()
-        try:
-            pid = manager.start(spawn.argv, env=spawn.env, cwd=str(workspace), log_path=str(log))
-            proc = prepared.started(ss._RayLeaseProcess(manager, pid))
-            deadline = time.monotonic() + 30
-            while manager.exit_code() is None and time.monotonic() < deadline:
-                time.sleep(0.05)
-            assert proc.setup_failure(log).startswith(failure) if failure else proc.setup_failure(log) == ""
-            assert manager.exit_code() == (1 if failure else code), log.read_text(encoding="utf-8")
-        finally:
-            manager.stop()
-            prepared.release()
-
-
 def test_a_login_the_app_replaces_or_makes_while_a_specialist_runs_is_not_shown_to_it(
     tmp_path: Path, sandboxed: BwrapIsolation, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -697,52 +668,3 @@ async def test_a_codex_the_agent_runner_sandboxes_reaches_the_mcp_servers_it_con
         "unnamed": "HTTPError",
     }
     assert (near.seen, far.seen, unnamed.seen) == (["/mcp"], [far_url], [])
-
-
-#: Run as a Ray actor's worker would: the actor's process manager starts the launch, then the actor waits.
-_ACTOR = """
-import json, sys, time
-from hyperloom.orchestrator.actions.executors._ray_serving import ManagedServerProcess
-spawn = json.loads(sys.argv[1])
-print(ManagedServerProcess().start(spawn["argv"], env=spawn["env"], cwd=spawn["cwd"]), flush=True)
-time.sleep(600)
-"""
-
-
-def _marked_within(mark: str, done: Callable[[list[int]], bool], seconds: float) -> list[int]:
-    """The processes carrying ``mark`` once ``done`` holds for them, or when ``seconds`` have passed."""
-    deadline = time.monotonic() + seconds
-    while True:
-        found = marked_pids(REAP_MARK_ENV, mark)
-        if done(found) or time.monotonic() > deadline:
-            return found
-        time.sleep(0.1)
-
-
-def test_a_sandbox_a_ray_actor_started_ends_when_the_actor_is_killed(tmp_path: Path, sandboxed: BwrapIsolation):
-    """The actor's death (an OOM kill, say) ends its bubblewrap, and with it every process of the sandbox: nothing
-    keeps the GPU devices and the worktree with no deadline, heartbeat or reaper left to end it."""
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    mark = f"actor-dies-{os.getpid()}-{time.monotonic_ns()}"
-    cmd = ["/bin/sh", "-c", "sleep 300 & sleep 300 & wait"]
-    env = {"PATH": "/usr/bin:/bin", REAP_MARK_ENV: mark}
-    prepared = prepare_launch(sandboxed, LaunchPlace(workspace), cmd, env)
-    spawn = prepared.actor(cmd, env)
-    child_env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
-    payload = json.dumps({"argv": spawn.argv, "env": spawn.env, "cwd": str(workspace)})
-    actor = subprocess.Popen([sys.executable, "-c", _ACTOR, payload], env=child_env, stdout=subprocess.PIPE, text=True)
-    try:
-        assert actor.stdout is not None and actor.stdout.readline().strip().isdigit()
-        running_before = _marked_within(mark, lambda found: len(found) >= 3, 30)
-        actor.kill()
-        actor.wait(timeout=30)
-        left = _marked_within(mark, lambda found: not found, 30)
-    finally:
-        actor.kill()
-        signal_processes(
-            [(pid, seen[1]) for pid in marked_pids(REAP_MARK_ENV, mark) if (seen := proc_identity(pid))], signal.SIGKILL
-        )
-        prepared.release()
-    assert len(running_before) >= 3  # the shell, its two sleeps (and the network relay)
-    assert left == []

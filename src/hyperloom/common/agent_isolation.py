@@ -55,7 +55,6 @@ __all__ = [
     "HOST_LAYER_ENV",
     "LAYER_BWRAP",
     "NONE",
-    "RAY_ACTOR_PATH",
     "REFUSED",
     "SANDBOX_ACCOUNT",
     "TEST_ACCOUNT",
@@ -80,8 +79,6 @@ __all__ = [
 
 log = logging.getLogger(__name__)
 
-#: The account tier's reason on the Ray GPU actor path, which cannot start its child as another account.
-RAY_ACTOR_PATH = "the Ray GPU actor path cannot run the specialist as another user"
 #: The account tier's reason for an agent sandbox, whose commands run as the app's own account.
 SANDBOX_ACCOUNT = "an agent sandbox runs its commands as the app's own account"
 #: The account tier's reason for a local test sandbox whose provider names no account for its processes.
@@ -124,13 +121,10 @@ class AccountIsolation:
 
 @dataclass(frozen=True)
 class BwrapIsolation:
-    """The agent runs in a bubblewrap sandbox with the probed bubblewrap; ``notes`` say why not as an account.
-    ``started_elsewhere``: another process (a Ray actor) starts bubblewrap, so no thread here decides what
-    ``--die-with-parent`` follows (:meth:`launch`)."""
+    """The agent runs in a bubblewrap sandbox with the probed bubblewrap; ``notes`` say why not as an account."""
 
     probe: BwrapProbe
     notes: tuple[str, ...] = ()
-    started_elsewhere: bool = False
 
     @property
     def shown(self) -> str:
@@ -152,8 +146,7 @@ class BwrapIsolation:
         The variables ``marks`` names leave ``env`` and are set inside with ``--setenv``, so bubblewrap's own
         processes carry no mark and a reaper's TERM reaches only the sandbox (their values show in bubblewrap's
         command line: never a secret). ``--die-with-parent`` is kept only on the main thread: it follows the thread
-        that starts bubblewrap, and one that ends first would SIGKILL the sandbox with no grace. Where another process
-        starts it (:attr:`started_elsewhere`), this thread decides nothing, and the policy's stands.
+        that starts bubblewrap, and one that ends first would SIGKILL the sandbox with no grace.
 
         Raises:
             IsolationRefused: ``policy`` names a problem for this bubblewrap's version (nothing was started).
@@ -168,7 +161,7 @@ class BwrapIsolation:
         policy = dataclasses.replace(
             policy,
             marks=(*policy.marks, *moved),
-            die_with_parent=policy.die_with_parent and (on_main or self.started_elsewhere),
+            die_with_parent=policy.die_with_parent and on_main,
         )
         try:
             return policy.argv(self.probe, argv, status_fd=status_fd), child_env
@@ -260,12 +253,10 @@ def isolation_required(user: str | None = None) -> bool:
     return _STATE.hosted or bool(_configured(user))
 
 
-def _account(name: str, allow_account: bool) -> tuple[RunAs | None, str]:
+def _account(name: str) -> tuple[RunAs | None, str]:
     """The account to run the agent as, or why there is none (the checks of the launch paths' account test)."""
     if not name:
         return None, f"{SPECIALIST_USER_ENV} is not set"
-    if not allow_account:
-        return None, RAY_ACTOR_PATH
     try:
         run_as = resolve_run_as(name)
     except RunAsError as exc:
@@ -320,15 +311,14 @@ def _unaccounted(
     return NoIsolation(reasons, transient=found.transient)
 
 
-def choose_agent_isolation(user: str | None = None, *, allow_account: bool = True) -> AgentIsolation:
-    """How to launch a specialist now (see the module doc). ``user`` defaults to ``HYPERLOOM_SPECIALIST_USER``;
-    ``allow_account=False`` (the Ray GPU actor path) never gives the account tier.
+def choose_agent_isolation(user: str | None = None) -> AgentIsolation:
+    """How to launch a specialist now (see the module doc). ``user`` defaults to ``HYPERLOOM_SPECIALIST_USER``.
 
     Raises:
         IsolationRefused: The specialist must be isolated and neither tier works here.
     """
     name = _configured(user)
-    run_as, reason = _account(name, allow_account)
+    run_as, reason = _account(name)
     if run_as is not None:
         return AccountIsolation(run_as)
     return _unaccounted(reason, required=isolation_required(name), warn=bool(name))
@@ -374,13 +364,11 @@ def layer_bwrap(environ: Mapping[str, str]) -> str | None:
     return str(Path(layer) / LAYER_BWRAP) if layer else None
 
 
-def require_agent_isolation(*, bwrap: str | None, allow_account: bool = True) -> AgentIsolation:
+def require_agent_isolation(*, bwrap: str | None) -> AgentIsolation:
     """At a hosted run's start-up: mark this process as one whose agents must be isolated, with the hosting layer's
     bubblewrap at ``bwrap`` (an absolute path; ``None`` or empty when the run has none, which refuses every launch
     bubblewrap would make) and no other, and choose now, so a host where neither tier works refuses before anything
-    runs. Where the account is chosen, bubblewrap is probed as well: the Ray GPU actor path never starts a specialist
-    as an account, so where bubblewrap cannot confine one either, one WARNING says that path refuses its specialists
-    and why, and the run goes on (the account isolates every other specialist).
+    runs.
 
     Raises:
         IsolationRefused: Neither tier works here.
@@ -388,16 +376,7 @@ def require_agent_isolation(*, bwrap: str | None, allow_account: bool = True) ->
     with _STATE.lock:
         _STATE.hosted = True
         _STATE.layer_bwrap = bwrap
-    chosen = choose_agent_isolation(allow_account=allow_account)
-    if isinstance(chosen, AccountIsolation):
-        found = _bwrap()
-        if not found.ok:
-            _log_once(
-                logging.WARNING,
-                f"specialists run as the account {chosen.run_as.user}, but {RAY_ACTOR_PATH} and bubblewrap cannot"
-                f" confine one here, so that path refuses its specialists: {'; '.join(_bwrap_reasons(found))}",
-            )
-    return chosen
+    return choose_agent_isolation()
 
 
 @dataclass(frozen=True)

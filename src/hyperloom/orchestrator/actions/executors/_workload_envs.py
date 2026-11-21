@@ -570,9 +570,9 @@ def apply_scriptable_runtime_defaults(
     # Also under the framework-agnostic name, and in the config rather than only
     # in os.environ. An entrypoint Hyperloom did not write can only be expected
     # to know the generic spelling, and the benchmark inherits its environment
-    # from whichever process launched the runner — a Ray worker carries the
-    # environment the raylet booted with, hours or days earlier, so a stale
-    # <FRAMEWORK>_DIR there outranks anything published later. Config envs are
+    # from whichever process launched the runner, which may have started before
+    # this publish, so a stale <FRAMEWORK>_DIR there outranks anything published
+    # later. Config envs are
     # applied on top of that inherited environment, so this is what actually
     # reaches the script.
     envs["FRAMEWORK_REPO_PATH"] = repo_path
