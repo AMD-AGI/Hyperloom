@@ -217,6 +217,7 @@ __all__ = [
     "AGENT_PORT",
     "DEFAULT_AGENTX_OBJECTIVE",
     "DOSSIER_MINUTES",
+    "MAX_BOOT_BUDGET_SEC",
     "SHARE_MINUTES",
     "SWEEP_FACTORS",
     "InferenceXShape",
