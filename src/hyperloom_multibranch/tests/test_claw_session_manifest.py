@@ -14,11 +14,20 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_multibranch.blackboard.knowledge.breakdown import SESSION_VARIABLES, claw_session_id
+from hyperloom_multibranch.blackboard.knowledge.breakdown import FILENAME, SESSION_VARIABLES, claw_session_id
 from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.manifest import read_manifest
-from hyperloom_multibranch.scheduling.resumption import deadline_after_downtime, resumable_run
-from hyperloom_multibranch.tests.test_skeleton import Stage, _resumed, _script, _signalling, _stage
+from hyperloom_multibranch.scheduling.resumption import deadline_after_downtime, persisted_run, resumable_run
+from hyperloom_multibranch.tests.test_skeleton import (
+    SCRIPTS,
+    Stage,
+    StuckStopToolbox,
+    _recovery,
+    _resumed,
+    _script,
+    _signalling,
+    _stage,
+)
 
 CLAW = SESSION_VARIABLES["claw_session_id"]
 
@@ -33,6 +42,13 @@ async def _resume(stage: Stage) -> Stage:
         deadline = deadline_after_downtime(resumed.layout, resumed.time.now())
         await resumed._session().resume(persisted.ended, deadline)
     return resumed
+
+
+def _breakdown_claw_session(stage: Stage) -> object:
+    """The Claw session the ``session_breakdown.json`` CLOSE wrote in ``stage``'s directory names."""
+
+    breakdown = json.loads((stage.layout.reports / FILENAME).read_text())
+    return breakdown["metadata"]["session"]["claw_session_id"]
 
 
 async def test_a_session_claw_hosts_records_its_claw_session_in_the_manifest_as_it_starts(
@@ -124,3 +140,52 @@ def test_the_claw_session_is_read_from_the_variable_the_breakdown_reads() -> Non
     assert CLAW == "CLAW_SESSION_ID"
     assert claw_session_id({CLAW: " claw-1 "}) == "claw-1"
     assert claw_session_id({CLAW: ""}) is None and claw_session_id({}) is None
+
+
+@pytest.mark.parametrize("given", ["claw-other", None], ids=["another", "none"])
+async def test_the_breakdown_of_a_resumed_session_names_the_claw_session_its_manifest_keeps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, given: str | None
+) -> None:
+    monkeypatch.setenv(CLAW, "claw-first")
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    await stage.run()
+    (stage.layout.reports / FILENAME).unlink()
+    _given(monkeypatch, given)
+
+    await _resume(stage)
+
+    assert read_manifest(stage.layout.manifest).claw_session_id == "claw-first"
+    assert _breakdown_claw_session(stage) == "claw-first"
+
+
+def _given(monkeypatch: pytest.MonkeyPatch, claw: str | None) -> None:
+    """Run what follows under the Claw session ``claw``, or under none."""
+
+    if claw is None:
+        monkeypatch.delenv(CLAW, raising=False)
+    else:
+        monkeypatch.setenv(CLAW, claw)
+
+
+@pytest.mark.parametrize(
+    ("started", "given", "named"),
+    [("claw-first", "claw-other", "claw-first"), ("claw-first", None, "claw-first"), (None, "claw-late", "claw-late")],
+    ids=["another", "none", "none-recorded"],
+)
+async def test_the_breakdown_of_a_final_only_names_the_claw_session_the_manifest_keeps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, started: str | None, given: str | None, named: str
+) -> None:
+    _given(monkeypatch, started)
+    stage = _stage(tmp_path)
+    stage.scripts = SCRIPTS
+    stage.toolbox_type = StuckStopToolbox
+    await stage.run()
+    (stage.layout.reports / FILENAME).unlink()
+    persisted = persisted_run(stage.layout.root)
+    _given(monkeypatch, given)
+
+    await _recovery(stage, persisted.settings).finish(persisted.ended)
+
+    assert read_manifest(stage.layout.manifest).claw_session_id == started
+    assert _breakdown_claw_session(stage) == named
