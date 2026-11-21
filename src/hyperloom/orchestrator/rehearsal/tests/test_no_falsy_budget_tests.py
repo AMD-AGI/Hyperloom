@@ -25,7 +25,7 @@ _GUARDED = (
     "orchestrator/phases/*.py",
     "orchestrator/specialists/*.py",
     "orchestrator/state/shared_state.py",
-    "orchestrator/state/_shared_state/budget.py",
+    "orchestrator/state/_shared_state/*.py",
     "orchestrator/enablement/*.py",
 )
 
