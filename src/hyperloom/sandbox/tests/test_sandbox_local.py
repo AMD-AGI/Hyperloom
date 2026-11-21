@@ -1260,3 +1260,21 @@ def test_provider_reports_the_shared_node_name(monkeypatch) -> None:
 
     with LocalSandboxProvider([LocalTemplate("dev", "dev")]) as provider:
         assert _create(provider, "dev", "dev").info().metadata["agent-sandbox.io/node-name"] == socket.gethostname()
+
+
+def test_list_entries_says_what_each_entry_is_without_following_a_link(make) -> None:
+    provider = make([LocalTemplate("dev", "dev")])
+    sb = _create(provider, "dev", "dev")
+    sb.run("mkdir -p out/files/round && printf 'hello' > out/files/a.log && ln -s /etc out/files/etc")
+    sb.run("ln -s a.log out/files/same.log && mkfifo out/files/pipe")
+    entries = sb.list_entries("/work/out/files")
+    assert [(e.name, e.kind) for e in entries] == [
+        ("a.log", "file"),
+        ("etc", "link"),
+        ("pipe", "other"),
+        ("round", "dir"),
+        ("same.log", "link"),
+    ]
+    assert entries[0].size == 5
+    with pytest.raises(FileNotFoundError):
+        sb.list_entries("/work/missing")

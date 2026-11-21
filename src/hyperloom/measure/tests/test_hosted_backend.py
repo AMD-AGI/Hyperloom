@@ -29,7 +29,7 @@ from hyperloom.measure.returncodes import (
 )
 from hyperloom.measure.spec import MeasurementSpec
 from hyperloom.measure.tests.bundle_factory import DEFAULT_FILES, manifest_document, spec_document
-from hyperloom.measure.tests.fake_runner import REPORT_PATH
+from hyperloom.measure.tests.fake_runner import REPORT_PATH, ROUND_DIR, ROUND_LINK, ROUND_TREE
 from hyperloom.measure.tests.hosted_fixtures import (
     HOSTNAME,
     Rig,
@@ -396,6 +396,29 @@ def test_a_test_that_runs_past_its_timeout_raises_and_closes_the_sandbox(rig, tm
         r.backend.run_test(call)
     assert r.provider.find({}, role="measurement") == []
     assert r.backend.journal.latest("req-1").extra["verdict"] == "timeout"
+
+
+def test_a_test_the_host_ends_keeps_its_rounds_nested_logs_and_the_last_progress_it_read(rig, tmp_path) -> None:
+    r = rig()
+    point = point_yaml(tmp_path, fake_mode="hang", fake_round_tree="true")
+    call = make_call(tmp_path, timeout_sec=2, point=point)
+    with pytest.raises(subprocess.TimeoutExpired):
+        r.backend.run_test(call)
+    saved = call.output_dir / f"hosted-{ROUND_DIR}"
+    for relative, data in ROUND_TREE.items():
+        kept = saved / relative
+        if relative.startswith("torch_trace/"):
+            assert not kept.exists(), "a profiler trace is not a log"
+        else:
+            assert kept.read_bytes() == data, relative
+    assert not (saved / ROUND_LINK).exists(), "a link out of the sandbox is never followed"
+    index = json.loads((call.output_dir / "hosted-saved-files.json").read_text())
+    assert {"path": f"{ROUND_DIR}/{ROUND_LINK}", "reason": "a link, not followed"} in index["skipped"]
+    seen = json.loads((call.output_dir / "hosted-progress.json").read_text())
+    progress = seen["progress"]
+    assert progress["phase"] == "running" and progress["server_ready"] is False
+    assert progress["last_line"] == "Finished streaming dequant fp8 wo_a" and progress["last_log_age_sec"] >= 0
+    assert seen["read_sec_ago"] >= 0
 
 
 def test_a_stopping_run_closes_the_sandbox_and_returns_the_stop_code(rig, tmp_path) -> None:
