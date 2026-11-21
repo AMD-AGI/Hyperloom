@@ -256,15 +256,17 @@ def external_has_ssh_control() -> bool:
 
 
 def external_has_server_control() -> bool:
-    """True when external mode can restart servers (SSH for infera and node lists, head IP for rayjob; never an
-    atomesh/sglangrouter pod hand-off)."""
+    """True when external mode can restart servers (SSH for infera, node lists and atomesh/sglangrouter pod
+    hand-offs, head IP for rayjob)."""
     if not external_service_url():
         return False
     get = handoff_lookup()
     if get(NODE_LIST_ENV).strip():
         return external_has_ssh_control()
     if normalize_mn_backend(get("INFERENCE_OPTIMIZER_MN_BACKEND")) in pd_handoff.PD_BACKENDS:
-        return False
+        from .pd_cluster import pd_cluster_has_control
+
+        return pd_cluster_has_control(get)
     return external_has_ssh_control() or bool(get("HYPERLOOM_MN_EXT_HEAD_IP").strip())
 
 

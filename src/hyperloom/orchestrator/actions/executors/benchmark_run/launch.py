@@ -304,21 +304,21 @@ class _BenchmarkLaunchMixin:
         server_args: str,
         resolved_model: str,
     ) -> dict[str, Any] | None:
-        from .._multi_node_env import round_server_env
+        from .._multi_node_env import is_pod_handoff_session, round_server_env
         from .._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
         if round_.ctx_extra.get("mn_round_restarted"):
             return None
         try:
             # Merge the session base UNDER the per-task args (last-wins) so a multi-node per-round restart
-            # carries the same base flags the single-node materialized YAML does.
+            # carries the same base flags the single-node materialized YAML does. A pod hand-off's engines run
+            # their own per-role args instead, so the single-node base stays off them.
             from hyperloom.inference_optimizer.grid_server_args import merge_server_args
             from hyperloom.orchestrator.state.base_launch import session_server_base
 
-            server_base = session_server_base()
             # Fold in the operator ``--server-args`` (``INFERENCE_OPTIMIZER_SERVER_ARGS``).
             operator_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
-            base = server_base.args
+            base = "" if is_pod_handoff_session() else session_server_base().args
             if operator_args:
                 base = merge_server_args(base, operator_args) if base else operator_args
             # Base on ``server_args`` (carries the one-shot cuda-graph eager-fallback flag when armed) so the MN

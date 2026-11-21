@@ -421,5 +421,56 @@ def test_pd_role_traces_take_each_single_host_workers_first_gpu_in_worker_order(
     }
 
 
+_PD_WORKERS = {
+    "backend": "sglangrouter",
+    "prefill_pods": [{"podIP": "10.0.0.1", "podId": "p0", "enginePort": 8010}],
+    "decode_pods": [{"podIP": "10.0.0.2", "podId": "d0", "enginePort": 8020}],
+}
+
+
+def test_pd_worker_health_dials_the_engine_port_of_each_role(serve, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.url.host}:{request.url.port}")
+        return _OK
+
+    serve({"health": [_OK]}, _PD_WORKERS)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+    _workers()
+    assert seen == ["10.0.0.1:8010", "10.0.0.2:8020"]
+
+
+def test_pd_worker_wait_holds_until_every_engine_on_a_shared_ip_answers(serve, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two engines on one IP are two targets: prefill answering must not mark decode ready."""
+    seen: list[int] = []
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.port)
+        if request.url.port == 8020 and seen.count(8020) < 3:
+            raise httpx.ConnectError("decode still loading")
+        return _OK
+
+    shared = {
+        "backend": "sglangrouter",
+        "prefill_pods": [{"podIP": "10.0.0.5", "podId": "p0", "enginePort": 8010}],
+        "decode_pods": [{"podIP": "10.0.0.5", "podId": "d0", "enginePort": 8020}],
+    }
+    serve({"health": [_OK]}, shared)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+    _workers()
+    assert seen == [8010, 8020, 8020, 8020]
+
+
+def test_shared_server_log_dir_defaults_to_user_data_server_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HYPERLOOM_MN_SERVER_LOG_DIR", raising=False)
+    monkeypatch.setenv("USER_DATA_PATH", "/shared/hl")
+    assert multi_node.server_log_dir() == "/shared/hl/server_logs"
+    monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", "/elsewhere/logs")
+    assert multi_node.server_log_dir() == "/elsewhere/logs"
+
+
 def test_the_multi_node_sglang_defaults_keep_the_prefix_cache_on() -> None:
     assert "--disable-radix-cache" not in life._merge_sglang_defaults("--chunked-prefill-size 8192")

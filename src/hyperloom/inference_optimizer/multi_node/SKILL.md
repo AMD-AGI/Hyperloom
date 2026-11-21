@@ -32,7 +32,7 @@ re-provisioned cluster rewrites them).
 | Action         | Use               | Never                                     |
 |----------------|-------------------|-------------------------------------------|
 | Restart server | `restart-server`  | `kubectl exec … sglang.launch_server`     |
-| Kill server    | `kill-inference`  | `pkill -f sglang`                         |
+| Kill server    | `kill-inference` (no-op on atomesh / sglangrouter) | `pkill -f sglang` |
 
 Bypassing loses the stable exit codes, cross-subcommand state, and the
 service URL every benchmark round measures.
@@ -65,9 +65,10 @@ frontend `:8000`** (`state.service_url`), never sglang rank-0.
 GCS); no SSH. Uses `bootstrap` → `verify` → `restart-server` (below).
 
 **atomesh / sglangrouter** — PD-disaggregated SGLang engines behind a router
-the platform runs at `state.service_url`. Every prefill and decode pod is
-reached on `HYPERLOOM_MN_EXT_SSH_PORT`, with no role offset. The hand-off is
-adopted for benchmarking only: per-round restarts are not available.
+the platform runs at `state.service_url`. `restart-server` SSHes to each
+prefill and decode pod (every pod on `HYPERLOOM_MN_EXT_SSH_PORT`, no role
+offset) and restarts only the engines in place. `kill-inference` stops
+nothing: the engines stay on their GPUs until the next `restart-server`.
 
 The topology (aggregated vs PD, per-role TP/EP, image, RDMA) is fixed by the
 platform at provision time; the flags here only describe what `restart-server`
@@ -176,7 +177,7 @@ TP / flag change — the CLI fans out across all pods; never per-pod invocations
 | `PD_PREFILL_NODES` / `PD_DECODE_NODES` | `--pd-prefill-nodes` / `--pd-decode-nodes` (or export) |
 | `PD_PREFILL_TP` / `PD_DECODE_TP` | `--pd-prefill-tp` / `--pd-decode-tp` (default = `--tp`) |
 | `PD_PREFILL_EP` / `PD_DECODE_EP` | **infera, atomesh, sglangrouter PD only**, export as `restart-server` defaults; `0` ⇒ shared `--ep` |
-| `PD_PREFILL_EXTRA_ARGS` / `PD_DECODE_EXTRA_ARGS` | **infera, atomesh, sglangrouter PD only**, export; infera: appended per-role AFTER shared `--extra-args` (role wins on dup keys); atomesh/sglangrouter: every flag the shared args set replaces the role's value of it (each flag appears once) |
+| `PD_PREFILL_EXTRA_ARGS` / `PD_DECODE_EXTRA_ARGS` | **infera, atomesh, sglangrouter PD only**, export; infera: appended per-role AFTER shared `--extra-args` (role wins on dup keys); atomesh/sglangrouter: every flag the shared args set replaces the role's value of it (each flag appears once); a round restart's shared args are the operator `--server-args` and the round's candidate only, without the single-node session base or the multi-node sglang defaults |
 | `PD_TRANSFER_BACKEND` | `--pd-transfer-backend {nixl\|mori\|mooncake}`. **Use `mooncake` for sglang** (see below) |
 | `ISL`/`OSL`/`CONC`/`PRECISION` | `optimize --isl/--osl/--conc/--precision` |
 | `--mn-image …` / `RayJob image:` / `Infera image:` | **Not an `optimize` flag** — the image is the platform's input; pods already exist by the time the optimizer runs |

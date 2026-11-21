@@ -60,6 +60,14 @@ def is_pd_session() -> bool:
     return is_multi_node() and is_pd_state(_read_state() or {})
 
 
+def is_pod_handoff_session() -> bool:
+    """Whether this multi-node session adopted an atomesh or sglangrouter pod hand-off rather than a node list."""
+    from hyperloom.inference_optimizer.multi_node.pd_session import PD_BACKENDS, is_pd_state
+
+    state = _read_state() or {}
+    return is_multi_node() and not is_pd_state(state) and str(state.get("backend") or "") in PD_BACKENDS
+
+
 def round_server_env(variant_envs: Mapping[str, Any] | None = None, unset_envs: Iterable[str] = ()) -> dict[str, str]:
     """The env a multi-node restart forwards to every rank, layered as a single-node round's ``benchmark.envs`` is.
 

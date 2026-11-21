@@ -14,8 +14,8 @@ import subprocess
 import tempfile
 import time
 import traceback
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass, replace
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,17 +25,27 @@ from hyperloom_common import aiter_jit_cache
 from hyperloom_common.env import EnvValueError, env_int
 
 from ._internal import ray_dashboard
-from ._internal import ssh_client, ssh_known_hosts
+from ._internal import ssh_client
 from ._internal.log import info, warn, err
+from ._internal.pod_ssh import (
+    EXIT_CONFIG_ERROR as EXIT_CONFIG_ERROR,
+    ConfigurationError as ConfigurationError,
+    _extract_pod_json as _extract_pod_json,
+    _infera_ssh_with_host_key_retry as _infera_ssh_with_host_key_retry,
+    _json_object_candidates as _json_object_candidates,
+    _load_state as _load_state,
+    _normalize_extra_args as _normalize_extra_args,
+    _save_state as _save_state,
+    _state_file as _state_file,
+    per_round_forward_overrides as per_round_forward_overrides,
+)
 from ._internal.server_args_safety import (
     ServerArgsRejected,
     prepare_shell_safe_extra_args,
     validate_server_args,
 )
 from .restart_pd_args import add_restart_pd_role_arguments, add_restart_pd_shape_arguments
-from .state_paths import _ensure_runtime_dir, resolve_state_file
 from ._internal.env_safety import filter_forward_env
-from ._internal.external_state import external_service_url, load_multi_node_state
 from ._internal.serving_probe import cluster_is_serving
 from .pd_session import PdSessionError, is_pd_state, launch_options, restart_round, stamp_launch_pods, stop_cluster
 
@@ -67,35 +77,14 @@ _RESUME_PROBE_TIMEOUT_ENV = "HYPERLOOM_MN_RESUME_PROBE_TIMEOUT_S"
 _DEFAULT_RESUME_PROBE_TIMEOUT_S = 30
 
 
-def _normalize_extra_args(s: str | None) -> str:
-    """Normalize ``--extra-args`` whitespace for equality (order-preserving; argv order matters)."""
-    return " ".join((s or "").split())
-
-
 # Exit codes — part of the CLI's contract with the agent; keep stable.
 EXIT_OK = 0
 EXIT_TRANSIENT = 1  # network / Ray Dashboard or SSH error / timeout — caller may retry
-EXIT_CONFIG_ERROR = 3  # missing env / required arg — fix the call, don't retry blindly
 EXIT_INTERRUPT = 130  # Ctrl-C / SIGINT
 
 
 class TransientFailure(RuntimeError):
     """Raised on poll timeout or repeated fetch failure. Exit code -> 1; caller may retry."""
-
-
-class ConfigurationError(RuntimeError):
-    """Raised when the environment is wrong in a way retrying cannot fix. Exit code -> EXIT_CONFIG_ERROR."""
-
-
-# State file
-def _state_file() -> Path:
-    """Return the active multi-node state file path."""
-    return resolve_state_file()
-
-
-def _infera_ssh_dir() -> Path:
-    """Session-scoped directory for the ephemeral multi-node SSH keypair."""
-    return _state_file().parent / "mn_ssh"
 
 
 def _multinode_server_log_dir() -> str:
@@ -107,36 +96,6 @@ def _multinode_server_log_dir() -> str:
         return str(_state_file().parent / "server_logs")
     except RuntimeError:  # state file unresolvable (dev/single box)
         return str(Path(tempfile.gettempdir()) / "multi_node_logs")
-
-
-def _load_state() -> dict[str, Any]:
-    """Load the CLI state file as a dict."""
-    state = load_multi_node_state()
-    if not external_service_url():
-        try:
-            nodes = int(os.environ.get("INFERENCE_OPTIMIZER_NODES", "") or 1)
-        except ValueError:
-            nodes = 1
-        if nodes >= 2 or state.get("external"):
-            raise ConfigurationError(
-                "multi-node state requested without a cluster hand-off: "
-                "HYPERLOOM_MN_EXT_SERVICE_URL is unset"
-                + (" while the state file describes a handed-over cluster" if state.get("external") else "")
-                + ". The platform provisions the cluster and exports the HYPERLOOM_MN_EXT_* "
-                "vars; see multi_node/SKILL.md 'Cluster hand-off'."
-            )
-    return state
-
-
-def _save_state(state: dict[str, Any]) -> None:
-    """Write the CLI state dict to the state file as pretty JSON."""
-    path = _state_file()
-    _ensure_runtime_dir(path.parent)
-    path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
-    try:
-        path.chmod(0o600)
-    except OSError as exc:
-        warn(f"could not chmod state file {path} to 0600: {exc}")
 
 
 def _require_state(*keys: str) -> dict[str, Any]:
@@ -161,45 +120,6 @@ def _ray_dashboard_client(state: dict[str, Any] | None = None) -> ray_dashboard.
     return ray_dashboard.RayDashboardClient(head, token=token)
 
 
-def _infera_known_hosts_path(state: dict[str, Any] | None = None) -> Path:
-    """Resolve the session known_hosts file for Infera SSH."""
-    st = state if state is not None else _load_state()
-    raw = str(st.get("ssh_known_hosts") or "").strip()
-    if raw:
-        return Path(raw)
-    return ssh_known_hosts.default_known_hosts_path(_infera_ssh_dir())
-
-
-def _infera_default_ssh_port(state: dict[str, Any]) -> int:
-    """Return the session default SSH port from state."""
-    return int(state.get("ssh_port") or ssh_client.DEFAULT_SSH_PORT)
-
-
-def _infera_ssh_with_host_key_retry(
-    state: dict[str, Any],
-    ip: str,
-    port: int | None,
-    run: Callable[[ssh_client.SshTarget], subprocess.CompletedProcess],
-) -> subprocess.CompletedProcess:
-    """Run ``run`` against an Infera pod; on a host-key mismatch, re-scan known_hosts and retry once."""
-    target = ssh_client.SshTarget(
-        host=ip,
-        key_path=state["ssh_key_path"],
-        port=int(port if port is not None else _infera_default_ssh_port(state)),
-        known_hosts=_infera_known_hosts_path(state),
-    )
-    cp = run(target)
-    if cp.returncode != 0 and ssh_known_hosts.is_host_key_error(cp.stderr):
-        warn(f"infera ssh {ip}:{target.port}: host key mismatch; refreshing known_hosts and retrying once")
-        try:
-            known_hosts = ssh_known_hosts.refresh_known_hosts([(ip, target.port)], target.known_hosts)
-        except RuntimeError as exc:
-            warn(f"infera ssh {ip}:{target.port}: known_hosts refresh failed: {exc}")
-            return cp
-        cp = run(replace(target, known_hosts=known_hosts))
-    return cp
-
-
 def _infera_ssh_run_script(
     state: dict[str, Any],
     ip: str,
@@ -211,20 +131,6 @@ def _infera_ssh_run_script(
     """Run a script on an Infera pod over SSH with host-key retry."""
     return _infera_ssh_with_host_key_retry(
         state, ip, port, lambda target: ssh_client.ssh_run_script(target, script, timeout=timeout)
-    )
-
-
-def _infera_ssh_bash_with_env(
-    state: dict[str, Any],
-    ip: str,
-    script: str,
-    *,
-    timeout: int,
-    port: int | None = None,
-) -> subprocess.CompletedProcess:
-    """Run a bash script on an Infera pod via SSH stdin with host-key retry."""
-    return _infera_ssh_with_host_key_retry(
-        state, ip, port, lambda target: ssh_client.ssh_run_bash_stdin(target, script, timeout=timeout)
     )
 
 
@@ -508,31 +414,6 @@ def _build_multinode_kill_entrypoint(pid_dir: str) -> str:
     )
 
 
-def _json_object_candidates(text: str) -> Iterator[str]:
-    """Yield balanced ``{...}`` blocks from the end of ``text`` backward, ignoring braces inside JSON strings."""
-    depth = 0
-    in_str = False
-    end = -1
-    for i in range(len(text) - 1, -1, -1):
-        ch = text[i]
-        if depth and ch == '"':
-            j = i
-            while j and text[j - 1] == "\\":
-                j -= 1
-            if (i - j) % 2 == 0:
-                in_str = not in_str
-        elif in_str:
-            continue
-        elif ch == "}":
-            if depth == 0:
-                end = i
-            depth += 1
-        elif ch == "{" and depth:
-            depth -= 1
-            if depth == 0:
-                yield text[i : end + 1]
-
-
 def _extract_launcher_summary(launch_logs: str) -> dict:
     """Parse the JSON summary launch_multinode.py writes to stdout: the last ``{...}`` block that parses; ``{}`` on failure."""
     for candidate in _json_object_candidates(launch_logs or ""):
@@ -720,51 +601,6 @@ def _build_multinode_apply_tracelens_patch_entrypoint(
     )
 
 
-def _extract_pod_json(logs: str) -> dict | None:
-    """Parse the last top-level JSON document from an interleaved Ray Dashboard job_logs blob (the in-pod scripts emit one)."""
-    for candidate in _json_object_candidates(logs or ""):
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            return None
-    return None
-
-
-def per_round_forward_overrides() -> dict[str, Any]:
-    """Parse the per-round env control vars into ``{"set": {...}, "unset": [...]}``.
-
-    Both multi-node backends launch from these, so they are parsed once here rather than
-    once per backend. What each backend then does with them differs: the RayJob path
-    filters the set through :func:`filter_forward_env`, while the Infera SSH path forwards
-    it verbatim.
-    """
-    raw = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
-    overrides: dict[str, str] = {}
-    if raw:
-        try:
-            parsed = json.loads(raw)
-        except (ValueError, TypeError):
-            warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
-            parsed = None
-        if isinstance(parsed, dict):
-            overrides = {str(k): str(v) for k, v in parsed.items()}
-        elif parsed is not None:
-            warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not a JSON object; skipping per-variant env forwarding")
-
-    raw_unset = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV", "").strip()
-    unset: list[str] = []
-    if raw_unset:
-        try:
-            parsed_unset = json.loads(raw_unset)
-        except (ValueError, TypeError):
-            warn("HYPERLOOM_MN_UNSET_FWD_ENV is not valid JSON; skipping per-variant env unsets")
-            parsed_unset = None
-        if isinstance(parsed_unset, list):
-            unset = sorted({str(k).strip() for k in parsed_unset if str(k).strip()})
-
-    return {"set": overrides, "unset": unset}
-
-
 def _forward_runtime_env(overrides: dict[str, Any]) -> dict[str, Any] | None:
     """Build the Ray runtime_env carrying per-round env overrides to every rank."""
     env_vars = filter_forward_env(dict(overrides.get("set") or {}))
@@ -818,6 +654,7 @@ from .commands.infera import (
     _infera_revert_patch as _infera_revert_patch,
     cmd_install_geak as cmd_install_geak,
 )
+from .commands.pd_cluster import is_pod_handoff, kill_pd_cluster, restart_pd_cluster
 
 
 def cmd_apply_patch(args: argparse.Namespace) -> int:
@@ -1340,6 +1177,8 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         return _pd_restart_server(args)
     if state.get("backend") == "infera":
         return _infera_restart_server(args)
+    if is_pod_handoff(state):
+        return restart_pd_cluster(args)
     rejected = _reject_unsupported_restart_args(args)
     if rejected:
         return rejected
@@ -1363,6 +1202,8 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
         return _pd_kill_inference(loaded)
     if loaded.get("backend") == "infera":
         return _infera_kill_inference(args)
+    if is_pod_handoff(loaded):
+        return kill_pd_cluster(loaded)
     state = _require_state("head_pod_ip")
     nnodes = int(state.get("nodes") or 1)
 

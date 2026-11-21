@@ -858,23 +858,23 @@ def test_an_unchanged_per_round_forward_env_still_allows_an_infera_resume(monkey
 
     state = {"ssh_key_path": "/tmp/k"}
     targets = [{"podIP": "10.0.0.1", "sshPort": 2222}]
-    monkeypatch.setattr(inf._mn_cli, "_infera_default_ssh_port", lambda st: 2222)
+    monkeypatch.setattr(inf, "_infera_default_ssh_port", lambda st: 2222)
     monkeypatch.setattr(
-        inf._mn_cli,
+        inf,
         "_infera_ssh_bash_with_env",
         lambda *a, **kw: _Completed(returncode=0, stdout="MN_ALIVE\n"),
     )
     assert inf._infera_servers_alive(state, targets, timeout=5) is True
 
     monkeypatch.setattr(
-        inf._mn_cli,
+        inf,
         "_infera_ssh_bash_with_env",
         lambda *a, **kw: _Completed(returncode=0, stdout="dead"),
     )
     assert inf._infera_servers_alive(state, targets, timeout=5) is False
 
     monkeypatch.setattr(
-        inf._mn_cli,
+        inf,
         "_infera_ssh_bash_with_env",
         lambda *a, **kw: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd=["ssh"], timeout=1)),
     )

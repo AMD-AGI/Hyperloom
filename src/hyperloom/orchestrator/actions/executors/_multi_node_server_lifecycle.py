@@ -28,7 +28,7 @@ from hyperloom.inference_optimizer.multi_node._internal.server_args_safety impor
     ServerArgsRejected,
     validate_server_args,
 )
-from ._multi_node_env import _read_state, is_multi_node, is_pd_session
+from ._multi_node_env import _read_state, is_multi_node, is_pd_session, is_pod_handoff_session
 from ._multi_node_restart_settings import RestartSettings
 
 # Scoped env flag (set by the roofline compute-bound re-profile) that tells this restart to strip DP-attention /
@@ -280,7 +280,7 @@ def _uses_aiter(
 
 
 # Per-variant env overrides -> forwarded to the SSH-launched sglang via
-# ``multi_node/commands/infera.py::_collect_forward_env`` (reads these control envs).
+# ``multi_node/_internal/pod_ssh.py::_collect_forward_env`` (reads these control envs).
 def _restart_env_scope(extra_env: dict[str, str] | None, unset_env, torch_profiler_dir: str):
     forwarded = json.dumps(filter_forward_env({str(k): str(v) for k, v in extra_env.items()})) if extra_env else None
     unset_keys = [str(k).strip() for k in (unset_env or []) if str(k).strip()]
@@ -442,8 +442,13 @@ async def restart_server_for_round(
             "lower --ep or raise the smaller per-group TP."
         )
 
-    # Apply the sglang launcher's default args only for sglang (vllm has its own).
-    extra_server_args = _merge_sglang_defaults(server.extra_server_args) if fw == "sglang" else server.extra_server_args
+    # Apply the sglang launcher's default args only for sglang (vllm has its own). A pod hand-off's engines keep their
+    # own per-role args, so only the round's args reach them.
+    extra_server_args = (
+        _merge_sglang_defaults(server.extra_server_args)
+        if fw == "sglang" and not is_pod_handoff_session()
+        else server.extra_server_args
+    )
 
     # Compute-bound profile override (multi-node only; already gated by the is_multi_node() no-op above).
     if os.environ.get(_COMPUTE_BOUND_PROFILE_ENV, "").strip() == "1":
@@ -885,21 +890,6 @@ def _worker_startup_crashed(tail: str) -> str | None:
     return None
 
 
-def _worker_health_targets(state: dict) -> list[tuple[str, str, str]]:
-    seen: set[str] = set()
-    targets: list[tuple[str, str, str]] = []
-    for role_key in ("prefill_pods", "decode_pods", "worker_pods"):
-        for pod in state.get(role_key) or []:
-            if not isinstance(pod, dict):
-                continue
-            ip = str(pod.get("podIP") or "").strip()
-            if not ip or ip in seen:
-                continue
-            seen.add(ip)
-            targets.append((role_key.replace("_pods", ""), ip, str(pod.get("podId") or ip)))
-    return targets
-
-
 def _worker_fastfail_reason(
     pending: list[str], *, elapsed: int, crash_grace: int, wedge_grace: int, timeout_s: int
 ) -> str | None:
@@ -944,11 +934,11 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
     import httpx as _httpx
 
     port = settings.worker_port
-    targets = _worker_health_targets(_read_state())
+    targets = multi_node.worker_health_targets(_read_state(), port)
     if not targets:
         return
     started = _t.monotonic()
-    ready: set[str] = set()
+    ready: set[tuple[str, int]] = set()
     # Detokenizer-wedge fast-fail: bail early on a wedged worker instead of burning the full timeout.
     wedge_grace = settings.worker_wedge_grace_s
     fastfail = env_flag("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", default=True)
@@ -959,17 +949,8 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
     async with _httpx.AsyncClient(timeout=10.0) as client:
         while True:
             elapsed = int(_t.monotonic() - started)
-            for role, ip, _pid in targets:
-                if ip in ready:
-                    continue
-                try:
-                    resp = await client.get("http://" + ip + ":" + str(port) + "/health")
-                except _httpx.HTTPError:
-                    continue
-                if resp.status_code == 200:
-                    ready.add(ip)
-                    log.info("worker /health OK (%s %s) after %ds [%d/%d]", role, ip, elapsed, len(ready), len(targets))
-            pending = [ip for _r, ip, _p in targets if ip not in ready]
+            await multi_node.poll_worker_health(client, targets, ready, elapsed)
+            pending = list(dict.fromkeys(ip for _r, ip, p in targets if (ip, p) not in ready))
             if not pending:
                 log.info(
                     "all %d worker(s) /health-ready after %ds; proceeding to frontend probe", len(targets), elapsed
@@ -996,16 +977,11 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
             await asyncio.sleep(settings.health_poll_s)
 
 
-def _shared_server_log_dir() -> str:
-    shared = os.path.expandvars(os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip())
-    return shared if shared.startswith("/") and "$" not in shared else ""
-
-
 def _shared_worker_log_tail(ip: str, max_bytes: int = 2_000_000) -> str | None:
     """Best-effort tail of a worker's shared-FS sglang server log."""
     import glob as _glob
 
-    shared = _shared_server_log_dir()
+    shared = multi_node.server_log_dir()
     if not shared:
         return None
     matches = _glob.glob(os.path.join(shared, "mn_infera_server_" + str(ip) + "_r*.log"))

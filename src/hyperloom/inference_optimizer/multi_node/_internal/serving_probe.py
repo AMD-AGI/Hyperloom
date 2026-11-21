@@ -133,3 +133,40 @@ def cluster_is_serving(state: dict[str, Any], *, pd_mode: str, timeout_s: int) -
         log.info("serving probe: %r", exc)
         return False
     return True
+
+
+def worker_health_targets(state: dict[str, Any] | None, default_port: int) -> list[tuple[str, str, int]]:
+    """``(role, ip, port)`` per worker pod; a pod's ``enginePort`` overrides ``default_port``."""
+    seen: set[tuple[str, int]] = set()
+    targets: list[tuple[str, str, int]] = []
+    for role_key in ("prefill_pods", "decode_pods", "worker_pods"):
+        for pod in (state or {}).get(role_key) or []:
+            if not isinstance(pod, dict):
+                continue
+            ip = str(pod.get("podIP") or "").strip()
+            port = int(pod.get("enginePort") or default_port)
+            if not ip or (ip, port) in seen:
+                continue
+            seen.add((ip, port))
+            targets.append((role_key.replace("_pods", ""), ip, port))
+    return targets
+
+
+async def poll_worker_health(
+    client: Any, targets: list[tuple[str, str, int]], ready: set[tuple[str, int]], elapsed: int
+) -> None:
+    """Add each ``(ip, port)`` of ``targets`` whose ``/health`` answers 200 to ``ready``."""
+    import httpx
+
+    for role, ip, port in targets:
+        if (ip, port) in ready:
+            continue
+        try:
+            resp = await client.get(f"http://{ip}:{port}/health")
+        except httpx.HTTPError:
+            continue
+        if resp.status_code == 200:
+            ready.add((ip, port))
+            log.info(
+                "worker /health OK (%s %s:%d) after %ds [%d/%d]", role, ip, port, elapsed, len(ready), len(targets)
+            )

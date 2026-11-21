@@ -24,7 +24,7 @@ differ only in how Hyperloom restarts the inference server each optimization rou
 |---------|--------------|-------|
 | `infera` | SSH | Hyperloom SSHes into each pod to launch or restart SGLang. Supports prefill/decode (PD) disaggregation. |
 | `rayjob` | Ray Dashboard REST API | Pods form a KubeRay cluster. Restarts go through the Ray Dashboard; no SSH required. |
-| `atomesh` | SSH | PD-disaggregated SGLang prefill and decode engines behind an atomesh router. Handed over as a node list (`HYPERLOOM_MN_NODE_LIST`), InferenceSuite launches the router and engines over SSH; handed over as pod IPs, the platform runs the router. |
+| `atomesh` | SSH | PD-disaggregated SGLang prefill and decode engines behind an atomesh router. Handed over as a node list (`HYPERLOOM_MN_NODE_LIST`), InferenceSuite launches the router and engines over SSH; handed over as pod IPs, the platform runs the router and Hyperloom restarts only the engines. |
 | `sglangrouter` | SSH | The same PD engines behind `sglang_router`. `infera` also takes a node list. |
 
 ## Cluster hand-off
@@ -68,7 +68,9 @@ The following table lists all hand-off variables.
 | `HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN` | rayjob | no | Ray Dashboard auth token, if the dashboard requires authentication. |
 | `HYPERLOOM_MN_EXT_PREFILL_URL`, `HYPERLOOM_MN_EXT_DECODE_URL` | atomesh, sglangrouter | no | Engine URL of each role (default `http://<first role IP>:8000`). The engine listens on the URL's port. |
 
-For atomesh and sglangrouter, `HYPERLOOM_MN_EXT_SSH_PORT` is the SSH port on every pod, with no
+For atomesh and sglangrouter, `HYPERLOOM_MN_EXT_SSH_KEY`, `HYPERLOOM_MN_EXT_SSH_PORT`,
+`HYPERLOOM_MN_EXT_PREFILL_IPS`, and `HYPERLOOM_MN_EXT_DECODE_IPS` are required for
+per-round restarts. `HYPERLOOM_MN_EXT_SSH_PORT` is the SSH port on every pod, with no
 per-role offset. The router is recorded from `HYPERLOOM_MN_EXT_SERVICE_URL`.
 
 A node-list cluster is handed over in one variable instead:
@@ -202,7 +204,8 @@ The following variables are exported on the sandbox side before calling `optimiz
 | `RANDOM_RANGE_RATIO` | Sequence-length jitter for the benchmark |
 | `INFERENCE_SUITE_TOOL_CACHE` | InferenceSuite tool cache under `${NFS_SHARED_ROOT}`, staged by `install.sh` |
 | `TRACELENS_ROOT` | TraceLens checkout path under `${NFS_SHARED_ROOT}` |
-| `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap and wait timeouts (Workload A only) |
+| `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap and wait timeouts (Workload A only). Engines of an atomesh or sglangrouter pod hand-off default both to `100000` when unset |
+| `MC_*` | Mooncake transfer settings, forwarded to the engine pods |
 | `HYPERLOOM_MN_PROFILE_WITH_STACK` | A true value (`1`, `true`, `yes`, `on`) records Python stacks in node-list engine traces (default off) |
 
 A node-list profiling round turns the client-side profiler off and starts and stops

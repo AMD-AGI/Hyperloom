@@ -16,8 +16,14 @@ from pathlib import Path
 from typing import Any
 
 from .._internal import infera_support
-from .._internal.env_safety import filter_forward_env
 from .._internal.log import info, warn, err
+from .._internal.pod_ssh import (
+    POD_FORWARD_ENV_PREFIXES,
+    _collect_forward_env,
+    _infera_default_ssh_port,
+    _infera_ssh_bash_with_env,
+    _record_last_restart,
+)
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
 from .._internal.ssh_client import RemoteScript
 
@@ -40,7 +46,7 @@ def _infera_target_for_host(state: dict[str, Any], ip: str) -> dict[str, Any]:
     for t in infera_support.gpu_ssh_targets_from_state(state):
         if str(t.get("podIP") or "").strip() == ip:
             return dict(t)
-    return {"podIP": ip, "sshPort": _mn_cli._infera_default_ssh_port(state), "podId": ""}
+    return {"podIP": ip, "sshPort": _infera_default_ssh_port(state), "podId": ""}
 
 
 def _infera_require_state() -> dict[str, Any]:
@@ -65,55 +71,6 @@ def _infera_require_state() -> dict[str, Any]:
     return state
 
 
-# Env-var prefixes forwarded from the controller's os.environ to the SSH-launched framework child (sandbox-side tuning
-# vars not present in the pod container env and not recovered from pid1).
-_FORWARD_ENV_PREFIXES = ("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_")
-
-
-def _collect_forward_env() -> dict[str, str]:
-    """Read prompt-provided tuning vars from os.environ for SSH forwarding."""
-    fwd = {k: v for k, v in os.environ.items() if any(k.startswith(p) for p in _FORWARD_ENV_PREFIXES)}
-    # Multi-node torch profiler: the infera SSH path (unlike the RayJob path in launch_multinode.py) never pins
-    # SGLANG_TORCH_PROFILER_DIR, so sglang writes traces to pod-local /tmp where the sandbox cannot read them ->
-    # roofline's profile_no_trace_failed.
-    trace_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
-    if trace_dir and "SGLANG_TORCH_PROFILER_DIR" not in fwd:
-        fwd["SGLANG_TORCH_PROFILER_DIR"] = trace_dir
-    # Forward no-patch shape-discovery config; the pod-side launcher sets
-    # PYTHONPATH itself (it is blocked from SSH forwarding).
-    for _shape_key in (
-        "TRACELENS_ROOT",
-        "TRACELENS_SHAPE_DISCOVERY",
-        "HYPERLOOM_SGLANG_VERSION_PIN",
-    ):
-        _shape_val = os.environ.get(_shape_key, "").strip()
-        if _shape_val and _shape_key not in fwd:
-            fwd[_shape_key] = _shape_val
-    # Explicit per-variant overrides are forwarded verbatim regardless of prefix and take precedence over
-    # prefix-matched values for the same key; the unsets are applied first so an override can reinstate a key.
-    overrides = _mn_cli.per_round_forward_overrides()
-    for key in overrides["unset"]:
-        fwd.pop(key, None)
-    fwd.update(overrides["set"])
-    # Expand any $VAR (e.g. $USER_DATA_PATH) left in the profiler dir so the SSH-launched sglang on the pod (where
-    # those vars are undefined) writes traces to an absolute shared-FS path, not an unresolved literal.
-    if fwd.get("SGLANG_TORCH_PROFILER_DIR"):
-        fwd["SGLANG_TORCH_PROFILER_DIR"] = os.path.expandvars(fwd["SGLANG_TORCH_PROFILER_DIR"])
-    # Forward a shared-FS (WekaFS) server-log dir so the SSH-launched sglang writes server.log to shared storage the
-    # client can read, not pod-local /tmp.
-    _slog = os.path.expandvars(
-        os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip() or "$USER_DATA_PATH/server_logs"
-    )
-    if _slog.startswith("/") and "$" not in _slog:
-        fwd["HYPERLOOM_MN_SERVER_LOG_DIR"] = _slog
-    # aiter/cpp_itfs runtime-compiled kernels (GH #458): the integrate re-baseline sets AITER_REBUILD=1 (transiently)
-    # so aiter wipes its build dir and recompiles the patched kernel on import.
-    aiter_rebuild = os.environ.get("AITER_REBUILD", "").strip()
-    if aiter_rebuild:
-        fwd["AITER_REBUILD"] = aiter_rebuild
-    return filter_forward_env(fwd)
-
-
 @dataclass(frozen=True)
 class _FanoutOptions:
     """How one infera command runs its SSH fan-outs: the per-pod timeout and whether pod output is echoed."""
@@ -133,14 +90,14 @@ def _infera_fanout_launch(
     """Ship + run launch_infera_node.py on each GPU pod over SSH."""
     poll_timeout = options.poll_timeout
     script = _mn_cli._read_bundled_pod_python_script("launch_infera_node.py", _mn_cli._LAUNCHER_DEPS)
-    forward_env = _collect_forward_env()
+    forward_env = _collect_forward_env(POD_FORWARD_ENV_PREFIXES)
     if forward_env:
         info(f"{label}: forwarding {len(forward_env)} tuning env vars to SSH child")
     results: list[dict] = []
     rc_total = 0
     for target in targets:
         ip = target["podIP"]
-        port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
+        port = int(target.get("sshPort") or _infera_default_ssh_port(state))
         info(f"{label}: ssh -> {ip}:{port}")
         try:
             cp = _mn_cli._infera_ssh_run_script(
@@ -271,9 +228,9 @@ def _infera_servers_alive(
         return False
     for target in targets:
         ip = target["podIP"]
-        port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
+        port = int(target.get("sshPort") or _infera_default_ssh_port(state))
         try:
-            cp = _mn_cli._infera_ssh_bash_with_env(state, ip, _INFERA_PID_PROBE, timeout=timeout, port=port)
+            cp = _infera_ssh_bash_with_env(state, ip, _INFERA_PID_PROBE, timeout=timeout, port=port)
         except subprocess.TimeoutExpired:
             return False
         if cp.returncode != 0 or "MN_ALIVE" not in (cp.stdout or ""):
@@ -365,17 +322,6 @@ def _infera_launch_workers(
     )
     rc, results = _infera_fanout_launch(state, launch_args, list(worker_targets), label="restart", options=fanout)
     return rc, {"worker": results}
-
-
-def _record_last_restart(state: dict[str, Any], args: argparse.Namespace, framework: str, pd_mode: str) -> None:
-    """Stamp the launched config onto ``state`` for the next restart's resume fast-path."""
-    state["last_restart_framework"] = framework
-    state["last_restart_model"] = args.model
-    state["last_restart_tp"] = int(args.tp)
-    state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
-    state["last_restart_pd_mode"] = pd_mode
-    state["last_restart_extra_args"] = _mn_cli._normalize_extra_args(getattr(args, "extra_args", ""))
-    state["last_restart_forward_env"] = _mn_cli.per_round_forward_overrides()
 
 
 def _infera_restart_server(args: argparse.Namespace) -> int:
@@ -480,7 +426,7 @@ def _infera_ssh_node_op(
 ) -> tuple[dict | None, dict]:
     """Ship kernel_node_ops.py to one pod over SSH and run one subcommand."""
     ip = target["podIP"]
-    port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
+    port = int(target.get("sshPort") or _infera_default_ssh_port(state))
     script = _mn_cli._read_bundled_pod_python_script("kernel_node_ops.py", _mn_cli._KERNEL_NODE_OPS_DEPS)
     try:
         cp = _mn_cli._infera_ssh_run_script(
@@ -547,7 +493,7 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
     pod_python = os.environ.get("HYPERLOOM_MN_POD_PYTHON", "/opt/venv/bin/python")
     for target in gpu_targets:
         ip = target["podIP"]
-        port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
+        port = int(target.get("sshPort") or _infera_default_ssh_port(state))
         info(f"apply-tracelens-patch (infera): ssh -> {ip}:{port}")
         try:
             cp = _mn_cli._infera_ssh_run_script(
@@ -599,7 +545,7 @@ def _infera_apply_patch(args: argparse.Namespace) -> int:
     failures: list[dict] = []
     for target in gpu_targets:
         ip = target["podIP"]
-        port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
+        port = int(target.get("sshPort") or _infera_default_ssh_port(state))
         info(f"apply-patch (infera): ssh -> {ip}:{port}")
         parsed, tx = _infera_ssh_node_op(state, target, op_args, timeout=args.timeout_sec)
         if parsed and str(parsed.get("status")) == "ok":
@@ -668,7 +614,7 @@ def _infera_revert_patch(args: argparse.Namespace) -> int:
     failures: list[dict] = []
     for ip, records in records_by_host.items():
         target = _infera_target_for_host(state, str(ip))
-        port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
+        port = int(target.get("sshPort") or _infera_default_ssh_port(state))
         info(f"revert-patch (infera): ssh -> {ip}:{port}")
         op_args = f"revert --records-json {shlex.quote(json.dumps(records, sort_keys=True))}"
         parsed, tx = _infera_ssh_node_op(state, target, op_args, timeout=args.timeout_sec)
@@ -760,7 +706,7 @@ def cmd_install_geak(args: argparse.Namespace) -> int:
     rc_total = 0
     for target in gpu_targets:
         ip = target["podIP"]
-        port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
+        port = int(target.get("sshPort") or _infera_default_ssh_port(state))
         info(f"install-geak: ssh -> {ip}:{port}")
         try:
             cp = _mn_cli._infera_ssh_run_script(
