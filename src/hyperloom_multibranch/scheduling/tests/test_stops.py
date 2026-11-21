@@ -24,7 +24,7 @@ from hyperloom.sandbox.reaper import ONE_REAP_SEC
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkRequest
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
+from hyperloom_multibranch.contracts.blackboard.records import BranchNode, LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import LineageKind
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -93,6 +93,24 @@ def test_the_stop_of_a_gave_up_branch_names_the_counts_the_runtime_kept() -> Non
     assert gave_up_reason(unready) == (
         "its specialist could not be started: attempt 1: the onboarding model's call failed: API Error: 400"
     )
+
+
+def test_the_lineage_reads_only_the_stop_of_a_give_up_after_crashes_as_a_branch_that_crashed_out() -> None:
+    crashed = SpecialistStatus(running=False, crashes=4, lost=0, gave_up=True, judge_failed=False)
+    stops = {
+        BranchStop(StopCause.GAVE_UP, gave_up_reason(crashed), 1.0): True,
+        BranchStop(StopCause.GAVE_UP, gave_up_reason(replace(crashed, lost=2)), 1.0): True,
+        BranchStop(StopCause.GAVE_UP, gave_up_reason(replace(crashed, crashes=0)), 1.0): False,
+        BranchStop(StopCause.GAVE_UP, gave_up_reason(replace(crashed, crashes=0, unready="no account")), 1.0): False,
+        BranchStop(StopCause.JUDGE, gave_up_reason(crashed), 1.0): False,
+    }
+
+    read = {
+        stop: BranchNode("b1", LineageKind.OPEN, "c0", "c0", stop_reason=stop.summary, stopped_at=1.0).crashed_out
+        for stop in stops
+    }
+
+    assert read == stops
 
 
 class KeepingToolbox(DownToolbox):

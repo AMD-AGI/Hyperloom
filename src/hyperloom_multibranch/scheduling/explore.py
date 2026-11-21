@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING
 
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle, SpecialistStatus
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, ConflictingWrite
+from hyperloom_multibranch.contracts.blackboard.vocab import GAVE_UP_AFTER_CRASHES
 from hyperloom_multibranch.contracts.blackboard.records import BranchProgress, BlackboardSnapshot, OpShares, priced_usd
 from hyperloom_multibranch.contracts.toolbox import Toolbox
 from hyperloom_multibranch.blackboard.rsi.frontier import FrontierScoring, probation_event
@@ -127,7 +128,7 @@ def gave_up_reason(status: SpecialistStatus) -> str:
         why = status.exhausted or "its sessions in a row found nothing to test"
         return f"its specialist gave up: {why}"
     lost = f", {status.lost} of them with a lost heartbeat" if status.lost else ""
-    return f"its specialist gave up after {status.crashes} crashes{lost}"
+    return f"{GAVE_UP_AFTER_CRASHES} {status.crashes} crashes{lost}"
 
 
 async def _uncapped() -> float:

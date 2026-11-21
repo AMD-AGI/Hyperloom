@@ -190,6 +190,63 @@ def test_an_op_whose_focused_branches_on_the_head_ended_without_a_commit_is_spen
     assert ALLREDUCE in [item.op for item in tolerant.ops] and ALLREDUCE in [item.op for item in moved.ops]
 
 
+CRASHED = "gave_up: its specialist gave up after 4 crashes"
+QUIET = "gave_up: its specialist gave up: its sessions in a row found nothing to test"
+
+
+def _ended(name: str, reason: str) -> BranchNode:
+    """A branch focused on the allreduce op on the head that stopped for ``reason``."""
+
+    return dataclasses.replace(_focused(name, ALLREDUCE), stop_reason=reason)
+
+
+def _judged_on(snapshot: BlackboardSnapshot, branch_name: str) -> BlackboardSnapshot:
+    """``snapshot`` with one more judged test, of ``branch_name``."""
+
+    judged = next(record for record in snapshot.records if record.judged)
+    moved = dataclasses.replace(
+        judged, request=dataclasses.replace(judged.request, request_id=f"j-{branch_name}", branch_id=branch_name)
+    )
+    return dataclasses.replace(snapshot, records=(*snapshot.records, moved))
+
+
+def test_branches_whose_specialist_only_crashed_before_a_judged_test_do_not_spend_their_focus(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    crashed = _worked(snapshot, _ended("b8", CRASHED), _ended("b9", f"{CRASHED}, 2 of them with a lost heartbeat"))
+    quiet = _worked(snapshot, _ended("b8", QUIET), _ended("b9", "judge: stalled"))
+    mixed = _worked(snapshot, _ended("b8", CRASHED), _ended("b9", QUIET))
+    tested = _judged_on(_worked(snapshot, _ended("b8", CRASHED), _ended("b9", QUIET)), "b8")
+
+    found = {
+        name: open_areas(worked, seconds_left=4 * HOUR, first_commit_minutes=42.0)
+        for name, worked in (("crashed", crashed), ("quiet", quiet), ("mixed", mixed), ("tested", tested))
+    }
+    one_bare = open_areas(
+        mixed, seconds_left=4 * HOUR, first_commit_minutes=42.0, playbook=replaced(H0, failed_op_limit=1)
+    )
+
+    assert ALLREDUCE in [item.op for item in found["crashed"].ops] and not found["crashed"].spent
+    assert dict(found["quiet"].spent) == {ALLREDUCE: FocusHistory(2, 2)}
+    assert ALLREDUCE in [item.op for item in found["mixed"].ops] and not found["mixed"].spent
+    assert dict(one_bare.spent) == {ALLREDUCE: FocusHistory(2, 1)}
+    assert dict(found["tested"].spent) == {ALLREDUCE: FocusHistory(2, 2)}
+
+
+def test_only_a_give_up_after_crashes_reads_as_a_branch_that_crashed_out() -> None:
+    reasons = {
+        CRASHED: True,
+        f"{CRASHED}, 1 of them with a lost heartbeat": True,
+        QUIET: False,
+        "gave_up: its specialist could not be started: no account": False,
+        "judge: its specialist gave up after 4 crashes": False,
+        "session_end: explore ended": False,
+    }
+
+    assert {reason: _ended("b8", reason).crashed_out for reason in reasons} == reasons
+    assert not _focused("b8", ALLREDUCE, running=True).crashed_out
+
+
 def _exhausted(
     snapshot: BlackboardSnapshot,
     branch_name: str,
