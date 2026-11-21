@@ -19,7 +19,6 @@ its server had reported ready and how old its newest log line was.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import threading
 from collections.abc import Mapping
@@ -40,7 +39,6 @@ __all__ = [
     "write_progress",
 ]
 
-log = logging.getLogger(__name__)
 
 PREFIX = "hosted-"
 INDEX_FILE = f"{PREFIX}saved-files.json"
