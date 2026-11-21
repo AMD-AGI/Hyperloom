@@ -59,8 +59,8 @@ def _listening(host: str, port: int) -> bool:
         return False
 
 
-def _spawn(host: str, port: int, home: Path, token: str, env: Mapping[str, str]) -> subprocess.Popen[bytes]:
-    child_env = dict(env)
+def _spawn(host: str, port: int, home: Path, token: str) -> subprocess.Popen[bytes]:
+    child_env = dict(os.environ)
     child_env["HYPERLOOM_KB_TOKEN"] = token
     package_root = str(Path(__file__).resolve().parent.parent)
     child_env["PYTHONPATH"] = os.pathsep.join(path for path in (package_root, child_env.get("PYTHONPATH", "")) if path)
@@ -131,11 +131,11 @@ def _health(config: RemoteConfig) -> dict[str, JsonValue]:
         ) from exc
 
 
-def _stale(health: Mapping[str, JsonValue], env: Mapping[str, str]) -> str:
+def _stale(health: Mapping[str, JsonValue]) -> str:
     expected = load_declaration(PACKAGED_DECLARATION).schema_ref
     if health.get("schema_ref") != expected:
         return f"it serves {health.get('schema_ref')!r} but this client writes {expected}"
-    if health.get("config_digest") != ServiceSettings.from_env(env).digest():
+    if health.get("config_digest") != ServiceSettings.from_env(os.environ).digest():
         return "it was started with other settings"
     if health.get("code_digest") != code_digest():
         return "it runs other Experience KB code than this client"
@@ -188,11 +188,10 @@ def ensure_local_service(
     config: RemoteConfig,
     home: str | Path,
     *,
-    env: Mapping[str, str] | None = None,
     timeout_seconds: float = DEFAULT_START_TIMEOUT_SECONDS,
     restart: bool = True,
 ) -> LocalService:
-    """Serve ``config.base_url`` from ``home`` with ``env``'s settings.
+    """Serve ``config.base_url`` from ``home`` with the settings in this process's environment.
 
     Only a service that answers with this client's token and serves ``home`` is reused; anything else on the port is
     refused. One started with other settings is restarted, keeping its data, unless ``restart`` is false: then it is
@@ -201,23 +200,22 @@ def ensure_local_service(
 
     host, port = _address(config.base_url)
     home = Path(home).expanduser()
-    launch_env = os.environ if env is None else env
     restarted = False
     if _listening(host, port):
         health = _health(config)
         _require_home(health, home, host, port)
-        reason = _stale(health, launch_env)
+        reason = _stale(health)
         if not reason:
             return LocalService(health)
         if not restart:
             return LocalService(health, stale=reason)
         _stop(health, host, port, home, timeout_seconds)
         restarted = True
-    process = _spawn(host, port, home, config.token, launch_env)
+    process = _spawn(host, port, home, config.token)
     _wait_until_listening(process, host, port, home / LOG_NAME, timeout_seconds)
     health = _health(config)
     _require_home(health, home, host, port)
-    if reason := _stale(health, launch_env):
+    if reason := _stale(health):
         raise LocalServiceError(f"the Experience service on {host}:{port} is not usable: {reason}")
     return LocalService(health, process, restarted)
 
