@@ -137,11 +137,7 @@ that set each flag and environment variable and what it overrode:
    and the framework's own ready timeout (`VLLM_ENGINE_READY_TIMEOUT_S`,
    `SGLANG_WARMUP_TIMEOUT`) at 10800 s, the largest value an InferenceX recipe
    sets and above Hyperloom's default boot limit, so a slow start ends at the
-   round's `boot_sec` as `server_boot_timeout`, not at the framework's 600 s.
-   A round whose test has a boot budget (`deadlines.boot_budget_sec`, from a
-   run's `--boot-budget-sec`) sets it to the budget plus 3600 s when that is
-   longer, the same headroom over the boot limit, so the 10800 s is not above
-   such a round's boot;
+   round's `boot_sec` as `server_boot_timeout`, not at the framework's 600 s;
 6. the runner's layer: the environment and floors a host needs, and the
    framework's metrics switch (`--enable-metrics` for SGLang; vLLM and ATOM need none)
    when the round samples KV telemetry;

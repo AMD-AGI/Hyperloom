@@ -19,7 +19,6 @@ server command names a program the round would not run, so it is refused.
 
 from __future__ import annotations
 
-import math
 import shlex
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -62,13 +61,8 @@ _DEVICE_MASK_ENVS = (GPU_MASK_ENV, HIP_MASK_ENV, "CUDA_VISIBLE_DEVICES")
 #: InferenceX recipe sets, and above Hyperloom's default boot limit (7200 s), so the round's ``boot_sec`` ends a slow
 #: start and names the step before the server gives up on its own. ``boot_sec`` leaves aiter builds out and the
 #: server's clock does not, so a start whose builds outlast the difference still meets the server's limit first. One
-#: value for every round without a boot budget, so a server a later round reuses runs the launch that round composes;
-#: a round with one follows its budget (:func:`ready_timeout_sec`).
+#: value for every round, so a server a later round reuses runs the launch that round composes.
 READY_TIMEOUT_SEC = 10800
-#: How far past a round's boot budget (``Deadlines.boot_budget_sec``) the guard holds the framework's ready timeout:
-#: the headroom :data:`READY_TIMEOUT_SEC` keeps over the default boot limit (10800 s over 7200 s), so a budgeted boot
-#: still ends at the budget as ``server_boot_timeout``, with the same allowance for aiter builds its clock leaves out.
-READY_MARGIN_SEC = 3600
 
 
 @dataclass(frozen=True)
@@ -245,20 +239,8 @@ def _number_text(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else str(value)
 
 
-def ready_timeout_sec(boot_budget_sec: float | None) -> int:
-    """What the guard sets a framework's own ready timeout to for a round with the boot budget ``boot_budget_sec``.
-
-    :data:`READY_TIMEOUT_SEC` without a budget; with one, the longer of that and the budget plus
-    :data:`READY_MARGIN_SEC`, so the framework never gives up on a start the budget still allows. A budget is one value
-    for every round of a test, so a server a later round reuses still runs the launch that round composes.
-    """
-    if boot_budget_sec is None:
-        return READY_TIMEOUT_SEC
-    return max(READY_TIMEOUT_SEC, math.ceil(boot_budget_sec) + READY_MARGIN_SEC)
-
-
 def _guard(
-    server: ServerConfig, server_flags: ServerFlags, ready_timeout_env: str | None, boot_budget_sec: float | None
+    server: ServerConfig, server_flags: ServerFlags, ready_timeout_env: str | None
 ) -> tuple[tuple[str, ...], dict[str, EnvValue]]:
     args = [server_flags.model, server.model_path, server_flags.host, server.host, server_flags.port, str(server.port)]
     if server_flags.served_model_name is not None:
@@ -268,7 +250,7 @@ def _guard(
         HIP_MASK_ENV: ",".join(map(str, range(len(server.gpus)))),
     }
     if ready_timeout_env is not None:
-        env[ready_timeout_env] = str(ready_timeout_sec(boot_budget_sec))
+        env[ready_timeout_env] = str(READY_TIMEOUT_SEC)
     return tuple(args), env
 
 
@@ -316,7 +298,7 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
     if golden is not None:
         composer.add_args(golden[0], LayerSource.GOLDEN)
         composer.set_env(golden[1], LayerSource.GOLDEN)
-    guard_args, guard_env = _guard(server, server_flags, spec.ready_timeout_env, config.deadlines.boot_budget_sec)
+    guard_args, guard_env = _guard(server, server_flags, spec.ready_timeout_env)
     composer.add_args(guard_args, LayerSource.GUARD)
     composer.set_env(guard_env, LayerSource.GUARD)
     composer.apply_runner(server.runner, spec.metrics_flag if config.telemetry.kv else None)
@@ -345,13 +327,4 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
     )
 
 
-__all__ = [
-    "GPU_MASK_ENV",
-    "READY_MARGIN_SEC",
-    "READY_TIMEOUT_SEC",
-    "Refusal",
-    "RoundFacts",
-    "compose",
-    "ready_timeout_sec",
-    "runner_owned",
-]
+__all__ = ["GPU_MASK_ENV", "READY_TIMEOUT_SEC", "Refusal", "RoundFacts", "compose", "runner_owned"]
