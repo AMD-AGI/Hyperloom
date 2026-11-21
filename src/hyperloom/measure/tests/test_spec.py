@@ -578,6 +578,16 @@ def test_a_sheet_that_asks_for_the_short_prompt_check_carries_the_plan_and_the_s
     assert MeasurementSpec.from_bytes(spec.to_bytes()) == spec
 
 
+def test_a_sheet_that_gives_the_boot_a_budget_carries_it_and_the_schema_allows_it() -> None:
+    document = _edit(lambda d: d["procedure"].update(boot_budget_sec=5400))
+
+    spec = MeasurementSpec.from_document(document)
+
+    assert spec.procedure.boot_budget_sec == 5400
+    assert list(VALIDATOR.iter_errors(document)) == []
+    assert MeasurementSpec.from_bytes(spec.to_bytes()) == spec
+
+
 def test_a_sheet_that_asks_for_none_has_no_such_key_so_its_bytes_and_hash_are_unchanged() -> None:
     spec = MeasurementSpec.from_document(spec_document())
 

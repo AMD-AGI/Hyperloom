@@ -100,13 +100,13 @@ The `multibranch` block of the campaign spec carries the options of `run` that s
   replays; the harness's default (3600 s) when not given.
 - `agentx_objective` (`--agentx-objective`), `p50_interactivity` (the default) or `total_token_throughput`: the axis
   the session is graded on.
-- `boot_budget_sec` (`--boot-budget-sec`), a positive whole number of seconds, at most 21600: how long the server of
-  a test may take to be ready; see [Boot budget](run-multibranch.md#options-of-run).
+- `boot_budget_sec` (`--boot-budget-sec`), a positive whole number of seconds, at most 10800: how long, at least, the
+  server of a test may take to be ready; see [Boot budget](run-multibranch.md#options-of-run).
 
 The two AgentX fields are taken with `multibranch.workload: agentx` only; with another workload, or a value of the
-wrong type, the run ends for good (exit code 2), naming the field. A `boot_budget_sec` raises only the limits the
-session sets; a measurement template that sets `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` must allow at least as
-long, or the server's own lifecycle ends the boot first.
+wrong type, the run ends for good (exit code 2), naming the field. A `boot_budget_sec` only raises the limits the
+session sets; the limit that remains is the server's own start timeout, which every round sets to 10800 s
+(`READY_TIMEOUT_SEC`), so a larger budget is refused.
 
 ### Starting the runner from the cache
 

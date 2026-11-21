@@ -97,13 +97,15 @@ value but `on`, `off` or empty is refused when the toolbox is built.
   bar and guards are read from the code, so a resumed session judges by the current rule. The manifest records the
   objective, so a resumed session keeps it; the frontier, FINAL, the dashboard and `MB-report.md` all read that metric. A
   `total_token_throughput` session writes no Recipe KB record: the KB partitions by workload, not objective.
-- **Boot budget:** `--boot-budget-sec SECONDS` (a positive whole number, at most 21600, 6 h) is how long the server of
-  a test may take to be ready, for a model whose checkpoint takes long to load. A test then runs for its workload's own
-  time plus that budget: its trace window (`agentx`) plus 1800 s for the warmup, the measured rounds, the accuracy
-  evaluation and the drain, plus the budget; and the boot limit (`server_boot_timeout`) is the budget. Without it, a
-  test's timeout is 3600 s for `inferencex` and the trace window plus 3600 s for `agentx`, and a boot may take half of
-  it; a budget of 1800 s keeps those timeouts. The limit the server's own lifecycle sets
-  (`INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` where the test runs) still applies.
+- **Boot budget:** `--boot-budget-sec SECONDS` (a positive whole number, at most 10800, 3 h) is how long, at least, the
+  server of a test may take to be ready, for a model whose checkpoint takes long to load. Without it, a test's timeout
+  is 3600 s for `inferencex` and the trace window plus 3600 s for `agentx`, and a boot may take half of it. A budget
+  only lengthens both: a test runs for its trace window (`agentx`) plus 1800 s for the warmup, the measured rounds, the
+  accuracy evaluation and the drain, plus the budget, when that is longer than its default timeout; and the boot limit
+  (`server_boot_timeout`) is the budget when that is longer than half of the timeout. A budget of 1800 s or less
+  changes nothing. The cap is the server's own start timeout, which every round sets to 10800 s (`READY_TIMEOUT_SEC`,
+  the framework's ready timeout such as `VLLM_ENGINE_READY_TIMEOUT_S`) and which no layer may raise: a longer budget
+  would wait for a server that has already given up.
 - **Base launch:** `--reference-script FILE`, a shell launch script or a base launch record frozen elsewhere, as for
   `hyperloom optimize`; the session freezes it as its base, a record without reading any recipe source. Without it
   the base comes from the recipe sources. Every component agent is served the frozen base unless `--agent-launch`

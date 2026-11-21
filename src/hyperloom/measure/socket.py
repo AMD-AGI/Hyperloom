@@ -158,8 +158,9 @@ class TestCall:
     #: Whether the points put a rebuilt framework (a farm, ``measure.farm``) first on the server's import path. Whoever
     #: laid the farm sets it; a serving interpreter that cannot import its framework is the candidate's failure only then.
     framework_changed: bool = False
-    #: How long the server of each round may take to be ready, never more than ``timeout_sec``
-    #: (``measure.boot_watch.boot_limit_sec``); ``None`` gives it the share of the round's budget it always had.
+    #: How long, at least, the server of each round may take to be ready, never more than ``timeout_sec``
+    #: (``measure.boot_watch.boot_limit_sec``); ``None`` gives it the share of the round's budget it always had, and a
+    #: budget below that share keeps the share.
     boot_budget_sec: float | None = None
     #: Ends the test when cancelled, as its boot limit does: the backend's own cancellation, which a caller that watches the
     #: test from beside it (the runner's card watch) passes in. ``None`` gives the backend one of its own; a caller that

@@ -128,7 +128,7 @@ AGENTX_OUTSIDE_TRACE_SEC = 3600
 #: What a test spends besides its server's boot and an AgentX trace window, when the run gives the boot a budget of its
 #: own (``Workload.boot_budget_sec``): an InferenceX test's warmup, measured rounds and accuracy evaluation, an AgentX
 #: replay's cold-cache warmup and drain. It is what the default boot share leaves of an InferenceX test's default
-#: timeout, so a boot budget of 1800 s keeps the default attempt timeouts.
+#: timeout, so a boot budget of 1800 s or less keeps the default attempt timeouts.
 OUTSIDE_BOOT_SEC = 1800
 
 
@@ -280,18 +280,17 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
 def attempt_timeout_sec(workload: Workload) -> int:
     """How long one attempt of a test of ``workload`` may run on either backend: the toolbox's default for an
     InferenceX workload, and for an AgentX one its trace window (the workload's, else :data:`AGENTX_TRACE_SEC`) plus
-    what the test spends outside it (:data:`AGENTX_OUTSIDE_TRACE_SEC`). A workload with a boot budget
-    (``Workload.boot_budget_sec``) runs for its trace window, if any, what it spends besides its boot
-    (:data:`OUTSIDE_BOOT_SEC`) and that budget instead."""
+    what the test spends outside it (:data:`AGENTX_OUTSIDE_TRACE_SEC`). A boot budget (``Workload.boot_budget_sec``)
+    only lengthens it: an attempt then runs for its trace window, if any, what it spends besides its boot
+    (:data:`OUTSIDE_BOOT_SEC`) and that budget when that is longer, and for the default otherwise."""
 
     from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC
 
     trace = 0 if workload.inferencex is not None else workload.agentx_duration_sec or AGENTX_TRACE_SEC
-    if workload.boot_budget_sec is not None:
-        return trace + OUTSIDE_BOOT_SEC + workload.boot_budget_sec
-    if workload.inferencex is not None:
-        return DEFAULT_TEST_TIMEOUT_SEC
-    return trace + AGENTX_OUTSIDE_TRACE_SEC
+    default = DEFAULT_TEST_TIMEOUT_SEC if workload.inferencex is not None else trace + AGENTX_OUTSIDE_TRACE_SEC
+    if workload.boot_budget_sec is None:
+        return default
+    return max(default, trace + OUTSIDE_BOOT_SEC + workload.boot_budget_sec)
 
 
 def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> None:

@@ -350,8 +350,8 @@ class LocalOptions:
     ``runner_envs`` add to the image's variables the runner template carries (for example ``INFERENCEX_REPO``) and win
     over the same name in the host's ``INFERENCEX_REPO``, which the template carries when set.
     ``archive`` is the result archive, a directory archive below ``session_dir`` when omitted. ``python`` is the interpreter the
-    runner and the measurement run with. ``timeout_sec`` is the timeout of one attempt, ``boot_budget_sec`` how long its
-    server may take to be ready (``TestCall.boot_budget_sec``; ``None`` for the default share of the timeout),
+    runner and the measurement run with. ``timeout_sec`` is the timeout of one attempt, ``boot_budget_sec`` how long, at
+    least, its server may take to be ready (``TestCall.boot_budget_sec``; ``None`` for the default share of the timeout),
     ``max_infra_retries`` the
     infrastructure retries per test before it ends as ``measurement_failed``, ``infra_backoff_seconds`` the wait before
     each one after a failure that is not the node's (:class:`~.attempts.InfraBackoff`) and ``poll_interval_sec`` how

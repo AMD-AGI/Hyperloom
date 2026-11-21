@@ -106,6 +106,7 @@ from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_vers
 from hyperloom_multibranch.scheduling import local_peers
 from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV
 from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation, launch_isolation
+from inference_suite import READY_TIMEOUT_SEC
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH, ProcessRecord
@@ -257,17 +258,19 @@ def test_a_run_is_served_at_the_ep_it_names_and_at_ep_1_by_default(workload: lis
 
 
 @pytest.mark.parametrize("workload", [WORKLOAD_ARGS, AGENTX_ARGS], ids=["inferencex", "agentx"])
-def test_a_run_gives_its_tests_servers_the_boot_budget_it_names_up_to_six_hours_and_none_by_default(
+def test_a_run_gives_its_tests_servers_the_boot_budget_it_names_up_to_the_servers_own_ready_timeout(
     workload: list[str],
 ) -> None:
     assert _settings(workload=workload).workload.boot_budget_sec is None
     assert _settings("--boot-budget-sec", "5400", workload=workload).workload.boot_budget_sec == 5400
-    assert _settings("--boot-budget-sec", "21600", workload=workload).workload.boot_budget_sec == 21600
+    top = str(READY_TIMEOUT_SEC)
+    assert _settings("--boot-budget-sec", top, workload=workload).workload.boot_budget_sec == READY_TIMEOUT_SEC
 
 
-@pytest.mark.parametrize("budget", ["0", "21601"])
+@pytest.mark.parametrize("budget", ["0", str(READY_TIMEOUT_SEC + 1)])
 def test_a_boot_budget_out_of_range_is_refused_with_its_range(budget: str) -> None:
-    with pytest.raises(ValueError, match=r"--boot-budget-sec must be a positive number of seconds, at most 21600"):
+    rule = f"--boot-budget-sec must be a positive number of seconds, at most {READY_TIMEOUT_SEC} "
+    with pytest.raises(ValueError, match=rule):
         _settings("--boot-budget-sec", budget)
 
 
@@ -399,7 +402,7 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *AGENTX_ARGS, "--agentx-objective", "output_throughput"],
         ["run", *WORKLOAD_ARGS, "--boot-budget-sec", "0"],
         ["run", *AGENTX_ARGS, "--boot-budget-sec", "-60"],
-        ["run", *WORKLOAD_ARGS, "--boot-budget-sec", "21601"],
+        ["run", *WORKLOAD_ARGS, "--boot-budget-sec", str(READY_TIMEOUT_SEC + 1)],
         ["run", *WORKLOAD_ARGS, "--boot-budget-sec", "1.5"],
     ],
 )
@@ -2078,7 +2081,10 @@ def test_a_session_run_with_no_grant_has_no_explore_cap(
         ({"multibranch": {"workload": "inferencex", "inferencex_commit": 1234567}}, "must be a string"),
         ({"multibranch": {"workload": "inferencex", "agentx_duration_sec": 600}}, "multibranch.agentx_duration_sec"),
         ({"multibranch": {"workload": "inferencex", "boot_budget_sec": "5400"}}, "multibranch.boot_budget_sec"),
-        ({"multibranch": {"workload": "inferencex", "boot_budget_sec": 21601}}, "--boot-budget-sec must be"),
+        (
+            {"multibranch": {"workload": "inferencex", "boot_budget_sec": READY_TIMEOUT_SEC + 1}},
+            "--boot-budget-sec must be",
+        ),
     ],
 )
 @pytest.mark.usefixtures("ready_environment")

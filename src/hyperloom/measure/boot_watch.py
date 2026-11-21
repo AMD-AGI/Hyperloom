@@ -88,18 +88,17 @@ _UTF8 = "utf-8"
 def boot_limit_sec(point: BenchmarkPoint, timeout_sec: float, boot_budget_sec: float | None = None) -> float | None:
     """How long the server of a round on ``point`` may take to be ready; ``None`` when no stamp can say it is.
 
-    A ``boot_budget_sec`` the caller gives (the test's ``TestCall.boot_budget_sec``) is the limit, never more than the
-    round's ``timeout_sec``. Without one, the limit is :data:`BOOT_SHARE` of the budget the point carries
-    (``server_lifecycle.server_ready_timeout_s``), never more than ``timeout_sec``; a point that carries none gets the
-    cap itself, which is what the launcher writes into that field.
+    The limit is :data:`BOOT_SHARE` of the budget the point carries (``server_lifecycle.server_ready_timeout_s``),
+    never more than ``timeout_sec``; a point that carries none gets the cap itself, which is what the launcher writes
+    into that field. A ``boot_budget_sec`` the caller gives (the test's ``TestCall.boot_budget_sec``) only lengthens
+    it: the limit is then that budget, never more than ``timeout_sec``, when it is longer than the share.
     """
     if point.framework.lower() not in _SERVER_FRAMEWORKS:
         return None
-    if boot_budget_sec is not None:
-        return min(boot_budget_sec, timeout_sec)
     carried = point.server_ready_timeout_s
     budget = carried if carried is not None and carried > 0 else timeout_sec
-    return BOOT_SHARE * min(budget, timeout_sec)
+    share = BOOT_SHARE * min(budget, timeout_sec)
+    return share if boot_budget_sec is None else max(share, min(boot_budget_sec, timeout_sec))
 
 
 class BootGuard:
