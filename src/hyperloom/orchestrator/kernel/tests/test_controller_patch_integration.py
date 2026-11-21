@@ -17,7 +17,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_par
 from hyperloom.inference_optimizer.breakdown.recorder.sections import STACK_EVENT_SECTIONS
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.actions.executors._patch_snapshot import _git_commit_kept
+from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import _git_commit_kept
 from hyperloom.orchestrator.kernel import controller_patch_integration as integration
 from hyperloom.orchestrator.kernel.campaign_baseline import RepoBaseline
 from hyperloom.orchestrator.kernel.controller_patch_integration import (

@@ -84,7 +84,7 @@ def _apply_feedback_note(enablement: Any) -> str:
     feedback = [fb for fb in (enablement.last_apply_feedback or []) if isinstance(fb, dict)]
     if not feedback:
         return ""
-    from ..actions.executors._apply_feedback import ApplyFeedback
+    from ..actions.executors.patching._apply_feedback import ApplyFeedback
 
     blocks = [
         "APPLY FAILURE FEEDBACK: the prior round's patch never reached the "
@@ -325,7 +325,7 @@ class EnablementParams(CoordinatorCollaborator):
         Fully exception-guarded: any failure returns ``""`` so the mandate
         degrades to the no-context form (G is grounding, never a hard dependency).
 
-        Delegates to :func:`~..actions.executors._apply_feedback.source_context_for_file`
+        Delegates to :func:`~..actions.executors.patching._apply_feedback.source_context_for_file`
         which is the shared file-resolve + window primitive.
 
         Args:
@@ -339,7 +339,7 @@ class EnablementParams(CoordinatorCollaborator):
         if not offending_file:
             return ""
         symbol = str(getattr(signature, "offending_symbol", "") or "").strip()
-        from ..actions.executors._apply_feedback import source_context_for_file
+        from ..actions.executors.patching._apply_feedback import source_context_for_file
         from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
 
         search_roots = [Path(str(r)) for r in resolve_kernel_search_roots()]

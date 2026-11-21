@@ -23,7 +23,7 @@ import yaml
 from hyperloom.inference_optimizer import model_config_utils
 from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     materialize_config_with_envs,
     LaunchLayer,
     MaterializeOptions,

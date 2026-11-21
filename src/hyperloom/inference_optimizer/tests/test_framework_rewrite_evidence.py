@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors import _framework_rewrite_evidence as evidence
+from hyperloom.orchestrator.actions.executors.framework_change import _framework_rewrite_evidence as evidence
 
 
 def _load_probe_module():
@@ -1501,7 +1501,7 @@ def test_evidence_collection_reports_that_it_was_unarmed():
 
 def test_evidence_collection_reports_an_aggregation_failure(tmp_path, monkeypatch):
     """A crash while merging the reports must not read as 'nothing to rewrite'."""
-    from hyperloom.orchestrator.actions.executors import _framework_rewrite_evidence as _ev
+    from hyperloom.orchestrator.actions.executors.framework_change import _framework_rewrite_evidence as _ev
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
 
     def _boom(*_args, **_kwargs):
@@ -1522,7 +1522,7 @@ def test_evidence_collection_reports_an_aggregation_failure(tmp_path, monkeypatc
 
 def test_gap_carries_the_host_side_bottleneck(tmp_path):
     """Host-side evidence contributes its own keyword to the framework arm's gap."""
-    from hyperloom.orchestrator.actions.executors._framework_gap_composer import compose_gap
+    from hyperloom.orchestrator.actions.executors.framework_change._framework_gap_composer import compose_gap
 
     document = evidence.build_evidence(
         [
@@ -1556,7 +1556,7 @@ def test_gap_carries_the_host_side_bottleneck(tmp_path):
 
 def test_gap_is_unchanged_without_evidence():
     """Omitting the evidence path reproduces the previous gap exactly."""
-    from hyperloom.orchestrator.actions.executors._framework_gap_composer import compose_gap
+    from hyperloom.orchestrator.actions.executors.framework_change._framework_gap_composer import compose_gap
 
     assert compose_gap(framework="sglang", gpu_type="mi300x", precision="fp8") == compose_gap(
         framework="sglang",
@@ -1568,7 +1568,7 @@ def test_gap_is_unchanged_without_evidence():
 
 def test_gap_tolerates_a_missing_evidence_file(tmp_path):
     """A stale path degrades to the manifest-only gap rather than raising."""
-    from hyperloom.orchestrator.actions.executors._framework_gap_composer import compose_gap
+    from hyperloom.orchestrator.actions.executors.framework_change._framework_gap_composer import compose_gap
 
     gap, keywords = compose_gap(framework="custom", rewrite_evidence_path=tmp_path / "absent.json")
     assert gap == "improve custom throughput"

@@ -27,8 +27,8 @@ from hyperloom.measure.socket import EnvironmentRef, RoundPlan, TestCall
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with, sha
 from hyperloom.measure.tests.framework_fixtures import make_framework
 from hyperloom.orchestrator.actions.executors import VariantResult
-from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
-from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import _build_variant_yaml
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import default_baseline_config
 
 LEVELS = (4, 16, 64)
 PORT = 8123

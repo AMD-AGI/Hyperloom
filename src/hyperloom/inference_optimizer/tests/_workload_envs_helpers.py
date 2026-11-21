@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _workload_envs as we
+from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 
 _WORKLOAD_ENV_KEYS = (
     "TP",

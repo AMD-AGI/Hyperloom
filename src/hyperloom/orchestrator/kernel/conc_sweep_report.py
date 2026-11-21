@@ -22,7 +22,7 @@ from hyperloom.inference_optimizer.roofline_ceiling import (
 )
 from hyperloom.inference_optimizer.roofline_model_meta import load_model_meta
 from hyperloom.inference_optimizer.session.session_paths import reports_dir
-from ..actions.executors._grid_runner import VariantResult
+from ..actions.executors.grid._grid_runner import VariantResult
 from ..actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS
 from ..state.shared_state import SharedState
 

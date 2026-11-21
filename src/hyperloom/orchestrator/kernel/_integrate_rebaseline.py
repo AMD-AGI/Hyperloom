@@ -362,7 +362,7 @@ async def _multi_node_restart_failure(
     # from a timed-out Forge driver.
     _sweep_integrate_aiter_locks(reason="integrate server startup")
     from ..actions.executors._multi_node_env import round_server_env
-    from ..actions.executors._multi_node_server_lifecycle import (
+    from ..actions.executors.serving._multi_node_server_lifecycle import (
         RoundServer,
         ServerRestartFailed,
         restart_server_for_round,

@@ -1399,7 +1399,10 @@ def test_framework_outside_the_marker_table_has_no_observable_binding(tmp_path):
 
 
 def test_evidence_builder_carries_the_binding_and_the_requested_digest(tmp_path):
-    from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
+    from hyperloom.orchestrator.actions.executors.workload._launch_evidence import (
+        RequestedLaunch,
+        build_launch_evidence,
+    )
 
     config = tmp_path / "materialized.yaml"
     config.write_text("benchmark:\n  framework: vllm\n  model: /models/b\n", encoding="utf-8")

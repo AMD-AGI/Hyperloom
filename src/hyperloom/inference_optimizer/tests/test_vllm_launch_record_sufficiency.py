@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hyperloom.common.launch_log_evidence import observed_server_identity_from_log
-from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
+from hyperloom.orchestrator.actions.executors.workload._launch_evidence import RequestedLaunch, build_launch_evidence
 from hyperloom.orchestrator.enablement.recipe.steps import build_recipe_steps
 from hyperloom.orchestrator.enablement.recipe.sufficiency import evaluate_replay_sufficiency
 from hyperloom.orchestrator.enablement.recipe.projections import project_launch_evidence

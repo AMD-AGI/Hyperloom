@@ -12,11 +12,11 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from hyperloom.orchestrator.actions.executors import _integrate_bench as integrate_bench
-from hyperloom.orchestrator.actions.executors import _patch_git as patch_git
+from hyperloom.orchestrator.actions.executors.integrate import _integrate_bench as integrate_bench
+from hyperloom.orchestrator.actions.executors.patching import _patch_git as patch_git
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
-from hyperloom.orchestrator.actions.executors._apply_feedback import PatchApplyResult, PresenceCheck
-from hyperloom.orchestrator.actions.executors._nogit_patch import _apply_patch_no_git
+from hyperloom.orchestrator.actions.executors.patching._apply_feedback import PatchApplyResult, PresenceCheck
+from hyperloom.orchestrator.actions.executors.patching._nogit_patch import _apply_patch_no_git
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
@@ -386,7 +386,7 @@ def _pr_head_round(repo: Path, head: str, **candidate_extra: object) -> dict:
 
 def _serve_superset(monkeypatch) -> None:
     """Make every ``diff_url`` fetch return the PR's diff."""
-    from hyperloom.orchestrator.actions.executors import _patch_source_pr
+    from hyperloom.orchestrator.actions.executors.patching import _patch_source_pr
 
     def fetch(_url, dest, *, timeout_sec):
         dest.write_text(_SUPERSET, encoding="utf-8")

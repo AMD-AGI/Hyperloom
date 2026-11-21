@@ -10,19 +10,19 @@ from .conc_sweep import conc_sweep_executor
 from .report import report_executor
 from .session_breakdown import session_breakdown_executor
 from .target_analysis import TargetAnalysisExecutor
-from ._workload_envs import (
+from .workload._workload_envs import (
     BenchmarkTarget,
     LaunchLayer,
     MaterializeOptions,
     default_baseline_config,
     materialize_benchmark_config,
 )
-from ._grid_base import GridVariant, VariantResult, grid_run_dirs, variant_slot
+from .grid._grid_base import GridVariant, VariantResult, grid_run_dirs, variant_slot
 from ._profile_setup import VLLM_PATCH_PROFILER_FIELDS
 from ._server_patcher import ensure_vllm_patched_for_tracelens
-from ._grid_runner import _run_grid_warmup_enabled as run_grid_warmup_enabled
-from ._grid_runner import GridLaunch, GridRecipe, GridStop, run_grid, teardown_variant_server
-from ._server_lifecycle import resolve_lifecycle_params
+from .grid._grid_runner import _run_grid_warmup_enabled as run_grid_warmup_enabled
+from .grid._grid_runner import GridLaunch, GridRecipe, GridStop, run_grid, teardown_variant_server
+from .serving._server_lifecycle import resolve_lifecycle_params
 from ._subprocess_kill import (
     COOPERATIVE_REAP_BUDGET_SEC,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -31,19 +31,19 @@ from ._subprocess_kill import (
     run_with_session_kill,
 )
 from .benchmark_result import harvest_leaked_artifacts
-from ._agentx_checkpoint import CHECKPOINT_ARTIFACT_NAME, AgentxCheckpoint
-from ._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_cacheless_agentx_baseline
+from .workload._agentx_checkpoint import CHECKPOINT_ARTIFACT_NAME, AgentxCheckpoint
+from .workload._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_cacheless_agentx_baseline
 from ._failed_step import failed_step_error_class
 from ._round_folder import RoundFolder, is_round_folder, read_round_launch
 from ._suite.config import CHECK_SERVER_ENVS, fixed_workload
 from ._suite.rounds import TOOL_CACHE_ENV, SuiteRoundRefused, external_agentx_config, staged_tool_cache
-from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
-from ._spec_decode_pin import (
+from .framework_change._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
+from .framework_change._spec_decode_pin import (
     SpeculativeDecodingPinnedError,
     refuse_unpinned_speculative_change,
     speculative_pin_reason,
 )
-from ._patch_laying import PatchedServer, is_patched_copy
+from .patching._patch_laying import PatchedServer, is_patched_copy
 from ._profile_setup import SGLANG_PATCH_SERVER_FLAG
 from ._server_patcher import ensure_patched_copy, lay_tracelens_patch
 

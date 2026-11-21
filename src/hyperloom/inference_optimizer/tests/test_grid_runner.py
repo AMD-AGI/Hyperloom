@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Consolidated tests for ``orchestrator.actions.executors._grid_runner``."""
+"""Consolidated tests for ``orchestrator.actions.executors.grid._grid_runner``."""
 
 from __future__ import annotations
 
@@ -14,19 +14,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _grid_runner
-from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors.grid import _grid_runner
+from hyperloom.orchestrator.actions.executors.grid import _grid_inputs, _round_report, _variant_rows
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
     dedup_vllm_server_args,
 )
-from hyperloom.orchestrator.actions.executors._benchmark_runtime import apply_runtime_benchmark_overrides
-from hyperloom.orchestrator.actions.executors._grid_variant_filter import (
+from hyperloom.orchestrator.actions.executors.workload._benchmark_runtime import apply_runtime_benchmark_overrides
+from hyperloom.orchestrator.actions.executors.grid._grid_variant_filter import (
     apply_user_skip_list,
     reorder_grid_for_multi_node,
     resolve_skip_spec,
 )
-from hyperloom.orchestrator.actions.executors._grid_runner import (
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import (
     GridVariant,
     VariantResult,
     _build_variant_yaml,
@@ -34,7 +34,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     run_grid,
 )
 
-from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import BenchmarkTarget, LaunchLayer
 
 from .conftest import write_benchmark_yaml
 
@@ -51,7 +51,7 @@ def _read_marker(slot):
 
 def test_write_variant_abort_marker_creates_file_with_expected_fields(tmp_path):
     slot = tmp_path / "variant_00_max_num_seqs_128"
-    _grid_runner._write_variant_abort_marker(
+    _variant_rows._write_variant_abort_marker(
         slot,
         variant_name="max_num_seqs_128",
         error_class="mn_server_restart_failed",
@@ -72,7 +72,7 @@ def test_write_variant_abort_marker_creates_file_with_expected_fields(tmp_path):
 def test_write_variant_abort_marker_truncates_huge_error_summary(tmp_path):
     slot = tmp_path / "variant"
     huge = "x" * 5000
-    _grid_runner._write_variant_abort_marker(
+    _variant_rows._write_variant_abort_marker(
         slot,
         variant_name="big",
         error_class="round_timeout",
@@ -84,7 +84,7 @@ def test_write_variant_abort_marker_truncates_huge_error_summary(tmp_path):
 
 def test_write_variant_abort_marker_creates_parent_dirs(tmp_path):
     slot = tmp_path / "deeper" / "than" / "expected" / "variant"
-    _grid_runner._write_variant_abort_marker(
+    _variant_rows._write_variant_abort_marker(
         slot,
         variant_name="x",
         error_class="yaml_build_error",
@@ -100,9 +100,9 @@ def test_write_variant_abort_marker_swallows_oserror(monkeypatch, tmp_path, capl
     def boom(*_args, **_kwargs):
         raise OSError("read-only fs")
 
-    monkeypatch.setattr(_grid_runner.Path, "write_text", boom)
+    monkeypatch.setattr(_variant_rows.Path, "write_text", boom)
     with caplog.at_level("WARNING"):
-        _grid_runner._write_variant_abort_marker(
+        _variant_rows._write_variant_abort_marker(
             slot,
             variant_name="x",
             error_class="mn_server_restart_failed",
@@ -197,7 +197,7 @@ async def test_a_variant_whose_config_cannot_be_built_fails_as_yaml_build_error(
     def _boom(*_a, **_k):
         raise ValueError("bad yaml render")
 
-    monkeypatch.setattr(gr, "_build_variant_yaml", _boom)
+    monkeypatch.setattr(_grid_runner, "_build_variant_yaml", _boom)
     results = await run_grid(
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
@@ -368,7 +368,7 @@ class TestSanitizeScriptName:
         ],
     )
     def test_accepts_safe_names(self, raw, expected):
-        assert gr.sanitize_script_name(raw) == expected
+        assert _grid_inputs.sanitize_script_name(raw) == expected
 
     @pytest.mark.parametrize(
         "raw",
@@ -376,18 +376,18 @@ class TestSanitizeScriptName:
     )
     def test_rejects_unsafe(self, raw):
         with pytest.raises(ValueError):
-            gr.sanitize_script_name(raw)
+            _grid_inputs.sanitize_script_name(raw)
 
 
 class TestSanitizeResultDir:
     def test_accepts_relative_and_absolute(self):
-        assert gr.sanitize_result_dir("runs/x") == "runs/x"
-        assert gr.sanitize_result_dir("/workspace/out") == "/workspace/out"
+        assert _grid_inputs.sanitize_result_dir("runs/x") == "runs/x"
+        assert _grid_inputs.sanitize_result_dir("/workspace/out") == "/workspace/out"
 
     def test_blank_returns_none(self):
-        assert gr.sanitize_result_dir(None) is None
-        assert gr.sanitize_result_dir("") is None
-        assert gr.sanitize_result_dir("   ") is None
+        assert _grid_inputs.sanitize_result_dir(None) is None
+        assert _grid_inputs.sanitize_result_dir("") is None
+        assert _grid_inputs.sanitize_result_dir("   ") is None
 
     @pytest.mark.parametrize(
         "raw",
@@ -395,7 +395,7 @@ class TestSanitizeResultDir:
     )
     def test_rejects_unsafe(self, raw):
         with pytest.raises(ValueError):
-            gr.sanitize_result_dir(raw)
+            _grid_inputs.sanitize_result_dir(raw)
 
 
 class TestGridVariantEnvSafety:
@@ -796,30 +796,30 @@ class TestSessionGridBounds:
     """One definition of the two numbers every benching arm needs."""
 
     def test_no_session_means_no_bounds(self):
-        assert _grid_runner.session_grid_bounds(None) == (None, None)
+        assert _grid_inputs.session_grid_bounds(None) == (None, None)
 
     def test_reads_the_deadline_and_the_measured_baseline(self):
         state = MagicMock()
         state.grid_session_deadline_sec.return_value = 4242.0
         state.baseline_runtime_sec = 600.0
-        assert _grid_runner.session_grid_bounds(state) == (4242.0, 600.0)
+        assert _grid_inputs.session_grid_bounds(state) == (4242.0, 600.0)
 
     def test_unmeasured_baseline_yields_no_estimate(self):
         """Zero is "not measured yet", which must not read as "needs 0 seconds"."""
         state = MagicMock()
         state.grid_session_deadline_sec.return_value = 4242.0
         state.baseline_runtime_sec = 0.0
-        assert _grid_runner.session_grid_bounds(state) == (4242.0, None)
+        assert _grid_inputs.session_grid_bounds(state) == (4242.0, None)
 
     def test_unparseable_baseline_yields_no_estimate(self):
         state = MagicMock()
         state.grid_session_deadline_sec.return_value = None
         state.baseline_runtime_sec = "not-a-number"
-        assert _grid_runner.session_grid_bounds(state) == (None, None)
+        assert _grid_inputs.session_grid_bounds(state) == (None, None)
 
     def test_state_without_the_deadline_accessor_is_tolerated(self):
         state = SimpleNamespace(baseline_runtime_sec=600.0)
-        assert _grid_runner.session_grid_bounds(state) == (None, 600.0)
+        assert _grid_inputs.session_grid_bounds(state) == (None, 600.0)
 
     def test_a_variant_is_priced_as_a_boot_and_a_benchmark(self):
         """What a variant actually spends, rather than what the baseline spent."""
@@ -830,7 +830,7 @@ class TestSessionGridBounds:
             baseline_warm_runtime_sec=400.0,
         )
 
-        deadline, variant_sec = _grid_runner.session_grid_bounds(state)
+        deadline, variant_sec = _grid_inputs.session_grid_bounds(state)
 
         assert deadline == 4242.0
         assert variant_sec == pytest.approx(750.0)
@@ -843,7 +843,7 @@ class TestSessionGridBounds:
             baseline_post_ready_runtime_sec=550.0,
         )
 
-        assert _grid_runner.session_grid_bounds(state)[1] == pytest.approx(900.0)
+        assert _grid_inputs.session_grid_bounds(state)[1] == pytest.approx(900.0)
 
     def test_a_baseline_that_never_reported_its_boot_falls_back_to_the_whole_round(self):
         """A scriptable workload runs no server, so there is no split to read."""
@@ -853,7 +853,7 @@ class TestSessionGridBounds:
             baseline_warm_runtime_sec=400.0,
         )
 
-        assert _grid_runner.session_grid_bounds(state)[1] == pytest.approx(900.0)
+        assert _grid_inputs.session_grid_bounds(state)[1] == pytest.approx(900.0)
 
 
 def test_compose_preserves_json_for_every_args_mode():
@@ -899,7 +899,7 @@ async def test_report_read_waits_for_a_report_still_being_written(tmp_path):
     report_path.write_text('{"throughput": {"output_th', encoding="utf-8")
 
     reads = {"n": 0}
-    real_parse = _grid_runner._parse_report
+    real_parse = _round_report._parse_report
 
     def _parse_then_complete(ws):
         reads["n"] += 1
@@ -911,8 +911,8 @@ async def test_report_read_waits_for_a_report_still_being_written(tmp_path):
             )
         return result
 
-    with patch.object(_grid_runner, "_parse_report", _parse_then_complete):
-        report, measurement = await _grid_runner._settled_measurement(
+    with patch.object(_round_report, "_parse_report", _parse_then_complete):
+        report, measurement = await _round_report._settled_measurement(
             workspace,
             subprocess_started_unix=None,
             settle_seconds=5.0,
@@ -934,7 +934,7 @@ async def test_report_read_gives_up_on_a_genuinely_invalid_report(tmp_path):
         encoding="utf-8",
     )
     started = time.monotonic()
-    _report, measurement = await _grid_runner._settled_measurement(
+    _report, measurement = await _round_report._settled_measurement(
         workspace,
         subprocess_started_unix=None,
         settle_seconds=0.05,
@@ -950,14 +950,14 @@ async def test_report_read_does_not_wait_when_the_process_already_failed(tmp_pat
     workspace = tmp_path / "benchmark_ws"
     workspace.mkdir()
     reads = {"n": 0}
-    real_parse = _grid_runner._parse_report
+    real_parse = _round_report._parse_report
 
     def _counting_parse(ws):
         reads["n"] += 1
         return real_parse(ws)
 
-    with patch.object(_grid_runner, "_parse_report", _counting_parse):
-        _report, measurement = await _grid_runner._settled_measurement(
+    with patch.object(_round_report, "_parse_report", _counting_parse):
+        _report, measurement = await _round_report._settled_measurement(
             workspace,
             subprocess_started_unix=None,
             settle_seconds=0.0,

@@ -49,7 +49,7 @@ def test_split_env_and_flags_falls_back_on_shlex_error() -> None:
 
 
 def test_accepted_config_uses_published_env_map_for_revalidation() -> None:
-    from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
+    from hyperloom.orchestrator.actions.executors.grid._grid_base import GridVariant
 
     config = {
         "flags": "--mem-fraction-static 0.95",

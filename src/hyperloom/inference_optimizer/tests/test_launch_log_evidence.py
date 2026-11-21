@@ -202,7 +202,7 @@ def test_the_vllm_binding_carries_the_width_and_digests_the_model(tmp_path: Path
     import hashlib
 
     from hyperloom.common.launch_log_evidence import observed_server_identity_from_log
-    from hyperloom.orchestrator.actions.executors._launch_evidence import _binding_from_vllm_identity
+    from hyperloom.orchestrator.actions.executors.workload._launch_evidence import _binding_from_vllm_identity
 
     log = tmp_path / "server.log"
     log.write_text(_VLLM_NON_DEFAULT, encoding="utf-8")
@@ -241,7 +241,10 @@ def test_a_vllm_launch_reaches_the_evidence_through_the_production_entry_point(t
     through the production entry point, which is the only thing that fails when
     the branch is removed.
     """
-    from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
+    from hyperloom.orchestrator.actions.executors.workload._launch_evidence import (
+        RequestedLaunch,
+        build_launch_evidence,
+    )
 
     config, slot, log = _vllm_slot(
         tmp_path,
@@ -263,7 +266,10 @@ def test_a_quoted_marker_is_not_accepted_as_a_vllm_launch_through_the_entry_poin
     """User- or attacker-supplied text echoed into the log quotes the marker
     but carries no launch record; binding to it reports settings the server
     never ran with."""
-    from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
+    from hyperloom.orchestrator.actions.executors.workload._launch_evidence import (
+        RequestedLaunch,
+        build_launch_evidence,
+    )
 
     config, slot, log = _vllm_slot(
         tmp_path,
@@ -281,7 +287,10 @@ def test_a_quoted_marker_is_not_accepted_as_a_vllm_launch_through_the_entry_poin
 def test_a_preceding_dict_does_not_displace_the_real_vllm_record(tmp_path):
     """Extraction anchored at the line's first brace reads an unrelated dict
     and ignores the actual record that follows it on the same line."""
-    from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
+    from hyperloom.orchestrator.actions.executors.workload._launch_evidence import (
+        RequestedLaunch,
+        build_launch_evidence,
+    )
 
     config, slot, log = _vllm_slot(
         tmp_path,
@@ -299,7 +308,10 @@ def test_a_preceding_dict_does_not_displace_the_real_vllm_record(tmp_path):
 def test_a_brace_inside_a_vllm_model_path_does_not_truncate_the_record(tmp_path):
     """A ``}`` inside a string is not structure; ending the payload there drops
     every field after it, including the parallelism the decision compares."""
-    from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
+    from hyperloom.orchestrator.actions.executors.workload._launch_evidence import (
+        RequestedLaunch,
+        build_launch_evidence,
+    )
 
     config, slot, log = _vllm_slot(
         tmp_path,
@@ -316,7 +328,7 @@ def test_a_brace_inside_a_vllm_model_path_does_not_truncate_the_record(tmp_path)
 def test_a_failing_server_log_reader_propagates_from_the_entry_point(tmp_path, monkeypatch):
     import pytest
 
-    from hyperloom.orchestrator.actions.executors import _launch_evidence as evidence_module
+    from hyperloom.orchestrator.actions.executors.workload import _launch_evidence as evidence_module
 
     def _boom(*_args, **_kwargs):
         raise RuntimeError("log reader bug")

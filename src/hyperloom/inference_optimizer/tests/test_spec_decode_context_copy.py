@@ -18,12 +18,12 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _integrate_bench as integrate_bench
-from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult, _build_variant_yaml
-from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
+from hyperloom.orchestrator.actions.executors.integrate import _integrate_bench as integrate_bench
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import VariantResult, _build_variant_yaml
+from hyperloom.orchestrator.actions.executors.workload._launch_evidence import RequestedLaunch, build_launch_evidence
 from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
-from hyperloom.orchestrator.actions.executors._spec_decode_context_copy import (
+from hyperloom.orchestrator.actions.executors.framework_change._spec_decode_context_copy import (
     CONTEXT_COPY_REFUSAL,
     context_copy_method,
     context_copy_refusal,
@@ -229,7 +229,7 @@ async def _explore(sub_agent_runner, tmp_path, names: list[str], *, entry: dict 
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.grid._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)

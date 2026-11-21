@@ -15,7 +15,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hyperloom.orchestrator.actions.executors._gpu_metrics import (
+from hyperloom.orchestrator.actions.executors.gpu._gpu_metrics import (
     GPU_ARTIFACT_NAME,
     gpu_metrics_from_report,
     write_gpu_metrics,
@@ -268,7 +268,7 @@ def test_a_report_that_lands_after_the_harvest_is_still_written(tmp_path):
     the round settles on a report the harvest never saw.
     """
     from hyperloom.orchestrator.actions.executors import benchmark_result as br
-    from hyperloom.orchestrator.actions.executors._gpu_metrics import write_gpu_metrics_from_report
+    from hyperloom.orchestrator.actions.executors.gpu._gpu_metrics import write_gpu_metrics_from_report
 
     # Harvest first, with no report on disk yet: nothing to write.
     br.harvest_leaked_artifacts(tmp_path)

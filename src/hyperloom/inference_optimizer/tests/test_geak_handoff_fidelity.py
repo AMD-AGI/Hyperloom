@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._gpu_pin import _resolve_serving_fidelity
+from hyperloom.orchestrator.actions.executors.gpu._gpu_pin import _resolve_serving_fidelity
 
 
 @pytest.fixture(autouse=True)

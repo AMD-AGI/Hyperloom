@@ -27,9 +27,9 @@ from hyperloom.orchestrator.kernel.geak_config import (
     _accepted_config_as_variant,
 )
 from ._accuracy_gate import parse_eval_results
-from ._gpu_power import ServerLogPhaseDriver, build_gpu_power_recorder, round_power_fields, round_power_summary
-from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_launch_evidence
-from ._workload_envs import GEAK_METRIC_OUTPUT
+from .gpu._gpu_power import ServerLogPhaseDriver, build_gpu_power_recorder, round_power_fields, round_power_summary
+from .workload._launch_evidence import RequestedLaunch, build_launch_evidence, persist_launch_evidence
+from .workload._agentx_switch import GEAK_METRIC_OUTPUT
 
 log = logging.getLogger(__name__)
 

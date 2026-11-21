@@ -33,8 +33,8 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_
 from hyperloom.orchestrator.loop._promote_outcome import IntegrateRecoveryIncomplete
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.actions.executors import _patch_artifacts as patch_artifacts
-from hyperloom.orchestrator.actions.executors import _patch_sources as patch_sources
+from hyperloom.orchestrator.actions.executors.patching import _patch_artifacts as patch_artifacts
+from hyperloom.orchestrator.actions.executors.patching import _patch_sources as patch_sources
 from hyperloom.orchestrator.loop.verdicts import CriticRuling
 from hyperloom.orchestrator.phases import phase_transitions
 
@@ -517,7 +517,7 @@ async def test_resume_commits_the_reinstalled_source_layer_on_a_git_tree(coord: 
 @pytest.mark.asyncio
 async def test_a_candidate_after_resume_still_sees_the_kept_source_layer(coord: Coordinator, tmp_path: Path) -> None:
     from hyperloom.orchestrator.actions.executors._git import _git_head_sha
-    from hyperloom.orchestrator.actions.executors._patch_git import _git_reset_clean, _git_stash_if_dirty
+    from hyperloom.orchestrator.actions.executors.patching._patch_git import _git_reset_clean, _git_stash_if_dirty
 
     tree = _git_framework_tree(tmp_path)
     _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})])
@@ -985,7 +985,7 @@ def crashed_integrate_window(coord: Coordinator, pending_candidate):
     writes before the bus sees anything. ``outcome_status=None`` is the crash
     that happened first: the phase is on disk, the runner never finished.
     """
-    from hyperloom.orchestrator.actions.executors._patch_git import restore_pending_integrate
+    from hyperloom.orchestrator.actions.executors.patching._patch_git import restore_pending_integrate
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     async def crash(*, keep: bool, outcome_status: str | None = None, cleanup_confirmed: bool = True):
@@ -1878,7 +1878,7 @@ async def test_resume_consistency_replays_pending_integrate_with_kept_result(coo
 
 @pytest.mark.asyncio
 async def test_resume_refuses_legacy_patch_without_task_evidence(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.actions.executors import _patch_git as patch_git
+    from hyperloom.orchestrator.actions.executors.patching import _patch_git as patch_git
 
     reversed_calls: list[str] = []
 
