@@ -29,6 +29,8 @@ PODS_KEY = "pods"
 LAUNCH_POD_KEYS = (PODS_KEY, "prefill_pods", "decode_pods", "worker_pods", "router_pods")
 PD_LAUNCH_KEY = "pd_launch"
 PD_DIGEST_KEY = "pd_launch_digest"
+TRACE_SHARED_KEY = "profile_trace_shared"
+TRACE_SHARE_ERROR_KEY = "profile_trace_share_error"
 
 _FRONTEND_BACKEND = {"atomesh": ATOMESH, "sglang-router": SGLANGROUTER, "infera": INFERA}
 _FRAMEWORK_BACKEND = {"atom": ATOMESH, "sglang": SGLANGROUTER}
@@ -120,6 +122,8 @@ __all__ = [
     "PD_DIGEST_KEY",
     "PD_LAUNCH_KEY",
     "SSH_BACKENDS",
+    "TRACE_SHARED_KEY",
+    "TRACE_SHARE_ERROR_KEY",
     "handed_node_list",
     "is_pd_state",
     "node_list_backend",

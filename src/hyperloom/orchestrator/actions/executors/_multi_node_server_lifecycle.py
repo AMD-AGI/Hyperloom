@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 from contextlib import contextmanager
@@ -17,15 +18,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterator, Mapping
 
+from hyperloom_common.io import safe_mtime
 from hyperloom_common.timeutil import format_exc_brief
-from hyperloom_common.env import EnvValueError, env_flag
+from hyperloom_common.env import EnvValueError, env_flag, env_float
 from hyperloom.inference_optimizer import multi_node
+from hyperloom.inference_optimizer.multi_node.pd_session import INFERA, PdSessionError, is_pd_state, session_engine_urls
 from hyperloom.inference_optimizer.multi_node._internal.env_safety import filter_forward_env
 from hyperloom.inference_optimizer.multi_node._internal.server_args_safety import (
     ServerArgsRejected,
     validate_server_args,
 )
-from hyperloom.inference_optimizer.multi_node.pd_session import PdSessionError
 from ._multi_node_env import _read_state, is_multi_node, is_pd_session
 from ._multi_node_restart_settings import RestartSettings
 
@@ -616,11 +618,12 @@ async def trigger_infera_engine_profile(
     action: str,
     body: dict | None = None,
 ) -> None:
-    """Drive torch profiling on every Infera worker via the frontend fan-out API."""
+    """Drive torch profiling on every Infera worker via the frontend fan-out API; a node-list Infera session profiles
+    its engines directly instead."""
     if not is_multi_node():
         return
     state = _read_state() or {}
-    if str(state.get("backend") or "").strip().lower() != "infera":
+    if str(state.get("backend") or "").strip().lower() != INFERA or is_pd_state(state):
         return
     service_url = str(state.get("service_url") or "").strip().rstrip("/")
     if not service_url:
@@ -629,19 +632,12 @@ async def trigger_infera_engine_profile(
             action,
         )
         return
-    try:
-        import httpx as _httpx
-    except ImportError:  # pragma: no cover
-        log.warning("httpx unavailable; cannot trigger infera profiling")
-        return
+    import httpx as _httpx
+
     route = "start" if action == "start" else "stop"
     url = f"{service_url}/v1/admin/profile/{route}"
     payload = dict(body or {}) if action == "start" else {}
-    if action == "start":
-        client_timeout = 30.0
-    else:
-        client_timeout = float(os.environ.get("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", "600") or 600)
-    async with _httpx.AsyncClient(timeout=client_timeout) as client:
+    async with _httpx.AsyncClient(timeout=_profile_client_timeout(action)) as client:
         try:
             resp = await client.post(url, json=payload)
             log.info(
@@ -652,6 +648,130 @@ async def trigger_infera_engine_profile(
             )
         except _httpx.HTTPError as exc:
             log.warning("infera profile %s -> %s failed (%s); continuing", route, url, exc)
+
+
+def _profile_client_timeout(action: str) -> float:
+    """HTTP timeout of a profile ``action``; a stop waits for the export (``HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S``)."""
+    return 30.0 if action == "start" else env_float("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", 600.0)
+
+
+PD_PROFILE_ROLES = ("prefill", "decode")
+
+
+def pd_worker_trace_dir(root: str, role: str, worker: int) -> str:
+    """Return the torch trace dir of one engine worker of ``role`` under a profiling round's trace root."""
+    return str(Path(root) / role / str(worker))
+
+
+_RANK_TRACE_RE = re.compile(r"\A(?P<batch>.+)-TP-(?P<rank>\d+)(?:-(?P<stage>[A-Z]+))?\.trace\.json\.gz\Z")
+_ROLE_STAGE = {"prefill": "EXTEND", "decode": "DECODE"}
+
+
+def _first_gpu_traces(paths: list[Path], role: str, nodes: int) -> list[str]:
+    """The first GPU's trace of each node from the newest batch in ``paths``; the heaviest file when none is per-rank.
+
+    SGLang numbers TP ranks across a worker's nodes, so node ``n`` starts at rank ``n * ranks_per_node``. A stage-split
+    trace prefers the role's own stage.
+    """
+    batches: dict[str, dict[int, dict[str, Path]]] = {}
+    newest: dict[str, float] = {}
+    for path in paths:
+        match = _RANK_TRACE_RE.match(path.name)
+        if match is None:
+            continue
+        batch = match["batch"]
+        batches.setdefault(batch, {}).setdefault(int(match["rank"]), {})[match["stage"] or ""] = path
+        newest[batch] = max(newest.get(batch, 0.0), safe_mtime(path))
+    if not batches:
+        return [str(max(paths, key=lambda p: (p.stat().st_size, p.name)))] if paths else []
+    ranks = batches[max(newest, key=lambda batch: newest[batch])]
+    per_node = -(-(max(ranks) + 1) // nodes)
+    picks: list[str] = []
+    for node in range(nodes):
+        stages = ranks.get(node * per_node)
+        if stages:
+            picks.append(str(stages.get(_ROLE_STAGE.get(role, "")) or stages.get("") or sorted(stages.values())[0]))
+    return picks
+
+
+def _placed(place: Callable[[dict[str, Any]], dict], state: dict[str, Any]) -> dict:
+    """``place(state)`` over a PD session's frozen launch; empty when the engines cannot be placed."""
+    try:
+        return place(state)
+    except PdSessionError as exc:
+        log.warning("pd profile: cannot place the engines of the frozen launch: %s", exc)
+        return {}
+
+
+def select_pd_node_traces(root: str, since_unix: float) -> dict[str, list[str]]:
+    """Return, per PD role, the first GPU's trace of each node written since ``since_unix``, worker by worker under
+    ``<root>/<role>/<worker>``; nodes are numbered across the role's workers in order."""
+    from hyperloom.inference_optimizer.multi_node.pd_session import session_worker_hosts
+
+    state = _read_state() or {}
+    workers = _placed(session_worker_hosts, state) if is_pd_state(state) else {}
+    selected: dict[str, list[str]] = {}
+    for role in PD_PROFILE_ROLES:
+        picks: list[str] = []
+        for worker, hosts in enumerate(workers.get(role, [])):
+            fresh = [
+                path
+                for path in Path(pd_worker_trace_dir(root, role, worker)).glob("*.trace.json.gz")
+                if path.is_file() and safe_mtime(path) >= since_unix
+            ]
+            picks += _first_gpu_traces(fresh, role, len(hosts))
+        if picks:
+            selected[role] = picks
+    return selected
+
+
+async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> None:
+    """POST /start_profile or /stop_profile to every prefill and decode engine of a PD session.
+
+    Each engine worker is reached at its first host on its role's engine port, as the frozen launch is placed on the
+    node list; the router writes no GPU traces. A start sends ``output_dir`` narrowed to
+    ``<output_dir>/<role>/<worker>`` and ``with_stack`` (``HYPERLOOM_MN_PROFILE_WITH_STACK``, default off); step-window
+    fields crash disaggregated SGLang.
+    """
+    if not is_multi_node():
+        return
+    state = _read_state() or {}
+    if not is_pd_state(state):
+        return
+    urls = _placed(session_engine_urls, state)
+    targets = [(role, worker, url) for role in PD_PROFILE_ROLES for worker, url in enumerate(urls.get(role, []))]
+    if not targets:
+        log.warning("trigger_pd_engine_profile(%s): no prefill/decode engines to profile", action)
+        return
+    import httpx as _httpx
+
+    starting = action == "start"
+    route = "start_profile" if starting else "stop_profile"
+    output_dir = str((body or {}).get("output_dir") or "").strip() if starting else ""
+    with_stack = env_flag("HYPERLOOM_MN_PROFILE_WITH_STACK", default=False)
+
+    async def _post(client: Any, role: str, worker: int, base_url: str) -> None:
+        """Send ``route`` to one engine; a transport error is logged, not raised."""
+        url = f"{base_url}/{route}"
+        payload: dict = {}
+        if output_dir:
+            worker_dir = pd_worker_trace_dir(output_dir, role, worker)
+            try:
+                Path(worker_dir).mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                log.debug("pd profile: cannot mkdir %s: %s", worker_dir, exc)
+            payload["output_dir"] = worker_dir
+        if starting:
+            payload["with_stack"] = with_stack
+        try:
+            resp = await client.post(url, json=payload)
+            log.info("pd profile %s %s -> %s HTTP %d", role, route, url, resp.status_code)
+        except _httpx.HTTPError as exc:
+            log.warning("pd profile %s -> %s failed (%s); continuing", route, url, exc)
+
+    # stop_profile returns after the trace export; engines start and stop together so each records the same window.
+    async with _httpx.AsyncClient(timeout=_profile_client_timeout(action)) as client:
+        await asyncio.gather(*(_post(client, role, worker, base_url) for role, worker, base_url in targets))
 
 
 async def _probe_health(client: Any, health_url: str) -> tuple[bool, str]:

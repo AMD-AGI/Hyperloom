@@ -34,6 +34,8 @@ _HANDOFF_CARRIED_KEYS = (
     "pd_decode_url",
     pd_handoff.PD_LAUNCH_KEY,
     pd_handoff.PD_DIGEST_KEY,
+    pd_handoff.TRACE_SHARED_KEY,
+    pd_handoff.TRACE_SHARE_ERROR_KEY,
 )
 
 # The fields that identify *which* cluster a state describes.

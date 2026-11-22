@@ -1,0 +1,67 @@
+###############################################################################
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""Truncate device events whose recorded duration runs past the next event on the same stream."""
+
+from __future__ import annotations
+
+import gzip
+import json
+from collections import defaultdict
+from pathlib import Path
+from typing import Any
+
+from hyperloom_common.io import WriteOptions, atomic_write_bytes
+
+from ._trace_inputs import open_json
+from ._trace_reader import _GPU_CATS, _STREAM_OVERLAP_EPS_US
+
+
+def clamp_stream_overlaps(trace_path: Path) -> dict[str, Any]:
+    """Clamp each GPU event to end at the next event's start on its (pid, tid) stream; rewrite the trace if changed."""
+    trace = open_json(trace_path)
+    events = trace.get("traceEvents", []) if isinstance(trace, dict) else trace
+
+    streams: dict[tuple[Any, Any], list[dict[str, Any]]] = defaultdict(list)
+    for ev in events:
+        if (
+            isinstance(ev, dict)
+            and ev.get("ph") == "X"
+            and ev.get("cat") in _GPU_CATS
+            and isinstance(ev.get("ts"), (int, float))
+            and isinstance(ev.get("dur"), (int, float))
+        ):
+            streams[(ev.get("pid"), ev.get("tid"))].append(ev)
+
+    clamped = 0
+    removed_us = 0.0
+    worst_name = ""
+    worst_us = 0.0
+    for stream in streams.values():
+        stream.sort(key=lambda ev: ev["ts"])
+        for cur, nxt in zip(stream, stream[1:]):
+            gap = nxt["ts"] - cur["ts"]
+            over = cur["dur"] - gap
+            if gap <= 0 or over <= _STREAM_OVERLAP_EPS_US:
+                continue
+            cur["dur"] = gap
+            clamped += 1
+            removed_us += over
+            if over > worst_us:
+                worst_name, worst_us = str(cur.get("name", "")), over
+
+    if clamped:
+        data = json.dumps(trace).encode("utf-8")
+        payload = gzip.compress(data) if trace_path.suffix == ".gz" else data
+        atomic_write_bytes(trace_path, payload, options=WriteOptions(preserve_mode=True))
+
+    return {
+        "clamped_events": clamped,
+        "removed_ms": round(removed_us / 1000.0, 4),
+        "worst_event": worst_name,
+        "worst_removed_ms": round(worst_us / 1000.0, 4),
+    }

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
 import yaml
-from TraceLens.Agent.Analysis.utils.config_utils import check_config
+from TraceLens.Agent.Analysis.utils.config_utils import SCOPE_STANDALONE, check_config
 
 from hyperloom.common.codex_session import (
     CodexSessionConfig,
@@ -288,7 +288,12 @@ def write_run_config(
     if capture_folder is not None:
         job["capture_folder"] = str(capture_folder.resolve())
     config = {"analysis_mode": analysis_mode, "output_dir": str(output_dir.resolve()), "jobs": [job]}
-    check_config(config, "standalone")
+    return write_checked_config(config, SCOPE_STANDALONE, output_dir)
+
+
+def write_checked_config(config: dict[str, Any], scope: str, output_dir: Path) -> Path:
+    """Check ``config`` with TraceLens's ``check_config`` under ``scope`` and write it as ``output_dir/run.yaml``."""
+    check_config(config, scope)
     config_path = output_dir / RUN_CONFIG_NAME
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     return config_path
@@ -348,6 +353,7 @@ class TraceLensSkillRequest:
         tracelens_internal_root: The TraceLens-internal root, ``None`` in OSS-only mode.
         capture_folder: Graph-capture folder, read only as the Codex runner's
             write scope; the run config already names it.
+        scope: The TraceLens scope the skill runs the config under.
     """
 
     skill_path: Path
@@ -355,6 +361,7 @@ class TraceLensSkillRequest:
     tracelens_root: Path
     tracelens_internal_root: Path | None
     capture_folder: Path | None
+    scope: str = SCOPE_STANDALONE
 
 
 @dataclass(frozen=True)
@@ -384,7 +391,7 @@ class _StreamIdleBounds:
 
 
 def build_orchestrator_prompt(request: TraceLensSkillRequest) -> str:
-    """Prompt an agent to run the TraceLens standalone skill from ``run.yaml``.
+    """Prompt an agent to run the TraceLens skill from ``run.yaml`` under ``request.scope``.
 
     Provider-neutral: the same prompt drives the Claude SDK runner and the
     Codex SDK runner. The trace, platform, analysis mode and capture folder
@@ -404,12 +411,12 @@ def build_orchestrator_prompt(request: TraceLensSkillRequest) -> str:
         str(request.tracelens_internal_root) if request.tracelens_internal_root else "(not installed; OSS-only mode)"
     )
     tl_extension_text = "TraceLens_internal" if request.tracelens_internal_root else "(unset)"
-    return f"""You are running TraceLens standalone analysis for Hyperloom.
+    return f"""You are running TraceLens {request.scope} analysis for Hyperloom.
 
 Read and follow the FULL instructions in this skill file:
 {request.skill_path}
 
-Run it from config {run_config}, standalone.
+Run it from config {run_config}, {request.scope}.
 The execution context below answers the remaining Step 0 questions.
 Do not ask the user any questions; proceed with the analysis.
 

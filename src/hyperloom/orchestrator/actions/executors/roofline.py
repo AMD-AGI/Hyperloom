@@ -27,6 +27,7 @@ from ...loop.sub_agent_runner import RunnerContext
 from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
+from ._pd_role_trace import ROLE_STEADY_STATE_MODE, pd_multi_trace_input
 from .profile import profile_trace_path
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
@@ -777,6 +778,21 @@ def _analysis_payload(task_params: dict[str, Any], *, trace_path: str, framework
     return payload
 
 
+def _apply_pd_role_settings(payload: dict[str, Any], profiled: _ProfileOutcome) -> None:
+    """Set on ``payload`` the PD analysis settings of the role whose trace the profile adopted as its main trace, and
+    for decode nodes and two or more nodes in all, the node traces for one multi-trace analysis; a no-op outside PD."""
+    role_traces = profiled.result.get("role_traces") or {}
+    main_role = next((role for role, path in role_traces.items() if path == profiled.trace_path), "")
+    if not main_role:
+        return
+    payload.setdefault("steady_state_mode", ROLE_STEADY_STATE_MODE[main_role])
+    payload.setdefault("split_llm_inference", False)
+    payload["clamp_stream_overlaps"] = True
+    pd_input = pd_multi_trace_input(profiled.result)
+    if pd_input:
+        payload["pd_node_traces"] = pd_input
+
+
 def _hot_kernels(ta_result: dict[str, Any]) -> list[Any]:
     """The hot kernels an analysis surfaced."""
     return ta_result.get("hot_kernels_top15") or ta_result.get("hot_kernels") or []
@@ -900,6 +916,7 @@ class RooflineExecutor:
             return profiled
         self._record_profile_findings(profiled)
         payload = _analysis_payload(ctx.task.params or {}, trace_path=profiled.trace_path, framework=arm.framework)
+        _apply_pd_role_settings(payload, profiled)
 
         analysis = await self._analyze(ctx, recorder, payload)
         if not isinstance(analysis, _AnalysisOutcome):
@@ -918,7 +935,7 @@ class RooflineExecutor:
 
         A failed profile is not re-run: the same configuration fails the same way, and the session degrades instead.
         """
-        from .profile import profile_executor
+        from .profile import PROFILE_TRACE_NOT_SHARED, profile_executor
 
         session_dir = Path(ctx.extra["session_dir"])
         run = recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL) if recorder is not None else 0
@@ -936,6 +953,8 @@ class RooflineExecutor:
                 recorder, run, session_dir, arm, _ProfileOutcome.of(returned, dict(profile_ctx.task.params or {}))
             )
         log.warning("roofline profile failed (%s): %s", unusable.error_class, unusable.message)
+        if unusable.error_class == PROFILE_TRACE_NOT_SHARED and not self.shared_state.gpu_trace_unsupported_reason:
+            self.shared_state.gpu_trace_unsupported_reason = unusable.message
         await _end_profile_run(recorder, run, session_dir, arm, _RunEnd("failed", unusable.result, unusable.failure))
         captured = await _fail_on_capture(recorder, ctx.task, session_dir, arm, unusable)
         if captured is not None:
@@ -1111,6 +1130,7 @@ class RooflineExecutor:
             "framework": payload["framework"],
             **{key: payload[key] for key in ("roofline_arm", "roofline_output_name") if key in payload},
         }
+        _apply_pd_role_settings(cb_payload, _ProfileOutcome(cb_profile, cb_trace, None, {}))
         analysis = await _compute_bound_analysis(recorder, session_dir, cb_payload)
         if analysis is None:
             return None, "re-profile produced no usable trace"
