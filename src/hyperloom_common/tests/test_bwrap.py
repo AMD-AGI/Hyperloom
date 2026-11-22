@@ -202,11 +202,26 @@ class FakeBwrap:
         return (self.directory / "argv").read_text().splitlines()
 
 
+HOST_DEV_NOTES = bwrap._dev_notes
+
+
 @pytest.fixture
 def fake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeBwrap:
+    """A stand-in ``bwrap`` first on ``PATH``, on a host whose ``/dev`` has every standard node (the tests that read
+    the note on an absent node put the real :func:`bwrap._dev_notes` back)."""
     stand_in = FakeBwrap(tmp_path / "bin")
     monkeypatch.setenv("PATH", str(stand_in.directory))
+    monkeypatch.setattr(bwrap, "_dev_notes", lambda: ())
     return stand_in
+
+
+def host_dev(monkeypatch: pytest.MonkeyPatch, *nodes: str) -> None:
+    """A host ``/dev`` holding only ``nodes`` (other paths are read as they are), read by the real note."""
+    exists = os.path.exists
+    monkeypatch.setattr(
+        bwrap.os.path, "exists", lambda path: path in nodes if path.startswith("/dev/") else exists(path)
+    )
+    monkeypatch.setattr(bwrap, "_dev_notes", HOST_DEV_NOTES)
 
 
 def probed(path: str = "bwrap", version: tuple[int, int, int] = (0, 13, 1)) -> BwrapProbe:
@@ -829,8 +844,7 @@ def test_a_sandbox_dev_is_built_from_the_nodes_the_host_has_never_bwraps_dev(
     # standard node is bound onto a tmpfs where the host has it, and the probe says which are absent.
     fake.configure(unbindable=FIELD_UNBINDABLE, dev_full_missing=True)
     fake.configure_unshare(allows=("user",))
-    exists = os.path.exists
-    monkeypatch.setattr(bwrap.os.path, "exists", lambda path: path != "/dev/full" and exists(path))
+    host_dev(monkeypatch, *(node for node in BASE_DEV_NODES if node != "/dev/full"))
 
     found = probe_bwrap()
 
@@ -844,6 +858,22 @@ def test_a_sandbox_dev_is_built_from_the_nodes_the_host_has_never_bwraps_dev(
         "/dev/zero, /dev/random, /dev/urandom, /dev/tty) bound into it, never bubblewrap's --dev or the host's whole "
         "/dev"
     )
+
+
+def test_the_dev_note_names_the_standard_nodes_the_host_lacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    host_dev(monkeypatch, *BASE_DEV_NODES)
+    assert bwrap._dev_notes() == ()
+
+    host_dev(monkeypatch, "/dev/null", "/dev/tty")
+    assert bwrap._dev_notes() == (
+        "the host's /dev has no /dev/zero, /dev/full, /dev/random, /dev/urandom: each sandbox's /dev is a tmpfs with "
+        "only the nodes the host has (/dev/null, /dev/tty) bound into it, never bubblewrap's --dev or the host's whole "
+        "/dev",
+    )
+
+    host_dev(monkeypatch)
+    assert bwrap._dev_notes()[0].startswith(f"the host's /dev has no {', '.join(BASE_DEV_NODES)}: ")
+    assert "the host has (none) bound" in bwrap._dev_notes()[0]
 
 
 def test_a_sandbox_whose_dev_null_does_not_work_is_refused(fake: FakeBwrap) -> None:

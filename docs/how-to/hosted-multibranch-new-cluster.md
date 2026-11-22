@@ -37,7 +37,7 @@ These are set in the app container's environment.
 | `HYPERLOOM_SOURCE_SHA` | yes | The full 40-hex commit the run executes. |
 | `HYPERLOOM_RSI_ARCHIVE` | yes, for the hosted multi-branch entry | Writable directory where sessions archive their search trees for later sessions to learn from. Point every session of a deployment at the same directory to share what they learn; a private directory keeps a session's tree out of the shared archive. There is no default. When the sessions may be different host accounts of one group, make it a directory of that group with the setgid bit (`chmod 2775`). |
 | `INFERENCE_SUITE_TOOL_CACHE` | no | The tool cache `install.sh` staged the pinned InferenceX client in. Default `inference-suite-tools` under the dependency cache. Without a staging there that verifies, the session refuses to start, naming `python -m inference_suite stage --tool-cache <dir>`. |
-| `HYPERLOOM_HOST_LAYER` | yes, unless `HYPERLOOM_SPECIALIST_USER` names an account the app can run agents as | The hosting layer's directory. A hosted run launches an agent under bubblewrap only with the layer's `bin/bwrap`, never one on `PATH` (the framework image may carry its own). |
+| `HYPERLOOM_HOST_LAYER` | yes, unless `HYPERLOOM_SPECIALIST_USER` names an account the app can run agents as | The hosting layer's directory. A hosted run launches an agent under bubblewrap only with the layer's `bin/bwrap`, never one on `PATH` (the framework image may carry its own). Where the container's root mount is unbindable (apptainer), bubblewrap runs only under the layer's `bin/unshare`, never one on `PATH`; the layer image does not build it, so a deployment there adds a static util-linux `unshare` whose `--help` lists `--user`, `--map-current-user`, `--mount` and `--propagation` (2.37.2 does) to the layer directory. |
 
 The model is named by the campaign spec (`model.path`), not by a variable. The app host reads the model's tokenizer
 files at that path.
@@ -45,7 +45,11 @@ files at that path.
 A hosted run starts nothing unconfined in the app container, beside its credentials: its specialists run as the account
 `HYPERLOOM_SPECIALIST_USER` names where it can be used, else under the layer's bubblewrap (`HYPERLOOM_HOST_LAYER`).
 Where neither can isolate them, the run ends before anything starts, naming both reasons (exit code 1); a bubblewrap
-that gives no answer within 10 s leaves the host to start the run again.
+that gives no answer within 10 s leaves the host to start the run again. Where the root mount is unbindable, a root app
+runs every launch under `unshare --mount`, and an app that is not root under `unshare --user --map-current-user --mount
+--propagation private` (the layer's `bin/unshare`, above). Under that user-namespace tier no launch can join another
+sandbox's namespaces: the specialists are confined, but a run measured on this container's cards is refused (see
+below), and a run measured in the grant's sandboxes starts.
 
 Each leg of a run may be another host account of one group. The entry checks `HYPERLOOM_STATE_DIR` and
 `USER_DATA_PATH` before it hands over (see the table above); before a session starts,
@@ -163,7 +167,10 @@ run in the app container, so the run needs no measurement or `dev` template, no 
   every test runs there.
 - The agent and dev sandboxes and the tests run in this container, beside the run's credentials, so the run starts only
   where they run isolated, as the specialists must: under the layer's bubblewrap (`HYPERLOOM_HOST_LAYER`). Where it
-  cannot sandbox them, the run ends before anything starts, naming them and why (exit code 1).
+  cannot sandbox them, the run ends before anything starts, naming them and why (exit code 1). Their commands join a
+  holder's namespaces, which bubblewrap cannot do under the `unshare --user` tier (an app that is not root on a node
+  whose root mount is unbindable): there the run is refused at start even though the specialists are confined
+  (`a launch cannot join another sandbox's namespaces here: ...`); measure such a deployment in the grant's sandboxes.
 - Without a visible-device mask, the cards are as many as `rocm-smi` shows, and a container that holds fewer render
   nodes (`/dev/dri/renderD*`) than that is refused, naming both counts: set `ROCR_VISIBLE_DEVICES` to the cards it was
   given.
