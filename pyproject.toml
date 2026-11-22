@@ -437,6 +437,8 @@ omit = [
     "src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py",
     "src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py",
     "src/hyperloom/orchestrator/actions/executors/_multi_node_env.py",
+    # Multi-node remote driver, piped to `python -` on each host.
+    "src/inference_suite/multinode/remote_driver.py",
     # Breakdown LLM HTTP client.
     "src/hyperloom/inference_optimizer/breakdown/reporters/llm_client.py",
     # Kernel tools that need real traces or a live framework install.
