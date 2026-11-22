@@ -87,6 +87,7 @@ class HostedSandboxes:
             timeout_sec=attempt_timeout_sec(setup.workload),
             boot_budget_sec=setup.workload.boot_budget_sec,
             make_before_break=setup.make_before_break,
+            dev_leases=setup.dev_leases > 0 or bool(setup.agents),
         )
         return build_hosted_toolbox(inputs, blackboard, acceptance, spec, options=options)
 

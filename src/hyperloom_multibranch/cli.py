@@ -89,8 +89,9 @@ A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 once as the grant has cards and sandboxes for, and the session stops before the grant ends as ``hosted run`` does. Its
 run id is ``HYPERLOOM_RUN_ID`` when set, the session's id otherwise. A missing or malformed grant variable is a usage
 error naming it. Its ``--dev-leases`` and ``--autonomous-agent`` run in ``dev`` sandboxes of the grant, so they also
-need the ``dev`` key (``HYPERLOOM_SANDBOX_KEY_DEV``) and ``USER_DATA_PATH``, the storage the ``dev`` template mounts at
-the same path; a usage error names what is missing.
+need the ``dev`` key (``HYPERLOOM_SANDBOX_KEY_DEV``), ``USER_DATA_PATH``, the storage the ``dev`` template mounts at
+the same path, a ``dev`` template of the session's TP in ``HYPERLOOM_SANDBOX_TEMPLATES``, and a grant that fits one
+lease beside a test (at least twice the TP in GPUs and two sandboxes); a usage error names what is missing or short.
 ``hosted run`` takes no arguments: it runs the session of the campaign spec a host injected, as
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
 sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`) or on this container's

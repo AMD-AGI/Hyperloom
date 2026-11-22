@@ -1615,6 +1615,8 @@ def test_a_hosted_restart_refuses_a_resume_it_should_finish_instead(
 
 #: A grant of four GPUs that has a day left.
 GRANT = {"max_sandboxes": 4, "max_gpus": 4, "gpu_hours": 100, "max_runtime_sec": 86400}
+#: A template list with a ``dev`` template of :data:`WORKLOAD_ARGS`' TP, which a session that lends dev sandboxes needs.
+TEMPLATES_WITH_DEV = {"measurement": {"2": "ar-01ja-measurement"}, "dev": {"2": "ar-01ja-dev"}}
 #: The campaign spec of :data:`WORKLOAD_ARGS` as a multibranch run, as a host injects it.
 SPEC: dict[str, object] = {
     "schema": "hyperloom.campaign-spec/v1",
@@ -1823,6 +1825,7 @@ def test_a_hosted_spec_lends_dev_sandboxes_and_runs_agents_with_the_grants_dev_k
 ) -> None:
     host.spec(multibranch={**SPEC["multibranch"], "dev_leases": 2, "autonomous_agents": ["/agents/a", "/agents/b"]})
     monkeypatch.setenv("HYPERLOOM_SANDBOX_KEY_DEV", "dev-key-0123456789")
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_TEMPLATES", json.dumps(TEMPLATES_WITH_DEV))
     agents = ("--autonomous-agent", "/agents/a", "--autonomous-agent", "/agents/b")
     on_the_command_line = _settings(*SPEC_RUN_ARGS, "--dev-leases", "2", *agents)
     monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
@@ -1830,6 +1833,59 @@ def test_a_hosted_spec_lends_dev_sandboxes_and_runs_agents_with_the_grants_dev_k
     assert cli.main(["hosted", "run"]) == 0
 
     assert agent_cli == [on_the_command_line]
+
+
+@pytest.mark.parametrize(
+    ("changed", "named"),
+    [
+        (
+            {"HYPERLOOM_SANDBOX_TEMPLATES": json.dumps({"measurement": {"2": "ar-01ja-measurement"}})},
+            "need a dev template of the session's 2 cards in HYPERLOOM_SANDBOX_TEMPLATES; its dev templates serve []",
+        ),
+        (
+            {"HYPERLOOM_GRANT_LIMITS": json.dumps({**GRANT, "max_gpus": 3})},
+            "the grant's 3 GPUs leave no 2-card dev sandbox beside one 2-card test (max_gpus must be at least 4)",
+        ),
+        (
+            {"HYPERLOOM_GRANT_LIMITS": json.dumps({**GRANT, "max_sandboxes": 1})},
+            "the grant's 1 sandbox leaves none for a dev sandbox beside one test (max_sandboxes must be at least 2)",
+        ),
+    ],
+    ids=["no-dev-template", "too-few-gpus", "too-few-sandboxes"],
+)
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_that_lends_dev_sandboxes_the_grant_cannot_make_ends_for_good_naming_why(
+    changed: dict[str, str], named: str, host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.spec(multibranch={**SPEC["multibranch"], "dev_leases": 1})
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_KEY_DEV", "dev-key-0123456789")
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_TEMPLATES", json.dumps(TEMPLATES_WITH_DEV))
+    for name, value in changed.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_USAGE
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_USAGE)
+    assert named in str(document["error"]) and "dev-key" not in str(document["error"])
+    assert agent_cli == [] and not any(host.workspace.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_that_lends_nothing_starts_with_a_dev_key_and_no_dev_template(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dev key the host gives a session that lends no dev sandbox and runs no agent is never used, so a template list
+    without a ``dev`` template, or a grant too small for one, does not keep the session from starting."""
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_KEY_DEV", "dev-key-0123456789")
+    monkeypatch.setenv("HYPERLOOM_GRANT_LIMITS", json.dumps({**GRANT, "max_gpus": 3, "max_sandboxes": 1}))
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    [settings] = agent_cli
+    assert (settings.dev_leases, settings.agents) == (0, ())
 
 
 @pytest.mark.usefixtures("ready_environment")
@@ -3034,6 +3090,7 @@ def test_a_hosted_run_lends_dev_sandboxes_and_runs_agents_in_the_grants_dev_sand
     extra: list[str], handed: Started, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HYPERLOOM_SANDBOX_KEY_DEV", "dev-key")
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_TEMPLATES", json.dumps(TEMPLATES_WITH_DEV))
 
     assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted", *extra]) == 0
 
@@ -3069,6 +3126,53 @@ def test_a_hosted_run_without_what_a_dev_sandbox_needs_is_a_usage_error_naming_i
     err = capsys.readouterr().err
     assert f"need {missing}" in err and "dev-key" not in err
     assert handed.sessions == []
+
+
+@pytest.mark.parametrize("extra", BRANCHES_IN_DEV_SANDBOXES, ids=["dev-leases", "agent"])
+@pytest.mark.parametrize(
+    ("changed", "named"),
+    [
+        ({"HYPERLOOM_SANDBOX_TEMPLATES": json.dumps({**TEMPLATES_WITH_DEV, "dev": {"1": "d1"}})}, "serve [1]"),
+        ({"HYPERLOOM_SANDBOX_TEMPLATES": json.dumps({**TEMPLATES_WITH_DEV, "dev": "d"})}, "'dev' templates must map"),
+        ({"HYPERLOOM_GRANT_LIMITS": json.dumps({**GRANT, "max_gpus": 3})}, "max_gpus must be at least 4"),
+        ({"HYPERLOOM_GRANT_LIMITS": json.dumps({**GRANT, "max_sandboxes": 1})}, "max_sandboxes must be at least 2"),
+    ],
+    ids=["no-dev-template-of-tp", "malformed-dev-templates", "too-few-gpus", "too-few-sandboxes"],
+)
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_that_lends_dev_sandboxes_the_grant_cannot_make_is_a_usage_error_naming_why(
+    extra: list[str],
+    changed: dict[str, str],
+    named: str,
+    handed: Started,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_KEY_DEV", "dev-key")
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_TEMPLATES", json.dumps(TEMPLATES_WITH_DEV))
+    for name, value in changed.items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted", *extra])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert named in err and "dev-key" not in err
+    assert handed.sessions == []
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_that_lends_nothing_starts_with_a_dev_key_and_no_dev_template(
+    handed: Started, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_KEY_DEV", "dev-key")
+    monkeypatch.setenv("HYPERLOOM_GRANT_LIMITS", json.dumps({**GRANT, "max_gpus": 3, "max_sandboxes": 1}))
+
+    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == 0
+
+    [(settings, _)] = handed.sessions
+    assert (settings.dev_leases, settings.agents) == (0, ())
 
 
 @pytest.mark.usefixtures("ready_environment")

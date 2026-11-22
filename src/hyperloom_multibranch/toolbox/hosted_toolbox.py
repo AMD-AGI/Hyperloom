@@ -79,6 +79,7 @@ __all__ = [
     "HostedToolbox",
     "HostedToolboxInputs",
     "build_hosted_toolbox",
+    "dev_templates",
     "handover_for",
     "parallel_tests_for",
 ]
@@ -246,6 +247,10 @@ class HostedOptions:
     grant's parallelism (:func:`parallel_tests_for`). ``False`` runs as many tests at once as the grant fits and closes
     each sandbox when its test ends. A hosted session sets it from the operator's ``multibranch.make_before_break`` of
     the campaign spec (``PeerSetup.make_before_break``, :class:`~hyperloom_multibranch.scheduling.hosted_peers.HostedSandboxes`).
+    ``dev_leases`` says whether the session lends ``dev`` sandboxes, to its specialists or its autonomous agents; a
+    session that lends none builds no branch leases (``HostedToolbox.leases`` is ``None``) and reads no ``dev`` template,
+    whatever ``dev`` key the host gave. A hosted session sets it from its ``dev_leases`` and ``agents``
+    (:class:`~hyperloom_multibranch.scheduling.hosted_peers.HostedSandboxes`).
     """
 
     policy: QueuePolicy | None = None
@@ -261,12 +266,13 @@ class HostedOptions:
     short_prompts: ShortPromptSetup | None = None
     framework_configs: str | None = None
     make_before_break: bool = True
+    dev_leases: bool = True
 
 
 class HostedToolbox(LeasedToolbox):
     """A :class:`RealToolbox` that also owns its hosted backend and sandbox provider; ``close`` releases them.
 
-    ``leases`` is ``None`` when the session has no grant limits or no ``dev`` key. ``run_id`` is the run's id, which every
+    ``leases`` is ``None`` when the session lends no ``dev`` sandboxes, has no grant limits or no ``dev`` key. ``run_id`` is the run's id, which every
     sandbox of the run carries whichever process, container or account of the run created it.
     """
 
@@ -436,8 +442,19 @@ def _leases(provider: SandboxProvider, inputs: HostedToolboxInputs, tuning: Leas
     grant = inputs.grant()
     if grant is None or inputs.dev_key is None:
         return None
-    dev = _role_templates(inputs.sandbox_templates, DEV_TEMPLATES)
-    return HostedBranchLeases(provider, grant, DevSession(inputs.run_id, inputs.tp, dev), tuning)
+    return HostedBranchLeases(
+        provider, grant, DevSession(inputs.run_id, inputs.tp, dev_templates(inputs.sandbox_templates)), tuning
+    )
+
+
+def dev_templates(templates: Mapping[str, object]) -> dict[int, str]:
+    """Card count to ``dev`` template name in the host's template list ``templates``: none when it has no ``dev`` role.
+
+    Raises:
+        ValueError: When the ``dev`` role does not map card counts to names, naming the role.
+    """
+
+    return _role_templates(templates, DEV_TEMPLATES)
 
 
 def handover_for(
@@ -528,12 +545,15 @@ def build_hosted_toolbox(
     """Build a :class:`RealToolbox` whose tests run in sandboxes of the sandbox service; call ``await toolbox.start()``
     before use and ``await toolbox.close()`` after.
 
-    The grant's GPUs are the cards: ``measurement_capacity`` reports them, with the cards of the branch sandboxes
-    leased as ``leased_cards``, and at most ``min(max_gpus // tp, max_sandboxes)`` tests run at once, one fewer where a
-    finished test's sandbox is kept for the next (:attr:`HostedOptions.make_before_break`, where at least three fit). Without grant
-    limits the toolbox cannot count the cards: the capacity is unknown, ``lease_branch_sandbox`` refuses with
-    ``unsupported_kind``, and at most as many tests run at once as the sandbox pool's default; the service's own quota
-    still bounds them (a refused create waits). Sandboxes of other runs are never touched.
+    At most ``min(max_gpus // tp, max_sandboxes)`` tests run at once, one fewer where a finished test's sandbox is kept
+    for the next (:attr:`HostedOptions.make_before_break`, where at least three fit). The cards are counted only for a
+    session that lends ``dev`` sandboxes (:attr:`HostedOptions.dev_leases`) and was given grant limits and a ``dev``
+    key: the grant's GPUs are the cards, ``measurement_capacity`` reports them, with the cards of the branch sandboxes
+    leased as ``leased_cards``, and ``lease_branch_sandbox`` leases them. Any other session -- one that lends none,
+    whatever limits the grant has, included -- reports its capacity as unknown and ``lease_branch_sandbox`` refuses
+    with ``unsupported_kind``. Without grant limits at most as many tests run at once as the sandbox pool's default;
+    the service's own quota still bounds them (a refused create waits).
+    Sandboxes of other runs are never touched.
 
     A session that reads another rule pack than the runner's has its results refused as ``rule_pack_mismatch``: the
     runner reads the pack of the commit it installs, and the backend takes only results that read the session's.
@@ -551,7 +571,8 @@ def build_hosted_toolbox(
     Raises:
         ShortPromptsNotStaged: ``HYPERLOOM_SHORT_PROMPTS`` names a set that is not staged in this host's runner cache; nothing
             has been started.
-        ValueError: When the templates have no runner template for ``tp`` (or no ``dev`` one, when leases are offered),
+        ValueError: When the templates have no runner template for ``tp`` (or no ``dev`` one, when the session lends
+            ``dev`` sandboxes and the host gave a ``dev`` key and grant limits),
             the grant cannot run one test, or the options and the acceptance setup name different short-prompt sets.
     """
 
@@ -563,7 +584,7 @@ def build_hosted_toolbox(
     parallel_tests_for(grant, inputs.tp)  # a grant that cannot run one test is refused before the templates are read
     runner = _runner_template(inputs)  # refused before the lease templates are read
     provider = _service_provider(inputs, options.retry)
-    leases = _leases(provider, inputs, options.lease_tuning)
+    leases = _leases(provider, inputs, options.lease_tuning) if options.dev_leases else None
     handover = handover_for(grant, inputs.tp, leases) if options.make_before_break else None
     parallel = parallel_tests_for(grant, inputs.tp, handover)
     config = HostedConfig(
