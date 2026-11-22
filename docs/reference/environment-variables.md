@@ -1115,7 +1115,7 @@ package to populate `session_breakdown.json` for downstream consumers.
 
 | Variable          | Description                                                                                |
 |-------------------|--------------------------------------------------------------------------------------------|
-| `CLAW_SESSION_ID` | Hosted SaFE / Claw session id, written to `session.claw_session_id` in `session_breakdown.json`. Set by the Primus-Claw sandbox; unset for local runs. |
+| `CLAW_SESSION_ID` | Hosted SaFE / Claw session id, written to `session.claw_session_id` in `session_breakdown.json`. A multi-branch session also records it at start as the top-level `claw_session_id` of `MB-manifest.json` (`null` when unset); the id follows the leg that runs: each `run --resume` or `final-only` given an id records it there and in the breakdown, and a leg given none keeps the recorded one. Set by the Primus-Claw sandbox; unset for local runs. |
 | `SANDBOX_USER_ID` | Hosted SaFE / Claw user id, written to `session.sandbox_user_id`. Set by Primus-Claw; unset for local runs.                                            |
 | `HYPERLOOM_LANGFUSE_ENABLE` | Primary switch (default **off**) for live Langfuse trace push. See details below. |
 | `HYPERLOOM_LLM_ATTRIBUTION` | Names the gateway whose attribution headers every LLM call should carry (default **unset**, emitting none). See details below. |

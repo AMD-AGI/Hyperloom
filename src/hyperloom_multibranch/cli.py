@@ -103,7 +103,8 @@ environment, agents it cannot isolate, a missing ``hosted`` package, the runner 
 session from running (exit 2 for a refused spec or session, else 1); a crash leaves no ``exit.json`` and is restarted.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
-manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard and breakdown. It
+manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard, breakdown and
+manifest. It
 creates no session directory, so it cannot start one. It carries the stop reason that session ended with, which is
 also what its exit code says: a session that did not run its course stays a failed session however FINAL goes. A
 session that was killed with its machine wrote no report at all; it ends for ``killed``, and so fails too. The
