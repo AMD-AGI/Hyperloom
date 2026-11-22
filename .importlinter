@@ -362,6 +362,7 @@ forbidden_modules =
     inference_suite.multinode.query
     inference_suite.multinode.record
     inference_suite.multinode.render
+    inference_suite.multinode.table
     inference_suite.parser_check
     inference_suite.pins
     inference_suite.profile
