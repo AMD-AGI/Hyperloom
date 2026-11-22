@@ -22,8 +22,8 @@ closing the toolbox within its own short bound and killing every registered proc
 A session that ended before FINAL, killed with its machine before CLOSE included, is read back by
 :func:`~hyperloom_multibranch.scheduling.resumption.persisted_run` and taken up again by :meth:`Session.finish`, which
 runs FINAL and CLOSE alone on a budget that is already spent, carrying the stop reason that session ended with: the
-roster and the branches are the ones that session persisted, and only its report, dashboard and breakdown are written
-again. One that ended before PRELUDE recorded its baseline
+roster and the branches are the ones that session persisted, and only its report, dashboard, breakdown and manifest
+are written again. One that ended before PRELUDE recorded its baseline
 (:func:`recorded_baseline`) has no candidate: the finish withdraws its unfinished tests and CLOSE reports why nothing was
 chosen. One whose PRELUDE recorded its baseline can be continued instead, without PRELUDE, by :meth:`Session.resume`
 (:mod:`~hyperloom_multibranch.scheduling.resumption`).
