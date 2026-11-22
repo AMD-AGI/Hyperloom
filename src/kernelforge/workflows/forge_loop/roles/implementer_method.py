@@ -117,10 +117,13 @@ CORRECTNESS_ONLY_WORKING_METHOD = """\
 """
 
 
-def working_method(*, correctness_only: bool, driver_run: str, max_blocks: int) -> str:
-    """The numbered method a gated session follows, for the verdict its gate requires."""
-    if correctness_only:
-        return CORRECTNESS_ONLY_WORKING_METHOD.format(driver_run=driver_run, max_blocks=max_blocks)
+def correctness_method(*, driver_run: str, max_blocks: int) -> str:
+    """The numbered method of a session whose gate requires correctness alone."""
+    return CORRECTNESS_ONLY_WORKING_METHOD.format(driver_run=driver_run, max_blocks=max_blocks)
+
+
+def performance_method(*, driver_run: str, max_blocks: int) -> str:
+    """The numbered method of a session whose gate requires performance, with its pacing thresholds filled in."""
     return PERFORMANCE_WORKING_METHOD.format(
         driver_run=driver_run,
         max_blocks=max_blocks,
@@ -160,8 +163,3 @@ def session_budget_section(deadline_sec: int) -> str:
         f"At minute {deadline_min} the session is cut off, and the loop validates whatever tracked changes the "
         "workspace holds at that moment.\n"
     )
-
-
-def time_section(deadline_sec: int, *, paced: bool) -> str:
-    """The time section of one invocation: a budget to pace against for a paced session, a deadline for any other."""
-    return session_budget_section(deadline_sec) if paced else deadline_section(deadline_sec)

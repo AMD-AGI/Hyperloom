@@ -28,7 +28,12 @@ from kernelforge.utils.gpu_arch import Profiler, arch_profile
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.workflows.forge_loop.gate.gate_tag import gate_outcome_tag
 from kernelforge.workflows.forge_loop.gate.insession_gate import GateMeasurement, GateScope, InSessionGate
-from kernelforge.workflows.forge_loop.roles.implementer_method import time_section, working_method
+from kernelforge.workflows.forge_loop.roles.implementer_method import (
+    correctness_method,
+    deadline_section,
+    performance_method,
+    session_budget_section,
+)
 from kernelforge.workflows.forge_loop.memory.lessons import SessionEnd
 from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
@@ -779,8 +784,8 @@ def make_agent_fn(
         driver_run=driver_run,
         case_aggregate=measurement.case_aggregate.value,
         score_formula=measurement.case_aggregate.formula,
-        working_method=working_method(
-            correctness_only=measurement.correctness_only, driver_run=driver_run, max_blocks=measurement.max_blocks
+        working_method=(correctness_method if measurement.correctness_only else performance_method)(
+            driver_run=driver_run, max_blocks=measurement.max_blocks
         ),
         backend_rule=(
             "Optimize only the selected assembly; keep the frontend, launcher and ABI frozen."
@@ -818,8 +823,8 @@ def make_agent_fn(
             # A session that searches for performance under its own stop check paces itself to a wrap-up minute;
             # every other session is told only where its deadline falls.
             paced = gate_stop_check and not measurement.correctness_only
-            deadline_section = time_section(session_deadline_sec, paced=paced)
-            prompt = _session_user_prompt(kernel_path, experiment_history, surface, deadline_section)
+            time_section = session_budget_section if paced else deadline_section
+            prompt = _session_user_prompt(kernel_path, experiment_history, surface, time_section(session_deadline_sec))
 
             # One fixed interaction budget per candidate Session.
             turn_cap = config.max_turns
