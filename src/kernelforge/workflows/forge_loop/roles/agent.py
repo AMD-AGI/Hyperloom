@@ -29,9 +29,10 @@ from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL
 from kernelforge.workflows.forge_loop.gate.gate_tag import gate_outcome_tag
 from kernelforge.workflows.forge_loop.gate.insession_gate import GateMeasurement, GateScope, InSessionGate
 from kernelforge.workflows.forge_loop.roles.implementer_method import (
-    correctness_method,
+    CORRECTNESS_ONLY_WORKING_METHOD,
+    PERFORMANCE_WORKING_METHOD,
     deadline_section,
-    performance_method,
+    render_method,
     session_budget_section,
 )
 from kernelforge.workflows.forge_loop.memory.lessons import SessionEnd
@@ -643,6 +644,12 @@ class ImplementerSetup:
     measurement: GateMeasurement = field(default_factory=GateMeasurement)
     session: SessionOptions = field(default_factory=SessionOptions)
 
+    @property
+    def paced(self) -> bool:
+        """Whether its sessions search for performance under their own stop check, and so work to a wrap-up minute."""
+        stop_check = self.session.insession_gate and self.measurement.driver_script
+        return bool(stop_check and self.session.insession_gate_stop_check) and not self.measurement.correctness_only
+
 
 @dataclass(frozen=True)
 class _SessionSurface:
@@ -777,6 +784,9 @@ def make_agent_fn(
     # Without the stop check the gate is protection only: its hooks deny an edit or a shell write to the measurement
     # surface while the session runs, and nothing decides when the session may end.
     gate_stop_check = gate_enabled and session.insession_gate_stop_check
+    # A session that searches for performance under its own stop check paces itself to a wrap-up minute; every other
+    # session is told only where its deadline falls.
+    time_section = session_budget_section if setup.paced else deadline_section
     gate_scope = _gate_scope(source_files, surface.is_repo_task, task.extra_protected_globs, extra_protected_paths)
     gate_system_prompt = _GATE_SYSTEM_PROMPT.format(
         **prompt_sections,
@@ -784,8 +794,10 @@ def make_agent_fn(
         driver_run=driver_run,
         case_aggregate=measurement.case_aggregate.value,
         score_formula=measurement.case_aggregate.formula,
-        working_method=(correctness_method if measurement.correctness_only else performance_method)(
-            driver_run=driver_run, max_blocks=measurement.max_blocks
+        working_method=render_method(
+            CORRECTNESS_ONLY_WORKING_METHOD if measurement.correctness_only else PERFORMANCE_WORKING_METHOD,
+            driver_run=driver_run,
+            max_blocks=measurement.max_blocks,
         ),
         backend_rule=(
             "Optimize only the selected assembly; keep the frontend, launcher and ABI frozen."
@@ -820,10 +832,6 @@ def make_agent_fn(
 
         def prepare_session() -> tuple[InSessionGate | None, AgentRunSpec]:
             """Build this session's in-session gate (None when disabled) and the run spec handed to the backend."""
-            # A session that searches for performance under its own stop check paces itself to a wrap-up minute;
-            # every other session is told only where its deadline falls.
-            paced = gate_stop_check and not measurement.correctness_only
-            time_section = session_budget_section if paced else deadline_section
             prompt = _session_user_prompt(kernel_path, experiment_history, surface, time_section(session_deadline_sec))
 
             # One fixed interaction budget per candidate Session.

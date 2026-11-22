@@ -117,14 +117,9 @@ CORRECTNESS_ONLY_WORKING_METHOD = """\
 """
 
 
-def correctness_method(*, driver_run: str, max_blocks: int) -> str:
-    """The numbered method of a session whose gate requires correctness alone."""
-    return CORRECTNESS_ONLY_WORKING_METHOD.format(driver_run=driver_run, max_blocks=max_blocks)
-
-
-def performance_method(*, driver_run: str, max_blocks: int) -> str:
-    """The numbered method of a session whose gate requires performance, with its pacing thresholds filled in."""
-    return PERFORMANCE_WORKING_METHOD.format(
+def render_method(template: str, *, driver_run: str, max_blocks: int) -> str:
+    """One of the two working methods above, with the driver command and every threshold it names filled in."""
+    return template.format(
         driver_run=driver_run,
         max_blocks=max_blocks,
         direction_stall=DIRECTION_STALL_CHANGES,
