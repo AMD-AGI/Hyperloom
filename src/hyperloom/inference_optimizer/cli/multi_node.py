@@ -8,9 +8,26 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Any
+from pathlib import Path
+from typing import Any, NoReturn
+
+from inference_suite.contracts.base_launch import BaseLaunch, LaunchQuery
+from inference_suite.multinode import NODE_LIST_ENV, RECORD_NAME, client_base
 
 from ..multi_node import TopologyHandoffError, topology_file_overlay
+from ..multi_node.pd_session import (
+    INFERA,
+    PD_BACKENDS,
+    PD_DIGEST_KEY,
+    PD_LAUNCH_KEY,
+    SSH_BACKENDS,
+    PdSessionError,
+    freeze_launch,
+    handed_node_list,
+    node_list_backend,
+    stamp_launch_pods,
+    verified_launch,
+)
 
 
 def _topology_file_overlay() -> dict[str, str] | None:
@@ -47,26 +64,99 @@ def _resolve_gpus_per_node(args: argparse.Namespace) -> int:
     return int(from_file) if from_file else 8
 
 
+def _hand_off_node_list() -> Any:
+    """The node list handed over, or ``None``; a malformed one exits 2."""
+    try:
+        return handed_node_list()
+    except TopologyHandoffError as exc:
+        _exit_refused(str(exc))
+
+
+def _default_mn_backend() -> str:
+    """The backend a node list's frontend names, else rayjob."""
+    nodes = _hand_off_node_list()
+    return node_list_backend(nodes) if nodes is not None else "rayjob"
+
+
 def _resolve_mn_backend(args: argparse.Namespace) -> str:
-    """Multi-node backend selector: --mn-backend > $TOPOLOGY_HANDOFF_FILE backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob."""
+    """Multi-node backend selector: --mn-backend > $TOPOLOGY_HANDOFF_FILE backend > $INFERENCE_OPTIMIZER_MN_BACKEND >
+    the node list's frontend > rayjob."""
     from_file = (_topology_file_overlay() or {}).get("INFERENCE_OPTIMIZER_MN_BACKEND", "")
     backend = (
         (getattr(args, "mn_backend", None) or "").strip()
         or from_file
         or os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "").strip()
         or os.environ.get("MN_BACKEND", "").strip()
-        or "rayjob"
+        or _default_mn_backend()
     ).lower()
-    if backend not in ("rayjob", "infera"):
-        print(
-            f"ERROR: --mn-backend must be 'rayjob' or 'infera', got {backend!r}",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+    choices = ("rayjob", *SSH_BACKENDS)
+    if backend not in choices:
+        _exit_refused(f"--mn-backend must be one of {', '.join(choices)}, got {backend!r}")
     return backend
 
 
-def _prepare_multi_node_state(args: argparse.Namespace) -> None:
+def is_pd_session(args: argparse.Namespace) -> bool:
+    """Whether a ``--nodes >= 2`` run serves a node-list cluster the suite launches: an atomesh or sglangrouter one,
+    or an Infera one handed over as a node list."""
+    if int(getattr(args, "nodes", 1) or 1) < 2:
+        return False
+    backend = _resolve_mn_backend(args)
+    return backend in PD_BACKENDS or (backend == INFERA and _hand_off_node_list() is not None)
+
+
+def freeze_pd_session_launch(
+    session_dir: Path, args: argparse.Namespace, session: LaunchQuery, inferencex_commit: str = ""
+) -> BaseLaunch:
+    """Resolve a fresh node-list session's launch on the handed-over cluster and freeze it in ``session_dir``, with the
+    client base its rounds measure it with, at whose topology the session then runs; exits 2 when no node list is
+    handed over, the session's ``--pd-mode`` is not the node list's mode, or no source serves the session."""
+    from ..multi_node import session_pd_mode
+    from ..session.base_launch import write_base_launch
+
+    nodes = _hand_off_node_list()
+    if nodes is None:
+        _exit_refused(f"--mn-backend {_resolve_mn_backend(args)} needs the {NODE_LIST_ENV} hand-off")
+    pd_mode = session_pd_mode()
+    if pd_mode != nodes.mode.value:
+        _exit_refused(
+            f"the handed-over cluster is {nodes.mode.value}, the session {pd_mode}; pass --pd-mode {nodes.mode.value}"
+        )
+    try:
+        launch = freeze_launch(session_dir, session, nodes, inferencex_commit)
+    except PdSessionError as exc:
+        _exit_refused(str(exc))
+    print(f"multi-node: froze the {launch.mode.value} launch {launch.digest()} from {launch.source}")
+    base = client_base(launch, session)
+    write_base_launch(session_dir, base)
+    args.tp, args.ep = base.topology.tp, base.topology.ep
+    os.environ["TP"], os.environ["EP"] = str(base.topology.tp), str(base.topology.ep)
+    return base
+
+
+def _exit_refused(problem: str) -> NoReturn:
+    """Print ``problem`` and exit 2."""
+    print(f"ERROR: {problem}", file=sys.stderr)
+    sys.exit(2)
+
+
+def _bind_pd_launch(ext_state: dict[str, Any], session_dir: Path | None) -> None:
+    """Record the session's frozen PD launch in ``ext_state``; exits 2 when it is missing or not the one frozen."""
+    from ..multi_node import load_multi_node_state
+
+    if session_dir is None:
+        _exit_refused("a PD session binds its frozen launch to a session directory, and none is open")
+    frozen = str(load_multi_node_state().get(PD_DIGEST_KEY) or "")
+    record = session_dir / RECORD_NAME
+    try:
+        launch = verified_launch(record, frozen)
+        ext_state[PD_LAUNCH_KEY] = str(record)
+        ext_state[PD_DIGEST_KEY] = launch.digest()
+        stamp_launch_pods(ext_state)
+    except PdSessionError as exc:
+        _exit_refused(str(exc))
+
+
+def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path | None = None) -> None:
     """Adopt the platform-provisioned cluster for a ``--nodes >= 2`` run."""
     nodes = max(1, int(args.nodes))
     if nodes < 2:
@@ -81,24 +171,23 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
     from hyperloom.orchestrator.actions.executors._multi_node_env import export_ray_address_to_os
 
     if not _hand_off_service_url():
-        print(
-            "ERROR: --nodes >= 2 requires a cluster provisioned by the platform. "
+        _exit_refused(
+            "--nodes >= 2 requires a cluster provisioned by the platform. "
             "Set HYPERLOOM_MN_EXT_SERVICE_URL (plus HYPERLOOM_MN_EXT_SSH_KEY and "
             "one of _PREFILL_IPS / _DECODE_IPS / _WORKER_IPS for infera, or "
             "HYPERLOOM_MN_EXT_HEAD_IP for rayjob); see multi_node/SKILL.md "
-            '"Cluster hand-off".',
-            file=sys.stderr,
+            '"Cluster hand-off".'
         )
-        sys.exit(2)
 
     ext_state = build_external_state_from_env()
     ext_state["backend"] = _resolve_mn_backend(args)
     _reject_unusable_backend(ext_state)
+    if is_pd_session(args):
+        _bind_pd_launch(ext_state, session_dir)
     try:
         _save_state(ext_state)
     except OSError as exc:
-        print(f"ERROR: cannot write multi-node state: {exc}", file=sys.stderr)
-        sys.exit(2)
+        _exit_refused(f"cannot write multi-node state: {exc}")
     os.environ["BENCHMARK_BASE_URL"] = ext_state["service_url"]
     export_ray_address_to_os()
     # Report server *control*, not SSH specifically: rayjob restarts through the Ray dashboard with no SSH at all, so
@@ -135,27 +224,25 @@ def _reject_unusable_backend(ext_state: dict[str, Any]) -> None:
     """Exit 2 when the selected backend cannot control this hand-off; flag a benchmark-only rayjob."""
     from ..multi_node._internal.external_state import external_has_ssh_control
 
+    if ext_state["backend"] in PD_BACKENDS and not ext_state.get("router_pod_ip"):
+        _exit_refused(f"--mn-backend {ext_state['backend']} needs the {NODE_LIST_ENV} hand-off of a PD cluster")
     if ext_state["backend"] == "infera" and not external_has_ssh_control():
-        print(
-            "ERROR: the infera backend requires SSH control. Set "
+        _exit_refused(
+            "the infera backend requires SSH control. Set "
             "HYPERLOOM_MN_EXT_SSH_KEY plus HYPERLOOM_MN_EXT_PREFILL_IPS/"
-            "DECODE_IPS (or WORKER_IPS). rayjob uses Ray, not SSH.",
-            file=sys.stderr,
+            "DECODE_IPS (or WORKER_IPS). rayjob uses Ray, not SSH."
         )
-        sys.exit(2)
     # The mirror image. --mn-backend defaults to rayjob, so an infera-shaped hand-off whose operator forgot the flag
     # arrives here as rayjob and would report server_control=yes -- SSH control is real, it is simply not the control
     # this backend uses.
     if ext_state["backend"] == "rayjob" and not ext_state.get("head_pod_ip"):
         if external_has_ssh_control():
-            print(
-                "ERROR: --mn-backend rayjob (the default) needs "
+            _exit_refused(
+                "--mn-backend rayjob (the default) needs "
                 "HYPERLOOM_MN_EXT_HEAD_IP, but this hand-off carries SSH "
                 "credentials and GPU pod IPs instead -- it is an infera "
-                "cluster. Pass --mn-backend infera.",
-                file=sys.stderr,
+                "cluster. Pass --mn-backend infera."
             )
-            sys.exit(2)
         print(
             "multi-node: rayjob with no HYPERLOOM_MN_EXT_HEAD_IP -- this cluster cannot be "
             "restarted, so the run is benchmark-only (see the warning below).",

@@ -122,6 +122,8 @@ def add_framework_arguments(opt: argparse.ArgumentParser) -> None:
 
 def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
     """Add the node-count and multi-node backend flags of ``optimize``."""
+    from ..multi_node.pd_session import SSH_BACKENDS
+
     opt.add_argument(
         "--nodes",
         type=int,
@@ -136,12 +138,14 @@ def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
     )
     opt.add_argument(
         "--mn-backend",
-        choices=("rayjob", "infera"),
+        choices=("rayjob", *SSH_BACKENDS),
         default=None,
         help="Multi-node backend when --nodes>=2: 'rayjob' (default, Ray "
-        "head+workers) or 'infera' (idle InferaDeployment + SSH control "
-        "plane). Defaults to rayjob when omitted. Single-node runs ignore "
-        "this flag.",
+        "head+workers), 'infera' (idle InferaDeployment + SSH control "
+        "plane), or 'atomesh' / 'sglangrouter' (a PD-disaggregated cluster "
+        "handed over as $HYPERLOOM_MN_NODE_LIST, launched over SSH). Defaults "
+        "to the node list's frontend, else rayjob, when omitted. Single-node "
+        "runs ignore this flag.",
     )
     opt.add_argument(
         "--gpus-per-node",

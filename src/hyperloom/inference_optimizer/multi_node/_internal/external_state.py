@@ -13,8 +13,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+from inference_suite.multinode import NODE_LIST_ENV
+
 from ..state_paths import resolve_state_file, state_file_safe_to_read
 from .infera_support import ssh_role_port_offset
+from . import pd_handoff
 from .ssh_client import DEFAULT_SSH_PORT
 from .topology_file import Lookup, handoff_lookup
 
@@ -29,6 +32,8 @@ _SESSION_KEY_PREFIX = "last_"
 _HANDOFF_CARRIED_KEYS = (
     "pd_prefill_url",
     "pd_decode_url",
+    pd_handoff.PD_LAUNCH_KEY,
+    pd_handoff.PD_DIGEST_KEY,
 )
 
 # The fields that identify *which* cluster a state describes.
@@ -105,8 +110,22 @@ def _service_url(get: Lookup) -> str:
     return u if u.startswith(("http://", "https://")) else ""
 
 
+def _pd_backend(nodes: Any) -> str:
+    """The PD backend the operator names, else the one the node list's frontend names."""
+    explicit = handoff_lookup()("INFERENCE_OPTIMIZER_MN_BACKEND").strip().lower()
+    return explicit if explicit in pd_handoff.PD_BACKENDS else pd_handoff.node_list_backend(nodes)
+
+
+def session_pd_mode() -> str:
+    """The session's PD mode as ``optimize`` mirrors ``--pd-mode`` into ``$PD_MODE``; aggregated when unset."""
+    return (os.environ.get("PD_MODE", "") or "aggregated").strip().lower()
+
+
 def external_service_url() -> str:
     """Return the handed-over cluster's benchmark URL, or empty when there is none."""
+    nodes = pd_handoff.handed_node_list()
+    if nodes is not None:
+        return nodes.service_url
     return _service_url(handoff_lookup())
 
 
@@ -137,6 +156,9 @@ def _record_pd_split(state: dict[str, Any], pd_mode: str, pn: int, dn: int) -> N
 
 def build_external_state_from_env() -> dict[str, Any]:
     """Synthesize multi-node state from ``TOPOLOGY_HANDOFF_FILE`` or, without it, ``HYPERLOOM_MN_EXT_*`` env vars."""
+    node_list = pd_handoff.handed_node_list()
+    if node_list is not None:
+        return pd_handoff.pd_state(node_list, _pd_backend(node_list))
     get = handoff_lookup()
     url = _service_url(get)
     if not url:
@@ -156,7 +178,7 @@ def build_external_state_from_env() -> dict[str, Any]:
     known_hosts = get("HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS").strip()
     gpn = _int_env("INFERENCE_OPTIMIZER_GPUS_PER_NODE", 8)
     # From the --pd-mode flag, mirrored into the env by `optimize`.
-    pd_mode = (os.environ.get("PD_MODE", "") or "aggregated").strip().lower()
+    pd_mode = session_pd_mode()
 
     prefill, decode, worker = (
         _ips("HYPERLOOM_MN_EXT_PREFILL_IPS"),
@@ -207,6 +229,9 @@ def build_external_state_from_env() -> dict[str, Any]:
 
 def external_has_ssh_control() -> bool:
     """True when the hand-off supplies an SSH key plus at least one GPU pod IP."""
+    nodes = pd_handoff.handed_node_list()
+    if nodes is not None:
+        return nodes.ssh is not None
     get = handoff_lookup()
     if not _service_url(get):
         return False
@@ -226,9 +251,10 @@ def external_has_server_control() -> bool:
     """True when external mode can restart servers (SSH for infera, head IP for rayjob)."""
     if not external_service_url():
         return False
-    if external_has_ssh_control():
-        return True
-    return bool(handoff_lookup()("HYPERLOOM_MN_EXT_HEAD_IP").strip())
+    get = handoff_lookup()
+    return external_has_ssh_control() or (
+        not get(NODE_LIST_ENV).strip() and bool(get("HYPERLOOM_MN_EXT_HEAD_IP").strip())
+    )
 
 
 def _read_state_file(path: Path) -> dict[str, Any]:
@@ -267,6 +293,9 @@ def _carry_disk_bookkeeping(disk: dict[str, Any], ext_state: dict[str, Any]) -> 
         carried = key.startswith(_SESSION_KEY_PREFIX) or key in _HANDOFF_CARRIED_KEYS
         if carried and key not in ext_state:
             ext_state[key] = value
+    # A node-list cluster's pods carry the commands of its launch, which the hand-off alone does not give.
+    if ext_state.get(pd_handoff.NODE_LIST_KEY) is True and disk.get(pd_handoff.PODS_KEY):
+        ext_state.update({key: disk[key] for key in pd_handoff.LAUNCH_POD_KEYS if key in disk})
 
 
 def load_multi_node_state() -> dict[str, Any]:

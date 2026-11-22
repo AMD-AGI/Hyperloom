@@ -37,6 +37,7 @@ from .state_paths import _ensure_runtime_dir, resolve_state_file
 from ._internal.env_safety import filter_forward_env
 from ._internal.external_state import external_service_url, load_multi_node_state
 from ._internal.serving_probe import cluster_is_serving
+from .pd_session import PdSessionError, is_pd_state, launch_options, restart_round, stamp_launch_pods, stop_cluster
 
 # Default poll budget sized under the sandbox 120s ceiling.
 _DEFAULT_POLL_INTERVAL_S = 6
@@ -1294,9 +1295,50 @@ def _restart_single_node(args: argparse.Namespace, state: dict) -> int:
     return 0
 
 
+def restart_pd_round(shared_args: str, ready_timeout_s: int) -> Any:
+    """Restart this PD session's cluster with one round's args over its frozen launch and record the pods of the
+    launch as run in the state file; returns the launch as run.
+
+    Raises:
+        PdSessionError: the launch cannot be verified, a host refused, or the cluster did not come up.
+    """
+    from .commands.infera import _collect_forward_env
+
+    state = _load_state()
+    ran = restart_round(state, shared_args, launch_options(_collect_forward_env(), ready_timeout_s))
+    stamp_launch_pods(state, ran)
+    _save_state(state)
+    return ran
+
+
+def _pd_restart_server(args: argparse.Namespace) -> int:
+    """Restart a PD session's cluster with ``--extra-args`` over its frozen launch."""
+    try:
+        ran = restart_pd_round(args.extra_args, _poll_timeout_from_args(args))
+    except PdSessionError as exc:
+        err(f"restart-server: {exc}")
+        return 1
+    info(f"restart-server: PD cluster up, launch {ran.digest()}")
+    return 0
+
+
+def _pd_kill_inference(state: dict[str, Any]) -> int:
+    """Stop a PD session's router and engines."""
+    try:
+        stop_cluster(state)
+    except PdSessionError as exc:
+        err(f"kill-inference: {exc}")
+        return 1
+    info("kill-inference: PD cluster stopped")
+    return 0
+
+
 def cmd_restart_server(args: argparse.Namespace) -> int:
     """Kill any prior vllm/sglang server and launch a new one."""
-    if _load_state().get("backend") == "infera":
+    state = _load_state()
+    if is_pd_state(state):
+        return _pd_restart_server(args)
+    if state.get("backend") == "infera":
         return _infera_restart_server(args)
     rejected = _reject_unsupported_restart_args(args)
     if rejected:
@@ -1316,7 +1358,10 @@ def _record_kill_and_invalidate_launch(state: dict) -> None:
 
 def cmd_kill_inference(args: argparse.Namespace) -> int:
     """Kill vllm/sglang on the RayJob without starting replacements."""
-    if _load_state().get("backend") == "infera":
+    loaded = _load_state()
+    if is_pd_state(loaded):
+        return _pd_kill_inference(loaded)
+    if loaded.get("backend") == "infera":
         return _infera_kill_inference(args)
     state = _require_state("head_pod_ip")
     nnodes = int(state.get("nodes") or 1)

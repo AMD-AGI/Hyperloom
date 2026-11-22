@@ -1565,7 +1565,7 @@ async def _open_knowledge_plane(
 
     bind_state_file_to_session(session_dir)
     if nodes_resolved >= 2:
-        await asyncio.to_thread(_prepare_multi_node_state, args)
+        await asyncio.to_thread(_prepare_multi_node_state, args, session_dir)
     return knowledge_plane
 
 

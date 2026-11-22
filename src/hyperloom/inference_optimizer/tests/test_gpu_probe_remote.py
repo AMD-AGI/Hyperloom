@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import argparse
 import subprocess
 import tempfile
 from pathlib import Path
@@ -13,7 +14,10 @@ import httpx
 import pytest
 
 from hyperloom.inference_optimizer.gpu_types import parse_gpu_type
+from hyperloom.inference_optimizer.cli import optimize_args
 from hyperloom.inference_optimizer.multi_node._internal import gpu_probe
+from hyperloom.inference_optimizer.multi_node.pd_session import SSH_BACKENDS
+from hyperloom.orchestrator.actions.executors import _multi_node_env
 
 
 @pytest.fixture(autouse=True)
@@ -225,3 +229,16 @@ def test_parse_gpu_type_preserves_exact_r9700_for_topology_validation():
     assert parse_gpu_type("AMD Radeon AI PRO R9700") == "r9700"
     assert parse_gpu_type("AMD Radeon AI PRO R9700S") is None
     assert parse_gpu_type("gfx1201") is None
+
+
+@pytest.mark.parametrize("backend", SSH_BACKENDS)
+def test_every_ssh_backend_is_probed_routed_and_accepted_over_ssh(monkeypatch, backend):
+    monkeypatch.setattr(gpu_probe, "build_external_state_from_env", lambda: {"backend": backend})
+    monkeypatch.setattr(gpu_probe, "_probe_via_infera_ssh", lambda state, timeout_s: "mi355x")
+    assert gpu_probe.remote_autodetect_gpu_type() == "mi355x"
+    state = {"backend": backend, "worker_pod_ips": ["w0"], "ssh_key_path": "/keys/id"}
+    monkeypatch.setattr(_multi_node_env, "_read_state", lambda: state)
+    assert _multi_node_env.infera_ssh_env_from_state()["MN_SSH_HOST"] == "w0"
+    parser = argparse.ArgumentParser()
+    optimize_args.add_cluster_arguments(parser)
+    assert parser.parse_args(["--mn-backend", backend]).mn_backend == backend

@@ -127,7 +127,7 @@ def _attach_baseline_launch_evidence(
     )
 
 
-def _attempt_failure(error_class: str, exc: Exception, output_dir: Path) -> dict[str, Any]:
+def _attempt_failure(error_class: str, exc: Exception | str, output_dir: Path) -> dict[str, Any]:
     """The failed result of an attempt refused before any round ran."""
     return {
         "status": "failed",
@@ -373,6 +373,10 @@ class _BenchmarkLaunchMixin:
             await asyncio.to_thread(
                 self._observe_bringup, round_, attempt_index, layout.server_log, ran.report.failure_detail or ""
             )
+        lost = await self._multi_node_engines_lost()
+        if lost:
+            log.warning("baseline_executor: %s; error_class=mn_engine_lost.", lost)
+            return _attempt_failure("mn_engine_lost", lost, round_.output_dir) | round_.capture_meta
         RoundFolder.read(layout.root).write_gpu_metrics(round_.output_dir)
         measurement = extract_benchmark_measurement(None, workspace=layout.root, subprocess_started_unix=started_unix)
         finished = _BenchProcess(
@@ -392,6 +396,17 @@ class _BenchmarkLaunchMixin:
         result = await self._succeeded_round_result(ran_round, finished, measurement, warnings)
         self._stamp_round_quality(ran_round, result, measurement, warnings)
         return result
+
+    @staticmethod
+    async def _multi_node_engines_lost() -> str:
+        """Why a multi-node round's engines are gone (replaced or exited), or ``""`` when they run."""
+        from .._multi_node_env import _read_state, is_pd_session
+
+        if not is_pd_session():
+            return ""
+        from hyperloom.inference_optimizer.multi_node.pd_session import engines_lost
+
+        return await asyncio.to_thread(engines_lost, _read_state())
 
     def _record_argv_refusal(self, round_: _BenchmarkRound, attempt_index: int, detail: str) -> None:
         """Record the parser's refusal at the parse rung, where enablement reads it as a terminal no patch repairs."""
