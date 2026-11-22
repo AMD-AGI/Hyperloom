@@ -9,6 +9,8 @@ import dataclasses
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from kernelforge.evaluation.scoring import KEEP_MEASUREMENT_COUNT
 from kernelforge.utils.git import GitError
 from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement, GateScope
@@ -164,6 +166,53 @@ def test_on_pre_bash_denies_protected_write(tmp_path):
         gate._on_pre_bash({"tool_name": "Bash", "tool_input": {"command": "echo x > forge_driver.py"}}, None, None)
     )
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pkill -f arena_forge_driver",
+        "pkill -9 -f 'g.py 1 b9'",
+        "killall python3",
+        "timeout 60 python3 sweep.py || pkill -f sweep.py",
+        "kill -9 $(pgrep -f rocprofv3) 2>/dev/null",
+        "pgrep -f bench | xargs -r kill",
+        "ps aux | grep sweep | awk '{print $2}' | xargs kill -9",
+        "bash -c 'pkill python'",
+        "kill -9 -1",
+        "python3 -c \"import subprocess; subprocess.run(['pkill', '-f', 'bench'])\"",
+    ],
+)
+def test_on_pre_bash_denies_a_kill_that_chooses_its_targets_by_name(tmp_path, command):
+    """Other campaigns on the host run the same tools, so a kill by name is never scoped to this session."""
+    gate, _ = _gate(tmp_path)
+
+    out = _run(gate._on_pre_bash({"tool_name": "Bash", "tool_input": {"command": command}}, None, None))
+
+    decision = out["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert "kernelforge.utils.session_kill '<pattern>'" in decision["permissionDecisionReason"]
+    assert any("DENIED process kill" in finding for finding in gate.findings)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "kill 12345",
+        "kill -9 $!",
+        "kill %1",
+        "kill -TERM $(cat sweep.pid)",
+        "kill $(jobs -p)",
+        "kill -l",
+        "pgrep -f sweep.py",
+        "ps aux | grep rocprofv3",
+        "python3 -m kernelforge.utils.session_kill sweep.py",
+    ],
+)
+def test_on_pre_bash_allows_a_kill_of_named_processes_and_a_search_that_kills_nothing(tmp_path, command):
+    gate, _ = _gate(tmp_path)
+
+    assert _run(gate._on_pre_bash({"tool_name": "Bash", "tool_input": {"command": command}}, None, None)) == {}
 
 
 def test_on_pre_bash_allows_readonly(tmp_path):

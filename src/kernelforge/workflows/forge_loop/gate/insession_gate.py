@@ -18,6 +18,7 @@ from typing import Any
 from kernelforge.agent_backends.workspace_guard import remove_filesystem_path
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS, PROTECTED_GLOBS
 from kernelforge.utils.git import GitError, git, git_bytes
+from kernelforge.utils.session_kill import pattern_kill_denial
 from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement, GateScope
 from kernelforge.workflows.forge_loop.gate.insession_scope import (
     _BASH_REDIRECT_TARGET,
@@ -25,12 +26,10 @@ from kernelforge.workflows.forge_loop.gate.insession_scope import (
     _INLINE_WRITE_INTENT,
     _PYTHON_VERB,
     _SHELL_VERBS,
-    _blank_heredocs,
-    _blank_quoted_payloads,
-    _heredoc_payloads,
     _is_disposable_redirect_target,
-    _python_command_payloads,
     _python_write_targets,
+    host_wide_kill_reason,
+    inline_programs,
     _short_option_value,
     _simple_commands,
     _unquote,
@@ -571,17 +570,11 @@ class InSessionGate:
             return ""
         # Every inline Python payload is parsed on its own, then blanked out so the
         # textual scans below never read a quoted program as shell text.
-        remainder = command
-        for find_payloads, blank in (
-            (_heredoc_payloads, _blank_heredocs),
-            (_python_command_payloads, _blank_quoted_payloads),
-        ):
-            payloads = find_payloads(remainder)
-            for source, _start, _end in payloads:
-                reason = self._python_write_deny_reason(source)
-                if reason:
-                    return reason
-            remainder = blank(remainder, [(start, end) for _source, start, end in payloads])
+        sources, remainder = inline_programs(command)
+        for source in sources:
+            reason = self._python_write_deny_reason(source)
+            if reason:
+                return reason
         return (
             self._redirect_deny_reason(remainder)
             or self._write_verb_deny_reason(remainder)
@@ -689,6 +682,14 @@ class InSessionGate:
                     "may sit silent before it starts; that wait is another "
                     "session's benchmark, not a hang."
                 ),
+            )
+        reason = host_wide_kill_reason(command)
+        if reason:
+            return self._deny_bash(
+                command,
+                reason=reason,
+                finding="DENIED process kill that chooses its targets by name across the host",
+                told=pattern_kill_denial(reason),
             )
         return {}
 

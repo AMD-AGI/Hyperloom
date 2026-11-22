@@ -593,6 +593,35 @@ def _session_processes(mark: SessionMark) -> dict[int, int]:
     return {pid: table[pid].starttime for pid in found if table[pid].state != "Z"}
 
 
+def _command_line(pid: int) -> str:
+    """One process's command line as a single string, empty once it is gone."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            return handle.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+    except OSError:
+        return ""
+
+
+def own_session_processes() -> dict[int, str]:
+    """The live processes of the agent session this process runs in, pid -> command line.
+
+    This process and its ancestors are left out -- the shell that ran it and the agent CLI above that -- so what
+    comes back is what the session started beside them. Empty outside a marked session.
+    """
+    token = os.environ.get(_SESSION_ENV, "")
+    table = _process_table()
+    lineage: set[int] = set()
+    pid = os.getpid()
+    while pid in table and pid not in lineage:
+        lineage.add(pid)
+        pid = table[pid].ppid
+    return {
+        proc.pid: _command_line(proc.pid)
+        for proc in table.values()
+        if proc.pid not in lineage and proc.state != "Z" and _carries(proc.pid, _SESSION_ENV, token)
+    }
+
+
 def _signal(pid: int, starttime: int, sig: signal.Signals) -> None:
     """Signal one process, and only while it is still the one identified."""
     proc = _read_proc(pid)
@@ -703,6 +732,7 @@ __all__ = [
     "SessionMark",
     "device_holders",
     "install_child_subreaper",
+    "own_session_processes",
     "processes_under",
     "reap_processes_under",
     "reap_session_processes",

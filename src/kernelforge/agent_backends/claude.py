@@ -14,7 +14,9 @@ import re
 import shutil
 import subprocess
 import sys
-from contextlib import suppress
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -254,6 +256,37 @@ def _sdk_hooks(hooks: AgentHooks, hook_type: Any) -> dict[str, list[Any]]:
         if entries:
             translated[name] = [_hook_matcher(entry, hook_type) for entry in entries]
     return translated
+
+
+def _sdk_reads_prompt_files() -> bool:
+    """Whether the installed SDK can hand the CLI its system prompt as a file."""
+    try:
+        from claude_agent_sdk import types as sdk_types
+    except ImportError:
+        return False
+    return hasattr(sdk_types, "SystemPromptFile")
+
+
+@contextmanager
+def _system_prompt_off_the_command_line(spec: AgentRunSpec) -> Iterator[AgentRunSpec]:
+    """Give the CLI its system prompt in a private file for the length of one query, instead of as an argument.
+
+    A command line is visible to every process on the host and is what a kill by pattern is matched against. The
+    system prompt names the driver, the profiler and the tools a session uses, so a session elsewhere on the host
+    that kills one of those by name would otherwise match this CLI as well.
+    """
+    if not spec.system_prompt or "system_prompt" in spec.provider_options or not _sdk_reads_prompt_files():
+        yield spec
+        return
+    handle, path = tempfile.mkstemp(prefix="forge-system-prompt-", suffix=".md")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(spec.system_prompt)
+        on_disk = {"type": "file", "path": path}
+        yield replace(spec, provider_options={**spec.provider_options, "system_prompt": on_disk})
+    finally:
+        with suppress(OSError):
+            os.unlink(path)
 
 
 def _load_claude_sdk() -> tuple[Any, Any]:
@@ -789,7 +822,8 @@ class ClaudeBackend:
     async def run(self, spec: AgentRunSpec, usage: Any = None) -> AgentRunResult:
         """Run one Claude SDK query and normalize its streamed messages."""
         spec = spec.resolved(self.runtime)
-        return await self._query_once(spec, _first_prompt(spec), usage=usage)
+        with _system_prompt_off_the_command_line(spec) as launch:
+            return await self._query_once(launch, _first_prompt(spec), usage=usage)
 
     async def resume(
         self,
@@ -802,12 +836,13 @@ class ClaudeBackend:
         if not session_id.strip():
             raise ClaudeBackendError("Claude resume requires a session ID")
         spec = spec.resolved(self.runtime)
-        result = await self._query_once(
-            spec,
-            feedback,
-            usage=usage,
-            resume_session_id=session_id.strip(),
-        )
+        with _system_prompt_off_the_command_line(spec) as launch:
+            result = await self._query_once(
+                launch,
+                feedback,
+                usage=usage,
+                resume_session_id=session_id.strip(),
+            )
         if not result.session_id:
             result.session_id = session_id.strip()
         return result

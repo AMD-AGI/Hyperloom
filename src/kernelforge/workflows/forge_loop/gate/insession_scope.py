@@ -47,6 +47,14 @@ _BASH_CMD_WRAPPERS = frozenset(
         "xargs",
     }
 )
+# Verbs that choose the processes they signal by name or pattern, out of every process on the host.
+_PATTERN_KILL_VERBS = frozenset({"pkill", "killall", "killall5", "skill"})
+# Verbs whose output is a list of processes found by name; a ``kill`` fed from one is a pattern kill in two steps.
+_PROCESS_SEARCH_VERBS = frozenset({"pgrep", "pidof", "ps"})
+# ``kill`` options that only ask a question, so naming no process with them signals nothing.
+_KILL_QUERY_OPTIONS = frozenset({"-l", "-L", "--list", "--table", "--help", "--version", "-V"})
+# The same verbs named inside an inline program, where no shell word carries them.
+_INLINE_PATTERN_KILL = re.compile(r"\b(?:pkill|killall)\b")
 # A shell variable assignment, which is what precedes a command's verb.
 _SHELL_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # In-process (python/perl) WRITE APIs — there is no shell verb to key off, so these are detected textually and paired
@@ -410,3 +418,59 @@ def _python_write_targets(source: str) -> tuple[set[str], bool, bool]:
         if targets is not None:
             written.record(targets, constants)
     return written.paths, written.ambiguous, written.found_write
+
+
+def inline_programs(command: str) -> tuple[list[str], str]:
+    """The inline Python programs a shell command carries, and the command with each of them blanked out.
+
+    Heredoc bodies come first and ``python -c`` payloads are then found in what is left, so a quoted program is
+    never read as shell text and a heredoc is never read as a quoted word.
+    """
+    sources: list[str] = []
+    remainder = command
+    for find_payloads, blank in (
+        (_heredoc_payloads, _blank_heredocs),
+        (_python_command_payloads, _blank_quoted_payloads),
+    ):
+        payloads = find_payloads(remainder)
+        sources.extend(source for source, _start, _end in payloads)
+        remainder = blank(remainder, [(start, end) for _source, start, end in payloads])
+    return sources, remainder
+
+
+def _kill_names_no_process(args: Sequence[str]) -> bool:
+    """Whether a ``kill`` is given no process of its own: its targets then come from a pipe or are every process."""
+    if any(arg in _KILL_QUERY_OPTIONS for arg in args):
+        return False
+    named = list(args[args.index("--") + 1 :]) if "--" in args else [arg for arg in args if not arg.startswith("-")]
+    return not named
+
+
+def _shell_kill_reason(text: str) -> str:
+    for verb, args in _simple_commands(text):
+        if verb in _PATTERN_KILL_VERBS:
+            return f"`{verb}` chooses its targets by name out of every process on the host"
+        if verb in _SHELL_VERBS:
+            nested = _shell_kill_reason(_short_option_value(args, "c"))
+            if nested:
+                return nested
+        if verb != "kill":
+            continue
+        search = next((word for word in map(_unquote, args) if word in _PROCESS_SEARCH_VERBS), "")
+        if search:
+            return f"`kill` takes its targets from `{search}`, a search by name over every process on the host"
+        if _kill_names_no_process(args):
+            return "`kill` names no process, so its targets come from a search or are every process"
+    return ""
+
+
+def host_wide_kill_reason(command: str) -> str:
+    """WHY a shell command signals processes it did not name one by one, or \"\" when it does not."""
+    if not command:
+        return ""
+    sources, remainder = inline_programs(command)
+    for source in sources:
+        found = _INLINE_PATTERN_KILL.search(source)
+        if found:
+            return f"an inline program runs `{found.group(0)}`, which chooses its targets by name"
+    return _shell_kill_reason(remainder)

@@ -25,6 +25,7 @@ from kernelforge.agent_backends.session_resume import run_session_with_api_resum
 from kernelforge.config import Config, resolve_agent_model
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS, TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.utils.gpu_arch import Profiler, arch_profile
+from kernelforge.utils.session_kill import session_kill_command
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.workflows.forge_loop.gate.gate_tag import gate_outcome_tag
 from kernelforge.workflows.forge_loop.gate.insession_gate import GateMeasurement, GateScope, InSessionGate
@@ -95,6 +96,15 @@ _DELIVERABLE_HYGIENE_RULE = (
     "configuration. The one exception is an option a library you call "
     "exposes no other way: set that, and say in a comment why there is no "
     "API for it."
+)
+
+# Other campaigns on the host run the same driver, profiler and script names, so a kill by name is never scoped to
+# the session that issues it. The gate denies one; this says what to use instead before the session reaches for it.
+_PROCESS_HYGIENE_RULE = (
+    "Stop only what this session started. `{session_kill} '<pattern>'` signals the processes of this session whose "
+    "command line matches, and no one else's; `kill <pid>` with a PID your own command reported is fine too. "
+    "`pkill`, `killall` and `kill` fed from `pgrep` or `ps` choose by name out of every process on the host, where "
+    "other campaigns run the same tools, and are denied."
 )
 
 _DRIVER_INTERPOSITION_SECTION = """
@@ -280,6 +290,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
   say so. An assumption about what the harness does is not a reason.
 - {workspace_hygiene_rule}
 - {deliverable_hygiene_rule}
+- {process_hygiene_rule}
 - As your VERY LAST output, after all edits/fixes are done and the kernel is in
   its final state, output one line starting with `PLAN:` — a SHORT headline
   (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
@@ -776,6 +787,7 @@ def make_agent_fn(
         "self_profiling_section": self_profiling_section,
         "workspace_hygiene_rule": _WORKSPACE_HYGIENE_RULE,
         "deliverable_hygiene_rule": _DELIVERABLE_HYGIENE_RULE,
+        "process_hygiene_rule": _PROCESS_HYGIENE_RULE.format(session_kill=session_kill_command()),
     }
     base_system_prompt = _BASE_SYSTEM_PROMPT.format(**prompt_sections)
 
