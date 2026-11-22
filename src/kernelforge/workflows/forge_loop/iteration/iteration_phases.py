@@ -545,7 +545,7 @@ class IterationPhasesMixin:
         resume would re-plan the round this one already spent.
         """
         iteration, session_sink = frame.iteration, frame.session_sink
-        optimization_plan_path, optimization_plan_created = round_plan.path, round_plan.executable
+        optimization_plan_path, optimization_plan_created = round_plan.path, round_plan.published
         self.results.append(result)
         self._apply_iteration_planning_state(
             optimization_plan_created=optimization_plan_created,

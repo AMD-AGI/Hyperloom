@@ -27,7 +27,9 @@ from kernelforge.workflows.forge_loop.policy.round_budget import (
 from kernelforge.workflows.forge_loop.search.search_policy import (
     OBJECTIVE_DISCOVER_NEW_MECHANISM,
     SEARCH_MODE_DIVERSIFY,
+    SEARCH_MODE_EXPLOIT,
     SearchPolicyDecision,
+    stall_thresholds,
 )
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
     _AMPLE_BUDGET_SEC,
@@ -65,10 +67,8 @@ def test_a_session_without_a_plan_is_told_to_choose_its_direction_from_the_evide
     assert "## Required optimization plan" not in histories[0]
 
 
-def test_a_stalled_search_sends_the_session_to_a_different_mechanism_and_counts_it_as_the_diversified_round(
-    tmp_path, monkeypatch
-):
-    """The session is the round's plan, so having run it is what returns the search to exploiting."""
+def test_a_stalled_search_sends_the_session_to_a_different_mechanism_and_leaves_the_cycle_open(tmp_path, monkeypatch):
+    """No plan was published, so nothing returns the search to exploiting until a session produces a new best."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     histories: list[str] = []
     monkeypatch.setattr(
@@ -86,7 +86,39 @@ def test_a_stalled_search_sends_the_session_to_a_different_mechanism_and_counts_
     )
 
     assert "choose a mechanism materially different from the ones already tried" in histories[0]
-    assert LoopStateStore(str(workspace)).load().diversification_cycle_completed is True
+    assert LoopStateStore(str(workspace)).load().diversification_cycle_completed is False
+
+
+def test_a_self_directed_loop_turns_after_one_session_without_a_new_best_and_is_reviewed_after_two(
+    tmp_path, monkeypatch
+):
+    """The stall lasts until a new best: every session in it is sent to a different mechanism, the third under a ruling."""
+    thresholds = stall_thresholds(planned_rounds=False)
+    loop, workspace = _make_loop(tmp_path, monkeypatch, supervise_after=thresholds.supervise_after, session_count=4)
+    loop.ic.diversify_after = thresholds.diversify_after
+    loop.config = SimpleNamespace(experiments_dir=workspace / "forge_experiments", gpu_target="gfx942")
+    histories: list[str] = []
+    modes: list[str] = []
+    reviewed_at: list[int] = []
+
+    async def supervisor(**kwargs):
+        reviewed_at.append(kwargs["iteration"])
+        return "\n# Supervisor Ruling\n\nRestructure the reduction.\n"
+
+    async def agent(_kernel_path, history, session_sink):
+        histories.append(history)
+        modes.append(loop._search_policy_decision.mode)
+        session_sink["plan"] = "inspect only"
+        return "No source change was needed."
+
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent, supervisor_fn=supervisor)))
+
+    assert modes == [SEARCH_MODE_EXPLOIT] + [SEARCH_MODE_DIVERSIFY] * 3
+    assert reviewed_at == [3]
+    assert "The search has gone 1 session(s) without a new best" in histories[1]
+    for under_ruling in histories[2:]:
+        assert "## Latest Supervisor Ruling" in under_ruling
+        assert "take one of its directions that no session since the ruling has measured" in under_ruling
 
 
 def test_a_session_under_a_supervisor_ruling_takes_its_search_mode_from_the_ruling(tmp_path, monkeypatch):
@@ -96,7 +128,8 @@ def test_a_session_under_a_supervisor_ruling_takes_its_search_mode_from_the_ruli
 
     direction = loop._session_direction("")
 
-    assert "The latest Supervisor Ruling below decides" in direction
+    assert "The latest Supervisor Ruling below is the planning authority while the search is stalled" in direction
+    assert "take one of its directions that no session since the ruling has measured" in direction
     assert "largest expected gain on the score" not in direction
 
 
@@ -140,7 +173,7 @@ def test_a_stalled_search_without_planning_hands_the_supervisors_ruling_to_the_n
     assert evidence[0]["latest_optimization_plan"] is None
     for later in histories[1:]:
         assert later.startswith("## Direction (yours to choose)")
-        assert "The latest Supervisor Ruling below decides" in later
+        assert "The latest Supervisor Ruling below is the planning authority" in later
         assert "## Latest Supervisor Ruling" in later
         assert "restructure the K loop" in later
 

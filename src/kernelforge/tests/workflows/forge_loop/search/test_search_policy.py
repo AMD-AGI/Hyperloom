@@ -10,12 +10,15 @@ from kernelforge.workflows.forge_loop.search.search_policy import (
     NO_CHANGES_ESCALATION_THRESHOLD,
     OBJECTIVE_DISCOVER_NEW_MECHANISM,
     OBJECTIVE_CANONICAL_GAIN,
+    PLANNED_ROUND_STALL,
     SEARCH_MODE_DIVERSIFY,
     SEARCH_MODE_EXPLOIT,
+    SELF_DIRECTED_STALL,
     RecentProgress,
     SearchPolicyDecision,
     SearchPolicyEngine,
     SearchState,
+    stall_thresholds,
 )
 
 
@@ -52,6 +55,51 @@ def test_stall_enters_diversify():
 
     assert stalled.mode == SEARCH_MODE_DIVERSIFY
     assert stalled.reason_codes == ("NO_IMPROVEMENT_STALL",)
+
+
+def test_a_self_directed_search_diversifies_after_one_iteration_without_a_new_best():
+    thresholds = stall_thresholds(planned_rounds=False)
+
+    decision = SearchPolicyEngine().decide(
+        SearchState(best_source="iteration", no_improvement_iters=1),
+        stall_threshold=thresholds.supervise_after,
+        diversify_after=thresholds.diversify_after,
+    )
+
+    assert thresholds == SELF_DIRECTED_STALL
+    assert decision.mode == SEARCH_MODE_DIVERSIFY
+    assert decision.reason_codes == ("NO_IMPROVEMENT_STALL",)
+
+
+def test_a_self_directed_search_stays_diversified_until_a_new_best():
+    """No plan is published, so no diversification cycle completes and nothing but a new best ends the stall."""
+    engine = SearchPolicyEngine()
+    thresholds = stall_thresholds(planned_rounds=False)
+
+    def decide(stalled: int) -> SearchPolicyDecision:
+        return engine.decide(
+            SearchState(best_source="iteration", no_improvement_iters=stalled, current_mode=SEARCH_MODE_DIVERSIFY),
+            stall_threshold=thresholds.supervise_after,
+            diversify_after=thresholds.diversify_after,
+        )
+
+    assert [decide(stalled).mode for stalled in (1, 2, 3, 4)] == [SEARCH_MODE_DIVERSIFY] * 4
+    assert decide(0).mode == SEARCH_MODE_EXPLOIT
+
+
+def test_a_planned_search_waits_for_the_supervisors_count_before_it_diversifies():
+    thresholds = stall_thresholds(planned_rounds=True)
+
+    def decide(stalled: int) -> SearchPolicyDecision:
+        return SearchPolicyEngine().decide(
+            SearchState(best_source="iteration", no_improvement_iters=stalled),
+            stall_threshold=thresholds.supervise_after,
+            diversify_after=thresholds.diversify_after,
+        )
+
+    assert thresholds == PLANNED_ROUND_STALL
+    assert decide(thresholds.diversify_after - 1).mode == SEARCH_MODE_EXPLOIT
+    assert decide(thresholds.diversify_after).mode == SEARCH_MODE_DIVERSIFY
 
 
 def test_completed_diversify_cycle_opens_bounded_exploit_window():

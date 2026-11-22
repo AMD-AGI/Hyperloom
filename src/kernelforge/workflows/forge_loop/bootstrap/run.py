@@ -611,8 +611,10 @@ def _agent_session(inputs: _RunInputs, opened: _OpenedCampaign) -> _AgentSession
 def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig) -> IterationConfig:
     """The loop's configuration: the campaign's task and measurement semantics, and this invocation's budget."""
     from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationConfig
+    from kernelforge.workflows.forge_loop.search.search_policy import stall_thresholds
 
     request, workspace, deadline = inputs.request, inputs.workspace, inputs.deadline
+    stall = stall_thresholds(planned_rounds=request.loop_shape.lanes > 1)
     # Measurement semantics come from the campaign, never from this invocation's defaults.
     iter_config = IterationConfig(
         kernel_file=str((workspace / campaign.kernel_path).resolve()),
@@ -641,6 +643,8 @@ def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig) -> Iteration
         case_aggregate=campaign.case_aggregate,
         lanes=request.loop_shape.lanes,
         merge_stacking=request.loop_shape.merge_stacking,
+        supervise_after=stall.supervise_after,
+        diversify_after=stall.diversify_after,
         # New files a KEEP may carry; a REVERT removes exactly the same set. From the campaign, so a resumed session
         # can still ship or remove the new file an earlier session was configured to.
         commit_new_paths=list(campaign.commit_new_paths),

@@ -291,7 +291,8 @@ The loop:
   doesn't supply one (so iteration 1 isn't kept unconditionally)
 
 When the search stalls, `--supervisor-backend codex|claude` escalates to a
-supervisor after three consecutive iterations without a new best. Interventions
+supervisor after three consecutive iterations without a new best, or after two
+at `--lanes 1`, where every iteration is a whole session. Interventions
 remain available for the full time budget. The supervisor adds API
 calls only while stuck; bench remains the final gate on every accepted edit.
 

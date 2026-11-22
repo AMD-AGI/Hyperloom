@@ -48,10 +48,13 @@ and from the lesson records. The search mode still reaches it there: while the
 search is exploiting it is asked for the largest expected gain, a structural
 change included, once the
 search has stalled it is asked for a mechanism materially different from the
-ones already tried, and an active Supervisor ruling decides between the two.
-Having run a session in the diversifying mode is what returns the search to
-exploiting, as publishing a diversified plan does when there is a planning
-stage.
+ones already tried, and an active Supervisor ruling names the directions to
+take. A session is a whole round here, so the stall is counted in sessions: one
+that ends without a new best turns the search to diversifying, two in a row
+bring the Supervisor's review, and the search stays diversifying until a
+session produces a new best. With a planning stage both counts are three
+iterations, and publishing a diversified plan returns the search to exploiting
+for the iterations that measure it.
 
 Each iteration of a campaign with more than one lane:
 

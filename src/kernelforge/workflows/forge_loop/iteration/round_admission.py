@@ -253,6 +253,7 @@ class RoundAdmissionMixin:
                 diversification_cycle_completed=(self.run_state.diversification_cycle_completed),
             ),
             stall_threshold=self.ic.supervise_after,
+            diversify_after=self.ic.diversify_after,
             recent=RecentProgress(
                 consecutive_no_changes=self._consecutive_no_changes(
                     self.state_store.recent_results(NO_CHANGES_STREAK_WINDOW)

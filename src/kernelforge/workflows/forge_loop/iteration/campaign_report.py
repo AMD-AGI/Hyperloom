@@ -276,13 +276,20 @@ class CampaignReportMixin:
         policy = self._search_policy_decision
         if self._supervisor_ruling:
             mode_guidance = (
-                "The latest Supervisor Ruling below decides whether this session pursues the largest expected "
-                "gain on the current best or a different mechanism."
+                "The latest Supervisor Ruling below is the planning authority while the search is stalled: take one "
+                "of its directions that no session since the ruling has measured, and once each of them has been "
+                "measured, a mechanism materially different from every one already tried."
             )
         elif policy is not None and policy.mode == SEARCH_MODE_DIVERSIFY:
+            stalled = self.run_state.stall.unresolved_stall_iters
+            opening = (
+                f"The search has gone {stalled} session(s) without a new best"
+                if stalled
+                else "Recent sessions have stopped paying"
+            )
             mode_guidance = (
-                "Recent sessions have stopped paying, so choose a mechanism materially different from the ones "
-                "already tried rather than a refinement of the current best."
+                f"{opening}, so choose a mechanism materially different from the ones already tried rather than a "
+                "refinement of the current best."
             )
         else:
             mode_guidance = (

@@ -90,6 +90,9 @@ class IterationConfig:
     # loop stopping at the first plateau.
     supervise_after: int = 3  # consecutive no-improvement iters that trigger
     supervise_cooldown: int = 3  # min iterations between interventions
+    # Consecutive iterations without a new best before the search leaves its current line for a different mechanism;
+    # None waits for the same count that brings the Supervisor.
+    diversify_after: int | None = None
     max_consecutive_orchestration_errors: int = 3
     # Task context handed to the Analysis Agent and planning chain.
     program_md: str = ""
@@ -180,6 +183,11 @@ class _RoundPlan:
 
     path: str = ""
     executable: bool = False
+
+    @property
+    def published(self) -> bool:
+        """Whether a plan document exists for the round to execute, as opposed to a session choosing for itself."""
+        return self.executable and bool(self.path)
 
 
 @dataclass(frozen=True)
