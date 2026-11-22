@@ -468,6 +468,72 @@ def test_a_make_before_break_that_is_not_true_or_false_is_refused(given: object)
         run_argv(spec, 1.0, 8)
 
 
+#: An AgentX run's workload section: its trace fixes the requests, so it names no sequence lengths.
+AGENTX_WORKLOAD = {"conc": 16, "precision": "fp8"}
+
+
+def test_an_agentx_spec_forwards_its_trace_window_objective_and_boot_budget() -> None:
+    given = {"agentx_duration_sec": 7200, "agentx_objective": "total_token_throughput", "boot_budget_sec": 5400}
+    spec = _spec("hosted", workload=AGENTX_WORKLOAD, multibranch={"workload": "agentx", **given})
+
+    argv = run_argv(spec, 1.0, 8)
+
+    assert {"--agentx-duration-sec=7200", "--agentx-objective=total_token_throughput", "--boot-budget-sec=5400"} <= set(
+        argv
+    )
+
+
+def test_a_spec_that_names_none_of_them_leaves_them_to_runs_defaults() -> None:
+    for spec in (_spec("hosted"), _spec("hosted", workload=AGENTX_WORKLOAD, multibranch={"workload": "agentx"})):
+        argv = run_argv(spec, 1.0, 8)
+        assert not [arg for arg in argv if arg.startswith(("--agentx-", "--boot-budget-sec"))]
+
+
+def test_an_inferencex_spec_forwards_its_boot_budget() -> None:
+    spec = _spec("hosted", multibranch={"workload": "inferencex", "boot_budget_sec": 5400})
+    assert "--boot-budget-sec=5400" in run_argv(spec, 1.0, 8)
+
+
+@pytest.mark.parametrize(
+    ("given", "refusal"),
+    [
+        (
+            {"agentx_duration_sec": 600},
+            "multibranch.agentx_duration_sec are taken by multibranch.workload 'agentx' only",
+        ),
+        ({"agentx_objective": "p50_interactivity"}, "multibranch.agentx_objective are taken by"),
+        (
+            {"agentx_duration_sec": 600, "agentx_objective": "p50_interactivity"},
+            "multibranch.agentx_duration_sec and multibranch.agentx_objective are taken by",
+        ),
+    ],
+)
+def test_an_inferencex_spec_with_an_agentx_field_is_refused_naming_it(given: dict[str, object], refusal: str) -> None:
+    spec = _spec("hosted", multibranch={"workload": "inferencex", **given})
+    with pytest.raises(HostedRefused, match=refusal):
+        run_argv(spec, 1.0, 8)
+
+
+@pytest.mark.parametrize(
+    ("given", "refusal"),
+    [
+        *(
+            ({field: value}, f"multibranch.{field} must be a positive whole number of seconds")
+            for field in ("agentx_duration_sec", "boot_budget_sec")
+            for value in ("3600", 3600.0, True, 0, -60, [3600])
+        ),
+        ({"agentx_objective": "output_throughput"}, "multibranch.agentx_objective must be one of p50_interactivity"),
+        ({"agentx_objective": 1}, "multibranch.agentx_objective must be one of"),
+    ],
+)
+def test_an_agentx_field_or_boot_budget_of_the_wrong_kind_is_refused_naming_it(
+    given: dict[str, object], refusal: str
+) -> None:
+    spec = _spec("hosted", workload=AGENTX_WORKLOAD, multibranch={"workload": "agentx", **given})
+    with pytest.raises(HostedRefused, match=refusal):
+        run_argv(spec, 1.0, 8)
+
+
 @pytest.fixture
 def umask_022() -> Iterator[None]:
     """This process under umask 022, the usual default, which is restored after the test."""

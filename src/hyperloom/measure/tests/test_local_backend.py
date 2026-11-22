@@ -36,6 +36,7 @@ from hyperloom.orchestrator.actions.executors import (
     PatchedServer,
     VariantResult,
 )
+from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_boot_budget_sec
 from inference_suite.contracts import Deadlines, FailedStep, RunLayout
 from inference_suite.tests import test_config_contract
 
@@ -929,6 +930,66 @@ def test_the_per_round_cap_and_the_leak_scope_come_from_the_call(grid, tmp_path,
         "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC": "321",
         "INFERENCE_OPTIMIZER_LEAK_ROOTS": str(tmp_path),
     }
+
+
+@pytest.mark.parametrize(("budget", "named"), [(None, None), (14400.0, "14400.0")])
+def test_the_boot_budget_of_the_call_is_named_to_its_rounds(grid, tmp_path, monkeypatch, budget, named):
+    """A round reads the test's boot budget from the environment and holds the framework's ready timeout past it."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC", raising=False)
+    captured: list[str | None] = []
+
+    async def look(**kwargs):
+        captured.append(os.environ.get("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC"))
+        return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
+
+    monkeypatch.setattr(local, "run_grid", look)
+
+    _run(_call(tmp_path, timeout_sec=20000, boot_budget_sec=budget))
+
+    assert captured == [named]
+    assert "INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC" not in os.environ, "the test puts the environment back"
+
+
+@pytest.mark.parametrize("budget", [None, 14400.0])
+def test_the_round_reads_the_boot_budget_the_backend_names(grid, tmp_path, monkeypatch, budget):
+    """The backend's side and the round's side agree on where the budget travels: a rename on one side alone fails."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC", raising=False)
+    read: list[float | None] = []
+
+    async def look(**kwargs):
+        read.append(resolve_boot_budget_sec())
+        return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
+
+    monkeypatch.setattr(local, "run_grid", look)
+
+    _run(_call(tmp_path, timeout_sec=20000, boot_budget_sec=budget))
+
+    assert read == [budget]
+
+
+@pytest.mark.parametrize("source", ["operator", "sheet"])
+def test_an_exported_boot_budget_does_not_reach_a_test_without_one(grid, tmp_path, monkeypatch, source):
+    """The budget is the backend's own: a value the operator or the sheet exported is removed from a test with none,
+    and the call's own budget wins over it, and the operator's value is back once the test ends."""
+    overrides: dict[str, str] = {}
+    if source == "operator":
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC", "9000")
+    else:
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC", raising=False)
+        overrides["INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC"] = "9000"
+    captured: list[str | None] = []
+
+    async def look(**kwargs):
+        captured.append(os.environ.get("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC"))
+        return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
+
+    monkeypatch.setattr(local, "run_grid", look)
+
+    _run(_call(tmp_path, timeout_sec=20000, env_overrides=overrides))
+    _run(_call(tmp_path, timeout_sec=20000, boot_budget_sec=14400.0, env_overrides=overrides))
+
+    assert captured == [None, "14400.0"]
+    assert os.environ.get("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC") == ("9000" if source == "operator" else None)
 
 
 def test_two_tests_in_one_process_do_not_overlap(monkeypatch, tmp_path):

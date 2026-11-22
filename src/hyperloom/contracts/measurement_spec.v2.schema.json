@@ -576,6 +576,10 @@
           "type": "number",
           "minimum": 1
         },
+        "boot_budget_sec": {
+          "type": "number",
+          "minimum": 1
+        },
         "deadline_unix": {
           "type": "number",
           "minimum": 0
