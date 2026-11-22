@@ -51,6 +51,7 @@ from inference_suite.contracts.base_launch import (
     UpstreamSource,
     Workload,
 )
+from inference_suite.frameworks import Framework
 from inference_suite.golden import GOLDEN_OWNED_ENV_PREFIXES, GOLDEN_OWNED_SPEC_CONFIG_KEYS, is_golden_owned_flag
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL
 from inference_suite.recipe.atom_catalog import atom_catalog_launches
@@ -67,13 +68,10 @@ from inference_suite.recipe.golden_curve import (
 from inference_suite.recipe.image_version import NO_RECIPE_IMAGE, recipe_image_facts
 from inference_suite.recipe.inferencex import AGENTX_TRACE_ENV, agentx_trace, inferencex_launches
 from inference_suite.recipe.model import (
-    ATOM_ENTRYPOINT,
     ATOM_RUNNER_OWNED,
     ATOM_TOPOLOGY,
-    SGLANG_ENTRYPOINT,
     SGLANG_RUNNER_OWNED,
     SGLANG_TOPOLOGY,
-    VLLM_ENTRYPOINT,
     VLLM_RUNNER_OWNED,
     VLLM_TOPOLOGY,
     InferencexSnapshot,
@@ -83,6 +81,7 @@ from inference_suite.recipe.model import (
     SourceLaunch,
     SourceMiss,
     boards_interchangeable,
+    entrypoint,
 )
 from inference_suite.recipe.sglang_cookbook import sglang_cookbook_launches
 from inference_suite.recipe.user_file import UserFile
@@ -91,7 +90,6 @@ from inference_suite.recipe.vllm_recipes import VllmRecipesSnapshot, vllm_recipe
 _FIELDS = ContractFields(RecipeSourceError)
 _T = TypeVar("_T")
 
-_ENTRYPOINTS = {"sglang": SGLANG_ENTRYPOINT, "vllm": VLLM_ENTRYPOINT, "atom": ATOM_ENTRYPOINT}
 _RUNNER_OWNED = {"sglang": SGLANG_RUNNER_OWNED, "vllm": VLLM_RUNNER_OWNED, "atom": ATOM_RUNNER_OWNED}
 #: The GPU masks the runner sets for each server it starts; a source's own are stripped.
 _RUNNER_OWNED_ENV = frozenset({"CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"})
@@ -349,10 +347,6 @@ def _operator_env(env: Mapping[str, str]) -> dict[str, EnvValue]:
     }
 
 
-def _entrypoint(framework: str) -> tuple[str, ...]:
-    return _carried(_ENTRYPOINTS.get(framework), f"{framework} serving entrypoint")
-
-
 def _client(env: Mapping[str, str]) -> ClientLaunch:
     return ClientLaunch(tool=INFERENCEX_TOOL, commit=INFERENCEX_CLIENT_COMMIT, env=env)
 
@@ -463,7 +457,7 @@ def _user_file_base(query: LaunchQuery, snapshot: SourceSnapshot, user_file: Use
         point=LaunchPoint(max(query.concurrencies), exact=True),
         image=NO_RECIPE_IMAGE,
         framework=query.framework,
-        entrypoint=_entrypoint(query.framework),
+        entrypoint=entrypoint(Framework(query.framework)),
         model=LaunchModel(query.model_id),
         topology=spelling.read(shell.args),
         args=shell.args,
@@ -497,7 +491,7 @@ def _default_base(query: LaunchQuery, snapshot: SourceSnapshot, misses: tuple[So
         point=LaunchPoint(max(query.concurrencies), exact=True),
         image=NO_RECIPE_IMAGE,
         framework=query.framework,
-        entrypoint=_entrypoint(query.framework),
+        entrypoint=entrypoint(Framework(query.framework)),
         model=LaunchModel(query.model_id),
         topology=topology,
         args=(*row.args, *topology_args),

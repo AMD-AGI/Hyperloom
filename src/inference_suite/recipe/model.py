@@ -79,7 +79,12 @@ class TopologySpelling:
         return (*args, self.ep_switch[0])
 
 
-def _entrypoint(framework: Framework) -> tuple[str, ...]:
+def entrypoint(framework: Framework) -> tuple[str, ...]:
+    """The serving entrypoint of ``framework`` as recipes spell it.
+
+    Raises:
+        RecipeSourceError: the framework runs no server.
+    """
     command = framework_facts(framework).server_command
     if command is None:
         raise RecipeSourceError(f"{framework.value} runs no server")
@@ -90,7 +95,7 @@ def _entrypoint(framework: Framework) -> tuple[str, ...]:
 _HOST = "host"
 _TENSOR_PARALLEL_SIZE = "--tensor-parallel-size"
 
-SGLANG_ENTRYPOINT = _entrypoint(Framework.SGLANG)
+SGLANG_ENTRYPOINT = entrypoint(Framework.SGLANG)
 #: The sglang server flags the runner sets or allocates for every round (canonical names): what srtctl owns, and the
 #: metrics switch the runner turns on when the round scrapes ``/metrics``.
 SGLANG_RUNNER_OWNED = frozenset(
@@ -101,7 +106,7 @@ SGLANG_TOPOLOGY = TopologySpelling(
     tp=(_TENSOR_PARALLEL_SIZE, "--tp-size", "--tp"), ep=("--ep-size", "--expert-parallel-size", "--ep")
 )
 
-VLLM_ENTRYPOINT = _entrypoint(Framework.VLLM)
+VLLM_ENTRYPOINT = entrypoint(Framework.VLLM)
 #: The vLLM server flags the runner sets or allocates for every round (canonical names), as srtctl owns them.
 VLLM_RUNNER_OWNED = frozenset(
     {"model", "served-model-name", _HOST, "port", "headless", "master-addr", "nnodes", "node-rank"}
@@ -113,7 +118,7 @@ VLLM_TOPOLOGY = TopologySpelling(
 )
 
 
-ATOM_ENTRYPOINT = _entrypoint(Framework.ATOM)
+ATOM_ENTRYPOINT = entrypoint(Framework.ATOM)
 #: The ATOM server flags the runner sets or allocates for every round (canonical names), as srtctl owns them.
 ATOM_RUNNER_OWNED = frozenset({"model", _HOST, "server-port"})
 ATOM_TOPOLOGY = TopologySpelling(tp=("-tp", _TENSOR_PARALLEL_SIZE), ep_switch=("--enable-expert-parallel",))
@@ -371,4 +376,5 @@ __all__ = [
     "VLLM_TOPOLOGY",
     "adaptive_verification_reason",
     "boards_interchangeable",
+    "entrypoint",
 ]
