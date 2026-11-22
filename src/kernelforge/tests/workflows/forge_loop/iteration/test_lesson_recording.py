@@ -1157,6 +1157,86 @@ def test_lesson_flows_from_one_iteration_into_the_next_prompt(tmp_path, monkeypa
     assert lessons_dir in prompts[1]
 
 
+def test_the_insight_list_and_every_measured_negative_reach_the_sessions_that_follow(tmp_path, monkeypatch):
+    """A record turn hands the list on, and a negative stays in front of later sessions after its record scrolls out.
+
+    session 1 -> record + insight lines -> insights.md and lessons/iter_001.md
+    -> session 2 is shown the list, and asked for it as it should stand next
+    -> session 3 is shown both negatives, one line each.
+    """
+    loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=3)
+    _stub_measurement(monkeypatch, walls=[0.5, 0.9, 0.9])
+    kernel = Path(loop.ic.kernel_file)
+    prompts: list[str] = []
+    record_prompts: list[str] = []
+    replies = [
+        "widened the loads\nNEGATIVES: split-K=4 (case +9%)\n"
+        "INSIGHT: a quick bench agrees with the driver only after a 1 GiB read flush",
+        "tried a fused reduce\nNEGATIVES: fused reduce (case +12%)\n"
+        "INSIGHT: a quick bench agrees with the driver only after a 1 GiB read flush\n"
+        "INSIGHT: a raw read probe gives 4.1 TB/s",
+        "nothing new\nNEGATIVES: none",
+    ]
+
+    async def summarizer(prompt: str) -> str:
+        record_prompts.append(prompt)
+        return replies[len(record_prompts) - 1]
+
+    async def agent_fn(_kernel_path, experiment_history, session_sink):
+        prompts.append(experiment_history)
+        kernel.write_text(f"def kernel():\n    return {len(prompts) + 1}\n")
+        session_sink["plan"] = f"edit {len(prompts)}"
+        session_sink["end_reason"] = "candidate_submitted"
+        session_sink["summarize"] = summarizer
+        return "rationale"
+
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
+
+    flush, probe = (
+        "a quick bench agrees with the driver only after a 1 GiB read flush",
+        "a raw read probe gives 4.1 TB/s",
+    )
+    # The record keeps the session's account and its negatives; the insight lines live in the list alone.
+    first = (workspace / "forge_experiments" / "lessons" / "iter_001.md").read_text()
+    assert "NEGATIVES: split-K=4 (case +9%)" in first
+    assert "INSIGHT:" not in first
+    # A reply that carries no list leaves the one the session before it wrote.
+    assert loop.insights.read() == [flush, probe]
+    # Each record turn is shown the list as it stood, and each session that follows reads it.
+    assert "The list as it stands:\n  (empty)" in record_prompts[0]
+    assert f"  INSIGHT: {flush}" in record_prompts[1]
+    assert "## Campaign insights (cumulative)" not in prompts[0]
+    assert f"- {flush}" in prompts[1] and probe not in prompts[1]
+    assert f"- {flush}\n- {probe}" in prompts[2]
+    # Both negatives are in front of the third session, whether or not their records are.
+    assert "## Measured negatives from every past iteration" in prompts[2]
+    assert "- iter 1 [" in prompts[2] and "split-K=4 (case +9%)" in prompts[2]
+    assert "- iter 2 [" in prompts[2] and "fused reduce (case +12%)" in prompts[2]
+    assert "check your direction against it before you choose" in prompts[2]
+
+
+def test_a_lanes_record_leaves_the_insight_list_alone(tmp_path, monkeypatch):
+    """Lane records are written side by side in their round, so none of them can be the whole list."""
+    from kernelforge.workflows.forge_loop.memory.insights import InsightStore
+
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    store = _attach_lessons(loop, workspace)
+    loop.insights = InsightStore(str(workspace))
+    loop.insights.replace(1, ["an established fact"])
+
+    asyncio.run(
+        loop._record_lesson(
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={"session_started": True},
+            lane_record=SummaryOutcome(text="lane 2 widened the loads\nINSIGHT: a lane's own line"),
+        )
+    )
+
+    assert loop.insights.read() == ["an established fact"]
+    assert "INSIGHT: a lane's own line" in store.read(3)
+
+
 def test_prompt_omits_the_digest_once_lessons_exist(tmp_path, monkeypatch):
     """The digest is reserved for the supervisor once the header renders.
 

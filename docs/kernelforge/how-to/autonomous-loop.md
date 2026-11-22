@@ -187,7 +187,10 @@ does not write that takeaway. After the session ends, a separate lesson turn
 records what the session explored, including the directions it kept or dropped,
 on the lines `HELD-FIXED`, `NEGATIVES`, and `DISPROOF`. The loop then appends
 the scope and outcome lines. That file is `lessons/iter_NNN.md`, and it is the
-only reasoning record. A lane takes that turn at the end of its round, while
+only reasoning record. The same turn returns the campaign's insight list as it
+should stand, which is stored apart in `insights.md` and read in full by every
+later session, alongside one line of measured negatives for each past
+iteration. A lane takes that turn at the end of its round, while
 its copy of the workspace still exists, and `lane_queue.json` carries the record,
 or the reason there is none, to whichever iteration measures the lane. When the loop
 starts it hides `forge_experiments/` from git with a `forge_experiments/.gitignore`

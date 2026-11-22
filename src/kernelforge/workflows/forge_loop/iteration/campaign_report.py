@@ -11,6 +11,7 @@ from kernelforge.workflows.forge_loop.iteration.handoffs import HandoffStore
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
 from kernelforge.workflows.forge_loop.campaign.loop_log import LOOP_BANNER, experiment_line
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationResult
+from kernelforge.workflows.forge_loop.memory.measured_negatives import render_measured_negatives
 from kernelforge.workflows.forge_loop.roles.prompt_view import (
     MAX_RECENT_ATTEMPT_LINES,
     OptionalRecords,
@@ -217,6 +218,7 @@ class CampaignReportMixin:
         )
         history = self._evidence_history(lh_header=lh_header, digest=digest)
         for render, label in (
+            (self._render_insights, "campaign insights"),
             (self._render_analysis_evidence_for_implementer, "Analysis evidence"),
             (self._render_case_config_coverage, "per-case configuration coverage"),
             (self._render_ceiling_advisory, "roofline attainment standing"),
@@ -255,6 +257,11 @@ class CampaignReportMixin:
         if lh_header:
             history = f"{lh_header}\n\n{history}"
         return f"{self._session_direction(optimization_plan_path)}\n\n{history}"
+
+    def _render_insights(self) -> str:
+        """The campaign's insight list, or "" when this loop keeps none or it is still empty."""
+        insights = getattr(self, "insights", None)
+        return insights.render_for_prompt() if insights is not None else ""
 
     def _session_direction(self, optimization_plan_path: str) -> str:
         """What the session is to work on: the round's synthesized plan, or how to choose a direction without one."""
@@ -300,7 +307,9 @@ class CampaignReportMixin:
             "No plan was synthesized for this session. Read the Analysis report named `analysis_summary` under "
             "Analysis Evidence below, when there is one, before you choose: it says where each scored case spends "
             "its time and ranks what it expects to pay. The lesson records and the attempt history say what was "
-            "already tried and what it measured; do not repeat a direction they disproved. "
+            "already tried and what it measured; do not repeat a direction they disproved. The list of measured "
+            "negatives below covers every past iteration, not only the ones whose records are shown: check your "
+            "direction against it before you choose. "
             f"{mode_guidance}"
         )
 
@@ -308,12 +317,11 @@ class CampaignReportMixin:
         """Join the digest, lessons and ledger into the history body, falling back to recent results."""
         # Lesson documents from the most recent iterations, verbatim, plus the absolute path of the directory
         # holding every past one.
-        lessons_txt = ""
+        lessons_txt = negatives_txt = ""
         if getattr(self, "lessons", None) is not None:
-            lessons_txt = self.lessons.render_for_prompt(
-                current_cases=self._scored_case_ids(),
-                kernel_source=self._kernel_source_for_scope(),
-            )
+            scope = {"current_cases": self._scored_case_ids(), "kernel_source": self._kernel_source_for_scope()}
+            lessons_txt = self.lessons.render_for_prompt(**scope)
+            negatives_txt = render_measured_negatives(self.lessons, **scope)
 
         ledger_txt = ""
         if self.ledger:
@@ -322,7 +330,7 @@ class CampaignReportMixin:
             ledger_txt = self.ledger.render_for_prompt(
                 include_recent=(not lessons_txt and (bool(lh_header) or not bool(digest)))
             )
-        sources = [lessons_txt, ledger_txt]
+        sources = [negatives_txt, lessons_txt, ledger_txt]
         if lh_header:
             print(f"  [agent] injected long-horizon header: {len(lh_header)} chars (digest reserved for supervisor)")
         else:
@@ -333,6 +341,8 @@ class CampaignReportMixin:
         history = "\n\n".join(p for p in sources if p)
         if lessons_txt:
             print(f"  [agent] injected lesson documents: {len(lessons_txt)} chars")
+        if negatives_txt:
+            print(f"  [agent] injected measured negatives: {len(negatives_txt)} chars")
         if not history:
             history = "\n".join(_compact_history_entry(r) for r in self.results[-5:])
         return history

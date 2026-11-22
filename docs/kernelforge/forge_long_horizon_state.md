@@ -14,6 +14,7 @@ forge_experiments/
   pending_keep.json
   candidates/
   lessons/
+  insights.md
   handoffs/
   analysis/
     work/<commit>/
@@ -377,6 +378,25 @@ Lesson text has no required output schema and is not parsed into a headline,
 direction status, suppression list, or PR adoption classification. A
 `REVERT_PERF` records only that the concrete candidate missed the KEEP
 threshold; it never suppresses the broader direction.
+
+Only the most recent lesson documents fit a prompt in full, so two things carry
+the earlier ones forward. The next session is shown a list of measured
+negatives with one line for every past iteration that recorded any: what its
+`NEGATIVES` line says measured worse, the constants and cases it was measured
+under, and whether that still stands. A line is `IN SCOPE` while those
+conditions hold, `RE-OPENABLE` once a pinned constant has moved or a scored case
+was not measured, and `UNSCOPED` when the conditions were never recorded. The
+session is asked to check its direction against the list before choosing it.
+
+The same lesson turn also maintains `insights.md`, the campaign's insight list:
+at most 12 one-sentence facts about the kernel and about measuring it, each with
+the measurement behind it -- what makes a quick bench agree with the driver, a
+bound that was measured, how the toolchain compiles a construct, a correctness
+condition a change has to keep. The turn is shown the list as it stands and
+returns it as it should stand, on `INSIGHT:` lines that are taken out of the
+lesson document and replace the stored list whole; a reply with no such line
+leaves the list unchanged. Every later session reads the whole list. Lane
+records are written side by side in their round and do not touch it.
 
 Every Supervisor attempt is archived verbatim in
 `supervisor/intervention_iter_NNN.md`. A non-empty review also atomically

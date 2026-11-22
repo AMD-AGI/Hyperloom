@@ -18,6 +18,7 @@ from kernelforge.workflows.forge_loop.iteration.fanout import LaneResult
 from kernelforge.workflows.forge_loop.iteration.handoffs import HandoffStore
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationResult
 from kernelforge.evaluation.jit_rebuild import force_jit_rebuild
+from kernelforge.workflows.forge_loop.memory.insights import InsightStore
 from kernelforge.workflows.forge_loop.memory.lessons import LessonStore
 from kernelforge.workflows.forge_loop.campaign.reporting import BestResultPublisher
 from kernelforge.workflows.forge_loop.campaign.run_state import (
@@ -473,8 +474,9 @@ class CampaignMixin:
         # signatures, then feeds concise toolchain observations and recent entries into the next prompt.
         self.ledger = ExperienceLedger(self.ic.workspace_dir)
 
-        # Per-iteration lesson documents.
+        # Per-iteration lesson documents, and the insight list their record turns maintain across iterations.
         self.lessons = LessonStore(self.ic.workspace_dir)
+        self.insights = InsightStore(self.ic.workspace_dir)
         self.handoff_store = HandoffStore(self.ic.workspace_dir)
 
         # Full-fidelity candidate archive: persists each iteration's WHOLE solution (kernel snapshot + diff + full
