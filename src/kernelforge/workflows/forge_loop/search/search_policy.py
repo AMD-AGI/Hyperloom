@@ -10,7 +10,7 @@ SEARCH_MODE_EXPLOIT = "EXPLOIT"
 SEARCH_MODE_DIVERSIFY = "DIVERSIFY"
 SEARCH_MODES = frozenset({SEARCH_MODE_EXPLOIT, SEARCH_MODE_DIVERSIFY})
 
-OBJECTIVE_IMMEDIATE_CANONICAL_GAIN = "IMMEDIATE_CANONICAL_GAIN"
+OBJECTIVE_CANONICAL_GAIN = "CANONICAL_GAIN"
 OBJECTIVE_DISCOVER_NEW_MECHANISM = "DISCOVER_NEW_MECHANISM"
 
 # One empty diff can be a session that honestly found nothing worth changing.
@@ -126,6 +126,6 @@ class SearchPolicyEngine:
         return SearchPolicyDecision(
             mode=mode,
             reason_codes=(reason,),
-            objective_kind=OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
+            objective_kind=OBJECTIVE_CANONICAL_GAIN,
             residence_iterations_remaining=next_residence,
         )

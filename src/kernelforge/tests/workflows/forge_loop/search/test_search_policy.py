@@ -9,7 +9,7 @@ from kernelforge.workflows.forge_loop.search.search_policy import (
     MARGINAL_GAIN_FLOOR,
     NO_CHANGES_ESCALATION_THRESHOLD,
     OBJECTIVE_DISCOVER_NEW_MECHANISM,
-    OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
+    OBJECTIVE_CANONICAL_GAIN,
     SEARCH_MODE_DIVERSIFY,
     SEARCH_MODE_EXPLOIT,
     RecentProgress,
@@ -270,7 +270,7 @@ def test_a_decision_must_state_why_it_was_taken():
         SearchPolicyDecision(
             mode=SEARCH_MODE_EXPLOIT,
             reason_codes=(),
-            objective_kind=OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
+            objective_kind=OBJECTIVE_CANONICAL_GAIN,
         )
 
 

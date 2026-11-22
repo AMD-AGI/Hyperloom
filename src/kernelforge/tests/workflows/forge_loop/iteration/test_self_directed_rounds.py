@@ -58,7 +58,10 @@ def test_a_session_without_a_plan_is_told_to_choose_its_direction_from_the_evide
     assert histories[0].startswith("## Direction (yours to choose)")
     assert "Read the Analysis report named `analysis_summary`" in histories[0]
     assert "do not repeat a direction they disproved" in histories[0]
-    assert "Choose the direction with the strongest immediate gain on the score." in histories[0]
+    assert (
+        "Choose the direction with the largest expected gain on the score, a structural change included."
+        in histories[0]
+    )
     assert "## Required optimization plan" not in histories[0]
 
 
@@ -94,7 +97,7 @@ def test_a_session_under_a_supervisor_ruling_takes_its_search_mode_from_the_ruli
     direction = loop._session_direction("")
 
     assert "The latest Supervisor Ruling below decides" in direction
-    assert "strongest immediate gain on the score" not in direction
+    assert "largest expected gain on the score" not in direction
 
 
 def test_a_stalled_search_without_planning_hands_the_supervisors_ruling_to_the_next_session(tmp_path, monkeypatch):

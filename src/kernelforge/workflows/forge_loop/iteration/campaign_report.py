@@ -276,8 +276,8 @@ class CampaignReportMixin:
         policy = self._search_policy_decision
         if self._supervisor_ruling:
             mode_guidance = (
-                "The latest Supervisor Ruling below decides whether this session pursues the strongest "
-                "immediate gain or a different mechanism."
+                "The latest Supervisor Ruling below decides whether this session pursues the largest expected "
+                "gain on the current best or a different mechanism."
             )
         elif policy is not None and policy.mode == SEARCH_MODE_DIVERSIFY:
             mode_guidance = (
@@ -285,7 +285,9 @@ class CampaignReportMixin:
                 "already tried rather than a refinement of the current best."
             )
         else:
-            mode_guidance = "Choose the direction with the strongest immediate gain on the score."
+            mode_guidance = (
+                "Choose the direction with the largest expected gain on the score, a structural change included."
+            )
         return (
             "## Direction (yours to choose)\n"
             "No plan was synthesized for this session. Read the Analysis report named `analysis_summary` under "

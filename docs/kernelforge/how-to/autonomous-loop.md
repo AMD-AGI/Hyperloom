@@ -45,7 +45,8 @@ do not run: no dispatch, specialist, synthesis or Critic session is bought, and
 no plan file is written. The Implementer is told so at the top of its prompt,
 reads the Analysis report itself, and chooses the session's direction from it
 and from the lesson records. The search mode still reaches it there: while the
-search is exploiting it is asked for the strongest immediate gain, once the
+search is exploiting it is asked for the largest expected gain, a structural
+change included, once the
 search has stalled it is asked for a mechanism materially different from the
 ones already tried, and an active Supervisor ruling decides between the two.
 Having run a session in the diversifying mode is what returns the search to
@@ -129,17 +130,24 @@ Each iteration of a campaign with more than one lane:
    and performance gate. Each Implementer
    session runs under a wall-clock budget sized from `--max-hours`
    (`min(210, max(90, 0.15 * campaign_minutes))` minutes, overridable with
-   `--session-timeout-sec`); the session is told this deadline and asked to hand
-   off its best candidate before it, and the backend cuts the session at the
-   deadline if it does not. A high fixed turn ceiling remains only as a runaway
-   backstop -- it does not bound a session's time.
-   A session that runs the in-session gate works one direction for as long as
-   it pays, rather than handing off its first improvement: it states the
-   direction and the score it expects before editing, measures the kernel it
-   starts from, then repeats edit, correctness and benchmark, keeping a copy of
-   the best version it has measured and undoing every change that does not
-   help. It leaves a direction once the goal is reached and two further changes
-   in a row move nothing, or once measurement disproves it, and it hands off the
+   `--session-timeout-sec`); the session is told this deadline, and the
+   backend cuts the session at the deadline, after which the loop validates
+   whatever tracked changes the workspace holds. A high fixed turn ceiling
+   remains only as a runaway backstop -- it does not bound a session's time.
+   A session that runs the in-session gate is meant to use its budget rather
+   than hand off its first improvement. It takes the direction it expects the
+   most from, a restructuring included, states the score it expects before
+   editing, measures the kernel it starts from, then repeats edit, correctness
+   and benchmark, keeping a copy of the best version it has measured and
+   restoring it into the workspace after every change that does not help. It
+   reads the clock with every measurement and paces itself by four numbers:
+   it leaves a direction that measurement disproved or that 8 measured changes
+   in a row failed to improve, and takes the next one; with more than 20
+   minutes before its wrap-up minute, the time left is no reason to pass over a
+   direction; it starts to finish at the wrap-up minute (80% of the session
+   budget), after 12 measured changes in a row without a new best, or once
+   every direction worth measuring has been measured; and it keeps each
+   measurement command in the foreground and under 4 minutes. It hands off the
    best version it measured -- or no candidate at all when nothing beat the
    current best. Lane sessions, which run without that gate, make their change
    and hand it off.

@@ -12,16 +12,20 @@ import pytest
 from kernelforge.agent_backends.base import AgentCapabilities, AgentRunResult
 from kernelforge.config import Config
 from kernelforge.evaluation.scoring import CaseAggregate
-from kernelforge.workflows.forge_loop.roles import agent
+from kernelforge.workflows.forge_loop.roles import agent, implementer_method
 
 
 @pytest.fixture()
-def gated_system_prompt(tmp_path, monkeypatch):
-    """Run one gated implementer session and return the system prompt it was given, whitespace-normalized."""
+def gated_prompts(tmp_path, monkeypatch):
+    """Run one gated implementer session and return its system and user prompts, whitespace-normalized."""
 
     def run(
-        *, correctness_only: bool, max_blocks: int = 7, case_aggregate: CaseAggregate = CaseAggregate.ARITHMETIC
-    ) -> str:
+        *,
+        correctness_only: bool,
+        max_blocks: int = 7,
+        case_aggregate: CaseAggregate = CaseAggregate.ARITHMETIC,
+        session_timeout_sec: int | None = None,
+    ) -> tuple[str, str]:
         kernel = tmp_path / "kernel.py"
         kernel.write_text("# kernel\n")
         driver = tmp_path / "driver.py"
@@ -56,13 +60,19 @@ def gated_system_prompt(tmp_path, monkeypatch):
                     max_blocks=max_blocks,
                     case_aggregate=case_aggregate,
                 ),
-                session=agent.SessionOptions(insession_gate=True),
+                session=agent.SessionOptions(insession_gate=True, session_timeout_sec=session_timeout_sec),
             ),
         )
         asyncio.run(agent_fn(str(kernel), ""))
-        return " ".join(specs[0].system_prompt.split())
+        return " ".join(specs[0].system_prompt.split()), " ".join(specs[0].user_prompt.split())
 
     return run
+
+
+@pytest.fixture()
+def gated_system_prompt(gated_prompts):
+    """The system prompt of one gated implementer session, whitespace-normalized."""
+    return lambda **options: gated_prompts(**options)[0]
 
 
 def test_a_session_judged_on_speed_works_one_direction_past_its_first_gain(gated_system_prompt) -> None:
@@ -79,8 +89,59 @@ def test_a_session_judged_on_speed_works_one_direction_past_its_first_gain(gated
     assert "Submit the best version, not the last one" in prompt
     assert "scratch directory outside the workspace" in prompt
     assert "Do not save or restore work with git" in prompt
-    # It leaves room for the gate that judges its stop.
+    # It knows what the gate that judges its stop will run.
     assert "takes three benchmark measurements" in prompt
+
+
+def test_a_session_judged_on_speed_takes_the_largest_direction_it_sees(gated_system_prompt) -> None:
+    prompt = gated_system_prompt(correctness_only=False)
+
+    assert "Take the larger expected gain even when it means restructuring the kernel" in prompt
+    assert "tuning constants follows a structural change, it does not replace one" in prompt
+    # While time is ample, neither the clock nor the risk is a reason to pass a direction over.
+    assert (
+        f"While more than {implementer_method.AMPLE_TIME_MINUTES} minutes remain before the wrap-up minute, "
+        '"not enough time" and "too risky" are not reasons to pass over a direction'
+    ) in prompt
+    # Nothing in it asks for an early hand-off.
+    assert "no candidate costs the campaign less" not in prompt
+
+
+def test_a_session_judged_on_speed_knows_when_to_change_direction_and_when_to_finish(gated_system_prompt) -> None:
+    prompt = gated_system_prompt(correctness_only=False)
+
+    # The clock is read with every measurement rather than estimated.
+    assert "--bench-mode; date" in prompt
+    assert "End every later driver command with `; date` as well" in prompt
+    assert "Read the clock, never estimate it" in prompt
+    # A direction is left on evidence, and the session finishes on the clock, on a stall or on an exhausted list.
+    assert f"when {implementer_method.DIRECTION_STALL_CHANGES} measured changes in a row have not improved" in prompt
+    assert f"when {implementer_method.SESSION_STALL_CHANGES} measured changes in a row — across directions —" in prompt
+    assert "when every direction worth measuring has been measured" in prompt
+    assert "A first improvement is none of these three" in prompt
+    # What a cut-off hands to the loop is the workspace, so the best version lives there between measurements.
+    assert "the workspace holds the best version this session has measured" in prompt
+    # A measurement neither runs in the background nor outlasts the prompt cache.
+    assert f"keep each command under {implementer_method.MAX_COMMAND_MINUTES} minutes" in prompt
+
+
+def test_a_session_judged_on_speed_is_given_its_wrap_up_minute(gated_prompts) -> None:
+    _system, user = gated_prompts(correctness_only=False, session_timeout_sec=3600)
+
+    assert "## Session budget" in user
+    assert "Run `date` before anything else: that reading is minute 0 of this session." in user
+    assert "You have about 60 minutes of wall-clock from it, and the session is meant to use them" in user
+    assert "The wrap-up minute is 48" in user
+    assert "the loop validates whatever tracked changes the workspace holds at that moment" in user
+    # The paced session is not told to stop early.
+    assert "do not reach for a larger gain" not in user
+
+
+def test_a_session_judged_on_correctness_alone_is_given_only_its_deadline(gated_prompts) -> None:
+    _system, user = gated_prompts(correctness_only=True, session_timeout_sec=3600)
+
+    assert "## Session deadline" in user
+    assert "wrap-up minute" not in user
 
 
 def test_a_session_judged_on_speed_ends_without_a_candidate_rather_than_a_near_tie(gated_system_prompt) -> None:

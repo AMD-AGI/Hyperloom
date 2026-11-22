@@ -24,7 +24,7 @@ from kernelforge.workflows.forge_loop.search.agent_relay import (
 )
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ARCHIVE_TIME_FORMAT, ExperimentsLayout
 from kernelforge.workflows.forge_loop.search.search_policy import (
-    OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
+    OBJECTIVE_CANONICAL_GAIN,
     SEARCH_MODE_EXPLOIT,
     SEARCH_MODES,
 )
@@ -203,7 +203,7 @@ class RunState:
     phase: str = PHASE_EXPLORE
     search_mode: str = SEARCH_MODE_EXPLOIT
     search_reason_codes: list[str] = field(default_factory=list)
-    search_objective: str = OBJECTIVE_IMMEDIATE_CANONICAL_GAIN
+    search_objective: str = OBJECTIVE_CANONICAL_GAIN
     search_mode_residence_remaining: int = 0
     diversification_cycle_completed: bool = False
     baseline_wall_ms: float | None = None
