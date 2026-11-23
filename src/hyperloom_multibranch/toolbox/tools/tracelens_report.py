@@ -174,9 +174,7 @@ def _text(payload: Mapping[str, Any], *keys: str) -> str:
 
 
 def target_platform(payload: Mapping[str, Any]) -> str:
-    """The GPU an analysis of ``payload`` is for: the request's ``target_platform``, else the session's label, which the
-    session exports as ``GPU_TYPE`` (:func:`~hyperloom_multibranch.scheduling.local_peers.workload_environment`); empty
-    when neither names one."""
+    """The GPU an analysis of ``payload`` is for: the request's ``target_platform``, else the session's ``GPU_TYPE``."""
     return _text(payload, "target_platform") or os.environ.get("GPU_TYPE", "").strip()
 
 

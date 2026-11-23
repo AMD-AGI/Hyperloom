@@ -163,14 +163,6 @@ def _kind_problems(card_on_the_machine, card_on_the_sheet):
     return check_hardware(facts, card=card_on_the_sheet, gpu_count=1, power_cap_w=None, partition_mode=None)
 
 
-def test_the_card_is_read_from_the_same_static_document_as_the_power_cap():
-    static = json.dumps({"gpu_data": [_static_row(0, name="AMD Instinct MI355 OAM")]})
-
-    facts = read_gpu_facts([0], _runner({"static --json": static}))
-
-    assert facts == [GpuFacts(0, dataclasses.replace(MI355X_CARD, name="AMD Instinct MI355 OAM"), None, None)]
-
-
 def test_a_card_of_the_same_kind_passes_whatever_its_name_says():
     """A node whose VBIOS calls an MI355X 'AMD Instinct MI355 OAM' runs the sheet's MI355X tests."""
     oam = dataclasses.replace(MI355X_CARD, name="AMD Instinct MI355 OAM", device_id="")

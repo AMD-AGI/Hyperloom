@@ -136,8 +136,7 @@ def resolve_arch_json_path(platform: str) -> Path | None:
 
 
 def theoretical_arch_spec(platform: str, card: GpuCard | None) -> dict | None:
-    """A TraceLens arch spec for ``platform`` from ``card``'s vendor dense peaks; ``None`` without a card, or when the
-    card reports no memory bandwidth or has no vendor peak at any precision."""
+    """A TraceLens arch spec for ``platform`` from ``card``'s vendor peaks; ``None`` when it has no bandwidth or peak."""
     if card is None or not card.memory_bandwidth_gbps:
         return None
     peaks = {f"matrix_{precision}": card.peak_tflops(precision) for precision in PEAK_PRECISIONS}
@@ -158,16 +157,9 @@ def _arch_spec_text(spec: dict) -> str:
 
 
 def write_vendor_peak_arch_spec(out_path: Path, platform: str, log: Callable[[str], None]) -> bool:
-    """Write the session card's vendor-peak arch spec for ``platform`` to ``out_path``; ``False`` when there is none.
-
-    The card is the one the session published (:func:`~hyperloom_common.gpu_card.session_card`): the analysis runs in a
-    child of the session, which inherits its environment.
-    """
+    """Write the session card's vendor-peak arch spec for ``platform`` to ``out_path``; ``False`` when it has none."""
     spec = theoretical_arch_spec(platform, session_card())
     if spec is None:
-        log(
-            f"gpu_arch_json: no vendor peaks for {normalize_platform(platform)}: the session's card is unknown or has none"
-        )
         return False
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(_arch_spec_text(spec), encoding="utf-8")

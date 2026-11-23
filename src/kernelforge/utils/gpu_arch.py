@@ -10,8 +10,6 @@ import subprocess
 from dataclasses import dataclass
 from enum import Enum
 
-from hyperloom_common.gpu_card import board_label
-
 
 def _spelling(value: str) -> str:
     """``value`` lowercase with spaces and dashes as underscores, the one spelling names are compared in."""
@@ -34,16 +32,15 @@ _GFX_RE = re.compile(r"\bgfx[0-9a-f]+\b(?!-)", re.IGNORECASE)
 def canon_arch(value: str) -> str:
     """The canonical lowercase gfx target ``value`` names; ``""`` when it names none.
 
-    Lenient: a spelling that contains a gfx target names it (``gfx942:sramecc+`` is ``gfx942``), and a name whose
-    :func:`hyperloom_common.gpu_card.board_label` is one of the stored labels names that label's target
-    (``AMD Instinct MI300X`` and ``mi300x_vf`` are ``gfx942``). Any other product name names none. Use it to pick a
-    target, not to key stored records; :func:`canonical_gpu_type` does that.
+    A spelling that contains a gfx target names it (``gfx942:sramecc+`` is ``gfx942``), and a stored label names its
+    target; any other value names none. Use it to pick a target, not to key stored records;
+    :func:`canonical_gpu_type` does that.
     """
     raw = str(value or "").strip().lower()
     match = _GFX_RE.search(raw)
     if match:
         return match.group(0)
-    return _ARCH_BY_GPU_TYPE.get(board_label(raw), "")
+    return _ARCH_BY_GPU_TYPE.get(raw, "")
 
 
 def canonical_gpu_type(value: str) -> str:

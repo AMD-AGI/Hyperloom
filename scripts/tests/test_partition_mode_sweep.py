@@ -464,23 +464,6 @@ class TestReadDeviceGib:
         monkeypatch.setattr(pms, "_amd_smi_json", lambda args, *a, **k: self._STATIC if args == ["static"] else None)
         assert pms.read_device_gib(3) == pytest.approx(36.0, abs=0.01)
 
-    def test_a_device_amd_smi_does_not_describe_has_no_reading(self, monkeypatch):
-        monkeypatch.setattr(pms, "_amd_smi_json", lambda args, *a, **k: self._STATIC)
-        assert pms.read_device_gib(0) is None
-
-    @pytest.mark.parametrize(
-        "failure",
-        [pms.SweepError("amd-smi not found"), pms.AmdSmiError("amd-smi static: card 3 reports no arch")],
-        ids=["amd-smi-fails", "a-card-it-cannot-describe"],
-    )
-    def test_an_unreadable_device_has_no_reading_and_says_so(self, monkeypatch, capsys, failure):
-        def fail(*_a, **_k):
-            raise failure
-
-        monkeypatch.setattr(pms, "_amd_smi_json", fail)
-        assert pms.read_device_gib(3) is None
-        assert "will not be checked for fit" in capsys.readouterr().out
-
 
 # ----------------------------------------------------------- mode resolution
 

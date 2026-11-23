@@ -153,7 +153,6 @@ class _ForgeGemmRun(NamedTuple):
     tuning_framework: str
     precision: str
     quant_type: str
-    #: The session card's arch; empty when the session read no card.
     gfx: str
     tp: int
     conc: int
@@ -164,7 +163,7 @@ class _ForgeGemmRun(NamedTuple):
     thorough: bool
 
     def forge_gpu_type(self) -> str:
-        """What KernelForge's ``--gpu-type`` is given: the session's arch, or ``auto`` to have it detect one."""
+        """KernelForge's ``--gpu-type``: the session's arch, else ``auto``."""
         return self.gfx or "auto"
 
 

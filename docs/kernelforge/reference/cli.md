@@ -459,7 +459,7 @@ configuration file, and cases the driver tags `unscored` get no ceiling.
 | `--config <file>` | `<W>/config.yaml` | Task configuration supplying `performance_command` and `source_file_path`. |
 | `--performance-command <cmd>` | config.yaml `performance_command` | Shell command that runs the timed benchmark. |
 | `--output-dir <dir>` | `<W>/forge_experiments/roofline_ceiling` | Where the report, the document and the evidence are published. |
-| `--arch <gfx>` | detected | Target architecture, e.g. `gfx950`. Detected via `rocminfo` when omitted. A gfx id, or a name whose label is one of `mi300x`, `mi355x`, `w7900` and `radeon8060s` (such as `MI355X`), is accepted; any other marketing name names no architecture and the target is detected as if `--arch` were omitted. |
+| `--arch <gfx>` | detected | Target architecture, e.g. `gfx950`. Detected via `rocminfo` when omitted. A gfx id, or one of the labels `mi300x`, `mi355x`, `w7900` and `radeon8060s`, is accepted; any other name names no architecture and the target is detected as if `--arch` were omitted. |
 | `--agent-provider <name>` | auto-selected | Agent provider for the analyst session. |
 | `--agent-model <name>` | provider default | Analyst model. |
 | `--agent-timeout-sec <s>` | `3600` | Wall-clock budget for the analyst session. |

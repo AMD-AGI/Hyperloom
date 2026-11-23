@@ -859,21 +859,6 @@ def test_t0_anchor_records_the_session_cards_arch_outside_the_canonical_id(
     assert "gfx942" not in row["canonical_id"]
 
 
-def test_t0_anchor_without_a_card_records_no_arch(
-    kb: RecipeKB,
-    session_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("HYPERLOOM_PARTITION_MODE", raising=False)
-    state = _FakeSharedState()
-
-    _anchor(kb, state, session_dir, "mi325x")
-
-    row = kb.local.get_recipe(canonical_id=_expected_cid(state, "M", "mi325x"))
-    assert row is not None
-    assert "gfx_arch" not in row
-
-
 def _seed_row_on(kb: RecipeKB, hardware: str, gfx_arch: str) -> None:
     identity = {"model": "M", "hardware": hardware, "framework_name": "sglang", "precision": "fp8"}
     kb.put_recipe(

@@ -149,7 +149,7 @@ def _env_digits(name: str) -> int | None:
 
 
 def _archived_card() -> dict[str, Any] | None:
-    """The card the session started on, for the record: a resume reads its card again rather than this."""
+    """The card the session started on; a resume reads its own."""
     card = gpu_card.session_card()
     return dataclasses.asdict(card) if card else None
 

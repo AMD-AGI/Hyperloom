@@ -455,10 +455,7 @@ def _topology_suffix(hardware: str) -> str:
 
 
 def _hardware_is_compatible(target: Mapping[str, Any], candidate: Mapping[str, Any]) -> bool:
-    """Accept the target identity's own hardware slug, or a row on the same recorded gfx arch with its topology.
-
-    A row that records no ``gfx_arch`` matches its own slug only.
-    """
+    """Accept the target's own hardware slug, or a row recording the same gfx arch with the same topology."""
     target_slug = _text(target.get("hardware")).lower()
     candidate_slug = _candidate_dimension(candidate, "hardware")
     if candidate_slug == target_slug:
@@ -725,7 +722,7 @@ def _resolve_t0_identity(
         "precision": _text(getattr(shared_state, "precision", "")),
         # The resolved version with its build suffix, which the session state keeps.
         "session_framework_version": version,
-        # Not a canonical-id dimension: the label names the row, the arch decides whose rows it may borrow.
+        # Outside the canonical id: it decides whose rows the session may borrow.
         "gfx_arch": gpu_card.session_gfx(),
     }
     identity["canonical_id"] = recipe_canonical_id(

@@ -271,7 +271,6 @@ class ServingStack:
 
     framework: str
     model_path: str
-    #: The session card's arch; empty when the session read no card.
     gfx: str = ""
     stack_fingerprint: dict | None = None
     draft_limits: DraftLimits = DraftLimits()

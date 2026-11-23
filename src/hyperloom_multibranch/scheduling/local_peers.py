@@ -205,7 +205,7 @@ class InferenceXCheckout:
 
 class ToolboxBackend(Protocol):
     """Where a session's tests run: it builds the session's toolbox on the blackboard handle, the acceptance setup and
-    the instruction sheet's context that every backend shares, and describes the kind of card its tests run on;
+    the instruction sheet's context that every backend shares, and describes the card its tests run on;
     ``on_this_machine`` says whether they run on this machine's cards."""
 
     on_this_machine: ClassVar[bool]
@@ -215,7 +215,7 @@ class ToolboxBackend(Protocol):
     ) -> RealToolbox: ...
 
     def card(self) -> GpuCard:
-        """The card every test runs on; raises :class:`PeersUnavailable` naming why it cannot be described."""
+        """The card every test runs on; raises :class:`PeersUnavailable` when it cannot be described."""
         ...
 
 
@@ -260,18 +260,12 @@ class LocalCards:
         return build_local_toolbox(session, blackboard, acceptance, spec, options=options)
 
     def card(self) -> GpuCard:
-        """The card ``amd-smi`` describes for every one of :attr:`cards`, which are ROCm device ids; raises
-        :class:`PeersUnavailable` when it cannot be read, does not list one of them, or they are not one kind."""
+        """The card ``amd-smi`` describes for :attr:`cards`; raises :class:`PeersUnavailable` when it describes none or
+        more than one kind."""
         try:
             machine = gpu_card.read_cards()
-        except AmdSmiError as exc:
-            raise PeersUnavailable(f"this machine's cards cannot be described: {exc}") from exc
-        unlisted = [index for index in self.cards if index >= len(machine)]
-        if unlisted:
-            raise PeersUnavailable(f"amd-smi describes {len(machine)} cards, so not the session's cards {unlisted}")
-        try:
             return gpu_card.one_kind(machine[index] for index in self.cards)
-        except ValueError as exc:
+        except (AmdSmiError, ValueError) as exc:
             raise PeersUnavailable(f"the session's cards {list(self.cards)} cannot be described: {exc}") from exc
 
 
@@ -533,9 +527,8 @@ def _option_reviews(base: BaseLaunch, toolbox: RealToolbox, directory: Path) -> 
 
 
 def _publish_session_card(backend: ToolboxBackend, workload: Workload) -> GpuCard:
-    """Publish the card ``backend``'s tests run on as the session's (:func:`~hyperloom_common.gpu_card.session_card`),
-    where the base launch, the canonical measurement and the analyses read its facts, and return it. The workload's
-    GPU type stays the session's label; a warning names both when the card's own label is another."""
+    """Publish the card ``backend``'s tests run on as the session's and return it; warns when its own label is not the
+    workload's GPU type, which stays the session's."""
 
     card = backend.card()
     gpu_card.publish_session_card(card)
@@ -556,9 +549,9 @@ def _toolbox(
     host: MeasurementHost, setup: PeerSetup, repo: ExperimentRepo, canonical: CanonicalMeasurement, card: GpuCard
 ) -> RealToolbox:
     """The session's toolbox on ``host``'s backend, every test's points rendered from ``canonical``, the session's
-    canonical measurement, and compiled from the session's blob store; every instruction sheet names ``card``, which
-    the runner checks its cards against. A plain explore runs no accuracy evaluation: the rule gate judges it on
-    throughput, and the confirm that follows a candidate runs the evaluation."""
+    canonical measurement, and compiled from the session's blob store; every instruction sheet names ``card``. A plain
+    explore runs no accuracy evaluation: the rule gate judges it on throughput, and the confirm that follows a
+    candidate runs the evaluation."""
 
     from hyperloom.measure.compile import EnvironmentCompiler
     from hyperloom.measure.hosted_spec import SpecContext

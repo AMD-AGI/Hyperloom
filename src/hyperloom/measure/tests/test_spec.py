@@ -645,25 +645,6 @@ def test_a_sheet_carries_the_session_s_card_as_its_reader_reads_it_and_the_schem
     assert MeasurementSpec.from_bytes(spec.to_bytes()) == spec
 
 
-@pytest.mark.parametrize("card", [None, "absent"])
-def test_a_sheet_whose_session_read_no_card_has_none(card: Any) -> None:
-    document = _edit(lambda d: d["hardware"].pop("card", None) if card == "absent" else d["hardware"].update(card=card))
-
-    spec = MeasurementSpec.from_document(document)
-
-    assert spec.hardware.card is None and spec.to_document()["hardware"]["card"] is None
-    assert list(VALIDATOR.iter_errors(document)) == []
-
-
-def test_a_card_without_a_name_device_id_bandwidth_or_clock_is_read_and_the_schema_allows_it() -> None:
-    document = _edit(lambda d: d["hardware"].update(card={"gfx": "gfx1201", "compute_units": 64, "memory_mib": 32624}))
-
-    card = MeasurementSpec.from_document(document).hardware.card
-
-    assert card == GpuCard("", "", "gfx1201", 64, 32624, None, None)
-    assert list(VALIDATOR.iter_errors(document)) == []
-
-
 @pytest.mark.parametrize(
     ("change", "message"),
     [
@@ -680,16 +661,6 @@ def test_a_card_that_breaks_its_contract_is_refused_by_the_reader_and_the_schema
     document = _with_card(**change)
 
     with pytest.raises(DocumentError, match=message):
-        MeasurementSpec.from_document(document)
-    assert list(VALIDATOR.iter_errors(document)) != []
-
-
-@pytest.mark.parametrize("required", ["gfx", "compute_units", "memory_mib"])
-def test_a_card_without_its_arch_compute_units_or_memory_is_refused_by_the_reader_and_the_schema(required) -> None:
-    document = _with_card()
-    del document["hardware"]["card"][required]
-
-    with pytest.raises(DocumentError, match=f"spec.hardware.card.{required}: missing"):
         MeasurementSpec.from_document(document)
     assert list(VALIDATOR.iter_errors(document)) != []
 

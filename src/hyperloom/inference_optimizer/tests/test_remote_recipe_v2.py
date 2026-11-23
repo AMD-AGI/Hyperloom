@@ -2836,7 +2836,7 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
     assert patch_kb.read_patches() == [patch_ref]
 
 
-def test_remote_adapter_sends_no_hardware_filter(tmp_path: Path) -> None:
+def test_remote_adapter_search_translates_the_labels_it_is_given(tmp_path: Path) -> None:
     class _Remote:
         def __init__(self) -> None:
             self.kwargs = {}
@@ -2857,7 +2857,7 @@ def test_remote_adapter_sends_no_hardware_filter(tmp_path: Path) -> None:
     assert remote.kwargs["scheme"] == "inference"
 
 
-def test_remote_client_search_sends_no_hardware_filter() -> None:
+def test_remote_client_search_posts_the_identity_match() -> None:
     calls = []
 
     def _request(method, path, payload=None):
@@ -2885,19 +2885,6 @@ def test_build_remote_knowledge_records_the_session_cards_gfx_arch(tmp_path: Pat
 
     assert bundle.knowledge["gfx_arch"] == "gfx942"
     assert knowledge_to_warm_recipe({"knowledge": bundle.knowledge})["gfx_arch"] == "gfx942"
-
-
-def test_build_remote_knowledge_without_a_card_records_no_gfx_arch(tmp_path: Path) -> None:
-    bundle = _build(_state(tmp_path), tmp_path / "files")
-
-    assert bundle.knowledge["gfx_arch"] == ""
-
-
-def test_a_record_written_before_gfx_arch_projects_an_empty_one(tmp_path: Path) -> None:
-    knowledge = dict(_build(_state(tmp_path), tmp_path / "files").knowledge)
-    knowledge.pop("gfx_arch")
-
-    assert knowledge_to_warm_recipe({"knowledge": knowledge})["gfx_arch"] == ""
 
 
 def test_remote_adapter_searches_agentx_identity_scheme(tmp_path: Path) -> None:

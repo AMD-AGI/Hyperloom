@@ -296,8 +296,6 @@ def test_a_frozen_base_serves_another_board_whose_query_records_the_same_card():
     ("frozen_card", "session_card"),
     [
         ({}, _MI355X_CARD),
-        (_MI355X_CARD, {}),
-        ({}, {}),
         (_MI355X_CARD, {**_MI355X_CARD, "memory_mib": 262128}),
         (_MI355X_CARD, {**_MI355X_CARD, "gfx": "gfx942"}),
     ],

@@ -145,11 +145,7 @@ def read_partition_mode(gpu_id: int = 0) -> str:
 
 
 def layout_for(mode: str, *, cu_per_partition: int, gib_per_partition: float | None = None) -> PartitionLayout:
-    """Describe what ``mode`` means for a device of ``cu_per_partition`` compute units.
-
-    A partitioned card presents each partition as a device of its own, so a device's compute units and memory are one
-    partition's.
-    """
+    """Describe what ``mode`` means; a partitioned card's device is one partition."""
     canonical = parse_mode(mode)
     if not canonical:
         raise PartitionError("no compute-partition mode given")
@@ -162,7 +158,7 @@ def layout_for(mode: str, *, cu_per_partition: int, gib_per_partition: float | N
 
 
 def observe_partition(gpu_id: int = 0, *, card: GpuCard | None) -> PartitionLayout | None:
-    """Read the live partition topology of one card, sized by the session's ``card``; ``None`` when either is unknown."""
+    """Read the live partition topology of one card, sized by ``card``; ``None`` when either is unknown."""
     try:
         mode = read_partition_mode(gpu_id)
     except PartitionError as exc:

@@ -201,12 +201,10 @@ def _recording(tmp_path: Path, text: str) -> str:
     ("recorded", "said"),
     [
         (lambda tmp_path: str(tmp_path / "missing.json"), "No such file"),
-        (lambda tmp_path: _recording(tmp_path, "amd-smi: not found\n"), "Expecting value"),
-        (lambda tmp_path: _recording(tmp_path, '{"gpu_data": []}'), "no GPU to describe"),
         (lambda tmp_path: _recording(tmp_path, '[{"gpu": 0, "asic": {}}]'), "card 0 reports no arch"),
         (lambda tmp_path: _recording(tmp_path, json.dumps(_two_kinds())), "the GPUs are not one kind of card"),
     ],
-    ids=["missing", "not-json", "no-card", "incomplete", "two-kinds"],
+    ids=["missing", "incomplete", "two-kinds"],
 )
 def test_a_recording_that_describes_no_one_kind_of_card_refuses_the_peers_saying_why(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded: Callable[[Path], str], said: str

@@ -102,7 +102,6 @@ if str(_SRC) not in sys.path:
 import yaml  # noqa: E402
 
 from hyperloom_common import gpu_card  # noqa: E402
-from hyperloom_common.amd_smi import AmdSmiError  # noqa: E402
 from hyperloom_common.coerce import to_float  # noqa: E402
 from hyperloom_common.jsonio import read_json_strict  # noqa: E402
 from hyperloom.common.round_measurement import round_measurement  # noqa: E402
@@ -533,14 +532,9 @@ def partition_cu_on_bus(agents: Sequence[HsaAgent], bus: int) -> int:
     return counts.pop()
 
 
-def read_device_gib(gpu_id: int) -> float | None:
-    """The memory one amd-smi device reports, in GiB; ``None``, with a note, when it cannot be read."""
-    try:
-        card = gpu_card.cards_of(_amd_smi_json(["static"])).get(gpu_id)
-    except (SweepError, AmdSmiError) as exc:
-        print(f"note: could not read GPU {gpu_id}'s memory ({exc}); partitions will not be checked for fit")
-        return None
-    return card.memory_mib / 1024 if card else None
+def read_device_gib(gpu_id: int) -> float:
+    """The memory amd-smi device ``gpu_id`` reports, in GiB."""
+    return gpu_card.cards_of(_amd_smi_json(["static"]))[gpu_id].memory_mib / 1024
 
 
 def card_total_gib(device_gib: float | None, device_mode: str) -> float | None:

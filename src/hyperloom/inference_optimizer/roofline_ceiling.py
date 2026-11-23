@@ -32,8 +32,7 @@ from hyperloom.inference_optimizer.roofline_model_meta import (
 )
 
 
-#: Each precision, as :data:`hyperloom_common.gpu_card.PEAK_PRECISIONS` and TraceLens' ``matrix_<precision>`` keys name
-#: it, with the other tags a run's config or server args spell it as.
+#: The other tags a run's config or server args spell each precision as.
 _PRECISION_SPELLINGS: dict[str, tuple[str, ...]] = {
     "bf16": ("bfloat16",),
     "fp16": ("float16",),
@@ -61,7 +60,6 @@ class RuntimeWorkload:
     """Runtime workload config used by the roofline ceiling."""
 
     model_path: str
-    #: The session's GPU label, which names the card's TraceLens arch JSON.
     gpu_type: str
     card: GpuCard | None
     precision: str
@@ -300,19 +298,14 @@ def apply_runtime_dtype(meta: "ModelMeta", rt: RuntimeDtype) -> "ModelMeta":
 
 
 def _measured_peak_tflops(platform: str, precision: str) -> float | None:
-    """The max-achievable TFLOPS TraceLens' arch JSON for ``platform`` holds at ``precision``; ``None`` when the
-    checkout has no readable one, or it has no positive peak there."""
-    if not platform.strip():
-        return None
+    """The peak TraceLens measured for ``platform`` at ``precision``; ``None`` when its checkout holds none."""
     spec = read_json(paths.tracelens_arch_json(paths.tracelens_root(), platform), default={}, require_dict=True)
-    peaks = spec.get("max_achievable_tflops")
-    peak = peaks.get(f"matrix_{precision}") if isinstance(peaks, dict) else None
-    return float(peak) if isinstance(peak, (int, float)) and peak > 0 else None
+    peak = (spec.get("max_achievable_tflops") or {}).get(f"matrix_{precision}")
+    return float(peak) if peak else None
 
 
 def _compute_peak(target: ComputeTarget) -> tuple[float, str]:
-    """``target``'s per-GPU peak as ``(TFLOPS, convention)``: TraceLens' measured max-achievable peak for its label,
-    else the card's vendor dense peak, else ``(0.0, "unknown")``."""
+    """Per-GPU ``(TFLOPS, convention)``: TraceLens' measured peak, else the card's vendor peak, else ``(0.0, "unknown")``."""
     precision = _PRECISION_TAGS.get(target.precision_tag.strip().lower())
     if precision is None:
         return 0.0, "unknown"
@@ -324,7 +317,7 @@ def _compute_peak(target: ComputeTarget) -> tuple[float, str]:
 
 
 def _bandwidth_bytes_per_sec(card: GpuCard | None, num_gpus: int) -> float:
-    """The memory bandwidth of ``num_gpus`` of ``card``; ``0.0`` when there is no card or it reports none."""
+    """The memory bandwidth of ``num_gpus`` of ``card``; ``0.0`` when unknown."""
     per_gpu = card.memory_bandwidth_gbps if card is not None else None
     return (per_gpu or 0.0) * 1e9 * max(num_gpus, 1)
 
@@ -351,8 +344,8 @@ class DecodeShape:
 
 @dataclass(frozen=True)
 class ComputeTarget:
-    """The GPUs a ceiling is resolved for: the card (``None`` when the session read none), the label its TraceLens arch
-    JSON is named by, how many serve the model, and the TFLOPS precision."""
+    """The GPUs a ceiling is resolved for: the card, the label that names its TraceLens arch JSON, how many serve the
+    model, and the TFLOPS precision."""
 
     card: GpuCard | None
     platform: str

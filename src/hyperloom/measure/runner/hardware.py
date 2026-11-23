@@ -50,7 +50,7 @@ Runner = Callable[[Sequence[str]], str | None]
 
 @dataclass(frozen=True)
 class GpuFacts:
-    """What one GPU says about itself: the card it is, read from the same ``amd-smi static`` as its power cap."""
+    """What one GPU says about itself."""
 
     index: int
     card: GpuCard
@@ -102,8 +102,7 @@ def _gpu_data(args: Sequence[str], run: Runner) -> list[dict[str, Any]] | None:
 
 
 def read_gpu_facts(visible: Sequence[int], run: Runner = amd_smi_or_none) -> list[GpuFacts] | None:
-    """The card, power cap and partition mode of each visible GPU, or ``None`` when ``amd-smi`` cannot say what a
-    visible GPU is."""
+    """The card, power cap and partition mode of each visible GPU, or ``None`` when ``amd-smi`` cannot say."""
     static = _gpu_data(["static", _JSON], run)
     if static is None:
         return None
@@ -202,11 +201,7 @@ def check_hardware(
     power_cap_w: float | None,
     partition_mode: str | None,
 ) -> list[str]:
-    """What differs between the machine and the sheet's ``hardware``; a value the machine did not give is not compared.
-
-    Each visible GPU must be the same kind of card as the sheet's ``card`` (:meth:`GpuCard.same_kind`): the facts
-    decide, not the name, which differs between boards of one kind. A sheet without a card is not compared with them.
-    """
+    """What differs between the machine and the sheet's ``hardware``; a value either side did not give is not compared."""
     problems = []
     if len(facts) < gpu_count:
         problems.append(f"{len(facts)} GPUs visible, {gpu_count} needed")

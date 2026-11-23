@@ -30,7 +30,6 @@ from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom.orchestrator.knowledge.remote_recipe.values import knowledge_to_warm_recipe
 from hyperloom.orchestrator.tests._fixtures import MI355X_CARD, publish_card
-from hyperloom_common.gpu_card import SESSION_CARD_ENV
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.contracts.repo import ResolvedPatch
 from hyperloom_multibranch.blackboard.knowledge.recipe_kb import from_recipe_kb_value, to_recipe_kb_value
@@ -133,17 +132,6 @@ def test_the_record_names_the_arch_of_the_sessions_card_which_a_reader_borrowing
 
     assert store.knowledge is not None and store.knowledge["gfx_arch"] == "gfx950"
     assert knowledge_to_warm_recipe({"knowledge": store.knowledge, "session_id": "sess-1"})["gfx_arch"] == "gfx950"
-
-
-def test_a_session_that_published_no_card_records_no_arch(
-    snapshot: BlackboardSnapshot, final: FinalRecipe, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv(SESSION_CARD_ENV, raising=False)
-    store = FakeRecipeStore(champion=_champion(1000.0))
-
-    publish_final_recipe(RemoteRecipeClient(store), snapshot, final)
-
-    assert store.knowledge is not None and store.knowledge["gfx_arch"] == ""
 
 
 def test_a_patch_a_model_wrote_during_a_merge_is_named_in_the_provenance(

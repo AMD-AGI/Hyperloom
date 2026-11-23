@@ -84,8 +84,7 @@ class SpecContext:
 
     ``blobs`` is the session's content-addressed blob store (``put``/``get``); attachments are written to it.
     ``shared_roots`` are the directories on shared storage whose files a runner cannot read: a path below one of them
-    (the model directory excepted) in the YAML becomes an attachment. ``card`` is the session's card, which a runner
-    holds its own cards to; ``None`` when the session read none.
+    (the model directory excepted) in the YAML becomes an attachment. A runner holds its cards to ``card``.
     """
 
     image_ref: str

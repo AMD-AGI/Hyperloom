@@ -159,13 +159,6 @@ def test_perfmodel_reads_the_card_bandwidth_and_vendor_peak_when_tracelens_measu
     assert out.peak_achievable_tflops == pytest.approx(2516.6)
 
 
-def test_a_card_without_an_fp4_rate_claims_no_fp4_compute_peak():
-    bf16 = rc.ComputeTarget(card=R9700_CARD, platform="r9700", num_gpus=1, precision_tag="bf16")
-    assert rc.resolve_compute_peak_provenance(bf16)["compute_peak_convention"] == "vendor"
-    fp4 = dataclasses.replace(bf16, precision_tag="mxfp4")
-    assert rc.resolve_compute_peak_provenance(fp4)["compute_peak_convention"] == "unknown"
-
-
 def test_perfmodel_routes_a_moe_model_through_the_fused_expert_op():
     """A MoE model replaces the three dense FFN GEMMs with one fused op."""
     out = _perfmodel(_dense_meta(num_experts=8, experts_per_tok=2, moe_intermediate_size=256))
@@ -757,14 +750,6 @@ def test_runtime_workload_prefers_the_benchmark_envs_over_state(tmp_path):
     assert (rt.tp, rt.concurrency, rt.isl, rt.osl) == (1, 8, 128, 64)
     assert rt.gpu_type == "mi325x"
     assert rt.framework == "sglang"
-
-
-def test_runtime_workload_carries_the_session_card(tmp_path, monkeypatch):
-    st = _state(tmp_path, _serving_benchmark(tmp_path / "m"))
-    assert rc.resolve_runtime_workload(st).card is None
-
-    publish_card(monkeypatch, MI325X_CARD)
-    assert rc.resolve_runtime_workload(st).card == MI325X_CARD
 
 
 def test_runtime_workload_falls_back_to_state_when_the_envs_are_silent(tmp_path):

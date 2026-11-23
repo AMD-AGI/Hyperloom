@@ -349,10 +349,8 @@ def _longest_wall_seconds(results: Iterable[TestResult]) -> float:
 def roofline_ceiling(workload: Workload) -> dict[str, float]:
     """The decode ceiling the main flow's roofline snapshot records for ``workload``
     (:func:`~hyperloom.inference_optimizer.roofline_ceiling.compute_roofline_breakdown_from_state`), keyed by the output
-    throughput it bounds. The bandwidth and peaks are the session's card's
-    (:func:`~hyperloom_common.gpu_card.session_card`, published as the peers are built), the GPU type names only the
-    TraceLens arch spec whose measured peaks are preferred. Empty for an AgentX workload, which is graded on
-    interactivity, and when the model's checkpoint cannot be read on this host or the session published no card."""
+    throughput it bounds. Empty for an AgentX workload, which is graded on interactivity, and when the model's
+    checkpoint cannot be read on this host or the session published no card."""
 
     shape = workload.inferencex
     if shape is None:

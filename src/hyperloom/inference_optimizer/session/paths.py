@@ -356,8 +356,7 @@ def tracelens_root() -> Path:
 
 
 def tracelens_arch_json(tracelens_root: Path, platform: str) -> Path:
-    """Where the TraceLens checkout at ``tracelens_root`` keeps the arch JSON of ``platform``, a GPU label in any case:
-    its arch dir names each file by the upper-case label."""
+    """The arch JSON a TraceLens checkout keeps for ``platform``, named by the upper-case GPU label."""
     return tracelens_root / "TraceLens" / "Agent" / "Analysis" / "utils" / "arch" / f"{platform.strip().upper()}.json"
 
 

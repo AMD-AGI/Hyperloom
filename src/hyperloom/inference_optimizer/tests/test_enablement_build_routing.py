@@ -97,20 +97,6 @@ async def test_escalate_enqueues_for_compiled_gap(coord, monkeypatch, card):
 
 
 @pytest.mark.asyncio
-async def test_a_build_without_a_session_card_names_no_arch(coord, monkeypatch):
-    coord.shared_state.framework = "vllm"
-
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
-
-    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-
-    await coord.enablement_build.maybe_escalate_to_targeted_build("hipErrorNoBinaryForGpu")
-
-    queued = [t for t in await coord.tasks.queued() if t.kind == "targeted_build"]
-    assert [TargetedBuildAction.from_state(task.params).gpu_arch for task in queued] == [""]
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("entry", ["escalate", "route"])
 async def test_build_pumps_propagate_their_failures(coord, monkeypatch, entry):
     """A failing pump reaches the lane's recording handler instead of dying at debug level."""

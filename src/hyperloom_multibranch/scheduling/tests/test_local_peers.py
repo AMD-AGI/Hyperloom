@@ -635,25 +635,11 @@ def test_a_machine_that_shows_no_card_fits_no_test(monkeypatch: pytest.MonkeyPat
         machine_parallel_tests(1)
 
 
-def test_the_local_cards_are_described_by_amd_smi_at_their_rocm_ids(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(gpu_card, "read_cards", lambda: [MI325X_CARD, MI325X_CARD, MI355X_CARD, MI355X_CARD])
-
-    assert LocalCards((2, 3)).card() == MI355X_CARD
-    assert LocalCards((0, 1)).card() == MI325X_CARD
-
-
 def test_local_cards_of_two_kinds_refuse_the_peers_naming_each_kind(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gpu_card, "read_cards", lambda: [MI325X_CARD, MI355X_CARD])
 
     with pytest.raises(PeersUnavailable, match=r"cards \[0, 1\].*1x AMD Instinct MI325X.*1x AMD Instinct MI355X"):
         LocalCards((0, 1)).card()
-
-
-def test_a_local_card_amd_smi_does_not_describe_refuses_the_peers(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(gpu_card, "read_cards", lambda: [MI355X_CARD] * 4)
-
-    with pytest.raises(PeersUnavailable, match=r"describes 4 cards, so not the session's cards \[4, 5\]"):
-        LocalCards((3, 4, 5)).card()
 
 
 def test_cards_amd_smi_cannot_read_refuse_the_peers_saying_why(monkeypatch: pytest.MonkeyPatch) -> None:

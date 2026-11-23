@@ -395,11 +395,6 @@ class TestFlyDSLTargetArch(unittest.TestCase):
         with mock.patch.dict(os.environ, _published(MI325X_CARD)):
             self.assertEqual(_flydsl_kernel_params("").get("FLYDSL_TARGET_ARCH"), "gfx942")
 
-    def test_a_session_without_a_card_gets_no_arch(self) -> None:
-        with mock.patch.dict(os.environ):
-            os.environ.pop(SESSION_CARD_ENV, None)
-            self.assertNotIn("FLYDSL_TARGET_ARCH", _flydsl_kernel_params(""))
-
 
 if __name__ == "__main__":
     unittest.main()

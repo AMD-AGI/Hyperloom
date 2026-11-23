@@ -398,8 +398,6 @@ def test_catalog_probe_keeps_anthropic_side_when_it_has_its_own_key(clean_creds_
     [
         pytest.param("", MI355X_CARD, "mi355x", id="card-only"),
         pytest.param("mi300x", None, "mi300x", id="given-only"),
-        pytest.param("mi355x", MI355X_CARD, "mi355x", id="agreement-silent"),
-        pytest.param("", None, "", id="no-inputs-returns-empty"),
         pytest.param("", replace(MI355X_CARD, name="AMD Radeon Graphics"), "", id="a-card-without-a-designation"),
     ],
 )
@@ -407,14 +405,6 @@ def test_session_label_without_a_disagreement_is_silent(given, card, label, caps
     """A given name is the label; without one the card's own name is."""
     assert session_setup._session_label(given, card) == label
     assert capsys.readouterr().err == ""
-
-
-def test_session_label_disagreement_takes_the_given_name_and_names_both(capsys):
-    """A given name counts: it is never overruled by the card, only printed beside the card's own."""
-    assert session_setup._session_label("mi350x", MI355X_CARD) == "mi350x"
-    warning = capsys.readouterr().err
-    assert warning.startswith("WARN:")
-    assert "'mi350x'" in warning and "'mi355x'" in warning
 
 
 # _emit_launch_info

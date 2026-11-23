@@ -12,9 +12,8 @@ toolbox keeps its journal, archive and landed output under ``MB-toolbox``. A run
 :class:`PinnedToolboxInputs` clones the run's source into ``MB-runner-source`` and has the commit's runner cache entry
 built from a private copy of the commit (:func:`private_copy`, :func:`runner_cache_pin`), or finds it built, and its
 inference_suite staging published, before anything is measured, and pins every runner sandbox to that entry's manifest
-through the toolbox's inputs. The application's container holds none of the runners' cards, so it reads the session's
-card from a recording of ``amd-smi static --json`` on their node (:data:`RUNNER_CARD_ENV`), which every runner checks
-its own cards against.
+through the toolbox's inputs. The session's card is read from a recording of ``amd-smi static --json`` on the
+runners' node (:data:`RUNNER_CARD_ENV`).
 
 The dev sandboxes a hosted session lends its specialists and its autonomous agents run in ``dev`` sandboxes of the grant
 (:func:`~hyperloom_multibranch.scheduling.local_peers.branch_sandboxes`): only their processes run there, and their
@@ -98,10 +97,8 @@ class HostedSandboxes:
         return build_hosted_toolbox(inputs, blackboard, acceptance, spec, options=options)
 
     def card(self) -> GpuCard:
-        """The card the ``amd-smi static --json`` document :data:`RUNNER_CARD_ENV` names describes for every card of the
-        runner sandboxes. A runner sandbox is started only for a test, so the app host is given a recording of one;
-        every runner checks its own cards against it. Raises :class:`PeersUnavailable` when the variable names no
-        file, or the file is no such document or describes more than one kind of card."""
+        """The card the recording :data:`RUNNER_CARD_ENV` names describes; raises :class:`PeersUnavailable` when it
+        names none or the recording describes no one kind of card."""
         recorded = os.environ.get(RUNNER_CARD_ENV, "").strip()
         if not recorded:
             raise PeersUnavailable(

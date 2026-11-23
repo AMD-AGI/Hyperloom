@@ -143,14 +143,13 @@ class Meta:
 
 
 def _card(value: Any, path: str) -> GpuCard | None:
-    """The card the session read, absent from a sheet whose session read none. Its name and device id may be empty or
-    left out: the driver does not name every card."""
+    """The card the session read; ``None`` when it read none."""
     if value is None:
         return None
     r = Reader(value, path)
     card = GpuCard(
-        name=r.string("name") if "name" in value else "",
-        device_id=r.string("device_id") if "device_id" in value else "",
+        name=r.string("name"),
+        device_id=r.string("device_id"),
         gfx=r.text("gfx") or "",
         compute_units=r.integer("compute_units", minimum=1) or 1,
         memory_mib=r.integer("memory_mib", minimum=1) or 1,
@@ -163,8 +162,7 @@ def _card(value: Any, path: str) -> GpuCard | None:
 
 @dataclass(frozen=True)
 class Hardware:
-    """The cards a test needs. ``gpu_type`` is the session's label for them; ``card`` is what the session's cards
-    reported, which the runner holds its own to, and is absent when the session read none."""
+    """The cards a test needs: ``gpu_type`` is the session's label, ``card`` what its cards reported."""
 
     gpu_type: str
     gpu_count: int

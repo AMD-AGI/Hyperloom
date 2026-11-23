@@ -455,10 +455,8 @@ def test_write_vendor_peak_arch_spec_writes_the_session_card(tmp_path: Path, mon
     assert json.loads(out.read_text(encoding="utf-8"))["max_achievable_tflops"]["matrix_bf16"] == 1307.4
 
     monkeypatch.delenv(SESSION_CARD_ENV)
-    logged: list[str] = []
-    assert not tab.write_vendor_peak_arch_spec(tmp_path / "none.json", "MI325X", logged.append)
+    assert not tab.write_vendor_peak_arch_spec(tmp_path / "none.json", "MI325X", lambda _m: None)
     assert not (tmp_path / "none.json").exists()
-    assert "no vendor peaks for MI325X" in logged[0]
 
 
 @pytest.mark.parametrize(

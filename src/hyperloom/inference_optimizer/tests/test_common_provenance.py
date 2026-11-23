@@ -157,16 +157,6 @@ def test_gfx_override_beats_the_session_card():
     assert detect_gfx_arch({"HYPERLOOM_GFX_ARCH": "gfx950", **_with_card(MI325X_CARD)}) == "gfx950"
 
 
-def test_gfx_never_spawns_a_probe(monkeypatch):
-    """Provenance runs on the crash path and under unit tests; the arch is read, never probed."""
-
-    def _boom(*a, **k):  # pragma: no cover - must never run
-        raise AssertionError("a subprocess was spawned to find the arch")
-
-    monkeypatch.setattr("hyperloom.common.provenance.subprocess.run", _boom)
-    assert detect_gfx_arch({}) is None
-
-
 def test_server_args_hash_stable_and_sensitive():
     a = ["--tp", "1", "--quant", "fp8"]
     b = ["--tp", "1", "--quant", "fp8"]

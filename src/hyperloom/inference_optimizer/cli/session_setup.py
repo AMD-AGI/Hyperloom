@@ -105,10 +105,7 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
 
 
 def _read_session_card(nodes: int) -> GpuCard | None:
-    """The card this session runs on: the one kind of card it can see, or a remote node's for a multi-node run.
-
-    Says why when no card could be read, and exits 2 when the cards it can see are not one kind.
-    """
+    """The card this session runs on, a remote node's for a multi-node run; exits 2 when its cards are not one kind."""
     try:
         if nodes >= 2:
             from ..multi_node._internal.gpu_probe import remote_cards
@@ -129,17 +126,14 @@ def _read_session_card(nodes: int) -> GpuCard | None:
 
 
 def _visible_cards(cards: list[GpuCard]) -> list[GpuCard]:
-    """The cards the first visible-device mask set names, by ROCm number; all of them when it names no number."""
+    """The cards the visible-device mask names; all of them when it names no number."""
     mask = next((raw for name in VISIBLE_DEVICE_VARS if (raw := os.environ.get(name, "").strip())), "")
     numbers = parse_device_list(mask)
     return [cards[number] for number in numbers if number < len(cards)] if numbers else cards
 
 
 def _session_label(given: str, card: GpuCard | None) -> str:
-    """The name the session files its results under: the one the operator gave, else the card's own.
-
-    A given name is taken as it is; when it differs from the card's own, both are printed.
-    """
+    """The name the session files its results under: the one given, else the card's own."""
     own = gpu_card.board_label(card.name) if card else ""
     if card and given and own and given != own:
         print(

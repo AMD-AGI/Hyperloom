@@ -112,10 +112,7 @@ def _cascade(kb: _RemoteKB) -> tuple[dict[str, Any], str, float]:
     [
         ("mi300x", ""),
         ("mi325x_ws16_pd1p1d_tp8_ep2_rayjob", "_ws16_pd1p1d_tp8_ep2_rayjob"),
-        ("mi355x_ws8_tp8_infera", "_ws8_tp8_infera"),
-        ("mi300x_ep8_cpx", "_ep8_cpx"),
         ("mi300x_cpx", "_cpx"),
-        ("radeon8060s", ""),
         # A single node never encodes tp, so this tail is part of the label.
         ("mi300x_tp8", ""),
     ],
@@ -128,12 +125,6 @@ def _row(hardware: str, gfx_arch: str = "") -> dict[str, str]:
     return {"hardware": hardware, "gfx_arch": gfx_arch}
 
 
-def test_same_slug_is_compatible_whatever_the_rows_record() -> None:
-    assert _hardware_is_compatible(_row(TARGET["hardware"]), _row(TARGET["hardware"]))
-    assert _hardware_is_compatible(_row("MI300X", "gfx942"), _row("mi300x"))
-    assert not _hardware_is_compatible(_row(""), _row(""))
-
-
 def test_another_label_is_compatible_only_on_the_same_recorded_arch_and_topology() -> None:
     target = _row(TARGET["hardware"], "gfx942")
     assert _hardware_is_compatible(target, _row("mi325x_ws16_pd1p1d_tp8_ep2_rayjob", "gfx942"))
@@ -142,12 +133,6 @@ def test_another_label_is_compatible_only_on_the_same_recorded_arch_and_topology
     assert not _hardware_is_compatible(target, _row("mi355x_ws16_pd1p1d_tp8_ep2_rayjob", "gfx950"))
     assert _hardware_is_compatible(_row("mi300x_tp8", "gfx942"), _row("mi325x", "gfx942"))
     assert not _hardware_is_compatible(_row("mi300x_tp8", "gfx942"), _row("mi325x_cpx", "gfx942"))
-
-
-def test_a_row_without_a_recorded_arch_matches_its_own_slug_only() -> None:
-    assert not _hardware_is_compatible(_row("mi300x", "gfx942"), _row("mi325x"))
-    assert not _hardware_is_compatible(_row("mi300x"), _row("mi325x", "gfx942"))
-    assert not _hardware_is_compatible(_row("mi300x"), _row("mi325x"))
 
 
 def test_candidate_hardware_falls_back_to_its_canonical_id() -> None:

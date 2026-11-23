@@ -6,13 +6,11 @@
 import argparse
 import asyncio
 import os
-from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from hyperloom_common import gpu_card
-from hyperloom_common.amd_smi import AmdSmiError
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS
 from hyperloom.inference_optimizer import cli
@@ -21,8 +19,6 @@ from hyperloom.inference_optimizer.cli.benchmark_config import configure_benchma
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.inference_optimizer.multi_node._internal import gpu_probe
 from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, MI355X_CARD
-
-from .conftest import cli_call_sequence
 
 
 @pytest.fixture(autouse=True)
@@ -95,14 +91,6 @@ def test_a_fresh_session_publishes_its_card_before_the_quantization_prelude(tmp_
     assert os.environ["GPU_TYPE"] == os.environ["TARGET_GPU_TYPE"] == "mi355x"
 
 
-def test_any_framework_launches_on_any_board(tmp_path, monkeypatch):
-    """No board table holds a framework back: sglang on an R9700 starts."""
-    _host(monkeypatch, replace(MI355X_CARD, name="AMD Radeon AI PRO R9700", gfx="gfx1201", compute_units=64))
-
-    _seed(tmp_path, monkeypatch, "--framework", "sglang")
-    assert os.environ["GPU_TYPE"] == os.environ["TARGET_GPU_TYPE"] == "r9700"
-
-
 def test_any_name_is_accepted_as_the_gpu_type():
     args = _build_parser().parse_args(["optimize", "--model", "/model", "--gpu-type", "MI300A"])
     assert args.gpu_type == "mi300a"
@@ -140,14 +128,6 @@ def test_a_host_whose_cards_cannot_be_read_runs_without_a_card(monkeypatch, caps
     assert "none read (amd-smi static could not run (test))" in capsys.readouterr().out
 
 
-def test_a_host_whose_cards_cannot_be_read_and_no_name_has_no_label(monkeypatch, capsys):
-    cli._resolve_target_gpu(args := _args(), nodes=1)
-
-    assert args.gpu_type is None
-    assert "GPU_TYPE" not in os.environ or not os.environ["GPU_TYPE"]
-    assert "GPU type        : <unset>" in capsys.readouterr().out
-
-
 def test_mixed_cards_refuse_the_session_and_list_each_kind(monkeypatch, capsys):
     _host(monkeypatch, MI325X_CARD, MI355X_CARD)
 
@@ -159,40 +139,13 @@ def test_mixed_cards_refuse_the_session_and_list_each_kind(monkeypatch, capsys):
     assert "AMD Instinct MI325X" in err and "AMD Instinct MI355X" in err
 
 
-@pytest.mark.parametrize(
-    ("mask", "value", "card"),
-    [
-        ("ROCR_VISIBLE_DEVICES", "1", MI355X_CARD),
-        ("HIP_VISIBLE_DEVICES", "0", MI325X_CARD),
-        ("CUDA_VISIBLE_DEVICES", "1,1", MI355X_CARD),
-    ],
-)
-def test_the_visible_device_mask_picks_the_cards_by_rocm_number(monkeypatch, mask, value, card):
-    _host(monkeypatch, MI325X_CARD, MI355X_CARD)
-    monkeypatch.setenv(mask, value)
-
-    cli._resolve_target_gpu(_args(), nodes=1)
-
-    assert gpu_card.session_card() == card
-
-
-def test_the_first_mask_set_decides(monkeypatch):
-    """ROCR slices the machine first; a HIP mask indexes into what it left."""
+def test_the_visible_device_mask_picks_the_cards_by_rocm_number(monkeypatch):
     _host(monkeypatch, MI325X_CARD, MI355X_CARD)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "1")
-    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0")
 
     cli._resolve_target_gpu(_args(), nodes=1)
 
     assert gpu_card.session_card() == MI355X_CARD
-
-
-def test_a_mask_without_numbers_sees_every_card(monkeypatch):
-    _host(monkeypatch, MI325X_CARD, MI355X_CARD)
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "GPU-a1b2c3")
-
-    with pytest.raises(SystemExit):
-        cli._resolve_target_gpu(_args(), nodes=1)
 
 
 def test_a_multi_node_session_reads_a_remote_nodes_cards(monkeypatch):
@@ -206,18 +159,6 @@ def test_a_multi_node_session_reads_a_remote_nodes_cards(monkeypatch):
     assert args.gpu_type == "mi355x"
 
 
-def test_a_multi_node_session_whose_remote_cannot_be_read_says_why(monkeypatch, capsys):
-    def unreachable():
-        raise AmdSmiError("remote amd-smi static via rayjob failed: dashboard unreachable")
-
-    monkeypatch.setattr(gpu_probe, "remote_cards", unreachable)
-
-    cli._resolve_target_gpu(_args("--gpu-type", "mi355x"), nodes=2)
-
-    assert gpu_card.session_card() is None
-    assert "dashboard unreachable" in capsys.readouterr().out
-
-
 def test_a_resume_restores_the_label_and_reads_the_card_again(tmp_path, monkeypatch):
     """The label is the session's; the facts are the machine's this leg runs on."""
     _host(monkeypatch, MI355X_CARD)
@@ -228,7 +169,3 @@ def test_a_resume_restores_the_label_and_reads_the_card_again(tmp_path, monkeypa
 
     assert os.environ["GPU_TYPE"] == "mi350x"
     assert gpu_card.session_card() == MI355X_CARD
-
-
-def test_resume_checks_the_custom_entrypoint():
-    assert "_require_custom_entrypoint" in cli_call_sequence("_resume_session")

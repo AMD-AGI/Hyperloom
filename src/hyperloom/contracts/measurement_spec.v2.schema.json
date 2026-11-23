@@ -153,9 +153,13 @@
           ],
           "additionalProperties": false,
           "required": [
+            "name",
+            "device_id",
             "gfx",
             "compute_units",
-            "memory_mib"
+            "memory_mib",
+            "memory_bandwidth_gbps",
+            "engine_clock_mhz"
           ],
           "properties": {
             "name": {

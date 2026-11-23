@@ -33,19 +33,11 @@ def test_a_stored_label_and_its_gfx_target_name_each_other(gfx, label):
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("gfx942", "gfx942"),
         ("GFX950", "gfx950"),
         ("gfx1201", "gfx1201"),
         ("gfx950:sramecc+:xnack-", "gfx950"),
         ("MI300X", "gfx942"),
-        ("mi355x", "gfx950"),
-        ("AMD Instinct MI355X", "gfx950"),
-        ("amd_instinct_mi300x", "gfx942"),
-        ("mi300x_vf", "gfx942"),
-        ("Radeon 8060S", "gfx1151"),
-        ("AMD Radeon 8060S Graphics", "gfx1151"),
-        ("radeon_8060s", "gfx1151"),
-        ("AMD Radeon PRO W7900", "gfx1100"),
+        ("radeon8060s", "gfx1151"),
     ],
 )
 def test_canon_arch_reads_a_gfx_target_or_a_stored_label(value, expected):
@@ -56,18 +48,11 @@ def test_canon_arch_reads_a_gfx_target_or_a_stored_label(value, expected):
     "value",
     [
         "",
-        "some-new-gpu",
         "gfx12-generic",
-        "gfx",
-        "R9700S",
-        "XR9700",
-        "MI300XL",
-        "W7900D",
-        "mi308x",
         "mi325x",
-        "AMD Instinct MI325X",
         "r9700",
-        "AMD Radeon AI PRO R9700",
+        "AMD Instinct MI355X",
+        "mi300x_vf",
     ],
 )
 def test_canon_arch_names_no_target_for_a_product_outside_the_stored_labels(value):
@@ -152,7 +137,7 @@ def test_instinct_and_unprofiled_targets_keep_the_instinct_defaults(gpu_target):
     assert profile.prompt_note == ""
 
 
-@pytest.mark.parametrize("gpu_target", ["gfx1100", "GFX1100", "gfx1100:xnack-", "w7900", "AMD Radeon PRO W7900"])
+@pytest.mark.parametrize("gpu_target", ["gfx1100", "GFX1100", "gfx1100:xnack-", "w7900"])
 def test_gfx1100_has_the_rdna3_profile(gpu_target):
     profile = arch_profile(gpu_target)
 

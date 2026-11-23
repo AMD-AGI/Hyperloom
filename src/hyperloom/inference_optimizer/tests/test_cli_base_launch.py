@@ -164,13 +164,6 @@ def test_the_query_carries_what_the_session_card_reports(tmp_path, fetched, monk
     assert (query.board, query.gfx, query.memory_mib) == ("mi350x", "gfx950", MI355X_CARD.memory_mib)
 
 
-def test_a_session_without_a_card_queries_by_its_label_alone(tmp_path, fetched):
-    _resolve(tmp_path, _args())
-
-    query = fetched[0][0]
-    assert (query.board, query.gfx, query.memory_mib) == ("mi355x", None, None)
-
-
 def test_a_new_session_state_carries_no_reference_launch(tmp_path, fetched):
     base = _resolve(tmp_path, _args())
 

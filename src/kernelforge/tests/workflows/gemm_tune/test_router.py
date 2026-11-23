@@ -270,7 +270,7 @@ class TestFp4UnsupportedArchSkip:
         fmoe = [s for s in specs if s.name == "fmoe_ck"][0]
         assert fmoe.should_run
 
-    @pytest.mark.parametrize("gpu_type", ["gfx942:sramecc+:xnack-", "AMD Instinct MI300X", "mi300x_vf"])
+    @pytest.mark.parametrize("gpu_type", ["gfx942:sramecc+:xnack-", "MI300X"])
     def test_a_spelling_of_gfx942_or_its_stored_label_skips_fp4(self, gpu_type):
         profile = _make_profile(is_moe=False)
         specs = select_tuners(
@@ -399,8 +399,6 @@ class TestGpuTypeAutoDetect:
         ("raw", "expected"),
         [
             ("gfx942:sramecc+:xnack-", "gfx942"),
-            ("mi300x_vf", "gfx942"),
-            ("AMD Instinct MI300X", "gfx942"),
             ("w7900", "gfx1100"),
             ("mi308x", ""),
             ("mi325x", ""),
