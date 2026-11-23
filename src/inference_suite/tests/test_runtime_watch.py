@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import textwrap
 import time
@@ -19,7 +20,7 @@ from inference_suite.contracts import PRE_READY_BUSY_SILENCE_SEC, Deadlines, Fai
 from inference_suite.frameworks import Framework
 from inference_suite.runtime import watch
 from inference_suite.runtime.phases import Phase, PhaseClock
-from inference_suite.runtime.process import PidfileError, ServerPidfile, spawn
+from inference_suite.runtime.process import ChildPlace, PidfileError, ServerPidfile, spawn
 from inference_suite.runtime.watch import BootReaders, Exited, RoundGate, ServerWatch, Stop, wait_child
 
 _DEADLINES = Deadlines(boot_sec=100, round_sec=1000, eval_sec=60, silence_sec=50, pre_ready_silence_sec=30)
@@ -334,6 +335,15 @@ def test_pidfile_round_trips_and_refuses_what_it_did_not_write(tmp_path):
     path.write_text("1234 1234\n")
     with pytest.raises(PidfileError, match="not JSON"):
         ServerPidfile.read(path)
+
+
+def test_a_child_placed_on_cpus_runs_on_those_from_its_start(tmp_path):
+    cpus = (sorted(os.sched_getaffinity(0))[0],)
+    probe = "import os; print(sorted(os.sched_getaffinity(0)))"
+    child = spawn((sys.executable, "-c", probe), {}, tmp_path / "out.log", place=ChildPlace(tmp_path, cpus))
+
+    assert wait_child(child, RoundGate(_DEADLINES, lambda: "", time.monotonic())) == Exited(0)
+    assert (tmp_path / "out.log").read_text().strip() == str(list(cpus))
 
 
 def test_a_silent_boot_whose_memory_grows_is_working_past_both_silence_bounds(tmp_path):

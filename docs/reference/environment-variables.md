@@ -166,6 +166,14 @@ when `--gpu-type` is omitted.
 
 Run `hyperloom optimize --help` for the exhaustive flag list.
 
+The prompts of a fixed workload have no flag; they are read from the environment of `hyperloom optimize` or
+`hyperloom-multibranch run` into every rendered point:
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATASET_PATH` | Unset (InferenceX's random prompts of `ISL` tokens) | Absolute path of a JSONL file of real prompts every fixed round sends instead, each line a `prompt` string or a `turns` list whose first turn is sent. A path that is not absolute refuses the round as `config_invalid`. See [InferenceSuite benchmark rounds](inference-suite.md#launch-layers). |
+| `DATASET_MAX_PROMPTS` | Unset (every line) | A positive integer: only the first that many lines of `DATASET_PATH` are sent, and a point that sets no `NUM_PROMPTS` sends at least that many requests, so each kept prompt is sent. Without `DATASET_PATH` it changes nothing. |
+
 ---
 
 ## Accuracy gates
@@ -681,6 +689,14 @@ upstream subprocess capture. Active logs do not prove useful progress.
 
 Profile, KernelForge, GEAK, LLM-call, and SGLang's own watchdog budgets are separate
 from these benchmark limits and retain their existing contracts.
+
+---
+
+## CPU placement on a shared host
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_SERVER_CPUS` | Unset (the round's own CPUs) | CPUs every server a benchmark round starts is pinned to, so that other work on the host does not share them. A list as `taskset -c` takes it: CPU numbers and ascending `first-last` ranges separated by commas, digits only (`32-63`, `0-15,64-79`, `3`). Any other value (`all`, a space inside the list, a range that runs backwards) fails every round as an invalid configuration before its server starts, with the variable named in the round's error. A round that measures a server it does not start (`BENCHMARK_BASE_URL`, multi-node) pins nothing. The process that runs the round reads it from its own environment: `hyperloom optimize` does; a test of `hyperloom-multibranch run` runs in a runner whose environment does not carry it, so its server is not pinned. |
 
 ---
 

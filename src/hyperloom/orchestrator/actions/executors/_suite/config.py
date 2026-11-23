@@ -79,6 +79,7 @@ from inference_suite.contracts import (
     LifecycleMode,
     MlperfWorkload,
     ProfileConfig,
+    PromptDataset,
     RunPaths,
     ScriptableRunEnv,
     ScriptableWorkload,
@@ -90,7 +91,7 @@ from inference_suite.contracts import (
 from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 
 from ..gpu._gpu_pin import ROCR_AUTOFILL_ENV
-from ..workload._workload_envs import QUALITY_REF_ENVS
+from ..workload._workload_envs import DATASET_MAX_PROMPTS_ENV, DATASET_PATH_ENV, QUALITY_REF_ENVS
 from .._profile_setup import (
     _DELAY_ITERATIONS,
     _MAX_ITERATIONS,
@@ -157,6 +158,8 @@ _CONSUMED_ENV = frozenset(
         _REMOTE_SERVER_ENV,
         _PROFILE_ENV,
         _PROFILE_BODY_ENV,
+        DATASET_PATH_ENV,
+        DATASET_MAX_PROMPTS_ENV,
     }
 )
 
@@ -187,6 +190,7 @@ class RoundSettings:
     ``base_path`` is where the frozen base the round composes on is stored; ``silence_sec`` bounds how long the
     server may log nothing once ready; ``env_inherit`` names the host environment the server and client may see;
     ``server_url`` is the server a client-only round measures, which a point's own ``BENCHMARK_BASE_URL`` overrides.
+    ``server_cpus`` are the CPUs the round's server is pinned to (empty: the round's own).
     ``boot_budget_sec`` is the boot budget of the test the round belongs to (``Deadlines.boot_budget_sec``), ``None``
     for none.
     """
@@ -200,6 +204,7 @@ class RoundSettings:
     env_inherit: tuple[str, ...] = ()
     deadline_unix: int | None = None
     server_url: str | None = None
+    server_cpus: tuple[int, ...] = ()
     boot_budget_sec: float | None = None
 
 
@@ -361,6 +366,7 @@ def _server(
         user=user,
         import_packages=KERNEL_LIBRARY_PACKAGES,
         env_inherit=settings.env_inherit,
+        cpus=settings.server_cpus,
     )
 
 
@@ -381,7 +387,16 @@ def _fixed(point: _Point) -> FixedWorkload:
         warmup_seed=WARMUP_SEED,
         tokenizer_mode=point.text(_TOKENIZER_MODE_ENV) or _CLIENT_TOKENIZER_MODE,
         trust_remote_code=point.flag(_CLIENT_TRUST_ENV, default=False),
+        dataset=_dataset(point),
     )
+
+
+def _dataset(point: _Point) -> PromptDataset | None:
+    path = point.text(DATASET_PATH_ENV)
+    if path is None:
+        return None
+    max_prompts = None if point.text(DATASET_MAX_PROMPTS_ENV) is None else point.integer(DATASET_MAX_PROMPTS_ENV)
+    return PromptDataset(path, max_prompts)
 
 
 def _eval(point: _Point, enabled: bool) -> EvalConfig:

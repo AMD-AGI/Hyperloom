@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The fixed-shape load: InferenceX's ``infx.bench_serving`` client against the round's server.
+"""The fixed-shape load: InferenceX's ``infx.bench_serving`` client against the round's server, or for a workload that
+names a prompt dataset, :mod:`inference_suite.load.dataset_client`, which writes the result keys this module reads.
 
 Every knob the client has a default for is passed, so two arms send the same requests whatever the client's defaults
 become or whichever host runs it; a switch the load leaves off (``--use-chat-template``) is absent. The warmup is its own invocation on its own seed, with its result discarded; the measured invocation runs no
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.power_energy import TimedRun
-from inference_suite.contracts.config import FixedWorkload, ServerConfig, SuiteConfig
+from inference_suite.contracts.config import FixedWorkload, PromptDataset, ServerConfig, SuiteConfig
 from inference_suite.contracts.launch import ClientInvocation
 from inference_suite.contracts.layout import RunLayout
 from inference_suite.contracts.report import FailedStep, FixedMetrics, ReportError
@@ -37,6 +38,8 @@ CLIENT_RANDOM_PREFIX_LEN = 0
 #: Each prompt-generation worker draws its chunk's padding seed in turn, so the count shapes the prompts; the client's
 #: own default (``min(cpu_count, 8)``) would make them depend on the client host.
 CLIENT_RANDOM_NUM_WORKERS = 8
+#: The client a workload with a prompt dataset runs, as a file: it imports nothing from this package.
+DATASET_CLIENT = Path(__file__).with_name("dataset_client.py")
 #: ``median_*`` gives the p50; these name the other percentiles the result's ``p<N>_*`` keys carry.
 METRIC_PERCENTILES = (90, 99)
 PERCENTILE_METRICS = ("ttft", "tpot", "itl", "e2el")
@@ -107,7 +110,46 @@ def fixed_client_env(tool: ClientTool) -> dict[str, str]:
 def client_argv(
     tool: ClientTool, target: ClientTarget, workload: FixedWorkload, client_pass: ClientPass
 ) -> tuple[str, ...]:
-    """The client argv for one pass: every load knob explicit, the tokenizer read from the served model's path."""
+    """The client argv for one pass: every load knob explicit."""
+    if workload.dataset is not None:
+        return _dataset_argv(tool, target, workload, workload.dataset, client_pass)
+    return _inferencex_argv(tool, target, workload, client_pass)
+
+
+def _dataset_argv(
+    tool: ClientTool, target: ClientTarget, workload: FixedWorkload, dataset: PromptDataset, client_pass: ClientPass
+) -> tuple[str, ...]:
+    argv = [
+        tool.python,
+        str(DATASET_CLIENT),
+        "--base-url",
+        target.base_url,
+        "--served-model-name",
+        target.served_model_name,
+        "--dataset",
+        dataset.path,
+        "--num-prompts",
+        str(client_pass.num_prompts),
+        "--max-concurrency",
+        str(workload.concurrency),
+        "--max-tokens",
+        str(workload.osl),
+        "--seed",
+        str(client_pass.seed),
+        "--metric-percentiles",
+        ",".join(str(percentile) for percentile in METRIC_PERCENTILES),
+    ]
+    if dataset.max_prompts is not None:
+        argv += ["--max-prompts", str(dataset.max_prompts)]
+    if client_pass.result is not None:
+        argv += ["--result", str(client_pass.result)]
+    return tuple(argv)
+
+
+def _inferencex_argv(
+    tool: ClientTool, target: ClientTarget, workload: FixedWorkload, client_pass: ClientPass
+) -> tuple[str, ...]:
+    """InferenceX's argv, its tokenizer read from the served model's path."""
     argv = [
         tool.python,
         "-m",
@@ -307,6 +349,7 @@ __all__ = [
     "ClientPass",
     "ClientTarget",
     "ClientTool",
+    "DATASET_CLIENT",
     "FixedOutcome",
     "FixedRound",
     "MeasuredWindow",

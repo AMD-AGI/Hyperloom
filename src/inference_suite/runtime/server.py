@@ -39,6 +39,7 @@ from inference_suite.runtime.process import (
     group_listens,
     listening_inodes,
     reap,
+    ChildPlace,
     spawn,
 )
 from inference_suite.runtime.watch import POLL_SEC, Cancel, RoundGate, BootReaders, ServerWatch, Stop
@@ -224,9 +225,8 @@ class ServerLifecycle:
             return busy
         started = time.monotonic()
         self._clock.mark(Phase.SPAWN, started)
-        spawned = self._spawned = spawn(
-            self._launch.argv, self._server_env(), self._log, cwd=self._layout.framework_cwd
-        )
+        place = ChildPlace(self._layout.framework_cwd, self._config.server.cpus)
+        spawned = self._spawned = spawn(self._launch.argv, self._server_env(), self._log, place=place)
         self._record(spawned)
         pid = spawned.proc.pid
         watch = ServerWatch(
