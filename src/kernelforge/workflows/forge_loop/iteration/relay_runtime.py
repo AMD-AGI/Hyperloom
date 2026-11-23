@@ -41,7 +41,10 @@ class RelayRuntimeMixin:
     def _supervisor_banner(self) -> str:
         """How the Supervisor is scheduled this session, in the operator's terms."""
         if self._search_actors is not None:
-            return "  Supervisor: enabled at a relay blockage when no other Agent profile is available"
+            return (
+                f"  Supervisor: enabled at a relay blockage ({self.ic.supervise_after} iterations without a new best) "
+                "when no other Agent profile is available"
+            )
         return (
             f"  Supervisor: enabled (after {self.ic.supervise_after} stalls, "
             f"cooldown {self.ic.supervise_cooldown}, no intervention cap)"
@@ -105,6 +108,14 @@ class RelayRuntimeMixin:
             residence_iterations_remaining=0,
         )
 
+    def _blockage_reached(self) -> bool:
+        """Whether the active profile has gone the loop's stall count without a new best.
+
+        The count is the one that schedules the Supervisor in a loop without a relay: a relay decides which
+        intervention a stalled search gets, not when the search has stalled.
+        """
+        return relay_blockage_reached(self.run_state.agent_relay, threshold=self.ic.supervise_after)
+
     def _lane_plans_match_active_profile(self, planned_iteration: int) -> bool:
         """Whether a recoverable lane plan was written by the profile now active, so it may still be dispatched."""
         try:
@@ -141,7 +152,7 @@ class RelayRuntimeMixin:
                 return replacement, "relay_profile_unavailable"
             if not search_actors.has_bundle(relay.active_profile_id):
                 raise RuntimeError(f"no Agent profile can run: {relay.active_profile_id} has no search actor")
-        if not relay_blockage_reached(relay, threshold=search_actors.blockage_threshold):
+        if not self._blockage_reached():
             return None, ""
         intervention = select_relay_intervention(relay, profiles=search_actors.profiles, availability=availability)
         return intervention, "relay_blockage_detected"
@@ -154,7 +165,7 @@ class RelayRuntimeMixin:
             self.state_store.save(self.run_state)
         self._recheck_profiles(iteration, search_actors)
         if self._lane_queue:
-            self._defer_intervention(search_actors)
+            self._defer_intervention()
             return self._runnable_bundle(search_actors)
         intervention, event_type = self._select_boundary_intervention(search_actors)
         if intervention is None:
@@ -177,10 +188,10 @@ class RelayRuntimeMixin:
         self._switch_search_actor(iteration, intervention)
         return search_actors.bundle(relay.active_profile_id)
 
-    def _defer_intervention(self, search_actors: SearchActorPool) -> None:
+    def _defer_intervention(self) -> None:
         """Measure the candidates a round already bought before any intervention changes the next plan."""
         relay = self.run_state.agent_relay
-        if relay_blockage_reached(relay, threshold=search_actors.blockage_threshold):
+        if self._blockage_reached():
             print(
                 f"  [relay] blockage reached on {relay.active_profile_id}; measuring "
                 f"{len(self._lane_queue)} queued lane candidate(s) before intervening"

@@ -48,6 +48,7 @@ from kernelforge.workflows.forge_loop.campaign.run_state import (
     WorkspaceLockError,
 )
 from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop
+from kernelforge.workflows.forge_loop.search.search_policy import PLANNED_ROUND_STALL, SELF_DIRECTED_STALL
 
 
 # The forge-loop CLI activates per-workspace aiter cache isolation, which writes AITER_ROOT_DIR / AITER_JIT_DIR (and
@@ -908,6 +909,20 @@ def test_a_single_lane_campaign_builds_no_planning_service(tmp_path, monkeypatch
         result.output
     )
     assert "Plan Critic" not in result.output
+
+
+@pytest.mark.parametrize(("lanes", "stall"), [("1", SELF_DIRECTED_STALL), ("2", PLANNED_ROUND_STALL)])
+def test_the_stall_counts_follow_the_sessions_lanes_and_the_campaign_records_none(tmp_path, monkeypatch, lanes, stall):
+    """One pair of counts reaches the loop, which turns the search and calls a relay blockage by them."""
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, workspace = _invoke_forge_loop(tmp_path, ["--lanes", lanes])
+
+    assert result.exit_code == 0, result.output
+    loop_config = captured["loops"][0].ic
+    assert (loop_config.diversify_after, loop_config.supervise_after) == (stall.diversify_after, stall.supervise_after)
+    stored = json.loads(CampaignConfigStore(str(workspace)).path.read_text())
+    assert set(stored["agent_relay"]) == {"primary_profile_id", "profiles"}
 
 
 def test_the_case_aggregate_belongs_to_the_campaign_and_reaches_the_loop_its_gate_and_the_result(tmp_path, monkeypatch):

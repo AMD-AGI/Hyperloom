@@ -123,11 +123,7 @@ class SearchActorBuildContext:
         return AgentProfile(profile.profile_id, effective[0], effective[1], profile.reasoning_effort)
 
 
-def resolve_relay_policy(
-    config: Config,
-    *,
-    blockage_threshold: int = 3,
-) -> AgentRelayPolicy:
+def resolve_relay_policy(config: Config) -> AgentRelayPolicy:
     """One relay member per auto-selectable provider, the provider this campaign starts on first as primary.
 
     A provider only an explicit name reaches joins the relay only as the primary that name chose.
@@ -140,7 +136,6 @@ def resolve_relay_policy(
     return AgentRelayPolicy(
         primary_profile_id=primary,
         profiles=tuple(AgentProfileSpec(provider, provider) for provider in providers),
-        blockage_threshold=blockage_threshold,
     )
 
 
@@ -166,11 +161,7 @@ def resolve_session_relay(policy: AgentRelayPolicy | None, config: Config) -> Ag
         model = config.agent_model if member.profile_id == primary.profile_id else ""
         runtime = agent_runtime_for(strict_config, member.provider, model or resolve_agent_model(member.provider))
         profiles.append(AgentProfile(member.profile_id, member.provider, runtime.model, runtime.reasoning_effort))
-    return AgentRelayConfig(
-        primary_profile_id=primary.profile_id,
-        profiles=tuple(profiles),
-        blockage_threshold=policy.blockage_threshold,
-    )
+    return AgentRelayConfig(primary_profile_id=primary.profile_id, profiles=tuple(profiles))
 
 
 def config_for_profile(

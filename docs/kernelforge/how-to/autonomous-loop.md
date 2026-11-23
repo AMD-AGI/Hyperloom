@@ -51,10 +51,11 @@ search has stalled it is asked for a mechanism materially different from the
 ones already tried, and an active Supervisor ruling names the directions to
 take. A session is a whole round here, so the stall is counted in sessions: one
 that ends without a new best turns the search to diversifying, two in a row
-bring the Supervisor's review, and the search stays diversifying until a
-session produces a new best. With a planning stage both counts are three
-iterations, and publishing a diversified plan returns the search to exploiting
-for the iterations that measure it.
+are a blockage, which hands the search to another Agent profile or, when none
+is available, brings the Supervisor's review (see *Model relay* below), and the
+search stays diversifying until a session produces a new best. With a planning
+stage both counts are three iterations, and publishing a diversified plan
+returns the search to exploiting for the iterations that measure it.
 
 Each iteration of a campaign with more than one lane:
 
@@ -381,7 +382,7 @@ Harness) is not auto-selectable: it joins the relay only as the primary, when
 the campaign starts on it through `--agent-backend deepseek`,
 `FORGE_AGENT_BACKEND=deepseek` or `INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`
 (the last is how a Hyperloom run selects it). The campaign records only the
-members, the primary and the blockage threshold. Each session resolves every
+members and the primary. Each session resolves every
 member's model: the primary takes `--model`; every member without one takes its
 provider's `CLAUDE_MODEL` / `CODEX_MODEL` / `DSH_MODEL`, else the provider's
 default model.
@@ -398,7 +399,9 @@ the reason. When only one profile passes, the log says model relay is off for
 the session and how to turn it on.
 
 A blockage is three consecutive non-improving search iterations produced by the
-active profile. Infrastructure, API, device-contention and integrity failures,
+active profile, or two at `--lanes 1`, where every iteration is a whole session.
+The count follows the session's `--lanes`, on `--resume` as well, and the
+startup log states it. Infrastructure, API, device-contention and integrity failures,
 and outcomes no profile produced (such as a stacked merge), do not count; a
 KEEP ends the blockage. Every blockage takes the first of these the session can
 run, checked against the startup check:
@@ -440,8 +443,8 @@ every profile and each switch.
 
 When the search plateaus and no other Agent profile is available (see
 *Model relay* above), `forge-loop` escalates to a supervisor backend.
-A campaign without relay escalates after three stalled iterations instead, at
-most once every three iterations; the startup log states which schedule
+A campaign without relay escalates after the same number of stalled iterations
+instead, at most once in that many; the startup log states which schedule
 applies.
 
 ```bash

@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from kernelforge.workflows.forge_loop.campaign.run_state import (
     ORCHESTRATION_CIRCUIT_CLOSED,
     ORCHESTRATION_CIRCUIT_OPEN,
@@ -24,6 +26,14 @@ from kernelforge.workflows.forge_loop.policy.round_budget import (
     FIRST_ROUND_MEASUREMENT_SEC,
     PLANNING_FLOOR_SEC,
 )
+from kernelforge.workflows.forge_loop.search.agent_relay import (
+    AgentAvailabilitySnapshot,
+    AgentProfile,
+    AgentRelayConfig,
+    ProfileAvailability,
+    ProviderAvailability,
+)
+from kernelforge.workflows.forge_loop.search.search_actors import SearchActorBundle, SearchActorPool
 from kernelforge.workflows.forge_loop.search.search_policy import (
     OBJECTIVE_DISCOVER_NEW_MECHANISM,
     SEARCH_MODE_DIVERSIFY,
@@ -89,10 +99,33 @@ def test_a_stalled_search_sends_the_session_to_a_different_mechanism_and_leaves_
     assert LoopStateStore(str(workspace)).load().diversification_cycle_completed is False
 
 
+def _relay_with_one_runnable_profile(agent, supervisor) -> SearchActorPool:
+    """A campaign's relay in a session where only its primary passed the startup check, so a blockage is reviewed."""
+    primary = AgentProfile("claude", "claude", "claude-opus-5")
+    other = AgentProfile("codex", "codex", "gpt-6-astra")
+    passed = ProfileAvailability("claude", primary.model, provider_available=True, model_available=True, available=True)
+    failed = ProfileAvailability("codex", other.model, reason="startup check timed out")
+    return SearchActorPool(
+        config=AgentRelayConfig(primary_profile_id=primary.profile_id, profiles=(primary, other)),
+        availability=AgentAvailabilitySnapshot(
+            checked_at="2026-11-22T05:55:06Z",
+            session_index=1,
+            providers={"claude": ProviderAvailability(available=True), "codex": ProviderAvailability()},
+            profiles={primary.profile_id: passed, other.profile_id: failed},
+        ),
+        bundles={primary.profile_id: SearchActorBundle(profile=primary, agent_fn=agent, supervisor_fn=supervisor)},
+    )
+
+
+@pytest.mark.parametrize("relay", [False, True], ids=["no relay", "relay with one runnable profile"])
 def test_a_self_directed_loop_turns_after_one_session_without_a_new_best_and_is_reviewed_after_two(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, relay
 ):
-    """The stall lasts until a new best: every session in it is sent to a different mechanism, the third under a ruling."""
+    """The stall lasts until a new best: every session in it is sent to a different mechanism, the third under a ruling.
+
+    The review comes at the same session whether the loop schedules the Supervisor itself or reaches it through a
+    relay that has no other profile to switch to.
+    """
     thresholds = stall_thresholds(planned_rounds=False)
     loop, workspace = _make_loop(tmp_path, monkeypatch, supervise_after=thresholds.supervise_after, session_count=4)
     loop.ic.diversify_after = thresholds.diversify_after
@@ -111,7 +144,10 @@ def test_a_self_directed_loop_turns_after_one_session_without_a_new_best_and_is_
         session_sink["plan"] = "inspect only"
         return "No source change was needed."
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent, supervisor_fn=supervisor)))
+    search_actors = _relay_with_one_runnable_profile(agent, supervisor) if relay else None
+    asyncio.run(
+        loop.run(runner_module.LoopAgents(agent_fn=agent, supervisor_fn=supervisor, search_actors=search_actors))
+    )
 
     assert modes == [SEARCH_MODE_EXPLOIT] + [SEARCH_MODE_DIVERSIFY] * 3
     assert reviewed_at == [3]
