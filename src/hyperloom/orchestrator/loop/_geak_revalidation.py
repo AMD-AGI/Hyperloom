@@ -15,11 +15,9 @@ from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_NO_PROMOTE,
     REBENCH_VALIDATED,
 )
-from hyperloom.common.perf_metric import GradedComparison
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GeakRebenchAttempt
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
-from ..actions.executors._accuracy_gate import EVAL_KIND_ACCURACY_UNAVAILABLE
 from ..actions.executors.explore import STACK_REVALIDATE_SOURCE
 from ..collaborator import CoordinatorCollaborator
 from ..kernel.geak_config import (
@@ -28,7 +26,7 @@ from ..kernel.geak_config import (
     _geak_has_accepted_kernel,
     _geak_overlay_digest,
     _geak_result_has_artifact,
-    _geak_revalidation_decision,
+    _geak_rebench_confirms,
     _normalize_geak_overlay_dir,
     geak_candidate_launch,
     geak_spec_name,
@@ -55,7 +53,6 @@ class _OverlayReading(NamedTuple):
     expected: str
     loaded: bool
     digest: str
-    decision: str
 
 
 class _RebenchDecision(NamedTuple):
@@ -91,39 +88,15 @@ def _geak_rebench_grid_row(accepted: Mapping[str, Any], product: _GeakProduct, o
     }
 
 
-def _grades_can_rule(
-    result: Mapping[str, Any],
-    measured: float,
-    baseline_grade: GradedComparison,
-    current_grade: GradedComparison,
-) -> bool:
-    if measured <= 0 or str(result.get("status") or "succeeded") not in {"succeeded", "ok"}:
-        return False
-    return (
-        baseline_grade.comparable and current_grade.comparable and baseline_grade.objective == current_grade.objective
-    )
-
-
-def _gate_refused(entry: Mapping[str, Any]) -> bool:
-    if "gates" not in entry:
-        return entry.get("reason") in {"accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}
-    return any(
-        isinstance(gate, Mapping) and gate.get("gate") in {"graded_axes", "accuracy"} and gate.get("passed") is False
-        for gate in entry.get("gates") or []
-    )
-
-
-def _native_rejection_reason(result: Mapping[str, Any], expected_hash: str) -> str:
+def _reverted_outcome(result: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The variant the round measured and a gate refused, if any."""
     return next(
         (
-            str(entry.get("reason") or "native_gate_rejected")
+            entry
             for entry in result.get("per_variant_outcomes") or []
-            if isinstance(entry, Mapping)
-            and entry.get("outcome") == "REVERT"
-            and _gate_refused(entry)
-            and (not expected_hash or entry.get("fingerprint") == expected_hash)
+            if isinstance(entry, Mapping) and entry.get("outcome") == "REVERT"
         ),
-        "",
+        None,
     )
 
 
@@ -293,23 +266,12 @@ class GeakRevalidation(CoordinatorCollaborator):
         return base
 
     async def _rule_on_geak_rebench(self, result: dict, *, task: "Task") -> Verdict:
-        promoted = False
         rebench = self._read_geak_rebench(result)
-        ruling = self._geak_rebench_decision(result, task=task, rebench=rebench)
-        decision, native_rejection = ruling.decision, ruling.native_rejection
-        # ``expected_cfg_hash`` fingerprints (args, envs) only, so it
-        # cannot see the overlay drop out between dispatch and launch —
-        # ``run_grid`` skips an overlay whose dir has gone away and logs
-        # a warning, and the run then measures plain flags while the
-        # credit still reads as a kernel win. Re-check the overlay's own
-        # identity here; a miss is inconclusive, not validated.
-        overlay = self._overlay_reading(task, decision=decision)
-        expected_overlay, overlay_loaded = overlay.expected, overlay.loaded
-        got_digest, decision = overlay.digest, overlay.decision
-        if native_rejection:
-            decision = REBENCH_NO_PROMOTE
-
+        overlay = self._overlay_reading(task)
+        decision, native_rejection = self._geak_rebench_decision(result, task=task, rebench=rebench, overlay=overlay)
+        expected_overlay, overlay_loaded, got_digest = overlay
         pending_status = self._geak_candidate_slot_status()
+        promoted = False
         if decision == REBENCH_VALIDATED:
             # Only an overlay that was dispatched AND still matches its
             # manifest proves a kernel was in the measurement.
@@ -318,12 +280,10 @@ class GeakRevalidation(CoordinatorCollaborator):
             )
             if not promoted:
                 decision = REBENCH_NO_PROMOTE
-        if decision in {REBENCH_NO_PROMOTE, "accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}:
-            await self._refuse_rebench(
-                result, task=task, rebench=rebench, decision=decision, native_rejection=native_rejection
-            )
+        if decision == REBENCH_NO_PROMOTE:
+            await self._refuse_rebench(result, task=task, rebench=rebench, native_rejection=native_rejection)
         elif decision == REBENCH_FAILED:
-            self._close_inconclusive_rebench(result, task=task, rebench=rebench)
+            self._close_unmeasured_rebench(result, rebench=rebench)
         expected_hash = str((task.params or {}).get("expected_cfg_hash") or "")
         self._record_geak_rebench_timeline(
             task=task,
@@ -385,29 +345,28 @@ class GeakRevalidation(CoordinatorCollaborator):
         )
 
     @staticmethod
-    def _overlay_reading(
-        task: "Task",
-        *,
-        decision: str,
-    ) -> _OverlayReading:
+    def _overlay_reading(task: "Task") -> _OverlayReading:
+        """Whether the overlay the rebench was dispatched with is still the one on disk.
+
+        ``expected_cfg_hash`` fingerprints (args, envs) only, so it cannot see the overlay drop out between dispatch
+        and launch: ``run_grid`` skips an overlay whose dir has gone away, and the run then measures plain flags.
+        """
         expected_overlay = str((task.params or {}).get("expected_overlay") or "")
-        overlay_loaded = True
-        got_digest = ""
-        if expected_overlay:
-            expected_digest = str((task.params or {}).get("expected_overlay_digest") or "")
-            got_digest = _geak_overlay_digest(expected_overlay)
-            overlay_loaded = overlay_is_loadable(expected_overlay) and (got_digest == expected_digest)
-            if not overlay_loaded and decision == REBENCH_VALIDATED:
-                log.warning(
-                    "geak 2b: overlay %r did not survive the run "
-                    "(loadable=%r digest expected=%r got=%r) -> inconclusive",
-                    expected_overlay,
-                    overlay_is_loadable(expected_overlay),
-                    expected_digest,
-                    got_digest,
-                )
-                decision = REBENCH_FAILED
-        return _OverlayReading(expected=expected_overlay, loaded=overlay_loaded, digest=got_digest, decision=decision)
+        if not expected_overlay:
+            return _OverlayReading(expected="", loaded=True, digest="")
+        expected_digest = str((task.params or {}).get("expected_overlay_digest") or "")
+        got_digest = _geak_overlay_digest(expected_overlay)
+        loadable = overlay_is_loadable(expected_overlay)
+        overlay_loaded = loadable and got_digest == expected_digest
+        if not overlay_loaded:
+            log.warning(
+                "geak 2b: overlay %r did not survive the run (loadable=%r digest expected=%r got=%r)",
+                expected_overlay,
+                loadable,
+                expected_digest,
+                got_digest,
+            )
+        return _OverlayReading(expected=expected_overlay, loaded=overlay_loaded, digest=got_digest)
 
     def _geak_rebench_decision(
         self,
@@ -415,32 +374,39 @@ class GeakRevalidation(CoordinatorCollaborator):
         *,
         task: "Task",
         rebench: _GeakRebench,
+        overlay: _OverlayReading,
     ) -> _RebenchDecision:
-        measured, got_hash = rebench.measured, rebench.got_hash
+        """Rule on a rebench round that returned a result.
+
+        A round that returned no measurement and no gate verdict fails and is retried. Any other round is a
+        ruling: validated when it measured the candidate's exact config, with its overlay intact, above the bar,
+        and refused otherwise.
+        """
         expected_hash = str((task.params or {}).get("expected_cfg_hash") or "")
+        reverted = _reverted_outcome(result)
+        if reverted is not None:
+            judged_candidate = not expected_hash or reverted.get("fingerprint") == expected_hash
+            reason = str(reverted.get("reason") or "native_gate_rejected") if judged_candidate else ""
+            return _RebenchDecision(decision=REBENCH_NO_PROMOTE, native_rejection=reason)
+        if rebench.measured <= 0 or str(result.get("status") or "succeeded") not in {"succeeded", "ok"}:
+            return _RebenchDecision(decision=REBENCH_FAILED, native_rejection="")
         baseline_grade = resolve_graded_comparison(self.shared_state, rebench.measurement, against_baseline=True)
         current_grade = resolve_graded_comparison(self.shared_state, rebench.measurement)
-        decision = _geak_revalidation_decision(
-            measured=baseline_grade.candidate,
-            baseline=baseline_grade.reference,
-            got_hash=got_hash,
-            expected_hash=expected_hash,
-            current_best=current_grade.reference,
+        grades = (baseline_grade, current_grade)
+        confirmed = (
+            all(grade.comparable for grade in grades)
+            and baseline_grade.objective == current_grade.objective
+            and all(grade.verdict == "KEEP" for grade in grades if grade.graded_on_intvty)
+            and overlay.loaded
+            and _geak_rebench_confirms(
+                measured=baseline_grade.candidate,
+                baseline=baseline_grade.reference,
+                got_hash=rebench.got_hash,
+                expected_hash=expected_hash,
+                current_best=current_grade.reference,
+            )
         )
-        if not _grades_can_rule(result, measured, baseline_grade, current_grade):
-            decision = REBENCH_FAILED
-        elif (not expected_hash or got_hash == expected_hash) and any(
-            grade.graded_on_intvty and grade.verdict != "KEEP" for grade in (baseline_grade, current_grade)
-        ):
-            decision = REBENCH_NO_PROMOTE
-        native_rejection = _native_rejection_reason(result, expected_hash)
-        if (
-            measured > 0
-            and got_hash == expected_hash
-            and (not baseline_grade.comparable or not current_grade.comparable)
-        ):
-            decision = REBENCH_NO_PROMOTE
-        return _RebenchDecision(decision=decision, native_rejection=native_rejection)
+        return _RebenchDecision(decision=REBENCH_VALIDATED if confirmed else REBENCH_NO_PROMOTE, native_rejection="")
 
     async def _refuse_rebench(
         self,
@@ -448,22 +414,16 @@ class GeakRevalidation(CoordinatorCollaborator):
         *,
         task: "Task",
         rebench: _GeakRebench,
-        decision: str,
         native_rejection: str,
     ) -> None:
         measured, measured_ok = rebench.measured, rebench.measured_ok
         candidate, current_best_tput = rebench.candidate, rebench.current_best_tput
-        log.info(
-            "geak 2b rebench rejected (decision=%s measured=%r current_best=%r)",
-            decision,
-            measured,
-            current_best_tput,
-        )
+        log.info("geak 2b rebench rejected (measured=%r current_best=%r)", measured, current_best_tput)
         await self.bus.record_observation(
             "coordinator",
             "observation",
             {
-                "kind": f"geak_{decision}",
+                "kind": f"geak_{REBENCH_NO_PROMOTE}",
                 "measured_tput": float(measured) if measured_ok else None,
                 "current_best_tput": (
                     float(current_best_tput) if isinstance(current_best_tput, (int, float)) else None
@@ -541,20 +501,12 @@ class GeakRevalidation(CoordinatorCollaborator):
             )
         )
 
-    def _close_inconclusive_rebench(self, result: dict, *, task: "Task", rebench: _GeakRebench) -> None:
-        """Settle a rebench that measured something other than the candidate as failed, leaving it retryable."""
-        expected_hash = (task.params or {}).get("expected_cfg_hash")
-        log.warning(
-            "geak 2b rebench inconclusive (measured=%r got_hash=%r expected=%r)",
-            rebench.measured,
-            rebench.got_hash,
-            expected_hash,
-        )
+    def _close_unmeasured_rebench(self, result: dict, *, rebench: _GeakRebench) -> None:
+        """Settle a rebench round that returned no measurement as failed, leaving the candidate retryable."""
+        status = str(result.get("status") or "succeeded")
+        log.warning("geak 2b rebench returned no measurement (status=%s measured=%r)", status, rebench.measured)
         self._close_failed_geak_revalidation(
-            {
-                "error_class": "rebench_inconclusive",
-                "error": f"measured={rebench.measured!r} cfg_hash={rebench.got_hash!r} expected={expected_hash!r}",
-            }
+            {"error_class": "rebench_no_measurement", "error": f"status={status} measured={rebench.measured!r}"}
         )
         result["status"] = REBENCH_FAILED
 

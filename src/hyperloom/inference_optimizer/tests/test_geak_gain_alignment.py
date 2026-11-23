@@ -17,7 +17,7 @@ from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import r
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.kernel.geak_config import (
     _geak_result_has_artifact,
-    _geak_revalidation_decision,
+    _geak_rebench_confirms,
     _normalize_geak_overlay_dir,
 )
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -35,39 +35,31 @@ _AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "worklo
 
 
 @pytest.mark.parametrize(
-    ("measured", "baseline", "got_hash", "expected_hash", "current_best", "decision"),
+    ("measured", "baseline", "got_hash", "expected_hash", "current_best", "confirmed"),
     [
-        pytest.param(115.0, 100.0, "abc", "abc", None, "validated", id="identity-and-engagement-hold"),
-        pytest.param(115.0, 100.0, "WRONG", "abc", None, "failed", id="config-identity-mismatch"),
-        pytest.param(101.0, 100.0, "abc", "abc", None, "no_promote", id="win-collapsed-to-baseline"),
-        pytest.param(115.0, 100.0, "", "", None, "validated", id="no-expected-hash-skips-identity"),
-        pytest.param(9623.0, 7380.7, "abc", "abc", 10067.9, "no_promote", id="not-beating-current-best"),
-        pytest.param(10500.0, 7380.7, "abc", "abc", 10067.9, "validated", id="beating-current-best"),
+        pytest.param(115.0, 100.0, "abc", "abc", None, True, id="identity-and-engagement-hold"),
+        pytest.param(115.0, 100.0, "WRONG", "abc", None, False, id="config-identity-mismatch"),
+        pytest.param(101.0, 100.0, "abc", "abc", None, False, id="win-collapsed-to-baseline"),
+        pytest.param(115.0, 100.0, "", "", None, True, id="no-expected-hash-skips-identity"),
+        pytest.param(9623.0, 7380.7, "abc", "abc", 10067.9, False, id="not-beating-current-best"),
+        pytest.param(10500.0, 7380.7, "abc", "abc", 10067.9, True, id="beating-current-best"),
+        pytest.param(0.0, 100.0, "abc", "abc", None, False, id="no-measurement"),
+        pytest.param(115.0, 0.0, "abc", "abc", None, False, id="no-baseline"),
+        pytest.param(None, 100.0, "abc", "abc", None, False, id="unmeasured-axis"),
     ],
 )
-def test_revalidation_decision(measured, baseline, got_hash, expected_hash, current_best, decision) -> None:
+def test_a_rebench_confirms_only_its_own_engaged_config(
+    measured, baseline, got_hash, expected_hash, current_best, confirmed
+) -> None:
     assert (
-        _geak_revalidation_decision(
+        _geak_rebench_confirms(
             measured=measured,
             baseline=baseline,
             got_hash=got_hash,
             expected_hash=expected_hash,
             current_best=current_best,
         )
-        == decision
-    )
-
-
-@pytest.mark.parametrize("measured,baseline", [(0.0, 100.0), (115.0, 0.0), (None, 100.0)])
-def test_revalidation_fails_on_bad_measurement(measured, baseline) -> None:
-    assert (
-        _geak_revalidation_decision(
-            measured=measured,
-            baseline=baseline,
-            got_hash="abc",
-            expected_hash="abc",
-        )
-        == "failed"
+        is confirmed
     )
 
 
@@ -230,16 +222,16 @@ async def test_agentx_2b_uses_current_canonical_measurement(
         assert state.cumulative_gain_validated_stack_len == 1
         assert state.cumulative_gain_validated_ts == "2026-09-08T00:00:00Z"
         assert resume_pending(state) is True
-        if case in {"lift_refused", "missing_axes"}:
+        if case == "missing_output":
+            assert attempt["status"] == "failed"
+            assert state.geak_result["revalidation_status"] == "failed"
+            assert state.geak_result["revalidation_error_class"] == "rebench_no_measurement"
+            assert result["status"] == "failed"
+        else:
             assert attempt["decision"] == "no_promote"
             assert attempt["status"] == "no_promote"
             assert state.geak_result["revalidation_status"] == "no_promote"
             assert result["status"] == "no_promote"
-        else:
-            assert attempt["status"] == "failed"
-            assert state.geak_result["revalidation_status"] == "failed"
-            assert state.geak_result["revalidation_error_class"] == "rebench_inconclusive"
-            assert result["status"] == "failed"
     assert {key: state.geak_result[key] for key in before_proposal} == before_proposal
 
 
@@ -336,8 +328,8 @@ async def test_2b_stamps_validated_from_orchestrator_rebench(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_2b_identity_mismatch_ends_failed_with_nothing_promoted(tmp_path: Path) -> None:
-    """A rebench that launched another config measured nothing about the candidate."""
+async def test_2b_identity_mismatch_is_refused_with_nothing_promoted(tmp_path: Path) -> None:
+    """A rebench that returned a measurement of another config did not confirm the candidate."""
     base, measured = 2844.209, 3270.0  # engaged, but fingerprint won't match
     coord = _coord(tmp_path, baseline=base, best_tput=3236.489)
     coord.shared_state.optimization_stack = [{"action": "geak_e2e", "variant_name": "geak_e2e", "tput": 3236.489}]
@@ -363,8 +355,8 @@ async def test_2b_identity_mismatch_ends_failed_with_nothing_promoted(tmp_path: 
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
     assert not ss.geak_pending
     assert resume_pending(ss) is True
-    assert ss.geak_result["revalidation_status"] == "failed"
-    assert result["status"] == "failed"
+    assert ss.geak_result["revalidation_status"] == "no_promote"
+    assert result["status"] == "no_promote"
 
 
 @pytest.mark.asyncio
@@ -456,11 +448,12 @@ async def test_structured_native_rejection_is_terminal(tmp_path, reason):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "outcome,reason,fingerprint",
-    [("FAILED", "no_measurement", "abc"), ("REVERT", "accuracy_drop", "different")],
+    "outcome,reason,fingerprint,settled",
+    [("FAILED", "no_measurement", "abc", "failed"), ("REVERT", "accuracy_drop", "different", "no_promote")],
+    ids=["no-measurement-stays-retryable", "another-config-reverted-is-refused"],
 )
-async def test_2b_round_that_did_not_measure_the_candidate_stays_retryable(
-    tmp_path: Path, outcome: str, reason: str, fingerprint: str
+async def test_2b_round_without_a_winner_settles_by_whether_it_measured(
+    tmp_path: Path, outcome: str, reason: str, fingerprint: str, settled: str
 ) -> None:
     coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
     set_resume_pending(coord.shared_state, True)
@@ -474,7 +467,7 @@ async def test_2b_round_that_did_not_measure_the_candidate_stays_retryable(
         task=_revalidate_task(expected_hash="abc"),
     )
     assert coord.shared_state.current_best["tput"] == 110.0
-    assert coord.shared_state.geak_result["revalidation_status"] == "failed"
+    assert coord.shared_state.geak_result["revalidation_status"] == settled
 
 
 def _ok_result(*, final: float, base_for_gain: float | None = None) -> dict:

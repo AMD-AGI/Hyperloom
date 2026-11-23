@@ -18,11 +18,6 @@ from hyperloom.common.env_safety import (
     is_allowed_external_env_key,
     is_allowed_variant_env_key,
 )
-from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
-    REBENCH_FAILED,
-    REBENCH_NO_PROMOTE,
-    REBENCH_VALIDATED,
-)
 from hyperloom.inference_optimizer.grid_server_args import without_runner_owned
 from inference_suite.argv import remove_server_args
 from inference_suite.contracts import RunnerOwned
@@ -120,30 +115,24 @@ def _accepted_config_controls(cfg: Any, *, inherited_remove_args: Any = None) ->
 _MIN_KERNEL_ENGAGED_GAIN_PCT: float = 2.0
 
 
-def _geak_revalidation_decision(
+def _geak_rebench_confirms(
     *,
     measured: Any,
     baseline: Any,
     got_hash: str,
     expected_hash: str,
     current_best: Any = None,
-) -> str:
-    """Decide a geak same-harness (2b) rebench outcome.
-
-    A round with no usable measurement, or one that launched another config, is inconclusive and fails. The
-    measured config is refused when it does not engage over baseline or does not beat ``current_best``.
-    """
-    measured_ok = isinstance(measured, (int, float)) and measured > 0
-    baseline_ok = isinstance(baseline, (int, float)) and baseline > 0
-    if not (measured_ok and baseline_ok):
-        return REBENCH_FAILED
+) -> bool:
+    """Whether a rebench measured the candidate's own config engaged over baseline and above ``current_best``."""
+    if not (
+        isinstance(measured, (int, float)) and measured > 0 and isinstance(baseline, (int, float)) and baseline > 0
+    ):
+        return False
     if expected_hash and str(got_hash or "") != str(expected_hash):
-        return REBENCH_FAILED
+        return False
     engaged = float(measured) >= float(baseline) * (1.0 + float(_MIN_KERNEL_ENGAGED_GAIN_PCT) / 100.0)
     beaten = isinstance(current_best, (int, float)) and current_best > 0 and float(measured) <= float(current_best)
-    if not engaged or beaten:
-        return REBENCH_NO_PROMOTE
-    return REBENCH_VALIDATED
+    return engaged and not beaten
 
 
 def _geak_result_has_artifact(result: dict[str, Any]) -> bool:

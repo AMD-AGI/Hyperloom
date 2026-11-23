@@ -342,6 +342,76 @@ async def test_geak_launch_controls_reach_materialized_rebench(
 
 
 @pytest.mark.asyncio
+async def test_a_rebench_the_executor_reverts_on_the_keep_threshold_refuses_the_candidate(
+    coordinator, tmp_path, monkeypatch
+) -> None:
+    """The executor's REVERT has no winner and no round throughput; it is a ruling on the candidate, not a failure."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors import explore
+    from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import VariantResult
+
+    baseline = tmp_path / "baseline.yaml"
+    baseline.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": "/models/test",
+                    "run_mode": "local",
+                    "benchmark_script": "sglang_custom.sh",
+                    "envs": {"TP": "1", "CONC": "8", "ISL": "256", "OSL": "256"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = coordinator.shared_state
+    state.baseline_config_path = str(baseline)
+    state.baseline_tput = 100.0
+    state.current_best = {"action": "explore", "tput": 110.0}
+    state.geak_result = {"schema_version": 2, "status": "ok", "accepted_config": {"flags": "--candidate"}}
+    state.geak_pending = {"status": "awaiting_rebench"}
+    params = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
+    task, _ = await coordinator.tasks.create_or_return_existing(
+        TaskSpec(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
+    )
+
+    async def below_the_keep_threshold(**kwargs):
+        variant = kwargs["grid"][0]
+        return [
+            VariantResult(
+                name=variant.name,
+                extra_server_args=variant.extra_server_args,
+                extra_envs=dict(variant.extra_envs),
+                status="succeeded",
+                output_throughput=100.5,
+            )
+        ]
+
+    monkeypatch.setattr(explore, "run_grid", below_the_keep_threshold)
+    monkeypatch.setattr(explore, "teardown_variant_server", lambda *_args: [])
+    monkeypatch.setattr(explore, "resolve_lifecycle_params", lambda _path: {"eligible": False})
+    result = await ExploreExecutor(session_dir=coordinator.session_dir)(
+        SimpleNamespace(task=task, extra={"shared_state": state})
+    )
+    reverted = [row for row in result["per_variant_outcomes"] if row["outcome"] == "REVERT"]
+    assert result["status"] == "succeeded" and result["output_throughput"] is None and not result["winners"]
+    assert [row["fingerprint"] for row in reverted] == [task.params["expected_cfg_hash"]]
+    assert not any(gate["gate"] in {"graded_axes", "accuracy"} and not gate["passed"] for gate in reverted[0]["gates"])
+
+    assert coordinator.writeback.is_promotable_result("explore", result)
+    await coordinator.writeback.promote_to_shared_state("explore", result, task=task)
+
+    assert state.current_best == {"action": "explore", "tput": 110.0}
+    assert not any(entry.get("action") == "geak_e2e" for entry in state.optimization_stack)
+    assert state.geak_result["revalidation_status"] == "no_promote"
+    assert state.geak_result["revalidation_error"] == "gain_below_threshold"
+    assert state.geak_pending == {}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("with_removal_controls", [False, True], ids=["plain", "removal_controls"])
 async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
     coordinator, with_removal_controls: bool
