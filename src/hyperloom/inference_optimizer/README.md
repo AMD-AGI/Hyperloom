@@ -81,7 +81,6 @@ src/hyperloom/inference_optimizer/
 │   └── lock.py                 # Single-optimizer session lock
 ├── baseline_comparison/        # InferenceX reference fetching & target analysis
 ├── breakdown/                  # session_breakdown.json producer (downstream contract)
-├── actions/                    # Per-action markdown specs
 ├── tools/                      # Operator CLIs (dump_session_breakdown/event_counts/…)
 ├── assets/                     # install.sh + bare-metal/profile configs
 └── tests/                      # Unit + regression tests
