@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 # What a session has read, built and measured is paid for again by the next one, so a session whose gate requires
-# performance takes the direction it expects most from, structural changes included, and keeps working directions
-# until its clock or its own measurements tell it to finish.
+# performance keeps working until its clock or its own measurements tell it to finish. Its first direction is the
+# round's plan when the round planned one, and otherwise the one it expects most from, structural changes included.
 #
 # How such a session paces itself. The wrap-up minute is this fraction of its wall-clock budget; the rest covers the
 # session's final check and the gate's own correctness and benchmark runs.
@@ -23,17 +23,20 @@ AMPLE_TIME_MINUTES = 20
 MAX_COMMAND_MINUTES = 4
 
 PERFORMANCE_WORKING_METHOD = """\
-2. Choose this session's direction before the first edit. From the evidence in
+2. Fix this session's direction before the first edit. When this invocation
+   names a required optimization plan, that plan is the direction: read it and
+   work it. When it leaves the direction to you, choose it from the evidence in
    this prompt — where each scored case spends its time, what earlier sessions
-   tried and what they measured — pick the ONE direction you expect to move the
-   score most: a mechanism (restructure a loop, fuse two passes, change the
+   tried and what they measured — and pick the ONE direction you expect to move
+   the score most: a mechanism (restructure a loop, fuse two passes, change the
    data layout, specialize per case), not a single constant. Take the larger
-   expected gain even when it means restructuring the kernel and twenty or
-   thirty minutes of work before its first measurement: the session is long
-   enough for that, and tuning constants follows a structural change, it does
-   not replace one. State the direction in one or two sentences: what it is,
-   which cases it should move, and the per-case speedup and resulting score
-   you expect. That number is this session's goal.
+   expected gain even when it means restructuring the kernel. Either way, a
+   direction may need twenty or thirty minutes of work before its first
+   measurement: the session is long enough for that, and tuning constants
+   follows a structural change, it does not replace one. State the direction
+   in one or two sentences: what it is, which cases it should move, and the
+   per-case speedup and resulting score you expect. That number is this
+   session's goal.
 3. Measure before you change anything. Run
      `python3 {driver_run} --warmup 3 --iters 20 --bench-mode; date`
    on the unchanged kernel and note the per-case times. They are this session's

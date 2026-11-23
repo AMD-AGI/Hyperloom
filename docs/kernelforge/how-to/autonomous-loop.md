@@ -139,10 +139,13 @@ Each iteration of a campaign with more than one lane:
    whatever tracked changes the workspace holds. A high fixed turn ceiling
    remains only as a runaway backstop -- it does not bound a session's time.
    A session that runs the in-session gate is meant to use its budget rather
-   than hand off its first improvement. It takes the direction it expects the
-   most from, a restructuring included, states the score it expects before
-   editing, measures the kernel it starts from, then repeats edit, correctness
-   and benchmark, keeping a copy of the best version it has measured and
+   than hand off its first improvement. That is every session of a single-lane
+   campaign and, in a campaign with more lanes, the session of a round that
+   does not fan out; the two differ only in where the direction comes from. It
+   takes the round's plan as its direction, or without one the direction it
+   expects the most from, a restructuring included, states the score it expects
+   before editing, measures the kernel it starts from, then repeats edit,
+   correctness and benchmark, keeping a copy of the best version it has measured and
    restoring it into the workspace after every change that does not help. It
    reads the clock with every measurement and paces itself by four numbers:
    it leaves a direction that measurement disproved or that 8 measured changes

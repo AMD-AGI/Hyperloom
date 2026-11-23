@@ -26,6 +26,7 @@ from kernelforge.workflows.forge_loop.policy.round_budget import (
     FIRST_ROUND_MEASUREMENT_SEC,
     PLANNING_FLOOR_SEC,
 )
+from kernelforge.workflows.forge_loop.roles import implementer_method
 from kernelforge.workflows.forge_loop.search.agent_relay import (
     AgentAvailabilitySnapshot,
     AgentProfile,
@@ -267,3 +268,16 @@ def test_a_campaign_stopped_on_failed_orchestration_resumes_without_a_planner(tm
     events = [event["type"] for event in LoopStateStore(str(workspace)).read_events()]
     assert "orchestration_circuit_retired" in events
     assert "orchestration_circuit_half_open" not in events
+
+
+def test_the_working_method_names_both_ways_a_session_is_given_its_direction(tmp_path, monkeypatch):
+    """The method speaks of a required plan and of a direction left to the session; the loop writes exactly those two."""
+    loop, _workspace = _make_loop(tmp_path, monkeypatch)
+    loop._supervisor_ruling = ""
+    loop._search_policy_decision = None
+    method = " ".join(implementer_method.PERFORMANCE_WORKING_METHOD.split())
+
+    assert loop._session_direction("/plans/optimization_plan.md").startswith("## Required optimization plan")
+    assert "a required optimization plan" in method
+    assert loop._session_direction("").startswith("## Direction (yours to choose)")
+    assert "leaves the direction to you" in method

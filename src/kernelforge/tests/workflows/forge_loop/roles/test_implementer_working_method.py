@@ -82,7 +82,7 @@ def test_a_session_judged_on_speed_works_one_direction_past_its_first_gain(gated
     prompt = gated_system_prompt(correctness_only=False)
 
     # It commits to a direction and a number before it edits, and measures the kernel it starts from.
-    assert "Choose this session's direction before the first edit" in prompt
+    assert "Fix this session's direction before the first edit" in prompt
     assert "That number is this session's goal" in prompt
     assert "Measure before you change anything" in prompt
     # The first gain opens the direction; it does not end the session.
@@ -161,7 +161,7 @@ def test_a_session_judged_on_correctness_alone_submits_its_first_passing_kernel(
     assert "As soon as the kernel passes the driver's correctness verdict, stop and submit it" in prompt
     assert "after 7 such rejected stops it ends the session" in prompt
     # Nothing in it asks for a performance search.
-    assert "Choose this session's direction" not in prompt
+    assert "Fix this session's direction" not in prompt
     assert "A first improvement is where the session starts" not in prompt
 
 
@@ -221,3 +221,12 @@ def test_only_the_provider_that_marks_its_sessions_declares_it() -> None:
     marking = {name for name in list_agent_providers() if get_agent_provider(name).capabilities.session_process_mark}
 
     assert marking == {"claude"}
+
+
+def test_the_method_takes_a_round_plan_as_the_direction_and_chooses_only_without_one(gated_system_prompt) -> None:
+    """One method serves a session handed a plan and a session left to choose, and tells neither to do both."""
+    prompt = gated_system_prompt(correctness_only=False)
+
+    assert "When this invocation names a required optimization plan, that plan is the direction" in prompt
+    assert "When it leaves the direction to you, choose it from the evidence in this prompt" in prompt
+    assert "Choose this session's direction" not in prompt
