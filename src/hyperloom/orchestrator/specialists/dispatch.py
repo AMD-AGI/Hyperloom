@@ -89,11 +89,6 @@ _ROUND_CARRIED_KEYS: tuple[str, ...] = (
 # Bounded transient-failure auto-retry for specialist dispatches (infra-only).
 SPECIALIST_AUTO_RETRY_MAX: int = 2
 
-# Hard-trigger thresholds: optimisation rounds a domain may go without a specialist dispatch / a KEEP before the
-# Coordinator force-dispatches one.
-FORCE_STALLED_SPECIALIST_ROUNDS: int = 8
-FORCE_STALLED_KEEP_ROUNDS: int = 12
-
 # Gap id for the custom dispatch when the ledger has no gap yet.
 CUSTOM_SESSION_GAP_ID: str = "gap.custom.session"
 
@@ -643,90 +638,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             pending.append(sub_intent)
         for sub_intent in pending:
             await self._coord.router.handle_delegate(source, sub_intent)
-
-    async def maybe_force_stalled_domain_specialist(self) -> None:
-        """Force-dispatch a domain specialist for a domain untouched for too many
-        specialist rounds that still has an open gap in the gaps[] ledger.
-
-        A real scheduling event (a domain delegate routed through PolicyGate +
-        warmup + the GPU specialist pool). Idempotent per
-        ``(anchor, round, macro_cycle)``; a domain with a specialist already
-        queued or running is skipped, and while the dispatcher's admission
-        gates would refuse a specialist the force is held for the tick without
-        reaching the router. The dispatcher zeroes the anchor's dispatch counter
-        when the forced specialist spawns; its keep counter clears only on a
-        KEEP from that domain's specialist. At most one forced dispatch per tick.
-
-        Note:
-            Side-effecting: may dispatch a domain specialist via
-            ``handle_intent``. Returns nothing.
-        """
-        state = self.shared_state
-        if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
-            return
-        stalled = state.stalled_domains(
-            specialist_threshold=FORCE_STALLED_SPECIALIST_ROUNDS,
-            keep_threshold=FORCE_STALLED_KEEP_ROUNDS,
-        )
-        if not stalled:
-            return
-
-        from .domains import domain_for_tag
-        from .in_flight import in_flight_domains
-
-        busy_domains = in_flight_domains([*await self.tasks.queued(), *await self.tasks.running()])
-        round_id = int((state.explore_search or {}).get("cursor") or 0)
-        for anchor in stalled:
-            gap_cid = state.best_gap_for_anchor(anchor)
-            if not gap_cid:
-                continue
-            dom = domain_for_tag(anchor)
-            if dom is None or dom.key in busy_domains:
-                continue
-            params: dict[str, Any] = {
-                "domain": dom.key,
-                "tags": [anchor],
-                "gap_canonical_id": gap_cid,
-                "scope": "domain",
-                "source": "coordinator_internal",
-                "reason": f"stalled_domain_force:{anchor}",
-            }
-            idempotency_key = f"forced-stalled-{anchor}-round{round_id}{self._coord.dispatcher.cycle_idem_suffix()}"
-            if await self.tasks.find_by_idempotency_key(idempotency_key) is not None:
-                continue
-            await self.warm_specialist_params(params)
-            if self.refuse_patch_without_source(params, task_id=idempotency_key):
-                continue
-            # The gates the router applies (the session's time, the untested backlog) refuse every stalled domain
-            # alike, so a refused force waits for a later tick instead of reaching the router as a denial.
-            denied = self._coord.dispatcher.admission_denial_for_action("specialist", params=params)
-            if denied is not None:
-                log.debug("stalled-domain force: held this tick by %s: %s", denied.rule, denied)
-                return
-            await self._send_forced_specialist(params, idempotency_key, round_id)
-            # One forced dispatch per tick.
-            return
-        return
-
-    async def _send_forced_specialist(self, params: dict[str, Any], idempotency_key: str, round_id: int) -> None:
-        """Send the forced delegate through the router, and log it as dispatched only if its task exists."""
-        intent = Intent(
-            type=IntentType.DELEGATE,
-            payload={"action_name": "specialist", "params": params, "idempotency_key": idempotency_key},
-        )
-        await self._coord.router.handle_intent("orchestration", intent)
-        try:
-            self.shared_state.save(self.session_dir)
-        except OSError:
-            log.exception("stalled-domain force: state save failed")
-        if await self.tasks.find_by_idempotency_key(idempotency_key) is not None:
-            log.info(
-                "stalled-domain force: dispatched domain=%s anchor=%s gap=%s round=%d",
-                params["domain"],
-                params["tags"][0],
-                params["gap_canonical_id"],
-                round_id,
-            )
 
     async def ensure_custom_specialist(self) -> None:
         """Dispatch the operator-defined specialist once per macro cycle in FRAMEWORK_AGENT.

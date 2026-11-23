@@ -367,8 +367,6 @@ def custom_coord(tmp_path: Path, monkeypatch):
         "warm_specialist_params",
         AsyncMock(side_effect=lambda params: params.setdefault("framework", "sglang")),
     )
-    # The stand-in admits; the admission gates are driven in test_stalled_domain_force_admission.py.
-    c.dispatcher.admission_denial_for_action = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
     c.router.handle_delegate = AsyncMock()  # type: ignore[assignment]
     c.router.handle_intent = AsyncMock()  # type: ignore[assignment]
     return c
@@ -534,25 +532,6 @@ async def test_a_refused_custom_dispatch_is_requested_once_per_cycle(tmp_path, m
     assert [cycle for cycle, _ in denials] == [0, 1]
     assert await coord.tasks.queued() == []
     assert coord.specialist_dispatch.refused_custom_key == _custom_key(1)
-
-
-async def test_stalled_domain_force_ignores_a_custom_hinted_gap_when_not_configured(custom_coord):
-    state = custom_coord.shared_state
-    state.custom_specialist_prompt = ""
-    state.upsert_gap({"canonical_id": "gap.hint", "domain_hint": "custom", "severity": "high"})
-    state.upsert_gap({"canonical_id": "gap.serving", "domain_hint": "serving_specialist", "severity": "low"})
-    for _ in range(50):
-        state.bump_domain_round_counters()
-
-    await custom_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
-
-    custom_coord.router.handle_intent.assert_awaited_once()
-    params = custom_coord.router.handle_intent.call_args.args[1].payload["params"]
-    assert (params["domain"], params["tags"], params["gap_canonical_id"]) == (
-        "serving_specialist",
-        ["framework"],
-        "gap.serving",
-    )
 
 
 # Dispatch order
@@ -911,7 +890,7 @@ def _recorder(calls: list[str]):
     ("only", "expected"),
     [
         (True, ["custom", "bench", "finish"]),
-        (False, ["framework", "bench", "scout", "recon", "stalled", "custom", "predictor"]),
+        (False, ["framework", "bench", "scout", "recon", "custom", "predictor"]),
     ],
 )
 async def test_only_mode_tick_runs_the_custom_work_alone(monkeypatch, only, expected):
@@ -931,9 +910,7 @@ async def test_only_mode_tick_runs_the_custom_work_alone(monkeypatch, only, expe
             maybe_enqueue_explore_research_scout=_rec("scout"),
             maybe_enqueue_config_plateau_static_recon=_rec("recon"),
         ),
-        specialist_dispatch=SimpleNamespace(
-            maybe_force_stalled_domain_specialist=_rec("stalled"), ensure_custom_specialist=_rec("custom")
-        ),
+        specialist_dispatch=SimpleNamespace(ensure_custom_specialist=_rec("custom")),
         record_exception=lambda **kwargs: pytest.fail(f"the tick raised: {kwargs}"),
     )
 
