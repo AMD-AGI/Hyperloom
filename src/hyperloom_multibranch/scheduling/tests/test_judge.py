@@ -64,8 +64,10 @@ from hyperloom_multibranch.scheduling.judge import (
 from hyperloom_multibranch.scheduling.judge_prompt import (
     JUDGE_PROMPT_VERSION,
     JUDGE_SYSTEM_PROMPT,
+    LAUNCH_CONFIG_ONLY,
     PLAYBOOK_JUDGE_PROMPT,
     PLAYBOOK_JUDGE_PROMPT_VERSION,
+    REPLY_FORMAT,
 )
 from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
@@ -264,6 +266,14 @@ def test_the_prompt_shows_the_agent_map_after_the_open_areas_only_when_the_sessi
         prompt.index(areas) < prompt.index(held) < prompt.index("Scheduling playbook h0:") < prompt.index("Reply with")
     )
     assert "The agent map" not in render_prompt(replace(_view(), open_areas=areas))
+
+
+def test_the_judge_of_a_session_held_to_launch_configuration_is_told_so_and_when_to_stop_it() -> None:
+    held = render_prompt(replace(_view(), source_changes=False, open_areas="Open areas:\n- attention"))
+
+    assert LAUNCH_CONFIG_ONLY in held and held.index(LAUNCH_CONFIG_ONLY) < held.index("Open areas:")
+    assert held.endswith(REPLY_FORMAT), "the reply format still closes the prompt"
+    assert "--no-source-changes" not in render_prompt(_view()), "a session that keeps source changes is told nothing"
 
 
 def test_a_playbook_session_s_prompt_makes_its_stall_evidence_the_one_stop_rule_for_a_stall() -> None:
@@ -591,11 +601,13 @@ def test_prompt_weighs_an_early_stop_against_the_explore_time_left() -> None:
 
 def test_the_prompt_version_is_derived_from_the_prompt_text() -> None:
     prompt = render_prompt(_view())
-    reply = prompt[prompt.index("Reply with") :]
+    # What a session's judge may be shown beside its system prompt: the reply format, and the block of a session held
+    # to launch configuration, which belongs to the fingerprint of every session as the specialists' optional texts do.
+    shown = f"{prompt[prompt.index('Reply with') :]}\n{LAUNCH_CONFIG_ONLY}"
 
-    assert JUDGE_PROMPT_VERSION == hashlib.sha256(f"{JUDGE_SYSTEM_PROMPT}\n{reply}".encode()).hexdigest()[:12]
+    assert JUDGE_PROMPT_VERSION == hashlib.sha256(f"{JUDGE_SYSTEM_PROMPT}\n{shown}".encode()).hexdigest()[:12]
     assert (
-        PLAYBOOK_JUDGE_PROMPT_VERSION == hashlib.sha256(f"{PLAYBOOK_JUDGE_PROMPT}\n{reply}".encode()).hexdigest()[:12]
+        PLAYBOOK_JUDGE_PROMPT_VERSION == hashlib.sha256(f"{PLAYBOOK_JUDGE_PROMPT}\n{shown}".encode()).hexdigest()[:12]
     )
 
 

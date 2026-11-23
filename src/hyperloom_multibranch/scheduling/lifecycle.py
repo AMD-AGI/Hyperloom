@@ -637,6 +637,7 @@ class Session:
             opening.plans,
             opening.map_for,
             final_cap,
+            source_changes=self._settings.source_changes,
         )
         reason = await self._explorer().run(window)
         if reason is SessionStopReason.NO_MEASUREMENT_CARDS:

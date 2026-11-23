@@ -164,7 +164,8 @@ class ExploreWindow:
     the root, or the Recipe KB champion PRELUDE replayed onto it. ``test_seconds`` is how long one test of the
     workload takes, the longest root test of the baseline. ``final_cap`` says, asked every tick, the
     latest EXPLORE may now end at for FINAL to end inside a limit of the session's caller, which comes sooner as the
-    validation FINAL would run grows; ``explore_end`` moves to it when it is sooner.
+    validation FINAL would run grows; ``explore_end`` moves to it when it is sooner. ``source_changes`` is the
+    session's ``RunSettings.source_changes``, which the judge is shown (``JudgeView.source_changes``).
     """
 
     root_commit: str
@@ -179,6 +180,7 @@ class ExploreWindow:
     agent_plans: tuple[str, ...] = ()
     map_for: tuple[str, ...] = ()
     final_cap: Callable[[], Awaitable[float]] = _uncapped
+    source_changes: bool = True
 
 
 @dataclass(frozen=True)
@@ -485,6 +487,7 @@ class Explorer:
             building=await waiting_builds(self._toolbox, snapshot.records),
             focus={node.branch: node.focus for node in snapshot.lineage.branches if node.focus},
             undealt=await self._specialists.undealt_directions(opens_on),
+            source_changes=window.source_changes,
         )
         view = self._with_playbook(view, snapshot)
         view = replace(view, agent_map=render_map(snapshot))
