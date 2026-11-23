@@ -49,6 +49,8 @@ line of the live output.
 stamp and a profiler trace, plus a link out of the sandbox root (:data:`ROUND_LINK`) whose target holds a log.
 ``fake_round_ready: <seconds>`` writes, before it runs, the ready stamp of a round below :data:`ROUND_DIR` that says its
 server booted in that many seconds.
+``fake_round_ruling: <mapping>`` writes, before it runs, that mapping as the AgentX checkpoint's ruling in the measured
+round's slot (the directory above :data:`ROUND_DIR`), where a round the checkpoint ruled on leaves it.
 ``fake_jit: true`` stages a contribution to the shared compiled-code cache (one aiter module, below ``/out/jit-cache``) and
 signs it into the manifest as a test that compiled it would; ``fake_jit_swap: true`` changes the staged list after the
 signing, as something that can write ``/out`` could.
@@ -442,6 +444,9 @@ def main() -> int:
             _atomic(
                 out / "files" / ROUND_DIR / "server_ready_at", f"{time.time()} {config['fake_round_ready']}\n".encode()
             )
+        if "fake_round_ruling" in config:
+            slot = out / "files" / Path(ROUND_DIR).parent
+            _atomic(slot / "agentx_checkpoint.json", json.dumps(config["fake_round_ruling"]).encode())
         if config.get("fake_ready"):
             _atomic(out / "files" / "server_ready_at", f"{time.time()} 5\n".encode())
         progress.touch()

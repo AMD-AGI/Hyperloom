@@ -322,20 +322,6 @@ class LocalSandbox:
                 total += len(chunk)
         return total
 
-    def list_dir(self, path: str) -> list[str]:
-        """List entry names of a directory, sorted.
-
-        Raises:
-            SandboxDenied: By the sealed policy, or for a path that escapes the root.
-            SandboxGone: When the sandbox has ended.
-            FileNotFoundError: When there is no such directory.
-        """
-        fd = self._open(self._gate(path, write=False), os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            return sorted(os.listdir(fd))
-        finally:
-            os.close(fd)
-
     def list_entries(self, path: str) -> list[DirEntry]:
         """The entries of a directory, sorted by name, each read without following a link.
 

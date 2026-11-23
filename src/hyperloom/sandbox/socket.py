@@ -185,9 +185,6 @@ class Sandbox(Protocol):
     def copy_out(self, path: str, dest: Path) -> int:
         """Stream a (possibly large) file to ``dest``; return the byte count."""
 
-    def list_dir(self, path: str) -> list[str]:
-        """Return the entry names of the directory ``path``, sorted."""
-
     def list_entries(self, path: str) -> list[DirEntry]:
         """The entries of the directory ``path``, sorted by name, each read without following a link."""
 

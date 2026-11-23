@@ -30,12 +30,17 @@ class _Tree:
         self.gone_after: int | None = None
         self.grows: dict[str, bytes] = {}  # appended to a file after it was listed, before it is copied
         self.on_copy = lambda: None
+        self.on_list = lambda path: None
+        self.listed: list[str] = []
+        self.extra: dict[str, list[DirEntry]] = {}  # entries a listing adds that no file on disk has, by listed path
 
     def _real(self, path: str) -> Path:
         return self.base / path.lstrip("/")
 
     def list_entries(self, path: str) -> list[DirEntry]:
-        entries = []
+        self.listed.append(path)
+        self.on_list(path)
+        entries = list(self.extra.get(path, ()))
         for name in sorted(os.listdir(self._real(path))):
             facts = os.lstat(self._real(path) / name)
             if stat.S_ISLNK(facts.st_mode):
@@ -237,6 +242,83 @@ def test_the_save_stops_at_its_deadline_and_still_lists_what_it_kept(tmp_path: P
     assert tree.copied == [f"{ROOT}/server.log"]
     assert [entry["path"] for entry in index["saved"]] == ["server.log"]
     assert index["stopped"] == "stopped at the 120 s deadline; 2 files found were not copied"
+
+
+def test_a_file_exactly_at_the_fetch_bound_is_fetched_and_one_byte_over_is_not(tmp_path: Path, monkeypatch) -> None:
+    base, output = tmp_path / "sandbox", tmp_path / "attempt"
+    _write(base, "at.log", b"a" * 40)
+    _write(base, "over.log", b"o" * 41)
+    tree = _Tree(base)
+    monkeypatch.setattr(hosted_logs, "FETCH_BYTES", 40)
+    save_runner_files(tree, ROOT, output)
+    assert tree.copied == [f"{ROOT}/at.log"]
+    assert _index(output)["skipped"] == [{"path": "over.log", "size": 41, "reason": "larger than fetch_bytes"}]
+
+
+def test_the_walk_reads_exactly_its_entry_bound(tmp_path: Path, monkeypatch) -> None:
+    base = tmp_path / "sandbox"
+    _write(base, "a.log", b"a\n")
+    _write(base, "b.log", b"b\n")
+    monkeypatch.setattr(hosted_logs, "ENTRIES", 2)
+    save_runner_files(_Tree(base), ROOT, tmp_path / "at")
+    index = _index(tmp_path / "at")
+    assert "listing_truncated" not in index and [entry["path"] for entry in index["saved"]] == ["a.log", "b.log"]
+    _write(base, "c.log", b"c\n")
+    save_runner_files(_Tree(base), ROOT, tmp_path / "over")
+    index = _index(tmp_path / "over")
+    assert index["listing_truncated"] == "stopped after 2 entries"
+    assert [entry["path"] for entry in index["saved"]] == ["a.log", "b.log"]
+
+
+@pytest.mark.parametrize("name", ["..", ".", "", "round/server.log", "nul\x00.log"])
+def test_a_listed_name_that_is_not_one_path_component_is_refused(tmp_path: Path, name: str) -> None:
+    """A sandbox that lists ``..`` (or any name that is not one component) never gets the save out of its root."""
+    base, output = tmp_path / "sandbox", tmp_path / "attempt"
+    _write(base, "round/server.log", b"ours\n")
+    (base / "out" / "secret.log").write_bytes(b"above the root\n")
+    tree = _Tree(base)
+    tree.extra[ROOT] = [DirEntry(name, "dir"), DirEntry(name, "file", 5)]
+    save_runner_files(tree, ROOT, output)
+    assert tree.listed == [ROOT, f"{ROOT}/round"]
+    assert tree.copied == [f"{ROOT}/round/server.log"]
+    index = _index(output)
+    assert [entry["path"] for entry in index["saved"]] == ["round/server.log"] and index["skipped"] == []
+    assert not list(output.rglob("secret.log"))
+
+
+def test_a_file_that_grew_after_the_total_was_spent_is_left_behind_not_kept_empty(tmp_path: Path, monkeypatch) -> None:
+    base, output = tmp_path / "sandbox", tmp_path / "attempt"
+    _write(base, "a.log", b"a" * 10)
+    _write(base, "b.log", b"")
+    tree = _Tree(base)
+    tree.grows[f"{ROOT}/b.log"] = b"B" * 5
+    monkeypatch.setattr(hosted_logs, "TOTAL_BYTES", 10)
+    save_runner_files(tree, ROOT, output)
+    index = _index(output)
+    assert tree.copied == [f"{ROOT}/a.log", f"{ROOT}/b.log"], "listed empty, it fit what was left"
+    assert index["truncated"] == [] and [entry["path"] for entry in index["saved"]] == ["a.log"]
+    assert index["skipped"] == [{"path": "b.log", "size": 5, "reason": "total_bytes reached"}]
+    assert index["saved_bytes"] == 10 and not (output / "hosted-b.log").exists()
+
+
+def test_the_walk_stops_at_the_deadline_and_names_every_directory_it_never_listed(tmp_path: Path, monkeypatch) -> None:
+    base, output = tmp_path / "sandbox", tmp_path / "attempt"
+    _write(base, "server.log", b"top\n")
+    _write(base, "variant_00_test/suite_run_0/server.log", b"boot\n")
+    _write(base, "variant_01_test/server.log", b"boot\n")
+    clock = [1000.0]
+    monkeypatch.setattr(hosted_logs, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(hosted_logs, "DEADLINE_SEC", 120.0)
+    tree = _Tree(base)
+    tree.on_list = lambda path: clock.__setitem__(0, clock[0] + 121.0)  # listing the root takes the whole deadline
+    save_runner_files(tree, ROOT, output)
+    index = _index(output)
+    assert tree.listed == [ROOT] and tree.copied == []
+    assert index["saved"] == [] and index["saved_bytes"] == 0
+    assert index["stopped"] == (
+        "stopped at the 120 s deadline; 2 directories were never listed: variant_00_test, variant_01_test; "
+        "1 files found were not copied"
+    )
 
 
 def test_a_missing_files_root_is_a_missing_file(tmp_path: Path) -> None:

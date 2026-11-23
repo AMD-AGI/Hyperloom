@@ -167,8 +167,10 @@ class _Saver:
         return time.monotonic() >= self.deadline
 
     def stop(self, left_behind: str) -> None:
-        """The save ran past its deadline and stopped; ``left_behind`` says what it did not reach."""
-        self.index["stopped"] = f"stopped at the {DEADLINE_SEC:g} s deadline; {left_behind}"
+        """The save ran past its deadline and stopped; ``left_behind`` says what it did not reach, after what the walk
+        said it did not reach when the walk stopped first."""
+        said = self.index.get("stopped") or f"stopped at the {DEADLINE_SEC:g} s deadline"
+        self.index["stopped"] = f"{said}; {left_behind}"
 
     def skip(self, path: str, reason: str, size: int) -> None:
         """A file left behind, with the size its listing gave."""
@@ -259,7 +261,8 @@ class _Walk:
         while self.pending:
             relative, depth = self.pending.pop(0)
             if relative and self.saver.past_deadline():
-                self.saver.stop(f"the directories from {relative} on were not listed")
+                unlisted = [relative, *(path for path, _ in self.pending)]
+                self.saver.stop(f"{len(unlisted)} directories were never listed: {', '.join(unlisted)}")
                 return self.found
             for entry in self._list(relative):
                 self.read += 1

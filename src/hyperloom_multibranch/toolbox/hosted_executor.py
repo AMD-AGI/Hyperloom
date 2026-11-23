@@ -38,6 +38,7 @@ from hyperloom.contracts.measurement import (
     CARD_UNKNOWN,
     CARD_UNOBSERVABLE,
     AccuracyValue,
+    AgentxCheckpointRuling,
     FailureClass,
     PhaseTiming,
     RoundValue,
@@ -198,7 +199,6 @@ class HostedExecutor:
         except subprocess.TimeoutExpired as expired:
             return self._timed_out(request_id, started, expired)
         result = self._result(request, accepted, call, outcome, _Span(started, self._clock()))
-        result = _with_checkpoint(result, call)
         result = await self._with_table_hits(result, accepted, call)
         result = await self._with_short_prompts(result, accepted, call)
         result = await self._with_long_context(result, accepted, call)
@@ -352,6 +352,9 @@ class HostedExecutor:
         rounds, accuracy = _measured_values(request, accepted, outcome) if failure is None else ((), ())
         location = self._profile_location(call) if failure is None and request.kind is TestKind.PROFILE else ""
         verdict = _landed_verdict(call) if failure is None and request.kind is TestKind.REPRO else ""
+        # What the attempt's directory holds counts only when a verified bundle landed it: an attempt that ended without
+        # one holds at most the host's saved copy of its runner's files, which is never a sample, a ruling or a check.
+        landed = Path(call.output_dir) if audit else None
         started = span.started
         gpu_seconds = max(0.0, finished - started) * facts.gpu_count
         return TestResult(
@@ -375,9 +378,9 @@ class HostedExecutor:
             )
             if failure is None
             else (),
-            # A landed bundle's stamps are a sample whether the test succeeded or not; an attempt that ended without
-            # landing one holds at most the host's saved copy of its runner's stamps, which is never a sample.
-            cold_start_seconds=boot_seconds(call.output_dir) if audit else None,
+            # A landed bundle's stamps are a sample whether the test succeeded or not.
+            cold_start_seconds=boot_seconds(landed) if landed is not None else None,
+            agentx_checkpoint=_ruling(request_id, call, landed),
             **_phase_fields(outcome.phases, span, finished, facts.gpu_count),
             **audit,
         )
@@ -551,18 +554,19 @@ def _unlike_checkpoint(result: TestResult, landed: Path) -> str | None:
     return None if held == recorded else f"agentx_checkpoint: recorded {recorded}, the bundle holds {held}"
 
 
-def _with_checkpoint(result: TestResult, call: TestCall) -> TestResult:
-    """``result`` with the ruling the AgentX checkpoint made on its measured round; a test that carried no checkpoint has
-    none, and one whose window never closed is logged, so the CLOSE report's count of unjudged tests can be traced."""
+def _ruling(request_id: str, call: TestCall, landed: Path | None) -> AgentxCheckpointRuling | None:
+    """The ruling the AgentX checkpoint made on the measured round, read from the verified bundle that ``landed``; a test
+    that carried no checkpoint has none, and one that holds none (its window never closed, or no bundle landed) is
+    logged, so the CLOSE report's count of unjudged tests can be traced."""
     if call.checkpoint is None:
-        return result
+        return None
     try:
-        ruling = read_ruling(Path(call.output_dir))
+        ruling = None if landed is None else read_ruling(landed)
     except (OSError, ValueError) as exc:
         raise MeasurementRefused(f"the AgentX checkpoint's ruling cannot be read: {exc}") from exc
     if ruling is None:
-        log.warning("agentx_checkpoint: %s ran under the checkpoint and it ruled on none", result.request_id)
-    return replace(result, agentx_checkpoint=ruling)
+        log.warning("agentx_checkpoint: %s ran under the checkpoint and it ruled on none", request_id)
+    return ruling
 
 
 def _unlike_consistency(result: TestResult, landed: Path) -> str | None:

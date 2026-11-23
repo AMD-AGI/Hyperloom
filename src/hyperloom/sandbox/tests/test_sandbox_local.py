@@ -199,7 +199,7 @@ def test_a_dev_symlink_cannot_escape_the_root(make) -> None:
         sb.write_file("/work/tmpdir/escape.txt", b"x")
 
 
-@pytest.mark.parametrize("verb", ["read_file", "copy_out", "list_dir", "write_file"])
+@pytest.mark.parametrize("verb", ["read_file", "copy_out", "list_entries", "write_file"])
 def test_a_path_swapped_for_a_link_out_after_its_gate_is_never_followed(
     make, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verb: str
 ) -> None:
@@ -214,12 +214,12 @@ def test_a_path_swapped_for_a_link_out_after_its_gate_is_never_followed(
     real_gate = local_sandbox.LocalSandbox._gate
 
     files = sb.fs / "work" / "out" / "files"
-    gated, target = (files, outside) if verb == "list_dir" else (files / "a.log", outside / "credentials.json")
+    gated, target = (files, outside) if verb == "list_entries" else (files / "a.log", outside / "credentials.json")
 
     def swapped(self, path: str, *, write: bool):
         if gated.is_symlink():  # what any gate (a second one too) checks is the sandbox's own file
             gated.unlink()
-            gated.mkdir() if verb == "list_dir" else gated.write_text("harmless\n")
+            gated.mkdir() if verb == "list_entries" else gated.write_text("harmless\n")
         found = real_gate(self, path, write=write)
         (self.fs / "work" / "swap").symlink_to(target)
         if gated.is_dir():
@@ -283,7 +283,7 @@ def test_path_traversal_is_confined_to_the_root(make) -> None:
     provider = make([LocalTemplate("dev", "dev")])
     sb = _create(provider, "dev", "dev")
     sb.write_file("/work/../../../../escape.txt", b"x")  # collapses to /escape.txt inside the root
-    assert "escape.txt" in sb.list_dir("/")
+    assert "escape.txt" in [e.name for e in sb.list_entries("/")]
     assert not Path("/escape.txt").exists()
 
 

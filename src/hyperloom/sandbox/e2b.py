@@ -637,15 +637,6 @@ class _E2BSandbox:
                 total += len(chunk)
         return total
 
-    def list_dir(self, path: str) -> list[str]:
-        """List entry names of a directory, sorted.
-
-        Raises:
-            FileNotFoundError: When there is no such directory.
-        """
-        with self._data_plane():
-            return sorted(entry.name for entry in self._handle.files.list(path))
-
     def list_entries(self, path: str) -> list[DirEntry]:
         """The entries of a directory, sorted by name; one the service reports a link target for is a link.
 
