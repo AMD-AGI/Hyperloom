@@ -9,13 +9,14 @@ are ``hyperloom_common/tests/test_bwrap*.py``; a confinement launched for real i
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import threading
 from pathlib import Path
 
 import pytest
 
-from hyperloom_common.bwrap import BwrapPolicy, BwrapProbe
+from hyperloom_common.bwrap import NO_JOIN, BwrapPolicy, BwrapProbe
 
 from hyperloom.common import agent_isolation
 from hyperloom.common.agent_isolation import (
@@ -51,6 +52,22 @@ LAYER_DENIED = BwrapProbe(LAYER, (0, 13, 1), ("bwrap: setting up uid map: Permis
 MISSING = BwrapProbe(None, None, ("bubblewrap: not found on PATH",))
 NO_ANSWER = BwrapProbe(LAYER, (0, 13, 1), (f"bubblewrap at {LAYER}: no answer in 10 s",), transient=True)
 NOT_SET = f"running them as an account: {SPECIALIST_USER_ENV} is not set"
+#: The layer's bubblewrap where only ``unshare --user`` gives it a mount tree it can bind (an app that is not root).
+IN_OWN_USERNS = BwrapProbe(
+    LAYER,
+    (0, 13, 1),
+    (),
+    prefix=(
+        "/opt/hyperloom-host/bin/unshare",
+        "--user",
+        "--map-current-user",
+        "--mount",
+        "--propagation",
+        "private",
+        "--",
+    ),
+    joins=False,
+)
 
 
 class Probes:
@@ -191,6 +208,27 @@ def test_a_hosted_run_refuses_an_unconfined_sandbox_too(probe):
     with pytest.raises(IsolationRefused) as refused:
         choose_sandbox_isolation()
     assert refused.value.reasons[0] == f"running them as an account: {SANDBOX_ACCOUNT}"
+
+
+def test_a_hosted_run_under_unshare_user_confines_its_specialists_and_refuses_sandboxes_that_join_a_holder(probe):
+    probe.answer = IN_OWN_USERNS
+    assert require_agent_isolation(bwrap=LAYER) == BwrapIsolation(IN_OWN_USERNS, (NOT_SET,))
+    assert bwrap_isolation() == BwrapIsolation(IN_OWN_USERNS), "a native compile launches alone, never joined"
+    for choose, account in ((choose_sandbox_isolation, SANDBOX_ACCOUNT), (choose_test_isolation, TEST_ACCOUNT)):
+        with pytest.raises(IsolationRefused) as refused:
+            choose()
+        assert refused.value.reasons == (
+            f"running them as an account: {account}",
+            f"bubblewrap ({LAYER}, 0.13.1): {NO_JOIN}",
+        )
+        assert not refused.value.transient
+
+
+def test_a_local_run_under_unshare_user_runs_joined_sandboxes_unconfined_as_without_bubblewrap(probe):
+    probe.answer = dataclasses.replace(IN_OWN_USERNS, path="/usr/bin/bwrap")
+    found = choose_sandbox_isolation()
+    assert isinstance(found, NoIsolation) and found.reasons[1].endswith(NO_JOIN)
+    assert isinstance(choose_agent_isolation(), BwrapIsolation)
 
 
 @pytest.mark.parametrize("bwrap", [LAYER, None], ids=["layer-named", "none-named"])

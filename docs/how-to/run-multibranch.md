@@ -81,6 +81,7 @@ value but `on`, `off` or empty is refused when the toolbox is built.
   (expert-parallel size, default 1), `--conc`, `--precision`; `--isl`/`--osl` for `inferencex` only,
   `--agentx-duration-sec` (the trace window each test replays, the harness's default when not given) and
   `--agentx-objective` for `agentx` only; `--kernel-optimizer`;
+  `--boot-budget-sec` (see **Boot budget** below);
   `--inferencex-commit SHA` to resolve the session's base launch from InferenceX at that commit instead of `main`
   (see [Base launch](../reference/inference-suite.md#base-launch)).
 - **AgentX objective:** `--agentx-objective p50_interactivity|total_token_throughput` (default
@@ -96,6 +97,15 @@ value but `on`, `off` or empty is refused when the toolbox is built.
   bar and guards are read from the code, so a resumed session judges by the current rule. The manifest records the
   objective, so a resumed session keeps it; the frontier, FINAL, the dashboard and `MB-report.md` all read that metric. A
   `total_token_throughput` session writes no Recipe KB record: the KB partitions by workload, not objective.
+- **Boot budget:** `--boot-budget-sec SECONDS` (a positive whole number, at most 21600, 6 h) is how long, at least, the
+  server of a test may take to be ready, for a model whose checkpoint takes long to load. Without it, a test's timeout
+  is 3600 s for `inferencex` and the trace window plus 3600 s for `agentx`, and a boot may take half of it. A budget
+  only lengthens both: a test runs for its trace window (`agentx`) plus 1800 s for the warmup, the measured rounds, the
+  accuracy evaluation and the drain, plus the budget, when that is longer than its default timeout; and the boot limit
+  (`server_boot_timeout`) is the budget when that is longer than half of the timeout. A budget of 1800 s or less
+  changes nothing. The server's own start timeout follows the budget: every round sets the framework's ready timeout
+  (`VLLM_ENGINE_READY_TIMEOUT_S`, `SGLANG_WARMUP_TIMEOUT`) to 10800 s, or to the budget plus 3600 s when that is
+  longer, so the server never gives up on a start the budget still allows.
 - **Base launch:** `--reference-script FILE`, a shell launch script or a base launch record frozen elsewhere, as for
   `hyperloom optimize`; the session freezes it as its base, a record without reading any recipe source. Without it
   the base comes from the recipe sources. Every component agent is served the frozen base unless `--agent-launch`
@@ -129,6 +139,12 @@ the profile and the root commit are the ones the first PRELUDE recorded.
 - **What it continues:** the earlier run's unfinished tests are withdrawn and the branches it left open are stopped.
   The roster and the integration branch open again (a `reopen` lineage event), and EXPLORE opens new branches, new
   ids and worktrees, on the integration head. Specialist and agent branches alike start fresh.
+- **Claw session:** a session started with `CLAW_SESSION_ID` records it as the top-level `claw_session_id` of
+  `MB-manifest.json` (`null` without it), so a collector of running sessions can tell whose a directory is before
+  CLOSE writes `session_breakdown.json`. The id follows the leg that runs: a `run --resume` or a `final-only` given
+  `CLAW_SESSION_ID` writes that id to the manifest and the breakdown, as the LLM attribution header carries it, and
+  logs the old and the new id when it changes; a leg given none keeps the recorded id. The manifest is the one record
+  of the id: the toolbox's `state.json` and `retest_view.json` do not carry it.
 - **Deadline:** the session's deadline moves by its downtime, the time between the last decision the earlier run
   recorded and the resume. The new deadline is written to the manifest and recorded as a `resume` phase in
   `MB-decisions.jsonl` with `ended`, `downtime_seconds` and `deadline`. GPU hours are not given back: the session

@@ -24,6 +24,7 @@ from .grid._grid_runner import _run_grid_warmup_enabled as run_grid_warmup_enabl
 from .grid._grid_runner import GridLaunch, GridRecipe, GridStop, run_grid, teardown_variant_server
 from .serving._server_lifecycle import resolve_lifecycle_params
 from ._subprocess_kill import (
+    BOOT_BUDGET_ENV,
     COOPERATIVE_REAP_BUDGET_SEC,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -48,6 +49,7 @@ from ._profile_setup import SGLANG_PATCH_SERVER_FLAG
 from ._server_patcher import ensure_patched_copy, lay_tracelens_patch
 
 __all__ = [
+    "BOOT_BUDGET_ENV",
     "SGLANG_PATCH_SERVER_FLAG",
     "VLLM_PATCH_PROFILER_FIELDS",
     "PatchedServer",

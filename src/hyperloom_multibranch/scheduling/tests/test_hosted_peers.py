@@ -476,7 +476,9 @@ def test_the_sessions_make_before_break_is_what_the_hosted_toolbox_is_built_with
         return _toolbox(None, tmp_path, options=built, grant_limits={**_GRANT, "max_sandboxes": 3, "max_gpus": 3})
 
     monkeypatch.setattr(hosted_toolbox, "build_hosted_toolbox", build)
-    setup = SimpleNamespace(layout=None, workload=dataclasses.replace(WORKLOAD, tp=1), make_before_break=keep)
+    setup = SimpleNamespace(
+        layout=None, workload=dataclasses.replace(WORKLOAD, tp=1), make_before_break=keep, dev_leases=0, agents=()
+    )
 
     toolbox = HostedSandboxes(lambda layout, tp: None).toolbox(setup, None, None, None)  # type: ignore[arg-type]
 
@@ -486,9 +488,48 @@ def test_the_sessions_make_before_break_is_what_the_hosted_toolbox_is_built_with
     assert toolbox.backend._config.max_parallel_tests == parallel
 
 
+@pytest.mark.parametrize(
+    ("dev_leases", "agents", "lends"), [(0, (), False), (1, (), True), (0, ("/agents/a",), True), (2, ("/a",), True)]
+)
+def test_a_session_builds_dev_leases_only_when_it_lends_dev_sandboxes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dev_leases: int, agents: tuple[str, ...], lends: bool
+) -> None:
+    """The host's ``dev`` key alone makes no lease: a session that lends no dev sandbox and runs no agent reads no
+    ``dev`` template, so one of another TP than the session's (here 1 card for a TP 2 session) keeps nothing from
+    starting; a session that lends builds its leases on the template of its TP, and refuses to start without one."""
+    given: list[hosted_toolbox.HostedOptions] = []
+
+    def build(inputs: object, blackboard: object, acceptance: object, spec: object, *, options):  # type: ignore[no-untyped-def]
+        given.append(options)
+        built = dataclasses.replace(options, framework_configs="")
+        return _toolbox(None, tmp_path, options=built, tp=2, sandbox_templates=templates)
+
+    monkeypatch.setattr(hosted_toolbox, "build_hosted_toolbox", build)
+    setup = SimpleNamespace(
+        layout=None, workload=dataclasses.replace(WORKLOAD, tp=2), make_before_break=True, dev_leases=dev_leases,
+        agents=agents,
+    )  # fmt: skip
+    sandboxes = HostedSandboxes(lambda layout, tp: None)
+    measurement = {"measurement": {"2": "r2"}}
+
+    templates = {**measurement, "dev": {"1": "d1"}}
+    if lends:
+        with pytest.raises(ValueError, match="no dev template has the session's 2 cards"):
+            sandboxes.toolbox(setup, None, None, None)  # type: ignore[arg-type]
+        templates = {**measurement, "dev": {"2": "d2"}}
+    toolbox = sandboxes.toolbox(setup, None, None, None)  # type: ignore[arg-type]
+
+    assert {options.dev_leases for options in given} == {lends}
+    if lends:
+        assert toolbox.leases is not None and toolbox.leases._session.template == "d2"
+    else:
+        assert toolbox.leases is None
+
+
 def test_make_before_break_is_on_unless_the_operator_turns_it_off() -> None:
     fields = {field.name: field.default for field in dataclasses.fields(RunSettings)}
     assert fields["make_before_break"] is True
     assert {field.name: field.default for field in dataclasses.fields(PeerSetup)}["make_before_break"] is True
     assert hosted_toolbox.HostedOptions().make_before_break is True
+    assert hosted_toolbox.HostedOptions().dev_leases is True, "a toolbox built by hand lends as before"
     assert not hasattr(hosted_toolbox.HostedOptions(), "handover_timeout_sec"), "no option without a reader"
