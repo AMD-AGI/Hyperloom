@@ -16,6 +16,7 @@ import pytest
 
 from hyperloom.contracts.measurement import FailureClass, SandboxFacts, TestResult, Validity
 from hyperloom.measure import sandboxes
+from hyperloom.measure.boot_watch import boot_seconds
 from hyperloom.measure.hosted import HostedMeasurementBackend
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT
 from hyperloom.measure.points import AcceptedMeasurement
@@ -60,6 +61,7 @@ class ScriptedBackend:
     calls: int = 0
     seen: list[TestOutcome] = field(default_factory=list)
     stamps: dict[str, str] = field(default_factory=dict)  # files the sandbox's rounds leave in the landed output
+    fake: dict[str, str] = field(default_factory=dict)  # further keys of the point that steer the fake runner
 
     name = "hosted"
 
@@ -70,7 +72,7 @@ class ScriptedBackend:
     def run_test(self, call):  # type: ignore[no-untyped-def]
         mode = self.modes[min(self.calls, len(self.modes) - 1)]
         self.calls += 1
-        point_yaml(self.point.parent, self.point.name, fake_mode=mode)
+        point_yaml(self.point.parent, self.point.name, fake_mode=mode, **self.fake)
         outcome = self.inner.run_test(call)  # type: ignore[attr-defined]
         for name, text in self.stamps.items():
             (call.output_dir / name).parent.mkdir(parents=True, exist_ok=True)
@@ -148,23 +150,26 @@ SAMPLE_STAMPS = {
 }
 
 
-async def test_a_succeeded_result_carries_the_boot_its_rounds_stamped(tmp_path: Path, rig) -> None:
+@pytest.mark.parametrize("mode", [OK, CANDIDATE])
+async def test_a_result_carries_the_boot_its_rounds_stamped_whether_or_not_the_test_succeeded(
+    tmp_path: Path, rig, mode: str
+) -> None:
     r = rig()
-    tb, scripted = _toolbox(tmp_path, r, OK)
+    tb, scripted = _toolbox(tmp_path, r, mode)
     scripted.stamps = SAMPLE_STAMPS
     _, result = await _run(tb)
     assert result.cold_start_seconds == 80.5
     assert (await tb.toolbox.queue_state()).cold_start_seconds == 80.5
 
 
-@pytest.mark.parametrize("mode", [CANDIDATE, NODE_FAULT])
-async def test_a_failed_attempt_holding_the_stamp_reports_no_cold_start(tmp_path: Path, rig, mode: str) -> None:
+async def test_an_attempt_saved_without_a_result_reports_no_cold_start(tmp_path: Path, rig) -> None:
     r = rig()
-    tb, scripted = _toolbox(tmp_path, r, mode)
-    scripted.stamps = SAMPLE_STAMPS
+    tb, scripted = _toolbox(tmp_path, r, NODE_FAULT)
+    scripted.fake = {"fake_round_ready": "80.5"}
     tb.toolbox.record_cold_start(75.0)
     _, result = await _run(tb)
-    assert result.validity is not Validity.SUCCEEDED
+    assert boot_seconds(tmp_path / "session" / result.output_dir) == 80.5, "the host saved the round's ready stamp"
+    assert result.validity is not Validity.SUCCEEDED and not result.manifest_sha256
     assert result.cold_start_seconds is None
     assert (await tb.toolbox.queue_state()).cold_start_seconds == 75.0
 

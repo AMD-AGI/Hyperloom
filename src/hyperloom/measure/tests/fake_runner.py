@@ -47,6 +47,8 @@ line of the live output.
 ``fake_round_tree: true`` writes, before it runs, what a real round leaves below its own directory
 (:data:`ROUND_TREE`, below :data:`ROUND_DIR`): the server log, a client log, the phase marks, ``launch.json``, a boot
 stamp and a profiler trace, plus a link out of the sandbox root (:data:`ROUND_LINK`) whose target holds a log.
+``fake_round_ready: <seconds>`` writes, before it runs, the ready stamp of a round below :data:`ROUND_DIR` that says its
+server booted in that many seconds.
 ``fake_jit: true`` stages a contribution to the shared compiled-code cache (one aiter module, below ``/out/jit-cache``) and
 signs it into the manifest as a test that compiled it would; ``fake_jit_swap: true`` changes the staged list after the
 signing, as something that can write ``/out`` could.
@@ -436,6 +438,10 @@ def main() -> int:
             _atomic(out / "files" / "server.log", f"boot\n{config['fake_log_line']}\n".encode())
         if config.get("fake_round_tree"):
             _round_tree(out / "files", root)
+        if "fake_round_ready" in config:
+            _atomic(
+                out / "files" / ROUND_DIR / "server_ready_at", f"{time.time()} {config['fake_round_ready']}\n".encode()
+            )
         if config.get("fake_ready"):
             _atomic(out / "files" / "server_ready_at", f"{time.time()} 5\n".encode())
         progress.touch()

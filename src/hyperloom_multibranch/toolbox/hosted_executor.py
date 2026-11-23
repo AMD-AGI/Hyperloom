@@ -375,7 +375,9 @@ class HostedExecutor:
             )
             if failure is None
             else (),
-            cold_start_seconds=boot_seconds(call.output_dir) if failure is None else None,
+            # A landed bundle's stamps are a sample whether the test succeeded or not; an attempt that ended without
+            # landing one holds at most the host's saved copy of its runner's stamps, which is never a sample.
+            cold_start_seconds=boot_seconds(call.output_dir) if audit else None,
             **_phase_fields(outcome.phases, span, finished, facts.gpu_count),
             **audit,
         )
