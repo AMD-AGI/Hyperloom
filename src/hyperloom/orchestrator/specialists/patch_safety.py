@@ -10,8 +10,8 @@ freeform). It provides:
 * unified-diff structural validation (a patch must carry at least one hunk),
 * git-grounding (``git apply --check`` against a clean checkout so a fabricated
   patch that does not apply to real source is flagged),
-* quantitative-claim guards (forbidden numeric fields, stripped rather than
-  merely reported, + numeric-claim regex on the qualitative argument),
+* the quantitative-claim guard (forbidden numeric fields, stripped rather than
+  merely reported).
 
 Pure / dependency-light: imports only stdlib, git via subprocess, and the
 stdlib-only ``hyperloom_common.unified_diff`` so it can be imported from the
@@ -67,14 +67,6 @@ FORBIDDEN_PROPOSAL_FIELDS: frozenset[str] = frozenset(
 # ``proposal_set[*]``.
 FORBIDDEN_PAYLOAD_FIELDS: frozenset[str] = FORBIDDEN_PROPOSAL_FIELDS - {"confidence"}
 
-
-# Numeric speedup claims smuggled into a qualitative argument / summary.
-_NUMERIC_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\b\d+(?:\.\d+)?\s*%"),
-    re.compile(r"\b\d+(?:\.\d+)?\s*x\b", re.I),
-    re.compile(r"\b\d+(?:\.\d+)?\s*(?:ms|us|tok/s|qps|tps)\b", re.I),
-    re.compile(r"\bspeedup\s*(?:of|=)?\s*\d", re.I),
-)
 
 # Unified diff sanity: must contain at least one @@ hunk header.
 _UNIFIED_DIFF_HUNK_RE: re.Pattern[str] = re.compile(
@@ -423,22 +415,6 @@ def _match_candidate_root(
     return PatchRootResolution(matches[0], matches=matches)
 
 
-def numeric_claims(text: str) -> list[str]:
-    """Return numeric-speedup claim substrings found in ``text``.
-
-    Args:
-        text: The free-text argument/summary to scan.
-
-    Returns:
-        The matched numeric-claim substrings (may be empty).
-    """
-    hits: list[str] = []
-    for pattern in _NUMERIC_CLAIM_PATTERNS:
-        for match in pattern.finditer(text or ""):
-            hits.append(match.group(0))
-    return hits
-
-
 def is_unified_diff(text: str) -> bool:
     """True iff ``text`` carries at least one unified-diff hunk header.
 
@@ -498,7 +474,6 @@ class PatchSafetyReport:
 
     ungrounded: list[dict[str, str]] = field(default_factory=list)
     grounding: dict[str, str] = field(default_factory=dict)
-    numeric_warnings: list[str] = field(default_factory=list)
     forbidden_fields: list[str] = field(default_factory=list)
     env_ungrounded: list[str] = field(default_factory=list)
 
@@ -534,42 +509,11 @@ class PatchSafetyReport:
         stale = [p for p, v in self.grounding.items() if v == GROUND_STALE]
         if stale:
             out.append("patch_safety_stale:" + ",".join(stale[:8]))
-        if self.numeric_warnings:
-            out.append("patch_safety_numeric:" + ",".join(self.numeric_warnings[:8]))
         if self.forbidden_fields:
             out.append("patch_safety_forbidden_fields:" + ",".join(self.forbidden_fields[:8]))
         if self.env_ungrounded:
             out.append("proposal_env_file_missing:" + "; ".join(self.env_ungrounded[:4]))
         return out
-
-
-def scan_numeric_claims(payload: dict[str, Any]) -> list[str]:
-    """Return the numeric speedup claims smuggled into ``payload``'s prose.
-
-    A number in a summary or qualitative argument is advisory: the Coordinator's
-    measured gain is the truth, not the claim, and the audit note this feeds is
-    how a smuggled one stays visible.
-
-    The forbidden *fields* are a different question, and
-    :func:`strip_forbidden_proposal_fields` is the one place that answers it: it
-    removes them and returns what it took. Answering it a second time here would
-    be a copy of that same ``keys & FORBIDDEN_*`` intersection with nothing
-    holding the two in step.
-
-    Args:
-        payload: The specialist_done payload to scan.
-
-    Returns:
-        The matched numeric-claim substrings, de-duped with order preserved.
-    """
-    warnings: list[str] = []
-    for key in ("summary", "expected_qualitative_argument", "cross_domain_rationale"):
-        warnings.extend(numeric_claims(str((payload or {}).get(key) or "")))
-    for proposal in (payload or {}).get("proposal_set") or []:
-        if not isinstance(proposal, dict):
-            continue
-        warnings.extend(numeric_claims(str(proposal.get("expected_qualitative_argument") or "")))
-    return list(dict.fromkeys(warnings))
 
 
 def strip_forbidden_proposal_fields(payload: dict[str, Any]) -> list[str]:
@@ -863,11 +807,10 @@ def admit_payload(
 ) -> PatchSafetyReport:
     """Apply the patch-safety gate to a specialist_done ``payload`` in place; the report of what it found.
 
-    It books what :func:`vet_patches` kept, scans the numeric claims, strips the forbidden fields and drops the
-    proposals whose env files are missing.
+    It books what :func:`vet_patches` kept, strips the forbidden fields and drops the proposals whose env files are
+    missing.
     """
     kept, ungrounded, grounding, spans_roots = vetted
-    numeric_warnings = scan_numeric_claims(payload)
     forbidden_fields = strip_forbidden_proposal_fields(payload)
     env_ungrounded = drop_env_ungrounded_proposals(payload)
     payload["patches_written"] = kept
@@ -882,7 +825,6 @@ def admit_payload(
     return PatchSafetyReport(
         ungrounded=ungrounded,
         grounding=grounding,
-        numeric_warnings=numeric_warnings,
         forbidden_fields=forbidden_fields,
         env_ungrounded=env_ungrounded,
     )
@@ -904,7 +846,6 @@ __all__ = [
     "admit_payload",
     "drop_env_ungrounded_proposals",
     "is_unified_diff",
-    "numeric_claims",
     "patch_escapes_tree",
     "patch_file_targets",
     "patch_is_annotation_only",
@@ -912,7 +853,6 @@ __all__ = [
     "patch_work_artifact_targets",
     "path_resolves_at",
     "resolve_patch_apply_root",
-    "scan_numeric_claims",
     "strip_forbidden_proposal_fields",
     "vet_patches",
 ]

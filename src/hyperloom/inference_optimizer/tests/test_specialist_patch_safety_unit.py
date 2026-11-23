@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """Unit tests for the universal patch-safety contract (diff structural checks, git grounding, missing-target detection,
-and quantitative-claim guards).
+and the forbidden-field strip).
 """
 
 from __future__ import annotations
@@ -82,14 +82,6 @@ def test_patch_targets_missing_dev_null_exempt(tmp_path):
 
 
 # ---- regex helpers --------------------------------------------------------
-def test_numeric_claims():
-    text = "this gives 12% and 3.5x speedup of 4, 100ms latency"
-    hits = ps.numeric_claims(text)
-    assert any("%" in h for h in hits)
-    assert any("x" in h.lower() for h in hits)
-    assert ps.numeric_claims("") == []
-
-
 def test_is_unified_diff():
     assert ps.is_unified_diff(_DIFF) is True
     assert ps.is_unified_diff("just text") is False
@@ -169,7 +161,6 @@ def test_patch_safety_report_notes():
             {"path": "p2", "verdict": ps.GROUND_MISSING_TARGET, "detail": "miss"},
         ],
         grounding={"p3": ps.GROUND_STALE},
-        numeric_warnings=["12%"],
         forbidden_fields=["confidence"],
     )
     notes = rep.notes()
@@ -177,7 +168,6 @@ def test_patch_safety_report_notes():
     assert "patch_safety_ungrounded" in joined
     assert "patch_safety_missing_target" in joined
     assert "patch_safety_stale" in joined
-    assert "patch_safety_numeric" in joined
     assert "patch_safety_forbidden_fields" in joined
 
 
@@ -241,31 +231,6 @@ def test_admit_payload_books_the_gate_and_reports_the_env_drops(tmp_path):
     assert any("expected_gain_pct" in f for f in report.forbidden_fields)
     assert report.env_ungrounded == payload["proposals_env_ungrounded"]
     assert any(n.startswith("proposal_env_file_missing:") for n in report.notes())
-
-
-# ---- scan_numeric_claims ---------------------------------------------------
-def test_scan_numeric_claims():
-    payload = {
-        "summary": "gives 20% boost",
-        "proposal_set": [
-            {"expected_qualitative_argument": "3x faster"},
-            "not-a-dict",
-        ],
-    }
-    warnings = ps.scan_numeric_claims(payload)
-    assert any("%" in w for w in warnings)
-    assert any("x" in w.lower() for w in warnings)
-
-
-def test_the_numeric_scan_answers_only_the_question_no_one_else_answers():
-    """It used to return the same ``keys & FORBIDDEN_*`` intersection ``strip_forbidden_proposal_fields`` computes, for a caller that discarded it: one question with two implementations, free to drift apart."""
-    payload = {
-        "expected_gain": 12.0,
-        "summary": "gives 20% boost",
-        "proposal_set": [{"score": 1, "confidence": 0.9}],
-    }
-
-    assert ps.scan_numeric_claims(payload) == ["20%"]
 
 
 # ---- strip_forbidden_proposal_fields --------------------------------------
