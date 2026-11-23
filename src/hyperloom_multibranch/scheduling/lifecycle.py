@@ -433,9 +433,6 @@ class Session:
 
         baseline = await self._blackboard.baseline()
         longest = longest_root_test_seconds(await self._blackboard.snapshot()) or 0.0
-        await self._toolbox.start()
-        await self._toolbox.withdraw_all(CONC_SWEEP)
-        await self._toolbox.set_policy(final_quota(self._settings.caps))
         sweep = ConcSweep(
             plan,
             baseline.root_commit,
@@ -447,6 +444,9 @@ class Session:
         )
         self._signals.install()
         try:
+            await self._toolbox.start()
+            await self._toolbox.withdraw_all(CONC_SWEEP)
+            await self._toolbox.set_policy(final_quota(self._settings.caps))
             return await sweep.run(self._signals.wait(), grant_end_unix)
         finally:
             self._signals.uninstall()

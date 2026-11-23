@@ -62,10 +62,12 @@ _RESEARCH_SCOUT_INTERVAL = 3
 
 @dataclass(frozen=True)
 class HostedPlugInputs:
-    """What a hosted run gives the plug host: the lock layer and the host inputs."""
+    """What a hosted run gives the plug host: the lock layer and the host inputs, and when its grant ends (Unix
+    seconds, ``None`` for a grant with no runtime)."""
 
     lock: Mapping[str, Mapping[str, str]]
     host_info: object
+    grant_end_unix: float | None = None
 
 
 _hosted_inputs: HostedPlugInputs | None = None
@@ -75,6 +77,11 @@ def set_hosted_plug_inputs(inputs: HostedPlugInputs | None) -> None:
     """Called by the hosted entry before ``optimize`` starts; ``None`` clears it.  Unset, plug resolution is unchanged."""
     global _hosted_inputs
     _hosted_inputs = inputs
+
+
+def hosted_grant_end_unix() -> float | None:
+    """When the hosted run's grant ends, Unix seconds; ``None`` outside a hosted run or for a grant with no runtime."""
+    return None if _hosted_inputs is None else _hosted_inputs.grant_end_unix
 
 
 def resolve_plug_manifest(args: argparse.Namespace) -> ResolvedManifest:

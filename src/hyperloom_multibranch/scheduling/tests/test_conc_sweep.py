@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ import pytest
 
 from hyperloom.contracts.measurement import RoundValue, TestRequest, TestResult, Validity
 from hyperloom.orchestrator.state import base_launch
+from hyperloom_multibranch import cli
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.contracts.toolbox import TestWithdrawn
 from hyperloom.orchestrator.conc_sweep.points import SweepPoints
@@ -26,6 +28,7 @@ from hyperloom_multibranch.scheduling.final import CandidateCheck, FinalCandidat
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, RunSettings, Workload
+from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from inference_suite.contracts import SourceKind
 
 WORKLOAD = Workload(
@@ -182,3 +185,49 @@ def test_a_closed_session_whose_sweep_did_not_settle_is_swept_again(tmp_path: Pa
     final.write_skipped(layout, WORKLOAD, final.NO_SWEEP_POINTS)
     assert not final.sweep_unfinished(layout, _settings())
     assert not final.sweep_unfinished(layout, replace(_settings(), conc_sweep=False))
+
+
+@pytest.mark.parametrize(
+    ("stop", "held", "swept"),
+    [
+        (SessionStopReason.TIME_EXHAUSTED, False, True),
+        (SessionStopReason.SIGNAL, False, False),
+        (SessionStopReason.TIME_EXHAUSTED, True, False),
+    ],
+    ids=["closed", "signalled", "lock_held"],
+)
+def test_a_new_session_sweeps_once_closed_unless_a_signal_stopped_it_or_another_run_holds_its_lock(
+    stop: SessionStopReason, held: bool, swept: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(cli, "require_specialist_reach", lambda branches: None)
+    sweeps: list[Path] = []
+    roots: list[Path] = []
+
+    class Closed:
+        def __init__(self, *_: object) -> None:
+            pass
+
+        async def run(self, cap: object) -> SimpleNamespace:
+            return SimpleNamespace(stop_reason=stop, exit_code=0)
+
+    async def sweep_closed(layout: SessionLayout, *_: object) -> None:
+        sweeps.append(layout.root)
+
+    def report_root(root: Path) -> None:
+        roots.append(root)
+        if held:
+            SessionLayout(root).final_only_lock.write_text("1\n")
+
+    monkeypatch.setattr(cli, "Session", Closed)
+    monkeypatch.setattr(cli, "sweep_closed", sweep_closed)
+    handlers = list(logging.getLogger().handlers)
+    try:
+        assert cli.run_session(_settings(), None, None, report_root) == 0  # type: ignore[arg-type]
+    finally:
+        for handler in set(logging.getLogger().handlers) - set(handlers):
+            logging.getLogger().removeHandler(handler)
+            handler.close()
+
+    assert sweeps == (roots if swept else [])
+    assert SessionLayout(roots[0]).final_only_lock.is_file() is held

@@ -97,6 +97,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
 )
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
+from hyperloom_multibranch.scheduling.final import NO_OPTIMIZATION, write_skipped
 from hyperloom_multibranch.scheduling.prelude import BASELINE_ESTABLISHED
 from hyperloom_multibranch.scheduling import review
 from hyperloom_multibranch.scheduling.layout import REVIEW_DIR, SessionLayout, create_session
@@ -1595,6 +1596,22 @@ def test_a_resume_whose_specialists_account_cannot_reach_the_session_is_refused_
 
     assert agent_cli == [] and RESUMED_TO == [], "not resumed"
     assert f"cannot search {tmp_path}" in capsys.readouterr().err
+
+
+def test_a_hosted_restart_sweeps_a_closed_session_until_its_conc_sweep_settles(tmp_path: Path) -> None:
+    layout = _ended_before_final(tmp_path / "session")
+    settings = _settings("--enable-conc-sweep")
+    _manifest(layout, settings=encode(settings))
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    _write(state_dir / "session.json", {"session_dir": str(layout.root)})
+
+    earlier = take_over_earlier_session(state_dir)
+    assert earlier.sweep is not None and earlier.sweep.root == layout.root and earlier.finish is None
+
+    write_skipped(layout, settings.workload, NO_OPTIMIZATION)
+    earlier = take_over_earlier_session(state_dir)
+    assert earlier.sweep is None and earlier.finish is not None
 
 
 def _hosted_ended_before_final(root: Path) -> PersistedRun:

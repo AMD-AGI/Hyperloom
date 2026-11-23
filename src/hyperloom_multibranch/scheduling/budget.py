@@ -28,8 +28,8 @@ from hyperloom_multibranch.scheduling.clock import Clock
 MB_DEFAULT_MAX_HOURS = 2.0
 # orchestrator/phases/machine_state.py DEFAULT_LONGRUN_MAX_MINUTES (14 days); a budget of 0 means unlimited
 MB_UNLIMITED_HOURS = 14 * 24
-# orchestrator/phases/machine_state.py DEFAULT_PHASE_BUDGET_PCT: FRAMEWORK_AGENT 38 + KERNEL_AGENT 47;
-# FINAL keeps its own 5
+# orchestrator/phases/machine_state.py DEFAULT_PHASE_BUDGET_PCT: FRAMEWORK_AGENT 40 + KERNEL_AGENT 50,
+# split here as EXPLORE 85 and FINAL 5
 MB_EXPLORE_SHARE = 85
 MB_FINAL_SHARE = 5
 # orchestrator/state/shared_state.py effective_closing_grace_sec: min(120, total * 0.02)

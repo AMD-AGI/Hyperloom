@@ -1059,14 +1059,18 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         await _close_optimize_run(coordinator, session_lock, session_dir, stop_reason)
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
-    closed = coordinator.shared_state
-    if closed.conc_sweep_enabled and closed.close_sequence_done and stop_reason not in ABORTED_STOP_REASONS:
+    if sweeps_after_close(coordinator.shared_state, stop_reason):
         from hyperloom.orchestrator.conc_sweep.cli import sweep_session
 
         await sweep_session(session_dir)
 
     _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
     return _exit_code_for_stop_reason(stop_reason, coordinator.shared_state.baseline_tput)
+
+
+def sweeps_after_close(state: Any, stop_reason: str | None) -> bool:
+    """Whether the session's conc sweep runs once it closed: asked for, CLOSE ran, and no signal stopped it."""
+    return state.conc_sweep_enabled and state.close_sequence_done and stop_reason not in ABORTED_STOP_REASONS
 
 
 async def _close_optimize_run(coordinator: Any, session_lock: Any, session_dir: Path, stop_reason: str | None) -> None:

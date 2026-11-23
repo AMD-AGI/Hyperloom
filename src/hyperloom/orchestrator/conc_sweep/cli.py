@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from hyperloom.inference_optimizer.cli.bootstrap import hosted_grant_end_unix
 from hyperloom.inference_optimizer.session.lock import SessionAlreadyRunning, SessionLock
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 
@@ -41,11 +42,12 @@ def _cancelled_by_signals(scope: CancelScope) -> Iterator[None]:
             signal.signal(signum, handler if handler is not None else signal.SIG_DFL)
 
 
-async def sweep_session(session_dir: Path, *, grant_end_unix: float | None = None) -> dict[str, Any]:
-    """Run the sweep of the session in ``session_dir`` under its lock; raises ``SessionAlreadyRunning``."""
+async def sweep_session(session_dir: Path) -> dict[str, Any]:
+    """Run the sweep of the session in ``session_dir`` under its lock, warned at a hosted run's grant end; raises
+    ``SessionAlreadyRunning``."""
     scope = CancelScope()
     with SessionLock(session_dir), use_cancel_scope(scope), _cancelled_by_signals(scope):
-        return await run_conc_sweep(session_dir, grant_end_unix=grant_end_unix)
+        return await run_conc_sweep(session_dir, grant_end_unix=hosted_grant_end_unix())
 
 
 def main(argv: list[str] | None = None) -> int:

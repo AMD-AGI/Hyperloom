@@ -260,9 +260,9 @@ def run_session(
     grant: GrantEnd | None = None,
 ) -> int:
     """Create the session directory, hand it to ``report_root`` -- by default printed on one stdout line -- before
-    anything else is built in it, run the session (:meth:`Session.run`, given ``grant``'s explore cap) and its conc
-    sweep when the settings ask for one (:func:`sweep_closed`, warned at ``grant``'s tests end), and return the
-    session's exit code.
+    anything else is built in it, run the session (:meth:`Session.run`, given ``grant``'s explore cap) and, when the
+    settings ask for one and no signal stopped the session, its conc sweep under the session's lock file
+    (:func:`sweep_closed`, warned at ``grant``'s tests end), and return the session's exit code.
     A session whose specialists run as an account that cannot reach its directory is refused before it runs
     (:func:`~hyperloom_multibranch.scheduling.specialist_reach.require_specialist_reach`, raising
     :class:`EnvironmentIncomplete`), unless it stops once its map is made: that session starts no specialist.
@@ -291,9 +291,18 @@ async def _run_session(
     host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
     session = Session(settings, peer_factory, host, services)
     outcome = await session.run(None if grant is None else grant.explore_cap)
-    if settings.conc_sweep:
-        await sweep_closed(layout, settings, peer_factory, services, None if grant is None else grant.tests_end_by)
+    if _sweeps_after(settings, outcome):
+        with _session_lock(layout) as held:
+            if held:
+                end = None if grant is None else grant.tests_end_by
+                await sweep_closed(layout, settings, peer_factory, services, end)
     return outcome.exit_code
+
+
+def _sweeps_after(settings: RunSettings, outcome: SessionOutcome) -> bool:
+    """Whether the session's conc sweep runs once it closed: asked for, and the session was not stopped by a signal."""
+
+    return settings.conc_sweep and outcome.stop_reason is not SessionStopReason.SIGNAL
 
 
 async def sweep_closed(
@@ -399,7 +408,7 @@ async def _run_leg(
         host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
         session = Session(persisted.settings, peer_factory, host, services)
         outcome = await leg(session, persisted.ended)
-        if persisted.settings.conc_sweep:
+        if _sweeps_after(persisted.settings, outcome):
             await sweep_closed(layout, persisted.settings, peer_factory, services)
         return outcome.exit_code
     finally:

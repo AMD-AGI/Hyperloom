@@ -707,8 +707,11 @@ def settings_from(
 
 
 def _concurrencies(value: str) -> tuple[int, ...]:
-    """``C1,C2,...`` as the distinct concurrencies it names, ascending."""
-    return tuple(sorted({int(item) for item in value.split(",")}))
+    """``C1,C2,...`` as the distinct concurrencies it names, ascending; each must be positive."""
+    concs = tuple(sorted({int(item) for item in value.split(",")}))
+    if concs[0] < 1:
+        raise argparse.ArgumentTypeError(f"concurrencies must be positive, got {value}")
+    return concs
 
 
 def _limit_errors(args: argparse.Namespace) -> list[str]:

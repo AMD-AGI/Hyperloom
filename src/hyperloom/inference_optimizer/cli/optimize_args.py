@@ -655,8 +655,11 @@ def add_conc_sweep_arguments(opt: argparse.ArgumentParser) -> None:
 
 
 def _concurrencies(value: str) -> tuple[int, ...]:
-    """``C1,C2,...`` as the distinct concurrencies it names, ascending."""
-    return tuple(sorted({int(item) for item in value.split(",")}))
+    """``C1,C2,...`` as the distinct concurrencies it names, ascending; each must be positive."""
+    concs = tuple(sorted({int(item) for item in value.split(",")}))
+    if concs[0] < 1:
+        raise argparse.ArgumentTypeError(f"concurrencies must be positive, got {value}")
+    return concs
 
 
 def add_plateau_arguments(opt: argparse.ArgumentParser) -> None:
@@ -718,7 +721,7 @@ def add_phase_budget_arguments(opt: argparse.ArgumentParser) -> None:
         type=float,
         default=None,
         help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase, which covers both configuration search "
-        "and source landing. Default: 0.38. "
+        "and source landing. Default: 0.40. "
         "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
@@ -726,7 +729,7 @@ def add_phase_budget_arguments(opt: argparse.ArgumentParser) -> None:
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.47. "
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.50. "
         "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(

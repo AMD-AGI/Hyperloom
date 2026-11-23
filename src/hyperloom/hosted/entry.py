@@ -401,7 +401,10 @@ def _plug_inputs(lock: Mapping[str, Mapping[str, str]], info: HostInfo) -> Itera
     """
     from hyperloom.inference_optimizer.cli.bootstrap import HostedPlugInputs, set_hosted_plug_inputs
 
-    set_hosted_plug_inputs(HostedPlugInputs(lock=lock, host_info=info))
+    limits = info.grant_limits
+    runtime = None if limits is None else limits.max_runtime_sec
+    end = None if runtime is None else info.run_created_at.timestamp() + runtime
+    set_hosted_plug_inputs(HostedPlugInputs(lock=lock, host_info=info, grant_end_unix=end))
     try:
         yield
     finally:

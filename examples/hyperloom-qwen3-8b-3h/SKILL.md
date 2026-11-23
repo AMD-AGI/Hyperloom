@@ -226,7 +226,7 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 5. Include `--phase-budget-framework-pct 0.50` in the optimize command. It is the
    value *before* redistribution: with `--no-kernel`, KERNEL_AGENT is disabled and
    its freed share is added on top,
-   so `0.50` becomes ~0.97 of wall clock for FRAMEWORK_AGENT. Raising `0.50`
+   so `0.50` becomes a full wall clock (1.0) for FRAMEWORK_AGENT. Raising `0.50`
    buys almost nothing — the post-redistribution share is capped at a full wall
    clock, and the excess is discarded.
    Do **not** pass `--no-framework-agent` — that skips OPTIMIZE entirely.

@@ -235,7 +235,9 @@ dispatches a `conc_sweep` task. Update anything that matches on the old names:
   `session_breakdown.json`.
 * It has no phase budget and no budget flag: the session budget alone gates it.
   The SWEEP budget flag is rejected with `unrecognized arguments`, and so is
-  `--conc-sweep-total-budget-sec`.
+  `--conc-sweep-total-budget-sec`. The share SWEEP held moves to the
+  optimisation phases: `FRAMEWORK_AGENT` defaults to 0.40 and `KERNEL_AGENT` to
+  0.50, what a session with the sweep off already ran with.
 * The concurrency sweep runs after the session closes, with `--enable-conc-sweep`
   or `hyperloom conc-sweep SESSION_DIR`.
 * Its exit is `cycle_end_done` (also the stop reason when no further cycle

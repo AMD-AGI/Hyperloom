@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -548,6 +549,16 @@ def test_the_host_values_travel_in_code_to_the_plug_host(run, monkeypatch):
         "gpu_hours": 12,
         "max_runtime_sec": None,
     }
+    assert hosted.grant_end_unix is None
+
+
+def test_a_grant_with_a_runtime_tells_the_run_when_it_ends(run, monkeypatch):
+    monkeypatch.setenv(Var.GRANT_LIMITS, json.dumps({"max_gpus": 8, "gpu_hours": 12, "max_runtime_sec": 7200}))
+    fake = FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    (hosted,) = fake.runs
+    created = datetime(2026, 10, 23, 8, 30, 5, tzinfo=timezone.utc).timestamp()
+    assert hosted.grant_end_unix == created + 7200
 
 
 def dataclass_dict(value):

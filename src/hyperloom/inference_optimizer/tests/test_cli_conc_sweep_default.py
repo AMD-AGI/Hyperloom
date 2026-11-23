@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.inference_optimizer.cli import sweeps_after_close
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -28,6 +29,25 @@ def test_the_operators_points_are_parsed_distinct_and_ascending():
     assert _parse("--conc-sweep-concs", "16,4,16").conc_sweep_concs == (4, 16)
     with pytest.raises(SystemExit):
         _parse("--conc-sweep-concs", "4,x")
+    with pytest.raises(SystemExit):
+        _parse("--conc-sweep-concs", "0,4")
+
+
+@pytest.mark.parametrize(
+    ("enabled", "closed", "stop_reason", "sweeps"),
+    [
+        (True, True, "time_exhausted", True),
+        (True, True, "signal", False),
+        (True, False, "time_exhausted", False),
+        (False, True, "time_exhausted", False),
+    ],
+)
+def test_a_session_sweeps_after_close_only_when_asked_closed_and_not_stopped_by_a_signal(
+    enabled: bool, closed: bool, stop_reason: str, sweeps: bool
+):
+    state = SharedState(conc_sweep_enabled=enabled, close_sequence_done=closed)
+
+    assert sweeps_after_close(state, stop_reason) is sweeps
 
 
 def test_cli_exposes_no_baseline_double_run_field(monkeypatch: pytest.MonkeyPatch):
