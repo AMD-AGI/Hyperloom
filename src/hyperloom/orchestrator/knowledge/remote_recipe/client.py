@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import math
@@ -32,7 +31,6 @@ from .sanitize import sanitize_shared_knowledge
 from .values import has_replay_material
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_READ_CHUNK = 1024 * 1024
 log = logging.getLogger(__name__)
 
 
@@ -196,51 +194,6 @@ def _validate_download_listing(
     return manifest
 
 
-def _verify_downloaded_files(
-    files_root: Path,
-    manifest: dict[str, tuple[int, str]],
-) -> None:
-    """Require an exact, regular-file match with size and SHA256 verification."""
-    if files_root.is_symlink():
-        raise RemoteRecipeValidationError(f"downloaded files root is a symlink: {files_root}")
-    actual: set[str] = set()
-    if files_root.exists() and not files_root.is_dir():
-        raise RemoteRecipeValidationError(f"downloaded files root is not a directory: {files_root}")
-    candidates = files_root.rglob("*") if files_root.is_dir() else ()
-    for path in candidates:
-        if path.is_symlink():
-            raise RemoteRecipeValidationError(f"downloaded artifact is a symlink: {path}")
-        if path.is_file():
-            actual.add(path.relative_to(files_root).as_posix())
-    expected = set(manifest)
-    missing = expected - actual
-    extra = actual - expected
-    if missing or extra:
-        raise RemoteRecipeValidationError(
-            f"downloaded artifact set mismatch: missing={sorted(missing)!r} extra={sorted(extra)!r}"
-        )
-    for relative_path, (expected_size, expected_digest) in manifest.items():
-        path = files_root / relative_path
-        if path.is_symlink() or not path.is_file():
-            raise RemoteRecipeValidationError(f"downloaded artifact is not a regular file: {relative_path}")
-        actual_size = path.stat().st_size
-        if actual_size != expected_size:
-            raise RemoteRecipeValidationError(
-                f"downloaded artifact size mismatch for {relative_path!r}: "
-                f"expected={expected_size} actual={actual_size}"
-            )
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            while chunk := handle.read(_READ_CHUNK):
-                digest.update(chunk)
-        actual_digest = digest.hexdigest()
-        if actual_digest != expected_digest:
-            raise RemoteRecipeValidationError(
-                f"downloaded artifact sha256 mismatch for {relative_path!r}: "
-                f"expected={expected_digest} actual={actual_digest}"
-            )
-
-
 def _deactivate_destination(path: Path) -> None:
     """Remove a destination without following a symlink."""
     if path.is_symlink() or (path.exists() and not path.is_dir()):
@@ -249,16 +202,9 @@ def _deactivate_destination(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def _activate_generation(
-    generation: Path,
-    root: Path,
-    listing_manifest: dict[str, tuple[int, str]],
-    recipe_json: str,
-) -> None:
-    """Verify a downloaded generation, write its ``recipe.json`` and swap it in as ``root``."""
-    files_root = generation / "files"
-    files_root.mkdir(parents=True, exist_ok=True)
-    _verify_downloaded_files(files_root, listing_manifest)
+def _activate_generation(generation: Path, root: Path, recipe_json: str) -> None:
+    """Write a downloaded generation's ``recipe.json`` and swap it in as ``root``."""
+    (generation / "files").mkdir(parents=True, exist_ok=True)
     for generated in list(generation.iterdir()):
         if generated.name == "files":
             continue
@@ -378,7 +324,7 @@ class RemoteRecipeClient:
             )
             if listing_manifest:
                 self.store.download_session(canonical_id, session_id, generation, listing=listing)
-            _activate_generation(generation, root, listing_manifest, recipe_json)
+            _activate_generation(generation, root, recipe_json)
             return document
         except Exception:
             _deactivate_destination(root)

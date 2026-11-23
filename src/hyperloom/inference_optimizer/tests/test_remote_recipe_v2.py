@@ -32,7 +32,6 @@ from hyperloom.orchestrator.knowledge.remote_recipe import (
 from hyperloom.orchestrator.knowledge.remote_recipe.client import (
     _champion,
     _validate_download_listing,
-    _verify_downloaded_files,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe.models import (
     MAX_FILE_BYTES,
@@ -1050,18 +1049,6 @@ def test_remote_client_internal_validation_error_paths(tmp_path: Path) -> None:
     with pytest.raises(RemoteRecipeValidationError, match="duplicate"):
         _validate_download_listing({"files": [duplicate, duplicate]})
 
-    not_a_directory = tmp_path / "not-a-directory"
-    not_a_directory.write_text("x", encoding="utf-8")
-    with pytest.raises(RemoteRecipeValidationError, match="not a directory"):
-        _verify_downloaded_files(not_a_directory, {})
-
-    target = tmp_path / "target"
-    target.mkdir()
-    symlink = tmp_path / "files-link"
-    symlink.symlink_to(target, target_is_directory=True)
-    with pytest.raises(RemoteRecipeValidationError, match="symlink"):
-        _verify_downloaded_files(symlink, {})
-
     class _ReadStore:
         def __init__(self, envelope=None) -> None:
             self.envelope = envelope
@@ -1544,9 +1531,6 @@ class _FakeStore:
                 }
             ]
         }
-        self.skip_download_paths: set[str] = set()
-        self.extra_download_file = False
-        self.symlink_download_file = False
         self.envelope = {
             "schema_version": 2,
             "record_id": "record-1",
@@ -1655,20 +1639,12 @@ class _FakeStore:
         files_root = Path(destination) / "files"
         files_root.mkdir(parents=True)
         for entry in self.files_listing.get("files") or []:
-            relative = str(entry.get("path") or "")
-            if relative in self.skip_download_paths:
-                continue
-            target = files_root / relative
+            target = files_root / str(entry.get("path") or "")
             target.parent.mkdir(parents=True, exist_ok=True)
             content = entry.get("_content", _DOWNLOAD_BYTES)
             if isinstance(content, str):
                 content = content.encode()
             target.write_bytes(content)
-        if self.extra_download_file:
-            (files_root / "extra.bin").write_bytes(b"extra")
-        if self.symlink_download_file:
-            link = files_root / "download-link"
-            link.symlink_to(Path(destination) / "outside")
         (Path(destination) / "values.json").write_text("stale", encoding="utf-8")
         (Path(destination) / "manifest.json").write_text("stale", encoding="utf-8")
         return []
@@ -2386,12 +2362,9 @@ def test_a_record_without_a_selection_reason_still_reads(tmp_path: Path) -> None
     [
         ("sha", "does not match the selected"),
         ("size", "does not match the selected"),
-        ("missing", "artifact set mismatch"),
-        ("extra", "artifact set mismatch"),
-        ("symlink", "symlink"),
     ],
 )
-def test_read_verifies_downloaded_manifest_before_recipe(
+def test_read_refuses_a_listing_that_differs_from_the_view_before_recipe(
     tmp_path: Path,
     mode: str,
     match: str,
@@ -2402,12 +2375,6 @@ def test_read_verifies_downloaded_manifest_before_recipe(
         entry["sha256"] = "0" * 64
     elif mode == "size":
         entry["size"] = len(_DOWNLOAD_BYTES) + 1
-    elif mode == "missing":
-        store.skip_download_paths.add(entry["path"])
-    elif mode == "extra":
-        store.extra_download_file = True
-    elif mode == "symlink":
-        store.symlink_download_file = True
     destination = tmp_path / f"verify-{mode}"
     destination.mkdir()
     (destination / "recipe.json").write_text("stale", encoding="utf-8")
@@ -2418,6 +2385,21 @@ def test_read_verifies_downloaded_manifest_before_recipe(
             scope=_SCOPE,
         )
     assert not destination.exists()
+
+
+def test_a_download_the_client_refuses_deactivates_the_destination(tmp_path: Path) -> None:
+    class _CorruptStore(_FakeStore):
+        def download_session(self, canonical_id, session_id, destination, *, listing=None):
+            super().download_session(canonical_id, session_id, destination, listing=listing)
+            raise KBStoreError("download of 'kernel/rewrite/verified.bin' sha256 mismatch")
+
+    destination = tmp_path / "corrupt"
+    destination.mkdir()
+    (destination / "recipe.json").write_text("stale", encoding="utf-8")
+    with pytest.raises(KBStoreError, match="sha256 mismatch"):
+        RemoteRecipeClient(_CorruptStore()).read("inference:m:h:f:mt:a:v:p", destination, scope=_SCOPE)
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".corrupt.generation-*"))
 
 
 def test_read_rejects_listing_without_required_size(tmp_path: Path) -> None:
