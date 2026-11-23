@@ -1,39 +1,54 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The ``upstream_pr_search`` tool: find upstream pull requests that look relevant, with the framework agent's search.
+"""The ``upstream_pr_search`` tool: find upstream pull requests that look relevant, and read the diff of one.
 
-The search runs in the process that hosts the toolbox, never in a measurement sandbox, and answers only for the repositories
-the rule pack names (``UPSTREAM_PR_REPOS``). The framework agent's own GitHub search is best-effort: an unreachable host, a
-refused token and an exhausted quota all come back as an empty list, which would read as "no pull request matches". The
-search made here asks GitHub the same question with the same query and fails instead, saying why
-(:class:`GitHubUnavailable`); an empty list means GitHub answered and found none. A search that also names a monitor service
-is the framework agent's own (host configuration only: a specialist cannot name one).
+The tool runs in the process that hosts the toolbox, never in a measurement sandbox, and answers only for the repositories
+the rule pack names (``UPSTREAM_PR_REPOS``). The framework agent's own GitHub search is best-effort: an unreachable
+host, a refused token and an exhausted quota all come back as an empty list, which would read as "no pull request
+matches". The search made here asks GitHub the same question, each keyword as a quoted phrase, and fails instead,
+saying why (:class:`GitHubUnavailable`); an empty list means GitHub answered and found none. A search that also names
+a monitor service is the framework agent's own (host configuration only: a specialist cannot name one).
+
+A diff is read a page at a time (:data:`DIFF_CHARS`): a result says how long the diff is, how long the part of each
+path is and where the next page starts, and a request names the offset to go on from, or one path to read alone.
+
+Pull-request text is data: titles, paths and diffs are in the result, and the summary carries a ref and a title only.
 """
 
 from __future__ import annotations
 
 import asyncio
-import http.client
-import json
-import urllib.error
-import urllib.parse
-import urllib.request
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.unified_diff import touched_paths
 from hyperloom.agents.framework.models import Candidate, CandidateSearchRequest, PRMonitorConfig
 from hyperloom.agents.framework.sources import SourceConfigError, enumerate_candidates
-from hyperloom.agents.framework.sources.github import PERF_TERMS, auth_headers, build_query
+from hyperloom.agents.framework.sources.github import (
+    MAX_OR_TERMS,
+    PERF_TERMS,
+    GitHubUnavailable,
+    build_query,
+    pr_diff,
+    pull_request,
+    search_issues,
+)
 from hyperloom.common.github_urls import repo_slug
 from hyperloom.common.outside_facts import UPSTREAM_PR_REPOS
 from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolFailure, ToolOutput, ToolRequest
 
 UPSTREAM_PR_TOOL = "upstream_pr_search"
 MAX_LIMIT = 20
-DEFAULT_LIMIT = 5
+DEFAULT_LIMIT = 10
+#: The keywords of a search that GitHub is asked for: its first ones.
+MAX_KEYWORDS = MAX_OR_TERMS
+#: The characters of a diff one result carries: a page of it.
+DIFF_CHARS = 60_000
+_FILE_SECTION = re.compile(r"(?m)^(?=diff --git )")
 _OPEN = "open"
 _STATES = frozenset({_OPEN, "merged", "closed", "all"})
 #: What is searched when the caller names no state: open pull requests only.
@@ -41,93 +56,98 @@ _OPEN_ONLY = (_OPEN,)
 #: The names the framework agent gives its two sources of candidates (its ``search_modes``).
 _MONITOR, _GITHUB = "pr_monitor", "github"
 _SEARCHED = frozenset(repo.lower() for repo in UPSTREAM_PR_REPOS)
-#: GitHub's search endpoint for issues and pull requests.
-_SEARCH_URL = "https://api.github.com/search/issues"
 _TIMEOUT_SEC = 10.0
-_HTTP_UNAUTHORIZED = 401
-_HTTP_RATE_LIMITED = (403, 429)
 
 
 @dataclass(frozen=True)
 class UpstreamSearch:
-    """The framework agent's search ``request``, and the pull-request ``states`` the caller asked for."""
+    """The framework agent's search ``request``, the pull-request ``states`` the caller asked for, and ``number``: the
+    one pull request the caller asked to read instead of searching (``None`` for a search). Its diff is read from the
+    character ``offset`` of it, or of the part of it that changes ``file`` when the caller names one."""
 
     request: CandidateSearchRequest
     states: tuple[str, ...] = _OPEN_ONLY
+    number: int | None = None
+    offset: int = 0
+    file: str = ""
 
     def state_qualifier(self) -> str:
         """``is:open`` when the caller asked for open pull requests only; any other state searches them all."""
         return "is:open" if set(self.states) == {_OPEN} else ""
 
 
-Enumerate = Callable[[UpstreamSearch], list[Candidate]]
+@dataclass(frozen=True)
+class Found:
+    """The candidates of a search, best first, and ``matched``: how many pull requests matched in all, ``None`` from a
+    source that does not count them (a monitor service)."""
+
+    candidates: list[Candidate]
+    matched: int | None = None
 
 
-class GitHubUnavailable(RuntimeError):
-    """GitHub's search cannot be used from this host; the message says why."""
+Enumerate = Callable[[UpstreamSearch], Found]
 
 
-def _token_hint() -> str:
-    """What to do about it: a request that carries no ``Authorization`` header was made without a token."""
-    held = "Authorization" in auth_headers("application/json")
-    return (
-        ""
-        if held
-        else "; the host has no GITHUB_TOKEN or GH_TOKEN, and an anonymous search is allowed very few requests"
-    )
+@dataclass(frozen=True)
+class PullRequestDiff:
+    """One pull request and its diff."""
+
+    ref: str
+    title: str
+    url: str
+    files: tuple[str, ...]
+    diff: str
 
 
-def _refusal(code: int) -> str:
-    if code == _HTTP_UNAUTHORIZED:
-        return "GitHub rejected the token of this host (GITHUB_TOKEN or GH_TOKEN)"
-    if code in _HTTP_RATE_LIMITED:
-        return f"GitHub refused the search (HTTP {code}), most likely a rate limit{_token_hint()}"
-    return f"GitHub answered the search with HTTP {code}"
+#: What a keyword may not carry into its quotes: a quote ends the phrase, and GitHub reads a backslash before the
+#: closing quote as a quote of the phrase, which then runs on into the next keyword. Each becomes a space, not
+#: nothing: the search finds a backslash between two words as it finds a space there.
+_BREAKS_A_PHRASE = str.maketrans({'"': " ", "\\": " "})
 
 
-def _github_answer(search: UpstreamSearch) -> dict[str, Any]:
-    """GitHub's answer to ``search``, the query the framework agent's own search sends, held to the caller's states.
-
-    Raises:
-        GitHubUnavailable: GitHub could not be asked, refused, or did not answer with a search result.
-    """
-    request = search.request
-    terms = tuple(word.lower() for word in request.keywords if word.strip()) or PERF_TERMS
-    query = " ".join(filter(None, (build_query(repo_slug(request.repo_url), terms=terms), search.state_qualifier())))
-    url = f"{_SEARCH_URL}?" + urllib.parse.urlencode({"q": query, "per_page": str(request.max_search_candidates)})
-    request = urllib.request.Request(url, headers=auth_headers("application/vnd.github+json"))
-    try:
-        with urllib.request.urlopen(request, timeout=_TIMEOUT_SEC) as response:  # nosec B310 - fixed GitHub HTTPS API URL.
-            answer = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raise GitHubUnavailable(_refusal(exc.code)) from None
-    except (OSError, http.client.HTTPException, ValueError) as exc:
-        raise GitHubUnavailable(
-            f"GitHub cannot be reached from this host ({type(exc).__name__}); check its network and proxy"
-        ) from None
-    if not isinstance(answer, dict) or not isinstance(answer.get("items"), list):
-        raise GitHubUnavailable("GitHub answered the search with something that is not a search result")
-    return answer
+def _phrases(keywords: tuple[str, ...]) -> tuple[str, ...]:
+    """Each of ``keywords`` as a quoted phrase of a GitHub search. Unquoted, GitHub requires the leading words of a
+    keyword of several words of every result, whatever the other keywords are, and reads a qualifier in a keyword."""
+    words = (" ".join(keyword.lower().translate(_BREAKS_A_PHRASE).split()) for keyword in keywords)
+    return tuple(f'"{word}"' for word in words if word)
 
 
-def search_github(search: UpstreamSearch) -> list[Candidate]:
-    """The pull requests GitHub's search finds for ``search``, best first.
+def search_github(search: UpstreamSearch) -> Found:
+    """The pull requests GitHub's search finds for ``search``: those that hold any one of its first
+    :data:`MAX_KEYWORDS` keywords, held to the caller's states.
 
     Raises:
         GitHubUnavailable: GitHub could not be asked or refused (never an empty list for that).
     """
-    if _MONITOR in search.request.search_modes:
-        return enumerate_candidates(search.request)
-    found = []
-    for item in _github_answer(search)["items"]:
+    request = search.request
+    if _MONITOR in request.search_modes:
+        return Found(enumerate_candidates(request))
+    terms = _phrases(request.keywords) or PERF_TERMS
+    query = " ".join(filter(None, (build_query(repo_slug(request.repo_url), terms=terms), search.state_qualifier())))
+    answer = search_issues(query, per_page=request.max_search_candidates, timeout_sec=_TIMEOUT_SEC)
+    candidates = []
+    for item in answer.items:
         number = item.get("number") if isinstance(item, dict) else None
         if isinstance(number, int):
-            found.append(
+            candidates.append(
                 Candidate(
                     ref=f"PR:{number}", title=str(item.get("title") or ""), html_url=str(item.get("html_url") or "")
                 )
             )
-    return found[: search.request.max_search_candidates]
+    return Found(candidates[: request.max_search_candidates], answer.total_count)
+
+
+def _read(search: UpstreamSearch) -> PullRequestDiff:
+    """The pull request ``search.number`` and its diff, as GitHub serves them.
+
+    Raises:
+        GitHubUnavailable: GitHub could not be asked or refused.
+    """
+    assert search.number is not None
+    repo_url = search.request.repo_url
+    listed = pull_request(repo_url, search.number)
+    diff = pr_diff(repo_url, search.number)
+    return PullRequestDiff(f"PR:{search.number}", listed.title, listed.html_url, tuple(touched_paths(diff)), diff)
 
 
 def _strings(value: Any) -> tuple[str, ...]:
@@ -136,6 +156,32 @@ def _strings(value: Any) -> tuple[str, ...]:
     if isinstance(value, str):
         return tuple(part for part in value.replace(",", " ").split() if part)
     return tuple(str(v).strip() for v in value if str(v).strip())
+
+
+def _number(params: Mapping[str, Any]) -> int | None:
+    """The pull request ``params`` ask to read, ``None`` when they ask for a search; raises :class:`InvalidRequest`."""
+    if params.get("number") is None:
+        return None
+    try:
+        number = int(params["number"])
+    except (TypeError, ValueError) as exc:
+        raise InvalidRequest("number must be an integer") from exc
+    if number < 1:
+        raise InvalidRequest("number must be the number of a pull request")
+    if _strings(params.get("keywords")):
+        raise InvalidRequest("number reads one pull request and keywords search for some: give one of the two")
+    return number
+
+
+def _offset(params: Mapping[str, Any]) -> int:
+    """The character ``params`` ask a diff to be read from; raises :class:`InvalidRequest`."""
+    try:
+        offset = int(params.get("offset") or 0)
+    except (TypeError, ValueError) as exc:
+        raise InvalidRequest("offset must be an integer") from exc
+    if offset < 0:
+        raise InvalidRequest("offset must be 0 or the next_offset of an earlier page")
+    return offset
 
 
 def build_search(params: Mapping[str, Any]) -> UpstreamSearch:
@@ -164,11 +210,108 @@ def build_search(params: Mapping[str, Any]) -> UpstreamSearch:
         keywords=_strings(params.get("keywords")),
         search_modes=(_MONITOR, _GITHUB) if monitor_url else (_GITHUB,),
     )
-    return UpstreamSearch(request, states)
+    number, offset, file = _number(params), _offset(params), str(params.get("file") or "").strip()
+    if number is None and (offset or file):
+        raise InvalidRequest("offset and file read the diff of one pull request: name it in number")
+    return UpstreamSearch(request, states, number, offset, file)
+
+
+def _file_parts(diff: str) -> dict[str, str]:
+    """The part of ``diff`` that changes each path, by path in the diff's order: its sections that name the path, each
+    from a ``diff --git`` line to the next."""
+    parts: dict[str, str] = {}
+    for section in _FILE_SECTION.split(diff):
+        for path in touched_paths(section):
+            parts[path] = parts.get(path, "") + section
+    return parts
+
+
+def _paged_text(pr: PullRequestDiff, parts: Mapping[str, str], search: UpstreamSearch) -> str:
+    """What ``search`` reads a page of: the diff of ``pr``, or the one of its ``parts`` that changes ``search.file``.
+
+    Raises:
+        ToolFailure: The diff has no part for that file, or ends before ``search.offset``.
+    """
+    if search.file and search.file not in parts:
+        raise ToolFailure(
+            f"the diff of {pr.ref} has no part that changes {search.file!r}: file_chars of a read without file has "
+            "the paths it holds"
+        )
+    text = parts[search.file] if search.file else pr.diff
+    if search.offset and search.offset >= len(text):
+        read = (
+            f"the part of the diff of {pr.ref} that changes {search.file!r}" if search.file else f"the diff of {pr.ref}"
+        )
+        raise ToolFailure(f"offset {search.offset} is past the end of the {len(text)} characters of {read}")
+    return text
+
+
+def _page_end(text: str, offset: int) -> int:
+    """Where the page of ``text`` that starts at ``offset`` ends: after its last whole line within :data:`DIFF_CHARS`
+    characters, or at that many characters when one line is longer."""
+    end = offset + DIFF_CHARS
+    if end >= len(text):
+        return len(text)
+    return text.rfind("\n", offset, end) + 1 or end
+
+
+def _page(search: UpstreamSearch) -> ToolOutput:
+    """One page of the diff of the pull request ``search`` names, with what is left to read of it."""
+    pr = _read(search)
+    parts = _file_parts(pr.diff)
+    text = _paged_text(pr, parts, search)
+    end = _page_end(text, search.offset)
+    next_offset = end if end < len(text) else None
+    read = "its diff"
+    if search.offset or next_offset or search.file:
+        read = (
+            f"characters {search.offset}-{end} of the {len(text)} of {'one file of ' if search.file else ''}its diff"
+            + (f", next_offset {next_offset}" if next_offset else "")
+        )
+    return ToolOutput(
+        result={
+            "repo_url": search.request.repo_url,
+            "ref": pr.ref,
+            "title": pr.title,
+            "url": pr.url,
+            "files": list(pr.files),
+            "diff": text[search.offset : end],
+            "offset": search.offset,
+            "next_offset": next_offset,
+            "file": search.file or None,
+            "diff_chars": len(pr.diff),
+            "file_chars": {path: len(part) for path, part in parts.items()},
+        },
+        summary=f"{pr.ref} {pr.title}: {read}",
+    )
+
+
+def _answer(enumerate_fn: Enumerate, search: UpstreamSearch) -> ToolOutput:
+    """A page of the diff of the pull request ``search`` names, or the candidates ``enumerate_fn`` finds for it."""
+    if search.number is not None:
+        return _page(search)
+    found = enumerate_fn(search)
+    prs = [{"ref": c.ref, "title": c.title, "url": c.html_url} for c in found.candidates]
+    not_shown = None if found.matched is None else found.matched - len(prs)
+    shown = f"{len(prs)} of {found.matched}" if not_shown else str(len(prs))
+    top = f"; top: {prs[0]['ref']} {prs[0]['title']}" if prs else ""
+    repo_url = search.request.repo_url
+    return ToolOutput(
+        result={
+            "repo_url": repo_url,
+            "keywords": list(search.request.keywords),
+            "candidates": prs,
+            "matched_prs": found.matched,
+            "not_shown": not_shown,
+        },
+        summary=f"{shown} upstream PR candidate(s) in {repo_url}{top}",
+    )
 
 
 class UpstreamPrSearch:
-    """Params: ``repo_url`` (required), ``keywords``, ``limit`` (default 5, at most 20), ``states``, ``pr_monitor_url``."""
+    """Params: ``repo_url`` (required), and either ``number`` (the pull request whose diff is returned, a page of it
+    from ``offset``, of the whole diff or of the part that changes ``file``) or a search: ``keywords``, ``limit``
+    (default 10, at most 20), ``states``, ``pr_monitor_url``. ``enumerate_fn`` runs the search."""
 
     name = UPSTREAM_PR_TOOL
 
@@ -181,17 +324,12 @@ class UpstreamPrSearch:
     async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
         search = build_search(request.params)
         try:
-            found = await asyncio.to_thread(self._enumerate, search)
+            return await asyncio.to_thread(_answer, self._enumerate, search)
+        except ToolFailure:
+            raise
         except SourceConfigError as exc:
             raise ToolFailure(f"upstream PR search is misconfigured: {exc}") from exc
         except GitHubUnavailable as exc:
             raise ToolFailure(f"upstream PR search cannot use GitHub: {exc}") from exc
         except Exception as exc:
             raise ToolFailure(f"upstream PR search failed: {type(exc).__name__}: {exc}") from exc
-        prs = [{"ref": c.ref, "title": c.title, "url": c.html_url} for c in found]
-        top = f"; top: {prs[0]['ref']} {prs[0]['title']}" if prs else ""
-        repo_url = search.request.repo_url
-        return ToolOutput(
-            result={"repo_url": repo_url, "keywords": list(search.request.keywords), "candidates": prs},
-            summary=f"{len(prs)} upstream PR candidate(s) in {repo_url}{top}",
-        )

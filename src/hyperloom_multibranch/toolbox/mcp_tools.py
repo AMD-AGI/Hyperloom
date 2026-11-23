@@ -75,7 +75,13 @@ from hyperloom_multibranch.blackboard.tools import ERROR, blackboard_tools
 from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, AnalysisStarter
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
-from hyperloom_multibranch.toolbox.tools.upstream_pr import DEFAULT_LIMIT, MAX_LIMIT, UPSTREAM_PR_TOOL
+from hyperloom_multibranch.toolbox.tools.upstream_pr import (
+    DEFAULT_LIMIT,
+    DIFF_CHARS,
+    MAX_KEYWORDS,
+    MAX_LIMIT,
+    UPSTREAM_PR_TOOL,
+)
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.blackboard.learning_search import LearningFinder
@@ -243,11 +249,23 @@ _KERNEL_TUNE_GUIDE = (
 
 _UPSTREAM_PR_GUIDE = (
     " upstream_pr_search: reads no commit and no profile test (leave profile_request_id out); params.repo_url is "
-    f"required, the GitHub URL of one of {', '.join(UPSTREAM_PR_REPOS)}; params.keywords (words to look for), "
-    f"params.limit (default {DEFAULT_LIMIT}, at most {MAX_LIMIT}) and params.states (open by default; merged, closed or all "
-    "search pull requests of every state) are optional. The search runs in the toolbox's host process, and its result arrives in poll_inbox: the "
-    "candidate pull requests with ref, title, url and score. A host that cannot reach GitHub fails the job and says why; "
-    "that is not an empty answer."
+    f"required, the GitHub URL of one of {', '.join(UPSTREAM_PR_REPOS)}. A search takes params.keywords, the words or "
+    "phrases to look for in a pull request's title, body and comments, and any one of them matches: a string is split "
+    "at spaces and commas into words, a list keeps each entry whole, so a phrase is an entry of a list. Only the "
+    f"first {MAX_KEYWORDS} are searched for. The search matches words, not parts of one, and not the paths a pull "
+    "request changes. "
+    f"params.limit (default {DEFAULT_LIMIT}, at most {MAX_LIMIT}) and params.states (open by default; merged, closed "
+    "or all search pull requests of every state) are optional. Each candidate has its ref, title and url. The result "
+    "also has matched_prs, the pull requests GitHub matched, and not_shown, those the limit left out: when not_shown "
+    "is not 0 the list is cut, so raise params.limit or search again with fewer, more specific words. "
+    "params.number, in place of keywords, returns that pull request's diff and the paths it changes instead of a "
+    f"search: one page of at most {DIFF_CHARS} characters, with diff_chars (the characters of the whole diff), "
+    "file_chars (those of each path's part of it) and next_offset. A next_offset that is not null is where the diff "
+    "goes on: ask again with it as params.offset until next_offset is null. params.file, a path of file_chars, reads "
+    "that path's part alone, and params.offset then counts within that part. The tool runs in the toolbox's host "
+    "process and asks GitHub; its result arrives in poll_inbox. A GitHub that cannot be asked fails the job and says "
+    "why, which is not an empty answer: a failure that names a wait is a spent rate limit, so ask again after it; "
+    "after any other, go on without this tool."
 )
 
 

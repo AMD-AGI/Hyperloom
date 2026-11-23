@@ -5,9 +5,13 @@
 
 from __future__ import annotations
 
+import email.message
+import http.client
 import io
 import json
 import urllib.error
+
+import pytest
 
 from hyperloom.agents.framework.sources import github as gh
 from hyperloom.agents.framework.sources._shared import GitHubPr
@@ -191,3 +195,79 @@ def test_pr_patches_anonymous_when_no_token(monkeypatch):
 
 def test_source_patch_exports():
     assert "pr_patches" in gh.__all__
+
+
+# pr_diff, search_issues: a failure is raised, never an empty answer -------------------------------------------------
+
+
+REPO_URL = "https://github.com/ggml-org/llama.cpp"
+QUERY = "repo:ggml-org/llama.cpp is:pr (decode)"
+
+
+def _refusing(code: int, headers: dict[str, str] | None = None, body: bytes = b""):
+    def _open(req):
+        message = email.message.Message()
+        for name, value in (headers or {}).items():
+            message[name] = value
+        raise urllib.error.HTTPError(req.get_full_url(), code, "refused", message, io.BytesIO(body))
+
+    return _open
+
+
+NOW = 1_800_000_000
+SPENT = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(NOW + 1500)}
+
+
+@pytest.mark.parametrize(
+    ("code", "headers", "body", "said"),
+    [
+        (403, SPENT, b"", "GitHub's rate limit for this host is spent (HTTP 403): ask again in 25 min"),
+        (429, {"Retry-After": "40"}, b"", "GitHub's rate limit for this host is spent (HTTP 429): ask again in 40 s"),
+        (
+            403,
+            {"x-ratelimit-remaining": "4990"},
+            b'{"message": "You have exceeded a secondary rate limit."}',
+            "GitHub's rate limit for this host is spent (HTTP 403): ask again in 60 s",
+        ),
+        (
+            403,
+            {"x-ratelimit-remaining": "4990"},
+            b'{"message": "Resource not accessible by personal access token"}',
+            "GitHub does not allow this host's token the search (HTTP 403); asking again will not change that",
+        ),
+    ],
+    ids=["quota-spent", "told-to-wait", "no-wait-named", "token-not-allowed"],
+)
+def test_a_refusal_says_how_long_to_wait_or_that_waiting_changes_nothing(
+    monkeypatch, code: int, headers: dict[str, str], body: bytes, said: str
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "a-token")
+    monkeypatch.setattr(gh.time, "time", lambda: NOW)
+    _install_urlopen(monkeypatch, _refusing(code, headers, body))
+    with pytest.raises(gh.GitHubUnavailable) as refused:
+        gh.search_issues(QUERY, per_page=5)
+    assert str(refused.value) == said
+
+
+def _checking_headers_as_http_client_does(req):
+    connection = http.client.HTTPSConnection("api.github.com")  # opens no socket before a request is sent
+    connection.putrequest("GET", "/")
+    for name, value in req.header_items():
+        connection.putheader(name, value)
+    raise AssertionError("http.client took the token as a header value")
+
+
+@pytest.mark.parametrize("token", ["ghp_first_line\nsecond_line", "ghp_not_latin_✓"], ids=["line-break", "not-latin-1"])
+def test_a_token_no_header_can_carry_is_named_without_its_value(monkeypatch, token: str) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", token)
+    _install_urlopen(monkeypatch, _checking_headers_as_http_client_does)
+    with pytest.raises(gh.GitHubUnavailable, match="GITHUB_TOKEN or GH_TOKEN. holds a line break") as refused:
+        gh.search_issues(QUERY, per_page=5)
+    assert not any(part in str(refused.value) for part in ("ghp_", "second_line", "✓"))
+
+
+@pytest.mark.parametrize("code", [406, 422])
+def test_pr_diff_says_when_github_serves_no_diff_of_a_pull_request(monkeypatch, code: int) -> None:
+    _install_urlopen(monkeypatch, _refusing(code))
+    with pytest.raises(gh.DiffRefused, match=f"serves no diff of pull request 31 .HTTP {code}."):
+        gh.pr_diff(REPO_URL, 31)
