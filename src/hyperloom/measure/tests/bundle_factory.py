@@ -194,7 +194,15 @@ def base_launch() -> BaseLaunch:
     """A frozen base resolved offline from the default table, as a session without InferenceX access freezes one."""
     snapshot = SourceSnapshot(None, 1_793_000_000, unread=UnreadSource("InferenceX", "offline"))
     query = LaunchQuery(
-        "meta-llama/Llama-3.1-8B-Instruct", "sglang", "mi355x", Workload.FIXED, (64,), isl=1024, osl=1024, tp=1
+        "meta-llama/Llama-3.1-8B-Instruct",
+        "sglang",
+        "mi355x",
+        Workload.FIXED,
+        (64,),
+        isl=1024,
+        osl=1024,
+        tp=1,
+        gfx="gfx950",
     )
     base = resolve_base(query, snapshot, gpus=8)
     assert isinstance(base, BaseLaunch), base

@@ -12,7 +12,9 @@ toolbox keeps its journal, archive and landed output under ``MB-toolbox``. A run
 :class:`PinnedToolboxInputs` clones the run's source into ``MB-runner-source`` and has the commit's runner cache entry
 built from a private copy of the commit (:func:`private_copy`, :func:`runner_cache_pin`), or finds it built, and its
 inference_suite staging published, before anything is measured, and pins every runner sandbox to that entry's manifest
-through the toolbox's inputs.
+through the toolbox's inputs. The application's container holds none of the runners' cards, so it reads the session's
+card from a recording of ``amd-smi static --json`` on their node (:data:`RUNNER_CARD_ENV`), which every runner checks
+its own cards against.
 
 The dev sandboxes a hosted session lends its specialists and its autonomous agents run in ``dev`` sandboxes of the grant
 (:func:`~hyperloom_multibranch.scheduling.local_peers.branch_sandboxes`): only their processes run there, and their
@@ -25,6 +27,7 @@ hosted``); a grant without a run id of its own names its sandboxes by the sessio
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -38,11 +41,13 @@ from typing import TYPE_CHECKING, ClassVar
 
 from hyperloom_common.shared_storage import make_shared_dirs
 from hyperloom.measure.runner.cache_build import CacheBuildError, WheelTarget, runner_wheel_target
+from hyperloom_common.amd_smi import AmdSmiError
+from hyperloom_common.gpu_card import GpuCard, cards_of, one_kind
 from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
 from hyperloom_multibranch.scheduling.hosted_run import grant_tests_end_by
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.local_peers import attempt_timeout_sec, load_peers, measurement_host, peers_on
-from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
+from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable, PeerSetup
 from hyperloom_multibranch.scheduling.settings import Workload
 
 if TYPE_CHECKING:
@@ -56,6 +61,8 @@ if TYPE_CHECKING:
 #: host's inputs and the runner cache pin into it (:class:`PinnedToolboxInputs`).
 ToolboxInputsFor = Callable[[SessionLayout, int], "HostedToolboxInputs"]
 
+#: The app host's path to a recording of ``amd-smi static --json`` on a node the runner sandboxes run on.
+RUNNER_CARD_ENV = "HYPERLOOM_RUNNER_GPU_CARD"
 #: The umask the runner cache is built under: the sandbox reads the cache as another account.
 RUNNER_CACHE_UMASK = 0o022
 #: How long fetching the run's source may take before the run fails.
@@ -89,6 +96,22 @@ class HostedSandboxes:
             dev_leases=setup.dev_leases > 0 or bool(setup.agents),
         )
         return build_hosted_toolbox(inputs, blackboard, acceptance, spec, options=options)
+
+    def card(self) -> GpuCard:
+        """The card the ``amd-smi static --json`` document :data:`RUNNER_CARD_ENV` names describes for every card of the
+        runner sandboxes. A runner sandbox is started only for a test, so the app host is given a recording of one;
+        every runner checks its own cards against it. Raises :class:`PeersUnavailable` when the variable names no
+        file, or the file is no such document or describes more than one kind of card."""
+        recorded = os.environ.get(RUNNER_CARD_ENV, "").strip()
+        if not recorded:
+            raise PeersUnavailable(
+                f"{RUNNER_CARD_ENV} names no recording of `amd-smi static --json` on a runner sandbox's node, so the "
+                "card the tests run on is unknown"
+            )
+        try:
+            return one_kind(cards_of(json.loads(Path(recorded).read_text(encoding="utf-8"))).values())
+        except (OSError, ValueError, AmdSmiError) as exc:
+            raise PeersUnavailable(f"{RUNNER_CARD_ENV}={recorded} describes no one kind of card: {exc}") from exc
 
 
 def load_hosted_peers(workload: Workload, inputs: ToolboxInputsFor) -> PeerFactory:
@@ -246,6 +269,7 @@ def private_copy(source: Path, private: Path, sha: str) -> Path:
 
 __all__ = [
     "RUNNER_CACHE_UMASK",
+    "RUNNER_CARD_ENV",
     "SOURCE_FETCH_TIMEOUT_SEC",
     "HostedSandboxes",
     "PinnedToolboxInputs",

@@ -95,8 +95,10 @@ default** — so a value left over in the shell cannot displace the shape the
 session was measured at. `PRECISION` is not on that ladder: on both branches it
 is **`--precision`, then `$PRECISION`, then the session's recorded value, then
 the checkpoint's own dtype, then the default**, so on a resume a `$PRECISION`
-left in the shell still outranks the recorded value. `GPU_TYPE` is a fallback
-when `--gpu-type` is omitted.
+left in the shell still outranks the recorded value. When `--gpu-type` is
+omitted, `TARGET_GPU_TYPE`, then `GPU_TYPE`, name the GPU; without any of them
+the GPU type is the label of the card the session reads (see
+[GPU card](#gpu-card)).
 
 - **Model / workload shape:** `--model`, `--model-class`, `--framework`,
   `--framework-version`, `--precision`, `--tp`, `--ep`, `--isl`, `--osl`,
@@ -447,6 +449,30 @@ immediately.
 
 ---
 
+## GPU card
+
+A session reads its GPUs with `amd-smi static --json` once per process start,
+fresh launch and resume alike: the cards of this host the first set
+visible-device mask names (all of them without one), or, for `--nodes >= 2`,
+the cards of a remote node through the cluster hand-off. They must be one kind
+(same arch, compute units, memory size and top engine clock), or the launch
+exits 2 listing each kind. When `amd-smi` cannot be read the session prints why
+and runs without a card: it uses no arch-specific launch row, opens no
+arch-specific gate and has no vendor peak. Nothing in Hyperloom keeps a list
+of boards; every hardware fact comes from the card.
+
+The GPU type (`--gpu-type`, `TARGET_GPU_TYPE`, `GPU_TYPE`) is only the label
+results, recipes and scripts are filed under. Any name is taken as given, and
+one that differs from the card's own label is kept with a warning naming both.
+Without one, the label is the card's market name reduced to its model
+designation (`AMD Instinct MI355X` becomes `mi355x`).
+
+| Variable | Set by | Description |
+|----------|--------|-------------|
+| `HYPERLOOM_GPU_CARD` | The session | The card the session read, as JSON (`name`, `device_id`, `gfx`, `compute_units`, `memory_mib`, `memory_bandwidth_gbps`, `engine_clock_mhz`); unset when it read none. Every process the session starts on its own host inherits it, specialists included, and reads the card from it instead of probing the GPU again. Not an operator setting: each start and resume overwrites or clears it. The manifest archives the same card as `gpu_card`. |
+| `HYPERLOOM_GFX_ARCH` (or `GFX_ARCH`) | Operator | Overrides the arch recorded in provenance and the platform fingerprint (`gfx_arch`), which is otherwise the card's. Nothing else reads it: the launch row, the FP4 gate and every other arch decision follow the card. |
+| `HYPERLOOM_RUNNER_GPU_CARD` | Operator, on the app host | Path on the app host to a recording of `amd-smi static --json` taken on a node the measurement sandboxes run on. Required for a hosted multi-branch session whose tests run in measurement sandboxes: the app container holds none of their cards, so the session takes its card from this file and every runner checks its own cards against it before a test. A missing, unreadable or mixed recording stops the session before any test; see [Run hosted multi-branch on a new cluster](../how-to/hosted-multibranch-new-cluster.md). |
+
 ## Compute partitioning (AMD)
 
 An MI300-series card can be split into independent partitions (`SPX`, `DPX`,
@@ -779,8 +805,8 @@ Without it every projection fails, and the round is benchmarked untouched.
 | `HYPERLOOM_INFERASIM_ESTIMATOR` | `des` | `des` replays a closed-loop client at the round's concurrency (10 requests per client, between 64 and 4,000). `analytical` selects the closed form, which ranked held-out configurations far worse. Any other value is an error. |
 | `HYPERLOOM_INFERASIM_MODEL` | inferred | InferaSim model preset to project, for example `gpt_oss_120B`. By default it is inferred from the model path: the most specific match wins, and a distilled checkpoint uses its student. With no match and neither this nor `HYPERLOOM_INFERASIM_WORKLOAD` set, the round is benchmarked. |
 | `HYPERLOOM_INFERASIM_WORKLOAD` | bundled template | Full InferaSim workload YAML; takes precedence over `HYPERLOOM_INFERASIM_MODEL`. |
-| `HYPERLOOM_INFERASIM_GPU_ARCH` | `mi355x` | Part to price when the session's GPU type is unknown. When it is known, the session GPU always wins. |
-| `HYPERLOOM_INFERASIM_HBM_GB` | from the part | Per-GPU HBM capacity in GB. By default the part's entry in the shared hardware table (`roofline_ceiling.HW_SPECS`), e.g. 192 (MI300X / MI308X), 256 (MI325X) or 288 (MI355X). |
+| `HYPERLOOM_INFERASIM_GPU_ARCH` | unset | Part to price when the session has no GPU type. When it has one, the session's GPU type always wins. With neither, the projection is refused and the variant is benchmarked. |
+| `HYPERLOOM_INFERASIM_HBM_GB` | the session card's memory | Per-GPU HBM capacity in GB. By default the memory size of the session's card in GiB, rounded to 0.1 (256.0 on an MI325X, 288.0 on an MI355X); without a card, InferaSim is given no `--hbm-capacity-gb`. |
 | `HYPERLOOM_INFERASIM_SERVING_MODEL` | `continuous` | InferaSim serving model: `continuous` or `static` batching. |
 
 ### InferaSim anchors
@@ -858,7 +884,7 @@ optional; defaults are safe for standard single-node deployments.
 |---|---|---|
 | `HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD` | Unset (`0`) | Set to `1` to completely disable Rung-5 auto-escalation.  When set, compiled-gap failures proceed to the stall gate without attempting a build.  Useful when the compile toolchain is unavailable or the session budget is too tight. |
 | `INFERENCE_`<br>`OPTIMIZER_`<br>`AITER_JIT_DIR` | Aiter default | Per-attempt override set automatically to `<attempt_root>/aiter_jit` by each targeted build.  Override manually only when you need the global JIT cache to point at a pre-built location; leaving it unset lets each build use its own isolated directory. |
-| `PYTORCH_ROCM_ARCH` | Detected | Explicit GPU target architecture (e.g. `gfx942`, `gfx950`) injected into each compile.  Set automatically from the session `--gpu-type`; operator-override applies to bare-metal installs outside the session.  **Compile target only — it does not participate in architecture detection.**  It names the archs a wheel is *built* for, not the installed device, so provenance ignores it entirely and resolves `gfx_arch` from `HYPERLOOM_GFX_ARCH`, then `--gpu-type`, then `rocminfo`. |
+| `PYTORCH_ROCM_ARCH` | Detected | Explicit GPU target architecture (e.g. `gfx942`, `gfx950`) injected into each compile.  Set automatically to the arch of the session's card; operator-override applies to bare-metal installs outside the session.  **Compile target only — it does not participate in architecture detection.**  It names the archs a wheel is *built* for, not the installed device, so provenance ignores it entirely and resolves `gfx_arch` from `HYPERLOOM_GFX_ARCH`, then the session's card (see [GPU card](#gpu-card)). |
 | `MAX_JOBS` | `8` | Parallelism cap for cmake/hipcc compile steps inside a targeted build.  Reduce on memory-constrained nodes (`MAX_JOBS=4` for a 64 GB compile node).  The default `8` is conservative enough for MI300X/MI355X nodes with 512 GB+. |
 | `HYPERLOOM_`<br>`FRAMEWORK_PYTHON` | Unset | Explicit interpreter that launches the server for a from-source build (the venv Python the artifact was compiled against).  Set automatically from `FrameworkRuntime.runtime_python_exe` through `apply_runtime_override` into the per-variant YAML `benchmark.envs`.  Both backends export that mapping to the server env; the bypass backend additionally uses this value as the `python -m` interpreter.  Operators normally do not set this by hand. |
 
@@ -1362,7 +1388,7 @@ harness requests, on the round's `PORT`, which the harness is given.
 | `MLPERF_TOKENIZER_DIR` | — (required) | Kimi-K3 fast-tokenizer directory the harness counts tokens with. Checked at preflight. |
 | `MLPERF_AGENTIC_FLOW` | `smoke_test` | `run_agentic.sh` flow: `smoke_test` (150 trajectories) or `full` (613). |
 | `AGENTIC_NUM_TRAJECTORIES` | Derived from the flow | Overrides the trajectory count. Sizes the benchmark timeout. |
-| `MLPERF_AGENTIC_HARDWARE` | `mi355x` | Hardware key passed to `run_agentic.sh`. |
+| `MLPERF_AGENTIC_HARDWARE` | The session's GPU type (`$GPU_TYPE`) | Hardware key passed to `run_agentic.sh`. With neither set, the point is refused in suite config. |
 
 Preflight also refuses a non-SGLang framework and a model path that is not
 Kimi. With `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` unset, the benchmark cap

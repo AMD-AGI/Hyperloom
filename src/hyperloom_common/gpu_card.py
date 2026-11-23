@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -94,6 +93,11 @@ class GpuCard:
             return None
         return round(self.compute_units * self.engine_clock_mhz * rate / 1e6, 1)
 
+    def describe(self) -> str:
+        """The card's name and the facts that make its kind, for a message that tells two cards apart."""
+        clock = f"{self.engine_clock_mhz} MHz" if self.engine_clock_mhz is not None else "no engine clock"
+        return f"{self.name or 'unnamed card'} ({self.gfx}, {self.compute_units} CUs, {self.memory_mib} MiB, {clock})"
+
     def _kind(self) -> tuple[str, int, int, int | None]:
         return (self.gfx, self.compute_units, self.memory_mib, self.engine_clock_mhz)
 
@@ -145,9 +149,11 @@ def one_kind(cards: Iterable[GpuCard]) -> GpuCard:
     cards = list(cards)
     if not cards:
         raise ValueError("no GPU to describe")
-    kinds = Counter(card._kind() for card in cards)
+    kinds: dict[tuple[str, int, int, int | None], list[GpuCard]] = {}
+    for card in cards:
+        kinds.setdefault(card._kind(), []).append(card)
     if len(kinds) > 1:
-        described = "; ".join(f"{count}x {_describe(kind, cards)}" for kind, count in kinds.items())
+        described = "; ".join(f"{len(same)}x {same[0].describe()}" for same in kinds.values())
         raise ValueError(f"the GPUs are not one kind of card: {described}")
     return cards[0]
 
@@ -164,13 +170,6 @@ def session_card(environ: Mapping[str, str] = os.environ) -> GpuCard | None:
     """The card the session published; ``None`` when it read none."""
     published = environ.get(SESSION_CARD_ENV)
     return GpuCard(**json.loads(published)) if published else None
-
-
-def _describe(kind: tuple[str, int, int, int | None], cards: list[GpuCard]) -> str:
-    gfx, compute_units, memory_mib, clock = kind
-    name = next(card.name for card in cards if card._kind() == kind) or "unnamed card"
-    clock_text = f"{clock} MHz" if clock is not None else "no engine clock"
-    return f"{name} ({gfx}, {compute_units} CUs, {memory_mib} MiB, {clock_text})"
 
 
 def _card(row: dict[str, Any]) -> GpuCard:

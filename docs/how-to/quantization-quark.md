@@ -32,8 +32,9 @@ python3 -m hyperloom optimize \
 ```
 
 Structured schemes are `fp8`, `ptpc_fp8`, `mxfp4`, and `mxfp4_fp8`.
-`mxfp4` / `mxfp4_fp8` are MI355X-only; when a structured scheme is unsupported
-on the selected GPU, Hyperloom prints `QUANTIZATION_SKIPPED`, sets
+`mxfp4` / `mxfp4_fp8` need a card whose arch has an FP4 rate (gfx950: MI350X,
+MI355X); a session that read no card does not check. When a structured scheme
+is unsupported on the session's card, Hyperloom prints `QUANTIZATION_SKIPPED`, sets
 `HYPERLOOM_QUANTIZATION_SKIPPED`, and continues on the unquantized model.
 
 ## Quark checkout

@@ -8,7 +8,8 @@ PRELUDE wrote, ``value`` from :func:`to_recipe_kb_value`, the experience lists f
 image digest and runtime snapshot, which ``value`` leaves out, travel in the provenance. Patch and kernel files are
 read from the session's blob store by the hash the recipe pins (the experiment repository holds recipes only), or
 copied out of a checkout when no store is given, and staged under the refs ``value`` names; each is checked against
-its pinned hash, so the KB stores exactly what was measured.
+its pinned hash, so the KB stores exactly what was measured. The knowledge names the arch of the session's card
+(``gfx_arch``, empty when the session published none), as the single-lineage CLOSE's does.
 
 InferenceX sessions compare ``optimized_throughput`` with the champion of their partition. An AgentX session graded on
 P50 interactivity compares its gain over its own baseline (objective ``agentx_keep``) and writes, as the main flow's
@@ -38,6 +39,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom_common import gpu_card
 from hyperloom_common.timeutil import epoch_iso
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_TOTAL, TOTAL_TOKEN_THROUGHPUT
 from hyperloom.contracts.recipe import Recipe, RecipeError
@@ -185,12 +187,16 @@ def knowledge_document(
 
     metrics = _metrics(snapshot, final, scope)
     lessons = session_lessons(snapshot, final.commit_id)
+    card = gpu_card.session_card()
     return sanitize_shared_knowledge(
         {
             "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
             "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
             **metrics,
             "workload_shape": {key: item for key, item in scope.as_dict().items() if key != "kernel_optimizer"},
+            # The KB Store holds ``knowledge`` opaque: a reader borrowing across GPU labels compares this on the rows
+            # it fetched, as it does on the single-lineage CLOSE's records.
+            "gfx_arch": card.gfx if card else "",
             "value": to_recipe_kb_value(final.recipe),
             "what_worked": list(lessons.worked),
             "what_failed": list(lessons.failed),

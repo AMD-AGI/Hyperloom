@@ -181,6 +181,178 @@ it.
   `_TIMEOUT_SEC` settings are no longer read, and no variant is skipped as
   `screen_decisively_slower`. The measurement store and the InferaSim
   projection are unchanged, and so is a run that never set the switch.
+- **A session reads its GPU from `amd-smi` and runs on any AMD GPU.** Hyperloom
+  no longer keeps a table of boards. Every start and resume reads the visible
+  cards with `amd-smi static --json` and prints the one it runs on, for example
+  `GPU card        : AMD Instinct MI325X (gfx942, 304 CUs, 262128 MiB, 2100 MHz)`;
+  that card's arch, compute units, memory, bandwidth and top engine clock decide
+  everything that depends on the hardware. Child processes read it from
+  `HYPERLOOM_GPU_CARD`, and the session manifest archives it as `gpu_card`
+  (null when none was read). Before, the board was named by
+  `rocm-smi --showproductname`, then torch, and only nine boards were known.
+  Those fallbacks are gone: a host whose `amd-smi` cannot be read prints
+  `GPU card        : none read (<reason>)` and runs without a card, so it gets
+  no arch-specific launch row, gate or vendor peak. A multi-node session reads
+  a remote node's cards the same way, so `amd-smi` must run on the remote node;
+  a remote command that exits non-zero, or a Ray job that does not succeed,
+  means no card. Visible cards of more than one kind (arch, compute units,
+  memory or top engine clock differ) now exit 2 at launch, listing each kind:
+  narrow the visible-device mask to one kind. `HYPERLOOM_GFX_ARCH` still
+  overrides the `gfx_arch` provenance records, which is otherwise the card's
+  (before: the board table, then `rocminfo`); nothing else reads it.
+- **`--gpu-type` accepts any name and is taken as given.** It no longer has to
+  be one of `mi300x`, `mi308x`, `mi325x`, `mi355x`, `r9700`, `r9600d`, `w7900`,
+  `w7900d` and `radeon8060s`, and a detected board no longer overrides a flag
+  that disagrees with it. The flag, then `TARGET_GPU_TYPE`, then `GPU_TYPE`,
+  name the label the session's results, recipes and scripts are filed under;
+  when that differs from the card's own label, the launch prints a `WARN`
+  naming both and keeps the given one. Without a name, the label is the card's
+  market name reduced to its model designation (`AMD Instinct MI355X` becomes
+  `mi355x`, `AMD Radeon 8060S Graphics` becomes `radeon8060s`), and a longer
+  designation such as `MI300XL` or `R9700S` is a label of its own. A session
+  that read no card and was given no name exits 2 when it resolves its base
+  launch, asking for `--gpu-type`. Every framework now launches on every board:
+  `sglang`, `atom` and `xdit` on an R9700, R9600D, W7900 or W7900D no longer
+  exit 2 with `currently validated only for vllm`.
+- **A recipe serves only the board it was tuned on.** InferenceX points, SGLang
+  cookbook cells and page headings, and ATOM catalog runner labels and page
+  headings are matched to the session's GPU type by name. Before, boards that
+  shared an arch and memory size borrowed each other's recipes with a
+  `tuned ... on A, not B` warning, so an MI355X session took ATOM catalog
+  entries tuned on `mi350x`, and MI350X and MI308X sessions took InferenceX
+  entries published for MI355X and MI300X; those sessions now fall through to
+  the next source or the default table. An SGLang page heading is matched
+  against the board names the cookbook's own cells use plus the session's,
+  as a whole word in any case. A frozen `base_launch.json` from another board
+  serves only when both queries record the same arch and memory size; the
+  query now records them as `gfx` and `memory_mib` (null without a card, and
+  outside the digest), so a base frozen by an earlier release serves its own
+  board only. To borrow another board's launch, pass it as
+  `--reference-script`.
+- **An arch the default table has no row for runs the framework's fallback
+  launch.** The default table picks its row by the card's arch instead of the
+  board name, and gains one fallback row per framework that sets only
+  `--trust-remote-code`. A fixed session whose card's arch has no tuned row, or
+  that read no card, runs the fallback and says so in its banner
+  (`the default table has no sglang launch tuned for gfx1201, so its fallback launch runs it`)
+  instead of exiting with `it has no sglang row for r9700 (gfx1201)`.
+- **ENABLEMENT and the kernel tools follow the card's arch, not the board
+  name.** A targeted build is attempted on every arch, Radeon included (the
+  R9700, R9600D, W7900 and W7900D were refused), and compiles for the card's
+  arch (`gpu_arch` and `PYTORCH_ROCM_ARCH`; empty without a card). The GEAK
+  handoff names the GPU by `gpu_type` alone; `expected_target` and
+  `expected_gfx` are no longer written. The AITER model-config check of a patch
+  compares its CSV rows with the card's arch and compute units and is skipped
+  without a card. `SGLANG_USE_AITER_FP8_PER_TOKEN` is injected on any gfx942
+  card whatever its name, and never without a card. KernelForge GEMM tuning is
+  given the card's arch, or `auto` without one, as `--gpu-type` and routing
+  target (before: the session's GPU type, defaulting to `mi300x`), and the
+  preshuffled block-scale FP8 path is chosen from the card's arch instead of
+  the board table and a `rocminfo` probe. FlyDSL kernel parameters carry
+  `FLYDSL_TARGET_ARCH` from the card and leave it out without one. Specialists
+  inherit `HYPERLOOM_GPU_CARD`, so a specialist's rebench injects what the gate
+  round did.
+- **Roofline peaks and bandwidth come from the card and TraceLens.** The memory
+  bandwidth is the one the driver reports (`vram.max_bandwidth`; 6144 GB/s on
+  an MI325X, where the table said 6000, so its memory ceiling rises 2.4%). The
+  compute peak is the measured `max_achievable_tflops` in the TraceLens arch
+  JSON named after the GPU type (`<LABEL>.json`) for any board that has one,
+  else the card's vendor dense peak (compute units × top engine clock × the
+  arch's rate per clock), else unknown; before, only MI300X and MI325X had
+  measured peaks and every other board read a hand-kept table. An MI308X now
+  gets its own compute units and peak instead of the MI300X's. The vendor case
+  is reported in `compute_peak_source` as
+  `the card's vendor dense peak (no TraceLens arch JSON peak for the label)`.
+  A session without a card has no analytic ceiling, and its conc-sweep report
+  has no `roofline_ceiling` block. When the TraceLens microbenchmark fails, the
+  vendor-peak arch JSON written in its place is built from the card (it now
+  carries `matrix_fp16`, and `memory_gb` in GiB), and without a card none is
+  written and the microbenchmark's error stands. **Upgrade note:** if
+  `TRACELENS_ROOT` points at a checkout you maintain, delete any `<LABEL>.json`
+  an earlier Hyperloom wrote there with vendor peaks: it is now read as
+  measured.
+- **`tracelens_analysis --target-platform` is required.** It no longer defaults
+  to `MI355X`, so a script that runs the tool directly and omits it exits 2.
+  A `trace_analyze` request whose payload and session both name no GPU type
+  fails with `error_class` `gpu_label_missing` before anything runs.
+- **Nothing defaults to MI355X.** When nothing names the machine, a custom
+  workload's entrypoint is the directory's single `.sh`; `custom_mi355x.sh` is
+  no longer looked for first.
+  `MLPERF_AGENTIC_HARDWARE` defaults to the session's GPU type, and an MLPerf
+  point with neither is refused in suite config. An InferaSim projection prices
+  the session's GPU type, or `HYPERLOOM_INFERASIM_GPU_ARCH`; with neither it is
+  refused and the variant is benchmarked. Its HBM capacity defaults to the
+  card's memory (256.0 GB on an MI325X) instead of the board table's.
+- **FP4 quantization follows the arch.** `--quantize-scheme mxfp4` and
+  `mxfp4_fp8` run on any card whose arch has an FP4 rate (gfx950), so an
+  MI350X can use them; before, only a session labelled `mi355x` could. On
+  another arch they are skipped with `QUANTIZATION_SKIPPED` as before; a
+  session that read no card no longer blocks them.
+- **Compute partitions are sized from the card alone.** A partitioned card's
+  compute units and memory per partition are the session card's. The board
+  table no longer fills in a figure `amd-smi` did not give: without a card the
+  session records no partition shape and warns, and a declared
+  `--compute-partition-mode` is refused. The report's `CU per partition` line
+  no longer carries `(from the device)` or `(derived from the board table)`.
+- **Recipe KB borrows across GPU types only between rows that record the same
+  arch.** The `same_gpu_isa` and `compatible_framework_version` warm-start
+  tiers accept a row filed under another GPU type only when the session and the
+  row both record the same `gfx_arch` and the same topology suffix; before, a
+  table of board names decided which boards shared an ISA. Local rows record
+  `gfx_arch` from the card when T0 anchors them; remote records carry it in the
+  knowledge document CLOSE writes. Rows written before this release match only
+  their own GPU type until a session on that type writes them again. Remote
+  warm-start searches no longer send `hardware_in`: they fetch every hardware
+  and filter on `gfx_arch` here.
+- **The hosted runner checks the card by its facts.** A measurement sheet's
+  `hardware` section gains a `card` object (`gfx`, `compute_units` and
+  `memory_mib` required; null when the session read no card), which the app
+  always writes. The runner compares every visible GPU's arch, compute units,
+  memory and top engine clock with it, so a node whose cards report another
+  name for the same kind passes and a different card is refused whatever it is
+  called; a sheet without a card is not compared. Before, the runner matched
+  the session's GPU type against a device-id table and the market name. A
+  visible GPU `amd-smi static` cannot describe now leaves every GPU fact
+  unread (`the GPUs' card, power cap and partition mode could not be read; they were not compared`),
+  and the result's `runner.gpu_model` is the card's market name, or null.
+  **Upgrade note:** a runner built from an earlier release refuses every sheet
+  this release writes, with `spec.hardware: unknown key 'card'`; move the app
+  and its runners together.
+- **Multi-branch sessions take any GPU type and read their card.**
+  `hyperloom-multibranch run --gpu-type` is still required but no longer has to
+  be `mi300x`, `mi325x`, `mi350x` or `mi355x`. A local session reads its card
+  from the GPUs its toolbox holds; a hosted session whose tests run in
+  measurement sandboxes reads it from the recording of `amd-smi static --json`
+  that `HYPERLOOM_RUNNER_GPU_CARD` names on the app host, and stops before any
+  test when that variable is unset or the file is unreadable or describes more
+  than one kind of card. The toolbox's roofline and TraceLens tools take the
+  platform a request names, else the session's GPU type, instead of defaulting
+  to `MI355X`. **Upgrade note:** set
+  `HYPERLOOM_RUNNER_GPU_CARD` on every hosted app host before upgrading; see
+  [Run hosted multi-branch on a new cluster](how-to/hosted-multibranch-new-cluster.md).
+- **KernelForge maps only gfx ids and its four stored labels to an arch.**
+  `canonical_gpu_type` no longer folds product names onto the label of their
+  arch: `MI325X`, `MI308X`, `AMD Instinct MI355X` and `Radeon 8060S` keep their
+  own spelling (`mi325x`, `mi308x`, `amd_instinct_mi355x`, `radeon_8060s`), so
+  a `forge-loop` or `gemm-tune` run given one files its KB records under it.
+  Arch lookups (`canon_arch`, the architecture profile, `gemm-tune` routing)
+  no longer map R9700, MI308X or MI325X: pass `gfx1201` or `gfx942`. Warm-start
+  ranking no longer counts W7900D and W7900 as one ISA.
+- **The bare-metal installer names the GPU as `amd-smi` reports it.** Phase 1
+  logs `GPU: AMD Instinct MI325X (gfx942)` and the closing prompt's `GPU:` line
+  carries the same; before, it printed `MI300X` or `MI355X` from `rocm-smi` or
+  the arch, and warned `GPU arch <gfx> untested (supported: gfx942/gfx950)` on
+  any other arch. That warning is gone; a host whose `amd-smi` describes no GPU
+  warns `GPU: not described by amd-smi`.
+- **`hyperloom_common.gpu_identity` is removed.** `AMD_GPU_BOARDS`, `GpuBoard`,
+  `gpu_board`, `board_named_in`, `gfx_arch_for_gpu_type`, `is_gfx_arch`,
+  `gpu_type_for_device_id` and `normalise_device_id` are gone, with no alias.
+  **Upgrade note:** code that imported them reads the card instead, from
+  `hyperloom_common.gpu_card`: `session_card()` for the session's card,
+  `read_cards()` or `cards_of(document)` for a machine's; `GpuCard.gfx`,
+  `.compute_units`, `.memory_mib` and `.peak_tflops(precision)` for what a
+  `GpuBoard` carried; `GpuCard.same_kind` to tell two cards apart; and
+  `board_label(name)` for the label of a market name.
 
 ## Hyperloom 1.2.0 release
 

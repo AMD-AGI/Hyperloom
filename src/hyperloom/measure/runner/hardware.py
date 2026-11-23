@@ -194,11 +194,6 @@ def released_gpus(visible: Sequence[int]) -> list[int] | None:
     return busy
 
 
-def _kind_of(card: GpuCard) -> str:
-    clock = f"{card.engine_clock_mhz} MHz" if card.engine_clock_mhz is not None else "no engine clock"
-    return f"{card.name or 'an unnamed card'} ({card.gfx}, {card.compute_units} CUs, {card.memory_mib} MiB, {clock})"
-
-
 def check_hardware(
     facts: Sequence[GpuFacts],
     *,
@@ -217,7 +212,7 @@ def check_hardware(
         problems.append(f"{len(facts)} GPUs visible, {gpu_count} needed")
     for gpu in facts:
         if card is not None and not gpu.card.same_kind(card):
-            problems.append(f"GPU {gpu.index} is {_kind_of(gpu.card)}, not {_kind_of(card)}")
+            problems.append(f"GPU {gpu.index} is {gpu.card.describe()}, not {card.describe()}")
         cap = gpu.power_cap_w
         if power_cap_w is not None and cap is not None and not reading_matches(cap, power_cap_w):
             problems.append(f"GPU {gpu.index} power cap {cap} W, not {power_cap_w} W")

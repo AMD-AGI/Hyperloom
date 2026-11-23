@@ -492,7 +492,8 @@ had a custom order hard-coded, confirm it is still intentional.
 
 ### Recommended: set `INFERENCE_OPTIMIZER_RESCUE_PATHS` if you use model-specific benchmark scripts
 
-When `--gpu-type` is set, Hyperloom pins
+When the session has a GPU type (`--gpu-type`, or the label of the card
+`amd-smi` reports), Hyperloom pins
 `benchmark_script=<framework>_<gpu_type>.sh` to stop InferenceX-native
 scripts from leaking `result.json` outside the session dir. If you
 intentionally use a model-specific script (for example, `dsr1_fp8_mi300x.sh`),

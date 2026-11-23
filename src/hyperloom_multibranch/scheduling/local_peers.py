@@ -59,6 +59,9 @@ from hyperloom_common.llm.llm_config import (
 )
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom.common.perf_metric import DATASET_PATH_ENV
+from hyperloom_common import gpu_card
+from hyperloom_common.amd_smi import AmdSmiError
+from hyperloom_common.gpu_card import GpuCard
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.interfaces import BranchLogStore, CommitQuery
@@ -202,14 +205,18 @@ class InferenceXCheckout:
 
 class ToolboxBackend(Protocol):
     """Where a session's tests run: it builds the session's toolbox on the blackboard handle, the acceptance setup and
-    the instruction sheet's context that every backend shares; ``on_this_machine`` says whether they run on this
-    machine's cards."""
+    the instruction sheet's context that every backend shares, and describes the kind of card its tests run on;
+    ``on_this_machine`` says whether they run on this machine's cards."""
 
     on_this_machine: ClassVar[bool]
 
     def toolbox(
         self, setup: PeerSetup, blackboard: LocalBlackboard, acceptance: AcceptanceSetup, spec: SpecContext
     ) -> RealToolbox: ...
+
+    def card(self) -> GpuCard:
+        """The card every test runs on; raises :class:`PeersUnavailable` naming why it cannot be described."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -251,6 +258,21 @@ class LocalCards:
             tests_end_by=self.tests_end_by,
         )
         return build_local_toolbox(session, blackboard, acceptance, spec, options=options)
+
+    def card(self) -> GpuCard:
+        """The card ``amd-smi`` describes for every one of :attr:`cards`, which are ROCm device ids; raises
+        :class:`PeersUnavailable` when it cannot be read, does not list one of them, or they are not one kind."""
+        try:
+            machine = gpu_card.read_cards()
+        except AmdSmiError as exc:
+            raise PeersUnavailable(f"this machine's cards cannot be described: {exc}") from exc
+        unlisted = [index for index in self.cards if index >= len(machine)]
+        if unlisted:
+            raise PeersUnavailable(f"amd-smi describes {len(machine)} cards, so not the session's cards {unlisted}")
+        try:
+            return gpu_card.one_kind(machine[index] for index in self.cards)
+        except ValueError as exc:
+            raise PeersUnavailable(f"the session's cards {list(self.cards)} cannot be described: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -377,11 +399,12 @@ def specialist_recall(reports: Path, learnings: ExperienceReader | None = None) 
 
 
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
-    """The session's peers on this machine; exports the workload into this process (:func:`_export_workload`) and
-    freezes the base launch every test runs on in ``MB-toolbox`` unless the session froze one
+    """The session's peers on this machine; exports the workload into this process (:func:`_export_workload`), publishes
+    the card the tests run on as the session's (:func:`_publish_session_card`) and freezes the base launch every test
+    runs on in ``MB-toolbox`` unless the session froze one
     (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`), which its component agents are served
-    unless the operator gave them a launch file. Raises :class:`PeersUnavailable`
-    when no base launch can be frozen or the session's canonical measurement cannot be taken.
+    unless the operator gave them a launch file. Raises :class:`PeersUnavailable` when the backend cannot describe its
+    card, no base launch can be frozen or the session's canonical measurement cannot be taken.
 
     Called on the event loop the session runs on. The toolbox is built, not started: the session starts it, and its
     close releases the backend and the sandboxes. The MCP service is started; the session stop stops it. How the
@@ -398,13 +421,14 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
 
     layout, workload = setup.layout, setup.workload
     _export_workload(workload, layout.toolbox, host.image.ref)
+    card = _publish_session_card(host.backend, workload)
     frozen = freeze_session_base(layout.toolbox, workload, setup.reference_script, setup.inferencex_commit)
     served = served_launch(frozen, setup.agent_launch)
     base, setup = server_base(frozen.launch), replace(setup, agent_launch=served)
     native = native_trees(os.environ)
     repo = GitExperimentRepo(layout.repo, setup.blobs, native=native)
     canonical_dir = layout.toolbox / CANONICAL_DIR
-    toolbox = _toolbox(host, setup, repo, _canonical(canonical_dir, workload, host, frozen.launch))
+    toolbox = _toolbox(host, setup, repo, _canonical(canonical_dir, workload, host, frozen.launch), card)
     reviews = _option_reviews(frozen.launch, toolbox, layout.toolbox)
     served = SpecialistToolOptions(
         option_reviews=reviews, native_server=native_component(workload.framework) is not None
@@ -508,12 +532,33 @@ def _option_reviews(base: BaseLaunch, toolbox: RealToolbox, directory: Path) -> 
     return OptionReviews(directory, inventory)
 
 
+def _publish_session_card(backend: ToolboxBackend, workload: Workload) -> GpuCard:
+    """Publish the card ``backend``'s tests run on as the session's (:func:`~hyperloom_common.gpu_card.session_card`),
+    where the base launch, the canonical measurement and the analyses read its facts, and return it. The workload's
+    GPU type stays the session's label; a warning names both when the card's own label is another."""
+
+    card = backend.card()
+    gpu_card.publish_session_card(card)
+    own = gpu_card.board_label(card.name)
+    if own and own != workload.gpu_type:
+        logger.warning(
+            "the GPU type is given as %r, but the cards call themselves %r (%s); this session's results are filed "
+            "under %r",
+            workload.gpu_type,
+            own,
+            card.describe(),
+            workload.gpu_type,
+        )
+    return card
+
+
 def _toolbox(
-    host: MeasurementHost, setup: PeerSetup, repo: ExperimentRepo, canonical: CanonicalMeasurement
+    host: MeasurementHost, setup: PeerSetup, repo: ExperimentRepo, canonical: CanonicalMeasurement, card: GpuCard
 ) -> RealToolbox:
     """The session's toolbox on ``host``'s backend, every test's points rendered from ``canonical``, the session's
-    canonical measurement, and compiled from the session's blob store. A plain explore runs no accuracy evaluation:
-    the rule gate judges it on throughput, and the confirm that follows a candidate runs the evaluation."""
+    canonical measurement, and compiled from the session's blob store; every instruction sheet names ``card``, which
+    the runner checks its cards against. A plain explore runs no accuracy evaluation: the rule gate judges it on
+    throughput, and the confirm that follows a candidate runs the evaluation."""
 
     from hyperloom.measure.compile import EnvironmentCompiler
     from hyperloom.measure.hosted_spec import SpecContext
@@ -529,6 +574,7 @@ def _toolbox(
         gpu_type=workload.gpu_type,
         blobs=setup.blobs,
         blob_root=str(setup.blobs.root),
+        card=card,
     )
     planner = HostedPlanner(compiler, canonical, layout.toolbox / POINTS_DIR)
     blackboard = LocalBlackboard(layout.blackboard, Writer(Role.TOOLBOX, TOOLBOX_WRITER))

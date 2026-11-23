@@ -124,7 +124,7 @@ def _read_session_card(nodes: int) -> GpuCard | None:
     except ValueError as exc:
         print(f"ERROR: {exc}; narrow the visible-device mask to one kind of card", file=sys.stderr)
         sys.exit(2)
-    print(f"GPU card        : {card.name or 'unnamed'} ({card.gfx}, {card.compute_units} CUs, {card.memory_mib} MiB)")
+    print(f"GPU card        : {card.describe()}")
     return card
 
 

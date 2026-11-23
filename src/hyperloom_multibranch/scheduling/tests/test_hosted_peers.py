@@ -18,7 +18,7 @@ import stat
 import subprocess
 import sys
 import zlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,8 +33,10 @@ from hyperloom.measure.runner.cache_layout import manifest_from_json
 from hyperloom.measure.runner.cache_layout import MANIFEST_NAME, SOURCE_DIR
 from hyperloom.measure.runner.suite_publish import SuitePublishError
 from hyperloom.measure.runner.tests.bootstrap_rig import Rig, make_rig
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD
 from hyperloom_multibranch.scheduling import hosted_peers
 from hyperloom_multibranch.scheduling.hosted_peers import (
+    RUNNER_CARD_ENV,
     HostedSandboxes,
     PinnedToolboxInputs,
     load_hosted_peers,
@@ -45,6 +47,7 @@ from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
+from hyperloom_multibranch.scheduling.tests.conftest import RECORDED_MI325X
 from hyperloom_multibranch.toolbox import hosted_toolbox
 from hyperloom_multibranch.toolbox.tests.test_hosted_toolbox import _toolbox
 
@@ -171,6 +174,55 @@ def test_hosted_peers_nobody_names_the_image_of_are_refused_before_anything_is_b
 
     with pytest.raises(PeersUnavailable, match="HYPERLOOM_ACTIVE_IMAGE_REF"):
         load_hosted_peers(WORKLOAD, inputs)  # type: ignore[arg-type]
+
+
+def _no_inputs(layout: object, tp: int) -> object:
+    raise AssertionError("the card is read before any toolbox input")
+
+
+def test_the_runners_card_is_the_one_the_recording_the_app_host_is_given_describes() -> None:
+    assert HostedSandboxes(_no_inputs).card() == MI325X_CARD  # type: ignore[arg-type]
+
+
+def test_an_app_host_given_no_recording_refuses_the_peers_naming_the_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(RUNNER_CARD_ENV)
+
+    with pytest.raises(PeersUnavailable, match=f"{RUNNER_CARD_ENV} names no recording of `amd-smi static --json`"):
+        HostedSandboxes(_no_inputs).card()  # type: ignore[arg-type]
+
+
+def _recording(tmp_path: Path, text: str) -> str:
+    path = tmp_path / "runner-card.json"
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+@pytest.mark.parametrize(
+    ("recorded", "said"),
+    [
+        (lambda tmp_path: str(tmp_path / "missing.json"), "No such file"),
+        (lambda tmp_path: _recording(tmp_path, "amd-smi: not found\n"), "Expecting value"),
+        (lambda tmp_path: _recording(tmp_path, '{"gpu_data": []}'), "no GPU to describe"),
+        (lambda tmp_path: _recording(tmp_path, '[{"gpu": 0, "asic": {}}]'), "card 0 reports no arch"),
+        (lambda tmp_path: _recording(tmp_path, json.dumps(_two_kinds())), "the GPUs are not one kind of card"),
+    ],
+    ids=["missing", "not-json", "no-card", "incomplete", "two-kinds"],
+)
+def test_a_recording_that_describes_no_one_kind_of_card_refuses_the_peers_saying_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded: Callable[[Path], str], said: str
+) -> None:
+    path = recorded(tmp_path)
+    monkeypatch.setenv(RUNNER_CARD_ENV, path)
+
+    with pytest.raises(PeersUnavailable, match=f"{RUNNER_CARD_ENV}={path} describes no one kind of card: .*{said}"):
+        HostedSandboxes(_no_inputs).card()  # type: ignore[arg-type]
+
+
+def _two_kinds() -> dict[str, list[dict[str, object]]]:
+    """The recorded node with its second card's compute units halved, as a partitioned card reports them."""
+    rows = json.loads(RECORDED_MI325X.read_text(encoding="utf-8"))["gpu_data"][:2]
+    rows[1]["asic"]["num_compute_units"] = 152
+    return {"gpu_data": rows}
 
 
 def _origin(path: Path) -> str:

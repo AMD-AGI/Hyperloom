@@ -46,6 +46,7 @@ import asyncio
 import csv
 import json
 import math
+import os
 import shlex
 import subprocess
 import sys
@@ -98,8 +99,6 @@ if TYPE_CHECKING:
 
 REPORT_ROUTE = "report"
 
-#: The platform ``tracelens_analysis`` assumes when it is not told one.
-DEFAULT_PLATFORM = "MI355X"
 _SPLITTER = "TraceLens.TraceUtils.split_trace.main"
 _PERF_REPORT = "TraceLens.Reporting.generate_perf_report_pytorch_inference"
 _SPLIT_NUM_STEPS = 32
@@ -172,6 +171,13 @@ def _text(payload: Mapping[str, Any], *keys: str) -> str:
         if value not in (None, ""):
             return str(value).strip()
     return ""
+
+
+def target_platform(payload: Mapping[str, Any]) -> str:
+    """The GPU an analysis of ``payload`` is for: the request's ``target_platform``, else the session's label, which the
+    session exports as ``GPU_TYPE`` (:func:`~hyperloom_multibranch.scheduling.local_peers.workload_environment`); empty
+    when neither names one."""
+    return _text(payload, "target_platform") or os.environ.get("GPU_TYPE", "").strip()
 
 
 def _sh(run: _Run, step: str, cmd: list[str]) -> None:
@@ -427,7 +433,7 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
     capture = (
         Path(capture_text).expanduser().resolve() if capture_text else discover_capture_folder(trace_input, [trace])
     )
-    arch = resolve_arch_json_path(_text(payload, "target_platform") or DEFAULT_PLATFORM)
+    arch = resolve_arch_json_path(target_platform(payload))
     _sh(run, "perf report", _perf_report_command(chunk, run, arch, capture))
     coverage = _graph_replay_coverage(run)
     if coverage.graph_under_recorded:
@@ -515,12 +521,12 @@ async def report_handler(payload: dict, *, session_dir: Path) -> dict[str, Any]:
 
 
 __all__ = [
-    "DEFAULT_PLATFORM",
     "REPORT_ROUTE",
     "WORKLOAD_HINTS",
     "report_handler",
     "tracer_fields",
     "split_hint",
+    "target_platform",
     "unusable_trace",
     "with_window_shares",
 ]

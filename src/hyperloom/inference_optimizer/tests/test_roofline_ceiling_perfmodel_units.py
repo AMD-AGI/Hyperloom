@@ -965,6 +965,27 @@ def test_compute_peak_takes_the_card_vendor_peak_without_a_readable_arch_json(mo
     }
 
 
+@pytest.mark.parametrize(
+    ("tag", "precision"),
+    [
+        ("bfloat16", "bf16"),
+        ("float16", "fp16"),
+        ("float8_e4m3fn", "fp8"),
+        ("float8_e5m2", "fp8"),
+        ("FP8", "fp8"),
+        ("float32", "fp32"),
+        ("mxfp4", "fp4"),
+        ("float4", "fp4"),
+    ],
+)
+def test_each_spelling_of_a_precision_reads_the_peak_at_that_precision(monkeypatch, tmp_path, tag, precision):
+    target = rc.ComputeTarget(card=MI355X_CARD, platform="mi355x", num_gpus=1, precision_tag=tag)
+    assert rc.resolve_compute_peak_provenance(target)["compute_peak_tflops"] == MI355X_CARD.peak_tflops(precision)
+
+    _plant_arch_json(monkeypatch, tmp_path, "MI355X", {f"matrix_{precision}": 123.0})
+    assert rc.resolve_compute_peak_provenance(target)["compute_peak_tflops"] == 123.0
+
+
 def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch, tmp_path):
     # The measured peak (100.0) is far from the card's vendor peak (1307.4), so swapping the achievable-then-vendor
     # order would change the result.

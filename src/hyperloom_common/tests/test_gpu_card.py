@@ -96,6 +96,8 @@ def test_only_gfx950_has_an_fp4_rate():
         ("AMD Radeon PRO W7900D", "w7900d"),
         ("Radeon 8060S Graphics", "radeon8060s"),
         ("AMD Radeon 8060S Graphics", "radeon8060s"),
+        ("AMD Radeon8060S Graphics", "radeon8060s"),
+        ("Radeon 8050S Graphics", "radeon8050s"),
     ],
 )
 def test_a_marketing_name_is_filed_under_its_model_designation(name, label):
@@ -173,6 +175,22 @@ def test_the_compute_unit_count_is_read_under_each_spelling_amd_smi_has_used(key
 def test_the_arch_and_device_id_are_lower_case():
     card = cards_of([_row(asic={"target_graphics_version": "GFX942", "device_id": "0x74A5"})])[0]
     assert (card.gfx, card.device_id) == ("gfx942", "74a5")
+
+
+@pytest.mark.parametrize(
+    ("reported", "device_id"),
+    [(" 0x75A3 ", "75a3"), (0x75A3, "75a3"), ("75b0", "75b0"), (None, ""), ("0x", ""), ("not-an-id", ""), (True, "")],
+)
+def test_a_device_id_reads_as_bare_hex_and_one_that_is_not_an_id_as_empty(reported, device_id):
+    assert cards_of([_row(asic={"device_id": reported})])[0].device_id == device_id
+
+
+def test_an_arch_without_a_published_rate_at_a_precision_gives_no_peak_there():
+    """AMD publishes only the FP16 rate of the Radeon 8060S's gfx1151; BF16 is read from it, FP8 and FP32 have none."""
+    strix_halo = GpuCard("Radeon 8060S Graphics", "1586", "gfx1151", 40, 65536, None, 2900)
+
+    assert strix_halo.peak_tflops("bf16") == strix_halo.peak_tflops("fp16") == 59.4
+    assert [strix_halo.peak_tflops(p) for p in ("fp8", "fp32", "fp4")] == [None, None, None]
 
 
 def test_cards_that_differ_only_in_name_are_one_kind():

@@ -71,7 +71,14 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     # A usable checkout needs .git (completeness gate).
     (tracelens_root / ".git").mkdir(parents=True)
     monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
-    return make_session_dir()
+    session = make_session_dir()
+    # A session whose card was read records its label; trace analysis names its platform by it.
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session)
+    state.gpu_type = "mi355x"
+    state.save(session)
+    return session
 
 
 def _heartbeat() -> Intent:
