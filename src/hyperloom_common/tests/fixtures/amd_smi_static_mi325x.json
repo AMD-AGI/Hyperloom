@@ -1,0 +1,584 @@
+{
+  "gpu_data": [
+    {
+      "gpu": 0,
+      "asic": {
+        "market_name": "AMD Instinct MI325X",
+        "vendor_id": "0x1002",
+        "vendor_name": "Advanced Micro Devices Inc. [AMD/ATI]",
+        "subvendor_id": "0x1002",
+        "device_id": "0x74a5",
+        "subsystem_id": "0x74a5",
+        "rev_id": "0x00",
+        "asic_serial": "0x0000000000000000",
+        "oam_id": 6,
+        "num_compute_units": 304,
+        "target_graphics_version": "gfx942",
+        "flags": 16
+      },
+      "vram": {
+        "type": "HBM3E",
+        "vendor": "SAMSUNG",
+        "size": {
+          "value": 262128,
+          "unit": "MB"
+        },
+        "bit_width": 8192,
+        "max_bandwidth": {
+          "value": 6144,
+          "unit": "GB/s"
+        }
+      },
+      "clock": {
+        "sys": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "112",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "500",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "2100",
+              "unit": "MHz"
+            }
+          }
+        },
+        "mem": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "900",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "1300",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1500",
+              "unit": "MHz"
+            }
+          }
+        },
+        "df": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "1300",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "1800",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1800",
+              "unit": "MHz"
+            }
+          }
+        },
+        "soc": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "32",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "889",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1143",
+              "unit": "MHz"
+            }
+          }
+        },
+        "dcef": "N/A",
+        "vclk0": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "29",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "914",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1333",
+              "unit": "MHz"
+            },
+            "Level 3": {
+              "value": "1680",
+              "unit": "MHz"
+            }
+          }
+        },
+        "vclk1": "N/A",
+        "dclk0": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "22",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "711",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1143",
+              "unit": "MHz"
+            },
+            "Level 3": {
+              "value": "1400",
+              "unit": "MHz"
+            }
+          }
+        },
+        "dclk1": "N/A"
+      }
+    },
+    {
+      "gpu": 1,
+      "asic": {
+        "market_name": "AMD Instinct MI325X",
+        "vendor_id": "0x1002",
+        "vendor_name": "Advanced Micro Devices Inc. [AMD/ATI]",
+        "subvendor_id": "0x1002",
+        "device_id": "0x74a5",
+        "subsystem_id": "0x74a5",
+        "rev_id": "0x00",
+        "asic_serial": "0x0000000000000000",
+        "oam_id": 7,
+        "num_compute_units": 304,
+        "target_graphics_version": "gfx942",
+        "flags": 16
+      },
+      "vram": {
+        "type": "HBM3E",
+        "vendor": "SAMSUNG",
+        "size": {
+          "value": 262128,
+          "unit": "MB"
+        },
+        "bit_width": 8192,
+        "max_bandwidth": {
+          "value": 6144,
+          "unit": "GB/s"
+        }
+      },
+      "clock": {
+        "sys": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "113",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "500",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "2100",
+              "unit": "MHz"
+            }
+          }
+        },
+        "mem": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "900",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "1300",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1500",
+              "unit": "MHz"
+            }
+          }
+        },
+        "df": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "1300",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "1800",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1800",
+              "unit": "MHz"
+            }
+          }
+        },
+        "soc": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "31",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "889",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1143",
+              "unit": "MHz"
+            }
+          }
+        },
+        "dcef": "N/A",
+        "vclk0": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "29",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "914",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1333",
+              "unit": "MHz"
+            },
+            "Level 3": {
+              "value": "1680",
+              "unit": "MHz"
+            }
+          }
+        },
+        "vclk1": "N/A",
+        "dclk0": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "22",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "711",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1143",
+              "unit": "MHz"
+            },
+            "Level 3": {
+              "value": "1400",
+              "unit": "MHz"
+            }
+          }
+        },
+        "dclk1": "N/A"
+      }
+    },
+    {
+      "gpu": 2,
+      "asic": {
+        "market_name": "AMD Instinct MI325X",
+        "vendor_id": "0x1002",
+        "vendor_name": "Advanced Micro Devices Inc. [AMD/ATI]",
+        "subvendor_id": "0x1002",
+        "device_id": "0x74a5",
+        "subsystem_id": "0x74a5",
+        "rev_id": "0x00",
+        "asic_serial": "0x0000000000000000",
+        "oam_id": 5,
+        "num_compute_units": 304,
+        "target_graphics_version": "gfx942",
+        "flags": 16
+      },
+      "vram": {
+        "type": "HBM3E",
+        "vendor": "SAMSUNG",
+        "size": {
+          "value": 262128,
+          "unit": "MB"
+        },
+        "bit_width": 8192,
+        "max_bandwidth": {
+          "value": 6144,
+          "unit": "GB/s"
+        }
+      },
+      "clock": {
+        "sys": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "113",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "500",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "2100",
+              "unit": "MHz"
+            }
+          }
+        },
+        "mem": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "900",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "1300",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1500",
+              "unit": "MHz"
+            }
+          }
+        },
+        "df": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "1300",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "1800",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1800",
+              "unit": "MHz"
+            }
+          }
+        },
+        "soc": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "31",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "889",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1143",
+              "unit": "MHz"
+            }
+          }
+        },
+        "dcef": "N/A",
+        "vclk0": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "29",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "914",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1333",
+              "unit": "MHz"
+            },
+            "Level 3": {
+              "value": "1680",
+              "unit": "MHz"
+            }
+          }
+        },
+        "vclk1": "N/A",
+        "dclk0": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "22",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "711",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1143",
+              "unit": "MHz"
+            },
+            "Level 3": {
+              "value": "1400",
+              "unit": "MHz"
+            }
+          }
+        },
+        "dclk1": "N/A"
+      }
+    },
+    {
+      "gpu": 3,
+      "asic": {
+        "market_name": "AMD Instinct MI325X",
+        "vendor_id": "0x1002",
+        "vendor_name": "Advanced Micro Devices Inc. [AMD/ATI]",
+        "subvendor_id": "0x1002",
+        "device_id": "0x74a5",
+        "subsystem_id": "0x74a5",
+        "rev_id": "0x00",
+        "asic_serial": "0x0000000000000000",
+        "oam_id": 4,
+        "num_compute_units": 304,
+        "target_graphics_version": "gfx942",
+        "flags": 16
+      },
+      "vram": {
+        "type": "HBM3E",
+        "vendor": "SAMSUNG",
+        "size": {
+          "value": 262128,
+          "unit": "MB"
+        },
+        "bit_width": 8192,
+        "max_bandwidth": {
+          "value": 6144,
+          "unit": "GB/s"
+        }
+      },
+      "clock": {
+        "sys": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "113",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "500",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "2100",
+              "unit": "MHz"
+            }
+          }
+        },
+        "mem": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "900",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "1300",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1500",
+              "unit": "MHz"
+            }
+          }
+        },
+        "df": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "1300",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "1800",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1800",
+              "unit": "MHz"
+            }
+          }
+        },
+        "soc": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "31",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "889",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1143",
+              "unit": "MHz"
+            }
+          }
+        },
+        "dcef": "N/A",
+        "vclk0": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "29",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "914",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1333",
+              "unit": "MHz"
+            },
+            "Level 3": {
+              "value": "1680",
+              "unit": "MHz"
+            }
+          }
+        },
+        "vclk1": "N/A",
+        "dclk0": {
+          "current_level": 0,
+          "frequency_levels": {
+            "Level 0": {
+              "value": "22",
+              "unit": "MHz"
+            },
+            "Level 1": {
+              "value": "711",
+              "unit": "MHz"
+            },
+            "Level 2": {
+              "value": "1143",
+              "unit": "MHz"
+            },
+            "Level 3": {
+              "value": "1400",
+              "unit": "MHz"
+            }
+          }
+        },
+        "dclk1": "N/A"
+      }
+    }
+  ]
+}

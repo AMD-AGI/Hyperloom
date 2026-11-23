@@ -10,14 +10,28 @@ which is what registers them with pytest.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import sys
 
 import pytest
 
+from hyperloom_common.gpu_card import SESSION_CARD_ENV, GpuCard
+
+MI355X_CARD = GpuCard("AMD Instinct MI355X", "75a3", "gfx950", 256, 294912, 8000.0, 2400)
+MI325X_CARD = GpuCard("AMD Instinct MI325X", "74a5", "gfx942", 304, 262128, 6144.0, 2100)
+
+
+def publish_card(monkeypatch, card: GpuCard) -> GpuCard:
+    """Make ``card`` the session's card for the rest of the test."""
+    monkeypatch.setenv(SESSION_CARD_ENV, json.dumps(dataclasses.asdict(card)))
+    return card
+
 
 @pytest.fixture(autouse=True)
 def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
-    """Isolate a test from the host: no session-dir pin, single-node, no live GPU power sampling, and a sandbox aiter.
+    """Isolate a test from the host: no session-dir pin, single-node, no session card, no live GPU power sampling, and
+    a sandbox aiter.
 
     Sampling follows ``amd-smi``, so on a GPU host every watchdog-driven test would otherwise query the real cards.
     Tests of the sampler turn it back on themselves.
@@ -27,6 +41,7 @@ def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
     overrides, the probe paths) is pointed at a sandbox; tests that model an install plant their own on top of it.
     """
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", raising=False)
+    monkeypatch.delenv(SESSION_CARD_ENV, raising=False)
     monkeypatch.setenv("HYPERLOOM_GPU_POWER_SAMPLING", "0")
     mn_state_sentinel = tmp_path_factory.mktemp("mn_state") / "missing_state.json"
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(mn_state_sentinel))

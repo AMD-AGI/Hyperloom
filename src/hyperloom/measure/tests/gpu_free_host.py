@@ -35,12 +35,14 @@ from pathlib import Path
 import pytest
 
 from hyperloom.sandbox import card_occupancy
+from hyperloom_common.gpu_card import SESSION_CARD_ENV
 from hyperloom.sandbox.tests.kernel_tree import KernelTree
 
 USES_REAL_GPUS_FLAG = "USES_REAL_GPUS"
 _GPU_TOOLS = ("amd-smi", "rocm-smi")
 _UNREADABLE_TOOL = "#!/bin/sh\nexit 1\n"
-_DEVICE_ENV = ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES")
+#: What would tell a runner which cards it has: the device masks, and the card a session on this host published.
+_DEVICE_ENV = ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", SESSION_CARD_ENV)
 _MODULE = "hyperloom.measure.tests.gpu_free_host"
 #: The interpreter a test starts a runner module with, ``(*IDLE_CARDS_PYTHON, "-m", module, *args)``, so that the runner
 #: reads an idle machine of its own instead of the host's cards.
