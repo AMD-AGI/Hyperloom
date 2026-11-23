@@ -746,8 +746,6 @@ def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
             )
             sys.exit(2)
         _validate_agent_runtime(critic_agent_root)
-        # Default WORKSPACE_PATH for critic-agent runtime: SKILL static-asset root (repo root), not artefact dir.
-        os.environ.setdefault("WORKSPACE_PATH", str(Path(__file__).resolve().parents[4]))
     return _AgentLineup(
         no_kernel=no_kernel,
         no_framework_agent=no_framework_agent,

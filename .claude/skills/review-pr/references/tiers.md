@@ -19,7 +19,7 @@ a failure surfaces, not by file size or churn.
 | 2 | `actions/executors/grid/_grid_runner.py`, `grid/_capability_probe.py`, `grid/_round_report.py`, `grid/_grid_inputs.py`, `grid/_variant_rows.py` | Shared by explore and sweep |
 | 2 | `orchestrator/phases/framework.py`, `phases/framework_reauthor.py`, `phases/framework_local_explore.py`, `phases/framework_proposals.py`, `phases/framework_records.py`, `phases/framework_discovery.py`, `phases/kernel.py`, `phases/kernel_geak_dispatch.py`, `phases/kernel_geak_promotion.py`, `phases/kernel_gemm_tuning.py` | One phase produces nothing or loops |
 | 2 | `protocol/action_surfaces.py` | Consumed by the CLI catalogue, the gate, the phase machine and the dispatcher. An action here but not in the owning role's set is unroutable |
-| 2 | `protocol/intent.py` | Severity/verdict frozensets deliberately duplicated from `agents/critic/runtime/intent_envelope.py`. Change one copy and the emitter produces intents the transport rejects |
+| 2 | `protocol/intent.py` | The intent schema every role backend validates its reply against (`validate_envelope`), and the verdict set PolicyGate and the Critic runtime (`agents/critic/runtime/`) import (`ALLOWED_VERDICTS`). A change reaches every emitter and the gate at once; a reply that stops validating is discarded mid-session, not caught at import |
 | 2 | `hyperloom_common/llm/llm_config.py`, `common/perf_metric.py` | Gateway env resolution and client construction for every role; `graded_axes_of` is what the phase handlers and writeback grade against |
 | 2 | `breakdown/schema.py`, `schema_framework.py`, `schema_kernel.py` | Typed shape of the persisted `session_breakdown.json`. Zero import fan-in, so nothing catches writer/reader drift |
 | 2 | `inference_optimizer/framework_paths.py` | Three non-interchangeable resolvers. Patches land in the wrong tree, or the session optimizes a tree it is not measuring |
@@ -52,9 +52,9 @@ Q2 — Does it decide, persist, or read the number a KEEP/REVERT is made
 Q3 — Is it a contract with more than one owner: a schema written to disk
      and read by a different module (state.json, session_breakdown.json,
      the session manifest), a constant set duplicated across a layer
-     boundary (protocol/intent.py vs agents/critic), or a subprocess
-     command line the orchestrator builds and another package parses
-     (python -m kernelforge.cli, install.sh, the slurm launchers)?
+     boundary, or a subprocess command line the orchestrator builds and
+     another package parses (python -m kernelforge.cli, install.sh, the
+     slurm launchers)?
      → YES → Tier 2 (both sides must move in the same PR; a one-sided
         change type-checks and imports fine)
 
