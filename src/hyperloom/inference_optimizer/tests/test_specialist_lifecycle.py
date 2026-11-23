@@ -297,14 +297,10 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
     import argparse
 
     from hyperloom.inference_optimizer.cli.executors import _build_specialist_executor
-    from hyperloom.orchestrator.roles.mock_backend import (
-        MockBackend as MockOrchBackend,
-        MockTurn,
-        ScriptedPlan,
-    )
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.state.task_registry import Task
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend as MockOrchBackend, MockTurn, ScriptedPlan
 
     done_payload = _done_payload(
         domain="serving_specialist",

@@ -23,11 +23,7 @@ from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_INTVTY_P50
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
-from hyperloom.orchestrator.roles.mock_backend import (
-    MockBackend,
-    MockTurn,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.kernel.patch_lifecycle import lifecycle_complete
 from hyperloom.orchestrator.phases import machine_state

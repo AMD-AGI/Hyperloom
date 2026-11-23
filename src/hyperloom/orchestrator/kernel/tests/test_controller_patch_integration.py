@@ -25,12 +25,9 @@ from hyperloom.orchestrator.kernel.controller_patch_integration import (
     integrate_controller_patches,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.roles import (
-    MockBackend,
-    MockCriticBackend,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.roles import MockCriticBackend
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
 _GIT_IDENTITY = {
     "GIT_AUTHOR_NAME": "integration-test",
