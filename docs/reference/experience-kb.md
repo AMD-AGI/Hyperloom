@@ -126,9 +126,12 @@ A read the service cannot answer, even one cut off mid-response, leaves the
 prompt as it would be without the Experience KB.
 
 A run waits on its local service at most 30 seconds per read, write, or health
-check. A read calls no model: it scans every record once per text signal, which
-measured about 1 second over 3000 records and a few milliseconds over a
-handful. After three reads in a row that do not complete, the session stops
+check. A read calls no model: it compares each text signal with every record,
+in time that grows with the number of records and the length of the text. A
+text signal holds at most 500 characters, which Hyperloom cuts its own to; one
+of that length measured about 1 second over 1000 records, a 30-character one
+about 0.1 second, and a read without a text signal about 10 milliseconds.
+After three reads in a row that do not complete, the session stops
 reading, so a hung or stopped service costs a run a few timeouts, not one per
 orchestration turn and specialist dispatch. The session breakdown writes its Experiences off the
 coordinator's event loop, and once one write spools, the rest of that
@@ -279,7 +282,7 @@ invalid.
 
 | Field | Required | Default | Meaning |
 |---|---|---|---|
-| `signals` | yes | | what to look for, at least one: `{"field", "value", "weight"}` for an exact match, `{"text", "weight"}` for a fuzzy one |
+| `signals` | yes | | what to look for, 1–32 of them: `{"field", "value", "weight"}` for an exact match, `{"text", "weight"}` for a fuzzy one of at most 500 characters |
 | `schema_ref` | no | the service's `--declaration` | the one schema to search |
 | `outcome` | no | `mixed` | one of the values the schema's decision field declares, or `mixed`; a schema without a decision field takes `mixed` only |
 | `limit` | no | `10` | maximum Experiences to return, 1–100 |
@@ -303,9 +306,10 @@ The caller states the signals; the service plans nothing. In an exact signal,
 number `2` does not match the string `"2"`). A text signal is matched lexically
 over each field by its declared `search` weight,
 [notes](experience-kb-schema.md#notes), and the objective. Every `weight` is
-greater than 0 and at most 1. A request without signals, with a signal of
-another shape, with a field the schema does not index, or with the former
-`decision` and `context` fields is refused with 400.
+greater than 0 and at most 1. A request without signals or with more than 32,
+with a signal of another shape, with a text longer than 500 characters, with a
+field the schema does not index, or with the former `decision` and `context`
+fields is refused with 400.
 
 An Experience is a candidate when it matches any signal, and candidates rank by
 the sum over the signals they match: an exact match adds the signal's weight, a

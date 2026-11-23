@@ -13,7 +13,15 @@ from typing import Any
 
 from hyperloom.common.perf_metric import agentx_active
 from hyperloom.inference_optimizer.experience_kb_service import REQUEST_TIMEOUT_SECONDS, mapping_schema_ref
-from hyperloom_kb import ConfigurationError, QuerySignal, ReadQuery, RemoteClient, RemoteClientError, RemoteConfig
+from hyperloom_kb import (
+    MAX_SIGNAL_TEXT_CHARS,
+    ConfigurationError,
+    QuerySignal,
+    ReadQuery,
+    RemoteClient,
+    RemoteClientError,
+    RemoteConfig,
+)
 from hyperloom_kb.collect import MappingError
 
 log = logging.getLogger(__name__)
@@ -61,7 +69,7 @@ def read_signals(
     """The signals of one read: an exact one per identity value and for the objective, a text one per observation.
 
     Only what ``SIGNAL_WEIGHTS`` weighs is sent, and no value that is unset: empty, or the 0 a session state leaves
-    an unset size at.
+    an unset size at. An observation is cut to the longest text a signal carries.
     """
 
     exact = {**{f"identity.{name}": value for name, value in identity.items()}, "objective": objective}
@@ -75,7 +83,7 @@ def read_signals(
         if field in _WEIGHT_OF and value not in (None, "", 0)
     ]
     for name, value in observations.items():
-        text = str(value or "").strip()
+        text = str(value or "").strip()[:MAX_SIGNAL_TEXT_CHARS]
         if name in _WEIGHT_OF and text:
             signals.append(QuerySignal(text=text, weight=_WEIGHT_OF[name]))
     return tuple(signals)

@@ -21,6 +21,7 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.roles import Backend
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.inference_optimizer.experience_kb import ExperienceKBEvidence
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 
@@ -224,6 +225,32 @@ async def test_the_block_is_injected_only_in_the_optimisation_phase(coord, phase
     coord.shared_state.specialist_rounds = [_round([{"name": "queued", "extra_args": "--a 1"}])]
     out = (await coord.conversation.compose_prompt("orchestration")).text
     assert ("=== Untested proposals (current cycle) ===" in out) is expected
+
+
+@pytest.mark.asyncio
+async def test_the_experience_read_is_given_the_queued_proposals_by_name(coord):
+    """The read is sent the proposal names, not the prompt section that wraps them in prose."""
+
+    class _Reads:
+        def __init__(self) -> None:
+            self.untested: list[str] = []
+
+        def read_for_framework(self, _state, *, untested_proposals=""):
+            self.untested.append(untested_proposals)
+            return ExperienceKBEvidence(tick=0, read_id="", status="unavailable", prompt_block="", rendered_refs=())
+
+    reads = _Reads()
+    coord._experience_kb = reads
+    coord.shared_state.phase = PHASE_FRAMEWORK_AGENT
+    coord.shared_state.macro_cycle = 0
+    coord.shared_state.specialist_rounds = [
+        _round([{"name": "fp8-kv-cache", "extra_args": "--a 1"}, {"name": "chunked-prefill", "extra_args": "--b 2"}])
+    ]
+
+    await coord.conversation.compose_prompt("orchestration")
+
+    assert reads.untested
+    assert all(sorted(text.split(", ")) == ["chunked-prefill", "fp8-kv-cache"] for text in reads.untested)
 
 
 @pytest.mark.asyncio

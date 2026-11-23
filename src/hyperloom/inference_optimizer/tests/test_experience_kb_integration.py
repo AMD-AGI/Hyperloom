@@ -24,7 +24,7 @@ from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInp
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 from hyperloom.orchestrator.specialists.domains import get_domain
 from hyperloom.orchestrator.state.shared_state import _KB_INJECTIONS_CAP, KbInjection, SharedState
-from hyperloom_kb import RemoteClient, RemoteConfig
+from hyperloom_kb import MAX_SIGNAL_TEXT_CHARS, RemoteClient, RemoteConfig
 from hyperloom_kb.collect import load_mapping
 
 _FIRST = "exp-00000000000000000000000000000001"
@@ -146,6 +146,16 @@ def test_a_specialist_read_adds_what_the_dispatch_investigates(tmp_path) -> None
         ("Enable AITER linear on MI300X", 0.4),
     ]
     assert _texts(blank) == [("decode bandwidth", 0.6), ("kernel_switch_specialist", 0.4)]
+
+
+def test_an_observation_longer_than_a_signal_carries_is_cut_to_fit(tmp_path) -> None:
+    client = FakeClient()
+    task = "x" * (MAX_SIGNAL_TEXT_CHARS + 1)
+
+    ExperienceKBIntegration(client, _SCHEMA).read_for_specialist(_state(), {"task_description": task})
+
+    (signals,) = client.calls
+    assert _texts(signals)[-1] == ("x" * MAX_SIGNAL_TEXT_CHARS, 0.5)
 
 
 def test_a_read_is_answered_once_per_tick_for_the_same_signals(tmp_path) -> None:

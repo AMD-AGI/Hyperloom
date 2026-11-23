@@ -61,6 +61,7 @@ log = logging.getLogger(__name__)
 MIXED_OUTCOME = "mixed"
 DEFAULT_READ_LIMIT = 10
 MAX_READ_LIMIT = 100
+MAX_READ_SIGNALS = 32
 MAX_LIST_LIMIT = 500
 # Complete records carry patch content, so an export page stays far smaller than a summary page.
 MAX_EXPORT_LIMIT = 100
@@ -342,10 +343,13 @@ class ExperienceHTTPService:
 
     @staticmethod
     def _signals(signals: tuple[QuerySignal, ...], declaration: ExperienceDeclaration) -> tuple[QuerySignal, ...]:
-        """``signals`` once every exact one names a field ``declaration`` indexes; a read needs at least one."""
+        """``signals`` once every exact one names a field ``declaration`` indexes; a read needs at least one and
+        takes at most ``MAX_READ_SIGNALS``."""
 
         if not signals:
             raise HTTPServiceError("signals must name at least one signal")
+        if len(signals) > MAX_READ_SIGNALS:
+            raise HTTPServiceError(f"signals must name at most {MAX_READ_SIGNALS} signals")
         indexed = declaration.lookup_fields()
         unknown = sorted({signal.field for signal in signals if signal.field and signal.field not in indexed})
         if unknown:
@@ -945,6 +949,7 @@ __all__ = [
     "DEFAULT_READ_LIMIT",
     "MAX_EXPORT_LIMIT",
     "MAX_READ_LIMIT",
+    "MAX_READ_SIGNALS",
     "MIXED_OUTCOME",
     "ExperienceHTTPService",
     "HTTPServiceConfig",

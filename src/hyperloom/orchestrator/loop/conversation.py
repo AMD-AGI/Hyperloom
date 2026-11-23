@@ -619,7 +619,9 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if untested_block:
                 sections.append("=== Untested proposals (current cycle) ===")
                 sections.append(untested_block)
-            kb_block = await self._kb_prompt_block(untested_block)
+            # The read matches the proposals by name; the section above wraps them in prose a record never holds.
+            proposal_names = ", ".join(str(row["name"]) for row in self.shared_state.untested_proposal_rows())
+            kb_block = await self._kb_prompt_block(proposal_names)
             if kb_block:
                 sections.append(kb_block)
         plateau_block = self.plateau_advisory_block()

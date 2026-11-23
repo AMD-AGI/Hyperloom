@@ -9,7 +9,7 @@ import dataclasses
 import json
 from pathlib import Path
 
-from hyperloom_kb import ReadStatus, RemoteReadResult
+from hyperloom_kb import MAX_SIGNAL_TEXT_CHARS, ReadStatus, RemoteReadResult
 
 from hyperloom_multibranch.contracts.blackboard.records import Learning, LearningRecord, BlackboardSnapshot
 from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
@@ -78,6 +78,15 @@ def test_a_learning_from_random_prompts_differs_in_the_dataset_for_a_session_tha
     (item,) = read_past_learnings(reader, profile(dataset="/data/prompts.jsonl"), "kv cache", limit=5).items
 
     assert "dataset differ" in item.render()
+
+
+def test_a_question_longer_than_a_signal_carries_is_cut_to_fit() -> None:
+    reader = FakeExperienceReader(completed_read())
+
+    read_past_learnings(reader, profile(), "x" * (MAX_SIGNAL_TEXT_CHARS + 1), limit=5)
+
+    ((signals, _limit),) = reader.calls
+    assert signals[-1].text == "x" * MAX_SIGNAL_TEXT_CHARS
 
 
 def test_a_learning_of_the_other_kind_of_session_says_which_kind() -> None:

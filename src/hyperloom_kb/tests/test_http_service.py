@@ -21,6 +21,7 @@ from typing import Any, BinaryIO
 import pytest
 
 from hyperloom_kb import (
+    MAX_SIGNAL_TEXT_CHARS,
     Experience,
     ExperienceDeclaration,
     ExperienceHTTPService,
@@ -51,7 +52,7 @@ from hyperloom_kb import (
 from hyperloom_kb.config import PACKAGED_DECLARATION
 from hyperloom_kb import database as database_module
 from hyperloom_kb.database import Database, open_database
-from hyperloom_kb.experience_service import code_digest
+from hyperloom_kb.experience_service import MAX_READ_SIGNALS, code_digest
 from hyperloom_kb.tests.conftest import fresh_database
 
 NOW = datetime(2026, 9, 28, tzinfo=timezone.utc)
@@ -661,6 +662,8 @@ def test_a_text_signal_adds_its_weight_times_how_well_the_text_matched(tmp_path:
         ([{"field": "identity.model", "value": "qwen3", "text": "page size", "weight": 1.0}], "either field and value"),
         ([{"weight": 1.0}], "either field and value"),
         ([{"text": "page size", "value": "qwen3", "weight": 1.0}], "a text signal holds no value"),
+        ([{"text": "x" * (MAX_SIGNAL_TEXT_CHARS + 1), "weight": 1.0}], "signal text is longer than"),
+        ([{"text": "page size", "weight": 1.0}] * (MAX_READ_SIGNALS + 1), "signals must name at most"),
         ([{"field": "identity.tp", "value": 2, "weight": 1.0}], "signal fields the schema does not index: identity.tp"),
         ([{"field": "change.content", "value": "x", "weight": 1.0}], "does not index: change.content"),
     ],

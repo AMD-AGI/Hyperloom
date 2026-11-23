@@ -119,10 +119,14 @@ class RemoteConfig:
         return config if timeout_seconds is None else replace(config, timeout_seconds=timeout_seconds)
 
 
+# A read compares each text signal with every record's summary, in time that grows with the text's length.
+MAX_SIGNAL_TEXT_CHARS = 500
+
+
 @dataclass(frozen=True, kw_only=True)
 class QuerySignal:
     """One thing a read looks for and how much it counts: a ``field`` holding exactly ``value``, or ``text`` matched
-    fuzzily. ``weight`` is in (0, 1]."""
+    fuzzily. ``weight`` is in (0, 1], and ``text`` holds at most ``MAX_SIGNAL_TEXT_CHARS`` characters."""
 
     weight: float
     field: str = ""
@@ -141,6 +145,8 @@ class QuerySignal:
             raise ValueError(f"signal {self.field} needs a scalar value")
         if self.text and self.value is not None:
             raise ValueError("a text signal holds no value")
+        if len(self.text) > MAX_SIGNAL_TEXT_CHARS:
+            raise ValueError(f"signal text is longer than {MAX_SIGNAL_TEXT_CHARS} characters")
 
     def to_dict(self) -> dict[str, JsonValue]:
         if self.field:
@@ -840,6 +846,7 @@ class RemoteExperienceKB:
 
 
 __all__ = [
+    "MAX_SIGNAL_TEXT_CHARS",
     "ExperienceStart",
     "ListPage",
     "LocalFiles",

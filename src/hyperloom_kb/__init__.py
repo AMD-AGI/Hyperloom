@@ -42,6 +42,7 @@ from hyperloom_kb.query_view import (
     repeat_group_key,
 )
 from hyperloom_kb.remote import (
+    MAX_SIGNAL_TEXT_CHARS,
     ExperienceStart,
     ExportPage,
     ListPage,
@@ -128,6 +129,7 @@ __all__ = [
     "CURRENT_SCHEMA_VERSION",
     "KNOWLEDGE_FIELDS",
     "MAX_FILE_BYTES",
+    "MAX_SIGNAL_TEXT_CHARS",
     "METADATA_FIELDS",
     "RATIONALE_DEFAULTS",
     "SCALAR_KINDS",
