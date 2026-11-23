@@ -148,7 +148,10 @@ when `--gpu-type` is omitted.
 - **Phase toggles:** `--enable-roofline` / `--no-enable-roofline`,
   `--enable-conc-sweep` / `--no-enable-conc-sweep`, `--conc-sweep-concs`,
   `--conc-sweep-total-budget-sec` (whole-sweep budget), `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`.
-- **Agent models:** `--claude-model`, `--codex-model`.
+- **Agent models:** `--claude-model`, `--codex-model`, and `--low-model`: a
+  cheaper model for the orchestration role and research-mode specialists, which
+  only decide or propose. Patch-mode specialists, the critic and kernel work keep
+  their models. Unset runs every role on its usual model.
 - **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`,
   `--extend-hours`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.

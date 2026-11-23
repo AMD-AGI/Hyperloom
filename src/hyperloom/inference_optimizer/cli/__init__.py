@@ -803,11 +803,7 @@ def _install_system_prompts(
 
 def _print_backend_banner(args: argparse.Namespace, backends: dict[str, Any], lineup: _AgentLineup) -> None:
     """Print the backend each role runs on and the run's tick limits."""
-    orchestration_str = _orchestration_banner(
-        backends.get("orchestration"),
-        claude_model=args.claude_model,
-        codex_model=args.codex_model,
-    )
+    orchestration_str = _orchestration_banner(backends.get("orchestration"))
     kernel_str = "DISABLED" if lineup.no_kernel else "programmatic"
     if lineup.critic_choice == "mock":
         critic_str = "mock"
@@ -820,6 +816,8 @@ def _print_backend_banner(args: argparse.Namespace, backends: dict[str, Any], li
             f"critic-agent(protocol={_review_protocol}, model={_review_model}, root={lineup.critic_agent_root})"
         )
     print(f"Backends        : orchestration={orchestration_str}, kernel={kernel_str}, critic={critic_str}")
+    if args.low_model:
+        print(f"Low model       : {args.low_model} (orchestration and research-mode specialists)")
     print(f"Max ticks       : {args.max_ticks or 'unlimited'} (budget = {args.max_hours}h)")
     print(f"Tick interval   : {args.tick_interval_sec}s")
     print()
@@ -947,6 +945,7 @@ def _build_run_backends(
             codex_follows_claude=intent.codex_follows_claude,
             claude_follows_codex=intent.claude_follows_codex,
             deepseek_model=llm_config.resolve_forge_llm_model(llm_config.AGENT_BACKEND_DEEPSEEK),
+            low_model=args.low_model,
         ),
         CriticSetup(
             choice=lineup.critic_choice,

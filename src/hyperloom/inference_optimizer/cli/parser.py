@@ -439,6 +439,16 @@ def _add_model_context_arguments(opt: argparse.ArgumentParser) -> None:
     opt.add_argument("--tick-interval-sec", type=float, default=0.0, help="Sleep between ticks (0 = no sleep)")
     opt.add_argument("--claude-model", type=str, default=_default_claude_model_env())
     opt.add_argument("--codex-model", type=str, default=_default_codex_model_env())
+    opt.add_argument(
+        "--low-model",
+        dest="low_model",
+        type=str,
+        default="",
+        help="Model id for the roles that decide or propose rather than write code: the orchestration role and "
+        "research-mode specialists. Patch-mode specialists, the critic and kernel work keep their models. It must "
+        "be served on the side orchestration runs on, and one real request checks it at startup. Empty (default): "
+        "every role runs on its usual model.",
+    )
 
 
 def _add_capacity_arguments(opt: argparse.ArgumentParser) -> None:

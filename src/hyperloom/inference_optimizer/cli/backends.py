@@ -73,8 +73,8 @@ def critic_on_codex_side(*, codex_follows_claude: bool, claude_follows_codex: bo
 def _resolve_critic_protocol(requested: str, *, orchestration_on_codex: bool) -> str:
     """Pick the critic's review protocol and verify that side is configured."""
     if requested == "auto":
-        # The critic reviews on the side the orchestration model was validated on, so a launch configures one model
-        # and every role uses it.
+        # The critic reviews on the side the orchestration model was validated on, so a launch configures one side
+        # and every role runs on it.
         return "openai" if orchestration_on_codex else "anthropic"
 
     if requested == "anthropic":
@@ -123,13 +123,27 @@ def _load_action_verdict_policy() -> dict[str, str]:
 
 @dataclass(frozen=True)
 class ModelRouting:
-    """The model ids a launch named for each CLI, and which side's id was rewritten into the other's."""
+    """The model ids a launch named for each CLI, and which side's id was rewritten into the other's.
+
+    ``low_model`` (``--low-model``) replaces the CLI's id for the orchestration role; the critic keeps the CLI's id.
+    """
 
     claude_model: str
     codex_model: str
     codex_follows_claude: bool = False
     claude_follows_codex: bool = False
     deepseek_model: str = llm_config.DEFAULT_DEEPSEEK_HARNESS_MODEL
+    low_model: str = ""
+
+    def orchestration_model(self, backend: str) -> str:
+        """The model id the orchestration role runs on when ``backend`` drives it."""
+        if self.low_model:
+            return self.low_model
+        if backend == llm_config.AGENT_BACKEND_CODEX:
+            return self.codex_model
+        if backend == llm_config.AGENT_BACKEND_DEEPSEEK:
+            return self.deepseek_model
+        return self.claude_model
 
 
 @dataclass(frozen=True)
@@ -147,16 +161,17 @@ def _build_orchestration_backend(models: ModelRouting, *, session_dir: Path) -> 
         codex_follows_claude=models.codex_follows_claude, claude_follows_codex=models.claude_follows_codex
     )
     allowed_intents = default_role_registry()[_ORCHESTRATION_ROLE].allowed_intents
+    model = models.orchestration_model(name)
     # Scratch only.
     scratch = agent_dir(session_dir, _ORCHESTRATION_ROLE)
     if name == llm_config.AGENT_BACKEND_CODEX:
-        return CodexBackend(allowed_intents=allowed_intents, model=models.codex_model, cwd=scratch / "codex_workspace")
+        return CodexBackend(allowed_intents=allowed_intents, model=model, cwd=scratch / "codex_workspace")
     if name == llm_config.AGENT_BACKEND_DEEPSEEK:
         # The role reads state and answers with intents; it writes no files,
         # so the harness gets no write permission to confine.
         return DeepSeekBackend(
             allowed_intents=allowed_intents,
-            model=models.deepseek_model,
+            model=model,
             cwd=scratch / "deepseek_workspace",
             permission_mode="read-only",
         )
@@ -164,7 +179,7 @@ def _build_orchestration_backend(models: ModelRouting, *, session_dir: Path) -> 
     # carries the full state projection, so it needs the agentic turn
     # budget.
     return ClaudeBackend(
-        model=models.claude_model,
+        model=model,
         allowed_intents=allowed_intents,
     )
 
@@ -210,16 +225,12 @@ def _build_backends(models: ModelRouting, critic: CriticSetup, *, session_dir: P
     }
 
 
-def _orchestration_banner(backend: Any, *, claude_model: str, codex_model: str) -> str:
+def _orchestration_banner(backend: Any) -> str:
     """Label the orchestration backend with the model it runs, for the launch banner."""
     if backend is None:
         return "DISABLED"
-    name = str(getattr(backend, "name", "") or "").strip().lower()
-    if name == "claude":
-        return f"Claude({claude_model})"
-    if name == "codex":
-        return f"Codex({codex_model})"
-    return f"{backend.__class__.__name__}({getattr(backend, 'model', '') or codex_model})"
+    label = {"claude": "Claude", "codex": "Codex"}.get(backend.name, backend.__class__.__name__)
+    return f"{label}({backend.model})"
 
 
 def _build_proposal_scorer(

@@ -163,11 +163,11 @@ def _custom_orch_model_allowed() -> bool:
     return env_bool("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", True)
 
 
-def _reject_unusable_claude_model(chosen: str, *, allow_custom: bool) -> None:
+def _reject_unusable_claude_model(chosen: str, *, allow_custom: bool, flag: str) -> None:
     """Refuse a model id the static allowlist cannot accept, before any gateway is asked."""
     if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
-            f"ERROR: --claude-model={chosen!r} is not allowed. "
+            f"ERROR: {flag}={chosen!r} is not allowed. "
             f"Orchestration model must be one of "
             f"{list(_CLAUDE_ALLOWED_MODELS)} (best first). Refusing to start. "
             f"For a non-AMD gateway, set "
@@ -178,7 +178,7 @@ def _reject_unusable_claude_model(chosen: str, *, allow_custom: bool) -> None:
         sys.exit(2)
     if allow_custom and not chosen:
         print(
-            "ERROR: --claude-model is empty but "
+            f"ERROR: {flag} is empty but "
             "custom orchestration model support is enabled; pass an explicit "
             "model id. Refusing to start.",
             file=sys.stderr,
@@ -273,7 +273,7 @@ def _validate_and_resolve_claude_model(
     chosen = (args.claude_model or "").strip()
     # Custom orchestration models are enabled by default; the gateway catalog probe below is the sole gate.
     allow_custom = _custom_orch_model_allowed()
-    _reject_unusable_claude_model(chosen, allow_custom=allow_custom)
+    _reject_unusable_claude_model(chosen, allow_custom=allow_custom, flag="--claude-model")
     catalog_ids, probed = _probe_claude_catalog(
         resolved_urls,
         chosen=chosen,
@@ -363,9 +363,49 @@ def _resolve_models_for_run(
     _probe_critic_review_model(
         args, codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
     )
+    _probe_low_model(args, codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex)
 
 
-_CRITIC_PROBE_TIMEOUT_SEC = 60.0
+_MODEL_PROBE_TIMEOUT_SEC = 60.0
+
+
+def _probe_model_reply(protocol: str, model: str, *, component: str) -> BaseException | None:
+    """Ask ``model`` for a short reply over ``protocol``, with the catalog retries.
+
+    Returns:
+        The last attempt's error when every attempt failed, else ``None``.
+    """
+    messages = [{"role": "user", "content": "Reply with OK."}]
+    last_error: BaseException | None = None
+    for delay in (0.0, *_CATALOG_RETRY_DELAYS_SEC):
+        if delay:
+            time.sleep(delay)
+        try:
+            if protocol == "anthropic":
+                llm_config.anthropic_completion(
+                    request=llm_config.AnthropicCompletionRequest(
+                        model=model, messages=messages, max_tokens=16, timeout_s=_MODEL_PROBE_TIMEOUT_SEC
+                    ),
+                    component=component,
+                    operation="preflight",
+                )
+            else:
+                llm_config.chat_completion(
+                    llm_config.get_openai_client(timeout=_MODEL_PROBE_TIMEOUT_SEC),
+                    component=component,
+                    operation="preflight",
+                    model=model,
+                    messages=messages,
+                    max_completion_tokens=16,
+                )
+        except Exception as exc:  # any failure means the model is unusable; the caller exits 2 after the last retry
+            log.warning(
+                "%s model %r probe failed over the %s protocol: %s", component, model, protocol, exc, exc_info=True
+            )
+            last_error = exc
+            continue
+        return None
+    return last_error
 
 
 def _probe_critic_review_model(
@@ -392,40 +432,42 @@ def _probe_critic_review_model(
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
 
-    messages = [{"role": "user", "content": "Reply with OK."}]
-    last_error: BaseException | None = None
-    for delay in (0.0, *_CATALOG_RETRY_DELAYS_SEC):
-        if delay:
-            time.sleep(delay)
-        try:
-            if protocol == "anthropic":
-                llm_config.anthropic_completion(
-                    request=llm_config.AnthropicCompletionRequest(
-                        model=model, messages=messages, max_tokens=16, timeout_s=_CRITIC_PROBE_TIMEOUT_SEC
-                    ),
-                    component="critic",
-                    operation="preflight",
-                )
-            else:
-                llm_config.chat_completion(
-                    llm_config.get_openai_client(timeout=_CRITIC_PROBE_TIMEOUT_SEC),
-                    component="critic",
-                    operation="preflight",
-                    model=model,
-                    messages=messages,
-                    max_completion_tokens=16,
-                )
-        except Exception as exc:  # any failure means the review path is unusable; exits 2 after the last retry
-            log.warning("critic model %r probe failed over the %s protocol: %s", model, protocol, exc, exc_info=True)
-            last_error = exc
-            continue
+    last_error = _probe_model_reply(protocol, model, component="critic")
+    if last_error is None:
         print(f"Preflight: critic model {model!r} answered over the {protocol} protocol")
         return
     print(
         f"ERROR: critic model {model!r} did not answer over the {protocol} protocol: {last_error!r}\n"
-        f"  The critic reviews with the orchestration model unless --critic-protocol selects the other side "
-        f"(then CLAUDE_MODEL for anthropic, CODEX_MODEL for openai); there is no fallback model.\n"
+        f"  The critic reviews on the side orchestration runs on unless --critic-protocol selects the other, with "
+        f"that side's model (CLAUDE_MODEL for anthropic, CODEX_MODEL for openai); there is no fallback model.\n"
         f"  Fix that model or its credential, or pass --critic-mock to run without a critic. Refusing to start.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+def _probe_low_model(args: argparse.Namespace, *, codex_follows_claude: bool, claude_follows_codex: bool) -> None:
+    """Send ``--low-model`` one real request before the session starts; exit rc=2 when it cannot answer.
+
+    Orchestration runs on it from the first tick and has no fallback model, so it is held to the orchestration
+    allowlist and asked over the side orchestration runs on.
+    """
+    model = args.low_model
+    if not model:
+        return
+    _reject_unusable_claude_model(model, allow_custom=_custom_orch_model_allowed(), flag="--low-model")
+    on_codex = critic_on_codex_side(
+        codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
+    )
+    protocol = "openai" if on_codex else "anthropic"
+    last_error = _probe_model_reply(protocol, model, component="orchestration")
+    if last_error is None:
+        print(f"Preflight: low model {model!r} answered over the {protocol} protocol")
+        return
+    print(
+        f"ERROR: low model {model!r} did not answer over the {protocol} protocol: {last_error!r}\n"
+        f"  Orchestration and research-mode specialists run on it; there is no fallback model.\n"
+        f"  Fix that model or its credential, or drop --low-model. Refusing to start.",
         file=sys.stderr,
     )
     sys.exit(2)

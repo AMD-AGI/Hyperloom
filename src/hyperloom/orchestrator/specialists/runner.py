@@ -741,6 +741,7 @@ class SpecialistRunner:
                     deadline=deadline,
                     progress_cb=ctx.extra.get("specialist_progress_cb"),
                     readable=(Path(str((ctx.task.params or {}).get("model_path") or "")),),
+                    low_tier=prep.profile.low_tier,
                 )
             )
             call_status, call_attributes = _subprocess_call_outcome(sub_result)

@@ -64,6 +64,7 @@ def _build(**over):
         codex_model=kwargs.pop("codex_model"),
         codex_follows_claude=kwargs.pop("codex_follows_claude", False),
         claude_follows_codex=kwargs.pop("claude_follows_codex", False),
+        low_model=kwargs.pop("low_model", ""),
     )
     critic = clib.CriticSetup(
         choice=kwargs.pop("critic_choice"),
@@ -280,6 +281,24 @@ def test_an_explicit_codex_pins_both_orchestration_and_the_critic_side(monkeypat
     built = _build(critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
     assert built["orchestration"][0] == "codex"
     assert built["critic"][1]["protocol"] == "openai"
+
+
+@pytest.mark.parametrize(
+    ("backend", "main_model"),
+    [("claude", "claude-x"), ("codex", "codex-y"), ("deepseek", llm_config.DEFAULT_DEEPSEEK_HARNESS_MODEL)],
+)
+def test_a_low_model_runs_orchestration_and_leaves_the_critic_on_the_main_model(
+    monkeypatch, backend, main_model
+) -> None:
+    """The critic judges what the cheaper orchestration decided, so it keeps the model the launch named."""
+    _set_dual_protocol_gateway(monkeypatch)
+    monkeypatch.setenv(llm_config.AGENT_BACKEND_ENV, backend)
+
+    assert _build()["orchestration"][1]["model"] == main_model
+    built = _build(low_model="cheap-z", critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
+    name, kwargs = built["orchestration"]
+    assert (name, kwargs["model"]) == (backend, "cheap-z")
+    assert "cheap-z" not in built["critic"][1].values()
 
 
 def test_the_harness_is_never_selected_by_credentials_alone(monkeypatch) -> None:

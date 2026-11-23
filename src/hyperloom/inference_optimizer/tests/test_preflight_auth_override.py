@@ -1281,6 +1281,7 @@ def _make_args(**overrides) -> argparse.Namespace:
     base = dict(
         claude_model="claude-opus-4-7",
         codex_model="gpt-5.4",
+        low_model="",
         critic_backend="mock",
         no_kernel=False,
     )
@@ -2167,6 +2168,54 @@ def test_a_mock_critic_sends_no_probe(monkeypatch):
     model_catalog._probe_critic_review_model(args, codex_follows_claude=False)
 
     assert sent == []
+
+
+def test_a_launch_asks_its_low_model_over_the_side_orchestration_runs_on(monkeypatch, capsys):
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    for var in (
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_API_KEY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
+    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"gpt-5.4"})
+    sent = _record_critic_probes(monkeypatch)
+
+    args = _make_args(codex_model="gpt-5.4", low_model="gpt-5.4-mini", critic_mock=True)
+    model_catalog._resolve_models_for_run(args, ("", ""), claude_follows_codex=True, codex_follows_claude=False)
+
+    assert sent == [("openai", "gpt-5.4-mini")]
+    assert "low model 'gpt-5.4-mini' answered over the openai protocol" in capsys.readouterr().out
+
+
+def test_a_low_model_that_cannot_answer_stops_the_launch(monkeypatch, capsys):
+    sent = _record_critic_probes(monkeypatch, fail=True)
+    monkeypatch.setattr(model_catalog, "critic_on_codex_side", lambda **kw: False)
+    args = _make_args(low_model="claude-haiku-5-5")
+
+    with pytest.raises(SystemExit) as exc_info:
+        model_catalog._probe_low_model(args, codex_follows_claude=False, claude_follows_codex=False)
+
+    assert exc_info.value.code == 2
+    assert set(sent) == {("anthropic", "claude-haiku-5-5")}
+    assert "drop --low-model" in capsys.readouterr().err
+
+
+def test_the_strict_orchestration_allowlist_refuses_a_low_model_before_asking_it(monkeypatch, capsys):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "0")
+    sent = _record_critic_probes(monkeypatch)
+    args = _make_args(low_model="claude-haiku-5-5")
+
+    with pytest.raises(SystemExit) as exc_info:
+        model_catalog._probe_low_model(args, codex_follows_claude=False, claude_follows_codex=False)
+
+    assert exc_info.value.code == 2
+    assert sent == []
+    assert "--low-model='claude-haiku-5-5' is not allowed" in capsys.readouterr().err
 
 
 def test_parser_anthropic_only_empty_codex_model_uses_claude_model(monkeypatch):

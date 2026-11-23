@@ -130,6 +130,9 @@ class SpecialistSubprocessConfig:
     model: str = ""
     """Model id for the selected agent CLI. Empty = that CLI's own default."""
 
+    low_model: str = ""
+    """Model id a low-tier spawn runs on (``--low-model``). Empty runs it on ``model``."""
+
     framework_source_roots: tuple[str, ...] = ()
     """Roots used to seed ``git worktree add`` and as ``--add-dir`` parents.
 
@@ -152,6 +155,10 @@ class SpecialistSubprocessConfig:
     refresh the liveness clock for one window before the subsequent stale window expires, yielding about two windows
     of silence before reap.
     """
+
+    def model_for(self, spawn: SpecialistSpawn) -> str:
+        """The model id ``spawn`` runs on."""
+        return (self.low_model if spawn.low_tier else "") or self.model
 
 
 def _add_error(outcome: dict[str, Any], error: str) -> None:
@@ -464,7 +471,7 @@ class SpecialistSubprocessDispatcher:
         if backend == AGENT_BACKEND_DEEPSEEK:
             dsh_request = DshLaunchRequest(
                 executable=resolve_dsh_executable(self.config.dsh_executable),
-                model=resolve_forge_llm_model(AGENT_BACKEND_DEEPSEEK, explicit=self.config.model),
+                model=resolve_forge_llm_model(AGENT_BACKEND_DEEPSEEK, explicit=self.config.model_for(request)),
                 mcp_config_path=self.config.mcp_config_path,
                 workspace=request.workspace,
                 system_prompt=request.system_prompt,
@@ -476,11 +483,7 @@ class SpecialistSubprocessDispatcher:
         if backend == AGENT_BACKEND_CODEX:
             # Codex's higher-priority developer instructions live in private task-local config.
             cmd, launch_env_additions = self._build_codex_launch(
-                workspace=request.workspace,
-                worktree=request.worktree,
-                system_prompt=request.system_prompt,
-                base_env=env,
-                sandbox_off=codex_sandbox_off(isolation),
+                request, base_env=env, sandbox_off=codex_sandbox_off(isolation)
             )
             env.update(launch_env_additions)
             # Per-task CODEX_HOME so concurrent specialists and the operator's
@@ -489,13 +492,7 @@ class SpecialistSubprocessDispatcher:
             # binaries under /tmp and would run without its PATH aliases.
             env["CODEX_HOME"] = str(request.workspace / ".codex")
             return cmd
-        cmd = self._build_claude_cmd(
-            system_prompt_file=request.workspace / "system_prompt.md",
-            system_prompt=request.system_prompt,
-            workspace=request.workspace,
-            worktree=request.worktree,
-            disallowed_tools=frozenset(request.disallowed_tools),
-        )
+        cmd = self._build_claude_cmd(request)
         stage_mcp_config(isolation, request.workspace, cmd)
         return cmd
 
@@ -563,14 +560,12 @@ class SpecialistSubprocessDispatcher:
 
     def _build_codex_launch(
         self,
+        request: SpecialistSpawn,
         *,
-        workspace: Path,
-        worktree: Path | None,
-        system_prompt: str,
         base_env: Mapping[str, str],
         sandbox_off: bool = False,
     ) -> tuple[list[str], dict[str, str]]:
-        """Build secure Codex argv, private config, and child-only env values.
+        """Build secure Codex argv, private config, and child-only env values for ``request``.
 
         Codex 0.144.4 accepts ``developer_instructions`` in ``config.toml`` as a
         real developer-role message. The same schema declares MCP servers under
@@ -607,11 +602,11 @@ class SpecialistSubprocessDispatcher:
         )
         env_additions = dict(provider_env_additions)
         env_additions.update(mcp_env_additions)
-        codex_home = workspace / ".codex"
+        codex_home = request.workspace / ".codex"
         try:
             _write_private_codex_config(
                 codex_home=codex_home,
-                developer_instructions=system_prompt,
+                developer_instructions=request.system_prompt,
                 mcp_lines=mcp_lines,
             )
         except OSError as exc:
@@ -619,7 +614,7 @@ class SpecialistSubprocessDispatcher:
                 f"cannot prepare private Codex config under {codex_home}: {exc}"
             ) from exc
 
-        cmd = self._codex_argv(executable, sandbox_mode, workspace, worktree, provider_config.overrides)
+        cmd = self._codex_argv(executable, sandbox_mode, request, provider_config.overrides)
         return cmd, env_additions
 
     @staticmethod
@@ -642,11 +637,11 @@ class SpecialistSubprocessDispatcher:
         return sandbox_mode
 
     def _codex_argv(
-        self, executable: str, sandbox_mode: str, workspace: Path, worktree: Path | None, overrides: tuple[str, ...]
+        self, executable: str, sandbox_mode: str, request: SpecialistSpawn, overrides: tuple[str, ...]
     ) -> list[str]:
-        """Assemble the ``codex exec`` argv for a specialist under ``sandbox_mode``."""
-        cfg = self.config
-        writable_dirs = self._writable_dirs(workspace, worktree)
+        """Assemble the ``codex exec`` argv for ``request`` under ``sandbox_mode``."""
+        model = self.config.model_for(request)
+        writable_dirs = self._writable_dirs(request.workspace, request.worktree)
         cmd: list[str] = [
             executable,
             "exec",
@@ -659,45 +654,34 @@ class SpecialistSubprocessDispatcher:
         else:
             cmd.extend(["--sandbox", sandbox_mode])
         # Primary working root; the reap loop spawns with the same cwd.
-        cmd.extend(["-C", str(worktree or workspace)])
+        cmd.extend(["-C", str(request.worktree or request.workspace)])
         for extra_dir in writable_dirs[1:]:
             cmd.extend(["--add-dir", extra_dir])
         for override in (*CODEX_BASE_OVERRIDES, *overrides):
             cmd.extend(["-c", override])
-        if cfg.model:
-            cmd.extend(["-m", cfg.model])
+        if model:
+            cmd.extend(["-m", model])
         cmd.append("-")
         return cmd
 
-    def _build_claude_cmd(
-        self,
-        *,
-        system_prompt_file: Path,
-        system_prompt: str,
-        workspace: Path,
-        worktree: Path | None,
-        disallowed_tools: frozenset[str] = frozenset(),
-    ) -> list[str]:
-        """Assemble the ``claude`` CLI argv for a specialist subprocess.
+    def _build_claude_cmd(self, request: SpecialistSpawn) -> list[str]:
+        """Assemble the ``claude`` CLI argv for ``request``.
 
         System and user prompts travel through separate channels: system via
-        ``--system-prompt-file``, user via stdin.
+        ``--system-prompt-file`` (``system_prompt.md`` in the task workspace), user via stdin.
 
         Args:
-            system_prompt_file (Path): Destination for the written system prompt;
-                passed to ``--system-prompt-file``.
-            system_prompt (str): The system prompt text to write.
-            workspace (Path): Task workspace surfaced as an ``--add-dir``.
-            worktree (Path | None): Write-isolated worktree surfaced as the
-                first ``--add-dir`` when present.
-            disallowed_tools: Tool names to remove from the available set.
+            request (SpecialistSpawn): The specialist to launch. Its worktree, when present, is the first
+                ``--add-dir`` and its workspace the next; its disallowed tools are removed from the available set.
 
         Returns:
             list[str]: The full command argv to spawn.
         """
-        write_text_nofollow(system_prompt_file.parent, (system_prompt_file.name,), system_prompt, mode=0o600)
+        system_prompt_file = request.workspace / "system_prompt.md"
+        write_text_nofollow(system_prompt_file.parent, (system_prompt_file.name,), request.system_prompt, mode=0o600)
 
         cfg = self.config
+        model = cfg.model_for(request)
         cmd: list[str] = [
             cfg.claude_executable,
             "--print",
@@ -714,16 +698,16 @@ class SpecialistSubprocessDispatcher:
             "--system-prompt-file",
             str(system_prompt_file),
         ]
-        if cfg.model:
-            cmd.extend(["--model", cfg.model])
-        if disallowed_tools:
-            cmd.extend(["--disallowedTools", ",".join(sorted(disallowed_tools))])
+        if model:
+            cmd.extend(["--model", model])
+        if request.disallowed_tools:
+            cmd.extend(["--disallowedTools", ",".join(sorted(set(request.disallowed_tools)))])
         from .leaf import build_leaf_agents_json
 
         cmd.extend(["--agents", build_leaf_agents_json()])
         if cfg.mcp_config_path:
             cmd.extend(["--mcp-config", cfg.mcp_config_path])
-        for d in self._writable_dirs(workspace, worktree):
+        for d in self._writable_dirs(request.workspace, request.worktree):
             cmd.extend(["--add-dir", d])
         return cmd
 
