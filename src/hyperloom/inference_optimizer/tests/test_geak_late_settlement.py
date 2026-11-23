@@ -40,7 +40,8 @@ def test_rejection_annotations_do_not_reopen_an_adjudicated_candidate(promotion)
 
 
 @pytest.mark.asyncio
-async def test_a_settled_agentx_candidate_is_not_re_promoted_on_the_next_kernel_entry(promotion):
+@pytest.mark.parametrize("benchmark_mode", ["agentx", "synthetic"])
+async def test_a_settled_candidate_is_not_re_promoted_on_the_next_kernel_entry(promotion, benchmark_mode):
     """A settled candidate stays settled across a re-entry: the runner's timing never enters the record.
 
     Recovery compares the persisted ``geak_result`` against the ``result.json`` still on disk. Anything
@@ -50,7 +51,7 @@ async def test_a_settled_agentx_candidate_is_not_re_promoted_on_the_next_kernel_
     """
     coord, result, _recorder = promotion
     state = coord.shared_state
-    state.benchmark_mode = "agentx"
+    state.benchmark_mode = benchmark_mode
     phase = coord.phase_kernel
     # The candidate settles unmeasured because this overlay will not load; while that holds, the settlement stands.
     overlay = coord.session_dir / "overlay-that-never-loaded"
@@ -64,7 +65,6 @@ async def test_a_settled_agentx_candidate_is_not_re_promoted_on_the_next_kernel_
     settled = phase._settle_geak_runner_exit(
         exited_ok,
         handoff=handoff,
-        agentx=True,
         facts=GeakRunnerFacts(
             started_at="2026-09-02T00:00:00+00:00", duration_sec=1200.0, runner_timeout_sec=3600, kill_timeout_sec=3900
         ),
@@ -83,7 +83,6 @@ async def test_a_settled_agentx_candidate_is_not_re_promoted_on_the_next_kernel_
     again = phase._settle_geak_runner_exit(
         exited_ok,
         handoff=handoff,
-        agentx=True,
         facts=GeakRunnerFacts(
             started_at="2026-09-02T09:00:00+00:00", duration_sec=90.0, runner_timeout_sec=1800, kill_timeout_sec=2100
         ),
@@ -96,7 +95,7 @@ async def test_a_settled_agentx_candidate_is_not_re_promoted_on_the_next_kernel_
 
     overlay.mkdir()
     (overlay / "sitecustomize.py").write_text("", encoding="utf-8")
-    reopened = phase._settle_geak_runner_exit(exited_ok, handoff=handoff, agentx=True, facts=GeakRunnerFacts())
+    reopened = phase._settle_geak_runner_exit(exited_ok, handoff=handoff, facts=GeakRunnerFacts())
     assert reopened is not None, "a candidate whose overlay became loadable is measured"
 
 
@@ -112,7 +111,6 @@ def test_a_failed_runner_logs_the_error_from_its_result_json(promotion, caplog):
         coord.phase_kernel._settle_geak_runner_exit(
             exited_failed,
             handoff={"exp_root": str(coord.session_dir), "eval_dir": ""},
-            agentx=False,
             facts=GeakRunnerFacts(
                 started_at="2026-09-02T00:00:00+00:00",
                 duration_sec=60.0,

@@ -292,7 +292,7 @@ async def _next_kernel_entry(coordinator, reported) -> bool:
     geak_dir.mkdir(exist_ok=True)
     (geak_dir / "result.json").write_text(json.dumps(reported), encoding="utf-8")
     coordinator.phase_kernel._record_geak_kernel_journey = lambda _result: None
-    return await coordinator.phase_kernel._promote_crashed_geak_result({}, agentx=True, cards=None)
+    return await coordinator.phase_kernel._promote_crashed_geak_result({}, cards=None)
 
 
 def _given_up(state) -> bool:
@@ -384,9 +384,7 @@ async def test_unmeasured_count_follows_a_product_the_geak_runner_hands_back(coo
     def handed_back(product):
         result_path.write_text(json.dumps(product), encoding="utf-8")
         exited = subprocess.CompletedProcess(args=["geak"], returncode=1, stdout="", stderr="")
-        return coordinator.phase_kernel._settle_geak_runner_exit(
-            exited, handoff={}, agentx=True, facts=GeakRunnerFacts()
-        )
+        return coordinator.phase_kernel._settle_geak_runner_exit(exited, handoff={}, facts=GeakRunnerFacts())
 
     assert handed_back(reported)[REVALIDATION_UNMEASURED] == 1
     another_product = {**reported, "final_throughput_tok_s": reported["final_throughput_tok_s"] + 1.0}

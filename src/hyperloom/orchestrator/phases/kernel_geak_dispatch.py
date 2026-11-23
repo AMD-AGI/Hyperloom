@@ -600,7 +600,7 @@ class _GeakDispatchMixin:
         return record
 
     def _settle_geak_runner_exit(
-        self, proc: subprocess.CompletedProcess, *, handoff: dict[str, Any], agentx: bool, facts: GeakRunnerFacts
+        self, proc: subprocess.CompletedProcess, *, handoff: dict[str, Any], facts: GeakRunnerFacts
     ) -> dict[str, Any] | None:
         result_path = self._geak_result_path()
         stderr_tail = (proc.stderr or "")[-2000:]
@@ -626,7 +626,7 @@ class _GeakDispatchMixin:
                 facts=facts,
             )
             return None
-        if agentx and self._geak_settled_replay(result):
+        if self._geak_settled_replay(result):
             # The runner left the candidate this session already settled, so it shipped no product: recording it
             # would retire the verdict and re-enqueue the revalidation that produced it. The file stays for the
             # next run to overwrite.
@@ -646,9 +646,7 @@ class _GeakDispatchMixin:
         result.setdefault("returncode", proc.returncode)
         return result
 
-    async def _dispatch_geak_runner(
-        self, handoff: dict[str, Any], *, from_phase: str, agentx: bool
-    ) -> GeakRunnerOutcome:
+    async def _dispatch_geak_runner(self, handoff: dict[str, Any], *, from_phase: str) -> GeakRunnerOutcome:
         out_dir = self.session_dir / "geak"
         # Budget-aware timeouts: shrink to the remaining run deadline and always reserve the closing-grace window.
         runner_timeout, kill_timeout, budget_known = self._geak_timeouts()
@@ -683,7 +681,7 @@ class _GeakDispatchMixin:
             # the phase as a timeout.
             facts = _facts()
             flushed = read_json(self._geak_result_path(), {}, require_dict=True)
-            settled = bool(flushed) and agentx and self._geak_settled_replay(flushed)
+            settled = bool(flushed) and self._geak_settled_replay(flushed)
             if flushed.get("status") == "ok" and not settled:
                 log.info(
                     "GEAK flushed an OK result.json under SIGTERM grace; promoting the recovered win despite the cap."
@@ -717,9 +715,7 @@ class _GeakDispatchMixin:
             )
             return GeakRunnerOutcome()
         facts = _facts()
-        return GeakRunnerOutcome(
-            self._settle_geak_runner_exit(proc, handoff=handoff, agentx=agentx, facts=facts), facts
-        )
+        return GeakRunnerOutcome(self._settle_geak_runner_exit(proc, handoff=handoff, facts=facts), facts)
 
     def _open_geak_handoff(self, *, agentx: bool) -> dict[str, Any] | None:
         try:
@@ -740,9 +736,7 @@ class _GeakDispatchMixin:
             recorder.record_geak_handoff(handoff)
         return handoff
 
-    async def _promote_crashed_geak_result(
-        self, handoff: dict[str, Any], *, agentx: bool, cards: list[int] | None
-    ) -> bool:
+    async def _promote_crashed_geak_result(self, handoff: dict[str, Any], *, cards: list[int] | None) -> bool:
         # A validated result.json written before a coordinator crash is promoted on resume, guarded by
         # ``_geak_win_already_recorded`` so a prior cycle's result.json does not short-circuit a fresh entry. A
         # result this session already settled is not recovered; new candidate evidence remains eligible.
@@ -815,7 +809,7 @@ class _GeakDispatchMixin:
         cards = _resolve_handoff_physical_gpus(
             gpu_ids=handoff["gpu_ids"], gpu_ids_space=handoff["gpu_ids_space"], gpu_pin=handoff.get("gpu_pin") or {}
         )
-        if await self._promote_crashed_geak_result(handoff, agentx=agentx, cards=cards):
+        if await self._promote_crashed_geak_result(handoff, cards=cards):
             return
 
         still_busy = await self._free_gpus_for_geak(cards)
@@ -825,7 +819,7 @@ class _GeakDispatchMixin:
             )
             return
 
-        outcome = await self._dispatch_geak_runner(handoff, from_phase=from_phase, agentx=agentx)
+        outcome = await self._dispatch_geak_runner(handoff, from_phase=from_phase)
         result, facts = outcome.result, outcome.facts
         if result is None:
             return
