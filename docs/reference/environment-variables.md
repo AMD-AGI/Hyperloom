@@ -171,7 +171,7 @@ The prompts of a fixed workload have no flag; they are read from the environment
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATASET_PATH` | Unset (InferenceX's random prompts of `ISL` tokens) | Absolute path of a JSONL file of real prompts every fixed round sends instead, each line a `prompt` string or a `turns` list whose first turn is sent. A path that is not absolute refuses the round as `config_invalid`. See [InferenceSuite benchmark rounds](inference-suite.md#launch-layers). |
+| `DATASET_PATH` | Unset (InferenceX's random prompts of `ISL` tokens) | Absolute path of a JSONL file of real prompts every fixed round sends instead, each line a `prompt` string or a `turns` list whose first turn is sent. A path that is not absolute refuses the round as `config_invalid`. The round's client opens the file once its server is up, so a file it cannot read fails the round as `client_failed`; a `hyperloom-multibranch run` test whose runner bubblewrap confines reads it only in a tree its sandbox shows, such as the model directory or the Hugging Face hub cache. See [InferenceSuite benchmark rounds](inference-suite.md#launch-layers). |
 | `DATASET_MAX_PROMPTS` | Unset (every line) | A positive integer: only the first that many lines of `DATASET_PATH` are sent, and a point that sets no `NUM_PROMPTS` sends at least that many requests, so each kept prompt is sent. Without `DATASET_PATH` it changes nothing. |
 
 ---
@@ -696,7 +696,7 @@ from these benchmark limits and retain their existing contracts.
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPERLOOM_SERVER_CPUS` | Unset (the round's own CPUs) | CPUs every server a benchmark round starts is pinned to, so that other work on the host does not share them. A list as `taskset -c` takes it: CPU numbers and ascending `first-last` ranges separated by commas, digits only (`32-63`, `0-15,64-79`, `3`). Any other value (`all`, a space inside the list, a range that runs backwards) fails every round as an invalid configuration before its server starts, with the variable named in the round's error. A round that measures a server it does not start (`BENCHMARK_BASE_URL`, multi-node) pins nothing. The process that runs the round reads it from its own environment: `hyperloom optimize` does; a test of `hyperloom-multibranch run` runs in a runner whose environment does not carry it, so its server is not pinned. |
+| `HYPERLOOM_SERVER_CPUS` | Unset (the round's own CPUs) | CPUs every server a benchmark round starts is pinned to, so that other work on the host does not share them. A list as `taskset -c` takes it: CPU numbers and ascending `first-last` ranges separated by commas, digits only (`32-63`, `0-15,64-79`, `3`). Any other value (`all`, a space inside the list, a range that runs backwards) fails every round as an invalid configuration before its server starts, with the variable named in the round's error. The list is not checked against the host: the kernel leaves out the CPUs it names that the host does not have, and a list that names none the host has raises where the server is started (`Exception occurred in preexec_fn.`) instead of failing the round as `config_invalid`. A round that measures a server it does not start (`BENCHMARK_BASE_URL`, multi-node) pins nothing. The process that runs the round reads it from its own environment: `hyperloom optimize` does; a test of `hyperloom-multibranch run` runs in a runner whose environment does not carry it, so its server is not pinned. |
 
 ---
 

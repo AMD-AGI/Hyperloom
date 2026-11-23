@@ -48,7 +48,7 @@ def read_prompts(path: Path, max_prompts: int | None) -> list[str]:
     """The prompts of the first ``max_prompts`` lines of the JSONL file at ``path`` (all when ``None``): each line's
     ``prompt`` string, else the first of its ``turns``."""
     prompts: list[str] = []
-    for number, line in enumerate(path.read_text(encoding=_ENCODING).splitlines(), start=1):
+    for number, line in enumerate(path.read_text(encoding=_ENCODING).split("\n"), start=1):
         if max_prompts is not None and len(prompts) == max_prompts:
             break
         if not line.strip():

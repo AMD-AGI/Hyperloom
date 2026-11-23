@@ -153,6 +153,14 @@ def test_a_line_without_a_prompt_is_refused(tmp_path: Path, line: str):
         dataset_client.read_prompts(path, None)
 
 
+def test_a_prompt_holding_a_unicode_line_separator_is_one_line_of_the_file(tmp_path: Path):
+    path = tmp_path / "prompts.jsonl"
+    prompts = ["one\u2028prompt", "another\x85one"]
+    lines = [json.dumps({"prompt": prompt}, ensure_ascii=False) for prompt in prompts]
+    path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8", newline="")
+    assert dataset_client.read_prompts(path, None) == prompts
+
+
 def test_percentiles_interpolate_as_numpy_does():
     values = [4.0, 1.0, 3.0, 2.0, 10.0]
     assert [dataset_client.percentile(values, p) for p in (50, 90, 99)] == pytest.approx([3.0, 7.6, 9.76])
