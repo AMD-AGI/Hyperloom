@@ -572,7 +572,7 @@ def inject_sglang_attention_backend(
 # sglang/ROCm images, verified end-to-end on a real MoE checkpoint.
 # ``moe_runner_requires_aiter`` below strips an *inherited*
 # ``--moe-runner-backend`` that would crash an aiter-only quant scheme (grid
-# variants, baseline retries).
+# variants).
 #
 # Matches space- or equals-separated form without false-matching a longer flag.
 SGLANG_MOE_RUNNER_BACKEND_RE = re.compile(r"--moe-runner-backend(?:[=\s]|$)")

@@ -8,14 +8,16 @@ AMD: sglang's own ``auto`` resolution already follows ``SGLANG_USE_AITER``
 correctly on current sglang/ROCm images. What remains is the aiter-only quant
 scheme detection (``moe_runner_requires_aiter``), used elsewhere to strip an
 *inherited* ``--moe-runner-backend`` that would crash such a checkpoint (grid
-variants, baseline retries), and ``materialize_config_with_envs`` never adding
-the flag on its own.
+variants), ``materialize_config_with_envs`` never adding the flag on its own,
+and a baseline launching the backend it was given.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -23,10 +25,10 @@ import yaml
 from hyperloom.inference_optimizer import model_config_utils
 from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     materialize_config_with_envs,
     LaunchLayer,
-    MaterializeOptions,
 )
 
 from .conftest import write_benchmark_yaml
@@ -236,7 +238,6 @@ def _materialize_envs(
     model: str,
     framework: str = "sglang",
     extra_server_args: str = "",
-    drop_moe_runner_backend: bool = False,
 ) -> dict:
     base = tmp_path / "base.yaml"
     write_benchmark_yaml(base, model=model, framework=framework, benchmark_script=None)
@@ -246,7 +247,6 @@ def _materialize_envs(
         base,
         out,
         launch=LaunchLayer(extra_server_args=extra_server_args),
-        options=MaterializeOptions(drop_moe_runner_backend=drop_moe_runner_backend),
     )
     return yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
@@ -271,25 +271,6 @@ def test_materialize_noop_for_quark_mxfp4_moe_on_amd(tmp_path, quark_mxfp4_moe_m
     assert "--moe-runner-backend" not in envs.get("EXTRA_SGLANG_ARGS", "")
 
 
-def test_materialize_drop_flag_is_noop_without_pin(tmp_path, moe_model, monkeypatch):
-    monkeypatch.setenv("GPU_TYPE", _AMD)
-    envs = _materialize_envs(tmp_path, model=moe_model, drop_moe_runner_backend=True)
-    assert "--moe-runner-backend" not in envs.get("EXTRA_SGLANG_ARGS", "")
-
-
-def test_materialize_drop_strips_inherited_backend(tmp_path, moe_model, monkeypatch):
-    monkeypatch.setenv("GPU_TYPE", _AMD)
-    envs = _materialize_envs(
-        tmp_path,
-        model=moe_model,
-        extra_server_args="--moe-runner-backend ck --foo 1",
-        drop_moe_runner_backend=True,
-    )
-    sglang_args = envs.get("EXTRA_SGLANG_ARGS", "")
-    assert "--moe-runner-backend" not in sglang_args
-    assert "--foo 1" in sglang_args
-
-
 def test_materialize_does_not_double_user_backend(tmp_path, moe_model, monkeypatch):
     monkeypatch.setenv("GPU_TYPE", _AMD)
     envs = _materialize_envs(
@@ -301,6 +282,31 @@ def test_materialize_does_not_double_user_backend(tmp_path, moe_model, monkeypat
     assert sglang_args.count("--moe-runner-backend") == 1
     assert "ck" in sglang_args
     assert "triton" not in sglang_args
+
+
+def test_a_baseline_killed_by_its_pinned_backend_fails_as_launched(tmp_path):
+    pinned = "--moe-runner-backend triton"
+    launched: list[str] = []
+    executor = BaselineExecutor(session_dir=tmp_path, shared_state=None)
+
+    async def _run_once(ctx, *, recorder=None, run_index=0):
+        launched.append(executor._settle_attempt_server_args(ctx.task.params, None)[1])
+        return {
+            "status": "failed",
+            "error_class": "server_init_dead",
+            "error": "AttributeError: 'QuarkW4A4MXFp4MoE' object has no attribute 'runner'",
+        }
+
+    executor._run_once = _run_once  # type: ignore[method-assign]
+    task = SimpleNamespace(
+        task_id="t-moe", kind="baseline", params={"framework": "sglang", "extra_server_args": pinned}
+    )
+
+    result = asyncio.run(executor._run_with_accuracy(SimpleNamespace(task=task, extra={})))
+
+    assert launched == [pinned]
+    assert result["status"] == "failed"
+    assert task.params["extra_server_args"] == pinned
 
 
 @pytest.mark.parametrize(

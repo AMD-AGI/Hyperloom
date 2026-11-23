@@ -58,7 +58,6 @@ ROW_ROUND = "round"
 
 # Every run row names why it ran, so a baseline that measured three times reads without re-deriving the retry reason.
 RUN_INITIAL = "initial"
-RUN_AFTER_MOE_RUNNER_FAILURE = "retry_after_moe_runner_failure"
 
 #: Quality-reference statuses whose figure the session went on to use. ``degraded`` is a baseline that stands on its
 #: cold warmup round because the budget would not hold the hot pass: knowingly depressed, but it is the number every
@@ -117,7 +116,6 @@ __all__ = [
     "ROUND_MEASURE",
     "ROUND_SINGLE",
     "ROUND_WARMUP",
-    "RUN_AFTER_MOE_RUNNER_FAILURE",
     "RUN_INITIAL",
     "SECTION_ACTION",
     "SECTION_EVENT",
@@ -650,12 +648,10 @@ class BaselineEventRecorder:
         """Record what this pass is about to launch the server under.
 
         Called at the launch, by the frame that resolved the args, the only
-        place and moment they are known as a fact. Recorded on the run rather
-        than only on the action because the MoE-runner retry drops a flag and
-        re-launches, so an action-only record would publish one invocation for
-        a pass that ran under two. An empty ``framework_args`` is a real
-        answer, the framework's own defaults; ``args_mode`` (``append`` or
-        ``replace``) decides whether the string is the whole of the request.
+        place and moment they are known as a fact. An empty ``framework_args``
+        is a real answer, the framework's own defaults; ``args_mode``
+        (``append`` or ``replace``) decides whether the string is the whole of
+        the request.
         """
         block: dict[str, Any] = {
             "framework_args": str(invocation.framework_args or ""),

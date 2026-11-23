@@ -17,7 +17,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_MEASURE,
     ROUND_SINGLE,
     ROUND_WARMUP,
-    RUN_AFTER_MOE_RUNNER_FAILURE,
     RUN_INITIAL,
     BaselineInvocation,
     BaselineRequest,
@@ -282,42 +281,6 @@ def test_rounds_that_start_in_the_same_second_keep_the_order_they_ran_in(tmp_pat
     assert all("ordinal" not in row for row in rounds)
 
 
-def test_each_pass_keeps_its_own_rounds_and_says_why_it_ran(tmp_path: Path) -> None:
-    recorder = _recorder()
-    first = recorder.begin_run(attempt_reason=RUN_INITIAL)
-    recorder.record_round(
-        run_index=first,
-        round_=BaselineRound(
-            label=ROUND_SINGLE,
-            started_at="2026-09-02T15:07:09+00:00",
-            duration_sec=30.0,
-            result=_failed(error_class="subprocess_nonzero"),
-        ),
-    )
-    recorder.end_run(run_index=first, result=_failed(error_class="subprocess_nonzero"))
-    second = recorder.begin_run(attempt_reason=RUN_AFTER_MOE_RUNNER_FAILURE)
-    recorder.record_round(
-        run_index=second,
-        round_=BaselineRound(
-            label=ROUND_SINGLE,
-            started_at="2026-09-02T15:09:09+00:00",
-            duration_sec=240.0,
-            result=_measured(),
-        ),
-    )
-    recorder.end_run(run_index=second, result=_measured())
-    recorder.finish(_measured())
-
-    runs = _actions(tmp_path)[0]["runs"]
-    assert [row["run_index"] for row in runs] == [1, 2]
-    assert [row["attempt_reason"] for row in runs] == [RUN_INITIAL, RUN_AFTER_MOE_RUNNER_FAILURE]
-    assert [row["status"] for row in runs] == ["failed", "succeeded"]
-    assert runs[0]["rounds"][0]["failure"]["error_class"] == "subprocess_nonzero"
-    assert runs[1]["rounds"][0]["failure"] is None
-    # A run that failed and was recovered from does not make the action failed.
-    assert _events(tmp_path)[0]["status"] == "succeeded"
-
-
 def test_a_pass_refused_before_it_booted_still_leaves_a_row(tmp_path: Path) -> None:
     recorder = _recorder()
     index = recorder.begin_run(attempt_reason=RUN_INITIAL)
@@ -566,7 +529,6 @@ async def test_the_executor_records_the_rounds_it_actually_ran(tmp_path: Path) -
     executor._run_once = _run_once  # type: ignore[method-assign]
     executor._run_single_benchmark = _benchmark  # type: ignore[method-assign]
     executor._maybe_stop_on_missing_baseline_accuracy = lambda *_a: None  # type: ignore[method-assign]
-    executor._is_moe_runner_rooted_failure = lambda _r: False  # type: ignore[method-assign]
     executor._resolve_shared_state = lambda state=None: state  # type: ignore[method-assign]
 
     result = await executor(_executor_ctx(tmp_path, config_path="/cfg.yaml"))
@@ -593,7 +555,6 @@ async def test_the_baseline_event_carries_the_per_gpu_output_the_session_anchors
 
     executor._run_once = _run_once  # type: ignore[method-assign]
     executor._maybe_stop_on_missing_baseline_accuracy = lambda *_a: None  # type: ignore[method-assign]
-    executor._is_moe_runner_rooted_failure = lambda _r: False  # type: ignore[method-assign]
     executor._resolve_shared_state = lambda state=None: state  # type: ignore[method-assign]
     ctx = _executor_ctx(tmp_path, config_path="/cfg.yaml")
     ctx.extra["shared_state"].tp = 8
@@ -618,7 +579,6 @@ async def test_an_inner_step_measurement_records_into_the_event_that_asked_for_i
 
     executor._run_once = _run_once  # type: ignore[method-assign]
     executor._maybe_stop_on_missing_baseline_accuracy = lambda *_a: None  # type: ignore[method-assign]
-    executor._is_moe_runner_rooted_failure = lambda _r: False  # type: ignore[method-assign]
     executor._resolve_shared_state = lambda state=None: state  # type: ignore[method-assign]
 
     await executor(_executor_ctx(tmp_path, **{INLINE_EVENT_PARAM: host}))
@@ -815,24 +775,6 @@ def test_only_observed_flags_are_reported_as_the_weaker_answer(tmp_path: Path) -
     assert invocation["framework_args"].endswith("--tp 8")
 
 
-def test_a_retry_that_changed_the_args_records_both_launches(tmp_path: Path) -> None:
-    recorder = _recorder()
-    first = recorder.begin_run(attempt_reason=RUN_INITIAL)
-    recorder.record_invocation(
-        run_index=first, invocation=BaselineInvocation(framework_args="--moe-runner-backend triton")
-    )
-    recorder.end_run(run_index=first, result=_failed())
-    second = recorder.begin_run(attempt_reason=RUN_AFTER_MOE_RUNNER_FAILURE)
-    recorder.record_invocation(run_index=second, invocation=BaselineInvocation(framework_args=""))
-    recorder.end_run(run_index=second, result=_measured())
-    recorder.finish(_measured())
-
-    runs = _actions(tmp_path)[0]["runs"]
-    assert [run["invocation"]["framework_args"] for run in runs] == ["--moe-runner-backend triton", ""]
-    # The action carries the launch its adopted measurement was taken under.
-    assert _actions(tmp_path)[0]["invocation"]["framework_args"] == ""
-
-
 # ---------------------------------------------------------------------------
 # the failure counters
 # ---------------------------------------------------------------------------
@@ -866,7 +808,6 @@ async def test_the_executor_reads_the_counters_off_the_session(tmp_path: Path) -
 
     executor._run_once = _run_once  # type: ignore[method-assign]
     executor._maybe_stop_on_missing_baseline_accuracy = lambda *_a: None  # type: ignore[method-assign]
-    executor._is_moe_runner_rooted_failure = lambda _r: False  # type: ignore[method-assign]
     executor._resolve_shared_state = lambda state=None: state  # type: ignore[method-assign]
 
     ctx = _executor_ctx(tmp_path, config_path="/cfg.yaml")
