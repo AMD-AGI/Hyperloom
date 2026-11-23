@@ -406,11 +406,13 @@ def test_the_sessions_menus_read_the_archive_and_log_each_menu_beside_the_report
     assert menus is not None
     menus.menu(snapshot, "s1", "c1")
     unlogged = session_menus(METRIC, None)
+    held = session_menus(METRIC, None, False)
     monkeypatch.delenv(ARCHIVE_ENV)
 
     assert [tree.session_id for tree in menus.trees] == ["sess-1"]
     assert [(logged.branch, logged.commit) for logged in MenuLog(reports / MENU_LOG).menus()] == [("s1", "c1")]
     assert unlogged is not None and unlogged.log is None
+    assert (menus.source_changes, held is not None and held.source_changes) == (True, False)
     assert session_menus(METRIC, reports) is None
 
 

@@ -138,6 +138,26 @@ def test_the_code_list_folds_a_familys_source_and_kernel_layers_into_one_line_an
     assert logged.odds[-2:] == (round(line.odds, 4),) * 2
 
 
+def test_a_session_held_to_launch_configuration_gives_and_logs_a_menu_without_the_code_list(
+    snapshot: BlackboardSnapshot, tmp_path: Path
+) -> None:
+    """Its toolbox refuses every line of the code list, so the list is neither shown nor logged as given."""
+    claim = snapshot.claims[0]
+    scheduler = Intent("s1", "c1", "scheduler", "tune max-num-seqs", KERNEL)
+    claimed = dataclasses.replace(claim, status=ClaimStatus.HELD, holder="zz", intent=scheduler)
+    snapshot = dataclasses.replace(snapshot, claims=(claimed, *snapshot.claims[1:]))
+    branch = _shown(snapshot)
+    kept = DirectionMenus(metric=METRIC).menu(snapshot, branch, "c1")
+
+    held = DirectionMenus(metric=METRIC, log=MenuLog(tmp_path / MENU_LOG), source_changes=False)
+    menu = held.menu(snapshot, branch, "c1")
+
+    assert kept.code and menu.code == () and menu.lines(CODE) == ()
+    assert menu.settings == kept.settings and len(menu.lines(SETTINGS)) == MENU_ITEMS
+    (logged,) = MenuLog(tmp_path / MENU_LOG).menus()
+    assert logged.sections == (SETTINGS,) * MENU_ITEMS
+
+
 def test_the_menu_log_reads_on_past_a_line_that_is_not_utf8_json_or_a_menu(tmp_path: Path) -> None:
     menu = {"format": MENU_LOG_FORMAT, "at": 2.0, "branch": "s1", "commit": "c1", "control": False, "families": ["kv"]}
     earlier = {**menu, "at": 1.0, "commit": "c0"}

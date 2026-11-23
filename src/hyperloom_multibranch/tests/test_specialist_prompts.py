@@ -335,6 +335,7 @@ def test_each_prompt_is_versioned_by_its_own_text(monkeypatch):
         ("DISCOVERY_TEXTS", lambda texts: (*texts, "One more rule."), "specialist_role"),
         ("_REFERENCES", lambda text: text + " One more rule.", "specialist_role"),
         ("_BASE", lambda text: text + " One more rule.", "specialist_role"),
+        ("_LAUNCH_CONFIG_ONLY", lambda text: text + " One more rule.", "specialist_role"),
         ("_HOLDS", lambda holds: {**holds, "geak": holds["geak"] + " more"}, "specialist_role"),
         ("_INFERENCEX_GRADING", lambda grading: replace(grading, trade_off=", more"), "specialist_role"),
         ("_LEASE_WAKE", lambda text: text + " One more rule.", "specialist_launch"),
@@ -350,6 +351,38 @@ def test_a_text_sent_only_under_some_settings_still_changes_its_prompt_s_version
     monkeypatch.setattr(prompts, name, edit(getattr(prompts, name)))
 
     assert prompt_versions()[version] != before[version]
+
+
+def test_a_session_held_to_launch_configuration_ends_its_role_by_saying_what_it_keeps_and_refuses():
+    kept = role_prompt(WORKLOAD)
+    held = role_prompt(replace(WORKLOAD, source_changes=False))
+
+    assert "--no-source-changes" not in kept, "a session that keeps source changes is told nothing of the option"
+    assert held.startswith(kept), "the role before it is the one every session is given"
+    told = " ".join(held[len(kept) :].split())
+    for said in (
+        "started with --no-source-changes",
+        "nothing but server arguments and environment variables",
+        "This overrides everything above",
+        "refuses, as launch_config_only, every test whose recipe holds a patch or a kernel artifact",
+        "Claim config intents only",
+        "start no kernel_tune and no knob_tune",
+        'A "left out:" patch or kernel of a replayed champion stays out',
+        "A setting that names a file you wrote",
+        "here, test the next setting",
+        "EXHAUSTED with why all_tested_or_claimed",
+        "a branch whose turns keep ending with nothing to test is stopped",
+    ):
+        assert said in told, said
+
+
+def test_the_role_of_a_session_held_to_launch_configuration_still_ends_with_what_only_it_is_told(tmp_path):
+    """The base launch and the references stay in it: the block overrides the source work, not the session's facts."""
+    base = ServerBase(args="--tp 2", env={"SGLANG_USE_AITER": "1"})
+    held = role_prompt(replace(WORKLOAD, source_changes=False), references={"notes": tmp_path}, server=RoleServer(base))
+
+    assert held.index("Reference material for this session") < held.index("The session's base launch")
+    assert held.index("The session's base launch") < held.index("Launch configuration only.")
 
 
 def test_a_launch_shows_the_latest_entries_cut_to_size_and_how_the_last_session_ended():
