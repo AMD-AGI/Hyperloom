@@ -31,6 +31,7 @@ from hyperloom.inference_optimizer.session.base_launch import BASE_LAUNCH_FILE, 
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.policy import gate as policy
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, MI355X_CARD, publish_card
 from inference_suite import SourceFetchError, SourceSnapshot
 from inference_suite.contracts import BaseLaunch, BaseLaunchError, Redacted, SourceKind, Topology, Workload
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT
@@ -155,6 +156,21 @@ def test_a_fresh_session_freezes_the_recipe_base_it_resolves(tmp_path, fetched, 
     assert shared_state_fields(base) == {"base_launch_digest": base.digest()}
 
 
+def test_the_query_carries_what_the_session_card_reports(tmp_path, fetched, monkeypatch):
+    publish_card(monkeypatch, MI355X_CARD)
+    _resolve(tmp_path, _args(gpu_type="mi350x"))
+
+    query = fetched[0][0]
+    assert (query.board, query.gfx, query.memory_mib) == ("mi350x", "gfx950", MI355X_CARD.memory_mib)
+
+
+def test_a_session_without_a_card_queries_by_its_label_alone(tmp_path, fetched):
+    _resolve(tmp_path, _args())
+
+    query = fetched[0][0]
+    assert (query.board, query.gfx, query.memory_mib) == ("mi355x", None, None)
+
+
 def test_a_new_session_state_carries_no_reference_launch(tmp_path, fetched):
     base = _resolve(tmp_path, _args())
 
@@ -191,6 +207,7 @@ def _banner_err(session_dir: Path, monkeypatch, capsys) -> str:
 
 
 def test_a_model_no_recipe_serves_runs_the_default_table_and_the_banner_says_so(tmp_path, fetched, monkeypatch, capsys):
+    publish_card(monkeypatch, MI325X_CARD)
     base = _resolve(tmp_path, _args(model="Kimi-K2.6", gpu_type="mi300x", operator_tp=1))
 
     assert base is not None and base.source.kind is SourceKind.DEFAULT_TABLE
@@ -356,11 +373,17 @@ def test_an_unreadable_operator_file_exits_2_before_any_source_is_read(tmp_path,
     assert fetched == []
 
 
-def test_a_session_no_source_serves_exits_2_naming_every_miss(tmp_path, fetched, capsys):
-    err = _refused(tmp_path, _args(model="Kimi-K2.6", gpu_type="r9700", operator_tp=1), capsys)
+def test_a_fixed_session_on_an_arch_without_a_tuned_row_runs_the_fallback_and_says_so(
+    tmp_path, fetched, monkeypatch, capsys
+):
+    """An arch nobody tuned a default for still launches; ENABLEMENT takes it from there."""
+    publish_card(monkeypatch, dataclasses.replace(MI355X_CARD, name="AMD Radeon AI PRO R9700", gfx="gfx1201"))
+    base = _resolve(tmp_path, _args(model="Kimi-K2.6", gpu_type="r9700", operator_tp=1))
 
-    assert "no source serves" in err
-    assert "default_table: it has no sglang row for r9700 (gfx1201)" in err
+    assert base is not None and base.source.kind is SourceKind.DEFAULT_TABLE
+    assert "no sglang launch tuned for gfx1201, so its fallback launch runs it" in _banner_err(
+        tmp_path, monkeypatch, capsys
+    )
 
 
 @pytest.mark.parametrize(

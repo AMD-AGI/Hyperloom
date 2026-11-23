@@ -21,9 +21,10 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
+from hyperloom_common.gpu_card import GpuCard
 from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError
 from hyperloom.common.launch_credentials import credentials_in_the_clear
 from hyperloom.contracts.measurement import Purpose
@@ -63,6 +64,7 @@ _SHORT_PROMPTS = "short_prompts"
 _LONG_CONTEXT = "long_context"
 _CHECKPOINT = "checkpoint"
 _BOOT_BUDGET = "boot_budget_sec"
+_CARD = "card"
 _RESULT_DIR = "result_dir"
 KINDS = ("test", "profile", _ACCURACY, "repro")
 PURPOSES = tuple(purpose.value for purpose in Purpose)
@@ -140,12 +142,35 @@ class Meta:
         }
 
 
+def _card(value: Any, path: str) -> GpuCard | None:
+    """The card the session read, absent from a sheet whose session read none. Its name and device id may be empty or
+    left out: the driver does not name every card."""
+    if value is None:
+        return None
+    r = Reader(value, path)
+    card = GpuCard(
+        name=r.string("name") if "name" in value else "",
+        device_id=r.string("device_id") if "device_id" in value else "",
+        gfx=r.text("gfx") or "",
+        compute_units=r.integer("compute_units", minimum=1) or 1,
+        memory_mib=r.integer("memory_mib", minimum=1) or 1,
+        memory_bandwidth_gbps=r.number("memory_bandwidth_gbps", minimum=0, optional=True),
+        engine_clock_mhz=r.integer("engine_clock_mhz", minimum=1, optional=True),
+    )
+    r.done()
+    return card
+
+
 @dataclass(frozen=True)
 class Hardware:
+    """The cards a test needs. ``gpu_type`` is the session's label for them; ``card`` is what the session's cards
+    reported, which the runner holds its own to, and is absent when the session read none."""
+
     gpu_type: str
     gpu_count: int
     power_cap_w: float | None
     partition_mode: str | None
+    card: GpuCard | None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "Hardware":
@@ -155,6 +180,7 @@ class Hardware:
             gpu_count=r.integer("gpu_count", minimum=1) or 1,
             power_cap_w=r.number("power_cap_w", minimum=0, optional=True),
             partition_mode=r.text("partition_mode", optional=True),
+            card=_card(r.optional(_CARD), r.at(_CARD)),
         )
         r.done()
         return hardware
@@ -165,6 +191,7 @@ class Hardware:
             "gpu_count": self.gpu_count,
             "power_cap_w": self.power_cap_w,
             "partition_mode": self.partition_mode,
+            _CARD: None if self.card is None else asdict(self.card),
         }
 
 

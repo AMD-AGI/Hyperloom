@@ -9,10 +9,9 @@ import os
 import sqlite3
 from typing import TYPE_CHECKING, Any
 
+from hyperloom_common import gpu_card
 from hyperloom_common.coerce import first_text
 from hyperloom_common.fs_utils import read_text_nofollow
-from hyperloom_common.gpu_identity import gfx_arch_for_gpu_type
-from hyperloom.inference_optimizer.gpu_types import targeted_build_validated
 from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 
 from ..collaborator import CoordinatorCollaborator
@@ -61,6 +60,12 @@ def _targeted_build_unavailable() -> bool:
     return is_multi_node()
 
 
+def _session_gfx() -> str:
+    """The arch a targeted build compiles for: the session card's; empty when the session read no card."""
+    card = gpu_card.session_card()
+    return card.gfx if card else ""
+
+
 def _compiled_gap_component(framework: str, symbol: str, launch_log: str) -> str:
     """The component a compiled-miss build targets, picked from the failure evidence.
 
@@ -105,28 +110,6 @@ def _log_escalated_build(
 class EnablementBuild(CoordinatorCollaborator):
     """Escalates to a compiled build and routes the result back into the lane."""
 
-    def _refuse_build_on_unvalidated_board(self, capability: str | None) -> bool:
-        """Refuse a targeted build on a board whose build path is unvalidated, logging it and telling the lane why."""
-        gpu_type = (getattr(self.shared_state, "gpu_type", "") or "").strip().lower()
-        if targeted_build_validated(gpu_type):
-            return False
-        log.warning(
-            "ENABLEMENT: targeted_build skipped capability=%s gpu_type=%s (build path not validated on this board)",
-            capability or "(none)",
-            gpu_type,
-        )
-        self.shared_state.enablement.last_build_failure = {
-            "failure_class": "preflight_toolchain",
-            "failure_summary": f"targeted builds are not validated on {gpu_type}; no build was attempted",
-        }
-        return True
-
-    async def _enqueue_on_validated_board(self, action: TargetedBuildAction) -> str:
-        """Enqueue ``action`` unless this board's build path is unvalidated; the task id, or ``""``."""
-        if self._refuse_build_on_unvalidated_board(action.capability):
-            return ""
-        return await self._coord.build_lifecycle.enqueue_targeted_build(action)
-
     async def maybe_escalate_to_targeted_build(
         self,
         launch_log: str,
@@ -154,7 +137,6 @@ class EnablementBuild(CoordinatorCollaborator):
         )
         signature = verdict.signature
         framework = first_text(getattr(state, "framework", "")).lower()
-        gpu_type = first_text(getattr(state, "gpu_type", "")).lower()
 
         # Two escalation triggers: 1.
         is_compiled_gap = is_targeted_build_candidate(signature, launch_log)
@@ -198,9 +180,9 @@ class EnablementBuild(CoordinatorCollaborator):
             reason=reason,
             repo_url=repo_url,
             ref=first_text(kept_stack.get("ref")),
-            gpu_arch=gfx_arch_for_gpu_type(gpu_type) or "",
+            gpu_arch=_session_gfx(),
         )
-        task_id = await self._enqueue_on_validated_board(action)
+        task_id = await self._coord.build_lifecycle.enqueue_targeted_build(action)
         if task_id:
             _log_escalated_build(action, task_id, verdict, loaded, arch_stall=arch_only)
 
@@ -236,7 +218,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 except (OSError, ValueError):  # unreadable or partial done file: retry next tick
                     return
             req = payload.get("needs_targeted_build") if isinstance(payload, dict) else None
-            if not isinstance(req, dict) or not req or self._refuse_build_on_unvalidated_board(req.get("capability")):
+            if not isinstance(req, dict) or not req:
                 _consume_marker()
                 return
 
@@ -274,7 +256,6 @@ class EnablementBuild(CoordinatorCollaborator):
             # compiled component.
             component = "vllm_source"
         framework = first_text(getattr(state, "framework", "")).lower() or "vllm"
-        gpu_type = first_text(getattr(state, "gpu_type", "")).lower()
         repo_url = first_text(req.get("repo_url"))
         ref = first_text(req.get("ref"))
         source_pr_url = ""
@@ -302,7 +283,7 @@ class EnablementBuild(CoordinatorCollaborator):
             reason=f"specialist request: {reason}",
             repo_url=repo_url,
             ref=ref,
-            gpu_arch=gfx_arch_for_gpu_type(gpu_type) or "",
+            gpu_arch=_session_gfx(),
             source_pr_url=source_pr_url,
         )
 

@@ -13,13 +13,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from hyperloom_common.gpu_identity import gpu_board
+from hyperloom_common.gpu_card import GpuCard
 
 log = logging.getLogger(__name__)
 
 #: Compute-partition mode -> partitions per card. Both gfx942 and gfx950 boards
 #: carry eight XCDs, so the ladder is the same width on each. Used to interpret a
-#: mode name; the per-partition CU count and memory are read from the device.
+#: mode name; the per-partition CU count and memory are the session card's.
 MODE_PARTITION_COUNTS: dict[str, int] = {
     "SPX": 1,
     "DPX": 2,
@@ -53,7 +53,6 @@ class PartitionLayout:
     partitions: int
     cu_per_partition: int
     gib_per_partition: float | None = None
-    probed: bool = False
 
     @property
     def partitioned(self) -> bool:
@@ -68,8 +67,7 @@ class PartitionLayout:
     def describe(self) -> str:
         """Return a one-line summary for logs and reports."""
         mem = f", {self.gib_per_partition:.0f} GiB" if self.gib_per_partition else ""
-        source = "" if self.probed else " (derived)"
-        return f"{self.mode} ({self.partitions} x {self.cu_per_partition} CU{mem}){source}"
+        return f"{self.mode} ({self.partitions} x {self.cu_per_partition} CU{mem})"
 
 
 @dataclass(frozen=True)
@@ -146,138 +144,25 @@ def read_partition_mode(gpu_id: int = 0) -> str:
     return modes[gpu_id]
 
 
-#: Field names ``amd-smi static --asic`` has used for a device's compute-unit
-#: count. Tried in order; the first that parses wins. Several are accepted
-#: because the schema has moved between releases and a missing CU count silently
-#: sends the caller to the per-board table, which is the answer this probe
-#: exists to avoid.
-_CU_KEYS: tuple[str, ...] = ("num_compute_units", "compute_units", "num_cu", "cu_count")
+def layout_for(mode: str, *, cu_per_partition: int, gib_per_partition: float | None = None) -> PartitionLayout:
+    """Describe what ``mode`` means for a device of ``cu_per_partition`` compute units.
 
-
-def read_device_cu(gpu_id: int = 0) -> int | None:
-    """Read the compute-unit count of one device."""
-    try:
-        payload = _amd_smi_json(["static", "-g", str(gpu_id), "--asic"])
-    except PartitionError as exc:
-        # Warned, not debugged: falling back to the per-board table is a downgrade in accuracy, and the consequence
-        # lands far from here as a benchmark that finds no device of the expected width.
-        log.warning("could not read GPU %d compute units, will fall back to the board table: %s", gpu_id, exc)
-        return None
-    rows = payload.get("gpu_data") if isinstance(payload, dict) else payload
-    candidates = rows if isinstance(rows, list) else [payload]
-    for row in candidates:
-        if not isinstance(row, dict):
-            continue
-        asic = row.get("asic") if isinstance(row.get("asic"), dict) else row
-        for key in _CU_KEYS:
-            try:
-                value = int(asic[key])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if value > 0:
-                return value
-    log.warning("GPU %d reported no compute-unit count, will fall back to the board table", gpu_id)
-    return None
-
-
-#: GiB per unit amd-smi may label a VRAM size with. The binary divisor is the
-#: right one for its "MB": an MI355X with 288 GiB reports 294896 "MB", which is
-#: mebibytes. "GB" is treated the same way for consistency with that.
-_VRAM_UNIT_GIB: dict[str, float] = {
-    "B": 1.0 / (1024**3),
-    "KB": 1.0 / (1024**2),
-    "KIB": 1.0 / (1024**2),
-    "MB": 1.0 / 1024,
-    "MIB": 1.0 / 1024,
-    "GB": 1.0,
-    "GIB": 1.0,
-    "TB": 1024.0,
-    "TIB": 1024.0,
-}
-
-
-def read_device_gib(gpu_id: int = 0) -> float | None:
-    """Read the HBM available to one device, in GiB."""
-    try:
-        payload = _amd_smi_json(["static", "-g", str(gpu_id), "--vram"])
-    except PartitionError as exc:
-        # Warned rather than debugged: this figure is the only input to the feasibility check, so losing it means the
-        # session proceeds without one -- a quieter log than the drop it is meant to prevent would invert the
-        # severities.
-        log.warning("could not read HBM capacity for GPU %d; feasibility will not be checked: %s", gpu_id, exc)
-        return None
-
-    rows = payload.get("gpu_data") if isinstance(payload, dict) else payload
-    if not isinstance(rows, list):
-        log.warning("GPU %d returned no VRAM rows; feasibility will not be checked", gpu_id)
-        return None
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        vram = row.get("vram")
-        size = vram.get("size") if isinstance(vram, dict) else None
-        if not isinstance(size, dict):
-            continue
-        try:
-            value = float(size.get("value"))
-        except (TypeError, ValueError):
-            continue
-        scale = _VRAM_UNIT_GIB.get(str(size.get("unit") or "").strip().upper())
-        if scale is None or value <= 0:
-            continue
-        return value * scale
-    log.warning("GPU %d reported no usable VRAM size; feasibility will not be checked", gpu_id)
-    return None
-
-
-def layout_for(
-    mode: str,
-    *,
-    gpu_type: str | None = None,
-    cu_per_partition: int | None = None,
-    gib_per_partition: float | None = None,
-) -> PartitionLayout:
-    """Describe what ``mode`` means, preferring probed numbers to tabled ones."""
+    A partitioned card presents each partition as a device of its own, so a device's compute units and memory are one
+    partition's.
+    """
     canonical = parse_mode(mode)
     if not canonical:
         raise PartitionError("no compute-partition mode given")
-    partitions = MODE_PARTITION_COUNTS[canonical]
-    if cu_per_partition and int(cu_per_partition) > 0:
-        return PartitionLayout(
-            mode=canonical,
-            partitions=partitions,
-            cu_per_partition=int(cu_per_partition),
-            gib_per_partition=gib_per_partition,
-            probed=True,
-        )
-
-    # Fallback: derive from the board's total.
-    board = gpu_board(gpu_type)
-    if board is None:
-        raise PartitionError(
-            f"cannot size {canonical} partitions: GPU {gpu_type!r} reported no CU count and is not in the board table"
-        )
-    cu_total = board.compute_units
-    if cu_total % partitions:
-        # Flooring here would be silent and then fatal much later: partition devices are selected by matching this
-        # exact CU count, so a floored value matches nothing and the benchmark reports "mode did not take effect" --
-        # true, but about the wrong cause.
-        raise PartitionError(
-            f"{gpu_type} has {cu_total} CU by the board table, which does not divide into "
-            f"{partitions} {canonical} partitions; the per-partition CU count would be wrong "
-            f"and device selection matches on it exactly"
-        )
     return PartitionLayout(
         mode=canonical,
-        partitions=partitions,
-        cu_per_partition=cu_total // partitions,
+        partitions=MODE_PARTITION_COUNTS[canonical],
+        cu_per_partition=int(cu_per_partition),
         gib_per_partition=gib_per_partition,
-        probed=False,
     )
 
 
-def observe_partition(gpu_id: int = 0, *, gpu_type: str | None = None) -> PartitionLayout | None:
-    """Read the live partition topology of one card."""
+def observe_partition(gpu_id: int = 0, *, card: GpuCard | None) -> PartitionLayout | None:
+    """Read the live partition topology of one card, sized by the session's ``card``; ``None`` when either is unknown."""
     try:
         mode = read_partition_mode(gpu_id)
     except PartitionError as exc:
@@ -286,16 +171,10 @@ def observe_partition(gpu_id: int = 0, *, gpu_type: str | None = None) -> Partit
     if mode not in MODE_PARTITION_COUNTS:
         log.warning("GPU %d reports compute-partition mode %r, which this build does not know", gpu_id, mode)
         return None
-    try:
-        return layout_for(
-            mode,
-            gpu_type=gpu_type,
-            cu_per_partition=read_device_cu(gpu_id),
-            gib_per_partition=read_device_gib(gpu_id),
-        )
-    except PartitionError as exc:
-        log.warning("GPU %d is in %s but its partitions could not be sized: %s", gpu_id, mode, exc)
+    if card is None:
+        log.warning("GPU %d is in %s, but the session read no card to size its partitions by", gpu_id, mode)
         return None
+    return layout_for(mode, cu_per_partition=card.compute_units, gib_per_partition=card.memory_mib / 1024)
 
 
 def published_shape(env: Mapping[str, str] | None = None) -> dict[str, Any] | None:
@@ -346,7 +225,7 @@ def fits_in_partition(
     return required_gib * max(1, int(streams_per_partition)) <= capacity_gib
 
 
-# The probe helpers behind observe_partition -- read_partition_mode(s), read_device_cu, read_device_gib -- are
+# The probe helpers behind observe_partition -- read_partition_mode(s) -- are
 # deliberately absent. observe_partition's docstring calls itself "the single entry point a caller needs", and listing
 # the steps it takes here would contradict that: they are the call graph, not the interface.
 __all__ = [

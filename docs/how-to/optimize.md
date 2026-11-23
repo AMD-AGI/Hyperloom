@@ -139,7 +139,13 @@ first source that serves the model on your GPU board:
 2. InferenceX `main`, or the commit `--inferencex-commit SHA` pins.
 3. The framework's cookbook `main` (SGLang cookbook, vLLM recipes, ATOM).
 4. A built-in default table, with a warning (fixed workloads without
-   `--inferencex-commit` only).
+   `--inferencex-commit` only): the framework's row for your card's
+   architecture, or, when the table has none for it or no card was read, the
+   framework's fallback row, which sets only `--trust-remote-code`.
+
+A recipe serves only the board it was tuned on: a recipe published for a
+sibling board, such as an `mi350x` launch on an `mi355x`, is not taken. To run
+one anyway, write it as a launch script and pass that as `--reference-script`.
 
 `--inferencex-commit SHA` resolves from InferenceX at that commit, a full sha
 or a prefix of 7 or more hex digits, for example to match a CI run; the full

@@ -29,13 +29,11 @@ from hyperloom_common.llm.llm_config import (
     preferred_agent_backend,
 )
 from hyperloom_common.env import forge_explicitly_enabled
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.platform_probe import probe_cpu_platform
 from hyperloom_common.pr_monitor_urls import kb_store_url
 from hyperloom.common.provenance import (
     RESOLVED_FRAMEWORK_ENV,
     RESOLVED_FRAMEWORK_PYTHON_ENV,
-    detect_gfx_arch,
 )
 from hyperloom_common.timeutil import now_iso
 from hyperloom.common.visible_devices import hip_mask_within_rocr
@@ -414,19 +412,6 @@ def _check_shm_disk() -> dict[str, Any]:
         "skip_reason": None,
         "detail": {"shm_free_gib": round(free_gb, 1), "min_gib": 16},
     }
-
-
-def _check_gfx_arch_resolvable(gpu_type: str | None = None) -> None:
-    """Warn when the GPU architecture cannot be resolved for provenance."""
-    if detect_gfx_arch(os.environ, gpu_type=gpu_type):
-        return
-    boards = "/".join(sorted(AMD_GPU_BOARDS))
-    print(
-        "Preflight: WARNING — GPU architecture could not be resolved; provenance "
-        "will record gfx_arch as null, so an archived report will not say which "
-        f"ISA produced its numbers. Pass --gpu-type ({boards}), "
-        "set HYPERLOOM_GFX_ARCH, or put rocminfo (/opt/rocm/bin) on PATH."
-    )
 
 
 def _check_platform_tuning() -> dict[str, Any]:

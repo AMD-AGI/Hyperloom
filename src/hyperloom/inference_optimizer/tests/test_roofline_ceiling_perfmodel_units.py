@@ -9,10 +9,31 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import dataclasses
+
 import pytest
 
+from hyperloom_common.gpu_card import GpuCard
 from hyperloom.inference_optimizer import roofline_ceiling as rc
 from hyperloom.inference_optimizer import roofline_model_meta as rmm
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, MI355X_CARD, publish_card
+
+R9700_CARD = GpuCard("AMD Radeon AI PRO R9700", "7551", "gfx1201", 64, 32624, 640.0, 2920)
+
+
+@pytest.fixture(autouse=True)
+def _empty_tracelens_checkout(monkeypatch, tmp_path_factory):
+    """A TraceLens checkout with no arch JSON, so a peak is measured only where a test plants one."""
+    monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path_factory.mktemp("tracelens")))
+
+
+def _plant_arch_json(monkeypatch, root: Path, name: str, max_achievable_tflops: dict) -> None:
+    """Make ``root`` the TraceLens checkout, its arch dir holding ``<name>.json`` with these measured peaks."""
+    arch_dir = root / "TraceLens" / "Agent" / "Analysis" / "utils" / "arch"
+    arch_dir.mkdir(parents=True, exist_ok=True)
+    spec = {"name": name, "mem_bw_gbps": 6000, "max_achievable_tflops": max_achievable_tflops}
+    (arch_dir / f"{name}.json").write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setenv("TRACELENS_ROOT", str(root))
 
 
 # ---- op formulas ----
@@ -94,11 +115,13 @@ def _dense_meta(**over) -> rmm.ModelMeta:
 
 
 def _perfmodel(meta=None, **over):
-    kw = dict(gpu_type="mi300x", num_gpus=1, precision_tag="bf16", concurrency=8, isl=128, osl=64)
+    kw = dict(card=MI325X_CARD, platform="mi325x", num_gpus=1, precision_tag="bf16", concurrency=8, isl=128, osl=64)
     kw.update(over)
     return rc.compute_roofline_from_perfmodel(
         meta=meta or _dense_meta(),
-        target=rc.ComputeTarget(gpu_type=kw["gpu_type"], num_gpus=kw["num_gpus"], precision_tag=kw["precision_tag"]),
+        target=rc.ComputeTarget(
+            card=kw["card"], platform=kw["platform"], num_gpus=kw["num_gpus"], precision_tag=kw["precision_tag"]
+        ),
         shape=rc.DecodeShape(isl=kw["isl"], osl=kw["osl"], concurrency=kw["concurrency"]),
     )
 
@@ -128,25 +151,19 @@ def test_perfmodel_decode_sits_between_its_own_memory_and_compute_ceilings():
     assert out.bound_kind == slower
 
 
-def test_perfmodel_uses_vendor_peak_when_achievable_spec_is_absent():
-    out = _perfmodel(gpu_type="mi355x")
+def test_perfmodel_reads_the_card_bandwidth_and_vendor_peak_when_tracelens_measured_none():
+    out = _perfmodel(card=MI355X_CARD, platform="mi355x")
 
     assert out is not None
     assert out.hbm_bw_gbps == pytest.approx(8000.0)
     assert out.peak_achievable_tflops == pytest.approx(2516.6)
 
 
-def test_perfmodel_uses_the_r9700_vendor_peak():
-    out = _perfmodel(gpu_type="r9700")
-
-    assert out is not None
-    assert out.hbm_bw_gbps == pytest.approx(640.0)
-    assert out.peak_achievable_tflops == pytest.approx(191.0)
-
-
-def test_r9700_claims_no_fp4_compute_peak():
-    assert rc.resolve_compute_peak_provenance("r9700", "bf16")["compute_peak_convention"] == "vendor"
-    assert rc.resolve_compute_peak_provenance("r9700", "mxfp4")["compute_peak_convention"] == "unknown"
+def test_a_card_without_an_fp4_rate_claims_no_fp4_compute_peak():
+    bf16 = rc.ComputeTarget(card=R9700_CARD, platform="r9700", num_gpus=1, precision_tag="bf16")
+    assert rc.resolve_compute_peak_provenance(bf16)["compute_peak_convention"] == "vendor"
+    fp4 = dataclasses.replace(bf16, precision_tag="mxfp4")
+    assert rc.resolve_compute_peak_provenance(fp4)["compute_peak_convention"] == "unknown"
 
 
 def test_perfmodel_routes_a_moe_model_through_the_fused_expert_op():
@@ -168,8 +185,9 @@ def test_perfmodel_declines_what_it_cannot_model():
     assert _perfmodel(_dense_meta(hidden_size=0)) is None
     assert _perfmodel(_dense_meta(num_attention_heads=0)) is None
     assert _perfmodel(_dense_meta(num_layers=0)) is None
-    # Unknown GPU, and a GPU with no achievable TFLOPS at this precision.
-    assert _perfmodel(gpu_type="h100") is None
+    # No card, a card that reports no bandwidth, and a precision the card has no peak at.
+    assert _perfmodel(card=None) is None
+    assert _perfmodel(card=dataclasses.replace(MI325X_CARD, memory_bandwidth_gbps=None)) is None
     assert _perfmodel(precision_tag="int3") is None
 
 
@@ -445,7 +463,7 @@ def test_perfmodel_sizes_the_moe_op_at_the_latent_expert_width(tmp_path):
         )
         b = rc.compute_roofline_from_perfmodel(
             meta=meta,
-            target=rc.ComputeTarget(gpu_type="mi355x", num_gpus=1, precision_tag="mxfp4"),
+            target=rc.ComputeTarget(card=MI355X_CARD, platform="mi355x", num_gpus=1, precision_tag="mxfp4"),
             shape=rc.DecodeShape(isl=1024, osl=128, concurrency=8),
         )
         return next(o for o in b.ops if o.name == "moe_fused")
@@ -495,7 +513,7 @@ def test_perfmodel_attributes_the_moe_ffn_for_a_quark_checkpoint(tmp_path):
     meta = rmm.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=int(expert_elems * 0.5 * 1.15)))
     breakdown = rc.compute_roofline_from_perfmodel(
         meta=meta,
-        target=rc.ComputeTarget(gpu_type="mi355x", num_gpus=8, precision_tag="mxfp4"),
+        target=rc.ComputeTarget(card=MI355X_CARD, platform="mi355x", num_gpus=8, precision_tag="mxfp4"),
         shape=rc.DecodeShape(isl=8192, osl=1024, concurrency=64),
     )
 
@@ -707,7 +725,7 @@ def _state(tmp_path: Path, benchmark: dict, **attrs):
 
     base = dict(
         baseline_config_path=str(cfg),
-        gpu_type="mi300x",
+        gpu_type="mi325x",
         model_path="",
         precision="",
         framework="",
@@ -737,8 +755,16 @@ def test_runtime_workload_prefers_the_benchmark_envs_over_state(tmp_path):
     st = _state(tmp_path, _serving_benchmark(tmp_path / "m"), tp=8, conc=99, isl=1, osl=2)
     rt = rc.resolve_runtime_workload(st)
     assert (rt.tp, rt.concurrency, rt.isl, rt.osl) == (1, 8, 128, 64)
-    assert rt.gpu_type == "mi300x"
+    assert rt.gpu_type == "mi325x"
     assert rt.framework == "sglang"
+
+
+def test_runtime_workload_carries_the_session_card(tmp_path, monkeypatch):
+    st = _state(tmp_path, _serving_benchmark(tmp_path / "m"))
+    assert rc.resolve_runtime_workload(st).card is None
+
+    publish_card(monkeypatch, MI325X_CARD)
+    assert rc.resolve_runtime_workload(st).card == MI325X_CARD
 
 
 def test_runtime_workload_falls_back_to_state_when_the_envs_are_silent(tmp_path):
@@ -761,7 +787,8 @@ def test_runtime_workload_survives_an_unreadable_baseline_yaml(tmp_path):
     assert rc.resolve_runtime_workload(st).concurrency == 1
 
 
-def test_breakdown_from_state_reports_the_decode_ceiling(tmp_path):
+def test_breakdown_from_state_reports_the_decode_ceiling(tmp_path, monkeypatch):
+    publish_card(monkeypatch, MI325X_CARD)
     model = _write_model(tmp_path / "m", _DENSE_CFG, weight_bytes=8 * 1024**2)
     bd = rc.compute_roofline_breakdown_from_state(_state(tmp_path, _serving_benchmark(model)))
 
@@ -906,74 +933,83 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
     assert act_floor.activation_dtype_bytes == 2.0
 
 
-def _peak_tables(monkeypatch, *, achievable: float, vendor: float) -> None:
-    monkeypatch.setitem(rc.HW_SPECS_ACHIEVABLE, "mi300x", {"peak_tflops": {"bf16": achievable}})
-    monkeypatch.setitem(rc.HW_SPECS, "mi300x", {"peak_tflops": {"bf16": vendor}})
+def test_compute_peak_reads_the_tracelens_arch_json_the_label_names(monkeypatch, tmp_path):
+    """A measured max-achievable peak in ``<LABEL>.json`` wins over the card's vendor peak, precision by precision."""
+    _plant_arch_json(monkeypatch, tmp_path, "MI325X", {"matrix_bf16": 843, "matrix_fp8": 0})
+    target = rc.ComputeTarget(card=MI325X_CARD, platform="mi325x", num_gpus=1, precision_tag="bfloat16")
+
+    assert rc.resolve_compute_peak_provenance(target) == {
+        "compute_peak_convention": "achievable",
+        "compute_peak_tflops": 843.0,
+        "compute_peak_source": "TraceLens arch JSON (max-achievable sustained)",
+    }
+    # A precision the JSON does not measure, or measures as zero, takes the card's vendor peak.
+    for tag, vendor in (("fp32", 163.4), ("fp8", 2614.9)):
+        provenance = rc.resolve_compute_peak_provenance(dataclasses.replace(target, precision_tag=tag))
+        assert (provenance["compute_peak_convention"], provenance["compute_peak_tflops"]) == ("vendor", vendor)
 
 
-def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch):
-    # Vendor is a *different* positive value (500.0) so swapping the achievable-then-vendor order would change the
-    # result.
-    _peak_tables(monkeypatch, achievable=100.0, vendor=500.0)
+def test_compute_peak_takes_the_card_vendor_peak_without_a_readable_arch_json(monkeypatch, tmp_path):
+    target = rc.ComputeTarget(card=MI325X_CARD, platform="mi325x", num_gpus=1, precision_tag="bf16")
+    assert rc.resolve_compute_peak_provenance(target)["compute_peak_tflops"] == 1307.4
+    assert rc.resolve_compute_peak_provenance(target)["compute_peak_convention"] == "vendor"
+
+    _plant_arch_json(monkeypatch, tmp_path, "MI325X", {})
+    (tmp_path / "TraceLens" / "Agent" / "Analysis" / "utils" / "arch" / "MI325X.json").write_text("{", encoding="utf-8")
+    assert rc.resolve_compute_peak_provenance(target)["compute_peak_convention"] == "vendor"
+
+    assert rc.resolve_compute_peak_provenance(dataclasses.replace(target, card=None)) == {
+        "compute_peak_convention": "unknown",
+        "compute_peak_tflops": 0.0,
+        "compute_peak_source": "unavailable",
+    }
+
+
+def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch, tmp_path):
+    # The measured peak (100.0) is far from the card's vendor peak (1307.4), so swapping the achievable-then-vendor
+    # order would change the result.
+    _plant_arch_json(monkeypatch, tmp_path / "measured", "MI325X", {"matrix_bf16": 100.0})
+    target = rc.ComputeTarget(card=MI325X_CARD, platform="mi325x", num_gpus=2, precision_tag="bf16")
 
     active = 1_000_000_000
     weight = 9_000_000_000
-    # achievable (100.0) must win over vendor (500.0).
     expected = (100.0 * 1e12 * 2) / (2.0 * active / 2.0)
     got = rc.compute_compute_bound_ceiling_tok_per_sec(
-        rc.ComputeTarget(gpu_type="mi300x", num_gpus=2, precision_tag="bf16"),
-        active_weight_bytes=active,
-        weight_bytes=weight,
-        weight_dtype_bytes=2.0,
+        target, active_weight_bytes=active, weight_bytes=weight, weight_dtype_bytes=2.0
     )
     assert got == pytest.approx(expected)
 
     # active→total-weight fallback (active_weight_bytes=0 falls back to weight_bytes).
     fallback = rc.compute_compute_bound_ceiling_tok_per_sec(
-        rc.ComputeTarget(gpu_type="mi300x", num_gpus=2, precision_tag="bf16"),
-        active_weight_bytes=0,
-        weight_bytes=weight,
-        weight_dtype_bytes=2.0,
+        target, active_weight_bytes=0, weight_bytes=weight, weight_dtype_bytes=2.0
     )
     assert fallback == pytest.approx((100.0 * 1e12 * 2) / (2.0 * weight / 2.0))
     assert fallback > 0.0
 
-    # Vendor-peak fallback: achievable absent (0.0), vendor-peak covers it.
-    _peak_tables(monkeypatch, achievable=0.0, vendor=200.0)
+    # Vendor-peak fallback: a checkout with no arch JSON for the label leaves the card's peak.
+    monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "empty"))
+    one_gpu = dataclasses.replace(target, num_gpus=1)
     vendor_fallback = rc.compute_compute_bound_ceiling_tok_per_sec(
-        rc.ComputeTarget(gpu_type="mi300x", num_gpus=1, precision_tag="bf16"),
-        active_weight_bytes=active,
-        weight_bytes=weight,
-        weight_dtype_bytes=2.0,
+        one_gpu, active_weight_bytes=active, weight_bytes=weight, weight_dtype_bytes=2.0
     )
-    assert vendor_fallback == pytest.approx((200.0 * 1e12) / (2.0 * active / 2.0))
-    assert vendor_fallback > 0.0
+    assert vendor_fallback == pytest.approx((1307.4 * 1e12) / (2.0 * active / 2.0))
 
+    without_card = dataclasses.replace(one_gpu, card=None)
     assert (
         rc.compute_compute_bound_ceiling_tok_per_sec(
-            rc.ComputeTarget(gpu_type="unknown-gpu", num_gpus=1, precision_tag="bf16"),
-            active_weight_bytes=active,
-            weight_bytes=weight,
-            weight_dtype_bytes=2.0,
-        )
-        == 0.0
-    )
-    _peak_tables(monkeypatch, achievable=100.0, vendor=500.0)
-    assert (
-        rc.compute_compute_bound_ceiling_tok_per_sec(
-            rc.ComputeTarget(gpu_type="mi300x", num_gpus=1, precision_tag="bf16"),
-            active_weight_bytes=0,
-            weight_bytes=0,
-            weight_dtype_bytes=2.0,
+            without_card, active_weight_bytes=active, weight_bytes=weight, weight_dtype_bytes=2.0
         )
         == 0.0
     )
     assert (
         rc.compute_compute_bound_ceiling_tok_per_sec(
-            rc.ComputeTarget(gpu_type="mi300x", num_gpus=1, precision_tag="bf16"),
-            active_weight_bytes=active,
-            weight_bytes=weight,
-            weight_dtype_bytes=0.0,
+            one_gpu, active_weight_bytes=0, weight_bytes=0, weight_dtype_bytes=2.0
+        )
+        == 0.0
+    )
+    assert (
+        rc.compute_compute_bound_ceiling_tok_per_sec(
+            one_gpu, active_weight_bytes=active, weight_bytes=weight, weight_dtype_bytes=0.0
         )
         == 0.0
     )

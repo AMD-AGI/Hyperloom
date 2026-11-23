@@ -16,8 +16,8 @@ from typing import Any, Callable, Iterator, Mapping, NamedTuple
 
 from packaging.version import InvalidVersion, Version
 
+from hyperloom_common import gpu_card
 from hyperloom_common.coerce import to_float
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.perf_metric import agentx_active, prompt_dataset_session
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStoreError,
@@ -387,9 +387,12 @@ def _build_t0_trace_extras(
     extra: "Mapping[str, Any]",
     fp: "Mapping[str, Any]",
     image_digest: str,
+    gfx_arch: str,
 ) -> dict[str, Any]:
     """Assemble operator-traceability + workload-shape tags for the recipe extras (skip empty/zero)."""
     _extras: dict[str, Any] = {}
+    if gfx_arch:
+        _extras["gfx_arch"] = gfx_arch
     _model_class = str(extra.get("model_class") or "").strip()
     if _model_class:
         _extras["model_class"] = _model_class
@@ -414,15 +417,12 @@ def _build_t0_trace_extras(
     return _extras
 
 
-#: SKU -> ISA family. Derived from the board table, so a new board becomes a
-#: fallback donor for its own ISA in the commit that adds it.
-_GPU_ISA_BY_SKU = {sku: board.gfx for sku, board in AMD_GPU_BOARDS.items()}
 #: ``ep`` and the partition mode suffix at any node count, so they appear both inside a cluster suffix and on their
 #: own. Kept as a named fragment rather than repeated, so the two forms cannot drift.
 _SHAPE_SUFFIX = r"(?:_ep[1-9]\d*)?(?:_(?:dpx|qpx|cpx))?"
-#: A single-node shape suffix has to parse here too, or ``_hardware_fallback_values`` stops offering the same-ISA
-#: SKUs for exactly the rows these suffixes were added for. The alternation keeps ``_ws`` mandatory for the cluster
-#: form, so an unrecognised suffix still fails to parse instead of being mistaken for a backend name.
+#: The topology ``kb_hardware_slug`` appends to a GPU label; everything before it is the label. The alternation keeps
+#: ``_ws`` mandatory for the cluster form, so a tail that is no topology (``mi300x_tp8``) stays part of the label
+#: instead of being mistaken for a backend name.
 _TOPOLOGY_SUFFIX_RE = re.compile(
     r"(?:_ws[1-9]\d*(?:_pd[1-9]\d*p[1-9]\d*d)?"
     rf"(?:_tp[1-9]\d*)?{_SHAPE_SUFFIX}(?:_[a-z0-9-]+)?"
@@ -448,42 +448,26 @@ def _cid_dimensions(cid: str) -> dict[str, str]:
         return {}
 
 
-def _parse_hardware_topology(hardware: str) -> tuple[str, str, str] | None:
-    """Return ``(SKU, ISA family, topology suffix)`` for a known GPU."""
-    value = str(hardware or "").strip().lower()
-    for sku, family in _GPU_ISA_BY_SKU.items():
-        if value == sku:
-            return sku, family, ""
-        if value.startswith(f"{sku}_"):
-            suffix = value[len(sku) :]
-            if _TOPOLOGY_SUFFIX_RE.fullmatch(suffix):
-                return sku, family, suffix
-    return None
+def _topology_suffix(hardware: str) -> str:
+    """The topology suffix a hardware slug ends in; empty for a single node in its default shape."""
+    suffix = _TOPOLOGY_SUFFIX_RE.search(hardware)
+    return suffix.group(0) if suffix else ""
 
 
-def _hardware_fallback_values(hardware: str) -> list[str]:
-    """List same-ISA SKUs carrying the target's exact topology suffix."""
-    parsed = _parse_hardware_topology(hardware)
-    if parsed is None:
-        value = str(hardware or "").strip().lower()
-        return [value] if value else []
-    _sku, family, suffix = parsed
-    return [f"{sku}{suffix}" for sku, sku_family in _GPU_ISA_BY_SKU.items() if sku_family == family]
+def _hardware_is_compatible(target: Mapping[str, Any], candidate: Mapping[str, Any]) -> bool:
+    """Accept the target identity's own hardware slug, or a row on the same recorded gfx arch with its topology.
 
-
-def _hardware_is_compatible(target: str, candidate: str) -> bool:
-    """Accept exact hardware or a known same-ISA SKU with exact topology."""
-    target_value = str(target or "").strip().lower()
-    candidate_value = str(candidate or "").strip().lower()
-    if candidate_value == target_value:
-        return bool(target_value)
-    target_parsed = _parse_hardware_topology(target_value)
-    candidate_parsed = _parse_hardware_topology(candidate_value)
-    return bool(
-        target_parsed
-        and candidate_parsed
-        and target_parsed[1] == candidate_parsed[1]
-        and target_parsed[2] == candidate_parsed[2]
+    A row that records no ``gfx_arch`` matches its own slug only.
+    """
+    target_slug = _text(target.get("hardware")).lower()
+    candidate_slug = _candidate_dimension(candidate, "hardware")
+    if candidate_slug == target_slug:
+        return bool(target_slug)
+    target_gfx = _text(target.get("gfx_arch")).lower()
+    return (
+        bool(target_gfx)
+        and target_gfx == _text(candidate.get("gfx_arch")).lower()
+        and _topology_suffix(target_slug) == _topology_suffix(candidate_slug)
     )
 
 
@@ -514,29 +498,22 @@ def _framework_version_is_compatible(target: str, candidate: str) -> bool:
     )
 
 
-def _warm_search_tiers(
-    identity: Mapping[str, Any],
-) -> tuple[
-    tuple[str, float, dict[str, str], list[str] | None, bool],
-    ...,
-]:
+#: ``(tier, confidence, labels, relax_framework_version)``. A tier whose labels leave out ``hardware`` searches every
+#: hardware and keeps the rows :func:`_hardware_is_compatible` accepts.
+_WarmTier = tuple[str, float, dict[str, str], bool]
+
+
+def _warm_search_tiers(identity: Mapping[str, Any]) -> tuple[_WarmTier, ...]:
     """Build the shared ordered seven-tuple degradation tiers."""
     labels = {key: _text(identity.get(key)) for key in _CID_DIMENSIONS if key != "model"}
-    hardware_values = _hardware_fallback_values(labels["hardware"])
+    any_hardware = {key: value for key, value in labels.items() if key != "hardware"}
     return (
-        ("same_arch_class", 0.95, labels, None, False),
-        (
-            "same_gpu_isa",
-            0.85,
-            {key: value for key, value in labels.items() if key != "hardware"},
-            hardware_values,
-            False,
-        ),
+        ("same_arch_class", 0.95, labels, False),
+        ("same_gpu_isa", 0.85, any_hardware, False),
         (
             "compatible_framework_version",
             0.72,
-            {key: value for key, value in labels.items() if key not in ("hardware", "framework_version")},
-            hardware_values,
+            {key: value for key, value in any_hardware.items() if key != "framework_version"},
             True,
         ),
     )
@@ -580,17 +557,9 @@ def _rank_warm_candidates(
     return ranked
 
 
-def _search_warm_candidates(
-    kb: Any,
-    *,
-    labels: dict[str, str],
-    hardware_in: list[str] | None = None,
-) -> list[Mapping[str, Any]]:
+def _search_warm_candidates(kb: Any, *, labels: dict[str, str]) -> list[Mapping[str, Any]]:
     """Run exact identity search, keeping only mapping rows."""
-    kwargs: dict[str, Any] = {"label_match": labels, "limit": 100}
-    if hardware_in is not None and getattr(kb, "mode", "") == "remote":
-        kwargs["hardware_in"] = hardware_in
-    rows = kb.search(**kwargs)
+    rows = kb.search(label_match=labels, limit=100)
     return [row for row in (rows or []) if isinstance(row, Mapping)]
 
 
@@ -614,17 +583,16 @@ def _remote_candidate_matches(
 
 def _tier_matches(
     kb: Any,
-    tiers: tuple[tuple[str, float, dict[str, str], list[str] | None, bool], ...],
+    tiers: tuple[_WarmTier, ...],
     identity: Mapping[str, Any],
     shape: Mapping[str, Any],
 ) -> Iterator[WarmMatch]:
     """Walk the degradation tiers, yielding each tier's trustworthy candidates best first."""
     seen = {_text(identity.get("canonical_id"))}
-    hardware = _text(identity.get("hardware"))
     version = _text(identity.get("framework_version"))
     precision = _text(identity.get("precision")).lower()
-    for tier, confidence, labels, hardware_in, relax_framework_version in tiers:
-        rows = _search_warm_candidates(kb, labels=labels, hardware_in=hardware_in)
+    for tier, confidence, labels, relax_framework_version in tiers:
+        rows = _search_warm_candidates(kb, labels=labels)
         usable: list[Mapping[str, Any]] = []
         for candidate in rows:
             candidate_id = str(candidate.get("canonical_id") or "")
@@ -633,10 +601,7 @@ def _tier_matches(
             seen.add(candidate_id)
             if not _remote_candidate_matches(kb, candidate, labels=labels):
                 continue
-            if hardware_in is not None and not _hardware_is_compatible(
-                hardware,
-                _candidate_dimension(candidate, "hardware"),
-            ):
+            if "hardware" not in labels and not _hardware_is_compatible(identity, candidate):
                 continue
             if _candidate_dimension(candidate, "precision") != precision:
                 continue
@@ -693,10 +658,9 @@ def _find_config_donor(
                 for key, value in labels.items()
                 if value and value not in ("unknown_model_type", "unknown_arch")
             },
-            hardware_in,
             relax_framework_version,
         )
-        for tier, confidence, labels, hardware_in, relax_framework_version in _warm_search_tiers(identity)
+        for tier, confidence, labels, relax_framework_version in _warm_search_tiers(identity)
     )
     return next(_tier_matches(kb, tiers, identity, shape), WarmMatch(None, "", 0.0))
 
@@ -751,6 +715,7 @@ def _resolve_t0_identity(
     if not version and framework:
         version = detect_framework_version(framework)
     architectures = getattr(shared_state, "model_architectures", None) or []
+    card = gpu_card.session_card()
     identity: dict[str, Any] = {
         "model": model,
         "hardware": hardware,
@@ -761,6 +726,8 @@ def _resolve_t0_identity(
         "precision": _text(getattr(shared_state, "precision", "")),
         # The resolved version with its build suffix, which the session state keeps.
         "session_framework_version": version,
+        # Not a canonical-id dimension: the label names the row, the arch decides whose rows it may borrow.
+        "gfx_arch": card.gfx if card else "",
     }
     identity["canonical_id"] = recipe_canonical_id(
         RecipeIdentity(
@@ -973,7 +940,13 @@ def run_t0_anchor(
             start_time=shared_state.warm_start_ts,
         )
     # T0 only stamps metadata (best_config preserved, rewritten at CLOSE).
-    extras = _build_t0_trace_extras(shared_state, extra=extra, fp=fingerprint, image_digest=request.image_digest)
+    extras = _build_t0_trace_extras(
+        shared_state,
+        extra=extra,
+        fp=fingerprint,
+        image_digest=request.image_digest,
+        gfx_arch=identity["gfx_arch"],
+    )
     _stamp_local_authority_row(kb, session_id=sid, fingerprint=fingerprint, identity=identity, extras=extras)
     match, context = _warm_start_lookup(kb, shared_state, identity)
     shared_state.warm_start_recipe = match

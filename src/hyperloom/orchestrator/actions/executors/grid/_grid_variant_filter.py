@@ -17,7 +17,6 @@ from typing import Any, Mapping
 
 from hyperloom_common.env import is_truthy
 from hyperloom.common.env_safety import operator_extra_env
-from hyperloom_common.gpu_identity import is_gfx_arch
 
 from hyperloom.common.failure_signature import SERVE_FLAG
 
@@ -267,26 +266,27 @@ def _fingerprint_component_matches(actual: str, expected: str) -> bool:
 
 @dataclass(frozen=True)
 class ServingStack:
-    """The framework, model, GPU and component versions a grid's variants are served on, and the draft bounds its
-    recipe declares."""
+    """The framework, model, GPU arch and component versions a grid's variants are served on, and the draft bounds
+    its recipe declares."""
 
     framework: str
     model_path: str
-    gpu_type: str = ""
+    #: The session card's arch; empty when the session read no card.
+    gfx: str = ""
     stack_fingerprint: dict | None = None
     draft_limits: DraftLimits = DraftLimits()
 
     @classmethod
     def of_recipe(
-        cls, benchmark: Mapping[str, Any], *, model_path: str, gpu_type: str = "", stack_fingerprint: dict | None = None
+        cls, benchmark: Mapping[str, Any], *, model_path: str, gfx: str = "", stack_fingerprint: dict | None = None
     ) -> ServingStack:
         """The stack ``benchmark``'s recipe is served on: its framework, and the draft bounds it declares."""
         framework = str(benchmark.get("framework") or "").lower()
-        return cls(framework, model_path, gpu_type, stack_fingerprint, DraftLimits.declared(benchmark))
+        return cls(framework, model_path, gfx, stack_fingerprint, DraftLimits.declared(benchmark))
 
 
 def _matches_unsafe_unified_attn_stack(serving: ServingStack) -> bool:
-    if serving.framework.strip().lower() != "sglang" or not is_gfx_arch(serving.gpu_type, "gfx950"):
+    if serving.framework.strip().lower() != "sglang" or serving.gfx != "gfx950":
         return False
     stack = serving.stack_fingerprint if isinstance(serving.stack_fingerprint, dict) else {}
     if any(

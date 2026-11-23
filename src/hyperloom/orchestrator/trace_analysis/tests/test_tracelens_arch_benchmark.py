@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -9,8 +10,16 @@ from unittest.mock import patch
 
 import pytest
 
+from hyperloom_common.gpu_card import SESSION_CARD_ENV
 from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS as _VISIBLE_DEVICE_VARS
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, MI355X_CARD, publish_card
 from hyperloom.orchestrator.trace_analysis import tracelens_arch_benchmark as tab
+
+
+@pytest.fixture(autouse=True)
+def _session_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The analysis runs in a session that read an MI355X."""
+    publish_card(monkeypatch, MI355X_CARD)
 
 
 @pytest.fixture(scope="module")
@@ -329,13 +338,12 @@ def test_populate_internal_extension_returns_bundled_spec_without_benchmark(
     candidates.assert_not_called()
 
 
-def test_populate_external_raises_on_microbench_failure(
-    tmp_path: Path,
-) -> None:
-    """Open-source path surfaces a non-zero microbenchmark exit code when the vendor-peak fallback is also unavailable."""
+def test_populate_external_raises_on_microbench_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Open-source path surfaces a non-zero microbenchmark exit code when the session read no card to take vendor peaks
+    from."""
+    monkeypatch.delenv(SESSION_CARD_ENV)
     with (
         patch.object(tab, "resolve_arch_json_path", return_value=None),
-        patch.object(tab, "write_vendor_peak_arch_spec", return_value=False),
         patch.object(tab, "list_candidate_physical_gpus", return_value=[0]),
     ):
         with pytest.raises(RuntimeError, match="exit code 7"):
@@ -375,7 +383,7 @@ def test_populate_falls_back_to_vendor_peaks_in_the_session_not_the_checkout(tmp
         second = _populate()
 
     assert first == second == tab.ArchSpec(session / "MI355X.json", tab.ArchSpecSource.VENDOR_PEAK)
-    assert json.loads(first.path.read_text(encoding="utf-8")) == tab.build_hyperloom_arch_spec("MI355X")
+    assert json.loads(first.path.read_text(encoding="utf-8")) == tab.theoretical_arch_spec("MI355X", MI355X_CARD)
     assert runs == ["0", "1"]
     assert not checkout.exists()
     warning = first.health_warning("mi355x")
@@ -416,35 +424,41 @@ def test_a_rejected_measurement_never_reaches_the_checkout(tmp_path: Path) -> No
     assert not checkout.exists()
 
 
-def test_a_vendor_peak_spec_left_in_the_checkout_is_measured_over(tmp_path: Path) -> None:
-    """The vendor-peak spec older versions wrote into the arch dir is not bundled: the board is measured, and the
-    measurement replaces it."""
-    checkout = tmp_path / "TraceLens"
-    planted = tab.default_arch_output_path(checkout, "MI355X")
-    planted.parent.mkdir(parents=True)
-    planted.write_text(json.dumps(tab.build_hyperloom_arch_spec("MI355X"), indent=4) + "\n", encoding="utf-8")
-    measured = {"name": "MI355X", "mem_bw_gbps": 6000.0, "max_achievable_tflops": {"matrix_bf16": 1500.0}}
+def test_theoretical_arch_spec_holds_the_card_vendor_peaks_under_the_platform_name() -> None:
+    assert tab.theoretical_arch_spec("mi355x", MI355X_CARD) == {
+        "name": "MI355X",
+        "mem_bw_gbps": 8000.0,
+        "memory_gb": 288.0,
+        "max_achievable_tflops": {
+            "matrix_fp32": 157.3,
+            "matrix_fp16": 2516.6,
+            "matrix_bf16": 2516.6,
+            "matrix_fp8": 5033.2,
+            "matrix_fp4": 10066.3,
+        },
+    }
+    # An arch without an fp4 rate carries no fp4 peak.
+    assert "matrix_fp4" not in tab.theoretical_arch_spec("MI325X", MI325X_CARD)["max_achievable_tflops"]
 
-    def _run_command(cmd, *, cwd, env=None):
-        Path(cmd[cmd.index("--output") + 1]).write_text(json.dumps(measured), encoding="utf-8")
-        return 0
 
-    with (
-        patch.object(tab, "_collect_arch_jsons", return_value={"MI355X": str(planted)}),
-        patch.object(tab, "list_candidate_physical_gpus", return_value=[0]),
-    ):
-        assert tab.resolve_arch_json_path("MI355X") is None
-        spec = tab.populate_gpu_arch_json(
-            tracelens_root=checkout,
-            platform="MI355X",
-            fallback_dir=tmp_path / "session",
-            log=lambda _msg: None,
-            microbench=tab.Microbench(_run_command),
-        )
-        assert tab.resolve_arch_json_path("MI355X") == planted
+def test_theoretical_arch_spec_needs_a_card_with_a_bandwidth_and_a_peak() -> None:
+    assert tab.theoretical_arch_spec("MI355X", None) is None
+    assert tab.theoretical_arch_spec("MI355X", dataclasses.replace(MI355X_CARD, memory_bandwidth_gbps=None)) is None
+    assert tab.theoretical_arch_spec("MI355X", dataclasses.replace(MI355X_CARD, engine_clock_mhz=None)) is None
+    assert tab.theoretical_arch_spec("MI355X", dataclasses.replace(MI355X_CARD, gfx="gfx90a")) is None
 
-    assert spec == tab.ArchSpec(planted, tab.ArchSpecSource.MEASURED)
-    assert json.loads(planted.read_text(encoding="utf-8")) == measured
+
+def test_write_vendor_peak_arch_spec_writes_the_session_card(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    out = tmp_path / "MI325X.json"
+    publish_card(monkeypatch, MI325X_CARD)
+    assert tab.write_vendor_peak_arch_spec(out, "MI325X", lambda _m: None)
+    assert json.loads(out.read_text(encoding="utf-8"))["max_achievable_tflops"]["matrix_bf16"] == 1307.4
+
+    monkeypatch.delenv(SESSION_CARD_ENV)
+    logged: list[str] = []
+    assert not tab.write_vendor_peak_arch_spec(tmp_path / "none.json", "MI325X", logged.append)
+    assert not (tmp_path / "none.json").exists()
+    assert "no vendor peaks for MI325X" in logged[0]
 
 
 @pytest.mark.parametrize(

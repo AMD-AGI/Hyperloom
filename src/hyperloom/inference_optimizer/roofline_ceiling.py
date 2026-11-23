@@ -13,11 +13,13 @@ from typing import Any, Mapping, NamedTuple
 
 import yaml
 
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
+from hyperloom_common.gpu_card import GpuCard, session_card
+from hyperloom_common.jsonio import read_json
 from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom.common.model_paths import resolve_local_model_dir
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.grid_server_args import server_arg_value
+from hyperloom.inference_optimizer.session import paths
 from hyperloom.inference_optimizer.roofline_model_meta import (
     HIDDEN_SIZE_KEY,
     NUM_HIDDEN_LAYERS_KEY,
@@ -30,32 +32,21 @@ from hyperloom.inference_optimizer.roofline_model_meta import (
 )
 
 
-#: Precision tags this module reads, by the precision ``GpuBoard.vendor_peak_tflops`` is keyed on.
-_PRECISION_TAGS: dict[str, tuple[str, ...]] = {
-    "bf16": ("bf16", "bfloat16"),
-    "fp16": ("fp16", "float16"),
-    "fp8": ("fp8", "float8_e4m3fn", "float8_e5m2"),
-    "fp4": ("mxfp4", "fp4", "float4"),
-    "fp32": ("fp32", "float32"),
-}
-
-
-def _with_precision_aliases(peaks: Mapping[str, float]) -> dict[str, float]:
-    """*peaks*, keyed by precision, under every tag :data:`_PRECISION_TAGS` reads that precision as."""
-    return {alias: tflops for tag, tflops in peaks.items() for alias in _PRECISION_TAGS[tag]}
-
-
-#: GPU per-chip peak specs (keys match ``SharedState.gpu_type``, lowercase).
-#: ``hbm_bw_gbps`` is vendor peak; ``peak_tflops`` is DENSE peak (missing key
-#: ⇒ 0.0 falls back to T_mem).
-HW_SPECS: dict[str, dict[str, Any]] = {
-    product: {
-        "hbm_gb": board.hbm_gb,
-        "hbm_bw_gbps": board.hbm_bw_gbps,
-        "peak_tflops": _with_precision_aliases(board.vendor_peak_tflops),
-    }
-    for product, board in AMD_GPU_BOARDS.items()
-    if board.hbm_bw_gbps is not None
+#: The precision, as :data:`hyperloom_common.gpu_card.PEAK_PRECISIONS` and TraceLens' ``matrix_<precision>`` keys name
+#: it, of each precision tag a run's config or server args can carry.
+_PRECISION_TAGS: dict[str, str] = {
+    "bf16": "bf16",
+    "bfloat16": "bf16",
+    "fp16": "fp16",
+    "float16": "fp16",
+    "fp8": "fp8",
+    "float8_e4m3fn": "fp8",
+    "float8_e5m2": "fp8",
+    "mxfp4": "fp4",
+    "fp4": "fp4",
+    "float4": "fp4",
+    "fp32": "fp32",
+    "float32": "fp32",
 }
 
 
@@ -74,7 +65,9 @@ class RuntimeWorkload:
     """Runtime workload config used by the roofline ceiling."""
 
     model_path: str
+    #: The session's GPU label, which names the card's TraceLens arch JSON.
     gpu_type: str
+    card: GpuCard | None
     precision: str
     framework: str
     tp: int
@@ -195,6 +188,7 @@ def resolve_runtime_workload(
     return RuntimeWorkload(
         model_path=str(point.model or getattr(state, "model_path", "") or ""),
         gpu_type=_runtime_gpu_type(state),
+        card=session_card(),
         precision=str(point.precision or getattr(state, "precision", "") or ""),
         framework=str(point.framework or getattr(state, "framework", "") or ""),
         tp=_env_int(envs, "TP") or _state_int("tp"),
@@ -276,7 +270,7 @@ def resolve_runtime_dtype(
 
 
 def _compute_tag_for_bytes(weight_bytes: float) -> str:
-    """Map weight bytes-per-element to a HW_SPECS compute precision key."""
+    """Map weight bytes-per-element to the precision the compute ceiling is resolved at."""
     if weight_bytes <= 0.5:
         return "fp4"
     if weight_bytes <= 1.0:
@@ -309,24 +303,34 @@ def apply_runtime_dtype(meta: "ModelMeta", rt: RuntimeDtype) -> "ModelMeta":
     )
 
 
-def _resolve_tflops(specs: dict[str, dict[str, Any]], gpu_type: str | None, precision_tag: str | None) -> float:
-    """``(gpu, precision)`` → TFLOPS from *specs*' ``peak_tflops`` table (case-insensitive); 0.0 on any miss."""
-    spec = specs.get((gpu_type or "").strip().lower())
-    if spec is None:
-        return 0.0
-    table = spec.get("peak_tflops")
-    if not isinstance(table, dict) or not precision_tag:
-        return 0.0
-    return float(table.get(str(precision_tag).strip().lower(), 0.0))
+def _measured_peak_tflops(platform: str, precision: str) -> float | None:
+    """The max-achievable TFLOPS TraceLens' arch JSON for ``platform`` holds at ``precision``; ``None`` when the
+    checkout has no readable one, or it has no positive peak there."""
+    if not platform.strip():
+        return None
+    spec = read_json(paths.tracelens_arch_json(paths.tracelens_root(), platform), default={}, require_dict=True)
+    peaks = spec.get("max_achievable_tflops")
+    peak = peaks.get(f"matrix_{precision}") if isinstance(peaks, dict) else None
+    return float(peak) if isinstance(peak, (int, float)) and peak > 0 else None
 
 
-def _compute_peak(gpu_type: str | None, precision_tag: str | None) -> tuple[float, str]:
-    """``(gpu, precision)`` → ``(TFLOPS, convention)``: max-achievable, else vendor dense peak, else ``(0.0, "unknown")``."""
-    achievable = _resolve_tflops(HW_SPECS_ACHIEVABLE, gpu_type, precision_tag)
-    if achievable > 0:
+def _compute_peak(target: ComputeTarget) -> tuple[float, str]:
+    """``target``'s per-GPU peak as ``(TFLOPS, convention)``: TraceLens' measured max-achievable peak for its label,
+    else the card's vendor dense peak, else ``(0.0, "unknown")``."""
+    precision = _PRECISION_TAGS.get(target.precision_tag.strip().lower())
+    if precision is None:
+        return 0.0, "unknown"
+    achievable = _measured_peak_tflops(target.platform, precision)
+    if achievable is not None:
         return achievable, "achievable"
-    vendor = _resolve_tflops(HW_SPECS, gpu_type, precision_tag)
-    return (vendor, "vendor") if vendor > 0 else (0.0, "unknown")
+    vendor = target.card.peak_tflops(precision) if target.card is not None else None
+    return (vendor, "vendor") if vendor else (0.0, "unknown")
+
+
+def _bandwidth_bytes_per_sec(card: GpuCard | None, num_gpus: int) -> float:
+    """The memory bandwidth of ``num_gpus`` of ``card``; ``0.0`` when there is no card or it reports none."""
+    per_gpu = card.memory_bandwidth_gbps if card is not None else None
+    return (per_gpu or 0.0) * 1e9 * max(num_gpus, 1)
 
 
 def compute_kv_bytes_per_token(
@@ -351,21 +355,22 @@ class DecodeShape:
 
 @dataclass(frozen=True)
 class ComputeTarget:
-    """The GPUs a compute ceiling is resolved for: the spec key, how many serve the model, and the TFLOPS precision."""
+    """The GPUs a ceiling is resolved for: the card (``None`` when the session read none), the label its TraceLens arch
+    JSON is named by, how many serve the model, and the TFLOPS precision."""
 
-    gpu_type: str
+    card: GpuCard | None
+    platform: str
     num_gpus: int
     precision_tag: str
 
 
 def compute_theoretical_peak_output_tok_per_sec(
-    meta: ModelMeta, shape: DecodeShape, *, gpu_type: str, num_gpus: int, kv_dtype_bytes: float
+    meta: ModelMeta, shape: DecodeShape, *, card: GpuCard | None, num_gpus: int, kv_dtype_bytes: float
 ) -> float:
-    """Decode-only memory-bound ceiling for ``output_throughput`` (returns 0.0, never raises, on unknown gpu_type / degenerate divisor). ``meta.active_weight_bytes`` shrinks per-token IO for MoE."""
-    spec = HW_SPECS.get((gpu_type or "").strip().lower())
-    if spec is None:
+    """Decode-only memory-bound ceiling for ``output_throughput`` (returns 0.0, never raises, without a card bandwidth / on a degenerate divisor). ``meta.active_weight_bytes`` shrinks per-token IO for MoE."""
+    bw_total_bytes_per_sec = _bandwidth_bytes_per_sec(card, num_gpus)
+    if bw_total_bytes_per_sec <= 0:
         return 0.0
-    bw_total_bytes_per_sec = spec["hbm_bw_gbps"] * 1e9 * max(num_gpus, 1)
     batch = max(shape.concurrency, 1)
     kv_bytes = compute_kv_bytes_per_token(
         num_layers=meta.num_layers,
@@ -397,7 +402,7 @@ def compute_compute_bound_ceiling_tok_per_sec(
     target: ComputeTarget, *, active_weight_bytes: int, weight_bytes: int, weight_dtype_bytes: float
 ) -> float:
     """Decode-only compute-bound ceiling for ``output_throughput``."""
-    peak_tflops, _ = _compute_peak(target.gpu_type, target.precision_tag)
+    peak_tflops, _ = _compute_peak(target)
     if peak_tflops <= 0 or weight_dtype_bytes <= 0:
         return 0.0
     # B=1 per-token figure; fall back to dense weight_bytes when active is missing.
@@ -470,12 +475,11 @@ def _read_vae_geometry(model_path: str) -> tuple[int, int]:
     return vae_scale, latent_channels
 
 
-def compute_diffusion_mem_img_per_sec(*, gpu_type: str, num_gpus: int, weight_bytes: int, num_steps: int) -> float:
+def compute_diffusion_mem_img_per_sec(
+    *, card: GpuCard | None, num_gpus: int, weight_bytes: int, num_steps: int
+) -> float:
     """Memory-roofline ceiling for diffusion image throughput (images/sec)."""
-    spec = HW_SPECS.get((gpu_type or "").strip().lower())
-    if spec is None:
-        return 0.0
-    bw = spec["hbm_bw_gbps"] * 1e9 * max(num_gpus, 1)
+    bw = _bandwidth_bytes_per_sec(card, num_gpus)
     if weight_bytes <= 0 or num_steps <= 0 or bw <= 0:
         return 0.0
     per_step_s = weight_bytes / bw
@@ -560,7 +564,7 @@ def _diffusion_latent_tokens_from_resolution(
 
 def compute_diffusion_compute_img_per_sec(target: ComputeTarget, dit: DitGeometry, *, num_steps: int) -> float:
     """Compute-roofline ceiling for diffusion image throughput (images/sec)."""
-    peak_tflops, _ = _compute_peak(target.gpu_type, target.precision_tag)
+    peak_tflops, _ = _compute_peak(target)
     latent_tokens = dit.latent_tokens
     if peak_tflops <= 0 or dit.params <= 0 or latent_tokens <= 0 or num_steps <= 0:
         return 0.0
@@ -605,13 +609,16 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
         if dit.latent_tokens > 0:
             cmp_img_s = compute_diffusion_compute_img_per_sec(
                 ComputeTarget(
-                    gpu_type=runtime.gpu_type, num_gpus=runtime.tp, precision_tag=runtime.precision or "bf16"
+                    card=runtime.card,
+                    platform=runtime.gpu_type,
+                    num_gpus=runtime.tp,
+                    precision_tag=runtime.precision or "bf16",
                 ),
                 dit,
                 num_steps=num_steps,
             )
     mem_img_s = compute_diffusion_mem_img_per_sec(
-        gpu_type=runtime.gpu_type,
+        card=runtime.card,
         num_gpus=runtime.tp,
         weight_bytes=mem_bytes,
         num_steps=num_steps,
@@ -644,7 +651,8 @@ def compute_roofline_breakdown_from_state(
     rt = resolve_runtime_dtype(state, meta, arm=arm)
     meta = apply_runtime_dtype(meta, rt)
     target = ComputeTarget(
-        gpu_type=runtime.gpu_type,
+        card=runtime.card,
+        platform=runtime.gpu_type,
         num_gpus=runtime.tp,
         precision_tag=rt.compute_precision_tag or runtime.precision or "bf16",
     )
@@ -652,7 +660,7 @@ def compute_roofline_breakdown_from_state(
     mem = compute_theoretical_peak_output_tok_per_sec(
         meta,
         shape,
-        gpu_type=target.gpu_type,
+        card=target.card,
         num_gpus=target.num_gpus,
         kv_dtype_bytes=_activation_kv_dtype_bytes(meta),
     )
@@ -682,24 +690,16 @@ def compute_roofline_breakdown_from_state(
 
 # TraceLens PerfModel per-op (bottom-up) roofline breakdown.
 
-#: Max-achievable (sustained) TFLOPS from TraceLens arch JSON files: measured max throughput instead of vendor dense
-#: TFLOPS. Only the peaks; bandwidth and capacity always come from HW_SPECS, the board rows.
-HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
-    "mi300x": {"peak_tflops": _with_precision_aliases({"bf16": 708.0, "fp16": 654.0, "fp8": 1273.0, "fp32": 163.0})},
-    "mi325x": {"peak_tflops": _with_precision_aliases({"bf16": 843.0, "fp16": 794.0, "fp8": 1519.0, "fp32": 194.0})},
-}
-
-
 _COMPUTE_PEAK_SOURCES = {
     "achievable": "TraceLens arch JSON (max-achievable sustained)",
-    "vendor": "vendor dense peak (achievable-table miss fallback)",
+    "vendor": "the card's vendor dense peak (no TraceLens arch JSON peak for the label)",
     "unknown": "unavailable",
 }
 
 
-def resolve_compute_peak_provenance(gpu_type: str | None, precision_tag: str | None) -> dict[str, Any]:
+def resolve_compute_peak_provenance(target: ComputeTarget) -> dict[str, Any]:
     """Provenance for the compute-peak TFLOPS used by every compute ceiling."""
-    tflops, convention = _compute_peak(gpu_type, precision_tag)
+    tflops, convention = _compute_peak(target)
     return {
         "compute_peak_convention": convention,
         "compute_peak_tflops": tflops,
@@ -840,16 +840,10 @@ def compute_roofline_from_perfmodel(
     *, meta: "ModelMeta", target: ComputeTarget, shape: DecodeShape
 ) -> "PerfModelBreakdown | None":
     """Bottom-up decode + prefill roofline using inlined GEMM/SDPA formulas."""
-    gpu_key = (target.gpu_type or "").strip().lower()
-    spec = HW_SPECS.get(gpu_key)
-    if spec is None:
-        return None
-
     n_gpus = max(target.num_gpus, 1)
-    bw_gbps = spec["hbm_bw_gbps"] * n_gpus
-    tag = (target.precision_tag or "bf16").strip().lower()
-    f_peak_tflops = _compute_peak(gpu_key, tag)[0] * n_gpus
-    if f_peak_tflops <= 0:
+    bw_gbps = _bandwidth_bytes_per_sec(target.card, n_gpus) / 1e9
+    f_peak_tflops = _compute_peak(target)[0] * n_gpus
+    if bw_gbps <= 0 or f_peak_tflops <= 0:
         return None
     bpe = float(meta.weight_dtype_bytes or 2.0)
     # Routed-expert weights may be a distinct precision (e.g. DeepSeek-V4 fp4 experts under fp8 attention); size the

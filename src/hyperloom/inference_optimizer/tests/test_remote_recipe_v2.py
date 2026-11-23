@@ -53,6 +53,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     has_replay_material,
 )
 from hyperloom.orchestrator.knowledge.recipe_journal import RecipeJournalCollaborator
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, publish_card
 from hyperloom.orchestrator.knowledge.remote_publish import remote_result_type
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -2835,7 +2836,7 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
     assert patch_kb.read_patches() == [patch_ref]
 
 
-def test_remote_adapter_forwards_hardware_in(tmp_path: Path) -> None:
+def test_remote_adapter_sends_no_hardware_filter(tmp_path: Path) -> None:
     class _Remote:
         def __init__(self) -> None:
             self.kwargs = {}
@@ -2850,16 +2851,53 @@ def test_remote_adapter_forwards_hardware_in(tmp_path: Path) -> None:
         tmp_path / "unused",
     )
 
-    assert (
-        adapter.search(
-            label_match={"framework_name": "sglang"},
-            hardware_in=["mi300x", "mi325x"],
-        )
-        == []
-    )
-    assert remote.kwargs["hardware_in"] == ["mi300x", "mi325x"]
+    assert adapter.search(label_match={"framework_name": "sglang"}) == []
+    assert set(remote.kwargs) == {"scheme", "match", "offset", "limit"}
     assert remote.kwargs["match"] == {"framework_name": "sglang"}
     assert remote.kwargs["scheme"] == "inference"
+
+
+def test_remote_client_search_sends_no_hardware_filter() -> None:
+    calls = []
+
+    def _request(method, path, payload=None):
+        calls.append((method, path, payload))
+        return {"items": [], "total": 0, "next_offset": None}
+
+    store = kb_store_client.KBStoreClient.__new__(kb_store_client.KBStoreClient)
+    store._request = _request  # type: ignore[method-assign]
+    client = RemoteRecipeClient(store)
+
+    client.search_identities(scheme="inference", match={"framework_name": "sglang"}, offset=3, limit=7)
+
+    assert calls == [
+        (
+            "POST",
+            "/v1/kb/search",
+            {"scheme": "inference", "match": {"framework_name": "sglang"}, "offset": 3, "limit": 7},
+        )
+    ]
+
+
+def test_build_remote_knowledge_records_the_session_cards_gfx_arch(tmp_path: Path, monkeypatch) -> None:
+    publish_card(monkeypatch, MI325X_CARD)
+    bundle = _build(_state(tmp_path), tmp_path / "files")
+
+    assert bundle.knowledge["gfx_arch"] == "gfx942"
+    assert knowledge_to_warm_recipe({"knowledge": bundle.knowledge})["gfx_arch"] == "gfx942"
+
+
+def test_build_remote_knowledge_without_a_card_records_no_gfx_arch(tmp_path: Path) -> None:
+    bundle = _build(_state(tmp_path), tmp_path / "files")
+
+    assert bundle.knowledge["gfx_arch"] == ""
+
+
+def test_a_record_written_before_gfx_arch_projects_an_empty_one(tmp_path: Path) -> None:
+    knowledge = dict(_build(_state(tmp_path), tmp_path / "files").knowledge)
+    knowledge.pop("gfx_arch")
+
+    assert knowledge_to_warm_recipe({"knowledge": knowledge})["gfx_arch"] == ""
 
 
 def test_remote_adapter_searches_agentx_identity_scheme(tmp_path: Path) -> None:

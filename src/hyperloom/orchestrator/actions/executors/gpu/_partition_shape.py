@@ -10,6 +10,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from hyperloom_common import gpu_card
 from hyperloom.common.gpu_partition import (
     PARTITION_COUNT_ENV,
     PARTITION_CU_ENV,
@@ -105,7 +106,8 @@ def per_stream_footprint_gib(
 
 _UNREADABLE_MODE_REFUSAL = (
     "--compute-partition-mode {declared_mode} was declared, but GPU {gpu}'s "
-    "compute-partition state could not be read, so the claim cannot be "
+    "compute-partition state could not be read, or the session read no card "
+    "to size its partitions by, so the claim cannot be "
     "checked. The flag asserts what the card is already in -- it does not "
     "set it. Drop the flag to run without the assertion."
 )
@@ -115,12 +117,6 @@ _MODE_MISMATCH_REFUSAL = (
     "the optimizer changes the mode, so this session would measure {mode} "
     "and record it under a name the operator did not intend. Set the card to "
     "{declared_mode} before launching, or drop the flag."
-)
-
-_TABLE_CU_COUNT_WARNING = (
-    "GPU {gpu}'s CU count came from the built-in board table, not the device. "
-    "Partition devices are selected by matching that count exactly, so if the "
-    "table is wrong for this board the benchmark will find no partitions."
 )
 
 _NO_FANOUT_WARNING = (
@@ -147,7 +143,6 @@ def validate_session_shape(
     *,
     declared_mode: str = "",
     streams: int = DEFAULT_STREAMS_PER_PARTITION,
-    gpu_type: str | None = None,
     model: PartitionModel = PartitionModel(),
     fanout_expected: bool = True,
 ) -> ShapeVerdict:
@@ -156,7 +151,7 @@ def validate_session_shape(
     notes: list[str] = []
     gpu = partition_gpu_id()
 
-    layout = observe_partition(gpu, gpu_type=gpu_type)
+    layout = observe_partition(gpu, card=gpu_card.session_card())
     if layout is None:
         if declared_mode:
             return ShapeVerdict(refusal=_UNREADABLE_MODE_REFUSAL.format(declared_mode=declared_mode, gpu=gpu))
@@ -170,8 +165,6 @@ def validate_session_shape(
         )
 
     notes.append(f"Compute partitioning : {layout.describe()}")
-    if not layout.probed:
-        warnings.append(_TABLE_CU_COUNT_WARNING.format(gpu=gpu))
 
     if not layout.partitioned:
         # An unpartitioned card is the default and needs no further checking: one partition is the whole card, which
@@ -254,7 +247,6 @@ def session_shape_summary(
         "cu_per_partition": layout.cu_per_partition,
         "gib_per_partition": layout.gib_per_partition,
         "streams_per_partition": max(1, int(streams)),
-        "cu_probed": layout.probed,
         "fanout_expected": bool(fanout_expected),
     }
 

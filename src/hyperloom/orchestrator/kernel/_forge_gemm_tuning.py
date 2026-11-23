@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from hyperloom_common import gpu_card
 from kernelforge.workflows.gemm_tune import RoutingEvidence, RoutingTarget
 
 from . import forge_gemm_tuning
@@ -152,7 +153,8 @@ class _ForgeGemmRun(NamedTuple):
     tuning_framework: str
     precision: str
     quant_type: str
-    gpu_type: str
+    #: The session card's arch; empty when the session read no card.
+    gfx: str
     tp: int
     conc: int
     mp: int
@@ -160,6 +162,10 @@ class _ForgeGemmRun(NamedTuple):
     model_id: str
     server_log: str
     thorough: bool
+
+    def forge_gpu_type(self) -> str:
+        """What KernelForge's ``--gpu-type`` is given: the session's arch, or ``auto`` to have it detect one."""
+        return self.gfx or "auto"
 
 
 class _ForgeShapeSources(NamedTuple):
@@ -198,7 +204,7 @@ def _forge_gemm_run(state: Any, task_id: str, session_dir: Path) -> _ForgeGemmRu
         tuning_framework="",
         precision=precision,
         quant_type=quant_type,
-        gpu_type=_state_setting(state, "gpu_type", os.environ.get("GPU_TYPE") or "mi300x").lower(),
+        gfx=card.gfx if (card := gpu_card.session_card()) else "",
         tp=tp,
         conc=int(state.conc or os.environ.get("CONC") or 64),
         mp=mp,
@@ -328,7 +334,7 @@ def _forge_gemm_tune_input(
         "framework": run.tuning_framework,
         "precision": run.precision,
         "quant_type": run.quant_type,
-        "gpu_type": run.gpu_type,
+        "gpu_type": run.forge_gpu_type(),
         "tp": run.tp,
         "conc": run.conc,
         "mp": run.mp,
@@ -468,7 +474,7 @@ async def _with_server_log(run: _ForgeGemmRun, state: Any, session_dir: Path) ->
             precision=run.precision,
             quant_type=run.quant_type,
             aiter_routing=_resolve_vllm_aiter_routing(
-                model_path=run.model_dir, server_log=server_log, tp=run.tp, gpu_type=run.gpu_type
+                model_path=run.model_dir, server_log=server_log, tp=run.tp, gfx=run.gfx
             ),
         ),
     )
@@ -515,7 +521,7 @@ async def _run_forge_gemm_tuning(
             framework=run.tuning_framework,
             precision=run.precision,
             quant_type=run.quant_type,
-            gpu_type=run.gpu_type,
+            gpu_type=run.forge_gpu_type(),
         ),
     )
 

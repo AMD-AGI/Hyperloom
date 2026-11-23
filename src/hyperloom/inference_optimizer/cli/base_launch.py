@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
+from hyperloom_common import gpu_card
 from hyperloom.common.agentx_workload import is_mlperf_backend
 from hyperloom.common.env_safety import BLOCKED_EXTERNAL_ENV_NAMES, is_credential_name
 from hyperloom.common.launch_credentials import credentials_in_the_clear, redact_credential_env
@@ -108,7 +109,8 @@ class SessionLaunch:
         return hf_repo_id(model) or Path(model).name or model
 
     def query(self) -> LaunchQuery:
-        """The session's query; raises :class:`BaseLaunchError` when it is malformed."""
+        """The session's query, with its card's facts; raises :class:`BaseLaunchError` when it is malformed."""
+        card = gpu_card.session_card()
         return LaunchQuery(
             model_id=self.model_id,
             framework=self.framework,
@@ -119,6 +121,8 @@ class SessionLaunch:
             ep=self.ep,
             isl=self.isl,
             osl=self.osl,
+            gfx=card.gfx if card else None,
+            memory_mib=card.memory_mib if card else None,
         )
 
 
@@ -132,7 +136,10 @@ def _session_launch(
     """The command line's session; an AgentX trace replay and a script name no sequence shape."""
     board = (getattr(args, "gpu_type", None) or "").strip()
     if not board:
-        _refuse("the base launch is resolved for the target GPU board, and none was detected; pass --gpu-type")
+        _refuse(
+            "the base launch is resolved for a GPU label, and the session has none: no card was read, or the card "
+            "reports no product name; pass --gpu-type"
+        )
     fixed = workload is Workload.FIXED
     return SessionLaunch(
         model=str(getattr(args, "model", "") or ""),

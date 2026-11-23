@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import dataclasses
 from dataclasses import replace
 
 import pytest
@@ -44,6 +45,7 @@ from hyperloom.measure.tests.bundle_factory import (
 )
 from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.orchestrator.actions.executors.workload._workload_envs import default_baseline_config
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, MI355X_CARD
 from inference_suite import staging_key
 
 SHEET_IMAGE = spec_document()["image"]["digest"]
@@ -59,6 +61,7 @@ def _sheet(**changes) -> dict:
     document["model_hashes"] = {}
     document["unset_envs"] = ["STALE_PIN"]
     document["procedure"].update({"rounds": {"warmup": 1, "measure": 1}, "deadline_unix": 0})
+    document["hardware"]["card"] = dataclasses.asdict(MI355X_CARD)
     document.update(changes)
     return document
 
@@ -107,7 +110,7 @@ def env(tmp_path, key, monkeypatch):
     monkeypatch.setattr(runner_tools, "normalised_manifest", lambda tool_cache: STAGING)
     # a machine that answers every question: the sheet's card, no errors, nothing resident
     monkeypatch.setattr(
-        runner.hardware, "read_gpu_facts", lambda visible: [GpuFacts(0, "AMD Instinct MI355X", 1400.0, "SPX/NPS1")]
+        runner.hardware, "read_gpu_facts", lambda visible: [GpuFacts(0, MI355X_CARD, 1400.0, "SPX/NPS1")]
     )
     monkeypatch.setattr(runner.hardware, "ecc_counts", lambda visible: {0: EccCounts(0, 0)})
     monkeypatch.setattr(runner.hardware, "busy_gpus", lambda visible: [])
@@ -454,14 +457,27 @@ def test_a_call_the_local_backend_refuses_is_spec_rejected(tmp_path, env, monkey
 
 
 def test_hardware_that_differs_from_the_sheet_is_a_preflight_mismatch(tmp_path, env, monkeypatch):
-    monkeypatch.setattr(
-        runner.hardware, "read_gpu_facts", lambda visible: [GpuFacts(0, "AMD Instinct MI300X", 750.0, None)]
-    )
+    monkeypatch.setattr(runner.hardware, "read_gpu_facts", lambda visible: [GpuFacts(0, MI325X_CARD, 1400.0, None)])
     backend = _Backend(_ok)
     monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
 
     assert _go(tmp_path, env, _sheet()) == 4
-    assert _status(tmp_path)["error_class"] == "preflight_mismatch" and backend.calls == []
+    status = _status(tmp_path)
+    assert status["error_class"] == "preflight_mismatch" and backend.calls == []
+    assert "GPU 0 is AMD Instinct MI325X" in status["message"]
+
+
+def test_a_card_of_the_sheet_s_kind_under_another_name_runs_and_the_result_names_the_machine_s_card(
+    tmp_path, env, monkeypatch
+):
+    oam = dataclasses.replace(MI355X_CARD, name="AMD Instinct MI355 OAM")
+    monkeypatch.setattr(runner.hardware, "read_gpu_facts", lambda visible: [GpuFacts(0, oam, 1400.0, "SPX/NPS1")])
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    manifest = ResultManifest.from_bytes((tmp_path / "out" / "manifest.json").read_bytes())
+    assert manifest.runner.gpu_model == "AMD Instinct MI355 OAM"
 
 
 def test_new_uncorrectable_ecc_errors_are_a_node_fault_and_no_result(tmp_path, env, monkeypatch):
@@ -698,10 +714,7 @@ def test_a_machine_that_does_not_state_its_image_is_not_refused_but_the_run_says
 
 
 def test_fewer_gpus_visible_after_the_test_are_a_node_fault_and_no_result(tmp_path, env, monkeypatch):
-    two = [
-        GpuFacts(0, "AMD Instinct MI355X", 1400.0, "SPX/NPS1"),
-        GpuFacts(1, "AMD Instinct MI355X", 1400.0, "SPX/NPS1"),
-    ]
+    two = [GpuFacts(0, MI355X_CARD, 1400.0, "SPX/NPS1"), GpuFacts(1, MI355X_CARD, 1400.0, "SPX/NPS1")]
     reads = iter([two, two[:1]])
     env["ROCR_VISIBLE_DEVICES"] = "0,1"
     monkeypatch.setattr(runner.hardware, "read_gpu_facts", lambda visible: next(reads))
@@ -716,7 +729,7 @@ def test_fewer_gpus_visible_after_the_test_are_a_node_fault_and_no_result(tmp_pa
 
 
 def test_gpus_that_answered_before_the_test_and_do_not_after_it_are_a_node_fault(tmp_path, env, monkeypatch):
-    reads = iter([[GpuFacts(0, "AMD Instinct MI355X", 1400.0, "SPX/NPS1")], None])
+    reads = iter([[GpuFacts(0, MI355X_CARD, 1400.0, "SPX/NPS1")], None])
     monkeypatch.setattr(runner.hardware, "read_gpu_facts", lambda visible: next(reads))
     monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
 

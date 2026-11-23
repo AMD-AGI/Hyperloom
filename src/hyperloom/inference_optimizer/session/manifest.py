@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common import gpu_card
 from hyperloom_common.io import atomic_write_json
 from hyperloom.common.provenance import build_provenance
 from hyperloom.common.session_files import shared_options
@@ -194,6 +196,8 @@ def build_manifest(
         "model_name": model_name,
         "framework": framework or "sglang",
         "gpu_type": gpu_type,
+        # The card the session started on, archived: a resume reads its card again rather than this.
+        "gpu_card": dataclasses.asdict(card) if (card := gpu_card.session_card()) else None,
         "tp": _env_digits("TP"),
         **{key: _prov.get(key) for key in ("gfx_arch", "ep", "graph_mode", "server_args", "server_args_hash")},
         "workload": workload,

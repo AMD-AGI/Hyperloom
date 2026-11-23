@@ -6,15 +6,17 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import struct
 from pathlib import Path
 
 import pytest
 
+from hyperloom_common import gpu_card
 from hyperloom.inference_optimizer.cli import model_gate as cli
-from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.cli import model_compat
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD
 
 
 def _write_config(model_dir: Path, *, with_tokenizer: bool = True, **fields) -> None:
@@ -35,6 +37,21 @@ def _args(model: str, *, gpu_type: str | None = None) -> argparse.Namespace:
     return argparse.Namespace(model=model, isl=1024, osl=1024, gpu_type=gpu_type)
 
 
+@contextlib.contextmanager
+def _amd_session():
+    """A session that read an AMD card; without one the AMD-only detectors stay off."""
+    gpu_card.publish_session_card(MI325X_CARD)
+    try:
+        yield
+    finally:
+        gpu_card.publish_session_card(None)
+
+
+def _detect_on_amd(model_path: str, **kwargs) -> str | None:
+    with _amd_session():
+        return model_compat._detect_incompatible_model_config(model_path, **kwargs)
+
+
 def _seed_state(session_dir: Path, monkeypatch):
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR",
@@ -45,13 +62,6 @@ def _seed_state(session_dir: Path, monkeypatch):
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / "reports").mkdir(parents=True, exist_ok=True)
     SharedState(session_id="t", model_name="m", model_path="m").save(session_dir)
-
-
-@pytest.fixture(autouse=True)
-def _default_non_amd_gpu(monkeypatch):
-    """Keep config checks hermetic unless a test passes gpu_type explicitly."""
-    monkeypatch.delenv("GPU_TYPE", raising=False)
-    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: None)
 
 
 # _detect_incompatible_model_config
@@ -65,10 +75,27 @@ def test_detect_reports_the_first_matching_detector(tmp_path):
         max_position_embeddings=4096,
         quantization_config={"quant_method": "bitsandbytes"},
     )
-    reason = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    reason = _detect_on_amd(str(m))
     assert reason is not None
     assert "bitsandbytes" in reason
     assert "tokenizer" not in reason
+
+
+def test_a_gpu_label_without_a_card_does_not_run_the_amd_detectors(tmp_path, monkeypatch):
+    """A session is on AMD when it read an AMD card; a name in GPU_TYPE reads nothing."""
+    monkeypatch.setenv("GPU_TYPE", "mi300x")
+    m = tmp_path / "bnb_no_tokenizer"
+    _write_config(
+        m,
+        with_tokenizer=False,
+        model_type="llama",
+        max_position_embeddings=4096,
+        quantization_config={"quant_method": "bitsandbytes"},
+    )
+    reason = model_compat._detect_incompatible_model_config(str(m))
+    assert reason is not None
+    assert "bitsandbytes" not in reason
+    assert "tokenizer" in reason
 
 
 def test_detect_healthy_config_returns_none(tmp_path):
@@ -178,7 +205,7 @@ def test_detect_dual_chunk_blocks_on_amd(tmp_path):
         max_position_embeddings=1010000,
         dual_chunk_attention_config={"chunk_size": 262144},
     )
-    reason = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    reason = _detect_on_amd(str(m))
     assert reason is not None
     assert "dual_chunk" in reason
 
@@ -213,7 +240,7 @@ def test_detect_modelopt_fp8_blocks_on_amd(tmp_path):
             "quantization": {"quant_algo": "FP8", "kv_cache_quant_algo": "FP8"},
         },
     )
-    reason = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    reason = _detect_on_amd(str(m))
     assert reason is not None
     assert "modelopt" in reason.lower() or "FP8" in reason
 
@@ -228,7 +255,7 @@ def test_detect_nvfp4_blocks_on_amd(tmp_path):
             "quantization": {"quant_algo": "NVFP4"},
         },
     )
-    reason = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    reason = _detect_on_amd(str(m))
     assert reason is not None
     assert "NVFP4" in reason or "nvfp4" in reason.lower()
 
@@ -242,7 +269,7 @@ def test_detect_bitsandbytes_blocks_on_amd(tmp_path):
         max_position_embeddings=8192,
         quantization_config={"quant_method": "bitsandbytes"},
     )
-    reason = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    reason = _detect_on_amd(str(m))
     assert reason is not None
     assert "bitsandbytes" in reason.lower()
 
@@ -270,7 +297,7 @@ def test_detect_amd_native_fp8_not_blocked(tmp_path):
         max_position_embeddings=8192,
         quantization_config={"quant_method": "fp8"},
     )
-    assert model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x") is None
+    assert _detect_on_amd(str(m)) is None
 
 
 def _write_safetensors_header(model_dir: Path, tensors: dict) -> None:
@@ -473,7 +500,7 @@ def test_preflight_passes_for_healthy_model(tmp_path, monkeypatch):
     assert not (sd / "reports" / "final.json").exists()
 
 
-def test_preflight_runs_amd_only_detectors_for_args_gpu_type(
+def test_preflight_blocks_amd_unsupported_arch_on_a_session_with_a_card(
     tmp_path,
     monkeypatch,
 ):
@@ -487,13 +514,8 @@ def test_preflight_runs_amd_only_detectors_for_args_gpu_type(
     sd = tmp_path / "session_amd_quant"
     _seed_state(sd, monkeypatch)
 
-    assert (
-        cli._preflight_model_config_compat(
-            _args(str(model), gpu_type="mi300x"),
-            sd,
-        )
-        is True
-    )
+    with _amd_session():
+        assert cli._preflight_model_config_compat(_args(str(model), gpu_type="mi300x"), sd) is True
     final = json.loads((sd / "reports" / "final.json").read_text())
     assert final["stop_reason"] == "model_config_incompatible"
 

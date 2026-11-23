@@ -27,6 +27,8 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     RecipeKB,
     recipe_canonical_id,
 )
+from hyperloom_common.gpu_card import GpuCard
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, MI355X_CARD, publish_card
 
 
 def test_agentx_donor_ignores_fixed_length_placeholders() -> None:
@@ -826,3 +828,103 @@ def test_a_row_filed_under_a_local_build_is_still_reached_from_its_release(
         0.72,
     )
     assert "--page-size 32" in json.dumps(state.warm_start_context)
+
+
+# --- the session card's arch decides which other labels' rows a session may borrow --
+
+
+def _anchor(kb: RecipeKB, state: _FakeSharedState, session_dir: Path, hw: str) -> None:
+    run_t0_anchor(
+        kb,
+        state,
+        T0AnchorRequest(workload="M", hw=hw, extra_attrs={"framework_name": "sglang"}),
+        session_dir=session_dir,
+    )
+
+
+def test_t0_anchor_records_the_session_cards_arch_outside_the_canonical_id(
+    kb: RecipeKB,
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_card(monkeypatch, MI325X_CARD)
+    monkeypatch.delenv("HYPERLOOM_PARTITION_MODE", raising=False)
+    state = _FakeSharedState()
+
+    _anchor(kb, state, session_dir, "mi325x")
+
+    row = kb.local.get_recipe(canonical_id=_expected_cid(state, "M", "mi325x"))
+    assert row is not None
+    assert row["gfx_arch"] == "gfx942"
+    assert "gfx942" not in row["canonical_id"]
+
+
+def test_t0_anchor_without_a_card_records_no_arch(
+    kb: RecipeKB,
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("HYPERLOOM_PARTITION_MODE", raising=False)
+    state = _FakeSharedState()
+
+    _anchor(kb, state, session_dir, "mi325x")
+
+    row = kb.local.get_recipe(canonical_id=_expected_cid(state, "M", "mi325x"))
+    assert row is not None
+    assert "gfx_arch" not in row
+
+
+def _seed_row_on(kb: RecipeKB, hardware: str, gfx_arch: str) -> None:
+    identity = {"model": "M", "hardware": hardware, "framework_name": "sglang", "precision": "fp8"}
+    kb.put_recipe(
+        RecipeUpsert(
+            canonical_id=recipe_canonical_id(
+                RecipeIdentity(
+                    **identity,
+                    framework_version="0.4.5",
+                    model_type="qwen3",
+                    architectures=["Qwen3ForCausalLM"],
+                )
+            ),
+            **identity,
+            framework_version="0.4.5",
+            best_config={"extra_server_args": "--borrowed-across-labels"},
+            sessions=[{"session_id": "s1", "gain_pct": 12.0}],
+            provenance={"source": "seed", "generator": "ut"},
+            extras={"gfx_arch": gfx_arch} if gfx_arch else None,
+        )
+    )
+
+
+def _qwen3_state() -> _FakeSharedState:
+    state = _FakeSharedState()
+    state.model_type, state.model_architectures = "qwen3", ["Qwen3ForCausalLM"]
+    return state
+
+
+@pytest.mark.parametrize(
+    ("card", "row_arch", "borrowed"),
+    [
+        (MI325X_CARD, "gfx942", True),
+        (MI355X_CARD, "gfx942", False),
+        (MI325X_CARD, "", False),
+    ],
+)
+def test_a_row_under_another_label_is_borrowed_only_on_the_same_recorded_arch(
+    kb: RecipeKB,
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    card: GpuCard,
+    row_arch: str,
+    borrowed: bool,
+) -> None:
+    _seed_row_on(kb, "mi300a", row_arch)
+    publish_card(monkeypatch, card)
+    monkeypatch.delenv("HYPERLOOM_PARTITION_MODE", raising=False)
+    state = _qwen3_state()
+
+    _anchor(kb, state, session_dir, "mi325x")
+
+    assert ("--borrowed-across-labels" in json.dumps(state.warm_start_context)) is borrowed
+    if borrowed:
+        assert (state.warm_start_recipe["tier"], state.warm_start_recipe["confidence"]) == ("same_gpu_isa", 0.85)

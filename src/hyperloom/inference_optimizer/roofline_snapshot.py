@@ -222,15 +222,20 @@ def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str
         return
     rt = resolve_runtime_dtype(state, meta, arm=arm)
     meta = apply_runtime_dtype(meta, rt)
-    compute_precision_tag = rt.compute_precision_tag or runtime.precision or "bf16"
+    target = ComputeTarget(
+        card=runtime.card,
+        platform=runtime.gpu_type,
+        num_gpus=runtime.tp,
+        precision_tag=rt.compute_precision_tag or runtime.precision or "bf16",
+    )
     pm_bd = compute_roofline_from_perfmodel(
         meta=meta,
-        target=ComputeTarget(gpu_type=runtime.gpu_type, num_gpus=runtime.tp, precision_tag=compute_precision_tag),
+        target=target,
         shape=DecodeShape(isl=runtime.isl, osl=runtime.osl, concurrency=runtime.concurrency),
     )
     snapshot["roofline_provenance"] = {
         "formula": "perfmodel" if pm_bd is not None else "legacy",
-        **resolve_compute_peak_provenance(runtime.gpu_type, compute_precision_tag),
+        **resolve_compute_peak_provenance(target),
         "runtime_weight_dtype": rt.weight_dtype_tag,
         "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
         "runtime_activation_dtype_bytes": rt.activation_dtype_bytes,

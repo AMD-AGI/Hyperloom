@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 
@@ -19,21 +20,42 @@ from hyperloom.measure.runner.hardware import (
     ecc_counts,
     read_gpu_facts,
 )
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, MI355X_CARD
+
+MI300X_CARD = dataclasses.replace(MI325X_CARD, name="AMD Instinct MI300X", device_id="74a1", memory_mib=196592)
 
 
 def _runner(answers):
     return lambda args: answers.get(" ".join(args))
 
 
+def _static_row(index: int, *, name: str = "AMD Instinct MI355X", **extra) -> dict:
+    """An ``amd-smi static`` row of an MI355X as amd-smi 27 prints it, under ``name``."""
+    return {
+        "gpu": index,
+        "asic": {
+            "market_name": name,
+            "device_id": "0x75A3",
+            "num_compute_units": 256,
+            "target_graphics_version": "gfx950",
+        },
+        "vram": {"size": {"value": 294912, "unit": "MB"}, "max_bandwidth": {"value": 8000, "unit": "GB/s"}},
+        "clock": {
+            "sys": {
+                "frequency_levels": {
+                    "Level 0": {"value": "400", "unit": "MHz"},
+                    "Level 1": {"value": "2400", "unit": "MHz"},
+                }
+            }
+        },
+        **extra,
+    }
+
+
 STATIC = json.dumps(
     {
         "gpu_data": [
-            {
-                "gpu": i,
-                "asic": {"market_name": "AMD Instinct MI355X"},
-                "limit": {"ppt0": {"socket_power_limit": {"value": 1400, "unit": "W"}}},
-            }
-            for i in range(4)
+            _static_row(i, limit={"ppt0": {"socket_power_limit": {"value": 1400, "unit": "W"}}}) for i in range(4)
         ]
     }
 )
@@ -54,10 +76,7 @@ def test_facts_of_the_visible_gpus_only():
 
     facts = read_gpu_facts([1, 2], run)
 
-    assert facts == [
-        GpuFacts(1, "AMD Instinct MI355X", 1400.0, "SPX/NPS1"),
-        GpuFacts(2, "AMD Instinct MI355X", 1400.0, "SPX/NPS1"),
-    ]
+    assert facts == [GpuFacts(1, MI355X_CARD, 1400.0, "SPX/NPS1"), GpuFacts(2, MI355X_CARD, 1400.0, "SPX/NPS1")]
 
 
 @pytest.mark.parametrize(
@@ -69,7 +88,7 @@ def test_facts_of_the_visible_gpus_only():
     ],
 )
 def test_the_power_cap_is_read_in_every_layout_amd_smi_reports_it(limit):
-    static = json.dumps({"gpu_data": [{"gpu": 0, "asic": {"market_name": "AMD Instinct MI355X"}, "limit": limit}]})
+    static = json.dumps({"gpu_data": [_static_row(0, limit=limit)]})
 
     (facts,) = read_gpu_facts([0], _runner({"static --json": static}))
 
@@ -77,10 +96,10 @@ def test_the_power_cap_is_read_in_every_layout_amd_smi_reports_it(limit):
 
 
 def test_a_power_cap_within_the_rounding_of_amd_smi_matches_the_sheet():
-    facts = [GpuFacts(0, "AMD Instinct MI355X", 749.8, "SPX/NPS1")]
+    facts = [GpuFacts(0, MI355X_CARD, 749.8, "SPX/NPS1")]
 
-    assert check_hardware(facts, gpu_type="mi355x", gpu_count=1, power_cap_w=750, partition_mode=None) == []
-    assert check_hardware(facts, gpu_type="mi355x", gpu_count=1, power_cap_w=749, partition_mode=None) == [
+    assert check_hardware(facts, card=MI355X_CARD, gpu_count=1, power_cap_w=750, partition_mode=None) == []
+    assert check_hardware(facts, card=MI355X_CARD, gpu_count=1, power_cap_w=749, partition_mode=None) == [
         "GPU 0 power cap 749.8 W, not 749 W"
     ]
 
@@ -104,6 +123,14 @@ def test_an_unreadable_tool_gives_none_and_not_a_guess():
     assert ecc_counts([0], _runner({}), _runner({})) is None
 
 
+def test_a_visible_card_amd_smi_cannot_describe_gives_none_and_one_that_is_not_visible_does_not_matter():
+    undescribed = {"gpu": 1, "asic": {"market_name": "AMD Instinct MI355X"}}
+    static = json.dumps({"gpu_data": [_static_row(0), undescribed]})
+
+    assert read_gpu_facts([0, 1], _runner({"static --json": static})) is None
+    assert read_gpu_facts([0], _runner({"static --json": static})) == [GpuFacts(0, MI355X_CARD, None, None)]
+
+
 def test_ecc_counts_need_every_visible_gpu():
     run, no_ras = _runner({"metric --ecc --json": ECC}), _runner({})
 
@@ -112,100 +139,57 @@ def test_ecc_counts_need_every_visible_gpu():
 
 
 def test_hardware_mismatches_are_named():
-    facts = [GpuFacts(0, "AMD Instinct MI355X", 1400.0, "SPX/NPS1")]
+    facts = [GpuFacts(0, MI355X_CARD, 1400.0, "SPX/NPS1")]
 
-    assert check_hardware(facts, gpu_type="mi355x", gpu_count=1, power_cap_w=1400, partition_mode="SPX/NPS1") == []
-    problems = check_hardware(facts, gpu_type="mi300x", gpu_count=2, power_cap_w=750, partition_mode="CPX/NPS4")
-    assert any("1 GPUs visible, 2 needed" in p for p in problems)
-    assert any("not mi300x" in p for p in problems)
-    assert any("power cap 1400.0 W, not 750 W" in p for p in problems)
-    assert any("partition SPX/NPS1, not CPX/NPS4" in p for p in problems)
+    assert check_hardware(facts, card=MI355X_CARD, gpu_count=1, power_cap_w=1400, partition_mode="SPX/NPS1") == []
+    problems = check_hardware(facts, card=MI300X_CARD, gpu_count=2, power_cap_w=750, partition_mode="CPX/NPS4")
+    assert problems == [
+        "1 GPUs visible, 2 needed",
+        "GPU 0 is AMD Instinct MI355X (gfx950, 256 CUs, 294912 MiB, 2400 MHz), "
+        "not AMD Instinct MI300X (gfx942, 304 CUs, 196592 MiB, 2100 MHz)",
+        "GPU 0 power cap 1400.0 W, not 750 W",
+        "GPU 0 partition SPX/NPS1, not CPX/NPS4",
+    ]
 
 
 def test_a_value_the_machine_did_not_give_is_not_compared():
-    facts = [GpuFacts(0, None, None, None)]
+    facts = [GpuFacts(0, MI355X_CARD, None, None)]
 
-    assert check_hardware(facts, gpu_type="mi355x", gpu_count=1, power_cap_w=1400, partition_mode="SPX/NPS1") == []
-
-
-def _card(model, device_id, arch):
-    return GpuFacts(0, model, 1400.0, "SPX/NPS1", device_id, arch)
+    assert check_hardware(facts, card=MI355X_CARD, gpu_count=1, power_cap_w=1400, partition_mode="SPX/NPS1") == []
 
 
-def _wrong_card(facts, gpu_type):
-    return check_hardware([facts], gpu_type=gpu_type, gpu_count=1, power_cap_w=None, partition_mode=None)
+def _kind_problems(card_on_the_machine, card_on_the_sheet):
+    facts = [GpuFacts(0, card_on_the_machine, 1400.0, "SPX/NPS1")]
+    return check_hardware(facts, card=card_on_the_sheet, gpu_count=1, power_cap_w=None, partition_mode=None)
 
 
-def test_the_device_id_and_arch_are_read_next_to_the_market_name():
-    static = json.dumps(
-        {
-            "gpu_data": [
-                {
-                    "gpu": 0,
-                    "asic": {
-                        "market_name": "AMD Instinct MI355 OAM",
-                        "device_id": "0x75A3",
-                        "target_graphics_version": "gfx950",
-                    },
-                }
-            ]
-        }
-    )
+def test_the_card_is_read_from_the_same_static_document_as_the_power_cap():
+    static = json.dumps({"gpu_data": [_static_row(0, name="AMD Instinct MI355 OAM")]})
 
     facts = read_gpu_facts([0], _runner({"static --json": static}))
 
-    assert facts == [GpuFacts(0, "AMD Instinct MI355 OAM", None, None, "75a3", "gfx950")]
+    assert facts == [GpuFacts(0, dataclasses.replace(MI355X_CARD, name="AMD Instinct MI355 OAM"), None, None)]
 
 
-def test_a_node_whose_market_name_is_mi355_oam_is_still_an_mi355x():
-    """A machine whose VBIOS reports 'AMD Instinct MI355 OAM' for device 0x75a3: a match on the name alone would
-    refuse every test there."""
-    oam = _card("AMD Instinct MI355 OAM", "75a3", "gfx950")
+def test_a_card_of_the_same_kind_passes_whatever_its_name_says():
+    """A node whose VBIOS calls an MI355X 'AMD Instinct MI355 OAM' runs the sheet's MI355X tests."""
+    oam = dataclasses.replace(MI355X_CARD, name="AMD Instinct MI355 OAM", device_id="")
 
-    for requested in ("mi355x", "MI355X", "MI355X "):
-        assert _wrong_card(oam, requested) == []
-    assert _wrong_card(_card("AMD Instinct MI355X", "75a3", "gfx950"), "MI355X") == []
+    assert _kind_problems(oam, MI355X_CARD) == []
 
 
-def test_a_different_card_is_refused_whatever_its_name_says():
-    mi300x = _card("AMD Instinct MI300X", "74a1", "gfx942")
-
-    problems = _wrong_card(mi300x, "MI355X")
-
-    assert problems == ["GPU 0 is AMD Instinct MI300X (device id 74a1, gfx942), not MI355X"]
-    # the device id decides, so a name that happens to contain the requested type does not rescue a different board
-    assert _wrong_card(_card("AMD Instinct MI355X", "74a1", "gfx942"), "MI355X")
-    # and the reverse request is refused too
-    assert _wrong_card(_card("AMD Instinct MI355 OAM", "75a3", "gfx950"), "MI300X")
-    assert _wrong_card(_card("AMD Instinct MI325X", "74a5", "gfx942"), "MI300X")
+def test_another_kind_of_card_is_refused_whatever_its_name_says():
+    assert _kind_problems(MI325X_CARD, MI355X_CARD) != []
+    # the same arch and compute units with less memory is another card
+    assert _kind_problems(MI300X_CARD, MI325X_CARD) != []
+    # a name that matches the sheet's does not make a different card the same
+    assert _kind_problems(dataclasses.replace(MI325X_CARD, name=MI355X_CARD.name), MI355X_CARD) != []
+    # nor does a lower top engine clock pass for the sheet's
+    assert _kind_problems(dataclasses.replace(MI355X_CARD, engine_clock_mhz=2100), MI355X_CARD) != []
 
 
-def test_an_unlisted_device_id_is_judged_by_architecture_and_then_by_name():
-    assert _wrong_card(_card("AMD Instinct MI355X", "ffff", "gfx942"), "MI355X")  # another architecture
-    assert _wrong_card(_card("AMD Instinct MI355X", "ffff", "gfx950"), "MI355X") == []
-    assert _wrong_card(
-        _card("AMD Instinct MI300X", "ffff", "gfx950"), "MI355X"
-    )  # same arch, a name that says otherwise
-    # 0x74a2 is an MI308X and, at revision A1, an MI300X: it names no board, so the name decides
-    assert _wrong_card(_card("AMD Instinct MI300X", "74a2", "gfx942"), "MI300X") == []
-    assert _wrong_card(_card("AMD Instinct MI308X", "74a2", "gfx942"), "MI308X") == []
-    assert _wrong_card(_card("AMD Instinct MI308X", "74a2", "gfx942"), "MI300X")
-
-
-def test_a_card_that_gives_only_the_driver_s_generic_name_is_taken_as_the_type_the_operator_gave(caplog):
-    with caplog.at_level("WARNING", logger="hyperloom.measure.runner.hardware"):
-        assert _wrong_card(_card("AMD Radeon Graphics", "ffff", "gfx1201"), "r9700") == []
-        assert _wrong_card(_card("AMD Radeon Graphics", "ffff", None), "r9700") == []
-    assert [record.getMessage() for record in caplog.records] == [
-        "GPU 0 names no board (AMD Radeon Graphics): taken as r9700, the --gpu-type given"
-    ] * 2
-    assert _wrong_card(_card("AMD Radeon Graphics", "ffff", "gfx1100"), "r9700")
-    assert _wrong_card(_card("AMD Radeon AI PRO R9600D", "ffff", "gfx1201"), "r9700")
-
-
-def test_a_type_without_a_device_id_table_is_compared_by_name_as_before():
-    assert _wrong_card(_card("AMD Instinct MI400X", "75a3", "gfx950"), "mi400x") == []
-    assert _wrong_card(_card("AMD Instinct MI355X", "75a3", "gfx950"), "mi400x")
+def test_a_sheet_without_a_card_is_not_compared_with_the_machine_s_cards():
+    assert _kind_problems(MI325X_CARD, None) == []
 
 
 def _ras(*gpus: dict[str, tuple[int, int] | None]) -> str:

@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common import gpu_card
 from hyperloom_common.checkpoint_quant import checkpoint_format
 from hyperloom_common.env import is_truthy
 from hyperloom.inference_optimizer.model_config_utils import load_model_config_dict
@@ -206,8 +207,9 @@ def _resolve_forge_precision_and_quant(state) -> tuple[str, str]:
 
 
 def _state_fp8_quant_type(state) -> str:
+    card = gpu_card.session_card()
     return _resolve_fp8_quant_type(
         _state_setting(state, "model_path"),
-        _state_setting(state, "gpu_type"),
+        card.gfx if card else "",
         _state_framework(state),
     )

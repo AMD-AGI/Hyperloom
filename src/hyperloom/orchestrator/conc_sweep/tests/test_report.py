@@ -22,8 +22,17 @@ from hyperloom.orchestrator.conc_sweep.report import (
 )
 from hyperloom.inference_optimizer.roofline_model_meta import ModelMeta
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.tests._fixtures import MI355X_CARD, publish_card
+from hyperloom_common.gpu_card import SESSION_CARD_ENV
 
 _LOAD_META_PATH = "hyperloom.orchestrator.conc_sweep.report.load_model_meta"
+
+
+@pytest.fixture(autouse=True)
+def _session_card(monkeypatch, tmp_path_factory) -> None:
+    """The session's card is an MI355X that TraceLens has measured no peak for."""
+    publish_card(monkeypatch, MI355X_CARD)
+    monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path_factory.mktemp("tracelens")))
 
 
 def _make_state(
@@ -208,7 +217,6 @@ def test_dense_fallback_no_moe_fields() -> None:
     ("meta", "state_overrides"),
     [
         pytest.param(None, {}, id="meta_unavailable"),
-        pytest.param(_qwen3_30b_a3b_meta(), {"gpu_type": ""}, id="gpu_type_missing"),
         pytest.param(_qwen3_30b_a3b_meta(), {"tp": 0}, id="tp_zero"),
     ],
 )
@@ -284,3 +292,11 @@ class TestTheCurveCarriesBothAxisPairs:
         assert [(row["arm"], row["conc"]) for row in rows] == [("optimized", "8")]
         assert rows[0]["e2e_norm_intvty_p90"] == "447.2"
         assert rows[0]["total_token_throughput"] == "25984.8"
+
+
+def test_returns_none_when_the_session_read_no_card(monkeypatch, stub_meta: ModelMeta) -> None:
+    monkeypatch.delenv(SESSION_CARD_ENV)
+    block = build_roofline_ceiling(
+        _make_state(), ArmCurves(baseline=[], optimized=[]), concs=[1, 8], isl=1024, osl=1024
+    )
+    assert block is None

@@ -145,6 +145,52 @@
             "null"
           ],
           "minLength": 1
+        },
+        "card": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "gfx",
+            "compute_units",
+            "memory_mib"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "device_id": {
+              "type": "string"
+            },
+            "gfx": {
+              "type": "string",
+              "minLength": 1
+            },
+            "compute_units": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "memory_mib": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "memory_bandwidth_gbps": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "engine_clock_mhz": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            }
+          }
         }
       }
     },

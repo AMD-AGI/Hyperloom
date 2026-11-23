@@ -17,13 +17,14 @@ import os
 import re
 import tarfile
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from hyperloom_common.env import env_bool
+from hyperloom_common.gpu_card import GpuCard
 from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError
 from hyperloom.common.outside_facts import ENV_TP
 from hyperloom.contracts.measurement import AttachmentRef
@@ -83,13 +84,15 @@ class SpecContext:
 
     ``blobs`` is the session's content-addressed blob store (``put``/``get``); attachments are written to it.
     ``shared_roots`` are the directories on shared storage whose files a runner cannot read: a path below one of them
-    (the model directory excepted) in the YAML becomes an attachment.
+    (the model directory excepted) in the YAML becomes an attachment. ``card`` is the session's card, which a runner
+    holds its own cards to; ``None`` when the session read none.
     """
 
     image_ref: str
     image_digest: str
     gpu_type: str
     blobs: Any
+    card: GpuCard | None = None
     power_cap_w: float | None = None
     partition_mode: str | None = None
     model_hashes: Mapping[str, str] = field(default_factory=dict)
@@ -358,6 +361,7 @@ def _hardware_section(ctx: SpecContext, gpus: int) -> dict[str, Any]:
         "gpu_count": gpus,
         "power_cap_w": ctx.power_cap_w,
         "partition_mode": ctx.partition_mode,
+        "card": None if ctx.card is None else asdict(ctx.card),
     }
 
 

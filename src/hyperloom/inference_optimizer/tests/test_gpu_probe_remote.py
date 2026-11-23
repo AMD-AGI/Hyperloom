@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the multi-node remote GPU-type probe."""
+"""Unit tests for reading a multi-node cluster's cards remotely."""
 
 from __future__ import annotations
 
@@ -12,13 +12,22 @@ from pathlib import Path
 import httpx
 import pytest
 
-from hyperloom.inference_optimizer.gpu_types import parse_gpu_type
+import hyperloom_common
+from hyperloom_common.amd_smi import AmdSmiError
 from hyperloom.inference_optimizer.multi_node._internal import gpu_probe
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD
+
+#: What ``amd-smi static --json`` printed on a four-card MI325X node.
+_MI325X_STATIC = (
+    Path(hyperloom_common.__file__).parent / "tests" / "fixtures" / "amd_smi_static_mi325x.json"
+).read_text(encoding="utf-8")
+
+_RAY_STATE = {"backend": "rayjob", "head_pod_ip": "10.0.0.1"}
 
 
 @pytest.fixture(autouse=True)
 def _has_handoff(monkeypatch):
-    # external_service_url() must return non-empty or the probe short-circuits.
+    # external_service_url() must return non-empty or there is no cluster to read.
     monkeypatch.setattr(gpu_probe, "external_service_url", lambda: "http://claw-ray:8888")
 
 
@@ -28,6 +37,7 @@ class _FakeRayClient:
     def __init__(self, logs: str, *, status: str = "SUCCEEDED") -> None:
         self._logs = logs
         self._status = status
+        self.entrypoints: list[str] = []
 
     def __enter__(self):
         return self
@@ -35,7 +45,8 @@ class _FakeRayClient:
     def __exit__(self, *_exc):
         return None
 
-    def submit_job(self, _entrypoint):
+    def submit_job(self, entrypoint):
+        self.entrypoints.append(entrypoint)
         return "sub-1"
 
     def get_job(self, _sub_id):
@@ -45,47 +56,11 @@ class _FakeRayClient:
         return self._logs
 
 
-def test_rayjob_probe_parses_product_name(monkeypatch):
-    # rocm-smi on the Ray head reports MI325X -> resolved to mi325x.
-    monkeypatch.setattr(
-        gpu_probe,
-        "build_external_state_from_env",
-        lambda: {"backend": "rayjob", "head_pod_ip": "10.0.0.1"},
-    )
-    monkeypatch.setattr(
-        gpu_probe.ray_dashboard,
-        "RayDashboardClient",
-        lambda *_a, **_k: _FakeRayClient("Card series: AMD Instinct MI325X OAM"),
-    )
-
-    assert gpu_probe.remote_autodetect_gpu_type(timeout_s=1) == "mi325x"
-
-
-def test_infera_probe_parses_product_name(monkeypatch):
-    # SSH into the first GPU pod; rocm-smi output resolves to mi325x.
-    monkeypatch.setattr(
-        gpu_probe,
-        "build_external_state_from_env",
-        lambda: {
-            "backend": "infera",
-            "ssh_key_path": "/tmp/key",
-            "ssh_known_hosts": "",
-            "prefill_pods": [{"podIP": "10.0.0.2", "sshPort": 27720}],
-        },
-    )
-    monkeypatch.setattr(
-        gpu_probe.ssh_known_hosts,
-        "refresh_known_hosts",
-        lambda _hosts, dest: dest,
-    )
-
-    def _fake_ssh_run(target, command, **_kwargs):
-        assert target.host == "10.0.0.2"
-        return subprocess.CompletedProcess(args=[command], returncode=0, stdout="GPU[0] : MI325X\n", stderr="")
-
-    monkeypatch.setattr(gpu_probe.ssh_client, "ssh_run", _fake_ssh_run)
-
-    assert gpu_probe.remote_autodetect_gpu_type(timeout_s=1) == "mi325x"
+def _ray(monkeypatch, logs: str, *, status: str = "SUCCEEDED") -> _FakeRayClient:
+    client = _FakeRayClient(logs, status=status)
+    monkeypatch.setattr(gpu_probe, "build_external_state_from_env", lambda: _RAY_STATE)
+    monkeypatch.setattr(gpu_probe.ray_dashboard, "RayDashboardClient", lambda *_a, **_k: client)
+    return client
 
 
 def _infera_state():
@@ -114,6 +89,31 @@ def _track_scratch_dirs(monkeypatch, tmp_path):
     return created
 
 
+def test_the_ray_head_reports_its_cards_through_amd_smi_static(monkeypatch):
+    client = _ray(monkeypatch, _MI325X_STATIC)
+
+    assert gpu_probe.remote_cards(timeout_s=1) == [MI325X_CARD] * 4
+    assert client.entrypoints == ["amd-smi static --json"]
+
+
+def test_the_document_is_found_among_the_lines_a_job_log_wraps_it_in(monkeypatch):
+    _ray(monkeypatch, f"[INFO] job started {{attempt: 1}}\n{_MI325X_STATIC}\n[INFO] job finished\n")
+
+    assert gpu_probe.remote_cards(timeout_s=1) == [MI325X_CARD] * 4
+
+
+def test_an_infera_pod_reports_its_cards_over_ssh(monkeypatch, tmp_path):
+    _track_scratch_dirs(monkeypatch, tmp_path)
+
+    def _fake_ssh_run(target, command, **_kwargs):
+        assert (target.host, command) == ("10.0.0.2", "amd-smi static --json")
+        return subprocess.CompletedProcess(args=[command], returncode=0, stdout=_MI325X_STATIC, stderr="")
+
+    monkeypatch.setattr(gpu_probe.ssh_client, "ssh_run", _fake_ssh_run)
+
+    assert gpu_probe.remote_cards(timeout_s=1) == [MI325X_CARD] * 4
+
+
 @pytest.mark.parametrize("ssh_explodes", [False, True])
 def test_infera_probe_removes_its_scratch_known_hosts(monkeypatch, tmp_path, ssh_explodes):
     """The one-shot keyscan dir must not accumulate under /tmp, even on failure."""
@@ -122,47 +122,51 @@ def test_infera_probe_removes_its_scratch_known_hosts(monkeypatch, tmp_path, ssh
     def _fake_ssh_run(_host, command, **_kwargs):
         if ssh_explodes:
             raise RuntimeError("ssh died")
-        return subprocess.CompletedProcess(args=[command], returncode=0, stdout="MI325X", stderr="")
+        return subprocess.CompletedProcess(args=[command], returncode=0, stdout=_MI325X_STATIC, stderr="")
 
     monkeypatch.setattr(gpu_probe.ssh_client, "ssh_run", _fake_ssh_run)
 
-    gpu_probe.remote_autodetect_gpu_type(timeout_s=1)
+    if ssh_explodes:
+        with pytest.raises(AmdSmiError, match="ssh died"):
+            gpu_probe.remote_cards(timeout_s=1)
+    else:
+        gpu_probe.remote_cards(timeout_s=1)
 
     assert created, "the probe should have keyscanned into a scratch dir"
     assert not any(p.exists() for p in created)
 
 
-def test_infera_probe_parses_output_despite_a_nonzero_exit(monkeypatch, tmp_path):
-    """_PROBE_CMD's `||` fallback can print a usable name and still exit non-zero."""
+def test_a_failed_remote_amd_smi_is_unreadable_and_says_why(monkeypatch, tmp_path):
+    """No fallback probe stands behind amd-smi, so its failure is the answer."""
     _track_scratch_dirs(monkeypatch, tmp_path)
     monkeypatch.setattr(
         gpu_probe.ssh_client,
         "ssh_run",
         lambda _host, command, **_kw: subprocess.CompletedProcess(
-            args=[command], returncode=1, stdout="gfx942", stderr="rocm-smi: not found"
+            args=[command], returncode=127, stdout="", stderr="amd-smi: command not found"
         ),
     )
 
-    assert gpu_probe.remote_autodetect_gpu_type(timeout_s=1) == "mi300x"
+    with pytest.raises(AmdSmiError, match="exited 127: amd-smi: command not found"):
+        gpu_probe.remote_cards(timeout_s=1)
 
 
-def test_rayjob_probe_parses_logs_despite_a_failed_job(monkeypatch):
-    """Same rule on the Ray path: a FAILED job may still have logged the name."""
-    monkeypatch.setattr(
-        gpu_probe,
-        "build_external_state_from_env",
-        lambda: {"backend": "rayjob", "head_pod_ip": "10.0.0.1"},
-    )
-    monkeypatch.setattr(
-        gpu_probe.ray_dashboard,
-        "RayDashboardClient",
-        lambda *_a, **_k: _FakeRayClient("AMD Instinct MI325X", status="FAILED"),
-    )
+def test_a_failed_ray_job_is_unreadable(monkeypatch):
+    _ray(monkeypatch, _MI325X_STATIC, status="FAILED")
 
-    assert gpu_probe.remote_autodetect_gpu_type(timeout_s=1) == "mi325x"
+    with pytest.raises(AmdSmiError, match="ended FAILED"):
+        gpu_probe.remote_cards(timeout_s=1)
 
 
-_BACKENDS = [_infera_state(), {"backend": "rayjob", "head_pod_ip": "10.0.0.1"}]
+@pytest.mark.parametrize("logs", ["", "amd-smi: no GPU found", '{"gpu_data": []}'])
+def test_output_that_describes_no_card_is_unreadable(monkeypatch, logs):
+    _ray(monkeypatch, logs)
+
+    with pytest.raises(AmdSmiError, match="printed no card"):
+        gpu_probe.remote_cards(timeout_s=1)
+
+
+_BACKENDS = [_infera_state(), _RAY_STATE]
 
 
 def _probe_failing_with(monkeypatch, tmp_path, failure, state):
@@ -174,7 +178,7 @@ def _probe_failing_with(monkeypatch, tmp_path, failure, state):
     monkeypatch.setattr(gpu_probe.ssh_client, "ssh_run", _fail)
     monkeypatch.setattr(gpu_probe.ray_dashboard, "RayDashboardClient", _fail)
     monkeypatch.setattr(gpu_probe, "build_external_state_from_env", lambda: state)
-    return gpu_probe.remote_autodetect_gpu_type(timeout_s=1)
+    return gpu_probe.remote_cards(timeout_s=1)
 
 
 @pytest.mark.parametrize("state", _BACKENDS)
@@ -188,8 +192,9 @@ def _probe_failing_with(monkeypatch, tmp_path, failure, state):
     ],
     ids=["http-error", "os-error", "runtime-error", "timeout"],
 )
-def test_expected_probe_failures_fall_back_to_none(monkeypatch, tmp_path, failure, state):
-    assert _probe_failing_with(monkeypatch, tmp_path, failure, state) is None
+def test_expected_transport_failures_are_unreadable_cards(monkeypatch, tmp_path, failure, state):
+    with pytest.raises(AmdSmiError, match=f"via {state['backend']} failed"):
+        _probe_failing_with(monkeypatch, tmp_path, failure, state)
 
 
 @pytest.mark.parametrize("state", _BACKENDS)
@@ -198,18 +203,23 @@ def test_an_unexpected_probe_error_propagates(monkeypatch, tmp_path, state):
         _probe_failing_with(monkeypatch, tmp_path, KeyError("status"), state)
 
 
-def test_no_handoff_returns_none(monkeypatch):
-    # Without an external service URL there is no cluster to probe.
+@pytest.mark.parametrize(
+    "state",
+    [{"backend": "rayjob"}, {"backend": "infera", "prefill_pods": [{"podIP": "10.0.0.2"}]}, {"backend": "slurm"}],
+    ids=["ray-without-head", "infera-without-key", "unsupported-backend"],
+)
+def test_a_hand_off_the_probe_cannot_reach_is_unreadable(monkeypatch, state):
+    monkeypatch.setattr(gpu_probe, "build_external_state_from_env", lambda: state)
+
+    with pytest.raises(AmdSmiError):
+        gpu_probe.remote_cards(timeout_s=1)
+
+
+def test_no_handoff_is_unreadable(monkeypatch):
+    # Without an external service URL there is no cluster to read.
     monkeypatch.setattr(gpu_probe, "external_service_url", lambda: "")
-    assert gpu_probe.remote_autodetect_gpu_type(timeout_s=1) is None
-
-
-def test_parse_gpu_type_prefers_specific_tag():
-    # gcnArchName fallback resolves gfx942 -> mi300x runner.
-    assert parse_gpu_type("gfx942:sramecc+:xnack-") == "mi300x"
-    # MI325X is not shadowed by the MI300X substring rule.
-    assert parse_gpu_type("AMD Instinct MI325X") == "mi325x"
-    assert parse_gpu_type("nothing here") is None
+    with pytest.raises(AmdSmiError, match="no multi-node cluster"):
+        gpu_probe.remote_cards(timeout_s=1)
 
 
 def test_a_failing_state_build_propagates(monkeypatch):
@@ -218,10 +228,4 @@ def test_a_failing_state_build_propagates(monkeypatch):
 
     monkeypatch.setattr(gpu_probe, "build_external_state_from_env", _boom)
     with pytest.raises(RuntimeError, match="bad hand-off env"):
-        gpu_probe.remote_autodetect_gpu_type(timeout_s=1)
-
-
-def test_parse_gpu_type_preserves_exact_r9700_for_topology_validation():
-    assert parse_gpu_type("AMD Radeon AI PRO R9700") == "r9700"
-    assert parse_gpu_type("AMD Radeon AI PRO R9700S") is None
-    assert parse_gpu_type("gfx1201") is None
+        gpu_probe.remote_cards(timeout_s=1)

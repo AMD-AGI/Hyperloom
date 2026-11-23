@@ -7,11 +7,14 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import json
 import os
 import tempfile
 import unittest
 import unittest.mock as mock
 
+from hyperloom_common.gpu_card import SESSION_CARD_ENV
 from hyperloom.inference_optimizer.framework_paths import resolve_known_source_prefixes
 from hyperloom.orchestrator.trace_analysis._candidate_assembly import derive_kernel_category
 from hyperloom.orchestrator.trace_analysis._kernel_classification import (
@@ -26,6 +29,12 @@ from hyperloom.orchestrator.trace_analysis._kernel_roofline import (
     _flydsl_kernel_params,
     enrich_candidates_with_runtime_metadata,
 )
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, MI355X_CARD
+
+
+def _published(card) -> dict[str, str]:
+    """The environment a session that read ``card`` gives this process."""
+    return {SESSION_CARD_ENV: json.dumps(dataclasses.asdict(card))}
 
 
 class TestFlyDSLClassification(unittest.TestCase):
@@ -237,6 +246,11 @@ class TestKernelCategoryDerivation(unittest.TestCase):
 class TestFlyDSLKernelParams(unittest.TestCase):
     """FlyDSL-specific metadata enrichment for GEAK prompt construction."""
 
+    def setUp(self) -> None:
+        session = mock.patch.dict(os.environ, _published(MI355X_CARD))
+        session.start()
+        self.addCleanup(session.stop)
+
     def _write_source(self, body: str) -> str:
         tmp = tempfile.NamedTemporaryFile(
             "w",
@@ -256,7 +270,7 @@ class TestFlyDSLKernelParams(unittest.TestCase):
             "FLYDSL_RUNTIME_ENABLE_CACHE": "1",
         }
         with mock.patch.dict(os.environ, env):
-            params = _flydsl_kernel_params("", "mi355x")
+            params = _flydsl_kernel_params("")
             self.assertEqual(params["FLYDSL_AUTOTUNE_CACHE_DIR"], "/tmp/flydsl-cache")
             self.assertEqual(params["FLYDSL_RUNTIME_ENABLE_CACHE"], "1")
 
@@ -267,24 +281,24 @@ class TestFlyDSLKernelParams(unittest.TestCase):
             "@flyc.kernel\n"
             "def k(): pass\n"
         )
-        params = _flydsl_kernel_params(path, "mi355x")
+        params = _flydsl_kernel_params(path)
         self.assertTrue(params.get("FLYDSL_USES_SMEM"))
 
     def test_source_buffer_load_marker_detected(self) -> None:
         path = self._write_source(
             "import flydsl.expr as fx\nfrom flydsl.expr import rocdl\nx = fx.rocdl.make_buffer_tensor(In)\n"
         )
-        params = _flydsl_kernel_params(path, "mi355x")
+        params = _flydsl_kernel_params(path)
         self.assertTrue(params.get("FLYDSL_USES_BUFFER_LOAD"))
 
     def test_source_without_markers_omits_fields(self) -> None:
         path = self._write_source("import flydsl.compiler as flyc\n@flyc.kernel\ndef k(): pass\n")
-        params = _flydsl_kernel_params(path, "mi355x")
+        params = _flydsl_kernel_params(path)
         self.assertNotIn("FLYDSL_USES_SMEM", params)
         self.assertNotIn("FLYDSL_USES_BUFFER_LOAD", params)
 
     def test_missing_source_does_not_raise(self) -> None:
-        params = _flydsl_kernel_params("/no/such/path.py", "mi355x")
+        params = _flydsl_kernel_params("/no/such/path.py")
         self.assertEqual(params.get("FLYDSL_TARGET_ARCH"), "gfx950")
         self.assertNotIn("FLYDSL_USES_SMEM", params)
 
@@ -375,20 +389,16 @@ class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
 
 
 class TestFlyDSLTargetArch(unittest.TestCase):
-    """FLYDSL_TARGET_ARCH comes from the shared board table, not a copy in this tool."""
+    """FLYDSL_TARGET_ARCH is the arch of the card the session read."""
 
-    def test_every_supported_board_gets_the_table_arch(self) -> None:
-        from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
+    def test_the_session_card_names_the_arch(self) -> None:
+        with mock.patch.dict(os.environ, _published(MI325X_CARD)):
+            self.assertEqual(_flydsl_kernel_params("").get("FLYDSL_TARGET_ARCH"), "gfx942")
 
-        for product, board in AMD_GPU_BOARDS.items():
-            self.assertEqual(
-                _flydsl_kernel_params("", product).get("FLYDSL_TARGET_ARCH"),
-                board.gfx,
-                product,
-            )
-
-    def test_an_unsupported_board_gets_no_arch(self) -> None:
-        self.assertNotIn("FLYDSL_TARGET_ARCH", _flydsl_kernel_params("", "mi250x"))
+    def test_a_session_without_a_card_gets_no_arch(self) -> None:
+        with mock.patch.dict(os.environ):
+            os.environ.pop(SESSION_CARD_ENV, None)
+            self.assertNotIn("FLYDSL_TARGET_ARCH", _flydsl_kernel_params(""))
 
 
 if __name__ == "__main__":

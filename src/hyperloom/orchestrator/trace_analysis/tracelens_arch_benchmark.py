@@ -15,12 +15,14 @@ from typing import Any, Callable, NamedTuple
 
 from TraceLens.Agent.Analysis.utils.arch_utils import _collect_arch_jsons
 
+from hyperloom_common.gpu_card import PEAK_PRECISIONS, GpuCard, session_card
 from hyperloom.common.visible_devices import (
     HIP_LEVEL_VARS,
     ROCR_LEVEL_VARS,
     effective_mask_tokens,
     parse_device_list,
 )
+from hyperloom.inference_optimizer.session.paths import tracelens_arch_json
 
 try:
     import torch
@@ -123,81 +125,49 @@ def single_physical_gpu_env(physical_id: int, *, base_env: dict[str, str] | None
 
 
 def resolve_arch_json_path(platform: str) -> Path | None:
-    """Resolve the bundled arch JSON path for a platform.
-
-    A checkout can hold the vendor-peak spec an older Hyperloom wrote into its arch dir as the fallback. That file is
-    not bundled, and no measurement produces its bytes, so it resolves to ``None`` and the board is measured again.
-    """
+    """Resolve the bundled arch JSON path for a platform."""
     canonical = normalize_platform(platform)
     if not canonical:
         return None
     for name, path in _collect_arch_jsons().items():
         if name.upper() == canonical:
-            found = Path(path)
-            return None if _holds_vendor_peaks(found, canonical) else found
+            return Path(path)
     return None
 
 
-#: hyperloom precision tag -> TraceLens ``max_achievable_tflops`` matrix key.
-_HYPERLOOM_DTYPE_TO_MATRIX_KEY: dict[str, str] = {
-    "bf16": "matrix_bf16",
-    "fp16": "matrix_fp16",
-    "fp32": "matrix_fp32",
-    "fp8": "matrix_fp8",
-    "fp4": "matrix_fp4",
-    "int8": "matrix_int8",
-}
-
-
-def build_hyperloom_arch_spec(platform: str) -> dict | None:
-    """Build a TraceLens arch spec from the board's vendor peaks, or ``None`` when Hyperloom has none for it.
-
-    Hyperloom's achievable table is not read: its rows copy TraceLens' bundled arch JSONs, which a run resolves
-    before it ever falls back to this spec.
-    """
-    from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS
-
-    spec = HW_SPECS.get((platform or "").strip().lower())
-    if not isinstance(spec, dict):
+def theoretical_arch_spec(platform: str, card: GpuCard | None) -> dict | None:
+    """A TraceLens arch spec for ``platform`` from ``card``'s vendor dense peaks; ``None`` without a card, or when the
+    card reports no memory bandwidth or has no vendor peak at any precision."""
+    if card is None or not card.memory_bandwidth_gbps:
         return None
-    table = spec.get("peak_tflops")
-    if not isinstance(table, dict):
+    peaks = {f"matrix_{precision}": card.peak_tflops(precision) for precision in PEAK_PRECISIONS}
+    maf = {key: tflops for key, tflops in peaks.items() if tflops}
+    if not maf:
         return None
-    maf: dict[str, float] = {}
-    for tag, matrix_key in _HYPERLOOM_DTYPE_TO_MATRIX_KEY.items():
-        val = table.get(tag)
-        if isinstance(val, (int, float)) and val > 0:
-            maf[matrix_key] = float(val)
-    mem_bw = spec.get("hbm_bw_gbps")
-    if not maf or not isinstance(mem_bw, (int, float)) or mem_bw <= 0:
-        return None
-    out: dict = {"name": normalize_platform(platform), "mem_bw_gbps": float(mem_bw)}
-    mem_gb = spec.get("hbm_gb")
-    if isinstance(mem_gb, (int, float)) and mem_gb > 0:
-        out["memory_gb"] = float(mem_gb)
-    out["max_achievable_tflops"] = maf
-    return out
+    return {
+        "name": normalize_platform(platform),
+        "mem_bw_gbps": card.memory_bandwidth_gbps,
+        "memory_gb": round(card.memory_mib / 1024, 1),
+        "max_achievable_tflops": maf,
+    }
 
 
 def _arch_spec_text(spec: dict) -> str:
-    """``spec`` as Hyperloom writes an arch JSON.
-
-    :func:`_holds_vendor_peaks` recognises the vendor-peak files older versions left in TraceLens checkouts by these
-    bytes, so changing the format stops it recognising them.
-    """
+    """``spec`` as Hyperloom writes an arch JSON."""
     return json.dumps(spec, indent=4) + "\n"
 
 
-def _holds_vendor_peaks(path: Path, platform: str) -> bool:
-    """Whether ``path`` holds the board's vendor-peak arch spec, byte for byte."""
-    spec = build_hyperloom_arch_spec(platform)
-    return spec is not None and path.read_bytes() == _arch_spec_text(spec).encode("utf-8")
-
-
 def write_vendor_peak_arch_spec(out_path: Path, platform: str, log: Callable[[str], None]) -> bool:
-    """Write the board's vendor-peak arch spec to ``out_path``; ``False`` when Hyperloom has no peaks for it."""
-    spec = build_hyperloom_arch_spec(platform)
+    """Write the session card's vendor-peak arch spec for ``platform`` to ``out_path``; ``False`` when there is none.
+
+    The card is the one the session published (:func:`~hyperloom_common.gpu_card.session_card`): the analysis runs in a
+    child of the session, which inherits its environment.
+    """
+    spec = theoretical_arch_spec(platform, session_card())
     if spec is None:
+        log(
+            f"gpu_arch_json: no vendor peaks for {normalize_platform(platform)}: the session's card is unknown or has none"
+        )
         return False
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(_arch_spec_text(spec), encoding="utf-8")
@@ -207,12 +177,6 @@ def write_vendor_peak_arch_spec(out_path: Path, platform: str, log: Callable[[st
         f"dtypes={sorted(spec['max_achievable_tflops'])})"
     )
     return True
-
-
-def default_arch_output_path(tracelens_root: Path, platform: str) -> Path:
-    """Return the default arch-spec JSON path for a platform."""
-    canonical = normalize_platform(platform)
-    return tracelens_root / "TraceLens/Agent/Analysis/utils/arch" / f"{canonical}.json"
 
 
 def _sanitize_measured_arch_spec(
@@ -359,7 +323,7 @@ def _measure_arch_spec(
             log(f"gpu_arch_json: patched name field -> {platform}")
         # Reject / sanitize a spec with 0 (unmeasured) MAF or bandwidth before roofline consumes it as a divisor.
         _sanitize_measured_arch_spec(payload, platform=platform, out_path=measured, log=log)
-    out_path = default_arch_output_path(tracelens_root, platform)
+    out_path = tracelens_arch_json(tracelens_root, platform)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(_arch_spec_text(payload), encoding="utf-8")
     log(f"gpu_arch_json: measured spec ready at {out_path}")

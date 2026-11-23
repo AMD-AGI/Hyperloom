@@ -189,8 +189,8 @@ def _tracelens_knows_arch(arch_json: Path | None, platform: str, out_dir: Path) 
 
     The run config names the platform: TraceLens' analysis steps need the name, and its report refuses a job that names
     both a platform and ``gpu_arch_json_path``. TraceLens resolves a name only from its bundled arch dir and from the
-    ``TL_EXTENSION`` packages, so an arch JSON resolved anywhere else (Hyperloom's spec from
-    :data:`hyperloom_common.gpu_identity.AMD_GPU_BOARDS`, a microbenchmark) is otherwise never read and a platform
+    ``TL_EXTENSION`` packages, so an arch JSON resolved anywhere else (Hyperloom's spec from the session's card, a
+    microbenchmark) is otherwise never read and a platform
     TraceLens does not bundle fails the run config's check (both routes) and the report. The JSON is served as a ``TL_EXTENSION`` package under ``out_dir``;
     the package root is put on ``sys.path`` and ``PYTHONPATH`` (for child processes); ``sys.path``, ``PYTHONPATH`` and
     ``TL_EXTENSION`` are restored on exit.
@@ -673,7 +673,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-id", default="")
     parser.add_argument("--model-name", default="")
     parser.add_argument("--framework", default="")
-    parser.add_argument("--target-platform", default="MI355X")
+    parser.add_argument(
+        "--target-platform",
+        required=True,
+        help="The GPU label of the cards the trace ran on (the session's --gpu-type); it names their arch JSON.",
+    )
     parser.add_argument(
         "--arch-gpus",
         type=parse_arch_gpus,

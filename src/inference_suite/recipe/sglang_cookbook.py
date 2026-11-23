@@ -8,9 +8,11 @@ only) are JavaScript, of which only literals are taken: a cell whose match, flag
 evaluated, and the page's overlay options are not composed on top. An AgentX file (AgentX only) is JSON whose
 verified single-node aggregated launches are read with the point's patch applied. A page's ``bash`` launch block
 serves the workload its section heads: AgentX under an Agentic or AgentX heading, fixed elsewhere; its board comes
-from the nearest heading naming one, its concurrency range from its title and its image from the section's text.
+from the nearest heading naming one of the boards the cookbook's cells name, its concurrency range from its title and
+its image from the section's text.
 
-Every form drops the flags the runner owns and keeps the rest as written. The cookbook pairs no golden curve with a
+A launch serves the board it was stated for and no other. Every form drops the flags the runner owns and keeps the
+rest as written. The cookbook pairs no golden curve with a
 launch, so its launches carry no golden acceptance.
 """
 
@@ -25,7 +27,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, last_alias_value
 from inference_suite.contracts.base_launch import LaunchQuery, LaunchSource, SourceKind, Topology, Workload
 from inference_suite.recipe.jslit import JsLiteralError, exported_value, has_expression
@@ -37,7 +38,6 @@ from inference_suite.recipe.model import (
     RepoBundle,
     SourceLaunch,
     SourceMiss,
-    boards_interchangeable,
 )
 
 SGLANG_REPO = "https://github.com/sgl-project/sglang"
@@ -137,13 +137,12 @@ class _Fit:
 class _Recipe:
     """A launch as one cookbook form states it, before it is held to a query.
 
-    ``board`` is the board it was tuned on and ``fit`` the concurrency it serves the query at. ``group`` names the cells it is one strategy of, and ``preference`` ranks
-    its strategy among theirs: the default strategy first, then the page's order.
+    ``fit`` is the concurrency it serves the query at. ``group`` names the cells it is one strategy of, and
+    ``preference`` ranks its strategy among theirs: the default strategy first, then the page's order.
     """
 
     path: str
     locator: str
-    board: str
     command: _Command
     fit: _Fit
     image: str | None
@@ -160,7 +159,7 @@ def _paths(bundle: RepoBundle, directory: str, suffix: str) -> list[str]:
 
 
 def _misfit(recipe: _Recipe, topology: Topology, query: LaunchQuery) -> str | None:
-    """Why ``recipe``, which serves the query's model on a like board, cannot serve ``query``."""
+    """Why ``recipe``, which serves the query's model on its board, cannot serve ``query``."""
     occurrences = argv_flag_occurrences(recipe.command.args)
     if query.workload is Workload.FIXED and last_alias_value(occurrences, _SPECULATIVE) is not None:
         return "it drafts tokens, and a fixed workload runs no speculative decoding"
@@ -185,8 +184,6 @@ def _launch(recipe: _Recipe, query: LaunchQuery, bundle: RepoBundle) -> SourceLa
         hicache = last_alias_value(argv_flag_occurrences(args), _HICACHE) is not None
         kv_offloading = "hicache" if hicache else "none"
     warnings = list(recipe.warnings)
-    if recipe.board != query.board:
-        warnings.append(f"the cookbook tuned {recipe.path} {recipe.locator} on {recipe.board}, not {query.board}")
     if recipe.fit.warning is not None:
         warnings.append(recipe.fit.warning)
     source = LaunchSource(
@@ -380,7 +377,6 @@ def _cell_recipe(path: str, index: int, config: Mapping[str, Any], model: str, t
     return _Recipe(
         path=path,
         locator=f"cells[{index}]",
-        board=match["hw"],
         command=command,
         fit=_cell_fit(f"{path} cells[{index}]", command, target),
         image=_image(image),
@@ -392,7 +388,7 @@ def _cell_recipe(path: str, index: int, config: Mapping[str, Any], model: str, t
 
 
 def _config_recipes(path: str, text: str, query: LaunchQuery) -> list[_Recipe | str]:
-    """The single-node cells of the config ``text`` that serve the query's model on a like board, a refused cell
+    """The single-node cells of the config ``text`` that serve the query's model on its board, a refused cell
     as the reason it is refused."""
     config = _config(text)
     recipes: list[_Recipe | str] = []
@@ -401,7 +397,7 @@ def _config_recipes(path: str, text: str, query: LaunchQuery) -> list[_Recipe | 
             continue
         hw = cell["match"].get("hw")
         model = _cell_model(config, cell["match"])
-        if model != query.model_id or not isinstance(hw, str) or not boards_interchangeable(query.board, hw):
+        if model != query.model_id or hw != query.board:
             continue
         if _single_node(cell):
             try:
@@ -452,8 +448,7 @@ def _cell_launches(query: LaunchQuery, bundle: RepoBundle) -> tuple[SourceLaunch
                 reasons.append(launch)
             else:
                 found.append((recipe, launch))
-    on_board = [(recipe, launch) for recipe, launch in found if recipe.board == query.board]
-    return _outcome([*_one_strategy(on_board or found), *reasons], "no deployment cell serves it here")
+    return _outcome([*_one_strategy(found), *reasons], "no deployment cell serves it here")
 
 
 # AgentX launches -----------------------------------------------------------------------------------------------------
@@ -556,7 +551,6 @@ def _agentx_recipe(path: str, data: Mapping[str, Any], cell: Mapping[str, Any], 
     return _Recipe(
         path=path,
         locator=f"{cell['id']} points[{index}]",
-        board=cell["hw"],
         command=_command([[str(word) for word in arg] for arg in worker["args"]], env),
         fit=_agentx_fit(cell, index, target),
         image=_image(cell.get("image")),
@@ -590,7 +584,7 @@ def _agentx_launches(query: LaunchQuery, bundle: RepoBundle) -> tuple[SourceLaun
         found += [
             _agentx_cell_launch(path, data, cell, query, bundle)
             for cell in data["cells"]
-            if cell.get("ckpt") == query.model_id and boards_interchangeable(query.board, cell.get("hw", ""))
+            if cell.get("ckpt") == query.model_id and cell.get("hw") == query.board
         ]
     return _outcome(found, "no AgentX launch serves it here")
 
@@ -647,13 +641,42 @@ def _page_blocks(path: str, text: str) -> Iterator[_PageBlock]:
     yield from _section_blocks(path, headings, prose, blocks)
 
 
-def _block_board(block: _PageBlock) -> str:
-    """The board named by the heading nearest ``block``."""
+def _config_boards(text: str) -> Iterator[object]:
+    for cell in _config(text)["cells"]:
+        if isinstance(cell, Mapping) and isinstance(cell.get("match"), Mapping):
+            yield cell["match"].get("hw")
+
+
+def _agentx_boards(text: str) -> Iterator[object]:
+    for cell in _agentx_data(text)["cells"]:
+        if isinstance(cell, Mapping):
+            yield cell.get("hw")
+
+
+def _heading_boards(query: LaunchQuery, bundle: RepoBundle) -> frozenset[str]:
+    """The boards a page heading is read for: every ``hw`` the cookbook's own cells name, and the query's."""
+    boards = {query.board}
+    for directory, read in ((CONFIG_DIR, _config_boards), (AGENTX_DIR, _agentx_boards)):
+        for path in _paths(bundle, directory, ".jsx"):
+            try:
+                boards.update(hw for hw in read(bundle.text(path)) if isinstance(hw, str) and hw)
+            except RecipeSourceError:
+                continue  # a file whose cells are code names no board
+    return frozenset(boards)
+
+
+def _names_board(heading: str, board: str) -> bool:
+    """Whether ``heading`` names ``board`` as a whole word, in any case; ``MI300XL`` names another board."""
+    return re.search(rf"(?<![a-z0-9]){re.escape(board)}(?![a-z0-9])", heading, re.IGNORECASE) is not None
+
+
+def _block_board(block: _PageBlock, boards: frozenset[str]) -> str:
+    """The one of ``boards`` named by the heading nearest ``block`` that names exactly one."""
     for heading in reversed(block.headings):
-        named = [product for product, board in AMD_GPU_BOARDS.items() if board.named_in(heading)]
+        named = [board for board in boards if _names_board(heading, board)]
         if len(named) == 1:
             return named[0]
-    raise RecipeSourceError("no heading above it names one AMD board")
+    raise RecipeSourceError("no heading above it names one board")
 
 
 def _block_command(block: _PageBlock) -> _Command:
@@ -704,7 +727,6 @@ def _block_recipe(block: _PageBlock, command: _Command, target: int) -> _Recipe:
     return _Recipe(
         path=block.path,
         locator=f"line {block.line} {block.title!r}",
-        board=_block_board(block),
         command=command,
         fit=_block_fit(block, target),
         image=image,
@@ -712,11 +734,14 @@ def _block_recipe(block: _PageBlock, command: _Command, target: int) -> _Recipe:
     )
 
 
-def _block_launch(block: _PageBlock, query: LaunchQuery, bundle: RepoBundle) -> SourceLaunch | str | None:
-    """The launch ``block`` gives ``query``, why it gives none, or ``None`` when it serves another model or board."""
+def _block_launch(
+    block: _PageBlock, boards: frozenset[str], query: LaunchQuery, bundle: RepoBundle
+) -> SourceLaunch | str | None:
+    """The launch ``block`` gives ``query``, why it gives none, or ``None`` when it serves another model or board;
+    its board is the one of ``boards`` its headings name."""
     try:
         command = _block_command(block)
-        if command.model != query.model_id or not boards_interchangeable(query.board, _block_board(block)):
+        if command.model != query.model_id or _block_board(block, boards) != query.board:
             return None
         return _launch(_block_recipe(block, command, max(query.concurrencies)), query, bundle)
     except RecipeSourceError as error:
@@ -726,14 +751,16 @@ def _block_launch(block: _PageBlock, query: LaunchQuery, bundle: RepoBundle) -> 
 def _page_launches(query: LaunchQuery, bundle: RepoBundle) -> tuple[SourceLaunch, ...] | SourceMiss:
     agentx = query.workload is Workload.AGENTX
     markers = [" ".join(entrypoint) for entrypoint in _ENTRYPOINTS]
-    found: list[SourceLaunch | str] = []
-    for path in _paths(bundle, COOKBOOK_DIR, ".mdx"):
-        for block in _page_blocks(path, bundle.text(path)):
-            if not any(marker in block.text for marker in markers) or query.model_id not in block.text:
-                continue
-            if any(_AGENTX_HEADING.search(heading) for heading in block.headings) == agentx:
-                launch = _block_launch(block, query, bundle)
-                found += [] if launch is None else [launch]
+    blocks = [
+        block
+        for path in _paths(bundle, COOKBOOK_DIR, ".mdx")
+        for block in _page_blocks(path, bundle.text(path))
+        if any(marker in block.text for marker in markers)
+        and query.model_id in block.text
+        and any(_AGENTX_HEADING.search(heading) for heading in block.headings) == agentx
+    ]
+    boards = _heading_boards(query, bundle) if blocks else frozenset()
+    found = [launch for block in blocks if (launch := _block_launch(block, boards, query, bundle)) is not None]
     return _outcome(found, "no page launch block serves it here")
 
 

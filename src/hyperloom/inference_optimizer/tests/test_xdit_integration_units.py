@@ -486,40 +486,6 @@ class TestRooflineSnapshotUnits:
         assert "25.0%" in table
 
 
-class TestHyperloomArchSpec:
-    """TraceLens arch spec derived from the board's vendor peaks."""
-
-    def _tab(self):
-        from hyperloom.orchestrator.trace_analysis import tracelens_arch_benchmark as tab
-
-        return tab
-
-    def test_build_spec_mi355x_falls_back_to_vendor(self):
-        tab = self._tab()
-        spec = tab.build_hyperloom_arch_spec("mi355x")
-        assert spec is not None
-        assert spec["mem_bw_gbps"] == pytest.approx(8000.0)
-        assert spec["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(2516.6)
-
-    def test_build_spec_case_insensitive_and_named(self):
-        tab = self._tab()
-        spec = tab.build_hyperloom_arch_spec("MI300X")
-        assert spec is not None
-        assert "matrix_bf16" in spec["max_achievable_tflops"]
-
-    def test_build_spec_unknown_platform_none(self):
-        tab = self._tab()
-        assert tab.build_hyperloom_arch_spec("nvidia-h100") is None
-
-    def test_write_spec_roundtrip(self, tmp_path):
-        tab = self._tab()
-        out = tmp_path / "MI300X.json"
-        assert tab.write_vendor_peak_arch_spec(out, "MI300X", lambda _m: None)
-
-        data = json.loads(out.read_text())
-        assert data["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(1307.4)
-
-
 class TestValidateTraceStructureScriptable:
     """For scriptable (xDiT) traces, the LLM/InferenceX structure checks are skipped; only the zero-ops (repeat=0 empty window) health signal applies."""
 

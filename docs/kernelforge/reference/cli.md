@@ -335,7 +335,7 @@ Model and target:
 | `--framework <name>` | required | `sglang`, `vllm` or `vllm-aiter` (vllm with `VLLM_ROCM_USE_AITER=1`). |
 | `--precision <p>` | required | `bf16`, `fp8`, `fp4`, `int8` or `awq`. |
 | `--quant-type <q>` | `auto` | `auto`, `none`, `per_token`, `blockscale`, `bpreshuffle`, `awq`, `gptq`, `fp4` or `mxfp4`. |
-| `--gpu-type <sku>` | `auto` | `auto` detects via `rocminfo`; otherwise `mi300x`, `mi355x`, `gfx942`, … |
+| `--gpu-type <sku>` | `auto` | `auto` detects via `rocminfo`; otherwise a gfx id such as `gfx942`, or one of the labels `mi300x`, `mi355x`, `w7900` and `radeon8060s`. Any other name names no architecture, so the architecture gates (FP4/MXFP4 on gfx942 and gfx1201) do not apply; pass the gfx id instead. |
 | `--output-dir <dir>` | required | Output directory for all artifacts. |
 
 Shape sources, in descending priority — `--demand` wins, then
@@ -459,7 +459,7 @@ configuration file, and cases the driver tags `unscored` get no ceiling.
 | `--config <file>` | `<W>/config.yaml` | Task configuration supplying `performance_command` and `source_file_path`. |
 | `--performance-command <cmd>` | config.yaml `performance_command` | Shell command that runs the timed benchmark. |
 | `--output-dir <dir>` | `<W>/forge_experiments/roofline_ceiling` | Where the report, the document and the evidence are published. |
-| `--arch <gfx>` | detected | Target architecture, e.g. `gfx950`. Detected via `rocminfo` when omitted; a marketing name such as `MI355X` is accepted. |
+| `--arch <gfx>` | detected | Target architecture, e.g. `gfx950`. Detected via `rocminfo` when omitted. A gfx id, or a name whose label is one of `mi300x`, `mi355x`, `w7900` and `radeon8060s` (such as `MI355X`), is accepted; any other marketing name names no architecture and the target is detected as if `--arch` were omitted. |
 | `--agent-provider <name>` | auto-selected | Agent provider for the analyst session. |
 | `--agent-model <name>` | provider default | Analyst model. |
 | `--agent-timeout-sec <s>` | `3600` | Wall-clock budget for the analyst session. |

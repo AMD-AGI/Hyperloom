@@ -22,7 +22,6 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from inference_suite.argv import argv_flag_occurrences
 from inference_suite.contracts import (
     BaseLaunch,
@@ -281,10 +280,36 @@ def test_a_frozen_base_resolved_for_an_org_repo_id_does_not_serve_a_directory_of
     )
 
 
-def test_a_frozen_base_serves_a_board_interchangeable_with_its_own():
-    frozen = _base(_fixed())
+_MI355X_CARD = {"gfx": "gfx950", "memory_mib": 294912}
 
-    assert _base(_fixed(board="mi350x"), _frozen_user_file(frozen)).digest() == frozen.digest()
+
+def test_a_frozen_base_serves_another_board_whose_query_records_the_same_card():
+    frozen = _base(_fixed(**_MI355X_CARD))
+
+    rebound = _base(_fixed(board="mi350x", **_MI355X_CARD), _frozen_user_file(frozen))
+
+    assert rebound.digest() == frozen.digest()
+    assert rebound.query.board == "mi350x"
+
+
+@pytest.mark.parametrize(
+    ("frozen_card", "session_card"),
+    [
+        ({}, _MI355X_CARD),
+        (_MI355X_CARD, {}),
+        ({}, {}),
+        (_MI355X_CARD, {**_MI355X_CARD, "memory_mib": 262128}),
+        (_MI355X_CARD, {**_MI355X_CARD, "gfx": "gfx942"}),
+    ],
+)
+def test_a_frozen_base_refuses_another_board_unless_both_queries_record_the_same_card(frozen_card, session_card):
+    frozen = _base(_fixed(**frozen_card))
+
+    miss = _miss(_fixed(board="mi350x", **session_card), _frozen_user_file(frozen))
+
+    assert miss.reasons() == (
+        "user_file: base_launch.json was resolved for board 'mi355x', but the session asks for 'mi350x'",
+    )
 
 
 def test_a_shell_user_file_needing_more_gpus_than_the_session_sees_is_a_miss_naming_both():
@@ -453,13 +478,13 @@ def test_an_arm_offloading_no_kv_cache_wins_at_the_same_tp():
     ]
 
 
-def test_boards_of_one_architecture_and_capacity_share_launches():
-    twin = _base(_agentx("zai-org/GLM-5.2-FP8", board="mi350x"))
-    assert twin.source.kind is SourceKind.INFERENCEX
-    assert any("on mi355x, not mi350x" in warning for warning in twin.warnings)
+@pytest.mark.parametrize("board", ["mi350x", "mi300x"])
+def test_a_recipe_serves_only_the_board_it_was_tuned_on(board):
+    assert _base(_agentx("zai-org/GLM-5.2-FP8")).source.kind is SourceKind.INFERENCEX
 
-    miss = _miss(_agentx("zai-org/GLM-5.2-FP8", board="mi300x"))
-    assert miss.reasons()[0] == "inferencex: no entry serves zai-org/GLM-5.2-FP8 with sglang on a mi300x"
+    miss = _miss(_agentx("zai-org/GLM-5.2-FP8", board=board))
+
+    assert miss.reasons()[0] == f"inferencex: no entry serves zai-org/GLM-5.2-FP8 with sglang on a {board}"
 
 
 def test_an_inferencex_golden_acceptance_becomes_the_golden_layer():
@@ -622,13 +647,16 @@ _ROWS = [
     ("sglang", {"gfx1151"},
      "--trust-remote-code --mem-fraction-static 0.5 --attention-backend triton --disable-cuda-graph",
      {"SGLANG_USE_AITER": "0"}),
+    ("sglang", set(), "--trust-remote-code", {}),
     ("vllm", {"gfx942", "gfx950"}, "--trust-remote-code --gpu-memory-utilization 0.95",
      {"VLLM_ROCM_USE_AITER": "1"}),
     ("vllm", {"gfx1201"}, "--trust-remote-code --gpu-memory-utilization 0.9",
      {"VLLM_ROCM_USE_AITER": "0", "FLASH_ATTENTION_TRITON_AMD_ENABLE": "TRUE"}),
     ("vllm", {"gfx1100", "gfx1151"}, "--trust-remote-code --gpu-memory-utilization 0.95",
      {"VLLM_ROCM_USE_AITER": "0", "VLLM_ROCM_USE_AITER_MHA": "0", "VLLM_ROCM_USE_AITER_RMSNORM": "0"}),
+    ("vllm", set(), "--trust-remote-code", {}),
     ("atom", {"gfx942", "gfx950"}, "--trust-remote-code", {}),
+    ("atom", set(), "--trust-remote-code", {}),
 ]  # fmt: skip
 
 
@@ -636,7 +664,15 @@ def test_each_default_row_carries_its_launch():
     rows = default_table().rows
 
     assert [(row.framework, set(row.gfx), " ".join(row.args), dict(row.env)) for row in rows] == _ROWS
-    assert {gfx for row in rows for gfx in row.gfx} <= {board.gfx for board in AMD_GPU_BOARDS.values()}
+
+
+@pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
+def test_each_framework_has_one_fallback_row_naming_no_architecture(framework):
+    fallbacks = [row for row in default_table().rows if row.framework == framework and not row.gfx]
+
+    assert [(row.args, dict(row.env)) for row in fallbacks] == [(("--trust-remote-code",), {})]
+    assert default_table().row(framework, "gfx9999") == fallbacks[0]
+    assert default_table().row(framework, None) == fallbacks[0]
 
 
 def test_the_default_table_leaves_dual_chunk_attention_and_the_moe_runner_to_the_host():
@@ -646,7 +682,7 @@ def test_the_default_table_leaves_dual_chunk_attention_and_the_moe_runner_to_the
 
 
 def test_a_fixed_query_no_recipe_serves_runs_the_default_row_with_its_topology():
-    base = _base(_fixed("Qwen/Qwen3-8B", framework="vllm", isl=1024, osl=1024, tp=2, ep=2))
+    base = _base(_fixed("Qwen/Qwen3-8B", framework="vllm", isl=1024, osl=1024, tp=2, ep=2, gfx="gfx950"))
 
     assert (base.source.kind, base.source.path) == (SourceKind.DEFAULT_TABLE, TABLE_PATH)
     assert base.args == (
@@ -670,9 +706,25 @@ def test_a_fixed_query_no_recipe_at_a_pinned_inferencex_serves_is_a_miss_naming_
     assert miss.reasons()[-1] == f"default_table: not taken while InferenceX is pinned at commit {pin}"
 
 
+@pytest.mark.parametrize(
+    ("gfx", "why"),
+    [
+        ("gfx1201", "the default table has no sglang launch tuned for gfx1201, so its fallback launch runs it"),
+        (None, "the GPU's architecture is unknown, so the sglang fallback launch, tuned for none, runs it"),
+    ],
+)
+def test_an_architecture_the_table_names_no_row_for_runs_the_fallback_row_and_says_so(gfx, why):
+    base = _base(_fixed("Qwen/Qwen3-8B", board="r9700", isl=1024, osl=1024, gfx=gfx))
+
+    assert base.source.kind is SourceKind.DEFAULT_TABLE
+    assert base.args == ("--trust-remote-code", "--tensor-parallel-size", "1")
+    assert base.env == {}
+    assert base.warnings[-1] == f"no recipe serves Qwen/Qwen3-8B; {why}"
+
+
 def test_no_default_row_or_no_topology_is_a_miss():
-    no_row = _miss(_fixed("Qwen/Qwen3-8B", board="r9700", isl=1024, osl=1024))
-    assert no_row.reasons()[-1] == "default_table: it has no sglang row for r9700 (gfx1201)"
+    no_row = _miss(_fixed("Qwen/Qwen3-8B", framework="xdit", isl=1024, osl=1024, gfx="gfx950"))
+    assert no_row.reasons()[-1] == "default_table: it has no xdit row"
 
     split_experts = _miss(_fixed("Qwen/Qwen3-8B", framework="vllm", isl=1024, osl=1024, tp=4, ep=2))
     assert "its experts span all 4 TP ranks, so it runs no ep 2" in split_experts.reasons()[-1]
@@ -694,7 +746,7 @@ def _unread_snapshot() -> SourceSnapshot:
 
 
 def test_a_fixed_query_whose_source_could_not_be_read_runs_the_default_row_and_records_why():
-    base = _base(_fixed(tp=8), _unread_snapshot())
+    base = _base(_fixed(tp=8, gfx="gfx950"), _unread_snapshot())
 
     assert (base.source.kind, base.source.path) == (SourceKind.DEFAULT_TABLE, TABLE_PATH)
     assert base.client.commit == INFERENCEX_CLIENT_COMMIT

@@ -6,12 +6,9 @@
 from __future__ import annotations
 
 import subprocess
-from dataclasses import replace
 
 import pytest
 
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
-from kernelforge.utils import gpu_arch
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.utils.gpu_arch import (
     CDNA_OCCUPANCY,
@@ -20,8 +17,17 @@ from kernelforge.utils.gpu_arch import (
     canon_arch,
     canonical_gpu_type,
     detect_arch,
-    product_arch,
 )
+
+# The labels stored KB records are filed under, by the gfx target each stands for.
+STORED_LABELS = [("gfx942", "mi300x"), ("gfx950", "mi355x"), ("gfx1100", "w7900"), ("gfx1151", "radeon8060s")]
+
+
+@pytest.mark.parametrize(("gfx", "label"), STORED_LABELS)
+def test_a_stored_label_and_its_gfx_target_name_each_other(gfx, label):
+    assert canon_arch(label) == gfx
+    assert canonical_gpu_type(gfx) == label
+    assert canonical_gpu_type(label) == label
 
 
 @pytest.mark.parametrize(
@@ -30,37 +36,50 @@ from kernelforge.utils.gpu_arch import (
         ("gfx942", "gfx942"),
         ("GFX950", "gfx950"),
         ("gfx1201", "gfx1201"),
+        ("gfx950:sramecc+:xnack-", "gfx950"),
         ("MI300X", "gfx942"),
-        ("mi308x", "gfx942"),
         ("mi355x", "gfx950"),
         ("AMD Instinct MI355X", "gfx950"),
         ("amd_instinct_mi300x", "gfx942"),
-        ("AMD Instinct MI325X", "gfx942"),
-        ("R9700", "gfx1201"),
-        ("Radeon 8060S", "gfx1151"),
         ("mi300x_vf", "gfx942"),
-        ("AMD Radeon AI PRO R9700", "gfx1201"),
+        ("Radeon 8060S", "gfx1151"),
         ("AMD Radeon 8060S Graphics", "gfx1151"),
         ("radeon_8060s", "gfx1151"),
+        ("AMD Radeon PRO W7900", "gfx1100"),
     ],
 )
-def test_canon_arch_folds_product_names_onto_their_gfx_target(value, expected):
+def test_canon_arch_reads_a_gfx_target_or_a_stored_label(value, expected):
     assert canon_arch(value) == expected
 
 
-@pytest.mark.parametrize("value", ["", "some-new-gpu", "gfx12-generic", "gfx", "R9700S", "XR9700", "MI300XL"])
-def test_canon_arch_names_no_target_rather_than_a_wrong_one(value):
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "some-new-gpu",
+        "gfx12-generic",
+        "gfx",
+        "R9700S",
+        "XR9700",
+        "MI300XL",
+        "W7900D",
+        "mi308x",
+        "mi325x",
+        "AMD Instinct MI325X",
+        "r9700",
+        "AMD Radeon AI PRO R9700",
+    ],
+)
+def test_canon_arch_names_no_target_for_a_product_outside_the_stored_labels(value):
     assert canon_arch(value) == ""
 
 
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("gfx942", "mi300x"),
-        ("MI325X", "mi300x"),
-        ("amd instinct mi355x", "mi355x"),
-        ("amd_instinct_mi325x", "mi300x"),
-        ("Radeon 8060S", "radeon8060s"),
+        ("MI300X", "mi300x"),
+        ("GFX950", "mi355x"),
+        ("Radeon8060S", "radeon8060s"),
         ("gfx1030", "gfx1030"),
         ("MI250-X", "mi250_x"),
     ],
@@ -69,55 +88,22 @@ def test_canonical_gpu_type_records_one_chip_under_one_name(value, expected):
     assert canonical_gpu_type(value) == expected
 
 
-def test_gfx1201_keeps_isa_identity_when_board_is_unspecified():
-    assert canonical_gpu_type("gfx1201") == "gfx1201"
-
-
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
+        ("gfx1201", "gfx1201"),
+        ("r9700", "r9700"),
+        ("r9600d", "r9600d"),
+        ("MI325X", "mi325x"),
+        ("amd instinct mi355x", "amd_instinct_mi355x"),
         ("mi300x_vf", "mi300x_vf"),
         ("gfx942:sramecc+:xnack-", "gfx942:sramecc+:xnack_"),
         ("my-mi355x-box", "my_mi355x_box"),
     ],
 )
-def test_canonical_gpu_type_keeps_a_spelling_that_only_contains_a_known_name(value, expected):
+def test_canonical_gpu_type_keeps_the_spelling_of_any_other_value(value, expected):
+    """Boards sharing a target (``r9700``/``r9600d`` on gfx1201) keep their own records, and so does gfx1201."""
     assert canonical_gpu_type(value) == expected
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        ("mi300x", "gfx942"),
-        (" MI355X ", "gfx950"),
-        ("amd_instinct_mi300x", "gfx942"),
-        ("r9700", "gfx1201"),
-        ("mi300x_vf", ""),
-        ("amd instinct mi300x", ""),
-        ("gfx942", ""),
-    ],
-)
-def test_product_arch_maps_only_an_exact_product_name(value, expected):
-    assert product_arch(value) == expected
-
-
-@pytest.mark.parametrize("board", AMD_GPU_BOARDS.values(), ids=lambda board: board.product)
-def test_every_board_the_shared_table_knows_is_recorded_under_a_board_of_its_own_target(board):
-    recorded = canonical_gpu_type(board.product)
-    assert AMD_GPU_BOARDS[recorded].gfx == board.gfx
-    expected = board.gfx if board.gfx == "gfx1201" else recorded
-    assert canonical_gpu_type(board.gfx) == expected
-
-
-def test_two_boards_sharing_gfx1201_keep_their_product_identity(monkeypatch):
-    r9600d = replace(AMD_GPU_BOARDS["r9700"], product="r9600d")
-    monkeypatch.setitem(AMD_GPU_BOARDS, "r9600d", r9600d)
-    monkeypatch.setitem(gpu_arch._ARCH_BY_GPU_TYPE, "r9600d", "gfx1201")
-
-    assert canon_arch("R9600D") == "gfx1201"
-    assert canonical_gpu_type("r9700") == "r9700"
-    assert canonical_gpu_type("r9600d") == "r9600d"
-    assert canonical_gpu_type("gfx1201") == "gfx1201"
 
 
 def _rocminfo(monkeypatch, *, returncode=0, stdout=""):
@@ -155,7 +141,7 @@ def test_detect_arch_is_empty_without_rocminfo(monkeypatch):
     assert detect_arch() == ""
 
 
-@pytest.mark.parametrize("gpu_target", ["gfx942", "gfx950", "gfx950:sramecc+:xnack-", "MI355X", "gfx1151", ""])
+@pytest.mark.parametrize("gpu_target", ["gfx942", "gfx950", "gfx950:sramecc+:xnack-", "MI355X", "gfx1151", "r9700", ""])
 def test_instinct_and_unprofiled_targets_keep_the_instinct_defaults(gpu_target):
     profile = arch_profile(gpu_target)
 
@@ -199,7 +185,7 @@ def test_every_profiled_hardware_pillar_ships_with_its_map():
         assert (root / arch_profile(gpu_target).hardware_knowledge / "INDEX.md").is_file(), gpu_target
 
 
-@pytest.mark.parametrize("gpu_target", ["gfx1201", "GFX1201", "gfx1201:sramecc-:xnack-", "r9700"])
+@pytest.mark.parametrize("gpu_target", ["gfx1201", "GFX1201", "gfx1201:sramecc-:xnack-"])
 def test_gfx1201_has_the_rdna4_profile(gpu_target):
     profile = arch_profile(gpu_target)
 

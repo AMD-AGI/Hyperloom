@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.common import gpu_partition as gp
+from hyperloom_common.gpu_card import GpuCard
 
 
 @pytest.fixture
@@ -32,14 +33,6 @@ def smi(monkeypatch):
 
 def _partition_payload(mode: str, gpu_id: int = 0) -> dict:
     return {"current_partition": [{"gpu_id": gpu_id, "accelerator_type": mode}]}
-
-
-def _vram_payload(value: float, unit: str = "MB") -> dict:
-    return {"gpu_data": [{"vram": {"size": {"value": value, "unit": unit}}}]}
-
-
-def _asic_payload(cu: int) -> dict:
-    return {"gpu_data": [{"asic": {"num_compute_units": cu}}]}
 
 
 class TestParseMode:
@@ -86,99 +79,12 @@ class TestReadPartitionMode:
         assert gp.read_partition_modes() == {1: "DPX"}
 
 
-class TestReadDeviceCu:
-    def test_reads_the_devices_own_cu_count(self, smi):
-        smi.payloads["--asic"] = _asic_payload(32)
-        assert gp.read_device_cu(0) == 32
-
-    @pytest.mark.parametrize("key", ["num_compute_units", "compute_units", "num_cu", "cu_count"])
-    def test_each_field_name_in_use_is_accepted(self, smi, key):
-        """The schema has moved between releases; a miss sends us to the table."""
-        smi.payloads["--asic"] = {"gpu_data": [{"asic": {key: 64}}]}
-        assert gp.read_device_cu(0) == 64
-
-    def test_a_flat_payload_without_an_asic_block_still_parses(self, smi):
-        smi.payloads["--asic"] = {"gpu_data": [{"num_compute_units": 256}]}
-        assert gp.read_device_cu(0) == 256
-
-    def test_an_unreadable_probe_is_none_and_warns(self, smi, caplog):
-        smi.payloads["--asic"] = gp.PartitionError("amd-smi absent")
-        with caplog.at_level("WARNING"):
-            assert gp.read_device_cu(0) is None
-        assert "fall back to the board table" in caplog.text
-
-    def test_a_missing_count_is_none_and_warns(self, smi, caplog):
-        smi.payloads["--asic"] = {"gpu_data": [{"asic": {"market_name": "MI355X"}}]}
-        with caplog.at_level("WARNING"):
-            assert gp.read_device_cu(0) is None
-        assert "no compute-unit count" in caplog.text
-
-    @pytest.mark.parametrize("bad", [0, -8, "n/a", None])
-    def test_an_unusable_value_is_not_taken(self, smi, bad):
-        smi.payloads["--asic"] = {"gpu_data": [{"asic": {"num_compute_units": bad}}]}
-        assert gp.read_device_cu(0) is None
-
-
-class TestReadDeviceGib:
-    @pytest.mark.parametrize(
-        ("mebibytes", "gib"),
-        # An MI355X's 288 GiB is reported as 294896 "MB"; under CPX a device *is* a partition, so it needs no dividing.
-        [(294896, 288.0), (36862, 36.0)],
-        ids=["a_whole_card", "a_cpx_partition"],
-    )
-    def test_mebibytes_are_the_binary_kind(self, smi, mebibytes, gib):
-        smi.payloads["--vram"] = _vram_payload(mebibytes, "MB")
-        assert gp.read_device_gib(0) == pytest.approx(gib, abs=0.1)
-
-    @pytest.mark.parametrize(
-        ("value", "unit", "expected"),
-        [(288, "GIB", 288.0), (288, "GB", 288.0), (1, "TIB", 1024.0)],
-    )
-    def test_other_units_scale(self, smi, value, unit, expected):
-        smi.payloads["--vram"] = _vram_payload(value, unit)
-        assert gp.read_device_gib(0) == pytest.approx(expected)
-
-    def test_an_unreadable_probe_warns_rather_than_debugs(self, smi, caplog):
-        """Losing this figure skips the feasibility check, which is the louder event."""
-        smi.payloads["--vram"] = gp.PartitionError("amd-smi failed")
-        with caplog.at_level("WARNING"):
-            assert gp.read_device_gib(0) is None
-        assert "feasibility will not be checked" in caplog.text
-
-    def test_an_unknown_unit_is_not_guessed(self, smi):
-        smi.payloads["--vram"] = _vram_payload(288, "parsecs")
-        assert gp.read_device_gib(0) is None
-
-
 class TestLayoutFor:
-    def test_a_probed_cu_count_is_used_verbatim(self):
+    def test_the_device_cu_count_is_one_partitions(self):
+        """A partitioned card presents each partition as a device of its own."""
         layout = gp.layout_for("CPX", cu_per_partition=32, gib_per_partition=36.0)
-        assert (layout.partitions, layout.cu_per_partition, layout.probed) == (8, 32, True)
-
-    def test_a_probed_count_does_not_consult_the_board_table(self):
-        """The table conflates boards that share an ISA; the device does not."""
-        layout = gp.layout_for("DPX", gpu_type="mi308x", cu_per_partition=40)
-        assert layout.cu_per_partition == 40
-        assert layout.probed is True
-
-    def test_the_table_is_the_fallback_and_says_so(self):
-        layout = gp.layout_for("DPX", gpu_type="mi300x")
-        assert (layout.partitions, layout.cu_per_partition) == (2, 152)
-        assert layout.probed is False
-        assert "derived" in layout.describe()
-
-    def test_an_unsizable_board_without_a_probe_raises(self):
-        with pytest.raises(gp.PartitionError, match="not in the board table"):
-            gp.layout_for("CPX", gpu_type="some-new-board")
-
-    def test_an_uneven_division_raises_rather_than_flooring(self, monkeypatch):
-        """A floored CU count matches no device, and reports the wrong cause."""
-        from hyperloom_common import gpu_identity
-
-        oddball = gpu_identity.GpuBoard("oddball", "gfx950", 300, 288.0, 8000.0, {})
-        monkeypatch.setitem(gpu_identity.AMD_GPU_BOARDS, "oddball", oddball)
-        with pytest.raises(gp.PartitionError, match="does not divide"):
-            gp.layout_for("CPX", gpu_type="oddball")
+        assert (layout.partitions, layout.cu_per_partition, layout.gib_per_partition) == (8, 32, 36.0)
+        assert layout.describe() == "CPX (8 x 32 CU, 36 GiB)"
 
     def test_an_unknown_mode_raises(self):
         with pytest.raises(gp.PartitionError, match="unknown compute-partition mode"):
@@ -190,40 +96,38 @@ class TestLayoutFor:
         assert layout.partitioned is False
 
 
-class TestObservePartition:
-    def test_describes_the_live_topology_from_the_device(self, smi):
-        smi.payloads["partition"] = _partition_payload("CPX")
-        smi.payloads["--asic"] = _asic_payload(32)
-        smi.payloads["--vram"] = _vram_payload(36862, "MB")
+#: One CPX partition of an MI355X, as amd-smi describes the device: 32 CUs and an eighth of 288 GiB.
+_CPX_PARTITION = GpuCard("AMD Instinct MI355X", "75a3", "gfx950", 32, 36862, 1000.0, 2400)
 
-        layout = gp.observe_partition(0)
+
+class TestObservePartition:
+    def test_the_partitions_are_sized_by_the_session_card(self, smi):
+        smi.payloads["partition"] = _partition_payload("CPX")
+
+        layout = gp.observe_partition(0, card=_CPX_PARTITION)
 
         assert layout is not None
         assert (layout.mode, layout.partitions, layout.cu_per_partition) == ("CPX", 8, 32)
         assert layout.gib_per_partition == pytest.approx(36.0, abs=0.1)
-        assert layout.probed is True
+        assert [call[0] for call in smi.calls] == ["partition"]
+
+    def test_a_card_in_a_mode_but_no_session_card_is_unsized_and_says_so(self, smi, caplog):
+        """No card table stands in for the facts the session could not read."""
+        smi.payloads["partition"] = _partition_payload("DPX")
+        with caplog.at_level("WARNING"):
+            assert gp.observe_partition(0, card=None) is None
+        assert "read no card" in caplog.text
 
     def test_an_unreadable_card_is_none_not_an_error(self, smi):
         """A host without amd-smi is the ordinary case, not a failure."""
         smi.payloads["partition"] = gp.PartitionError("amd-smi not found")
-        assert gp.observe_partition(0) is None
+        assert gp.observe_partition(0, card=_CPX_PARTITION) is None
 
     def test_a_mode_this_build_does_not_know_is_refused_loudly(self, smi, caplog):
         smi.payloads["partition"] = _partition_payload("OPX")
         with caplog.at_level("WARNING"):
-            assert gp.observe_partition(0) is None
+            assert gp.observe_partition(0, card=_CPX_PARTITION) is None
         assert "does not know" in caplog.text
-
-    def test_falls_back_to_the_table_when_the_cu_probe_fails(self, smi):
-        smi.payloads["partition"] = _partition_payload("DPX")
-        smi.payloads["--asic"] = gp.PartitionError("no asic block")
-        smi.payloads["--vram"] = _vram_payload(294896, "MB")
-
-        layout = gp.observe_partition(0, gpu_type="mi300x")
-
-        assert layout is not None
-        assert layout.cu_per_partition == 152
-        assert layout.probed is False
 
 
 class TestFitsInPartition:

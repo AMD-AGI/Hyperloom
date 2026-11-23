@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.coerce import to_float
+from hyperloom_common.gpu_card import GpuCard
 from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
-from hyperloom.inference_optimizer.gpu_types import amd_gpu_board
 
 from ._nogit_patch import _is_within
 
@@ -203,19 +203,18 @@ def _is_aiter_gemm_model_config(spec: _ArtifactSpec) -> bool:
 def _validate_aiter_gemm_artifacts(
     specs: list[_ArtifactSpec],
     *,
-    gpu_type: str | None,
+    card: GpuCard | None,
 ) -> list[dict[str, str]]:
-    """Reject AITER GEMM CSVs that cannot dispatch on the target GPU.
+    """Reject AITER GEMM CSVs that cannot dispatch on ``card``; without a card there is nothing to check against.
 
     A model-config seed containing rows for another architecture, or placeholder
     rows that still require an offline tuning step, has no runtime effect. Such
     an artifact must not enter E2E promotion because benchmark variance could
     otherwise attribute an unrelated gain to it.
     """
-    board = amd_gpu_board(gpu_type)
-    if board is None:
+    if card is None:
         return []
-    expected_gfx, expected_cu_num = board.gfx, board.compute_units
+    expected_gfx, expected_cu_num = card.gfx, card.compute_units
     errors: list[dict[str, str]] = []
     required_columns = {"gfx", "cu_num", "us", "kernelName"}
 

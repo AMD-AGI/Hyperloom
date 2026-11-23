@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Collection, Final, Mapping
 
+from hyperloom_common import gpu_card
 from hyperloom_common.coerce import to_float
 
 from hyperloom_common.coerce import first_text, optional_positive_int
@@ -1066,12 +1067,16 @@ def build_remote_knowledge(
     if scope.kernel_optimizer == "forge":
         _adopt_prior_kernel(state, sections, value, files)
     _validate_patch_column(value)
+    card = gpu_card.session_card()
     knowledge = sanitize_shared_knowledge(
         {
             "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
             "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
             **profile.metrics,
             "workload_shape": workload_shape(state, scope=scope),
+            # The KB Store holds ``knowledge`` opaque and cannot filter on this: a reader borrowing across GPU labels
+            # compares it on the rows it fetched.
+            "gfx_arch": card.gfx if card else "",
             "value": value,
             "what_worked": worked,
             "what_failed": _experience(state, "last_action_failures"),
@@ -1164,6 +1169,7 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         "pitfalls": list(knowledge.get("pitfalls") or []),
         "sessions": ([{"session_id": session_id, "gain_pct": validated_gain}] if session_id else []),
         "provenance": _mapping(knowledge.get("provenance")),
+        "gfx_arch": str(knowledge.get("gfx_arch") or ""),
         "remote_session_id": session_id,
         "remote_schema_version": int(document.get("schema_version") or 2),
         "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,

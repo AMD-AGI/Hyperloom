@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1130,111 +1129,6 @@ def test_multi_node_state_paths_warn_on_permission_failures(monkeypatch: pytest.
     state_paths._ensure_runtime_dir(runtime_dir)
     assert runtime_dir.is_dir()
     assert "could not chmod runtime dir" in messages[-1]
-
-
-# inference_optimizer.gpu_types
-
-
-def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.inference_optimizer import gpu_types
-
-    class _Completed:
-        stdout = "GPU[0] : Card series: AMD Instinct MI325X"
-
-    def _rocm_ok(cmd, capture_output, text, timeout):
-        assert cmd == ["rocm-smi", "--showproductname"]
-        assert capture_output is True
-        assert text is True
-        assert timeout == 5
-        return _Completed()
-
-    monkeypatch.setattr(subprocess, "run", _rocm_ok)
-    assert gpu_types._autodetect_gpu_type() == "mi325x"
-
-    def _rocm_missing(*_args, **_kwargs):
-        raise FileNotFoundError("rocm-smi")
-
-    fake_torch = SimpleNamespace(
-        cuda=SimpleNamespace(get_device_properties=lambda _idx: SimpleNamespace(gcnArchName="gfx950:sramecc+:xnack-"))
-    )
-    monkeypatch.setattr(subprocess, "run", _rocm_missing)
-    monkeypatch.setitem(sys.modules, "torch", fake_torch)
-    assert gpu_types._autodetect_gpu_type() == "mi355x"
-
-    fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(RuntimeError("no gpu"))
-    assert gpu_types._autodetect_gpu_type() is None
-
-    fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(KeyError("device"))
-    with pytest.raises(KeyError, match="device"):
-        gpu_types._autodetect_gpu_type()
-
-
-def test_gpu_type_autodetect_is_none_when_torch_cannot_load_its_library(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.inference_optimizer import gpu_types
-
-    def _rocm_missing(*_args, **_kwargs):
-        raise FileNotFoundError("rocm-smi")
-
-    def _loader_failure(fullname, path=None, target=None):
-        if fullname == "torch":
-            raise OSError("libamdhip64.so.6: cannot open shared object file")
-
-    monkeypatch.setattr(subprocess, "run", _rocm_missing)
-    monkeypatch.delitem(sys.modules, "torch", raising=False)
-    monkeypatch.setattr(sys, "meta_path", [SimpleNamespace(find_spec=_loader_failure), *sys.meta_path])
-
-    assert gpu_types._autodetect_gpu_type() is None
-
-
-def test_r9700_autodetect_requires_exact_product_not_gfx1201(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.inference_optimizer import gpu_types
-
-    class _Completed:
-        stdout = "GPU[0] : Card series: AMD Radeon AI PRO R9700"
-
-    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: _Completed())
-    assert gpu_types._autodetect_gpu_type() == "r9700"
-
-    _Completed.stdout = "GPU[0] : Card series: AMD Radeon AI PRO R9700S"
-    fake_torch = SimpleNamespace(
-        cuda=SimpleNamespace(get_device_properties=lambda _idx: SimpleNamespace(gcnArchName="gfx1201"))
-    )
-    monkeypatch.setitem(sys.modules, "torch", fake_torch)
-    assert gpu_types._autodetect_gpu_type() is None
-
-
-def test_amd_gpu_type_resolves_explicit_then_env_then_probe_and_rejects_unknown_names(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from hyperloom.inference_optimizer import gpu_types
-
-    monkeypatch.delenv("TARGET_GPU_TYPE", raising=False)
-    monkeypatch.delenv("GPU_TYPE", raising=False)
-    assert gpu_types._resolve_amd_gpu_type("mi308x") == "mi308x"
-    assert gpu_types._resolve_amd_gpu_type("nvidia") is None
-
-    monkeypatch.setenv("GPU_TYPE", " MI325X ")
-    assert gpu_types._resolve_amd_gpu_type() == "mi325x"
-    monkeypatch.setenv("TARGET_GPU_TYPE", "MI325X")
-    monkeypatch.setenv("GPU_TYPE", "mi300x")
-    assert gpu_types._resolve_amd_gpu_type() == "mi325x"
-    monkeypatch.delenv("TARGET_GPU_TYPE")
-    monkeypatch.setenv("GPU_TYPE", "unknown")
-    assert gpu_types._resolve_amd_gpu_type() is None
-
-    monkeypatch.setenv("TARGET_GPU_TYPE", "r9700")
-    monkeypatch.setenv("GPU_TYPE", "gfx12")
-    assert gpu_types._resolve_amd_gpu_type() == "r9700"
-
-    monkeypatch.delenv("TARGET_GPU_TYPE", raising=False)
-    monkeypatch.setenv("GPU_TYPE", "gfx1201")
-    assert gpu_types._resolve_amd_gpu_type() is None
-
-    monkeypatch.delenv("GPU_TYPE", raising=False)
-    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: "mi355x")
-    assert gpu_types._resolve_amd_gpu_type() == "mi355x"
-    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: "gfx000")
-    assert gpu_types._resolve_amd_gpu_type() is None
 
 
 # Tests for breakdown.reporters

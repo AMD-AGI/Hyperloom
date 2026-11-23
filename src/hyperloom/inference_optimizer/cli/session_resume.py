@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom_common import gpu_card
 
 from ..model_config_utils import summarize_model_config
 from ..session.manifest import load_manifest
@@ -39,6 +40,7 @@ from .session_setup import (
     _apply_operator_supplied_paths,
     _enforce_expected_framework,
     _persist_operator_supplied_paths,
+    _read_session_card,
     _registered_framework_or_exit,
     _require_custom_entrypoint,
     _restore_operator_supplied_paths_from_state,
@@ -144,7 +146,7 @@ class _OperatorLaunchShape:
 
 
 def _reexport_session_identity(args: argparse.Namespace, state, session_dir: Path) -> None:
-    """Re-export the resumed session's model path, framework and GPU type."""
+    """Re-export the resumed session's model path, framework and GPU type, and publish the card it runs on."""
     if state.model_path:
         resume_model_path = str(state.model_path)
         os.environ["MODEL_PATH"] = resume_model_path
@@ -168,6 +170,9 @@ def _reexport_session_identity(args: argparse.Namespace, state, session_dir: Pat
     if state.gpu_type:
         os.environ["TARGET_GPU_TYPE"] = os.environ["GPU_TYPE"] = state.gpu_type
         print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
+    # Read again rather than restored: the facts are the machine's this leg runs on.
+    nodes = max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1))
+    gpu_card.publish_session_card(_read_session_card(nodes))
 
 
 def _reexport_session_environment(

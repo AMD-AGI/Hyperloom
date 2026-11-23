@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Which AMD GPU a run targets: the one mapping between product names and gfx targets, and the local probe."""
+"""Which AMD GPU a run targets: the gfx targets the stored GPU labels stand for, and the local probe."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import subprocess
 from dataclasses import dataclass
 from enum import Enum
 
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS, board_named_in
+from hyperloom_common.gpu_card import board_label
 
 
 def _spelling(value: str) -> str:
@@ -18,53 +18,43 @@ def _spelling(value: str) -> str:
     return re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
 
 
-# Product names fold onto their gfx target so a caller reporting ``MI355X`` and a probe reporting ``gfx950`` agree.
-_ARCH_BY_GPU_TYPE = {
-    _spelling(name): board.gfx for board in AMD_GPU_BOARDS.values() for name in (board.product, *board.aliases)
-}
-# Established product aliases; gfx1201 stays an ISA because it names more than one board.
+# The labels KB records are stored under; changing one strands the records filed under it. gfx1201 stays an ISA
+# because it names more than one board.
 _GPU_TYPE_BY_ARCH = {
     "gfx942": "mi300x",
     "gfx950": "mi355x",
     "gfx1100": "w7900",
     "gfx1151": "radeon8060s",
 }
+_ARCH_BY_GPU_TYPE = {gpu_type: arch for arch, gpu_type in _GPU_TYPE_BY_ARCH.items()}
 # A concrete target only: rocminfo also lists generic ISAs such as ``gfx12-generic`` beside the chip's own.
 _GFX_RE = re.compile(r"\bgfx[0-9a-f]+\b(?!-)", re.IGNORECASE)
 
 
 def canon_arch(value: str) -> str:
-    """The canonical lowercase gfx target ``value`` names, product name or gfx alike; ``""`` when it names none.
+    """The canonical lowercase gfx target ``value`` names; ``""`` when it names none.
 
-    Lenient: a spelling that contains a gfx target, or names a board as a whole word the way
-    :func:`hyperloom_common.gpu_identity.board_named_in` reads probe output, folds onto it (``mi300x_vf`` is
-    ``gfx942``; ``R9700S`` and ``MI300XL`` are other products and name none). Use it to pick a target, not to key
-    stored records; :func:`canonical_gpu_type` does that.
+    Lenient: a spelling that contains a gfx target names it (``gfx942:sramecc+`` is ``gfx942``), and a name whose
+    :func:`hyperloom_common.gpu_card.board_label` is one of the stored labels names that label's target
+    (``AMD Instinct MI300X`` and ``mi300x_vf`` are ``gfx942``). Any other product name names none. Use it to pick a
+    target, not to key stored records; :func:`canonical_gpu_type` does that.
     """
     raw = str(value or "").strip().lower()
-    if not raw:
-        return ""
     match = _GFX_RE.search(raw)
     if match:
-        return match.group(0).lower()
-    board = board_named_in(re.sub(r"[_-]+", " ", raw))
-    return board.gfx if board else ""
+        return match.group(0)
+    return _ARCH_BY_GPU_TYPE.get(board_label(raw), "")
 
 
 def canonical_gpu_type(value: str) -> str:
-    """The product name a known chip is recorded under; any other value keeps its own normalized spelling.
+    """The label a stored gfx target's records are filed under; any other value keeps its own normalized spelling.
 
-    Exact, because the result keys KB records: only a known product name or gfx target maps, so a spelling that
-    merely contains one (``mi300x_vf``, ``gfx942:sramecc+``) keeps the records it was stored under.
+    Exact, because the result keys KB records: only the gfx target itself maps, so a spelling that merely contains
+    one (``gfx942:sramecc+``) or names another board on the same target (``mi325x``) keeps the records it was stored
+    under.
     """
     normalized = _spelling(value)
-    arch = _ARCH_BY_GPU_TYPE.get(normalized, normalized)
-    return _GPU_TYPE_BY_ARCH.get(arch, normalized)
-
-
-def product_arch(value: str) -> str:
-    """The gfx target of ``value`` when it is spelled exactly as a known product name; ``""`` otherwise."""
-    return _ARCH_BY_GPU_TYPE.get(str(value or "").strip().lower(), "")
+    return _GPU_TYPE_BY_ARCH.get(normalized, normalized)
 
 
 @dataclass(frozen=True)
@@ -218,5 +208,4 @@ __all__ = [
     "canon_arch",
     "canonical_gpu_type",
     "detect_arch",
-    "product_arch",
 ]

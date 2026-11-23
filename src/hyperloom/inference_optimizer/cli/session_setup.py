@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Session setup shared by fresh and resumed launches: framework, operator paths, partition shape, lock and budget."""
+"""Session setup shared by fresh and resumed launches: card, framework, operator paths, partition shape, lock, budget."""
 
 from __future__ import annotations
 
@@ -14,11 +14,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom_common import gpu_card
+from hyperloom_common.amd_smi import AmdSmiError
+from hyperloom_common.gpu_card import GpuCard
 from hyperloom.common.gpu_partition import PartitionModel
 from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled
+from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS, parse_device_list
 
 from .. import framework_registry
-from ..gpu_types import require_board_framework
 from ..session.lock import SessionAlreadyRunning, SessionLock
 from .launch_shape import _refuse_multinode_partition_shape
 from .parser import DEFAULT_MAX_HOURS
@@ -101,9 +104,54 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
             os.environ[_XDIT_MODEL_NAME_ENV] = archived
 
 
+def _read_session_card(nodes: int) -> GpuCard | None:
+    """The card this session runs on: the one kind of card it can see, or a remote node's for a multi-node run.
+
+    Says why when no card could be read, and exits 2 when the cards it can see are not one kind.
+    """
+    try:
+        if nodes >= 2:
+            from ..multi_node._internal.gpu_probe import remote_cards
+
+            cards = remote_cards()
+        else:
+            cards = _visible_cards(gpu_card.read_cards())
+    except AmdSmiError as exc:
+        print(f"GPU card        : none read ({exc})")
+        return None
+    try:
+        card = gpu_card.one_kind(cards)
+    except ValueError as exc:
+        print(f"ERROR: {exc}; narrow the visible-device mask to one kind of card", file=sys.stderr)
+        sys.exit(2)
+    print(f"GPU card        : {card.name or 'unnamed'} ({card.gfx}, {card.compute_units} CUs, {card.memory_mib} MiB)")
+    return card
+
+
+def _visible_cards(cards: list[GpuCard]) -> list[GpuCard]:
+    """The cards the first visible-device mask set names, by ROCm number; all of them when it names no number."""
+    mask = next((raw for name in VISIBLE_DEVICE_VARS if (raw := os.environ.get(name, "").strip())), "")
+    numbers = parse_device_list(mask)
+    return [cards[number] for number in numbers if number < len(cards)] if numbers else cards
+
+
+def _session_label(given: str, card: GpuCard | None) -> str:
+    """The name the session files its results under: the one the operator gave, else the card's own.
+
+    A given name is taken as it is; when it differs from the card's own, both are printed.
+    """
+    own = gpu_card.board_label(card.name) if card else ""
+    if card and given and own and given != own:
+        print(
+            f"WARN: the GPU type is given as {given!r}, but the card calls itself {own!r} ({card.name}); "
+            f"this session's results are filed under {given!r}",
+            file=sys.stderr,
+        )
+    return given or own
+
+
 def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> None:
-    """Fail at launch when the framework is not validated on the board, or a custom one has no entrypoint."""
-    require_board_framework(gpu_type or "", framework)
+    """Fail at launch when a custom framework has no entrypoint."""
     if str(framework or "").strip().lower() != "custom":
         return
     from hyperloom.orchestrator.actions.executors.workload._framework_runtime import (
@@ -253,7 +301,6 @@ def _export_partition_shape(
     request: PartitionRequest,
     *,
     framework: str | None = None,
-    gpu_type: str | None = None,
     nodes: int = 1,
     model: PartitionModel = PartitionModel(),
 ) -> dict[str, Any]:
@@ -312,7 +359,6 @@ def _export_partition_shape(
     verdict = validate_session_shape(
         declared_mode=mode,
         streams=streams,
-        gpu_type=gpu_type,
         model=model,
         # The footprint refusal is arithmetic about streams sharing a partition.
         fanout_expected=fanout or bool(mode) or streams_named,

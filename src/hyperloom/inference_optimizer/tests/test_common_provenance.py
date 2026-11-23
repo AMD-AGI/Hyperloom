@@ -6,16 +6,19 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 
 import pytest
 
+from hyperloom_common.gpu_card import SESSION_CARD_ENV, GpuCard
 from hyperloom.common.provenance import (
     build_provenance,
     detect_gfx_arch,
     server_args_hash,
 )
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, MI355X_CARD
 
 
 def _ns(**kw):
@@ -54,7 +57,6 @@ def test_target_product_wins_over_runner_in_provenance():
         probe=False,
     )
     assert p["gpu_type"] == "r9700"
-    assert p["gfx_arch"] == "gfx1201"
 
 
 def test_args_override_env():
@@ -120,47 +122,49 @@ def test_missing_degrades_to_none_never_raises():
     assert p["image"] is None
 
 
+def _with_card(card: GpuCard) -> dict[str, str]:
+    return {SESSION_CARD_ENV: json.dumps(dataclasses.asdict(card))}
+
+
 def test_gfx_env_normalized_and_fallback():
     # A decorated arch string is normalized to the bare gfx token.
-    assert detect_gfx_arch({"HYPERLOOM_GFX_ARCH": "gfx950:sramecc+:xnack-"}, probe=False) == "gfx950"
+    assert detect_gfx_arch({"HYPERLOOM_GFX_ARCH": "gfx950:sramecc+:xnack-"}) == "gfx950"
     # Priority falls back to GFX_ARCH.
-    assert detect_gfx_arch({"GFX_ARCH": "gfx942"}, probe=False) == "gfx942"
-    # No env + no probe -> None (never shells out to rocminfo).
-    assert detect_gfx_arch({}, probe=False) is None
+    assert detect_gfx_arch({"GFX_ARCH": "gfx942"}) == "gfx942"
+    # No override and no session card: nothing to record.
+    assert detect_gfx_arch({}) is None
 
 
 def test_gfx_ignores_build_target_env():
     """PYTORCH_ROCM_ARCH names compile targets, not the installed device."""
     build_list = {"PYTORCH_ROCM_ARCH": "gfx90a;gfx942;gfx950;gfx1100"}
-    assert detect_gfx_arch(build_list, probe=False) is None
-    assert detect_gfx_arch({"PYTORCH_ROCM_ARCH": "gfx942"}, probe=False) is None
+    assert detect_gfx_arch(build_list) is None
+    assert detect_gfx_arch({"PYTORCH_ROCM_ARCH": "gfx942"}) is None
     # A real override still wins over the build target.
-    assert detect_gfx_arch({**build_list, "HYPERLOOM_GFX_ARCH": "gfx950"}, probe=False) == "gfx950"
+    assert detect_gfx_arch({**build_list, "HYPERLOOM_GFX_ARCH": "gfx950"}) == "gfx950"
 
 
-def test_gfx_resolves_from_gpu_type_without_probing():
-    """--gpu-type answers the question rocminfo would, and is always present."""
-    assert detect_gfx_arch({}, gpu_type="mi355x", probe=False) == "gfx950"
-    assert detect_gfx_arch({}, gpu_type="MI300X", probe=False) == "gfx942"
-    # The session env carries it too, when args are not threaded through.
-    assert detect_gfx_arch({"GPU_TYPE": "mi325x"}, probe=False) == "gfx942"
-    # An unrecognised board must not invent an answer.
-    assert detect_gfx_arch({}, gpu_type="h100", probe=False) is None
+def test_gfx_is_the_session_cards_and_never_the_labels():
+    """A label is a name: ``mi355x`` in GPU_TYPE says nothing about the arch, the card does."""
+    assert detect_gfx_arch(_with_card(MI355X_CARD)) == "gfx950"
+    assert detect_gfx_arch({"GPU_TYPE": "mi355x", "TARGET_GPU_TYPE": "mi355x"}) is None
+    p = build_provenance(args=None, env={"GPU_TYPE": "mi355x", **_with_card(MI325X_CARD)}, probe=False)
+    assert (p["gpu_type"], p["gfx_arch"]) == ("mi355x", "gfx942")
 
 
-def test_gfx_override_beats_gpu_type():
-    """An explicit operator override outranks the board table."""
-    assert detect_gfx_arch({"HYPERLOOM_GFX_ARCH": "gfx950"}, gpu_type="mi300x", probe=False) == "gfx950"
+def test_gfx_override_beats_the_session_card():
+    """An explicit operator override outranks what the card reports."""
+    assert detect_gfx_arch({"HYPERLOOM_GFX_ARCH": "gfx950", **_with_card(MI325X_CARD)}) == "gfx950"
 
 
-def test_gfx_gpu_type_short_circuits_the_probe(monkeypatch):
-    """A resolvable gpu_type must not spawn rocminfo."""
+def test_gfx_never_spawns_a_probe(monkeypatch):
+    """Provenance runs on the crash path and under unit tests; the arch is read, never probed."""
 
     def _boom(*a, **k):  # pragma: no cover - must never run
-        raise AssertionError("rocminfo probed despite a known gpu_type")
+        raise AssertionError("a subprocess was spawned to find the arch")
 
     monkeypatch.setattr("hyperloom.common.provenance.subprocess.run", _boom)
-    assert detect_gfx_arch({}, gpu_type="mi355x", probe=True) == "gfx950"
+    assert detect_gfx_arch({}) is None
 
 
 def test_server_args_hash_stable_and_sensitive():
@@ -207,35 +211,8 @@ def test_json_serializable():
 
 
 # --- probe/marker branch coverage (WP-0) -----------------------------------
-from types import SimpleNamespace
 
 import hyperloom.common.provenance as _prov
-
-
-def test_gfx_arch_probe_via_rocminfo(monkeypatch):
-    # empty env -> falls through to the rocminfo subprocess probe.
-    monkeypatch.setattr(
-        _prov.subprocess,
-        "run",
-        lambda *a, **k: SimpleNamespace(returncode=0, stdout="  Name:  gfx950  \n"),
-    )
-    assert detect_gfx_arch({}, probe=True) == "gfx950"
-
-
-def _rocminfo_not_installed(*a, **k):
-    raise FileNotFoundError("rocminfo not installed")
-
-
-@pytest.mark.parametrize(
-    "run",
-    [
-        pytest.param(_rocminfo_not_installed, id="subprocess_absent"),
-        pytest.param(lambda *a, **k: SimpleNamespace(returncode=1, stdout=""), id="nonzero_returncode"),
-    ],
-)
-def test_gfx_arch_probe_failure_is_none(monkeypatch, run):
-    monkeypatch.setattr(_prov.subprocess, "run", run)
-    assert detect_gfx_arch({}, probe=True) is None
 
 
 def test_read_first_line(tmp_path):

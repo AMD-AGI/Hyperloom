@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What the machine says about its GPUs: model, power cap, partition mode, ECC counts, memory in use.
+"""What the machine says about its GPUs: what card each is, power cap, partition mode, ECC counts, memory in use.
 
 Everything is read through ``amd-smi`` and ``rocm-smi`` and is ``None`` when it cannot be read; a value that could not
 be read is never filled in, and a check that needs it is not made (the runner records that it was not).
@@ -20,12 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from hyperloom_common.amd_smi import AmdSmiError, gpu_rows, run_amd_smi
-from hyperloom_common.gpu_identity import (
-    AMD_GPU_BOARDS,
-    gfx_arch_for_gpu_type,
-    gpu_type_for_device_id,
-    normalise_device_id,
-)
+from hyperloom_common.gpu_card import GpuCard, cards_of
 from hyperloom.common.gpu_power_settings import reading_matches, socket_power_cap_w
 from hyperloom.common.rocm_smi import GpuVram, gpu_vram_usage, vram_busy
 
@@ -55,18 +50,12 @@ Runner = Callable[[Sequence[str]], str | None]
 
 @dataclass(frozen=True)
 class GpuFacts:
-    """What one GPU says about itself.
-
-    ``model`` is the market name amd-smi prints; it is kept for the record and is not what identifies the card (a node's
-    VBIOS may call an MI355X "AMD Instinct MI355 OAM"). ``device_id`` and ``gfx_arch`` identify it.
-    """
+    """What one GPU says about itself: the card it is, read from the same ``amd-smi static`` as its power cap."""
 
     index: int
-    model: str | None
+    card: GpuCard
     power_cap_w: float | None
     partition_mode: str | None
-    device_id: str | None = None
-    gfx_arch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -113,32 +102,25 @@ def _gpu_data(args: Sequence[str], run: Runner) -> list[dict[str, Any]] | None:
 
 
 def read_gpu_facts(visible: Sequence[int], run: Runner = amd_smi_or_none) -> list[GpuFacts] | None:
-    """Model, power cap and partition mode of each visible GPU, or ``None`` when ``amd-smi`` cannot say."""
+    """The card, power cap and partition mode of each visible GPU, or ``None`` when ``amd-smi`` cannot say what a
+    visible GPU is."""
     static = _gpu_data(["static", _JSON], run)
     if static is None:
+        return None
+    rows = [row for row in static if row["gpu"] in visible]
+    try:
+        cards = cards_of(rows)
+    except AmdSmiError:
         return None
     partitions = {
         item.get("gpu"): item.get("partition") for item in _gpu_data(["static", "--partition", _JSON], run) or []
     }
     facts = []
-    for item in static:
-        index = item.get("gpu")
-        if index not in visible:
-            continue
+    for row in rows:
+        index = row["gpu"]
         partition = partitions.get(index) or {}
         mode = "/".join(str(partition[k]) for k in ("accelerator_partition", "memory_partition") if partition.get(k))
-        asic = item.get("asic") if isinstance(item.get("asic"), dict) else {}
-        arch = asic.get("target_graphics_version")
-        facts.append(
-            GpuFacts(
-                index,
-                asic.get("market_name"),
-                socket_power_cap_w(item.get("limit")),
-                mode or None,
-                normalise_device_id(asic.get("device_id")),
-                arch.strip().lower() if isinstance(arch, str) and arch.strip() else None,
-            )
-        )
+        facts.append(GpuFacts(index, cards[index], socket_power_cap_w(row.get("limit")), mode or None))
     return facts
 
 
@@ -212,44 +194,30 @@ def released_gpus(visible: Sequence[int]) -> list[int] | None:
     return busy
 
 
-#: What amd-smi prints for a card whose VBIOS carries no market name.
-_GENERIC_MODEL = "amdradeongraphics"
-
-
-def _wrong_card(gpu: GpuFacts, gpu_type: str) -> bool:
-    """Whether ``gpu`` is a different card from the requested type, judged by what the silicon says before its name.
-
-    The device id names the board when it belongs to one; failing that, a different architecture is a different card;
-    only when neither can say is the market name compared, as a substring. A card that gives only the driver's generic
-    name names no board, so nothing read from it contradicts the operator's ``--gpu-type``: it is taken as that type,
-    with a warning.
-    """
-    wanted = gpu_type.replace(" ", "").lower()
-    model = None if gpu.model is None else gpu.model.replace(" ", "").lower()
-    if wanted in AMD_GPU_BOARDS:
-        board = gpu_type_for_device_id(gpu.device_id)
-        if board is not None:
-            return board != wanted
-        arch = gfx_arch_for_gpu_type(wanted)
-        if gpu.gfx_arch is not None and arch is not None and gpu.gfx_arch != arch:
-            return True
-    if model == _GENERIC_MODEL:
-        log.warning("GPU %s names no board (%s): taken as %s, the --gpu-type given", gpu.index, gpu.model, gpu_type)
-        return False
-    return model is not None and wanted not in model
+def _kind_of(card: GpuCard) -> str:
+    clock = f"{card.engine_clock_mhz} MHz" if card.engine_clock_mhz is not None else "no engine clock"
+    return f"{card.name or 'an unnamed card'} ({card.gfx}, {card.compute_units} CUs, {card.memory_mib} MiB, {clock})"
 
 
 def check_hardware(
-    facts: Sequence[GpuFacts], *, gpu_type: str, gpu_count: int, power_cap_w: float | None, partition_mode: str | None
+    facts: Sequence[GpuFacts],
+    *,
+    card: GpuCard | None,
+    gpu_count: int,
+    power_cap_w: float | None,
+    partition_mode: str | None,
 ) -> list[str]:
-    """What differs between the machine and the sheet's ``hardware``; a value the machine did not give is not compared."""
+    """What differs between the machine and the sheet's ``hardware``; a value the machine did not give is not compared.
+
+    Each visible GPU must be the same kind of card as the sheet's ``card`` (:meth:`GpuCard.same_kind`): the facts
+    decide, not the name, which differs between boards of one kind. A sheet without a card is not compared with them.
+    """
     problems = []
     if len(facts) < gpu_count:
         problems.append(f"{len(facts)} GPUs visible, {gpu_count} needed")
     for gpu in facts:
-        if _wrong_card(gpu, gpu_type):
-            seen = ", ".join(x for x in (gpu.device_id and f"device id {gpu.device_id}", gpu.gfx_arch) if x)
-            problems.append(f"GPU {gpu.index} is {gpu.model}{f' ({seen})' if seen else ''}, not {gpu_type}")
+        if card is not None and not gpu.card.same_kind(card):
+            problems.append(f"GPU {gpu.index} is {_kind_of(gpu.card)}, not {_kind_of(card)}")
         cap = gpu.power_cap_w
         if power_cap_w is not None and cap is not None and not reading_matches(cap, power_cap_w):
             problems.append(f"GPU {gpu.index} power cap {cap} W, not {power_cap_w} W")

@@ -208,7 +208,6 @@ class TestFp4UnsupportedArchSkip:
         ("gpu_type", "gfx_arch", "framework"),
         [
             ("mi300x", "gfx942", "sglang"),
-            ("r9700", "gfx1201", "vllm-aiter"),
             ("gfx1201", "gfx1201", "vllm-aiter"),
         ],
     )
@@ -251,7 +250,6 @@ class TestFp4UnsupportedArchSkip:
         ("gpu_type", "gfx_arch", "framework"),
         [
             ("mi300x", "gfx942", "sglang"),
-            ("r9700", "gfx1201", "vllm-aiter"),
             ("gfx1201", "gfx1201", "vllm-aiter"),
         ],
     )
@@ -272,23 +270,29 @@ class TestFp4UnsupportedArchSkip:
         fmoe = [s for s in specs if s.name == "fmoe_ck"][0]
         assert fmoe.should_run
 
-    def test_other_gfx942_skus_skip_fp4(self):
-        for gpu_type in ("mi308x", "mi325x"):
-            profile = _make_profile(is_moe=False)
-            specs = select_tuners(
-                profile,
-                RoutingTarget(
-                    framework="sglang",
-                    precision="fp4",
-                    quant_type="fp4",
-                    gpu_type=gpu_type,
-                ),
-                RoutingEvidence(
-                    has_untuned_csv=True,
-                ),
-            )
-            a4w4 = [s for s in specs if s.name == "a4w4_blockscale"][0]
-            assert not a4w4.should_run, f"{gpu_type} should skip fp4"
+    @pytest.mark.parametrize("gpu_type", ["gfx942:sramecc+:xnack-", "AMD Instinct MI300X", "mi300x_vf"])
+    def test_a_spelling_of_gfx942_or_its_stored_label_skips_fp4(self, gpu_type):
+        profile = _make_profile(is_moe=False)
+        specs = select_tuners(
+            profile,
+            RoutingTarget(framework="sglang", precision="fp4", quant_type="fp4", gpu_type=gpu_type),
+            RoutingEvidence(has_untuned_csv=True),
+        )
+        a4w4 = [s for s in specs if s.name == "a4w4_blockscale"][0]
+        assert a4w4.skip_reason == "AITER FP4/MXFP4 tuning unsupported on gfx942"
+
+    @pytest.mark.parametrize("gpu_type", ["mi308x", "mi325x", "r9700"])
+    def test_a_board_outside_the_stored_labels_names_no_arch_and_is_not_gated(self, monkeypatch, gpu_type):
+        """Only a gfx id or a stored label names an arch; pass the gfx id to gate another board."""
+        monkeypatch.setattr(router, "detect_arch", lambda: pytest.fail("an explicit value must not probe"))
+        profile = _make_profile(is_moe=False)
+        specs = select_tuners(
+            profile,
+            RoutingTarget(framework="sglang", precision="fp4", quant_type="fp4", gpu_type=gpu_type),
+            RoutingEvidence(has_untuned_csv=True),
+        )
+        a4w4 = [s for s in specs if s.name == "a4w4_blockscale"][0]
+        assert a4w4.should_run, a4w4.skip_reason
 
     def test_fp8_unaffected_on_gfx942(self):
         profile = _make_profile(is_moe=False)
@@ -394,12 +398,16 @@ class TestGpuTypeAutoDetect:
     @pytest.mark.parametrize(
         ("raw", "expected"),
         [
-            ("gfx942:sramecc+:xnack-", "gfx942:sramecc+:xnack-"),
-            ("mi300x_vf", ""),
-            ("AMD Instinct MI300X", ""),
+            ("gfx942:sramecc+:xnack-", "gfx942"),
+            ("mi300x_vf", "gfx942"),
+            ("AMD Instinct MI300X", "gfx942"),
+            ("w7900", "gfx1100"),
+            ("mi308x", ""),
+            ("mi325x", ""),
+            ("r9700", ""),
         ],
     )
-    def test_resolve_gfx_arch_maps_only_exact_names(self, monkeypatch, raw, expected):
+    def test_resolve_gfx_arch_maps_gfx_ids_and_stored_labels_only(self, monkeypatch, raw, expected):
         monkeypatch.setattr(router, "detect_arch", lambda: pytest.fail("an explicit value must not probe"))
 
         assert router._resolve_gfx_arch(raw) == expected
@@ -440,12 +448,11 @@ class TestGpuTypeAutoDetect:
         [
             ("gfx942", "mi300x"),
             ("MI300X", "mi300x"),
-            ("AMD Instinct MI300X", "mi300x"),
-            ("mi308x", "mi300x"),
-            ("mi325x", "mi300x"),
             ("gfx950", "mi355x"),
             ("MI355X", "mi355x"),
-            ("AMD-Instinct-MI355X", "mi355x"),
+            ("mi308x", "mi308x"),
+            ("mi325x", "mi325x"),
+            ("AMD-Instinct-MI355X", "amd_instinct_mi355x"),
         ],
     )
     def test_public_resolver_canonicalizes_explicit_known_values(

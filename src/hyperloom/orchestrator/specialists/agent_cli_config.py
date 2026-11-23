@@ -56,6 +56,8 @@ _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "HF_HUB_CACHE",
         "HF_HUB_OFFLINE",
         "HOME",
+        # The session's card, so the specialist's rebench materializes its point for the arch the gate's rounds do.
+        "HYPERLOOM_GPU_CARD",
         "HTTPS_PROXY",
         "HTTP_PROXY",
         "INFERENCEX_PATH",

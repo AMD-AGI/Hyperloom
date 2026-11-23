@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom_common.coerce import to_int
-from hyperloom_common.gpu_identity import gfx_arch_for_gpu_type
+from hyperloom_common.gpu_card import session_card
 
 from hyperloom.common.outside_facts import ENV_CONC, ENV_EP, ENV_ISL, ENV_MAX_MODEL_LEN, ENV_OSL, ENV_TP
 
@@ -101,26 +101,14 @@ def _arg_first(args: Any, *names: str) -> Any:
     return None
 
 
-def detect_gfx_arch(env: Mapping[str, str], *, gpu_type: str | None = None, probe: bool = True) -> str | None:
-    """Detect the ROCm gfx arch (e.g. ``gfx950``)."""
+def detect_gfx_arch(env: Mapping[str, str]) -> str | None:
+    """The gfx arch (e.g. ``gfx950``) to record: an operator override, else the session card's; ``None`` for neither."""
     raw = _env_first(env, *_GFX_ENVS)
     if raw:
         m = _GFX_RE.search(raw)
         return m.group(0).lower() if m else raw
-    from_type = gfx_arch_for_gpu_type(gpu_type or _env_first(env, "GPU_TYPE"))
-    if from_type:
-        return from_type
-    if not probe:
-        return None
-    try:
-        out = subprocess.run(["rocminfo"], capture_output=True, text=True, timeout=3)  # nosec B603 B607
-        if out.returncode == 0:
-            m = _GFX_RE.search(out.stdout or "")
-            if m:
-                return m.group(0).lower()
-    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
-        pass
-    return None
+    card = session_card(env)
+    return card.gfx if card else None
 
 
 def detect_graph_mode(env: Mapping[str, str]) -> str | None:
@@ -365,7 +353,7 @@ def build_provenance(
         "image": detect_image(env, probe=probe),
         # hardware / parallelism / graph
         "gpu_type": gpu_type,
-        "gfx_arch": detect_gfx_arch(env, gpu_type=gpu_type, probe=probe),
+        "gfx_arch": detect_gfx_arch(env),
         "tp": to_int(_arg_first(args, "tp") or _env_first(env, ENV_TP)),
         "ep": to_int(_arg_first(args, "ep") or _env_first(env, ENV_EP)),
         "graph_mode": (_arg_first(args, "graph_mode") or detect_graph_mode(env)),

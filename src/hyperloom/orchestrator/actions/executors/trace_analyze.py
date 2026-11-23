@@ -415,6 +415,8 @@ def _build_trace_analyze_cmd(
         # Pass the resolved root explicitly so the tool never relies on inherited env.
         "--tracelens-root",
         str(run.tracelens_root),
+        "--target-platform",
+        run.target_platform,
     ]
     # The tool's SDK run books its model requests onto this session's trajectory ledger.
     for key, value in inherited_scope_fields().items():
@@ -423,7 +425,6 @@ def _build_trace_analyze_cmd(
     cmd += _optional_flags(
         ("--model-name", run.model_name),
         ("--framework", run.framework),
-        ("--target-platform", run.target_platform),
     )
     arch_gpus = payload.get(ARCH_GPUS_PARAM)
     if arch_gpus is not None:
@@ -690,6 +691,12 @@ async def trace_analyze_handler(
 
     framework, framework_warnings = _framework_for_analysis(payload, state)
     target_platform = first_text(payload.get("target_platform"), state.gpu_type)
+    if not target_platform:
+        return {
+            "status": "failed",
+            "error_class": "gpu_label_missing",
+            "error": "no GPU label: the payload names no target_platform and the session recorded no gpu_type",
+        }
     model_name = first_text(payload.get("model_name"), state.model_name, state.model_path)
 
     # Analysis route: default ``agent`` (TraceLens SDK/LLM); ``non-llm`` runs TraceLens alone,

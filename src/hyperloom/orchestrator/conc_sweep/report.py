@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom_common import io as _common_io
+from hyperloom_common.gpu_card import session_card
 from hyperloom.inference_optimizer.breakdown import patch_breakdown_conc_sweep
 from hyperloom.inference_optimizer.roofline_ceiling import (
     ComputeTarget,
@@ -159,19 +160,20 @@ def build_roofline_ceiling(
     isl: int,
     osl: int,
 ) -> dict[str, Any] | None:
-    """Per-conc decode roofline alongside the measured curves."""
+    """Per-conc decode roofline alongside the measured curves; ``None`` when the session read no card."""
     model_path = str(getattr(state, "model_path", "") or "")
     precision = str(getattr(state, "precision", "") or "") or "bf16"
     meta = load_model_meta(model_path, precision_hint=precision)
     if meta is None:
         return None
+    card = session_card()
     gpu_type = str(getattr(state, "gpu_type", "") or "")
     num_gpus = int(getattr(state, "tp", 0) or 0)
-    if not gpu_type or num_gpus <= 0:
+    if card is None or num_gpus <= 0:
         return None
 
     t_cmp = compute_compute_bound_ceiling_tok_per_sec(
-        ComputeTarget(gpu_type=gpu_type, num_gpus=num_gpus, precision_tag=precision),
+        ComputeTarget(card=card, platform=gpu_type, num_gpus=num_gpus, precision_tag=precision),
         active_weight_bytes=meta.active_weight_bytes,
         weight_bytes=meta.weight_bytes,
         weight_dtype_bytes=meta.weight_dtype_bytes,
@@ -185,7 +187,7 @@ def build_roofline_ceiling(
         t_mem = compute_theoretical_peak_output_tok_per_sec(
             meta,
             DecodeShape(isl=isl, osl=osl, concurrency=c),
-            gpu_type=gpu_type,
+            card=card,
             num_gpus=num_gpus,
             kv_dtype_bytes=meta.weight_dtype_bytes,
         )

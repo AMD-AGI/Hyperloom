@@ -13,10 +13,9 @@ from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _cascade_warm_start_search,
     _donor_is_trustworthy,
     _framework_version_is_compatible,
-    _hardware_fallback_values,
     _hardware_is_compatible,
-    _parse_hardware_topology,
     _rank_warm_candidates,
+    _topology_suffix,
 )
 from hyperloom.orchestrator.knowledge.recipe_kb.local_store import (
     _matches_labels,
@@ -33,6 +32,7 @@ TARGET = {
     "precision": "bf16",
 }
 TARGET_CID = "inference:" + ":".join(TARGET.values())
+TARGET_IDENTITY = {**TARGET, "canonical_id": TARGET_CID, "gfx_arch": "gfx942"}
 TARGET_SHAPE = {"conc": 64, "isl": 128, "osl": 128}
 
 
@@ -102,52 +102,58 @@ def _cascade(kb: _RemoteKB) -> tuple[dict[str, Any], str, float]:
     return _cascade_warm_start_search(
         kb,  # type: ignore[arg-type]
         cid=TARGET_CID,
-        identity={**TARGET, "canonical_id": TARGET_CID},
+        identity=TARGET_IDENTITY,
         shape=TARGET_SHAPE,
     )
 
 
 @pytest.mark.parametrize(
-    ("hardware", "expected"),
+    ("hardware", "suffix"),
     [
-        ("mi300x", ("mi300x", "gfx942", "")),
-        (
-            "MI325X_ws16_pd1p1d_tp8_ep2_rayjob",
-            (
-                "mi325x",
-                "gfx942",
-                "_ws16_pd1p1d_tp8_ep2_rayjob",
-            ),
-        ),
-        ("mi355x_ws8_tp8_infera", ("mi355x", "gfx950", "_ws8_tp8_infera")),
-        ("h100", None),
-        ("mi300x_tp8", None),
+        ("mi300x", ""),
+        ("mi325x_ws16_pd1p1d_tp8_ep2_rayjob", "_ws16_pd1p1d_tp8_ep2_rayjob"),
+        ("mi355x_ws8_tp8_infera", "_ws8_tp8_infera"),
+        ("mi300x_ep8_cpx", "_ep8_cpx"),
+        ("mi300x_cpx", "_cpx"),
+        ("radeon8060s", ""),
+        # A single node never encodes tp, so this tail is part of the label.
+        ("mi300x_tp8", ""),
     ],
 )
-def test_hardware_topology_parser(
-    hardware: str,
-    expected: tuple[str, str, str] | None,
-) -> None:
-    assert _parse_hardware_topology(hardware) == expected
+def test_topology_suffix_is_what_the_slug_ends_in(hardware: str, suffix: str) -> None:
+    assert _topology_suffix(hardware) == suffix
 
 
-def test_hardware_fallback_preserves_topology_and_isa() -> None:
-    values = _hardware_fallback_values(TARGET["hardware"])
-    assert values == [
-        "mi300x_ws16_pd1p1d_tp8_ep2_rayjob",
-        "mi308x_ws16_pd1p1d_tp8_ep2_rayjob",
-        "mi325x_ws16_pd1p1d_tp8_ep2_rayjob",
-    ]
-    assert _hardware_is_compatible(
-        TARGET["hardware"],
-        "mi325x_ws16_pd1p1d_tp8_ep2_rayjob",
-    )
-    assert not _hardware_is_compatible(
-        TARGET["hardware"],
-        "mi325x_ws8_pd1p1d_tp8_ep2_rayjob",
-    )
-    assert not _hardware_is_compatible(TARGET["hardware"], "mi355x_ws16_pd1p1d_tp8_ep2_rayjob")
-    assert not _hardware_is_compatible("h100", "h200")
+def _row(hardware: str, gfx_arch: str = "") -> dict[str, str]:
+    return {"hardware": hardware, "gfx_arch": gfx_arch}
+
+
+def test_same_slug_is_compatible_whatever_the_rows_record() -> None:
+    assert _hardware_is_compatible(_row(TARGET["hardware"]), _row(TARGET["hardware"]))
+    assert _hardware_is_compatible(_row("MI300X", "gfx942"), _row("mi300x"))
+    assert not _hardware_is_compatible(_row(""), _row(""))
+
+
+def test_another_label_is_compatible_only_on_the_same_recorded_arch_and_topology() -> None:
+    target = _row(TARGET["hardware"], "gfx942")
+    assert _hardware_is_compatible(target, _row("mi325x_ws16_pd1p1d_tp8_ep2_rayjob", "gfx942"))
+    assert _hardware_is_compatible(target, _row("mi300a_ws16_pd1p1d_tp8_ep2_rayjob", "GFX942"))
+    assert not _hardware_is_compatible(target, _row("mi325x_ws8_pd1p1d_tp8_ep2_rayjob", "gfx942"))
+    assert not _hardware_is_compatible(target, _row("mi355x_ws16_pd1p1d_tp8_ep2_rayjob", "gfx950"))
+    assert _hardware_is_compatible(_row("mi300x_tp8", "gfx942"), _row("mi325x", "gfx942"))
+    assert not _hardware_is_compatible(_row("mi300x_tp8", "gfx942"), _row("mi325x_cpx", "gfx942"))
+
+
+def test_a_row_without_a_recorded_arch_matches_its_own_slug_only() -> None:
+    assert not _hardware_is_compatible(_row("mi300x", "gfx942"), _row("mi325x"))
+    assert not _hardware_is_compatible(_row("mi300x"), _row("mi325x", "gfx942"))
+    assert not _hardware_is_compatible(_row("mi300x"), _row("mi325x"))
+
+
+def test_candidate_hardware_falls_back_to_its_canonical_id() -> None:
+    candidate = _candidate("alias-a", hardware="mi325x_ws16_pd1p1d_tp8_ep2_rayjob", gfx_arch="gfx942")
+    candidate.pop("hardware")
+    assert _hardware_is_compatible(TARGET_IDENTITY, candidate)
 
 
 @pytest.mark.parametrize(
@@ -195,7 +201,7 @@ def test_exact_and_each_fallback_confidence_order() -> None:
     cases = [
         ([[_candidate("alias-a")]], ("same_arch_class", 0.95)),
         (
-            [[], [_candidate("alias-a", hardware="mi325x_ws16_pd1p1d_tp8_ep2_rayjob")]],
+            [[], [_candidate("alias-a", hardware="mi325x_ws16_pd1p1d_tp8_ep2_rayjob", gfx_arch="gfx942")]],
             ("same_gpu_isa", 0.85),
         ),
         (
@@ -207,6 +213,7 @@ def test_exact_and_each_fallback_confidence_order() -> None:
                         "alias-a",
                         hardware="mi325x_ws16_pd1p1d_tp8_ep2_rayjob",
                         framework_version="1.2.4",
+                        gfx_arch="gfx942",
                     )
                 ],
             ],
@@ -306,9 +313,31 @@ def test_selected_tier_never_searches_lower_runtime_fallbacks() -> None:
     assert kb.selected == [row["canonical_id"]]
 
 
-def test_hardware_search_passes_exact_same_isa_values() -> None:
+def test_relaxed_tiers_search_every_hardware_and_filter_on_the_recorded_arch() -> None:
     kb = _RemoteKB([[], [], []])
     assert _cascade(kb)[1:] == ("miss", 0.0)
-    assert "hardware_in" not in kb.search_calls[0]
+    assert kb.search_calls[0]["label_match"]["hardware"] == TARGET["hardware"]
     for call in kb.search_calls[1:]:
-        assert call["hardware_in"] == _hardware_fallback_values(TARGET["hardware"])
+        assert set(call) == {"label_match", "limit"}
+        assert "hardware" not in call["label_match"]
+
+
+def test_relaxed_tier_skips_rows_on_another_or_unrecorded_arch() -> None:
+    sibling = "mi325x_ws16_pd1p1d_tp8_ep2_rayjob"
+    unrecorded = _candidate("unrecorded", hardware=sibling, gain=90.0)
+    other_arch = _candidate("other-arch", hardware=sibling, gfx_arch="gfx950", gain=80.0)
+    same_arch = _candidate("same-arch", hardware=sibling, gfx_arch="gfx942", gain=5.0)
+    row, tier, _confidence = _cascade(_RemoteKB([[], [unrecorded, other_arch, same_arch]]))
+    assert row["model"] == "same-arch"
+    assert tier == "same_gpu_isa"
+
+
+def test_a_session_without_a_card_borrows_nothing_across_labels() -> None:
+    sibling = _candidate("alias-a", hardware="mi325x_ws16_pd1p1d_tp8_ep2_rayjob", gfx_arch="gfx942")
+    row, tier, _confidence = _cascade_warm_start_search(
+        _RemoteKB([[], [sibling], [sibling]]),  # type: ignore[arg-type]
+        cid=TARGET_CID,
+        identity={**TARGET_IDENTITY, "gfx_arch": ""},
+        shape=TARGET_SHAPE,
+    )
+    assert (row, tier) == ({}, "miss")

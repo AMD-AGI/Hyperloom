@@ -274,12 +274,12 @@ def _preflight(ctx: _Context, spec: MeasurementSpec, visible: list[int]):
     facts = hardware.read_gpu_facts(visible)
     problems = _image_problems(ctx, spec.image.digest)
     if facts is None:
-        ctx.notes.append("GPU model, power cap and partition mode could not be read; they were not compared")
+        ctx.notes.append("the GPUs' card, power cap and partition mode could not be read; they were not compared")
     else:
         h = spec.hardware
         problems += hardware.check_hardware(
             facts,
-            gpu_type=h.gpu_type,
+            card=h.card,
             gpu_count=h.gpu_count,
             power_cap_w=h.power_cap_w,
             partition_mode=h.partition_mode,
@@ -522,7 +522,7 @@ def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Finding
                 "signing_key_fingerprint": signing.public_key_fingerprint(pem),
                 "node_name": ctx.environ.get("NODE_NAME"),
                 "image_digest": spec.image.digest,
-                "gpu_model": first.model if first else None,
+                "gpu_model": (first.card.name or None) if first else None,
                 "power_cap_w": first.power_cap_w if first else None,
                 "partition_mode": first.partition_mode if first else None,
                 "hyperloom_version": _version(),
