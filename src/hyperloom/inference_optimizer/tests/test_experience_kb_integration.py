@@ -128,21 +128,24 @@ def test_a_specialist_read_adds_what_the_dispatch_investigates(tmp_path) -> None
     params = {
         "domain": "kernel_switch_specialist",
         "gap_symptom": "VLLM_ROCM_USE_AITER defaults False",
-        "task_description": "  ",
+        "task_description": "bridge the AITER linear path",
         "pr_lead": {"title": "Enable AITER linear on MI300X"},
     }
 
     evidence = integration.read_for_specialist(_state(), params)
+    integration.read_for_specialist(_state(8), {"domain": "kernel_switch_specialist", "gap_symptom": "  "})
 
     assert evidence.read_id == "read-1"
-    (signals,) = client.calls
-    assert _exact(signals)["identity.model"] == ("Qwen3-8B", 1.0)
-    assert _texts(signals) == [
+    described, blank = client.calls
+    assert _exact(described)["identity.model"] == ("Qwen3-8B", 1.0)
+    assert _texts(described) == [
         ("decode bandwidth", 0.6),
         ("kernel_switch_specialist", 0.4),
         ("VLLM_ROCM_USE_AITER defaults False", 0.6),
+        ("bridge the AITER linear path", 0.5),
         ("Enable AITER linear on MI300X", 0.4),
     ]
+    assert _texts(blank) == [("decode bandwidth", 0.6), ("kernel_switch_specialist", 0.4)]
 
 
 def test_a_read_is_answered_once_per_tick_for_the_same_signals(tmp_path) -> None:
