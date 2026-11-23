@@ -15,7 +15,7 @@ from typing import Any
 
 from hyperloom_common.coerce import dict_rows, first_str
 from hyperloom_common.jsonio import read_json
-from hyperloom.common.tracelens_report import member_name
+from hyperloom.common.tracelens_report import member_name, system_metric_text
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.roofline_ceiling import (
     ComputeTarget,
@@ -645,6 +645,21 @@ def direction_saturation(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _system_finding_line(finding: dict[str, Any]) -> str:
+    """One TraceLens system finding as its priority, title, node and share metric (its first ``%`` row)."""
+    metrics = [m for m in finding.get("metrics") or [] if isinstance(m, dict)]
+    share = next((m for m in metrics if m.get("unit") == "%"), metrics[0] if metrics else None)
+    node = f" [{finding['node']}]" if finding.get("node") else ""
+    shown = f"  {system_metric_text(share)}" if share else ""
+    return f"  P{finding.get('priority') or '?'} {finding.get('operation') or '?'}{node}{shown}"
+
+
+def _system_findings_lines(trace_analyze: dict[str, Any]) -> list[str]:
+    """The digest's ``system_findings`` block; empty when TraceLens reported none."""
+    rows = [_system_finding_line(f) for f in trace_analyze.get("system_findings") or [] if isinstance(f, dict)]
+    return ["system_findings:", *rows] if rows else []
+
+
 def build_profiler_digest(
     snapshots: list[dict[str, Any]] | None,
     trace_analyze: dict[str, Any] | None,
@@ -693,6 +708,8 @@ def build_profiler_digest(
     lever = BOTTLENECK_DOMAIN_HINTS.get(direction)
     if lever:
         lines.append(f"suggested_lever (dominant={direction}): {lever[0]}")
+
+    lines.extend(_system_findings_lines(ta))
 
     reusable = ta.get("reusable_native_kernel_ids")
     if reusable:

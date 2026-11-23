@@ -47,6 +47,15 @@ _ADMISSION_DROPS: tuple[tuple[str, str], ...] = (
 #: Domains whose focus reads the target's ``config.json`` summary from ``model_info``.
 _MODEL_INFO_DOMAINS: frozenset[str] = frozenset({"static_recon_specialist", "speculative_decoding_specialist"})
 
+#: The ``last_trace_analyze`` lists a specialist's roofline evidence carries, and how many rows of each it is shown.
+_ROOFLINE_EVIDENCE_LISTS: tuple[str, ...] = ("hot_kernels_top15", "fusion_findings", "system_findings")
+_ROOFLINE_EVIDENCE_ROWS = 8
+
+
+def _evidence_rows(last_trace_analyze: dict[str, Any], key: str) -> list[Any]:
+    return list(last_trace_analyze.get(key) or [])[:_ROOFLINE_EVIDENCE_ROWS]
+
+
 #: ``(SharedState attribute, param key, conversion)`` for the values a specialist is warmed with. The converted value
 #: decides: an empty string, an empty container and a zero are not exported, because an absent key is how the
 #: specialist reads "this session has none".
@@ -246,13 +255,11 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                         exc,
                     )
                     executive_summary = {}
-            hot_kernels = list(last_ta.get("hot_kernels_top15") or [])[:8]
             params["roofline_evidence"] = {
                 "analysis_md_path": analysis_path,
                 "roofline_snapshot_id": last_ta.get("roofline_snapshot_id"),
                 "executive_summary": executive_summary,
-                "hot_kernels_top15": hot_kernels,
-                "fusion_findings": list(last_ta.get("fusion_findings") or [])[:8],
+                **{key: _evidence_rows(last_ta, key) for key in _ROOFLINE_EVIDENCE_LISTS},
             }
 
         measurement = getattr(state, "current_best_measurement", None)

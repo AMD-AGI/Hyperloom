@@ -12,7 +12,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.tracelens_report import fusion_findings
+from hyperloom.common.tracelens_report import fusion_findings, system_findings
 from hyperloom_common.coerce import to_int
 from hyperloom_common.timeutil import now_iso
 
@@ -44,6 +44,13 @@ _ROOFLINE_SIGNAL_KEYS: tuple[str, ...] = (
     "suggestion",
     "roofline_name",
 )
+
+
+def _tracelens_findings(analysis_md_path: str) -> dict[str, list[dict[str, Any]]]:
+    """TraceLens' fusion and system findings from the ``analysis.json`` beside ``analysis_md_path``; none without one."""
+    if not analysis_md_path:
+        return {"fusion_findings": [], "system_findings": []}
+    return {"fusion_findings": fusion_findings(analysis_md_path), "system_findings": system_findings(analysis_md_path)}
 
 
 def _saturation_delta(sat: dict[str, Any], prev_sat: dict[str, Any], key: str) -> float | None:
@@ -187,7 +194,7 @@ class _RooflineStateMixin:
             "trace_health_warnings": [dict(e) for e in warning_rows if isinstance(e, dict) and e.get("code")],
             "analysis_md_path": str(analysis_md_path),
             "analysis_md_text": analysis_md_text,
-            "fusion_findings": fusion_findings(analysis_md_path) if analysis_md_path else [],
+            **_tracelens_findings(analysis_md_path),
             "roofline_snapshot_id": to_int(recorded.get("roofline_snapshot_id"), 0) + 1,
             "roofline_baseline_gain_at_snapshot": float(self.cumulative_gain_validated),
             "ts": now_iso(),

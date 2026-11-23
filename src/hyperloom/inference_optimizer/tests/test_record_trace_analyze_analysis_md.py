@@ -65,6 +65,33 @@ def test_records_the_fusion_findings_of_the_json_beside_the_md(tmp_path: Path) -
     ]
 
 
+def test_records_the_system_findings_of_the_json_beside_the_md(tmp_path: Path) -> None:
+    analysis_md = tmp_path / "analysis.md"
+    analysis_md.write_text("# Executive Summary\n", encoding="utf-8")
+    system = {
+        "operation": "High GPU Idle Time",
+        "node": None,
+        "members": [{"metric": "Idle %", "value": 18.4, "unit": "%"}],
+        "impact": None,
+        "resolution": "Capture the decode step in a graph.",
+        "priority": 1,
+    }
+    (tmp_path / "analysis.json").write_text(json.dumps({"system_optimizations": [system]}), encoding="utf-8")
+
+    state = SharedState()
+    state.record_trace_analyze(_payload(tmp_path / "trace.json"), _result_with_report(analysis_md))
+
+    assert state.last_trace_analyze["system_findings"] == [
+        {
+            "operation": "High GPU Idle Time",
+            "node": "",
+            "priority": 1,
+            "metrics": [{"metric": "Idle %", "value": 18.4, "unit": "%"}],
+            "resolution": "Capture the decode step in a graph.",
+        }
+    ]
+
+
 def test_missing_trace_report_path_yields_empty_text() -> None:
     """No ``trace_report_path`` field → ``analysis_md_text`` is ``""``."""
     state = SharedState()
@@ -76,6 +103,7 @@ def test_missing_trace_report_path_yields_empty_text() -> None:
     assert cached["analysis_md_path"] == ""
     assert cached["analysis_md_text"] == ""
     assert cached["fusion_findings"] == []
+    assert cached["system_findings"] == []
 
 
 def test_unreadable_analysis_md_degrades_silently(tmp_path: Path) -> None:

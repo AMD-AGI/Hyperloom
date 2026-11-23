@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.coerce import first_str, to_float
+from hyperloom_common.coerce import first_str, to_float, to_int
 from hyperloom_common.jsonio import read_json
 
 __all__ = [
@@ -17,6 +17,8 @@ __all__ = [
     "fusion_findings",
     "member_kernel_names",
     "member_name",
+    "system_findings",
+    "system_metric_text",
     "task_operation",
 ]
 
@@ -71,6 +73,51 @@ def fusion_findings(report_path: str | Path) -> list[dict[str, Any]]:
                 "operation": task_operation(task),
                 "projected_e2e_pct": to_float(impact.get("mid")),
                 "members": members,
+            }
+        )
+    return findings
+
+
+def system_metric_text(row: Mapping[str, Any]) -> str:
+    """One metric row of a system finding as ``<metric>: <value>[<unit>]``; ``n/a`` for a value TraceLens could not read."""
+    value, unit = row.get("value"), str(row.get("unit") or "")
+    if not isinstance(value, (int, float)):
+        shown = "n/a"
+    elif unit == "%":
+        shown = f"{value:g}%"
+    else:
+        shown = f"{value:g} {unit}" if unit and unit != "count" else f"{value:g}"
+    return f"{row.get('metric') or '?'}: {shown}"
+
+
+def system_findings(report_path: str | Path) -> list[dict[str, Any]]:
+    """The report's ``system_optimizations[]`` in TraceLens' order (report priority, largest share of GPU time first).
+
+    Each finding keeps its fixed ``operation`` title, the ``node`` of a multi-node report (empty otherwise), the report
+    ``priority``, its metric rows (``value`` is None when unreadable) and its ``resolution``. A missing report or key
+    reads as no findings.
+    """
+    report = read_json(analysis_json_path(report_path), default={}, require_dict=True)
+    findings: list[dict[str, Any]] = []
+    for task in report.get("system_optimizations") or []:
+        if not isinstance(task, dict):
+            continue
+        metrics = [
+            {
+                "metric": first_str(row.get("metric")),
+                "value": to_float(row.get("value")),
+                "unit": first_str(row.get("unit")),
+            }
+            for row in task.get("members") or []
+            if isinstance(row, dict) and row.get("metric")
+        ]
+        findings.append(
+            {
+                "operation": task_operation(task),
+                "node": first_str(task.get("node")),
+                "priority": to_int(task.get("priority")),
+                "metrics": metrics,
+                "resolution": first_str(task.get("resolution")).strip(),
             }
         )
     return findings

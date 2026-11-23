@@ -502,9 +502,12 @@ them**:
   before `🟡`; fusion rows want a fused rewrite). You dispatch neither: the
   rewrite controller selects its own operators and integrates its own patches,
   and fusion queues its KEEPs for you to `integrate`.
-* **`## System-Level Optimizations`** → `explore` variants; the text
-  names the flag (e.g. "graph capture stalls" → `--cuda-graph-max-bs`).
-  Prefer a `provenance='specialist:<domain>'` variant targeting it.
+* **System bottlenecks** → `explore` variants. TraceLens lists them under
+  `system_findings` in `profiler_digest` (priority, title, share of GPU
+  time); a dispatched specialist also gets each one's metrics and the head of
+  its fix, whose full text stays under `## System-Level Optimizations`. The fix
+  names the lever (e.g. "capture the decode step in a graph" → CUDA-graph
+  settings). Prefer a `provenance='specialist:<domain>'` variant targeting it.
 
 <!-- phase: FRAMEWORK_AGENT -->
 ### Choosing specialist domain by bottleneck

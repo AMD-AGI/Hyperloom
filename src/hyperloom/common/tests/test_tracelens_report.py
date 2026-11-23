@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from hyperloom.common.tracelens_report import analysis_json_path, fusion_findings, member_name
+from hyperloom.common.tracelens_report import analysis_json_path, fusion_findings, member_name, system_findings
 
 _ATTENTION_GEMM = "Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x32..."
 _SOFTMAX = "void at::native::(anonymous namespace)::cunn_SoftMaxForwardReg<c10::BFloat1..."
@@ -71,3 +71,57 @@ def test_a_report_without_fusion_findings_reads_as_none(tmp_path):
 
     assert fusion_findings(tmp_path / "analysis.json") == []
     assert fusion_findings(tmp_path / "missing" / "analysis.md") == []
+
+
+def test_system_findings_keep_tracelens_order_with_their_metric_rows_and_resolution(tmp_path):
+    report = {
+        "system_optimizations": [
+            {
+                "operation": "Exposed Collective Communication",
+                "node": None,
+                "members": [
+                    {"metric": "Exposed Communication %", "value": 60.72, "unit": "%"},
+                    {"metric": "Compute/Comm Overlap %", "value": None, "unit": "%"},
+                ],
+                "impact": None,
+                "resolution": " Prefetch each all-gather off the critical path. ",
+                "priority": 1,
+            },
+            {
+                "operation": "High GPU Idle Time",
+                "node": "node-1",
+                "members": [{"metric": "Idle %", "value": 18.4, "unit": "%"}],
+                "impact": None,
+                "resolution": None,
+                "priority": 2,
+            },
+        ]
+    }
+    (tmp_path / "analysis.json").write_text(json.dumps(report), encoding="utf-8")
+
+    assert system_findings(tmp_path / "analysis.md") == [
+        {
+            "operation": "Exposed Collective Communication",
+            "node": "",
+            "priority": 1,
+            "metrics": [
+                {"metric": "Exposed Communication %", "value": 60.72, "unit": "%"},
+                {"metric": "Compute/Comm Overlap %", "value": None, "unit": "%"},
+            ],
+            "resolution": "Prefetch each all-gather off the critical path.",
+        },
+        {
+            "operation": "High GPU Idle Time",
+            "node": "node-1",
+            "priority": 2,
+            "metrics": [{"metric": "Idle %", "value": 18.4, "unit": "%"}],
+            "resolution": "",
+        },
+    ]
+
+
+def test_a_report_without_system_findings_reads_as_none(tmp_path):
+    (tmp_path / "analysis.json").write_text(json.dumps({"system_optimizations": []}), encoding="utf-8")
+
+    assert system_findings(tmp_path / "analysis.json") == []
+    assert system_findings(tmp_path / "missing" / "analysis.md") == []

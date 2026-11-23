@@ -8,6 +8,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.prompt_safety import flatten_for_prompt
+from hyperloom.common.tracelens_report import system_metric_text
+
 from ..specialists.prompt_inputs import SpecialistPromptInputs
 
 # GPU share below which re-dispatching an op to another backend is not worth the
@@ -117,6 +120,35 @@ def _fusion_findings_rows(findings: Any) -> list[str]:
     return rows
 
 
+# A TraceLens resolution runs to 2000 characters; the head names the lever, the full text stays in analysis.md.
+_SYSTEM_RESOLUTION_CHARS = 300
+
+
+def _system_findings_rows(findings: Any) -> list[str]:
+    """Render TraceLens' system bottlenecks with their metrics and fix; empty when the report has none."""
+    if not findings:
+        return []
+    rows = ["**System bottlenecks (TraceLens, report priority: largest share of GPU time first):**", ""]
+    for finding in findings:
+        node = f" [{finding['node']}]" if finding.get("node") else ""
+        metrics = "; ".join(system_metric_text(row) for row in finding.get("metrics") or [])
+        rows.append(f"- P{finding.get('priority') or '?'} {finding.get('operation') or ''}{node}: {metrics}")
+        resolution = flatten_for_prompt(str(finding.get("resolution") or ""))
+        if resolution:
+            rows.append(f"  fix: {resolution[:_SYSTEM_RESOLUTION_CHARS]}")
+    rows += [
+        "",
+        "These are launch-level bottlenecks, worked through server args and envs (`explore` variants) rather than "
+        "kernel rewrites: High GPU Idle Time -> CUDA-graph capture, batch size, async scheduling; Exposed Collective "
+        "Communication -> parallel layout and compute/communication overlap; H2D / D2H / D2D Memory Copy Overhead -> "
+        "pinned memory, non-blocking copies, keeping tensors on device, dropping redundant copies. A family with no "
+        "finding here is one TraceLens did not flag on this trace. Each `fix` is cut to "
+        f"{_SYSTEM_RESOLUTION_CHARS} characters; the full text is under `## System-Level Optimizations` in analysis.md.",
+        "",
+    ]
+    return rows
+
+
 def roofline_evidence_section(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section from ``inp.roofline_evidence``;
     empty evidence renders a heading + ``(none)`` placeholder.
@@ -184,6 +216,7 @@ def roofline_evidence_section(inp: SpecialistPromptInputs) -> list[str]:
         rows.append("")
 
     rows.extend(_fusion_findings_rows(ev.get("fusion_findings")))
+    rows.extend(_system_findings_rows(ev.get("system_findings")))
 
     analysis_path = ev.get("analysis_md_path")
     if analysis_path:
