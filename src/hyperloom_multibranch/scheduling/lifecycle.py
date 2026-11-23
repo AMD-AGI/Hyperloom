@@ -344,7 +344,8 @@ class Session:
             self._integrator.replay_champion,
             profiler.profile_root,
         )
-        return Prelude(self._context, prelude_services, warm_start=warm_start)
+        source_changes = self._settings.source_changes
+        return Prelude(self._context, prelude_services, warm_start=warm_start, source_changes=source_changes)
 
     def _build_integrator(self, repo: ExperimentRepo, checks: SessionChecks, services: SessionServices) -> Integrator:
         """The integrator, writing as itself to the blackboard and the merge log, with the LLM patch resolver whose

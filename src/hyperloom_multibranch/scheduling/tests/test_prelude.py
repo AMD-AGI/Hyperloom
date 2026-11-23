@@ -52,6 +52,7 @@ from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling import prelude as prelude_module
 from hyperloom_multibranch.scheduling.prelude import (
     BASELINE_ESTABLISHED,
+    NO_SOURCE_CHANGES_REASON,
     PREFLIGHT_OUT_OF_TIME,
     Prelude,
     PreludeFailed,
@@ -197,6 +198,7 @@ def _prelude(
     recipe_kb: RecipeDownloader | None = None,
     replay: ReplayChampion | None = None,
     processes: ProcessRegistry | None = None,
+    source_changes: bool = True,
 ) -> Prelude:
     """``replay`` replays the champion in place of the integrator; by default it only notes the replay in
     ``peers.replays`` and waits for the baseline's anchoring."""
@@ -209,7 +211,8 @@ def _prelude(
     context = SchedulerContext(
         layout, roster, _blackboard(layout), decisions, registry, clock, desk, RecordedReservations()
     )
-    warm_start = None if recipe_kb is None else WarmStartSource(recipe_kb, LocalBlobStore(layout.blobs))
+    blobs = LocalBlobStore(layout.blobs)
+    warm_start = None if recipe_kb is None else WarmStartSource(recipe_kb, blobs)
 
     async def open_integration(root: str) -> None:
         peers.opened.append(root)
@@ -231,7 +234,7 @@ def _prelude(
         replay or replay_champion,
         profiler.profile_root,
     )
-    return Prelude(context, services, warm_start=warm_start)
+    return Prelude(context, services, warm_start=warm_start, source_changes=source_changes)
 
 
 def _warm_start_decision(layout: SessionLayout) -> dict[str, Any]:
@@ -557,6 +560,59 @@ async def test_a_champion_from_this_image_whose_patches_acceptance_refuses_is_na
 
     version = rule_pack_identity()["version"]
     assert (lead.replay, lead.refusal) == (None, ReplayRefusal("delta_not_applicable", STACK_REFUSED.reason, version))
+
+
+@pytest.mark.parametrize("source_image", ["", OTHER_IMAGE], ids=["this-image", "another-image"])
+async def test_a_session_that_keeps_no_source_changes_replays_a_champions_launch_config_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_image: str
+) -> None:
+    """``run --no-source-changes``: the champion's patch is never offered to acceptance, which here refuses any; its
+    launch config, without the variable only that patch reads, is what the session replays and offers."""
+    layout = _layout(tmp_path)
+    peers = _peers(layout)
+    peers.toolbox.reject_if(lambda request: STACK_REFUSED if request.delta.components else None)
+    monkeypatch.setattr(prelude_module, "replay_leads", _patched_replays(source_image))
+
+    [lead] = (await _run(_prelude(layout, peers, recipe_kb=OneChampionKB(), source_changes=False))).warm_leads
+
+    assert lead.refusal is None and lead.replay is not None and lead.replay.recipe is None
+    assert lead.replay.reason == NO_SOURCE_CHANGES_REASON
+    assert (lead.replay.launch.server_args, dict(lead.replay.launch.envs)) == ("--enable-expert-parallel", {})
+    assert ("patch", GATE_PATCH) in [(item.kind, item.ref.rsplit("/", 1)[-1]) for item in lead.replay.references]
+    assert "its launch config only, this session keeps launch configuration only, and its gain was" in lead.describe()
+    assert _warm_start_decision(layout) == {"leads": [lead.describe()], "unread": ""}
+
+
+async def test_a_champion_no_check_answered_for_still_replays_its_launch_config_alone_without_source_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback does not wait for acceptance: a check that never answers leaves the launch-only replay offered."""
+    layout = _layout(tmp_path)
+    peers = _peers(layout)
+
+    async def unanswered(request: object) -> None:
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(peers.toolbox, "check_test", unanswered)
+    monkeypatch.setattr(prelude_module, "PREFLIGHT_SECONDS", 0.01)
+    monkeypatch.setattr(prelude_module, "replay_leads", _patched_replays(""))
+
+    [lead] = (await _run(_prelude(layout, peers, recipe_kb=OneChampionKB(), source_changes=False))).warm_leads
+
+    assert lead.unchecked == PREFLIGHT_OUT_OF_TIME and lead.replay is not None
+    assert (lead.replay.recipe, lead.replay.reason) == (None, NO_SOURCE_CHANGES_REASON)
+
+
+@pytest.mark.parametrize("kept", [True, False], ids=["source-changes-kept", "launch-configuration-only"])
+async def test_the_profile_records_whether_the_session_keeps_source_changes(tmp_path: Path, kept: bool) -> None:
+    """With or without a Recipe KB: CLOSE reads the profile to keep a session held to launch configuration out of the
+    archive."""
+    layout = _layout(tmp_path)
+
+    result = await _run(_prelude(layout, _peers(layout), source_changes=kept))
+
+    assert result.profile.source_changes is kept
+    assert await _blackboard(layout).session_profile() == result.profile
 
 
 async def test_a_replay_acceptance_has_not_answered_for_in_preludes_time_stays_offered_marked_not_checked(
