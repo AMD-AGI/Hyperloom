@@ -61,6 +61,7 @@ _ACCURACY = "accuracy"
 _SHORT_PROMPTS = "short_prompts"
 _LONG_CONTEXT = "long_context"
 _CHECKPOINT = "checkpoint"
+_BOOT_BUDGET = "boot_budget_sec"
 _RESULT_DIR = "result_dir"
 KINDS = ("test", "profile", _ACCURACY, "repro")
 PURPOSES = tuple(purpose.value for purpose in Purpose)
@@ -486,6 +487,9 @@ class Procedure:
     short_prompts: ShortPromptPlan | None = None
     long_context: LongContextPlan | None = None
     checkpoint: CheckpointPlan | None = None
+    #: How long, at least, each round's server may take to be ready (``TestCall.boot_budget_sec``); ``None``: the default
+    #: share.
+    boot_budget_sec: float | None = None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "Procedure":
@@ -505,6 +509,7 @@ class Procedure:
             short_prompts=_short_prompts(r.optional(_SHORT_PROMPTS), r.at(_SHORT_PROMPTS)),
             long_context=_long_context(r.optional(_LONG_CONTEXT), r.at(_LONG_CONTEXT)),
             checkpoint=_checkpoint(r.optional(_CHECKPOINT), r.at(_CHECKPOINT)),
+            boot_budget_sec=r.number(_BOOT_BUDGET, minimum=1, optional=True),
         )
         r.done()
         return procedure
@@ -526,6 +531,8 @@ class Procedure:
             document[_LONG_CONTEXT] = self.long_context.to_document()
         if self.checkpoint is not None:
             document[_CHECKPOINT] = self.checkpoint.to_document()
+        if self.boot_budget_sec is not None:
+            document[_BOOT_BUDGET] = self.boot_budget_sec
         return document
 
 

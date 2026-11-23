@@ -308,6 +308,22 @@ def test_defaulted_deadline_keys_may_be_omitted():
     )
 
 
+def test_a_boot_budget_round_trips_and_is_written_only_when_set():
+    config = _config()
+    assert "boot_budget_sec" not in config.to_document()["deadlines"]
+    assert SuiteConfig.from_document(config.to_document()).deadlines.boot_budget_sec is None
+
+    budgeted = replace(config, deadlines=replace(config.deadlines, boot_budget_sec=14400.0))
+    assert budgeted.to_document()["deadlines"]["boot_budget_sec"] == 14400.0
+    assert SuiteConfig.from_document(budgeted.to_document()).deadlines == budgeted.deadlines
+
+
+@pytest.mark.parametrize("budget", [0, -1, "14400", True])
+def test_a_boot_budget_that_is_not_a_positive_number_is_refused(budget):
+    with pytest.raises(ConfigError, match="the boot budget"):
+        replace(_config().deadlines, boot_budget_sec=budget)
+
+
 def test_eval_probe_is_required():
     document = _config().to_document()
     del document["eval"]["probe"]

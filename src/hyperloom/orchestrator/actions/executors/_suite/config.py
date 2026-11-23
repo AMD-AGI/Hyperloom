@@ -187,6 +187,8 @@ class RoundSettings:
     ``base_path`` is where the frozen base the round composes on is stored; ``silence_sec`` bounds how long the
     server may log nothing once ready; ``env_inherit`` names the host environment the server and client may see;
     ``server_url`` is the server a client-only round measures, which a point's own ``BENCHMARK_BASE_URL`` overrides.
+    ``boot_budget_sec`` is the boot budget of the test the round belongs to (``Deadlines.boot_budget_sec``), ``None``
+    for none.
     """
 
     base_path: str
@@ -198,6 +200,7 @@ class RoundSettings:
     env_inherit: tuple[str, ...] = ()
     deadline_unix: int | None = None
     server_url: str | None = None
+    boot_budget_sec: float | None = None
 
 
 @dataclass(frozen=True)
@@ -789,6 +792,7 @@ def _deadlines(point: _Point, settings: RoundSettings) -> Deadlines:
         eval_sec=point.timeout_sec,
         silence_sec=settings.silence_sec,
         deadline_unix=settings.deadline_unix,
+        boot_budget_sec=settings.boot_budget_sec,
     )
 
 
