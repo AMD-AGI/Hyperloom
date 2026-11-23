@@ -70,7 +70,7 @@ class AgentRelayPolicy:
     @classmethod
     def from_dict(cls, payload: object) -> AgentRelayPolicy:
         """Strictly rebuild the persisted relay policy."""
-        data = _strict_mapping(_without_retired_fields(payload), cls, "agent relay policy")
+        data = _strict_mapping(payload, cls, "agent relay policy")
         raw_profiles = data["profiles"]
         if not isinstance(raw_profiles, (list, tuple)):
             raise ValueError("agent relay policy profiles must be a list")
@@ -453,17 +453,6 @@ def migrate_run_state_relay_fields(payload: object) -> dict[str, Any]:
             "profiles": {},
         }
     return migrated
-
-
-# What a campaign once recorded in its relay policy and no longer does.
-_RETIRED_POLICY_FIELDS = frozenset({"blockage_threshold"})
-
-
-def _without_retired_fields(payload: object) -> object:
-    """A stored relay policy without the fields an earlier version wrote and this one does not read."""
-    if not isinstance(payload, dict):
-        return payload
-    return {key: value for key, value in payload.items() if key not in _RETIRED_POLICY_FIELDS}
 
 
 def _validate_relay_membership(primary_profile_id: str, profiles: Sequence) -> None:
