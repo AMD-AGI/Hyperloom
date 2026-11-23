@@ -91,6 +91,15 @@ it.
   created. **Upgrade note:** move from `vllm/vllm-openai-rocm:v0.33.0-rocm100` to
   `v0.34.0-rocm100`; on a ROCm 7.2.x bare-metal host use Docker, a ROCm 10 host, or
   `VLLM_VERSION=0.33.0 VLLM_ROCM_VARIANT=rocm72`.
+- **A multi-branch session reads and writes the workspace's Experience KB.**
+  With `HYPERLOOM_KB_URL` set, a session's briefs recall past sessions' tests
+  and its learnings tool their learnings, and CLOSE writes the session's tests
+  and learnings there. An InferenceX session reads both schemas its tests are
+  written under, so a kernel change is recalled too. A loopback service is
+  started before the session, outside the session's process tree, and left
+  serving; one serving with other settings is not restarted
+  (`experience_kb_service ensure --no-restart`). Before, a session read and
+  wrote no Experience KB, whatever the environment named.
 
 ## Hyperloom 1.2.0 release
 

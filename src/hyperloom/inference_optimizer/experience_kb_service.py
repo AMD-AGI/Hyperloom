@@ -212,7 +212,14 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init-env", help="Write the local service URL and a generated token into .env.")
     init.add_argument("--env-file", type=Path, default=Path(".env"))
-    commands.add_parser("ensure", help="Start the local service unless it already serves, then check its health.")
+    ensure = commands.add_parser(
+        "ensure", help="Start the local service unless it already serves, then check its health."
+    )
+    ensure.add_argument(
+        "--no-restart",
+        action="store_true",
+        help="Leave a service started with other settings serving instead of restarting it.",
+    )
     commands.add_parser("push", help="Send the Experiences written here and not yet pushed to the global KB.")
     commands.add_parser(
         "pull",
@@ -245,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  rejected: {item}", file=sys.stderr)
         return 0 if report["status"] == "completed" and not rejected else 1
     try:
-        service = ensure_service()
+        service = ensure_service(restart=not args.no_restart)
     except (LocalServiceError, RemoteClientError) as exc:
         print(f"Experience KB service failed: {exc}", file=sys.stderr)
         return 1
@@ -257,6 +264,8 @@ def main(argv: list[str] | None = None) -> int:
         f"Experience KB service {state} at {os.environ['HYPERLOOM_KB_URL']}: "
         f"{service.health.get('experience_count', 0)} Experiences under {service_home()}"
     )
+    if service.stale:
+        print(f"Experience KB service left serving with other settings: {service.stale}", file=sys.stderr)
     return 0
 
 
