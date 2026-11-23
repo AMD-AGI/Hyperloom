@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.agents.framework.models import Candidate, CandidateSearchRequest
+from hyperloom.agents.framework.models import Candidate
 from hyperloom.agents.framework.sources.github import PERF_TERMS, GitHubUnavailable, build_query, search_issues
 from hyperloom.common.github_urls import repo_slug
 from hyperloom.common.outside_facts import UPSTREAM_PR_REPOS
@@ -38,9 +38,11 @@ _TIMEOUT_SEC = 10.0
 
 @dataclass(frozen=True)
 class UpstreamSearch:
-    """The search ``request``, and the pull-request ``states`` the caller asked for."""
+    """What the caller asked for: the repository, the keywords, how many pull requests, and in which states."""
 
-    request: CandidateSearchRequest
+    repo_url: str
+    keywords: tuple[str, ...] = ()
+    limit: int = DEFAULT_LIMIT
     states: tuple[str, ...] = _OPEN_ONLY
 
     def state_qualifier(self) -> str:
@@ -83,10 +85,9 @@ def search_github(search: UpstreamSearch) -> Found:
     Raises:
         GitHubUnavailable: GitHub could not be asked or refused (never an empty list for that).
     """
-    request = search.request
-    terms = _phrases(request.keywords) or PERF_TERMS
-    query = " ".join(filter(None, (build_query(repo_slug(request.repo_url), terms=terms), search.state_qualifier())))
-    answer = search_issues(query, per_page=request.max_search_candidates, timeout_sec=_TIMEOUT_SEC)
+    terms = _phrases(search.keywords) or PERF_TERMS
+    query = " ".join(filter(None, (build_query(repo_slug(search.repo_url), terms=terms), search.state_qualifier())))
+    answer = search_issues(query, per_page=search.limit, timeout_sec=_TIMEOUT_SEC)
     candidates = []
     for item in answer.items:
         number = item.get("number") if isinstance(item, dict) else None
@@ -96,7 +97,7 @@ def search_github(search: UpstreamSearch) -> Found:
                     ref=f"PR:{number}", title=str(item.get("title") or ""), html_url=str(item.get("html_url") or "")
                 )
             )
-    return Found(candidates[: request.max_search_candidates], answer.total_count)
+    return Found(candidates[: search.limit], answer.total_count)
 
 
 def _strings(value: Any) -> tuple[str, ...]:
@@ -108,7 +109,7 @@ def _strings(value: Any) -> tuple[str, ...]:
 
 
 def build_search(params: Mapping[str, Any]) -> UpstreamSearch:
-    """Turn tool parameters into the search request; raises :class:`InvalidRequest`."""
+    """Turn tool parameters into the search; raises :class:`InvalidRequest`."""
     repo_url = str(params.get("repo_url") or "").strip()
     try:
         slug = repo_slug(repo_url)
@@ -129,12 +130,7 @@ def build_search(params: Mapping[str, Any]) -> UpstreamSearch:
     wordless = [keyword for keyword in keywords if not _words(keyword)]
     if wordless:
         raise InvalidRequest(f"keyword {wordless[0]!r} holds no word to search for")
-    request = CandidateSearchRequest(
-        repo_url=repo_url,
-        max_search_candidates=limit,
-        keywords=keywords,
-    )
-    return UpstreamSearch(request, states)
+    return UpstreamSearch(repo_url, keywords, limit, states)
 
 
 def _candidates(found: Found, search: UpstreamSearch) -> ToolOutput:
@@ -143,11 +139,11 @@ def _candidates(found: Found, search: UpstreamSearch) -> ToolOutput:
     not_shown = found.matched - len(prs)
     shown = f"{len(prs)} of {found.matched}" if not_shown else str(len(prs))
     top = f"; top: {prs[0]['ref']} {prs[0]['title']}" if prs else ""
-    repo_url = search.request.repo_url
+    repo_url = search.repo_url
     return ToolOutput(
         result={
             "repo_url": repo_url,
-            "keywords": list(search.request.keywords),
+            "keywords": list(search.keywords),
             "candidates": prs,
             "matched_prs": found.matched,
             "not_shown": not_shown,
