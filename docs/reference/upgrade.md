@@ -123,12 +123,12 @@ the tool directly must pass the root its output lands under
 
 Every session's `storage/coordinator.db` now records schema version 8, and
 there are no in-place migrations. `optimize --resume-from` on a session whose
-database records an older version, which is every session started by 1.1.4 or
+database records an older version, which is every session started by 1.1.5 or
 earlier, exits 2 at resume admission, before `state.json` or the database is
 touched:
 
 ```text
-ERROR: --resume-from coordinator.db is at schema version 6, older than this build's 8:
+ERROR: --resume-from coordinator.db is at schema version 7, older than this build's 8:
 sessions created before this release cannot be resumed. Finish the session under the
 build that started it, or start a new session.
 ```

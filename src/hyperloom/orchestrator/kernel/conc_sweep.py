@@ -4,7 +4,7 @@
 """Concurrency sweep over the CONC ladder."""
 
 from __future__ import annotations
-from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import prepare_grid_benchmark_config
 
 import logging
 import time
@@ -33,7 +33,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
 )
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
-from ..actions.executors._grid_runner import (
+from ..actions.executors.grid._grid_runner import (
     GridLaunch,
     GridRecipe,
     GridStop,
@@ -42,7 +42,7 @@ from ..actions.executors._grid_runner import (
     run_grid,
     teardown_variant_server,
 )
-from ..actions.executors._grid_runner import variant_conc
+from ..actions.executors.grid._grid_runner import variant_conc
 from ..actions.executors._subprocess_kill import session_deadline_to_remaining_sec
 from ..actions.cancel_channel import current_cancel_scope
 from ..actions.stop_attribution import (
@@ -51,7 +51,7 @@ from ..actions.stop_attribution import (
     STOPPED_BY_THE_RUN,
     StoppedByTheRun,
 )
-from ..actions.executors._workload_envs import (
+from ..actions.executors.workload._workload_envs import (
     BenchmarkTarget,
     FrameworkScriptMismatchError,
     MaterializeOptions,
@@ -682,7 +682,7 @@ class _RungRun:
 
 def _resolve_arm_strategy(run: _SweepRun, arm_name: str) -> ArmStrategy:
     """How one arm runs its ladder: on one persistent server when its framework is lifecycle-eligible."""
-    from ..actions.executors._server_lifecycle import resolve_lifecycle_params
+    from ..actions.executors.serving._server_lifecycle import resolve_lifecycle_params
 
     recorder = run.recorder
     # Resolve lifecycle params (port, framework) from the materialized config.

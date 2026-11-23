@@ -13,7 +13,7 @@ import pytest
 from hyperloom.orchestrator.loop import coordinator as coord_mod
 from hyperloom.orchestrator.phases import framework_records
 from hyperloom.orchestrator.phases import machine_state as ps_mod
-from hyperloom.orchestrator.actions.executors import _patch_source_pr as fpr_mod
+from hyperloom.orchestrator.actions.executors.patching import _patch_source_pr as fpr_mod
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 
 from .conftest import make_coordinator

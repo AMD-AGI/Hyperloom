@@ -12,7 +12,7 @@ from hyperloom_common.coerce import to_str_list
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ....policy.denial import PolicyDenied
 
-from .._grid_base import DEFAULT_KEEP_THRESHOLD_PCT
+from ..grid._grid_base import DEFAULT_KEEP_THRESHOLD_PCT
 from .._proposal_identity import (
     BaseControls,
     content_fingerprint,

@@ -15,7 +15,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     inject_sglang_watchdog_timeout,
     resolve_sglang_watchdog_timeout,
 )
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     materialize_config_with_envs,
     LaunchLayer,
 )

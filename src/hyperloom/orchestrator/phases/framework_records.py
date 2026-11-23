@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from hyperloom_common.coerce import dict_rows, first_str, first_text, to_list, to_mapping
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_lever_kind
-from ..actions.executors import _integrate_vocabulary, is_executable, normalize_proposal
+from ..actions.executors.integrate import _integrate_vocabulary
+from ..actions.executors import is_executable, normalize_proposal
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 from ..state.task_registry import TaskNotFound

@@ -9,7 +9,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from hyperloom.orchestrator.actions.executors._patch_source_pr import (
+from hyperloom.orchestrator.actions.executors.patching._patch_source_pr import (
     _fetch_diff_to_path,
     _materialize_pr_diff_from_head,
     materialize_candidate_patches,
@@ -148,10 +148,10 @@ def test_fetch_diff_to_path_passes_max_filesize(tmp_path: Path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._patch_source_pr.subprocess.run",
+        "hyperloom.orchestrator.actions.executors.patching._patch_source_pr.subprocess.run",
         fake_run,
     )
-    from hyperloom.orchestrator.actions.executors._patch_source_pr import DEFAULT_DIFF_MAX_BYTES
+    from hyperloom.orchestrator.actions.executors.patching._patch_source_pr import DEFAULT_DIFF_MAX_BYTES
 
     ok, err = _fetch_diff_to_path("https://example.test/pr.diff", dest, timeout_sec=5.0)
     assert ok, err

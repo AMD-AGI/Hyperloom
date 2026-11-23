@@ -14,17 +14,18 @@ import yaml
 
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
-from hyperloom.orchestrator.actions.executors import _agentx_checkpoint
+from hyperloom.orchestrator.actions.executors.workload import _agentx_checkpoint
 from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
-from hyperloom.orchestrator.actions.executors._agentx_checkpoint import (
+from hyperloom.orchestrator.actions.executors.workload._agentx_checkpoint import (
     CHECKPOINT_ARTIFACT_NAME,
     AgentxCheckpoint,
     checkpoint_summary,
     read_checkpoint,
 )
-from hyperloom.orchestrator.actions.executors._grid_base import GridRound, run_grid_suite_round
+from hyperloom.orchestrator.actions.executors.grid._grid_base import GridRound, run_grid_suite_round
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     AGENTX_EARLY_STOP_RETURNCODE,
+    BOOT_BUDGET_ENV,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
 )
 from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
@@ -40,7 +41,7 @@ from hyperloom.orchestrator.actions.executors._suite.rounds import (
     session_route,
     suite_route,
 )
-from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _base, _point
+from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _base, _launch, _point
 from hyperloom.orchestrator.rehearsal import READY, LaunchAttempt, LaunchScenario, ScriptedRounds, VirtualClock
 from inference_suite.contracts import FailedStep, LifecycleMode, RunStatus
 
@@ -236,6 +237,45 @@ def test_a_point_that_names_its_port_keeps_it(session, tmp_path, monkeypatch) ->
 
     (config,) = [call.config for call in rounds.calls]
     assert config.server.port == 8123
+
+
+@pytest.mark.parametrize(("budget", "ready"), [(None, "10800"), ("14400", "18000"), ("5400", "10800")])
+def test_a_rounds_framework_ready_timeout_follows_the_boot_budget_of_its_test(
+    session, tmp_path, monkeypatch, budget, ready
+) -> None:
+    """The measurement backend names a test's boot budget in the environment; the round carries it into its config and
+    the guard holds the framework's own ready timeout past it."""
+    if budget is None:
+        monkeypatch.delenv(BOOT_BUDGET_ENV, raising=False)
+    else:
+        monkeypatch.setenv(BOOT_BUDGET_ENV, budget)
+    rounds = _rounds()
+    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
+    point = _write_point(tmp_path / "slot" / "point.yaml")
+
+    run_suite_round(
+        suite_route(session),
+        SuiteRound(point, point.parent, round_lifecycle(point.parent, LifecycleMode.OWN)),
+        on_poll=lambda: None,
+    )
+
+    (config,) = [call.config for call in rounds.calls]
+    assert config.deadlines.boot_budget_sec == (None if budget is None else float(budget))
+    entry = {entry.name: entry for entry in _launch(config, _base("sglang")).env_sources}["SGLANG_WARMUP_TIMEOUT"]
+    assert entry.value == ready
+
+
+@pytest.mark.parametrize("budget", ["soon", "0", "-5", "inf"])
+def test_a_boot_budget_that_is_not_a_positive_number_refuses_the_round(session, tmp_path, monkeypatch, budget) -> None:
+    monkeypatch.setenv(BOOT_BUDGET_ENV, budget)
+    point = _write_point(tmp_path / "slot" / "point.yaml")
+    lifecycle = round_lifecycle(point.parent, LifecycleMode.OWN)
+
+    with pytest.raises(SuiteRoundRefused) as refused:
+        run_suite_round(suite_route(session), SuiteRound(point, point.parent, lifecycle), on_poll=lambda: None)
+
+    assert refused.value.error_class == failed_step_error_class(FailedStep.CONFIG_INVALID)
+    assert BOOT_BUDGET_ENV in refused.value.detail
 
 
 def test_the_round_sees_the_host_environment_but_not_its_gpu_masks() -> None:

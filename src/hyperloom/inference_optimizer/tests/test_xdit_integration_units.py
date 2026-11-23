@@ -13,10 +13,10 @@ from hyperloom.inference_optimizer import framework_registry as fr
 from hyperloom.inference_optimizer.roofline_ceiling import RooflineBreakdown
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 from hyperloom.orchestrator.actions.executors import benchmark_result as br
-from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
-from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
-from hyperloom.orchestrator.actions.executors import explore as ex
+from hyperloom.orchestrator.actions.executors.grid import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors.grid._grid_variant_filter import ServingStack
+from hyperloom.orchestrator.actions.executors.grid import _grid_variant_filter as vf
+from hyperloom.orchestrator.actions.executors.grid import _grid_base as ex
 
 
 class TestFrameworkRegistry:
@@ -315,7 +315,7 @@ class TestExploreGrid:
 
 
 def _default_config(kind: str):
-    from hyperloom.orchestrator.actions.executors import _workload_envs as we
+    from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
     from hyperloom.orchestrator.actions.executors import profile as pf
 
     return {"baseline": we.default_baseline_config, "profile": pf._default_profile_config}[kind]()
@@ -387,7 +387,7 @@ class TestLifecycleScriptableSkip:
         }
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text(yaml.safe_dump(cfg), encoding="utf-8")
-        from hyperloom.orchestrator.actions.executors._server_lifecycle import (
+        from hyperloom.orchestrator.actions.executors.serving._server_lifecycle import (
             resolve_lifecycle_params,
         )
 
@@ -406,7 +406,7 @@ class TestLifecycleScriptableSkip:
         }
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text(yaml.safe_dump(cfg), encoding="utf-8")
-        from hyperloom.orchestrator.actions.executors._server_lifecycle import (
+        from hyperloom.orchestrator.actions.executors.serving._server_lifecycle import (
             resolve_lifecycle_params,
         )
 

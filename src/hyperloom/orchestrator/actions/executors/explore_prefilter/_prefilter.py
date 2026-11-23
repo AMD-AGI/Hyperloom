@@ -44,9 +44,9 @@ from . import _reuse as reuse
 from ._projection import ProjectionRequest, projection_enabled, route_variants
 from ._remeasure import _is_config_replay_variant, is_stack_revalidation
 from ._screen import screen_enabled, screen_variants
-from .._grid_base import GridVariant
-from .._grid_runner import GridRecipe, _build_variant_yaml
-from .._workload_envs import BenchmarkTarget, LaunchLayer
+from ..grid._grid_base import GridVariant
+from ..grid._grid_runner import GridRecipe, _build_variant_yaml
+from ..workload._workload_envs import BenchmarkTarget, LaunchLayer
 
 log = logging.getLogger(__name__)
 

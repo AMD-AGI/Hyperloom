@@ -127,13 +127,13 @@ def test_a_keep_that_changes_the_stack_does_not_resurrect_benched_proposals():
 
 
 def test_a_nameless_proposal_gets_a_stable_name_the_grid_parser_accepts():
-    from hyperloom.orchestrator.actions.executors.explore import _grid_variants_from_payload
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import grid_variants_from_payload
 
     entry = _round([{"extra_args": "--z"}], domain="comm_specialist")
     entry["task_id"] = "deadbeef99"
     line = _state([entry]).to_untested_proposals_summary()
     assert "comm-deadbeef-0" in line
-    assert _grid_variants_from_payload([{"name": "comm-deadbeef-0", "extra_args": "--z"}])
+    assert grid_variants_from_payload([{"name": "comm-deadbeef-0", "extra_args": "--z"}])
 
 
 def test_a_non_numeric_cycle_does_not_break_prompt_assembly():

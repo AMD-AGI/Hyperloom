@@ -18,22 +18,22 @@ import pytest
 from hyperloom.orchestrator.tests._helpers import patch_integrate_patch_roots
 
 from hyperloom.orchestrator.actions.executors import _accuracy_gate
-from hyperloom.orchestrator.actions.executors import _integrate_apply as integrate_apply
-from hyperloom.orchestrator.actions.executors import _patch_sources as patch_sources
+from hyperloom.orchestrator.actions.executors.integrate import _integrate_apply as integrate_apply
+from hyperloom.orchestrator.actions.executors.patching import _patch_sources as patch_sources
 from hyperloom.orchestrator.actions.executors import _setup_replay
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
-from hyperloom.orchestrator.actions.executors import _patch_artifacts as patch_artifacts
-from hyperloom.orchestrator.actions.executors import _integrate_results as integrate_results
+from hyperloom.orchestrator.actions.executors.patching import _patch_artifacts as patch_artifacts
+from hyperloom.orchestrator.actions.executors.integrate import _integrate_results as integrate_results
 
 from hyperloom.orchestrator.tests._helpers import integrate_extra, variant_result
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     FrameworkScriptMismatchError,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.task_registry import Task
-from hyperloom.orchestrator.actions.executors import _integrate_bench as integrate_bench
+from hyperloom.orchestrator.actions.executors.integrate import _integrate_bench as integrate_bench
 
 
 _VALID_PATCH = """\
@@ -331,7 +331,7 @@ async def test_bench_patch_forwards_the_session_and_phase_budgets_to_the_grid(tm
     config_path.write_text("benchmark: {}\n", encoding="utf-8")
 
     from hyperloom.common.deadline import Deadline
-    from hyperloom.orchestrator.actions.executors import _integrate_results as integrate_results
+    from hyperloom.orchestrator.actions.executors.integrate import _integrate_results as integrate_results
 
     captured: dict[str, Any] = {}
     phase = Deadline.after(900.0)
@@ -714,7 +714,7 @@ async def test_a_later_patch_failing_to_prepare_still_reverts_the_earlier_one(tm
     over that uncommitted tail left the first patch in the framework tree and
     graded an untouched-but-for-that tree as an environment fault.
     """
-    from hyperloom.orchestrator.actions.executors import _nogit_patch
+    from hyperloom.orchestrator.actions.executors.patching import _nogit_patch
 
     session = tmp_path / "s"
     session.mkdir()
@@ -745,7 +745,7 @@ async def test_a_later_patch_failing_to_prepare_still_reverts_the_earlier_one(tm
 @pytest.mark.asyncio
 async def test_a_crash_while_preparing_a_later_patch_still_reverts_the_earlier_one(tmp_path, monkeypatch):
     """The same tail, reached by losing the process rather than by returning."""
-    from hyperloom.orchestrator.actions.executors import _nogit_patch
+    from hyperloom.orchestrator.actions.executors.patching import _nogit_patch
 
     session = tmp_path / "s"
     session.mkdir()
@@ -1049,7 +1049,7 @@ async def test_apply_only_restores_user_stash_but_resume_refuses_unproven_user_m
 
 @pytest.mark.asyncio
 async def test_cancel_mid_non_git_apply_restores_prepared_ledger_without_returned_records(tmp_path, monkeypatch):
-    from hyperloom.orchestrator.actions.executors import _nogit_patch
+    from hyperloom.orchestrator.actions.executors.patching import _nogit_patch
 
     session = tmp_path / "session"
     repo = tmp_path / "fw"

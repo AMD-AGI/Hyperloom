@@ -15,13 +15,13 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
-from hyperloom.orchestrator.actions.executors import _patch_artifacts as patch_artifacts
+from hyperloom.orchestrator.actions.executors.patching import _patch_artifacts as patch_artifacts
 from hyperloom.orchestrator.actions.executors._git import _git_head_sha
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.delivery import ledger
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
-from hyperloom.orchestrator.actions.executors import _integrate_bench as integrate_bench
+from hyperloom.orchestrator.actions.executors.integrate import _integrate_bench as integrate_bench
 
 
 def _make_workspace(tmp_path: Path) -> Path:

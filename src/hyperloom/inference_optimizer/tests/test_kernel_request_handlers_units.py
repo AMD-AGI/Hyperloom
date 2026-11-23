@@ -43,7 +43,7 @@ from hyperloom.orchestrator.kernel import _forge_shapes as forge_shapes
 from hyperloom.orchestrator.kernel import serving_log_evidence as serving_log_evidence
 from hyperloom.orchestrator.kernel import _shape_capture as shape_capture
 from hyperloom.orchestrator.kernel import _untuned_gemm_csv as untuned_gemm_csv
-from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import LaunchLayer
 
 
 _FUSION_PROVIDER_ENV_KEYS = (
@@ -2172,7 +2172,7 @@ class TestRunGemmTuningHandler:
 
         import yaml
 
-        from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
+        from hyperloom.orchestrator.actions.executors.workload._workload_envs import materialize_config_with_envs
 
         monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
         base = tmp_path / "base.yaml"

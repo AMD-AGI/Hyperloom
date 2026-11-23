@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.actions.executors.explore import runnable_grid_variants
+from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import runnable_grid_variants
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop._explore_grid import EXPLORE_GRID_MISSING, explore_grid_denial
 from hyperloom.orchestrator.state.pending_proposal import PendingProposal

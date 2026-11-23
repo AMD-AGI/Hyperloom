@@ -20,7 +20,7 @@ from inference_suite.contracts import Report, RunLayout
 from inference_suite.contracts.launch import Launch
 from inference_suite.contracts.layout import REPORT_FILE
 
-from ._gpu_metrics import write_gpu_metrics_from_report
+from .gpu._gpu_metrics import write_gpu_metrics_from_report
 
 
 #: The session-breakdown report a GEAK sweep point or a multi-node round writes into its workspace.

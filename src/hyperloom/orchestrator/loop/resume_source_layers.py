@@ -13,8 +13,8 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_
 from hyperloom.inference_optimizer.session.session_paths import kernel_patch_backup_roots
 
 from ..actions.executors._git import _run_git_cp
-from ..actions.executors._nogit_patch import _is_git_tree
-from ..actions.executors._patch_snapshot import _git_commit_kept
+from ..actions.executors.patching._nogit_patch import _is_git_tree
+from ..actions.executors.patching._patch_snapshot import _git_commit_kept
 from ..kernel.kept_patch_restore import KeptPatchRestoreError, restore_kept_patches_on_pods
 from ..source_snapshot import SourceLayerInstall, install_source_layers
 

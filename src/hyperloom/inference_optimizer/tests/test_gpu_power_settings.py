@@ -490,7 +490,7 @@ class TestVisibleCards:
         assert "cannot be checked" in error and "device numbers" in error
 
     def test_the_sampler_samples_the_cards_the_mask_names(self, tmp_path, monkeypatch):
-        from hyperloom.orchestrator.actions.executors._gpu_power import build_gpu_power_recorder
+        from hyperloom.orchestrator.actions.executors.gpu._gpu_power import build_gpu_power_recorder
 
         monkeypatch.delenv("HYPERLOOM_GPU_POWER_SAMPLING", raising=False)
         monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/amd-smi")

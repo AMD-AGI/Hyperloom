@@ -82,7 +82,7 @@ def process_environ():
 
 def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
     """Put the executors in multi-node mode with a no-op per-round server restart."""
-    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl
+    from hyperloom.orchestrator.actions.executors.serving import _multi_node_server_lifecycle as mnl
 
     async def _no_restart(*_args, **_kwargs) -> None:
         return None
@@ -431,7 +431,7 @@ def build_coord(tmp_path):
 def patch_integrate_patch_roots(monkeypatch, tmp_path: Path) -> None:
     """Register common tmp_path framework repos as integrate_patch search roots."""
     from hyperloom.inference_optimizer import framework_paths as fp
-    from hyperloom.orchestrator.actions.executors import _patch_artifacts, _patch_sources
+    from hyperloom.orchestrator.actions.executors.patching import _patch_artifacts, _patch_sources
 
     real = fp.resolve_kernel_search_roots
 

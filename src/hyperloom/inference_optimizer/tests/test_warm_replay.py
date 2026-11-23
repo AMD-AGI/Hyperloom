@@ -3342,7 +3342,7 @@ def test_a_promoted_warm_replay_patch_is_reinstalled_on_a_fresh_tree(tmp_path):
 
 def test_a_candidate_after_a_promoted_warm_replay_still_benches_its_overlays(tmp_path):
     """Every integrate_patch candidate stashes a dirty tree first, so the adopted overlays have to be committed."""
-    from hyperloom.orchestrator.actions.executors._patch_git import _git_stash_if_dirty
+    from hyperloom.orchestrator.actions.executors.patching._patch_git import _git_stash_if_dirty
 
     coord, tree, result, params = _replayed_on_a_git_tree(tmp_path)
     stock_head = _tree_git(tree, "rev-parse", "HEAD").strip()

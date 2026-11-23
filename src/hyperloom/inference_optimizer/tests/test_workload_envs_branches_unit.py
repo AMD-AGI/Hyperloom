@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _workload_envs as we
+from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
 
 from ._workload_envs_helpers import clear_env, materialize, write_config
@@ -201,7 +201,7 @@ def test_profile_shape_tool_keeps_the_inherited_pythonpath(monkeypatch, tmp_path
     # inherited entries, or the profile server loses the operator's and the image's import paths.
     import os
 
-    from hyperloom.orchestrator.actions.executors import _framework_rewrite_evidence as evidence
+    from hyperloom.orchestrator.actions.executors.framework_change import _framework_rewrite_evidence as evidence
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
 
     tool_dir = _arm_sglang_shape_tool(monkeypatch, tmp_path)
@@ -253,7 +253,9 @@ def test_the_cli_and_the_orchestrator_read_one_set_of_workload_defaults():
     assert imported == ["__future__"], imported
 
     # And the orchestrator side must not import the CLI parser at any scope.
-    orchestrator_src = Path(we.__file__).read_text(encoding="utf-8")
+    orchestrator_src = "".join(
+        path.read_text(encoding="utf-8") for path in sorted(Path(we.__file__).parent.glob("*.py"))
+    )
     assert "inference_optimizer.cli import parser" not in orchestrator_src
     assert "inference_optimizer.cli.parser" not in orchestrator_src
 
