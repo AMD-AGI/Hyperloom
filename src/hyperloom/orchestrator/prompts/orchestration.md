@@ -502,12 +502,15 @@ them**:
   before `🟡`; fusion rows want a fused rewrite). You dispatch neither: the
   rewrite controller selects its own operators and integrates its own patches,
   and fusion queues its KEEPs for you to `integrate`.
-* **System bottlenecks** → `explore` variants. TraceLens lists them under
+* **System bottlenecks** → an `explore` variant where the framework exposes
+  the lever as a server arg or env (e.g. "capture the decode step in a graph"
+  → CUDA-graph settings), otherwise a specialist patch at the call site the
+  fix names (a host read such as `.item()`, a redundant `.contiguous()` or
+  clone); neither is a kernel rewrite. TraceLens lists them under
   `system_findings` in `profiler_digest` (priority, title, share of GPU
   time); a dispatched specialist also gets each one's metrics and the head of
-  its fix, whose full text stays under `## System-Level Optimizations`. The fix
-  names the lever (e.g. "capture the decode step in a graph" → CUDA-graph
-  settings). Prefer a `provenance='specialist:<domain>'` variant targeting it.
+  its fix, whose full text stays under `## System-Level Optimizations`. For a
+  variant, prefer `provenance='specialist:<domain>'` targeting it.
 
 <!-- phase: FRAMEWORK_AGENT -->
 ### Choosing specialist domain by bottleneck

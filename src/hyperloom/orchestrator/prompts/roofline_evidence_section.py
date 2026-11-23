@@ -138,12 +138,14 @@ def _system_findings_rows(findings: Any) -> list[str]:
             rows.append(f"  fix: {resolution[:_SYSTEM_RESOLUTION_CHARS]}")
     rows += [
         "",
-        "These are launch-level bottlenecks, worked through server args and envs (`explore` variants) rather than "
-        "kernel rewrites: High GPU Idle Time -> CUDA-graph capture, batch size, async scheduling; Exposed Collective "
-        "Communication -> parallel layout and compute/communication overlap; H2D / D2H / D2D Memory Copy Overhead -> "
-        "pinned memory, non-blocking copies, keeping tensors on device, dropping redundant copies. A family with no "
-        "finding here is one TraceLens did not flag on this trace. Each `fix` is cut to "
-        f"{_SYSTEM_RESOLUTION_CHARS} characters; the full text is under `## System-Level Optimizations` in analysis.md.",
+        "High GPU Idle Time points at CUDA-graph capture, batch size and async scheduling; Exposed Collective "
+        "Communication at parallel layout and compute/communication overlap; H2D / D2H / D2D Memory Copy Overhead at "
+        "pinned memory, non-blocking copies, keeping tensors on device and dropping redundant copies. Where the "
+        "framework exposes the lever as a server arg or env, propose it as an `explore` variant; where the fix names a "
+        "source change at a call site (a host read such as `.item()`, a redundant `.contiguous()` or clone), patch "
+        "that call site. Neither is a kernel rewrite. A family with no finding here is one TraceLens did not flag on "
+        f"this trace. Each `fix` is cut to {_SYSTEM_RESOLUTION_CHARS} characters; the full text is under "
+        "`## System-Level Optimizations` in analysis.md.",
         "",
     ]
     return rows
