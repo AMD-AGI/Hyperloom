@@ -364,8 +364,8 @@ def add_run_mode_arguments(opt: argparse.ArgumentParser) -> None:
         "but exposes a text-generation path, run it on the TEXT path with "
         "a degraded-mode warning instead of fail-fasting. Image/audio "
         "inputs are ignored, so numbers reflect the text decoder alone. "
-        "True VLMs with no text path (Llava / PaliGemma / Qwen-VL / "
-        "Phi3V) still fail-fast regardless of this flag. Pass "
+        "A multimodal model with no text decoder in its config still "
+        "fail-fasts regardless of this flag. Pass "
         "--no-allow-mm-text-fallback to fail-fast on text-coercible "
         "models too. Default: enabled.",
     )
