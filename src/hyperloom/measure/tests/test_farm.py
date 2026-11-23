@@ -109,6 +109,16 @@ def test_files_compiled_against_another_version_are_refused_naming_both_and_noth
     assert not (tmp_path / "farm").exists()
 
 
+def test_a_runtime_root_with_no_entries_compiled_against_another_version_is_refused(tmp_path):
+    # A native-only patch compiles to a runtime root with no entries; its build's outputs are still laid.
+    root = _root(kind="runtime", version="0.0.1")
+
+    with pytest.raises(FrameworkVersionMismatch, match=f"against PyYAML 0.0.1, .* has PyYAML {VERSION}"):
+        build_farm([root], tmp_path / "farm", python=sys.executable, read_blob=_blobs())
+
+    assert not (tmp_path / "farm").exists()
+
+
 @pytest.mark.parametrize(
     "root",
     [

@@ -183,7 +183,7 @@ def locate_package(import_name: str, python: str, cwd: Path) -> Path:
     return Path(locations[0])
 
 
-def _installed_version(dist_name: str, python: str, cwd: Path) -> str:
+def installed_version(dist_name: str, python: str, cwd: Path) -> str:
     """The version of ``dist_name`` that ``python`` has installed (``-I``, as :func:`locate_package` looks), ``""`` when
     it has none."""
     try:
@@ -202,10 +202,11 @@ def _installed_version(dist_name: str, python: str, cwd: Path) -> str:
 
 
 def check_framework_versions(roots: Iterable[EnvRoot], *, python: str, cwd: Path) -> None:
-    """Refuse ``roots`` when one that changes files was compiled against another version of its distribution than the
-    one ``python`` has installed.
+    """Refuse ``roots`` when one that lays files was compiled against another version of its distribution than the one
+    ``python`` has installed.
 
-    A root that changes nothing, or that names no version, or whose distribution ``python`` has no metadata for, is not
+    A root lays files when it has entries or is a ``runtime`` root (which lays its build's outputs even with no entries).
+    A root that lays nothing, or that names no version, or whose distribution ``python`` has no metadata for, is not
     compared: there is nothing to lay, or nothing to compare against.
 
     Raises:
@@ -213,10 +214,10 @@ def check_framework_versions(roots: Iterable[EnvRoot], *, python: str, cwd: Path
     """
     seen: dict[str, str] = {}
     for root in roots:
-        if not (root.entries and root.dist_name and root.dist_version):
+        if not ((root.entries or root.kind == _RUNTIME_KIND) and root.dist_name and root.dist_version):
             continue
         if root.dist_name not in seen:
-            seen[root.dist_name] = _installed_version(root.dist_name, python, cwd)
+            seen[root.dist_name] = installed_version(root.dist_name, python, cwd)
         installed = seen[root.dist_name]
         if installed and installed != root.dist_version:
             raise FrameworkVersionMismatch(

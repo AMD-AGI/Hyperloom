@@ -84,6 +84,7 @@ def _farm(
 ) -> farm_module.Farm:
     """The farm of a candidate that changed one SGLang file (``changed`` to ``data``), built as a test builds it."""
     monkeypatch.setattr(farm_module, "locate_package", lambda name, python, cwd: installed / name)
+    monkeypatch.setattr(farm_module, "installed_version", lambda dist_name, python, cwd: "0.5.21")
     address = "sha256:" + hashlib.sha256(data).hexdigest()
     root = EnvRoot("sglang", "package", "sglang", "sglang", "0.5.21", (EnvEntry(changed, "upsert", address, "0644"),))
     built = build_farm([root], tmp_path / "farm", python=sys.executable, read_blob=lambda address: data)
