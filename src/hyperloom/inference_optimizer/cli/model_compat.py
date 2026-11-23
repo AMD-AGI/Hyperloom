@@ -15,50 +15,8 @@ from .. import framework_registry
 from .. import gpu_types as _gpu_types
 from ...common.model_paths import resolve_local_model_dir
 from ..model_config_utils import (
-    _config_architectures,
-    config_scopes,
     load_model_config_dict,
     _model_has_dual_chunk_attention,
-)
-
-
-# minimax_m1: its lightning-attention kernel needs 128KB LDS but MI300X's per-CU shared-memory limit is 64KB → "out of
-# resource: shared memory" at engine init.
-_AMD_UNSUPPORTED_MODEL_TYPES = frozenset({"deepseek_v32", "minimax_m1"})
-
-_AMD_UNSUPPORTED_ARCHITECTURES = frozenset(
-    {
-        "deepseekv32forcausallm",
-        "minimaxm1forcausallm",
-    }
-)
-
-_UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
-
-
-# Architectures Transformers/sglang's ModelConfig does not recognize at all (hardware-agnostic): ModelConfig
-# validation raises a ValidationError in engine init regardless of GPU vendor.
-_UNRECOGNIZED_MODEL_TYPES = frozenset(
-    {
-        "glm4_moe_lite",
-        "mimo_v2_flash",
-    }
-)
-
-_UNRECOGNIZED_ARCHITECTURES = frozenset(
-    {
-        "glm4moeliteforcausallm",
-        "mimov2flashforcausallm",
-    }
-)
-
-# Some model_type values only appear inside nested decoder configs carried by a wrapper, so these are checked only
-# against the nested text_config scope. ministral3: Mistral3 multimodal wrapper (vLLM registry raises
-# KeyError('ministral3') for text_config.model_type).
-_NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES = frozenset(
-    {
-        "ministral3",
-    }
 )
 
 
@@ -281,25 +239,6 @@ _TOKENIZER_ARTIFACT_FILES = (
 )
 
 
-def _detect_unrecognized_architecture(data: dict) -> str | None:
-    """Return a reason when the architecture is unknown to Transformers/sglang."""
-    for depth, scope in enumerate(config_scopes(data)):
-        model_type = str(scope.get("model_type") or "").strip().lower()
-        arches = {a.lower() for a in _config_architectures(scope)}
-        unrecognized_types = _UNRECOGNIZED_MODEL_TYPES
-        if depth:
-            unrecognized_types = _UNRECOGNIZED_MODEL_TYPES | _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES
-        if model_type in unrecognized_types or arches & _UNRECOGNIZED_ARCHITECTURES:
-            label = model_type or (next(iter(arches), "") if arches else "?")
-            return (
-                f"model type '{label}' is not recognized by Transformers/"
-                f"sglang/vLLM's ModelConfig or model registry; engine init "
-                f"raises a validation/registry error. Needs a framework "
-                f"upgrade or a registered architecture mapping."
-            )
-    return None
-
-
 _VOCAB_WEIGHT_NAMES = (
     "embed_tokens.weight",
     "wte.weight",
@@ -432,36 +371,6 @@ def _detect_missing_tokenizer_files(model_path: str, data: dict) -> str | None:
     )
 
 
-def _detect_amd_unsupported_architecture(data: dict) -> str | None:
-    """Return a reason when the architecture has no AMD/ROCm runtime path."""
-    model_type = str(data.get("model_type") or "").strip().lower()
-    arches = {a.lower() for a in _config_architectures(data)}
-    if model_type in _AMD_UNSUPPORTED_MODEL_TYPES or arches & _AMD_UNSUPPORTED_ARCHITECTURES:
-        label = model_type or (next(iter(arches), "") if arches else "?")
-        return (
-            f"model architecture '{label}' has no AMD/ROCm runtime path "
-            f"(needs a vendor engine on NVIDIA Hopper/Blackwell, e.g. "
-            f"DeepSeek Sparse Attention); it crashes in engine init on "
-            f"this hardware."
-        )
-    return None
-
-
-def _detect_unregistered_custom_autoconfig(data: dict) -> str | None:
-    """Return a reason for a custom AutoConfig with an unregistered model_type."""
-    auto_map = data.get("auto_map")
-    model_type = str(data.get("model_type") or "").strip().lower()
-    if isinstance(auto_map, dict) and auto_map.get("AutoConfig") and model_type in _UNREGISTERED_CUSTOM_CONFIG_TYPES:
-        return (
-            f"model_type '{model_type}' ships a custom AutoConfig "
-            f"({auto_map['AutoConfig']}) but is not registered in sglang/"
-            f"vLLM's config mapping; the engine falls back to "
-            f"PreTrainedConfig which lacks key attributes "
-            f"(max_position_embeddings) and crashes in init."
-        )
-    return None
-
-
 def _detect_amd_dual_chunk_attention(model_path: str) -> str | None:
     """Return a reason when a model needs the AMD-unsupported dual-chunk backend."""
     if not _model_has_dual_chunk_attention(model_path):
@@ -507,17 +416,6 @@ _COMPAT_DETECTORS: tuple[DetectorSpec, ...] = (
         amd_only=True,
     ),
     DetectorSpec(
-        "amd_unsupported_architecture",
-        _detect_amd_unsupported_architecture,
-        args=("data",),
-        amd_only=True,
-    ),
-    DetectorSpec(
-        "unrecognized_architecture",
-        _detect_unrecognized_architecture,
-        args=("data",),
-    ),
-    DetectorSpec(
         "private_quant",
         _detect_private_quant,
         args=("model_path", "data"),
@@ -537,11 +435,6 @@ _COMPAT_DETECTORS: tuple[DetectorSpec, ...] = (
         _detect_missing_tokenizer_files,
         args=("model_path", "data"),
         skip_when_scriptable=True,
-    ),
-    DetectorSpec(
-        "unregistered_custom_autoconfig",
-        _detect_unregistered_custom_autoconfig,
-        args=("data",),
     ),
     DetectorSpec(
         "amd_dual_chunk_attention",

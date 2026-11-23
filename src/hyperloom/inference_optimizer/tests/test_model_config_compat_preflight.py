@@ -157,228 +157,6 @@ def test_detect_missing_tokenizer_but_auto_map_ok(tmp_path):
     assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
-def test_detect_minimax_m1_blocked_on_amd(tmp_path):
-    # minimax_m1 lightning-attention kernel needs 128KB LDS > MI300X 64KB.
-    m = tmp_path / "minimax"
-    _write_config(
-        m,
-        model_type="minimax_m1",
-        architectures=["MiniMaxM1ForCausalLM"],
-        max_position_embeddings=80000,
-    )
-    reason = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
-    assert reason is not None
-    assert "AMD/ROCm" in reason
-
-
-def test_detect_minimax_m1_not_blocked_off_amd(tmp_path):
-    # AMD-specific LDS limit; do not block on non-AMD hardware.
-    m = tmp_path / "minimax_non_amd"
-    _write_config(
-        m,
-        model_type="minimax_m1",
-        architectures=["MiniMaxM1ForCausalLM"],
-        max_position_embeddings=80000,
-    )
-    assert model_compat._detect_incompatible_model_config(str(m)) is None
-
-
-def test_detect_unrecognized_arch_blocked_hardware_agnostic(tmp_path):
-    # glm4_moe_lite: Transformers does not recognize → ValidationError on any GPU.
-    m = tmp_path / "glm47flash"
-    _write_config(
-        m,
-        model_type="glm4_moe_lite",
-        architectures=["Glm4MoeLiteForCausalLM"],
-        max_position_embeddings=131072,
-    )
-    reason_amd = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
-    reason_off = model_compat._detect_incompatible_model_config(str(m))
-    assert reason_amd is not None and "not recognized" in reason_amd
-    assert reason_off is not None and "not recognized" in reason_off
-
-
-def test_detect_mimo_v2_flash_unrecognized_blocked(tmp_path):
-    # mimo_v2_flash: unrecognized arch + Unknown attention backend TRITON.
-    m = tmp_path / "mimo"
-    _write_config(
-        m,
-        model_type="mimo_v2_flash",
-        architectures=["MiMoV2FlashForCausalLM"],
-        max_position_embeddings=131072,
-    )
-    reason = model_compat._detect_incompatible_model_config(str(m))
-    assert reason is not None and "not recognized" in reason
-
-
-# DeepSeek-V4 resolves via AutoConfig/vLLM get_config; glm_moe_dsa and gemma4 are registered by AutoConfig and vLLM's
-# ModelRegistry/ModelConfig. None of them is fail-fasted.
-@pytest.mark.parametrize(
-    ("model_type", "arch", "max_position"),
-    [
-        ("deepseek_v4", "DeepseekV4ForCausalLM", 1048576),
-        ("glm_moe_dsa", "GlmMoeDsaForCausalLM", 131072),
-        ("gemma4", "Gemma4ForCausalLM", 32768),
-    ],
-    ids=["deepseek_v4", "glm_moe_dsa", "gemma4"],
-)
-def test_detect_now_recognized_arch_not_blocked(tmp_path, model_type, arch, max_position):
-    m = tmp_path / model_type
-    _write_config(
-        m,
-        model_type=model_type,
-        architectures=[arch],
-        max_position_embeddings=max_position,
-    )
-    reason = model_compat._detect_incompatible_model_config(str(m))
-    assert reason is None
-
-
-@pytest.mark.parametrize(
-    ("model_type", "arch"),
-    [
-        ("bailing_moe", "BailingMoeV2ForCausalLM"),
-        ("bailing_hybrid", "BailingMoeV2_5ForCausalLM"),
-        ("ovis2_6_next", "Ovis2_6_NextForCausalLM"),
-    ],
-    ids=["bailing_moe", "bailing_hybrid", "ovis2_6_next"],
-)
-def test_detect_arch_left_to_runtime_scope(tmp_path, model_type, arch):
-    # Bailing and Ovis filters are out of scope for the fail-fast gate.
-    m = tmp_path / model_type
-    _write_config(
-        m,
-        model_type=model_type,
-        architectures=[arch],
-        max_position_embeddings=32768,
-    )
-    reason = model_compat._detect_incompatible_model_config(str(m))
-    assert reason is None
-
-
-def test_detect_nested_ministral3_unrecognized_blocked(tmp_path):
-    # Mistral3 wrapper exposes text_config.model_type=ministral3; vLLM raises KeyError.
-    m = tmp_path / "mistral3"
-    _write_config(
-        m,
-        model_type="mistral3",
-        architectures=["Mistral3ForConditionalGeneration"],
-        image_token_index=10,
-        text_config={
-            "model_type": "ministral3",
-            "max_position_embeddings": 393216,
-            "vocab_size": 131072,
-            "hidden_size": 5120,
-            "num_hidden_layers": 40,
-        },
-    )
-    reason = model_compat._detect_incompatible_model_config(str(m))
-    assert reason is not None and "ministral3" in reason
-
-
-def test_detect_pure_nested_ministral3_blocked(tmp_path):
-    # Parent model_type is NOT ministral3 (a generic wrapper); only the nested text_config carries ministral3.
-    m = tmp_path / "wrapper_nested_ministral3"
-    _write_config(
-        m,
-        model_type="some_wrapper",
-        architectures=["SomeWrapperForConditionalGeneration"],
-        text_config={
-            "model_type": "ministral3",
-            "max_position_embeddings": 32768,
-            "vocab_size": 131072,
-        },
-    )
-    reason = model_compat._detect_incompatible_model_config(str(m))
-    assert reason is not None and "ministral3" in reason
-
-
-def test_detect_nested_qwen3_5_moe_text_not_blocked(tmp_path):
-    # Nested qwen3_5_moe_text is registered by the runtime and falls through to the text_coercible degraded path; not
-    # gated.
-    m = tmp_path / "wrapper_nested_qwen3_5_moe_text"
-    _write_config(
-        m,
-        model_type="qwen3_5_moe",
-        architectures=["Qwen3_5MoeForConditionalGeneration"],
-        text_config={
-            "model_type": "qwen3_5_moe_text",
-            "max_position_embeddings": 262144,
-            "vocab_size": 151936,
-        },
-    )
-    assert model_compat._detect_incompatible_model_config(str(m)) is None
-
-
-def test_detect_top_level_qwen3_5_moe_not_blocked(tmp_path):
-    # Bare top-level qwen3_5_moe remains in the text-coercible runtime path; only the nested text_config subtype has a
-    # confirmed registry failure.
-    m = tmp_path / "bare_qwen3_5_moe"
-    _write_config(
-        m,
-        model_type="qwen3_5_moe",
-        architectures=["Qwen3_5MoeForConditionalGeneration"],
-        max_position_embeddings=262144,
-        vocab_size=151936,
-    )
-    assert model_compat._detect_incompatible_model_config(str(m)) is None
-
-
-def test_detect_top_level_ministral3_not_blocked(tmp_path):
-    # A bare top-level model_type=ministral3 (no Mistral3 wrapper) is left to the framework; only the nested
-    # text_config form is a confirmed failure.
-    m = tmp_path / "bare_ministral3"
-    _write_config(
-        m,
-        model_type="ministral3",
-        architectures=["Ministral3ForCausalLM"],
-        max_position_embeddings=32768,
-        vocab_size=131072,
-    )
-    assert model_compat._detect_incompatible_model_config(str(m)) is None
-
-
-def test_detect_glm4_moe_not_blocked(tmp_path):
-    # glm4_moe (GLM-4.5/4.6 mainline) is a supported arch; must NOT be blocked by the unrecognized-arch rule (only
-    # glm4_moe_lite is unrecognized).
-    m = tmp_path / "glm4moe"
-    _write_config(
-        m,
-        model_type="glm4_moe",
-        architectures=["Glm4MoeForCausalLM"],
-        max_position_embeddings=131072,
-    )
-    assert model_compat._detect_incompatible_model_config(str(m)) is None
-
-
-def test_detect_amd_unsupported_arch_with_maxpos_blocks(tmp_path):
-    m = tmp_path / "deepseek_v32_amd"
-    _write_config(
-        m,
-        model_type="deepseek_v32",
-        architectures=["DeepseekV32ForCausalLM"],
-        max_position_embeddings=163840,
-        rope_scaling={"type": "yarn", "factor": 40.0},
-    )
-
-    reason = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
-    assert reason is not None
-    assert "AMD/ROCm" in reason
-
-
-def test_detect_amd_unsupported_arch_not_blocked_off_amd(tmp_path):
-    m = tmp_path / "deepseek_v32_non_amd"
-    _write_config(
-        m,
-        model_type="deepseek_v32",
-        architectures=["DeepseekV32ForCausalLM"],
-        max_position_embeddings=163840,
-        rope_scaling={"type": "yarn", "factor": 40.0},
-    )
-
-    assert model_compat._detect_incompatible_model_config(str(m)) is None
-
-
 def test_detect_corrupt_config_blocks(tmp_path):
     m = tmp_path / "corrupt"
     _write_corrupt_config(m)
@@ -670,30 +448,6 @@ def test_model_is_gemma2_detects_nested_text_config(tmp_path):
     assert mcu.model_is_gemma2(str(m)) is True
 
 
-def test_detect_unregistered_custom_config_blocks(tmp_path):
-    m = tmp_path / "kimi_k2"
-    _write_config(
-        m,
-        model_type="kimi_k2",
-        max_position_embeddings=131072,
-        auto_map={"AutoConfig": "configuration_deepseek.DeepseekV3Config"},
-    )
-    reason = model_compat._detect_incompatible_model_config(str(m))
-    assert reason is not None
-    assert "kimi_k2" in reason
-
-
-def test_detect_custom_automap_known_type_not_blocked(tmp_path):
-    m = tmp_path / "known_automap"
-    _write_config(
-        m,
-        model_type="llama",
-        max_position_embeddings=8192,
-        auto_map={"AutoConfig": "configuration_custom.CustomConfig"},
-    )
-    assert model_compat._detect_incompatible_model_config(str(m)) is None
-
-
 # _preflight_model_config_compat — persistence + return contract
 def test_preflight_blocks_and_persists(tmp_path, monkeypatch):
     model = tmp_path / "bad"
@@ -720,19 +474,18 @@ def test_preflight_passes_for_healthy_model(tmp_path, monkeypatch):
     assert not (sd / "reports" / "final.json").exists()
 
 
-def test_preflight_blocks_amd_unsupported_arch_from_args_gpu_type(
+def test_preflight_runs_amd_only_detectors_for_args_gpu_type(
     tmp_path,
     monkeypatch,
 ):
-    model = tmp_path / "deepseek_v32"
+    model = tmp_path / "bnb"
     _write_config(
         model,
-        model_type="deepseek_v32",
-        architectures=["DeepseekV32ForCausalLM"],
-        max_position_embeddings=163840,
-        rope_scaling={"type": "yarn", "factor": 40.0},
+        model_type="llama",
+        max_position_embeddings=4096,
+        quantization_config={"quant_method": "bitsandbytes"},
     )
-    sd = tmp_path / "session_amd_arch"
+    sd = tmp_path / "session_amd_quant"
     _seed_state(sd, monkeypatch)
 
     assert (
