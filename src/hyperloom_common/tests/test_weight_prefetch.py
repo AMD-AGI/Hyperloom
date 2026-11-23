@@ -482,6 +482,7 @@ def test_an_evicted_file_is_found_uncached_and_read_back_into_the_cache(tmp_path
     size = 8 << 20
     _evicted(path, size)
     host = LinuxHost()
+    spans: list[tuple[int, int]] | None = None
     try:
         spans = host.uncached(path, size)
     except OSError as exc:
