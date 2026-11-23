@@ -282,13 +282,13 @@ def _section_phase_semantics(
             "exits ENABLEMENT and `baseline_tput > 0` exits PRELUDE, each after",
             "the initial roofline it enqueued completes (the Phase block's `hold` line);",
             "the per-phase budget cap or a terminal stop_reason exits FRAMEWORK_AGENT",
-            "/ KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
+            "/ KERNEL_AGENT / CYCLE_END; the wall-clock deadline (closing phase) routes to CLOSE.",
             "You may also emit `escalate_strategy_change{next_action_hint=",
             "'skip_to_kernel'}` in FRAMEWORK_AGENT when you judge",
             "the current phase exhausted; the Coordinator validates the hint",
             "vocab and routes the transition on the next tick. No hint ends the",
             "run: the Coordinator prices the remaining budget itself and exits",
-            "with an honest terminal stop_reason (`sweep_done` /",
+            "with an honest terminal stop_reason (`cycle_end_done` /",
             "`global_converged` / `time_exhausted`) once a further cycle cannot",
             "be funded.",
         ]
@@ -764,7 +764,7 @@ Read the optimization lane's outcome before you act: a `state.gaps[]`
 `layer='kernel_agent'` gap names the target, `pending_keep_kernels` lists the
 KEEPs awaiting integrate, `rejected_kernel_ids` lists the ids already written
 off, and `last_action_failures` explains a request of your own that failed.
-KERNEL_AGENT → SWEEP advance is driven by the phase budget, idle-no-progress,
+KERNEL_AGENT → CYCLE_END advance is driven by the phase budget, idle-no-progress,
 agent settled with no pending kernel work, or a terminal stop_reason.
 
 ### `trace_analyze` — read-only candidate analysis

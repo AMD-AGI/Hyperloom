@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests pinning ``orchestrator.kernel.conc_sweep_report.build_roofline_ceiling`` (MoE/dense ceiling + MBU + safe-degrade)."""
+"""Tests pinning ``conc_sweep.report.build_roofline_ceiling`` (MoE/dense ceiling + MBU + safe-degrade)."""
 
 from __future__ import annotations
 
@@ -10,13 +10,11 @@ from unittest.mock import patch
 
 import pytest
 
-# kernel.conc_sweep and actions.executors.conc_sweep import each other; this resolves only once executors is already
-# in sys.modules.
-from hyperloom.orchestrator.kernel.conc_sweep_report import ArmCurves, build_roofline_ceiling
+from hyperloom.conc_sweep.report import ArmCurves, build_roofline_ceiling
 from hyperloom.inference_optimizer.roofline_model_meta import ModelMeta
 from hyperloom.orchestrator.state.shared_state import SharedState
 
-_LOAD_META_PATH = "hyperloom.orchestrator.kernel.conc_sweep_report.load_model_meta"
+_LOAD_META_PATH = "hyperloom.conc_sweep.report.load_model_meta"
 
 
 def _make_state(

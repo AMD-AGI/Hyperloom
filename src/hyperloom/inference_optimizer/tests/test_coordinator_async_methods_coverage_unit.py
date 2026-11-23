@@ -548,7 +548,7 @@ async def test_escalate_skip_to_kernel_deferred(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["PRELUDE", "ENABLEMENT", "KERNEL_AGENT", "SWEEP"])
+@pytest.mark.parametrize("phase", ["PRELUDE", "ENABLEMENT", "KERNEL_AGENT", "CYCLE_END"])
 async def test_escalate_skip_to_kernel_outside_framework_agent_is_refused_to_its_sender(
     coord: Coordinator, phase: str
 ) -> None:

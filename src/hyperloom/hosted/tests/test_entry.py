@@ -206,6 +206,24 @@ def test_a_second_start_of_the_same_run_resumes_the_same_directory(run, monkeypa
     assert _session_json(run) == first
 
 
+def test_a_restart_over_a_closed_session_whose_sweep_did_not_finish_sweeps_it_and_ends_the_run(run, monkeypatch):
+    from hyperloom.conc_sweep import cli as sweep_cli
+
+    closed = {"stop_reason": "cycle_end_done", "conc_sweep_enabled": True, "close_sequence_done": True}
+    fake = FakeOptimize(monkeypatch, returncode=1, effect=lambda argv: None)
+    entry.main(["run"])
+    session = Path(_session_json(run))
+    (session / "state.json").write_text(json.dumps(closed))
+    swept: list[list[str]] = []
+    monkeypatch.setattr(sweep_cli, "main", lambda argv: swept.append(argv) or 0)
+    run.restart()
+
+    assert entry.main(["run"]) == 0
+
+    assert swept == [[str(session)]] and len(fake.calls) == 1
+    assert _exit(run) == {"final": True, "returncode": 0, "stop_reason": "cycle_end_done"}
+
+
 def test_a_different_run_never_reuses_another_runs_directory(run, monkeypatch):
     fake = FakeOptimize(monkeypatch)
     entry.main(["run"])

@@ -86,6 +86,7 @@ FIELDS: tuple[Field, ...] = (
     Field("launch.extra_env", "extra_env", Kind.STR_MAP),
     Field("options.kernel", "kernel", Kind.BOOL),
     Field("options.framework_agent", "framework_agent", Kind.BOOL),
+    Field("options.conc_sweep", "conc_sweep", Kind.BOOL),
     Field("options.eval", "eval", Kind.ENUM, choices=(True,)),
     Field("options.enablement", "enablement", Kind.ENUM, choices=("all", "launch", "eval", "off")),
     Field("placement.profile", "profile", Kind.ENUM, required=True, choices=(PROFILE_WITH_CARDS, "hosted-cpu")),
@@ -130,6 +131,7 @@ class CampaignSpec:
     extra_env: Mapping[str, str] | None = None
     kernel: bool | None = None
     framework_agent: bool | None = None
+    conc_sweep: bool | None = None
     eval: bool | None = None
     enablement: str | None = None
     specialist_capacity: int | None = None
@@ -306,6 +308,8 @@ def optimize_args(spec: CampaignSpec, *, plug_profile: str | None = None, sessio
     args += [f"{flag}={getattr(spec, attr)}" for attr, flag in _VALUE_FLAGS if getattr(spec, attr) is not None]
     args += [f"--extra-env={key}={value}" for key, value in (spec.extra_env or {}).items()]
     args += [flag for attr, flag in _OFF_FLAGS if getattr(spec, attr) is False]
+    if spec.conc_sweep:
+        args.append("--enable-conc-sweep")
     if plug_profile is not None:
         args.append(f"--plug-profile={plug_profile}")
     if session_dir is not None:

@@ -1,0 +1,183 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The conc sweep of a closed session runs only past a FINAL that chose a commit that gained, sweeps the root and that
+commit over the recipe's points, one test per AgentX point and one per InferenceX arm, keeps what an earlier run of it
+measured, and ends cancelled on a stop signal with the points measured before it."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from hyperloom.contracts.measurement import RoundValue, TestRequest, TestResult, Validity
+from hyperloom.orchestrator.state import base_launch
+from hyperloom_multibranch.blackboard.codec import encode
+from hyperloom_multibranch.contracts.toolbox import TestWithdrawn
+from hyperloom_multibranch.scheduling import conc_sweep
+from hyperloom_multibranch.scheduling.final import CandidateCheck, FinalCandidate, FinalChoice
+from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.roster import RosterCaps
+from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, RunSettings, Workload
+from inference_suite.contracts import SourceKind
+
+WORKLOAD = Workload(
+    "/models/Llama-3.1-8B-Instruct", "sglang", 2, 16, "fp8", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 512)
+)
+AGENTX = replace(WORKLOAD, inferencex=None)
+CHOSEN = FinalCandidate("integration", "integration", "c0ffee", 130.0)
+
+
+def _settings(workload: Workload = WORKLOAD, *, parallel: int = 2, concs: tuple[int, ...] = ()) -> RunSettings:
+    return RunSettings(
+        workload, 3.0, 0.0, 0.0, RosterCaps(4, 2, parallel), 60.0, conc_sweep=True, conc_sweep_concs=concs
+    )
+
+
+def _layout(tmp_path: Path, chosen: FinalCandidate | None = CHOSEN, gain_pct: float | None = 4.0) -> SessionLayout:
+    layout = SessionLayout(tmp_path / "MB-session")
+    layout.reports.mkdir(parents=True)
+    checks = () if chosen is None else (CandidateCheck(chosen, gain_pct=gain_pct),)
+    final = FinalChoice(chosen, checks, "the higher output_throughput at conc 16", "output_throughput", 16)
+    layout.report.write_text(json.dumps({"stop_reason": "time_exhausted", "final": encode(final)}))
+    return layout
+
+
+@pytest.fixture
+def inferencex_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    point = SimpleNamespace(source_concs=(4, 32))
+    launch = SimpleNamespace(source=SimpleNamespace(kind=SourceKind.INFERENCEX), point=point)
+    monkeypatch.setattr(base_launch, "frozen_base", lambda _toolbox: SimpleNamespace(launch=launch))
+
+
+class _Tests:
+    """Answers each sweep test with a measure round per concurrency, and records every request."""
+
+    def __init__(self, failing: frozenset[str] = frozenset()) -> None:
+        self.requests: list[TestRequest] = []
+        self.withdrawn: list[str] = []
+        self.failing = failing
+        self.hold = asyncio.Event()
+        self.held = False
+
+    async def result(self, request: TestRequest) -> TestResult:
+        self.requests.append(request)
+        if self.held and len(self.requests) > 1:
+            await self.hold.wait()
+            raise TestWithdrawn(f"t{len(self.requests)}", self.withdrawn[-1])
+        scale = 100.0 if request.parent_commit == "root" else 130.0
+        rounds = tuple(
+            RoundValue("measure", conc, {"output_throughput": scale * conc, "total_token_throughput": 2 * scale * conc})
+            for conc in request.concurrency
+        )
+        failed = request.parent_commit in self.failing
+        validity = Validity.CANDIDATE_FAILED if failed else Validity.SUCCEEDED
+        return TestResult(request_id=f"t{len(self.requests)}", validity=validity, rounds=() if failed else rounds)
+
+    async def withdraw_integration(self, reason: str) -> tuple[str, ...]:
+        self.withdrawn.append(reason)
+        self.hold.set()
+        return ()
+
+
+def _sweep(layout: SessionLayout, settings: RunSettings, tests: _Tests) -> conc_sweep.ConcSweep:
+    plan = conc_sweep.sweep_plan(layout, settings)
+    assert isinstance(plan, conc_sweep.SweepPlan)
+    caps = settings.caps
+    return conc_sweep.ConcSweep(plan, "root", layout, settings.workload, tests, caps.max_parallel_tests, 600.0)
+
+
+async def _never() -> int:
+    await asyncio.Event().wait()
+    return 0
+
+
+def _summary(layout: SessionLayout) -> dict[str, Any]:
+    return json.loads((layout.reports / "conc_sweep_summary.json").read_text())
+
+
+@pytest.mark.parametrize(
+    ("chosen", "gain_pct"),
+    [(None, None), (replace(CHOSEN, root=True), 4.0), (CHOSEN, 0.0), (CHOSEN, None)],
+)
+def test_a_final_that_chose_no_gaining_commit_beside_the_root_gets_no_sweep(
+    tmp_path: Path, inferencex_base: None, chosen: FinalCandidate | None, gain_pct: float | None
+):
+    assert conc_sweep.sweep_plan(_layout(tmp_path, chosen, gain_pct), _settings()) == conc_sweep.NO_OPTIMIZATION
+
+
+def test_the_plan_sweeps_the_chosen_commit_over_the_recipes_points_with_the_workloads_conc(
+    tmp_path: Path, inferencex_base: None
+):
+    plan = conc_sweep.sweep_plan(_layout(tmp_path), _settings(concs=(2,)))
+
+    assert plan == conc_sweep.SweepPlan("c0ffee", conc_sweep.SweepPoints((4, 16, 32), "inferencex"))
+    assert (plan.test_points(WORKLOAD), plan.test_points(AGENTX)) == (3, 1)
+
+
+def test_an_inferencex_arm_is_one_sweep_test_and_both_arms_run_at_once(tmp_path: Path, inferencex_base: None):
+    layout, tests = _layout(tmp_path), _Tests()
+
+    payload = asyncio.run(_sweep(layout, _settings(), tests).run(_never()))
+
+    assert sorted((r.parent_commit, r.concurrency) for r in tests.requests) == [
+        ("c0ffee", (4, 16, 32)),
+        ("root", (4, 16, 32)),
+    ]
+    assert {r.purpose.value for r in tests.requests} == {"health"} and not any(r.accuracy for r in tests.requests)
+    assert payload["status"] == "succeeded" and payload["summary"]["successful_pairs"] == 3
+    assert _summary(layout)["optimized"]["commit"] == "c0ffee"
+    assert payload["estimated_sec"] == 600 * 3
+
+
+def test_an_agentx_point_is_a_test_of_its_own(tmp_path: Path, inferencex_base: None):
+    tests = _Tests()
+
+    asyncio.run(_sweep(_layout(tmp_path), _settings(AGENTX, parallel=1), tests).run(_never()))
+
+    assert [r.concurrency for r in tests.requests if r.parent_commit == "root"] == [(16,), (4,), (32,)]
+
+
+def test_an_arm_that_failed_leaves_the_sweep_failed_and_a_later_run_measures_only_it(
+    tmp_path: Path, inferencex_base: None
+):
+    layout = _layout(tmp_path)
+    assert asyncio.run(_sweep(layout, _settings(), _Tests(frozenset({"c0ffee"}))).run(_never()))["status"] == "failed"
+
+    tests = _Tests()
+    payload = asyncio.run(_sweep(layout, _settings(), tests).run(_never()))
+
+    assert [r.parent_commit for r in tests.requests] == ["c0ffee"]
+    assert payload["status"] == "succeeded"
+
+
+def test_a_stop_signal_takes_the_tests_back_and_keeps_what_landed(tmp_path: Path, inferencex_base: None):
+    layout, tests = _layout(tmp_path), _Tests()
+    tests.held = True
+
+    async def stop_after_first() -> int:
+        while not layout.reports.joinpath("conc_sweep_summary.json").is_file():
+            await asyncio.sleep(0)
+        return 15
+
+    payload = asyncio.run(_sweep(layout, _settings(AGENTX, parallel=1), tests).run(stop_after_first()))
+
+    assert (payload["status"], payload["cancel_reason"]) == ("cancelled", "signal 15")
+    assert tests.withdrawn == ["signal 15"]
+    measured = [p["conc"] for arm in ("baseline", "optimized") for p in _summary(layout)[arm]["points"]]
+    assert measured == [WORKLOAD.conc]
+
+
+def test_a_closed_session_whose_sweep_did_not_settle_is_swept_again(tmp_path: Path):
+    layout = _layout(tmp_path)
+
+    assert conc_sweep.sweep_unfinished(layout, _settings())
+    conc_sweep.write_skipped(layout, WORKLOAD, conc_sweep.NO_SWEEP_POINTS)
+    assert not conc_sweep.sweep_unfinished(layout, _settings())
+    assert not conc_sweep.sweep_unfinished(layout, replace(_settings(), conc_sweep=False))

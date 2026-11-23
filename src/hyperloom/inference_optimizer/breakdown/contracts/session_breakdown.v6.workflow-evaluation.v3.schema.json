@@ -36,7 +36,7 @@
               "const": "hyperloom.workflow_evaluation.v3"
             },
             "contract_digest": {
-              "const": "e0d44b1ababa0febbcf0bf1b416b11f62dd52d4ff3a8877cfc8f8c709e774516"
+              "const": "c78e8eeaf35d8d30495070294ef6e8f1ee783f4825fb986632202be65b6e01c2"
             },
             "run_flags": {
               "type": "object",
@@ -94,9 +94,7 @@
                   "profile",
                   "roofline"
                 ],
-                "SWEEP": [
-                  "conc_sweep"
-                ],
+                "CYCLE_END": [],
                 "CLOSE": [
                   "report",
                   "session_breakdown"
@@ -120,7 +118,7 @@
                 "KERNEL_AGENT": [
                   "integrate"
                 ],
-                "SWEEP": [],
+                "CYCLE_END": [],
                 "CLOSE": [
                   "report",
                   "session_breakdown"
@@ -129,7 +127,6 @@
             },
             "coordinator_internal_actions": {
               "const": [
-                "conc_sweep",
                 "kernel_agent",
                 "profile",
                 "replay_warm_recipe",
@@ -216,7 +213,6 @@
               "roofline",
               "kernel",
               "baseline",
-              "conc_sweep",
               "enablement",
               "phase",
               "stack",
@@ -347,7 +343,7 @@
                         "ENABLEMENT",
                         "FRAMEWORK_AGENT",
                         "KERNEL_AGENT",
-                        "SWEEP",
+                        "CYCLE_END",
                         "CLOSE"
                       ]
                     },
@@ -724,6 +720,7 @@
             "baseline_over_power_budget",
             "coordinator_exception",
             "custom",
+            "cycle_end_done",
             "emergency",
             "enablement_attempts_exhausted",
             "environment_fault",
@@ -741,8 +738,6 @@
             "signal",
             "supervisor_coordinator_died",
             "supervisor_tick_stalled",
-            "sweep_done",
-            "sweep_failed",
             "target_reached",
             "time_exhausted",
             "time_exhausted_during_prelude",
@@ -807,7 +802,6 @@
         "action": {
           "enum": [
             "baseline",
-            "conc_sweep",
             "explore",
             "gemm_tuning",
             "integrate",
@@ -835,7 +829,7 @@
             "ENABLEMENT",
             "FRAMEWORK_AGENT",
             "KERNEL_AGENT",
-            "SWEEP",
+            "CYCLE_END",
             "CLOSE"
           ]
         },
@@ -983,7 +977,7 @@
             "ENABLEMENT",
             "FRAMEWORK_AGENT",
             "KERNEL_AGENT",
-            "SWEEP",
+            "CYCLE_END",
             "CLOSE"
           ]
         },
@@ -1010,7 +1004,7 @@
         "budget",
         "plateau",
         "hint",
-        "sweep_result",
+        "cycle_end_result",
         "macro_cycle",
         "run_flags",
         "enablement_in_flight"
@@ -1047,7 +1041,7 @@
             "skip_to_sweep"
           ]
         },
-        "sweep_result": {
+        "cycle_end_result": {
           "type": [
             "object",
             "null"
@@ -1063,7 +1057,7 @@
             "ENABLEMENT",
             "FRAMEWORK_AGENT",
             "KERNEL_AGENT",
-            "SWEEP",
+            "CYCLE_END",
             "CLOSE"
           ]
         },
@@ -1124,7 +1118,7 @@
               "plateau": {
                 "type": "null"
               },
-              "sweep_result": {
+              "cycle_end_result": {
                 "type": "null"
               }
             }
@@ -1155,7 +1149,7 @@
               "plateau": {
                 "type": "null"
               },
-              "sweep_result": {
+              "cycle_end_result": {
                 "type": "null"
               }
             }
@@ -1186,7 +1180,7 @@
               "plateau": {
                 "$ref": "#/$defs/framework_plateau"
               },
-              "sweep_result": {
+              "cycle_end_result": {
                 "type": "null"
               }
             }
@@ -1217,7 +1211,7 @@
               "plateau": {
                 "$ref": "#/$defs/kernel_plateau"
               },
-              "sweep_result": {
+              "cycle_end_result": {
                 "type": "null"
               }
             }
@@ -1227,7 +1221,7 @@
           "if": {
             "properties": {
               "current_phase": {
-                "const": "SWEEP"
+                "const": "CYCLE_END"
               }
             },
             "required": [
@@ -1248,8 +1242,8 @@
               "plateau": {
                 "type": "null"
               },
-              "sweep_result": {
-                "$ref": "#/$defs/sweep_inputs"
+              "cycle_end_result": {
+                "$ref": "#/$defs/cycle_end_inputs"
               }
             }
           }
@@ -1279,7 +1273,7 @@
               "plateau": {
                 "type": "null"
               },
-              "sweep_result": {
+              "cycle_end_result": {
                 "type": "null"
               }
             }
@@ -1610,7 +1604,7 @@
       },
       "additionalProperties": false
     },
-    "sweep_reloop": {
+    "cycle_end_reloop": {
       "type": "object",
       "required": [
         "current_gain_pct",
@@ -1659,39 +1653,18 @@
       },
       "additionalProperties": false
     },
-    "sweep_inputs": {
+    "cycle_end_inputs": {
       "type": "object",
       "required": [
-        "status",
-        "was_skipped",
-        "budget_exhausted",
-        "skip_reason",
-        "successful_pairs",
-        "summary_present",
+        "settled",
         "reloop"
       ],
       "properties": {
-        "status": {
-          "type": "string"
-        },
-        "was_skipped": {
-          "type": "boolean"
-        },
-        "budget_exhausted": {
-          "type": "boolean"
-        },
-        "skip_reason": {
-          "type": "string"
-        },
-        "successful_pairs": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "summary_present": {
+        "settled": {
           "type": "boolean"
         },
         "reloop": {
-          "$ref": "#/$defs/sweep_reloop"
+          "$ref": "#/$defs/cycle_end_reloop"
         }
       },
       "additionalProperties": false

@@ -52,23 +52,22 @@ def cyclic_coordinator(session_dir):
     return Coordinator(session_dir, backends=backends)
 
 
-def _arm_sweep_loopback(st):
+def _arm_cycle_end_loopback(st):
     now = datetime.now(timezone.utc)
-    st.phase = ps.PHASE_SWEEP
+    st.phase = ps.PHASE_CYCLE_END
     st.start_ts = (now - timedelta(hours=1)).isoformat()
     st.max_minutes = 96 * 60
     st.macro_cycle = 0
     st.cumulative_gain_validated = 7.0
     st.gain_at_cycle_start = 0.0
-    st.last_conc_sweep = {"status": "succeeded"}
-    st.last_conc_sweep = {"status": "succeeded"}
+    st.cycle_end_settled_cycle = 0
 
 
 @pytest.mark.asyncio
 async def test_soft_restart_runs_at_loopback(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
-    _arm_sweep_loopback(st)
+    _arm_cycle_end_loopback(st)
 
     await c.phase_machine.advance_phase_if_needed()
 
@@ -80,7 +79,7 @@ async def test_soft_restart_runs_at_loopback(cyclic_coordinator):
 async def test_soft_restart_preserves_best_and_ledger(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
-    _arm_sweep_loopback(st)
+    _arm_cycle_end_loopback(st)
     st.current_best = {"tput": 123.0, "extra_server_args": "--foo"}
     st.optimization_stack = [{"name": "v1", "gain_pct": 5.0}]
     st.apply_explore_search_update(
@@ -125,7 +124,7 @@ async def _noop_phase_side_effects(c):
     c.phase_internal.maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
 
 
-def _arm_explore_to_sweep(st):
+def _arm_explore_to_cycle_end(st):
     now = datetime.now(timezone.utc)
     st.phase = ps.PHASE_FRAMEWORK_AGENT
     st.phase_started_unix = (now - timedelta(minutes=5)).timestamp()
@@ -139,7 +138,7 @@ def _arm_explore_to_sweep(st):
 async def test_phase_transition_cancels_queued_specialist(cyclic_coordinator):
     c = cyclic_coordinator
     await _noop_phase_side_effects(c)
-    _arm_explore_to_sweep(c.shared_state)
+    _arm_explore_to_cycle_end(c.shared_state)
 
     queued, _ = await c.tasks.create_or_return_existing(
         TaskSpec(
@@ -152,16 +151,16 @@ async def test_phase_transition_cancels_queued_specialist(cyclic_coordinator):
     await c.phase_machine.advance_phase_if_needed()
 
     updated = await c.tasks.get(queued.task_id)
-    assert c.shared_state.phase == ps.PHASE_SWEEP
+    assert c.shared_state.phase == ps.PHASE_CYCLE_END
     assert updated.state == "cancelled"
-    assert updated.history[-1]["evidence"]["reason"] == "phase_transition:FRAMEWORK_AGENT->SWEEP"
+    assert updated.history[-1]["evidence"]["reason"] == "phase_transition:FRAMEWORK_AGENT->CYCLE_END"
 
 
 @pytest.mark.asyncio
 async def test_phase_transition_waits_for_a_running_specialist(cyclic_coordinator):
     c = cyclic_coordinator
     await _noop_phase_side_effects(c)
-    _arm_explore_to_sweep(c.shared_state)
+    _arm_explore_to_cycle_end(c.shared_state)
 
     running, _ = await c.tasks.create_or_return_existing(
         TaskSpec(
@@ -177,27 +176,7 @@ async def test_phase_transition_waits_for_a_running_specialist(cyclic_coordinato
 
     await c.tasks.transition(running.task_id, "cancelled", evidence={"reason": "stopped"})
     await c.phase_machine.advance_phase_if_needed()
-    assert c.shared_state.phase == ps.PHASE_SWEEP
-
-
-@pytest.mark.asyncio
-async def test_phase_transition_preserves_target_phase_queued_task(cyclic_coordinator):
-    c = cyclic_coordinator
-    await _noop_phase_side_effects(c)
-    _arm_explore_to_sweep(c.shared_state)
-
-    queued, _ = await c.tasks.create_or_return_existing(
-        TaskSpec(
-            kind="conc_sweep",
-            params={},
-            idempotency_key="queued-conc-sweep",
-        ),
-    )
-
-    await c.phase_machine.advance_phase_if_needed()
-
-    assert c.shared_state.phase == ps.PHASE_SWEEP
-    assert (await c.tasks.get(queued.task_id)).state == "queued"
+    assert c.shared_state.phase == ps.PHASE_CYCLE_END
 
 
 @pytest.mark.asyncio

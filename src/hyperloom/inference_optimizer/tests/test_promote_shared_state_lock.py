@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Behavior-lock tests for ``WritebackCollaborator.promote_to_shared_state``: per-task_kind state writes, audit rows,
-and sweep/conc_sweep early-return.
+"""Behavior-lock tests for ``WritebackCollaborator.promote_to_shared_state``: per-task_kind state writes and audit
+rows.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client impo
     KnowledgeSections,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe.values import has_new_keep
-from hyperloom.orchestrator.state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 
@@ -86,36 +85,6 @@ def _count_record_attempt(coord: Coordinator, monkeypatch) -> list[dict]:
 
     monkeypatch.setattr(coord.shared_state, "record_action_attempt", spy)
     return calls
-
-
-# GAP 1: sweep / conc_sweep early-return double-track — each records + saves + returns on its own, so the unified tail
-# record_action_attempt must not re-fire.
-@pytest.mark.asyncio
-async def test_promote_conc_sweep_records_once_and_returns_before_tail(session_dir, monkeypatch):
-    coord = _coord(session_dir)
-    s = coord.shared_state
-    calls = _count_record_attempt(coord, monkeypatch)
-
-    await coord.writeback.promote_to_shared_state(
-        "conc_sweep",
-        {
-            "status": "succeeded",
-            "summary": {"best_speedup": 1.3, "best_conc": 8},
-        },
-        task=_task("conc_sweep"),
-    )
-
-    # conc_sweep is NOT in _AUDIT_ACTIONS, so an audit attempt here could only
-    # ever return on the method's first line. The branch used to make the call
-    # anyway, assembling a rich extras dict that was dropped every time; it has
-    # been removed, and the sweep's skip reason, budget verdict and summary are
-    # recorded on the conc_sweep timeline event instead.
-    assert "conc_sweep" not in _AUDIT_ACTIONS
-    assert calls == []
-    # No conc_sweep_attempts ledger exists; record_conc_sweep wrote last_conc_sweep.
-    assert not hasattr(s, "conc_sweep_attempts")
-    assert s.last_conc_sweep.get("status") == "succeeded"
-    assert s.last_conc_sweep.get("summary", {}).get("best_speedup") == 1.3
 
 
 # GAP 2: changed / audit convergence for baseline / profile / explore / roofline.
@@ -2816,7 +2785,7 @@ async def test_promote_leaves_a_clean_result_out_of_the_failure_log(session_dir)
 async def test_a_config_attempt_is_ledgered_with_no_timeline_open(session_dir):
     """The row is what the dryness judgment reads, so no recorder may gate it.
 
-    The recorder lives for one FRAMEWORK_AGENT entry; a round settling in SWEEP
+    The recorder lives for one FRAMEWORK_AGENT entry; a round settling in CYCLE_END
     finds it closed, which is how every row outside that window went missing.
     """
     coord = _coord(session_dir)

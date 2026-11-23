@@ -225,6 +225,32 @@ removed from `.env` and launchers: `INFERENCE_OPTIMIZER_RAY_EXEC`,
 conc-sweep arm strategy `serving_lease_held` or the `ensure_ray` install step.
 Multi-node runs (RayJob through the Ray Dashboard) are unchanged.
 
+### Required: `SWEEP` is renamed `CYCLE_END` and runs no concurrency sweep
+
+The phase between `KERNEL_AGENT` and `CLOSE` is now `CYCLE_END`. It integrates
+pending KEEPs and validates the stack, then loops back or closes; it no longer
+dispatches a `conc_sweep` task. Update anything that matches on the old names:
+
+* The phase is `CYCLE_END` in `state.json`, `phase_history` and
+  `session_breakdown.json`.
+* It has no phase budget and no budget flag: the session budget alone gates it.
+  The SWEEP budget flag is rejected with `unrecognized arguments`, and so is
+  `--conc-sweep-total-budget-sec`.
+* The concurrency sweep runs after the session closes, with `--enable-conc-sweep`
+  or `hyperloom conc-sweep SESSION_DIR`.
+* Its exit is `cycle_end_done` (also the stop reason when no further cycle
+  runs); the SWEEP stop reasons no longer occur.
+* Its predicate input is `cycle_end_result` (`settled`, `reloop`) instead of
+  `sweep_result`.
+
+Sessions no longer write `reports/conc_sweep_summary.json`,
+`reports/conc_sweep_curve.png`, the `conc_sweep_summary` and
+`conc_sweep_curve_png` keys of `final.json`, the `conc_sweep` timeline event of
+`session_breakdown.json`, or the sweep's result in `state.json`.
+`--enable-conc-sweep` and `--conc-sweep-concs` are still accepted and recorded
+in `state.json`, but no sweep runs during the session. A session recorded in
+`SWEEP` does not resume: finish it under the build that started it.
+
 ### Recommended: commands that stay outside `hyperloom.cli`
 
 `hyperloom <command>` covers setup, check, optimize, recover, quantize,

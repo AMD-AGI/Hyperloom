@@ -126,11 +126,12 @@ import io
 import logging
 import os
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 from hyperloom_common.shared_storage import open_shared_append
 from hyperloom.common.outside_facts.image_check import ImageCheckFailed
@@ -141,6 +142,7 @@ from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom.measure.runner.cache_build import CacheBuildError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom_multibranch.cli_options import (
+    CONC_SWEEP_COMMAND,
     ENCODING,
     FINAL_ONLY_COMMAND,
     HOSTED_COMMAND,
@@ -153,6 +155,8 @@ from hyperloom_multibranch.cli_options import (
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.budget import ExploreCap
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom.conc_sweep.report import SETTLED
+from hyperloom_multibranch.scheduling.conc_sweep import sweep_plan, write_skipped
 from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers, local_grant_peers
 from hyperloom_multibranch.scheduling.hosted_run import (
     GrantDeadline,
@@ -161,6 +165,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     close_then_start,
     grant_deadline,
     grant_explore_cap,
+    grant_tests_end_by,
     grant_tests_that_fit,
     hosted_restart_leg,
     hosted_storage,
@@ -178,7 +183,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     write_final_exit,
 )
 from hyperloom_multibranch.scheduling import review
-from hyperloom_multibranch.scheduling.layout import create_session
+from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import Session
 from hyperloom_multibranch.scheduling.llm import (
     MB_RESOLVER_MAX_TOKENS,
@@ -186,6 +191,7 @@ from hyperloom_multibranch.scheduling.llm import (
     anthropic_completion,
     default_model,
 )
+from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.local_peers import (
     load_peers,
     machine_parallel_tests,
@@ -249,16 +255,18 @@ def run_session(
     services: SessionServices,
     report_root: Callable[[Path], None] = _print_root,
     explore_cap: ExploreCap | None = None,
+    grant_end_unix: float | None = None,
 ) -> int:
     """Create the session directory, hand it to ``report_root`` -- by default printed on one stdout line -- before
-    anything else is built in it, run the session (:meth:`Session.run`, given ``explore_cap``) and return its exit code.
+    anything else is built in it, run the session (:meth:`Session.run`, given ``explore_cap``) and its conc sweep when
+    the settings ask for one (:func:`sweep_closed`, warned at ``grant_end_unix``), and return the session's exit code.
 
     The session and its peers are built on the event loop they run on, which the specialist tools of the MCP service
     hand every toolbox call to. Whatever the session's processes orphan is reparented to this process, so the session
     stop kills it and reports it while it runs."""
 
     with adopting_orphans():
-        return asyncio.run(_run_session(settings, peer_factory, services, report_root, explore_cap))
+        return asyncio.run(_run_session(settings, peer_factory, services, report_root, explore_cap, grant_end_unix))
 
 
 async def _run_session(
@@ -267,6 +275,7 @@ async def _run_session(
     services: SessionServices,
     report_root: Callable[[Path], None],
     explore_cap: ExploreCap | None = None,
+    grant_end_unix: float | None = None,
 ) -> int:
     clock = Clock()
     layout = create_session(workspace_root(), settings.workload.model_basename, clock)
@@ -274,7 +283,47 @@ async def _run_session(
     logging.getLogger().addHandler(_file_handler(layout.scheduler_log))
     host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
     session = Session(settings, peer_factory, host, services)
-    return (await session.run(explore_cap)).exit_code
+    outcome = await session.run(explore_cap)
+    if settings.conc_sweep:
+        await sweep_closed(layout, settings, peer_factory, services, grant_end_unix)
+    return outcome.exit_code
+
+
+async def sweep_closed(
+    layout: SessionLayout,
+    settings: RunSettings,
+    peer_factory: PeerFactory,
+    services: SessionServices,
+    grant_end_unix: float | None = None,
+) -> dict[str, Any]:
+    """The concurrency sweep of the closed session in ``layout``, on a session built over it whose tests may run as
+    long as its plan's points need; returns the report it wrote."""
+
+    plan = await asyncio.to_thread(sweep_plan, layout, settings)
+    if isinstance(plan, str):
+        return write_skipped(layout, settings.workload, plan)
+    clock = Clock()
+    host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
+    session = Session(settings, peer_factory, host, services, test_points=plan.test_points(settings.workload))
+    return await session.conc_sweep(plan, grant_end_unix)
+
+
+def conc_sweep(
+    layout: SessionLayout,
+    settings: RunSettings,
+    peer_factory: PeerFactory,
+    services: SessionServices,
+    grant_end_unix: float | None = None,
+) -> int:
+    """``conc-sweep SESSION_DIR``: :func:`sweep_closed` under the session's lock file; 0 once the sweep settled."""
+
+    with _session_lock(layout) as held:
+        if not held:
+            return EXIT_USAGE
+        with adopting_orphans():
+            payload = asyncio.run(sweep_closed(layout, settings, peer_factory, services, grant_end_unix))
+    print(f"{PROG}: conc sweep {payload['status']} {payload.get('skip_reason', '')}".rstrip(), flush=True)
+    return 0 if payload["status"] in SETTLED else EXIT_FAILED
 
 
 def final_only(
@@ -305,17 +354,28 @@ def _over_session(
     """Run ``leg`` over the session directory ``persisted`` was read from, holding the session's lock file while it
     works; a second run over the same directory is refused rather than left to write over the first one's report."""
 
-    lock = persisted.layout.final_only_lock
+    with _session_lock(persisted.layout) as held:
+        if not held:
+            return EXIT_USAGE
+        with adopting_orphans():
+            return asyncio.run(_run_leg(persisted, peer_factory, services, leg))
+
+
+@contextlib.contextmanager
+def _session_lock(layout: SessionLayout) -> Iterator[bool]:
+    """Hold the session's lock file for the block, yielding whether it was free; a held one is named on stderr."""
+
+    lock = layout.final_only_lock
     try:
         holder = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         print(f"{PROG}: {lock} is held, by the pid it names; delete it if that run is gone", file=sys.stderr)
-        return EXIT_USAGE
+        yield False
+        return
     os.write(holder, f"{os.getpid()}\n".encode())
     os.close(holder)
     try:
-        with adopting_orphans():
-            return asyncio.run(_run_leg(persisted, peer_factory, services, leg))
+        yield True
     finally:
         lock.unlink()
 
@@ -331,7 +391,10 @@ async def _run_leg(
     try:  # a hosted run that closes this session goes on to start another, which logs to its own directory
         host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
         session = Session(persisted.settings, peer_factory, host, services)
-        return (await leg(session, persisted.ended)).exit_code
+        outcome = await leg(session, persisted.ended)
+        if persisted.settings.conc_sweep:
+            await sweep_closed(layout, persisted.settings, peer_factory, services)
+        return outcome.exit_code
     finally:
         logging.getLogger().removeHandler(handler)
         handler.close()
@@ -417,6 +480,11 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     earlier = take_over_earlier_session(host.state_dir)
     if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json
         return HostedStart(lambda: EXIT_FAILED)
+    if earlier.sweep is not None:  # it closed and was killed during its conc sweep: the exit code is the sweep's
+        settings = read_manifest(earlier.sweep.manifest).settings
+        ready = hosted_ready_session(host, settings.workload, local=spec.measurement == MEASUREMENT_LOCAL)
+        sweep = partial(conc_sweep, earlier.sweep, settings, ready.peer_factory, ready.services)
+        return HostedStart(partial(sweep, grant_end_unix=grant_tests_end_by(host)))
     persisted = earlier.finish
     if (taken := persisted or earlier.left) is not None:
         share_with_the_group(taken.layout.root)
@@ -428,7 +496,15 @@ def _hosted_start(host: HostInfo) -> HostedStart:
         return HostedStart(partial(leg, persisted, ready.peer_factory, ready.services))
     close = partial(final_only, peer_factory=ready.peer_factory, services=ready.services)
     record = partial(started_session, host.state_dir)
-    start = partial(run_session, settings, ready.peer_factory, ready.services, record, grant_explore_cap(host))
+    start = partial(
+        run_session,
+        settings,
+        ready.peer_factory,
+        ready.services,
+        record,
+        grant_explore_cap(host),
+        grant_tests_end_by(host),
+    )
     return HostedStart(partial(close_then_start, earlier.left, close, start))
 
 
@@ -505,7 +581,8 @@ def _start(settings: RunSettings, grant: HandedGrant | None) -> int:
         ready = hosted_ready_session(grant.host, settings.workload)
         _stop_before_grant_ends(grant.host)
     cap = None if grant is None else grant_explore_cap(grant.host)
-    return run_session(settings, ready.peer_factory, ready.services, explore_cap=cap)
+    end = None if grant is None else grant_tests_end_by(grant.host)
+    return run_session(settings, ready.peer_factory, ready.services, explore_cap=cap, grant_end_unix=end)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -515,9 +592,12 @@ def main(argv: list[str] | None = None) -> int:
         return hosted_run()
     if args.command == "review":
         return review.main(args)
-    persisted = grant = None
+    persisted = grant = swept = None
     try:
-        if args.command == FINAL_ONLY_COMMAND:
+        if args.command == CONC_SWEEP_COMMAND:
+            swept = SessionLayout(args.session_dir)
+            settings = read_manifest(swept.manifest).settings
+        elif args.command == FINAL_ONLY_COMMAND:
             persisted = persisted_run(args.session_dir)
             settings = persisted.settings
         elif args.resume is not None:
@@ -534,6 +614,9 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(EXIT_USAGE) from exc
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format=LOG_FORMAT)
     try:
+        if swept is not None:
+            ready = ready_session(settings.workload, load_peers)
+            return conc_sweep(swept, settings, ready.peer_factory, ready.services)
         if persisted is not None:
             ready = ready_session(settings.workload, load_peers)
             if args.command == FINAL_ONLY_COMMAND:

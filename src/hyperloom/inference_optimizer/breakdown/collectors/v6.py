@@ -297,7 +297,6 @@ def _stage_reached(
         "KERNEL_AGENT": (
             "kernel" if any(state.get(key) for key in ("last_fusion", "last_gemm_tuning")) else "kernel_agent"
         ),
-        "SWEEP": "conc_sweep",
         "CLOSE": "close",
     }
     if phase in phase_map:

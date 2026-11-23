@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The conc-sweep report: one curve row per rung, the roofline ceiling beside the curves, and the JSON/CSV write."""
+"""The conc-sweep report: one curve row per rung, the roofline ceiling beside the curves, and the JSON/CSV/PNG write."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hyperloom_common import io as _common_io
 from hyperloom.inference_optimizer.roofline_ceiling import (
@@ -22,11 +22,21 @@ from hyperloom.inference_optimizer.roofline_ceiling import (
 )
 from hyperloom.inference_optimizer.roofline_model_meta import load_model_meta
 from hyperloom.inference_optimizer.session.session_paths import reports_dir
-from ..actions.executors.grid._grid_runner import VariantResult
-from ..actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS
-from ..state.shared_state import SharedState
+
+from .plot import ConcCurveOptions, render_conc_sweep_curve
+
+if TYPE_CHECKING:
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import VariantResult
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
 log = logging.getLogger(__name__)
+
+SUMMARY_FILE = "conc_sweep_summary.json"
+RAW_FILE = "conc_sweep_raw.csv"
+CURVE_FILE = "conc_sweep_curve.png"
+FINAL_FILE = "final.json"
+#: The statuses of a sweep that ran its course, whatever it measured.
+SETTLED = frozenset({"succeeded", "partial", "skipped"})
 
 
 def point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
@@ -62,31 +72,6 @@ def point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
         "workspace": v.workspace,
         "report_path": v.report_path,
     }
-
-
-def budget_limited_without_valid_pair(
-    *,
-    budget_exhausted: bool,
-    summary: dict[str, Any],
-    baseline_points: list[dict[str, Any]],
-    optimized_points: list[dict[str, Any]],
-) -> bool:
-    """Return true when budget gating, not benchmark failure, prevented all pairs."""
-    if not budget_exhausted or int(summary.get("successful_pairs") or 0) > 0:
-        return False
-    points = baseline_points + optimized_points
-    if not points:
-        return False
-    saw_budget_skip = False
-    for point in points:
-        status = str(point.get("status") or "").lower()
-        error_class = str(point.get("error_class") or "")
-        if error_class in {"budget_exhausted", SESSION_TIME_EXHAUSTED_CLASS}:
-            saw_budget_skip = True
-            continue
-        if status not in ("succeeded", "skipped"):
-            return False
-    return saw_budget_skip
 
 
 def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
@@ -217,26 +202,47 @@ def _model_meta_record(meta: Any) -> dict[str, Any]:
     }
 
 
-def flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> Exception | None:
-    """Atomically write the conc-sweep summary JSON + CSV to the reports dir.
+def read_summary(reports: Path) -> dict[str, Any] | None:
+    """The summary an earlier run of the sweep left in ``reports``, or ``None``."""
+    path = reports / SUMMARY_FILE
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
 
-    Returns what stopped the write, so a caller that recorded the paths can say
-    they are where the report was meant to go rather than where it is.
-    """
-    try:
-        rdir = reports_dir(session_dir)
-        rdir.mkdir(parents=True, exist_ok=True)
-        json_path = Path(payload["report_json_path"])
-        csv_path = Path(payload["report_csv_path"])
-        _common_io.atomic_write_text(
-            json_path,
-            json.dumps(payload, indent=2, ensure_ascii=False, default=str),
-        )
-        all_points: list[dict[str, Any]] = list((payload.get("baseline") or {}).get("points") or []) + list(
-            (payload.get("optimized") or {}).get("points") or []
-        )
-        _write_csv(csv_path, all_points)
-    except (OSError, ValueError, csv.Error) as exc:
-        log.warning("conc_sweep: flush_conc_sweep_report failed", exc_info=True)
-        return exc
-    return None
+
+def sweep_unfinished(session_dir: Path) -> bool:
+    """Whether the optimize session in ``session_dir`` closed, asked for a conc sweep, and that sweep has not run its
+    course; read off ``state.json`` and the summary alone."""
+    state = json.loads((session_dir / "state.json").read_text(encoding="utf-8"))
+    if not (state.get("conc_sweep_enabled") and state.get("close_sequence_done")):
+        return False
+    summary = read_summary(reports_dir(session_dir))
+    return summary is None or summary["status"] not in SETTLED
+
+
+def write_report(payload: dict[str, Any], reports: Path) -> None:
+    """Atomically write the summary JSON and the raw CSV into ``reports``."""
+    reports.mkdir(parents=True, exist_ok=True)
+    _common_io.atomic_write_text(reports / SUMMARY_FILE, json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    _write_csv(reports / RAW_FILE, [*payload["baseline"]["points"], *payload["optimized"]["points"]])
+
+
+def write_curve(payload: dict[str, Any], reports: Path, options: ConcCurveOptions) -> Path | None:
+    """Draw the sweep's curve into ``reports``; ``None`` when there is nothing to draw or no matplotlib."""
+    return render_conc_sweep_curve(payload, reports / CURVE_FILE, options)
+
+
+def publish_curve(payload: dict[str, Any], session_dir: Path, options: ConcCurveOptions) -> None:
+    """Draw the sweep's curve and point the session's ``final.json`` at the summary and the curve."""
+    reports = reports_dir(session_dir)
+    curve = write_curve(payload, reports, options)
+    final = reports / FINAL_FILE
+    if not final.is_file():
+        return
+    document = json.loads(final.read_text(encoding="utf-8"))
+    document["conc_sweep_summary"] = {
+        "report_path": (reports / SUMMARY_FILE).relative_to(session_dir).as_posix(),
+        "status": payload["status"],
+        "summary": payload["summary"],
+    }
+    if curve is not None:
+        document["conc_sweep_curve_png"] = curve.relative_to(session_dir).as_posix()
+    _common_io.atomic_write_text(final, json.dumps(document, indent=2, ensure_ascii=False, default=str))

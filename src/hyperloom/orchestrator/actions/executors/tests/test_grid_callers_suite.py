@@ -22,16 +22,14 @@ import pytest
 import yaml
 
 from hyperloom.common.deadline import Deadline
+from hyperloom.conc_sweep import runner as conc_sweep
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
-from hyperloom.inference_optimizer.tests.test_conc_sweep import _make_state
 from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle
 from hyperloom.orchestrator.actions.executors.grid._grid_base import TS_SKIPPED_DEDUP, VariantResult
 from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
 from hyperloom.orchestrator.actions.executors import explore as explore_module
 from hyperloom.orchestrator.actions.executors.explore import BASELINE_NOOP, ExploreExecutor
 from hyperloom.orchestrator.actions.executors.tests.test_grid_suite_round import _HOT, suite  # noqa: F401
-from hyperloom.orchestrator.kernel import conc_sweep
-from hyperloom.orchestrator.kernel.conc_sweep import run_conc_sweep
 from hyperloom.orchestrator.rehearsal import READY, LaunchAttempt, LaunchScenario, ScriptedRounds, VirtualClock
 from hyperloom.orchestrator.rehearsal import installed_clock
 from hyperloom.orchestrator.specialists.rebench import RebenchBenchmark, RebenchServer, run_specialist_rebench
@@ -46,11 +44,9 @@ _PORT = 30123
 @pytest.fixture
 def eligible(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make every point lifecycle-eligible on ``_PORT``."""
-    monkeypatch.setattr(
-        _server_lifecycle,
-        "resolve_lifecycle_params",
-        lambda _path: {"eligible": True, "framework": "sglang", "port": _PORT, "reason": ""},
-    )
+    params = {"eligible": True, "framework": "sglang", "port": _PORT, "reason": ""}
+    monkeypatch.setattr(_server_lifecycle, "resolve_lifecycle_params", lambda _path: params)
+    monkeypatch.setattr(conc_sweep, "resolve_lifecycle_params", lambda _path: params)
 
 
 def _rounds(monkeypatch: pytest.MonkeyPatch, count: int) -> ScriptedRounds:
@@ -67,14 +63,27 @@ def _session(suite: SimpleNamespace) -> Path:
 def _sweep(monkeypatch, suite: SimpleNamespace, concs: list[int]) -> list:
     """Sweep both arms over ``concs`` and return the config of every round played."""
     rounds = _rounds(monkeypatch, 2 * len(concs))
-    state = _make_state(baseline_config_path=str(suite.point), tp=2, current_best={"extra_envs": {"SGLANG_X": "1"}})
-    monkeypatch.setattr(
-        conc_sweep,
-        "prepare_grid_benchmark_config",
-        lambda src, out_dir, **_kw: Path(shutil.copy(src, Path(out_dir) / "conc_sweep_base.with_envs.yaml")),
+    state = replace(
+        SharedState.load_or_init(_session(suite)),
+        framework="sglang",
+        tp=2,
+        conc=concs[0],
+        isl=1024,
+        osl=1024,
+        baseline_config_path=str(suite.point),
+        current_best={"extra_envs": {"SGLANG_X": "1"}},
+        cumulative_gain_validated=5.0,
+        conc_sweep_concs=list(concs),
     )
+    state.save(_session(suite))
+
+    def materialize(src: Path, out_dir: Path, **_kw: object) -> Path:
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        return Path(shutil.copy(src, Path(out_dir) / "conc_sweep_base.with_envs.yaml"))
+
+    monkeypatch.setattr(conc_sweep, "prepare_grid_benchmark_config", materialize)
     with installed_clock(rounds.clock):
-        payload = asyncio.run(run_conc_sweep(state, _session(suite), concs=concs, total_budget_sec=9000))
+        payload = asyncio.run(conc_sweep.run_conc_sweep(_session(suite)))
     assert payload["summary"]["successful_pairs"] == len(concs), payload
     return [call.config for call in rounds.calls]
 

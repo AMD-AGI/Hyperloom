@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The SWEEP handoff turn and the macro-cycle loopback that consumes its directive."""
+"""The CYCLE_END handoff turn and the macro-cycle loopback that consumes its directive."""
 
 from __future__ import annotations
 
@@ -18,28 +18,27 @@ from .conftest import make_coordinator
 _DIRECTIVE = "attack the KV cache, deprioritise scheduler knobs"
 
 
-def _sweep_coordinator(session_dir, *, replies: list[MockTurn]):
+def _cycle_end_coordinator(session_dir, *, replies: list[MockTurn]):
     orchestration = MockBackend(ScriptedPlan(turns=replies), name="orchestration")
     coord = make_coordinator(session_dir)
     coord.backends["orchestration"] = orchestration
     st = coord.shared_state
     now = datetime.now(timezone.utc)
-    st.phase = ps.PHASE_SWEEP
+    st.phase = ps.PHASE_CYCLE_END
     st.start_ts = (now - timedelta(hours=1)).isoformat()
     st.max_minutes = 96 * 60
     st.macro_cycle = 0
     st.cumulative_gain_validated = 7.0
     st.gain_at_cycle_start = 0.0
-    st.last_conc_sweep = {"status": "running"}
     return coord, orchestration
 
 
 @pytest.mark.asyncio
-async def test_sweep_asks_for_the_directive_once_per_cycle(session_dir):
-    coord, orchestration = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
+async def test_cycle_end_asks_for_the_directive_once_per_cycle(session_dir):
+    coord, orchestration = _cycle_end_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
 
-    await coord.phase_sweep.pump()
-    await coord.phase_sweep.pump()
+    await coord.phase_cycle_end.pump()
+    await coord.phase_cycle_end.pump()
 
     assert len(orchestration.calls) == 1
     assert "MACRO-CYCLE HANDOFF" in orchestration.calls[0]["prompt"]
@@ -51,8 +50,8 @@ async def test_sweep_asks_for_the_directive_once_per_cycle(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_a_held_sweep_exit_still_writes_the_next_cycles_directive(session_dir):
-    coord, orchestration = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
+async def test_a_held_cycle_end_exit_still_writes_the_next_cycles_directive(session_dir):
+    coord, orchestration = _cycle_end_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
     coord.dispatcher.admission_frozen = True
 
     await coord.phase_machine.pump_current_phase()
@@ -63,9 +62,9 @@ async def test_a_held_sweep_exit_still_writes_the_next_cycles_directive(session_
 
 @pytest.mark.asyncio
 async def test_a_reply_without_intents_is_not_an_error(session_dir):
-    coord, _ = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
+    coord, _ = _cycle_end_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
 
-    await coord.phase_sweep.pump()
+    await coord.phase_cycle_end.pump()
 
     observations = await coord.bus.tail(n=50, topic="observation")
     assert not any((o.payload or {}).get("kind") == "no_intent_emitted" for o in observations)
@@ -73,32 +72,30 @@ async def test_a_reply_without_intents_is_not_an_error(session_dir):
 
 @pytest.mark.asyncio
 async def test_the_handoff_turn_is_billed_like_any_reactor_turn(session_dir, monkeypatch):
-    coord, _ = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
+    coord, _ = _cycle_end_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
     billed: list[str] = []
     monkeypatch.setattr(
         "hyperloom.orchestrator.loop.coordinator.trace_reactor_llm_call",
         lambda _session_dir, _state, agent, result, **_: billed.append(agent),
     )
 
-    await coord.phase_sweep.pump()
+    await coord.phase_cycle_end.pump()
 
     assert billed == ["orchestration"]
 
 
 @pytest.mark.asyncio
-async def test_a_sweep_that_settles_on_entry_hands_off_before_the_machine_leaves(session_dir):
+async def test_a_cycle_end_that_settles_on_entry_hands_off_before_the_machine_leaves(session_dir):
     from hyperloom.orchestrator.phases.machine import Transition
 
-    coord, orchestration = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
+    coord, orchestration = _cycle_end_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
     st = coord.shared_state
-    st.last_conc_sweep = {}
-    st.conc_sweep_enabled = False
 
-    await coord.phase_sweep.on_enter_sweep(
-        Transition(from_phase=ps.PHASE_FRAMEWORK_AGENT, to_phase=ps.PHASE_SWEEP, reason="test", evidence={})
+    await coord.phase_cycle_end.on_enter_cycle_end(
+        Transition(from_phase=ps.PHASE_FRAMEWORK_AGENT, to_phase=ps.PHASE_CYCLE_END, reason="test", evidence={})
     )
 
-    assert st.last_conc_sweep["status"] == "skipped"
+    assert st.cycle_end_settled_cycle == 0
     assert len(orchestration.calls) == 1
     assert st.orchestration_memory["for_cycle"] == 0
     assert st.orchestration_memory["next_cycle_directive"] == _DIRECTIVE
@@ -108,9 +105,9 @@ async def test_a_sweep_that_settles_on_entry_hands_off_before_the_machine_leaves
 async def test_a_failed_transition_save_still_enters_the_next_cycle_and_then_raises(session_dir, monkeypatch):
     from unittest.mock import AsyncMock
 
-    coord, _ = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
+    coord, _ = _cycle_end_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
     st = coord.shared_state
-    st.last_conc_sweep = {"status": "succeeded"}
+    st.cycle_end_settled_cycle = 0
     entered = AsyncMock()
     restarted = AsyncMock()
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", entered)
@@ -140,14 +137,14 @@ async def test_a_failed_transition_save_still_enters_the_next_cycle_and_then_rai
 async def test_a_failed_handoff_turn_records_the_error_and_leaves_no_directive(session_dir, monkeypatch):
     from hyperloom.orchestrator.roles.base import LLMCallFailed
 
-    coord, orchestration = _sweep_coordinator(session_dir, replies=[])
+    coord, orchestration = _cycle_end_coordinator(session_dir, replies=[])
 
     async def _timed_out(**_kwargs):
         raise LLMCallFailed("Claude backend timed out: turn exceeded its 1500s wall-clock bound")
 
     monkeypatch.setattr(orchestration, "run", _timed_out)
 
-    await coord.phase_sweep.pump()
+    await coord.phase_cycle_end.pump()
 
     assert coord.shared_state.orchestration_memory["for_cycle"] == 0
     assert coord.shared_state.orchestration_memory["next_cycle_directive"] == ""
@@ -157,10 +154,10 @@ async def test_a_failed_handoff_turn_records_the_error_and_leaves_no_directive(s
 
 @pytest.mark.asyncio
 async def test_no_handoff_is_requested_when_no_further_cycle_is_feasible(session_dir):
-    coord, orchestration = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
+    coord, orchestration = _cycle_end_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
     coord.shared_state.saturated_directions = {"kv_cache": {"saturated": True}}
 
-    await coord.phase_sweep.pump()
+    await coord.phase_cycle_end.pump()
 
     assert orchestration.calls == []
     assert coord.shared_state.orchestration_memory == {}
@@ -168,10 +165,10 @@ async def test_no_handoff_is_requested_when_no_further_cycle_is_feasible(session
 
 @pytest.mark.asyncio
 async def test_the_next_cycle_opens_on_the_directive_and_enters_as_one_sequence(session_dir):
-    coord, _ = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
+    coord, _ = _cycle_end_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
     st = coord.shared_state
-    await coord.phase_sweep.pump()
-    st.last_conc_sweep = {"status": "succeeded"}
+    await coord.phase_cycle_end.pump()
+    st.cycle_end_settled_cycle = 0
     directives: list[str] = []
     coord.orch_prompt = OrchestrationPrompt(
         overrides={"orchestration": "ORIGINAL"},

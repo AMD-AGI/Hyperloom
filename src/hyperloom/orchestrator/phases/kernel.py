@@ -625,7 +625,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         from_phase = str((ctx.task.params or {}).get("from_phase") or "")
         if self.geak_enabled():
             # GEAK owns the whole KERNEL_AGENT phase: one in-process e2e run seeded with the best config so far, then
-            # hand straight to SWEEP.
+            # hand straight to CYCLE_END.
             await self._run_geak_kernel_phase(from_phase=from_phase)
             return {"status": "ok", "route": "geak"}
         if not self._gemm_tuning_required_before_kernel_opt():
@@ -1067,7 +1067,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             if record is not None:
                 queued += 1
         log.info(
-            "KERNEL entry: queued %d/%d fusion sibling(s) for SWEEP-entry integrate (refused=%s)",
+            "KERNEL entry: queued %d/%d fusion sibling(s) for CYCLE_END-entry integrate (refused=%s)",
             queued,
             len(outcome.patches),
             refused or "none",

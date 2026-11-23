@@ -236,7 +236,7 @@ class LocalCards:
         # The tests read private copies of the tables of the aiter this machine's servers import (a vLLM image's
         # site-packages, not an SGLang image's workspace), or a keep that adds rows to a default table is refused.
         options = LocalOptions(
-            timeout_sec=attempt_timeout_sec(setup.workload),
+            timeout_sec=attempt_timeout_sec(setup.workload) * setup.test_points,
             boot_budget_sec=setup.workload.boot_budget_sec,
             framework_configs=str(image_configs()),
             tests_end_by=self.tests_end_by,

@@ -69,7 +69,6 @@ def configure_benchmark(args: argparse.Namespace) -> None:
             raise ValueError("--no-agentx-accuracy requires native AgentX; other workloads have no accuracy round")
         return
     _validate_agentx_options(args)
-    args.enable_conc_sweep = False
 
 
 def _bind_yaml_arguments(args: argparse.Namespace, benchmark: dict) -> None:
@@ -113,8 +112,6 @@ def _validate_agentx_options(args: argparse.Namespace) -> None:
         raise ValueError("AgentX optimization requires one node")
     if any(getattr(args, key, None) is not None and int(getattr(args, key)) <= 0 for key in ("tp", "ep", "conc")):
         raise ValueError("AgentX TP, EP and CONC must be positive")
-    if getattr(args, "enable_conc_sweep", None):
-        raise ValueError("AgentX concurrency is fixed per session; create a session for each CONC")
     conflicting = [
         name
         for name in ("isl", "osl", "profile_osl", "max_model_len", "quantize", "quantize_scheme")

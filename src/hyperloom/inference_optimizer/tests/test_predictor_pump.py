@@ -544,7 +544,7 @@ async def test_entry_asks_at_its_own_decision_point_after_filing_an_earlier_answ
     # Answered while FRAMEWORK was away, so nothing filed it.
     await phase._predictor._inflight
     state.macro_cycle = 1
-    await phase.on_enter_framework(SimpleNamespace(from_phase="SWEEP"))
+    await phase.on_enter_framework(SimpleNamespace(from_phase="CYCLE_END"))
 
     assert len(service.requests) == 2
     assert [(r["round_id"], r["cycle"]) for r in _predictor_rounds(state)] == [("c0-s0-r0", 0), ("c1-s0-r0", 1)]

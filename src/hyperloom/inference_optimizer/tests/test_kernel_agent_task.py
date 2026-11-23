@@ -295,7 +295,7 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
         )
     )
     task = next(task for task in await c.tasks.queued() if task.kind == "kernel_agent")
-    c.shared_state.phase = ps.PHASE_SWEEP
+    c.shared_state.phase = ps.PHASE_CYCLE_END
     c.shared_state.macro_cycle = 4
     c.shared_state.tick = 99
 
@@ -373,7 +373,7 @@ def test_kernel_agent_in_flight_never_blocks_a_budget_exit():
 
 @pytest.mark.asyncio
 async def test_kernel_holds_while_its_task_is_in_flight_and_leaves_once_it_settles(coord, monkeypatch):
-    """The exit rule must not hand the GPUs to SWEEP while the kernel_agent task still holds them."""
+    """The exit rule must not hand the GPUs to CYCLE_END while the kernel_agent task still holds them."""
     c = coord
     _skip_phase_entry_effects(c, monkeypatch)
     st = c.shared_state
@@ -393,7 +393,7 @@ async def test_kernel_holds_while_its_task_is_in_flight_and_leaves_once_it_settl
     await c.tasks.transition(task.task_id, "succeeded", evidence={"result_keys": []})
     await c.phase_machine.advance_phase_if_needed()
 
-    assert st.phase == ps.PHASE_SWEEP
+    assert st.phase == ps.PHASE_CYCLE_END
     assert st.phase_history[-1]["reason"] == "kernel_no_more_leverage"
 
 
@@ -432,7 +432,7 @@ async def test_a_spent_phase_budget_lets_the_running_kernel_agent_finish_before_
     await _settle(c, task.task_id)
     await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
 
-    assert st.phase == ps.PHASE_SWEEP
+    assert st.phase == ps.PHASE_CYCLE_END
     assert (await c.tasks.get(task.task_id)).state == "succeeded"
     assert not any((await c.locks.lane_holders()).values())
 
@@ -624,7 +624,7 @@ async def test_phase_transition_waits_until_no_task_is_running(coord, monkeypatc
 
     await c.tasks.transition(task.task_id, "succeeded", evidence={"result_keys": []})
     await c.phase_machine.advance_phase_if_needed()
-    assert st.phase == ps.PHASE_SWEEP
+    assert st.phase == ps.PHASE_CYCLE_END
     assert await c.tasks.running() == []
 
 
@@ -640,7 +640,7 @@ async def test_phase_transition_drops_queued_work_the_next_phase_does_not_allow(
 
     await c.phase_machine.advance_phase_if_needed()
 
-    assert st.phase == ps.PHASE_SWEEP
+    assert st.phase == ps.PHASE_CYCLE_END
     assert (await c.tasks.get(roofline.task_id)).state == "cancelled"
     assert await c.tasks.queued() == []
 

@@ -16,6 +16,11 @@ _COMMANDS: dict[str, tuple[str, tuple[str, ...], str]] = {
     "check": (f"{_IO}.tools.preflight_optimizer", (), "Check host readiness for a model before optimizing"),
     "optimize": (f"{_IO}.cli", ("optimize",), "Run a multi-agent optimization session"),
     "recover": (f"{_IO}.cli", ("recover",), "Rebuild a crashed session's artifacts, or confirm cleanup for a resume"),
+    "conc-sweep": (
+        "hyperloom.conc_sweep.cli",
+        (),
+        "Sweep a finished session's baseline and optimized launch over CONC",
+    ),
     "quantize": ("hyperloom.agents.quantization.cli", (), "Quantize a model with AMD Quark"),
     "multi-node": (f"{_IO}.multi_node.cli", (), "Operate the multi-node cluster of a session"),
     "hosted": ("hyperloom.hosted.entry", (), "Run a campaign that a hosting platform handed over ('hosted run')"),

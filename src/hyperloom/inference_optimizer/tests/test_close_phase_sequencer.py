@@ -177,7 +177,7 @@ def coord(tmp_path: Path):
 
 
 def _close_phase_history_row() -> dict[str, Any]:
-    return {"to_phase": "CLOSE", "reason": "sweep_done", "evidence": {}}
+    return {"to_phase": "CLOSE", "reason": "cycle_end_done", "evidence": {}}
 
 
 @pytest.mark.asyncio
@@ -198,7 +198,7 @@ async def test_record_close_step_appends_to_evidence_close_steps(coord):
 async def test_record_close_step_creates_missing_evidence_dict(coord):
     """Phase_history row with no ``evidence`` key gets one installed."""
     coord.shared_state.phase_history = [
-        {"to_phase": "CLOSE", "reason": "sweep_done"},
+        {"to_phase": "CLOSE", "reason": "cycle_end_done"},
     ]
     await coord.phase_close._record_close_step("done", status="done")
     evidence = coord.shared_state.phase_history[-1]["evidence"]
@@ -275,7 +275,9 @@ async def test_close_sequencer_still_reports_when_the_first_report_task_was_canc
     )
     coord.shared_state.closing_report_task_id = "wallclock-report"
 
-    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="CYCLE_END", to_phase="CLOSE", reason="test", evidence={})
+    )
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     by_step = {r["step"]: r for r in rows}
@@ -491,7 +493,9 @@ async def test_the_sequencer_records_the_state_a_running_report_ended_in(coord):
     _running_report_row(coord)
     coord.shared_state.closing_report_task_id = "wallclock-report"
 
-    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="CYCLE_END", to_phase="CLOSE", reason="test", evidence={})
+    )
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     report = next(r for r in rows if r["step"] == "report")
@@ -511,7 +515,9 @@ async def test_a_resumed_leg_writes_its_own_report_and_breakdown(coord, tmp_path
         coord.tasks._by_id[row.task_id] = row
     coord.shared_state.resumed_ts = "2026-09-25T09:46:24+00:00"
 
-    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="CYCLE_END", to_phase="CLOSE", reason="test", evidence={})
+    )
 
     ran = [(t.kind, t.idempotency_key) for t in coord.sub.run_calls if t.kind in {"report", "session_breakdown"}]
     assert ran == [
@@ -536,9 +542,11 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     coord.shared_state.model_name = "model"
     coord.shared_state.gpu_type = "mi300x"
     # stop_reason is normally set by the phase machine before CLOSE is entered.
-    coord.shared_state.stop_reason = "sweep_done"
+    coord.shared_state.stop_reason = "cycle_end_done"
 
-    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="CYCLE_END", to_phase="CLOSE", reason="test", evidence={})
+    )
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     steps = [r["step"] for r in rows]
@@ -568,8 +576,8 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     assert by_step["langfuse_flush"]["status"] == "done"
     assert by_step["done"]["status"] == "done"
     assert coord.shared_state.close_sequence_done is True
-    # A normal SWEEP completion's sweep_done reason must be preserved.
-    assert coord.shared_state.stop_reason == "sweep_done"
+    # A normal CYCLE_END completion's cycle_end_done reason must be preserved.
+    assert coord.shared_state.stop_reason == "cycle_end_done"
 
 
 @pytest.mark.asyncio
@@ -593,9 +601,11 @@ async def test_close_sequencer_records_its_own_verdict_and_artifacts(
     coord.shared_state.model_name = "model"
     coord.shared_state.gpu_type = "mi300x"
     # stop_reason is normally set by the phase machine before CLOSE is entered.
-    coord.shared_state.stop_reason = "sweep_done"
+    coord.shared_state.stop_reason = "cycle_end_done"
 
-    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="CYCLE_END", to_phase="CLOSE", reason="test", evidence={})
+    )
 
     recorded = assemble_parts(tmp_path, warnings=[])["close"]
     assert recorded["status"] == "succeeded"
@@ -707,10 +717,12 @@ async def test_close_sequencer_records_the_unsettled_geak_candidate_the_final_re
 
     monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.shared_state.stop_reason = "sweep_done"
+    coord.shared_state.stop_reason = "cycle_end_done"
     coord.shared_state.geak_pending = dict(pending)
 
-    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="CYCLE_END", to_phase="CLOSE", reason="test", evidence={})
+    )
 
     close = collect_v6_close([], recorded=assemble_parts(tmp_path, warnings=[])["close"])
     assert close["geak_candidate"] == expected
@@ -725,8 +737,8 @@ async def test_a_resumed_close_replaces_the_candidate_the_first_close_recorded(c
 
     monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.shared_state.stop_reason = "sweep_done"
-    transition = Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={})
+    coord.shared_state.stop_reason = "cycle_end_done"
+    transition = Transition(from_phase="CYCLE_END", to_phase="CLOSE", reason="test", evidence={})
 
     coord.shared_state.geak_pending = {"status": "rebench_cancelled", "self_reported_gain_pct": 12.5}
     await coord.phase_close.on_enter_close(transition)
@@ -747,10 +759,12 @@ async def test_a_resumed_close_replaces_the_candidate_the_first_close_recorded(c
 async def test_close_sequencer_records_no_geak_candidate_when_none_is_pending(coord, tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.shared_state.stop_reason = "sweep_done"
+    coord.shared_state.stop_reason = "cycle_end_done"
     coord.shared_state.geak_pending = {}
 
-    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="CYCLE_END", to_phase="CLOSE", reason="test", evidence={})
+    )
 
     assert "geak_candidate" not in collect_v6_close([], recorded=assemble_parts(tmp_path, warnings=[])["close"])
 
@@ -774,7 +788,9 @@ async def test_close_sequencer_records_the_recipe_publication_under_close(
     coord.shared_state.model_name = "model"
     coord.shared_state.gpu_type = "mi300x"
 
-    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="CYCLE_END", to_phase="CLOSE", reason="test", evidence={})
+    )
 
     write_back = assemble_parts(tmp_path, warnings=[])["close"]["kb_write_back"]
     assert write_back["status"] == "written"
@@ -807,7 +823,9 @@ async def test_close_sequencer_records_degraded_when_a_step_fails(
 
     coord.sub = _FailingRunner()
 
-    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="CYCLE_END", to_phase="CLOSE", reason="test", evidence={})
+    )
 
     recorded = assemble_parts(tmp_path, warnings=[])["close"]
     assert recorded["status"] == "degraded"
@@ -827,7 +845,9 @@ async def _enqueue_report(coord) -> None:
 
 
 async def _enter_close(coord) -> None:
-    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="CYCLE_END", to_phase="CLOSE", reason="test", evidence={})
+    )
 
 
 _CLOSE_SAVE_SITES = {
@@ -945,7 +965,9 @@ async def test_close_sequencer_surfaces_remote_finalize_failure(
         },
     )
 
-    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="CYCLE_END", to_phase="CLOSE", reason="test", evidence={})
+    )
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     fact = next(row for row in rows if row["step"] == "fact_finalize")
@@ -961,7 +983,9 @@ async def test_close_sequencer_does_not_overwrite_caller_set_stop_reason(
     coord.shared_state.phase_history = [_close_phase_history_row()]
     coord.shared_state.stop_reason = "signal"
 
-    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+    await coord.phase_close.on_enter_close(
+        Transition(from_phase="CYCLE_END", to_phase="CLOSE", reason="test", evidence={})
+    )
 
     assert coord.shared_state.stop_reason == "signal"
 
@@ -976,18 +1000,8 @@ async def _advance_into_close(coord, monkeypatch, reason: str) -> None:
         "compute_next_phase",
         lambda *_a, **_k: (machine_state.PHASE_CLOSE, reason, {"terminal": True}),
     )
-    coord.shared_state.phase = machine_state.PHASE_SWEEP
+    coord.shared_state.phase = machine_state.PHASE_CYCLE_END
     await coord.phase_machine.advance_phase_if_needed()
-
-
-@pytest.mark.asyncio
-async def test_a_sweep_budget_exit_closes_the_run_as_time_exhausted(tmp_path: Path, monkeypatch):
-    coord = make_coordinator(tmp_path)
-
-    await _advance_into_close(coord, monkeypatch, "sweep_budget_exhausted")
-
-    assert coord.shared_state.phase == machine_state.PHASE_CLOSE
-    assert coord.shared_state.stop_reason == "time_exhausted"
 
 
 @pytest.mark.asyncio
@@ -997,7 +1011,7 @@ async def test_a_close_reason_outside_the_stop_vocabulary_is_refused(tmp_path: P
     with pytest.raises(ValueError, match="not_a_real_vocab_reason"):
         await _advance_into_close(coord, monkeypatch, "not_a_real_vocab_reason")
 
-    assert coord.shared_state.phase == machine_state.PHASE_SWEEP
+    assert coord.shared_state.phase == machine_state.PHASE_CYCLE_END
 
 
 @pytest.mark.asyncio
@@ -1005,7 +1019,7 @@ async def test_entering_close_keeps_the_stop_reason_already_set(tmp_path: Path, 
     coord = make_coordinator(tmp_path)
     coord.shared_state.set_stop_reason("signal")
 
-    await _advance_into_close(coord, monkeypatch, "sweep_done")
+    await _advance_into_close(coord, monkeypatch, "cycle_end_done")
 
     assert coord.shared_state.stop_reason == "signal"
 
@@ -1026,19 +1040,19 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
         role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
-    # Seed state at SWEEP boundary.
-    coord.shared_state.phase = "SWEEP"
+    # Seed state at CYCLE_END boundary.
+    coord.shared_state.phase = "CYCLE_END"
     coord.shared_state.phase_history = [
         {"to_phase": "EXPLORE", "evidence": {}, "reason": "prelude_done"},
-        {"to_phase": "SWEEP", "evidence": {}, "reason": "kernel_no_more_leverage"},
+        {"to_phase": "CYCLE_END", "evidence": {}, "reason": "kernel_no_more_leverage"},
     ]
     machine_state.record_phase_transition(
         coord.shared_state,
         to_phase="CLOSE",
-        reason="sweep_done",
+        reason="cycle_end_done",
         evidence={"trigger": "test_e2e"},
     )
-    await coord.phase_machine._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
+    await coord.phase_machine._on_phase_entered(from_phase="CYCLE_END", to_phase="CLOSE")
 
     rows_report = await coord.tasks.db.fetchall(
         "SELECT * FROM tasks WHERE idempotency_key=?",
@@ -1262,10 +1276,10 @@ class TestEveryTerminalReachesAWrittenReport:
         machine_state.record_phase_transition(
             coord.shared_state,
             to_phase="CLOSE",
-            reason="sweep_done",
+            reason="cycle_end_done",
             evidence={"trigger": "test"},
         )
-        await coord.phase_machine._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
+        await coord.phase_machine._on_phase_entered(from_phase="CYCLE_END", to_phase="CLOSE")
         assert coord.shared_state.close_sequence_done is True
 
         assert await coord.phase_close.ensure_close_sequence(reason="terminal") is False
@@ -1314,11 +1328,11 @@ async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
         role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
-    coord.shared_state.phase = "SWEEP"
-    coord.shared_state.phase_history = [{"to_phase": "SWEEP", "evidence": {}, "reason": "kernel_no_more_leverage"}]
-    machine_state.record_phase_transition(coord.shared_state, to_phase="CLOSE", reason="sweep_done", evidence={})
+    coord.shared_state.phase = "CYCLE_END"
+    coord.shared_state.phase_history = [{"to_phase": "CYCLE_END", "evidence": {}, "reason": "kernel_no_more_leverage"}]
+    machine_state.record_phase_transition(coord.shared_state, to_phase="CLOSE", reason="cycle_end_done", evidence={})
 
-    await coord.phase_machine._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
+    await coord.phase_machine._on_phase_entered(from_phase="CYCLE_END", to_phase="CLOSE")
 
     zips = sorted((dest_root / "hyperloom-session-packages").glob("*.zip"))
     assert len(zips) == 1

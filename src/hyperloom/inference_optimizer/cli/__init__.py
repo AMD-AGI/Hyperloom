@@ -118,7 +118,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     PromptCycle,
     SessionContext,
 )
-from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ABORTED_STOP_REASONS, SUPERVISOR_RESTART_REASON
 
 from ..session.lock import SessionAlreadyRunning, SessionLock, SessionLockPathError
 from ..session.paths import ENV_USER_DATA_PATH, asset_system_prompts_dir, make_session_dir
@@ -269,14 +269,13 @@ def _reset_state_file(session_dir: Path, state: SharedState) -> None:
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
 
-    ENABLEMENT has no flag: nothing enforces a per-phase cap for it.
+    ENABLEMENT and CYCLE_END have no flag: nothing enforces a per-phase cap for either.
     """
     from hyperloom.orchestrator.phases.machine_state import (
         PHASE_CLOSE,
         PHASE_FRAMEWORK_AGENT,
         PHASE_KERNEL_AGENT,
         PHASE_PRELUDE,
-        PHASE_SWEEP,
     )
 
     phase_budget_pct: dict[str, float] = {}
@@ -284,7 +283,6 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
         ("phase_budget_prelude_pct", PHASE_PRELUDE),
         ("phase_budget_framework_pct", PHASE_FRAMEWORK_AGENT),
         ("phase_budget_kernel_pct", PHASE_KERNEL_AGENT),
-        ("phase_budget_sweep_pct", PHASE_SWEEP),
         ("phase_budget_close_pct", PHASE_CLOSE),
     ):
         val = getattr(args, cli_field)
@@ -1061,7 +1059,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         await _close_optimize_run(coordinator, session_lock, session_dir, stop_reason)
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
-    # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
+    closed = coordinator.shared_state
+    if closed.conc_sweep_enabled and closed.close_sequence_done and stop_reason not in ABORTED_STOP_REASONS:
+        from hyperloom.conc_sweep.cli import sweep_session
+
+        await sweep_session(session_dir)
 
     _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
     return _exit_code_for_stop_reason(stop_reason, coordinator.shared_state.baseline_tput)

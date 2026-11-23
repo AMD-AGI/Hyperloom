@@ -634,43 +634,29 @@ def add_recon_arguments(opt: argparse.ArgumentParser) -> None:
 
 
 def add_conc_sweep_arguments(opt: argparse.ArgumentParser) -> None:
-    """Add the post-optimization concurrency-sweep flags of ``optimize``."""
-    # Post-optimization concurrency sweep: a baseline-vs-optimized grid across CONC values (see
-    # orchestrator/conc_sweep.py). Defaults to None so bootstrap can pick by benchmark mode.
+    """Add the post-session concurrency-sweep flags of ``optimize`` (``hyperloom.conc_sweep``)."""
     opt.add_argument(
         "--enable-conc-sweep",
         dest="enable_conc_sweep",
         action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Run a post-optimization concurrency sweep (baseline vs "
-        "current_best across CONC) and write "
-        "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
-        "On by default for synthetic workloads, off by default for MLPerf. "
-        "Unavailable for native AgentX: start a separate session for each CONC.",
+        default=False,
+        help="Once the session closes, sweep its baseline and its optimized launch over the concurrencies of the "
+        "base's InferenceX recipe and write reports/conc_sweep_summary.json + conc_sweep_raw.csv; "
+        "`hyperloom conc-sweep SESSION_DIR` runs the same sweep by hand. Off by default.",
     )
     opt.add_argument(
         "--conc-sweep-concs",
         dest="conc_sweep_concs",
-        type=str,
-        default=None,
-        help="Comma-separated CONC ladder for --enable-conc-sweep. Run with --conc first, then cheapest first "
-        "(low-to-high for synthetic, high-to-low for MLPerf), so the order given does not matter. "
-        "Defaults to the ladder for the workload: "
-        "256,128,64,32,16,8,4,2 for synthetic, 1,4,8,10,14,20,28 for MLPerf. "
-        "Unavailable for native AgentX.",
+        type=_concurrencies,
+        default=(),
+        help="Comma-separated concurrencies of the conc sweep for a base no InferenceX recipe gave "
+        "(a --reference-script); ignored for one that did. The session's --conc is always among them.",
     )
-    opt.add_argument(
-        "--conc-sweep-total-budget-sec",
-        dest="conc_sweep_total_budget_sec",
-        type=int,
-        default=9000,
-        help="Total wall-clock budget (seconds) for the whole conc-sweep action, independent of the per-variant "
-        "round timeout. Past its first CONC the baseline arm may spend half of it; the optimized arm runs only the CONCs the "
-        "baseline reached, so a budget that runs out drops whole pairs. Once exhausted, remaining variants are "
-        "recorded as status=skipped / error_class=budget_exhausted and the JSON envelope carries "
-        "budget_exhausted=true. Default 9000 (~2.5h); set to 0 to disable. Also bounded above by the main "
-        "session wall-clock deadline since conc_sweep runs as a SWEEP-phase action.",
-    )
+
+
+def _concurrencies(value: str) -> tuple[int, ...]:
+    """``C1,C2,...`` as the distinct concurrencies it names, ascending."""
+    return tuple(sorted({int(item) for item in value.split(",")}))
 
 
 def add_plateau_arguments(opt: argparse.ArgumentParser) -> None:
@@ -741,14 +727,6 @@ def add_phase_budget_arguments(opt: argparse.ArgumentParser) -> None:
         type=float,
         default=None,
         help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.47. "
-        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
-    )
-    opt.add_argument(
-        "--phase-budget-sweep-pct",
-        dest="phase_budget_sweep_pct",
-        type=float,
-        default=None,
-        help="Wall-clock budget cap for SWEEP. Default: 0.05. "
         "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(

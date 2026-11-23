@@ -32,7 +32,7 @@ def _tr(reason: str) -> Transition:
     """Minimal Transition for driving close_framework_timeline in tests."""
     return Transition(
         from_phase="FRAMEWORK_AGENT",
-        to_phase="SWEEP",
+        to_phase="CYCLE_END",
         reason=reason,
         evidence={},
     )
@@ -98,7 +98,7 @@ async def test_phase_transition_closes_the_event(session_dir: Path):
 
     await coord.phase_machine._on_phase_entered(
         from_phase="FRAMEWORK_AGENT",
-        to_phase="SWEEP",
+        to_phase="CYCLE_END",
         reason="optimize_no_more_leverage",
         evidence={"evidence": "both_arms_plateaued", "switch_bottleneck": True},
     )

@@ -406,7 +406,7 @@ brief:
   domain force, predictor and general bench are skipped, and the phase hints
   `skip_to_sweep` once the custom task (or its refused admission), its grid and
   its patch reviews are done; the exit goes to KERNEL_AGENT when that phase is
-  enabled, else SWEEP, and later phases run as usual.
+  enabled, else CYCLE_END, and later phases run as usual.
 - **PrimaTune predictor rows**: with `--primatune-endpoint` and
   `--primatune-mode active`, the predictor's proposals lead the untested-proposal
   block. Orchestration copies the ones worth a slot into its next `explore` grid
@@ -778,7 +778,7 @@ and the operator's stated value is lost:
 | Model class | `--model-class` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | Input seq length | `--isl` | Pass the prompt's ISL. Default `1024` when omitted. |
 | Output seq length | `--osl` | Pass the prompt's OSL. Default `1024` when omitted. |
-| Concurrency | `--conc` | Pass the prompt's CONC (max in-flight requests). Default `64`. SWEEP measures a ladder around it (native AgentX instead fixes CONC in its YAML); `--conc-sweep-concs` overrides the workload's default ladder. |
+| Concurrency | `--conc` | Pass the prompt's CONC (max in-flight requests). Default `64`. Native AgentX instead fixes CONC in its YAML. |
 | Tensor parallel | `--tp` | Pass the prompt's TP. Default `1`. |
 | Expert parallel | `--ep` | Pass the prompt's EP for MoE. Default `1`. |
 | Precision | `--precision` | Match the checkpoint (`bf16` default / `fp8` / ...). Keep consistent with `--quantize`. |
@@ -1046,14 +1046,13 @@ Operator server flags have one supported CLI entry point:
 profile, explore, and sweep. Explicit `--max-model-len` / `$MAX_MODEL_LEN`
 wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is accepted for compatibility; baseline uses the first value.
-Use `--conc-sweep-concs` to override the synthetic ladder SWEEP measures (`256,128,64,32,16,8,4,2`). Native AgentX uses `HYPERLOOM_AGENTX=1` with the ordinary workload flags, or `--benchmark-config` for an AgentX workload YAML. Hyperloom archives the resolved workload as `benchmark.yaml`; CONC is fixed per session, so start a separate session to measure another concurrency.
+Native AgentX uses `HYPERLOOM_AGENTX=1` with the ordinary workload flags, or `--benchmark-config` for an AgentX workload YAML. Hyperloom archives the resolved workload as `benchmark.yaml`; CONC is fixed per session, so start a separate session to measure another concurrency.
 
-Concurrency sweeps apply only to serving workloads. For server-less PyTorch
-workloads (`custom` and `xdit`), SWEEP records `non_serving_workload` and proceeds
-to CLOSE. Optimize the declared forward-pass workload; do not propose request
-concurrency as an optimization for these models.
+For server-less PyTorch workloads (`custom` and `xdit`), optimize the declared
+forward-pass workload; do not propose request concurrency as an optimization
+for these models.
 
-Native AgentX supports one node and SGLang, vLLM or ATOM; an ATOM session takes its base from InferenceX's ATOM agentic entries. It rejects `--enable-conc-sweep`,
+Native AgentX supports one node and SGLang, vLLM or ATOM; an ATOM session takes its base from InferenceX's ATOM agentic entries. It rejects
 `--isl`, `--osl`, `--profile-osl`, `--max-model-len`, `--quantize` and
 `--quantize-scheme`. `--reference-script` is its base launch, ahead of the
 recipes; a session no recipe serves and given no script exits 2. Prepare quantized checkpoints before the run.
@@ -1567,7 +1566,7 @@ python3 -m hyperloom session state "$SESSION"
 ```
 
 It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_best`,
-`last_trace_analyze`, `last_conc_sweep`, `explore_last_round`,
+`last_trace_analyze`, `explore_last_round`,
 `phase`, the latest orchestration and specialist Experience KB injections when
 they exist, plus the recent lifecycle events.
 
@@ -1758,3 +1757,5 @@ Report concise status:
 - last kernel optimized, correctness, micro speedup, E2E gain, decision
 - any new `experience_kb_injections` entry: each injected Experience's summary and its section of `prompt_block`
 - whether the process is still running or stopped and why
+- with `--enable-conc-sweep`, the sweep's `status`, points and best speedup from `reports/conc_sweep_summary.json`;
+  the sweep runs after CLOSE (`hyperloom conc-sweep SESSION_DIR` reruns the points not yet measured)

@@ -512,6 +512,21 @@ def test_a_make_before_break_that_is_not_true_or_false_is_refused(given: object)
         run_argv(spec, 1.0, 8)
 
 
+def test_the_operator_asks_for_the_conc_sweep_and_its_points_in_the_spec() -> None:
+    section = {"workload": "inferencex", "conc_sweep": True, "conc_sweep_concs": [64, 4]}
+    argv = run_argv(dataclasses.replace(_spec("hosted"), multibranch=section), 1.0, 8)
+
+    assert "--enable-conc-sweep" in argv and "--conc-sweep-concs=64,4" in argv
+    assert "--enable-conc-sweep" not in run_argv(_spec("hosted"), 1.0, 8)
+
+
+@pytest.mark.parametrize("given", [{"conc_sweep": "yes"}, {"conc_sweep_concs": [0]}, {"conc_sweep_concs": "4,8"}])
+def test_a_conc_sweep_field_of_the_wrong_type_is_refused(given: dict[str, object]) -> None:
+    spec = dataclasses.replace(_spec("hosted"), multibranch={"workload": "inferencex", **given})
+    with pytest.raises(HostedRefused, match="multibranch.conc_sweep"):
+        run_argv(spec, 1.0, 8)
+
+
 #: An AgentX run's workload section: its trace fixes the requests, so it names no sequence lengths.
 AGENTX_WORKLOAD = {"conc": 16, "precision": "fp8"}
 

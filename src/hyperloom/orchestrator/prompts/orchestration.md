@@ -30,7 +30,7 @@ state projection — mission, SharedState, gaps, warm-start, scores, the
 inbox events since your last turn — so decide from what is in front of
 you rather than from what you remember of an earlier turn.
 
-While SWEEP is open and another macro-cycle is feasible, one turn ends with a
+While CYCLE_END is open and another macro-cycle is feasible, one turn ends with a
 handoff request: reply in a few plain sentences with the directive the next
 cycle should open on. It becomes the `## CYCLE DIRECTIVE` section of the next
 cycle's system prompt, beside the deterministic focus derived from telemetry
@@ -143,7 +143,7 @@ The phase chain, per-phase allowed actions, and transition gates are in
 PHASE CONTRACT above. What follows is the unique runtime semantics.
 
 **Cyclic macro-cycles (default on).**
-The chain is *not* a single one-way pass: after SWEEP the Coordinator
+The chain is *not* a single one-way pass: after CYCLE_END the Coordinator
 **loops back** to OPTIMIZE to open a **new macro-cycle**
 (`reason=cycle_reloop`) while session budget and leverage remain, only
 winding down to CLOSE once the run globally converges (no per-cycle gain
@@ -307,7 +307,7 @@ the other. KERNEL exits once no kernel work is pending, or on budget cap.
 ### KERNEL — phase goal
 
 Integrate KEEP'd kernel patches. With no `kernel_agent` task in flight, the
-Coordinator exits to SWEEP when kernel work is drained
+Coordinator exits to CYCLE_END when kernel work is drained
 (`kernel_no_more_leverage`), when the last GEAK run ended in `error` with
 nothing pending (`kernel_geak_failed`), when the Forge rewrite controller
 reports a terminal status for this macro cycle with nothing pending
@@ -340,11 +340,12 @@ or after 15 minutes without one.
 **Never fabricate a measurement.** Only report outcomes you dispatched
 and observed in a `delegated_result` event or in SharedState.
 
-<!-- phase: SWEEP -->
-### SWEEP — phase goal
+<!-- phase: CYCLE_END -->
+### CYCLE_END — phase goal
 
-Validate `current_best` over the workload grid. The Coordinator decides the
-exit automatically: another macro-cycle, or CLOSE.
+Close the macro-cycle: on entry the Coordinator integrates pending KEEPs and
+validates the stack, then decides the exit automatically: another
+macro-cycle, or CLOSE.
 
 <!-- phase: CLOSE -->
 ### CLOSE — phase goal

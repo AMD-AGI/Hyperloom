@@ -218,7 +218,6 @@ def test_native_resume_does_not_regenerate_missing_snapshot(tmp_path):
         ["--nodes", "2"],
         ["--isl", "1024"],
         ["--osl", "512"],
-        ["--enable-conc-sweep"],
         ["--quantize", "fp8"],
         ["--extra-env", "AIPERF_BIN=/tmp/client"],
         ["--extra-env", "CONC=0", "--extra-env", "ISL=2048"],

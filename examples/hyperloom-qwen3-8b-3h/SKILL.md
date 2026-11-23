@@ -117,7 +117,6 @@ Required optimize CLI flags:
 - `--target-gain 30`
 - `--max-hours 3`
 - `--phase-budget-framework-pct 0.50`
-- `--phase-budget-sweep-pct 0.01`
 - `--no-kernel`
 - `--no-enable-conc-sweep`
 - `--no-enable-roofline`
@@ -224,15 +223,15 @@ and the stop reason. Never print API keys, tokens, or custom header values.
    critic subprocesses can import `hyperloom.agents` after changing cwd.
 3. Run it detached the way the harness understands: if `$CLAW_SESSION_ID` is set and your bash tool takes a `run_in_background` parameter, hand the optimizer command to it with `run_in_background=true`, without shell-level detachment (`setsid`, `nohup`, or a trailing `&`); otherwise use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends. In Docker mode that launch still runs inside one attached `docker exec … bash -lc`; never `docker exec -d`.
 4. Pass all required optimize CLI flags in the `python -m hyperloom optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`: the flag is the top of the ladder, while a value reaching the environment from `.env` is indistinguishable from one a previous run left there, and on `--resume-from` the session's recorded workload outranks it.
-5. Include `--phase-budget-framework-pct 0.50` and `--phase-budget-sweep-pct 0.01`
-   in the optimize command. These are the value *before* redistribution: with
-   `--no-kernel`, KERNEL_AGENT is disabled and its freed share is added on top,
-   so `0.50` becomes ~0.99 of wall clock for FRAMEWORK_AGENT. Raising `0.50`
+5. Include `--phase-budget-framework-pct 0.50` in the optimize command. It is the
+   value *before* redistribution: with `--no-kernel`, KERNEL_AGENT is disabled and
+   its freed share is added on top,
+   so `0.50` becomes ~0.97 of wall clock for FRAMEWORK_AGENT. Raising `0.50`
    buys almost nothing — the post-redistribution share is capped at a full wall
    clock, and the excess is discarded.
    Do **not** pass `--no-framework-agent` — that skips OPTIMIZE entirely.
 6. Include `--no-kernel` in the optimize command so the Kernel Agent phase is skipped.
-7. Include `--no-enable-conc-sweep` in the optimize command so the SWEEP-phase post-optimization concurrency sweep is skipped.
+7. Include `--no-enable-conc-sweep` in the optimize command so no post-session concurrency sweep is configured.
 8. Include `--no-enable-roofline` in the optimize command so PRELUDE uses the lighter profile path instead of roofline analysis.
 9. Report the session ID, log path, PID, and initial health check result.
 10. Inspect persisted state on requested status checks; report when work stops.

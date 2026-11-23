@@ -158,7 +158,7 @@ def test_cycle_strategy_planner_avoids_saturated_focus(cyclic_coordinator):
 def test_redirect_advisory_empty_outside_explore(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
-    st.phase = ps.PHASE_SWEEP
+    st.phase = ps.PHASE_CYCLE_END
     st.mark_bottleneck_switch(prev_bottleneck="MoE_fused")
     assert c.conversation._bottleneck_redirect_advisory_block() == ""
 

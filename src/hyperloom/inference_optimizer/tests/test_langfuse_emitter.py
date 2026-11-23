@@ -1866,7 +1866,7 @@ def test_record_status_throttles_unchanged_snapshots(tmp_path, monkeypatch):
     em.record_status(_status(phase="EXPLORE"))  # throttled
     assert em._counts["status_updates_sent"] == 1
 
-    em.record_status(_status(phase="SWEEP"))  # changed -> sent
+    em.record_status(_status(phase="CYCLE_END"))  # changed -> sent
     assert em._counts["status_updates_sent"] == 2
 
 

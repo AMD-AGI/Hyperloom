@@ -16,7 +16,7 @@ specialist-intel, forge-step, GEMM-tuning and trajectory
 Mapping (trace -> phase span -> agent span -> generation)::
 
     Trace                 = one session
-      phase span          = PRELUDE / ENABLEMENT / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / ...
+      phase span          = PRELUDE / ENABLEMENT / FRAMEWORK_AGENT / KERNEL_AGENT / CYCLE_END / ...
         agent span        = component (orchestration / kernel_agent /
                             specialist / critic / geak / forge /
                             proposal_scorer / ...)

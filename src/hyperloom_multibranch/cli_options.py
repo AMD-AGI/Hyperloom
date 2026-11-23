@@ -60,6 +60,8 @@ SWITCH = "store_true"
 LOCAL_MEASUREMENT, HOSTED_MEASUREMENT = "local", "hosted"
 #: The command that runs FINAL and CLOSE alone over a session directory.
 FINAL_ONLY_COMMAND = "final-only"
+#: The command that runs the concurrency sweep of a closed session.
+CONC_SWEEP_COMMAND = "conc-sweep"
 #: The command a host runs a session under, with the campaign spec it injects.
 HOSTED_COMMAND = "hosted"
 
@@ -80,6 +82,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     final_only.add_argument("session_dir", type=Path, help="The session directory of the run to finish.")
     final_only.add_argument("-v", "--verbose", action=SWITCH, help="Log at debug level.")
+    conc_sweep = commands.add_parser(
+        CONC_SWEEP_COMMAND,
+        help=(
+            "Sweep a closed session's root and the commit FINAL chose over the concurrencies of the base's InferenceX"
+            " recipe, measured on this machine; the points already measured are kept."
+        ),
+    )
+    conc_sweep.add_argument("session_dir", type=Path, help="The session directory of a closed run.")
+    conc_sweep.add_argument("-v", "--verbose", action=SWITCH, help="Log at debug level.")
     hosted = commands.add_parser(HOSTED_COMMAND, help="Run under a host that injects the campaign spec and its inputs.")
     hosted_commands = hosted.add_subparsers(dest="hosted_command", required=True)
     hosted_commands.add_parser(
@@ -236,6 +247,19 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Hosted: keep a finished test's sandbox until the next one runs, where 3+ tests fit (one fewer runs).",
+    )
+    run.add_argument(
+        "--enable-conc-sweep",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="After CLOSE, sweep the root and the commit FINAL chose over the base's InferenceX recipe concurrencies.",
+    )
+    run.add_argument(
+        "--conc-sweep-concs",
+        type=_concurrencies,
+        default=(),
+        metavar="C1,C2,...",
+        help="The conc sweep's concurrencies for a base no InferenceX recipe gave; ignored for one that did.",
     )
     run.add_argument(
         "--measurement",
@@ -673,7 +697,14 @@ def settings_from(
         review_gate=args.review_gate,
         inferencex_commit=parse_inferencex_commit(args.inferencex_commit) if args.inferencex_commit else "",
         agentx_early_stop=session_early_stop(os.environ),
+        conc_sweep=args.enable_conc_sweep,
+        conc_sweep_concs=args.conc_sweep_concs,
     )
+
+
+def _concurrencies(value: str) -> tuple[int, ...]:
+    """``C1,C2,...`` as the distinct concurrencies it names, ascending."""
+    return tuple(sorted({int(item) for item in value.split(",")}))
 
 
 def _limit_errors(args: argparse.Namespace) -> list[str]:

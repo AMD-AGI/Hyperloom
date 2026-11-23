@@ -8,7 +8,7 @@
       "ENABLEMENT",
       "FRAMEWORK_AGENT",
       "KERNEL_AGENT",
-      "SWEEP",
+      "CYCLE_END",
       "CLOSE"
     ],
     "dispatch_classes": [
@@ -31,7 +31,6 @@
       "roofline",
       "kernel",
       "baseline",
-      "conc_sweep",
       "enablement",
       "phase",
       "stack",
@@ -50,6 +49,7 @@
       "baseline_over_power_budget",
       "coordinator_exception",
       "custom",
+      "cycle_end_done",
       "emergency",
       "enablement_attempts_exhausted",
       "environment_fault",
@@ -67,8 +67,6 @@
       "signal",
       "supervisor_coordinator_died",
       "supervisor_tick_stalled",
-      "sweep_done",
-      "sweep_failed",
       "target_reached",
       "time_exhausted",
       "time_exhausted_during_prelude",
@@ -78,7 +76,6 @@
     ],
     "dispatch_actions": [
       "baseline",
-      "conc_sweep",
       "explore",
       "gemm_tuning",
       "integrate",
@@ -126,9 +123,7 @@
       "profile",
       "roofline"
     ],
-    "SWEEP": [
-      "conc_sweep"
-    ],
+    "CYCLE_END": [],
     "CLOSE": [
       "report",
       "session_breakdown"
@@ -150,14 +145,13 @@
     "KERNEL_AGENT": [
       "integrate"
     ],
-    "SWEEP": [],
+    "CYCLE_END": [],
     "CLOSE": [
       "report",
       "session_breakdown"
     ]
   },
   "coordinator_internal_actions": [
-    "conc_sweep",
     "kernel_agent",
     "profile",
     "replay_warm_recipe",

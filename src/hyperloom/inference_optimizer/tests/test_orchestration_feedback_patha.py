@@ -479,14 +479,14 @@ def test_short_session_reloop_boundary(monkeypatch, benchmark_timeout, expected_
     now = datetime.now(timezone.utc)
     st = SharedState(
         session_id="t",
-        phase=ps.PHASE_SWEEP,
+        phase=ps.PHASE_CYCLE_END,
         start_ts=(now - timedelta(hours=0.5)).isoformat(),
         max_minutes=2 * 60,
         macro_cycle=0,
         cumulative_gain_validated=5.0,
         gain_at_cycle_start=0.0,
     )
-    st.last_conc_sweep = {"status": "succeeded"}
+    st.cycle_end_settled_cycle = 0
     start_unix = datetime.fromisoformat(st.start_ts).timestamp()
 
     if benchmark_timeout is None:
