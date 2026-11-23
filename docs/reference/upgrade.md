@@ -242,6 +242,8 @@ dispatches a `conc_sweep` task. Update anything that matches on the old names:
   runs); the SWEEP stop reasons no longer occur.
 * Its predicate input is `cycle_end_result` (`settled`, `reloop`) instead of
   `sweep_result`.
+* A session that reached it reports `outcome.stage_reached` `cycle_end` where it
+  reported `conc_sweep`.
 
 Sessions no longer write `reports/conc_sweep_summary.json`,
 `reports/conc_sweep_curve.png`, the `conc_sweep_summary` and

@@ -131,7 +131,9 @@ runs no concurrency sweep. The phase that closes each macro-cycle is
 `CYCLE_END` rather than `SWEEP` in every `phase` value, and its predicate
 inputs are `cycle_end_result` (`settled`, `reloop`) rather than
 `sweep_result`. The SWEEP stop reasons are replaced by `cycle_end_done`, and
-the workflow contract's digest changes with them.
+the workflow contract's digest changes with them. A session that reached the
+phase reports `outcome.stage_reached` `cycle_end` where it reported
+`conc_sweep`.
 
 V6 was the preceding cutover, for the timeline: each action records its own event
 while it runs, so an event's `start_time` is when the work began rather than
