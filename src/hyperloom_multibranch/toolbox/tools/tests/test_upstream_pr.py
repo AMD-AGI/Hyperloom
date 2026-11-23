@@ -152,6 +152,7 @@ async def test_a_bad_repo_is_refused_at_submit(tmp_path: Path) -> None:
         ({"number": 20, "offset": "far"}, "offset must be an integer"),
         ({"number": 20, "offset": -1}, "offset must be 0 or the next_offset of an earlier page"),
         ({"keywords": ["draft"], "offset": 60000}, "offset and file read the diff of one pull request"),
+        ({"keywords": ["draft"], "file": "a.cpp"}, "offset and file read the diff of one pull request"),
     ],
 )
 def test_a_bad_number_is_refused_with_its_reason(params: dict, match: str) -> None:
