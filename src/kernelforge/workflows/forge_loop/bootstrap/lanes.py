@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
 from kernelforge.config import Config
+from kernelforge.utils.import_root import import_name_of, import_path_first
 from kernelforge.workflows.forge_loop.bootstrap.errors import ForgeLoopError
 
 if TYPE_CHECKING:
@@ -183,6 +185,11 @@ def _make_lane_agent_factory(
         # the .so against the source it was built from, so lanes sharing one build cache load each other's binaries
         # and each one measures a kernel it did not write.
         lane_env = child_cache_environment(lane_root.with_name(lane_root.name + _LANE_AITER_CACHE_SUFFIX))
+        if import_name_of(Path(binding.workspace_dir)):
+            # The lane copy stands under the workspace's name in a directory of its own, which has to come before the
+            # one holding the canonical workspace: by that name the lane's session would otherwise import the
+            # canonical workspace, and time a kernel the lane did not write.
+            lane_env["PYTHONPATH"] = import_path_first(lane_root.parent, os.environ.get("PYTHONPATH", ""))
 
         async def session(kernel_path: str, plan: str, *, session_sink: dict | None = None) -> str:
             _assert_lane_session_cwd(

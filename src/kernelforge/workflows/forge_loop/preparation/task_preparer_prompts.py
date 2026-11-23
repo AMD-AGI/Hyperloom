@@ -489,7 +489,8 @@ from pathlib import Path
 import torch
 
 from graph_harness import cuda_graph_bench
-# Import the kernel's STABLE public entry point (adapt this import + call):
+# Import the kernel's STABLE public entry point (adapt this import + call). It has to load from this workspace:
+# preflight refuses a driver that loaded a source file of the campaign from another copy, such as an installed one.
 from your_kernel_module import your_entry_point  # noqa: F401
 
 _SEED = 0
