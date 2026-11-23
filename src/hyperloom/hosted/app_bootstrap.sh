@@ -11,14 +11,16 @@
 #      run here, naming it, instead of at its first write,
 #   3. builds the wheel for that commit in a directory of its own on the container's disk (never on the shared storage,
 #      where another account of the group could put a wheel of its own in its place before the install) and installs
-#      that wheel, and nothing else, into the framework's own Python environment (the one the legacy flow's
-#      install.sh installs into, with the image's torch and ROCm stack), not into a venv of its own: a venv made from
-#      it cannot see that stack. The runtime dependencies are not installed here: the entry runs the wheel's install.sh
-#      before optimize, which resolves them in that environment as the legacy launchers do,
-#   4. sets HYPERLOOM_CODE_REVISION=<sha> and runs `python -m hyperloom hosted run` with that Python.
+#      that wheel, and nothing else, into the framework Python's environment (the one the legacy flow's install.sh
+#      installs into, with the image's torch and ROCm stack) when this account can write it, and otherwise into a
+#      virtual environment beside it, ${TMPDIR:-/tmp}/hyperloom-venv, that sees that stack (below). The runtime
+#      dependencies are not installed here: the entry runs the wheel's install.sh before optimize, which resolves them
+#      in the environment the wheel went into, as the legacy launchers do,
+#   4. sets HYPERLOOM_CODE_REVISION=<sha> and runs `python -m hyperloom hosted run` with the Python of that environment
+#      (the framework's, or the venv's, whose bin directory then leads PATH, ahead of the framework's).
 #
-# The environment records the installed commit, so a restart in the same container installs nothing; a new container
-# builds the wheel again.
+# The environment the wheel went into records the installed commit (.hyperloom-install), so a restart in the same
+# container installs nothing; a new container builds the wheel again.
 #
 # An account that cannot write the framework's environment (a uid other than root, an image mounted read-only) installs
 # into a virtual environment beside it instead, on the container's own disk: ${TMPDIR:-/tmp}/hyperloom-venv, made by the
@@ -28,8 +30,10 @@
 # (hyperloom.measure.runner.bootstrap): --system-site-packages would expose the base interpreter's directories, not
 # those of a framework that is itself a virtual environment (/opt/venv). Its own packages come first. The framework's
 # environment is not written. The stamp and the console scripts live in the new environment, whose bin directory leads
-# PATH, and its Python runs the entry, which hands it to install.sh. When that place cannot be written either, the run
-# ends with a final exit.json naming it.
+# PATH (the framework's bin follows it), and its Python runs the entry, which hands it to install.sh. When that place
+# cannot be written, is not this account's own directory, or the framework Python cannot make the venv there, the run
+# ends with a final exit.json naming it. TMPDIR is taken as it is: one mounted noexec still takes the venv, but the
+# console scripts and extension modules installed there cannot run.
 #
 # A source on this machine (a path or a file:// URL, such as the host's mirror) may belong to another account: in a
 # container that maps one id, a mirror the host's root owns shows as 65534. git refuses to fetch from a repository
@@ -128,13 +132,12 @@ def writable(path):
     return os.access(path, os.W_OK)
 paths = sysconfig.get_paths()
 print(int(all(writable(path) for path in (sys.prefix, paths["purelib"], paths["platlib"], paths["scripts"]))))
-')" || fail_final "the framework Python $framework_py does not run"
+')" || fail "the framework Python $framework_py does not run"
 
 venv_dir=""
 if [[ "$framework_writable" != "1" ]]; then
   venv_parent="${TMPDIR:-/tmp}"
   venv_dir="$venv_parent/hyperloom-venv"
-  echo "hosted bootstrap: this account (uid $EUID) cannot write the environment of $framework_py; installing into $venv_dir" >&2
   require_writable "the place for a virtual environment beside the framework's (TMPDIR)" "$venv_parent"
   # One left by an earlier start of this container is reused only when it is this account's own directory.
   if [[ -e "$venv_dir" || -L "$venv_dir" ]] && [[ -L "$venv_dir" || ! -d "$venv_dir" || ! -O "$venv_dir" ]]; then
@@ -233,6 +236,7 @@ install_into_framework() {
   local wheels=("$work/out"/*.whl) install=("${pip[@]}")
   [[ ${#wheels[@]} -eq 1 && -f "${wheels[0]}" ]] || fail "expected exactly one wheel in $work/out"
   if [[ -n "$venv_dir" ]]; then
+    echo "hosted bootstrap: this account (uid $EUID) cannot write the environment of $framework_py; installing into $venv_dir" >&2
     make_venv
     install=("$venv_dir/bin/python" -m pip --disable-pip-version-check --no-input)
   fi
@@ -245,12 +249,17 @@ install_into_framework() {
 if [[ "$(cat "$stamp" 2>/dev/null || true)" != "$sha" ]]; then
   install_into_framework
 fi
-[[ -z "$venv_dir" ]] || framework_py="$venv_dir/bin/python"
+# The entry runs with the Python of the environment the wheel went into; the framework's bin stays on PATH either way.
+entry_py="$framework_py"
+path_head="$(dirname "$framework_py")"
+if [[ -n "$venv_dir" ]]; then
+  entry_py="$venv_dir/bin/python"
+  path_head="$venv_dir/bin:$path_head"
+fi
 
 export HYPERLOOM_CODE_REVISION="$sha"
 if [[ "$in_venv" == "1" ]]; then
   export VIRTUAL_ENV="$env_prefix"
 fi
-framework_bin="$(dirname "$framework_py")"
-export PATH="$framework_bin:$PATH"
-exec "$framework_py" -m hyperloom hosted run
+export PATH="$path_head:$PATH"
+exec "$entry_py" -m hyperloom hosted run

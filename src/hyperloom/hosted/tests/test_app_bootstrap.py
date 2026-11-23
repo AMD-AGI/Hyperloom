@@ -6,6 +6,7 @@ source on this machine that another account owns, which the fetch alone trusts, 
 
 from __future__ import annotations
 
+import ensurepip
 import json
 import os
 import shutil
@@ -167,12 +168,15 @@ def test_a_directory_put_where_exit_json_goes_is_never_written_into(tmp_path):
 
 
 _STUB = """#!/bin/bash
-# A stand-in for the framework Python: answers the two probes and records every other call.
+# A stand-in for the framework Python: answers the probes and records every other call; FAKE_PROBE_FAILS makes the
+# writability probe fail as a Python that does not run would, FAKE_VENV_FAILS makes `-m venv` fail after its record.
 if [[ "$1" == "-c" ]]; then
+  [[ "$2" != *W_OK* || -z "${FAKE_PROBE_FAILS:-}" ]] || exit 1
   case "$2" in *W_OK*) echo "${FAKE_WRITABLE:-1}" ;; *base_prefix*) echo 1 ;; *) echo "$FAKE_PREFIX" ;; esac
   exit 0
 fi
 echo "$*" >>"$FAKE_LOG"
+[[ "$1 $2" != "-m venv" || -z "${FAKE_VENV_FAILS:-}" ]] || exit 1
 if [[ " $* " == *" wheel "* ]]; then
   while [[ "$1" != "-w" ]]; do shift; done
   : >"$2/hyperloom-0-py3-none-any.whl"
@@ -422,7 +426,7 @@ _FILES = {
         "spec = importlib.util.find_spec('framework_pkg')\n"
         "report = {'argv': sys.argv[1:], 'executable': sys.executable, 'prefix': sys.prefix,\n"
         "          'base_prefix': sys.base_prefix, 'framework_pkg': spec.origin if spec else None,\n"
-        "          'path0': os.environ['PATH'].split(os.pathsep)[0], 'virtual_env': os.environ.get('VIRTUAL_ENV'),\n"
+        "          'path': os.environ['PATH'].split(os.pathsep), 'virtual_env': os.environ.get('VIRTUAL_ENV'),\n"
         "          'revision': os.environ.get('HYPERLOOM_CODE_REVISION'), 'hyperloom': __file__}\n"
         "open(os.environ['REPORT'], 'w').write(json.dumps(report))\n"
     ),
@@ -527,7 +531,10 @@ def test_a_framework_this_account_cannot_write_gets_a_venv_beside_it_that_sees_i
     venv = tmp_path / "container-tmp" / "hyperloom-venv"
     assert report["argv"] == ["hosted", "run"]
     assert report["executable"] == str(venv / "bin" / "python") and report["prefix"] == str(venv)
-    assert report["path0"] == str(venv / "bin") and report["virtual_env"] == str(venv)
+    assert report["path"][:2] == [str(venv / "bin"), str(tmp_path / "read-only-framework" / "bin")], (
+        "the venv's bin leads PATH and the framework's bin stays on it, behind"
+    )
+    assert report["virtual_env"] == str(venv)
     assert Path(report["hyperloom"]).is_relative_to(venv), "Hyperloom is installed into the new environment"
     assert report["framework_pkg"] and Path(report["framework_pkg"]).is_relative_to(framework_venv), (
         "the framework's own package is found where the image has it"
@@ -547,6 +554,7 @@ def test_a_restart_reuses_the_venv_and_a_new_commit_makes_it_anew(tmp_path, fram
     code, _, stderr, report = _read_only_run(tmp_path, framework_venv, package_source)
     assert code == 0 and report["prefix"] == str(venv), stderr
     assert (venv / "left-by-the-first-start").exists(), "a restart of the same commit installs nothing"
+    assert "installing into" not in stderr, "and does not say it does"
     (package_source / "another").write_text("")
     _git(package_source, "add", "another")
     _git(package_source, "commit", "-q", "-m", "next")
@@ -579,11 +587,26 @@ def test_a_venv_path_that_is_not_this_accounts_directory_ends_the_run_for_good(t
 
 @pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
 def test_a_framework_python_that_cannot_make_a_venv_ends_the_run_for_good(tmp_path, source):
+    code, stderr, _, calls = _framework_run(tmp_path, source, FAKE_WRITABLE="0", FAKE_VENV_FAILS="1")
+    _expect_final(code, _exit_file(tmp_path), stderr, "cannot make a virtual environment in")
+    assert [c for c in calls if c.startswith("-m venv --clear --without-pip ")]
+    assert not [c for c in calls if " install " in c]
+
+
+@pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
+def test_a_venv_the_pth_step_cannot_complete_in_ends_the_run_for_good(tmp_path, source):
     code, stderr, _, calls = _framework_run(tmp_path, source, FAKE_WRITABLE="0")
-    # The stub makes no environment, so the .pth step finds no interpreter in it.
+    # The stub's `-m venv` succeeds and makes nothing, so the .pth step finds no interpreter in the venv.
     _expect_final(code, _exit_file(tmp_path), stderr, "hyperloom-venv see the framework's packages")
     assert [c for c in calls if c.startswith("-m venv --clear --without-pip ")]
     assert not [c for c in calls if " install " in c]
+
+
+@pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
+def test_a_framework_python_whose_probe_does_not_run_is_left_to_a_restart(tmp_path, source):
+    code, stderr, _, calls = _framework_run(tmp_path, source, FAKE_PROBE_FAILS="1")
+    assert (code, _exit_file(tmp_path)) == (1, None), stderr
+    assert "does not run" in stderr and calls == []
 
 
 def _exit_file(tmp_path):
@@ -612,3 +635,69 @@ def test_the_bootstrap_itself_finds_that_this_account_cannot_write_the_framework
             directory.chmod(directory.stat().st_mode | 0o200)
     assert code == 0 and exit_file is None, stderr
     assert report["prefix"] == str(tmp_path / "container-tmp" / "hyperloom-venv") and report["framework_pkg"]
+
+
+def _plain_framework(root: Path, *venv_args: str) -> Path:
+    """A framework environment of this account's own, made by ``python -m venv`` with ``venv_args``."""
+    subprocess.run([sys.executable, "-m", "venv", *venv_args, str(root)], check=True, capture_output=True, timeout=300)
+    return root
+
+
+def _framework_path(framework: Path, name: str) -> Path:
+    python = framework / "bin" / "python"
+    done = subprocess.run(
+        [str(python), "-c", f"import sysconfig; print(sysconfig.get_path({name!r}))"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return Path(done.stdout.strip())
+
+
+@pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
+@pytest.mark.parametrize("layout", ["complete", "site-packages-not-made-yet"])
+def test_the_real_probe_keeps_a_framework_this_account_can_write_on_the_old_path(tmp_path, package_source, layout):
+    """The real probe, with no stand-in, on a framework this account can write: the wheel and the stamp go into it and
+    its Python runs the entry. A framework whose site-packages does not exist yet (pip makes it) is writable through
+    the nearest directory above it."""
+    framework = tmp_path / "writable-framework"
+    env = {}
+    if layout == "complete":
+        _plain_framework(framework)
+    else:
+        _plain_framework(framework, "--without-pip")
+        _framework_path(framework, "purelib").rmdir()
+        bundled = sorted((Path(ensurepip.__file__).parent / "_bundled").glob("pip-*.whl"))
+        if not bundled:
+            pytest.skip("this Python carries no bundled pip wheel")
+        env["PYTHONPATH"] = str(bundled[-1])
+    code, exit_file, stderr, report = _read_only_run(
+        tmp_path, framework, package_source, PYTHON=str(framework / "bin" / "python"), **env
+    )
+    assert code == 0 and exit_file is None, stderr
+    assert report["executable"] == str(framework / "bin" / "python") and report["prefix"] == str(framework)
+    assert report["path"][0] == str(framework / "bin") and report["virtual_env"] == str(framework)
+    assert Path(report["hyperloom"]).is_relative_to(framework), "Hyperloom is installed into the framework"
+    sha = _git(package_source, "rev-parse", "HEAD")
+    assert (framework / ".hyperloom-install").read_text().strip() == sha
+    assert not (tmp_path / "container-tmp" / "hyperloom-venv").exists() and "installing into" not in stderr
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes a directory without write permission")
+@pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
+@pytest.mark.parametrize("read_only", ["purelib", "scripts"])
+def test_the_real_probe_asks_about_each_directory_pip_installs_into(tmp_path, package_source, read_only):
+    """A framework whose prefix this account can write but one of the directories pip installs into it cannot."""
+    framework = _plain_framework(tmp_path / "framework-with-one-read-only-directory")
+    directory = _framework_path(framework, read_only)
+    directory.chmod(directory.stat().st_mode & ~0o222)
+    try:
+        code, exit_file, stderr, report = _read_only_run(
+            tmp_path, framework, package_source, PYTHON=str(framework / "bin" / "python")
+        )
+    finally:
+        directory.chmod(directory.stat().st_mode | 0o200)
+    venv = tmp_path / "container-tmp" / "hyperloom-venv"
+    assert code == 0 and exit_file is None, stderr
+    assert report["prefix"] == str(venv) and (venv / ".hyperloom-install").is_file()
+    assert not (framework / ".hyperloom-install").exists()
