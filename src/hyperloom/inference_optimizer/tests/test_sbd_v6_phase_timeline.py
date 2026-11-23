@@ -413,14 +413,12 @@ def test_a_kernel_phase_ruling_is_filed_on_the_thing_it_ruled_on(tmp_path):
             verdict="reject",
             reasoning="the kernel is already fused",
             confidence=0.8,
-            failure_reason_code="no_headroom",
         ),
     )
 
     review = _ext("KERNEL_AGENT")["proposals"]["rows"][0]["critic_review"]
     assert review["verdict"] == "reject"
     assert review["confidence"] == 0.8
-    assert review["failure_reason_code"] == "no_headroom"
 
 
 def test_a_ruling_reaching_a_proposal_after_its_phase_exited_still_lands_on_it(tmp_path):

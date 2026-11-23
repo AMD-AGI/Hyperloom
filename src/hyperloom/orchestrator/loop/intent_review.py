@@ -33,7 +33,6 @@ def variant_review_rows(payload: Mapping[str, Any] | None) -> list[dict[str, Any
                 "variant_name": variant,
                 "verdict": str(fields.get("verdict") or ""),
                 "reason": str(fields.get("rationale") or fields.get("reasoning") or ""),
-                "failure_reason_code": str(fields.get("failure_reason_code") or ""),
             }
         )
     return rows
@@ -60,7 +59,6 @@ def _record_phase_proposal_review(pending: Any, ruling: CriticRuling) -> None:
             source=str(fields.get("source") or ""),
             reasoning=str(ruling.reasoning or ""),
             confidence=fields.get("confidence"),
-            failure_reason_code=fields.get("failure_reason_code"),
             advisory=ruling.advisory,
             variants=ruling.variant_verdicts,
         )
@@ -115,7 +113,6 @@ def record_critic_review(router: Any, pending: Any, ruling: CriticRuling) -> Non
             reviewer=REVIEWER_CRITIC if grounded else REVIEWER_CRITIC_UNAVAILABLE,
             reason=reason,
             confidence=fields.get("confidence"),
-            failure_reason_code=str(fields.get("failure_reason_code") or ""),
             advisory=ruling.advisory,
             variants=ruling.variant_verdicts,
         ),

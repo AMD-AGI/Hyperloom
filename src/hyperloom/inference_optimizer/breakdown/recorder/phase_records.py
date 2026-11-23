@@ -270,7 +270,6 @@ class ProposalReview:
     source: str = ""
     reasoning: Any = None
     confidence: Any = None
-    failure_reason_code: Any = None
     advisory: Mapping[str, Any] | None = None
     variants: Any = None
 
@@ -284,7 +283,6 @@ class ProposalReview:
                 "source": str(self.source or ""),
                 "reasoning": _clip(self.reasoning, MAX_REASON_CHARS),
                 "confidence": _float_or_none(self.confidence),
-                "failure_reason_code": _text_or_none(self.failure_reason_code),
                 "required_evidence": [str(item) for item in _as_list(advice.get("required_evidence"))],
                 "risks": [dict(risk) for risk in _as_list(advice.get("risks")) if isinstance(risk, Mapping)],
                 "advice_text": _text_or_none(advice.get("advice_text")),

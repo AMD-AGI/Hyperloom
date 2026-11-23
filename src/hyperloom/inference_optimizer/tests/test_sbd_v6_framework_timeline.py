@@ -539,7 +539,6 @@ def test_a_proposal_review_carries_exactly_the_recorded_keys(_bound_session):
         "reviewer",
         "reason",
         "confidence",
-        "failure_reason_code",
         "concerns",
         "reviewed_at",
     }

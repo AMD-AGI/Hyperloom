@@ -52,8 +52,8 @@ def _iteration_rows(iterations: list[dict[str, Any]]) -> list[list[Any]]:
 def _review_rows(iterations: list[dict[str, Any]]) -> list[list[Any]]:
     """One row per framework ruling, tagged with the pass that handed it down.
 
-    Both verdicts are carried: a reject the loop held to an advise-only rule
-    still ran, and reporting either alone misreads what happened.
+    The effective verdict is shown only when the emitted envelope carried a
+    different one from the review.
     """
     rows: list[list[Any]] = []
     for seq, it in enumerate(iterations, start=1):
@@ -69,7 +69,6 @@ def _review_rows(iterations: list[dict[str, Any]]) -> list[list[Any]]:
                     verdict or "—",
                     effective if effective and effective != verdict else "",
                     review.get("confidence"),
-                    review.get("failure_reason_code") or "",
                     str(review.get("reasoning") or "")[:_SUMMARY_CELL],
                 ]
             )
@@ -121,7 +120,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     parts: list[str] = ["**Passes**\n\n" + passes, ""]
 
     reviews = md_table(
-        ["#", "proposal", "candidate", "arm", "verdict", "effective", "conf", "failure_code", "reasoning"],
+        ["#", "proposal", "candidate", "arm", "verdict", "effective", "conf", "reasoning"],
         _review_rows(iterations),
     )
     if reviews:

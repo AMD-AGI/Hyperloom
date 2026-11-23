@@ -306,7 +306,6 @@ class CriticReview:
     reviewer: str = REVIEWER_CRITIC
     reason: str = ""
     confidence: Any = None
-    failure_reason_code: str = ""
     advisory: Mapping[str, Any] | None = None
     variants: Iterable[Mapping[str, Any]] | None = None
 
@@ -518,7 +517,6 @@ class FrameworkEventRecorder:
             "reviewer": review.reviewer,
             "reason": review.reason,
             "confidence": _float_or_none(review.confidence),
-            "failure_reason_code": review.failure_reason_code,
             "concerns": [],
             "reviewed_at": _now(),
         }

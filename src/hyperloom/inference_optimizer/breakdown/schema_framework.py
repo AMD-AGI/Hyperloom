@@ -94,7 +94,6 @@ class V6FrameworkCriticVariantRuling(TypedDict, total=False):
     variant_name: str
     verdict: str
     reason: str
-    failure_reason_code: str
 
 
 class V6FrameworkCriticReviewOutcome(TypedDict, total=False):
@@ -122,7 +121,6 @@ class V6FrameworkCriticReview(TypedDict, total=False):
     reviewer: str
     reason: str
     confidence: float | None
-    failure_reason_code: str
     concerns: list[str]
     reviewed_at: str
     variants: list[V6FrameworkCriticVariantRuling]

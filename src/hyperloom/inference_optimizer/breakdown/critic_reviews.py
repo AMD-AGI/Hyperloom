@@ -68,7 +68,6 @@ def _ruling(verdict: dict[str, Any], effective: dict[str, Any]) -> dict[str, Any
         ),
         "reasoning": str(verdict.get("reasoning") or ""),
         "confidence": _first(verdict.get("confidence")),
-        "failure_reason_code": _first(verdict.get("failure_reason_code")),
         "required_evidence": _string_list(verdict.get("required_evidence")),
         "risks": [
             {

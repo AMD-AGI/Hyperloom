@@ -235,7 +235,6 @@ class V6PhaseProposalReview(TypedDict, total=False):
     source: str
     reasoning: str
     confidence: float | None
-    failure_reason_code: str | None
     required_evidence: list[str]
     risks: list[dict[str, Any]]
     advice_text: str | None

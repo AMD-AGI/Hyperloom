@@ -1221,7 +1221,6 @@ def test_a_review_records_the_grounds_the_critic_stated(session_dir: Path):
             "verdict": "advise",
             "reasoning": "the batch size is untested at this sequence length",
             "confidence": 0.4,
-            "failure_reason_code": "insufficient_evidence",
             "required_evidence": ["a short run at conc=4"],
             "risks": [{"severity": "medium", "risk": "may raise the memory floor"}],
             "advice_text": "run the shortest variant first",
@@ -1234,7 +1233,6 @@ def test_a_review_records_the_grounds_the_critic_stated(session_dir: Path):
     assert review["verdict"] == "advise"
     assert review["reviewer"] == "critic"
     assert review["confidence"] == 0.4
-    assert review["failure_reason_code"] == "insufficient_evidence"
     assert review["required_evidence"] == ["a short run at conc=4"]
     assert review["risks"] == [{"severity": "medium", "risk": "may raise the memory floor"}]
     assert review["advice_text"] == "run the shortest variant first"
@@ -1330,7 +1328,7 @@ def test_a_patch_review_lands_on_the_candidate_it_judged(session_dir: Path):
             ruling=CriticRuling(
                 verdict="reject",
                 reasoning="touches the serving loop",
-                payload={"verdict": "reject", "failure_reason_code": "serving_loop_touched"},
+                payload={"verdict": "reject"},
             ),
         )
     )

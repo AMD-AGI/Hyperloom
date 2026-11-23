@@ -882,14 +882,6 @@ async def test_user_prompt_includes_judge_bundle_and_instructions(
     assert '"abc"' in user_text  # proposal msg_id from judge bundle
 
 
-def test_the_output_schema_asks_for_the_rule_the_verdict_rests_on():
-    """The Critic is told to reply with *exactly* this schema, and the Coordinator holds a reject to the verdict its cited rule declared by reading `failure_reason_code`."""
-    schema, _, rules = _REVIEW_OUTPUT_INSTRUCTIONS.partition("Rules (mirror")
-
-    assert '"failure_reason_code"' in schema
-    assert "failure_reason_code" in rules
-
-
 # Static context propagation — backend sources model/framework from manifest.json.
 def _write_manifest(session_dir: Path, payload: dict[str, Any]) -> Path:
     """Write a minimal manifest.json the backend can ingest."""

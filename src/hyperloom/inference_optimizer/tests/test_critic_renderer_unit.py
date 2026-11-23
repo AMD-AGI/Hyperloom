@@ -78,6 +78,6 @@ def test_both_tables_label_the_sequence_column_as_a_pass_number():
 
     assert headers == [
         "| # | phase | macro_cycle | topic | rulings | said |",
-        "| # | proposal | candidate | arm | verdict | effective | conf | failure_code | reasoning |",
+        "| # | proposal | candidate | arm | verdict | effective | conf | reasoning |",
     ]
     assert "**Artifacts of the last pass** (pass 1)" in out.markdown_block
