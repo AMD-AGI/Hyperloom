@@ -14,9 +14,8 @@ LLM proposes one change to the scheduling playbook into the pool beside the arch
 curates the RSI lesson pool the knowledge steps published the session's learnings to (:func:`curate_lessons`), steps
 that never stop CLOSE; a CLOSE whose knowledge steps archived no tree asks neither. A later CLOSE of a session whose
 earlier CLOSE archived its tree (:func:`archived_before`), a resumed session's or a ``final-only``'s, runs none of these steps and reports each as :data:`ARCHIVED_BEFORE`; ``session_breakdown.json``, which also counts how the merges went and how each met a
-conflicting patch from the integrator's merge log, the knowledge steps' receipts and :data:`IMAGE_CHECK_FILE`, the
-whole image check the session ran before its first phase, land in ``MB-reports/``, and the dashboard is rebuilt a last
-time with the queue the stop left.
+conflicting patch from the integrator's merge log, and the knowledge steps' receipts land in ``MB-reports/``, and the
+dashboard is rebuilt a last time with the queue the stop left.
 """
 
 from __future__ import annotations
@@ -29,7 +28,6 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.jsonio import read_jsonl
-from hyperloom.common.outside_facts.image_check import ImageCheckReport
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom.measure.compile import BlobError, BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
@@ -67,8 +65,6 @@ from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_close_knowledge
 #: The single-lineage CLOSE's status when no Recipe KB is configured.
 KB_DISABLED = "disabled"
 KB_FAILED = "failed"
-#: The whole image check's report, under ``MB-reports/``.
-IMAGE_CHECK_FILE = "image_check.json"
 #: Why a CLOSE writes no knowledge step: an earlier CLOSE of the session archived its search tree, and the archive, the
 #: playbook trials and the RSI pools keep what one session wrote once.
 ARCHIVED_BEFORE = "an earlier CLOSE of this session archived its search tree"
@@ -183,16 +179,14 @@ class CloseAuthoring:
 @dataclass(frozen=True)
 class ExportSources:
     """What CLOSE exports from: the scheduler's blackboard handle, the repository and the blob store that hold the
-    chosen commit's recipe and its files, the session's dashboard, the image check it ran before its first phase,
-    ``None`` for a FINAL and CLOSE over a session that ended before FINAL, which run none, PRELUDE's warm-start
-    leads, none for a session that stopped before them, and an AgentX session's checkpoint (``None`` in an InferenceX
+    chosen commit's recipe and its files, the session's dashboard, PRELUDE's warm-start leads, none for a session that
+    stopped before them, and an AgentX session's checkpoint (``None`` in an InferenceX
     session)."""
 
     blackboard: Blackboard
     repo: ExperimentRepo
     blobs: BlobStore
     dashboard: SessionDashboard
-    image_check: ImageCheckReport | None
     warm_leads: tuple[WarmLead, ...]
     checkpoint: CheckpointScope | None = None
 
@@ -231,7 +225,6 @@ class SessionExports:
         self._repo = sources.repo
         self._blobs = sources.blobs
         self._dashboard = sources.dashboard
-        self._image_check = sources.image_check
         self._warm_leads = sources.warm_leads
         self._checkpoint = sources.checkpoint
         self._metric = metric
@@ -240,8 +233,6 @@ class SessionExports:
     async def export(self, final: FinalChoice | None, queue: QueueState | None) -> CloseExports:
         """Write the exports; ``queue`` is what the toolbox reported after the stop."""
 
-        if self._image_check is not None:
-            await asyncio.to_thread(self._image_check.write, self._layout.reports / IMAGE_CHECK_FILE)
         snapshot = await self._blackboard.snapshot()
         chosen = await self._final_recipe(final)
         kb_write_back = await self._publish(snapshot, chosen)
@@ -328,7 +319,6 @@ class SessionExports:
 
 __all__ = [
     "KB_DISABLED",
-    "IMAGE_CHECK_FILE",
     "KB_FAILED",
     "ARCHIVED_BEFORE",
     "CloseExports",

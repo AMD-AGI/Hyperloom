@@ -17,7 +17,6 @@ from pathlib import Path
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
 from hyperloom_common.env import EnvValueError
 from hyperloom_common.shared_storage import setgid_warnings, writable_problems
-from hyperloom.common.outside_facts.image_check import mode_from_environment
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
@@ -106,12 +105,10 @@ def require_writable_storage(env: Mapping[str, str], dirs: Mapping[str, Path]) -
 
 
 def require_session_environment(settings: RunSettings, env: Mapping[str, str]) -> None:
-    """Raise ValueError when ``env`` contradicts the workload of ``settings``, cannot price its dollar cap or sets an
-    image check mode there is none of."""
+    """Raise ValueError when ``env`` contradicts the workload of ``settings`` or cannot price its dollar cap."""
 
     require_workload_switch(settings.workload, env)
     require_priced_models(settings.max_llm_usd, env)
-    mode_from_environment(env)
 
 
 def hosted_runner_cache(env: Mapping[str, str]) -> Path:

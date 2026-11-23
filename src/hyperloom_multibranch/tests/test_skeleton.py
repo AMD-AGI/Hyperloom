@@ -40,8 +40,6 @@ from hyperloom_common.jsonio import read_jsonl
 from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom_common.proctree import running
-from hyperloom.common.outside_facts.image_check import FactResult, ImageCheckFailed, ImageCheckMode, ImageCheckReport
-from hyperloom.common.outside_facts.image_check_eval import Status
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import (
     NOT_REPRODUCED,
@@ -130,7 +128,7 @@ from hyperloom_multibranch.scheduling.explore import (
     FORK_NOT_LANDED,
     OPEN_CUT_REASON,
 )
-from hyperloom_multibranch.scheduling.exports import ARCHIVED_BEFORE, IMAGE_CHECK_FILE
+from hyperloom_multibranch.scheduling.exports import ARCHIVED_BEFORE
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL, PRIMARY_POINT_ONLY
 from hyperloom_multibranch.scheduling import judge
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
@@ -245,14 +243,6 @@ WORKLOAD = Workload(
 )
 #: The same workload as an AgentX trace replay.
 AGENTX = replace(WORKLOAD, inferencex=None)
-#: What the session's image check finds: one fact of the rule pack that does not hold here, under the default mode.
-IMAGE_CHECK = ImageCheckReport(
-    ImageCheckMode.WARN,
-    rule_pack_identity(),
-    "2023-11-14T22:13:20Z",
-    {"python": "/usr/bin/python3"},
-    (FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone"),),
-)
 #: How the session's peers launch its agents and tests: all unconfined, as no account is configured and no bubblewrap
 #: is found.
 ISOLATION = LaunchIsolation(
@@ -457,7 +447,6 @@ class Stage:
     critic: Callable[[UsageSink], FixReviewer] = lambda _usage: RefusingCritic()
     author: ScriptedCompletion = field(default_factory=ScriptedCompletion)
     learnings: LearningRecall | None = None
-    image_check: Callable[[], ImageCheckReport] = lambda: IMAGE_CHECK
     isolation: LaunchIsolation = ISOLATION
     dossier_pass: DossierPass | None = None
     dev_leases: DevLeases | None = None
@@ -594,10 +583,9 @@ class Stage:
         await then(branch, head)
 
     async def run(self) -> SessionOutcome:
-        """Run the session, its image check answered by ``image_check`` instead of this environment."""
+        """Run the session."""
 
-        with self._polls_on_virtual_time() as patch:
-            patch.setattr(lifecycle, "run_image_check", self.image_check)
+        with self._polls_on_virtual_time():
             return await self._session().run()
 
     async def finish(self, ended: SessionStopReason, *, restart: bool = False) -> SessionOutcome:
@@ -613,8 +601,7 @@ class Stage:
 
         if deadline is None:
             deadline = deadline_after_downtime(self.layout, self.time.now())
-        with self._polls_on_virtual_time() as patch:
-            patch.setattr(lifecycle, "run_image_check", self.image_check)
+        with self._polls_on_virtual_time():
             return await self._session().resume(ended, deadline)
 
     @contextlib.contextmanager
@@ -806,8 +793,6 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     manifest = json.loads(stage.layout.manifest.read_text())
     assert set(manifest["code_version"]) == {"package", "git_sha"} and manifest["metric"] == GRADED_OUTPUT
     assert manifest["rule_pack"] == rule_pack_identity()
-    assert manifest["image_check"] == IMAGE_CHECK.summary()
-    assert json.loads((stage.layout.reports / IMAGE_CHECK_FILE).read_text()) == IMAGE_CHECK.to_json()
     assert manifest["agent_isolation"] == json.loads(stage.layout.report.read_text())["agent_isolation"]
     assert read_manifest(stage.layout.manifest).agent_isolation == ISOLATION
     assert "A" + ISOLATION.line()[1:] in stage.layout.report_markdown.read_text().splitlines()
@@ -1228,23 +1213,6 @@ async def test_the_profile_of_a_replayed_start_commit_is_stopped_before_final_wh
 
     assert outcome.stop_reason is SessionStopReason.JUDGE_STOPPED
     assert "profile" in order and "stop" in order[order.index("profile") : order.index("final")]
-
-
-def _fails_strictly() -> ImageCheckReport:
-    raise ImageCheckFailed(replace(IMAGE_CHECK, mode=ImageCheckMode.STRICT))
-
-
-async def test_a_strict_image_check_that_fails_stops_the_session_before_its_manifest_and_any_phase(
-    tmp_path: Path,
-) -> None:
-    stage = _stage(tmp_path)
-    stage.image_check = _fails_strictly
-
-    with pytest.raises(ImageCheckFailed, match="sglang.renamed-flag"):
-        await stage.run()
-
-    assert not stage.layout.manifest.exists() and not stage.layout.report.exists()
-    assert stage.judge.calls == []
 
 
 async def test_a_stop_signal_skips_to_close_and_stops_every_branch(tmp_path: Path) -> None:
