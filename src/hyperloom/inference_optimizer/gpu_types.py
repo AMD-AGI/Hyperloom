@@ -139,7 +139,12 @@ def _board_framework_error(gpu_type: str, framework: str) -> str | None:
 #: has not validated.
 _PRODUCT_REQUIRED_GFX = frozenset({"gfx1100", "gfx1101", "gfx1102"})
 
-_MASK_HINT = "If the host has other GPUs, set ROCR_VISIBLE_DEVICES to the GPUs this session should use."
+#: Preflight drops ROCR_VISIBLE_DEVICES and HIP_VISIBLE_DEVICES from .env, so only the launching shell's value counts.
+_MASK_HINT = (
+    "If the host has other GPUs, give the container only the /dev/dri render nodes of the GPUs this session should "
+    "use, or export ROCR_VISIBLE_DEVICES with their indices in the shell that launches Hyperloom (a value in .env is "
+    "ignored)."
+)
 
 
 def _visible_gpu(agent: GpuAgent) -> str:
@@ -229,7 +234,8 @@ def product_launch_error(
         if agents is None:
             seen, fix = "could not run", "Put rocminfo on PATH and give"
         else:
-            seen, fix = "lists no GPU", "Check that ROCR_VISIBLE_DEVICES does not hide the card, and give"
+            seen = "lists no GPU"
+            fix = "Check that ROCR_VISIBLE_DEVICES in the launching shell does not hide the card, and give"
         return (
             f"{named} is identified by its nameplate or PCI ID, but rocminfo {seen}, so the card is unconfirmed. "
             f"{fix} the session the card's /dev/kfd and /dev/dri nodes."

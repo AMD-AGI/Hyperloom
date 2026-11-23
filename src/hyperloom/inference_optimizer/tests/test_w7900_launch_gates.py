@@ -48,7 +48,11 @@ _ROCMINFO_4X_W7900 = Path(__file__).parent / "fixtures" / "rocminfo_4x_w7900_dua
 
 _W7900_IDS = "w7900 (PCI 1002:7448 or 1002:744a)"
 _SESSION = "the session's GPU type"
-_MASK_HINT = "If the host has other GPUs, set ROCR_VISIBLE_DEVICES to the GPUs this session should use."
+_MASK_HINT = (
+    "If the host has other GPUs, give the container only the /dev/dri render nodes of the GPUs this session should "
+    "use, or export ROCR_VISIBLE_DEVICES with their indices in the shell that launches Hyperloom (a value in .env is "
+    "ignored)."
+)
 
 
 def _error(gpu_type, agents, *, framework="vllm", resumed=False, remote=False):
@@ -78,6 +82,13 @@ def test_w7900_on_another_gfx1100_board_is_refused(agent):
     assert _error("w7900", [agent]) == (
         f"--gpu-type w7900 is {_W7900_IDS}, but the visible GPU is {agent.marketing_name!r}. {_MASK_HINT}"
     )
+
+
+@pytest.mark.parametrize("name", ["ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"])
+def test_a_device_mask_in_dotenv_is_ignored_as_the_refusals_say(name):
+    from hyperloom.common.env_safety import is_allowed_dotenv_key
+
+    assert not is_allowed_dotenv_key(name)
 
 
 @pytest.mark.parametrize("agent", [RX_7800_XT, RX_7600])
@@ -156,8 +167,8 @@ def test_w7900_needs_its_nameplate_or_pci_id_and_neither_may_disagree(gpu_type, 
         ),
         (
             [],
-            "but rocminfo lists no GPU, so the card is unconfirmed. Check that ROCR_VISIBLE_DEVICES does not hide "
-            "the card, and give the session the card's /dev/kfd and /dev/dri nodes.",
+            "but rocminfo lists no GPU, so the card is unconfirmed. Check that ROCR_VISIBLE_DEVICES in the launching "
+            "shell does not hide the card, and give the session the card's /dev/kfd and /dev/dri nodes.",
         ),
     ],
     ids=["no-rocminfo", "no-gpu"],

@@ -280,7 +280,9 @@ never a bare `gfx1100`. A `--gpu-type w7900` the probe contradicts, or another `
 code 2, and so does a local launch where `rocminfo` cannot run or lists no GPU. The kernel phase also needs a GEAK
 checkout that identifies the card as `w7900`; pass `--no-kernel` to run without it. A `gfx1100`, `gfx1101` or `gfx1102`
 GPU that names no supported board (a W7800 or an RX 7900, say) is refused unless `--gpu-type` names a board on that
-ISA; set `ROCR_VISIBLE_DEVICES` to leave such a card out. `w7900d` keeps the probe-wins rule.
+ISA. To leave such a card out, give the container only the W7900's `/dev/dri` render node, or export
+`ROCR_VISIBLE_DEVICES` in the shell that launches Hyperloom; preflight ignores it in `.env`. `w7900d` keeps the
+probe-wins rule.
 
 **Pin GPUs with `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.** On the known
 ROCm stack the latter can make `torch.cuda.is_available()` return false.

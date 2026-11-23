@@ -1259,8 +1259,9 @@ exits with code 2, as do a local launch where rocminfo cannot run or lists no
 GPU and a kernel phase whose GEAK checkout does not identify the card as
 `w7900` (pass `--no-kernel` to skip it). A gfx1100, gfx1101 or gfx1102 GPU that
 names no supported board is refused unless `--gpu-type` names a board on that
-ISA (set `ROCR_VISIBLE_DEVICES` to leave such a card out). `w7900d` keeps the
-probe-wins rule.
+ISA. To leave such a card out, give the container only the W7900's render node,
+or export `ROCR_VISIBLE_DEVICES` in the launching shell; preflight ignores it in
+`.env`. `w7900d` keeps the probe-wins rule.
 
 Do not set `HIP_VISIBLE_DEVICES` on the known ROCm stack unless the user asks;
 it can make `torch.cuda.is_available()` return false. Use
