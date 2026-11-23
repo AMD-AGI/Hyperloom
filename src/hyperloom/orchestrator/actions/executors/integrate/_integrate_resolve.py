@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The front of one integration attempt: resolving what it integrates, provisioning its runtime and localizing the source."""
+"""The front of one integration attempt: resolving what it integrates and provisioning its runtime."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -17,16 +16,13 @@ from hyperloom_common.coerce import to_float
 from hyperloom.inference_optimizer.session.session_paths import enablement_stacks_dir, runs_dir
 
 from ....state.shared_state import inject_stack_base_params
-from ..framework_change._enablement_config import _enablement_gap
 from .._integrate_attempt import IntegrateAttempt
 from ._integrate_refusals import _enablement_lane_closed_skip, _enforce_critic_gate
-from ..patching._patch_git import _detect_p_level
 from ..patching._patch_source_pr import _candidate_slug, materialize_candidate_patches
 from ._integrate_vocabulary import PATCH_SOURCE_UPSTREAM_PR, resolve_patch_source
 from ..patching._patch_sources import (
     _acquiring_round,
     _done_field,
-    _first_ref_in_repo,
     _read_done_payload,
     _resolve_framework_root,
 )
@@ -45,7 +41,7 @@ _LAUNCH_ONLY_MUTATION_FIELDS: tuple[str, ...] = (
 
 
 class ResolveStageMixin:
-    """Resolve the patches an attempt integrates, provision the runtime it measures in, and localize the source it edits."""
+    """Resolve the patches an attempt integrates, and provision the runtime it measures in."""
 
     def _stage_resolve_launch_only(
         self,
@@ -354,85 +350,6 @@ class ResolveStageMixin:
                         shutil.rmtree(child, ignore_errors=True)
         except OSError:
             log.debug("integrate_patch: attempt-dir GC failed for %s", attempt_dir, exc_info=True)
-
-    async def _stage_localize_source(self, attempt: IntegrateAttempt, params: dict[str, Any]) -> None:
-        """Fetch a localization diff and record it on ``attempt`` for ``_stage_apply`` (Rung 4).
-
-        Does nothing when the round's gap needs no code acquisition, no
-        bridging candidate in the framework's own repo was discovered, or the
-        adapter cannot localize. A change that cannot be localized (compiled,
-        oversize, outside the package, or not fetched) is skipped and the
-        round runs on its own patches.
-        """
-        gap = _enablement_gap(params)
-        if gap is None:
-            return
-
-        from hyperloom.inference_optimizer import framework_registry
-
-        from ....enablement.runtime.adapters import get_adapter
-        from ....enablement.runtime.localization import build_localization_diff
-
-        refs = attempt.shared_state.enablement.candidate_refs
-        if not refs:
-            return
-        framework = str(getattr(attempt.shared_state, "framework", "") or "").strip().lower()
-        repo_url = framework_registry.repo_url(framework)
-        if not repo_url:
-            return
-        ref = _first_ref_in_repo(refs, repo_url)
-        if not ref:
-            return
-
-        adapter = get_adapter(framework)
-        action = adapter.build_localization_action(gap, candidate_ref=ref, repo_url=repo_url)
-        if action is None:
-            return
-
-        from hyperloom.agents.framework.sources import github as _gh
-
-        diff_text, touched_paths, verdict = await asyncio.to_thread(
-            build_localization_diff,
-            action,
-            fetch_pr_patches=lambda slug, num: _gh.pr_patches(slug, num),
-            scope=adapter.package_path,
-        )
-        if not verdict.is_localizable:
-            log.info("integrate_patch: localization of %s skipped: %s", ref, verdict.reason)
-            return
-
-        loc_dir = runs_dir(self.session_dir, "integrate_patch", attempt.task_id) / "localization"
-        loc_dir.mkdir(parents=True, exist_ok=True)
-        gap_slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", action.gap_id or "localization")
-        patch_path = loc_dir / f"{gap_slug}.patch"
-        patch_path.write_text(diff_text, encoding="utf-8")
-
-        attempt.localization_patches = [patch_path]
-        attempt.localization_action = action
-        attempt.localization_touched = list(touched_paths)
-        log.info(
-            "integrate_patch: localization staged %s (%d file(s), kind=%s)",
-            patch_path,
-            len(touched_paths),
-            action.kind,
-        )
-
-    @staticmethod
-    def _admit_localization(attempt: IntegrateAttempt, framework_root: Path, patch_paths: list[Path]) -> list[Path]:
-        """Put the localization ahead of the round's patches when it applies to the stashed tree, else drop it.
-
-        The recorded patch set is what recovery sweeps, so it follows.
-        """
-        loc = attempt.localization_patches
-        if not loc:
-            return patch_paths
-        if any(_detect_p_level(framework_root, p) is None for p in loc):
-            log.info("integrate_patch: localization %s does not apply to %s; skipped", loc, framework_root)
-            attempt.drop_localization()
-            return patch_paths
-        patch_paths = [*loc, *patch_paths]
-        attempt.pending["patches"] = [str(p) for p in patch_paths]
-        return patch_paths
 
     async def _record_closure_baseline(self, attempt: IntegrateAttempt, params: dict[str, Any]) -> None:
         """Observe the environment before the enablement's first setup command, through the KEEP's interpreter.

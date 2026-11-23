@@ -648,7 +648,7 @@ def _reset_baseline_failure_backstop(state: Any) -> None:
 
 
 def _stack_kept_runtime(state: Any, res: dict[str, Any]) -> None:
-    """Persist the accepted runtime, point the session framework tree at it, and keep the localization manifest."""
+    """Persist the accepted runtime, and point the session framework tree at it."""
     action = res.get("enablement_kept_stack_action")
     if isinstance(action, dict) and action:
         state.enablement.kept_stack_action = action
@@ -663,12 +663,6 @@ def _stack_kept_runtime(state: Any, res: dict[str, Any]) -> None:
         if source_root:
             point_session_framework_root(source_root, state.framework)
             state.framework_repo_path = source_root
-    # Record the localized closure manifest so it is not re-fetched on the next round.
-    manifest = res.get("enablement_localization_manifest")
-    if isinstance(manifest, dict) and manifest:
-        existing = list(state.enablement.localization_manifest or [])
-        existing.append(manifest)
-        state.enablement.localization_manifest = existing
 
 
 def _rearm_on_kept(state: Any, res: dict[str, Any]) -> None:

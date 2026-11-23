@@ -129,7 +129,6 @@ def _integrate_patch_test_framework_roots(monkeypatch, tmp_path):
 def _stub_external_integrate_operations(monkeypatch):
     from types import SimpleNamespace
 
-    from hyperloom.agents.framework.sources import github
     from hyperloom.orchestrator.actions.executors import _multi_node_env
     from hyperloom.orchestrator.enablement.recipe import keep_probe
     from hyperloom.orchestrator.enablement.runtime import adapters
@@ -140,7 +139,6 @@ def _stub_external_integrate_operations(monkeypatch):
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
     monkeypatch.setattr(integrate_bench, "run_grid", forbidden)
     monkeypatch.setattr(integrate_resolve, "materialize_candidate_patches", forbidden)
-    monkeypatch.setattr(github, "pr_patches", forbidden)
     monkeypatch.setattr(
         adapters,
         "get_adapter",

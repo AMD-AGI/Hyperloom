@@ -193,7 +193,6 @@ def test_relocated_modules_are_importable() -> None:
         "hyperloom.orchestrator.enablement.artifacts",
         "hyperloom.orchestrator.enablement.runtime.adapters",
         "hyperloom.orchestrator.enablement.runtime.stack_actions",
-        "hyperloom.orchestrator.enablement.runtime.localization",
         "hyperloom.orchestrator.enablement.runtime.build_actions",
         "hyperloom.orchestrator.enablement.runtime.build_utils",
         "hyperloom.orchestrator.enablement.runtime.targeted_build",

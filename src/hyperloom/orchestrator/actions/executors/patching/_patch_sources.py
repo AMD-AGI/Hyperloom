@@ -8,12 +8,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from hyperloom_common.fs_utils import read_text_nofollow
-from hyperloom.common.github_urls import repo_slug
 from hyperloom.inference_optimizer.framework_paths import (
     framework_apply_tree,
     resolve_framework_tree,
@@ -38,29 +36,6 @@ def _acquiring_round(params: dict[str, Any]) -> bool:
     acquire nothing of its own.
     """
     return bool(params.get("enablement")) and not params.get("enablement_launch_only")
-
-
-def _first_ref_in_repo(refs: Iterable[Any], repo_url: str) -> str:
-    """The best-ranked candidate ref that points at ``repo_url``.
-
-    Discovery ranks bridge-repo PRs (aiter, HIP, ROCm) alongside the
-    framework's own, and a diff is only applicable to the tree it was cut from.
-    A bare ``"PR:1234"`` names no repo and is the framework's by construction.
-    """
-    try:
-        want = repo_slug(repo_url)
-    except ValueError:
-        return ""
-    for raw in refs:
-        ref = str(raw).strip()
-        if not ref:
-            continue
-        try:
-            if repo_slug(ref) == want:
-                return ref
-        except ValueError:
-            return ref
-    return ""
 
 
 def _done_field(done_payload: dict[str, Any] | None, key: str) -> Any:

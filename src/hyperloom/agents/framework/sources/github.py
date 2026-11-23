@@ -3,7 +3,7 @@
 
 """GitHub Search backend for perf PR candidate discovery, and the strict search of GitHub's pull requests.
 
-``search_perf_prs`` and ``pr_patches`` are best-effort: a GitHub that cannot be asked reads as "nothing found". The
+``search_perf_prs`` is best-effort: a GitHub that cannot be asked reads as "nothing found". The
 strict search (``search_issues``) is for a caller that must tell the two apart: it raises :class:`GitHubUnavailable`,
 which says why, and an empty answer means GitHub answered with none.
 """
@@ -90,27 +90,6 @@ def search_perf_prs(
             )
         )
     return out[:limit]
-
-
-def pr_patches(repo_slug: str, number: int, *, timeout_sec: float = 30.0) -> str:
-    """Return a merged PR's unified diff (``git apply``-ready), or ``\"\"``."""
-    slug = str(repo_slug or "").strip().strip("/")
-    if not slug or number <= 0:
-        return ""
-    api_url = f"https://api.github.com/repos/{slug}/pulls/{int(number)}"
-    for url, accept in (
-        (api_url, "application/vnd.github.diff"),
-        (f"https://github.com/{slug}/pull/{int(number)}.diff", "text/plain"),
-    ):
-        req = urllib.request.Request(url, headers=_auth_headers(accept))
-        try:
-            with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - fixed GitHub HTTPS URL.
-                text = resp.read().decode(_ENCODING, "replace")
-            if text.strip():
-                return text
-        except (OSError, http.client.HTTPException, ValueError):  # best-effort; try the fallback URL
-            continue
-    return ""
 
 
 _API = "https://api.github.com"
@@ -239,7 +218,6 @@ __all__ = [
     "GitHubUnavailable",
     "SearchAnswer",
     "build_query",
-    "pr_patches",
     "search_issues",
     "search_perf_prs",
     "token_configured",

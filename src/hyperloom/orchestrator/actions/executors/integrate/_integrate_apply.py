@@ -248,7 +248,7 @@ class ApplyStageMixin:
         shared_state = attempt.shared_state
         recovery = attempt.pending["recovery"]
         recovery_root = Path(recovery["root"])
-        patch_paths = self._admit_localization(attempt, framework_root, deliverable.patch_paths)
+        patch_paths = deliverable.patch_paths
         recovery["phase"] = "ready"
         if shared_state is not None:
             shared_state.save(self.session_dir)

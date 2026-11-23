@@ -145,7 +145,6 @@ class EnablementStackAction:
     index_url: str = ""
     packages: tuple[str, ...] = ()
     attempt_venv_root: str = ""
-    pr_number: int = 0
 
     def to_state(self) -> dict[str, Any]:
         """Serialize to a plain dict for task params / shared state."""
@@ -161,7 +160,6 @@ class EnablementStackAction:
             "index_url": self.index_url,
             "packages": list(self.packages),
             "attempt_venv_root": self.attempt_venv_root,
-            "pr_number": self.pr_number,
         }
 
     @classmethod
@@ -173,10 +171,6 @@ class EnablementStackAction:
         method = str(d.get("acquisition_method") or "none")
         if method not in _ACQUISITION_METHODS:
             method = "none"
-        try:
-            pr_number = int(d.get("pr_number") or 0)
-        except (TypeError, ValueError):
-            pr_number = 0
         return cls(
             kind=str(d.get("kind") or "runtime_candidate"),
             framework=str(d.get("framework") or "").strip().lower(),
@@ -189,7 +183,6 @@ class EnablementStackAction:
             index_url=str(d.get("index_url") or ""),
             packages=packages,
             attempt_venv_root=str(d.get("attempt_venv_root") or ""),
-            pr_number=pr_number,
         )
 
 
