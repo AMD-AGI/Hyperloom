@@ -374,7 +374,9 @@ def require_hosted_isolation(spec: CampaignSpec, env: Mapping[str, str]) -> None
     unconfined on this host, as the path that launches it would
     (:func:`~hyperloom_multibranch.scheduling.launch_isolation.launch_isolation`): its specialists always, and the
     agent and dev sandboxes and the tests of a spec measured on this container's cards, which then run here (in the
-    grant's sandboxes otherwise).
+    grant's sandboxes otherwise). An app that is not root, where the root mount cannot be bound, confines its
+    specialists under the layer's ``bin/unshare --user`` when the probe's canary holds there; that tier cannot run a
+    sandbox whose commands join a holder's namespaces, so a spec measured on this container's cards is refused there.
 
     Raises:
         PeersUnavailable: A launch on this host would run unconfined or be refused, naming which and why; the run ends
