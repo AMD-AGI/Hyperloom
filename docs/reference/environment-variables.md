@@ -693,8 +693,12 @@ cache with 8 sequential streams from the spawn until the server is ready
 (`hyperloom_common.weight_prefetch`): only a checkpoint on a network or FUSE
 file system, only as much as the memory headroom allows
 (`memory.max - memory.current` less a tenth of the limit, at least 16 GiB),
-and again for what the loader drops from the cache, at most three times. It
-never fails a round. When it is on, the round's run_dir holds
+and again for what the loader drops from the cache, at most three times. A
+checkpoint the round's account neither owns nor may write is read once and not
+refilled: Linux does not tell such an account which of its pages are cached, so
+each file is read whole by its size within the same headroom, and what the
+loader drops from the cache afterwards is not read again. It never fails a
+round. When it is on, the run_dir of the round that boots the server holds
 `weight_prefetch.json`: the files it chose, why it skipped, the bytes it read,
 and how many file reads failed.
 

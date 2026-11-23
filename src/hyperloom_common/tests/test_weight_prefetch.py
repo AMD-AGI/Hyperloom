@@ -21,7 +21,6 @@ from hyperloom_common.weight_prefetch import (
     WEIGHT_PREFETCH_ENV,
     LinuxHost,
     Memory,
-    PrefetchTuning,
     WeightPrefetch,
     checkpoint_files,
     start_weight_prefetch,
@@ -94,11 +93,32 @@ def _model(tmp_path: Path, sizes: dict[str, int], index: bool = True) -> Path:
     return model
 
 
-def _run(model: Path, host: FakeHost, **tuning) -> WeightPrefetch:
-    prefetch = WeightPrefetch(model, host, PrefetchTuning(**{"streams": 1, "max_refills": 0, **tuning}))
-    prefetch.start()
-    assert prefetch.join(10.0), "the prefetch ends on its own"
-    return prefetch
+@pytest.fixture
+def machine(monkeypatch):
+    """Make ``host`` the machine every :class:`WeightPrefetch` built after it reads, as ``start_weight_prefetch`` builds
+    it, with one stream and no refill unless the test says otherwise."""
+
+    def install(host, *, streams: int = 1, max_refills: int = 0, refill_interval_sec: float = 30.0) -> None:
+        monkeypatch.setattr(wp, "LinuxHost", lambda: host)
+        monkeypatch.setattr(wp, "_STREAMS", streams)
+        monkeypatch.setattr(wp, "_MAX_REFILLS", max_refills)
+        monkeypatch.setattr(wp, "_REFILL_INTERVAL_SEC", refill_interval_sec)
+
+    return install
+
+
+@pytest.fixture
+def run(machine):
+    """Run a prefetch of ``model`` on ``host`` to its end."""
+
+    def run(model: Path, host, **tuning) -> WeightPrefetch:
+        machine(host, **tuning)
+        prefetch = WeightPrefetch(model)
+        prefetch.start()
+        assert prefetch.join(10.0), "the prefetch ends on its own"
+        return prefetch
+
+    return run
 
 
 def _names(n: int, size: int = 60 * GIB) -> dict[str, int]:
@@ -128,62 +148,62 @@ def test_without_an_index_every_safetensors_file_is_read_in_name_order(tmp_path)
     assert [p.name for p in checkpoint_files(model)] == ["b-3.safetensors", "b-11.safetensors"]
 
 
-def test_it_reads_the_files_in_order_while_they_fit_the_headroom(tmp_path) -> None:
+def test_it_reads_the_files_in_order_while_they_fit_the_headroom(tmp_path, run) -> None:
     sizes = _names(4)  # 4 x 60 GiB against 170 GiB of headroom: two fit
     host = FakeHost(sizes)
-    prefetch = _run(_model(tmp_path, sizes), host)
+    prefetch = run(_model(tmp_path, sizes), host)
 
     names = list(sizes)
     assert host.reads == [(names[0], (0, 60 * GIB)), (names[1], (0, 60 * GIB))]
-    assert prefetch.read_bytes == 120 * GIB and prefetch.passes == 1
+    assert prefetch.outcome.read_bytes == 120 * GIB and prefetch.outcome.passes == 1
 
 
-def test_the_headroom_at_the_start_bounds_the_reads_even_when_use_does_not_grow(tmp_path) -> None:
+def test_the_headroom_at_the_start_bounds_the_reads_even_when_use_does_not_grow(tmp_path, run) -> None:
     sizes = _names(4)
     host = FakeHost(sizes)
     host.charged = False  # the pages are charged elsewhere, so the live headroom alone would let all four through
-    _run(_model(tmp_path, sizes), host)
+    run(_model(tmp_path, sizes), host)
 
     assert [name for name, _ in host.reads] == list(sizes)[:2]
 
 
-def test_only_what_is_not_cached_is_read(tmp_path) -> None:
+def test_only_what_is_not_cached_is_read(tmp_path, run) -> None:
     sizes = _names(1, 10 * GIB)
     host = FakeHost(sizes)
     name = next(iter(sizes))
     host.uncached_spans[name] = [(0, GIB), (5 * GIB, 6 * GIB)]
-    _run(_model(tmp_path, sizes), host)
+    run(_model(tmp_path, sizes), host)
 
     assert host.reads == [(name, (0, GIB)), (name, (5 * GIB, 6 * GIB))]
 
 
 @pytest.mark.parametrize("fs", ["ext4", "xfs", "tmpfs", "overlay", None])
-def test_a_checkpoint_on_a_local_or_unknown_file_system_is_not_read(tmp_path, fs, caplog) -> None:
+def test_a_checkpoint_on_a_local_or_unknown_file_system_is_not_read(tmp_path, fs, caplog, run) -> None:
     sizes = _names(2, GIB)
     host = FakeHost(sizes, fs=fs)
     with caplog.at_level(logging.INFO, logger=wp.__name__):
-        prefetch = _run(_model(tmp_path, sizes), host)
-    assert host.reads == [] and prefetch.passes == 0
+        prefetch = run(_model(tmp_path, sizes), host)
+    assert host.reads == [] and prefetch.outcome.passes == 0
     assert "not a network file system" in caplog.text
 
 
 @pytest.mark.parametrize("fs", ["nfs", "nfs4", "ceph", "fuse.juicefs", "lustre"])
-def test_a_checkpoint_on_a_network_file_system_is_read(tmp_path, fs) -> None:
+def test_a_checkpoint_on_a_network_file_system_is_read(tmp_path, fs, run) -> None:
     sizes = _names(1, GIB)
     host = FakeHost(sizes, fs=fs)
-    _run(_model(tmp_path, sizes), host)
+    run(_model(tmp_path, sizes), host)
     assert len(host.reads) == 1
 
 
-def test_too_little_headroom_reads_nothing(tmp_path, caplog) -> None:
+def test_too_little_headroom_reads_nothing(tmp_path, caplog, run) -> None:
     sizes = _names(1, GIB)
     host = FakeHost(sizes, used=LIMIT - 20 * GIB - 7 * GIB)  # 7 GiB over the margin: under the 8 GiB that matters
     with caplog.at_level(logging.INFO, logger=wp.__name__):
-        _run(_model(tmp_path, sizes), host)
+        run(_model(tmp_path, sizes), host)
     assert host.reads == [] and "too small to matter" in caplog.text
 
 
-def test_it_stops_when_the_server_takes_the_headroom_and_does_not_read_again(tmp_path, caplog) -> None:
+def test_it_stops_when_the_server_takes_the_headroom_and_does_not_read_again(tmp_path, caplog, run) -> None:
     sizes = _names(3, 50 * GIB)  # all three fit the 170 GiB the start leaves
     host = FakeHost(sizes)
     original = host.read
@@ -196,14 +216,14 @@ def test_it_stops_when_the_server_takes_the_headroom_and_does_not_read_again(tmp
 
     host.read = read  # type: ignore[method-assign]
     with caplog.at_level(logging.INFO, logger=wp.__name__):
-        prefetch = _run(_model(tmp_path, sizes), host, max_refills=3, refill_interval_sec=0.01)
+        prefetch = run(_model(tmp_path, sizes), host, max_refills=3, refill_interval_sec=0.01)
 
     assert [name for name, _ in host.reads] == [next(iter(sizes))]
-    assert prefetch.passes == 1, "no refill once the memory ran out"
+    assert prefetch.outcome.passes == 1, "no refill once the memory ran out"
     assert "headroom ran out" in caplog.text
 
 
-def test_what_the_loader_drops_from_the_cache_is_read_again_a_bounded_number_of_times(tmp_path) -> None:
+def test_what_the_loader_drops_from_the_cache_is_read_again_a_bounded_number_of_times(tmp_path, run) -> None:
     sizes = _names(2, 4 * GIB)
     host = FakeHost(sizes)
     original = host.read
@@ -215,24 +235,25 @@ def test_what_the_loader_drops_from_the_cache_is_read_again_a_bounded_number_of_
         return got
 
     host.read = read  # type: ignore[method-assign]
-    prefetch = _run(_model(tmp_path, sizes), host, max_refills=2, refill_interval_sec=0.01)
+    prefetch = run(_model(tmp_path, sizes), host, max_refills=2, refill_interval_sec=0.01)
 
-    assert prefetch.passes == 3
+    assert prefetch.outcome.passes == 3
     assert [name for name, _ in host.reads] == list(sizes) * 3
 
 
-def test_a_cache_that_stays_warm_is_not_read_again(tmp_path) -> None:
+def test_a_cache_that_stays_warm_is_not_read_again(tmp_path, machine) -> None:
     sizes = _names(1, 4 * GIB)
     host = FakeHost(sizes)
-    prefetch = WeightPrefetch(_model(tmp_path, sizes), host, PrefetchTuning(streams=1, refill_interval_sec=0.01))
+    machine(host, max_refills=3, refill_interval_sec=0.01)
+    prefetch = WeightPrefetch(_model(tmp_path, sizes))
     prefetch.start()
     assert not prefetch.join(0.2), "it keeps watching the cache until it is stopped"
     prefetch.stop()
     assert prefetch.join(5.0)
-    assert prefetch.passes == 1 and len(host.reads) == 1
+    assert prefetch.outcome.passes == 1 and len(host.reads) == 1
 
 
-def test_stop_ends_a_read_in_progress(tmp_path) -> None:
+def test_stop_ends_a_read_in_progress(tmp_path, machine) -> None:
     sizes = _names(2, GIB)
     host = FakeHost(sizes)
     reading = threading.Event()
@@ -243,20 +264,21 @@ def test_stop_ends_a_read_in_progress(tmp_path) -> None:
         return 0
 
     host.read = read  # type: ignore[method-assign]
-    prefetch = WeightPrefetch(_model(tmp_path, sizes), host, PrefetchTuning(streams=1))
+    machine(host)
+    prefetch = WeightPrefetch(_model(tmp_path, sizes))
     prefetch.start()
     assert reading.wait(10.0)
     prefetch.stop()
     assert prefetch.join(5.0)
 
 
-def test_a_file_that_cannot_be_read_does_not_stop_the_others_and_is_counted(tmp_path, caplog) -> None:
+def test_a_file_that_cannot_be_read_does_not_stop_the_others_and_is_counted(tmp_path, caplog, run) -> None:
     sizes = _names(3, GIB)
     host = FakeHost(sizes)
     names = list(sizes)
     host.fail_read = {names[1]}
     with caplog.at_level(logging.WARNING, logger=wp.__name__):
-        prefetch = _run(_model(tmp_path, sizes), host, streams=2)
+        prefetch = run(_model(tmp_path, sizes), host, streams=2)
     assert sorted(name for name, _ in host.reads) == [names[0], names[2]]
     assert prefetch.outcome.unreadable == 1
     failed = [record for record in caplog.records if "not read" in record.getMessage()]
@@ -264,7 +286,7 @@ def test_a_file_that_cannot_be_read_does_not_stop_the_others_and_is_counted(tmp_
     assert "Input/output error" in caplog.text
 
 
-def test_a_host_that_cannot_be_read_ends_the_prefetch_quietly(tmp_path, caplog) -> None:
+def test_a_host_that_cannot_be_read_ends_the_prefetch_quietly(tmp_path, caplog, run) -> None:
     sizes = _names(1, GIB)
     host = FakeHost(sizes)
 
@@ -273,14 +295,16 @@ def test_a_host_that_cannot_be_read_ends_the_prefetch_quietly(tmp_path, caplog) 
 
     host.memory = broken  # type: ignore[method-assign]
     with caplog.at_level(logging.WARNING, logger=wp.__name__):
-        prefetch = _run(_model(tmp_path, sizes), host)
-    assert host.reads == [] and prefetch.passes == 0
+        prefetch = run(_model(tmp_path, sizes), host)
+    assert host.reads == [] and prefetch.outcome.passes == 0
     assert prefetch.outcome.error == "PermissionError: cgroupfs is not readable" and prefetch.outcome.ended
     failed = [record for record in caplog.records if "failed and ends" in record.getMessage()]
     assert failed and failed[0].exc_info is not None, "the traceback is logged"
 
 
-def test_a_file_whose_residency_the_kernel_hides_is_read_whole_within_the_budget_and_not_refilled(tmp_path) -> None:
+def test_a_file_whose_residency_the_kernel_hides_is_read_whole_within_the_budget_and_not_refilled(
+    tmp_path, run
+) -> None:
     sizes = _names(4, 60 * GIB)
     host = FakeHost(sizes)
     host.blind = set(sizes)
@@ -292,17 +316,17 @@ def test_a_file_whose_residency_the_kernel_hides_is_read_whole_within_the_budget
         return got
 
     host.read = read  # type: ignore[method-assign]
-    prefetch = _run(_model(tmp_path, sizes), host, max_refills=2, refill_interval_sec=0.01)
+    prefetch = run(_model(tmp_path, sizes), host, max_refills=2, refill_interval_sec=0.01)
 
     names = list(sizes)
     assert host.reads == [(names[0], (0, 60 * GIB)), (names[1], (0, 60 * GIB))], "by size, within 170 GiB"
-    assert prefetch.passes == 1
+    assert prefetch.outcome.passes == 1
     assert [item["residency_known"] for item in prefetch.outcome.chosen] == [False, False]
 
 
-def test_the_outcome_names_the_files_the_totals_and_why_nothing_was_read(tmp_path) -> None:
+def test_the_outcome_names_the_files_the_totals_and_why_nothing_was_read(tmp_path, run) -> None:
     sizes = _names(4)
-    prefetch = _run(_model(tmp_path, sizes), FakeHost(sizes))
+    prefetch = run(_model(tmp_path, sizes), FakeHost(sizes))
     outcome = prefetch.outcome
     assert [item["name"] for item in outcome.chosen] == list(sizes)[:2]
     assert (outcome.files, outcome.total_bytes, outcome.read_bytes) == (4, 240 * GIB, 120 * GIB)
@@ -313,29 +337,22 @@ def test_the_outcome_names_the_files_the_totals_and_why_nothing_was_read(tmp_pat
     assert json.loads(record.read_text(encoding="utf-8"))["read_bytes"] == 120 * GIB
 
     (tmp_path / "local").mkdir()
-    skipped = _run(_model(tmp_path / "local", sizes), FakeHost(sizes, fs="ext4")).outcome
+    skipped = run(_model(tmp_path / "local", sizes), FakeHost(sizes, fs="ext4")).outcome
     assert skipped.skipped == "on ext4, not a network file system" and skipped.chosen == []
 
 
 def test_an_outcome_that_cannot_be_written_is_logged(tmp_path, caplog) -> None:
-    prefetch = WeightPrefetch(tmp_path, FakeHost({}))
+    prefetch = WeightPrefetch(tmp_path)
     with caplog.at_level(logging.WARNING, logger=wp.__name__):
         prefetch.write_outcome(tmp_path / "missing" / "weight_prefetch.json")
     assert caplog.records and caplog.records[0].exc_info is not None
 
 
-@pytest.fixture
-def fake_linux_host(monkeypatch) -> dict[str, FakeHost]:
-    """``start_weight_prefetch`` builds a :class:`LinuxHost`; this hands it the fake of the model a test registers."""
-    hosts: dict[str, FakeHost] = {}
-    monkeypatch.setattr(wp, "LinuxHost", lambda: hosts["host"])
-    return hosts
-
-
-def test_it_is_off_unless_the_environment_turns_it_on(tmp_path, fake_linux_host) -> None:
+def test_it_is_off_unless_the_environment_turns_it_on(tmp_path, machine) -> None:
     sizes = _names(1, GIB)
     model = _model(tmp_path, sizes)
-    host = fake_linux_host["host"] = FakeHost(sizes)
+    host = FakeHost(sizes)
+    machine(host)
     assert start_weight_prefetch(str(model), {}) is None
     assert start_weight_prefetch(str(model), {WEIGHT_PREFETCH_ENV: "0"}) is None
     assert start_weight_prefetch(str(model), {WEIGHT_PREFETCH_ENV: "bogus"}) is None
@@ -347,9 +364,10 @@ def test_it_is_off_unless_the_environment_turns_it_on(tmp_path, fake_linux_host)
     assert host.reads == [(next(iter(sizes)), (0, GIB))]
 
 
-def test_a_model_that_is_not_a_directory_reads_nothing_and_says_so(tmp_path, fake_linux_host) -> None:
+def test_a_model_that_is_not_a_directory_reads_nothing_and_says_so(tmp_path, machine) -> None:
     on = {WEIGHT_PREFETCH_ENV: "1"}
-    host = fake_linux_host["host"] = FakeHost({})
+    host = FakeHost({})
+    machine(host)
     for model in ("org/model-name", str(tmp_path / "missing")):
         prefetch = start_weight_prefetch(model, on)
         assert prefetch is not None and prefetch.join(10.0)
@@ -357,8 +375,8 @@ def test_a_model_that_is_not_a_directory_reads_nothing_and_says_so(tmp_path, fak
     assert host.reads == []
 
 
-def test_a_thread_that_cannot_start_starts_nothing(tmp_path, fake_linux_host, monkeypatch, caplog) -> None:
-    fake_linux_host["host"] = FakeHost({})
+def test_a_thread_that_cannot_start_starts_nothing(tmp_path, machine, monkeypatch, caplog) -> None:
+    machine(FakeHost({}))
 
     def refuse(self) -> None:
         raise RuntimeError("can't start new thread")
@@ -443,9 +461,9 @@ def test_the_linux_host_reads_a_file_into_the_cache_and_then_finds_nothing_uncac
 
 @pytest.mark.parametrize(
     ("euid", "owner", "writable", "visible"),
-    [(0, 5, False, True), (7, 7, False, True), (7, 5, True, True), (7, 5, False, False)],
+    [(7, 7, False, True), (7, 5, True, True), (7, 5, False, False), (0, 5, False, False)],
 )
-def test_the_kernel_tells_residency_only_to_the_owner_a_writer_or_root(
+def test_the_kernel_tells_residency_only_to_the_owner_or_a_writer(
     monkeypatch, tmp_path, euid, owner, writable, visible
 ) -> None:
     monkeypatch.setattr(wp.os, "geteuid", lambda: euid)
@@ -475,7 +493,7 @@ def _evicted(path: Path, size: int) -> None:
 
 @pytest.mark.skipif(not hasattr(os, "posix_fadvise"), reason="needs posix_fadvise")
 @pytest.mark.parametrize("visible", [True, False])
-def test_an_evicted_file_is_found_uncached_and_read_back_into_the_cache(tmp_path, monkeypatch, visible) -> None:
+def test_an_evicted_file_is_found_uncached_and_read_back_into_the_cache(tmp_path, monkeypatch, visible, run) -> None:
     model = tmp_path / "model"
     model.mkdir()
     path = model / "model.safetensors"
@@ -494,8 +512,8 @@ def test_an_evicted_file_is_found_uncached_and_read_back_into_the_cache(tmp_path
     if not visible:  # another account's file: the kernel's answer is not taken, the file is read by its size
         monkeypatch.setattr(wp, "_residency_visible", lambda path, owner: False)
         assert host.uncached(path, size) is None
-    prefetch = _run(model, _NetworkHost())
+    prefetch = run(model, _NetworkHost())
 
-    assert prefetch.read_bytes == (size if not visible else sum(end - start for start, end in spans))
+    assert prefetch.outcome.read_bytes == (size if not visible else sum(end - start for start, end in spans))
     monkeypatch.setattr(wp, "_residency_visible", lambda path, owner: True)
     assert host.uncached(path, size) == [], "the read left the file in the page cache"

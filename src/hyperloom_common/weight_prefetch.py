@@ -11,8 +11,8 @@ server is spawned until it is ready, so that its faults find the pages cached.
 It runs alongside the server rather than before it. The server's own start (process start, distributed and device set-up,
 shard loading) overlaps the reads instead of waiting for them, and a loader that drops the checkpoint's page cache while it
 starts (SGLang's engram host table does, before it pre-faults its shard) would discard what a read before the start had
-cached. So after the first pass, every ``refill_interval_sec`` until the server is ready, it asks the kernel which pages
-of the files it chose are no longer cached (``mincore``) and reads those again, at most ``max_refills`` times.
+cached. So after the first pass, every ``_REFILL_INTERVAL_SEC`` until the server is ready, it asks the kernel which
+pages of the files it chose are no longer cached (``mincore``) and reads those again, at most ``_MAX_REFILLS`` times.
 
 ``mincore`` tells the truth only about a file this process owns or may open for writing; for any other file Linux reports
 every page cached. Such a file is read whole, by its size, within the same budget, and is not read again by a refill.
@@ -58,7 +58,6 @@ __all__ = [
     "LinuxHost",
     "Memory",
     "PrefetchOutcome",
-    "PrefetchTuning",
     "WeightPrefetch",
     "checkpoint_files",
     "start_weight_prefetch",
@@ -73,6 +72,10 @@ _GIB = 1 << 30
 #: with four, still close to linear, so four had not reached what the storage serves; eight keeps going up that line at
 #: a cost of eight 16 MiB buffers. Not an operator setting: a hosted round that shows otherwise changes it here.
 _STREAMS = 8
+#: After the first pass, how often the cache is looked at again while the server starts, and how many refills there are
+#: at most.
+_REFILL_INTERVAL_SEC = 30.0
+_MAX_REFILLS = 3
 #: Bytes one ``preadv`` asks for; a stop is seen between two of them.
 _CHUNK = 16 << 20
 #: Headroom kept free for the server: a tenth of the limit, and never less than this.
@@ -132,15 +135,6 @@ class Host(Protocol):
 
     def read(self, path: Path, span: Span, stop: threading.Event) -> int:
         """Read ``span`` of the file into the page cache, until it is read or ``stop`` is set; the bytes read."""
-
-
-@dataclass(frozen=True)
-class PrefetchTuning:
-    """How many files are read at once, how long a refill waits, and how many refills there are at most."""
-
-    streams: int = _STREAMS
-    refill_interval_sec: float = 30.0
-    max_refills: int = 3
 
 
 @dataclass
@@ -213,21 +207,12 @@ class _PassTally:
 class WeightPrefetch:
     """Reads one checkpoint into the page cache in background threads from :meth:`start` until :meth:`stop`."""
 
-    def __init__(self, model_dir: Path, host: Host | None = None, tuning: PrefetchTuning | None = None) -> None:
+    def __init__(self, model_dir: Path) -> None:
         self._model_dir = model_dir
-        self._host: Host = LinuxHost() if host is None else host
-        self._tuning = PrefetchTuning() if tuning is None else tuning
+        self._host: Host = LinuxHost()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self.outcome = PrefetchOutcome(str(model_dir), streams=self._tuning.streams)
-
-    @property
-    def passes(self) -> int:
-        return self.outcome.passes
-
-    @property
-    def read_bytes(self) -> int:
-        return self.outcome.read_bytes
+        self.outcome = PrefetchOutcome(str(model_dir), streams=_STREAMS)
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="weight-prefetch", daemon=True)
@@ -281,7 +266,7 @@ class WeightPrefetch:
         if not refillable:
             return
         refills = 0
-        while refills < self._tuning.max_refills and not self._stop.wait(self._tuning.refill_interval_sec):
+        while refills < _MAX_REFILLS and not self._stop.wait(_REFILL_INTERVAL_SEC):
             uncached = sum(_span_total(self._host.uncached(item.path, item.size) or ()) for item in refillable)
             if uncached < _MIN_REFILL:
                 continue
@@ -338,7 +323,7 @@ class WeightPrefetch:
             wanted / _GIB,
             len(chosen),
             budget / _GIB,
-            self._tuning.streams,
+            _STREAMS,
         )
         return chosen
 
@@ -352,7 +337,7 @@ class WeightPrefetch:
         started = time.monotonic()
         streams = [
             threading.Thread(target=self._stream, args=(work, tally), name=f"weight-prefetch-{n}", daemon=True)
-            for n in range(min(self._tuning.streams, len(chosen)))
+            for n in range(min(_STREAMS, len(chosen)))
         ]
         for stream in streams:
             stream.start()
@@ -501,10 +486,11 @@ def _merge(spans: Iterable[Span]) -> list[Span]:
 
 def _residency_visible(path: Path, owner: int) -> bool:
     """Whether ``mincore`` reports which pages of the file at ``path`` (owned by ``owner``) are cached. Linux answers
-    only for a file the caller owns or may open for writing (root may do both); for any other file, a file of another
-    account or on a read-only mount, it reports every page cached."""
-    euid = os.geteuid()
-    if euid in (0, owner):
+    only for a file the caller owns or may open for writing; for any other file, a file of another account or on a
+    read-only mount, it reports every page cached. Root is no exception: root of a user namespace that does not map the
+    file's owner, or root without ``CAP_FOWNER`` and ``CAP_DAC_OVERRIDE``, gets the same answer, and ``os.access`` says
+    so too. Real root over a read-only mount is then told hidden, and reads the file whole."""
+    if os.geteuid() == owner:
         return True
     return os.access(path, os.W_OK, effective_ids=os.access in os.supports_effective_ids)
 
