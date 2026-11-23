@@ -255,12 +255,6 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         help="Dev sandboxes lent to the specialists at once, from the cards tests are measured on; 0 = none.",
     )
     run.add_argument(
-        "--make-before-break",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Hosted: keep a finished test's sandbox until the next one runs, where 3+ tests fit (one fewer runs).",
-    )
-    run.add_argument(
         "--enable-conc-sweep",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -691,7 +685,6 @@ def settings_from(
         reference_script=_reference_script(args.reference_script, args.framework),
         dev_leases=args.dev_leases,
         playbook=PlaybookMode(args.playbook),
-        make_before_break=args.make_before_break,
         agent_directions=_agent_directions(args.agent_directions, agents),
         agent_pack=_agent_pack(args.agent_pack, agents),
         agent_launch=_agent_launch(args.agent_launch, agents, args.reference_script),
