@@ -102,7 +102,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--max-hours <h>` | `1.0` | Runtime budget in hours; the loop is time-driven. Minimum `1.0`. A round is started only when what remains can finish it, so the run ends before the budget does. Above 2 hours this also enables Analysis profiling and, for single-lane rounds, Plan Critic review. |
+| `--max-hours <h>` | `1.0` | Runtime budget in hours; the loop is time-driven. Minimum `1.0`. A round is started only when what remains can finish it, so the run ends before the budget does. Above 2 hours this also enables Analysis profiling and, in a campaign with more than one lane, Plan Critic review; a single-lane campaign has no planning stage to review. |
 | `--deadline-unix <t>` | `0` | Absolute UNIX deadline shared by task preparation and optimization. |
 | `--session-timeout-sec <s>` | from `--max-hours` | Wall-clock budget for one implementer session. The claude backend cuts the session at this deadline and the session is told about it. Under `--roofline-ceiling on` it also bounds the ceiling analyst session. |
 | `--agent-timeout-sec <s>` | provider default | Timeout for one Agent session. |

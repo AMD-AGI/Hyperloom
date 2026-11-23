@@ -118,8 +118,9 @@ class IterationConfig:
     # How one measurement's per-case speedups combine into the score every KEEP, gate and report is judged on.
     case_aggregate: CaseAggregate = CaseAggregate.ARITHMETIC
     # Implementer lanes run concurrently from one round's analysis, each in its own workspace copy, and each candidate
-    # is measured on its own. 1 keeps the single fused plan and single session this loop has always run; fan-out also
-    # needs an ``agent_factory``, because a session is bound to its workspace.
+    # is measured on its own. 1 runs one session a round with no plan: the campaign builds no planning service and the
+    # session chooses its direction. Fan-out also needs an ``agent_factory``, because a session is bound to its
+    # workspace.
     lanes: int = 1
     # Whether a stalled search may spend an iteration measuring two archived rejected gains applied together.
     merge_stacking: bool = True
