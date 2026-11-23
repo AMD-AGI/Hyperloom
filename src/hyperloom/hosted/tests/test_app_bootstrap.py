@@ -409,34 +409,33 @@ def test_a_source_another_account_owns_is_fetched_and_no_other_repository_is_tru
     assert refused.returncode != 0 and "dubious ownership" in refused.stderr
 
 
-# A stand-in for a system Python (no virtual environment) and its pip, in three shapes (FAKE_PIP):
-#   old    a pip before 23.0.1: `pip install --help` does not list --break-system-packages and an install given it fails,
-#          yet `pip install --break-system-packages --help` exits 0, as field images report for such a pip;
-#   23.0   pip 23.0.x: `pip install` lists and takes the option, `pip wheel` rejects it as "no such option";
-#   modern a current pip: the same split, listed with a different help line.
-# No pip's `wheel` knows the option. A rejected option exits 2, as a real pip does.
+# A stand-in for a system Python (no virtual environment) and its pip, in two shapes (FAKE_PIP):
+#   old    a pip before 23.0.1: it has no --break-system-packages, so any command given it, `install --help` included,
+#          fails with "no such option";
+#   23.0.1 pip 23.0.1 and later: `pip install` takes the option, `pip wheel` rejects it.
+# Like real pip, every shape rejects the option before the subcommand and on `pip wheel`. A rejected option exits 2.
 _SYSTEM_STUB = """#!/bin/bash
 if [[ "$1" == "-c" ]]; then
   case "$2" in *base_prefix*) echo 0 ;; *) echo "$FAKE_PREFIX" ;; esac
   exit 0
 fi
+subcommand=""
+for arg in "$@"; do
+  case "$arg" in
+    install | wheel) [[ -n "$subcommand" ]] || subcommand="$arg" ;;
+    --break-system-packages)
+      if [[ "$subcommand" != install || "$FAKE_PIP" == old ]]; then
+        echo "no such option: --break-system-packages" >&2
+        exit 2
+      fi
+      ;;
+  esac
+done
 if [[ " $* " == *" --help "* ]]; then
-  if [[ " $* " == *" install "* ]]; then
-    echo "Install Options:"
-    case "$FAKE_PIP" in
-      23.0) echo "  --break-system-packages     Allow pip to modify an EXTERNALLY-MANAGED Python installation" ;;
-      modern) echo "  --break-system-packages   Allow pip to modify an EXTERNALLY-MANAGED Python installation" ;;
-    esac
-    echo "  --force-reinstall           Reinstall all packages even if they are already up-to-date."
-  fi
   exit 0
 fi
-if [[ " $* " == *" --break-system-packages "* ]] && { [[ " $* " == *" wheel "* ]] || [[ "$FAKE_PIP" == old ]]; }; then
-  echo "no such option: --break-system-packages" >&2
-  exit 2
-fi
 echo "$*" >>"$FAKE_LOG"
-if [[ " $* " == *" wheel "* ]]; then
+if [[ "$subcommand" == wheel ]]; then
   while [[ "$1" != "-w" ]]; do shift; done
   : >"$2/hyperloom-0-py3-none-any.whl"
 fi
@@ -446,12 +445,10 @@ fi
 @pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
 @pytest.mark.parametrize(
     ("fake_pip", "install_gets_it"),
-    [("old", False), ("23.0", True), ("modern", True)],
-    ids=["pip-before-23.0.1", "pip-23.0.x", "modern-pip"],
+    [("old", False), ("23.0.1", True)],
+    ids=["pip-before-23.0.1", "pip-23.0.1-or-later"],
 )
-def test_a_system_python_gets_break_system_packages_on_an_install_whose_help_lists_it(
-    tmp_path, source, fake_pip, install_gets_it
-):
+def test_a_system_python_gets_break_system_packages_on_its_install_only(tmp_path, source, fake_pip, install_gets_it):
     stub = tmp_path / "framework" / "bin" / "python"
     stub.parent.mkdir(parents=True)
     stub.write_text(_SYSTEM_STUB)

@@ -112,17 +112,12 @@ env_prefix="$("$framework_py" -c 'import sys; print(sys.prefix)')"
 in_venv="$("$framework_py" -c 'import sys; print(int(sys.prefix != sys.base_prefix))')"
 stamp="$env_prefix/.hyperloom-install"
 pip=("$framework_py" -m pip --disable-pip-version-check --no-input)
-# Outside a virtual environment pip refuses to modify the interpreter's packages without --break-system-packages
-# (install.sh does the same). It is an option of `pip install` alone: `pip wheel` rejects it as "no such option" on every
-# pip, so it goes to the install only, and only when `pip install --help` lists it (pip >= 23.0.1). The help text is
-# read rather than the exit code of `pip install --break-system-packages --help`, which tells nothing on a pip that
-# answers --help before it parses the rest.
+# Outside a virtual environment pip refuses to modify the interpreter's packages without this (install.sh does the same).
+# It is an option of `pip install` alone, so it goes after that subcommand on the one install below: before the
+# subcommand, or on `pip wheel`, pip rejects it as "no such option".
 install_extra=()
-if [[ "$in_venv" == "0" ]]; then
-  install_help="$("${pip[@]}" install --help 2>/dev/null)" || install_help=""
-  if [[ "$install_help" == *--break-system-packages* ]]; then
-    install_extra=(--break-system-packages)
-  fi
+if [[ "$in_venv" == "0" ]] && "$framework_py" -m pip install --break-system-packages --help >/dev/null 2>&1; then
+  install_extra=(--break-system-packages)
 fi
 
 work=""
