@@ -67,7 +67,7 @@ _TEMPORARY_TRIES = 100
 _MAX_LINKS = 40
 #: A directory with one of these bits lets accounts other than its owner put a link in it.
 _OPEN_TO_OTHERS = stat.S_IWGRP | stat.S_IWOTH
-#: When a link cannot be made, a new file is made at its final name instead (:func:`create_new_shared_file`).
+#: When a link cannot be made, a new file is made at its final name instead (:func:`_create_new`).
 _NO_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS})
 #: What the kernel writes its reports under /proc in.
 _PROC_ENCODING = "ascii"
@@ -498,23 +498,17 @@ def open_shared_replacement(path: Path, *, mode: int = SHARED_FILE_MODE) -> int:
     return descriptor
 
 
-def create_new_shared_file(path: Path, *, mode: int = SHARED_FILE_MODE) -> int:
-    """Create ``path`` new with ``mode``: a descriptor open for appending to it.
+def _create_new(directory: int, name: str, mode: int) -> int:
+    """``name`` in ``directory`` made new with ``mode``, final already: a descriptor open for appending to it.
 
-    The file is made under a name of its own and given its mode first, then linked to ``path`` (which fails for any
-    name there already, a link included), so ``path`` never names it with another mode, even when the process is
-    killed meanwhile. Where the file system makes no links it is made at ``path`` itself (``O_EXCL``, never through a
-    link). ``mode`` is masked by the umask outside shared storage (:func:`parent_is_shared`).
+    The file is made under a name of its own and given its mode first, then linked to ``name`` (which fails for any
+    name there already, a link included), so ``name`` never names it with another mode, even when the process is
+    killed meanwhile. Where the file system makes no links it is made at ``name`` itself (``O_EXCL``, never through a
+    link).
 
     Raises:
         FileExistsError: When anything, a link included, has that name already; it is left as it is.
     """
-    with shared_parent(path) as (directory, name, widen):
-        return _create_new(directory, name, _final_mode(mode, widen))
-
-
-def _create_new(directory: int, name: str, mode: int) -> int:
-    """:func:`create_new_shared_file` of ``name`` in ``directory`` with ``mode``, final already."""
     descriptor, temporary = _new_temporary(directory, name, mode, os.O_APPEND)
     try:
         os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
@@ -553,7 +547,7 @@ def open_shared_append(path: Path, *, mode: int = SHARED_FILE_MODE, make_parents
     """``path`` opened for appending (the caller closes the descriptor), its directory reached as
     :func:`open_directory` reaches it and never through a link at its own name.
 
-    When missing it is made new as :func:`create_new_shared_file` makes it, with ``mode`` below shared storage
+    When missing it is made new as :func:`_create_new` makes it, with ``mode`` below shared storage
     (:func:`parent_is_shared`), so the next account of the group appends to it too, and as the umask leaves ``mode``
     anywhere else; one another process made meanwhile, or one there already, is opened as it is. One another account
     made without group write fails ``EACCES``: a file that is appended to cannot be replaced by rename. With
@@ -734,7 +728,6 @@ __all__ = [
     "Flush",
     "child_umask",
     "copy_shared_file",
-    "create_new_shared_file",
     "create_shared_file",
     "current_umask",
     "directory_is_shared",
