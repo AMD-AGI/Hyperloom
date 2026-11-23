@@ -113,8 +113,11 @@ in_venv="$("$framework_py" -c 'import sys; print(int(sys.prefix != sys.base_pref
 stamp="$env_prefix/.hyperloom-install"
 pip=("$framework_py" -m pip --disable-pip-version-check --no-input)
 # Outside a virtual environment pip refuses to modify the interpreter's packages without this (install.sh does the same).
+# It is an option of `pip install` alone, so it goes after that subcommand on the one install below: before the
+# subcommand, or on `pip wheel`, pip rejects it as "no such option".
+install_extra=()
 if [[ "$in_venv" == "0" ]] && "$framework_py" -m pip install --break-system-packages --help >/dev/null 2>&1; then
-  pip+=(--break-system-packages)
+  install_extra=(--break-system-packages)
 fi
 
 work=""
@@ -168,7 +171,7 @@ install_into_framework() {
   local wheels=("$work/out"/*.whl)
   [[ ${#wheels[@]} -eq 1 && -f "${wheels[0]}" ]] || fail "expected exactly one wheel in $work/out"
   # Reinstall: another commit's wheel has the same version and pip would keep it.
-  "${pip[@]}" install -q --force-reinstall --no-deps --no-index "${wheels[0]}"
+  "${pip[@]}" install "${install_extra[@]}" -q --force-reinstall --no-deps --no-index "${wheels[0]}"
   printf '%s\n' "$sha" >"$stamp"
   cleanup
 }

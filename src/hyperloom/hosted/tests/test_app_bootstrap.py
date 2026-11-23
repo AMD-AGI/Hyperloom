@@ -407,3 +407,66 @@ def test_a_source_another_account_owns_is_fetched_and_no_other_repository_is_tru
     assert rev_parse(served).returncode == 0
     refused = rev_parse(other)
     assert refused.returncode != 0 and "dubious ownership" in refused.stderr
+
+
+# A stand-in for a system Python (no virtual environment) and its pip, in two shapes (FAKE_PIP):
+#   old    a pip before 23.0.1: it has no --break-system-packages, so any command given it, `install --help` included,
+#          fails with "no such option";
+#   23.0.1 pip 23.0.1 and later: `pip install` takes the option, `pip wheel` rejects it.
+# Like real pip, every shape rejects the option before the subcommand and on `pip wheel`. A rejected option exits 2.
+_SYSTEM_STUB = """#!/bin/bash
+if [[ "$1" == "-c" ]]; then
+  case "$2" in *base_prefix*) echo 0 ;; *) echo "$FAKE_PREFIX" ;; esac
+  exit 0
+fi
+subcommand=""
+for arg in "$@"; do
+  case "$arg" in
+    install | wheel) [[ -n "$subcommand" ]] || subcommand="$arg" ;;
+    --break-system-packages)
+      if [[ "$subcommand" != install || "$FAKE_PIP" == old ]]; then
+        echo "no such option: --break-system-packages" >&2
+        exit 2
+      fi
+      ;;
+  esac
+done
+if [[ " $* " == *" --help "* ]]; then
+  exit 0
+fi
+echo "$*" >>"$FAKE_LOG"
+if [[ "$subcommand" == wheel ]]; then
+  while [[ "$1" != "-w" ]]; do shift; done
+  : >"$2/hyperloom-0-py3-none-any.whl"
+fi
+"""
+
+
+@pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
+@pytest.mark.parametrize(
+    ("fake_pip", "install_gets_it"),
+    [("old", False), ("23.0.1", True)],
+    ids=["pip-before-23.0.1", "pip-23.0.1-or-later"],
+)
+def test_a_system_python_gets_break_system_packages_on_its_install_only(tmp_path, source, fake_pip, install_gets_it):
+    stub = tmp_path / "framework" / "bin" / "python"
+    stub.parent.mkdir(parents=True)
+    stub.write_text(_SYSTEM_STUB)
+    stub.chmod(0o755)
+    log = tmp_path / "calls"
+    code, exit_file, stderr = _bootstrap(
+        tmp_path,
+        HYPERLOOM_SOURCE_REPO=str(source),
+        HYPERLOOM_SOURCE_SHA=_git(source, "rev-parse", "HEAD"),
+        PYTHON=str(stub),
+        FAKE_PREFIX=str(tmp_path / "framework"),
+        FAKE_LOG=str(log),
+        FAKE_PIP=fake_pip,
+    )
+    assert (code, exit_file) == (0, None), stderr
+    calls = log.read_text().splitlines()
+    (wheel,) = [c for c in calls if " wheel " in c]
+    (install,) = [c for c in calls if " install " in c]
+    assert "--break-system-packages" not in wheel.split()
+    assert ("--break-system-packages" in install.split()) is install_gets_it, install
+    assert calls[-1] == "-m hyperloom hosted run"
