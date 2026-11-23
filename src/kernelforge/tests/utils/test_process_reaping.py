@@ -15,10 +15,10 @@ from pathlib import Path
 import pytest
 
 from kernelforge.utils import process_reaping
-from kernelforge.agent_backends.claude import _reap_workspace_processes
+from kernelforge.agent_backends.claude import _reap_session_processes, _reap_workspace_processes
 from kernelforge.utils.process_reaping import (
+    SessionMark,
     _read_proc,
-    _Survey,
     install_child_subreaper,
     processes_under,
 )
@@ -128,13 +128,15 @@ def spawn():
     children: list[subprocess.Popen] = []
     strays: list[int] = []
 
-    def _spawn(cwd: Path, script: str = _SLEEPS, *, own_group: bool = True):
+    def _spawn(cwd: Path, script: str = _SLEEPS, *, own_group: bool = True, mark: SessionMark | None = None):
         child = subprocess.Popen(
             [sys.executable, "-c", script],
             cwd=str(cwd),
             start_new_session=own_group,
             stdout=subprocess.PIPE,
             text=True,
+            # What an agent CLI started under ``mark`` hands down to everything it starts.
+            env={**os.environ, **(mark.environment if mark is not None else {})},
         )
         children.append(child)
         line = child.stdout.readline()
@@ -391,14 +393,13 @@ async def test_a_process_that_appears_during_the_grace_window_is_asked_first(
     """A shell being torn down starts its last command on the way out."""
     scans = [{11: 100}, {11: 100, 22: 200}, {22: 200}, {}]
     sent: list[tuple[int, signal.Signals]] = []
-    monkeypatch.setattr(process_reaping, "_survey", lambda _: _Survey(scans.pop(0), ()))
     monkeypatch.setattr(
         process_reaping,
         "_signal",
         lambda pid, _start, sig: sent.append((pid, sig)),
     )
 
-    reaped, unkillable = await process_reaping._escalate("/nowhere")
+    reaped, unkillable = await process_reaping._escalate(lambda: scans.pop(0))
 
     assert sent == [(11, signal.SIGTERM), (22, signal.SIGTERM)]
     assert reaped == (11, 22)
@@ -546,3 +547,82 @@ def test_a_missing_proc_answers_empty_rather_than_raising(tmp_path, monkeypatch)
     assert processes_under(str(tmp_path)) == set()
     report = asyncio.run(_reap_workspace_processes(str(tmp_path)))
     assert report.contended is False
+
+
+# ── what one session started, wherever it went ────────────────────────────────
+
+
+async def test_what_a_session_started_is_reaped_outside_its_workspace(tmp_path, spawn):
+    """A profiler started from a scratch directory is the session's as much as a benchmark in its workspace."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    mark = SessionMark()
+    stray = spawn(scratch, mark=mark)
+    assert stray.pid not in processes_under(str(workspace))
+
+    report = await _reap_session_processes(mark, str(workspace))
+
+    assert stray.wait(timeout=10) != 0
+    assert stray.pid in report.reaped
+    assert report.contended is False
+
+
+async def test_another_sessions_processes_beside_it_are_left_running(tmp_path, spawn):
+    """Sessions that share a directory do not share what they started."""
+    mark = SessionMark()
+    mine = spawn(tmp_path, mark=mark)
+    theirs = spawn(tmp_path, mark=SessionMark())
+    unmarked = spawn(tmp_path)
+
+    await _reap_session_processes(mark, str(tmp_path))
+
+    assert mine.wait(timeout=10) != 0
+    assert theirs.poll() is None
+    assert unmarked.poll() is None
+
+
+async def test_a_session_process_in_the_callers_own_group_is_reached(tmp_path, spawn):
+    """The agent CLI runs in the loop's process group; its mark, not its group, says whose it is."""
+    mark = SessionMark()
+    attached = spawn(tmp_path, own_group=False, mark=mark)
+    assert os.getpgid(attached.pid) == os.getpgrp()
+
+    report = await _reap_session_processes(mark, str(tmp_path))
+
+    assert attached.wait(timeout=10) != 0
+    assert attached.pid in report.reaped
+
+
+async def test_a_detached_process_is_still_the_sessions_after_the_shell_that_started_it_has_gone(tmp_path, spawn):
+    """Reparented and in a session of its own, only its environment still names where it came from."""
+    mark = SessionMark()
+    shell = spawn(tmp_path, _starts_a_child_in(tmp_path, then_exits=True), mark=mark)
+    orphan = shell.announced[0]
+    shell.wait(timeout=10)
+
+    report = await _reap_session_processes(mark, str(tmp_path))
+
+    await _wait_gone(orphan)
+    assert orphan in report.reaped
+
+
+async def test_a_session_process_that_ignores_sigterm_is_killed(tmp_path, spawn):
+    mark = SessionMark()
+    stubborn = spawn(tmp_path, _IGNORES_SIGTERM, mark=mark)
+
+    report = await _reap_session_processes(mark, str(tmp_path))
+
+    assert stubborn.wait(timeout=10) == -signal.SIGKILL
+    assert report.unkillable == ()
+
+
+async def test_a_session_that_left_nothing_behind_reports_nothing(tmp_path, spawn):
+    bystander = spawn(tmp_path)
+
+    report = await _reap_session_processes(SessionMark(), str(tmp_path))
+
+    assert report.reaped == ()
+    assert report.contended is False
+    assert bystander.poll() is None

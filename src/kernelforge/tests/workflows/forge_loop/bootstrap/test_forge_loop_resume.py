@@ -25,6 +25,7 @@ import kernelforge.workflows.forge_loop.roles.supervisor as supervisor_module
 from kernelforge.cli import main
 from kernelforge.workflows.forge_loop.bootstrap.session_budget import _forge_session_timeout_sec
 from kernelforge.config import Config
+from kernelforge.evaluation.scoring import CaseAggregate
 from kernelforge.workflows.forge_loop.campaign.campaign_config import (
     CampaignConfigStore,
     CampaignInputs,
@@ -47,6 +48,7 @@ from kernelforge.workflows.forge_loop.campaign.run_state import (
     WorkspaceLockError,
 )
 from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop
+from kernelforge.workflows.forge_loop.search.search_policy import PLANNED_ROUND_STALL, SELF_DIRECTED_STALL
 
 
 # The forge-loop CLI activates per-workspace aiter cache isolation, which writes AITER_ROOT_DIR / AITER_JIT_DIR (and
@@ -888,6 +890,62 @@ def test_multi_lane_long_horizon_reports_the_critic_it_enabled(
         "Plan Critic: enabled (long-horizon, same backend/model; skips rounds that continue a kept route)"
         in result.output
     )
+
+
+def test_a_single_lane_campaign_builds_no_planning_service(tmp_path, monkeypatch):
+    """One lane has nothing to divide, so no round buys a dispatch, a specialist, a synthesis or a critic."""
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, _workspace = _invoke_forge_loop(
+        tmp_path,
+        ["--profiling", "--max-hours", "2.0001", "--lanes", "1"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["run_kwargs"]["agents"].orchestration_service is None
+    assert "orchestration_service_kwargs" not in captured
+    assert captured["run_kwargs"]["agents"].analysis_service is captured["analysis_service"]
+    assert "Orchestration: off (one lane; the Implementer chooses its direction from the Analysis evidence)" in (
+        result.output
+    )
+    assert "Plan Critic" not in result.output
+
+
+@pytest.mark.parametrize(("lanes", "stall"), [("1", SELF_DIRECTED_STALL), ("2", PLANNED_ROUND_STALL)])
+def test_the_stall_counts_follow_the_sessions_lanes_and_the_campaign_records_none(tmp_path, monkeypatch, lanes, stall):
+    """One pair of counts reaches the loop, which turns the search and calls a relay blockage by them."""
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, workspace = _invoke_forge_loop(tmp_path, ["--lanes", lanes])
+
+    assert result.exit_code == 0, result.output
+    loop_config = captured["loops"][0].ic
+    assert (loop_config.diversify_after, loop_config.supervise_after) == (stall.diversify_after, stall.supervise_after)
+    stored = json.loads(CampaignConfigStore(str(workspace)).path.read_text())
+    assert set(stored["agent_relay"]) == {"primary_profile_id", "profiles"}
+
+
+def test_the_case_aggregate_belongs_to_the_campaign_and_reaches_the_loop_its_gate_and_the_result(tmp_path, monkeypatch):
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, workspace = _invoke_forge_loop(tmp_path, ["--case-aggregate", "geometric"])
+
+    assert result.exit_code == 0, result.output
+    assert CampaignConfigStore(str(workspace)).load().case_aggregate is CaseAggregate.GEOMETRIC
+    assert captured["loops"][0].ic.case_aggregate is CaseAggregate.GEOMETRIC
+    assert captured["agent_fn_setup"].measurement.case_aggregate is CaseAggregate.GEOMETRIC
+    assert _result_payload(result.output)["case_aggregate"] == "geometric"
+
+
+def test_a_campaign_that_names_no_case_aggregate_is_scored_arithmetically(tmp_path, monkeypatch):
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, workspace = _invoke_forge_loop(tmp_path, [])
+
+    assert result.exit_code == 0, result.output
+    assert CampaignConfigStore(str(workspace)).load().case_aggregate is CaseAggregate.ARITHMETIC
+    assert captured["loops"][0].ic.case_aggregate is CaseAggregate.ARITHMETIC
+    assert _result_payload(result.output)["case_aggregate"] == "arithmetic"
 
 
 def test_forge_loop_can_disable_all_experience_kb_io(tmp_path, monkeypatch):

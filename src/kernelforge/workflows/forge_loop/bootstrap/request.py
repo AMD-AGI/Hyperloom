@@ -70,6 +70,7 @@ class LoopShape:
     lanes: int
     merge_stacking: bool
     bench_repeat: int
+    case_aggregate: str
     commit_new_paths: tuple[str, ...]
 
 

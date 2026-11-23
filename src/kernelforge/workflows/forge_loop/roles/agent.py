@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable
 
 
 from kernelforge.agent_backends import (
+    AgentCapabilities,
     AgentRunSpec,
     AgentToolPolicy,
     create_registered_backend,
@@ -25,13 +26,22 @@ from kernelforge.agent_backends.session_resume import run_session_with_api_resum
 from kernelforge.config import Config, resolve_agent_model
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS, TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.utils.gpu_arch import Profiler, arch_profile
+from kernelforge.utils.session_kill import session_kill_command
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.workflows.forge_loop.gate.gate_tag import gate_outcome_tag
 from kernelforge.workflows.forge_loop.gate.insession_gate import GateMeasurement, GateScope, InSessionGate
+from kernelforge.workflows.forge_loop.roles.implementer_method import (
+    CORRECTNESS_ONLY_WORKING_METHOD,
+    PERFORMANCE_WORKING_METHOD,
+    deadline_section,
+    render_method,
+    session_budget_section,
+)
 from kernelforge.workflows.forge_loop.memory.lessons import SessionEnd
 from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,
+    CaseAggregate,
     GateScoring,
     keep_t_critical,
 )
@@ -88,6 +98,28 @@ _DELIVERABLE_HYGIENE_RULE = (
     "exposes no other way: set that, and say in a comment why there is no "
     "API for it."
 )
+
+# Other campaigns on the host run the same driver, profiler and script names, so a kill by name is never scoped to
+# the session that issues it. The gate denies one; this says what to use instead before the session reaches for it.
+# One line of the gated prompt's rule list, present only where both halves of it are true.
+_PROCESS_HYGIENE_RULE = (
+    "- Stop only what this session started. `{session_kill} '<pattern>'` signals the processes of this session whose "
+    "command line matches, and no one else's; `kill <pid>` with a PID your own command reported is fine too. "
+    "`pkill`, `killall` and `kill` fed from `pgrep` or `ps` choose by name out of every process on the host, where "
+    "other campaigns run the same tools, and are denied.\n"
+)
+
+
+def _process_hygiene_rule(capabilities: AgentCapabilities) -> str:
+    """The process rule for a provider that makes it true, else nothing.
+
+    The rule offers the scoped kill, which finds a session's processes by the mark the provider sets, and says a kill
+    by name is denied, which the provider's hooks do. A session of a provider that does neither is told nothing.
+    """
+    if capabilities.session_process_mark and capabilities.stop_hooks:
+        return _PROCESS_HYGIENE_RULE.format(session_kill=session_kill_command())
+    return ""
+
 
 _DRIVER_INTERPOSITION_SECTION = """
 ## Run the driver through this command
@@ -214,8 +246,8 @@ You are a GPU kernel optimization agent working in ONE self-correcting session.
 ## Your Task
 Improve the target kernel's performance while keeping it numerically correct.
 Unlike a one-shot edit, you own a full edit→verify→fix loop IN THIS SESSION:
-edit the kernel, build/run it yourself to check, read any error, and fix it —
-repeat until the kernel is CORRECT and FASTER than the current best.
+edit the kernel, build/run it yourself to check, read any error, and fix it.
+How far to take that loop is set out under "How to work" below.
 
 ## Program (what to optimize and how)
 {program_md}
@@ -237,8 +269,8 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
     `python3 {driver_run} --warmup 3 --iters 20 --bench-mode`
   prints per-case `case_ms: <case> <ms>` plus one `mean_ms: <ms>` aggregate
   (the arithmetic mean across cases). `mean_ms` is diagnostic only. The score is
-  the equal-weight arithmetic mean of per-case speedups:
-  `mean(pristine_case_ms / candidate_case_ms)`. Run this before you stop; the
+  the equal-weight {case_aggregate} mean of per-case speedups:
+  `{score_formula}`. Run this before you stop; the
   gate reports the resulting mean case speedup.
 - You may run these (and read the driver) as often as you like — executing the
   driver is always allowed. What is HARD-DENIED is any EDIT or shell write to it
@@ -252,28 +284,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
    solution archive (forge_experiments/candidates/iter_NNN/) where every prior
    kernel is saved in full. Read prior kernels there to compare, reuse, or COMBINE
    approaches — the file on disk is only the current best, not the search history.
-2. Use Edit to make a change with a clear hypothesis.
-3. VERIFY IT YOURSELF with Bash before finishing, using the driver documented
-   above (run from the current directory):
-     `python3 {driver_run}` → full-suite correctness verdict
-     `python3 {driver_run} --warmup 3 --iters 20 --bench-mode`
-                              → per-case timings plus diagnostic `mean_ms`
-   If correctness fails or a compile error is raised, READ the error and FIX it —
-   do not stop on a broken kernel. Optimize the mean of per-case speedups,
-   not raw `mean_ms`; the in-session gate computes the authoritative score.
-4. As soon as you have the FIRST candidate that you believe is correct and
-   faster than the current best, STOP exploring. Submit it immediately to the
-   outer loop, which is the sole authority for canonical correctness, benchmark,
-   KEEP, and REVERT. Do not spend the remaining Session searching for a larger
-   gain after you already have a plausible improvement.
-5. There is NO hard edit budget — make as many changes to non-protected tracked
-   implementation files as a direction needs, verifying as you go. What IS bounded is fruitless
-   stopping: each time you STOP with a candidate that is correct but not faster
-   than best, the gate sends you back to keep improving, and after {max_blocks}
-   such rejected stops it ends the session and hands off. So do not circle
-   micro-tweaks inside the noise band — if a direction is not beating best,
-   switch to a materially different one rather than resubmitting near-ties.
-
+{working_method}
 ## Rules
 - The target kernel file may NOT be self-contained. If the performance-relevant
   code lives in other workspace files it includes/imports (headers, modules,
@@ -293,7 +304,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
   say so. An assumption about what the harness does is not a reason.
 - {workspace_hygiene_rule}
 - {deliverable_hygiene_rule}
-- As your VERY LAST output, after all edits/fixes are done and the kernel is in
+{process_hygiene_rule}- As your VERY LAST output, after all edits/fixes are done and the kernel is in
   its final state, output one line starting with `PLAN:` — a SHORT headline
   (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
   NOW IN THE FILE (the one that will be committed and benchmarked), e.g. "raise
@@ -318,26 +329,12 @@ def _pr_kb_child_env() -> dict[str, str]:
     return {name: os.environ[name] for name in _PR_KB_CHILD_ENV_VARS if os.environ.get(name, "").strip()}
 
 
-def _deadline_section(deadline_sec: int) -> str:
-    """Tell the session its own wall-clock bound."""
-    deadline_min = max(1, round(deadline_sec / 60))
-    return (
-        "## Session deadline\n"
-        f"You have about {deadline_min} minutes of wall-clock for "
-        "THIS session before it is cut off; a session cut off mid-turn hands "
-        "off nothing. Well before then, stop improving and submit the best "
-        "candidate you actually have through the clean handoff "
-        "(candidate_submitted) — do not reach for a larger gain you cannot "
-        "land in time.\n"
-    )
-
-
-def _gate_scoring_context(scoring: GateScoring) -> str:
+def _gate_scoring_context(scoring: GateScoring, aggregate: CaseAggregate) -> str:
     """Tell the session the exact rule its candidate will be judged by."""
     return (
         "\n\n## Authoritative mean case scoring state\n"
         "Each of three independent measurements is scored as "
-        "`mean(pristine_case_ms / candidate_case_ms)` with equal case "
+        f"`{aggregate.formula}` with equal case "
         "weight. The mean of those three scores must beat the "
         "current best by at least "
         f"{keep_t_critical(KEEP_MEASUREMENT_COUNT):g} standard "
@@ -671,6 +668,12 @@ class ImplementerSetup:
     measurement: GateMeasurement = field(default_factory=GateMeasurement)
     session: SessionOptions = field(default_factory=SessionOptions)
 
+    @property
+    def paced(self) -> bool:
+        """Whether its sessions search for performance under their own stop check, and so work to a wrap-up minute."""
+        stop_check = self.session.insession_gate and self.measurement.driver_script
+        return bool(stop_check and self.session.insession_gate_stop_check) and not self.measurement.correctness_only
+
 
 @dataclass(frozen=True)
 class _SessionSurface:
@@ -728,8 +731,10 @@ def _pr_mcp_servers(pr_kb_repo: str, backend) -> dict[str, StdioMcpServer]:
     return pr_mcp_servers
 
 
-def _session_user_prompt(kernel_path: str, experiment_history: str, surface: _SessionSurface, deadline_sec: int) -> str:
-    """The per-invocation prompt: what the session may edit, its deadline and the prior experience."""
+def _session_user_prompt(
+    kernel_path: str, experiment_history: str, surface: _SessionSurface, deadline_section: str
+) -> str:
+    """The per-invocation prompt: what the session may edit, its time budget and the prior experience."""
     target_section = _target_section(
         kernel_path,
         is_repo_task=surface.is_repo_task,
@@ -740,7 +745,7 @@ def _session_user_prompt(kernel_path: str, experiment_history: str, surface: _Se
 
     return f"""\
 {target_section}
-{_deadline_section(deadline_sec)}
+{deadline_section}
 ## Prior experience (distilled constraints + recent iterations)
 {experiment_history if experiment_history else "(none — this is iteration 1)"}
 
@@ -795,6 +800,7 @@ def make_agent_fn(
         "self_profiling_section": self_profiling_section,
         "workspace_hygiene_rule": _WORKSPACE_HYGIENE_RULE,
         "deliverable_hygiene_rule": _DELIVERABLE_HYGIENE_RULE,
+        "process_hygiene_rule": _process_hygiene_rule(backend.capabilities),
     }
     base_system_prompt = _BASE_SYSTEM_PROMPT.format(**prompt_sections)
 
@@ -803,12 +809,21 @@ def make_agent_fn(
     # Without the stop check the gate is protection only: its hooks deny an edit or a shell write to the measurement
     # surface while the session runs, and nothing decides when the session may end.
     gate_stop_check = gate_enabled and session.insession_gate_stop_check
+    # A session that searches for performance under its own stop check paces itself to a wrap-up minute; every other
+    # session is told only where its deadline falls.
+    time_section = session_budget_section if setup.paced else deadline_section
     gate_scope = _gate_scope(source_files, surface.is_repo_task, task.extra_protected_globs, extra_protected_paths)
     gate_system_prompt = _GATE_SYSTEM_PROMPT.format(
         **prompt_sections,
         driver_base=driver_base,
         driver_run=driver_run,
-        max_blocks=measurement.max_blocks,
+        case_aggregate=measurement.case_aggregate.value,
+        score_formula=measurement.case_aggregate.formula,
+        working_method=render_method(
+            CORRECTNESS_ONLY_WORKING_METHOD if measurement.correctness_only else PERFORMANCE_WORKING_METHOD,
+            driver_run=driver_run,
+            max_blocks=measurement.max_blocks,
+        ),
         backend_rule=(
             "Optimize only the selected assembly; keep the frontend, launcher and ABI frozen."
             if task.kernel_backend_name == "assembly"
@@ -842,7 +857,7 @@ def make_agent_fn(
 
         def prepare_session() -> tuple[InSessionGate | None, AgentRunSpec]:
             """Build this session's in-session gate (None when disabled) and the run spec handed to the backend."""
-            prompt = _session_user_prompt(kernel_path, experiment_history, surface, session_deadline_sec)
+            prompt = _session_user_prompt(kernel_path, experiment_history, surface, time_section(session_deadline_sec))
 
             # One fixed interaction budget per candidate Session.
             turn_cap = config.max_turns
@@ -862,7 +877,7 @@ def make_agent_fn(
                     best_mean_case_speedup=gate_scoring.best_mean_case_speedup,
                 )
                 if gate_stop_check:
-                    system_prompt = gate_system_prompt + _gate_scoring_context(gate_scoring)
+                    system_prompt = gate_system_prompt + _gate_scoring_context(gate_scoring, measurement.case_aggregate)
                 # Built only for a provider that runs them. A backend which ignores
                 # ``AgentRunSpec.hooks`` drops the whole group without a word, so
                 # attaching one anyway makes this call site read as protection the

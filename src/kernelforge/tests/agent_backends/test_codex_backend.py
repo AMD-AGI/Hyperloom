@@ -1109,7 +1109,9 @@ def test_implementer_leaves_the_takeaway_to_the_lesson_turn(
     assert spec.additional_directories == []
     assert "## Reasoning log" not in spec.user_prompt
     assert "reasoning log" not in spec.system_prompt.lower()
-    assert "land in time.\n\n## Prior experience" in spec.user_prompt
+    # Nothing stands between the session's time budget and the prior experience it is handed.
+    budget_closing = "at that moment." if insession_gate else "land in time."
+    assert f"{budget_closing}\n\n## Prior experience" in spec.user_prompt
     assert "You do NOT write a takeaway" in spec.system_prompt
     assert "separate turn" in spec.system_prompt
     assert spec.system_prompt.index("starting with `PLAN:`") < spec.system_prompt.index("You do NOT write a takeaway")
