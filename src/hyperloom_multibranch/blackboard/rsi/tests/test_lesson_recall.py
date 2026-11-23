@@ -16,6 +16,8 @@ from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import Learning, LearningRecord, BlackboardSnapshot
 from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
 from hyperloom_multibranch.blackboard.families import Family, Mechanism
+from hyperloom_multibranch.blackboard.knowledge.experience import experience_identity
+from hyperloom_multibranch.blackboard.knowledge.tests.fakes import FakeExperienceReader, completed_read
 from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, NOTES_HEADING, RetrievalLog
 from hyperloom_multibranch.blackboard.rsi.briefing import CrossSessionBriefing, RecallCache
 from hyperloom_multibranch.blackboard.rsi.lesson_recall import GIST_CHARS, SHOWN_BEFORE, LessonRecall, edited_lessons
@@ -218,3 +220,49 @@ async def test_the_brief_shows_past_lessons_as_learnt_before(tmp_path: Path, poo
     brief = await briefing.startup_brief("c0")
 
     assert f"learnt before: [past-1, same conditions, measured] {CORRECTION} [{graph}]" in brief.lessons
+
+
+def _kb_learning(text: str) -> FakeExperienceReader:
+    item = {
+        "experience_id": "exp-kb",
+        "source_run_id": "sess-0",
+        "identity": experience_identity(profile()),
+        "change_summary": text,
+        "decision": "measured",
+    }
+    return FakeExperienceReader(completed_read(item))
+
+
+async def test_the_brief_and_the_learnings_tool_fill_the_slots_left_with_the_kbs_learnings_and_a_claim_reads_none(
+    tmp_path: Path, pool: LessonPool
+) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    snapshot = await blackboard.snapshot()
+    graph = lesson(pool, "graph", CORRECTION, evidence=MEASURED)
+    reader = _kb_learning("cuda graph capture needs eager prefill on this model")
+    log = tmp_path / LEARNINGS_LOG
+    recall = LessonRecall(reader, pool=pool, log=RetrievalLog(log))
+    kb = "[sess-0, same conditions, measured] cuda graph capture needs eager prefill on this model [exp-kb]"
+
+    told = await recall.lines(snapshot, "cuda graph", limit=5, branch="s1")
+    claimed = await recall.about(snapshot, "cuda graph max batch size", branch="s1")
+    brief = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, focus="cuda graph", branch="s2", learnings=recall
+    ).startup_brief("c0")
+    (asked, claim, _) = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+    assert told == [NOTES_HEADING, f"- [past-1, same conditions, measured] {CORRECTION} [{graph}]", f"- {kb}"]
+    assert f"learnt before: {kb}" in brief.lessons
+    assert (asked["past"], claim["past"]) == ([graph, "exp-kb"], [graph])
+    assert [context["observations"]["query"] for _, context, _ in reader.calls] == ["cuda graph"]
+
+
+def test_no_kb_read_once_this_session_and_the_pool_fill_the_list(
+    snapshot: BlackboardSnapshot, pool: LessonPool
+) -> None:
+    graph = lesson(pool, "graph", CORRECTION, evidence=MEASURED)
+    reader = _kb_learning("cuda graph capture needs eager prefill on this model")
+
+    found = LessonRecall(reader, pool=pool).notes(snapshot, "cuda graph", limit=1)
+
+    assert [item.experience_id for item in found.past] == [graph] and reader.calls == []

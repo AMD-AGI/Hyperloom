@@ -12,9 +12,11 @@ standing (:func:`~hyperloom_multibranch.blackboard.rsi.lessons.standing_factor`)
 first, then the newer. A lesson's family is that of the direction it names, else of its words. A lesson this session
 revised or retired is no longer shown; the learning that did it is, among this session's. Each lesson shows its id,
 which a learning of this session may revise or retire it by, the conditions it differs in, whether a test measured it
-and how often sessions bore it out. A granted claim, the learnings tool and a brief list
-:data:`~hyperloom_multibranch.blackboard.learning_search.NOTES` of them; a menu line of a brief, its family's best note
-(:meth:`LessonRecall.family_note`). The pool is read once, when first asked.
+and how often sessions bore it out. The learnings tool and a brief fill the slots left with the Experience KB's past
+learnings (:class:`~hyperloom_multibranch.blackboard.knowledge.learning_recall.LearningRecall`), which name no family.
+A granted claim, the learnings tool and a brief list :data:`~hyperloom_multibranch.blackboard.learning_search.NOTES` of
+them; a menu line of a brief, its family's best note (:meth:`LessonRecall.family_note`). The pool is read once, when
+first asked.
 
 A brief starts each launch of a branch's specialist. From it on, a claim's reply names a lesson the launch was shown
 already by its gist and id alone: the same lessons came back with claim after claim, half the lessons a claim showed.
@@ -201,11 +203,19 @@ class LessonRecall(LearningRecall):
                 found.append((Match(kin, overlap * weight, head.written_at), item))
         return found
 
-    def notes(self, snapshot: BlackboardSnapshot, query: str, *, limit: int, family: Family | None = None) -> Notes:
-        """This session's learnings and the pool's lessons that bear on ``query``, in one list of ``limit``."""
-
+    def _pooled(self, snapshot: BlackboardSnapshot, query: str, limit: int, family: Family | None) -> Notes:
         chosen = _ranked(session_scored(snapshot, query, family), self._scored(snapshot, query, family), limit)
         return _notes(chosen, snapshot)
+
+    def notes(self, snapshot: BlackboardSnapshot, query: str, *, limit: int, family: Family | None = None) -> Notes:
+        """This session's learnings and the pool's lessons that bear on ``query``, then the Experience KB's past
+        learnings in the slots left, in one list of ``limit``. It reads the KB, so call it off the event loop."""
+
+        found = self._pooled(snapshot, query, limit, family)
+        left = limit - len(found.lines)
+        read = self.past_for(snapshot, query, limit=limit) if left > 0 else None
+        kb = read.items[:left] if read is not None and read.available else ()
+        return found + Notes(tuple(item.render() for item in kb), (), kb, (False,) * len(kb))
 
     def family_note(self, snapshot: BlackboardSnapshot, family: Family) -> Notes:
         """The best of this session's learnings and the pool's lessons about ``family`` itself, for its menu line."""
@@ -242,9 +252,10 @@ class LessonRecall(LearningRecall):
         self, snapshot: BlackboardSnapshot, query: str, *, branch: str, family: Family | None = None
     ) -> list[str]:
         """The :data:`~hyperloom_multibranch.blackboard.learning_search.NOTES` notes about a claimed direction, in one
-        list, as one retrieval of the log; a lesson this launch of the branch was shown already by its gist alone."""
+        list, as one retrieval of the log; a lesson this launch of the branch was shown already by its gist alone. A
+        claim reads no Experience KB: each read is planned by an LLM."""
 
-        found = await asyncio.to_thread(self.notes, snapshot, query, limit=NOTES, family=family)
+        found = await asyncio.to_thread(self._pooled, snapshot, query, NOTES, family)
         with self._lock:
             seen = frozenset(self._shown.get(branch, ()))
         return self._logged(snapshot, Retrieval(branch, RetrievalSource.CLAIM, query), _named_again(found, seen))

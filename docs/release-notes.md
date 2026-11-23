@@ -94,7 +94,8 @@ it.
 - **A multi-branch session reads and writes the workspace's Experience KB.**
   With `HYPERLOOM_KB_URL` and `HYPERLOOM_KB_TOKEN` exported (the values
   `hyperloom-setup` writes into `.env`), a session's briefs recall past
-  sessions' tests and its learnings tool their learnings, and CLOSE writes the
+  sessions' tests and learnings and its learnings tool their learnings, after
+  this session's and the RSI lesson pool's; a claim reads none. CLOSE writes the
   session's tests and learnings there, spooling beside the service's data what
   it does not take. An InferenceX session reads both schemas its tests are
   written under, so a kernel change is recalled too. A loopback service is
