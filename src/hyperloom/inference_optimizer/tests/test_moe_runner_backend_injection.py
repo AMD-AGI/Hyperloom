@@ -284,18 +284,21 @@ def test_materialize_does_not_double_user_backend(tmp_path, moe_model, monkeypat
     assert "triton" not in sglang_args
 
 
+_MISSING_RUNNER_TRACEBACK = (
+    'File ".../quark/schemes/quark_w4a4_mxfp4_moe.py", line 295, in apply_weights\n'
+    "    return self.runner.run(dispatch_output, quant_info)\n"
+    "AttributeError: 'QuarkW4A4MXFp4MoE' object has no attribute 'runner'\n"
+)
+
+
 def test_a_baseline_killed_by_its_pinned_backend_fails_as_launched(tmp_path):
     pinned = "--moe-runner-backend triton"
-    launched: list[str] = []
+    launches: list[tuple[str, dict]] = []
     executor = BaselineExecutor(session_dir=tmp_path, shared_state=None)
 
-    async def _run_once(ctx, *, recorder=None, run_index=0):
-        launched.append(executor._settle_attempt_server_args(ctx.task.params, None)[1])
-        return {
-            "status": "failed",
-            "error_class": "server_init_dead",
-            "error": "AttributeError: 'QuarkW4A4MXFp4MoE' object has no attribute 'runner'",
-        }
+    async def _run_once(ctx, *, recorder=None, run_index=0, **options):
+        launches.append((executor._settle_attempt_server_args(ctx.task.params, None, **options)[1], options))
+        return {"status": "failed", "error_class": "server_init_dead", "error": _MISSING_RUNNER_TRACEBACK}
 
     executor._run_once = _run_once  # type: ignore[method-assign]
     task = SimpleNamespace(
@@ -304,9 +307,23 @@ def test_a_baseline_killed_by_its_pinned_backend_fails_as_launched(tmp_path):
 
     result = asyncio.run(executor._run_with_accuracy(SimpleNamespace(task=task, extra={})))
 
-    assert launched == [pinned]
+    assert launches == [(pinned, {})]
     assert result["status"] == "failed"
+    assert result["error_class"] == "server_init_dead"
+    assert result["error"] == _MISSING_RUNNER_TRACEBACK
     assert task.params["extra_server_args"] == pinned
+
+
+def test_materialize_keeps_a_pinned_backend_the_checkpoint_has_no_runner_for(
+    tmp_path, quark_mxfp4_moe_model, monkeypatch
+):
+    monkeypatch.setenv("GPU_TYPE", _AMD)
+    envs = _materialize_envs(
+        tmp_path,
+        model=quark_mxfp4_moe_model,
+        extra_server_args="--moe-runner-backend triton",
+    )
+    assert "--moe-runner-backend triton" in envs["EXTRA_SGLANG_ARGS"]
 
 
 @pytest.mark.parametrize(

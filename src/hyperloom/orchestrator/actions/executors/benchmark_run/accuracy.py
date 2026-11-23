@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.agentx_workload import is_mlperf_backend
 from hyperloom.common.perf_metric import agentx_active
-from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import RUN_INITIAL
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
 from inference_suite.contracts import FailedStep
 from inference_suite.server_log import death_excerpt
@@ -223,7 +222,7 @@ class _BaselineAccuracyMixin:
 
     async def _run_with_accuracy(self, ctx: RunnerContext, *, recorder: Any = None) -> dict[str, Any]:
         """Run the baseline and its accuracy round; an eval-rooted failure fails the round."""
-        result = await self._run_pass(ctx, recorder=recorder, attempt_reason=RUN_INITIAL)
+        result = await self._run_pass(ctx, recorder=recorder)
         # An eval that never reached a verdict because the server was gone is a broken measurement, not a statement
         # about accuracy or about a missing framework capability. Leaving it in the eval-rooted branch stamps it as an
         # eval-failure contract and hands it to the enablement lane, which then spends rounds looking for a capability

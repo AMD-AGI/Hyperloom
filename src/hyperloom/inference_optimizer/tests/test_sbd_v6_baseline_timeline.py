@@ -169,7 +169,7 @@ def test_the_event_is_on_the_timeline_before_the_measurement_finishes(tmp_path: 
 def test_the_window_starts_when_the_action_started_not_when_it_ended(tmp_path: Path) -> None:
     recorder = _recorder()
     opened = _events(tmp_path)[0]["start_time"]
-    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    index = recorder.begin_run()
     recorder.record_round(
         run_index=index,
         round_=BaselineRound(
@@ -199,7 +199,7 @@ def test_the_window_starts_when_the_action_started_not_when_it_ended(tmp_path: P
 
 def test_a_measured_baseline_closes_succeeded_with_its_numbers(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    index = recorder.begin_run()
     recorder.record_round(
         run_index=index,
         round_=BaselineRound(
@@ -228,7 +228,7 @@ def test_a_measured_baseline_closes_succeeded_with_its_numbers(tmp_path: Path) -
 
 def test_the_discarded_warmup_is_recorded_beside_the_pass_that_counted(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    index = recorder.begin_run()
     recorder.record_round(
         run_index=index,
         round_=BaselineRound(
@@ -259,7 +259,7 @@ def test_the_discarded_warmup_is_recorded_beside_the_pass_that_counted(tmp_path:
 
 def test_rounds_that_start_in_the_same_second_keep_the_order_they_ran_in(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    index = recorder.begin_run()
     same_second = "2026-09-02T15:07:09+00:00"
     for label in (ROUND_WARMUP, ROUND_MEASURE, ROUND_ACCURACY):
         recorder.record_round(
@@ -283,7 +283,7 @@ def test_rounds_that_start_in_the_same_second_keep_the_order_they_ran_in(tmp_pat
 
 def test_a_pass_refused_before_it_booted_still_leaves_a_row(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    index = recorder.begin_run()
     refused = _failed(error_class="session_time_exhausted", error="the run's clock refused the round")
     recorder.end_run(run_index=index, result=refused)
     recorder.finish(refused)
@@ -297,7 +297,7 @@ def test_a_pass_refused_before_it_booted_still_leaves_a_row(tmp_path: Path) -> N
 
 def test_a_baseline_standing_on_its_cold_warmup_closes_degraded(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    index = recorder.begin_run()
     recorder.record_round(
         run_index=index,
         round_=BaselineRound(
@@ -322,7 +322,7 @@ def test_a_baseline_standing_on_its_cold_warmup_closes_degraded(tmp_path: Path) 
 
 def test_a_failed_baseline_names_the_class_it_failed_with(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    index = recorder.begin_run()
     recorder.record_round(
         run_index=index,
         round_=BaselineRound(
@@ -438,7 +438,7 @@ def test_each_action_is_assembled_under_its_own_task_id(tmp_path: Path) -> None:
 
 def test_a_killed_session_leaves_an_interrupted_event_with_its_rows(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    index = recorder.begin_run()
     recorder.record_round(
         run_index=index,
         round_=BaselineRound(
@@ -462,7 +462,7 @@ def test_a_killed_session_leaves_an_interrupted_event_with_its_rows(tmp_path: Pa
 
 def test_assembling_the_same_rows_twice_gives_the_same_event(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    index = recorder.begin_run()
     for label in (ROUND_WARMUP, ROUND_MEASURE):
         recorder.record_round(
             run_index=index,
@@ -619,7 +619,7 @@ async def test_an_executor_raise_closes_the_event_it_opened(tmp_path: Path) -> N
 def test_the_measurement_says_where_its_latency_came_from(tmp_path: Path) -> None:
     recorder = _recorder()
     measured = _measured(ttft_e2el_source="rescued_raw_result", tpot_source="derived_from_e2el_ttft")
-    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    index = recorder.begin_run()
     recorder.record_round(
         run_index=index,
         round_=BaselineRound(
@@ -702,7 +702,7 @@ def _evidence(**overrides: Any) -> dict[str, Any]:
 
 def test_the_launch_reports_the_args_it_resolved(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    index = recorder.begin_run()
     recorder.record_invocation(
         run_index=index,
         invocation=BaselineInvocation(
@@ -729,7 +729,7 @@ def test_the_launch_reports_the_args_it_resolved(tmp_path: Path) -> None:
 
 def test_an_empty_arg_string_is_an_answer_rather_than_a_gap(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    index = recorder.begin_run()
     recorder.record_invocation(
         run_index=index, invocation=BaselineInvocation(framework_args="", config_path="/w/baseline.yaml")
     )
@@ -742,7 +742,7 @@ def test_an_empty_arg_string_is_an_answer_rather_than_a_gap(tmp_path: Path) -> N
 
 def test_the_observed_flags_do_not_overwrite_what_was_requested(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run(attempt_reason=RUN_INITIAL)
+    index = recorder.begin_run()
     recorder.record_invocation(
         run_index=index, invocation=BaselineInvocation(framework_args="--attention-backend aiter")
     )

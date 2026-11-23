@@ -56,7 +56,7 @@ ROW_ACTION = "action"
 ROW_RUN = "run"
 ROW_ROUND = "round"
 
-# Every run row names why it ran, so a baseline that measured three times reads without re-deriving the retry reason.
+# The ``attempt_reason`` every run row carries.
 RUN_INITIAL = "initial"
 
 #: Quality-reference statuses whose figure the session went on to use. ``degraded`` is a baseline that stands on its
@@ -609,7 +609,7 @@ class BaselineEventRecorder:
             producer=PRODUCER,
         )
 
-    def begin_run(self, *, attempt_reason: str) -> int:
+    def begin_run(self) -> int:
         """Record that a pass through the executor's core has started."""
         self._run_index += 1
         self._sink.record(
@@ -617,7 +617,7 @@ class BaselineEventRecorder:
             {
                 "task_id": self._task_id,
                 "run_index": self._run_index,
-                "attempt_reason": str(attempt_reason),
+                "attempt_reason": RUN_INITIAL,
                 "status": "running",
                 "start_time": _now_iso(),
             },
@@ -668,8 +668,7 @@ class BaselineEventRecorder:
             row_type=ROW_RUN,
             natural_ids=(self._action_id, str(int(run_index))),
         )
-        # The action's copy is the last pass to launch, the one its adopted
-        # measurement was taken under. Repeated writes deep-merge.
+        # The action carries the launch its measurement was taken under.
         self._record_action({"invocation": block})
 
     def record_round(self, *, run_index: int, round_: BaselineRound) -> None:

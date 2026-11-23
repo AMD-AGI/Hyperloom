@@ -188,15 +188,9 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         """Run the action inside the bound session."""
         return await self._run_with_accuracy(ctx)
 
-    async def _run_pass(
-        self,
-        ctx: RunnerContext,
-        *,
-        recorder: Any,
-        attempt_reason: str,
-    ) -> dict[str, Any]:
-        """Run one pass through :meth:`_run_once`, recorded as its own row."""
-        index = recorder.begin_run(attempt_reason=attempt_reason) if recorder is not None else 0
+    async def _run_pass(self, ctx: RunnerContext, *, recorder: Any) -> dict[str, Any]:
+        """Run :meth:`_run_once`, recorded as the action's run row."""
+        index = recorder.begin_run() if recorder is not None else 0
         try:
             result = await self._run_once(ctx, recorder=recorder, run_index=index)
         except BaseException as exc:

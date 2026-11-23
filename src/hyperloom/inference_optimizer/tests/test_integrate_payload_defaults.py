@@ -554,13 +554,10 @@ class TestIntegrateHandlerHonoursStateDefault:
     [{"remove_args": ["--disable-cuda-graph"]}, {"args_mode": "replace"}],
     ids=["remove-only", "replace-only"],
 )
-@pytest.mark.parametrize("framework", ["sglang", "vllm"])
-async def test_control_only_integrate_measures_without_resolving_historical_patch(
-    session_dir, monkeypatch, controls, framework
-):
+async def test_control_only_integrate_measures_without_resolving_historical_patch(session_dir, monkeypatch, controls):
     from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
 
-    monkeypatch.setenv("FRAMEWORK", framework)
+    monkeypatch.setenv("FRAMEWORK", "sglang")
     state = _seed_state(session_dir, baseline_tput=1000.0, baseline_config_path="/tmp/base.yaml")
     seed_kernel_keep(state, "gemm_controls_only", source_file="/tmp/unrelated.py", artifact="/tmp/unrelated.patch")
     state.save(session_dir)
@@ -591,8 +588,48 @@ async def test_control_only_integrate_measures_without_resolving_historical_patc
     assert result["apply_result"]["reason"] == "env_only_no_patch_applied"
     assert captured["extra_envs"] == {}
     assert captured["extra_server_args"] == ""
-    assert result["extra_server_args"] == ""
     assert {key: captured[key] for key in controls} == controls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested", ["", "--max-num-seqs 128"], ids=["no-args", "own-args"])
+async def test_a_vllm_integrate_rebaseline_launches_and_reports_the_requested_server_args(
+    session_dir, monkeypatch, requested
+):
+    from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
+
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    state = _seed_state(session_dir, baseline_tput=1000.0, baseline_config_path="/tmp/base.yaml")
+    seed_kernel_keep(state, "gemm_args_only", source_file="/tmp/unrelated.py", artifact="/tmp/unrelated.patch")
+    state.save(session_dir)
+    launched = {}
+
+    class FakeBaselineExecutor:
+        default_timeout_sec = 7800
+
+        def __init__(self, *, session_dir, shared_state):
+            self.session_dir = session_dir
+
+        async def __call__(self, ctx):
+            launched.update(ctx.task.params)
+            return {"output_throughput": 1100.0, "completed_requests": 10}
+
+    monkeypatch.setattr(baseline_mod, "BaselineExecutor", FakeBaselineExecutor)
+
+    result = await krh.integrate_handler(
+        {
+            "kernel_id": "gemm_args_only",
+            "source": "forge_gemm_tuning",
+            "mode": "env_only",
+            "extra_server_args": requested,
+            "remove_args": ["--disable-cuda-graph"],
+        },
+        session_dir=session_dir,
+    )
+
+    assert result["status"] == "ok", result
+    assert launched["extra_server_args"] == requested
+    assert result["extra_server_args"] == requested
 
 
 @pytest.mark.asyncio
