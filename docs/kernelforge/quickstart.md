@@ -33,14 +33,6 @@ For rocprof-compute hardware profiling (System Speed-of-Light + roofline), add t
 profiling degrades to the lightweight PMC path. (`install.sh` installs it for you
 unless you set `SKIP_FORGE_PROFILING=1`.)
 
-On pip-packaged ROCm the profiler runs from the ROCm tree the workload's own
-torch loads, not from whichever tree `ROCM_PATH` names. An image that installs
-both `_rocm_sdk_core` and `_rocm_sdk_devel` carries the same libraries twice;
-a profiler taken from the tree torch does not use aborts every torch process
-with `Option 'spirv-expand-step' registered more than once`. `install.sh`
-restores the `libhsa-amd-aqlprofile64.so` name the profiler needs in every
-tree that carries it.
-
 Verify:
 
 ```bash

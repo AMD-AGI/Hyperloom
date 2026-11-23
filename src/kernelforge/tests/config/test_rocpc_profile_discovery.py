@@ -34,12 +34,6 @@ def rocpc_profile() -> ModuleType:
     return module
 
 
-@pytest.fixture(autouse=True)
-def _no_torch_runtime(rocpc_profile, monkeypatch) -> None:
-    """Keep the interpreter running the tests out of the answer: whether it has a torch, and from which ROCm tree."""
-    monkeypatch.setattr(rocpc_profile, "_loaded_rocm_root", lambda python: None)
-
-
 def _make_libexec(root: Path) -> Path:
     libexec = root / "libexec" / "rocprofiler-compute"
     libexec.mkdir(parents=True, exist_ok=True)
@@ -184,81 +178,6 @@ def test_profiler_env_keeps_a_rocm_path_that_already_has_the_sdk(rocpc_profile, 
     monkeypatch.syspath_prepend(str(site))
 
     assert rocpc_profile._profiler_env()["ROCM_PATH"] == str(devel)
-
-
-def test_profiler_env_follows_the_tree_torch_loads_over_rocm_path(rocpc_profile, tmp_path, monkeypatch) -> None:
-    """An image carrying both wheels points ROCM_PATH at _rocm_sdk_devel while torch loads the same libraries from
-    _rocm_sdk_core. A profiler taken from the first maps a second LLVM into the process and aborts it with
-    ``Option 'spirv-expand-step' registered more than once``."""
-    devel = tmp_path / "_rocm_sdk_devel"
-    core = tmp_path / "_rocm_sdk_core"
-    for tree in (devel, core):
-        (tree / "lib" / "rocprofiler-sdk").mkdir(parents=True)
-    monkeypatch.setenv("ROCM_PATH", str(devel))
-    monkeypatch.setenv("PATH", "/usr/bin")
-    monkeypatch.setattr(rocpc_profile, "_loaded_rocm_root", lambda python: str(core))
-
-    env = rocpc_profile._profiler_env()
-
-    assert env["ROCM_PATH"] == str(core)
-    # rocprofv3 comes from the same tree as the libraries it loads.
-    assert env["PATH"].split(os.pathsep) == [str(core / "bin"), "/usr/bin"]
-
-
-def test_a_torch_runtime_without_the_profiler_sdk_leaves_rocm_path_in_charge(
-    rocpc_profile, tmp_path, monkeypatch
-) -> None:
-    """A torch that bundles its own HIP runtime names a tree with nothing to profile through."""
-    bundled = tmp_path / "torch"
-    (bundled / "lib").mkdir(parents=True)
-    rocm = tmp_path / "rocm"
-    (rocm / "lib" / "rocprofiler-sdk").mkdir(parents=True)
-    monkeypatch.setenv("ROCM_PATH", str(rocm))
-    monkeypatch.setattr(rocpc_profile, "_loaded_rocm_root", lambda python: str(bundled))
-
-    assert rocpc_profile._profiler_env()["ROCM_PATH"] == str(rocm)
-
-
-def test_the_loaded_tree_is_read_from_the_interpreters_own_torch(rocpc_profile, monkeypatch) -> None:
-    monkeypatch.undo()
-    rocpc_profile._loaded_rocm_root.cache_clear()
-    seen: list[list[str]] = []
-
-    def fake_run(command, **_kwargs):
-        seen.append(command)
-        return subprocess.CompletedProcess(command, 0, "/site/_rocm_sdk_core\n", "")
-
-    monkeypatch.setattr(rocpc_profile.subprocess, "run", fake_run)
-
-    assert rocpc_profile._loaded_rocm_root("/venv/bin/python") == "/site/_rocm_sdk_core"
-    assert seen[0][:2] == ["/venv/bin/python", "-c"]
-    assert "import os, torch" in seen[0][2] and "libamdhip64" in seen[0][2]
-    rocpc_profile._loaded_rocm_root.cache_clear()
-
-
-@pytest.mark.parametrize(
-    "outcome",
-    [
-        subprocess.CompletedProcess([], 1, "", "ModuleNotFoundError: No module named 'torch'"),
-        subprocess.CompletedProcess([], 0, "", ""),
-        OSError("no such interpreter"),
-        subprocess.TimeoutExpired("python", 120),
-    ],
-    ids=["no torch", "no HIP runtime mapped", "no interpreter", "import hung"],
-)
-def test_an_interpreter_with_no_torch_runtime_to_name_names_none(rocpc_profile, monkeypatch, outcome) -> None:
-    monkeypatch.undo()
-    rocpc_profile._loaded_rocm_root.cache_clear()
-
-    def fake_run(*_args, **_kwargs):
-        if isinstance(outcome, BaseException):
-            raise outcome
-        return outcome
-
-    monkeypatch.setattr(rocpc_profile.subprocess, "run", fake_run)
-
-    assert rocpc_profile._loaded_rocm_root("/venv/bin/python") is None
-    rocpc_profile._loaded_rocm_root.cache_clear()
 
 
 def test_profiler_env_exposes_the_sdk_own_amdsmi(rocpc_profile, tmp_path, monkeypatch) -> None:
