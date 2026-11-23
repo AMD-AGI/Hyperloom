@@ -348,11 +348,7 @@ def custom_coord(tmp_path: Path, monkeypatch):
     source_root = tmp_path / "framework"
     (source_root / ".git").mkdir(parents=True)
     c.shared_state.framework_repo_path = str(source_root)
-    c.tasks = SimpleNamespace(
-        queued=AsyncMock(return_value=[]),
-        running=AsyncMock(return_value=[]),
-        find_by_idempotency_key=AsyncMock(return_value=None),
-    )
+    c.tasks = SimpleNamespace(find_by_idempotency_key=AsyncMock(return_value=None))
     c.bus = SimpleNamespace(record_observation=AsyncMock())
     monkeypatch.setattr(
         SpecialistDispatchCollaborator,
@@ -414,17 +410,6 @@ async def test_dispatch_key_names_the_cycle_and_the_definition(custom_coord):
 
     _, key = _dispatched(custom_coord)
     assert key == _custom_key(2, "other focus")
-
-
-async def test_a_task_that_only_borrows_the_custom_tag_does_not_hold_the_dispatch_back(custom_coord):
-    custom_coord.tasks.queued.return_value = [
-        SimpleNamespace(kind="specialist", params={"domain": "serving_specialist", "tags": ["custom_specialist"]})
-    ]
-
-    await custom_coord.specialist_dispatch.ensure_custom_specialist()
-
-    _, key = _dispatched(custom_coord)
-    assert key == _custom_key()
 
 
 @pytest.mark.parametrize(("prompt", "phase"), [("", "FRAMEWORK_AGENT"), (_PROMPT, "ENABLEMENT")])

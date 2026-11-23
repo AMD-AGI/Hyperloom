@@ -168,7 +168,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     def refuse_patch_without_source(self, params: dict[str, Any], *, task_id: str) -> bool:
         """Whether a warmed patch specialist must be refused because no git source tree backs it.
 
-        A refusal ``last_action_failures`` already lists is not recorded again.
+        A refusal ``last_action_failures`` already lists is not recorded again: Orchestration can re-send the
+        delegate under a new idempotency key.
         """
         state = self.shared_state
         error = specialist_patch_preflight_error(params, framework_repo_path=state.framework_repo_path)
