@@ -11,10 +11,10 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors import _git as gitmod
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
-from hyperloom.orchestrator.actions.executors import _integrate_enablement_gate as integrate_enablement_gate
-from hyperloom.orchestrator.actions.executors import _patch_git as patch_git
-from hyperloom.orchestrator.actions.executors import _patch_sources as patch_sources
-from hyperloom.orchestrator.actions.executors import _integrate_refusals as integrate_refusals
+from hyperloom.orchestrator.actions.executors.integrate import _integrate_enablement_gate as integrate_enablement_gate
+from hyperloom.orchestrator.actions.executors.patching import _patch_git as patch_git
+from hyperloom.orchestrator.actions.executors.patching import _patch_sources as patch_sources
+from hyperloom.orchestrator.actions.executors.integrate import _integrate_refusals as integrate_refusals
 from hyperloom.orchestrator.tests._helpers import git_repo_tracking
 
 
@@ -729,7 +729,7 @@ def test_harvest_realized_diff_reads_the_keep_commit(tmp_path):
     """The KEEP is already committed, so its own commit is the realized change."""
     import subprocess as sp
 
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import harvest_realized_diff
+    from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import harvest_realized_diff
 
     root = tmp_path / "framework"
     root.mkdir()
@@ -749,7 +749,7 @@ def test_harvest_realized_diff_reads_the_keep_commit(tmp_path):
 
 
 def test_harvest_realized_diff_returns_empty_without_a_change(tmp_path):
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import harvest_realized_diff
+    from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import harvest_realized_diff
 
     root = tmp_path / "framework"
     root.mkdir()
@@ -760,7 +760,7 @@ def test_harvest_realized_diff_returns_empty_without_a_change(tmp_path):
 
 
 def test_harvest_realized_diff_returns_empty_outside_git(tmp_path):
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import harvest_realized_diff
+    from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import harvest_realized_diff
 
     plain = tmp_path / "plain"
     plain.mkdir()

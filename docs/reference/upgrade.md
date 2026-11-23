@@ -123,12 +123,12 @@ the tool directly must pass the root its output lands under
 
 Every session's `storage/coordinator.db` now records schema version 8, and
 there are no in-place migrations. `optimize --resume-from` on a session whose
-database records an older version, which is every session started by 1.1.4 or
+database records an older version, which is every session started by 1.1.5 or
 earlier, exits 2 at resume admission, before `state.json` or the database is
 touched:
 
 ```text
-ERROR: --resume-from coordinator.db is at schema version 6, older than this build's 8:
+ERROR: --resume-from coordinator.db is at schema version 7, older than this build's 8:
 sessions created before this release cannot be resumed. Finish the session under the
 build that started it, or start a new session.
 ```
@@ -178,6 +178,34 @@ A failed `--quantize` prelude now exits 4 instead of 3; exit 3 means only
 that another optimizer holds the session lock. Launchers that branch on the
 exit code should treat 4 as a non-retryable failure. See also
 [operations.md](operations.md) for the full exit-code table.
+
+### Required: stop the local Ray head and end running sessions
+
+A single-node `hyperloom optimize` no longer uses Ray: serving rounds and GPU
+specialists run as local subprocesses, and GPU specialists get their GPUs from
+the session's GPU pool. The installer no longer installs Ray or starts a Ray
+head, and preflight no longer checks Ray. A head that an earlier installer
+started keeps running until you stop it, so run this once on each host or
+container that ran an earlier version:
+
+```bash
+ray stop --force
+```
+
+There is no migration for a session in flight: end running `optimize` sessions
+before upgrading. These environment variables are no longer read and can be
+removed from `.env` and launchers: `INFERENCE_OPTIMIZER_RAY_EXEC`,
+`INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT`,
+`INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY`,
+`INFERENCE_OPTIMIZER_RAY_ROUND_WAIT_SEC`, `INFERENCE_OPTIMIZER_RAY_NUM_GPUS`,
+`INFERENCE_OPTIMIZER_RAY_SPECIALIST_SCHED_TIMEOUT_SEC`,
+`HYPERLOOM_RAY_{CONNECT_PROBE,READY,STATUS,STOP,INIT}_TIMEOUT_SEC`,
+`HL_RAY_HEAD_PORT`, `RAY_MIN_NOFILE`, `RAY_VERSION`, `RAY_NUM_GPUS` and
+`SKIP_RAY_START`. The failure classes `ray_round_unplaced`,
+`ray_cluster_infeasible` and `ray_actor_error` and the return codes -913 and
+-916 no longer occur, and `session_breakdown.json` no longer reports the
+conc-sweep arm strategy `serving_lease_held` or the `ensure_ray` install step.
+Multi-node runs (RayJob through the Ray Dashboard) are unchanged.
 
 ### Recommended: commands that stay outside `hyperloom.cli`
 

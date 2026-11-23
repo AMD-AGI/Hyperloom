@@ -15,7 +15,7 @@
 # Phase 5  runtime env     — persist bare-metal runtime vars into .env
 #
 # Scope: bare-metal base setup only. Open-source deps and the optimizer runtime
-# (io pkg, InferenceX, kernel-agent Ray/GEAK/TraceLens, fa) are installed
+# (io pkg, InferenceX, kernel-agent GEAK/TraceLens, fa) are installed
 # by the inference_optimizer skill, not here. It STOPS before launching.
 
 set -euo pipefail
@@ -36,7 +36,7 @@ KERNEL_AGENT_ENV_FILE=""
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
 
 HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
-HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.1.5}"
+HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.2.0}"
 ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 # Installed name must outrank the vendor library in ldconfig's ordering.

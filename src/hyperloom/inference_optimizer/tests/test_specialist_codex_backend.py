@@ -772,19 +772,6 @@ def _successful_codex_script(path: Path) -> Path:
     )
 
 
-class _NeverStartedGpuLease:
-    """Ray lease double that records an erroneous setup-time launch."""
-
-    def __init__(self) -> None:
-        self.start_calls = 0
-        self.kwargs: dict[str, Any] = {}
-
-    def start_async(self, launch: Any) -> None:
-        self.start_calls += 1
-        self.kwargs = {name: value for name, value in vars(launch).items() if name != "cmd"}
-        raise RuntimeError("setup failure must precede Ray submission")
-
-
 def test_specialist_env_drops_the_retired_gateway_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """A name the child can no longer authenticate with is not worth forwarding."""
     monkeypatch.delenv("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", raising=False)
@@ -834,7 +821,6 @@ async def test_codex_secret_opt_out_masks_parent_provider_secrets_before_resolut
         popen_calls += 1
 
     monkeypatch.setattr(sp.subprocess, "Popen", _recording_popen)
-    lease = _NeverStartedGpuLease()
     workspace = tmp_path / "workspace"
     result = await SpecialistSubprocessDispatcher(
         SpecialistSubprocessConfig(
@@ -852,7 +838,6 @@ async def test_codex_secret_opt_out_masks_parent_provider_secrets_before_resolut
             user_prompt="user",
             disallowed_tools=frozenset(),
             deadline=Deadline.after(10.0),
-            gpu_lease=lease,
         )
     )
 
@@ -865,9 +850,6 @@ async def test_codex_secret_opt_out_masks_parent_provider_secrets_before_resolut
     assert header_secret not in result.error
     assert not (workspace / ".codex" / "config.toml").exists()
     assert popen_calls == 0
-    assert lease.start_calls == 0
-    assert openai_secret not in repr(lease.kwargs)
-    assert header_secret not in repr(lease.kwargs)
 
 
 @pytest.mark.asyncio
@@ -979,84 +961,13 @@ async def test_workspace_write_fails_closed_when_bwrap_probe_fails(
     assert "refusing to fall back" in result.error
 
 
-class _RecordingGpuLease:
-    """Minimal Ray lease double recording replace-env and file-backed stdin."""
-
-    def __init__(self, workspace: Path) -> None:
-        self.workspace = workspace
-        self.started: dict[str, Any] = {}
-        self._alive = False
-
-    def start_async(self, launch: Any) -> None:
-        self.started = {**vars(launch), "cmd": list(launch.cmd)}
-        Path(launch.log_path).write_text("", encoding="utf-8")
-        (self.workspace / "specialist_done.json").write_text(
-            '{"proposal_set":[],"summary":"ray"}',
-            encoding="utf-8",
-        )
-
-    def poll_started(self) -> int:
-        return 4242
-
-    def is_alive(self) -> bool:
-        return self._alive
-
-    def exit_code(self) -> int:
-        return 0
-
-    def stop(self) -> None:
-        self._alive = False
-
-    def close(self) -> None:
-        self._alive = False
-
-
 @pytest.mark.asyncio
-async def test_ray_codex_launch_uses_replace_env_and_prompt_file_stdin(
+async def test_a_sandboxed_codex_runs_with_its_own_sandbox_off(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ray must receive the same filtered env and stdin transport as local Popen."""
-    _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
-    _enable_codex_bypass(monkeypatch)
-    workspace = tmp_path / "workspace"
-    lease = _RecordingGpuLease(workspace)
-    result = await SpecialistSubprocessDispatcher(
-        SpecialistSubprocessConfig(
-            agent_backend=AGENT_BACKEND_CODEX,
-            codex_executable="/usr/bin/codex",
-            poll_interval_seconds=0.01,
-        )
-    ).run(
-        SpecialistSpawn(
-            task_id="ray-stdin",
-            workspace=workspace,
-            worktree=None,
-            worktree_base=None,
-            system_prompt="ray system",
-            user_prompt="ray user prompt",
-            disallowed_tools=frozenset(),
-            gpu_ids=(0,),
-            deadline=Deadline.after(10.0),
-            gpu_lease=lease,
-        )
-    )
-
-    assert result.exit_code == 0
-    assert lease.started["stdin_path"] == str(workspace / "prompt.md")
-    assert Path(lease.started["stdin_path"]).read_text(encoding="utf-8") == "ray user prompt"
-    assert lease.started["cmd"][-1] == "-"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("exit_code", [0, 1])
-async def test_a_sandboxed_codex_runs_with_its_own_sandbox_off_in_a_single_node_ray_actor(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    exit_code: int,
-) -> None:
-    """bubblewrap is the sandbox: codex's own is off whatever is configured, and never probed; the actor's command is
-    bubblewrap's, opened by a shell that hands it the status file."""
+    """bubblewrap is the sandbox: codex's own is off whatever is configured, and never probed; the command spawned is
+    bubblewrap's, handed its status descriptor."""
     from hyperloom_common.bwrap import BwrapProbe
     from hyperloom.common.agent_isolation import BwrapIsolation
     from hyperloom_common.proctree import REAP_MARK_ENV
@@ -1065,10 +976,15 @@ async def test_a_sandboxed_codex_runs_with_its_own_sandbox_off_in_a_single_node_
     monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "workspace-write")
     monkeypatch.setattr(sp, "probe_codex_sandbox_capability", lambda **_kwargs: pytest.fail("not probed under bwrap"))
     bwrap = BwrapIsolation(BwrapProbe("/opt/fake/bwrap", (0, 13, 1), ()))
-    monkeypatch.setattr(sp, "resolve_launch_isolation", lambda lease: bwrap)
+    monkeypatch.setattr(sp, "resolve_launch_isolation", lambda: bwrap)
+    spawned: list[tuple[list[str], dict[str, Any]]] = []
+
+    def _refused_popen(cmd: Any, **kwargs: Any) -> None:
+        spawned.append((list(cmd), kwargs))
+        raise OSError("spawn refused by test")
+
+    monkeypatch.setattr(sp.subprocess, "Popen", _refused_popen)
     workspace = tmp_path / "workspace"
-    lease = _RecordingGpuLease(workspace)
-    monkeypatch.setattr(lease, "exit_code", lambda: exit_code)
     result = await SpecialistSubprocessDispatcher(
         SpecialistSubprocessConfig(
             agent_backend=AGENT_BACKEND_CODEX,
@@ -1077,33 +993,27 @@ async def test_a_sandboxed_codex_runs_with_its_own_sandbox_off_in_a_single_node_
         )
     ).run(
         SpecialistSpawn(
-            task_id="ray-bwrap",
+            task_id="bwrap-codex",
             workspace=workspace,
             worktree=None,
             worktree_base=None,
-            system_prompt="ray system",
-            user_prompt="ray user prompt",
+            system_prompt="system",
+            user_prompt="user prompt",
             disallowed_tools=frozenset(),
             gpu_ids=(0,),
             deadline=Deadline.after(10.0),
-            gpu_lease=lease,
         )
     )
 
-    cmd = lease.started["cmd"]
+    assert "spawn refused by test" in result.error
+    # Patching Popen reaches every subprocess here: the specialist's spawn is the one in a session of its own.
+    [(cmd, kwargs)] = [(cmd, kwargs) for cmd, kwargs in spawned if kwargs.get("start_new_session")]
+    assert cmd[0] == "/opt/fake/bwrap" and "--json-status-fd" in cmd and "pass_fds" in kwargs
     codex = cmd[cmd.index("--") + 1 :]
-    if exit_code:  # bubblewrap failed and wrote no exit-code to the status file the actor's shell opened
-        assert result.exit_code is None
-        assert result.error == "specialist sandbox could not be set up: bubblewrap exited 1 before the agent started"
-    else:
-        assert result.exit_code == 0 and result.error == ""
-    assert cmd[:2] == ["/bin/sh", "-c"] and cmd[4] == "/opt/fake/bwrap"
-    assert cmd[cmd.index("--json-status-fd") + 1] == "3" and "--die-with-parent" in cmd
     codex = codex[codex.index("/usr/bin/codex") :]  # after the relay of the sandbox's network
     assert codex[0] == "/usr/bin/codex" and "--dangerously-bypass-approvals-and-sandbox" in codex
-    assert "--sandbox" not in codex and REAP_MARK_ENV not in lease.started["env"]
-    assert lease.started["env"]["CODEX_HOME"] == str(workspace / ".codex")
-    assert not Path(cmd[3]).parent.exists()  # the status directory went with the launch
+    assert "--sandbox" not in codex and REAP_MARK_ENV not in kwargs["env"]
+    assert kwargs["env"]["CODEX_HOME"] == str(workspace / ".codex")
 
 
 @pytest.mark.asyncio
@@ -1245,7 +1155,6 @@ async def test_codex_mcp_env_rejects_control_and_provider_collisions_before_laun
         popen_calls += 1
 
     monkeypatch.setattr(sp.subprocess, "Popen", _recording_popen)
-    lease = _NeverStartedGpuLease()
     workspace = tmp_path / "workspace"
     result = await SpecialistSubprocessDispatcher(
         SpecialistSubprocessConfig(
@@ -1264,7 +1173,6 @@ async def test_codex_mcp_env_rejects_control_and_provider_collisions_before_laun
             user_prompt="user",
             disallowed_tools=frozenset(),
             deadline=Deadline.after(10.0),
-            gpu_lease=lease,
         )
     )
 
@@ -1272,8 +1180,6 @@ async def test_codex_mcp_env_rejects_control_and_provider_collisions_before_laun
     assert "collision" in result.error.lower() or "reserved" in result.error.lower()
     assert not (workspace / ".codex" / "config.toml").exists()
     assert popen_calls == 0
-    assert lease.start_calls == 0
-    assert "mcp-override" not in repr(lease.kwargs)
 
 
 def test_codex_mcp_env_accepts_identical_benign_existing_value(

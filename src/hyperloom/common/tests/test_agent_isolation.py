@@ -9,19 +9,19 @@ are ``hyperloom_common/tests/test_bwrap*.py``; a confinement launched for real i
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import threading
 from pathlib import Path
 
 import pytest
 
-from hyperloom_common.bwrap import BwrapPolicy, BwrapProbe
+from hyperloom_common.bwrap import NO_JOIN, BwrapPolicy, BwrapProbe
 
 from hyperloom.common import agent_isolation
 from hyperloom.common.agent_isolation import (
     HOST_LAYER_ENV,
     NO_LAYER_BWRAP,
-    RAY_ACTOR_PATH,
     SANDBOX_ACCOUNT,
     TEST_ACCOUNT,
     AccountIsolation,
@@ -52,6 +52,22 @@ LAYER_DENIED = BwrapProbe(LAYER, (0, 13, 1), ("bwrap: setting up uid map: Permis
 MISSING = BwrapProbe(None, None, ("bubblewrap: not found on PATH",))
 NO_ANSWER = BwrapProbe(LAYER, (0, 13, 1), (f"bubblewrap at {LAYER}: no answer in 10 s",), transient=True)
 NOT_SET = f"running them as an account: {SPECIALIST_USER_ENV} is not set"
+#: The layer's bubblewrap where only ``unshare --user`` gives it a mount tree it can bind (an app that is not root).
+IN_OWN_USERNS = BwrapProbe(
+    LAYER,
+    (0, 13, 1),
+    (),
+    prefix=(
+        "/opt/hyperloom-host/bin/unshare",
+        "--user",
+        "--map-current-user",
+        "--mount",
+        "--propagation",
+        "private",
+        "--",
+    ),
+    joins=False,
+)
 
 
 class Probes:
@@ -187,49 +203,41 @@ def test_a_hosted_probe_that_gave_no_answer_refuses_as_transient(probe):
 
 def test_a_hosted_run_refuses_an_unconfined_sandbox_too(probe):
     probe.answer = IN_LAYER
-    require_agent_isolation(bwrap=LAYER, allow_account=True)
+    require_agent_isolation(bwrap=LAYER)
     probe.answer = LAYER_DENIED
     with pytest.raises(IsolationRefused) as refused:
         choose_sandbox_isolation()
     assert refused.value.reasons[0] == f"running them as an account: {SANDBOX_ACCOUNT}"
 
 
-def _ray_path_refuses(reason: str) -> str:
-    return (
-        f"specialists run as the account {ACCOUNT.user}, but {RAY_ACTOR_PATH} and bubblewrap cannot confine one here,"
-        f" so that path refuses its specialists: {reason}"
-    )
+def test_a_hosted_run_under_unshare_user_confines_its_specialists_and_refuses_sandboxes_that_join_a_holder(probe):
+    probe.answer = IN_OWN_USERNS
+    assert require_agent_isolation(bwrap=LAYER) == BwrapIsolation(IN_OWN_USERNS, (NOT_SET,))
+    assert bwrap_isolation() == BwrapIsolation(IN_OWN_USERNS), "a native compile launches alone, never joined"
+    for choose, account in ((choose_sandbox_isolation, SANDBOX_ACCOUNT), (choose_test_isolation, TEST_ACCOUNT)):
+        with pytest.raises(IsolationRefused) as refused:
+            choose()
+        assert refused.value.reasons == (
+            f"running them as an account: {account}",
+            f"bubblewrap ({LAYER}, 0.13.1): {NO_JOIN}",
+        )
+        assert not refused.value.transient
 
 
-@pytest.mark.parametrize(
-    ("bwrap", "answer", "reason"),
-    [
-        (LAYER, LAYER_DENIED, f"bubblewrap ({LAYER}, 0.13.1): bwrap: setting up uid map: Permission denied"),
-        (LAYER, NO_ANSWER, f"bubblewrap at {LAYER}: no answer in 10 s"),
-        (None, None, NO_LAYER_BWRAP),
-    ],
-    ids=["denied", "no-answer", "none-named"],
-)
-def test_a_hosted_run_with_an_account_warns_once_that_the_ray_path_refuses_where_bubblewrap_cannot_confine(
-    account, caplog, probe, bwrap, answer, reason
+def test_a_local_run_under_unshare_user_runs_joined_sandboxes_unconfined_as_without_bubblewrap(probe):
+    probe.answer = dataclasses.replace(IN_OWN_USERNS, path="/usr/bin/bwrap")
+    found = choose_sandbox_isolation()
+    assert isinstance(found, NoIsolation) and found.reasons[1].endswith(NO_JOIN)
+    assert isinstance(choose_agent_isolation(), BwrapIsolation)
+
+
+@pytest.mark.parametrize("bwrap", [LAYER, None], ids=["layer-named", "none-named"])
+def test_a_hosted_run_with_an_account_chooses_it_says_nothing_more_and_probes_no_bubblewrap(
+    account, caplog, probe, bwrap
 ):
-    probe.answer = answer
     with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
         assert require_agent_isolation(bwrap=bwrap) == AccountIsolation(ACCOUNT)
-    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.WARNING, _ray_path_refuses(reason))]
-    if answer:
-        assert probe.asked == [bwrap], "the layer's bubblewrap, by its path"
-    with pytest.raises(IsolationRefused) as refused:
-        choose_agent_isolation(allow_account=False)
-    assert reason in refused.value.reasons, "the Ray GPU actor path refuses for the reason the warning gave"
-    assert choose_agent_isolation() == AccountIsolation(ACCOUNT), "every other specialist: the account"
-
-
-def test_a_hosted_run_with_an_account_and_a_layer_bubblewrap_that_confines_says_nothing_more(account, caplog, probe):
-    probe.answer = IN_LAYER
-    with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
-        assert require_agent_isolation(bwrap=LAYER) == AccountIsolation(ACCOUNT)
-    assert caplog.records == [] and probe.asked == [LAYER]
+    assert caplog.records == [] and probe.asked == []
 
 
 # ---- the order of the tiers ----
@@ -269,22 +277,6 @@ def test_no_account_configured_logs_no_warning_when_bubblewrap_is_used(caplog, p
     with caplog.at_level(logging.WARNING, logger=agent_isolation.__name__):
         choose_agent_isolation()
     assert caplog.records == []
-
-
-def test_the_ray_actor_path_never_gets_the_account_tier(account, probe):
-    probe.answer = ON_PATH
-    found = choose_agent_isolation(allow_account=False)
-    assert found == BwrapIsolation(ON_PATH, (f"running them as an account: {RAY_ACTOR_PATH}",))
-
-
-def test_a_configured_account_makes_a_specialist_launch_required_on_the_ray_path_too(account, probe):
-    probe.answer = DENIED
-    with pytest.raises(IsolationRefused) as refused:
-        choose_agent_isolation(allow_account=False)
-    assert refused.value.reasons == (
-        f"running them as an account: {RAY_ACTOR_PATH}",
-        "bubblewrap (/usr/bin/bwrap, 0.11.1): bwrap: setting up uid map: Permission denied",
-    )
 
 
 def test_a_configured_account_where_neither_tier_works_refuses(account, probe):
@@ -328,7 +320,7 @@ def test_a_local_test_sandbox_is_bubblewrapped_where_it_works_and_never_refused_
 
 def test_a_hosted_run_refuses_an_unconfined_test_sandbox_and_probes_only_its_layer_bubblewrap(probe):
     probe.answer = IN_LAYER
-    require_agent_isolation(bwrap=LAYER, allow_account=True)
+    require_agent_isolation(bwrap=LAYER)
     probe.answer = LAYER_DENIED
     probe.asked.clear()
     with pytest.raises(IsolationRefused) as refused:

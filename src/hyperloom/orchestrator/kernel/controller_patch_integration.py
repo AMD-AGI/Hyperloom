@@ -21,12 +21,12 @@ from kernelforge.workflows.rewrite_controller import (
 )
 
 from hyperloom_common.io import JsonFormat, atomic_write_json
-from hyperloom.orchestrator.actions.executors._patch_snapshot import (
+from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import (
     _git_commit_kept,
     _patch_touched_paths,
 )
-from hyperloom.orchestrator.actions.executors._patch_git import _git_apply_reverse, _git_restore_to_head
-from hyperloom.orchestrator.actions.executors.patch_conflict_merge import (
+from hyperloom.orchestrator.actions.executors.patching._patch_git import _git_apply_reverse, _git_restore_to_head
+from hyperloom.orchestrator.actions.executors.patching.patch_conflict_merge import (
     LandingContext,
     PatchMergeOutcome,
     apply_patch_resolving_conflicts,

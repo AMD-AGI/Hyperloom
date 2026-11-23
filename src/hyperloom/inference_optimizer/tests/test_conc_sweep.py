@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._grid_runner import (
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import (
     GridVariant,
     VariantResult,
     GridRecipe,
@@ -39,7 +39,7 @@ from hyperloom.common.gain_math import conc_pair_comparison as _build_comparison
 from hyperloom.common.perf_metric import graded_metric_key
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.phases.kernel_stack import KernelStackPhase
-from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import BenchmarkTarget
 
 
 # Fixtures
@@ -164,8 +164,8 @@ def test_conc_sweep_preserves_retained_launch_controls(
 ):
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import _build_variant_yaml
 
     baseline_args = (
         current_best.get("extra_server_args") if current_best.get("args_mode") == "replace" else ""
@@ -241,8 +241,8 @@ def test_conc_sweep_loads_retained_overlay_only_in_optimized_arm(
 
     import yaml
 
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle
 
     overlay = session_dir / "retained_overlay"
     overlay.mkdir()
@@ -608,7 +608,7 @@ def test_run_conc_sweep_targets_the_session_board(
 def test_conc_sweep_preserves_baseline_script_through_variant_materialization(session_dir, baseline_yaml, monkeypatch):
     import yaml
 
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import _build_variant_yaml
 
     baseline_yaml.write_text(
         "benchmark:\n  framework: sglang\n  model: /models/test\n  run_mode: local\n"
@@ -618,9 +618,6 @@ def test_conc_sweep_preserves_baseline_script_through_variant_materialization(se
     state.gpu_type = "MI355X"
     state.baseline_benchmark_script = "sglang_custom.sh"
     monkeypatch.setenv("GPU_TYPE", "mi355x")
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
-    )
     calls = []
 
     async def capture_grid(**kwargs):
@@ -2107,7 +2104,7 @@ def test_format_conc_sweep_curve_section_with_png():
 
 def _patch_lifecycle_eligible(monkeypatch: pytest.MonkeyPatch, teardown_log: list[tuple]):
     """Patch resolve_lifecycle_params → eligible and track teardown calls."""
-    import hyperloom.orchestrator.actions.executors._server_lifecycle as _sl
+    import hyperloom.orchestrator.actions.executors.serving._server_lifecycle as _sl
 
     def _fake_resolve(_cfg_path):
         return {"eligible": True, "framework": "vllm", "port": 8888, "reason": ""}
@@ -2177,9 +2174,6 @@ def test_single_server_boot_round_measures_its_rung_and_the_next_rung_reuses_it(
     """The round that boots an arm's server measures its own rung on it; no round of the sweep asks to boot only."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     _patch_lifecycle_eligible(monkeypatch, [])
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
-    )
     calls: list[dict[str, Any]] = []
 
     async def _fake_run_grid(*, grid: list[GridVariant], **kw):
@@ -2211,9 +2205,6 @@ def test_a_session_closing_during_a_boot_round_starts_no_round_after_it(
     """A closing session does not start the round after the one that booted the server."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     _patch_lifecycle_eligible(monkeypatch, [])
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
-    )
     calls: list[str] = []
 
     async def _fake_run_grid(*, grid: list[GridVariant], **kw):
@@ -2273,7 +2264,7 @@ def test_single_server_not_eligible_restarts_the_server_per_rung(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """A non-lifecycle-eligible framework routes straight to Option B."""
-    import hyperloom.orchestrator.actions.executors._server_lifecycle as _sl
+    import hyperloom.orchestrator.actions.executors.serving._server_lifecycle as _sl
 
     monkeypatch.setattr(
         _sl,
@@ -2441,9 +2432,6 @@ def test_a_cancelled_sweep_stops_the_ladder_and_is_not_failed(
 
     teardown_log: list[tuple] = []
     _patch_lifecycle_eligible(monkeypatch, teardown_log)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
-    )
     state = _make_state(baseline_config_path=str(baseline_yaml))
     scope = CancelScope()
     transition = "phase_transition:SWEEP->CLOSE"

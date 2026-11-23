@@ -106,7 +106,7 @@ def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> N
     require_board_framework(gpu_type or "", framework)
     if str(framework or "").strip().lower() != "custom":
         return
-    from hyperloom.orchestrator.actions.executors._workload_envs import (
+    from hyperloom.orchestrator.actions.executors.workload._framework_runtime import (
         apply_scriptable_runtime_defaults,
     )
     from hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers import (
@@ -260,7 +260,7 @@ def _export_partition_shape(
     """Validate the session's compute-partition shape and publish it."""
     declared_mode, streams_per_partition = request.declared_mode, request.streams_per_partition
     from hyperloom.common.gpu_partition import PartitionError, parse_mode
-    from hyperloom.orchestrator.actions.executors._partition_shape import (
+    from hyperloom.orchestrator.actions.executors.gpu._partition_shape import (
         DEFAULT_STREAMS_PER_PARTITION,
         PARTITION_COUNT_ENV,
         PARTITION_CU_ENV,

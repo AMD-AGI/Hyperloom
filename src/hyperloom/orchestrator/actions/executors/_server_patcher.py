@@ -23,7 +23,7 @@ from hyperloom_common.unified_diff import parse_unified_diff
 from hyperloom.inference_optimizer.session import paths
 
 from ._git import _git_head_sha
-from ._patch_laying import PatchedServer, _ensure_patched, _ensure_patched_in_place, _lay_in, _PatchPlan
+from .patching._patch_laying import PatchedServer, _ensure_patched, _ensure_patched_in_place, _lay_in, _PatchPlan
 
 log = logging.getLogger(__name__)
 

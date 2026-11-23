@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
+from hyperloom.orchestrator.actions.executors.serving._server_lifecycle import GpuHandoff
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
@@ -179,7 +179,7 @@ async def test_a_baseline_reproduction_failure_keeps_the_absent_backends(
     monkeypatch.setattr("hyperloom.orchestrator.phases.kernel_geak_dispatch._GEAK_RUNNER_MODULE", runner.stem)
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(tmp_path), os.environ.get("PYTHONPATH")])))
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._server_lifecycle.free_gpus_for_handoff",
+        "hyperloom.orchestrator.actions.executors.serving._server_lifecycle.free_gpus_for_handoff",
         lambda *_args, **_kwargs: GpuHandoff(reaped=[], busy=[], holders=[], unverified=""),
     )
 

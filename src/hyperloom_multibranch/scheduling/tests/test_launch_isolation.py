@@ -78,8 +78,7 @@ def unmarked(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _runner_gives(monkeypatch: pytest.MonkeyPatch, answer: AgentIsolation | RunAsError) -> None:
-    def resolve(gpu_lease: object | None) -> AgentIsolation:
-        assert gpu_lease is None, "a session's specialists are not launched on the Ray actor path"
+    def resolve() -> AgentIsolation:
         if isinstance(answer, RunAsError):
             raise answer
         return answer
@@ -412,7 +411,7 @@ def test_the_record_of_the_specialists_is_what_a_specialist_the_runner_launches_
     cmd = ["/bin/sh", "-c", REACHES.format(pid=os.getpid())]
     env = {"PATH": "/usr/bin:/bin"}
     try:
-        tier = resolve_launch_isolation(None)
+        tier = resolve_launch_isolation()
     except IsolationRefused:
         assert recorded == REFUSED
         return

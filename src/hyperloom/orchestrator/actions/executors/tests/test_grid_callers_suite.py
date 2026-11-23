@@ -24,8 +24,8 @@ import yaml
 from hyperloom.common.deadline import Deadline
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.inference_optimizer.tests.test_conc_sweep import _make_state
-from hyperloom.orchestrator.actions.executors import _server_lifecycle
-from hyperloom.orchestrator.actions.executors._grid_base import TS_SKIPPED_DEDUP, VariantResult
+from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle
+from hyperloom.orchestrator.actions.executors.grid._grid_base import TS_SKIPPED_DEDUP, VariantResult
 from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
 from hyperloom.orchestrator.actions.executors import explore as explore_module
 from hyperloom.orchestrator.actions.executors.explore import BASELINE_NOOP, ExploreExecutor
@@ -51,7 +51,6 @@ def eligible(monkeypatch: pytest.MonkeyPatch) -> None:
         "resolve_lifecycle_params",
         lambda _path: {"eligible": True, "framework": "sglang", "port": _PORT, "reason": ""},
     )
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_k: None)
 
 
 def _rounds(monkeypatch: pytest.MonkeyPatch, count: int) -> ScriptedRounds:

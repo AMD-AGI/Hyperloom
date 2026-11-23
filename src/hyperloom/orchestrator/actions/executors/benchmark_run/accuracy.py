@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -30,8 +30,7 @@ from .._accuracy_gate import (
     parse_eval_results,
 )
 from .._failed_step import failed_step_error_class
-from .._grid_runner import lease_cards, session_grid_bounds
-from .._ray_serving import ServingLease, maybe_serving_lease
+from ..grid._grid_inputs import session_grid_bounds
 from .._subprocess_kill import resolve_benchmark_timeouts
 from .._suite.rounds import AccuracyRound, SuiteRoundRefused, deadline_unix, run_accuracy_suite_round, session_route
 from .records import (
@@ -96,40 +95,31 @@ async def run_accuracy_round(request: AccuracyRound, *, session: Path) -> Accura
     """Run the D9 accuracy round ``request`` names into ``<slot>/accuracy``.
 
     The round serves the slot's launch on a server of its own with the base's golden layer left out, and runs only the
-    eval. A request without a serving lease runs on one of its own when Ray manages the GPUs.
+    eval.
     """
     slot = request.slot
     route = session_route(session)
     if route is None:
         log.error("accuracy_round: %s froze no base launch to serve the accuracy round on", session)
         return AccuracyRoundOutcome(slot, failed_step_error_class(FailedStep.CONFIG_INVALID))
-    owned = None
-    if request.serving_lease is None:
-        owned = maybe_serving_lease(num_gpus=lease_cards(request.config_path, session))
-        request = replace(request, serving_lease=owned)
     try:
         async with heartbeat_while_output_flows(unit="accuracy_round", label="eval") as activity:
             ran = await asyncio.to_thread(run_accuracy_suite_round, route, request, on_poll=activity.note)
     except SuiteRoundRefused as exc:
         log.error("accuracy_round: refused before it ran: %s", exc)
         return AccuracyRoundOutcome(slot, exc.error_class)
-    finally:
-        if owned is not None:
-            owned.close()
     step = ran.report.failed_step
     return AccuracyRoundOutcome(ran.layout.root, "" if step is None else failed_step_error_class(step))
 
 
-async def run_candidate_accuracy_round(
-    slot: Path, launch: Path, state: Any, *, session: Path, lease: ServingLease | None = None
-) -> AccuracyRoundOutcome:
+async def run_candidate_accuracy_round(slot: Path, launch: Path, state: Any, *, session: Path) -> AccuracyRoundOutcome:
     """Run the accuracy round of a candidate whose throughput cleared the KEEP threshold, capped as a benchmark round.
 
-    ``launch`` is the AgentX point the candidate ran in ``slot``; ``lease`` is the serving lease its gate still holds.
+    ``launch`` is the AgentX point the candidate ran in ``slot``.
     """
     timeout_sec = resolve_benchmark_timeouts()[1]
     deadline = deadline_unix(session_grid_bounds(state)[0])
-    return await run_accuracy_round(AccuracyRound(launch, slot, timeout_sec, deadline, lease), session=session)
+    return await run_accuracy_round(AccuracyRound(launch, slot, timeout_sec, deadline), session=session)
 
 
 def record_accuracy_round(result: dict[str, Any], outcome: AccuracyRoundOutcome) -> None:

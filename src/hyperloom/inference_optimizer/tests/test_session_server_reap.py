@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle as sl
 from hyperloom_common.proctree import proc_identity, running
 from inference_suite.frameworks import Framework
 from inference_suite.runtime.process import ServerPidfile, Spawned, spawn

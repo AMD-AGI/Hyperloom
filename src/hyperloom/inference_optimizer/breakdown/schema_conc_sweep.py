@@ -312,7 +312,6 @@ class V6ConcSweepArm(TypedDict, total=False):
     strategy: str
     strategy_reason: str | None
     lifecycle: V6ConcSweepLifecycle
-    serving_lease_held: bool | None
     refused: V6ConcSweepRefused | None
     failure: V6Failure | None
     grid: list[V6ConcSweepRung]

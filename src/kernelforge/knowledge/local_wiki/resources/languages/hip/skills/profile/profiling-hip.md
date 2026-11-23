@@ -22,9 +22,11 @@ profiling output and what lever each signal points to. Hardware peaks live in `l
 ## 1. Wall time & basic trace
 ```bash
 # kernel-level timing + stats
-rocprofv3 --kernel-trace --stats -f csv -- python test_driver.py --profile-run
+rocprofv3 --kernel-trace --stats -f csv -- <command ...>
 # isolate your kernel by name (rocprofv3 also records torch/library/runtime dispatches)
 ```
+`<command ...>` launches the kernel under test and little else; choosing it is covered in
+`common_methodology/profiling/measure_rocpc_workflow.md` (*The command to profile*).
 Bench discipline: warmup ≥ several hundred iters, report **median** of ≥3 reps; a change must beat the
 current best by more than run-to-run jitter (~2% noise floor) to count as real.
 

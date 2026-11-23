@@ -9,7 +9,7 @@ import logging
 import os
 import signal
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +19,9 @@ log = logging.getLogger(__name__)
 #: Long enough for a serving engine to unmap its device memory, short enough
 #: that every window derived from it stays inside a round's stop budget.
 TERM_GRACE_SEC: float = 5.0
+
+#: How often blocking work that a cooperative stop can interrupt looks up to check whether it was asked to stop.
+STOP_GATE_POLL_SECONDS: float = 0.5
 
 #: How often a wait looks at what it is waiting for.
 _POLL_SEC: float = 0.05
@@ -30,6 +33,7 @@ REAP_MARK_ENV: str = "HYPERLOOM_REAP_MARK"
 
 __all__ = [
     "REAP_MARK_ENV",
+    "STOP_GATE_POLL_SECONDS",
     "TERM_GRACE_SEC",
     "ProcessId",
     "boot_unix",
@@ -45,6 +49,9 @@ __all__ = [
     "running",
     "signal_group",
     "signal_processes",
+    "tree_cpu_sec",
+    "tree_io_bytes",
+    "tree_rss_bytes",
 ]
 
 #: A process, pinned to the incarnation that was observed: ``(pid, start_time)``.
@@ -77,6 +84,102 @@ def proc_identity(pid: int) -> tuple[int, int] | None:
         return int(fields[1]), int(fields[19])
     except (OSError, ValueError, IndexError):
         return None
+
+
+def _cpu_ticks(pid: int, start_time: int | None) -> int | None:
+    """The clock ticks ``pid`` has run in user and system mode, its own and those of the children it has waited for;
+    ``None`` when it is gone, unreadable, or (given ``start_time``) another incarnation."""
+    try:
+        fields = _stat_fields(pid)
+        if start_time is not None and int(fields[19]) != start_time:
+            return None
+        # utime, stime, cutime, cstime: fields 14-17 of the stat line, counted from ``state`` as field 3.
+        return sum(int(value) for value in fields[11:15])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def tree_cpu_sec(root_pid: int) -> float | None:
+    """The CPU seconds, user and system, that ``root_pid`` and its live descendants have used so far.
+
+    Each process counts the children it has already waited for, so a descendant that exits and is collected keeps its
+    time in its parent's count. The root is read last, so a child collected between the listing and its own read is
+    counted through the root rather than lost from this reading and found again in the next one; a total that still
+    falls is one a caller reads as no growth. ``None`` when ``root_pid`` or ``/proc`` cannot be read.
+    """
+    try:
+        below = descendants(root_pid)
+    except OSError:
+        return None
+    ticks = sum(_cpu_ticks(pid, start_time) or 0 for pid, start_time in below)
+    root = _cpu_ticks(root_pid, None)
+    if root is None:
+        return None
+    return (root + ticks) / os.sysconf("SC_CLK_TCK")
+
+
+#: Per-process readings of a tree, keyed by the incarnation each was read from.
+TreeReadings = dict[ProcessId, int]
+
+
+def _rss_bytes(pid: int) -> int | None:
+    """``VmRSS`` of ``pid`` in bytes; ``None`` when it is gone, unreadable, or has no memory of its own (a zombie)."""
+    try:
+        line = next(line for line in _status_text(pid).splitlines() if line.startswith("VmRSS:"))
+        return int(line.split()[1]) * 1024
+    except (OSError, StopIteration, ValueError, IndexError):
+        return None
+
+
+def _io_bytes(pid: int) -> int | None:
+    """``rchar`` + ``read_bytes`` of ``pid`` from ``/proc/<pid>/io``; ``None`` when it is gone or the file cannot be
+    read (it needs ptrace access, which some sandboxes refuse with ``EACCES``)."""
+    try:
+        values = dict(line.split(":", 1) for line in (_PROC / str(pid) / "io").read_text(encoding="ascii").splitlines())
+        return int(values["rchar"]) + int(values["read_bytes"])
+    except (OSError, KeyError, ValueError):
+        return None
+
+
+def _tree_readings(root_pid: int, read: Callable[[int], int | None]) -> TreeReadings | None:
+    """``read`` of ``root_pid`` and each live descendant, keyed by ``(pid, start_time)``: a pid that was replaced
+    between the listing and its read is skipped, so two readings compare one process with itself. ``None`` when the
+    root or ``/proc`` cannot be read."""
+    try:
+        below = descendants(root_pid)
+    except OSError:
+        return None
+    root = proc_identity(root_pid)
+    if root is None:
+        return None
+    readings: TreeReadings = {}
+    for pid, start_time in [*below, (root_pid, root[1])]:
+        value = read(pid)
+        identity = proc_identity(pid)
+        if value is not None and identity is not None and identity[1] == start_time:
+            readings[(pid, start_time)] = value
+    if (root_pid, root[1]) not in readings:
+        return None
+    return readings
+
+
+def tree_rss_bytes(root_pid: int) -> TreeReadings | None:
+    """The resident memory (``VmRSS``) of ``root_pid`` and each live descendant, in bytes.
+
+    Pages a process faults in from a file it mapped count here and nowhere in its IO counters: a fault is not a read
+    system call, so it does not grow ``rchar``, and a network filesystem does not account ``read_bytes`` either. A
+    boot that pre-faults a checkpoint mapped from a network filesystem shows its progress only in this reading.
+    ``None`` when ``root_pid`` or ``/proc`` cannot be read.
+    """
+    return _tree_readings(root_pid, _rss_bytes)
+
+
+def tree_io_bytes(root_pid: int) -> TreeReadings | None:
+    """The bytes ``root_pid`` and each live descendant have read so far, ``rchar`` + ``read_bytes``.
+
+    ``None`` when ``/proc`` or the root's counters cannot be read; a descendant whose counters cannot be read is left out.
+    """
+    return _tree_readings(root_pid, _io_bytes)
 
 
 def boot_unix() -> float:

@@ -204,33 +204,6 @@ async def test_specialist_gpu_pool_allocates_and_releases(conn):
 
 
 @pytest.mark.asyncio
-async def test_ray_observation_admits_up_to_pending_limit(conn):
-    """§3.2: under single-node Ray, admission is COUNT-based (pending limit), not physical-capacity-based — so multiple
-    specialists queue on ONE GPU.
-    """
-    # A single physical GPU: the legacy try_acquire caps at 1 concurrent...
-    pool = SpecialistGpuPool(conn, gpu_ids=[0])
-    a = await pool.try_acquire_ray_observation(holder_id="h-a", task_id="t-a", pending_limit=3)
-    b = await pool.try_acquire_ray_observation(holder_id="h-b", task_id="t-b", pending_limit=3)
-    c = await pool.try_acquire_ray_observation(holder_id="h-c", task_id="t-c", pending_limit=3)
-    # ...but the Ray observation ledger admits up to pending_limit (3) at once, each on a distinct synthetic slot id
-    # above the real device id space.
-    assert a is not None and b is not None and c is not None
-    slots = sorted(list(a.gpu_ids) + list(b.gpu_ids) + list(c.gpu_ids))
-    assert slots == [100000, 100001, 100002]
-    # Over the limit -> backpressure (None; caller keeps the task queued).
-    d = await pool.try_acquire_ray_observation(holder_id="h-d", task_id="t-d", pending_limit=3)
-    assert d is None
-    # Releasing frees a slot for the next admission (reuses the low slot).
-    await pool.release(a)
-    e = await pool.try_acquire_ray_observation(holder_id="h-e", task_id="t-e", pending_limit=3)
-    assert e is not None and list(e.gpu_ids) == [100000]
-    await pool.release(b)
-    await pool.release(c)
-    await pool.release(e)
-
-
-@pytest.mark.asyncio
 async def test_specialist_gpu_pool_rejects_oversized_request(conn):
     pool = SpecialistGpuPool(conn, gpu_ids=[0])
     assert (
@@ -827,13 +800,10 @@ async def test_live_old_owner_keeps_conflicting_lanes_until_release(conn, locks)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ray", [False, True])
-async def test_gpu_owner_keeps_capacity_until_release(conn, ray):
+async def test_gpu_owner_keeps_capacity_until_release(conn):
     pool = SpecialistGpuPool(conn, gpu_ids=[0])
 
     async def acquire(holder):
-        if ray:
-            return await pool.try_acquire_ray_observation(holder_id=holder, task_id=holder, pending_limit=1)
         return await pool.try_acquire(count=1, holder_id=holder, task_id=holder)
 
     lease = await acquire("old")

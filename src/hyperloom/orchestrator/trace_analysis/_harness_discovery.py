@@ -270,6 +270,6 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
         if same_lib:
             unique = same_lib
     # Demote multi-GPU / distributed tests to the end: backends running on a
-    # single Ray worker can't satisfy them, and they tend to make agents bail.
+    # single GPU can't satisfy them, and they tend to make agents bail.
     unique.sort(key=lambda path: any(tag in path.lower() for tag in _MULTIGPU_PATH_TAGS))
     return unique[:10]

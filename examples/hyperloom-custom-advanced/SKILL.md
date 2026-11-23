@@ -56,8 +56,8 @@ skip the user-approval step (#1314).
 Suggested Docker images:
 
 - `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.34.0-rocm100`
-- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.23-rocm10-mi30x-20261118`
-- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.23-rocm10-mi35x-20261118`
+- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.23-rocm10-mi30x-20261111`
+- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.23-rocm10-mi35x-20261111`
 
 In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
 (or the current host when it is unset) before running setup or optimize:
@@ -254,7 +254,7 @@ PY
 
 Before the first `optimize` launch, run the full runtime installer in the same
 environment that will launch the optimizer. Preflight loads `kernel-agent.env.sh`
-before it can reach the later Ray and benchmark-client auto-install checks, so this
+before it can reach the later benchmark-client auto-install checks, so this
 step must happen before launching.
 
 For Docker mode, run this inside the container. For bare-metal mode, run it on
@@ -267,7 +267,6 @@ load_dotenv_no_clobber
 : "${USER_DATA_PATH:?USER_DATA_PATH missing}"
 export USER_DATA_PATH
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
-ulimit -Sn 65536 || true
 bash "$INSTALL_SH"
 ```
 

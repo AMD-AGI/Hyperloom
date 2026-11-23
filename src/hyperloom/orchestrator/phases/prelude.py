@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging as _logging
 import sqlite3
 from pathlib import Path
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 from hyperloom_common.coerce import to_float, to_int
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradingAnchor, constraint_fields, graded_axes_of
@@ -29,7 +29,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     SKIP_NO_WARM_START_RECIPE,
     SKIP_RECIPE_NOT_REPLAYABLE,
     SKIP_RECIPE_READ_FAILED,
-    SKIP_RESTATES_BASELINE,
     SKIP_WORKLOAD_CONFIG_INCOMPATIBLE,
     WarmReplayApplyItem,
     WarmReplayMeasurement,
@@ -47,7 +46,6 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
 )
 from ..actions.executors._accuracy_gate import AccuracyReference
 from ..actions.executors.benchmark_run.warm_patches import revert_warm_kernel_patches
-from ..actions.executors.explore import restates_the_baseline_launch
 from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
 from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
 from ..state.task_registry import Task, TaskSpec, create_on_free_key
@@ -66,7 +64,7 @@ from .warm_replay_stack import (
     warm_replay_source_layer,
 )
 from .prelude_warm_kernel import _WarmKernelPrepMixin, _merge_named_current_recipe_configs
-from .prelude_warm_launch import suppress_recipe_config, warm_replay_task_spec
+from .prelude_warm_launch import _WarmLaunchSkipMixin, suppress_recipe_config, warm_replay_task_spec
 from .warm_replay_eval import read_replay_eval
 
 log = _logging.getLogger(__name__)
@@ -153,7 +151,7 @@ def _warm_donor_metadata(replay: Mapping[str, Any]) -> dict[str, Any]:
     return {field: replay.get(field) for field in _WARM_REPLAY_DONOR_FIELDS if replay.get(field) not in (None, "", [])}
 
 
-class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
+class PreludePhase(_WarmKernelPrepMixin, _WarmLaunchSkipMixin, CoordinatorCollaborator):
     """PRELUDE phase handler: session boot, target analysis, and phase seeding."""
 
     def internal_analysis_kind(self) -> str:
@@ -577,6 +575,8 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
             config, overlay, sdk_replay, current_remote, recipe_suppressed
         )
         if self._skip_restated_replay(combined_args, combined_envs, [*patches, *overlay["pending"]], identity):
+            return None
+        if self._skip_context_copy_replay(combined_args, combined_envs, overlay, identity):
             return None
         workload = self._workload_compatible_launch(combined_args, overlay)
         if workload is None:
@@ -1060,30 +1060,6 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
             # on the timeline, and opening it twice would restate its start.
             open_event_on_timeline=False,
         )
-
-    def _skip_restated_replay(
-        self,
-        args: str,
-        envs: Mapping[str, Any],
-        code_changes: Sequence[Any],
-        identity: Mapping[str, Any],
-    ) -> bool:
-        """Skip a replay whose launch would be the baseline's own; True when it did.
-
-        Patches and kernel items change the code, which no launch comparison sees,
-        so a replay carrying any of them always runs.
-        """
-        if code_changes:
-            return False
-        if not restates_the_baseline_launch(self.shared_state, args, envs):
-            return False
-        log.info("PRELUDE: warm replay skipped: %r %s only restate the baseline launch", args, sorted(envs))
-        self._skip_warm_replay(
-            code=SKIP_RESTATES_BASELINE,
-            outcome={"status": "skipped", "reason": SKIP_RESTATES_BASELINE, **identity},
-            details={"extra_server_args": args, "extra_envs": sorted(envs)},
-        )
-        return True
 
     def _skip_warm_replay(
         self,

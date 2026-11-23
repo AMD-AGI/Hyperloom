@@ -29,7 +29,7 @@ from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.points import AcceptedMeasurement, default_canonical
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.tunableop_table import NODE_CARDS, TUNABLEOP_ENV, TUNABLEOP_TABLE, tunableop_reads
-from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import default_baseline_config
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, RequestRejected
 from hyperloom_multibranch.toolbox import kernel_artifacts, mcp_tools
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact

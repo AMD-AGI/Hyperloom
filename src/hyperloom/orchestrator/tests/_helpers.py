@@ -88,7 +88,7 @@ def git_repo_tracking(checkout: Path, *files: str) -> Path:
 def patch_integrate_patch_roots(monkeypatch: Any, tmp_path: Path) -> None:
     """Register common tmp_path framework repos as integrate_patch search roots."""
     from hyperloom.inference_optimizer import framework_paths as fp
-    from hyperloom.orchestrator.actions.executors import _patch_artifacts, _patch_sources
+    from hyperloom.orchestrator.actions.executors.patching import _patch_artifacts, _patch_sources
 
     real = fp.resolve_kernel_search_roots
 
@@ -124,7 +124,7 @@ def integrate_extra(params: dict[str, Any]) -> dict[str, Any]:
 
 def variant_result(**overrides: Any) -> Any:
     """A real ``VariantResult`` with plausible defaults."""
-    from hyperloom.orchestrator.actions.executors._grid_base import VariantResult
+    from hyperloom.orchestrator.actions.executors.grid._grid_base import VariantResult
 
     fields: dict[str, Any] = {
         "name": "v1",

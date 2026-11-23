@@ -13,7 +13,7 @@ import pytest
 
 from hyperloom.common.bringup import LadderStage
 from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
-from hyperloom.orchestrator.actions.executors._grid_base import failed_step_class
+from hyperloom.orchestrator.actions.executors.grid._grid_base import failed_step_class
 from hyperloom.orchestrator.actions.executors.benchmark_run.launch import _suite_round_failure
 from hyperloom.orchestrator.bringup import observe_bringup
 from hyperloom.orchestrator.state.analysis_failures import (

@@ -15,7 +15,7 @@
 #      AgentX harness at the commit inference_suite.pins pins, in
 #      INFERENCE_SUITE_TOOL_CACHE
 #   3. Benchmark client and scriptable quality-gate deps in $PYTHON
-#   4. Kernel-agent tools: ray + ray-head bring-up, TraceLens, GEAK, the
+#   4. Kernel-agent tools: TraceLens, GEAK, the
 #      Claude CLI and the LLM gateway env, from the steps in the sibling
 #      install_kernel_tools.sh (sourced, not run on its own).
 
@@ -181,7 +181,7 @@ Installs:
   - Stages the InferenceSuite tools (InferenceX client, GSM8K task, AgentX
     harness) at the pinned commit into INFERENCE_SUITE_TOOL_CACHE
   - Benchmark client deps and scriptable quality-gate deps (SSIM/LPIPS)
-  - Ray + ray-head start, TraceLens, GEAK, and LLM gateway env for the kernel agent.
+  - TraceLens, GEAK, and LLM gateway env for the kernel agent.
   - src/hyperloom/agents/framework/ is part of this editable install (PR discovery, isolation helpers).
 
 Options:
@@ -754,10 +754,8 @@ ensure_torch_compatible_with_gpu() {
   # A timeout is fatal rather than a skip. It is the strongest "this node's GPU
   # is wedged" signal install.sh gets, and the default path below this gate keeps
   # touching the driver with no time-box of its own -- `import lpips` in
-  # ensure_scriptable_quality_deps, _torch_hip_version, and kernel-agent's
-  # ensure_ray_started, which calls torch.cuda.device_count() and so initialises
-  # the HIP runtime. Falling through would only move the same hang a minute or
-  # two later and point the next reader at Ray. Dying here releases the
+  # ensure_scriptable_quality_deps and _torch_hip_version. Falling through would
+  # only move the same hang a minute or two later. Dying here releases the
   # allocation and names the cause; SKIP_TORCH_GATE covers a node that is merely
   # slow, the same way it already covers this gate's other verdicts.
   local smi_rc=0
@@ -1769,10 +1767,10 @@ ensure_langfuse_when_enabled() {
 # --- 4. Kernel-agent tools ---
 install_kernel_agent_tools() {
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "would install ray + TraceLens + GEAK + LLM gateway env"
+    log "would install TraceLens + GEAK + LLM gateway env"
     return 0
   fi
-  log "installing ray + TraceLens + GEAK + LLM gateway env"
+  log "installing TraceLens + GEAK + LLM gateway env"
   local stale_keys_file key
   stale_keys_file="$(mktemp)"
   # A subshell keeps the steps' variables and PATH out of the steps that follow;

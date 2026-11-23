@@ -479,7 +479,8 @@ def test_recorded_framework_attempts_satisfy_the_packaged_mapping(session_dir: P
 def test_an_auto_benched_specialist_proposal_publishes_its_reasoning_citations_and_read(session_dir: Path) -> None:
     import asyncio
 
-    from hyperloom.orchestrator.actions.executors.explore import _decision_fields, _grid_variants_from_payload
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import grid_variants_from_payload
+    from hyperloom.orchestrator.actions.executors.grid._explore_variants import decision_fields
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
@@ -502,7 +503,7 @@ def test_an_auto_benched_specialist_proposal_publishes_its_reasoning_citations_a
 
     asyncio.run(coord.phase_framework._maybe_bench_untested_proposals())
     [task] = [task for task in asyncio.run(coord.tasks.queued()) if task.kind == "explore"]
-    [variant] = _grid_variants_from_payload(task.params["grid"])
+    [variant] = grid_variants_from_payload(task.params["grid"])
     asyncio.run(
         coord.recipe_journal.fact_write_hook(
             task=task,
@@ -515,7 +516,7 @@ def test_an_auto_benched_specialist_proposal_publishes_its_reasoning_citations_a
                         "reason": "gain_below_threshold",
                         "fingerprint": "fp-auto",
                         "metrics": {"base_tput": 100.0, "tput": 99.0, "gain_pct": -1.0},
-                        "variant": {"extra_server_args": variant.extra_server_args, **_decision_fields(variant)},
+                        "variant": {"extra_server_args": variant.extra_server_args, **decision_fields(variant)},
                         "measured_against": {"throughput": 100.0, "extra_server_args": ""},
                         "gates": [{"gate": "keep_threshold", "passed": False, "observed": -1.0, "threshold": 3.0}],
                     }

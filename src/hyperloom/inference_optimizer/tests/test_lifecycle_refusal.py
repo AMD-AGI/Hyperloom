@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _multi_node_env
-from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle as sl
 
 _PORT = 8888
 
@@ -77,4 +77,4 @@ def test_lifecycle_port_is_below_the_ephemeral_range(tmp_path, monkeypatch):
 
     port = _resolve(tmp_path, {"framework": "vllm", "benchmark_script": "vllm_mi300x.sh"})["port"]
 
-    assert port < ephemeral_start and port not in ports.DEV_SANDBOX_PORTS and port not in ports.RAY_WORKER_PORTS
+    assert port < ephemeral_start and port not in ports.DEV_SANDBOX_PORTS

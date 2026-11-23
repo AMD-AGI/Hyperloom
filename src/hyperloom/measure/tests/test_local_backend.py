@@ -36,6 +36,7 @@ from hyperloom.orchestrator.actions.executors import (
     PatchedServer,
     VariantResult,
 )
+from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_boot_budget_sec
 from inference_suite.contracts import Deadlines, FailedStep, RunLayout
 from inference_suite.tests import test_config_contract
 
@@ -147,18 +148,14 @@ def _run(call: TestCall):
 
 
 def test_a_single_point_test_is_one_run_grid_call_with_one_variant(grid, unheld, tmp_path):
-    call = _call(tmp_path, result_dir="/res", session_deadline_sec=123.0, serving_lease="lease")
+    call = _call(tmp_path, result_dir="/res", session_deadline_sec=123.0)
 
     outcome = _run(call)
 
     (kwargs,) = grid.calls
     assert [v.name for v in kwargs["grid"]] == ["test"]
     assert kwargs["output_root"] == tmp_path / "out"
-    assert (kwargs["launch"].result_dir, kwargs["stop"].session_deadline_sec, kwargs["launch"].serving_lease) == (
-        "/res",
-        123.0,
-        "lease",
-    )
+    assert (kwargs["launch"].result_dir, kwargs["stop"].session_deadline_sec) == ("/res", 123.0)
     assert kwargs["launch"].server_lifecycle is None
     (config,) = grid.configs
     assert config == yaml.safe_load(call.points[0].read_text()), "the point is run as it is"
@@ -935,6 +932,66 @@ def test_the_per_round_cap_and_the_leak_scope_come_from_the_call(grid, tmp_path,
     }
 
 
+@pytest.mark.parametrize(("budget", "named"), [(None, None), (14400.0, "14400.0")])
+def test_the_boot_budget_of_the_call_is_named_to_its_rounds(grid, tmp_path, monkeypatch, budget, named):
+    """A round reads the test's boot budget from the environment and holds the framework's ready timeout past it."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC", raising=False)
+    captured: list[str | None] = []
+
+    async def look(**kwargs):
+        captured.append(os.environ.get("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC"))
+        return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
+
+    monkeypatch.setattr(local, "run_grid", look)
+
+    _run(_call(tmp_path, timeout_sec=20000, boot_budget_sec=budget))
+
+    assert captured == [named]
+    assert "INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC" not in os.environ, "the test puts the environment back"
+
+
+@pytest.mark.parametrize("budget", [None, 14400.0])
+def test_the_round_reads_the_boot_budget_the_backend_names(grid, tmp_path, monkeypatch, budget):
+    """The backend's side and the round's side agree on where the budget travels: a rename on one side alone fails."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC", raising=False)
+    read: list[float | None] = []
+
+    async def look(**kwargs):
+        read.append(resolve_boot_budget_sec())
+        return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
+
+    monkeypatch.setattr(local, "run_grid", look)
+
+    _run(_call(tmp_path, timeout_sec=20000, boot_budget_sec=budget))
+
+    assert read == [budget]
+
+
+@pytest.mark.parametrize("source", ["operator", "sheet"])
+def test_an_exported_boot_budget_does_not_reach_a_test_without_one(grid, tmp_path, monkeypatch, source):
+    """The budget is the backend's own: a value the operator or the sheet exported is removed from a test with none,
+    and the call's own budget wins over it, and the operator's value is back once the test ends."""
+    overrides: dict[str, str] = {}
+    if source == "operator":
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC", "9000")
+    else:
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC", raising=False)
+        overrides["INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC"] = "9000"
+    captured: list[str | None] = []
+
+    async def look(**kwargs):
+        captured.append(os.environ.get("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC"))
+        return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
+
+    monkeypatch.setattr(local, "run_grid", look)
+
+    _run(_call(tmp_path, timeout_sec=20000, env_overrides=overrides))
+    _run(_call(tmp_path, timeout_sec=20000, boot_budget_sec=14400.0, env_overrides=overrides))
+
+    assert captured == [None, "14400.0"]
+    assert os.environ.get("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC") == ("9000" if source == "operator" else None)
+
+
 def test_two_tests_in_one_process_do_not_overlap(monkeypatch, tmp_path):
     active, peak = [0], [0]
     gate = threading.Lock()
@@ -978,7 +1035,7 @@ BOOT_ENVS = {"RUN_EVAL": "false", "NUM_PROMPTS": "1"}
 def _envs_handed_to_the_round(grid: _Grid, tmp_path: Path, call: dict[str, Any]) -> dict[str, Any]:
     """The ``benchmark.envs`` ``run_grid`` makes of one recorded call: its own layering of the point and the recipe's
     base variables over the round's shape the process environment held while the call ran."""
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import _build_variant_yaml
 
     shape = grid.shapes[next(index for index, recorded in enumerate(grid.calls) if recorded is call)]
     with mock.patch.dict(os.environ):
@@ -1417,7 +1474,7 @@ def _agentx_launch(monkeypatch, tmp_path, python) -> dict[str, Any]:
     """What ``run_grid`` hands the round for the point, and what the server it launches then imports from ``a.f()``."""
     import subprocess
 
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import _build_variant_yaml
 
     launched: dict[str, Any] = {}
 

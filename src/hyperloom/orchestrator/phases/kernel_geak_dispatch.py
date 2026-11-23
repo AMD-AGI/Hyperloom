@@ -28,11 +28,11 @@ from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointErro
 from hyperloom.inference_optimizer.agentx.report import replayed_trace
 from inference_suite import CLIENT_ROOT_ENV, CLIENT_SCRIPT, inferencex_root
 from ..actions.executors import read_round_launch, staged_tool_cache
-from ..actions.executors._workload_envs import geak_grading_fields, geak_metric_axis
+from ..actions.executors.workload._agentx_switch import geak_grading_fields, geak_metric_axis
 from ..bus.message_bus import Message
 from ..kernel.geak_config import _geak_has_accepted_kernel
 from ..kernel.lane_budget import INSUFFICIENT_BUDGET
-from ..actions.executors._gpu_pin import (
+from ..actions.executors.gpu._gpu_pin import (
     coerce_tp,
     resolve_gpu_pin,
     _resolve_handoff_gpu_identity,
@@ -196,7 +196,7 @@ class _GeakDispatchMixin:
         The ``kernel_agent`` task holds every serving lane by now, but a lane only records that the round holding it
         ended, not that the server the round booted went with it.
         """
-        from ..actions.executors._server_lifecycle import free_gpus_for_handoff
+        from ..actions.executors.serving._server_lifecycle import free_gpus_for_handoff
 
         gpus = await asyncio.to_thread(
             free_gpus_for_handoff, self.session_dir, cards, timeout_sec=_GEAK_GPU_FREE_WAIT_SEC
@@ -222,7 +222,7 @@ class _GeakDispatchMixin:
         A card still holding the VRAM of a process GEAK's run left behind fails the server's memory-balance check at
         boot, and the candidate is then dropped unvalidated. The rebench is attempted either way: this only waits.
         """
-        from ..actions.executors._server_lifecycle import free_gpus_for_handoff
+        from ..actions.executors.serving._server_lifecycle import free_gpus_for_handoff
 
         gpus = await asyncio.to_thread(
             free_gpus_for_handoff, self.session_dir, cards, timeout_sec=_GEAK_GPU_FREE_WAIT_SEC

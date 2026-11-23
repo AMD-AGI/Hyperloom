@@ -14,9 +14,9 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors.grid import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
-from hyperloom.orchestrator.actions.executors._grid_runner import (
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import (
     GridVariant,
     run_grid,
     GridLaunch,
@@ -24,7 +24,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 )
 from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 
-from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import BenchmarkTarget
 
 
 @pytest.fixture(autouse=True)
@@ -103,7 +103,7 @@ class TestVariantHeartbeat:
         with (
             progress_scope(sink or _collect),
             patch(
-                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                "hyperloom.orchestrator.actions.executors.grid._grid_runner.run_with_session_kill",
                 side_effect=run_side_effect,
             ),
         ):

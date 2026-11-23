@@ -29,7 +29,7 @@ from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
     BenchmarkRunExecutor,
 )
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     default_baseline_config,
     materialize_benchmark_config,
     BenchmarkTarget,

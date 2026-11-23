@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Learn about GEAK, Hyperloom's agent-driven GPU kernel optimization framework. Covers Triton, HIP, and FlyDSL kernel rewriting, parallel optimization, and patch validation."
-        "keywords": "GEAK, Hyperloom, GPU kernel optimization, Triton, HIP, FlyDSL, AMD GPU, ROCm, kernel rewriting, benchmarking, parallel optimization, LLM inference, agent, Ray"
+        "keywords": "GEAK, Hyperloom, GPU kernel optimization, Triton, HIP, FlyDSL, AMD GPU, ROCm, kernel rewriting, benchmarking, parallel optimization, LLM inference, agent"
 ---
 # GEAK
 
@@ -79,8 +79,8 @@ each variable the process environment comes before the materialized baseline
 recipe's `benchmark.envs`.
 
 That module is also the single definition of the tuple and the mask parser that
-`orchestrator/bus/gpu_pool.py`, `orchestrator/policy/gate.py`,
-`actions/executors/_ray_serving.py` and `common/env_safety.py` use. Those layers
+`orchestrator/bus/gpu_pool.py`, `orchestrator/policy/gate.py` and
+`common/env_safety.py` use. Those layers
 read the narrower `COUNTING_VISIBLE_DEVICE_VARS` on purpose — they answer "how
 many GPUs does this process have", and widening that would change GPU accounting
 repo-wide — while this resolver answers "where is this run pinned", and a run

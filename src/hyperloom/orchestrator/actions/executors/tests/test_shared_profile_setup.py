@@ -13,7 +13,7 @@ import yaml
 from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.orchestrator.actions.executors import PatchedServer, _server_patcher
 from hyperloom.orchestrator.actions.executors._profile_setup import prepare_profile, speculative_tokens_per_step
-from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer, materialize_config_with_envs
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import LaunchLayer, materialize_config_with_envs
 from hyperloom.orchestrator.actions.executors.agentx_point import apply_native_runtime, enable_profile
 
 

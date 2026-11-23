@@ -164,3 +164,85 @@ def test_reap_exited_children_leaves_another_incarnation_and_a_live_child(
     assert proctree.reap_exited_children(named) == 0
     assert _state(zombie.pid) == "Z", "a zombie of another start time is not the one named"
     assert sleeper.poll() is None
+
+
+def test_tree_cpu_sec_sums_the_tree_and_skips_what_exited_or_was_replaced(monkeypatch):
+    # utime, stime, cutime, cstime are the stat fields at 11-14 after the comm; the start time is at 19.
+    def stat(ticks: int, start_time: int) -> list[str]:
+        return ["S", *["0"] * 10, str(ticks), "0", "0", "0", *["0"] * 4, str(start_time)]
+
+    fields = {1: ["S", *["0"] * 10, "1", "2", "3", "4", *["0"] * 4, "100"], 2: stat(10, 200), 4: stat(1000, 999)}
+
+    def read(pid: int) -> list[str]:
+        if pid not in fields:
+            raise FileNotFoundError(pid)  # exited between the listing and its read
+        return fields[pid]
+
+    monkeypatch.setattr(proctree, "_stat_fields", read)
+    monkeypatch.setattr(proctree, "descendants", lambda root: [(2, 200), (3, 300), (4, 400)])
+    clock_ticks = os.sysconf("SC_CLK_TCK")
+    # pid 4 is another process than the one listed (its start time differs): not the server's.
+    assert proctree.tree_cpu_sec(1) == pytest.approx(20 / clock_ticks)
+    assert proctree.tree_cpu_sec(5) is None, "a root that cannot be read is no reading"
+
+    def unlisted(root: int) -> list[tuple[int, int]]:
+        raise PermissionError(root)
+
+    monkeypatch.setattr(proctree, "descendants", unlisted)
+    assert proctree.tree_cpu_sec(1) is None, "a tree that cannot be listed is no reading"
+
+
+def test_tree_cpu_sec_counts_a_child_collected_between_the_listing_and_its_read_through_the_root(monkeypatch):
+    collected = False
+
+    def read(pid: int) -> list[str]:
+        nonlocal collected
+        if pid == 2:
+            collected = True  # it exits now, and the root waits for it before its own read
+            raise FileNotFoundError(pid)
+        cutime = 10 if collected else 0
+        return ["S", *["0"] * 10, "5", "0", str(cutime), "0", *["0"] * 4, "100"]
+
+    monkeypatch.setattr(proctree, "_stat_fields", read)
+    monkeypatch.setattr(proctree, "descendants", lambda root: [(2, 200)])
+    assert proctree.tree_cpu_sec(1) == pytest.approx(15 / os.sysconf("SC_CLK_TCK"))
+
+
+def test_tree_cpu_sec_reads_this_process(sleeper):
+    assert (proctree.tree_cpu_sec(os.getpid()) or 0.0) > 0.0
+    assert proctree.tree_cpu_sec(sleeper.pid) is not None
+
+
+def test_tree_rss_and_io_key_each_process_by_its_incarnation_and_skip_what_they_cannot_read(monkeypatch):
+    identities = {1: (0, 100), 2: (1, 200), 3: (1, 300), 4: (1, 999)}
+    rss = {1: 10, 2: 20, 4: 40}  # pid 3 is gone (or unreadable) by its read; pid 4 is another process than listed
+    monkeypatch.setattr(proctree, "proc_identity", identities.get)
+    monkeypatch.setattr(proctree, "descendants", lambda root: [(2, 200), (3, 300), (4, 400)])
+
+    def status(pid: int) -> str:
+        if pid not in rss:
+            raise FileNotFoundError(pid)
+        return f"Name:\tx\nVmRSS:\t   {rss[pid]} kB\n"
+
+    monkeypatch.setattr(proctree, "_status_text", status)
+    assert proctree.tree_rss_bytes(1) == {(1, 100): 10240, (2, 200): 20480}
+    io = {1: "rchar: 7\nwchar: 1\nread_bytes: 3\n", 2: "rchar: 5\nread_bytes: 0\n"}
+
+    def read_io(path: Path, encoding: str) -> str:
+        pid = int(path.parent.name)
+        if pid not in io:
+            raise PermissionError(13, "Permission denied", str(path))  # EACCES: unknown, never zero
+        return io[pid]
+
+    monkeypatch.setattr(Path, "read_text", read_io)
+    assert proctree.tree_io_bytes(1) == {(1, 100): 10, (2, 200): 5}
+    del io[1]
+    assert proctree.tree_io_bytes(1) is None, "a root whose counters cannot be read is no reading"
+    assert proctree.tree_rss_bytes(5) is None, "a root that is gone is no reading"
+
+
+def test_tree_rss_and_io_read_this_process():
+    me = (os.getpid(), proctree.proc_identity(os.getpid())[1])
+    assert (proctree.tree_rss_bytes(os.getpid()) or {}).get(me, 0) > 0
+    io = proctree.tree_io_bytes(os.getpid())
+    assert io is None or io.get(me, -1) >= 0

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.common.gpu_partition import PartitionLayout, PartitionModel, layout_for
-from hyperloom.orchestrator.actions.executors import _partition_shape as ps
+from hyperloom.orchestrator.actions.executors.gpu import _partition_shape as ps
 
 
 @pytest.fixture(autouse=True)

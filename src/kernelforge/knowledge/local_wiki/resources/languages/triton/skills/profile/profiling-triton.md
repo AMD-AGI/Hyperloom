@@ -21,8 +21,10 @@ profiling output and which knob each signal points to. Hardware peaks live in `l
 
 ## 1. Autotune + wall time
 ```bash
-TRITON_PRINT_AUTOTUNING=1 rocprofv3 --kernel-trace --stats -f csv -- python test_driver.py --profile-run
+TRITON_PRINT_AUTOTUNING=1 rocprofv3 --kernel-trace --stats -f csv -- <command ...>
 ```
+`<command ...>` launches the kernel under test and little else; choosing it is covered in
+`common_methodology/profiling/measure_rocpc_workflow.md` (*The command to profile*).
 `TRITON_PRINT_AUTOTUNING=1` prints the winning `triton.Config` + timing; rocprofv3 gives kernel-level
 wall time. Bench discipline: `warmup≥25`, `rep≥100` (median), and a real win must beat the current best
 by more than run-to-run jitter (~2% noise floor). Autotune timing alone is not enough — confirm with ISA

@@ -1732,7 +1732,7 @@ def test_fresh_campaign_captures_post_prep_driver_digest_and_base(tmp_path, monk
     repaired_body = "pass\n# repaired by prep\n"
 
     def fake_preflight(**_kwargs):
-        return SimpleNamespace(ok=False, profile_ok=False, summary=lambda: "needs prep")
+        return SimpleNamespace(ok=False, summary=lambda: "needs prep")
 
     def fake_prepare(**kwargs):
         # Simulate the prep agent: repair the driver and commit scaffolding into pristine, advancing HEAD and changing
@@ -1757,7 +1757,7 @@ def test_fresh_campaign_captures_post_prep_driver_digest_and_base(tmp_path, monk
             wrote_files=["driver.py", "task_helper.py"],
             created_files=["task_helper.py"],
             rolled_back=False,
-            final_preflight=SimpleNamespace(profile_ok=True),
+            final_preflight=SimpleNamespace(),
             message="prepared",
             audit_dir="",
         )

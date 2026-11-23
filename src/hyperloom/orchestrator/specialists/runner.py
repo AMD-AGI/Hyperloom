@@ -726,9 +726,7 @@ class SpecialistRunner:
             agent=domain.key,
             attributes={"name": domain.key},
         ) as call_span:
-            # Ray-managed GPU execution: when the dispatcher acquired a GpuSpecialistLease, run the whole subprocess
-            # inside its num_gpus actor so any GPU command lands within Ray's assigned devices. ``None`` keeps the
-            # local path (``gpu_ids`` pinned into *_VISIBLE_DEVICES). A sandbox shows the model when it is a local path.
+            # A sandbox shows the model when it is a local path.
             sub_result: SpecialistSubprocessResult = await self.subprocess_dispatcher.run(
                 SpecialistSpawn(
                     task_id=ctx.task.task_id,
@@ -741,7 +739,6 @@ class SpecialistRunner:
                     disallowed_tools=SPECIALIST_TOOL_DENYLIST,
                     gpu_ids=tuple(ctx.extra.get("gpu_ids") or ()),
                     deadline=deadline,
-                    gpu_lease=ctx.extra.get("gpu_specialist_lease"),
                     progress_cb=ctx.extra.get("specialist_progress_cb"),
                     readable=(Path(str((ctx.task.params or {}).get("model_path") or "")),),
                 )

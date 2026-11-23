@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._nogit_patch import (
+from hyperloom.orchestrator.actions.executors.patching._nogit_patch import (
     _apply_patch_no_git,
     _reverse_applies_cleanly,
 )
@@ -122,7 +122,7 @@ def test_a_near_miss_is_not_accepted_as_already_applied(tmp_path: Path) -> None:
 
 
 def test_a_revert_that_leaves_a_patched_file_behind_is_named(tmp_path: Path) -> None:
-    from hyperloom.orchestrator.actions.executors._patch_git import restore_pending_integrate
+    from hyperloom.orchestrator.actions.executors.patching._patch_git import restore_pending_integrate
 
     root = tmp_path / "wheel"
     root.mkdir()

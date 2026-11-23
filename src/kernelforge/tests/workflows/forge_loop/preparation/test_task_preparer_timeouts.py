@@ -51,5 +51,3 @@ def test_preflight_defaults_stay_raised():
         assert task_preflight.PREFLIGHT_BENCH_TIMEOUT_S >= 1800
     if "FORGE_PREFLIGHT_GRAPH_TIMEOUT" not in os.environ:
         assert task_preflight.PREFLIGHT_GRAPH_TIMEOUT_S >= 900
-    if "FORGE_PREFLIGHT_PROFILE_TIMEOUT" not in os.environ:
-        assert task_preflight.PREFLIGHT_PROFILE_TIMEOUT_S >= 900

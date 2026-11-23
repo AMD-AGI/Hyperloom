@@ -96,7 +96,7 @@ def test_bench_falsy_values(falsy):
 
 
 def test_reserves_benchmark_lane_only_for_bench_capable():
-    """Only bench-capable patch specialists hold the whole-machine serving_slot."""
+    """Only bench-capable patch specialists reserve the benchmark lane."""
     assert resolve_specialist_profile({"mode": "patch", "bench": True}).reserves_benchmark_lane is True
     authoring = {"framework_agent_authoring": True, "domain": "serving_specialist"}
     assert resolve_specialist_profile(authoring).reserves_benchmark_lane is False

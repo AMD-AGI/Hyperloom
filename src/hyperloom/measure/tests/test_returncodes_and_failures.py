@@ -42,10 +42,8 @@ IMPORT_ERROR_REASON = f"{failure_signature.IMPORT_ERROR}: ModuleNotFoundError: N
 def test_the_hosted_return_codes_are_distinct_negative_and_clear_of_the_local_sentinels() -> None:
     codes = sorted(returncodes.HOSTED_RETURNCODES)
     assert len(codes) == 5 and all(code < 0 for code in codes)
-    local = set()
-    for module in ("_subprocess_kill", "_ray_serving"):
-        mod = importlib.import_module(f"hyperloom.orchestrator.actions.executors.{module}")
-        local |= {v for k, v in vars(mod).items() if k.endswith(("_RC", "_RETURNCODE")) and isinstance(v, int)}
+    mod = importlib.import_module("hyperloom.orchestrator.actions.executors._subprocess_kill")
+    local = {v for k, v in vars(mod).items() if k.endswith(("_RC", "_RETURNCODE")) and isinstance(v, int)}
     assert local, "no local sentinel found: the collection is stale"
     assert not local & set(codes)
 

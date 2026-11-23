@@ -18,7 +18,14 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
-from hyperloom_common.proctree import REAP_MARK_ENV, TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
+from hyperloom_common.proctree import (
+    REAP_MARK_ENV,
+    STOP_GATE_POLL_SECONDS,
+    TERM_GRACE_SEC,
+    collect_tree,
+    kill_tree,
+    marked_pids,
+)
 
 
 from ..cancel_channel import CancelScope, cancel_scope_listener
@@ -31,10 +38,6 @@ _REAP_COLLECT_SECONDS: float = 1.0
 
 # How long draining a reaped child's capture threads is given.
 _CAPTURE_DRAIN_SECONDS: float = 2.0
-
-# How often the blocking side looks up from the child to check its stop gates -- the session deadline and the cancel
-# scope among them.
-STOP_GATE_POLL_SECONDS: float = 0.5
 
 # What stopping a running round costs, end to end, from the moment something asks it to: noticing at the poll,
 # SIGTERM'ing the tree, waiting out the grace before SIGKILL, collecting the child, and draining its pipes.
@@ -131,12 +134,8 @@ def kill_my_spawned_server(
 #: run instead of opening a framework enablement round.
 AGENTX_PREFLIGHT_ERROR_CLASS: str = "agentx_preflight"
 
-# -913 is ``_ray_serving._RAY_ACTOR_DIED_RC``.
-
 # Sentinel ``returncode`` when the session wall-clock budget ran out mid-round and the tree was reaped.
 SESSION_TIME_EXHAUSTED_RETURNCODE: int = -915
-
-# -916 is ``_ray_serving._ACTOR_TIMEOUT_RC``.
 
 # Sentinel ``returncode`` when the orchestrator cancelled the action this child was launched for -- a shutdown, or a
 # budget that is spent.
@@ -150,6 +149,9 @@ AGENTX_EARLY_STOP_ERROR_CLASS: str = "agentx_early_stop"
 # validated there once by preflight, so nothing re-reads them from an env a variant composed.
 BENCHMARK_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"
 BENCHMARK_SILENCE_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC"
+# The boot budget of the test the invocation runs. It is private to the measurement backend, which sets it from
+# ``TestCall.boot_budget_sec`` and removes it from a test that has none, so an exported value never reaches such a test.
+BOOT_BUDGET_ENV = "INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC"
 
 
 def default_benchmark_timeout_sec(env: Mapping[str, str] | None = None) -> float:
@@ -209,6 +211,24 @@ def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[fl
         positive(BENCHMARK_SILENCE_TIMEOUT_ENV, 600.0),
         positive(BENCHMARK_TIMEOUT_ENV, default_benchmark_timeout_sec(source)),
     )
+
+
+def resolve_boot_budget_sec() -> float | None:
+    """The boot budget :data:`BOOT_BUDGET_ENV` names, ``None`` when it is unset or empty.
+
+    Raises:
+        ValueError: When it is set to something other than a finite, positive number of seconds.
+    """
+    raw = os.environ.get(BOOT_BUDGET_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{BOOT_BUDGET_ENV} must be finite and positive, got {raw!r}") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{BOOT_BUDGET_ENV} must be finite and positive, got {raw!r}")
+    return value
 
 
 def sync_agentx_phase_wait(envs: dict[str, Any], timeout_sec: float) -> None:

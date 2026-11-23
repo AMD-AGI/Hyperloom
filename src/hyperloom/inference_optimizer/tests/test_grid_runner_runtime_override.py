@@ -10,7 +10,7 @@ import yaml
 from pathlib import Path
 
 
-from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml, GridRecipe
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridVariant, _build_variant_yaml, GridRecipe
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
 
 
