@@ -221,14 +221,6 @@ def test_gate_allows_a_builtin_dispatch_with_the_generic_custom_tag():
     )
 
 
-def test_the_custom_specialist_gets_no_round_counters():
-    """Operator-defined domains are per session, so the stalled-domain bookkeeping never counts them."""
-    state = SharedState()
-    state.bump_domain_round_counters()
-    assert "custom_specialist" not in state.rounds_since_last_specialist
-    assert "custom_specialist" not in state.rounds_since_last_keep
-
-
 # CLI
 def _ns(**kw: Any) -> argparse.Namespace:
     base = {

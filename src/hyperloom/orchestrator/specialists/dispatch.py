@@ -822,10 +822,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         self.shared_state.record_specialist_round(round_entry)
         self._record_specialist_round_product(task=task, round_entry=round_entry)
 
-        # Per-anchor coverage ledger: every specialist completion is
-        # one "round" — tick all anchors.
-        self.shared_state.bump_domain_round_counters()
-
         # Persist so a resume picks up the bookkeeping without re-running the specialist.
         try:
             self.shared_state.save(self.session_dir)

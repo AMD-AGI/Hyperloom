@@ -157,30 +157,6 @@ async def test_frozen_admission_spawns_nothing(coord):
     assert fast.calls
 
 
-async def test_spawning_a_specialist_resets_its_domain_stale_counter(coord):
-    from hyperloom.orchestrator.specialists.domains import get_domain
-
-    specialist = _Gated()
-    coord.sub.register_executor("specialist", specialist)
-    anchor = get_domain("serving_specialist").kb_anchor
-    for _ in range(5):
-        coord.shared_state.bump_domain_round_counters()
-    await _enqueue(
-        coord,
-        "specialist",
-        "cpu-spec",
-        ["research_lane"],
-        {"domain": "serving_specialist", "gap_canonical_id": "gap.test"},
-    )
-
-    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
-    assert coord.shared_state.rounds_since_last_specialist[anchor] == 0
-
-    specialist.gate.set()
-    await _settle(coord)
-    assert specialist.calls
-
-
 async def test_waiting_for_running_work_returns_when_an_action_finishes(coord):
     slow = _Gated()
     coord.sub.register_executor("slow_action", slow)

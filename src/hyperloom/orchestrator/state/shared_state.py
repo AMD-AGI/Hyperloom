@@ -608,9 +608,6 @@ class SharedState(
     explore_search: dict[str, Any] = field(default_factory=dict)
     # specialist sub-agent rolling state; one entry per config-arm round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
-    # Per-kb_anchor coverage counters: config-arm rounds since a specialist was dispatched / since a KEEP landed.
-    rounds_since_last_specialist: dict[str, int] = field(default_factory=dict)
-    rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
     # Patch verdict ledger keyed by review subject (a specialist task_id, or a candidate id for a PR pre-screen); Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
     specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
     # Intervention-mix ledger ({change_type∈{config,code_patch,config_attempt,code_patch_attempt}}); Robustness detects config-only loops.
