@@ -12,10 +12,7 @@ from hyperloom.common.framework_arm import review_row_id, verdict_subject
 from .verdicts import CriticRuling
 
 
-def variant_review_rows(
-    payload: Mapping[str, Any] | None,
-    held_by_name: Mapping[str, str] | None,
-) -> list[dict[str, Any]]:
+def variant_review_rows(payload: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     """Return one row per named variant, in the order the Critic wrote them.
 
     A variant the Critic rejected never reaches a bench, so the map is the only
@@ -25,23 +22,16 @@ def variant_review_rows(
     entries = (payload or {}).get("verdict_map")
     if not isinstance(entries, Mapping):
         return []
-    held = held_by_name or {}
     rows: list[dict[str, Any]] = []
     for name, entry in entries.items():
         variant = str(name or "")
         if not variant:
             continue
         fields = entry if isinstance(entry, Mapping) else {}
-        authored = str(fields.get("verdict") or "")
-        effective = str(held.get(variant) or "") or authored
         rows.append(
             {
                 "variant_name": variant,
-                "verdict": authored,
-                "effective_verdict": effective,
-                # A hold is visible in the pair, and naming the rule twice
-                # would be a second thing to keep in step with the hold itself.
-                "held_to_rule": str(fields.get("failure_reason_code") or "") if effective != authored else "",
+                "verdict": str(fields.get("verdict") or ""),
                 "reason": str(fields.get("rationale") or fields.get("reasoning") or ""),
                 "failure_reason_code": str(fields.get("failure_reason_code") or ""),
             }
@@ -66,8 +56,7 @@ def _record_phase_proposal_review(pending: Any, ruling: CriticRuling) -> None:
     phase_event.record_proposal_review(
         ProposalReview(
             proposal_msg_id=proposal_id,
-            verdict=ruling.authored or ruling.effective,
-            effective_verdict=ruling.effective,
+            verdict=ruling.verdict,
             source=str(fields.get("source") or ""),
             reasoning=str(ruling.reasoning or ""),
             confidence=fields.get("confidence"),
@@ -94,10 +83,8 @@ def record_critic_review(router: Any, pending: Any, ruling: CriticRuling) -> Non
     """Record the Critic's ruling on one proposal, onto the proposal.
 
     Every action the Critic reviews is recorded, not only the config-arm grid.
-    ``authored`` (what the Critic wrote) and ``effective`` (what the loop acted
-    on) are both kept: a reject held to a formatting rule is mirrored onto state
-    as the reject the Critic wrote. A rejected proposal is settled here, since
-    it never reaches a bench and nothing downstream would otherwise resolve it.
+    A rejected proposal is settled here, since it never reaches a bench and
+    nothing downstream would otherwise resolve it.
     """
     # The framework row below exists only while a framework event is open for
     # this cycle, so the proposal's own row is what carries a ruling reached in
@@ -117,17 +104,14 @@ def record_critic_review(router: Any, pending: Any, ruling: CriticRuling) -> Non
         CriticReview,
     )
 
-    authored = ruling.authored
-    effective = ruling.effective
+    verdict = ruling.verdict
     reason = str(ruling.reasoning or "")
     fields = ruling.payload or {}
     grounded = str(fields.get("source") or REVIEWER_CRITIC) == REVIEWER_CRITIC
     recorder.record_proposal_review(
         proposal_id,
         CriticReview(
-            verdict=authored or effective,
-            effective_verdict=effective,
-            held_to_rule=str(fields.get("failure_reason_code") or "") if effective != authored else "",
+            verdict=verdict,
             reviewer=REVIEWER_CRITIC if grounded else REVIEWER_CRITIC_UNAVAILABLE,
             reason=reason,
             confidence=fields.get("confidence"),
@@ -139,10 +123,10 @@ def record_critic_review(router: Any, pending: Any, ruling: CriticRuling) -> Non
     recorder.record_proposal_step(
         proposal_id,
         step=STEP_REVIEWED,
-        outcome=effective,
+        outcome=verdict,
         reason=reason,
     )
-    if effective == "reject":
+    if verdict == "reject":
         router.settle_dropped_proposal(pending, reason or "critic_rejected")
 
 

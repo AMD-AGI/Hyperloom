@@ -361,7 +361,7 @@ def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
     """Cross-domain mandate appended when ``scope == 'domains'``. The
     single deliverable is still
     ONE ``specialist_done``; the difference is the patch may span every domain
-    in scope and the Critic will hold it to the cross-domain rules.
+    in scope.
 
     Args:
         inp: The specialist prompt inputs (reads ``extra_focus_tags`` /
@@ -388,9 +388,7 @@ def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
         "- show this is genuine cross-domain synthesis, not a concatenation of "
         + "two independent single-domain edits (that is an explore grid combo, "
         + "not a cross-domain patch).",
-        "Set ``scope='domains'`` on the proposal so the Critic attaches the "
-        + "cross-domain review rules. Never self-report numeric speedups — the "
-        + "Coordinator measures gain.",
+        "Never self-report numeric speedups — the Coordinator measures gain.",
     ]
 
 

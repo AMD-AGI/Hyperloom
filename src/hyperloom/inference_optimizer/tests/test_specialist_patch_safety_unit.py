@@ -321,53 +321,6 @@ def test_stripping_tolerates_a_payload_that_is_not_a_dict(payload):
     assert ps.strip_forbidden_proposal_fields(payload) == []
 
 
-# ---- quantitative_claim_rule_descriptor ------------------------------------
-def test_a_format_slip_is_advisory_not_a_reject():
-    rule = ps.quantitative_claim_rule_descriptor()
-
-    assert rule["failure_verdict"] == "advise"
-    assert rule["failure_reason_code"] == ps.QUANTITATIVE_CLAIM_REASON_CODE
-
-
-# ---- advisory_only_reason_codes --------------------------------------------
-def test_every_rule_that_asked_for_advice_is_enforceable():
-    codes = ps.advisory_only_reason_codes()
-
-    assert ps.QUANTITATIVE_CLAIM_REASON_CODE in codes
-    for rule in ps.cross_domain_rule_descriptors():
-        if rule["failure_verdict"] == ps.ADVISE_VERDICT:
-            assert rule["failure_reason_code"] in codes
-
-
-def test_a_rule_asking_for_a_reject_is_left_alone(monkeypatch):
-    """The set is derived from the descriptors, so a rule keeping ``reject`` stays out of it."""
-    hard = ps.CrossDomainRule(
-        rule_id="hard_guard",
-        description="a violation here is grounds for refusal",
-        failure_verdict="reject",
-        failure_reason_code="cross_domain_hard_guard",
-    )
-    monkeypatch.setattr(ps, "CROSS_DOMAIN_RULES", ps.CROSS_DOMAIN_RULES + (hard,))
-
-    codes = ps.advisory_only_reason_codes()
-
-    assert "cross_domain_hard_guard" not in codes
-    assert ps.QUANTITATIVE_CLAIM_REASON_CODE in codes
-
-
-# ---- advisory_rules_govern -------------------------------------------------
-@pytest.mark.parametrize("action_name", ["specialist", "explore"])
-def test_the_rules_govern_the_proposal_kinds_they_are_written_about(action_name):
-    """``proposal_set[*]`` reaches review as a specialist proposal or the explore grid it is materialised into; the framework candidate is the one the quantitative-claim rule names by exception."""
-    assert ps.advisory_rules_govern(action_name) is True
-
-
-@pytest.mark.parametrize("action_name", ["integrate_patch", "kernel_opt", "sweep", "baseline", "", None])
-def test_integrate_patch_is_never_governed_by_an_advisory_rule(action_name):
-    """None of these carries a specialist ``proposal_set``, and holding an ``integrate_patch`` reject to ``advise`` would land the refused patch."""
-    assert ps.advisory_rules_govern(action_name) is False
-
-
 # ---- vet_patches ----------------------------------------------------------
 def test_vet_patches(tmp_path, monkeypatch):
     good = tmp_path / "good.patch"

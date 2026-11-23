@@ -1154,7 +1154,6 @@ def test_a_rejected_grid_is_reviewed_and_dropped(session_dir: Path):
             pending=coord.state.pending_proposals[msg_id],
             ruling=CriticRuling(
                 verdict="reject",
-                authored_verdict="reject",
                 reasoning="every variant raises the memory floor",
                 advisory=None,
                 approved_variant_names=None,
@@ -1233,7 +1232,6 @@ def test_a_review_records_the_grounds_the_critic_stated(session_dir: Path):
 
     review = _events(session_dir)[0]["ext"]["proposals"][0]["critic_review"]
     assert review["verdict"] == "advise"
-    assert review["effective_verdict"] == "advise"
     assert review["reviewer"] == "critic"
     assert review["confidence"] == 0.4
     assert review["failure_reason_code"] == "insufficient_evidence"
@@ -1243,31 +1241,6 @@ def test_a_review_records_the_grounds_the_critic_stated(session_dir: Path):
     assert review["alternative_action"] == "shrink the grid"
     assert review["outcome"]["materialized"] is True
     assert review["outcome"]["denied"] is False
-
-
-def test_a_verdict_held_to_its_rule_keeps_both_readings(session_dir: Path):
-    coord = _coordinator(session_dir)
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.phase_framework._open_framework_timeline()
-
-    msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
-    _review(
-        coord,
-        msg_id,
-        {
-            "verdict": "reject",
-            "reasoning": "specialist_quantitative_claim_violation: the payload carries predicted_gain_pct.",
-            "failure_reason_code": "specialist_quantitative_claim_violation",
-        },
-    )
-    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
-
-    review = _events(session_dir)[0]["ext"]["proposals"][0]["critic_review"]
-    assert review["verdict"] == "reject"
-    assert review["effective_verdict"] == "advise"
-    assert review["held_to_rule"] == "specialist_quantitative_claim_violation"
-    # A held reject still dispatches, which is the whole point of the hold.
-    assert review["outcome"]["materialized"] is True
 
 
 def test_a_per_variant_review_records_every_variants_ruling(session_dir: Path):
@@ -1300,7 +1273,7 @@ def test_a_per_variant_review_records_every_variants_ruling(session_dir: Path):
     assert rows["cuda_graph"]["verdict"] == "reject"
     assert "hang" in rows["cuda_graph"]["reason"]
     # The grid still ran, on the subset that survived.
-    assert review["effective_verdict"] == "approve"
+    assert review["verdict"] == "approve"
     assert review["outcome"]["materialized"] is True
 
 
@@ -1356,7 +1329,6 @@ def test_a_patch_review_lands_on_the_candidate_it_judged(session_dir: Path):
             pending=pending,
             ruling=CriticRuling(
                 verdict="reject",
-                authored_verdict="reject",
                 reasoning="touches the serving loop",
                 payload={"verdict": "reject", "failure_reason_code": "serving_loop_touched"},
             ),

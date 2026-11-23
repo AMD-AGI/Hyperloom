@@ -232,8 +232,6 @@ class V6PhaseProposalReview(TypedDict, total=False):
     """The Critic's ruling on one proposal, filed on the proposal."""
 
     verdict: str
-    effective_verdict: str
-    held_to_rule: bool
     source: str
     reasoning: str
     confidence: float | None

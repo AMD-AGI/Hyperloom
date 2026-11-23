@@ -267,7 +267,6 @@ class ProposalReview:
 
     proposal_msg_id: str
     verdict: str
-    effective_verdict: str = ""
     source: str = ""
     reasoning: Any = None
     confidence: Any = None
@@ -277,17 +276,11 @@ class ProposalReview:
 
     def row(self) -> dict[str, Any]:
         """The proposal row fields this ruling persists as."""
-        authored = str(self.verdict or "")
-        effective = str(self.effective_verdict or "") or authored
         advice = self.advisory or {}
         return {
             "proposal_msg_id": str(self.proposal_msg_id),
             "critic_review": {
-                "verdict": authored,
-                "effective_verdict": effective,
-                # Its own field because the two verdicts alone say that they
-                # differ, not that the envelope validator imposed it.
-                "held_to_rule": effective != authored,
+                "verdict": str(self.verdict or ""),
                 "source": str(self.source or ""),
                 "reasoning": _clip(self.reasoning, MAX_REASON_CHARS),
                 "confidence": _float_or_none(self.confidence),

@@ -300,11 +300,9 @@ class GateVerdict:
 
 @dataclass(frozen=True)
 class CriticReview:
-    """The Critic's ruling on one proposal, both as authored and as the loop committed it."""
+    """The Critic's ruling on one proposal."""
 
     verdict: str
-    effective_verdict: str = ""
-    held_to_rule: str = ""
     reviewer: str = REVIEWER_CRITIC
     reason: str = ""
     confidence: Any = None
@@ -504,9 +502,7 @@ class FrameworkEventRecorder:
         """Record the Critic's ruling on one proposal, inline on its row.
 
         The review lives on the proposal so that it follows the proposal
-        wherever it was raised. Both verdicts are kept: a reject the loop held
-        to a rule that only declared ``advise`` is two facts, and reporting
-        either alone misreads the round.
+        wherever it was raised.
 
         ``review.advisory`` is recorded as given, since the vocabulary is the
         Critic's own and a re-spelling here would drift from what it emitted.
@@ -519,8 +515,6 @@ class FrameworkEventRecorder:
             return
         ruling: dict[str, Any] = {
             "verdict": review.verdict,
-            "effective_verdict": review.effective_verdict or review.verdict,
-            "held_to_rule": review.held_to_rule,
             "reviewer": review.reviewer,
             "reason": review.reason,
             "confidence": _float_or_none(review.confidence),
