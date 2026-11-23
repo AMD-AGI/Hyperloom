@@ -44,6 +44,7 @@ __all__ = [
     "BASE_DEV_NODES",
     "BWRAP_FLOOR",
     "NESTED_SAFE",
+    "NO_JOIN",
     "SYSTEM_ROOTS",
     "BwrapPolicy",
     "BwrapPolicyError",
@@ -71,8 +72,11 @@ NESTED_SAFE: Version = (0, 12, 0)
 #: The system trees a sandbox that runs programs binds read-only; a root that is a symlink (``/bin -> usr/bin``)
 #: becomes the same symlink, and one the host lacks is skipped.
 SYSTEM_ROOTS = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/opt")
-#: The device nodes every sandbox gets, each bound only where the host has it (a GPU container's ``/dev`` may lack
-#: ``/dev/full``, which is why ``--dev`` is not used).
+#: The device nodes every sandbox gets, each bound with ``--dev-bind-try`` onto a fresh tmpfs ``/dev`` only where the
+#: host has it: a GPU container's ``/dev`` may lack ``/dev/full`` (apptainer's ``--containall`` keeps only ``null``,
+#: ``zero``, ``random``, ``urandom``, ``tty``, ``ptmx``, ``pts``, ``shm`` and the fd links), and bubblewrap's
+#: ``--dev`` then fails (``Can't open source /dev/full``), which is why it is never used; nor is the host's whole
+#: ``/dev`` bound. The probe notes which are absent.
 BASE_DEV_NODES = ("/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/tty")
 
 _BWRAP = "bwrap"
@@ -103,8 +107,25 @@ _USERNS_SYSCTLS = (
 _PYTHON_FLAGS = ("-I", "-S", "-c")
 _VERSION = re.compile(r"bubblewrap (\d+)\.(\d+)\.(\d+)")
 #: Under ``unshare --mount`` bubblewrap starts from a private copy of the mount tree, which a root mount marked
-#: unbindable (as some container runtimes leave it) otherwise refuses to every bind with ``EINVAL``.
-_PRIVATE_MOUNTS = ("--mount", "--")
+#: unbindable (as apptainer leaves it) otherwise refuses to every bind with ``EINVAL``; private propagation clears the
+#: mark, and is asked for by name where the ``unshare`` lists ``--propagation`` (util-linux makes it the default). It
+#: needs ``CAP_SYS_ADMIN``, which root has and any other uid lacks.
+_MOUNT = "--mount"
+_PROPAGATION = "--propagation"
+_PRIVATE = (_PROPAGATION, "private")
+#: The same private copy for a uid without ``CAP_SYS_ADMIN``: a user namespace of its own, mapping only this uid and
+#: gid, owns the new mount namespace, and private propagation clears the root's unbindable mark. It needs an
+#: ``unshare`` whose ``--help`` lists every option in :data:`_USER_MOUNT_FLAGS` (a static util-linux 2.37.2 build
+#: does; the version is never read) and a kernel that lets this uid make a user namespace, as bubblewrap does.
+_USER_MAP = ("--user", "--map-current-user")
+_USER_MOUNTS = (*_USER_MAP, _MOUNT, *_PRIVATE, "--")
+_USER_MOUNT_FLAGS = (*_USER_MAP, _MOUNT, _PROPAGATION)
+_LONG_OPTION = re.compile(r"(?<![\w-])--[a-z][a-z-]*")
+#: Why a launch that joins a :class:`Holder` is refused under a prefix that gives each launch its own user namespace.
+NO_JOIN = (
+    "a launch cannot join another sandbox's namespaces here: bubblewrap runs only under unshare --user, which gives "
+    "each launch a user namespace of its own"
+)
 _HOLD = "import signal; print('ready', flush=True); signal.pause()"
 #: Finds the ``unshare`` for a launch of a bubblewrap: its path, else ``None`` and why.
 _FindUnshare = Callable[[str], tuple[str | None, str]]
@@ -332,6 +353,8 @@ class BwrapPolicy:
         """
         launcher = bwrap.launcher
         refused = self.problems(bwrap.version or (0, 0, 0))  # set whenever the launcher is
+        if self.join is not None and not bwrap.joins:
+            refused.append(NO_JOIN)
         if refused:
             raise BwrapPolicyError(refused)
         tail = ["--chdir", self.chdir] if self.chdir else []
@@ -526,9 +549,11 @@ class BwrapStatus:
 @dataclass(frozen=True)
 class BwrapProbe:
     """Whether bubblewrap runs a sandbox here, and how: ``problems`` is empty when it does, else each names the step
-    and bubblewrap's own line. ``prefix`` goes before every launch (``unshare --mount --`` where the root mount
-    cannot be bound) and ``notes`` say why. A ``transient`` probe got no answer in time: never cached, never a
-    final refusal."""
+    and bubblewrap's own line. ``prefix`` goes before every launch (``unshare --mount --propagation private --``, or
+    ``unshare --user --map-current-user --mount --propagation private --`` for a uid without ``CAP_SYS_ADMIN``, where the root mount
+    cannot be bound) and ``notes`` say why. ``joins`` is whether a launch may join a :class:`Holder`'s namespaces:
+    not under a prefix that gives each launch a user namespace of its own, from which another launch's cannot be
+    entered. A ``transient`` probe got no answer in time: never cached, never a final refusal."""
 
     path: str | None
     version: Version | None
@@ -536,6 +561,7 @@ class BwrapProbe:
     prefix: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
     transient: bool = False
+    joins: bool = True
 
     @property
     def ok(self) -> bool:
@@ -559,6 +585,11 @@ def outcome(action):
     except OSError as exc:
         return errno.errorcode.get(exc.errno, str(exc.errno))
     return "ok"
+def dev_null():
+    with open("/dev/null", "r+b", buffering=0) as handle:
+        handle.write(b"x")
+        if handle.read(1):
+            raise OSError(errno.EIO, "read")
 def umount(path):
     import ctypes
     libc = ctypes.CDLL(None, use_errno=True)
@@ -574,6 +605,7 @@ print(json.dumps({
     "ro_chmod": outcome(lambda: os.chmod(os.path.join(ro, "visible"), 0o600)),
     "rw_write": outcome(lambda: open(os.path.join(rw, "created"), "wb").close()),
     "umount_mask": outcome(lambda: umount(secret_dir)),
+    "dev_null": outcome(dev_null),
     "pid_namespace": "own" if os.readlink("/proc/self/ns/pid") != app_pidns else "the app's",
     "NoNewPrivs": status.get("NoNewPrivs", "").strip(),
     "CapEff": status.get("CapEff", "").strip(),
@@ -587,6 +619,7 @@ _CANARY_EXPECTED = {
     "ro_chmod": "EROFS",
     "rw_write": "ok",
     "umount_mask": "EPERM",
+    "dev_null": "ok",
     "pid_namespace": "own",
     "NoNewPrivs": "1",
     "CapEff": "0000000000000000",
@@ -702,50 +735,103 @@ def _unshare_beside(bwrap: str) -> tuple[str | None, str]:
         return beside, ""
     why = (
         f"no unshare beside {bwrap} to give a launch its own mounts, and none is taken from PATH for a bubblewrap "
-        "named by path: the host must make the root mount private first (mount --make-rprivate /)"
+        "named by path: the host must make the root mount private first (mount --make-rprivate /), or the layer "
+        "must carry a static unshare (util-linux; its --help must list --user, --map-current-user, --mount and "
+        "--propagation) as bin/unshare"
     )
     return None, why
 
 
-def _with_private_mounts(canary: _Canary, first: BwrapProbe, unshare: str | None, timeout: float) -> BwrapProbe:
-    """The canary again under ``unshare --mount`` after the ``first`` run's binds failed with ``EINVAL`` (an
-    unbindable root)."""
+def _unshare_options(unshare: str, timeout: float) -> frozenset[str]:
+    """The long options the ``unshare`` at ``unshare`` lists in its ``--help`` (util-linux prints it on stdout,
+    busybox on stderr), none when it does not run; ``subprocess.TimeoutExpired`` when it did not answer. Options are
+    read, never a version: a distribution's build may carry an option its version number predates."""
+    try:
+        shown = subprocess.run([unshare, "--help"], capture_output=True, text=True, timeout=timeout, check=False)
+    except OSError:
+        return frozenset()
+    return frozenset(_LONG_OPTION.findall(shown.stdout + shown.stderr))
+
+
+def _missing_user_flags(unshare: str, options: frozenset[str]) -> str:
+    """Why the ``unshare`` at ``unshare``, listing ``options``, cannot make a user namespace for a launch, or ``""``
+    when it lists every flag :data:`_USER_MOUNTS` needs."""
+    missing = [flag for flag in _USER_MOUNT_FLAGS if flag not in options]
+    if not missing:
+        return ""
+    return f"unshare at {unshare} does not list {', '.join(missing)} in its --help, which unshare --user needs here"
+
+
+def _with_private_mounts(canary: _Canary, first: BwrapProbe, unshare: str, timeout: float) -> BwrapProbe:
+    """The canary again after the ``first`` run's binds failed with ``EINVAL`` (an unbindable root): under ``unshare
+    --mount``, else (a uid without ``CAP_SYS_ADMIN``) under ``unshare --user --map-current-user --mount
+    --propagation private``. The first that holds is the tier every launch takes; when neither does, the problems of
+    both."""
     path, version = first.path, first.version
-    prefix = (str(unshare), *_PRIVATE_MOUNTS)
+    options = _unshare_options(unshare, timeout)
+    prefix = (unshare, _MOUNT, *(_PRIVATE if _PROPAGATION in options else ()), "--")
+    again = canary.run(BwrapProbe(path, version, (), prefix=prefix), timeout)
+    if not again:
+        note = (
+            f"binds from the root mount fail here ({first.problems[0]}): every launch runs under unshare --mount, "
+            "which gives it a private copy of the mount tree"
+        )
+        return BwrapProbe(path, version, (), prefix=prefix, notes=(note,))
+    problems = (*first.problems, *(f"under unshare --mount: {line}" for line in again))
+    missing = _missing_user_flags(unshare, options)
+    if missing:
+        return BwrapProbe(path, version, (*problems, missing))
+    prefix = (unshare, *_USER_MOUNTS)
     again = canary.run(BwrapProbe(path, version, (), prefix=prefix), timeout)
     if again:
-        return BwrapProbe(path, version, (*first.problems, *(f"under unshare --mount: {line}" for line in again)))
+        return BwrapProbe(path, version, (*problems, *(f"under unshare --user --mount: {line}" for line in again)))
     note = (
-        f"binds from the root mount fail here ({first.problems[0]}): every launch runs under unshare --mount, "
-        "which gives it a private copy of the mount tree"
+        f"binds from the root mount fail here ({first.problems[0]}) and unshare --mount does not run "
+        f"({problems[-1]}): every launch runs under unshare --user --map-current-user --mount --propagation private, "
+        "which gives it a private copy of the mount tree in a user namespace of its own, so no launch joins another "
+        "sandbox's namespaces"
     )
-    return BwrapProbe(path, version, (), prefix=prefix, notes=(note,))
+    return BwrapProbe(path, version, (), prefix=prefix, notes=(note,), joins=False)
 
 
 def _transient(path: str, version: Version | None, timeout: float) -> BwrapProbe:
     return BwrapProbe(path, version, (f"bubblewrap at {path}: no answer in {timeout:g} s",), transient=True)
 
 
+def _dev_notes() -> tuple[str, ...]:
+    """Which of :data:`BASE_DEV_NODES` the host lacks, and so how a sandbox's ``/dev`` is made here."""
+    absent = [node for node in BASE_DEV_NODES if not os.path.exists(node)]
+    if not absent:
+        return ()
+    kept = [node for node in BASE_DEV_NODES if node not in absent]
+    return (
+        f"the host's /dev has no {', '.join(absent)}: each sandbox's /dev is a tmpfs with only the nodes the host has "
+        f"({', '.join(kept) or 'none'}) bound into it, never bubblewrap's --dev or the host's whole /dev",
+    )
+
+
 def _canary_probe(path: str, version: Version, timeout: float, unshare: _FindUnshare) -> BwrapProbe:
     try:
         with _canary() as canary:
-            first = BwrapProbe(path, version, canary.run(BwrapProbe(path, version, ()), timeout))
-            if not _unbindable(first.problems):
-                return first
-            found, missing = unshare(path)
-            if found is None:
-                return dataclasses.replace(first, problems=(*first.problems, missing))
-            return _with_private_mounts(canary, first, found, timeout)
+            found = BwrapProbe(path, version, canary.run(BwrapProbe(path, version, ()), timeout))
+            if _unbindable(found.problems):
+                beside, missing = unshare(path)
+                if beside is None:
+                    found = dataclasses.replace(found, problems=(*found.problems, missing))
+                else:
+                    found = _with_private_mounts(canary, found, beside, timeout)
     except subprocess.TimeoutExpired:
         return _transient(path, version, timeout)
+    return dataclasses.replace(found, notes=(*found.notes, *_dev_notes())) if found.ok else found
 
 
 def probe_bwrap(bwrap: str | None = None, *, timeout: float = _TIMEOUT) -> BwrapProbe:
     """Whether ``bwrap`` (an absolute path; default: the one on ``PATH``) runs a sandbox here: not setuid, at least
     :data:`BWRAP_FLOOR`, and a canary sandbox of an agent's shape holds (masks unreadable, read-only binds
     ``EROFS``, the writable tree writable, its own pid namespace, no capabilities, ``no_new_privs``). Where the root
-    mount cannot be bound, the canary runs again under ``unshare --mount``, for a ``bwrap`` given by path only with
-    the ``unshare`` beside it. Not cached: :func:`bwrap_probe` is."""
+    mount cannot be bound, the canary runs again under ``unshare --mount`` and, where that fails (a uid without
+    ``CAP_SYS_ADMIN``), under ``unshare --user --map-current-user --mount --propagation private``, for a ``bwrap``
+    given by path only with the ``unshare`` beside it. Not cached: :func:`bwrap_probe` is."""
     if bwrap is None:
         return _probe(shutil.which(_BWRAP), _unshare_on_path, timeout)
     return _probe(bwrap, _unshare_beside, timeout)

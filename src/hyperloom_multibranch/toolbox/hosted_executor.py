@@ -149,6 +149,8 @@ class HostedExecutor:
         session_dir: The session directory; test output lands below ``<session_dir>/tests`` and a result's
             ``output_dir`` is relative to it.
         timeout_sec: The timeout of one attempt.
+        boot_budget_sec: How long, at least, the server of each round of an attempt may take to be ready
+            (``TestCall.boot_budget_sec``); ``None`` gives it the backend's default share of ``timeout_sec``.
         workload_kind: The campaign's workload; an AgentX baseline served with the prefix cache off does not end
             ``succeeded``.
 
@@ -166,11 +168,13 @@ class HostedExecutor:
         session_dir: Path,
         *,
         timeout_sec: int = DEFAULT_TEST_TIMEOUT_SEC,
+        boot_budget_sec: int | None = None,
         workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
     ) -> None:
         self._backend = backend
         self._session = Path(session_dir)
         self._timeout = timeout_sec
+        self._boot_budget = boot_budget_sec
         self._clock: Callable[[], float] = time.time
         self._workload = workload_kind
         #: The requests whose smoke passed: a retry in a fresh sandbox does not ask again.
@@ -304,6 +308,7 @@ class HostedExecutor:
             environment=accepted.environment,  # type: ignore[arg-type]  # the sheet reads its overlay
             output_dir=output_dir,
             timeout_sec=self._timeout,
+            boot_budget_sec=self._boot_budget,
             silence_timeout_sec=TEST_SILENCE_TIMEOUT_SEC,
             cwd=str(self._session),
             task_id=request.request_id or "",
