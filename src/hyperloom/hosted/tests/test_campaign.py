@@ -100,6 +100,7 @@ REFUSALS = [
     (_with(MINIMAL, "launch", {"extra_env": {"A=B": "1"}}), "launch.extra_env has the invalid name 'A=B'"),
     (_with(MINIMAL, "launch", {"server_args": ["x"]}), "launch.server_args must be a string"),
     (_with(MINIMAL, "options", {"kernel": "yes"}), "options.kernel must be true or false"),
+    (_with(MINIMAL, "options", {"source_changes": "no"}), "options.source_changes must be true or false"),
     (_with(MINIMAL, "options", {"eval": False}), "options.eval must be one of True, got False"),
     (_with(MINIMAL, "options", {"enablement": "some"}), "options.enablement must be one of 'all'"),
     (_with(MINIMAL, "placement.profile", _DELETE), "placement.profile is required"),

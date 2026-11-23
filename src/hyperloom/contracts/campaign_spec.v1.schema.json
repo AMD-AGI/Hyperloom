@@ -68,6 +68,10 @@
       "properties": {
         "kernel": {"type": "boolean"},
         "framework_agent": {"type": "boolean"},
+        "source_changes": {
+          "type": "boolean",
+          "description": "false holds the multi-branch session to server arguments and environment variables (run --no-source-changes): its toolbox refuses every test whose recipe holds a patch or a kernel artifact. Not taken with multibranch.autonomous_agents."
+        },
         "eval": {"const": true, "description": "The accuracy eval cannot be turned off; false is refused."},
         "enablement": {"enum": ["all", "launch", "eval", "off"]}
       }

@@ -14,11 +14,11 @@ the legacy entry validated, a multi-branch session needs ``multibranch.workload`
 ``multibranch.conc_sweep_concs`` ``--conc-sweep-concs``, ``multibranch.conc_sweep_parallel``
 ``--conc-sweep-parallel``, ``multibranch.agentx_duration_sec`` ``--agentx-duration-sec`` and
 ``multibranch.agentx_objective`` ``--agentx-objective`` (an ``agentx`` workload only), ``multibranch.boot_budget_sec``
-``--boot-budget-sec``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what runs at once
-where the session measures. The fields ``run`` has no option for --
-``objective``, ``options``, ``placement.profile`` and ``placement.specialist_capacity`` -- are not read. A spec that
-sets ``launch.server_args`` or ``launch.extra_env`` is refused rather than run without them: a multi-branch session's
-base launch, its flags and its environment, is the shell script ``multibranch.reference_script`` names.
+``--boot-budget-sec``, ``options.source_changes`` ``false`` ``--no-source-changes``, and
+``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what runs at once where the session measures.
+``objective``, the other ``options``, ``placement.profile`` and ``placement.specialist_capacity`` are not read. A spec
+that sets ``launch.server_args`` or ``launch.extra_env`` is refused rather than run without them: a multi-branch
+session's base launch, its flags and its environment, is the shell script ``multibranch.reference_script`` names.
 
 With ``placement.measurement`` ``hosted`` (the default), every test, PRELUDE's included, runs in a measurement sandbox
 of the grant, so the application's container needs no card: ``hosted-cpu`` serves as ``hosted-gpu`` does. Dev
@@ -210,11 +210,13 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
     }
     agents = [f"--autonomous-agent={source}" for source in _agent_sources(section.get("autonomous_agents"))]
     switches = _switches(section)
+    held = ["--no-source-changes"] if spec.source_changes is False else []
     return [
         "run",
         *(f"--{option}={value}" for option, value in values.items() if value is not None),
         *agents,
         *switches,
+        *held,
     ]
 
 
