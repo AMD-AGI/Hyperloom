@@ -18,6 +18,7 @@ import pytest
 from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.local_templates import image_env
 from hyperloom.measure.runner.cache_layout import CACHE_ENV
+from hyperloom.measure.runner.tools import INFERENCEX_STORE, TOOL_CHECKOUTS_DIR
 from hyperloom.measure.tests.bundle_factory import STAGING, base_launch, stage_into
 from hyperloom.measure.returncodes import HOSTED_SPEC_REJECTED_RC
 from hyperloom.measure.socket import SessionFacts
@@ -158,7 +159,10 @@ def test_the_shipped_runner_flow_produces_a_result_the_backend_accepts(real, tmp
     assert envs["ROCR_VISIBLE_DEVICES"] == "0", "the rewritten point carries this sandbox's cards"
     inferencex = seen["benchmark"]["inferencex_path"]
     assert inferencex.endswith("InferenceX-" + _head(tmp_path / "inferencex"))
-    assert inferencex.startswith(str(tmp_path / "sandboxes")), "the runner's scratch is the sandbox's own directory"
+    assert not inferencex.startswith(str(tmp_path / "runner-cache")), "the test runs its own tree"
+    assert (tmp_path / "runner-cache" / TOOL_CHECKOUTS_DIR / INFERENCEX_STORE / "HEAD").is_file(), (
+        "later tests fetch it here"
+    )
     assert [x.phase for x in outcome.rounds] == ["measure"]
     assert outcome.rounds[0].output_dir == call.output_dir / "suite_run_0"
     assert (outcome.sandbox.gpu_ids, outcome.sandbox.node_name) == ((0,), "node-a")

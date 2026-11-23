@@ -11,6 +11,8 @@ operator chain the model may lack (experts, a recurrent layer) sends a branch on
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 DIRECTIONS = (
     "Fast path checks: make sure every setting the recipe asks for and every patch really takes its fast path. Read "
     "the server.log of your branch's tests for what fell back: an eager or plain torch path, CUDA graphs off, a kernel "
@@ -127,11 +129,12 @@ def direction_name(direction: str) -> str:
     return direction.split(":", 1)[0]
 
 
-def session_direction(named: str) -> str | None:
-    """The session direction an exhausted record's ``direction`` names: its name alone, or followed by a qualifier."""
+def session_direction(named: str, directions: Sequence[str]) -> str | None:
+    """The one of the session's ``directions`` an exhausted record's ``direction`` names: its name alone, or followed
+    by a qualifier."""
 
     named = named.strip().lower()
-    for direction in sorted(DIRECTIONS, key=lambda d: -len(direction_name(d))):
+    for direction in sorted(directions, key=lambda d: -len(direction_name(d))):
         name = direction_name(direction).lower()
         if named == name or (named.startswith(name) and not named[len(name)].isalnum()):
             return direction

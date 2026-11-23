@@ -20,7 +20,9 @@ specialist gave up, a fork the gate did not land, or an admitted fork or repair 
 changes what the branches are worth: a merge that moved the integration head by a large gain, the bottleneck of the
 profile taken of the integration head after such a merge moving, or a quarantined measurement node. A branch the
 judge opens after the opening batch starts from the integration head, briefed on a focus; in a session that plays a
-playbook, one opens while the open areas leave no op open only on a focus the judge names. The judge reads the
+playbook, one opens while the open areas leave no op open only on a focus the judge names. While directions of the
+session are left that no branch has held, every judge round opens a branch with no focus for each, within the free
+slots, whatever the judge answers (:func:`~hyperloom_multibranch.scheduling.judge.coverage_floor`). The judge reads the
 frontier-scored progress, how similar archived sessions went, which running branches made much the same change, the
 events since its last call, how far each branch lies behind the integration head, which branches lead it while their
 commits fail to merge, whether a profile of the integration head runs, the GPU hours (tests' GPU time plus card
@@ -30,7 +32,10 @@ again), which explore tests each branch has queued and which native builds its t
 what to stop. No judge round starts once less of EXPLORE is left than a branch needs to start, since nothing it
 decided could take effect; a judge call that has not answered by the EXPLORE deadline counts as failed, and a
 branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background task
-of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the
+of its own, in rounds as wide as the integration branch's K. When EXPLORE ends the integrator starts no more merge
+tests and takes back those still at their first reading; a merge whose first reading the rule gate already judged a
+gain, and whose confirm is queued or running, gets the time of one test to finish (:func:`confirm_seconds`), so that
+gain is on the integration head FINAL reads. Then that task is cancelled and the
 integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and no merge
 test competes with FINAL's measurements; a profile of the integration head still running is cancelled before that,
 taking its test back. Under ``--max-gpu-hours`` EXPLORE also ends, at a tick, once the session's tests have used the GPU
@@ -62,7 +67,13 @@ from hyperloom_multibranch.blackboard.rsi.session import judge_history, judge_op
 from hyperloom_multibranch.blackboard.rsi.stranded import stranded_leads
 from hyperloom_multibranch.scheduling.agent_map import render_map
 from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR
-from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, BatchStart, BranchControl, BranchFocus
+from hyperloom_multibranch.scheduling.branches import (
+    SPECIALIST_START_SECONDS,
+    UNFOCUSED,
+    BatchStart,
+    BranchControl,
+    BranchFocus,
+)
 from hyperloom_multibranch.scheduling.build_waits import waiting_builds
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
@@ -109,6 +120,8 @@ OPEN_CUT_REASON = "branch slots taken"
 FORK_NOT_LANDED = "the rule gate did not land the fork"
 PLAYBOOK_FALLBACK_REASON = "the challenger playbook broke the safety envelope; the champion plays from now on"
 PLAYBOOK_OPEN_CUT_REASON = "the playbook opens no more branches now"
+#: The ends of EXPLORE that leave a merge no confirm: the GPU hours EXPLORE has are used, or no card is left to measure on.
+ENDS_WITHOUT_CONFIRM = frozenset({SessionStopReason.GPU_HOURS_EXHAUSTED, SessionStopReason.NO_MEASUREMENT_CARDS})
 
 
 def gave_up_reason(status: SpecialistStatus) -> str:
@@ -144,7 +157,8 @@ class ExploreWindow:
     component agents whose directions one mapping branch maps in EXPLORE before each runs its share (empty for none).
 
     ``root_commit`` is the session's measurement anchor and nothing moves it. ``start_commit`` is where EXPLORE opens:
-    the root, or the Recipe KB champion PRELUDE replayed onto it. ``final_cap`` says, asked every tick, the
+    the root, or the Recipe KB champion PRELUDE replayed onto it. ``test_seconds`` is how long one test of the
+    workload takes, the longest root test of the baseline. ``final_cap`` says, asked every tick, the
     latest EXPLORE may now end at for FINAL to end inside a limit of the session's caller, which comes sooner as the
     validation FINAL would run grows; ``explore_end`` moves to it when it is sooner.
     """
@@ -153,6 +167,7 @@ class ExploreWindow:
     start_commit: str
     explore_end: float
     session_deadline: float
+    test_seconds: float
     explore_gpu_seconds: float
     max_llm_usd: float
     user_directions: tuple[str, ...]
@@ -193,6 +208,17 @@ def spent_gpu_seconds(progress: Iterable[BranchProgress]) -> float:
     the root included, and a test withdrawn before its result counts none; an open lease counts up to the reading."""
 
     return sum(row.gpu_seconds + row.held_card_seconds for row in progress)
+
+
+def confirm_seconds(window: ExploreWindow, ended: SessionStopReason, now: float, cap: float) -> float:
+    """The clock seconds a merge waiting for its confirm gets to finish once EXPLORE ``ended`` at ``now``: one test of
+    the workload, or none where that test would end past the session's deadline or past ``cap``, what the window's
+    :attr:`~ExploreWindow.final_cap` says now, or where EXPLORE ended out of GPU hours or of cards to measure on.
+
+    FINAL starts that much later at the most, and still before the deadline."""
+
+    fits = now + window.test_seconds <= min(window.session_deadline, cap)
+    return window.test_seconds if fits and ended not in ENDS_WITHOUT_CONFIRM else 0.0
 
 
 def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | None:
@@ -269,7 +295,12 @@ class Explorer:
         await self._dashboard.refresh()
         merging = asyncio.ensure_future(self._merge_forever())
         try:
-            return await self._steer(window, merging)
+            reason = await self._steer(window, merging)
+            seconds = confirm_seconds(window, reason, self._clock.now(), await window.final_cap())
+            if seconds:
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await self._clock.wait_for(self._integrator.finish_round(), seconds)
+            return reason
         finally:
             merging.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -385,6 +416,7 @@ class Explorer:
         snapshot = await self._blackboard.snapshot()
         specialists = await self._specialist_states()
         await self._record_probations(snapshot, progress)
+        opens_on = window.start_commit if opening else await self._branches.integration_head()
         view = JudgeView(
             now=now,
             explore_remaining_seconds=max(window.explore_end - now, 0.0),
@@ -415,6 +447,7 @@ class Explorer:
             queued=queued_intents(snapshot.records, snapshot.intents),
             building=await waiting_builds(self._toolbox, snapshot.records),
             focus={node.branch: node.focus for node in snapshot.lineage.branches if node.focus},
+            undealt=await self._specialists.undealt_directions(opens_on),
         )
         view = self._with_playbook(view, snapshot)
         view = replace(view, agent_map=render_map(snapshot))
@@ -429,7 +462,8 @@ class Explorer:
 
     def _with_playbook(self, view: JudgeView, snapshot: BlackboardSnapshot) -> JudgeView:
         """``view`` with the playbook the session plays and where a new branch could open under it in what is left of
-        EXPLORE, kept for the round's opens; as it is for a session that plays none."""
+        EXPLORE, kept for the round's opens, and with no direction to deal at a steering call the playbook lets no
+        unfocused branch open at (:meth:`_playbook_room`); as it is for a session that plays none."""
 
         if self._play is None:
             return view
@@ -438,6 +472,8 @@ class Explorer:
             snapshot, self._progress.history, self._metric, seconds_left=left, playbook=playbook
         )
         self._areas_profile = snapshot.op_shares.get(self._areas.profiled)
+        if not view.opening and (self._areas.too_late or self._areas.exhausted):
+            view = replace(view, undealt=())
         return replace(view, open_areas=self._areas.render(), playbook=self._play.render())
 
     async def _specialist_states(self) -> dict[str, SpecialistStatus]:
@@ -519,6 +555,7 @@ class Explorer:
                 detail={
                     "open": decision.open_count,
                     "open_k": decision.open_k,
+                    "unfocused": decision.unfocused,
                     "k": {order.branch: order.k for order in decision.k},
                     "stop": {order.branch: order.reason for order in decision.stop},
                     "held": {order.branch: order.reason.value for order in decision.held},
@@ -584,15 +621,20 @@ class Explorer:
         await asyncio.to_thread(_record_versions, self._manifest, played)
 
     async def _focus(self, decision: JudgeDecision, start: BatchStart) -> tuple[BranchFocus, ...]:
-        """The focus of each branch the judge opens from ``start`` after the opening batch: in a session that plays a
-        playbook, the profile op the judge named for it, else the round's open areas in turn, and only the named ones
-        while those areas leave no op open; in one that plays none, as :meth:`SessionEvents.focus_on` gives it."""
+        """The focus of each branch opened from ``start`` after the opening batch: none for the first ones, which the
+        decision opens for the directions no branch has held, then, in a session that plays a playbook, the profile
+        op the judge named for it, else the round's open areas in turn, and only the named ones while those areas
+        leave no op open; in one that plays none, as :meth:`SessionEvents.focus_on` gives it."""
 
+        asked = decision.open_count - decision.unfocused
         if self._areas is None:
-            return await self._events.focus_on(start.start_commit, decision.focus, decision.open_count)
-        ranked = [item.op for item in self._areas.ops]
-        focus = refill_focus(decision.focus, decision.open_count, self._areas_profile, ranked)
-        return tuple(aim for aim in focus if aim.text) if self._areas.exhausted else focus
+            focus = await self._events.focus_on(start.start_commit, decision.focus, asked)
+        else:
+            ranked = [item.op for item in self._areas.ops]
+            focus = refill_focus(decision.focus, asked, self._areas_profile, ranked)
+            if self._areas.exhausted:
+                return tuple(aim for aim in focus if aim.text)
+        return (UNFOCUSED,) * decision.unfocused + focus
 
     async def _open_batch(
         self, count: int, k: int, start: BatchStart, focus: tuple[BranchFocus, ...] = ()
@@ -639,6 +681,7 @@ __all__ = [
     "ExploreWindow",
     "Explorer",
     "Steering",
+    "confirm_seconds",
     "gave_up_reason",
     "integration_row",
     "spent_gpu_seconds",

@@ -86,6 +86,8 @@ from hyperloom.measure.runner.service import Progress, RunnerFailure, join_notes
 from hyperloom.measure.runner.snapshot import SnapshotError, check_snapshot
 from hyperloom.measure.runner.cache_layout import CACHE_ENV, DEFAULT_CACHE_DIR
 from hyperloom.measure.runner.tools import (
+    INFERENCEX_STORE,
+    TOOL_CHECKOUTS_DIR,
     StagingMismatch,
     ToolError,
     ensure_inference_suite,
@@ -295,9 +297,11 @@ def _surface_sha256(points: list[Path]) -> str:
 def _prepare(ctx: _Context, spec: MeasurementSpec) -> tuple[list[Path], Path, Farm | None]:
     """Tools, attachments, farm and the rewritten YAML; returns the point path and the InferenceX checkout."""
     try:
-        inferencex = ensure_inferencex(spec.tools.inferencex, ctx.cache)
+        runner_cache = Path(ctx.environ.get(CACHE_ENV) or DEFAULT_CACHE_DIR)
+        inferencex = ensure_inferencex(
+            spec.tools.inferencex, ctx.cache, runner_cache / TOOL_CHECKOUTS_DIR / INFERENCEX_STORE
+        )
         if spec.tools.staging is not None:
-            runner_cache = Path(ctx.environ.get(CACHE_ENV) or DEFAULT_CACHE_DIR)
             staged = ensure_inference_suite(runner_cache, spec.tools.staging)
             ctx.environ[TOOL_CACHE_ENV], ctx.staging = str(staged.tool_cache), staged.normalised
     except StagingMismatch as exc:

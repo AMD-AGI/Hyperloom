@@ -135,7 +135,9 @@ class _Session:
         await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, BRANCH, from_commit=start))
         return start
 
-    def runtime(self, runs, *, blackboard=LocalBlackboard, clock=lambda: 0.0, claim_ttl=600.0) -> SpecialistRuntime:
+    def runtime(
+        self, runs, *, blackboard=LocalBlackboard, clock=lambda: 0.0, claim_ttl=600.0, directions=DIRECTIONS
+    ) -> SpecialistRuntime:
         def blackboard_for(branch: str) -> LocalBlackboard:
             return blackboard(self.root, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
 
@@ -143,7 +145,7 @@ class _Session:
             self.gate, self.toolbox, InferenceXRule(self.reader, 64), LocalBlobStore(self.root.parent / "blobs")
         )
         pacing = RuntimePacing(poll_seconds=0.01, claim_ttl_seconds=claim_ttl, clock=clock)
-        return SpecialistRuntime(blackboard_for, judging, runs, pacing=pacing)
+        return SpecialistRuntime(blackboard_for, judging, runs, pacing=pacing, directions=directions)
 
     async def claim(self, key) -> ClaimStatus:
         (found,) = [claim for claim in (await self.reader.snapshot()).claims if claim.key == key]
@@ -919,3 +921,27 @@ async def test_a_refused_retest_of_a_finishing_branch_is_noted_and_its_judge_end
     notices = await judged.notices()
     assert f"{NOTICE} the retest of {first} was refused ({stopped}); nothing was judged" in notices
     assert not any("judging this branch failed" in notice for notice in notices)
+
+
+SYNTHETIC_DIRECTIONS = ("direction A: its method", "direction B: its method", "direction C: its method")
+
+
+async def test_the_undealt_directions_are_those_no_branch_has_held_that_are_open_on_the_commit(session):
+    runs = _Runs()
+    runtime = session.runtime(runs, directions=SYNTHETIC_DIRECTIONS)
+    head = await session.repo.head(BRANCH)
+
+    await runtime.start(BRANCH, head)
+    assert await runtime.undealt_directions(head) == ("direction B", "direction C")
+
+    record = {"direction": "direction c", "head": head, "tried": ["r1"], "why": "all_tested_or_claimed"}
+    record |= {"detail": "nothing of it is left on this head", "reopen_if": "the head moves"}
+    blackboard = LocalBlackboard(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
+    entry = BranchLogEntry(BRANCH, BranchLogType.RESULT, EXHAUSTED_PREFIX + json.dumps(record))
+    await blackboard.append_branch_log(entry)
+    assert await runtime.undealt_directions(head) == ("direction B",)
+    assert await runtime.undealt_directions("a-later-head") == ("direction B", "direction C")
+
+    await _until(lambda: _true(len(runs.started) == 1), "the specialist to start")
+    await runtime.stop(BRANCH)
+    assert await runtime.undealt_directions(head) == ("direction B",)

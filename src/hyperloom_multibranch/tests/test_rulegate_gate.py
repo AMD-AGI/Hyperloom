@@ -109,6 +109,21 @@ async def test_a_retest_is_the_callers_next_step(setup):
     assert (await blackboard.record("r1")).judgement is None
 
 
+async def test_a_provisional_gain_whose_branch_left_its_parent_is_recorded_without_a_retest(setup):
+    blackboard, repo, measured = setup
+    verifier = RecordingVerifier()
+    gate = RuleGate(blackboard, repo, RecordingScheduler(AdmissionStatus.ACCEPTED), verifier)
+    landed_first = await repo.commit("s1", "c0", BASELINE, "another candidate of c0")
+    provisional = _judged(Verdict.NEEDS_CONFIRM, accuracy=AccuracyVerdict.FAILED)
+
+    assert await gate.settle(measured, provisional) is Action.RECORD_ONLY
+
+    assert await repo.head("s1") == landed_first
+    record = await blackboard.record("r1")
+    assert (record.judgement, record.conclusion, record.commit_id) == (provisional, Conclusion.RECORDED_ONLY, None)
+    assert verifier.asked == []
+
+
 async def test_a_blocked_gain_is_held_for_its_specialist_s_diagnosis(setup):
     blackboard, repo, measured = setup
     gate = RuleGate(blackboard, repo, RecordingScheduler(AdmissionStatus.ACCEPTED), RecordingVerifier())

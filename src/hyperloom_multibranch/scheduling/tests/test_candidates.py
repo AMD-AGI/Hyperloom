@@ -17,7 +17,7 @@ from hyperloom.contracts.recipe import (
     Recipe,
 )
 from hyperloom.contracts.measurement import AttachmentRef
-from hyperloom_multibranch.blackboard.tests.factories import intent, judgement, request
+from hyperloom_multibranch.blackboard.tests.factories import intent, judgement, request, result
 from hyperloom_multibranch.contracts.blackboard.records import CommittedCommit, MergeState, RetractionRef, TestRecord
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, MergeOutcome
 from hyperloom_multibranch.contracts.judgement import Verdict
@@ -164,6 +164,32 @@ async def test_commits_never_tried_are_offered_before_those_coming_back_each_in_
     offered = await Candidates(_Committed(commits, records), None).offered_on("i1")
 
     assert [commit.commit_id for commit in offered] == ["new-large", "new-small", "back-large", "back-small"]
+
+
+def _tested(commit_id: str, gain: float, merge_test: str) -> CommittedCommit:
+    """A commit whose latest merge, on head ``i0``, was tested as ``merge_test`` and left pending."""
+
+    last = MergeState(MergeOutcome.PENDING, "i0", merge_test)
+    return replace(_commit(commit_id, "c0"), gain_pct=gain, last_merge=last, merge_attempts=1)
+
+
+async def test_a_commit_a_round_superseded_is_offered_before_those_never_tried() -> None:
+    """``unsettled`` was left pending too, by a regression set that did not run clean: it comes back after the new."""
+
+    commits = (
+        replace(_commit("new", "c0"), gain_pct=9.0),
+        _tested("unsettled", 5.0, "m-unsettled"),
+        _tested("superseded", 2.0, "m-superseded"),
+    )
+    records = {f"r-{commit.commit_id}": _landed(commit.commit_id, Verdict.IMPROVED) for commit in commits}
+    for merge_test in ("m-unsettled", "m-superseded"):
+        records[merge_test] = TestRecord(request(merge_test, intent("b01", "i0")), result=result(merge_test))
+    candidates = Candidates(_Committed(commits, records), None)
+
+    candidates.record_superseded("m-superseded")
+    offered = await candidates.offered_on("i1")
+
+    assert [commit.commit_id for commit in offered] == ["superseded", "new", "unsettled"]
 
 
 async def test_a_commit_not_stackable_on_as_many_heads_as_the_cap_is_not_offered_again_whatever_came_after() -> None:

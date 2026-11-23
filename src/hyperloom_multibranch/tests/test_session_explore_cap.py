@@ -111,7 +111,7 @@ async def test_explore_s_end_is_asked_again_while_it_runs_and_ends_explore_once_
     assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
     phases = {str(row["reason"]): row for row in _decisions(stage) if row["kind"] == "phase"}
     explore_end = float(str(phases["explore"]["detail"]["explore_end"]))
-    assert len(works) == 4, "asked as EXPLORE opened, then every tick until it ended EXPLORE"
+    assert len(works) == 5, "asked as EXPLORE opened, every tick until it ended EXPLORE, then for a merge's confirm"
     opened, final = float(str(phases["explore"]["at"])), float(str(phases["final"]["at"]))
     assert final < explore_end, "FINAL started before the end EXPLORE opened with"
     assert final < opened + SETTINGS.judge_interval_seconds, "the end is asked every tick, not every judge interval"

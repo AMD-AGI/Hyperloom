@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import zlib
 from dataclasses import replace
 
 import pytest
@@ -255,3 +256,32 @@ def test_a_published_staging_is_refused_when_this_interpreters_lm_eval_is_not_at
 
     with pytest.raises(ToolError, match=r"cannot be identified: .* lm_eval 0\.4\.1, not lm_eval\[api\]==0\.4\.13"):
         _ensure(tmp_path)
+
+
+def test_a_tree_an_earlier_test_changed_is_not_what_a_later_test_runs(upstream, tmp_path, monkeypatch):
+    repo, commit = upstream
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+    store = tmp_path / "runner-cache" / tools.TOOL_CHECKOUTS_DIR / tools.INFERENCEX_STORE
+
+    first = ensure_inferencex(commit, tmp_path / "scratch-1", store)
+    (first / "benchmarks" / "benchmark_lib.sh").write_text("tampered\n")
+    monkeypatch.setenv("INFERENCEX_REPO", str(tmp_path / "offline"))
+    second = ensure_inferencex(commit, tmp_path / "scratch-2", store)
+
+    assert second.is_relative_to(tmp_path / "scratch-2"), "each test runs its own tree"
+    assert (second / "benchmarks" / "benchmark_lib.sh").read_text() == "# lib\n"
+
+
+def test_an_object_changed_in_the_store_is_refused_and_the_commit_fetched_again(upstream, tmp_path, monkeypatch):
+    repo, commit = upstream
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+    store = tmp_path / "runner-cache" / tools.TOOL_CHECKOUTS_DIR / tools.INFERENCEX_STORE
+    ensure_inferencex(commit, tmp_path / "scratch-1", store)
+    blob = _git(repo, "rev-parse", "HEAD:benchmarks/benchmark_lib.sh")
+    loose = store / "objects" / blob[:2] / blob[2:]
+    loose.chmod(0o644)
+    loose.write_bytes(zlib.compress(b"blob 9\x00tampered\n"))
+
+    second = ensure_inferencex(commit, tmp_path / "scratch-2", store)
+
+    assert (second / "benchmarks" / "benchmark_lib.sh").read_text() == "# lib\n"
