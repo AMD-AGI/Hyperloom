@@ -180,24 +180,13 @@ session's deny `pkill`, `killall`, and a `kill` whose targets come from `pgrep`,
 names what to run instead: `python -m kernelforge.utils.session_kill
 '<pattern>'` signals the processes carrying the calling session's mark whose
 command line matches, and never the shell or the agent CLI that ran it; a
-`kill` of a named PID is left alone. The Claude CLI is also handed its system
-prompt in a private file rather than as an argument, so the driver and tool
-names in the prompt are not on a command line for another session's pattern to
-match.
-
-The same mark bounds what a session may stop while it runs. A host that runs
-several campaigns has the same driver, profiler and scratch-script names in each
-of them, so a kill that chooses its targets by name is never scoped to the
-session that issues it. The Implementer's in-session hooks and the Analysis
-session's deny `pkill`, `killall`, and a `kill` whose targets come from `pgrep`,
-`pidof`, `ps` or a pipe, in the shell and inside an inline program. The denial
-names what to run instead: `python -m kernelforge.utils.session_kill
-'<pattern>'` signals the processes carrying the calling session's mark whose
-command line matches, and never the shell or the agent CLI that ran it; a
-`kill` of a named PID is left alone. The Claude CLI is also handed its system
-prompt in a private file rather than as an argument, so the driver and tool
-names in the prompt are not on a command line for another session's pattern to
-match.
+`kill` of a named PID is left alone. The Implementer's prompt states the same
+rule only on a provider that both marks its sessions and runs the hooks, which
+today is Claude: a Codex session carries no mark and no hook, is told nothing
+about either, and its kills are not checked. The Claude CLI is also handed its
+system prompt in a private file rather than as an argument, so the driver and
+tool names in the prompt are not on a command line for another session's
+pattern to match.
 
 The plan file is the Implementer's planning source of truth for that iteration.
 Dispatch inputs and specialist analyses are retained beside it.

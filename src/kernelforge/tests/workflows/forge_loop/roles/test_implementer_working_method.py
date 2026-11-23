@@ -25,6 +25,7 @@ def gated_prompts(tmp_path, monkeypatch):
         max_blocks: int = 7,
         case_aggregate: CaseAggregate = CaseAggregate.ARITHMETIC,
         session_timeout_sec: int | None = None,
+        capabilities: AgentCapabilities = AgentCapabilities(stop_hooks=True, session_process_mark=True),
     ) -> tuple[str, str]:
         kernel = tmp_path / "kernel.py"
         kernel.write_text("# kernel\n")
@@ -32,9 +33,11 @@ def gated_prompts(tmp_path, monkeypatch):
         driver.write_text("raise AssertionError('prompt tests must not execute the driver')\n")
         specs = []
 
+        session_capabilities = capabilities
+
         class RecordingBackend:
             name = "claude"
-            capabilities = AgentCapabilities(stop_hooks=True)
+            capabilities = session_capabilities
 
             def __init__(self, runtime):
                 self.runtime = runtime
@@ -177,3 +180,44 @@ def test_a_session_is_told_the_score_its_campaign_is_judged_on(
     assert f"The score is the {named} of per-case speedups: {formula}" in prompt
     assert f"Each of three independent measurements is scored as {formula} with equal case weight" in prompt
     assert "Judge a change by the score defined above" in prompt
+
+
+_SCOPED_KILL = "kernelforge.utils.session_kill '<pattern>'"
+
+
+def test_a_provider_that_marks_its_sessions_and_runs_the_hooks_is_told_the_process_rule(gated_system_prompt) -> None:
+    prompt = gated_system_prompt(correctness_only=False)
+
+    assert "- Stop only what this session started." in prompt
+    assert _SCOPED_KILL in prompt
+    assert "and are denied. - As your VERY LAST output" in prompt
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [
+        AgentCapabilities(),
+        AgentCapabilities(stop_hooks=True),
+        AgentCapabilities(session_process_mark=True),
+    ],
+    ids=["neither", "hooks without a mark", "a mark without hooks"],
+)
+def test_a_provider_that_cannot_keep_the_process_rule_is_not_told_it(gated_system_prompt, capabilities) -> None:
+    """Without the mark the scoped kill matches nothing, and without the hooks a kill by name is not denied."""
+    prompt = gated_system_prompt(correctness_only=False, capabilities=capabilities)
+
+    assert "Stop only what this session started" not in prompt
+    assert _SCOPED_KILL not in prompt
+    assert "are denied" not in prompt
+    # The rule list closes up around the missing line.
+    assert "- - " not in prompt
+    assert "- As your VERY LAST output" in prompt
+
+
+def test_only_the_provider_that_marks_its_sessions_declares_it() -> None:
+    """The registry is where a provider says its sessions carry the mark the scoped kill selects by."""
+    from kernelforge.agent_backends.registry import get_agent_provider, list_agent_providers
+
+    marking = {name for name in list_agent_providers() if get_agent_provider(name).capabilities.session_process_mark}
+
+    assert marking == {"claude"}

@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable
 
 
 from kernelforge.agent_backends import (
+    AgentCapabilities,
     AgentRunSpec,
     AgentToolPolicy,
     create_registered_backend,
@@ -100,12 +101,25 @@ _DELIVERABLE_HYGIENE_RULE = (
 
 # Other campaigns on the host run the same driver, profiler and script names, so a kill by name is never scoped to
 # the session that issues it. The gate denies one; this says what to use instead before the session reaches for it.
+# One line of the gated prompt's rule list, present only where both halves of it are true.
 _PROCESS_HYGIENE_RULE = (
-    "Stop only what this session started. `{session_kill} '<pattern>'` signals the processes of this session whose "
+    "- Stop only what this session started. `{session_kill} '<pattern>'` signals the processes of this session whose "
     "command line matches, and no one else's; `kill <pid>` with a PID your own command reported is fine too. "
     "`pkill`, `killall` and `kill` fed from `pgrep` or `ps` choose by name out of every process on the host, where "
-    "other campaigns run the same tools, and are denied."
+    "other campaigns run the same tools, and are denied.\n"
 )
+
+
+def _process_hygiene_rule(capabilities: AgentCapabilities) -> str:
+    """The process rule for a provider that makes it true, else nothing.
+
+    The rule offers the scoped kill, which finds a session's processes by the mark the provider sets, and says a kill
+    by name is denied, which the provider's hooks do. A session of a provider that does neither is told nothing.
+    """
+    if capabilities.session_process_mark and capabilities.stop_hooks:
+        return _PROCESS_HYGIENE_RULE.format(session_kill=session_kill_command())
+    return ""
+
 
 _DRIVER_INTERPOSITION_SECTION = """
 ## Run the driver through this command
@@ -290,8 +304,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
   say so. An assumption about what the harness does is not a reason.
 - {workspace_hygiene_rule}
 - {deliverable_hygiene_rule}
-- {process_hygiene_rule}
-- As your VERY LAST output, after all edits/fixes are done and the kernel is in
+{process_hygiene_rule}- As your VERY LAST output, after all edits/fixes are done and the kernel is in
   its final state, output one line starting with `PLAN:` — a SHORT headline
   (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
   NOW IN THE FILE (the one that will be committed and benchmarked), e.g. "raise
@@ -787,7 +800,7 @@ def make_agent_fn(
         "self_profiling_section": self_profiling_section,
         "workspace_hygiene_rule": _WORKSPACE_HYGIENE_RULE,
         "deliverable_hygiene_rule": _DELIVERABLE_HYGIENE_RULE,
-        "process_hygiene_rule": _PROCESS_HYGIENE_RULE.format(session_kill=session_kill_command()),
+        "process_hygiene_rule": _process_hygiene_rule(backend.capabilities),
     }
     base_system_prompt = _BASE_SYSTEM_PROMPT.format(**prompt_sections)
 
