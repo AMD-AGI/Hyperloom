@@ -1046,6 +1046,19 @@ def test_the_short_prompt_plan_of_the_sheet_is_the_one_the_call_carries(tmp_path
     assert call.short_prompts is not None and call.short_prompts.to_document() == SHORT_PROMPTS
 
 
+@pytest.mark.parametrize(("given", "carried"), [({"boot_budget_sec": 5400.0}, 5400.0), ({}, None)])
+def test_the_boot_budget_of_the_sheet_is_the_one_the_call_carries(tmp_path, env, monkeypatch, given, carried):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+    sheet = _sheet()
+    sheet["procedure"].update(given)
+
+    assert _go(tmp_path, env, sheet) == 0
+
+    (call,) = backend.calls
+    assert call.boot_budget_sec == carried
+
+
 def test_a_prompt_set_the_sandbox_does_not_hold_is_spec_rejected_before_any_server_starts(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(tmp_path / "empty-cache"))
     call = TestCall(

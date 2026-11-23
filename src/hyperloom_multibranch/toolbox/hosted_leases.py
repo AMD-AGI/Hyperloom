@@ -56,6 +56,7 @@ __all__ = [
     "HostedBranchLease",
     "HostedBranchLeases",
     "LeaseTuning",
+    "lease_shortfall",
 ]
 
 log = logging.getLogger(__name__)
@@ -91,6 +92,24 @@ class GrantLimits:
     def __post_init__(self) -> None:
         if min(self.max_sandboxes, self.max_gpus, self.max_runtime_sec) < 1 or self.gpu_hours <= 0:
             raise ValueError("a grant has at least one sandbox, one GPU, one second and some GPU hours")
+
+
+def lease_shortfall(grant: GrantLimits, tp: int) -> str | None:
+    """Why ``grant`` can never admit one lease of ``tp`` cards, which must leave one test of ``tp`` cards its room and
+    its sandbox (what :class:`HostedBranchLeases` refuses as ``lease_leaves_no_measurement`` with no lease held), or
+    ``None`` when it can."""
+
+    if grant.max_gpus < 2 * tp:
+        return (
+            f"the grant's {grant.max_gpus} GPUs leave no {tp}-card dev sandbox beside one {tp}-card test"
+            f" (max_gpus must be at least {2 * tp})"
+        )
+    if grant.max_sandboxes < 2:
+        return (
+            f"the grant's {grant.max_sandboxes} sandbox leaves none for a dev sandbox beside one test"
+            " (max_sandboxes must be at least 2)"
+        )
+    return None
 
 
 @dataclass(frozen=True)
