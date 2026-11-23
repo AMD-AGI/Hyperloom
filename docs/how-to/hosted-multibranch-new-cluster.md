@@ -120,11 +120,15 @@ Start the runner with the step that `hyperloom.measure.runner.bootstrap.runner_t
 `sh <cache>/<HYPERLOOM_SOURCE_SHA>/bootstrap.sh` step is safe only when no account but the builder can write the cache:
 the script is what checks the manifest, so it cannot check itself.
 
-The step makes `/in`, `/out` and `/scratch` (or the directories the template names) and needs to write each of them. On
-an image whose root is read-only the platform must bind them writable into the sandbox; the step otherwise ends the
-start with a `runner_start_failed` status that names the directory it could not make or write. The runner's boot log
-goes to `HYPERLOOM_RUNNER_BOOT_LOG` when the sandbox sets it, else to `/runner-boot.log`, or, when the image root is
-read-only, to `runner-boot.log` in the out directory or in `TMPDIR`.
+The step makes `/in`, `/out` and `/scratch` (or the directories the template names); the runner only reads the in
+directory, but it must be able to write the out and scratch directories. On an image whose root is read-only the
+platform must bind those writable into the sandbox. A scratch or in directory the step cannot make, or a scratch
+directory it cannot write, ends the start with a `runner_start_failed` status that names it; when the out directory
+itself cannot be made or written, no status can be left there, so the step prints the reason on stderr and exits 1. The
+runner's boot log goes to `/runner-boot.log` (or the template's `boot_log`) when the step can write it, else to
+`runner-boot.log` in the out directory; when neither can be written the start ends with that reason. A template embeds
+the step when it is built, so an existing template keeps the old step, and its boot log at `/runner-boot.log`, until it
+is rebuilt.
 
 The script reads the entry's `source.tar` once and unpacks it into the sandbox's scratch directory only when those bytes
 are the archive the manifest records. It copies the wheels there, checking each against the manifest as it copies,

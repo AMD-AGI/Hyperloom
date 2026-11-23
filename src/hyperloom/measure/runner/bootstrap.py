@@ -100,10 +100,10 @@ sandbox, the one that answers readiness and through which the application delive
 in the foreground never ends, so the agent never starts, the sandbox never turns ready and the spec never arrives. Use
 :func:`runner_template_step`, which makes the directories, runs the template's own preparation and then starts the
 checked line in the background (``nohup ... &``) with its output in ``runner-boot.log`` next to the scratch directory,
-and returns at once. On an image whose root is read-only the step still starts: the boot log goes where
-``HYPERLOOM_RUNNER_BOOT_LOG`` says, or else to the out directory or ``TMPDIR``; the directories it cannot make or write
-end the start with a failure that names them, since only the platform can provide them, by binding them writable. The runner then waits for the spec for ``--spec-wait-sec`` seconds, :data:`TEMPLATE_SPEC_WAIT_SEC`
-unless the step's arguments name another.
+and returns at once. On an image whose root is read-only the step still starts: the boot log goes to
+``runner-boot.log`` in the out directory, and an out or scratch directory it cannot make or write ends the start naming
+it, since only the platform can provide them, by binding them writable. The runner then waits for the spec for
+``--spec-wait-sec`` seconds, :data:`TEMPLATE_SPEC_WAIT_SEC` unless the step's arguments name another.
 
 A template step must also reach ``sh`` as written. A platform may expand variables in a step's text before any shell
 parses it, whatever quotes surround them (Kubernetes turns ``$$`` into ``$`` and ``$(NAME)`` into a value in a
@@ -126,7 +126,6 @@ from hyperloom.measure.runner import cache_layout
 
 __all__ = [
     "BOOTSTRAP_SCRIPT",
-    "BOOT_LOG_ENV",
     "TEMPLATE_SPEC_WAIT_SEC",
     "runner_start_command",
     "runner_start_shell_line",
@@ -310,8 +309,6 @@ def _with_spec_wait(runner_args: tuple[str, ...]) -> tuple[str, ...]:
 #: ``HYPERLOOM_SCRATCH_DIR``, whose defaults the script's are; and where it writes the runner's output.
 _TEMPLATE_DIRS = ("/in", "/out", "/scratch")
 _BOOT_LOG = "/runner-boot.log"
-#: The sandbox's variable that names the boot log, taken as it is when set (a path the step cannot write fails the start).
-BOOT_LOG_ENV = "HYPERLOOM_RUNNER_BOOT_LOG"
 
 #: What the template step's payload runs when the start fails before anything wrote ``status.json``: the line or the
 #: template's preparation ended with code ``$1`` and nothing reported why. It writes the start failure the application
@@ -329,23 +326,22 @@ _START_FAILED = (
     '&& mv "$o/.status.json.tmp" "$o/status.json"; fi; return "$1"; }'
 )
 
-#: Makes each of its arguments, which must then be writable: the template's directories are where the runner and the
-#: application write, and on an image whose root is read-only only the platform can provide them, by binding them.
+#: Makes each of its arguments; all but the first (the in directory, which the runner only reads) must then be writable:
+#: they are where the runner and the application write, and on an image whose root is read-only only the platform can
+#: provide them, by binding them.
 _MAKE_DIRS = (
-    'hl_dirs() { for hl_d in "$@"; do if ! mkdir -p "$hl_d" 2>/dev/null || [ ! -w "$hl_d" ]; then '
-    'hl_why="@NAME@: cannot make or write the directory $hl_d (the image root is read-only or not writable by this '
-    'account): the platform must bind $hl_d writable into the sandbox"; echo "$hl_why" >&2; return 1; fi; done; }'
+    'hl_dirs() { hl_w=; for hl_d in "$@"; do if ! mkdir -p "$hl_d" 2>/dev/null || { [ -n "$hl_w" ] && [ ! -w "$hl_d" ]; }; '
+    'then hl_why="@NAME@: cannot make or write the directory $hl_d (the image root is read-only or not writable by this '
+    'account): the platform must bind $hl_d writable into the sandbox"; echo "$hl_why" >&2; return 1; fi; hl_w=1; '
+    "done; }"
 )
 
-#: Sets ``hl_boot``: ``HYPERLOOM_RUNNER_BOOT_LOG`` when set, else the first of the template's boot log, the out directory
-#: and ``TMPDIR`` where a ``runner-boot.log`` can be written, so a read-only image root does not end the start. A log it
-#: cannot write anywhere ends the start with that reason.
+#: Sets ``hl_boot`` to the template's boot log when it can be written, else to ``runner-boot.log`` in the out directory,
+#: so a read-only image root does not end the start. When neither can be written the start ends with that reason.
 _PICK_BOOT_LOG = (
-    'hl_log() { hl_boot=${@BOOT_ENV@:-}; if [ -n "$hl_boot" ]; then { true >>"$hl_boot"; } 2>/dev/null && return 0; '
-    'hl_why="@NAME@: cannot write the boot log $hl_boot that @BOOT_ENV@ names"; '
-    'else for hl_boot in @BOOT@ "${HYPERLOOM_OUT_DIR:-@OUT@}/runner-boot.log" "${TMPDIR:-/tmp}/runner-boot.log"; do '
+    'hl_log() { o=${HYPERLOOM_OUT_DIR:-@OUT@}; hl_t=@BOOT@; for hl_boot in "$hl_t" "$o/runner-boot.log"; do '
     '{ true >>"$hl_boot"; } 2>/dev/null && return 0; done; '
-    'hl_why="@NAME@: cannot write runner-boot.log at the template path, in the out directory or in TMPDIR"; fi; '
+    'hl_why="@NAME@: cannot write the boot log $hl_t or runner-boot.log in the out directory $o"; '
     'echo "$hl_why" >&2; return 1; }'
 )
 
@@ -383,17 +379,19 @@ def runner_template_payload(
     whose defaults the script's are), runs ``pre`` (the template's own preparation, one line of ``sh``, run in the
     foreground and only when the directories were made), then starts :func:`runner_start_shell_line` with
     ``runner_args`` under ``nohup`` in the background, with ``env`` set for it alone and its output in ``boot_log``
-    (``runner-boot.log`` next to the scratch directory, never inside it). Each of ``dirs`` must be writable once made,
-    or the start fails naming it. The sandbox's ``HYPERLOOM_RUNNER_BOOT_LOG``, when set, is the boot log instead; when
-    it is not and ``boot_log`` cannot be written (a read-only image root), the log is ``runner-boot.log`` in the out
-    directory, or else in ``TMPDIR``. A step that never returned would keep the sandbox from ever turning ready (see the
-    module's documentation), and so would a background part that held the step's stdin, stdout or stderr: a platform
-    reading the step's output to its end would wait for the runner, so the background part has its own. ``runner_args``
-    get ``--spec-wait-sec`` :data:`TEMPLATE_SPEC_WAIT_SEC` unless they name it.
+    (``runner-boot.log`` next to the scratch directory, never inside it). Each of ``dirs`` but the first (the in
+    directory, which the runner only reads) must be writable once made, or the start fails naming it. When
+    ``boot_log`` cannot be written (a read-only image root), the log is ``runner-boot.log`` in the out directory. A step
+    that never returned would keep the sandbox from ever turning ready (see the module's documentation), and so would a
+    background part that held the step's stdin, stdout or stderr: a platform reading the step's output to its end would
+    wait for the runner, so the background part has its own. ``runner_args`` get ``--spec-wait-sec``
+    :data:`TEMPLATE_SPEC_WAIT_SEC` unless they name it.
 
     A start that fails before anything wrote ``status.json`` (the directories, the boot log, ``pre``, or the started
     line ending non-zero without one) leaves a ``runner_start_failed`` status with what the step found or the boot log's
-    tail in ``HYPERLOOM_OUT_DIR``, or in the second of ``dirs`` (``/out`` when there is none) when that is empty.
+    tail in ``HYPERLOOM_OUT_DIR``, or in the second of ``dirs`` (``/out`` when there is none) when that is empty. When
+    that out directory itself cannot be made or written, no status can be left: the step prints the reason on stderr
+    and exits 1, as before.
 
     Raises:
         ValueError: ``pre`` spans lines, or a name in ``env`` is not a shell variable name.
@@ -407,10 +405,7 @@ def runner_template_payload(
     start = shlex.quote(runner_start_shell_line(*_with_spec_wait(runner_args)))
     out = shlex.quote(dirs[1] if len(dirs) > 1 else _TEMPLATE_DIRS[1])
     functions = "; ".join(
-        part.replace("@OUT@", out)
-        .replace("@BOOT@", shlex.quote(boot_log))
-        .replace("@BOOT_ENV@", BOOT_LOG_ENV)
-        .replace("@NAME@", _NAME)
+        part.replace("@OUT@", out).replace("@BOOT@", shlex.quote(boot_log)).replace("@NAME@", _NAME)
         for part in (_START_FAILED, _MAKE_DIRS, _PICK_BOOT_LOG)
     )
     background = (
