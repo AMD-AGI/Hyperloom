@@ -3,10 +3,8 @@
 
 """Bundle a session's consumer-facing artifacts into a single zip under the destination root.
 
-The root is ``HYPERLOOM_SESSION_PACKAGE_DEST``, the session's own archive (``<session dir>/archive``) when unset, so the
-package is on the storage the session is on, never only in the container. A Claw sandbox, whose sync ships
-``/workspace``, names ``/workspace``. A hosted run (``hyperloom hosted run``) sets it to ``<session dir>/archive``, made
-shared by the run's accounts, whatever the host passed.
+The root is ``HYPERLOOM_SESSION_PACKAGE_DEST``, ``/workspace`` when unset, so the Claw sandbox sync picks the zip up.  A
+hosted run (``hyperloom hosted run``) sets it to ``<session dir>/archive``, on the shared storage, whatever the host passed.
 
 A root with the setgid bit (the hosted archive, ``2770``) is one the accounts of one group write in turn: the directories
 made below it get its mode, and every file is a new one renamed into place with that mode less the execute bits, so the
@@ -50,12 +48,14 @@ from inference_suite.contracts.layout import (
 )
 
 from ..session.optimization_journal import JOURNAL_FILENAME
-from ..session.paths import PRIVATE_SESSION_SUBDIRS, archive_root, is_path_within
+from ..session.paths import PRIVATE_SESSION_SUBDIRS, is_path_within
 from ..session.session_paths import BRINGUP_SEGMENT, ENABLEMENT_SEGMENT
 
 log = logging.getLogger(__name__)
 
+# Default destination root.
 ENV_PACKAGE_DEST_ROOT = "HYPERLOOM_SESSION_PACKAGE_DEST"
+DEFAULT_DEST_ROOT = Path("/workspace")
 
 # Also lay the curated files down loose (uncompressed, relative tree) under the dest root so a consumer can fetch one
 # file without unzipping.
@@ -154,11 +154,10 @@ _MAX_TOTAL_BYTES = 256 * 1024 * 1024  # 256 MB
 _MAX_RESERVED_BYTES = 64 * 1024 * 1024  # 64 MB
 
 
-def _dest_root(session_dir: Path) -> Path:
-    """The destination root of ``session_dir``'s package: the one ``HYPERLOOM_SESSION_PACKAGE_DEST`` names, else the
-    session's archive."""
+def _dest_root() -> Path:
+    """Resolve the destination root for session packages."""
     override = (os.environ.get(ENV_PACKAGE_DEST_ROOT) or "").strip()
-    return Path(override) if override else archive_root(session_dir)
+    return Path(override) if override else DEFAULT_DEST_ROOT
 
 
 def _loose_enabled() -> bool:
@@ -634,8 +633,7 @@ def package_session_artifacts(
     *,
     session_id: str = "",
 ) -> Path | None:
-    """Bundle curated artifacts of ``session_dir`` into one zip under the dest root (default
-    ``<session_dir>/archive/<PACKAGE_SUBDIR>/``)."""
+    """Bundle curated artifacts of ``session_dir`` into one zip under the dest root (default ``/workspace/<PACKAGE_SUBDIR>/``)."""
     sd = Path(session_dir).resolve()
     if not sd.is_dir():
         log.warning("session package skipped: session_dir not a dir: %s", sd)
@@ -658,7 +656,7 @@ def package_session_artifacts(
         reserved_overflow=reserved_overflow,
     )
 
-    root = _dest_root(sd)
+    root = _dest_root()
     shared = _group_mode(root)
     out_dir = root / PACKAGE_SUBDIR
     _make_dirs(out_dir, shared)

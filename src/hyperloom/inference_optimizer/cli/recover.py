@@ -203,7 +203,7 @@ def _run_recover_session(args: argparse.Namespace) -> int:
     except (OSError, ValueError):
         log.exception("recover: langfuse push failed (non-fatal)")
 
-    # 3) Re-package the artifact bundle so it carries the recovered SBD.
+    # 3) Re-package the artifact bundle so /workspace carries the recovered SBD.
     try:
         from ..breakdown import package_session_artifacts
 
