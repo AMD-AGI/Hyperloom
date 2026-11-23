@@ -587,7 +587,7 @@ proposals already in a grid do not count.
 ```
 intent_type: "delegate"
 payload: {action_name: "specialist", params: {
-  tags: ["serving_specialist"], gap_canonical_id: "gap.<...>",
+  tags: ["serving_specialist"], gap_canonical_id: "<canonical_id from === Current gaps ===>",
   sub_kind: "..."
 }}
 ```

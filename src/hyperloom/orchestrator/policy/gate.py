@@ -46,7 +46,6 @@ from ..specialists.profile import SCOPE_FREEFORM as SPECIALIST_SCOPE_FREEFORM
 from ..specialists.patch_safety import parse_patch_targets
 from .validators import (
     SPECIALIST_FREEFORM_WAVE_MAX,
-    autofill_gap_from_ledger,
     check_freeform_task_description,
     log_specialist_dispatch_coherence,
     validate_coordinator_managed_action,
@@ -646,17 +645,13 @@ class PolicyGate:
         # and the runner synthesizes an empty result for an unresolvable anchor.
         log_specialist_dispatch_coherence(scope_raw, tags)
 
-        gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
-        # Backfill the gap id from the gaps[] ledger by matching the dispatch
-        # anchor against each gap's ``domain_hint``; only mutates on a match.
-        if not gap and not autofill_gap_from_ledger(self.shared_state, params, tags):
+        if not str(params.get("gap_canonical_id") or "").strip():
             raise PolicyDenied(
                 "delegate{action='specialist'}: params.gap_canonical_id required",
                 rule="specialist_dispatch_source",
                 hint=(
-                    "Provide a canonical gap id (e.g. "
-                    "'gap.attention.fp8_kv_cache.session-<sid>') so the "
-                    "specialist can anchor its KB traversal."
+                    "Name a canonical_id from the '=== Current gaps ===' block, or dispatch "
+                    "scope='freeform' with a task_description."
                 ),
             )
         validate_specialist_max_turns_raw(params.get("max_turns"), where="params.max_turns")

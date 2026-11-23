@@ -342,7 +342,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         """Warm the targeted gap's symptom, layer and recent attempts from the gaps[] ledger."""
         state = self.shared_state
         # Fill gap-specific anchors from the gaps[] ledger.
-        gap_cid = str(params.get("gap_canonical_id") or "").strip() or str(params.get("gap") or "").strip()
+        gap_cid = str(params.get("gap_canonical_id") or "").strip()
         if gap_cid:
             gap = state.find_gap(gap_cid)
             if gap is not None:

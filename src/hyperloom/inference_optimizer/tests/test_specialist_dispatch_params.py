@@ -332,64 +332,21 @@ def test_domains_scope_with_one_tag_allowed(gate, orchestration_role):
     )
 
 
-# --------------------------------------------------------------------------- # Gap auto-fill from the gaps[] ledger
-# (friction symmetry, point 4) --------------------------------------------------------------------------- #
-def _gate_with_gaps(gaps: list[dict]) -> PolicyGate:
+def test_domain_dispatch_without_a_gap_is_denied_even_when_the_ledger_has_a_match(orchestration_role):
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState()
-    for g in gaps:
-        state.upsert_gap(g)
-    return PolicyGate(role_registry=default_role_registry(), shared_state=state)
-
-
-def test_domain_dispatch_backfills_gap_from_ledger(orchestration_role):
-    gate = _gate_with_gaps(
-        [
-            {
-                "canonical_id": "gap.framework.scheduler.session-1",
-                "domain_hint": "serving_specialist",
-                "severity": "high",
-            },
-        ]
+    state.upsert_gap(
+        {"canonical_id": "gap.framework.scheduler", "domain_hint": "serving_specialist", "severity": "high"}
     )
-    params = {"domain": "serving_specialist"}  # no gap_canonical_id
-    gate._validate_specialist_dispatch(orchestration_role, _dispatch(params))
-    # Mutated in place so the downstream dispatch carries the canonical id.
-    assert params["gap_canonical_id"] == "gap.framework.scheduler.session-1"
-
-
-def test_gap_backfill_prefers_high_severity_then_least_attempted(orchestration_role):
-    gate = _gate_with_gaps(
-        [
-            {
-                "canonical_id": "gap.low",
-                "domain_hint": "serving_specialist",
-                "severity": "medium",
-                "attempts": [{"x": 1}],
-            },
-            {"canonical_id": "gap.win", "domain_hint": "framework", "severity": "high"},
-        ]
-    )
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
     params = {"domain": "serving_specialist"}
-    gate._validate_specialist_dispatch(orchestration_role, _dispatch(params))
-    # framework is serving_specialist's kb_anchor, so both match; high wins.
-    assert params["gap_canonical_id"] == "gap.win"
-
-
-def test_gap_backfill_noop_when_no_anchor_match_still_rejects(orchestration_role):
-    gate = _gate_with_gaps(
-        [
-            {"canonical_id": "gap.kernel", "domain_hint": "kernel_switch_specialist", "severity": "high"},
-        ]
-    )
     with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            orchestration_role,
-            _dispatch({"domain": "comm_specialist"}),
-        )
+        gate._validate_specialist_dispatch(orchestration_role, _dispatch(params))
     assert exc.value.rule == "specialist_dispatch_source"
-    assert "gap" in str(exc.value)
+    assert params == {"domain": "serving_specialist"}
+    assert "=== Current gaps ===" in exc.value.hint
+    assert "freeform" in exc.value.hint
 
 
 @pytest.mark.skipif(len(_REAL_TAGS) < 2, reason="need >=2 knowledge-domain tags")
