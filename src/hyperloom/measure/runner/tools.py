@@ -16,6 +16,7 @@ the runner only verifies it and compares its normalised manifest with the one th
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -42,6 +43,8 @@ __all__ = [
     "ensure_inference_suite",
     "ensure_inferencex",
 ]
+
+log = logging.getLogger(__name__)
 
 INFERENCEX_REPO = "https://github.com/SemiAnalysisAI/InferenceX.git"
 _COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
@@ -199,7 +202,8 @@ def _keep(store: Path, scratch: Path, commit: str) -> None:
     """Add ``commit`` from the checked ``scratch`` to ``store`` for later tests of the host.
 
     A store this runner cannot write (a read-only runner cache) or another test updating it at once only means a later
-    test fetches the commit from the network again. Hooks are off: the server under test can write the store's config.
+    test fetches the commit from the network again, which the log says. Hooks are off: the server under test can
+    write the store's config.
     """
     try:
         if not _is_repository(store):
@@ -213,8 +217,8 @@ def _keep(store: Path, scratch: Path, commit: str) -> None:
             scratch.resolve().as_uri(),
             f"{commit}:refs/tools/{commit}",
         )
-    except (OSError, ToolError):
-        pass
+    except (OSError, ToolError) as exc:
+        log.warning("%s was not kept in %s, so a later test fetches it from the network again: %s", commit, store, exc)
 
 
 def _is_repository(store: Path) -> bool:

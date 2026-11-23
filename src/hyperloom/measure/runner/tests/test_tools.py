@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -270,6 +271,22 @@ def test_a_tree_an_earlier_test_changed_is_not_what_a_later_test_runs(upstream, 
 
     assert second.is_relative_to(tmp_path / "scratch-2"), "each test runs its own tree"
     assert (second / "benchmarks" / "benchmark_lib.sh").read_text() == "# lib\n"
+
+
+def test_a_store_that_cannot_be_written_costs_a_warning_and_the_test_still_gets_its_tree(
+    upstream, tmp_path, monkeypatch, caplog
+):
+    repo, commit = upstream
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+    (tmp_path / "runner-cache").write_text("a file where the runner cache belongs\n")
+    store = tmp_path / "runner-cache" / tools.TOOL_CHECKOUTS_DIR / tools.INFERENCEX_STORE
+
+    with caplog.at_level(logging.WARNING, logger=tools.__name__):
+        tree = ensure_inferencex(commit, tmp_path / "scratch-1", store)
+
+    assert _git(tree, "rev-parse", "HEAD") == commit
+    (record,) = caplog.records
+    assert commit in record.getMessage() and str(store) in record.getMessage()
 
 
 def test_an_object_changed_in_the_store_is_refused_and_the_commit_fetched_again(upstream, tmp_path, monkeypatch):
