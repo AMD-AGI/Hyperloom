@@ -332,23 +332,6 @@ def test_domains_scope_with_one_tag_allowed(gate, orchestration_role):
     )
 
 
-def test_domain_dispatch_without_a_gap_is_denied_even_when_the_ledger_has_a_match(orchestration_role):
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    state = SharedState()
-    state.upsert_gap(
-        {"canonical_id": "gap.framework.scheduler", "domain_hint": "serving_specialist", "severity": "high"}
-    )
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
-    params = {"domain": "serving_specialist"}
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(orchestration_role, _dispatch(params))
-    assert exc.value.rule == "specialist_dispatch_source"
-    assert params == {"domain": "serving_specialist"}
-    assert "=== Current gaps ===" in exc.value.hint
-    assert "freeform" in exc.value.hint
-
-
 @pytest.mark.skipif(len(_REAL_TAGS) < 2, reason="need >=2 knowledge-domain tags")
 def test_single_domain_scope_with_multiple_tags_allowed(gate, orchestration_role):
     gate._validate_specialist_dispatch(

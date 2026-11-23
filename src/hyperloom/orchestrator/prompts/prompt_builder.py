@@ -431,7 +431,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
         return (
             "delegate{action_name='specialist', params={"
             f"domain=<one of {_llm_selectable_domains()}>, "
-            "gap_canonical_id=<canonical_id from === Current gaps ===>, "
+            "gap_canonical_id=<stable gap id>, "
             "gap_symptom?=<str>, gap_layer?=<str>, "
             "gap_evidence?={profile_trace:..., ...}, "
             "max_turns?=<int<=1000 or 0=unbounded>}}"
