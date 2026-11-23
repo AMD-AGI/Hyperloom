@@ -634,7 +634,7 @@ def add_recon_arguments(opt: argparse.ArgumentParser) -> None:
 
 
 def add_conc_sweep_arguments(opt: argparse.ArgumentParser) -> None:
-    """Add the post-session concurrency-sweep flags of ``optimize`` (``hyperloom.conc_sweep``)."""
+    """Add the post-session concurrency-sweep flags of ``optimize`` (``hyperloom.orchestrator.conc_sweep``)."""
     opt.add_argument(
         "--enable-conc-sweep",
         dest="enable_conc_sweep",

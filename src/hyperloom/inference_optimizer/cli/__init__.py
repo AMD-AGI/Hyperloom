@@ -1061,7 +1061,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     closed = coordinator.shared_state
     if closed.conc_sweep_enabled and closed.close_sequence_done and stop_reason not in ABORTED_STOP_REASONS:
-        from hyperloom.conc_sweep.cli import sweep_session
+        from hyperloom.orchestrator.conc_sweep.cli import sweep_session
 
         await sweep_session(session_dir)
 

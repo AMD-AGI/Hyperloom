@@ -14,7 +14,7 @@ from hyperloom.common.perf_metric import graded_metric_key
 
 
 def test_render_conc_sweep_curve_no_data_returns_none(tmp_path: Path):
-    from hyperloom.conc_sweep.plot import ConcCurveOptions, render_conc_sweep_curve
+    from hyperloom.orchestrator.conc_sweep.plot import ConcCurveOptions, render_conc_sweep_curve
 
     payload = {
         "baseline": {"points": []},
@@ -28,7 +28,7 @@ def test_render_conc_sweep_curve_no_data_returns_none(tmp_path: Path):
 
 def test_render_conc_sweep_curve_writes_png(tmp_path: Path):
     pytest.importorskip("matplotlib")
-    from hyperloom.conc_sweep.plot import ConcCurveOptions, render_conc_sweep_curve
+    from hyperloom.orchestrator.conc_sweep.plot import ConcCurveOptions, render_conc_sweep_curve
 
     payload = {
         "baseline": {
@@ -80,7 +80,7 @@ class TestTheChartFollowsTheGradedAxis:
         }
 
     def test_the_total_axis_reads_interactivity_and_total(self):
-        from hyperloom.conc_sweep import plot
+        from hyperloom.orchestrator.conc_sweep import plot
 
         axes = plot._axes_for_metric("total_token_throughput", tp_eff=8.0)
         xs, ys, _concs = plot._arm_series(
@@ -92,7 +92,7 @@ class TestTheChartFollowsTheGradedAxis:
         assert "per Chip" in axes.y_label
 
     def test_the_output_axis_keeps_the_output_pair(self):
-        from hyperloom.conc_sweep import plot
+        from hyperloom.orchestrator.conc_sweep import plot
 
         axes = plot._axes_for_metric("output_throughput", tp_eff=8.0)
         xs, ys, _concs = plot._arm_series(
@@ -102,7 +102,7 @@ class TestTheChartFollowsTheGradedAxis:
         assert ys == [pytest.approx(183.44 / 8.0)]
 
     def test_a_summary_naming_no_metric_reads_as_the_comparison_default(self):
-        from hyperloom.conc_sweep import plot
+        from hyperloom.orchestrator.conc_sweep import plot
 
         assert plot._graded_metric_of({}) == "output_throughput"
         assert plot._graded_metric_of({"summary": {"metric": ""}}) == "output_throughput"
@@ -120,7 +120,7 @@ class TestTheChartFollowsTheGradedAxis:
     )
     def test_the_chart_plots_the_field_the_summary_graded(self, monkeypatch, mode: str, env: dict[str, str]):
         """Binds both sides: whichever way the session resolved its axis, the curve reads the same point field the summary took its speedups on."""
-        from hyperloom.conc_sweep import plot
+        from hyperloom.orchestrator.conc_sweep import plot
 
         monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
         monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
@@ -145,7 +145,7 @@ class TestTheChartFollowsTheGradedAxis:
             assert ys == [pytest.approx(183.44 / 8.0)]
 
     def test_a_rung_missing_its_axis_is_dropped_not_zeroed(self):
-        from hyperloom.conc_sweep import plot
+        from hyperloom.orchestrator.conc_sweep import plot
 
         axes = plot._axes_for_metric("total_token_throughput", tp_eff=1.0)
         points = [
@@ -179,7 +179,7 @@ class TestTheCurveFollowsTheLadder:
         }
 
     def test_a_series_runs_in_concurrency_order_even_where_interactivity_does_not(self):
-        from hyperloom.conc_sweep import plot
+        from hyperloom.orchestrator.conc_sweep import plot
 
         axes = plot._axes_for_metric("total_token_throughput", tp_eff=8.0)
         xs, _ys, concs = plot._arm_series(self._payload()["optimized"]["points"], 8.0, axes)
@@ -190,7 +190,7 @@ class TestTheCurveFollowsTheLadder:
     def test_the_rendered_line_joins_the_rungs_in_concurrency_order(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        from hyperloom.conc_sweep.plot import ConcCurveOptions, render_conc_sweep_curve
+        from hyperloom.orchestrator.conc_sweep.plot import ConcCurveOptions, render_conc_sweep_curve
 
         calls = _install_fake_matplotlib(monkeypatch)
         out_path = tmp_path / "curve.png"
@@ -211,7 +211,7 @@ class TestTheCurveFollowsTheLadder:
     def test_a_rung_only_one_arm_measured_is_drawn_hollow_and_explained(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        from hyperloom.conc_sweep.plot import ConcCurveOptions, render_conc_sweep_curve
+        from hyperloom.orchestrator.conc_sweep.plot import ConcCurveOptions, render_conc_sweep_curve
 
         calls = _install_fake_matplotlib(monkeypatch)
         render_conc_sweep_curve(self._payload(), tmp_path / "curve.png", ConcCurveOptions(tp=8))
@@ -222,7 +222,7 @@ class TestTheCurveFollowsTheLadder:
         assert any("one arm only" in str(kwargs.get("label", "")) for _args, kwargs in calls["plots"])
 
     def test_matched_rungs_carry_no_hollow_marker_or_note(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-        from hyperloom.conc_sweep.plot import ConcCurveOptions, render_conc_sweep_curve
+        from hyperloom.orchestrator.conc_sweep.plot import ConcCurveOptions, render_conc_sweep_curve
 
         calls = _install_fake_matplotlib(monkeypatch)
         payload = self._payload()
@@ -232,7 +232,7 @@ class TestTheCurveFollowsTheLadder:
         assert not any("markerfacecolor" in kwargs for _args, kwargs in calls["plots"])
 
     def test_an_arm_against_an_empty_arm_has_nothing_to_be_unpaired_with(self):
-        from hyperloom.conc_sweep import plot
+        from hyperloom.orchestrator.conc_sweep import plot
 
         assert plot._unpaired([4.0, 8.0], []) == [False, False]
         assert plot._unpaired([4.0, 8.0], [8.0]) == [True, False]
@@ -252,7 +252,7 @@ def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
             raise ImportError("no module named matplotlib (mocked)")
         return _real_import(name, *args, **kwargs)
 
-    from hyperloom.conc_sweep.plot import ConcCurveOptions, render_conc_sweep_curve
+    from hyperloom.orchestrator.conc_sweep.plot import ConcCurveOptions, render_conc_sweep_curve
 
     monkeypatch.setattr(builtins, "__import__", _mock_import)
     result = render_conc_sweep_curve(
@@ -264,7 +264,7 @@ def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
 
 
 def test_conc_sweep_plot_series_helpers_filter_and_sort_points_by_conc():
-    from hyperloom.conc_sweep import plot as conc_sweep_plot
+    from hyperloom.orchestrator.conc_sweep import plot as conc_sweep_plot
 
     axes = conc_sweep_plot._axes_for_metric("output_throughput", 2.0)
     xs, ys, concs = conc_sweep_plot._arm_series(

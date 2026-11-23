@@ -207,7 +207,7 @@ def test_a_second_start_of_the_same_run_resumes_the_same_directory(run, monkeypa
 
 
 def test_a_restart_over_a_closed_session_whose_sweep_did_not_finish_sweeps_it_and_ends_the_run(run, monkeypatch):
-    from hyperloom.conc_sweep import cli as sweep_cli
+    from hyperloom.orchestrator.conc_sweep import cli as sweep_cli
 
     closed = {"stop_reason": "cycle_end_done", "conc_sweep_enabled": True, "close_sequence_done": True}
     fake = FakeOptimize(monkeypatch, returncode=1, effect=lambda argv: None)

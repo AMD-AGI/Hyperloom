@@ -5,7 +5,7 @@
 
 The points are the concurrencies the InferenceX arm of the session's frozen base publishes, or the operator's
 ``--conc-sweep-concs`` for a base no InferenceX arm gave, with the workload's CONC among them
-(:func:`hyperloom.conc_sweep.runner.sweep_points`). It runs only when FINAL chose a commit other than the root whose
+(:func:`hyperloom.orchestrator.conc_sweep.runner.sweep_points`). It runs only when FINAL chose a commit other than the root whose
 reproduction gained over the baseline. Both arms are submitted at once, so they run side by side where the session
 runs two tests at once and one after the other where it runs one. An AgentX point is a test of its own, booted cold as
 every AgentX level is, so each lands as it ends; an InferenceX arm is one sweep test over all its points on one server,
@@ -26,9 +26,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom.common.gain_math import conc_pair_comparison
-from hyperloom.conc_sweep.plot import ConcCurveOptions
-from hyperloom.conc_sweep.points import SCHEMA_VERSION, SweepPoints, ladder, sweep_points
-from hyperloom.conc_sweep.report import SETTLED, read_summary, write_curve, write_report
+from hyperloom.orchestrator.conc_sweep.plot import ConcCurveOptions
+from hyperloom.orchestrator.conc_sweep.points import SCHEMA_VERSION, SweepPoints, ladder, sweep_points
+from hyperloom.orchestrator.conc_sweep.report import SETTLED, read_summary, write_curve, write_report
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom_multibranch.blackboard.codec import decode

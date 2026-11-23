@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.conc_sweep import points, runner
+from hyperloom.orchestrator.conc_sweep import points, runner
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridVariant, VariantResult
 from hyperloom.orchestrator.state.shared_state import SharedState

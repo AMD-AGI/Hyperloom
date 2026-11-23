@@ -155,7 +155,7 @@ from hyperloom_multibranch.cli_options import (
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.budget import ExploreCap
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom.conc_sweep.report import SETTLED
+from hyperloom.orchestrator.conc_sweep.report import SETTLED
 from hyperloom_multibranch.scheduling.conc_sweep import sweep_plan, write_skipped
 from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers, local_grant_peers
 from hyperloom_multibranch.scheduling.hosted_run import (

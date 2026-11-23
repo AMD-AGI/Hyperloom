@@ -10,11 +10,11 @@ from unittest.mock import patch
 
 import pytest
 
-from hyperloom.conc_sweep.report import ArmCurves, build_roofline_ceiling
+from hyperloom.orchestrator.conc_sweep.report import ArmCurves, build_roofline_ceiling
 from hyperloom.inference_optimizer.roofline_model_meta import ModelMeta
 from hyperloom.orchestrator.state.shared_state import SharedState
 
-_LOAD_META_PATH = "hyperloom.conc_sweep.report.load_model_meta"
+_LOAD_META_PATH = "hyperloom.orchestrator.conc_sweep.report.load_model_meta"
 
 
 def _make_state(

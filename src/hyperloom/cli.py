@@ -17,7 +17,7 @@ _COMMANDS: dict[str, tuple[str, tuple[str, ...], str]] = {
     "optimize": (f"{_IO}.cli", ("optimize",), "Run a multi-agent optimization session"),
     "recover": (f"{_IO}.cli", ("recover",), "Rebuild a crashed session's artifacts, or confirm cleanup for a resume"),
     "conc-sweep": (
-        "hyperloom.conc_sweep.cli",
+        "hyperloom.orchestrator.conc_sweep.cli",
         (),
         "Sweep a finished session's baseline and optimized launch over CONC",
     ),

@@ -299,7 +299,7 @@ class SharedState(
     geak_result: dict[str, Any] = field(default_factory=dict)
     # Terminal result of the phase-level KernelForge rewrite controller.
     kernel_rewrite_controller_result: dict[str, Any] = field(default_factory=dict)
-    # Whether the session runs its concurrency sweep once it closes (``--enable-conc-sweep``, ``hyperloom.conc_sweep``).
+    # Whether the session runs its concurrency sweep once it closes (``--enable-conc-sweep``, ``hyperloom.orchestrator.conc_sweep``).
     conc_sweep_enabled: bool = False
     # Which benchmark workload this session measures: "agentx" (agentic trace replay) or "synthetic" (ISL/OSL).
     benchmark_mode: str = ""

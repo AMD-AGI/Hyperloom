@@ -22,7 +22,7 @@ import pytest
 import yaml
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.conc_sweep import runner as conc_sweep
+from hyperloom.orchestrator.conc_sweep import runner as conc_sweep
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle
 from hyperloom.orchestrator.actions.executors.grid._grid_base import TS_SKIPPED_DEDUP, VariantResult

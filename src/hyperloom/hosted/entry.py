@@ -69,7 +69,7 @@ from hyperloom_common.shared_storage import (
 from hyperloom.common import confinement
 from hyperloom.common.agent_isolation import IsolationRefused, layer_bwrap, require_agent_isolation
 from hyperloom.common.owner_scope import local_owner_scope
-from hyperloom.conc_sweep.report import sweep_unfinished
+from hyperloom.orchestrator.conc_sweep.report import sweep_unfinished
 from hyperloom.hosted.campaign import FLOW_MULTIBRANCH, CampaignError, CampaignSpec, optimize_args, parse_campaign
 from hyperloom.hosted.host_info import HOST_ONLY_VARS, HostInfo, HostInfoError, Var, read_host_info, take_host_info
 from hyperloom.hosted.mcp_host_tools import register_host_tools
@@ -527,7 +527,7 @@ def _optimize(argv: list[str], state_dir: Path, session_dir: Path) -> int:
 def _sweep(state_dir: Path, session_dir: Path) -> int:
     """Run the conc sweep of a session that closed and was stopped before its sweep ran its course, and end the run:
     resuming a closed session would open another macro-cycle instead. The return code is the sweep's."""
-    from hyperloom.conc_sweep.cli import main as sweep_main
+    from hyperloom.orchestrator.conc_sweep.cli import main as sweep_main
 
     print(f"[hosted] sweeping session {session_dir}, which closed before its conc sweep finished", flush=True)
     returncode = sweep_main([str(session_dir)])
