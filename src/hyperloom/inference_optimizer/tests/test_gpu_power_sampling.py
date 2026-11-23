@@ -12,10 +12,8 @@ import pytest
 
 from hyperloom_common import gpu_telemetry
 from inference_suite.contracts.layout import POWER
-from inference_suite.server_log import LogCursor
 from hyperloom.orchestrator.actions.executors.gpu._gpu_power import (
     POWER_FIELDS,
-    build_gpu_power_recorder,
     round_power_summary,
 )
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
@@ -102,31 +100,8 @@ def test_the_measurement_falls_back_to_the_report_when_no_recorder_ran(tmp_path)
     assert "power_valid" not in measurement and "gpu_energy_j" not in measurement
 
 
-def test_the_builder_follows_amd_smi_and_the_switch(tmp_path, monkeypatch):
-    """On wherever amd-smi exists, unless the operator turns it off; nothing to sample without amd-smi."""
-    from hyperloom.orchestrator.actions.executors.gpu import _gpu_power
-
-    log_path = str(tmp_path / "server.log")
-    monkeypatch.delenv("HYPERLOOM_GPU_POWER_SAMPLING", raising=False)
-    monkeypatch.setattr("shutil.which", lambda name: None)
-    assert build_gpu_power_recorder(log_path, {}) is None
-    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/amd-smi")
-    built: list[dict] = []
-    monkeypatch.setattr(_gpu_power, "PowerRecorder", lambda **kwargs: built.append(kwargs) or kwargs)
-    monkeypatch.setattr("hyperloom.common.gpu_power_settings.gpus_in_rocm_order", lambda: list(range(8)))
-    assert build_gpu_power_recorder(log_path, {"HIP_VISIBLE_DEVICES": "4,5"}) is not None
-    scope = built[0]["scope"]
-    assert scope.gpus == (4, 5) and scope.window_source == "server_log_poll"
-    assert built[0]["output_path"] == str(tmp_path / POWER) and built[0]["timing"].fast_sec == 1.0
-    monkeypatch.setenv("HYPERLOOM_GPU_POWER_SAMPLING", "0")
-    assert build_gpu_power_recorder(log_path, {}) is None
-    assert build_gpu_power_recorder(None, {}) is None
-
-
 @pytest.mark.parametrize(("value", "sampled"), [("0.2", 0.5), ("1.5", 1.5), ("1.6", None), ("3", None)])
-def test_an_interval_too_long_for_the_sample_gap_limit_is_refused_where_it_is_set(
-    tmp_path, monkeypatch, value, sampled
-):
+def test_an_interval_too_long_for_the_sample_gap_limit_is_refused_where_it_is_set(monkeypatch, value, sampled):
     """A round sampled at an interval whose gaps could reach the 3 s limit would be invalid every time, so the
     setting is refused and the round samples nothing; below the floor it is raised to the floor."""
     from hyperloom.orchestrator.actions.executors.gpu._gpu_power import round_gpu_telemetry
@@ -136,8 +111,6 @@ def test_an_interval_too_long_for_the_sample_gap_limit_is_refused_where_it_is_se
     monkeypatch.setenv("HYPERLOOM_GPU_POWER_INTERVAL_S", value)
     telemetry = round_gpu_telemetry()
     assert (telemetry.interval_sec if telemetry.enabled else None) == sampled
-    recorder = build_gpu_power_recorder(str(tmp_path / "server.log"), {})
-    assert (None if recorder is None else recorder._timing.fast_sec) == sampled
 
 
 def test_a_recorder_refuses_an_interval_too_long_for_the_sample_gap_limit(tmp_path):
@@ -147,47 +120,6 @@ def test_a_recorder_refuses_an_interval_too_long_for_the_sample_gap_limit(tmp_pa
             scope=gpu_telemetry.RecorderScope(gpus=(0,)),
             timing=gpu_telemetry.RecorderTiming(fast_sec=2.0),
         )
-
-
-class _PhaseLog:
-    def __init__(self) -> None:
-        self.phases: list[str] = []
-
-    def note_phase(self, phase, mono):
-        self.phases.append(phase)
-
-
-def _ready_line() -> str:
-    from inference_suite.server_log import READY_MARKERS
-
-    return READY_MARKERS[0] + "\n"
-
-
-def _unlistable_logs() -> list[str]:
-    raise PermissionError("replay output is not readable")
-
-
-def test_an_unreadable_replay_log_is_warned_once_and_polling_continues(caplog):
-    from hyperloom.orchestrator.actions.executors.gpu._gpu_power import ServerLogPhaseDriver
-
-    driver = ServerLogPhaseDriver(_PhaseLog(), _unlistable_logs, cursor=LogCursor())
-    with caplog.at_level("DEBUG", logger="hyperloom.orchestrator.actions.executors.gpu._gpu_power"):
-        driver._poll_logs()
-        driver._poll_logs()
-    levels = [record.levelname for record in caplog.records if "cannot read the replay" in record.getMessage()]
-    assert levels == ["WARNING", "DEBUG"]
-
-
-def test_a_phase_driver_bug_is_not_swallowed():
-    from hyperloom.orchestrator.actions.executors.gpu._gpu_power import ServerLogPhaseDriver
-
-    class _BrokenCursor(LogCursor):
-        def advance(self, server_log_path):
-            raise KeyError("scan bug")
-
-    driver = ServerLogPhaseDriver(_PhaseLog(), lambda: ["server.log"], cursor=_BrokenCursor())
-    with pytest.raises(KeyError):
-        driver.stop()
 
 
 def test_the_gpu_monitor_block_is_read_whole_by_the_gpu_metrics_reader(tmp_path):

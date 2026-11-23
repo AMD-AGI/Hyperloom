@@ -5,32 +5,21 @@
 
 A benchmark report's ``gpu_monitor`` block samples one card over the whole process, so it describes
 neither the serving cards nor the load being measured; :class:`hyperloom_common.gpu_telemetry.PowerRecorder` does.
-This module builds that recorder for a GEAK replay (:func:`build_gpu_power_recorder`), names the same sampling for an
-inference_suite round, which runs the recorder itself (:func:`round_gpu_telemetry`), drives it from the server logs of a
-child the watchdog does not own (:class:`ServerLogPhaseDriver`), and reads the round's energy back as measurement
-fields (:func:`round_power_fields`) for the power-budget checks and the search.
+This module names that sampling for an inference_suite round, which runs the recorder itself
+(:func:`round_gpu_telemetry`), and reads the round's energy back as measurement fields (:func:`round_power_fields`)
+for the power-budget checks and the search.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import threading
-import time
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 from hyperloom_common.amd_smi import metric_value
 from hyperloom_common.env import EnvValueError, env_float
-from hyperloom_common.gpu_telemetry import (
-    DEFAULT_INTERVAL_SEC,
-    MIN_INTERVAL_SEC,
-    GpuPhase,
-    PowerRecorder,
-    RecorderScope,
-    RecorderTiming,
-    fast_interval,
-)
+from hyperloom_common.gpu_telemetry import DEFAULT_INTERVAL_SEC, fast_interval
 from hyperloom.common.gpu_power_settings import gpu_power_sampling_unavailable
 from inference_suite.contracts import READABLE_REPORT_SCHEMAS, GpuTelemetry, PowerSummary
 from inference_suite.contracts.layout import POWER
@@ -39,15 +28,10 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "POWER_FIELDS",
-    "ServerLogPhaseDriver",
-    "build_gpu_power_recorder",
     "round_gpu_telemetry",
     "round_power_fields",
     "round_power_summary",
 ]
-
-#: The window a GEAK replay's recorder measures comes from polling its server logs, not from phase marks.
-_SERVER_LOG_WINDOW = "server_log_poll"
 
 #: The measurement fields a round's power fills, each from the :class:`PowerSummary` figure it names (``None`` for
 #: ``power_valid``, which is the summary's own). Scalars only: ``hosted_executor`` publishes a round's finite numbers
@@ -65,108 +49,8 @@ POWER_FIELDS = {
 
 _INTERVAL_ENV = "HYPERLOOM_GPU_POWER_INTERVAL_S"
 
-#: How long :meth:`ServerLogPhaseDriver.stop` waits for a poll in flight, beyond one interval.
-_DRIVER_JOIN_SLACK_SEC = 10.0
-
 #: How far a recorder's start may precede the subprocess it is paired with and still be that round's.
 _START_SLACK_SEC = 5.0
-
-
-class ServerLogPhaseDriver:
-    """Drives a recorder's phase from server logs that appear while one subprocess runs.
-
-    For a child the watchdog loop does not own, such as a GEAK replay that boots its own server once per replica. Each
-    newly seen log is a fresh boot, so the recorder returns to ``boot`` until that server reports ready; the markers are
-    the watchdog's own, so a replay is cut into phases exactly like a native round.
-    """
-
-    def __init__(
-        self,
-        recorder: Any,
-        find_logs: Callable[[], list[str]],
-        *,
-        cursor: Any,
-        interval_sec: float = DEFAULT_INTERVAL_SEC,
-    ) -> None:
-        """Prepare a driver; nothing is read until :meth:`start`.
-
-        ``cursor`` is the watchdog's own log cursor, passed in rather than imported: the watchdog module builds this
-        module's recorder, so importing it back from here would close a cycle.
-        """
-        self._recorder = recorder
-        self._find_logs = find_logs
-        self._cursor = cursor
-        self._interval = max(MIN_INTERVAL_SEC, float(interval_sec))
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._read_failed = False
-
-    def poll(self) -> None:
-        """Read what every log appended since the last poll and move the recorder's phase on."""
-        for path in self._find_logs():
-            if self._cursor.open_log(path):
-                self._recorder.note_phase(GpuPhase.BOOT, time.monotonic())
-            scan = self._cursor.advance(path)
-            now = time.monotonic()
-            if scan.saw_ready:
-                self._recorder.note_phase(GpuPhase.MEASURED, now)
-            if scan.saw_warmup_begin:
-                self._recorder.note_phase(GpuPhase.WARMUP, now)
-            if scan.saw_measured_begin:
-                self._recorder.note_phase(GpuPhase.MEASURED, now)
-
-    def _poll_logs(self) -> None:
-        """:meth:`poll`, with a replay log that cannot be listed or read reported once at warning, then at debug."""
-        try:
-            self.poll()
-        except OSError as exc:
-            level = logging.DEBUG if self._read_failed else logging.WARNING
-            self._read_failed = True
-            log.log(level, "gpu_power: cannot read the replay's server logs, so its phase may not advance: %s", exc)
-
-    def _loop(self) -> None:
-        while not self._stop.is_set():
-            self._poll_logs()
-            self._stop.wait(self._interval)
-
-    def start(self) -> None:
-        """Begin polling on a background thread."""
-        self._thread = threading.Thread(target=self._loop, name="gpu-power-phase", daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        """Stop polling, after one last read so a phase that began just before exit is not lost."""
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=self._interval + _DRIVER_JOIN_SLACK_SEC)
-        self._poll_logs()
-
-
-def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | None) -> PowerRecorder | None:
-    """A GEAK replay's power recorder, writing ``power.json`` beside ``server_log_path``; ``None`` when sampling is off
-    or there is no ``amd-smi`` to sample with. The caller starts it."""
-    if not server_log_path or gpu_power_sampling_unavailable():
-        return None
-    try:
-        from hyperloom_common.amd_smi import AmdSmiError
-
-        from hyperloom.common.gpu_power_settings import visible_gpu_indices
-
-        try:
-            gpus = visible_gpu_indices(env or {})
-        except AmdSmiError as exc:
-            # Serving cards are still found by the VRAM they hold, as on a host with no mask.
-            log.warning("gpu_power: %s; sampling every card", exc)
-            gpus = None
-        scope = RecorderScope(gpus=None if gpus is None else tuple(sorted(gpus)), window_source=_SERVER_LOG_WINDOW)
-        return PowerRecorder(
-            output_path=str(Path(server_log_path).parent / POWER),
-            scope=scope,
-            timing=RecorderTiming(fast_sec=_interval_sec()),
-        )
-    except EnvValueError:
-        log.warning("gpu_power: recorder could not be built; this round samples nothing", exc_info=True)
-        return None
 
 
 def _interval_sec() -> float:
@@ -213,8 +97,8 @@ def _read_power_json(workspace: Path, subprocess_started_unix: float | None) -> 
 def round_power_summary(
     report: Mapping[str, Any] | None, workspace: Path | None, *, subprocess_started_unix: float | None = None
 ) -> PowerSummary | None:
-    """The round's power: an inference_suite report's ``power`` section, else the ``power.json`` a GEAK replay left
-    in ``workspace``; ``None`` when no recorder ran for the round."""
+    """The round's power: an inference_suite report's ``power`` section, else the ``power.json`` a recorder left in
+    ``workspace``; ``None`` when no recorder ran for the round."""
     if report and report.get("schema") in READABLE_REPORT_SCHEMAS:
         section = report.get("power")
         return None if section is None else PowerSummary.from_document(section)

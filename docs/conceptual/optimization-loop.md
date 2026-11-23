@@ -476,9 +476,7 @@ record counts as unmeasured. So does a round whose energy is not valid, such as
 one in which a configured card had no power reading (a 0 W or negative socket
 power, which no working sensor reports, reads as none): such cards are listed as
 `unread_gpus`, since a card missing from the readings would drop out of the
-total and escape its own limit. A GEAK replay boots its own server once per
-replica, so its phases are read from the server logs the replay writes, with
-the same markers, and each new log counts as a fresh boot.
+total and escape its own limit.
 
 The budgets are on average draw at the deployed cap, the shape of a
 power-provisioned rack where cards keep their full cap for headroom: the total
