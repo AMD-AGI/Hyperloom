@@ -10,7 +10,9 @@ the legacy entry validated, a multi-branch session needs ``multibranch.workload`
 ``multibranch.reference_script`` ``--reference-script``, ``multibranch.max_branches`` ``--max-branches``,
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
 ``--autonomous-agent``, ``multibranch.make_before_break`` (``true`` by default) ``--make-before-break`` or
-``--no-make-before-break``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what runs at once
+``--no-make-before-break``, ``multibranch.agentx_duration_sec`` ``--agentx-duration-sec`` and
+``multibranch.agentx_objective`` ``--agentx-objective`` (an ``agentx`` workload only), ``multibranch.boot_budget_sec``
+``--boot-budget-sec``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what runs at once
 where the session measures. The fields ``run`` has no option for --
 ``objective``, ``options``, ``placement.profile`` and ``placement.specialist_capacity`` -- are not read. A spec that
 sets ``launch.server_args`` or ``launch.extra_env`` is refused rather than run without them: a multi-branch session's
@@ -18,9 +20,10 @@ base launch, its flags and its environment, is the shell script ``multibranch.re
 
 With ``placement.measurement`` ``hosted`` (the default), every test, PRELUDE's included, runs in a measurement sandbox
 of the grant, so the application's container needs no card: ``hosted-cpu`` serves as ``hosted-gpu`` does. Dev
-sandboxes and agents run in ``dev`` sandboxes of the grant, so they need its ``dev`` key and the session directory on
-the storage ``USER_DATA_PATH`` names, which the ``dev`` template mounts at the same path
-(:func:`refuse_unhosted_branches`). With ``local``, which the spec allows only for ``hosted-gpu``, the tests, the dev
+sandboxes and agents run in ``dev`` sandboxes of the grant, so they need its ``dev`` key, a ``dev`` template of the
+session's TP, a grant that fits one lease beside a test, and the session directory on the storage ``USER_DATA_PATH``
+names, which the ``dev`` template mounts at the same path (:func:`refuse_unhosted_branches`); a session with neither
+reads no ``dev`` template, whatever ``dev`` key the host gave. With ``local``, which the spec allows only for ``hosted-gpu``, the tests, the dev
 sandboxes and the agents run in the application's container on its own cards, as ``run`` does on a machine's, and the
 run needs no sandbox of the grant, nor a grant: its framework is the image this container runs, so ``framework.image``
 must name the image the measurement pins name, by its digest (:func:`require_local_image`).
@@ -82,6 +85,8 @@ from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_EN
 from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.toolbox import WorkloadKind
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.scheduling.budget import (
     MB_CLOSE_GRACE_CAP_SECONDS,
     MB_SECONDS_PER_HOUR,
@@ -102,7 +107,7 @@ from hyperloom_multibranch.scheduling.resumption import (
 )
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
-from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
+from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits, lease_shortfall
 from hyperloom_multibranch.toolbox.resume_guard import BaselineNotReusable, check_hosted_baseline_reusable
 
 # hyperloom/hosted/entry.py EXIT_FILE and SESSION_FILE
@@ -126,6 +131,8 @@ RESTART_READER = "restart"
 #: ``exit.json`` and ``session.json`` reach the disk before their names, and are ``664``: the run's next leg, maybe
 #: another account of the group, reads ``session.json`` to take over the session it names.
 _DURABLE = WriteOptions(fsync=True, shared=True)
+#: The values ``multibranch.agentx_objective`` takes, as ``run --agentx-objective`` does.
+_AGENTX_OBJECTIVES = tuple(objective.value for objective in AgentXObjective)
 _ENCODING = "utf-8"
 
 log = logging.getLogger(__name__)
@@ -192,6 +199,8 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         "max-branches": section.get("max_branches"),
         "dev-leases": section.get("dev_leases"),
         "max-parallel-tests": min(spec.max_parallel_tests, parallel_tests),
+        **_agentx_values(section),
+        "boot-budget-sec": _whole_seconds(section, "boot_budget_sec"),
     }
     agents = [f"--autonomous-agent={source}" for source in _agent_sources(section.get("autonomous_agents"))]
     switches = _switches(section)
@@ -201,6 +210,35 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         *agents,
         *switches,
     ]
+
+
+def _agentx_values(section: Mapping[str, Any]) -> dict[str, Any]:
+    """``multibranch.agentx_duration_sec`` and ``multibranch.agentx_objective`` as ``run``'s options; refused when
+    either is not of its type, or is given for a workload other than ``agentx``, as ``run`` refuses its options."""
+
+    duration = _whole_seconds(section, "agentx_duration_sec")
+    objective = section.get("agentx_objective")
+    if objective is not None and objective not in _AGENTX_OBJECTIVES:
+        raise HostedRefused(f"multibranch.agentx_objective must be one of {', '.join(_AGENTX_OBJECTIVES)}")
+    given = [
+        field
+        for field, value in (("agentx_duration_sec", duration), ("agentx_objective", objective))
+        if value is not None
+    ]
+    if given and section.get("workload") != WorkloadKind.AGENTX.value:
+        raise HostedRefused(
+            f"multibranch.{' and multibranch.'.join(given)} are taken by multibranch.workload 'agentx' only"
+        )
+    return {"agentx-duration-sec": duration, "agentx-objective": objective}
+
+
+def _whole_seconds(section: Mapping[str, Any], field: str) -> int | None:
+    """``multibranch.<field>``, a positive whole number of seconds when given; ``run`` checks its range."""
+
+    seconds = section.get(field)
+    if seconds is not None and (isinstance(seconds, bool) or not isinstance(seconds, int) or seconds <= 0):
+        raise HostedRefused(f"multibranch.{field} must be a positive whole number of seconds")
+    return seconds
 
 
 def _switches(section: Mapping[str, Any]) -> list[str]:
@@ -263,10 +301,13 @@ def _agent_sources(sources: object) -> list[str]:
 def refuse_unhosted_branches(settings: RunSettings, host: HostInfo, env: Mapping[str, str]) -> None:
     """Refuse a session whose dev sandboxes or autonomous agents could not run in ``dev`` sandboxes of ``host``'s
     grant: one the grant gives no ``dev`` key or no limits for, or whose session directory is not where ``env``'s
-    ``USER_DATA_PATH`` names, the storage the ``dev`` template mounts at the same path.
+    ``USER_DATA_PATH`` names, the storage the ``dev`` template mounts at the same path; one whose template list has no
+    ``dev`` template of the session's TP; or one whose grant cannot admit a single lease beside a test. Refused here,
+    before the session starts, the run ends for good instead of failing every start of the toolbox. A session that lends
+    no dev sandbox and runs no agent is not looked at.
 
     Raises:
-        HostedRefused: Naming every variable that is missing.
+        HostedRefused: Naming every variable that is missing, the missing template or the grant's shortfall.
     """
 
     if not settings.dev_leases and not settings.agents:
@@ -281,6 +322,26 @@ def refuse_unhosted_branches(settings: RunSettings, host: HostInfo, env: Mapping
         raise HostedRefused(
             f"dev sandboxes and autonomous agents run in the grant's dev sandboxes and need {', '.join(missing)}"
         )
+    _refuse_unlendable(host, settings.workload.tp)
+
+
+def _refuse_unlendable(host: HostInfo, tp: int) -> None:
+    # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
+    from hyperloom_multibranch.toolbox.hosted_toolbox import dev_templates
+
+    try:
+        templates = dev_templates(host.sandbox_templates or {})
+    except ValueError as exc:
+        raise HostedRefused(f"{Var.SANDBOX_TEMPLATES}: {exc}") from exc
+    if tp not in templates:
+        raise HostedRefused(
+            f"dev sandboxes and autonomous agents need a dev template of the session's {tp} cards in"
+            f" {Var.SANDBOX_TEMPLATES}; its dev templates serve {sorted(templates)}"
+        )
+    grant = toolbox_grant(host.grant_limits)
+    shortfall = None if grant is None else lease_shortfall(grant, tp)
+    if shortfall is not None:
+        raise HostedRefused(f"dev sandboxes and autonomous agents cannot run in this grant: {shortfall}")
 
 
 def require_local_image(spec: CampaignSpec, env: Mapping[str, str]) -> None:
@@ -313,7 +374,9 @@ def require_hosted_isolation(spec: CampaignSpec, env: Mapping[str, str]) -> None
     unconfined on this host, as the path that launches it would
     (:func:`~hyperloom_multibranch.scheduling.launch_isolation.launch_isolation`): its specialists always, and the
     agent and dev sandboxes and the tests of a spec measured on this container's cards, which then run here (in the
-    grant's sandboxes otherwise).
+    grant's sandboxes otherwise). An app that is not root, where the root mount cannot be bound, confines its
+    specialists under the layer's ``bin/unshare --user`` when the probe's canary holds there; that tier cannot run a
+    sandbox whose commands join a holder's namespaces, so a spec measured on this container's cards is refused there.
 
     Raises:
         PeersUnavailable: A launch on this host would run unconfined or be refused, naming which and why; the run ends

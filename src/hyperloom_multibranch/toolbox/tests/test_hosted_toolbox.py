@@ -560,6 +560,19 @@ async def test_leases_need_both_the_dev_key_and_the_grant(tmp_path: Path, change
     assert refused.value.code == "unsupported_kind"
 
 
+async def test_a_toolbox_that_lends_nothing_refuses_a_lease_as_unsupported(tmp_path: Path) -> None:
+    """A session that lends no dev sandbox builds no leases even with the dev key and the grant, and reads no ``dev``
+    template: one with no template of the session's cards is not refused."""
+    options = HostedOptions(framework_configs="", dev_leases=False)
+    templates = {"measurement": _RUNNER_MAP, "dev": {"2": _DEVS[1]}}
+    toolbox = _toolbox(None, tmp_path, options=options, grant_limits=_GRANT, sandbox_templates=templates, tp=1)
+
+    assert toolbox.leases is None
+    with pytest.raises(RequestRejected) as refused:
+        await toolbox.lease_branch_sandbox("b1", 1)
+    assert refused.value.code == "unsupported_kind"
+
+
 @pytest.mark.parametrize(
     ("templates", "tp", "message"),
     [

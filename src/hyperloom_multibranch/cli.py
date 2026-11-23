@@ -13,6 +13,10 @@ requests; either takes ``--ep``, the expert-parallel size its server runs at, 1 
 model in the image ``HYPERLOOM_ACTIVE_IMAGE_REF`` names, and a ``--model`` that is a directory is recorded by its
 resolved path, which its benchmark pins. An operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than
 ``--workload``, or that names a benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``, is refused.
+``--boot-budget-sec`` (at most 6 h; the round raises the server's own start timeout above it) is how long, at least,
+a test's server may take to be ready: it only lengthens, so a test runs for its trace window, if any, half an hour more
+and that budget when that is longer than its default timeout, and a boot may take the budget when that is longer than
+half of the timeout.
 ``--max-gpu-hours`` caps the GPU hours the session uses, tests' GPU time plus card time any lease holds: EXPLORE ends
 with ``gpu_hours_exhausted`` once only FINAL's share is left, and FINAL still runs.
 ``--max-llm-usd`` caps the dollars the session's LLM calls cost: EXPLORE
@@ -85,8 +89,9 @@ A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 once as the grant has cards and sandboxes for, and the session stops before the grant ends as ``hosted run`` does. Its
 run id is ``HYPERLOOM_RUN_ID`` when set, the session's id otherwise. A missing or malformed grant variable is a usage
 error naming it. Its ``--dev-leases`` and ``--autonomous-agent`` run in ``dev`` sandboxes of the grant, so they also
-need the ``dev`` key (``HYPERLOOM_SANDBOX_KEY_DEV``) and ``USER_DATA_PATH``, the storage the ``dev`` template mounts at
-the same path; a usage error names what is missing.
+need the ``dev`` key (``HYPERLOOM_SANDBOX_KEY_DEV``), ``USER_DATA_PATH``, the storage the ``dev`` template mounts at
+the same path, a ``dev`` template of the session's TP in ``HYPERLOOM_SANDBOX_TEMPLATES``, and a grant that fits one
+lease beside a test (at least twice the TP in GPUs and two sandboxes); a usage error names what is missing or short.
 ``hosted run`` takes no arguments: it runs the session of the campaign spec a host injected, as
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
 sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`) or on this container's
@@ -98,7 +103,8 @@ environment, agents it cannot isolate, a missing ``hosted`` package, the runner 
 session from running (exit 2 for a refused spec or session, else 1); a crash leaves no ``exit.json`` and is restarted.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
-manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard and breakdown. It
+manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard, breakdown and
+manifest. It
 creates no session directory, so it cannot start one. It carries the stop reason that session ended with, which is
 also what its exit code says: a session that did not run its course stays a failed session however FINAL goes. A
 session that was killed with its machine wrote no report at all; it ends for ``killed``, and so fails too. The
