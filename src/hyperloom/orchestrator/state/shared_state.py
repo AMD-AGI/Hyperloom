@@ -701,8 +701,6 @@ class SharedState(
     # Latest roofline saturation per specialist-domain family and prev->current cycle bottleneck movement.
     saturated_directions: dict[str, dict[str, Any]] = field(default_factory=dict)
     bottleneck_shift: dict[str, Any] = field(default_factory=dict)
-    # Per-cycle advisory focus log; persisted so cycle strategy survives resume.
-    cycle_strategy_log: list[dict[str, Any]] = field(default_factory=list)
 
     # Recipe KB integration fields — Coordinator-only writers.
     recipe_kb_session_id: str = ""

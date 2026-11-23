@@ -313,15 +313,8 @@ class _PhaseStateMixin:
         self.conc_sweep_granted_until_unix = 0.0
 
     def open_macro_cycle(self, *, no_gain_cycle_streak: int) -> None:
-        """Finish the current macro-cycle's strategy row, start the next cycle, and reset its per-cycle state."""
-        finished = self.macro_cycle
-        gain_delta = round(self.cumulative_gain_validated - self.gain_at_cycle_start, 6)
-        rows = [r for r in self.cycle_strategy_log if isinstance(r, dict)]
-        for row in rows:
-            if row.get("cycle") == finished and row.get("gain_delta") is None:
-                row["gain_delta"] = gain_delta
-        self.cycle_strategy_log = rows[-50:]
-        self.macro_cycle = finished + 1
+        """Start the next macro-cycle and reset its per-cycle state."""
+        self.macro_cycle += 1
         self.no_gain_cycle_streak = no_gain_cycle_streak
         self.gain_at_cycle_start = self.cumulative_gain_validated
         self.reset_per_cycle_plateau_state()

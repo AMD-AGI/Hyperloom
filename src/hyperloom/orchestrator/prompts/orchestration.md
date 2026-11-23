@@ -33,9 +33,7 @@ you rather than from what you remember of an earlier turn.
 While SWEEP is open and another macro-cycle is feasible, one turn ends with a
 handoff request: reply in a few plain sentences with the directive the next
 cycle should open on. It becomes the `## CYCLE DIRECTIVE` section of the next
-cycle's system prompt, beside the deterministic focus derived from telemetry
-(bottleneck shift, saturation signals, historical cycle gains) and condensed
-prior-cycle history.
+cycle's system prompt.
 
 <!-- phase: FRAMEWORK_AGENT -->
 <!-- transport: tools -->
