@@ -329,8 +329,6 @@ class _GeakPromotionMixin:
             **graded_axes_of(graded_measurement),
             "workspace": result.get("eval_dir"),
         }
-        if graded_measurement is result:
-            return measurement
         for key in (
             "extra_server_args",
             "effective_extra_server_args",
@@ -359,61 +357,6 @@ class _GeakPromotionMixin:
             if value not in (None, "", {}):
                 measurement[key] = value
         return measurement
-
-    def _compose_geak_launch_delta(
-        self,
-        measurement: dict[str, Any],
-        accepted_config: Mapping[str, Any],
-        *,
-        accepted_flags: str,
-        parsed_envs: dict[str, str],
-    ) -> None:
-        """Write GEAK's accepted launch onto ``measurement`` as a delta over the session's base launch.
-
-        The delta stays in append mode unless the prior stack or GEAK's own return is a complete snapshot, so the
-        base launch's arguments are applied by whoever materializes the round, not copied into the delta.
-        """
-        from hyperloom_common.coerce import to_str_list
-        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
-        from hyperloom.inference_optimizer.grid_server_args import compose_server_args
-        from inference_suite.argv import remove_server_args
-
-        cb_now = self.shared_state.current_best
-        accepted_controls = _accepted_config_controls(accepted_config)
-        prior_controls = _accepted_config_controls(cb_now)
-        launch_controls = {**prior_controls, **accepted_controls}
-        for key in ("remove_args", "unset_envs"):
-            values = list(dict.fromkeys(to_str_list(prior_controls.get(key)) + to_str_list(accepted_controls.get(key))))
-            if values:
-                launch_controls[key] = values
-        complete = accepted_controls.get("args_mode") == "replace"
-        if complete and "remove_args" in accepted_config:
-            launch_controls["remove_args"] = to_str_list(accepted_config["remove_args"])
-        if not launch_controls:
-            return
-        measurement["extra_server_args"] = compose_server_args(
-            base_extra_args="" if complete else cb_now.get("extra_server_args"),
-            variant_extra_args=accepted_flags,
-            remove_args=launch_controls.get("remove_args"),
-            args_mode="replace" if complete else "append",
-        )
-        if not complete and launch_controls.get("remove_args"):
-            # A legacy delta can re-enable a removed flag; a removal kept beside it would prune it again when the
-            # delta is applied.
-            accepted_identity = canonical_fingerprint(accepted_flags, {})
-            launch_controls["remove_args"] = [
-                spec
-                for spec in launch_controls["remove_args"]
-                if canonical_fingerprint(remove_server_args(accepted_flags, [spec]), {}) == accepted_identity
-            ]
-        launch_envs = dict(cb_now.get("extra_envs") or {})
-        for key in accepted_controls.get("unset_envs", []):
-            launch_envs.pop(key, None)
-        launch_envs.update(parsed_envs)
-        measurement["extra_envs"] = launch_envs
-        measurement.update(launch_controls)
-        snapshot = complete or prior_controls.get("args_mode") == "replace"
-        measurement["args_mode"] = "replace" if snapshot else "append"
 
     def _record_geak_lift_attribution(
         self,
@@ -451,11 +394,14 @@ class _GeakPromotionMixin:
         result: dict[str, Any],
         *,
         measured_tput: float,
+        measurement_provenance: Mapping[str, Any],
         provenance: str = "geak_e2e_promote",
         overlay_loaded: bool | None = None,
-        measurement_provenance: Mapping[str, Any] | None = None,
     ) -> bool:
-        """Promote a measured GEAK candidate and return whether the lift succeeded."""
+        """Promote a GEAK candidate on the rebench round that measured it and return whether the lift succeeded.
+
+        ``measurement_provenance`` is that round's winner row: the launch it ran and the axes it was graded on.
+        """
         if not isinstance(result, dict):
             return False
         measured = to_float(measured_tput, 0.0)
@@ -474,21 +420,13 @@ class _GeakPromotionMixin:
         # The lever is stamped here, not guessed from the task kind: GEAK promotes on a proven kernel overlay OR on a
         # config/env-only win, and only this site holds the overlay proof.
         entry_extra = self._geak_stack_entry_extra(result, overlay_loaded=overlay_loaded)
-        graded_measurement = measurement_provenance if isinstance(measurement_provenance, Mapping) else result
         promotion_measurement = self._geak_promotion_measurement(
             result,
-            graded_measurement,
+            measurement_provenance,
             accepted_flags=accepted_flags,
             parsed_envs=parsed_envs,
             kernel_proven=bool(entry_extra.get("accepted_kernels") or entry_extra.get("accepted_heads")),
         )
-        if graded_measurement is result or "extra_server_args" not in graded_measurement:
-            self._compose_geak_launch_delta(
-                promotion_measurement,
-                result.get("accepted_config") or {},
-                accepted_flags=accepted_flags,
-                parsed_envs=parsed_envs,
-            )
         if not self._coord.writeback.lift_to_current_best(
             "geak_e2e", measured, promotion_measurement, entry_extra=entry_extra
         ):
@@ -506,7 +444,7 @@ class _GeakPromotionMixin:
             overlay_loaded=overlay_loaded,
             pre_geak_tput=pre_geak_tput,
         )
-        self._coord.writeback.validate(measured, graded_measurement, source="geak_e2e_promote")
+        self._coord.writeback.validate(measured, measurement_provenance, source="geak_e2e_promote")
         self.shared_state.geak_pending = {}
         return True
 

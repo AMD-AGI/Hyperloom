@@ -124,16 +124,10 @@ def rebench_task(result):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "lane,claimed_intvty,fresh_intvty,accepted",
-    [
-        ("direct", 50.0, None, False),
-        ("direct", 120.0, None, True),
-        ("2b", 100.0, 50.0, False),
-        ("2b", 50.0, 120.0, True),
-        ("2b", 50.0, None, False),
-    ],
+    "claimed_intvty,fresh_intvty,accepted",
+    [(100.0, 50.0, False), (50.0, 120.0, True), (50.0, None, False)],
 )
-async def test_geak_acceptance_requires_native_retention(promotion, lane, claimed_intvty, fresh_intvty, accepted):
+async def test_geak_acceptance_requires_native_retention(promotion, claimed_intvty, fresh_intvty, accepted):
     coord, result, recorder = promotion
     recorder.begin(tput_before=110.0)
     state = coord.shared_state
@@ -164,15 +158,11 @@ async def test_geak_acceptance_requires_native_retention(promotion, lane, claime
             e2e_norm_intvty_p90=fresh_intvty,
             e2e_norm_intvty_p50=fresh_intvty,
         )
-    if lane == "direct":
-        returned = coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=True)
-        assert returned is accepted
-    else:
-        await coord.writeback.promote_to_shared_state(
-            "explore",
-            {"output_throughput": 120.0, "best_variant": measurement, "winners": []},
-            task=rebench_task(result),
-        )
+    await coord.writeback.promote_to_shared_state(
+        "explore",
+        {"output_throughput": 120.0, "best_variant": measurement, "winners": []},
+        task=rebench_task(result),
+    )
     assert not state.geak_pending
     assert resume_pending(state) is (not accepted)
     if accepted:
@@ -180,8 +170,7 @@ async def test_geak_acceptance_requires_native_retention(promotion, lane, claime
         assert state.current_best["final_overlay"] == result["final_overlay"]
         assert len(state.optimization_stack) == len(before_stack) + 1
         assert state.kernel_integrate_attempts["candidate_kernel"]["validated"] is True
-        expected_total = 1500.0 if lane == "direct" else 1200.0 if fresh_intvty is not None else None
-        assert state.current_best.get("total_throughput") == expected_total
+        assert state.current_best.get("total_throughput") == 1200.0
         expected_gain = 20.0
         assert state.cumulative_gain_validated == pytest.approx(expected_gain)
     else:
@@ -195,11 +184,10 @@ async def test_geak_acceptance_requires_native_retention(promotion, lane, claime
             "rebench_did_not_beat_current_best",
         }
     recorder.finish(KernelExit(tput_after=state.current_best["tput"]))
-    if lane == "2b":
-        event = next(event for event in read_timeline_events(coord.session_dir) if event.get("type") == "kernel")
-        rebench = event["ext"]["rebench"]
-        assert len(rebench) == 1
-        assert rebench[0]["decision"] == ("validated" if accepted else "no_promote")
+    event = next(event for event in read_timeline_events(coord.session_dir) if event.get("type") == "kernel")
+    rebench = event["ext"]["rebench"]
+    assert len(rebench) == 1
+    assert rebench[0]["decision"] == ("validated" if accepted else "no_promote")
     state.save(coord.session_dir)
     restored = SharedState.load_or_init(coord.session_dir)
     assert restored.current_best == state.current_best
@@ -338,129 +326,6 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(promotion, closed
     refreshed = next(event for event in read_timeline_events(coord.session_dir) if event.get("type") == "kernel")
     assert integrated_count(refreshed["ext"]) == 0
     assert settled_e2e(refreshed["ext"])["decision"] == "REVERT"
-
-
-def test_geak_complete_config_survives_direct_promotion(promotion):
-    coord, result, recorder = promotion
-    coord.shared_state.current_best["extra_server_args"] = "--disable-radix-cache"
-    result["accepted_config"] = {"flags": "", "env_map": {}, "args_mode": "replace"}
-    coord.phase_kernel._record_geak_candidate({**result, "final_throughput_tok_s": 120.0})
-    assert coord.shared_state.geak_pending["args_mode"] == "replace"
-    assert coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
-    assert coord.shared_state.current_best["extra_server_args"] == ""
-    assert coord.shared_state.current_best["args_mode"] == "replace"
-
-
-@pytest.mark.parametrize("accepted_mode", ["append", "replace"])
-def test_geak_replay_without_launch_fields_preserves_stack_controls(promotion, accepted_mode):
-    coord, result, _ = promotion
-    state = coord.shared_state
-    state.current_best.update(
-        extra_server_args="--chunked-prefill-size 1024 --mem-fraction-static 0.9",
-        extra_envs={"SGLANG_AITER_MLA_PERSIST": "3"},
-        args_mode="replace",
-        remove_args=["--disable-radix-cache"],
-        # A name the snapshot's own ``extra_envs`` does not set: an unset of a key the snapshot asserts is no delta
-        # against that snapshot, so it is not carried.
-        unset_envs=["SGLANG_MOE_PADDING"],
-    )
-    result["accepted_config"] = {"flags": "--mem-fraction-static 0.95", "env_map": {}, "args_mode": accepted_mode}
-    assert coord.phase_kernel.promote_geak_from_candidate(
-        result, measured_tput=120.0, measurement_provenance={"accuracy": 0.9}, overlay_loaded=False
-    )
-    best = state.current_best
-    expected = (
-        "--mem-fraction-static 0.95"
-        if accepted_mode == "replace"
-        else "--chunked-prefill-size 1024 --mem-fraction-static 0.95"
-    )
-    assert best["extra_server_args"] == expected
-    assert best["args_mode"] == "replace"
-    assert best["unset_envs"] == ["SGLANG_MOE_PADDING"]
-    assert best["extra_envs"] == {"SGLANG_AITER_MLA_PERSIST": "3"}
-
-
-def test_geak_removal_is_a_delta_that_keeps_the_other_base_flags(promotion):
-    """The promoted launch stays a delta over the base: the removal travels, the base's own flags are not copied in."""
-    from hyperloom.inference_optimizer.grid_server_args import compose_server_args
-
-    coord, result, _ = promotion
-    coord.shared_state.current_best["extra_server_args"] = "--chunked-prefill-size 1024"
-    result["accepted_config"] = {"remove_args": ["--disable-radix-cache"]}
-    assert coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
-    best = coord.shared_state.current_best
-    assert (best["extra_server_args"], best["args_mode"]) == ("--chunked-prefill-size 1024", "append")
-    assert best["remove_args"] == ["--disable-radix-cache"]
-    assert (
-        compose_server_args(
-            inherited_args="--disable-radix-cache --mem-fraction-static 0.7",
-            base_extra_args=best["extra_server_args"],
-            remove_args=best["remove_args"],
-        )
-        == "--mem-fraction-static 0.7 --chunked-prefill-size 1024"
-    )
-
-
-@pytest.mark.parametrize("returned_removals", [None, [], ["--disable-radix-cache"]])
-def test_complete_geak_return_distinguishes_omitted_and_empty_removals(promotion, returned_removals):
-    coord, result, _ = promotion
-    coord.shared_state.current_best.update(remove_args=["--disable-radix-cache"])
-    result["accepted_config"] = {
-        "flags": "--mem-fraction-static 0.95 --disable-radix-cache",
-        "env_map": {},
-        "args_mode": "replace",
-    }
-    if returned_removals is not None:
-        result["accepted_config"]["remove_args"] = returned_removals
-    assert coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
-    best = coord.shared_state.current_best
-    removed = returned_removals != []
-    assert best["extra_server_args"] == (
-        "--mem-fraction-static 0.95" if removed else "--mem-fraction-static 0.95 --disable-radix-cache"
-    )
-    assert best.get("remove_args", []) == (["--disable-radix-cache"] if removed else [])
-
-
-@pytest.mark.parametrize("explicit_append", [False, True])
-@pytest.mark.parametrize(
-    "readded, removal",
-    [
-        ("--disable-radix-cache", "--disable-radix-cache"),
-        ("--mem-fraction-static 0.8", "--mem-fraction-static"),
-        ("--mem-fraction-static=0.8", "--mem-fraction-static=0.8"),
-    ],
-)
-def test_legacy_readdition_survives_retention_and_rematerialization(promotion, explicit_append, readded, removal):
-    from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
-    from hyperloom.inference_optimizer.grid_server_args import compose_server_args
-
-    coord, result, _ = promotion
-    state = coord.shared_state
-    state.current_best.update(
-        extra_server_args="--chunked-prefill-size 1024",
-        args_mode="replace",
-        remove_args=[removal, "--enable-torch-compile"],
-    )
-    result["accepted_config"] = {"flags": readded, "env_map": {}}
-    if explicit_append:
-        result["accepted_config"]["args_mode"] = "append"
-    assert coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
-    state.save(coord.session_dir)
-    best = SharedState.load_or_init(coord.session_dir).current_best
-    assert canonical_fingerprint(best["extra_server_args"], {}) == canonical_fingerprint(
-        f"--chunked-prefill-size 1024 {readded}", {}
-    )
-    assert best["remove_args"] == ["--enable-torch-compile"]
-    assert best["args_mode"] == "replace"
-    assert (
-        compose_server_args(
-            inherited_args="--enable-torch-compile",
-            variant_extra_args=best["extra_server_args"],
-            remove_args=best["remove_args"],
-            args_mode=best["args_mode"],
-        )
-        == best["extra_server_args"]
-    )
 
 
 @pytest.mark.parametrize(("power_w", "promoted"), [(650.0, True), (812.0, False), (None, False)])
