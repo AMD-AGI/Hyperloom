@@ -245,13 +245,12 @@ _LADDER_RUNGS: tuple[str, ...] = (
     "new code or dependencies.",
     "Rung 2 - In-tree source patch: a unified diff against the INSTALLED source tree "
     "— register the arch, a small forward/config/tokenizer bridge, or backport a "
-    "merged PR. Pure Python, no compile.",
+    "merged PR. Pure Python, no compile; a change touching compiled or "
+    "build-backend files defers to Rung 5.",
     "Rung 3 - Attempt-scoped runtime: the capability lives in a DIFFERENT version of "
     "the framework or of a pure-Python dependency — request that ref / those "
     "packages via needs_runtime (see below) and it is installed into an isolated "
     "per-attempt venv. No compile, no shared-venv mutation.",
-    "Rung 4 - Source localization: localize a merged-PR / vendored closure into the "
-    "source root; changes touching compiled or build-backend files defer to Rung 5.",
     "Rung 5 - Off-loop compiled build: AITER / sgl-kernel / vLLM-from-source, built "
     "in an isolated venv with the same ROCm pins as Rung 3 on the off-loop build "
     "lane. Request it via needs_targeted_build (see below); do not compile inline.",
@@ -261,7 +260,7 @@ _LADDER_KIND_TO_RUNG: tuple[str, ...] = (
     "serve_flag / tokenizer_error -> Rung 1",
     "missing_model_arch (pure registration) / capability_disabled -> Rung 2",
     "missing_model_arch / missing_weight (absent here, present in another version) -> Rung 3",
-    "import_error / merged-PR closure -> Rung 4",
+    "import_error / merged-PR closure -> Rung 2 (pure Python) or Rung 5 (compiled / build-backend files)",
     "hip_kernel_missing / hip_runtime_error / native unsupported_dtype / missing compiled symbol -> Rung 5",
     "resource_constraint (OOM / GPU count) -> NOT a code gap; cannot be patched",
     "accuracy_below_floor / eval_generation_pathology / eval_runtime_failure -> "
@@ -299,7 +298,7 @@ ENABLEMENT_HEURISTICS: tuple[str, ...] = (
 def build_enablement_ladder_book(signature: FailureSignature | None = None) -> str:
     """Render the advisory enablement methodology (the "ladder book").
 
-    Prose only: the two axes (diagnose once / climb as needed), the Rung 0-5
+    Prose only: the two axes (diagnose once / climb as needed), the rung
     ladder, an advisory ``kind -> recommended entry rung`` table, and the folded
     environment-setup / incremental-progress / attempt-runtime / targeted-build guidance. When a
     ``signature`` is given, a one-line entry-rung hint is added; it never routes
