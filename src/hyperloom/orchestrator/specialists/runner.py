@@ -215,7 +215,6 @@ def _workload_prompt_fields(params: dict[str, Any]) -> dict[str, Any]:
         "model_info": _param(params, "model_info", dict),
         "static_recon_checklist": _param(params, "static_recon_checklist", str),
         "enablement_source_context": _param(params, "enablement_source_context", str),
-        "enablement_candidate_refs": _param_texts(params, "enablement_candidate_refs"),
         "enablement_failure_signature": _param(params, "enablement_failure_signature", dict),
         "enablement_accepted_config": {
             "extra_envs": _param(params, "base_extra_envs", dict),

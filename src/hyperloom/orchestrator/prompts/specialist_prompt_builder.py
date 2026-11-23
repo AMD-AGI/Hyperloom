@@ -779,11 +779,9 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     ``enablement_failure_signature``. Kept in the user prompt so the cached
     system prompt stays task-independent.
 
-    The dispatch's own evidence — source lines near the offending site (plus the
-    checkpoint weight inventory on a weight-init failure) and the ranked bridging
-    refs — is folded in from ``enablement_*`` inputs. Without them the mandate
-    renders its generic skeleton, so the agent is told to find a bridge while the
-    candidates already discovered for it are withheld.
+    The dispatch's own evidence — source lines near the offending site, plus the
+    checkpoint weight inventory on a weight-init failure — is folded in from
+    ``enablement_source_context``.
 
     Args:
         inp: Assembled prompt inputs for the current dispatch.
@@ -799,7 +797,6 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
         (inp.framework or "").strip().lower(),
         model or "(target model)",
         FailureSignature.from_dict(inp.enablement_failure_signature),
-        candidate_refs=inp.enablement_candidate_refs,
         source_context=inp.enablement_source_context,
     )
     rows = ["## 1b. ENABLEMENT PLAYBOOK", ""]

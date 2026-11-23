@@ -21,8 +21,6 @@ from hyperloom.orchestrator.enablement.mandate import (
     _resolve_package_version,
     build_enablement_ladder_book,
     build_mandate,
-    build_search_plan,
-    score_enablement_title,
 )
 
 
@@ -67,12 +65,6 @@ def test_task_description_carries_failure_context() -> None:
     assert "Glm5ForCausalLM" in td
 
 
-def test_task_description_lists_candidate_refs() -> None:
-    """Provided candidate refs appear in the mandate, best-first order preserved."""
-    td = _mandate(_sig(), candidate_refs=("PR:123", "PR:456"))
-    assert td.index("PR:123") < td.index("PR:456")
-
-
 def test_task_description_lists_secondary_failure_classes() -> None:
     """A signature with secondary_kinds renders the SECONDARY FAILURE CLASSES line."""
     sig = FailureSignature(
@@ -104,13 +96,6 @@ def test_invariants_present_and_mention_runnable_gate() -> None:
     assert all(inv in td for inv in ENABLEMENT_PATCH_INVARIANTS)
     assert any("RUNNABILITY" in inv for inv in ENABLEMENT_PATCH_INVARIANTS)
     assert any("git apply --check" in inv for inv in ENABLEMENT_PATCH_INVARIANTS)
-
-
-def test_empty_candidate_refs_filtered() -> None:
-    """Blank refs are dropped."""
-    td = _mandate(_sig(), candidate_refs=("", "PR:7", ""))
-    assert "  - PR:7" in td
-    assert "  - \n" not in td
 
 
 def test_source_context_rendered_when_provided() -> None:
@@ -173,68 +158,6 @@ def test_mandate_embeds_ladder_book() -> None:
     td = _mandate(_sig())
     assert "ENABLEMENT METHODOLOGY" in td
     assert "Rung 5" in td
-
-
-# --- discovery: build_search_plan + ranking --------------------------------
-
-
-def test_plan_hip_failure_unions_bridge_repos() -> None:
-    """A HIP failure always unions the ROCm/HIP/aiter bridge repos (default-on)."""
-    sig = classify_failure("RuntimeError: hipErrorNoBinaryForGpu: no kernel image is available")
-    plan = build_search_plan(sig, framework_repo_url=_SGLANG)
-    assert plan.repos[0] == _SGLANG
-    assert "https://github.com/ROCm/aiter.git" in plan.repos
-    assert "https://github.com/ROCm/HIP.git" in plan.repos
-
-
-def test_plan_framework_layer_has_no_bridge_repos() -> None:
-    """A framework-layer failure adds no bridge repos (bridge_layer == 'framework' -> ())."""
-    sig = classify_failure("ValueError: Model architecture 'FooForCausalLM' is not supported")
-    plan = build_search_plan(sig, framework_repo_url=_SGLANG)
-    assert plan.repos == (_SGLANG,)
-
-
-def test_plan_for_a_fork_also_searches_its_upstream() -> None:
-    """A fork's PR list rarely carries Day-1 model support, so its upstream is searched after it."""
-    sig = classify_failure("ValueError: Model architecture 'FooForCausalLM' is not supported")
-    plan = build_search_plan(sig, framework_repo_url="https://github.com/ROCm/vllm.git")
-    assert plan.repos == ("https://github.com/ROCm/vllm.git", "https://github.com/vllm-project/vllm.git")
-
-
-def test_plan_keywords_include_arch_tokens_and_model() -> None:
-    """Offending arch name is tokenized (CamelCase) into ranking keywords."""
-    sig = classify_failure("ValueError: Model architecture 'Glm5ForCausalLM' is not supported")
-    plan = build_search_plan(sig, framework_repo_url=_SGLANG, model="zai-org/GLM-5")
-    assert "glm" in plan.keywords
-    assert "causal" in plan.keywords
-
-
-def test_plan_keywords_lead_with_the_symbol_and_skip_the_model_directory() -> None:
-    """The offending symbol leads the keywords; only the model's name, not its directory, is mined."""
-    sig = classify_failure(
-        "Value error, The checkpoint you are trying to load has model type `glm5_next` "
-        "but Transformers does not recognize this architecture."
-    )
-    plan = build_search_plan(sig, framework_repo_url=_SGLANG, model="/root/models/GLM-5.3-Flash")
-    assert plan.keywords[:2] == ("glm5", "next")
-    assert {"glm", "flash"} <= set(plan.keywords)
-    assert not {"root", "models"} & set(plan.keywords)
-
-
-def test_ranking_prefers_enablement_intent() -> None:
-    """A title that 'adds support' outranks a generic perf title for the same arch."""
-    sig = classify_failure("ValueError: Model architecture 'Glm5ForCausalLM' is not supported")
-    plan = build_search_plan(sig, framework_repo_url=_SGLANG, model="GLM-5")
-    enable = score_enablement_title("Add GLM support to model registry", plan)
-    perf = score_enablement_title("Optimize GLM attention throughput", plan)
-    assert enable > perf
-
-
-def test_empty_title_scores_zero() -> None:
-    """An empty title scores 0.0 without raising."""
-    sig = classify_failure("NotImplementedError: x")
-    plan = build_search_plan(sig, framework_repo_url=_SGLANG)
-    assert score_enablement_title("", plan) == 0.0
 
 
 # --- authoring: source-root / version injection ----------------------------

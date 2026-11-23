@@ -167,14 +167,12 @@ def test_a_round_is_recorded_with_what_it_was_pointed_at(_bound_session):
             attempt=1,
             failure_kind="missing_fused_moe",
             launch_log="ImportError: cannot import name 'fused_moe'",
-            candidate_refs=["v0.4.1", "v0.4.2"],
         )
     )
 
     rows = _ext(_bound_session)["attempts"]["rows"]
     assert len(rows) == 1
     assert rows[0]["failure_kind"] == "missing_fused_moe"
-    assert rows[0]["candidate_refs"] == ["v0.4.1", "v0.4.2"]
     assert "fused_moe" in rows[0]["launch_log_excerpt"]
 
 

@@ -224,7 +224,6 @@ class AuthoringDispatch:
     attempt: int
     failure_kind: str = ""
     launch_log: Any = ""
-    candidate_refs: Any = None
     mode: str = ""
     origin: str = ""
 
@@ -236,7 +235,6 @@ class AuthoringDispatch:
             "failure_kind": str(self.failure_kind or ""),
             "dispatched_at": _now(),
             "launch_log_excerpt": _tail(self.launch_log),
-            "candidate_refs": [str(ref) for ref in _as_list(self.candidate_refs)],
         }
 
 

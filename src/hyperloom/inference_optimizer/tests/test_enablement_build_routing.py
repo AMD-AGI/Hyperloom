@@ -644,7 +644,6 @@ def _make_params_fake(**kw):
     fake.build_enablement_specialist_params = types.MethodType(
         EnablementParams.build_enablement_specialist_params, fake
     )
-    fake._discover_enablement_candidate_refs = lambda plan, *, deadline: []
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
     return fake
