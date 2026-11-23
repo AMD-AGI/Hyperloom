@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Specialist dispatch helpers: warmup, auto-retry, wave fan-out, stalled-domain forcing, and round-entry construction."""
+"""Specialist dispatch helpers: warmup, auto-retry, wave fan-out, and round-entry construction."""
 
 from __future__ import annotations
 
@@ -158,7 +158,7 @@ def _round_entry_extras(
 
 
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
-    """Specialist dispatch: warmup, auto-retry, wave fan-out, stalled-domain forcing, and round-entry construction."""
+    """Specialist dispatch: warmup, auto-retry, wave fan-out, and round-entry construction."""
 
     def __init__(self, coordinator: "Coordinator") -> None:
         super().__init__(coordinator)
@@ -168,7 +168,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     def refuse_patch_without_source(self, params: dict[str, Any], *, task_id: str) -> bool:
         """Whether a warmed patch specialist must be refused because no git source tree backs it.
 
-        A refusal ``last_action_failures`` already lists is not recorded again: the force dispatch retries every tick.
+        A refusal ``last_action_failures`` already lists is not recorded again.
         """
         state = self.shared_state
         error = specialist_patch_preflight_error(params, framework_repo_path=state.framework_repo_path)
