@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -270,12 +271,13 @@ def test_a_variants_unset_envs_are_not_inherited_by_its_round(monkeypatch, suite
 
 
 def test_the_servers_a_round_starts_are_pinned_to_the_cpus_the_host_names(monkeypatch, suite):
-    monkeypatch.setenv("HYPERLOOM_SERVER_CPUS", "32-33,40")
+    cpus = tuple(sorted(os.sched_getaffinity(0))[:2])
+    monkeypatch.setenv("HYPERLOOM_SERVER_CPUS", ",".join(str(cpu) for cpu in cpus))
     _, calls, _ = _play(
         monkeypatch, suite, LaunchAttempt(outcome=READY, metrics=_HOT), launch=GridLaunch(warmup_before_measure=False)
     )
 
-    assert {call.config.server.cpus for call in calls} == {(32, 33, 40)}
+    assert {call.config.server.cpus for call in calls} == {cpus}
 
 
 def test_server_cpus_that_name_no_cpu_list_refuse_the_round_as_an_invalid_config(monkeypatch, suite):
@@ -286,6 +288,18 @@ def test_server_cpus_that_name_no_cpu_list_refuse_the_round_as_an_invalid_config
 
     assert row.status == "failed" and row.error_class == failed_step_error_class(FailedStep.CONFIG_INVALID), row
     assert "HYPERLOOM_SERVER_CPUS" in row.error
+    assert not calls
+
+
+@pytest.mark.parametrize("named", ["100000-100001", "{own},100000"], ids=["none-of-the-host", "one-not-of-the-host"])
+def test_server_cpus_the_host_cannot_run_a_server_on_refuse_the_round_as_an_invalid_config(monkeypatch, suite, named):
+    monkeypatch.setenv("HYPERLOOM_SERVER_CPUS", named.format(own=min(os.sched_getaffinity(0))))
+    row, calls, _ = _play(
+        monkeypatch, suite, LaunchAttempt(outcome=READY), launch=GridLaunch(warmup_before_measure=False)
+    )
+
+    assert row.status == "failed" and row.error_class == failed_step_error_class(FailedStep.CONFIG_INVALID), row
+    assert "HYPERLOOM_SERVER_CPUS" in row.error and "100000" in row.error
     assert not calls
 
 

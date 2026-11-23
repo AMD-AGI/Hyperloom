@@ -28,7 +28,7 @@ from pathlib import Path
 
 import yaml
 
-from hyperloom_common.cpu_list import SERVER_CPUS_ENV, cpu_list
+from hyperloom_common.cpu_list import SERVER_CPUS_ENV, cpu_list, runnable_cpus
 from hyperloom_common.env import env_flag
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.common.ports import pick_server_port
@@ -279,10 +279,20 @@ def _settings(
 
 def _server_cpus() -> tuple[int, ...]:
     named = os.environ.get(SERVER_CPUS_ENV, "").strip()
+    if not named:
+        return ()
     try:
-        return cpu_list(named) if named else ()
+        cpus = cpu_list(named)
     except ValueError as exc:
         raise _refused_at(FailedStep.CONFIG_INVALID, f"{SERVER_CPUS_ENV}: {exc}") from None
+    absent = sorted(set(cpus) - runnable_cpus(cpus))
+    if absent:
+        raise _refused_at(
+            FailedStep.CONFIG_INVALID,
+            f"{SERVER_CPUS_ENV}: {named!r} names {len(absent)} CPU(s) a server cannot run on here, the lowest "
+            f"CPU {absent[0]}",
+        )
+    return cpus
 
 
 def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable[[], None]) -> RoundResult:

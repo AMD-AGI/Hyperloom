@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import os
 import re
+import threading
+from collections.abc import Iterable
 
-__all__ = ["SERVER_CPUS_ENV", "cpu_list"]
+__all__ = ["SERVER_CPUS_ENV", "cpu_list", "runnable_cpus"]
 
 #: The CPUs every measured server is pinned to, apart from the ones builds compile on: a host's deployment fact, read
 #: where a round starts its server.
@@ -31,3 +34,25 @@ def cpu_list(text: str) -> tuple[int, ...]:
             raise ValueError(f"{text!r}: the range {part} runs backwards")
         cpus.extend(range(low, high + 1))
     return tuple(dict.fromkeys(cpus))
+
+
+def runnable_cpus(cpus: Iterable[int]) -> frozenset[int]:
+    """Those of ``cpus`` a process started from this one may run on.
+
+    The kernel is asked for each, by a thread that ends with the question: the affinity this process runs with
+    does not say, because a child may be given a CPU of the host that its parent is not running on.
+    """
+    granted: set[int] = set()
+
+    def ask() -> None:
+        for cpu in cpus:
+            try:
+                os.sched_setaffinity(0, (cpu,))
+            except (OSError, OverflowError):  # no such CPU here: it stays out of the answer
+                continue
+            granted.add(cpu)
+
+    thread = threading.Thread(target=ask)
+    thread.start()
+    thread.join()
+    return frozenset(granted)
