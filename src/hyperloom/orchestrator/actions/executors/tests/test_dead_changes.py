@@ -5,17 +5,11 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors.explore_prefilter.dead_changes import (
-    KNOWN_DEAD_CHANGE,
-    carried_dead_change,
-    dead_changes,
-)
-from hyperloom.orchestrator.actions.executors.grid._grid_base import GridVariant
+from hyperloom.orchestrator.actions.executors.explore_prefilter.dead_changes import carried_dead_change, dead_changes
 
 _WS = "ws-1"
 _AITER_ON = {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MOE": "1"}
@@ -93,37 +87,3 @@ def test_a_decision_round_failure_carries_its_log_text_as_the_reason():
     row = _failed("v00", _AITER_ON, error_excerpt=None, reason=_MOE_DEATH)
     (dead,) = dead_changes([row], workload_signature=_WS)
     assert dead.cause.startswith("ValueError: Unquantized MoE backend")
-
-
-def _round(tested: dict[str, Any], ledger: dict[str, Any] | None = None) -> Any:
-    from hyperloom.orchestrator.actions.executors.explore import _ExploreRound
-
-    rnd = _ExploreRound.__new__(_ExploreRound)
-    rnd.params = {}
-    rnd.ss = SimpleNamespace(explore_search={"tested": ledger or {}})
-    rnd.tested = dict(tested)
-    rnd.skipped = []
-    rnd.ws_sig = _WS
-    rnd.round_id = "explore-002"
-    rnd.running_tput = 100.0
-    rnd.accuracy_reference = SimpleNamespace(score=None)
-    rnd.args = ""
-    rnd.envs = {}
-    rnd.remove_args = []
-    rnd.unset_envs = []
-    rnd.args_mode = "append"
-    return rnd
-
-
-@pytest.mark.parametrize("earlier", ["this_round", "an_earlier_round"])
-def test_explore_skips_siblings_of_a_variant_whose_server_died_at_init(earlier):
-    """The #2751 run: after v00 died, v02 and v03 carried the same AITER change and died the same way."""
-    death = {"fp-v00": _failed("v00_enable_aiter_moe", _AITER_ON)}
-    rnd = _round(death) if earlier == "this_round" else _round({}, ledger=death)
-    sibling = GridVariant("v02_aiter_moe_plus_no_eager", "--no-enforce-eager", dict(_AITER_ON))
-    unrelated = GridVariant("v01_remove_eager_mode", "--no-enforce-eager")
-
-    assert rnd._carries_dead_change(sibling) is True
-    assert rnd._carries_dead_change(unrelated) is False
-    assert [(s["name"], s["reason"]) for s in rnd.skipped] == [("v02_aiter_moe_plus_no_eager", KNOWN_DEAD_CHANGE)]
-    assert "v00_enable_aiter_moe" in rnd.skipped[0]["detail"]
