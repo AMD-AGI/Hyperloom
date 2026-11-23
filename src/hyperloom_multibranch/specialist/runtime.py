@@ -4,8 +4,7 @@
 """The specialist lifecycle: on each branch, the specialist's session and the branch's judge.
 
 A branch started with no direction, no repair, no focus and no third-party agent takes one of the session's
-directions (given at construction, :data:`~hyperloom_multibranch.specialist.directions.DIRECTIONS` by default) that
-no branch has held yet, so the branches split the
+:data:`~hyperloom_multibranch.specialist.directions.DIRECTIONS` that no branch has held yet, so the branches split the
 work instead of all sweeping the same settings, and a stopped branch's direction is not handed out again while another
 was never tried. Once each was held, it takes the one the fewest branches held over the session, then the one the
 fewest running branches hold. A direction given to a branch counts when it is one of these. A direction whose
@@ -241,13 +240,11 @@ class SpecialistRuntime:
         sessions: SessionFactory,
         *,
         pacing: RuntimePacing = RuntimePacing(),
-        directions: tuple[str, ...] = DIRECTIONS,
     ) -> None:
         self._blackboard_for = blackboard_for
         self._judging = judging
         self._sessions = sessions
         self._pacing = pacing
-        self._directions = directions
         self._branches: dict[str, _Branch] = {}
         self._held: Counter[str] = Counter()
         self._closed: set[tuple[str, str]] = set()
@@ -258,7 +255,7 @@ class SpecialistRuntime:
             raise ValueError(f"branch {branch!r} already has a specialist")
         if not task.direction.strip() and task.repair is None and not task.agent and not task.focus:
             task = replace(task, direction=self._least_held(await self._open_on(start_commit)))
-        if task.direction in self._directions:
+        if task.direction in DIRECTIONS:
             self._held[task.direction] += 1
         state = _Branch(branch, start_commit, task, self._blackboard_for(branch))
         self._branches[branch] = state
@@ -440,7 +437,7 @@ class SpecialistRuntime:
     async def _learn_exhausted(self, state: _Branch) -> None:
         """Close, on its head, each of the session's directions that ``state``'s specialist recorded exhausted."""
         for exhausted in exhausted_records(record.entry for record in await state.blackboard.branch_log(state.name)):
-            direction = session_direction(exhausted.direction, self._directions)
+            direction = session_direction(exhausted.direction)
             if direction is None:
                 logger.warning(
                     "an exhausted record of %s names none of the session's directions: %r",
@@ -455,7 +452,7 @@ class SpecialistRuntime:
         # A stop that ends while a log is read takes its branch out of the dict.
         for state in tuple(self._branches.values()):
             await self._learn_exhausted(state)
-        return [d for d in self._directions if (start_commit, d) not in self._closed]
+        return [d for d in DIRECTIONS if (start_commit, d) not in self._closed]
 
     def _least_held(self, open_here: list[str]) -> str:
         running = [state.task.direction for state in self._branches.values()]

@@ -231,7 +231,7 @@ from hyperloom_multibranch.scheduling.settings import DOSSIER_MINUTES
 from hyperloom_multibranch.specialist import autonomous_session
 from hyperloom_multibranch.specialist.component_agent import MAPPED, SplitFailed
 from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
-from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name
 from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionCrashed
@@ -2504,17 +2504,6 @@ async def test_an_unreadable_steering_reply_keeps_every_branch_and_k_as_they_wer
     assert stage.sessions.k == {"b01": 2, "b02": 2, "b03": 2}
 
 
-FOUR_DIRECTIONS = tuple(f"direction {name}: its method" for name in "ABCD")
-
-
-class FourDirections(RefusingRuntime):
-    """The runtime of a session that deals :data:`FOUR_DIRECTIONS`; a test double for a session's directions, not a
-    placeholder."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, directions=FOUR_DIRECTIONS, **kwargs)
-
-
 async def test_every_judge_round_opens_a_branch_for_each_direction_no_branch_has_held_whatever_the_judge_answers(
     tmp_path: Path,
 ) -> None:
@@ -2524,7 +2513,6 @@ async def test_every_judge_round_opens_a_branch_for_each_direction_no_branch_has
     stage = _stage(tmp_path)
     stop = _reply({"open": 0, "branches": [], "stop": [{"branch": "b02", "reason": STOP_REASON}]})
     stage.judge = ScriptedCompletion([OPENING, stop], fallback=_reply({"open": 0}))
-    stage.runtime_type = FourDirections
     stage.settings = replace(SETTINGS, max_hours=2.0)
 
     outcome = await stage.run()
@@ -2533,13 +2521,15 @@ async def test_every_judge_round_opens_a_branch_for_each_direction_no_branch_has
     first, refill = BranchOrigin.FIRST_BATCH.value, BranchOrigin.REFILL.value
     assert _origins(stage) == {"b01": first, "b02": first, "b03": first, "b04": refill}
     assert {branch: runs[0] for branch, runs in stage.sessions.directions.items()} == dict(
-        zip(("b01", "b02", "b03", "b04"), FOUR_DIRECTIONS)
+        zip(("b01", "b02", "b03", "b04"), DIRECTIONS)
     )
+    names = [direction_name(direction) for direction in DIRECTIONS]
     opening, stopping, refilling, *later = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
-    assert opening["undealt_directions"] == ["direction A", "direction B", "direction C", "direction D"]
-    assert (stopping["free_branch_slots"], stopping["undealt_directions"]) == (0, ["direction D"])
-    assert (refilling["free_branch_slots"], refilling["undealt_directions"]) == (1, ["direction D"])
-    assert later and all(state["undealt_directions"] == [] for state in later)
+    assert opening["undealt_directions"] == names
+    assert (stopping["free_branch_slots"], stopping["undealt_directions"]) == (0, names[3:])
+    assert (refilling["free_branch_slots"], refilling["undealt_directions"]) == (1, names[3:])
+    held = [(state["free_branch_slots"], state["undealt_directions"]) for state in later]
+    assert held and all(state == (0, names[4:]) for state in held)
     judged = [row["detail"] for row in _decisions(stage) if row["kind"] == "judge"]
     assert [(detail["open"], detail["unfocused"]) for detail in judged[:3]] == [(3, 3), (0, 0), (1, 1)]
     assert all((detail["open"], detail["unfocused"]) == (0, 0) for detail in judged[3:])

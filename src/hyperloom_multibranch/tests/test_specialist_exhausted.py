@@ -53,12 +53,10 @@ def test_a_record_after_a_note_in_the_same_entry_is_read():
 
 
 def test_a_record_names_a_session_direction_by_its_name_or_the_name_and_a_qualifier():
-    gemm = next(d for d in DIRECTIONS if d.startswith("GEMM tuning:"))
-
-    assert session_direction("GEMM tuning", DIRECTIONS) == gemm
-    assert session_direction(" gemm TUNING (decode blockscale CK table)", DIRECTIONS) == gemm
-    assert session_direction("GEMM tunings", DIRECTIONS) is None
-    assert session_direction("server args/env settings", DIRECTIONS) is None
+    assert session_direction("GEMM tuning") == next(d for d in DIRECTIONS if d.startswith("GEMM tuning:"))
+    assert session_direction(" gemm TUNING (decode blockscale CK table)") == session_direction("GEMM tuning")
+    assert session_direction("GEMM tunings") is None
+    assert session_direction("server args/env settings") is None
 
 
 # Details of blocked_by_tool records in the shape a session writes them.
