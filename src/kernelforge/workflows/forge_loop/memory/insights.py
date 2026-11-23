@@ -25,6 +25,13 @@ MAX_INSIGHTS = 12
 # The longest one entry may be; a longer one is cut at this length.
 MAX_INSIGHT_CHARS = 320
 
+# What stands above the list in a session's prompt.
+_LIST_PREAMBLE = (
+    "What earlier sessions established about this kernel and about measuring it, each with the measurement "
+    "behind it. They describe what was measured, not what to do: build on them, and re-measure one before "
+    "relying on it where your own result disagrees."
+)
+
 _INSIGHT_REQUEST = """\
 After the record, maintain the campaign's insight list. It carries from session
 to session what has been established about this kernel and about measuring it.
@@ -114,12 +121,5 @@ class InsightStore:
         entries = self.read()
         if not entries:
             return ""
-        lines = [
-            "## Campaign insights (cumulative)",
-            "What earlier sessions established about this kernel and about measuring it, each with the measurement "
-            "behind it. They describe what was measured, not what to do: build on them, and re-measure one before "
-            "relying on it where your own result disagrees.",
-            "",
-            *(f"- {entry}" for entry in entries),
-        ]
+        lines = ["## Campaign insights (cumulative)", _LIST_PREAMBLE, "", *(f"- {entry}" for entry in entries)]
         return "\n".join(lines)

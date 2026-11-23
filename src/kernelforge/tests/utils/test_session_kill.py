@@ -58,9 +58,8 @@ def test_only_this_sessions_matching_processes_are_signalled(marked_session, cap
     assert f"sent SIGTERM to pid {mine.pid}" in capsys.readouterr().out
 
 
-def test_the_caller_and_its_ancestors_are_never_candidates(marked_session):
-    _own_env, _started = marked_session
-
+@pytest.mark.usefixtures("marked_session")
+def test_the_caller_and_its_ancestors_are_never_candidates():
     candidates = process_reaping.own_session_processes()
 
     assert os.getpid() not in candidates

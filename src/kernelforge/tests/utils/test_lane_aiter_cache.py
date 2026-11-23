@@ -244,7 +244,8 @@ def _overlay(options) -> dict[str, str]:
     """What a session's CLI is started with, less the mark every session carries to have its leftovers found."""
     env = dict(options.kwargs["env"])
     for name in SessionMark().environment:
-        assert env.pop(name)
+        mark = env.pop(name)
+        assert mark
     return env
 
 

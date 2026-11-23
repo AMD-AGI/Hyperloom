@@ -1169,12 +1169,11 @@ def test_the_insight_list_and_every_measured_negative_reach_the_sessions_that_fo
     kernel = Path(loop.ic.kernel_file)
     prompts: list[str] = []
     record_prompts: list[str] = []
+    flush_insight = "INSIGHT: a quick bench agrees with the driver only after a 1 GiB read flush"
     replies = [
-        "widened the loads\nNEGATIVES: split-K=4 (case +9%)\n"
-        "INSIGHT: a quick bench agrees with the driver only after a 1 GiB read flush",
-        "tried a fused reduce\nNEGATIVES: fused reduce (case +12%)\n"
-        "INSIGHT: a quick bench agrees with the driver only after a 1 GiB read flush\n"
-        "INSIGHT: a raw read probe gives 4.1 TB/s",
+        f"widened the loads\nNEGATIVES: split-K=4 (case +9%)\n{flush_insight}",
+        f"tried a fused reduce\nNEGATIVES: fused reduce (case +12%)\n{flush_insight}\n"
+        + "INSIGHT: a raw read probe gives 4.1 TB/s",
         "nothing new\nNEGATIVES: none",
     ]
 

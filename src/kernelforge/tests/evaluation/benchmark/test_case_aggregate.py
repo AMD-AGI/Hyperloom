@@ -32,14 +32,14 @@ def test_a_geometric_score_counts_a_gain_by_its_ratio() -> None:
     assert score == pytest.approx(1.0)
 
 
-def test_an_unscored_case_is_left_out_of_either_aggregate() -> None:
+@pytest.mark.parametrize("aggregate", list(CaseAggregate))
+def test_an_unscored_case_is_left_out_of_either_aggregate(aggregate: CaseAggregate) -> None:
     baseline = {**_BASELINE, "unscored": 1.0}
     candidate = {**_CANDIDATE, "unscored": 0.001}
 
-    for aggregate in CaseAggregate:
-        assert calculate_mean_case_speedup(candidate, baseline, ["unscored"], aggregate) == pytest.approx(
-            calculate_mean_case_speedup(_CANDIDATE, _BASELINE, aggregate=aggregate)
-        )
+    assert calculate_mean_case_speedup(candidate, baseline, ["unscored"], aggregate) == pytest.approx(
+        calculate_mean_case_speedup(_CANDIDATE, _BASELINE, aggregate=aggregate)
+    )
 
 
 def test_every_independent_measurement_is_scored_under_the_named_aggregate() -> None:

@@ -14,16 +14,15 @@ import pytest
 import kernelforge.workflows.forge_loop.gate.insession_gate as gate_module
 from kernelforge.evaluation.scoring import CaseAggregate
 from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement, GateScope
-from kernelforge.workflows.forge_loop.gate.insession_gate import InSessionGate
 from kernelforge.tests.workflows.forge_loop.gate._gate_workspace import committed_task_workspace
 
 # One case 4x faster, one 5x slower: an arithmetic win of 2.1x and a geometric loss of 0.894x.
 _CANDIDATE_CASE_MS = {"won": 0.25, "lost": 5.0}
 
 
-def _edited_gate(tmp_path: Path, monkeypatch, aggregate: CaseAggregate) -> InSessionGate:
+def _edited_gate(tmp_path: Path, monkeypatch, aggregate: CaseAggregate) -> gate_module.InSessionGate:
     workspace, kernel = committed_task_workspace(tmp_path)
-    gate = InSessionGate(
+    gate = gate_module.InSessionGate(
         GateMeasurement(driver_script=str(workspace / "forge_driver.py"), case_aggregate=aggregate),
         GateScope(kernel_file=str(kernel), target_files=[str(kernel)]),
         baseline_case_times={"won": 1.0, "lost": 1.0},
