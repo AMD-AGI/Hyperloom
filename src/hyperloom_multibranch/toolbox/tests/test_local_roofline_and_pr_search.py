@@ -386,6 +386,16 @@ async def test_a_specialist_gets_the_pull_requests_a_search_finds(
     assert "repo%3Asgl-project%2Fsglang" in url and "moe" in url and "per_page=2" in url
 
 
+async def test_a_search_that_names_no_limit_asks_for_ten_candidates(
+    served: Local, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    github = _install(monkeypatch, Github([_pr(number, "Faster MoE decode") for number in range(1, 13)]))
+    _, record = await _search(served, keywords=["moe"])
+    assert (len(record["result"]["candidates"]), record["result"]["not_shown"]) == (10, 2)
+    ((url, *_),) = github.requests
+    assert "per_page=10" in url
+
+
 async def test_the_search_is_made_by_the_toolbox_process_with_its_token_and_the_token_is_not_in_the_result(
     served: Local, monkeypatch: pytest.MonkeyPatch
 ) -> None:
