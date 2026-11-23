@@ -295,7 +295,7 @@ class SharedState(
     kernel_enabled: bool = True
     # KERNEL-phase backend, recorded once when the session is created: "geak" (default) or "forge".
     kernel_optimizer: str = "geak"
-    # Snapshot of the last GEAK e2e run (result.json + final_launch.sh / bench_e2e.sh handles).
+    # The last GEAK e2e run's result.json, with the verdict the rebench settled on it.
     geak_result: dict[str, Any] = field(default_factory=dict)
     # Terminal result of the phase-level KernelForge rewrite controller.
     kernel_rewrite_controller_result: dict[str, Any] = field(default_factory=dict)

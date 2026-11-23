@@ -279,8 +279,6 @@ class _GeakPromotionMixin:
             "geak_status": str(result.get("status") or ""),
             "baseline_alignment_status": str((result.get("baseline_alignment") or {}).get("status") or ""),
             "final_overlay": result.get("final_overlay") or "",
-            "final_launch_script": result.get("final_launch_script"),
-            "bench_script": result.get("bench_script"),
             "eval_dir": result.get("eval_dir"),
             # GEAK's own within-harness speedups, for the report's audit cross-check.
             "alignment": {
