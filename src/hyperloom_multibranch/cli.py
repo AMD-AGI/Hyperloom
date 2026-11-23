@@ -255,7 +255,7 @@ def run_session(
     anything else is built in it, run the session (:meth:`Session.run`, given ``explore_cap``) and return its exit code.
     A session whose specialists run as an account that cannot reach its directory is refused before it runs
     (:func:`~hyperloom_multibranch.scheduling.specialist_reach.require_specialist_reach`, raising
-    :class:`EnvironmentIncomplete`).
+    :class:`EnvironmentIncomplete`), unless it stops once its map is made: that session starts no specialist.
 
     The session and its peers are built on the event loop they run on, which the specialist tools of the MCP service
     hand every toolbox call to. Whatever the session's processes orphan is reparented to this process, so the session
@@ -276,7 +276,8 @@ async def _run_session(
     layout = create_session(workspace_root(), settings.workload.model_basename, clock)
     report_root(layout.root)
     logging.getLogger().addHandler(_file_handler(layout.scheduler_log))
-    require_specialist_reach(layout.branches)
+    if not settings.stop_after_map:
+        require_specialist_reach(layout.branches)
     host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
     session = Session(settings, peer_factory, host, services)
     return (await session.run(explore_cap)).exit_code
@@ -295,11 +296,8 @@ def final_only(
 def resume(
     persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, until: float, cap: ExploreCap | None
 ) -> int:
-    """:func:`final_only` running :meth:`Session.resume` up to the deadline ``until`` with EXPLORE capped by ``cap``,
-    refused first, as a new session is, when the specialists' account cannot reach the session
-    (:func:`~hyperloom_multibranch.scheduling.specialist_reach.require_specialist_reach`)."""
+    """:func:`final_only` running :meth:`Session.resume` up to the deadline ``until`` with EXPLORE capped by ``cap``."""
 
-    require_specialist_reach(persisted.layout.branches)
     return _over_session(persisted, peer_factory, services, lambda session, ended: session.resume(ended, until, cap))
 
 
@@ -554,6 +552,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == FINAL_ONLY_COMMAND:
                 return final_only(persisted, ready.peer_factory, ready.services)
             deadline = deadline_after_downtime(persisted.layout, Clock().now())
+            require_specialist_reach(persisted.layout.branches)
             return resume(persisted, ready.peer_factory, ready.services, deadline, None)
         return _start(settings, grant)
     except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed, CacheBuildError, ToolboxInputsError) as exc:

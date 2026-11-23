@@ -21,11 +21,11 @@ import os
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.common.agent_isolation import AccountIsolation, AgentIsolation, IsolationRefused
+from hyperloom.common.agent_isolation import AccountIsolation, IsolationRefused
 from hyperloom.common.env_safety import RunAs, RunAsError
 from hyperloom.orchestrator.specialists.launch_env import resolve_launch_isolation
 from hyperloom_common.shared_storage import ownership
@@ -58,10 +58,6 @@ class ProbeResult:
     output: str
 
 
-#: Runs an argv as an account, as a specialist is started, and says how it ended.
-Prober = Callable[[RunAs, Sequence[str]], ProbeResult]
-
-
 def run_as_account(run_as: RunAs, argv: Sequence[str]) -> ProbeResult:
     """``argv`` run as ``run_as`` the way a specialist is started: demoted to its uid, gid and groups, with no
     capability (:meth:`~hyperloom.common.env_safety.RunAs.command`). A probe that cannot be started is an exit of
@@ -83,17 +79,13 @@ def run_as_account(run_as: RunAs, argv: Sequence[str]) -> ProbeResult:
     return ProbeResult(done.returncode, done.stdout + done.stderr)
 
 
-def require_specialist_reach(
-    branches: Path,
-    *,
-    isolation: Callable[[], AgentIsolation] | None = None,
-    prober: Prober | None = None,
-) -> None:
-    """Refuse a session whose specialists run as an account (``isolation``, as the agent runner chooses it) that
-    cannot search the way to ``branches``, the session's branch directory, or write and read a file in a directory
-    below it shared with its group as a launch shares a workspace, asked by running a probe as the account through
-    ``prober``. Nothing is asked when specialists do not run as an account, or when no tier works: the start of the
-    session reports that (:mod:`~hyperloom_multibranch.scheduling.launch_isolation`).
+def require_specialist_reach(branches: Path) -> None:
+    """Refuse a session whose specialists run as an account (as the agent runner chooses it,
+    :func:`~hyperloom.orchestrator.specialists.launch_env.resolve_launch_isolation`) that cannot search the way to
+    ``branches``, the session's branch directory, or write and read a file in a directory below it shared with its
+    group as a launch shares a workspace, asked by running a probe as the account (:func:`run_as_account`). Nothing is
+    asked when specialists do not run as an account, or when no tier works: the start of the session reports that
+    (:mod:`~hyperloom_multibranch.scheduling.launch_isolation`).
 
     Raises:
         EnvironmentIncomplete: The account cannot reach ``branches``, naming the first directory it cannot search with
@@ -101,7 +93,7 @@ def require_specialist_reach(
     """
 
     try:
-        found = (isolation or resolve_launch_isolation)()
+        found = resolve_launch_isolation()
     except (IsolationRefused, RunAsError):
         return
     if not isinstance(found, AccountIsolation):
@@ -116,9 +108,7 @@ def require_specialist_reach(
                 f"cannot share a directory below {branches} with the specialists' account {_account(run_as)}, as each"
                 f" launch shares its workspace: {exc}"
             ) from exc
-        result = (prober or run_as_account)(
-            run_as, ["sh", "-c", PROBE_SCRIPT, "sh", str(probe), *map(str, _way_to(branches))]
-        )
+        result = run_as_account(run_as, ["sh", "-c", PROBE_SCRIPT, "sh", str(probe), *map(str, _way_to(branches))])
     finally:
         _remove(probe)
     if result.returncode != 0:
@@ -178,7 +168,6 @@ def _remove(probe: Path) -> None:
 __all__ = [
     "PROBE_PREFIX",
     "ProbeResult",
-    "Prober",
     "require_specialist_reach",
     "run_as_account",
 ]

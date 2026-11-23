@@ -1579,6 +1579,23 @@ def test_a_resume_continues_the_session_on_the_settings_its_manifest_holds(
     assert 3600.0 + before <= deadline <= 3600.0 + time.time(), "the first deadline, moved by the time it was down"
 
 
+@pytest.mark.usefixtures("ready_environment")
+def test_a_resume_whose_specialists_account_cannot_reach_the_session_is_refused_before_it_runs(
+    agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    layout = _ended_before_final(tmp_path / "session")
+    _killed(layout, ANOTHER_POD)
+    layout.branches.mkdir()  # as every session makes it
+    account = RunAs("hl-specialist", os.getuid(), os.getgid(), (), "/")
+    monkeypatch.setattr(specialist_reach, "resolve_launch_isolation", lambda: agent_isolation.AccountIsolation(account))
+    monkeypatch.setattr(specialist_reach, "run_as_account", lambda *_: ProbeResult(3, f"search\t{tmp_path}\n"))
+
+    assert cli.main(["run", "--resume", str(layout.root)]) == cli.EXIT_FAILED
+
+    assert agent_cli == [] and RESUMED_TO == [], "not resumed"
+    assert f"cannot search {tmp_path}" in capsys.readouterr().err
+
+
 def _hosted_ended_before_final(root: Path) -> PersistedRun:
     """A session measured in a grant's sandboxes, killed with the container it ran in, as a restart of the run in
     another container reads it back: its last decision at 0 and its deadline at 3600."""
