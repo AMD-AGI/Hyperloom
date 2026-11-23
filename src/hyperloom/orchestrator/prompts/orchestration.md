@@ -26,8 +26,8 @@
 ### Operating model — one full state projection per turn
 
 Every turn is self-contained. The message you receive carries the full
-state projection — mission, SharedState, gaps, warm-start, scores, the
-inbox events since your last turn — so decide from what is in front of
+state projection — mission, SharedState, gaps, warm-start, the inbox
+events since your last turn — so decide from what is in front of
 you rather than from what you remember of an earlier turn.
 
 While SWEEP is open and another macro-cycle is feasible, one turn ends with a
