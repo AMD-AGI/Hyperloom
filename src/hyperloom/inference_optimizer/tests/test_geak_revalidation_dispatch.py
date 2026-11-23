@@ -876,6 +876,27 @@ def _render_final(
     return list(section.key_facts), list(section.warnings)
 
 
+@pytest.mark.parametrize(
+    ("pending", "settled", "tag"),
+    [
+        ({"status": "rebench_cancelled"}, {}, "rebench_cancelled"),
+        ({}, {"revalidation_status": "failed"}, "rebench_failed"),
+        ({}, {"revalidation_status": "fallback_failed"}, "rebench_fallback_failed"),
+        ({}, {"revalidation_status": "no_promote"}, None),
+        ({}, {"revalidation_status": "no_material"}, None),
+    ],
+)
+def test_mission_summary_flags_a_candidate_dropped_without_a_verdict(pending, settled, tag) -> None:
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    summary = SharedState(baseline_tput=100.0, geak_pending=pending, geak_result=settled).to_mission_summary()
+
+    if tag is None:
+        assert "dropped unvalidated" not in summary
+    else:
+        assert f"geak candidate dropped unvalidated ({tag})" in summary
+
+
 def test_final_report_surfaces_cancelled_geak_revalidation() -> None:
     """A measured candidate dropped for a missed rebench must be visible."""
     facts, warnings = _render_final(
