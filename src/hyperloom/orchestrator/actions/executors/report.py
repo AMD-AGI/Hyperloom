@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common import io as _common_io
-from inference_suite.server_log import death_excerpt
+from inference_suite.server_log import cause_line, death_excerpt
 from hyperloom.common.agent_isolation import session_isolation_lines
 from hyperloom.common.failure_signature import is_engine_capacity_error
 from hyperloom.common.gain_math import gain_pct
@@ -79,6 +79,8 @@ def _pick_failure_headline(text: str) -> str:
     for ln in lines:
         if is_engine_capacity_error(ln):
             return ln
+    if cause := cause_line(text):
+        return cause
     priority = (
         "out of memory",
         "fatal",

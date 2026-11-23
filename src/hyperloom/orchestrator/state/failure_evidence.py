@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from inference_suite.contracts import FailedStep
+from inference_suite.server_log import cause_line
 
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.failure_signature import SERVE_FLAG, framework_unimportable_line, is_engine_capacity_error
@@ -356,7 +357,7 @@ def failure_from_variant_outcome(
 def render_failure_line(fe: dict[str, Any], *, excerpt_chars: int = 160) -> str:
     """Format one failure evidence packet as a compact single line."""
     error_class = str(fe.get("error_class") or "")
-    body = str(fe.get("error_excerpt") or fe.get("reason") or "")
+    body = cause_line(fe.get("error_excerpt")) or str(fe.get("error_excerpt") or fe.get("reason") or "")
     parts = [
         f"fid={fe.get('failure_id') or ''}",
         f"variant={str(fe.get('variant_name') or '')!r}",

@@ -280,6 +280,21 @@ class TestRenderFailureLine:
         line = render_failure_line(fe)
         assert "warmup_failed" in line
 
+    def test_names_the_cause_rather_than_the_report_of_the_death(self):
+        fe = {
+            "failure_id": "fail.t1.abc",
+            "variant_name": "v00",
+            "stage": FAILURE_STAGE_WARMUP,
+            "error_class": "server_init_dead",
+            "error_excerpt": (
+                "(EngineCore pid=7) ERROR ValueError: no ROCm AITER backend\n"
+                "(APIServer pid=1) RuntimeError: Engine core initialization failed. See root cause above."
+            ),
+        }
+        line = render_failure_line(fe)
+        assert "msg='ValueError: no ROCm AITER backend'" in line
+        assert "Engine core initialization failed" not in line
+
     def test_keeps_the_tail_of_a_long_body(self):
         fe = {
             "failure_id": "fail.t1.abc",

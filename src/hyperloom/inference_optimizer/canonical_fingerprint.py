@@ -15,6 +15,7 @@ from hyperloom.common.perf_metric import agentx_enabled
 
 __all__ = [
     "canonical_fingerprint",
+    "change_items",
     "workload_signature",
 ]
 
@@ -38,6 +39,16 @@ def _is_flag(token: str) -> bool:
     if not stripped:
         return False
     return not stripped[0].isdigit()
+
+
+_APPEND_MODE = "append"
+_ARGS_MODES = frozenset({_APPEND_MODE, "replace"})
+
+
+def _args_mode(value: str | None) -> str:
+    """``value`` as a known args mode; anything else appends."""
+    mode = str(value or _APPEND_MODE).strip().lower()
+    return mode if mode in _ARGS_MODES else _APPEND_MODE
 
 
 def _args_pairs(args_text: str) -> list[list[str]]:
@@ -76,12 +87,10 @@ def canonical_fingerprint(
     """Return the canonical 16-char fingerprint for a variant."""
     args_pairs = _args_pairs(str(extra_args or ""))
     env_pairs = sorted((str(k), str(v)) for k, v in (extra_envs or {}).items())
-    mode = str(args_mode or "append").strip().lower()
-    if mode not in {"append", "replace"}:
-        mode = "append"
+    mode = _args_mode(args_mode)
     remove_list = sorted(_coerce_list(remove_args))
     unset_list = sorted(_coerce_list(unset_envs))
-    if not remove_list and not unset_list and mode == "append":
+    if not remove_list and not unset_list and mode == _APPEND_MODE:
         payload_obj: Any = [args_pairs, [list(p) for p in env_pairs]]
     else:
         payload_obj = [
@@ -98,6 +107,24 @@ def canonical_fingerprint(
         separators=(",", ":"),
     )
     return hashlib.sha1(payload.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
+
+
+def change_items(
+    extra_args: str | None,
+    extra_envs: dict[str, Any] | None,
+    *,
+    remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None,
+    unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
+    args_mode: str = "append",
+) -> frozenset[tuple[str, ...]]:
+    """Return a variant's change as the items its fingerprint is built from, so one change can carry another whole."""
+    items: set[tuple[str, ...]] = {("arg", *pair) for pair in _args_pairs(str(extra_args or ""))}
+    items |= {("env", str(k), str(v)) for k, v in (extra_envs or {}).items()}
+    items |= {("remove", name) for name in _coerce_list(remove_args)}
+    items |= {("unset", name) for name in _coerce_list(unset_envs)}
+    if (mode := _args_mode(args_mode)) != _APPEND_MODE:
+        items.add(("args_mode", mode))
+    return frozenset(items)
 
 
 def workload_signature(
