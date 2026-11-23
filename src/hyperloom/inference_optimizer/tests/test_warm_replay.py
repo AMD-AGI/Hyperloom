@@ -18,7 +18,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
 from hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches import restore_warm_kernel_snapshots
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.phases import prelude as prelude_mod
+from hyperloom.orchestrator.phases import prelude_warm_settle as warm_settle_mod
 from hyperloom.orchestrator.phases import prelude_warm_kernel as prelude_warm_kernel_mod
 from hyperloom.orchestrator.phases.prelude import PRELUDE_ARM_DROPPED
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -2149,7 +2149,7 @@ def test_combined_replay_revert_rolls_back_recipe_and_kernel(tmp_path, monkeypat
         lambda target, sha, manifest=None: recipe_rollbacks.append((target, sha)) or {"ok": True, "errors": []},
     )
     monkeypatch.setattr(
-        prelude_mod,
+        warm_settle_mod,
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []},
     )
@@ -2426,7 +2426,7 @@ def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(tmp_path, monk
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
     kernel_rollbacks: list[list[dict]] = []
     monkeypatch.setattr(
-        prelude_mod,
+        warm_settle_mod,
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []},
     )
@@ -2613,7 +2613,7 @@ def test_rollback_restores_a_nogit_tree_from_its_backups(tmp_path, monkeypatch):
     )
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     monkeypatch.setattr(
-        prelude_mod,
+        warm_settle_mod,
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: {"ok": True, "errors": []},
     )
@@ -2642,7 +2642,7 @@ def test_rollback_of_an_unmutated_tree_is_a_no_op(tmp_path, monkeypatch):
     """An overlay already present is applied as a no-op, so there is nothing to undo."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     monkeypatch.setattr(
-        prelude_mod,
+        warm_settle_mod,
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: {"ok": True, "errors": []},
     )
@@ -2709,7 +2709,7 @@ def test_rollback_restores_every_tree_the_replay_patched(tmp_path, monkeypatch):
     )
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     monkeypatch.setattr(
-        prelude_mod,
+        warm_settle_mod,
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: {"ok": True, "errors": []},
     )

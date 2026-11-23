@@ -59,6 +59,17 @@ source evidence but cannot run shell commands, profiling, or serving benchmarks.
 top-levels the host deploys onto the server, at least one. A task's `repo_root`
 must be one of them; a draft naming any other checkout is refused.
 
+A repository the host snapshot from an installed package holds that package's
+files at its root, so nothing imports it by the package's name. The optional
+`"served_trees": {"<repository>": "<installed package directory>"}` names the
+package each such repository is served from. The controller then creates its
+checkout of the repository as a directory of the package's name, links the
+package's compiled extension modules into it, links the other served trees
+installed in the same directory beside it, and runs forge-loop with
+`--import-name`, so a driver that imports the package measures the checkout
+and a package that finds files beside itself finds them. A repository with no
+served tree is checked out as it always was.
+
 ## forge-loop
 
 Runs one measurement-driven optimization campaign over a single kernel:
@@ -81,6 +92,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | Option | Default | Meaning |
 |:--|:--|:--|
 | `--workspace <dir>` | required | Git workspace the campaign runs in. |
+| `--import-name <package>` | none | The package the workspace is: it holds that package's own files at its root, as a checkout of a snapshot of an installed package does, and is the directory of that name. The directory holding it goes first on the import path of everything the loop runs, so a driver importing the package by name loads the tree being edited. Each lane copy is laid out the same way, with whatever is linked beside the workspace linked beside it too. |
 | `--resume` | off | Continue the campaign already stored in that exact workspace. |
 | `--kernel <file>` | none | The kernel file to optimize. This is the anchor the loop edits. |
 | `--driver <file>` | none | The validation/bench driver. |

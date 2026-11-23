@@ -37,6 +37,7 @@ from kernelforge.config import Config, KnowledgeConfig, agent_runtime_overrides
 from kernelforge.workflows.forge_loop.memory.knowledge_integration import kb_reference_program_md
 from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 from kernelforge.utils.git import git_head
+from kernelforge.utils.import_root import import_path_first
 from kernelforge.utils.gpu_arch import Profiler, arch_profile
 from kernelforge.workflows.forge_loop.campaign.schema import ExperimentSubject
 
@@ -455,6 +456,22 @@ class _SearchPlan:
     assembly: _AssemblyPreparation
 
 
+def _put_workspace_first_on_import_path(import_name: str | None, workspace: Path) -> None:
+    """Make ``workspace`` the package ``import_name`` for everything this process starts.
+
+    The directory holding the workspace goes first on this process's ``PYTHONPATH``, which the driver runs, the agent
+    sessions and the lanes all start from.
+    """
+    if not import_name:
+        return
+    if workspace.name != import_name:
+        raise ForgeLoopError(
+            f"--import-name {import_name} names a package the workspace cannot be imported as: the workspace has to "
+            f"be a directory of that name, and is {workspace}"
+        )
+    os.environ["PYTHONPATH"] = import_path_first(workspace.parent, os.environ.get("PYTHONPATH", ""))
+
+
 def run_forge_loop(request: ForgeLoopRequest, *, publish_result: Callable[[dict], None]) -> dict:
     """Run one forge-loop campaign and return its result.
 
@@ -477,6 +494,7 @@ def run_forge_loop(request: ForgeLoopRequest, *, publish_result: Callable[[dict]
         raise ForgeLoopError("--profile-timeout-sec must be positive")
 
     workspace = Path(request.campaign.workspace_dir).resolve()
+    _put_workspace_first_on_import_path(request.campaign.import_name, workspace)
     workspace_lock = WorkspaceLock(workspace / "forge_experiments" / "workspace.lock")
     try:
         workspace_lock.acquire()

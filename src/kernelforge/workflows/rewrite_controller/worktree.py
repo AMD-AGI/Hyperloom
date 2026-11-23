@@ -19,6 +19,7 @@ from pathlib import Path
 from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.workflows.rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.workflows.rewrite_controller.paths import ControllerLayout
+from kernelforge.workflows.rewrite_controller.served_package import stand_in_for_served_package
 from kernelforge.utils.git import GitError, git
 from kernelforge.config.edit_policy import FORGE_LOOP_OUTPUT_DIRNAME
 from kernelforge.workflows.forge_loop.api import hide_forge_loop_output
@@ -61,6 +62,12 @@ class OperatorWorktree:
     never loaded, and the campaign would measure the unmodified original. Such a
     task borrows the live repository instead, which is why it also carries the
     lock that makes the borrow exclusive.
+
+    A private checkout of a repository the host snapshot from an installed
+    package is not loaded either unless it is imported ahead of that package.
+    It stands under the package's name, ``import_name``, which forge-loop is
+    given so that it puts the directory holding the checkout first on the
+    import path of what the campaign runs.
     """
 
     repo_root: Path
@@ -84,6 +91,7 @@ class OperatorWorktree:
     #: the repository: every in-place task in one repository is handed the same
     #: experiments directory, so the next would inherit this one's state.
     archive_dir: Path | None = None
+    import_name: str = ""
 
 
 def _git_toplevel(repo_root: Path) -> Path:
@@ -439,7 +447,7 @@ def operator_workspace(task: KernelRewriteTask, layout: ControllerLayout) -> Pat
     repo_root = task.repo_root.resolve()
     if needs_inplace(str(repo_root)):
         return repo_root
-    return layout.workspace_dir(task.operator_id)
+    return layout.checkout_dir(task.operator_id, repo_root)
 
 
 def _borrow_live_repository(task: KernelRewriteTask, layout: ControllerLayout) -> OperatorWorktree:
@@ -559,11 +567,16 @@ def release_operator_worktree(worktree: OperatorWorktree | None) -> None:
         release_repo_lock(worktree.lock)
 
 
-def create_operator_worktree(
-    task: KernelRewriteTask,
-    layout: ControllerLayout,
-) -> OperatorWorktree:
-    """Create one fresh branch/worktree from the task's pinned base commit."""
+def _installed_beside(served_tree: Path, layout: ControllerLayout) -> list[Path]:
+    """The other trees the host serves from the directory ``served_tree`` is installed in."""
+    return [tree for tree in layout.served_trees.values() if tree != served_tree and tree.parent == served_tree.parent]
+
+
+def create_operator_worktree(task: KernelRewriteTask, layout: ControllerLayout) -> OperatorWorktree:
+    """Create one fresh branch/worktree from the task's pinned base commit.
+
+    A checkout of a repository the handoff names an installed package for is made the package the campaign imports.
+    """
     repo_root = task.repo_root.resolve()
     if _git_toplevel(repo_root) != repo_root:
         raise WorktreeError(f"repo_root must be the Git top-level directory: {repo_root}")
@@ -571,9 +584,11 @@ def create_operator_worktree(
     if needs_inplace(str(repo_root)):
         return _borrow_live_repository(task, layout)
 
-    workspace = layout.workspace_dir(task.operator_id)
-    if workspace.exists():
-        raise WorktreeError(f"operator workspace already exists and cannot be resumed: {workspace}")
+    task_workspace = layout.workspace_dir(task.operator_id)
+    if task_workspace.exists():
+        raise WorktreeError(f"operator workspace already exists and cannot be resumed: {task_workspace}")
+    workspace = layout.checkout_dir(task.operator_id, repo_root)
+    served_tree = layout.served_trees.get(repo_root)
     workspace.parent.mkdir(parents=True, exist_ok=True)
     branch = _branch_name(task.operator_id)
     try:
@@ -592,6 +607,8 @@ def create_operator_worktree(
             raise WorktreeError(f"worktree HEAD mismatch: created {actual_head}, expected {task.base_commit}")
         kernel_path, source_files = _validate_declared_sources(workspace, task)
         hide_forge_loop_output(workspace)
+        if served_tree is not None:
+            stand_in_for_served_package(workspace, served_tree, _installed_beside(served_tree, layout))
         return OperatorWorktree(
             repo_root=repo_root,
             workspace=workspace,
@@ -599,9 +616,11 @@ def create_operator_worktree(
             base_commit=task.base_commit,
             kernel_path=kernel_path,
             source_files=source_files,
+            import_name=served_tree.name if served_tree is not None else "",
         )
     except Exception:
         _remove_partial_worktree(repo_root, workspace, branch)
+        shutil.rmtree(task_workspace, ignore_errors=True)
         raise
 
 

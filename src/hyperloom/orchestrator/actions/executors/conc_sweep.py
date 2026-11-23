@@ -40,6 +40,21 @@ log = logging.getLogger(__name__)
 _RECORDER_PRODUCER = "orchestrator"
 
 
+def _declined_as_non_serving(state: SharedState) -> dict[str, Any] | None:
+    """The skip envelope for a workload with no request concurrency, or ``None`` to go ahead.
+
+    SWEEP declines these on entry; a sweep also reaches this executor by explicit
+    request, which does not pass through that entry.
+    """
+    from hyperloom.inference_optimizer.framework_registry import is_scriptable
+
+    framework = str(getattr(state, "framework", "") or "")
+    if not is_scriptable(framework):
+        return None
+    log.info("conc_sweep: %s is a non-serving workload; skipping the sweep.", framework)
+    return {"status": "succeeded", "was_skipped": True, "skip_reason": "non_serving_workload"}
+
+
 class ConcSweepExecutor:
     """Run the coordinator-owned concurrency sweep action."""
 
@@ -68,6 +83,10 @@ class ConcSweepExecutor:
         """
         session_dir = Path(ctx.extra["session_dir"])
         state = SharedState.load_or_init(session_dir)
+
+        declined = _declined_as_non_serving(state)
+        if declined is not None:
+            return declined
 
         params = ctx.task.params or {}
         # ``None`` falls back to the ladder run_conc_sweep resolves for this workload; an empty list short-circuits

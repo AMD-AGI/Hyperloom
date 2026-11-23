@@ -172,6 +172,24 @@ These are no longer read and are silently ignored, so drop them:
 from `critic_review` on framework proposals. Consumers that read them should
 stop.
 
+### Required: the Critic stops writing unread session memory
+
+`critic-session-memory/<session_id>/decisions.jsonl` and `context.json` are no
+longer written. Every verdict is still in `critic-workdir/<NNNNNN>/emit.json`,
+which keeps the newest 50 turns, and the applied ones are in the session
+breakdown's phase-event `proposal` rows under `critic_review`.
+`judge_bundle.json` renames `merged_context` to `context` and drops
+`missing_context`; it, `emit.json` and the `reviewed_msg_ids.json` entries
+drop the always-null `decision_id`. Consumers that read them should stop.
+
+`python -m hyperloom.agents.critic.runtime.cli` ignores a request's
+`proposals`, `options` and `decision_id`, and no longer fills an empty
+`context` from the prompt's `Shared session state` section: a request
+without `context` now lists `model` and `framework` in `required_context`.
+Pass `context` explicitly.
+
+`hyperloom optimize` no longer sets `WORKSPACE_PATH`, which nothing read.
+
 ### Required: quantization failure exits 4
 
 A failed `--quantize` prelude now exits 4 instead of 3; exit 3 means only

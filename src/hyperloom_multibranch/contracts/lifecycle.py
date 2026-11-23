@@ -22,7 +22,9 @@ class SpecialistStatus:
     either way. ``unready`` says why its specialist could not be started (its session not built, or its preflight
     failed), empty when it was. ``finished`` says why a third-party agent's run ended of itself (its exit, such as its
     deadline), the other way such a specialist is not restarted; empty when it did not. ``exhausted`` is the summary of
-    the last exhausted record of a specialist that gave up finding nothing to test, empty without one.
+    the last exhausted record of a specialist that gave up finding nothing to test, empty without one. ``crashed_out``
+    says it gave up because its sessions crashed or lost their heartbeat past the restart limits, not because they
+    found nothing to test; a give-up of the latter kind may follow earlier crashes.
     """
 
     running: bool
@@ -33,6 +35,7 @@ class SpecialistStatus:
     unready: str = ""
     finished: str = ""
     exhausted: str = ""
+    crashed_out: bool = False
 
 
 @dataclass(frozen=True)
