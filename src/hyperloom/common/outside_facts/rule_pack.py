@@ -88,7 +88,6 @@ class Entry:
 
     kind: Kind
     body: Mapping[str, Any]
-    project: str = ""
 
 
 _COMMON_FIELDS = frozenset({"kind", "project", "reason", "examples"})
@@ -231,7 +230,7 @@ def _parse_entry(where: str, raw: object) -> Entry:
     _text(where, "reason", raw["reason"])
     body = {name: raw[name] for name in own_fields}
     check(where, body, raw["examples"])
-    return Entry(kind, body, raw["project"])
+    return Entry(kind, body)
 
 
 def _refuse_ambiguous_mapping(path: Path, node: yaml.MappingNode, where: str) -> None:
