@@ -477,8 +477,6 @@ omit = [
     # Shipped sample drivers, reference kernels, and local-wiki assets.
     "src/kernelforge/examples/*",
     "src/kernelforge/knowledge/local_wiki/resources/*",
-    # Byte-identical upstream KB Store SDK; validated by checksum contract tests.
-    "src/kernelforge/knowledge/kb_store/remote_client.py",
     # CLI entry points (argument plumbing; exercised via the CLIs themselves).
     "src/kernelforge/cli/*",
     # The gemm-tune and forge-fuse pipelines and the stages they drive: agent sessions,
@@ -576,7 +574,6 @@ exclude = [
     "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/kb_store_client.py",
     "src/kernelforge/examples",
     "src/kernelforge/knowledge/local_wiki/resources",
-    "src/kernelforge/knowledge/kb_store/remote_client.py",
 ]
 # SonarSource CPD defaults: a clone is at least 100 tokens and 10 lines (jscpd).
 duplication-min-tokens = 100
@@ -676,7 +673,6 @@ extend-exclude = [
     # repository owns.
     "src/kernelforge/examples",
     "src/kernelforge/knowledge/local_wiki/resources",
-    "src/kernelforge/knowledge/kb_store/remote_client.py",
 ]
 
 [tool.ruff.lint]

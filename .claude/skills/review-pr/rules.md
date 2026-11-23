@@ -1012,7 +1012,7 @@ head, then against the same paths at `base.txt`, and match per function name:
 
 ```bash
 radon cc -s -n D $(cut -f3 "$WORK/numstat.txt" | grep '^src/.*\.py$' | grep -v '/tests/' \
-  | grep -v -e '^src/kernelforge/examples/' -e '/_vendor/' -e '/local_wiki/resources/' -e 'kb_store/remote_client.py')
+  | grep -v -e '^src/kernelforge/examples/' -e '/_vendor/' -e '/local_wiki/resources/')
 
 git show "$(cat "$WORK/base.txt")":<path> > "$WORK/base-<name>.py"
 radon cc -s -n D "$WORK/base-<name>.py"

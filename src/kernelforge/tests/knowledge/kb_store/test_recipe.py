@@ -725,7 +725,7 @@ def test_a_refused_candidate_write_raises_the_store_error(
     def refuse(*_args, **_kwargs):
         raise _credentialed_store_error(token)
 
-    monkeypatch.setattr(store, "put_knowledge", refuse)
+    monkeypatch.setattr(store, "replace_knowledge", refuse)
 
     with pytest.raises(KBStoreError, match="the store said .* expired"):
         kb.write_candidate({"tag": "refused"}, files=[spec.flydsl_kernel], speedup=2.0)
@@ -743,7 +743,7 @@ def test_a_refused_flydsl_solution_write_redacts_and_bounds_the_store_error(
     def refuse(*_args, **_kwargs):
         raise _credentialed_store_error(token)
 
-    monkeypatch.setattr(store, "put_knowledge", refuse)
+    monkeypatch.setattr(store, "replace_knowledge", refuse)
 
     outcome = flydsl_kb.write_flydsl_kb_solution(
         flydsl_kb.RewriteKbTarget(spec, str(driver), _remote_config_with_token(tmp_path, token)),
