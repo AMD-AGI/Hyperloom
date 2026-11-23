@@ -148,6 +148,12 @@ def _env_digits(name: str) -> int | None:
     return int(raw) if raw.strip().isdigit() else None
 
 
+def _archived_card() -> dict[str, Any] | None:
+    """The card the session started on, for the record: a resume reads its card again rather than this."""
+    card = gpu_card.session_card()
+    return dataclasses.asdict(card) if card else None
+
+
 def build_manifest(
     session_dir: Path,
     *,
@@ -196,8 +202,7 @@ def build_manifest(
         "model_name": model_name,
         "framework": framework or "sglang",
         "gpu_type": gpu_type,
-        # The card the session started on, archived: a resume reads its card again rather than this.
-        "gpu_card": dataclasses.asdict(card) if (card := gpu_card.session_card()) else None,
+        "gpu_card": _archived_card(),
         "tp": _env_digits("TP"),
         **{key: _prov.get(key) for key in ("gfx_arch", "ep", "graph_mode", "server_args", "server_args_hash")},
         "workload": workload,

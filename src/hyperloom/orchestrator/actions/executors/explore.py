@@ -428,7 +428,7 @@ class _ExploreRound:
             serving=ServingStack.of_recipe(
                 self.bench,
                 model_path=self.target.model_path,
-                gfx=card.gfx if (card := gpu_card.session_card()) else "",
+                gfx=gpu_card.session_gfx(),
                 stack_fingerprint=getattr(self.ss, "stack_fingerprint_meta", None),
             ),
             base_server_args=self._composed_args(self.base_args, self.base_remove_args),

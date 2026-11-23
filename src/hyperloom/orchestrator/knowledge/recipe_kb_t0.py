@@ -715,7 +715,6 @@ def _resolve_t0_identity(
     if not version and framework:
         version = detect_framework_version(framework)
     architectures = getattr(shared_state, "model_architectures", None) or []
-    card = gpu_card.session_card()
     identity: dict[str, Any] = {
         "model": model,
         "hardware": hardware,
@@ -727,7 +726,7 @@ def _resolve_t0_identity(
         # The resolved version with its build suffix, which the session state keeps.
         "session_framework_version": version,
         # Not a canonical-id dimension: the label names the row, the arch decides whose rows it may borrow.
-        "gfx_arch": card.gfx if card else "",
+        "gfx_arch": gpu_card.session_gfx(),
     }
     identity["canonical_id"] = recipe_canonical_id(
         RecipeIdentity(

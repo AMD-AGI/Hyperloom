@@ -15,9 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Collection, Final, Mapping
 
 from hyperloom_common import gpu_card
-from hyperloom_common.coerce import to_float
-
-from hyperloom_common.coerce import first_text, optional_positive_int
+from hyperloom_common.coerce import first_text, optional_positive_int, to_float
 from hyperloom.common.env_safety import (
     ENV_FILE_LIST_SEP,
     env_file_list_elements,
@@ -1057,8 +1055,7 @@ def build_remote_knowledge(
     KernelAgentKB(sections).stage_from_state(state, kernel_optimizer=scope.kernel_optimizer)
 
     merged = merge_staged_sections(sections, files, required=required_columns)
-    missing_columns = required_columns - merged.keys()
-    if missing_columns:
+    if missing_columns := required_columns - merged.keys():
         raise RemoteRecipeValidationError(f"required staged columns are missing: {sorted(missing_columns)!r}")
     value: dict[str, Any] = {name: merged.get(name, {}) for name in RECIPE_SECTIONS}
     # Carrying the prior record forward runs last: it unions rows and refs into the assembled columns, so it must see
@@ -1067,16 +1064,13 @@ def build_remote_knowledge(
     if scope.kernel_optimizer == "forge":
         _adopt_prior_kernel(state, sections, value, files)
     _validate_patch_column(value)
-    card = gpu_card.session_card()
     knowledge = sanitize_shared_knowledge(
         {
             "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
             "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
             **profile.metrics,
             "workload_shape": workload_shape(state, scope=scope),
-            # The KB Store holds ``knowledge`` opaque and cannot filter on this: a reader borrowing across GPU labels
-            # compares it on the rows it fetched.
-            "gfx_arch": card.gfx if card else "",
+            "gfx_arch": gpu_card.session_gfx(),
             "value": value,
             "what_worked": worked,
             "what_failed": _experience(state, "last_action_failures"),

@@ -27,9 +27,8 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         )
 
         scheme = getattr(args, "quantize_scheme", None)
-        card = gpu_card.session_card()
         try:
-            validate_scheme(scheme, card.gfx if card else None)
+            validate_scheme(scheme, gpu_card.session_gfx())
         except SchemeNotSupportedError as exc:
             # Pre-flight config error: skip quantization and continue on the un-quantized model, made
             # machine-detectable via a stdout marker + env var.

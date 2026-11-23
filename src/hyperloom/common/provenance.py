@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom_common.coerce import to_int
-from hyperloom_common.gpu_card import session_card
+from hyperloom_common.gpu_card import session_gfx
 
 from hyperloom.common.outside_facts import ENV_CONC, ENV_EP, ENV_ISL, ENV_MAX_MODEL_LEN, ENV_OSL, ENV_TP
 
@@ -107,8 +107,7 @@ def detect_gfx_arch(env: Mapping[str, str]) -> str | None:
     if raw:
         m = _GFX_RE.search(raw)
         return m.group(0).lower() if m else raw
-    card = session_card(env)
-    return card.gfx if card else None
+    return session_gfx(env) or None
 
 
 def detect_graph_mode(env: Mapping[str, str]) -> str | None:

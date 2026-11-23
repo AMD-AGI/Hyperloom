@@ -44,6 +44,8 @@ SGLANG_REPO = "https://github.com/sgl-project/sglang"
 CONFIG_DIR = "docs/src/snippets/configs/"
 AGENTX_DIR = "docs/src/snippets/agentx/"
 COOKBOOK_DIR = "docs/cookbook/"
+#: The deployment cells of a model, and of an AgentX worker, are components in files of this suffix.
+_CELLS_SUFFIX = ".jsx"
 
 _FRAMEWORK = "sglang"
 #: The command lines that start an sglang server, as the cookbook spells them.
@@ -433,7 +435,7 @@ def _one_strategy(launches: list[tuple[_Recipe, SourceLaunch]]) -> list[SourceLa
 def _cell_launches(query: LaunchQuery, bundle: RepoBundle) -> tuple[SourceLaunch, ...] | SourceMiss:
     found: list[tuple[_Recipe, SourceLaunch]] = []
     reasons = []
-    for path in _paths(bundle, CONFIG_DIR, ".jsx"):
+    for path in _paths(bundle, CONFIG_DIR, _CELLS_SUFFIX):
         text = bundle.text(path)
         if query.model_id not in text:
             continue
@@ -572,7 +574,7 @@ def _agentx_cell_launch(
 
 def _agentx_launches(query: LaunchQuery, bundle: RepoBundle) -> tuple[SourceLaunch, ...] | SourceMiss:
     found: list[SourceLaunch | str] = []
-    for path in _paths(bundle, AGENTX_DIR, ".jsx"):
+    for path in _paths(bundle, AGENTX_DIR, _CELLS_SUFFIX):
         text = bundle.text(path)
         if query.model_id not in text:
             continue
@@ -657,7 +659,7 @@ def _heading_boards(query: LaunchQuery, bundle: RepoBundle) -> frozenset[str]:
     """The boards a page heading is read for: every ``hw`` the cookbook's own cells name, and the query's."""
     boards = {query.board}
     for directory, read in ((CONFIG_DIR, _config_boards), (AGENTX_DIR, _agentx_boards)):
-        for path in _paths(bundle, directory, ".jsx"):
+        for path in _paths(bundle, directory, _CELLS_SUFFIX):
             try:
                 boards.update(hw for hw in read(bundle.text(path)) if isinstance(hw, str) and hw)
             except RecipeSourceError:

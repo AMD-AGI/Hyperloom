@@ -30,6 +30,7 @@ __all__ = [
     "publish_session_card",
     "read_cards",
     "session_card",
+    "session_gfx",
 ]
 
 #: Holds the session's card as JSON, for this process and every child that inherits its environment.
@@ -37,29 +38,22 @@ SESSION_CARD_ENV = "HYPERLOOM_GPU_CARD"
 
 PEAK_PRECISIONS = ("fp32", "fp16", "bf16", "fp8", "fp4")
 
+#: FP32 runs at the same rate on every arch that publishes an FP32 peak.
+_FP32_RATE = 256
 #: Dense matrix FLOPs one compute unit completes per engine-clock cycle, by arch and precision. A card's vendor peak
 #: is its compute units x its top engine clock x this rate; an arch or a precision without an entry has no published
-#: peak to reproduce.
+#: peak to reproduce. BF16 runs at the FP16 rate on every arch, so the table holds the one figure.
 _PEAK_RATES: dict[str, dict[str, int]] = {
-    "gfx942": {"fp32": 256, "fp16": 2048, "bf16": 2048, "fp8": 4096},
-    "gfx950": {"fp32": 256, "fp16": 4096, "bf16": 4096, "fp8": 8192, "fp4": 16384},
-    "gfx1201": {"fp32": 256, "fp16": 1024, "bf16": 1024, "fp8": 2048},
-    "gfx1100": {"fp32": 256, "fp16": 512, "bf16": 512},
-    "gfx1151": {"fp16": 512, "bf16": 512},
+    "gfx942": {"fp32": _FP32_RATE, "fp16": 2048, "fp8": 4096},
+    "gfx950": {"fp32": _FP32_RATE, "fp16": 4096, "fp8": 8192, "fp4": 16384},
+    "gfx1201": {"fp32": _FP32_RATE, "fp16": 1024, "fp8": 2048},
+    "gfx1100": {"fp32": _FP32_RATE, "fp16": 512},
+    "gfx1151": {"fp16": 512},
 }
 
 _CU_KEYS = ("num_compute_units", "compute_units", "num_cu", "cu_count")
-_MIB_PER_UNIT = {
-    "B": 1.0 / 1024**2,
-    "KB": 1.0 / 1024,
-    "KIB": 1.0 / 1024,
-    "MB": 1.0,
-    "MIB": 1.0,
-    "GB": 1024.0,
-    "GIB": 1024.0,
-    "TB": 1024.0**2,
-    "TIB": 1024.0**2,
-}
+#: Each unit ``vram.size`` is reported in, as the power of 1024 it is of a MiB; amd-smi's ``MB`` is binary.
+_UNIT_POWER_OF_MIB = {"B": -2, "KB": -1, "KIB": -1, "MB": 0, "MIB": 0, "GB": 1, "GIB": 1, "TB": 2, "TIB": 2}
 #: A name amd-smi prints when libdrm does not know the card: the device id itself.
 _BARE_DEVICE_ID = re.compile(r"0x[0-9a-f]+", re.IGNORECASE)
 
@@ -84,7 +78,12 @@ class GpuCard:
 
     def same_kind(self, other: GpuCard) -> bool:
         """Whether ``other`` computes like this card: same arch, compute units, memory and top engine clock."""
-        return self._kind() == other._kind()
+        return (self.gfx, self.compute_units, self.memory_mib, self.engine_clock_mhz) == (
+            other.gfx,
+            other.compute_units,
+            other.memory_mib,
+            other.engine_clock_mhz,
+        )
 
     def peak_tflops(self, precision: str) -> float | None:
         """Vendor dense peak at ``precision`` in TFLOPS; ``None`` without an engine clock or a rate for the arch."""
@@ -98,13 +97,10 @@ class GpuCard:
         clock = f"{self.engine_clock_mhz} MHz" if self.engine_clock_mhz is not None else "no engine clock"
         return f"{self.name or 'unnamed card'} ({self.gfx}, {self.compute_units} CUs, {self.memory_mib} MiB, {clock})"
 
-    def _kind(self) -> tuple[str, int, int, int | None]:
-        return (self.gfx, self.compute_units, self.memory_mib, self.engine_clock_mhz)
-
 
 def peak_rate(gfx: str, precision: str) -> int | None:
     """Dense matrix FLOPs per compute unit per engine-clock cycle on ``gfx`` at ``precision``; ``None`` when unknown."""
-    return _PEAK_RATES.get(gfx, {}).get(precision)
+    return _PEAK_RATES.get(gfx, {}).get("fp16" if precision == "bf16" else precision)
 
 
 def board_label(name: str) -> str:
@@ -149,11 +145,15 @@ def one_kind(cards: Iterable[GpuCard]) -> GpuCard:
     cards = list(cards)
     if not cards:
         raise ValueError("no GPU to describe")
-    kinds: dict[tuple[str, int, int, int | None], list[GpuCard]] = {}
+    kinds: list[list[GpuCard]] = []
     for card in cards:
-        kinds.setdefault(card._kind(), []).append(card)
+        same = next((kind for kind in kinds if kind[0].same_kind(card)), None)
+        if same is None:
+            kinds.append([card])
+        else:
+            same.append(card)
     if len(kinds) > 1:
-        described = "; ".join(f"{len(same)}x {same[0].describe()}" for same in kinds.values())
+        described = "; ".join(f"{len(kind)}x {kind[0].describe()}" for kind in kinds)
         raise ValueError(f"the GPUs are not one kind of card: {described}")
     return cards[0]
 
@@ -170,6 +170,12 @@ def session_card(environ: Mapping[str, str] = os.environ) -> GpuCard | None:
     """The card the session published; ``None`` when it read none."""
     published = environ.get(SESSION_CARD_ENV)
     return GpuCard(**json.loads(published)) if published else None
+
+
+def session_gfx(environ: Mapping[str, str] = os.environ) -> str:
+    """The arch of the card the session published; empty when it read none."""
+    card = session_card(environ)
+    return card.gfx if card else ""
 
 
 def _card(row: dict[str, Any]) -> GpuCard:
@@ -228,10 +234,10 @@ def _device_id(value: Any) -> str:
 
 
 def _memory_mib(size: Any) -> int | None:
-    """``vram.size`` in MiB; amd-smi's ``MB`` is binary, and a bare number is in it."""
+    """``vram.size`` in MiB; a bare number is in amd-smi's ``MB``."""
     unit = _text(size.get("unit")) if isinstance(size, dict) else ""
-    value, scale = _number(size), _MIB_PER_UNIT.get(unit.upper() or "MB")
-    return _positive_int(value * scale) if value is not None and scale is not None else None
+    value, power = _number(size), _UNIT_POWER_OF_MIB.get(unit.upper() or "MB")
+    return _positive_int(value * 1024.0**power) if value is not None and power is not None else None
 
 
 def _engine_clock_mhz(clock: Any) -> int | None:

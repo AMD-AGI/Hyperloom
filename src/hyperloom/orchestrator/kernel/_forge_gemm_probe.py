@@ -207,9 +207,4 @@ def _resolve_forge_precision_and_quant(state) -> tuple[str, str]:
 
 
 def _state_fp8_quant_type(state) -> str:
-    card = gpu_card.session_card()
-    return _resolve_fp8_quant_type(
-        _state_setting(state, "model_path"),
-        card.gfx if card else "",
-        _state_framework(state),
-    )
+    return _resolve_fp8_quant_type(_state_setting(state, "model_path"), gpu_card.session_gfx(), _state_framework(state))

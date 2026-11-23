@@ -189,7 +189,7 @@ it.
   everything that depends on the hardware. Child processes read it from
   `HYPERLOOM_GPU_CARD`, and the session manifest archives it as `gpu_card`
   (null when none was read). Before, the board was named by
-  `rocm-smi --showproductname`, then torch, and only nine boards were known.
+  `rocm-smi --showproductname`, then torch, and only ten boards were known.
   Those fallbacks are gone: a host whose `amd-smi` cannot be read prints
   `GPU card        : none read (<reason>)` and runs without a card, so it gets
   no arch-specific launch row, gate or vendor peak. A multi-node session reads
@@ -201,8 +201,8 @@ it.
   overrides the `gfx_arch` provenance records, which is otherwise the card's
   (before: the board table, then `rocminfo`); nothing else reads it.
 - **`--gpu-type` accepts any name and is taken as given.** It no longer has to
-  be one of `mi300x`, `mi308x`, `mi325x`, `mi355x`, `r9700`, `r9600d`, `w7900`,
-  `w7900d` and `radeon8060s`, and a detected board no longer overrides a flag
+  be one of `mi300x`, `mi308x`, `mi325x`, `mi350x`, `mi355x`, `r9700`, `r9600d`,
+  `w7900`, `w7900d` and `radeon8060s`, and a detected board no longer overrides a flag
   that disagrees with it. The flag, then `TARGET_GPU_TYPE`, then `GPU_TYPE`,
   name the label the session's results, recipes and scripts are filed under;
   when that differs from the card's own label, the launch prints a `WARN`

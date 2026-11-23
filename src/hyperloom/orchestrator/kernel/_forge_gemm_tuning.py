@@ -204,7 +204,7 @@ def _forge_gemm_run(state: Any, task_id: str, session_dir: Path) -> _ForgeGemmRu
         tuning_framework="",
         precision=precision,
         quant_type=quant_type,
-        gfx=card.gfx if (card := gpu_card.session_card()) else "",
+        gfx=gpu_card.session_gfx(),
         tp=tp,
         conc=int(state.conc or os.environ.get("CONC") or 64),
         mp=mp,

@@ -187,7 +187,6 @@ def knowledge_document(
 
     metrics = _metrics(snapshot, final, scope)
     lessons = session_lessons(snapshot, final.commit_id)
-    card = gpu_card.session_card()
     return sanitize_shared_knowledge(
         {
             "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
@@ -196,7 +195,7 @@ def knowledge_document(
             "workload_shape": {key: item for key, item in scope.as_dict().items() if key != "kernel_optimizer"},
             # The KB Store holds ``knowledge`` opaque: a reader borrowing across GPU labels compares this on the rows
             # it fetched, as it does on the single-lineage CLOSE's records.
-            "gfx_arch": card.gfx if card else "",
+            "gfx_arch": gpu_card.session_gfx(),
             "value": to_recipe_kb_value(final.recipe),
             "what_worked": list(lessons.worked),
             "what_failed": list(lessons.failed),

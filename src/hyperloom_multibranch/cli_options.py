@@ -144,11 +144,7 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
 
     run.add_argument("--model", help="Model path, or an id found under HL_MODEL_BASE or in the Hugging Face cache.")
     run.add_argument("--framework", help="Inference framework, e.g. vllm or sglang.")
-    run.add_argument(
-        "--gpu-type",
-        type=str.lower,
-        help="The label the session files its results under, in any case, e.g. mi355x; the cards are read, not named.",
-    )
+    run.add_argument("--gpu-type", type=str.lower, help="The label results are filed under, e.g. mi355x, in any case.")
     run.add_argument("--workload", choices=[kind.value for kind in WorkloadKind], help="Workload kind.")
     run.add_argument("--tp", type=int, help="Tensor-parallel size; must fit the machine's cards.")
     run.add_argument(

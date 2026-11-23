@@ -32,21 +32,17 @@ from hyperloom.inference_optimizer.roofline_model_meta import (
 )
 
 
-#: The precision, as :data:`hyperloom_common.gpu_card.PEAK_PRECISIONS` and TraceLens' ``matrix_<precision>`` keys name
-#: it, of each precision tag a run's config or server args can carry.
+#: Each precision, as :data:`hyperloom_common.gpu_card.PEAK_PRECISIONS` and TraceLens' ``matrix_<precision>`` keys name
+#: it, with the other tags a run's config or server args spell it as.
+_PRECISION_SPELLINGS: dict[str, tuple[str, ...]] = {
+    "bf16": ("bfloat16",),
+    "fp16": ("float16",),
+    "fp8": ("float8_e4m3fn", "float8_e5m2"),
+    "fp4": ("mxfp4", "float4"),
+    "fp32": ("float32",),
+}
 _PRECISION_TAGS: dict[str, str] = {
-    "bf16": "bf16",
-    "bfloat16": "bf16",
-    "fp16": "fp16",
-    "float16": "fp16",
-    "fp8": "fp8",
-    "float8_e4m3fn": "fp8",
-    "float8_e5m2": "fp8",
-    "mxfp4": "fp4",
-    "fp4": "fp4",
-    "float4": "fp4",
-    "fp32": "fp32",
-    "float32": "fp32",
+    tag: precision for precision, spellings in _PRECISION_SPELLINGS.items() for tag in (precision, *spellings)
 }
 
 
