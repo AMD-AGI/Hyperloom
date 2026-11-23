@@ -200,6 +200,7 @@ class _Branch:
     unready: str = ""
     finished: str = ""
     exhausted: str = ""
+    crashed_out: bool = False
     judge: BranchJudge | None = None
 
 
@@ -294,6 +295,7 @@ class SpecialistRuntime:
             state.unready,
             state.finished,
             state.exhausted,
+            state.crashed_out,
         )
 
     async def stop(self, branch: str, *, finish_tests: bool = False) -> None:
@@ -384,7 +386,7 @@ class SpecialistRuntime:
                 if not why:
                     await _notice(state, _restarted(error))
                     continue
-                state.session, state.gave_up = None, True
+                state.session, state.gave_up, state.crashed_out = None, True, True
                 await _notice(state, f"the specialist {why} ({error!r}); it is not restarted")
                 return
 

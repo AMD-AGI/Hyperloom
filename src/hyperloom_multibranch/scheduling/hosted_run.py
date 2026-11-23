@@ -107,7 +107,9 @@ from hyperloom_multibranch.scheduling.resumption import (
     recorded_baseline,
     require_resumable,
 )
+from hyperloom_multibranch.scheduling.session_environment import EnvironmentIncomplete
 from hyperloom_multibranch.scheduling.settings import RunSettings
+from hyperloom_multibranch.scheduling.specialist_reach import require_specialist_reach
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits, lease_shortfall
 from hyperloom_multibranch.toolbox.resume_guard import BaselineNotReusable, check_hosted_baseline_reusable
@@ -728,10 +730,12 @@ def hosted_restart_leg(
     session was measured in the grant's sandboxes and its baseline still measures what a test measured now would
     (:func:`~hyperloom_multibranch.toolbox.resume_guard.check_hosted_baseline_reusable`: the same build,
     ``MEASUREMENT_EPOCH``, image, base launch and runner template cards; not the node or the account, which a
-    reschedule changes by design); else ``finish`` (``cli.final_only``), and one warning names why. A file of the
+    reschedule changes by design), and the specialists' account can reach the session
+    (:func:`~hyperloom_multibranch.scheduling.specialist_reach.require_specialist_reach`); else ``finish``
+    (``cli.final_only``), whose FINAL and CLOSE start no specialist, and one warning names why. A file of the
     session this account cannot read (:data:`CANNOT_READ_SESSION`) is such a why: the finish then meets it and ends
     the run as it did before there was a resume, rather than this start crashing with no ``exit.json`` for the host
-    to start again. Writes nothing. Blocks."""
+    to start again. Writes nothing but the reach probe's directory, which it removes. Blocks."""
 
     root = persisted.layout.root
     if not persisted.layout.runner_source.exists():  # what a session measured in the grant's sandboxes cloned
@@ -740,7 +744,8 @@ def hosted_restart_leg(
     try:
         check_hosted_baseline_reusable(persisted.layout.toolbox, persisted.settings.workload.tp)
         deadline = hosted_resume_deadline(persisted, time.time())
-    except (BaselineNotReusable, ResumeRefused, *CANNOT_READ_SESSION) as exc:
+        require_specialist_reach(persisted.layout.branches)
+    except (BaselineNotReusable, ResumeRefused, EnvironmentIncomplete, *CANNOT_READ_SESSION) as exc:
         log.warning("hosted run: finishing %s instead of resuming it: %s", root, exc)
         return finish
     log.info("hosted run: resuming %s up to the deadline its first start set", root)
