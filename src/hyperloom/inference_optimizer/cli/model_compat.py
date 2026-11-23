@@ -363,11 +363,8 @@ def _detect_missing_tokenizer_files(model_path: str, data: dict) -> str | None:
     if any((mdir / f).is_file() for f in _TOKENIZER_ARTIFACT_FILES):
         return None
     return (
-        "model directory ships weights + config but no tokenizer artifacts "
-        f"({', '.join(_TOKENIZER_ARTIFACT_FILES)}); sglang loads a degraded "
-        "fallback tokenizer whose warmup encodes an empty prompt, producing an "
-        "empty (M=0) batch that crashes the aiter rotary_embedding kernel with "
-        "SIGFPE on MI300X (Gensyn-Swarm fine-tune class)."
+        f"model directory has no tokenizer artifacts ({', '.join(_TOKENIZER_ARTIFACT_FILES)}) "
+        "and config.json declares no AutoTokenizer."
     )
 
 

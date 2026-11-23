@@ -93,7 +93,6 @@ def test_detect_diffusers_pipeline_blocks_without_config_json(tmp_path):
 
 
 def test_detect_missing_tokenizer_blocks(tmp_path):
-    # Gensyn-Swarm fine-tune class: weights + config, no tokenizer artifacts.
     m = tmp_path / "no_tok"
     _write_config(
         m,
@@ -729,6 +728,7 @@ def test_unsupported_model_fail_fast_emits_to_langfuse(tmp_path, monkeypatch):
         model,
         model_type="llava",
         architectures=["LlavaForConditionalGeneration"],
+        vision_config={"hidden_size": 1024},
         max_position_embeddings=4096,
     )
     sd = tmp_path / "session_vlm_lf"

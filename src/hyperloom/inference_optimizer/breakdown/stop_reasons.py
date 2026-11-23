@@ -125,8 +125,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "model_context_window_too_small",
         # Model-arch preflight: multimodal/vision model unsupported.
         "unsupported_model_arch",
-        # Pre-run model-config compatibility preflight: config.json is corrupt or declares RoPE scaling without a
-        # max-position field (both crash at load).
+        # Model-config preflight: the model directory is not a loadable text-generation checkpoint.
         "model_config_incompatible",
         # Two baseline attempts failed argument or configuration validation; kept for the sessions that ended on it.
         "baseline_arg_error",

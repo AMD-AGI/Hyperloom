@@ -705,11 +705,7 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
 def _refuse_model_config(args: argparse.Namespace, session_dir: Path, *, model: str, detail: str) -> None:
     """Record the model-config gate failure, persist its stop report and breakdown, and print the refusal."""
     name = Path(model).name or model
-    reason = (
-        f"Model '{name}' has an incompatible config: {detail} Refusing to run "
-        f"before the heavy server bring-up. Upgrade the framework/transformers "
-        f"to a version that supports this model, or skip it on this hardware."
-    )
+    reason = f"Model '{name}' has an incompatible config: {detail} Refusing to run before the heavy server bring-up."
     _persist_gate_stop_report(
         session_dir,
         stop_reason="model_config_incompatible",

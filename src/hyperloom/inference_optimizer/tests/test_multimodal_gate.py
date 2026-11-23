@@ -212,13 +212,14 @@ def test_detect_invalid_config_returns_none(tmp_path):
 
 
 # 2. preflight gate — persists a canonical stop reason and signals exit
-def test_preflight_blocks_gemma3(tmp_path, monkeypatch):
+def test_preflight_blocks_multimodal_model_without_text_decoder(tmp_path, monkeypatch):
     model = tmp_path / "gemma3"
     _write_config(
         model,
         {
             "architectures": ["Gemma3ForConditionalGeneration"],
             "model_type": "gemma3",
+            "vision_config": {"hidden_size": 1024},
         },
     )
     sd = tmp_path / "session"
@@ -282,6 +283,7 @@ def test_preflight_persists_stop_reason_under_strict_env(tmp_path, monkeypatch):
         {
             "architectures": ["Gemma3ForConditionalGeneration"],
             "model_type": "gemma3",
+            "vision_config": {"hidden_size": 1024},
         },
     )
     sd = tmp_path / "session_strict"
@@ -353,6 +355,7 @@ def test_preflight_vision_only_ignores_fallback_flag(tmp_path, monkeypatch):
         {
             "architectures": ["LlavaForConditionalGeneration"],
             "model_type": "llava",
+            "vision_config": {"hidden_size": 1024},
         },
     )
     sd = tmp_path / "session_vision_only"
@@ -400,6 +403,7 @@ def test_preflight_scriptable_xdit_skips_even_vlm_config(tmp_path, monkeypatch):
         {
             "architectures": ["LlavaForConditionalGeneration"],
             "model_type": "llava",
+            "vision_config": {"hidden_size": 1024},
         },
     )
     sd = tmp_path / "session_xdit_vlm"
@@ -417,6 +421,7 @@ def test_preflight_serving_framework_still_blocks_vlm(tmp_path, monkeypatch):
         {
             "architectures": ["LlavaForConditionalGeneration"],
             "model_type": "llava",
+            "vision_config": {"hidden_size": 1024},
         },
     )
     sd = tmp_path / "session_sglang_vlm"

@@ -888,6 +888,7 @@ def test_each_model_gate_failure_is_written_to_final_sbd(
             {
                 "architectures": ["Gemma3ForConditionalGeneration"],
                 "model_type": "gemma3",
+                "vision_config": {"hidden_size": 1024},
             },
         )
     elif scenario == "config":
