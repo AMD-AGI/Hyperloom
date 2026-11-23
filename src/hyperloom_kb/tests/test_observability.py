@@ -317,7 +317,9 @@ def test_a_stopped_service_finishes_the_request_in_flight(tmp_path: Path) -> Non
 
 def test_sigterm_stops_the_service_once_it_drained(tmp_path: Path) -> None:
     home, port = tmp_path / "home", _free_port()
-    env = {key: value for key, value in os.environ.items() if not key.startswith(("ANTHROPIC_", "HYPERLOOM_"))} | {
+    env = {
+        key: value for key, value in os.environ.items() if not key.startswith(("ANTHROPIC_", "OPENAI_", "HYPERLOOM_"))
+    } | {
         "HYPERLOOM_KB_TOKEN": TOKEN,
         "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
     }

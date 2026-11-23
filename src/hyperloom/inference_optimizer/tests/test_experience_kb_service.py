@@ -15,7 +15,6 @@ import pytest
 from hyperloom_kb.tests.database_fixtures import new_database, postgres_conninfo  # noqa: F401
 
 import hyperloom
-from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL
 from hyperloom.inference_optimizer import cli, experience_collect, experience_kb_service
 from hyperloom_kb import (
     GLOBAL_TOKEN_ENV,
@@ -135,12 +134,9 @@ def test_the_service_keeps_its_data_under_user_data_path(monkeypatch, tmp_path: 
     monkeypatch.setenv("HYPERLOOM_KB_URL", "http://127.0.0.1:8787")
 
     experience_kb_service.ensure_service()
-    monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-4-8")
-    experience_kb_service.ensure_service()
 
-    assert [call["home"] for call in started] == [tmp_path / "experience-kb"] * 2
-    assert started[0]["env"]["LOCAL_KB_PLANNER_MODEL"] == DEFAULT_CLAUDE_MODEL
-    assert "LOCAL_KB_PLANNER_MODEL" not in started[1]["env"]
+    assert [call["home"] for call in started] == [tmp_path / "experience-kb"]
+    assert "LOCAL_KB_PLANNER_MODEL" not in started[0]["env"], "the service resolves its planner model itself"
 
 
 def test_ensure_reports_a_service_that_cannot_serve(monkeypatch, capsys) -> None:

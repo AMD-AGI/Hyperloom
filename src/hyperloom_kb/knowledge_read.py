@@ -9,15 +9,14 @@ import hashlib
 import json
 import math
 import os
-import ssl
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
+from hyperloom_common.llm import llm_config
+from hyperloom_common.llm.llm_headers import parse_custom_headers
 from hyperloom_kb.query_view import QueryViewRef, RepeatAnnotations, RetrievalCapability
 from hyperloom_kb.retrieval import (
     CandidateHit,
@@ -38,24 +37,8 @@ from hyperloom_kb.schema import (
     RenderedRef,
 )
 
-PLANNER_TOOL_NAME = "submit_query_plan"
 MAX_QUERY_SIGNALS = 8
-PLANNER_SYSTEM_PROMPT = """You plan one Experience KB read.
-Select only the 1-8 most important retrieval signals.
-Use the submit_query_plan tool and return no prose.
-Call it exactly once with an object whose only top-level field is signals, an array.
-
-A structured signal has source_path, field, value, and weight:
-- source_path must identify a scalar request value such as context.model.
-- field must be copied from allowed_structured_fields.
-- value must exactly copy the scalar at source_path. Never infer a structured value from prose.
-
-A text signal has source_path, text, and weight:
-- source_path must identify decision or a string request value such as context.question.
-- text must exactly copy the full string at source_path.
-
-Every weight is greater than 0 and at most 1. Omit unimportant signals."""
-PLANNER_TOOL_INPUT_SCHEMA: dict[str, JsonValue] = {
+PLANNER_PLAN_SCHEMA: dict[str, JsonValue] = {
     "type": "object",
     "additionalProperties": False,
     "required": ["signals"],
@@ -108,6 +91,23 @@ PLANNER_TOOL_INPUT_SCHEMA: dict[str, JsonValue] = {
         }
     },
 }
+PLANNER_SYSTEM_PROMPT = f"""You plan one Experience KB read.
+Select only the 1-8 most important retrieval signals.
+Reply with one JSON object and no prose: its only top-level field is signals, an array.
+
+A structured signal has source_path, field, value, and weight:
+- source_path must identify a scalar request value such as context.model.
+- field must be copied from allowed_structured_fields.
+- value must exactly copy the scalar at source_path. Never infer a structured value from prose.
+
+A text signal has source_path, text, and weight:
+- source_path must identify decision or a string request value such as context.question.
+- text must exactly copy the full string at source_path.
+
+Every weight is greater than 0 and at most 1. Omit unimportant signals.
+
+The object satisfies this JSON Schema:
+{json.dumps(PLANNER_PLAN_SCHEMA, sort_keys=True)}"""
 PLANNER_PROMPT_HASH = hashlib.sha256(PLANNER_SYSTEM_PROMPT.encode()).hexdigest()
 # A planner call measured 4-6 s; a gateway slower than this fails the read rather than stalling the decision it feeds.
 DEFAULT_PLANNER_TIMEOUT_SECONDS = 20.0
@@ -126,25 +126,35 @@ class QueryPlanValidationError(ValueError):
     """Raised when an LLM plan violates the read contract."""
 
 
+PLANNER_ANTHROPIC = "anthropic"
+PLANNER_OPENAI = "openai"
+PLANNER_COMPONENT = "experience_kb"
+PLANNER_OPERATION = "plan_read"
+# The stop reason each protocol gives a reply cut at its token limit.
+_TRUNCATED = {PLANNER_ANTHROPIC: "max_tokens", PLANNER_OPENAI: "length"}
+
+
 @dataclass(frozen=True)
 class PlannerGatewayConfig:
+    """The gateway reads are planned through, resolved as the main flow's clients resolve theirs
+    (:mod:`hyperloom_common.llm.llm_config`): the Anthropic side when it has a key, else the OpenAI side.
+
+    ``base_url`` is empty on the OpenAI side when the SDK's default serves.
+    """
+
+    protocol: str
     base_url: str
     api_key: str
     model: str
+    headers: tuple[tuple[str, str], ...] = ()
     timeout_seconds: float = DEFAULT_PLANNER_TIMEOUT_SECONDS
     max_output_tokens: int = 1_400
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "base_url",
-            _required_text(self.base_url, "planner base_url").rstrip("/"),
-        )
-        object.__setattr__(
-            self,
-            "api_key",
-            _required_text(self.api_key, "planner api_key"),
-        )
+        if self.protocol not in _TRUNCATED:
+            raise QueryPlanValidationError(f"unknown planner protocol {self.protocol!r}")
+        object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
+        object.__setattr__(self, "api_key", _required_text(self.api_key, "planner api_key"))
         object.__setattr__(self, "model", _required_text(self.model, "planner model"))
         if self.timeout_seconds <= 0 or self.max_output_tokens < 1:
             raise QueryPlanValidationError("planner gateway limits must be positive")
@@ -155,55 +165,60 @@ class PlannerGatewayConfig:
         env: Mapping[str, str] | None = None,
     ) -> PlannerGatewayConfig:
         source = os.environ if env is None else env
-        base_url = str(source.get("ANTHROPIC_BASE_URL") or "")
-        api_key = str(source.get("ANTHROPIC_API_KEY") or source.get("ANTHROPIC_AUTH_TOKEN") or "")
-        model = str(
-            source.get("LOCAL_KB_PLANNER_MODEL") or source.get("CLAUDE_MODEL") or source.get("ANTHROPIC_MODEL") or ""
-        )
-        return cls(
-            base_url,
-            api_key,
-            model,
+        limits = (
             float(source.get("LOCAL_KB_PLANNER_TIMEOUT_SECONDS") or DEFAULT_PLANNER_TIMEOUT_SECONDS),
             int(source.get("LOCAL_KB_PLANNER_MAX_OUTPUT_TOKENS") or 1_400),
         )
+        model = str(source.get("LOCAL_KB_PLANNER_MODEL") or "")
+        if key := llm_config.anthropic_synthesizable_key(source):
+            base_url = (source.get("ANTHROPIC_BASE_URL") or "").strip() or llm_config.DEFAULT_ANTHROPIC_BASE_URL
+            headers = parse_custom_headers(source.get("ANTHROPIC_CUSTOM_HEADERS"), env=source)
+            model = model or llm_config.resolve_forge_llm_model(llm_config.AGENT_BACKEND_CLAUDE, env=source)
+            return cls(PLANNER_ANTHROPIC, base_url, key, model, tuple(sorted(headers.items())), *limits)
+        if not llm_config.openai_agent_credentialed(source):
+            raise QueryPlanValidationError("no Anthropic or OpenAI key names a planner gateway")
+        client = llm_config.resolve_openai_client_config(env=dict(source))
+        model = model or llm_config.resolve_forge_llm_model(llm_config.AGENT_BACKEND_CODEX, env=source)
+        headers = tuple(sorted(client.default_headers.items()))
+        return cls(PLANNER_OPENAI, client.base_url or "", client.api_key, model, headers, *limits)
 
 
-class AnthropicPlannerBackend:
-    """Anthropic-compatible planner backend using only the Python standard library."""
+class GatewayPlannerBackend:
+    """Plans through the main flow's gateway clients, with their headers, connect retries and usage ledger;
+    ``env`` is the environment ``config`` was resolved from."""
 
-    def __init__(
-        self,
-        config: PlannerGatewayConfig,
-        *,
-        opener: Callable[..., Any] = urllib.request.urlopen,
-    ) -> None:
+    def __init__(self, config: PlannerGatewayConfig, env: Mapping[str, str] | None = None) -> None:
         self.config = config
         self.model = config.model
-        self._opener = opener
+        self._env = dict(os.environ if env is None else env)
 
-    def _request_body(self, system_prompt: str, user_payload: str, temperature: float) -> bytes:
-        """The Messages API request body that forces one call of the planner tool."""
-        return json.dumps(
-            {
-                "model": self.model,
-                "max_tokens": self.config.max_output_tokens,
-                "temperature": temperature,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": user_payload}],
-                "tools": [
-                    {
-                        "name": PLANNER_TOOL_NAME,
-                        "description": "Submit the complete weighted Experience retrieval plan.",
-                        "input_schema": PLANNER_TOOL_INPUT_SCHEMA,
-                    }
-                ],
-                "tool_choice": {
-                    "type": "tool",
-                    "name": PLANNER_TOOL_NAME,
-                },
-            }
-        ).encode()
+    def _reply(self, system_prompt: str, user_payload: str, temperature: float) -> tuple[str, str]:
+        config = self.config
+        if config.protocol == PLANNER_OPENAI:
+            client = llm_config.get_openai_client(env=self._env, timeout=config.timeout_seconds)
+            chat = llm_config.chat_completion(
+                client,
+                component=PLANNER_COMPONENT,
+                operation=PLANNER_OPERATION,
+                model=config.model,
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_payload}],
+                max_tokens=config.max_output_tokens,
+                temperature=temperature,
+            )
+            return chat.text, chat.finish_reason or ""
+        with llm_config.get_anthropic_client(env=self._env, timeout=config.timeout_seconds) as client:  # type: ignore[attr-defined]
+            message = llm_config.anthropic_messages(
+                client,
+                component=PLANNER_COMPONENT,
+                operation=PLANNER_OPERATION,
+                timeout_s=config.timeout_seconds,
+                model=config.model,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_payload}],
+                max_tokens=config.max_output_tokens,
+                temperature=temperature,
+            )
+        return message.text, message.stop_reason or ""
 
     def complete(
         self,
@@ -212,49 +227,14 @@ class AnthropicPlannerBackend:
         user_payload: str,
         temperature: float,
     ) -> str:
-        body = self._request_body(system_prompt, user_payload, temperature)
-        request = urllib.request.Request(
-            f"{self.config.base_url}/v1/messages",
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "anthropic-version": "2023-06-01",
-                "x-api-key": self.config.api_key,
-            },
-            method="POST",
-        )
         try:
-            with self._opener(
-                request,
-                timeout=self.config.timeout_seconds,
-                context=ssl.create_default_context(),
-            ) as response:
-                payload = json.loads(response.read())
-        except (
-            OSError,
-            TimeoutError,
-            urllib.error.HTTPError,
-            urllib.error.URLError,
-            ValueError,
-        ) as exc:
-            raise PlannerExecutionError(f"planner gateway failed with {type(exc).__name__}") from exc
-        content = payload.get("content") if isinstance(payload, dict) else None
-        if not isinstance(content, list):
-            raise PlannerExecutionError("planner gateway returned no content")
-        stop_reason = str(payload.get("stop_reason") or "")
-        if stop_reason == "max_tokens":
+            text, stop_reason = self._reply(system_prompt, user_payload, temperature)
+        except Exception as exc:  # isolation boundary: a failed gateway call fails the read, not the service
+            raise PlannerExecutionError(f"planner gateway failed with {type(exc).__name__}: {exc}") from exc
+        if stop_reason == _TRUNCATED[self.config.protocol]:
             raise PlannerExecutionError("planner gateway truncated output at max_tokens")
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "tool_use" and item.get("name") == PLANNER_TOOL_NAME:
-                tool_input = item.get("input")
-                if not isinstance(tool_input, dict):
-                    raise PlannerExecutionError("planner tool input is not an object")
-                return _canonical(tool_input)
-        text = "".join(
-            str(item.get("text") or "") for item in content if isinstance(item, dict) and item.get("type") == "text"
-        ).strip()
-        if not text:
-            raise PlannerExecutionError("planner gateway did not call submit_query_plan")
+        if not text.strip():
+            raise PlannerExecutionError("planner gateway returned no text")
         return text
 
 
@@ -1176,8 +1156,10 @@ def _prompt_block(execution: WeightedQueryExecution) -> str:
 
 __all__ = [
     "PLANNER_PROMPT_HASH",
+    "PLANNER_ANTHROPIC",
+    "PLANNER_OPENAI",
     "PLANNER_SYSTEM_PROMPT",
-    "AnthropicPlannerBackend",
+    "GatewayPlannerBackend",
     "KnowledgeReadError",
     "KnowledgeReadService",
     "LLMQueryPlanner",

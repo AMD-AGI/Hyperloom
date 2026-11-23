@@ -255,7 +255,7 @@ optional: unset, the workspace uses only its local KB. See
 | `HYPERLOOM_GLOBAL_KB_URL` | Unset | A global Experience KB to share Experiences with; `experience_kb_service push` and `pull` sync with it. |
 | `HYPERLOOM_GLOBAL_KB_TOKEN` | Unset | The global KB's access token; required with its URL. |
 | `HYPERLOOM_KB_AUTO_PUSH` | Off | `1` pushes each run's Experiences to the global KB after they are written locally. |
-| `LOCAL_KB_PLANNER_MODEL` | `CLAUDE_MODEL` | The model the Experience service plans reads with, through `ANTHROPIC_BASE_URL`. |
+| `LOCAL_KB_PLANNER_MODEL` | `CLAUDE_MODEL`, or `CODEX_MODEL` on the OpenAI side | The model the Experience service plans reads with, through the Anthropic gateway when it has a key, else the OpenAI one. |
 | `LOCAL_KB_PLANNER_TIMEOUT_SECONDS` | `20` | How long the Experience service waits on its planner before a read fails. A run waits 30 s per read, so a value above that makes every read fail. |
 | `LOCAL_KB_PLANNER_MAX_OUTPUT_TOKENS` | `1400` | The most output tokens the Experience service's planner may spend on one read plan. A plan cut at this limit fails its read with `planner gateway truncated output at max_tokens`. |
 

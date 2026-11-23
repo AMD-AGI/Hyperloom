@@ -16,7 +16,6 @@ import sys
 from pathlib import Path
 
 from hyperloom_common.env import EnvValueError, env_bool
-from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom_kb import (
     GLOBAL_URL_ENV,
@@ -51,7 +50,6 @@ HOME_ENV = "HYPERLOOM_KB_HOME"
 MAPPING = "hyperloom-sbd-v6"
 AUTO_PUSH_ENV = "HYPERLOOM_KB_AUTO_PUSH"
 _PLACEHOLDER = "<PLEASE_FILL_IN>"
-_PLANNER_MODEL_KEYS = ("LOCAL_KB_PLANNER_MODEL", "CLAUDE_MODEL", "ANTHROPIC_MODEL")
 
 
 def mapping_schema_ref() -> str:
@@ -131,10 +129,7 @@ def ensure_service(*, restart: bool = True) -> LocalService | None:
     config = RemoteConfig.from_env(timeout_seconds=REQUEST_TIMEOUT_SECONDS)
     if config is None or not is_loopback(config.base_url):
         return None
-    env = dict(os.environ)
-    if not any(env.get(key) for key in _PLANNER_MODEL_KEYS):
-        env["LOCAL_KB_PLANNER_MODEL"] = DEFAULT_CLAUDE_MODEL
-    return ensure_local_service(config, service_home(), env=env, restart=restart)
+    return ensure_local_service(config, service_home(), env=dict(os.environ), restart=restart)
 
 
 def _workspace_client(command: str) -> RemoteClient:

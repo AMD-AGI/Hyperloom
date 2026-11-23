@@ -3,20 +3,24 @@
 
 from __future__ import annotations
 
+import functools
 import json
+import types
 from datetime import datetime, timezone
 
+import httpx
+import openai
 import pytest
 
 from hyperloom_kb import (
     LEXICAL_FUZZY_PROVIDER_REF,
-    AnthropicPlannerBackend,
     Experience,
     ExperienceDeclaration,
     ExperienceStatus,
     FieldDeclaration,
     FieldKind,
     FieldRole,
+    GatewayPlannerBackend,
     InMemoryExperienceStore,
     InMemoryQueryViewStore,
     KnowledgeReadService,
@@ -29,6 +33,7 @@ from hyperloom_kb import (
     PlannerGatewayConfig,
     Provenance,
     QueryExecutor,
+    QueryPlanValidationError,
     ReadRequest,
     ReadStatus,
     ReadTrace,
@@ -38,6 +43,7 @@ from hyperloom_kb import (
     WeightedQueryPlan,
     derive_experience_id,
 )
+from hyperloom_common.llm import llm_config
 from hyperloom_kb.tests.view_fixtures import publish_view, submit_complete
 
 NOW = datetime(2026, 9, 22, tzinfo=timezone.utc)
@@ -105,20 +111,6 @@ class FakePlannerBackend:
         response = self.responses[min(self.calls, len(self.responses) - 1)]
         self.calls += 1
         return response
-
-
-class FakeHTTPResponse:
-    def __init__(self, payload: dict) -> None:
-        self.payload = payload
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        return False
-
-    def read(self) -> bytes:
-        return json.dumps(self.payload).encode()
 
 
 def _planner_response() -> str:
@@ -209,46 +201,121 @@ def test_llm_planner_retries_invalid_output_and_returns_validated_plan() -> None
     assert WeightedQueryPlan.from_dict(plan.to_dict()) == plan
 
 
-def test_anthropic_planner_backend_reads_text_response() -> None:
-    seen = {}
+GATEWAY = {
+    "ANTHROPIC_BASE_URL": "https://gateway.test/Unified",
+    "ANTHROPIC_API_KEY": "secret",
+    "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}",
+}
+OPENAI_GATEWAY = {
+    "OPENAI_BASE_URL": "https://gateway.test/v1",
+    "OPENAI_API_KEY": "sk",
+    "OPENAI_CUSTOM_HEADERS": "X-Team: kb",
+}
 
-    def opener(request, **kwargs):
-        seen["url"] = request.full_url
-        seen["timeout"] = kwargs["timeout"]
-        return FakeHTTPResponse(
-            {
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "name": "submit_query_plan",
-                        "input": json.loads(_planner_response()),
-                    }
-                ],
-                "stop_reason": "tool_use",
-            }
-        )
 
-    backend = AnthropicPlannerBackend(
-        PlannerGatewayConfig(
-            "https://planner.example/api",
-            "secret",
-            "test-model",
-            timeout_seconds=5,
-        ),
-        opener=opener,
+def _messages_reply(text: str, stop_reason: str) -> bytes:
+    events = (
+        {"type": "message_start", "message": {"content": [], "usage": {"input_tokens": 1, "output_tokens": 0}}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": stop_reason}, "usage": {"output_tokens": 1}},
+        {"type": "message_stop"},
     )
+    return "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events).encode()
 
-    text = backend.complete(
-        system_prompt="system",
-        user_payload="payload",
-        temperature=0,
+
+def _chat_reply(text: str, finish_reason: str) -> bytes:
+    choice = {"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": finish_reason}
+    return json.dumps(
+        {"id": "c", "object": "chat.completion", "created": 0, "model": "m", "choices": [choice]}
+    ).encode()
+
+
+def _gateway(monkeypatch: pytest.MonkeyPatch, reply: bytes, status: int = 200) -> list[httpx.Request]:
+    """Answers both protocols' clients with ``reply`` through the main flow's own client construction."""
+
+    seen: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(status, content=reply)
+
+    transport = httpx.MockTransport(handle)
+    stub = types.SimpleNamespace(
+        Client=functools.partial(httpx.Client, transport=transport),
+        ConnectError=httpx.ConnectError,
+        ConnectTimeout=httpx.ConnectTimeout,
     )
+    monkeypatch.setattr(llm_config, "_httpx_module", lambda: stub)
+    monkeypatch.setattr(
+        openai, "OpenAI", functools.partial(openai.OpenAI, http_client=httpx.Client(transport=transport))
+    )
+    return seen
 
-    assert json.loads(text)["signals"]
-    assert seen == {
-        "url": "https://planner.example/api/v1/messages",
-        "timeout": 5,
-    }
+
+def _complete(env: dict[str, str]) -> str:
+    backend = GatewayPlannerBackend(PlannerGatewayConfig.from_env(env), env)
+    return backend.complete(system_prompt="system", user_payload="payload", temperature=0)
+
+
+def test_the_planner_reads_through_the_anthropic_gateway_with_its_custom_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _gateway(monkeypatch, _messages_reply(_planner_response(), "end_turn"))
+
+    text = _complete(GATEWAY)
+
+    [request] = seen
+    body = json.loads(request.content)
+    assert json.loads(text)["signals"] and str(request.url) == "https://gateway.test/Unified/v1/messages"
+    assert request.headers["ocp-apim-subscription-key"] == request.headers["x-api-key"] == "secret"
+    assert (body["model"], body["system"], body["temperature"]) == (llm_config.DEFAULT_CLAUDE_MODEL, "system", 0)
+    assert "tool_choice" not in body and "tools" not in body
+
+
+def test_an_openai_only_environment_plans_through_chat_completions(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _gateway(monkeypatch, _chat_reply(_planner_response(), "stop"))
+
+    text = _complete(OPENAI_GATEWAY)
+
+    [request] = seen
+    body = json.loads(request.content)
+    assert json.loads(text)["signals"] and str(request.url) == "https://gateway.test/v1/chat/completions"
+    assert request.headers["x-team"] == "kb" and request.headers["authorization"] == "Bearer sk"
+    assert (body["model"], body["temperature"]) == (llm_config.DEFAULT_CODEX_MODEL, 0)
+    assert [message["role"] for message in body["messages"]] == ["system", "user"]
+
+
+@pytest.mark.parametrize(
+    ("env", "reply"),
+    [(GATEWAY, _messages_reply("{", "max_tokens")), (OPENAI_GATEWAY, _chat_reply("{", "length"))],
+    ids=["anthropic", "openai"],
+)
+def test_a_reply_cut_at_the_token_limit_fails_the_plan(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], reply: bytes
+) -> None:
+    _gateway(monkeypatch, reply)
+
+    with pytest.raises(PlannerExecutionError, match="truncated output at max_tokens"):
+        _complete(env)
+
+
+def test_a_gateway_that_refuses_the_call_fails_the_plan_not_the_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    _gateway(monkeypatch, b'{"error": "missing subscription key"}', status=401)
+
+    with pytest.raises(PlannerExecutionError, match="planner gateway failed with RuntimeError.*status=401"):
+        _complete(GATEWAY)
+
+
+def test_the_planner_gateway_is_the_anthropic_side_with_a_key_else_the_openai_side() -> None:
+    both = PlannerGatewayConfig.from_env({**OPENAI_GATEWAY, **GATEWAY, "LOCAL_KB_PLANNER_MODEL": "planner"})
+
+    assert (both.protocol, both.model) == ("anthropic", "planner")
+    assert both.headers == (("Ocp-Apim-Subscription-Key", "secret"),)
+    assert PlannerGatewayConfig.from_env(OPENAI_GATEWAY).protocol == "openai"
+    with pytest.raises(QueryPlanValidationError, match="no Anthropic or OpenAI key"):
+        PlannerGatewayConfig.from_env({"ANTHROPIC_BASE_URL": "https://gateway.test"})
 
 
 @pytest.mark.parametrize("field", ["identity.not_declared", "change.content", "baseline_identity.config"])
@@ -298,29 +365,6 @@ def test_a_planner_call_gives_up_after_twenty_seconds_unless_configured_otherwis
 
     assert PlannerGatewayConfig.from_env(env).timeout_seconds == 20.0
     assert PlannerGatewayConfig.from_env({**env, "LOCAL_KB_PLANNER_TIMEOUT_SECONDS": "45"}).timeout_seconds == 45.0
-
-
-def test_anthropic_backend_reports_truncated_tool_output() -> None:
-    backend = AnthropicPlannerBackend(
-        PlannerGatewayConfig(
-            "https://planner.example/api",
-            "secret",
-            "test-model",
-        ),
-        opener=lambda *_args, **_kwargs: FakeHTTPResponse(
-            {
-                "content": [],
-                "stop_reason": "max_tokens",
-            }
-        ),
-    )
-
-    with pytest.raises(PlannerExecutionError, match="truncated"):
-        backend.complete(
-            system_prompt="system",
-            user_payload="payload",
-            temperature=0,
-        )
 
 
 def test_read_service_plans_queries_and_returns_prompt_ready_evidence() -> None:
