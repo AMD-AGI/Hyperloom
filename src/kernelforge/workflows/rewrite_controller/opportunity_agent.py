@@ -474,6 +474,11 @@ tree — a source file to hash, a config to read — as
 that root from the current working directory, which is not the repository, nor
 from an environment variable, which the loop repoints at its build cache.
 
+The driver has to run the copy under optimization. Importing the operator by
+its package's name does so: the host runs the driver with that copy ahead of
+any installed one. It refuses a driver that loaded one of the task's source
+files from anywhere else, so do not point the driver at an installed path.
+
 Publish the strongest plausible task before investigating secondary candidates.
 The host and forge-loop own validation, so do not spend the analysis budget
 trying to prove an implementation. Do not write state.json and do not modify

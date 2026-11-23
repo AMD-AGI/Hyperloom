@@ -131,7 +131,7 @@ def test_a_consumed_mandate_is_withdrawn_and_keeps_its_first_consumer():
 
 
 def test_the_patch_keeps_the_predictors_provenance_on_its_way_to_integrate_patch():
-    from hyperloom.orchestrator.phases.framework import _forward_integrate_source
+    from hyperloom.orchestrator.phases.framework_proposals import _forward_integrate_source
 
     dst: dict[str, Any] = {}
     _forward_integrate_source({"provenance": "primatune", "lever_kind": "source_patch"}, dst, {})

@@ -18,6 +18,8 @@ class CampaignTarget:
     kernel: str | None
     driver: str | None
     workspace_dir: str
+    #: The package the workspace is, when the workspace holds that package's own files at its root.
+    import_name: str | None
     snr_threshold: float
 
 

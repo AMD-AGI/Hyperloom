@@ -316,7 +316,6 @@ hyperloom = [
     "SKILL.md",
     "README.md",
     "actions/*.md",
-    "references/*.md",
 ]
 "hyperloom.agents.quantization" = [
     "SKILL.md",

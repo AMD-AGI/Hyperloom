@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import yaml
@@ -74,6 +75,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
     AGENTX_OUTSIDE_TRACE_SEC,
     AGENTX_TRACE_SEC,
+    OUTSIDE_BOOT_SEC,
     InferenceXCheckout,
     LocalCards,
     MeasurementHost,
@@ -138,6 +140,8 @@ from hyperloom.sandbox.e2b import E2BSandboxProvider
 from hyperloom.sandbox.socket import Role as SandboxRole, SandboxInfo
 from hyperloom_multibranch.toolbox import hosted_toolbox
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC
+from hyperloom.common.benchmark_config import BenchmarkPoint
+from hyperloom.measure.boot_watch import BOOT_SHARE, boot_limit_sec
 from hyperloom_multibranch.toolbox.hosted_toolbox import HostedToolbox, HostedToolboxInputs
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
@@ -657,6 +661,84 @@ async def test_an_agentx_session_replays_the_trace_window_it_names_and_its_tests
     assert options.timeout_sec == 600 + AGENTX_OUTSIDE_TRACE_SEC
 
 
+@pytest.mark.parametrize(
+    ("workload", "timeout"),
+    [
+        (WORKLOAD, DEFAULT_TEST_TIMEOUT_SEC),
+        (replace(WORKLOAD, boot_budget_sec=5400), OUTSIDE_BOOT_SEC + 5400),
+        (AGENTX, AGENTX_TRACE_SEC + AGENTX_OUTSIDE_TRACE_SEC),
+        (replace(AGENTX, boot_budget_sec=5400), AGENTX_TRACE_SEC + OUTSIDE_BOOT_SEC + 5400),
+        (replace(AGENTX, agentx_duration_sec=600, boot_budget_sec=5400), 600 + OUTSIDE_BOOT_SEC + 5400),
+    ],
+    ids=["inferencex", "inferencex-budget", "agentx", "agentx-budget", "agentx-window-budget"],
+)
+def test_a_boot_budget_longer_than_the_default_margin_lengthens_an_attempt_and_none_keeps_the_defaults(
+    workload: Workload, timeout: int
+) -> None:
+    assert attempt_timeout_sec(workload) == timeout
+
+
+@pytest.mark.parametrize("budget", [1, 60, 1799, OUTSIDE_BOOT_SEC])
+@pytest.mark.parametrize("workload", [WORKLOAD, AGENTX, replace(AGENTX, agentx_duration_sec=600)])
+def test_a_boot_budget_of_half_an_hour_or_less_never_shortens_an_attempt(workload: Workload, budget: int) -> None:
+    assert attempt_timeout_sec(replace(workload, boot_budget_sec=budget)) == attempt_timeout_sec(workload)
+
+
+def test_an_inferencex_budget_under_half_an_hour_keeps_the_hour_and_its_half_hour_boot() -> None:
+    timeout = attempt_timeout_sec(replace(WORKLOAD, boot_budget_sec=60))
+
+    assert timeout == DEFAULT_TEST_TIMEOUT_SEC, "not 1800 + 60 s"
+    assert boot_limit_sec(_serving_point(timeout), timeout, 60) == DEFAULT_TEST_TIMEOUT_SEC * BOOT_SHARE
+
+
+def test_an_agentx_budget_of_half_an_hour_keeps_the_window_s_timeout_and_its_hour_long_boot() -> None:
+    timeout = attempt_timeout_sec(replace(AGENTX, boot_budget_sec=1800))
+
+    assert timeout == AGENTX_TRACE_SEC + AGENTX_OUTSIDE_TRACE_SEC
+    assert boot_limit_sec(_serving_point(timeout), timeout, 1800) == timeout * BOOT_SHARE, (
+        "not halved to the 1800 s budget"
+    )
+
+
+def _serving_point(timeout_sec: int) -> BenchmarkPoint:
+    """A point of a serving framework whose ready timeout is the attempt's, as every round sets it
+    (``sync_benchmark_timeout``)."""
+
+    lifecycle = {"server_ready_timeout_s": timeout_sec}
+    return BenchmarkPoint.from_document({"benchmark": {"framework": "sglang", "server_lifecycle": lifecycle}})
+
+
+async def test_the_boot_budget_and_the_timeout_it_sets_reach_the_local_toolbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    given = _options_given(monkeypatch, local_hosted, "build_local_toolbox")
+    executors = _executors_built(monkeypatch, local_hosted)
+
+    async with _peers(tmp_path / "budget", monkeypatch, replace(WORKLOAD, boot_budget_sec=5400)):
+        pass
+    async with _peers(tmp_path / "default", monkeypatch, WORKLOAD):
+        pass
+
+    [budget, default] = given
+    assert (budget.timeout_sec, budget.boot_budget_sec) == (OUTSIDE_BOOT_SEC + 5400, 5400)
+    assert (default.timeout_sec, default.boot_budget_sec) == (DEFAULT_TEST_TIMEOUT_SEC, None)
+    assert executors == [(OUTSIDE_BOOT_SEC + 5400, 5400), (DEFAULT_TEST_TIMEOUT_SEC, None)]
+
+
+def _executors_built(monkeypatch: pytest.MonkeyPatch, module: object) -> list[tuple[int, int | None]]:
+    """The attempt timeout and boot budget of every executor ``module`` builds from here on; it still builds them."""
+
+    built: list[tuple[int, int | None]] = []
+    executor = module.HostedExecutor  # type: ignore[attr-defined]
+
+    def recorded(*args: object, **kwargs: Any) -> object:
+        built.append((kwargs["timeout_sec"], kwargs.get("boot_budget_sec")))
+        return executor(*args, **kwargs)
+
+    monkeypatch.setattr(module, "HostedExecutor", recorded)
+    return built
+
+
 def _options_given(monkeypatch: pytest.MonkeyPatch, module: object, builder: str) -> list[object]:
     """The options every toolbox ``builder`` of ``module`` builds from here on is given, its default when none is; it
     still builds it."""
@@ -1128,6 +1210,24 @@ async def test_an_agentx_test_in_the_services_sandboxes_may_outlast_its_trace_wi
 
     [agentx] = given
     assert agentx.timeout_sec > max(AGENTX_TRACE_SEC, AGENTX_TEST_PAST_AN_HOUR_SEC)
+
+
+async def test_the_boot_budget_and_the_timeout_it_sets_reach_the_toolbox_in_the_services_sandboxes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = tmp_path / "models" / "GLM-5.3"
+    model.mkdir(parents=True)
+    given = _options_given(monkeypatch, hosted_toolbox, "build_hosted_toolbox")
+    executors = _executors_built(monkeypatch, hosted_toolbox)
+    host = replace(HOST, backend=_service_sandboxes(monkeypatch, []))
+    workload = replace(AGENTX, model=str(model), agentx_duration_sec=600, boot_budget_sec=5400)
+
+    async with _peers(tmp_path / "workspace", monkeypatch, workload, host):
+        pass
+
+    [agentx] = given
+    assert (agentx.timeout_sec, agentx.boot_budget_sec) == (600 + OUTSIDE_BOOT_SEC + 5400, 5400)
+    assert executors == [(600 + OUTSIDE_BOOT_SEC + 5400, 5400)]
 
 
 def _agent_clients(monkeypatch: pytest.MonkeyPatch) -> list[GateClient | None]:
