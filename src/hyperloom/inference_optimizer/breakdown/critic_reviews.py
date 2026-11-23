@@ -58,14 +58,11 @@ def _specialist_authors_source(params: dict[str, Any], candidate_id: str) -> boo
     )
 
 
-def _ruling(verdict: dict[str, Any], effective: dict[str, Any]) -> dict[str, Any]:
-    """The critic's ruling on one proposal, beside what the emitted envelope made effective."""
+def _ruling(verdict: dict[str, Any], emitted: dict[str, Any]) -> dict[str, Any]:
+    """The critic's ruling on one proposal, with the advice and follow-ups its emitted envelope carries."""
     return {
         "source": "critic" if str(verdict.get("source") or "critic") == "critic" else "critic_unavailable",
         "verdict": str(verdict.get("verdict") or ""),
-        "effective_verdict": str(
-            _first(effective.get("verdict"), verdict.get("effective_verdict"), verdict.get("verdict")) or ""
-        ),
         "reasoning": str(verdict.get("reasoning") or ""),
         "confidence": _first(verdict.get("confidence")),
         "required_evidence": _string_list(verdict.get("required_evidence")),
@@ -76,9 +73,9 @@ def _ruling(verdict: dict[str, Any], effective: dict[str, Any]) -> dict[str, Any
             }
             for risk in dict_rows(verdict.get("risks"))
         ],
-        "advice_text": _first(verdict.get("advice_text"), effective.get("advice_text")),
+        "advice_text": _first(verdict.get("advice_text"), emitted.get("advice_text")),
         "alternative_action": _first(verdict.get("alternative_action")),
-        "followup_task_ids": _string_list(_first(effective.get("followup_task_ids"), verdict.get("followup_task_ids"))),
+        "followup_task_ids": _string_list(_first(emitted.get("followup_task_ids"), verdict.get("followup_task_ids"))),
     }
 
 

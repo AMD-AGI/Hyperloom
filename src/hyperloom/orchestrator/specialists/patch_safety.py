@@ -36,7 +36,7 @@ from hyperloom.common.env_safety import ungrounded_env_file_reason
 from hyperloom_common.unified_diff import strip_diff_path, strip_path_components
 
 
-# Quantitative / priority fields rejected outright on any patch proposal:
+# Quantitative / priority fields stripped from any patch proposal:
 # throughput / gain numbers are the Coordinator's measured truth, never a
 # self-reported claim from the worker.
 #

@@ -42,17 +42,6 @@ def test_a_pass_that_ruled_on_nothing_is_still_reported():
     assert "heartbeat" in out.markdown_block
 
 
-def test_framework_rulings_show_the_effective_verdict_only_when_it_differs():
-    held = cr.render(_critic({"iter": 1, "framework_reviews": [{"verdict": "reject", "effective_verdict": "advise"}]}))
-    assert "advise" in held.markdown_block
-
-    agreed = cr.render(
-        _critic({"iter": 1, "framework_reviews": [{"verdict": "approve", "effective_verdict": "approve"}]})
-    )
-    rulings = agreed.markdown_block.split("**Framework rulings**", 1)[1]
-    assert rulings.count("approve") == 1
-
-
 def test_a_malformed_verdict_count_does_not_lose_the_section():
     out = cr.render(_critic({"iter": 1, "verdict_counts": {"approve": "many"}}))
     assert out.skipped is False
@@ -78,6 +67,6 @@ def test_both_tables_label_the_sequence_column_as_a_pass_number():
 
     assert headers == [
         "| # | phase | macro_cycle | topic | rulings | said |",
-        "| # | proposal | candidate | arm | verdict | effective | conf | reasoning |",
+        "| # | proposal | candidate | arm | verdict | conf | reasoning |",
     ]
     assert "**Artifacts of the last pass** (pass 1)" in out.markdown_block

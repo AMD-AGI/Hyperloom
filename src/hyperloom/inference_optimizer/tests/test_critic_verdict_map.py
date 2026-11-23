@@ -613,10 +613,20 @@ async def test_a_rejected_integrate_patch_is_never_materialised(coord):
 
 
 @pytest.mark.asyncio
-async def test_the_verdict_acted_on_is_the_verdict_mirrored(coord):
+@pytest.mark.parametrize(
+    "ruling",
+    [
+        pytest.param({"verdict": "advise"}, id="a_single_verdict"),
+        pytest.param(
+            {"verdict_map": {"v_a": {"verdict": "advise"}, "v_b": {"verdict": "reject"}}},
+            id="a_map_whose_advised_variant_proceeds",
+        ),
+    ],
+)
+async def test_the_verdict_acted_on_is_the_verdict_mirrored(coord, ruling):
     coord.shared_state = _PatchVerdictSharedState()
     _seed_pending(coord, "msg-plain-permit", "specialist", {"task_id": "t-plain"})
-    await _rule(coord, "msg-plain-permit", verdict="advise")
+    await _rule(coord, "msg-plain-permit", **ruling)
 
     assert _posted_verdict(coord) == "advise"
     assert coord.shared_state.patch_verdicts["t-plain"] == "advise"

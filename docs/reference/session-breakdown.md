@@ -460,8 +460,7 @@ asked forty times and ruled on nothing reads very differently from one where
 it was never asked.
 
 `framework_reviews` holds the framework-phase rulings of that pass, each with
-the `verdict` the review wrote and the `effective_verdict` its emitted
-envelope carried.
+the `verdict` the Critic wrote.
 
 ---
 
@@ -674,7 +673,6 @@ The following example shows a complete `session_breakdown.json` for a finished G
             "proposal_msg_id": "msg-4f21",
             "arm": "config",
             "verdict": "reject",
-            "effective_verdict": "reject",
             "reasoning": "no measurement backs the projected gain"
           }
         ]

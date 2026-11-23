@@ -934,7 +934,6 @@ class SpecialistRunner:
         for proposal in done_payload.get("proposal_set") or []:
             if not isinstance(proposal, dict):
                 continue
-            # The dispatch scope feeds the Critic's cross-domain enrichment.
             proposal.setdefault("scope", prep.profile.scope)
             if "experience_citations" in proposal:
                 proposal["experience_citations"] = normalize_citations(proposal["experience_citations"], shown)
@@ -942,7 +941,7 @@ class SpecialistRunner:
             done_payload["experience_citations"] = normalize_citations(done_payload["experience_citations"], shown)
 
         # Universal patch-safety gate: drop non-diff/escaping patches, git-ground
-        # the rest, and scan for smuggled claims. Grounding is per set, not per
+        # the rest, and strip the forbidden fields. Grounding is per set, not per
         # patch, so the root below applies to all of them or to none.
         base_checkout = prep.worktree_base or prep.worktree
         vetted = _patch_safety.vet_patches(
