@@ -13,7 +13,7 @@ copies the bytes the server logged during the round into its run_dir's ``server.
 
 Ready means three things at once: ``/health`` answers 200, the process is alive, and the log shows a ready marker.
 Until then, when ``HYPERLOOM_WEIGHT_PREFETCH`` says so, the model's checkpoint is read into the page cache alongside the
-boot (:mod:`hyperloom_common.weight_prefetch`).
+boot (:mod:`hyperloom_common.weight_prefetch`), and what that did is written to the run_dir's ``weight_prefetch.json``.
 """
 
 from __future__ import annotations
@@ -246,6 +246,7 @@ class ServerLifecycle:
         finally:
             if prefetch is not None:
                 prefetch.stop()
+                prefetch.write_outcome(self._layout.weight_prefetch)
         if stop is not None:
             self._teardown_stop = self._teardown()
             return stop

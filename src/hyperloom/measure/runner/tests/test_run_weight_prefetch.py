@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A hosted runner turns the checkpoint prefetch on for its test, unless its sandbox's environment already decided."""
+"""The runner leaves the checkpoint prefetch as its sandbox's environment sets it: off unless the template turns it on."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from hyperloom.measure.runner.tests.test_run_jit import _arm, env, key, rig  # n
 from hyperloom_common.weight_prefetch import WEIGHT_PREFETCH_ENV
 
 
-@pytest.mark.parametrize(("given", "seen"), [(None, "1"), ("0", "0"), ("1", "1")])
-def test_the_runner_turns_the_prefetch_on_unless_the_sandbox_says(rig, monkeypatch, given, seen) -> None:
+@pytest.mark.parametrize(("given", "seen"), [(None, None), ("0", "0"), ("1", "1")])
+def test_the_runner_leaves_the_prefetch_as_the_sandbox_sets_it(rig, monkeypatch, given, seen) -> None:
     observed: list[str | None] = []
     original_start = rig._start
 
