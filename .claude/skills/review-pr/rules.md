@@ -1012,7 +1012,7 @@ head, then against the same paths at `base.txt`, and match per function name:
 
 ```bash
 radon cc -s -n D $(cut -f3 "$WORK/numstat.txt" | grep '^src/.*\.py$' | grep -v '/tests/' \
-  | grep -v -e '^src/kernelforge/examples/' -e '/_vendor/' -e '/local_wiki/resources/')
+  | grep -v -e '^src/kernelforge/examples/' -e '/local_wiki/resources/')
 
 git show "$(cat "$WORK/base.txt")":<path> > "$WORK/base-<name>.py"
 radon cc -s -n D "$WORK/base-<name>.py"
@@ -1020,7 +1020,7 @@ radon cc -s -n D "$WORK/base-<name>.py"
 
 radon (6.0.1, as the gate pins) counts every `and` / `or`, ternary, comprehension and `assert` as a
 branch, as the gate and the code-health report do; `-n D` lists the functions above 20, and the
-`grep -v` keeps Ruff's `extend-exclude` trees (vendored SDK copies, `src/kernelforge/examples`) out. Present at head and absent at base, or a higher number at head than at base,
+`grep -v` keeps Ruff's `extend-exclude` trees (`src/kernelforge/examples`, the local-wiki resources) out. Present at head and absent at base, or a higher number at head than at base,
 fires. The same number on both sides is backlog and is silent. The `code-metrics` CI job measures
 the same two cases, but its `baseline-raise` label waives them, so the rule stays for the one
 question CI cannot answer: whether a labelled PR gives the reason. `AGENTS.md` *Size is a design

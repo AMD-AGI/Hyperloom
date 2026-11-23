@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Recipe policy wrapper around the vendored KB Store SDK."""
+"""Recipe policy wrapper around the KB Store client."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ import os
 import re
 import shutil
 import tempfile
-import threading
 from pathlib import Path
 from typing import Any
 
-from ._vendor.kb_store_client import KBStoreClient, KBStoreError
+from hyperloom_common.kb_store import KBStoreClient, KBStoreError
+
 from .models import (
     MAX_FILE_BYTES,
     MAX_FILES,
@@ -289,11 +289,10 @@ def _view_artifact_manifest(
 
 
 class RemoteRecipeClient:
-    """Recipe-specific read/write policy over the vendored store client."""
+    """Recipe-specific read/write policy over the KB Store client."""
 
     def __init__(self, store: KBStoreClient) -> None:
         self.store = store
-        self._store_lock = threading.RLock()
 
     @classmethod
     def from_env(cls) -> "RemoteRecipeClient":
@@ -364,68 +363,28 @@ class RemoteRecipeClient:
             raise
 
         try:
-            with self._store_lock:
-                listing = self.store.list_session_files(
-                    canonical_id,
-                    session_id,
+            listing = self.store.list_session_files(canonical_id, session_id)
+            listing_manifest = _validate_download_listing(listing)
+            if listing_manifest != view_manifest:
+                raise RemoteRecipeValidationError(
+                    "session file listing does not match the selected Hyperloom Recipe View artifact manifest"
                 )
-                listing_manifest = _validate_download_listing(listing)
-                if listing_manifest != view_manifest:
-                    raise RemoteRecipeValidationError(
-                        "session file listing does not match the selected Hyperloom Recipe View artifact manifest"
-                    )
-                root.parent.mkdir(parents=True, exist_ok=True)
-                generation = Path(
-                    tempfile.mkdtemp(
-                        prefix=f".{root.name}.generation-",
-                        dir=root.parent,
-                    )
+            root.parent.mkdir(parents=True, exist_ok=True)
+            generation = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{root.name}.generation-",
+                    dir=root.parent,
                 )
-                if listing_manifest:
-                    self._download_with_pinned_listing(canonical_id, session_id, generation, listing)
-                _activate_generation(generation, root, listing_manifest, recipe_json)
+            )
+            if listing_manifest:
+                self.store.download_session(canonical_id, session_id, generation, listing=listing)
+            _activate_generation(generation, root, listing_manifest, recipe_json)
             return document
         except Exception:
             _deactivate_destination(root)
             if generation is not None:
                 _deactivate_destination(generation)
             raise
-
-    def _download_with_pinned_listing(
-        self,
-        canonical_id: str,
-        session_id: str,
-        generation: Path,
-        listing: Any,
-    ) -> None:
-        """Download one session's files into ``generation`` with the SDK's listing pinned to ``listing``."""
-        # Pin the SDK's internal listing to the compared snapshot.
-        original_listing_method = self.store.list_session_files
-
-        def validated_listing(
-            requested_canonical_id: str,
-            requested_session_id: str,
-            *,
-            kind: str = "",
-        ) -> dict[str, Any]:
-            if requested_canonical_id != canonical_id or requested_session_id != session_id or kind:
-                return original_listing_method(
-                    requested_canonical_id,
-                    requested_session_id,
-                    kind=kind,
-                )
-            return listing
-
-        self.store.list_session_files = validated_listing  # type: ignore[method-assign]
-        try:
-            self.store.download_session(
-                canonical_id,
-                session_id,
-                generation,
-                include_values=False,
-            )
-        finally:
-            self.store.list_session_files = original_listing_method  # type: ignore[method-assign]
 
     def search_identities(
         self,
@@ -511,11 +470,10 @@ class RemoteRecipeClient:
         if score <= prior:
             return outcome("skipped", "not_better_than_champion")
         self._put_bundle_files(canonical_id, session_id, bundle, files_dir)
-        self.store.put_knowledge(
+        self.store.replace_knowledge(
             canonical_id,
+            session_id,
             bundle.knowledge,
-            session_id=session_id,
-            mode="replace",
             scope=scope_payload,
             objective_schema=profile.objective_schema,
         )

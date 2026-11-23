@@ -29,7 +29,6 @@ from hyperloom.orchestrator.knowledge.remote_recipe import (
     knowledge_to_warm_recipe,
     write_final_remote_recipe,
 )
-from hyperloom.orchestrator.knowledge.remote_recipe._vendor import kb_store_client
 from hyperloom.orchestrator.knowledge.remote_recipe.client import (
     _champion,
     _validate_download_listing,
@@ -59,6 +58,7 @@ from hyperloom.orchestrator.knowledge.remote_publish import remote_result_type
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
+from hyperloom_common import kb_store
 
 _DOWNLOAD_BYTES = b"verified artifact"
 _DOWNLOAD_SHA256 = hashlib.sha256(_DOWNLOAD_BYTES).hexdigest()
@@ -1361,7 +1361,7 @@ def test_remote_close_transport_failure_is_nonfatal(
             return BytesIO(cause)
         raise cause
 
-    monkeypatch.setattr(kb_store_client.urllib.request, "urlopen", respond)
+    monkeypatch.setattr(kb_store.urllib.request, "urlopen", respond)
     if cause is None or isinstance(cause, KBStoreError):
 
         def fail_publish(cls):
@@ -1618,22 +1618,21 @@ class _FakeStore:
             if path.is_file()
         }
 
-    def put_knowledge(
+    def replace_knowledge(
         self,
         canonical_id,
+        session_id,
         knowledge,
         *,
-        session_id="",
-        mode="merge",
         scope=None,
         objective_schema="",
     ):
         self.calls.append(
             (
-                "put_knowledge",
+                "replace_knowledge",
                 canonical_id,
                 session_id,
-                mode,
+                "replace",
                 scope,
                 objective_schema,
             )
@@ -1647,12 +1646,12 @@ class _FakeStore:
             self.champion = value - 1
             raise KBStoreError("POST champion -> HTTP 409: write_conflict")
 
-    def list_session_files(self, canonical_id, session_id, *, kind=""):
-        self.calls.append(("list_session_files", canonical_id, session_id, kind))
+    def list_session_files(self, canonical_id, session_id):
+        self.calls.append(("list_session_files", canonical_id, session_id))
         return self.files_listing
 
-    def download_session(self, canonical_id, session_id, destination, *, include_values):
-        self.calls.append(("download_session", canonical_id, session_id, include_values))
+    def download_session(self, canonical_id, session_id, destination, *, listing=None):
+        self.calls.append(("download_session", canonical_id, session_id, listing))
         files_root = Path(destination) / "files"
         files_root.mkdir(parents=True)
         for entry in self.files_listing.get("files") or []:
@@ -1711,7 +1710,7 @@ def test_write_order_replace_metric_and_409_retry(tmp_path: Path) -> None:
         client=client,
     )
     names = [call[0] for call in store.calls]
-    assert names[:4] == ["get_rollup", "put_dir", "put_knowledge", "set_champion"]
+    assert names[:4] == ["get_rollup", "put_dir", "replace_knowledge", "set_champion"]
     assert names[-2:] == ["get_rollup", "set_champion"]
     assert store.calls[2][3] == "replace"
     assert store.calls[2][-1] == "single_throughput"
@@ -1719,7 +1718,7 @@ def test_write_order_replace_metric_and_409_retry(tmp_path: Path) -> None:
     assert store.calls[0][-1] == _SCOPE.as_dict()
     assert store.calls[2][4] == _SCOPE.as_dict()
     assert store.calls[3][-1] == _SCOPE.as_dict()
-    assert len([call for call in store.calls if call[0] == "put_knowledge"]) == 1
+    assert len([call for call in store.calls if call[0] == "replace_knowledge"]) == 1
     assert all(not str(call[1]).startswith("kernel:") for call in store.calls if len(call) > 1)
     assert store.published_knowledge is not None
     assert "kernel" in store.published_knowledge["value"]
@@ -1875,7 +1874,7 @@ def test_absent_rollup_is_treated_as_first_write(tmp_path: Path) -> None:
     assert [call[0] for call in store.calls] == [
         "get_rollup",
         "put_dir",
-        "put_knowledge",
+        "replace_knowledge",
         "set_champion",
     ]
 
@@ -1911,7 +1910,7 @@ def test_agentx_writes_baseline_relative_interactivity_gain(tmp_path: Path) -> N
     )
 
     assert result.status == "written"
-    put = next(call for call in store.calls if call[0] == "put_knowledge")
+    put = next(call for call in store.calls if call[0] == "replace_knowledge")
     assert put[4] == {"kernel_optimizer": "forge", "tp": 8, "conc": 64}
     assert put[5] == "agentx_keep"
     assert store.published_knowledge["interactivity_gain_pct"] == pytest.approx(20.0)
@@ -2000,15 +1999,6 @@ def test_agentx_warm_replay_accepts_three_dimension_scope() -> None:
     assert call[-1] == {"kernel_optimizer": "forge", "tp": 8, "conc": 64}
 
 
-def test_vendored_scope_query_serializes_only_supplied_dimensions() -> None:
-    query = kb_store_client.KBStoreClient._scope_query({"kernel_optimizer": "forge", "tp": 8, "conc": 64})
-    assert "kernel_optimizer=forge" in query
-    assert "tp=8" in query
-    assert "conc=64" in query
-    assert "isl" not in query
-    assert "osl" not in query
-
-
 def test_recipe_canonical_id_changes_only_the_agentx_scheme() -> None:
     from hyperloom.inference_optimizer.recipe_snapshot_constants import (
         RecipeIdentity,
@@ -2064,7 +2054,7 @@ def test_put_dir_refs_must_cover_every_uploaded_file(tmp_path: Path) -> None:
             "session-1",
             client=RemoteRecipeClient(store),  # type: ignore[arg-type]
         )
-    assert not any(call[0] == "put_knowledge" for call in store.calls)
+    assert not any(call[0] == "replace_knowledge" for call in store.calls)
 
 
 def test_read_sequence_writes_flat_recipe_and_files_only(tmp_path: Path) -> None:
@@ -2088,7 +2078,7 @@ def test_read_sequence_writes_flat_recipe_and_files_only(tmp_path: Path) -> None
         "list_session_files",
         "download_session",
     ]
-    assert store.calls[-1][-1] is False
+    assert store.calls[-1][-1] is store.files_listing
     saved = json.loads((tmp_path / "bundle" / "recipe.json").read_text(encoding="utf-8"))
     assert saved == row
     assert "knowledge" not in saved
@@ -2177,24 +2167,11 @@ def test_kernel_reads_same_downloaded_inference_recipe_without_second_get(
     assert not (tmp_path / "runtime" / "kernel_agent_kb").exists()
 
 
-def test_read_pins_manifest_against_download_relisting(tmp_path: Path) -> None:
+def test_read_downloads_exactly_the_listing_it_compared(tmp_path: Path) -> None:
     class _RelistingStore(_FakeStore):
-        def download_session(
-            self,
-            canonical_id,
-            session_id,
-            destination,
-            *,
-            include_values,
-        ):
-            assert self.list_session_files(canonical_id, session_id) is self.files_listing
-            self.list_session_files("other:identity", session_id, kind="patch")
-            return super().download_session(
-                canonical_id,
-                session_id,
-                destination,
-                include_values=include_values,
-            )
+        def list_session_files(self, canonical_id, session_id):
+            super().list_session_files(canonical_id, session_id)
+            return {"files": [dict(entry) for entry in self.files_listing["files"]]}
 
     store = _RelistingStore()
     row = RemoteRecipeClient(store).read(
@@ -2204,7 +2181,10 @@ def test_read_pins_manifest_against_download_relisting(tmp_path: Path) -> None:
     )
 
     assert row is not None
-    assert ("list_session_files", "other:identity", "champion-session", "patch") in store.calls
+    assert [call[0] for call in store.calls].count("list_session_files") == 1
+    downloaded = next(call for call in store.calls if call[0] == "download_session")
+    assert downloaded[-1] == store.files_listing
+    assert downloaded[-1] is not store.files_listing
 
 
 def test_view_manifest_mismatch_deactivates_without_download(
@@ -2317,7 +2297,7 @@ def test_read_passes_through_the_services_selection_reason(tmp_path: Path) -> No
 
 
 def _sections(tmp_path: Path):
-    return kb_store_client.KnowledgeSections(tmp_path / "draft")
+    return KnowledgeSections(tmp_path / "draft")
 
 
 def test_a_staged_file_is_published_under_its_own_section(tmp_path: Path) -> None:
@@ -3101,96 +3081,6 @@ def test_owner_sdk_rejects_symlink_timeline_ref(
     sections = KnowledgeSections(tmp_path / "draft", warm_start_dir=warm)
 
     assert PatchKB(sections).prior_file(ref) is None
-
-
-def test_vendored_sdk_matches_upstream_git_blob() -> None:
-    path = Path(kb_store_client.__file__)
-    content = path.read_bytes()
-    digest = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
-    assert digest == "9dbb293ccab87b33555ef48b7e27ec93e726e86c"
-
-
-def test_vendored_sdk_uses_new_view_and_search_routes() -> None:
-    client = kb_store_client.KBStoreClient.__new__(kb_store_client.KBStoreClient)
-    calls = []
-
-    def _request(method, path, payload=None):
-        calls.append((method, path, payload))
-        return {"items": [], "total": 0, "next_offset": None}
-
-    client._request = _request  # type: ignore[method-assign]
-    scope = _SCOPE.as_dict()
-    assert client.get_hyperloom_recipe_view("inference:m:h", scope=scope) == {
-        "items": [],
-        "total": 0,
-        "next_offset": None,
-    }
-    client.search_identities(
-        scheme="inference",
-        match={"framework_name": "sglang"},
-        hardware_in=["mi300x"],
-        offset=10,
-        limit=5,
-    )
-    client.get_rollup("inference:m:h", scope=scope)
-    client.put_knowledge(
-        "inference:m:h",
-        {"value": {}},
-        session_id="session-1",
-        mode="replace",
-        scope=scope,
-    )
-    client.set_champion(
-        "inference:m:h",
-        "session-1",
-        metric="optimized_throughput",
-        value=10.0,
-        scope=scope,
-    )
-
-    assert calls == [
-        (
-            "GET",
-            "/v1/kb/inference:m:h/views/hyperloom-recipe?kernel_optimizer=forge&tp=8&conc=64&isl=1024&osl=256",
-            None,
-        ),
-        (
-            "POST",
-            "/v1/kb/search",
-            {
-                "scheme": "inference",
-                "match": {"framework_name": "sglang"},
-                "offset": 10,
-                "limit": 5,
-                "hardware_in": ["mi300x"],
-            },
-        ),
-        (
-            "GET",
-            "/v1/kb/inference:m:h/sessions?kernel_optimizer=forge&tp=8&conc=64&isl=1024&osl=256",
-            None,
-        ),
-        (
-            "POST",
-            "/v1/kb/inference:m:h",
-            {
-                "knowledge": {"value": {}},
-                "mode": "replace",
-                "session_id": "session-1",
-                "scope": scope,
-            },
-        ),
-        (
-            "POST",
-            "/v1/kb/inference:m:h/champion",
-            {
-                "session_id": "session-1",
-                "metric": "optimized_throughput",
-                "value": 10.0,
-                "scope": scope,
-            },
-        ),
-    ]
 
 
 # --- shape dimensions the canonical_id cannot express ------------------------
