@@ -34,6 +34,7 @@ from .proposal_schemas import (
 from .specialist_focus import _DOMAIN_FOCUS_TEMPLATES
 from .specialist_prompt_text import (
     IDENTITY_MANDATE_LINES,
+    ENABLEMENT_LAUNCH_CONFIG_ONLY_LINES,
     KEPT_LAUNCH_CONFIG_ONLY_ROW,
     ORCHESTRATOR_CHANNEL_LINES,
     PATCH_FIELD_LINES,
@@ -805,6 +806,7 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     )
     rows = ["## 1b. ENABLEMENT PLAYBOOK", ""]
     rows.extend(mandate.splitlines())
+    rows.extend(ENABLEMENT_LAUNCH_CONFIG_ONLY_LINES if inp.no_source_changes else ())
     acc_cfg = inp.enablement_accepted_config or {}
     acc_envs = {str(k): str(v) for k, v in (acc_cfg.get("extra_envs") or {}).items()}
     acc_args = str(acc_cfg.get("extra_server_args") or "").strip()
