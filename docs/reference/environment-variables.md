@@ -1044,10 +1044,10 @@ uses bubblewrap. `hyperloom hosted run` checks before its installer or `optimize
 works, the run ends with a final `exit.json` (return code 2) whose `error` names both reasons; a probe that gave no
 answer in time ends the leg without one, so the host starts it again. The probe (`python -I -m
 hyperloom_common.bwrap probe [--bwrap PATH]`) refuses a setuid bubblewrap and one older than 0.5.0, then runs a canary
-sandbox and checks from inside that its masks, read-only binds, pid namespace, capabilities and `no_new_privs` hold. It
-runs once per process for each binary, interpreter, ids, namespaces and user-namespace sysctls; one that gives no
-answer within 10 s is not kept, and refuses a hosted start-up as transient. A failed probe names the step with
-bubblewrap's own line; the usual causes:
+sandbox and checks from inside that its masks, read-only binds, pid namespace, capabilities and `no_new_privs` hold
+and that `/dev/null` takes a write and reads back empty. It runs once per process for each binary, interpreter, ids,
+namespaces and user-namespace sysctls; one that gives no answer within 10 s is not kept, and refuses a hosted start-up
+as transient. A failed probe names the step with bubblewrap's own line; the usual causes:
 
 | Probe line | Cause |
 |------------|-------|
