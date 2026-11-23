@@ -90,6 +90,7 @@ from hyperloom_multibranch.scheduling import hosted_peers
 from hyperloom_multibranch.scheduling import hosted_run as hosted_run_module
 from hyperloom_multibranch.scheduling.hosted_run import (
     GRANT_MARGIN_SECONDS,
+    GrantEnd,
     final_reserve_seconds,
     hosted_resume_deadline,
     take_over_earlier_session,
@@ -936,10 +937,10 @@ def agent_cli(agent_binaries: None, monkeypatch: pytest.MonkeyPatch) -> list[Run
         peer_factory: PeerFactory,
         services: object,
         report_root: object = None,
-        explore_cap: ExploreCap | None = None,
+        grant: GrantEnd | None = None,
     ) -> int:
         runs.append(settings)
-        EXPLORE_CAPS.append(explore_cap)
+        EXPLORE_CAPS.append(None if grant is None else grant.explore_cap)
         return 0
 
     def final_only(

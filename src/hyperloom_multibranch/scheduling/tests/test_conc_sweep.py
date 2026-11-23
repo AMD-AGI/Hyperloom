@@ -20,7 +20,8 @@ from hyperloom.contracts.measurement import RoundValue, TestRequest, TestResult,
 from hyperloom.orchestrator.state import base_launch
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.contracts.toolbox import TestWithdrawn
-from hyperloom_multibranch.scheduling import conc_sweep
+from hyperloom.orchestrator.conc_sweep.points import SweepPoints
+from hyperloom_multibranch.scheduling import final
 from hyperloom_multibranch.scheduling.final import CandidateCheck, FinalCandidate, FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.roster import RosterCaps
@@ -86,11 +87,11 @@ class _Tests:
         return ()
 
 
-def _sweep(layout: SessionLayout, settings: RunSettings, tests: _Tests) -> conc_sweep.ConcSweep:
-    plan = conc_sweep.sweep_plan(layout, settings)
-    assert isinstance(plan, conc_sweep.SweepPlan)
+def _sweep(layout: SessionLayout, settings: RunSettings, tests: _Tests) -> final.ConcSweep:
+    plan = final.sweep_plan(layout, settings)
+    assert isinstance(plan, final.SweepPlan)
     caps = settings.caps
-    return conc_sweep.ConcSweep(plan, "root", layout, settings.workload, tests, caps.max_parallel_tests, 600.0)
+    return final.ConcSweep(plan, "root", layout, settings.workload, tests, caps.max_parallel_tests, 600.0)
 
 
 async def _never() -> int:
@@ -109,15 +110,15 @@ def _summary(layout: SessionLayout) -> dict[str, Any]:
 def test_a_final_that_chose_no_gaining_commit_beside_the_root_gets_no_sweep(
     tmp_path: Path, inferencex_base: None, chosen: FinalCandidate | None, gain_pct: float | None
 ):
-    assert conc_sweep.sweep_plan(_layout(tmp_path, chosen, gain_pct), _settings()) == conc_sweep.NO_OPTIMIZATION
+    assert final.sweep_plan(_layout(tmp_path, chosen, gain_pct), _settings()) == final.NO_OPTIMIZATION
 
 
 def test_the_plan_sweeps_the_chosen_commit_over_the_recipes_points_with_the_workloads_conc(
     tmp_path: Path, inferencex_base: None
 ):
-    plan = conc_sweep.sweep_plan(_layout(tmp_path), _settings(concs=(2,)))
+    plan = final.sweep_plan(_layout(tmp_path), _settings(concs=(2,)))
 
-    assert plan == conc_sweep.SweepPlan("c0ffee", conc_sweep.SweepPoints((4, 16, 32), "inferencex"))
+    assert plan == final.SweepPlan("c0ffee", SweepPoints((4, 16, 32), "inferencex"))
     assert (plan.test_points(WORKLOAD), plan.test_points(AGENTX)) == (3, 1)
 
 
@@ -177,7 +178,7 @@ def test_a_stop_signal_takes_the_tests_back_and_keeps_what_landed(tmp_path: Path
 def test_a_closed_session_whose_sweep_did_not_settle_is_swept_again(tmp_path: Path):
     layout = _layout(tmp_path)
 
-    assert conc_sweep.sweep_unfinished(layout, _settings())
-    conc_sweep.write_skipped(layout, WORKLOAD, conc_sweep.NO_SWEEP_POINTS)
-    assert not conc_sweep.sweep_unfinished(layout, _settings())
-    assert not conc_sweep.sweep_unfinished(layout, replace(_settings(), conc_sweep=False))
+    assert final.sweep_unfinished(layout, _settings())
+    final.write_skipped(layout, WORKLOAD, final.NO_SWEEP_POINTS)
+    assert not final.sweep_unfinished(layout, _settings())
+    assert not final.sweep_unfinished(layout, replace(_settings(), conc_sweep=False))

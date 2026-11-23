@@ -93,7 +93,6 @@ from hyperloom_multibranch.scheduling.budget import ExploreCap, HardStop, Sessio
 from hyperloom_multibranch.scheduling.budget import explore_gpu_seconds
 from hyperloom_multibranch.scheduling.checkpoint_tally import CheckpointScope
 from hyperloom_multibranch.scheduling.close import CloseReport, Closer
-from hyperloom_multibranch.scheduling.conc_sweep import ConcSweep, SweepPlan
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog, downtime_until
@@ -101,7 +100,13 @@ from hyperloom_multibranch.scheduling.events import IntegrationProfiler, Session
 from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering
 from hyperloom_multibranch.blackboard.knowledge.breakdown import claw_session_id, leg_claw_session_id
 from hyperloom_multibranch.scheduling.exports import CloseAuthoring, ExportServices, ExportSources, SessionExports
-from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalSelector, session_candidates
+from hyperloom_multibranch.scheduling.final import (
+    ConcSweep,
+    FinalCandidates,
+    FinalSelector,
+    SweepPlan,
+    session_candidates,
+)
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import BundlingIntegrator, Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, Judge, session_grace

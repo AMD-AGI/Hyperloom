@@ -23,7 +23,6 @@ from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, agentx_replay_session, is_agentx_mode
 from hyperloom.inference_optimizer.framework_registry import is_scriptable
 from hyperloom.inference_optimizer.grading import resolved_grading
-from hyperloom.inference_optimizer.session.base_launch import read_base_launch
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
 from hyperloom.orchestrator.actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
@@ -45,6 +44,7 @@ from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     prepare_grid_benchmark_config,
 )
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
+from hyperloom.orchestrator.state.base_launch import frozen_base
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom_common.timeutil import utc_now_compact
 
@@ -349,7 +349,8 @@ async def run_conc_sweep(session_dir: Path, *, grant_end_unix: float | None = No
     optimized = optimized_arm(state)
     if optimized is None or state.cumulative_gain_validated <= 0:
         return _skipped(state, session_dir, "no_optimization")
-    points = sweep_points(read_base_launch(session_dir), state.conc, state.conc_sweep_concs)
+    frozen = frozen_base(session_dir)
+    points = sweep_points(None if frozen is None else frozen.launch, state.conc, state.conc_sweep_concs)
     if points is None:
         return _skipped(state, session_dir, "no_sweep_points")
     setup = _prepare(state, session_dir)

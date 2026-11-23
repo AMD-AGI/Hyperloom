@@ -81,7 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     final_only.add_argument("session_dir", type=Path, help="The session directory of the run to finish.")
-    final_only.add_argument("-v", "--verbose", action=SWITCH, help="Log at debug level.")
+    _add_verbose_option(final_only)
     conc_sweep = commands.add_parser(
         CONC_SWEEP_COMMAND,
         help=(
@@ -90,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     conc_sweep.add_argument("session_dir", type=Path, help="The session directory of a closed run.")
-    conc_sweep.add_argument("-v", "--verbose", action=SWITCH, help="Log at debug level.")
+    _add_verbose_option(conc_sweep)
     hosted = commands.add_parser(HOSTED_COMMAND, help="Run under a host that injects the campaign spec and its inputs.")
     hosted_commands = hosted.add_subparsers(dest="hosted_command", required=True)
     hosted_commands.add_parser(
@@ -108,7 +108,11 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
     _add_specialist_input_options(run)
     _add_concurrency_options(run)
     _add_playbook_option(run)
-    run.add_argument("-v", "--verbose", action=SWITCH, help="Log at debug level.")
+    _add_verbose_option(run)
+
+
+def _add_verbose_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("-v", "--verbose", action=SWITCH, help="Log at debug level.")
 
 
 def _add_agentx_options(run: argparse.ArgumentParser) -> None:

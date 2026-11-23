@@ -183,8 +183,8 @@ class RunSettings:
     where the grant fits at least three tests at once; it runs one test fewer at once there. Off, every test the grant
     fits runs at once and each sandbox is closed when its test ends. A session measured on this machine ignores it.
     ``conc_sweep`` runs the concurrency sweep of the closed session after CLOSE
-    (:mod:`~hyperloom_multibranch.scheduling.conc_sweep`); ``conc_sweep_concs`` are the operator's points for a base no
-    InferenceX arm gave."""
+    (:class:`~hyperloom_multibranch.scheduling.final.ConcSweep`); ``conc_sweep_concs`` are the operator's points for a
+    base no InferenceX arm gave."""
 
     workload: Workload
     max_hours: float

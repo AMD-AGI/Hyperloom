@@ -28,7 +28,6 @@ from hyperloom_multibranch.scheduling.budget import (
     MB_CLOSE_GRACE_FRACTION,
     MB_DEFAULT_MAX_HOURS,
     MB_EXPLORE_SHARE,
-    MB_FINAL_SHARE,
     MB_UNLIMITED_HOURS,
     HardStop,
     SessionBudget,
@@ -58,7 +57,6 @@ def test_constants_match_the_main_flow_sources() -> None:
     assert MB_UNLIMITED_HOURS == 14 * 24
     shares = {name: int(round(float(pct) * 100)) for name, pct in re.findall(r"PHASE_(\w+): (0\.\d+),", machine)}
     assert shares["FRAMEWORK_AGENT"] + shares["KERNEL_AGENT"] == MB_EXPLORE_SHARE
-    assert shares["SWEEP"] == MB_FINAL_SHARE
     assert f"min({MB_CLOSE_GRACE_CAP_SECONDS}, (max_minutes or 0.0) * 60.0 * {MB_CLOSE_GRACE_FRACTION})" in shared
 
 

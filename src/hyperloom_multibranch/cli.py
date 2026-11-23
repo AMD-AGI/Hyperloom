@@ -156,14 +156,16 @@ from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.budget import ExploreCap
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom.orchestrator.conc_sweep.report import SETTLED
-from hyperloom_multibranch.scheduling.conc_sweep import sweep_plan, write_skipped
+from hyperloom_multibranch.scheduling.final import sweep_plan, write_skipped
 from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers, local_grant_peers
 from hyperloom_multibranch.scheduling.hosted_run import (
     GrantDeadline,
+    GrantEnd,
     HostedExit,
     campaign_spec,
     close_then_start,
     grant_deadline,
+    grant_end,
     grant_explore_cap,
     grant_tests_end_by,
     grant_tests_that_fit,
@@ -255,12 +257,12 @@ def run_session(
     peer_factory: PeerFactory,
     services: SessionServices,
     report_root: Callable[[Path], None] = _print_root,
-    explore_cap: ExploreCap | None = None,
-    grant_end_unix: float | None = None,
+    grant: GrantEnd | None = None,
 ) -> int:
     """Create the session directory, hand it to ``report_root`` -- by default printed on one stdout line -- before
-    anything else is built in it, run the session (:meth:`Session.run`, given ``explore_cap``) and its conc sweep when
-    the settings ask for one (:func:`sweep_closed`, warned at ``grant_end_unix``), and return the session's exit code.
+    anything else is built in it, run the session (:meth:`Session.run`, given ``grant``'s explore cap) and its conc
+    sweep when the settings ask for one (:func:`sweep_closed`, warned at ``grant``'s tests end), and return the
+    session's exit code.
     A session whose specialists run as an account that cannot reach its directory is refused before it runs
     (:func:`~hyperloom_multibranch.scheduling.specialist_reach.require_specialist_reach`, raising
     :class:`EnvironmentIncomplete`), unless it stops once its map is made: that session starts no specialist.
@@ -270,7 +272,7 @@ def run_session(
     stop kills it and reports it while it runs."""
 
     with adopting_orphans():
-        return asyncio.run(_run_session(settings, peer_factory, services, report_root, explore_cap, grant_end_unix))
+        return asyncio.run(_run_session(settings, peer_factory, services, report_root, grant))
 
 
 async def _run_session(
@@ -278,8 +280,7 @@ async def _run_session(
     peer_factory: PeerFactory,
     services: SessionServices,
     report_root: Callable[[Path], None],
-    explore_cap: ExploreCap | None = None,
-    grant_end_unix: float | None = None,
+    grant: GrantEnd | None = None,
 ) -> int:
     clock = Clock()
     layout = create_session(workspace_root(), settings.workload.model_basename, clock)
@@ -289,9 +290,9 @@ async def _run_session(
         require_specialist_reach(layout.branches)
     host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
     session = Session(settings, peer_factory, host, services)
-    outcome = await session.run(explore_cap)
+    outcome = await session.run(None if grant is None else grant.explore_cap)
     if settings.conc_sweep:
-        await sweep_closed(layout, settings, peer_factory, services, grant_end_unix)
+        await sweep_closed(layout, settings, peer_factory, services, None if grant is None else grant.tests_end_by)
     return outcome.exit_code
 
 
@@ -509,15 +510,7 @@ def _hosted_start(host: HostInfo) -> HostedStart:
         return HostedStart(partial(leg, persisted, ready.peer_factory, ready.services))
     close = partial(final_only, peer_factory=ready.peer_factory, services=ready.services)
     record = partial(started_session, host.state_dir)
-    start = partial(
-        run_session,
-        settings,
-        ready.peer_factory,
-        ready.services,
-        record,
-        grant_explore_cap(host),
-        grant_tests_end_by(host),
-    )
+    start = partial(run_session, settings, ready.peer_factory, ready.services, record, grant_end(host))
     return HostedStart(partial(close_then_start, earlier.left, close, start))
 
 
@@ -593,9 +586,8 @@ def _start(settings: RunSettings, grant: HandedGrant | None) -> int:
     else:
         ready = hosted_ready_session(grant.host, settings.workload)
         _stop_before_grant_ends(grant.host)
-    cap = None if grant is None else grant_explore_cap(grant.host)
-    end = None if grant is None else grant_tests_end_by(grant.host)
-    return run_session(settings, ready.peer_factory, ready.services, explore_cap=cap, grant_end_unix=end)
+    end = None if grant is None else grant_end(grant.host)
+    return run_session(settings, ready.peer_factory, ready.services, grant=end)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -35,6 +35,7 @@ SUMMARY_FILE = "conc_sweep_summary.json"
 RAW_FILE = "conc_sweep_raw.csv"
 CURVE_FILE = "conc_sweep_curve.png"
 FINAL_FILE = "final.json"
+_ENCODING = "utf-8"
 #: The statuses of a sweep that ran its course, whatever it measured.
 SETTLED = frozenset({"succeeded", "partial", "skipped"})
 
@@ -94,7 +95,7 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
         "error",
     ]
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with csv_path.open("w", newline="", encoding="utf-8") as fp:
+    with csv_path.open("w", newline="", encoding=_ENCODING) as fp:
         writer = csv.DictWriter(fp, fieldnames=columns)
         writer.writeheader()
         for p in points:
@@ -205,13 +206,13 @@ def _model_meta_record(meta: Any) -> dict[str, Any]:
 def read_summary(reports: Path) -> dict[str, Any] | None:
     """The summary an earlier run of the sweep left in ``reports``, or ``None``."""
     path = reports / SUMMARY_FILE
-    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+    return json.loads(path.read_text(encoding=_ENCODING)) if path.is_file() else None
 
 
 def sweep_unfinished(session_dir: Path) -> bool:
     """Whether the optimize session in ``session_dir`` closed, asked for a conc sweep, and that sweep has not run its
     course; read off ``state.json`` and the summary alone."""
-    state = json.loads((session_dir / "state.json").read_text(encoding="utf-8"))
+    state = json.loads((session_dir / "state.json").read_text(encoding=_ENCODING))
     if not (state.get("conc_sweep_enabled") and state.get("close_sequence_done")):
         return False
     summary = read_summary(reports_dir(session_dir))
@@ -237,7 +238,7 @@ def publish_curve(payload: dict[str, Any], session_dir: Path, options: ConcCurve
     final = reports / FINAL_FILE
     if not final.is_file():
         return
-    document = json.loads(final.read_text(encoding="utf-8"))
+    document = json.loads(final.read_text(encoding=_ENCODING))
     document["conc_sweep_summary"] = {
         "report_path": (reports / SUMMARY_FILE).relative_to(session_dir).as_posix(),
         "status": payload["status"],

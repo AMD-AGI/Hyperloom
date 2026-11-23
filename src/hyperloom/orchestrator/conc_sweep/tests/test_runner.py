@@ -81,7 +81,8 @@ def grid(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(runner, "prepare_grid_benchmark_config", materialize)
     monkeypatch.setattr(runner, "resolve_lifecycle_params", lambda _: {"eligible": True, "port": 9000})
     monkeypatch.setattr(runner, "teardown_variant_server", lambda _: [])
-    monkeypatch.setattr(runner, "read_base_launch", lambda _: _base(SourceKind.INFERENCEX, (4, 8, 32)))
+    frozen = SimpleNamespace(launch=_base(SourceKind.INFERENCEX, (4, 8, 32)))
+    monkeypatch.setattr(runner, "frozen_base", lambda _: frozen)
     return SimpleNamespace(calls=calls, failing=failing)
 
 

@@ -94,7 +94,7 @@ from hyperloom_multibranch.scheduling.budget import (
     ExploreCap,
     FinalWork,
 )
-from hyperloom_multibranch.scheduling.conc_sweep import sweep_unfinished
+from hyperloom_multibranch.scheduling.final import sweep_unfinished
 from hyperloom_multibranch.scheduling.launch_isolation import launch_isolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.manifest import read_manifest
