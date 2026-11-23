@@ -1050,8 +1050,16 @@ async def test_a_run_given_the_inferencex_checkout_briefs_its_launches_for_the_s
         ("make_before_break", False),
         ("agent_port", 32100),
         ("inferencex_commit", "8a76a78e41"),
+        ("source_changes", False),
     ],
-    ids=["dev-leases", "make-before-break-on", "make-before-break-off", "agent-port", "inferencex-commit"],
+    ids=[
+        "dev-leases",
+        "make-before-break-on",
+        "make-before-break-off",
+        "agent-port",
+        "inferencex-commit",
+        "no-source-changes",
+    ],
 )
 async def test_a_setting_of_the_run_reaches_the_peers(tmp_path: Path, name: str, value: object) -> None:
     stage = _stage(tmp_path)

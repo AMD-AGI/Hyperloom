@@ -72,7 +72,7 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
-from hyperloom_multibranch.blackboard.codec import encode
+from hyperloom_multibranch.blackboard.codec import decode, encode
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import (
@@ -778,6 +778,30 @@ def test_make_before_break_is_on_unless_the_command_line_turns_it_off() -> None:
     assert _settings().make_before_break is True
     assert _settings("--make-before-break").make_before_break is True
     assert _settings("--no-make-before-break").make_before_break is False
+
+
+def test_source_changes_are_kept_unless_the_command_line_holds_the_session_to_launch_configuration() -> None:
+    assert _settings().source_changes is True
+    assert _settings("--no-source-changes").source_changes is False
+
+
+def test_a_session_held_to_launch_configuration_takes_no_autonomous_agent() -> None:
+    with pytest.raises(ValueError, match="--no-source-changes is not taken with --autonomous-agent"):
+        _settings("--no-source-changes", "--autonomous-agent", "/agents/a")
+
+
+def test_the_manifest_keeps_a_session_held_to_launch_configuration_and_an_older_one_keeps_source_changes() -> None:
+    held = replace(_settings(), source_changes=False)
+    assert decode(RunSettings, encode(held)).source_changes is False
+    older = encode(held)
+    del older["source_changes"]  # type: ignore[index]
+    assert decode(RunSettings, older).source_changes is True
+
+
+def test_a_resume_takes_its_sessions_setting_and_no_source_changes_option_beside_it() -> None:
+    args = cli_options.build_parser().parse_args(["run", "--resume", "MB-session", "--no-source-changes"])
+    with pytest.raises(ValueError, match="no other option; given: source_changes"):
+        cli_options.refuse_options_beside_resume(args)
 
 
 def test_dev_leases_lend_specialists_dev_sandboxes_and_default_to_none() -> None:

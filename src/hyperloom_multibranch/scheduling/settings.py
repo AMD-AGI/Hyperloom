@@ -190,7 +190,8 @@ class RunSettings:
     ``conc_sweep`` runs the concurrency sweep of the closed session after CLOSE
     (:class:`~hyperloom_multibranch.scheduling.final.ConcSweep`); ``conc_sweep_concs`` are the operator's points, in
     place of the base's InferenceX arm's; ``conc_sweep_parallel`` is how many of the sweep's tests run at once, within
-    ``caps.max_parallel_tests``."""
+    ``caps.max_parallel_tests``.
+    ``source_changes`` off has its toolbox refuse every test whose recipe holds a patch or a kernel artifact."""
 
     workload: Workload
     max_hours: float
@@ -219,6 +220,7 @@ class RunSettings:
     conc_sweep: bool = False
     conc_sweep_concs: tuple[int, ...] = ()
     conc_sweep_parallel: int = DEFAULT_CONC_SWEEP_PARALLEL
+    source_changes: bool = True
 
 
 def session_early_stop(environ: Mapping[str, str]) -> EarlyStopMode:

@@ -116,6 +116,7 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
     _add_specialist_input_options(run)
     _add_concurrency_options(run)
     _add_playbook_option(run)
+    _add_source_changes_option(run)
     _add_verbose_option(run)
 
 
@@ -293,6 +294,22 @@ def _add_playbook_option(run: argparse.ArgumentParser) -> None:
             "The scheduling playbook the session plays from the RSI archive: the champion, or, in a "
             "challenger session, the oldest playbook on trial; auto (the default) makes half the sessions, drawn by "
             "their id, challenger sessions."
+        ),
+    )
+
+
+def _add_source_changes_option(run: argparse.ArgumentParser) -> None:
+    """What the session may keep: source changes too, or launch configuration only."""
+
+    run.add_argument(
+        "--no-source-changes",
+        dest="source_changes",
+        action="store_false",
+        help=(
+            "Keep only server arguments and environment variables, as hyperloom optimize --no-source-changes does: a"
+            " test whose recipe holds a patch or a kernel artifact is refused (launch_config_only), whoever submits"
+            " it, so no branch, merge or FINAL hands one on. Not taken with --autonomous-agent, whose agent works by"
+            " its own logic. Default: source changes are kept."
         ),
     )
 
@@ -610,6 +627,15 @@ def _agent_dossier(path: Path | None, directions: Path | None) -> str:
     return str(path.absolute())
 
 
+def _source_changes(kept: bool, agents: list[str]) -> bool:
+    """Whether the session keeps source changes; refused off beside an agent, which no option of the session keeps
+    from working on source for as long as it holds its cards."""
+
+    if agents and not kept:
+        raise ValueError("--no-source-changes is not taken with --autonomous-agent: an agent works by its own logic")
+    return kept
+
+
 def _agent_port(port: int | None, agents: list[str]) -> int:
     """The first port of the agents' port blocks; refused with no agent to serve on it, or when it is no port."""
 
@@ -706,6 +732,7 @@ def settings_from(
         conc_sweep=args.enable_conc_sweep,
         conc_sweep_concs=args.conc_sweep_concs,
         conc_sweep_parallel=args.conc_sweep_parallel,
+        source_changes=_source_changes(args.source_changes, agents),
     )
 
 

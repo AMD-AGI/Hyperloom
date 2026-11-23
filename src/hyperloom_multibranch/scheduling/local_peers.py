@@ -536,7 +536,13 @@ def _toolbox(
     if workload.kind is WorkloadKind.AGENTX:
         checkpoint = CheckpointReferences(setup.agentx_early_stop, workload.agentx_objective, blackboard)
     acceptance = AcceptanceSetup(
-        repo, planner, image.digest, workload_kind=workload.kind, explore_accuracy=False, checkpoint=checkpoint
+        repo,
+        planner,
+        image.digest,
+        workload_kind=workload.kind,
+        explore_accuracy=False,
+        checkpoint=checkpoint,
+        source_changes=setup.source_changes,
     )
     return host.backend.toolbox(setup, blackboard, acceptance, spec)
 

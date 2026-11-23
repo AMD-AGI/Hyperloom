@@ -308,6 +308,7 @@ class Session:
             settings.agentx_early_stop,
             make_before_break=settings.make_before_break,
             test_points=self._test_points,
+            source_changes=settings.source_changes,
         )
 
     def _map_calls(self) -> MapCalls:
