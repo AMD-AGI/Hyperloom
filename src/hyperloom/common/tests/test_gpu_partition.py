@@ -111,12 +111,12 @@ class TestObservePartition:
         assert layout.gib_per_partition == pytest.approx(36.0, abs=0.1)
         assert [call[0] for call in smi.calls] == ["partition"]
 
-    def test_a_card_in_a_mode_but_no_session_card_is_unsized_and_says_so(self, smi, caplog):
-        """No card table stands in for the facts the session could not read."""
+    @pytest.mark.parametrize("card", [None, GpuCard("", "", "gfx950", None, 294912, None, None)])
+    def test_a_card_in_a_mode_without_a_compute_unit_count_is_unsized_and_says_so(self, smi, caplog, card):
         smi.payloads["partition"] = _partition_payload("DPX")
         with caplog.at_level("WARNING"):
-            assert gp.observe_partition(0, card=None) is None
-        assert "read no card" in caplog.text
+            assert gp.observe_partition(0, card=card) is None
+        assert "no compute-unit count" in caplog.text
 
     def test_an_unreadable_card_is_none_not_an_error(self, smi):
         """A host without amd-smi is the ordinary case, not a failure."""

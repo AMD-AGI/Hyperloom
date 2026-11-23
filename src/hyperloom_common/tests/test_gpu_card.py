@@ -7,13 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_common import amd_smi
+from hyperloom_common import amd_smi, gpu_card
 from hyperloom_common.amd_smi import AmdSmiError
 from hyperloom_common.gpu_card import (
     GpuCard,
     board_label,
     cards_of,
     one_kind,
+    probed_cards,
     publish_session_card,
     read_cards,
     session_card,
@@ -164,8 +165,86 @@ def test_read_cards_numbers_the_cards_as_rocm_does(monkeypatch):
     assert [card.compute_units for card in read_cards()] == [11, 10]
 
 
-def test_a_machine_whose_amd_smi_lists_no_card_cannot_be_read(monkeypatch):
-    _amd_smi_answers(monkeypatch, static={"gpu_data": []}, listed=[])
+_ROCM_SMI = {
+    "card0": {
+        "Card Series": "AMD Instinct MI325X",
+        "Card Model": "0x74a5",
+        "Node ID": "5",
+        "GFX Version": "gfx942",
+        "VRAM Total Memory (B)": str(262128 << 20),
+    },
+    "card1": {
+        "Card Series": "AMD Instinct MI355X",
+        "Card Model": "0x75a3",
+        "Node ID": "2",
+        "GFX Version": "gfx950",
+        "VRAM Total Memory (B)": str(294912 << 20),
+    },
+}
+_TORCH = {
+    "torch": [
+        {
+            "name": "AMD Instinct MI325X",
+            "gcnArchName": "gfx942:sramecc+:xnack-",
+            "multi_processor_count": 304,
+            "total_memory": 262128 << 20,
+            "clock_rate": 2100000,
+        }
+    ]
+}
+_TORCH_MI325X = dataclasses.replace(_MI325X, device_id="", memory_bandwidth_gbps=None)
 
-    with pytest.raises(AmdSmiError, match="reports no GPU"):
+
+def test_rocm_smi_describes_its_cards_in_rocm_order_without_compute_units_or_clock():
+    cards = probed_cards(json.dumps(_ROCM_SMI))
+
+    assert cards == [
+        GpuCard("AMD Instinct MI355X", "75a3", "gfx950", None, 294912, None, None),
+        GpuCard("AMD Instinct MI325X", "74a5", "gfx942", None, 262128, None, None),
+    ]
+    assert cards[0].peak_tflops("bf16") is None
+    assert cards[0].describe() == "AMD Instinct MI355X (gfx950, 294912 MiB)"
+
+
+def test_torch_describes_a_card_but_for_its_bandwidth_among_other_lines():
+    assert probed_cards(f"[INFO] started {{attempt: 1}}\n{json.dumps(_TORCH)}\n[INFO] done\n") == [_TORCH_MI325X]
+
+
+def test_output_that_describes_no_card_or_one_without_its_arch_is_refused():
+    with pytest.raises(AmdSmiError, match="no GPU is described in 'amd-smi: command not found'"):
+        probed_cards("amd-smi: command not found\n")
+    with pytest.raises(AmdSmiError, match="rocm-smi reports a card without its arch"):
+        probed_cards(json.dumps({"card0": {"Card Series": "AMD Instinct MI300X", "VRAM Total Memory (B)": "1048576"}}))
+
+
+def _probes_answer(monkeypatch, answers):
+    """amd-smi cannot run; each other probe prints its entry of ``answers``, or fails when it has none."""
+
+    def unreadable(*_args):
+        raise AmdSmiError("amd-smi static could not run")
+
+    def output(probe):
+        tool = probe.split()[0]
+        if tool not in answers:
+            raise AmdSmiError(f"{tool} could not run")
+        return json.dumps(answers[tool])
+
+    monkeypatch.setattr(amd_smi, "read_amd_smi_json", unreadable)
+    monkeypatch.setattr(gpu_card, "_probe_output", output)
+
+
+def test_a_machine_amd_smi_cannot_describe_is_asked_through_rocm_smi_then_torch(monkeypatch):
+    _probes_answer(monkeypatch, {"rocm-smi": _ROCM_SMI, "python3": _TORCH})
+    assert [card.gfx for card in read_cards()] == ["gfx950", "gfx942"]
+
+    _probes_answer(monkeypatch, {"python3": _TORCH})
+    assert read_cards() == [_TORCH_MI325X]
+
+
+def test_a_machine_no_probe_describes_cannot_be_read_and_gives_each_reason(monkeypatch):
+    _probes_answer(monkeypatch, {})
+
+    with pytest.raises(
+        AmdSmiError, match="amd-smi static could not run; rocm-smi could not run; python3 could not run"
+    ):
         read_cards()

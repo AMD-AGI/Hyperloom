@@ -35,6 +35,8 @@ from pathlib import Path
 import pytest
 
 from hyperloom.sandbox import card_occupancy
+from hyperloom_common import gpu_card
+from hyperloom_common.amd_smi import AmdSmiError
 from hyperloom_common.gpu_card import SESSION_CARD_ENV
 from hyperloom.sandbox.tests.kernel_tree import KernelTree
 
@@ -72,6 +74,11 @@ def required_scratch_root(helper: str) -> str:
     return scratch
 
 
+def _unreadable_probe(probe: str) -> str:
+    """torch is not a tool on ``PATH`` to shadow, so no card probe of this process runs at all."""
+    raise AmdSmiError(f"{probe.split()[0]} could not run (test)")
+
+
 def _own_scratch(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(TEST_SCRATCH_ENV, str(tmp_path_factory.mktemp("scratch")))
 
@@ -102,6 +109,7 @@ def machine_without_readable_gpus(
     monkeypatch.setenv("PATH", f"{shadow}{os.pathsep}{os.environ.get('PATH', '')}")
     for name in _DEVICE_ENV:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(gpu_card, "_probe_output", _unreadable_probe)
 
 
 @pytest.fixture(autouse=True)

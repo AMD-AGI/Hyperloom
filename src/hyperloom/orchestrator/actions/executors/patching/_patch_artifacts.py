@@ -205,14 +205,14 @@ def _validate_aiter_gemm_artifacts(
     *,
     card: GpuCard | None,
 ) -> list[dict[str, str]]:
-    """Reject AITER GEMM CSVs that cannot dispatch on ``card``; without a card there is nothing to check against.
+    """Reject AITER GEMM CSVs that cannot dispatch on ``card``; unchecked when its compute-unit count is unknown.
 
     A model-config seed containing rows for another architecture, or placeholder
     rows that still require an offline tuning step, has no runtime effect. Such
     an artifact must not enter E2E promotion because benchmark variance could
     otherwise attribute an unrelated gain to it.
     """
-    if card is None:
+    if card is None or card.compute_units is None:
         return []
     expected_gfx, expected_cu_num = card.gfx, card.compute_units
     errors: list[dict[str, str]] = []

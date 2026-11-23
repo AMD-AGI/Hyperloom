@@ -451,15 +451,23 @@ immediately.
 
 ## GPU card
 
-A session reads its GPUs with `amd-smi static --json` once per process start,
-fresh launch and resume alike: the cards of this host the first set
-visible-device mask names (all of them without one), or, for `--nodes >= 2`,
-the cards of a remote node through the cluster hand-off. They must be one kind
-(same arch, compute units, memory size and top engine clock), or the launch
-exits 2 listing each kind. When `amd-smi` cannot be read the session prints why
-and runs without a card: it uses no arch-specific launch row, opens no
-arch-specific gate and has no vendor peak. Nothing in Hyperloom keeps a list
-of boards; every hardware fact comes from the card.
+A session reads its GPUs once per process start, fresh launch and resume
+alike: the cards of this host the first set visible-device mask names (all of
+them without one), or, for `--nodes >= 2`, the cards of a remote node through
+the cluster hand-off. It asks, in turn, until one describes a card:
+
+1. `amd-smi static --json`: every fact.
+2. `rocm-smi --showproductname --showmeminfo vram --json`: name, arch and
+   memory. No compute-unit count, bandwidth or clock, so there is no vendor
+   peak, AITER CSV check or partition sizing.
+3. torch's device properties (`gcnArchName`): every fact but the bandwidth.
+
+The cards must be one kind (same arch, compute units, memory size and top
+engine clock), or the launch exits 2 listing each kind. When none of the three
+describes a card the session prints each one's reason and runs without a card:
+it uses no arch-specific launch row, opens no arch-specific gate and has no
+vendor peak. Nothing in Hyperloom keeps a list of boards; every hardware fact
+comes from the card.
 
 The GPU type (`--gpu-type`, `TARGET_GPU_TYPE`, `GPU_TYPE`) is only the label
 results, recipes and scripts are filed under. Any name is taken as given, and

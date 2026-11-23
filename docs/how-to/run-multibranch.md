@@ -25,11 +25,11 @@ The session directory is created under `USER_DATA_PATH` and its path is printed 
 ## Environment
 
 Every variable below is checked before anything is created: a missing or malformed one fails the command with no
-session directory left behind. Two steps run later, in the new session before PRELUDE: the read of the session's
-card (`amd-smi static --json`, or the recording `HYPERLOOM_RUNNER_GPU_CARD` names with `--measurement hosted`),
-which fails the command (exit 1) with the session directory left behind when the cards cannot be described or are
-not one kind; and on a local session the publish of the inference_suite staging into the runner cache, which fails
-it the same way when that directory cannot be written.
+session directory left behind. Two steps run later, in the new session before PRELUDE: the read of
+the session's card (from the machine, or the recording `HYPERLOOM_RUNNER_GPU_CARD` names with `--measurement
+hosted`), which fails the command (exit 1) with the session directory left behind when the cards cannot be described
+or are not one kind; and on a local session the publish of the inference_suite staging into the runner cache, which
+fails it the same way when that directory cannot be written.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
@@ -158,9 +158,9 @@ host has no token. The session logs one WARNING when its toolbox is built. Every
   (see [Base launch](../reference/inference-suite.md#base-launch)).
 - **GPU type and card:** `--gpu-type` is the label the session files its results under (recipes, the Recipe KB, the
   TraceLens arch spec the analyses read), in any case; any name is accepted. The facts come from the card itself: when
-  the session starts it reads `amd-smi static --json` for the cards it measures on (in a hosted session, the recording
-  `HYPERLOOM_RUNNER_GPU_CARD` names) and every test's base launch, roofline and measurement sheet follow that card's
-  arch, compute units, memory and clocks. Cards of more than one kind, or cards `amd-smi` cannot describe, refuse the
+  the session starts it reads the cards it measures on (`amd-smi`, else `rocm-smi`, else torch; in a hosted session,
+  the recording `HYPERLOOM_RUNNER_GPU_CARD` names) and every test's base launch, roofline and measurement sheet follow
+  that card's arch, compute units, memory and clocks. Cards of more than one kind, or cards no probe describes, refuse the
   session before PRELUDE (exit 1), naming each kind. A `--gpu-type` other than the card's own label (`mi355x` for an
   AMD Instinct MI355X) is kept and logged as a warning that names both.
 - **AgentX objective:** `--agentx-objective p50_interactivity|total_token_throughput` (default

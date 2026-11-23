@@ -181,18 +181,19 @@ it.
   `_TIMEOUT_SEC` settings are no longer read, and no variant is skipped as
   `screen_decisively_slower`. The measurement store and the InferaSim
   projection are unchanged, and so is a run that never set the switch.
-- **A session reads its GPU from `amd-smi`; no board table is kept.** Every
-  start and resume reads the visible cards with `amd-smi static --json` and
-  prints the one it runs on (`GPU card        : AMD Instinct MI325X (gfx942,
-  304 CUs, 262128 MiB, 2100 MHz)`). Its arch, compute units, memory, bandwidth
-  and top engine clock replace the per-board rows, so a card needs no
-  registration. Child processes read it from `HYPERLOOM_GPU_CARD` and the
-  manifest archives it as `gpu_card`. The `rocm-smi` and torch probes are gone:
-  a host whose `amd-smi` cannot be read prints `GPU card        : none read
-  (<reason>)` and runs without arch-specific launch rows, gates or vendor
-  peaks, and a multi-node run needs `amd-smi` on the remote node. Visible cards
-  of more than one kind exit 2 at launch, listing each kind: narrow the
-  visible-device mask.
+- **A session reads its GPU from the machine; no board table is kept.** Every
+  start and resume reads the visible cards and prints the one it runs on (`GPU
+  card        : AMD Instinct MI325X (gfx942, 304 CUs, 262128 MiB, 2100 MHz)`).
+  Its arch, compute units, memory, bandwidth and top engine clock replace the
+  per-board rows, so a card needs no registration. The session asks `amd-smi
+  static --json` first, then `rocm-smi` (name, arch and memory only, so no
+  vendor peak, AITER CSV check or partition sizing), then torch's device
+  properties (`gcnArchName`; no bandwidth); a multi-node run asks a remote node
+  the same way. Child processes read the card from `HYPERLOOM_GPU_CARD` and the
+  manifest archives it as `gpu_card`. A host none of the three can describe
+  prints `GPU card        : none read (<reasons>)` and runs without
+  arch-specific launch rows, gates or vendor peaks. Visible cards of more than
+  one kind exit 2 at launch, listing each kind: narrow the visible-device mask.
 - **`--gpu-type` accepts any name and is taken as given.** It names the label
   results, recipes and KB rows are filed under (the flag, then
   `TARGET_GPU_TYPE`, then `GPU_TYPE`). A detected board no longer overrides it;
@@ -253,7 +254,7 @@ it.
   new sheets with `spec.hardware: unknown key 'card'`; move the app and its
   runners together.
 - **Multi-branch sessions take any `--gpu-type` and read their card**: locally
-  from `amd-smi`, hosted from the recording of `amd-smi static --json` that
+  from the machine, hosted from the recording of `amd-smi static --json` that
   `HYPERLOOM_RUNNER_GPU_CARD` names on the app host. The session stops before
   any test when the variable is unset or the recording describes no one kind of
   card. The roofline and TraceLens tools default to the session's GPU type.

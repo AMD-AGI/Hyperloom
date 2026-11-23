@@ -23,8 +23,8 @@ def add_gpu_partition_arguments(opt: argparse.ArgumentParser) -> None:
         type=str.lower,
         default=None,
         help="The name this session's results are filed under (recipes, KB rows, reports), e.g. mi355x. "
-        "Taken as given; without it the name comes from the card amd-smi reports, and a WARN is printed "
-        "when the two differ. Needed when amd-smi reports no product name for the card.",
+        "Taken as given; without it the name comes from the card the machine reports, and a WARN is printed "
+        "when the two differ. Needed when the machine reports no product name for the card.",
     )
     opt.add_argument(
         "--compute-partition-mode",

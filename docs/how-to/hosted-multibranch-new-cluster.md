@@ -219,8 +219,8 @@ run in the app container, so the run needs no measurement or `dev` template, no 
 - Without a visible-device mask, the cards are as many as `rocm-smi` shows, and a container that holds fewer render
   nodes (`/dev/dri/renderD*`) than that is refused, naming both counts: set `ROCR_VISIBLE_DEVICES` to the cards it was
   given.
-- The session's card is read from `amd-smi static --json` on this container, not from `HYPERLOOM_RUNNER_GPU_CARD`: the
-  container needs `amd-smi`, and the cards it uses must be one kind, or the run does not start.
+- The session's card is read on this container (`amd-smi`, else `rocm-smi`, else torch), not from
+  `HYPERLOOM_RUNNER_GPU_CARD`: the cards it uses must be one kind, or the run does not start.
 
 ## Example: clusters with an NFS share
 

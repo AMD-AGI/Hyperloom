@@ -173,7 +173,10 @@
               "minLength": 1
             },
             "compute_units": {
-              "type": "integer",
+              "type": [
+                "integer",
+                "null"
+              ],
               "minimum": 1
             },
             "memory_mib": {

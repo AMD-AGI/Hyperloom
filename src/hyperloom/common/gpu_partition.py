@@ -167,8 +167,10 @@ def observe_partition(gpu_id: int = 0, *, card: GpuCard | None) -> PartitionLayo
     if mode not in MODE_PARTITION_COUNTS:
         log.warning("GPU %d reports compute-partition mode %r, which this build does not know", gpu_id, mode)
         return None
-    if card is None:
-        log.warning("GPU %d is in %s, but the session read no card to size its partitions by", gpu_id, mode)
+    if card is None or card.compute_units is None:
+        log.warning(
+            "GPU %d is in %s, but the session read no compute-unit count to size its partitions by", gpu_id, mode
+        )
         return None
     return layout_for(mode, cu_per_partition=card.compute_units, gib_per_partition=card.memory_mib / 1024)
 

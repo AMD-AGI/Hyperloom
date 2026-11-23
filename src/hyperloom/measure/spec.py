@@ -151,7 +151,7 @@ def _card(value: Any, path: str) -> GpuCard | None:
         name=r.string("name"),
         device_id=r.string("device_id"),
         gfx=r.text("gfx") or "",
-        compute_units=r.integer("compute_units", minimum=1) or 1,
+        compute_units=r.integer("compute_units", minimum=1, optional=True),
         memory_mib=r.integer("memory_mib", minimum=1) or 1,
         memory_bandwidth_gbps=r.number("memory_bandwidth_gbps", minimum=0, optional=True),
         engine_clock_mhz=r.integer("engine_clock_mhz", minimum=1, optional=True),

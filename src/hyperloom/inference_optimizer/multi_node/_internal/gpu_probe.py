@@ -1,12 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The cards of a multi-node run's handed-over cluster, read by ``amd-smi static --json`` on one of its GPU nodes."""
+"""The cards of a multi-node run's handed-over cluster, read on one of its GPU nodes."""
 
 from __future__ import annotations
 
-import json
-import re
 import shutil
 import subprocess
 import tempfile
@@ -16,23 +14,22 @@ from typing import Any
 
 import httpx
 
-from hyperloom_common import amd_smi
+from hyperloom_common import gpu_card
 from hyperloom_common.amd_smi import AmdSmiError
-from hyperloom_common.gpu_card import GpuCard, cards_of
+from hyperloom_common.gpu_card import GpuCard
 
 from . import ray_dashboard, ssh_client, ssh_known_hosts
 from .external_state import build_external_state_from_env, external_service_url
 
-_PROBE_CMD = "amd-smi static --json"
+#: The first probe that runs on the node answers.
+_PROBE_CMD = " || ".join(gpu_card.PROBES)
 
 # Ray Dashboard job terminal states (mirror multi_node.cluster_access).
 _TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "STOPPED"}
 
-_DOCUMENT_START = re.compile(r"[\[{]")
-
 
 def remote_cards(*, timeout_s: int = 60) -> list[GpuCard]:
-    """The cards one GPU node of the handed-over cluster reports, in amd-smi order.
+    """The cards one GPU node of the handed-over cluster reports.
 
     Raises:
         AmdSmiError: no cluster was handed over, its backend has no probe, the probe could not run, or what it
@@ -44,26 +41,12 @@ def remote_cards(*, timeout_s: int = 60) -> list[GpuCard]:
     backend = str(state.get("backend") or "").lower()
     probes = {"rayjob": _probe_via_ray_head, "infera": _probe_via_infera_ssh}
     if backend not in probes:
-        raise AmdSmiError(f"the multi-node backend {backend!r} has no remote amd-smi probe")
+        raise AmdSmiError(f"the multi-node backend {backend!r} has no remote card probe")
     try:
         output = probes[backend](state, timeout_s=timeout_s)
     except (httpx.HTTPError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-        raise AmdSmiError(f"remote amd-smi static via {backend} failed: {exc}") from exc
-    cards = cards_of(_amd_smi_document(output))
-    return [cards[index] for index in sorted(cards)]
-
-
-def _amd_smi_document(output: str) -> Any:
-    """The first ``amd-smi --json`` document in ``output``, which a job log may wrap in lines of its own."""
-    decoder = json.JSONDecoder()
-    for start in _DOCUMENT_START.finditer(output):
-        try:
-            document, _ = decoder.raw_decode(output, start.start())
-        except ValueError:
-            continue
-        if amd_smi.gpu_rows(document):
-            return document
-    raise AmdSmiError(f"the remote {_PROBE_CMD} printed no card: {output.strip()[-500:]!r}")
+        raise AmdSmiError(f"the remote card probe via {backend} failed: {exc}") from exc
+    return gpu_card.probed_cards(output)
 
 
 def _probe_via_ray_head(state: dict[str, Any], *, timeout_s: int) -> str:
@@ -123,5 +106,5 @@ def _probe_via_infera_ssh(state: dict[str, Any], *, timeout_s: int) -> str:
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
     if cp.returncode != 0:
-        raise AmdSmiError(f"ssh to {host}: {_PROBE_CMD} exited {cp.returncode}: {(cp.stderr or '').strip()[-500:]}")
+        raise AmdSmiError(f"ssh to {host}: the card probe exited {cp.returncode}: {(cp.stderr or '').strip()[-500:]}")
     return cp.stdout or ""

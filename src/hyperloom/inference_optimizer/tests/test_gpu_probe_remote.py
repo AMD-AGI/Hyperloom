@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 import hyperloom_common
+from hyperloom_common import gpu_card
 from hyperloom_common.amd_smi import AmdSmiError
 from hyperloom.inference_optimizer.multi_node._internal import gpu_probe
 from hyperloom.orchestrator.tests._fixtures import MI325X_CARD
@@ -89,24 +90,18 @@ def _track_scratch_dirs(monkeypatch, tmp_path):
     return created
 
 
-def test_the_ray_head_reports_its_cards_through_amd_smi_static(monkeypatch):
+def test_the_ray_head_is_asked_with_each_probe_in_turn_and_reports_its_cards(monkeypatch):
     client = _ray(monkeypatch, _MI325X_STATIC)
 
     assert gpu_probe.remote_cards(timeout_s=1) == [MI325X_CARD] * 4
-    assert client.entrypoints == ["amd-smi static --json"]
-
-
-def test_the_document_is_found_among_the_lines_a_job_log_wraps_it_in(monkeypatch):
-    _ray(monkeypatch, f"[INFO] job started {{attempt: 1}}\n{_MI325X_STATIC}\n[INFO] job finished\n")
-
-    assert gpu_probe.remote_cards(timeout_s=1) == [MI325X_CARD] * 4
+    assert client.entrypoints == [" || ".join(gpu_card.PROBES)]
 
 
 def test_an_infera_pod_reports_its_cards_over_ssh(monkeypatch, tmp_path):
     _track_scratch_dirs(monkeypatch, tmp_path)
 
     def _fake_ssh_run(target, command, **_kwargs):
-        assert (target.host, command) == ("10.0.0.2", "amd-smi static --json")
+        assert (target.host, command) == ("10.0.0.2", " || ".join(gpu_card.PROBES))
         return subprocess.CompletedProcess(args=[command], returncode=0, stdout=_MI325X_STATIC, stderr="")
 
     monkeypatch.setattr(gpu_probe.ssh_client, "ssh_run", _fake_ssh_run)
@@ -162,7 +157,7 @@ def test_a_failed_ray_job_is_unreadable(monkeypatch):
 def test_output_that_describes_no_card_is_unreadable(monkeypatch, logs):
     _ray(monkeypatch, logs)
 
-    with pytest.raises(AmdSmiError, match="printed no card"):
+    with pytest.raises(AmdSmiError, match="no GPU is described"):
         gpu_probe.remote_cards(timeout_s=1)
 
 

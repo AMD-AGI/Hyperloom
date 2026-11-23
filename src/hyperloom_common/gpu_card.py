@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""One GPU as ``amd-smi static`` describes it, the card a session publishes for its consumers, and per-arch peak rates."""
+"""One GPU as its machine describes it, the card a session publishes for its consumers, and per-arch peak rates."""
 
 from __future__ import annotations
 
 import json
 import os
 import re
+import shlex
+import subprocess  # nosec B404 - fixed probe commands.
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -17,12 +19,14 @@ from hyperloom_common.amd_smi import AmdSmiError
 
 __all__ = [
     "PEAK_PRECISIONS",
+    "PROBES",
     "SESSION_CARD_ENV",
     "GpuCard",
     "board_label",
     "cards_of",
     "one_kind",
     "peak_rate",
+    "probed_cards",
     "publish_session_card",
     "read_cards",
     "session_card",
@@ -44,6 +48,24 @@ _PEAK_RATES: dict[str, dict[str, int]] = {
     "gfx1151": {"fp16": 512},
 }
 
+#: Unmasked, so torch numbers the cards as ROCm does.
+_TORCH_PROBE = (
+    "import json, os; "
+    "[os.environ.pop(v, None) for v in ('ROCR_VISIBLE_DEVICES', 'HIP_VISIBLE_DEVICES', 'CUDA_VISIBLE_DEVICES')]; "
+    "import torch; "
+    "facts = ('name', 'gcnArchName', 'multi_processor_count', 'total_memory', 'clock_rate'); "
+    "cards = map(torch.cuda.get_device_properties, range(torch.cuda.device_count())); "
+    "print(json.dumps({'torch': [{f: getattr(c, f, None) for f in facts} for c in cards]}))"
+)
+#: The commands a machine is asked for its cards with, most complete first. rocm-smi reports no compute-unit count,
+#: bandwidth or clock; torch no bandwidth.
+PROBES = (
+    "amd-smi static --json",
+    "rocm-smi --showproductname --showmeminfo vram --json",
+    f"python3 -c {shlex.quote(_TORCH_PROBE)}",
+)
+_PROBE_TIMEOUT_SEC = 120.0
+
 #: amd-smi prints the device id as the name of a card libdrm does not know.
 _BARE_DEVICE_ID = re.compile(r"0x[0-9a-f]+", re.IGNORECASE)
 _BRAND_WORDS = frozenset({"amd", "instinct", "radeon", "pro", "ai", "graphics"})
@@ -52,14 +74,14 @@ _VARIANT_WORDS = frozenset({"hf", "vf", "oam", "dual", "slot"})
 
 @dataclass(frozen=True)
 class GpuCard:
-    """One GPU as ``amd-smi static`` reports it."""
+    """One GPU as its machine reports it; a fact is ``None`` when the probe that read it does not report it."""
 
     #: Empty when the driver has no marketing name for the card.
     name: str
     #: Lower-case hex without ``0x``.
     device_id: str
     gfx: str
-    compute_units: int
+    compute_units: int | None
     memory_mib: int
     memory_bandwidth_gbps: float | None
     #: Top level of the system clock.
@@ -75,16 +97,17 @@ class GpuCard:
         )
 
     def peak_tflops(self, precision: str) -> float | None:
-        """Vendor dense peak in TFLOPS; ``None`` without an engine clock or a rate for the arch."""
+        """Vendor dense peak in TFLOPS; ``None`` without compute units, an engine clock or a rate for the arch."""
         rate = peak_rate(self.gfx, precision)
-        if rate is None or self.engine_clock_mhz is None:
+        if rate is None or self.compute_units is None or self.engine_clock_mhz is None:
             return None
         return round(self.compute_units * self.engine_clock_mhz * rate / 1e6, 1)
 
     def describe(self) -> str:
         """The card's name and kind, for a message."""
-        clock = f"{self.engine_clock_mhz} MHz" if self.engine_clock_mhz is not None else "no engine clock"
-        return f"{self.name or 'unnamed card'} ({self.gfx}, {self.compute_units} CUs, {self.memory_mib} MiB, {clock})"
+        facts = ((self.compute_units, "CUs"), (self.memory_mib, "MiB"), (self.engine_clock_mhz, "MHz"))
+        known = ", ".join(f"{value} {unit}" for value, unit in facts if value is not None)
+        return f"{self.name or 'unnamed card'} ({self.gfx}, {known})"
 
 
 def peak_rate(gfx: str, precision: str) -> int | None:
@@ -110,12 +133,45 @@ def cards_of(document: Any) -> dict[int, GpuCard]:
     return {row["gpu"]: _card(row) for row in amd_smi.gpu_rows(document)}
 
 
+def probed_cards(output: str) -> list[GpuCard]:
+    """The cards in the first JSON document of ``output`` that describes any: what one of :data:`PROBES` printed,
+    possibly among other lines. rocm-smi's and torch's are in ROCm order, amd-smi's in its own.
+
+    Raises:
+        AmdSmiError: no document describes a card, or one describes a card without its arch or memory size.
+    """
+    decoder = json.JSONDecoder()
+    for start in re.finditer(r"[\[{]", output):
+        try:
+            document, _ = decoder.raw_decode(output, start.start())
+        except ValueError:
+            continue
+        cards = _document_cards(document)
+        if cards:
+            return cards
+    raise AmdSmiError(f"no GPU is described in {output.strip()[-300:]!r}")
+
+
 def read_cards() -> list[GpuCard]:
-    """This machine's cards, indexed by ROCm device number; raises :class:`AmdSmiError` when there is none to read."""
-    cards = cards_of(amd_smi.read_amd_smi_json("static"))
-    if not cards:
-        raise AmdSmiError("amd-smi static reports no GPU")
-    return [cards[index] for index in amd_smi.gpus_in_rocm_order()]
+    """This machine's cards, indexed by ROCm device number, from the first of :data:`PROBES` that describes any.
+
+    Raises:
+        AmdSmiError: no probe describes a card; the message gives each one's reason.
+    """
+    reasons = []
+    try:
+        cards = cards_of(amd_smi.read_amd_smi_json("static"))
+        if cards:
+            return [cards[index] for index in amd_smi.gpus_in_rocm_order()]
+        reasons.append("amd-smi static reports no GPU")
+    except AmdSmiError as exc:
+        reasons.append(str(exc))
+    for probe in PROBES[1:]:
+        try:
+            return probed_cards(_probe_output(probe))
+        except AmdSmiError as exc:
+            reasons.append(str(exc))
+    raise AmdSmiError("; ".join(reasons))
 
 
 def one_kind(cards: Iterable[GpuCard]) -> GpuCard:
@@ -146,6 +202,60 @@ def session_gfx(environ: Mapping[str, str] = os.environ) -> str:
     """The arch of the card the session published; empty when it read none."""
     card = session_card(environ)
     return card.gfx if card else ""
+
+
+def _probe_output(probe: str) -> str:
+    tool = probe.split()[0]
+    try:
+        done = subprocess.run(  # nosec B603 - one of PROBES.
+            shlex.split(probe), capture_output=True, text=True, timeout=_PROBE_TIMEOUT_SEC, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AmdSmiError(f"{tool} could not run: {exc}") from exc
+    if done.returncode != 0:
+        said = done.stderr.strip().splitlines()[-1:]
+        raise AmdSmiError(f"{tool} exited {done.returncode}" + (f": {said[0][:200]}" if said else ""))
+    return done.stdout
+
+
+def _document_cards(document: Any) -> list[GpuCard]:
+    if isinstance(document, dict) and "torch" in document:
+        return [_torch_card(facts) for facts in document["torch"]]
+    if isinstance(document, dict) and "gpu_data" not in document:
+        rows = [row for key, row in document.items() if re.fullmatch(r"card\d+", key) and isinstance(row, dict)]
+        return [_rocm_smi_card(row) for row in sorted(rows, key=lambda row: int(row.get("Node ID") or 0))]
+    return list(cards_of(document).values())
+
+
+def _rocm_smi_card(row: dict[str, Any]) -> GpuCard:
+    gfx, memory_bytes = _text(row.get("GFX Version")).lower(), _positive_int(row.get("VRAM Total Memory (B)"))
+    if not (gfx and memory_bytes):
+        raise AmdSmiError("rocm-smi reports a card without its arch or memory size")
+    return GpuCard(
+        name=_text(row.get("Card Series")),
+        device_id=_text(row.get("Card Model")).lower().removeprefix("0x"),
+        gfx=gfx,
+        compute_units=None,
+        memory_mib=memory_bytes >> 20,
+        memory_bandwidth_gbps=None,
+        engine_clock_mhz=None,
+    )
+
+
+def _torch_card(facts: dict[str, Any]) -> GpuCard:
+    gfx, memory_bytes = _text(facts.get("gcnArchName")).lower().split(":")[0], _positive_int(facts.get("total_memory"))
+    if not (gfx and memory_bytes):
+        raise AmdSmiError("torch reports a card without its arch or memory size")
+    clock_khz = _positive_int(facts.get("clock_rate"))
+    return GpuCard(
+        name=_text(facts.get("name")),
+        device_id="",
+        gfx=gfx,
+        compute_units=_positive_int(facts.get("multi_processor_count")),
+        memory_mib=memory_bytes >> 20,
+        memory_bandwidth_gbps=None,
+        engine_clock_mhz=clock_khz // 1000 if clock_khz else None,
+    )
 
 
 def _card(row: dict[str, Any]) -> GpuCard:

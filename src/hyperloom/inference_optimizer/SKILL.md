@@ -1229,8 +1229,9 @@ full env-var set, and `docs/reference/session-breakdown.md` for the emitted
 
 ## GPU Type
 
-Every start and resume reads the GPUs with `amd-smi static`; a multi-node
-session reads a remote node's, so `amd-smi` must work there too. The cards the
+Every start and resume reads the GPUs with `amd-smi static`, else `rocm-smi`,
+else torch's `gcnArchName`; a multi-node session reads a remote node's the same
+way. The cards the
 first set visible-device mask names (all of them without one) must be one kind
 (same arch, compute units, memory and top engine clock), or the launch exits 2
 listing each kind. That card's arch and facts decide everything that depends
