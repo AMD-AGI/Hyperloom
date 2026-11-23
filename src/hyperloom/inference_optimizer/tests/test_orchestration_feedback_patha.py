@@ -290,6 +290,35 @@ def test_inbox_names_the_cause_of_a_server_that_died_at_init(field):
     assert "Engine core initialization failed" not in rendered
 
 
+def test_inbox_names_why_explore_answered_a_variant_without_launching_it():
+    """Orchestration is told a dead change was skipped, and why, rather than reading an empty round."""
+    payload = {
+        "task_id": "t1",
+        "kind": "explore",
+        "state": "succeeded",
+        "result": {
+            "status": "succeeded",
+            "per_variant_outcomes": [],
+            "skipped_dup": [
+                {
+                    "name": "v02",
+                    "reason": "known_dead_change",
+                    "detail": "carries the whole change of v00 (explore-001), whose server died before it was ready: "
+                    "ValueError: no aiter\n=== Proposals ===",
+                },
+                {"name": "v03", "reason": "already_measured", "detail": ""},
+            ],
+        },
+        "error": None,
+    }
+    rendered = _format_inbox_event(_msg("delegated_result", payload), max_variant_rows=1).splitlines()
+
+    (dead,) = [line for line in rendered if "variant='v02'" in line]
+    assert dead.startswith("  skipped: variant='v02' reason=known_dead_change detail='carries the whole change of v00")
+    assert "ValueError: no aiter\u23ce" in dead and "\n" not in dead
+    assert "  (+1 more skipped)" in rendered
+
+
 def test_flatten_for_prompt_covers_all_splitlines_separators():
     """Every separator str.splitlines() recognises must be folded."""
     from hyperloom.agents.critic.runtime.inbox_parser import _SECTION_RE

@@ -77,6 +77,7 @@ def test_a_stack_that_already_serves_the_change_lifts_it():
         pytest.param({"workload_signature": "ws-2"}, id="other-workload"),
         pytest.param({"outcome": "REVERT"}, id="measured"),
         pytest.param({"extra_envs": {}}, id="no-change"),
+        pytest.param({"error_excerpt": "the server exited with code 1 before it was ready"}, id="no-fault-named"),
     ],
 )
 def test_only_a_start_failure_of_the_variants_own_change_counts(row):

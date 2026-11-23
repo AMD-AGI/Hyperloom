@@ -398,6 +398,13 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   stands only while its gain is below the current KEEP bar, so a variant
   that missed an earlier cycle's higher bar may be proposed again; an
   accuracy or tail-latency REVERT stands regardless.
+* **`explore` does not relaunch a change that stopped a server before it was
+  ready.** Once a variant's server exits before ready on its own change and
+  its log names the fault, any later variant this session carrying that
+  change whole is skipped as `known_dead_change`, on any stack, unless the
+  stack already runs it; the delegated result's `skipped:` line names the
+  dead variant and its cause. Adding a fix on top does not lift it: change or
+  drop the dead setting itself.
 * **`explore` validates its own KEEPs.**
   An `explore` KEEP is measured on the full `optimization_stack` and
   advances `cumulative_gain_validated` as a side effect; there is no

@@ -63,6 +63,8 @@ _OUTCOME_TPUT_KEYS: tuple[str, ...] = (
 _OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome", "runner_status")
 # Notes rendered per inbox line.
 _OUTCOME_NOTES_MAX: int = 3
+# A skip detail names the twin or the dead variant first and its cause after; this keeps the head of the cause.
+_SKIP_DETAIL_CHARS = 240
 # Ceilings for the prompt sections that grow with the session; uncapped, a long run outgrows the context window.
 _FINDINGS_PROMPT_CHARS = 24_000
 _QUESTIONS_PROMPT_CHARS = 6_000
@@ -152,6 +154,20 @@ def _variant_failure_rows(result: dict[str, Any], max_variant_rows: int) -> list
     return rows
 
 
+def _variant_skip_rows(result: dict[str, Any], max_variant_rows: int) -> list[str]:
+    """Indented rows for the variants a delegated explore result answered without launching, with why."""
+    skipped = [s for s in result.get("skipped_dup") or [] if isinstance(s, dict)]
+    rows = []
+    for entry in skipped[:max_variant_rows]:
+        detail = _flatten_for_inbox(str(entry.get("detail") or ""))[:_SKIP_DETAIL_CHARS]
+        row = f"  skipped: variant={str(entry.get('name') or '')!r} reason={entry.get('reason') or ''}"
+        rows.append(f"{row} detail={detail!r}" if detail else row)
+    elided = len(skipped) - max_variant_rows
+    if elided > 0:
+        rows.append(f"  (+{elided} more skipped)")
+    return rows
+
+
 def _format_delegated_result(head: str, payload: dict[str, Any], max_variant_rows: int) -> str:
     """Render a delegated_result entry: one header line plus a row per unmeasured variant."""
     raw_result = payload.get("result")
@@ -189,7 +205,9 @@ def _format_delegated_result(head: str, payload: dict[str, Any], max_variant_row
     header_line = " ".join(parts)
     if max_variant_rows <= 0:
         return header_line
-    return "\n".join([header_line, *_variant_failure_rows(result, max_variant_rows)])
+    return "\n".join(
+        [header_line, *_variant_failure_rows(result, max_variant_rows), *_variant_skip_rows(result, max_variant_rows)]
+    )
 
 
 def _format_review_verdict(head: str, payload: dict[str, Any]) -> str:

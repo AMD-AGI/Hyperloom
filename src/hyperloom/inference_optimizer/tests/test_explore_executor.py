@@ -860,20 +860,13 @@ _MOE_INIT_DEATH = (
 )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("died", ["an_earlier_round", "this_round"])
-async def test_explore_executor_never_launches_a_variant_carrying_a_change_that_died_at_init(
-    sub_agent_runner,
-    tmp_path,
-    monkeypatch,
-    died,
-):
-    """#2751: once v00's AITER pair stopped its server before ready, a variant carrying that pair is not launched."""
+async def _explore_after_a_dead_change(runner, tmp_path, monkeypatch, *, died, grid, **params):
+    """Run an explore task whose session saw v00's AITER pair stop a server before ready; the launched names and result."""
     from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
     from hyperloom.orchestrator.actions.executors import explore as explore_mod
     from hyperloom.orchestrator.actions.executors.grid._grid_base import VariantResult
 
-    sub, tr, _ = sub_agent_runner
+    sub, tr, _ = runner
     base = tmp_path / "base.yaml"
     write_benchmark_yaml(base)
     v00 = {"name": "v00_enable_aiter_moe", "extra_envs": dict(_AITER_ON)}
@@ -899,10 +892,6 @@ async def test_explore_executor_never_launches_a_variant_carrying_a_change_that_
         return []
 
     monkeypatch.setattr(explore_mod, "run_grid", _capture_run_grid)
-    grid = [
-        {"name": "v02_aiter_moe_plus_knob", "extra_envs": {**_AITER_ON, "HL_KNOB": "1"}},
-        {"name": "v01_knob_only", "extra_envs": {"HL_KNOB": "1"}},
-    ]
     task, _ = await tr.create_or_return_existing(
         TaskSpec(
             kind="explore",
@@ -910,19 +899,59 @@ async def test_explore_executor_never_launches_a_variant_carrying_a_change_that_
                 "config_path": str(base),
                 "base_tput": 800.0,
                 "grid": grid if died == "an_earlier_round" else [v00, *grid],
+                **params,
             },
-            idempotency_key=f"ex-known-dead-change-{died}",
+            idempotency_key=f"ex-known-dead-change-{died}-{sorted(params)}",
         ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-
     res = await sub.run_task(task, extra_context={"shared_state": state})
+    return launched, res.result
+
+
+_SIBLING = {"name": "v02_aiter_moe_plus_knob", "extra_envs": {**_AITER_ON, "HL_KNOB": "1"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("died", ["an_earlier_round", "this_round"])
+async def test_explore_executor_never_launches_a_variant_carrying_a_change_that_died_at_init(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+    died,
+):
+    """#2751: once v00's AITER pair stopped its server before ready, a variant carrying that pair is not launched."""
+    grid = [dict(_SIBLING), {"name": "v01_knob_only", "extra_envs": {"HL_KNOB": "1"}}]
+    launched, result = await _explore_after_a_dead_change(sub_agent_runner, tmp_path, monkeypatch, died=died, grid=grid)
 
     assert "v02_aiter_moe_plus_knob" not in launched
     assert "v01_knob_only" in launched
-    skipped = {s["name"]: s for s in res.result["skipped_dup"]}
+    skipped = {s["name"]: s for s in result["skipped_dup"]}
     assert skipped["v02_aiter_moe_plus_knob"]["reason"] == "known_dead_change"
     assert "v00_enable_aiter_moe" in skipped["v02_aiter_moe_plus_knob"]["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exempt", ["stack_revalidation", "kernel_overlay"])
+async def test_explore_executor_still_launches_a_revalidation_or_an_overlay_that_carries_a_dead_change(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+    exempt,
+):
+    """A revalidation re-measures the stack on purpose, and an overlay changes the code the death was seen on."""
+    sibling = dict(_SIBLING)
+    params: dict[str, str] = {}
+    if exempt == "stack_revalidation":
+        params["source"] = "stack_revalidate"
+    else:
+        sibling["overlay_pythonpath"] = str(tmp_path)
+    launched, result = await _explore_after_a_dead_change(
+        sub_agent_runner, tmp_path, monkeypatch, died="an_earlier_round", grid=[sibling], **params
+    )
+
+    assert "v02_aiter_moe_plus_knob" in launched
+    assert all(s.get("reason") != "known_dead_change" for s in result.get("skipped_dup") or [])
 
 
 @pytest.mark.asyncio

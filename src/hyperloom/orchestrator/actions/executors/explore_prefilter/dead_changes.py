@@ -3,8 +3,8 @@
 
 """The changes this session saw stop a server before it was ready, and the variants that would launch one again.
 
-Within one session the host and build stay fixed, so such a change kills any launch that carries it whole; the
-experience corpus's attribution is left as conservative as ``classify_failure_attribution`` makes it.
+A start death counts only when its log names the fault; it then holds for the rest of the session, a later source patch
+included. The experience corpus's attribution is left as conservative as ``classify_failure_attribution`` makes it.
 """
 
 from __future__ import annotations
@@ -43,10 +43,7 @@ class DeadChange:
     cause: str
 
     def detail(self) -> str:
-        cause = f": {self.cause}" if self.cause else ""
-        return (
-            f"carries the whole change of {self.name} ({self.round_id}), whose server died before it was ready{cause}"
-        )
+        return f"carries the whole change of {self.name} ({self.round_id}), whose server died before it was ready: {self.cause}"
 
 
 def _items_of(change: Mapping[str, Any]) -> frozenset[tuple[str, ...]]:
@@ -59,16 +56,20 @@ def _items_of(change: Mapping[str, Any]) -> frozenset[tuple[str, ...]]:
     )
 
 
-def _died_at_init(row: Mapping[str, Any]) -> bool:
-    """Whether the row's server exited before it was ready on its own change, not on memory, capacity or the host."""
+def _start_death_cause(row: Mapping[str, Any]) -> str | None:
+    """The fault line of a row whose server exited before it was ready on its own change, else None.
+
+    A log that names no fault (an exit code alone) cannot tell the change from memory, capacity or the host.
+    """
     error_class = str(row.get("error_class") or "")
     excerpt = failure_text(row)
-    if error_class != SERVER_INIT_DEAD or row.get("framework_changed"):
-        return False
+    cause = cause_line(excerpt)
+    if not cause or error_class != SERVER_INIT_DEAD or row.get("framework_changed"):
+        return None
     if classify_root_cause_type(error_class, excerpt) != _ENGINE_INIT:
-        return False
+        return None
     attribution = classify_failure_attribution(error_class=error_class, framework_changed=False, error_excerpt=excerpt)
-    return attribution != FAILURE_ATTRIBUTION_ENVIRONMENT
+    return None if attribution == FAILURE_ATTRIBUTION_ENVIRONMENT else cause
 
 
 def dead_changes(rows: Iterable[Mapping[str, Any]], *, workload_signature: str) -> list[DeadChange]:
@@ -80,13 +81,14 @@ def dead_changes(rows: Iterable[Mapping[str, Any]], *, workload_signature: str) 
         if str(row.get("workload_signature") or "") != workload_signature:
             continue
         items = _items_of(row)
-        if items and _died_at_init(row):
+        cause = _start_death_cause(row) if items else None
+        if cause:
             out.append(
                 DeadChange(
                     name=str(row.get("name") or "?"),
                     round_id=str(row.get("round_id") or "an earlier round"),
                     items=items,
-                    cause=cause_line(failure_text(row)) or "",
+                    cause=cause,
                 )
             )
     return out
