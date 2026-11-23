@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -219,20 +221,22 @@ def test_format_variant_line_shows_error_class_and_reason():
     assert "reason=mla_gluon" in line
 
 
-def test_format_variant_line_names_the_cause_of_a_server_that_died_at_init():
+_INIT_DEATH = (
+    "(EngineCore pid=7) ERROR ValueError: Unquantized MoE backend 'ROCm AITER' is unsupported here\n"
+    "(APIServer pid=1) RuntimeError: Engine core initialization failed. See root cause above."
+)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param({"reason": "warmup_failed", "error_excerpt": _INIT_DEATH}, id="warmup_row"),
+        pytest.param({"reason": _INIT_DEATH}, id="decision_row"),
+    ],
+)
+def test_format_variant_line_names_the_cause_of_a_server_that_died_at_init(row):
     """The proposer reads this line; the report of the death alone does not say which change to stop proposing."""
-    line = SharedState._format_variant_line(
-        {
-            "name": "v00",
-            "gain_pct": None,
-            "error_class": "server_init_dead",
-            "reason": "warmup_failed",
-            "error_excerpt": (
-                "(EngineCore pid=7) ERROR ValueError: Unquantized MoE backend 'ROCm AITER' is unsupported here\n"
-                "(APIServer pid=1) RuntimeError: Engine core initialization failed. See root cause above."
-            ),
-        }
-    )
+    line = SharedState._format_variant_line({"name": "v00", "gain_pct": None, "error_class": "server_init_dead", **row})
     assert "reason=ValueError: Unquantized MoE backend 'ROCm AITER' is unsupported here" in line
 
 

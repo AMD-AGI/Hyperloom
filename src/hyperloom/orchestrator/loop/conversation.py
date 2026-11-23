@@ -144,9 +144,7 @@ def _variant_failure_rows(result: dict[str, Any], max_variant_rows: int) -> list
     failures = [v for v in pvos if isinstance(v, dict) and str(v.get("outcome") or "").upper() in UNMEASURED_OUTCOMES]
     rows: list[str] = []
     for vo in failures[:max_variant_rows]:
-        row = dict(vo)
-        row["error_excerpt"] = _flatten_for_inbox(vo.get("error_excerpt") or vo.get("reason") or "")
-        rows.append("  failure: " + render_failure_line(row, excerpt_chars=120))
+        rows.append("  failure: " + render_failure_line(vo, excerpt_chars=120))
     elided = len(failures) - max_variant_rows
     if elided > 0:
         pull = qualified_context_tool_name("get_variant_failures")

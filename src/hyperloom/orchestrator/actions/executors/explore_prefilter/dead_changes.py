@@ -20,6 +20,7 @@ from ....state.failure_evidence import (
     SERVER_INIT_DEAD,
     classify_failure_attribution,
     classify_root_cause_type,
+    failure_text,
 )
 from ..grid._grid_base import TS_FAILED
 
@@ -58,15 +59,10 @@ def _items_of(change: Mapping[str, Any]) -> frozenset[tuple[str, ...]]:
     )
 
 
-def _excerpt_of(row: Mapping[str, Any]) -> str:
-    # A warmup failure carries its log text as ``error_excerpt``; a decision-round failure carries it as ``reason``.
-    return str(row.get("error_excerpt") or row.get("reason") or "")
-
-
 def _died_at_init(row: Mapping[str, Any]) -> bool:
     """Whether the row's server exited before it was ready on its own change, not on memory, capacity or the host."""
     error_class = str(row.get("error_class") or "")
-    excerpt = _excerpt_of(row)
+    excerpt = failure_text(row)
     if error_class != SERVER_INIT_DEAD or row.get("framework_changed"):
         return False
     if classify_root_cause_type(error_class, excerpt) != _ENGINE_INIT:
@@ -90,7 +86,7 @@ def dead_changes(rows: Iterable[Mapping[str, Any]], *, workload_signature: str) 
                     name=str(row.get("name") or "?"),
                     round_id=str(row.get("round_id") or "an earlier round"),
                     items=items,
-                    cause=cause_line(_excerpt_of(row)) or "",
+                    cause=cause_line(failure_text(row)) or "",
                 )
             )
     return out

@@ -572,7 +572,7 @@ class _ExploreRound:
         round. A stack revalidation exists to re-measure, and a kernel overlay changes the launch without changing
         the fingerprint, so neither is ever skipped.
         """
-        if self.ss is None or is_stack_revalidation(self.params) or getattr(gv, "overlay_pythonpath", ""):
+        if is_stack_revalidation(self.params) or getattr(gv, "overlay_pythonpath", ""):
             return False
         fingerprint = variant_fingerprint(gv)
         prior = measured_verdict(

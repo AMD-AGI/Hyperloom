@@ -13,6 +13,8 @@ from inference_suite.server_log import cause_line
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 
+from ..failure_evidence import failure_text
+
 # Width budget for artifact anchors.
 _ANCHOR_MAX_CHARS = 100
 
@@ -77,9 +79,9 @@ def format_diagnosis(entry: dict[str, Any]) -> str:
     reason = str(entry.get("reason") or "").strip()
     if reason and reason not in _REASONS_IMPLIED_BY_GAIN:
         # flatten+defang prevents section-header injection from untrusted log text.
-        excerpt = str(entry.get("error_excerpt") or "")
-        cause = cause_line(excerpt)
-        body = _flatten_for_prompt(cause or excerpt or reason)
+        text = failure_text(entry)
+        cause = cause_line(text)
+        body = _flatten_for_prompt(cause or text)
         parts.append(f"reason={body[:_REASON_CHARS] if cause else body[-_REASON_CHARS:]}")
     return "  " + " ".join(parts) if parts else ""
 
