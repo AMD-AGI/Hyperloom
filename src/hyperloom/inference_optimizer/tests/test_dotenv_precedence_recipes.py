@@ -643,13 +643,21 @@ def test_setup_skill_offers_the_codex_backend_with_its_own_side() -> None:
 
 
 @pytest.mark.parametrize(
-    ("exported", "destination"),
-    [({}, "/workspace"), ({"HYPERLOOM_SESSION_PACKAGE_DEST": "/data/packages"}, "/data/packages")],
+    ("workspace_is_there", "exported", "destination"),
+    [
+        (True, {}, "{workspace}"),
+        (True, {"HYPERLOOM_SESSION_PACKAGE_DEST": "/data/packages"}, "/data/packages"),
+        (False, {}, ""),
+    ],
 )
-def test_the_launch_block_sends_the_session_package_to_workspace_unless_a_destination_is_exported(
-    tmp_path: Path, exported: dict[str, str], destination: str
+def test_the_launch_block_sends_the_session_package_to_a_writable_workspace_unless_a_destination_is_exported(
+    tmp_path: Path, workspace_is_there: bool, exported: dict[str, str], destination: str
 ) -> None:
-    """Under Claw the launch is its own tool call in a new shell, so the launch block itself names the destination."""
+    """Under Claw the launch is its own tool call in a new shell, so the launch block itself names the destination.
+    A directory of the test stands in for ``/workspace``."""
+    workspace = tmp_path / "workspace"
+    if workspace_is_there:
+        workspace.mkdir()
     (launch,) = [
         block
         for block in _bash_blocks((PKG_ROOT / "SKILL.md").read_text(encoding="utf-8"))
@@ -658,10 +666,10 @@ def test_the_launch_block_sends_the_session_package_to_workspace_unless_a_destin
     start = next(i for i, line in enumerate(launch) if "-m hyperloom optimize --verbose" in line)
 
     observed = _run_recipe(
-        "\n".join(launch[:start]),
+        "\n".join(launch[:start]).replace("/workspace", str(workspace)),
         tmp_path,
         {"USER_DATA_PATH": str(tmp_path / "data"), "MODEL_PATH": "/models/m", **exported},
         observed=("HYPERLOOM_SESSION_PACKAGE_DEST",),
     )
 
-    assert observed == {"HYPERLOOM_SESSION_PACKAGE_DEST": destination}
+    assert observed == {"HYPERLOOM_SESSION_PACKAGE_DEST": destination.format(workspace=workspace)}

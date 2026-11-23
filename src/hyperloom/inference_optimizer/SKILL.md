@@ -1319,8 +1319,8 @@ fi
 . "${INSTALL_SH%/*}/runtime_env.sh"
 load_dotenv_no_clobber
 export USER_DATA_PATH
-# The sandbox sync ships /workspace; without this the session package stays in <session dir>/archive.
-export HYPERLOOM_SESSION_PACKAGE_DEST="${HYPERLOOM_SESSION_PACKAGE_DEST:-/workspace}"
+# The sandbox sync ships /workspace; a host without one keeps the session package in <session dir>/archive.
+if [ -w /workspace ]; then export HYPERLOOM_SESSION_PACKAGE_DEST="${HYPERLOOM_SESSION_PACKAGE_DEST:-/workspace}"; fi
 # Resolve the launch interpreter in this shell; preflight loads generated runtime state.
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
