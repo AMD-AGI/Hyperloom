@@ -270,6 +270,7 @@ class SessionExports:
         selection = encode(final) if final is not None else None
         stepped = knowledge_document(knowledge, playbook, curation)
         merges = _merge_statistics(read_jsonl(self._layout.merges))
+        manifest = read_manifest(self._layout.manifest)
         document = build_breakdown(
             snapshot,
             CloseOutcome(
@@ -283,7 +284,8 @@ class SessionExports:
             SessionPlace(
                 session_dir=self._layout.root,
                 runner_dir=self._layout.logs,
-                code_revision=read_manifest(self._layout.manifest).code_version.git_sha or None,
+                code_revision=manifest.code_version.git_sha or None,
+                claw_session_id=manifest.claw_session_id,
             ),
         )
         breakdown = write_breakdown(self._layout.reports, document)
