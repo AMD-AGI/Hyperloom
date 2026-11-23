@@ -554,10 +554,13 @@ class TestIntegrateHandlerHonoursStateDefault:
     [{"remove_args": ["--disable-cuda-graph"]}, {"args_mode": "replace"}],
     ids=["remove-only", "replace-only"],
 )
-async def test_control_only_integrate_measures_without_resolving_historical_patch(session_dir, monkeypatch, controls):
+@pytest.mark.parametrize("framework", ["sglang", "vllm"])
+async def test_control_only_integrate_measures_without_resolving_historical_patch(
+    session_dir, monkeypatch, controls, framework
+):
     from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
 
-    monkeypatch.setenv("FRAMEWORK", "sglang")
+    monkeypatch.setenv("FRAMEWORK", framework)
     state = _seed_state(session_dir, baseline_tput=1000.0, baseline_config_path="/tmp/base.yaml")
     seed_kernel_keep(state, "gemm_controls_only", source_file="/tmp/unrelated.py", artifact="/tmp/unrelated.patch")
     state.save(session_dir)
@@ -588,6 +591,7 @@ async def test_control_only_integrate_measures_without_resolving_historical_patc
     assert result["apply_result"]["reason"] == "env_only_no_patch_applied"
     assert captured["extra_envs"] == {}
     assert captured["extra_server_args"] == ""
+    assert result["extra_server_args"] == ""
     assert {key: captured[key] for key in controls} == controls
 
 
