@@ -466,7 +466,6 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
 
     from hyperloom.agents.framework import isolation
     from hyperloom.orchestrator.enablement.runtime import adapters
-    from hyperloom.common.failure_signature import classify_failure
     from hyperloom.orchestrator.enablement.runtime.stack_actions import (
         EnablementStackAction,
         FrameworkRuntime,
@@ -523,9 +522,6 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
         {
             "specialist_task_id": "spec-first",
             "enablement": True,
-            "enablement_failure_signature": classify_failure(
-                "ValueError: Model architectures ['DeepseekV4ForCausalLM'] are not supported for now."
-            ).to_dict(),
             "extra_envs": {"VLLM_USE_AITER": "1"},
             "apply_only": True,
         },

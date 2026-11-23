@@ -503,7 +503,9 @@ build, the source PR URL is recorded as build provenance in the session
 breakdown's `installed_versions` map (`source_pr_url`); see the
 [`enablement` section](../reference/session-breakdown.md#enablement--admission-round-lifecycle-builds--attempt-runtimes).
 An auto-escalated build names no PR: it builds the ref of the runtime the
-session already kept, or leaves the ref to tag autoselect.
+session already kept, and otherwise names no ref. With no ref, the AITER build
+takes the newest tag that builds and imports; sgl-kernel and vLLM build the
+default branch.
 
 ### Novelty and crash safety
 

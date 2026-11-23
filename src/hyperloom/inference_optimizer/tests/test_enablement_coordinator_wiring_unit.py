@@ -87,7 +87,7 @@ def _fake_self(tmp_path, **state_kw):
     return _enqueue_self(tmp_path, **state_kw)
 
 
-def test_build_params_actionable_failure_tags_enablement(monkeypatch, tmp_path):
+def test_build_params_actionable_failure_tags_enablement(tmp_path):
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.launch_observation_path = "/s/reports/bringup/round-abc-000.json"
     params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
@@ -108,7 +108,7 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch, tmp_path):
     assert "enablement_origin" not in params
 
 
-def test_build_params_threads_eval_origin_carriers(monkeypatch, tmp_path):
+def test_build_params_threads_eval_origin_carriers(tmp_path):
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.origin = "eval"
     fake.shared_state.enablement.accuracy_floor = 0.3
@@ -129,7 +129,7 @@ _TRANSFORMERS_UNRECOGNIZED_LOG = (
 )
 
 
-def test_build_params_seeds_no_deterministic_shared_venv_mutation(monkeypatch, tmp_path):
+def test_build_params_seeds_no_deterministic_shared_venv_mutation(tmp_path):
     """An arch-miss round must NOT auto-seed ANY shared-venv mutation."""
     fake = _enqueue_self(tmp_path, model_name="deepseek-ai/DeepSeek-V4-Flash")
     params = fake.enablement_params.build_enablement_specialist_params(_TRANSFORMERS_UNRECOGNIZED_LOG)
@@ -141,7 +141,7 @@ def test_build_params_seeds_no_deterministic_shared_venv_mutation(monkeypatch, t
     assert not any("transformers" in c for c in setup)
 
 
-def test_build_params_dispatches_even_for_unknown_failure(monkeypatch, tmp_path):
+def test_build_params_dispatches_even_for_unknown_failure(tmp_path):
     """Q1: a non-blank UNKNOWN log still dispatches (kind is advisory, not a gate)."""
     fake = _enqueue_self(tmp_path)
     params = fake.enablement_params.build_enablement_specialist_params(
@@ -1012,7 +1012,7 @@ async def test_rearm_kept_stacks_setup_commands(monkeypatch, tmp_path):
     ]
 
 
-def test_build_params_threads_base_setup_commands_when_stacked(monkeypatch, tmp_path):
+def test_build_params_threads_base_setup_commands_when_stacked(tmp_path):
     """Q3: stacked base setup commands are passed to the next round + noted."""
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.setup_commands = ["pip install -U transformers"]
@@ -1023,7 +1023,7 @@ def test_build_params_threads_base_setup_commands_when_stacked(monkeypatch, tmp_
     assert "setup command" in params["notes"]
 
 
-def test_build_params_tells_the_next_round_which_setup_commands_were_refused(monkeypatch, tmp_path):
+def test_build_params_tells_the_next_round_which_setup_commands_were_refused(tmp_path):
     """A refusal the author cannot see is re-authored until the budget runs out."""
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.last_setup_refusals = ["ln -sf /a /b"]
@@ -1033,7 +1033,7 @@ def test_build_params_tells_the_next_round_which_setup_commands_were_refused(mon
     assert "ln -sf /a /b" in params["notes"]
 
 
-def test_build_params_hands_the_next_round_the_env_reads_of_the_inert_one(monkeypatch, tmp_path):
+def test_build_params_hands_the_next_round_the_env_reads_of_the_inert_one(tmp_path):
     """Without the names the next round repeats the patch and hits the same wall."""
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.last_inert_round_env_reads = ["HL_FUSE_RMSNORM"]
@@ -1044,7 +1044,7 @@ def test_build_params_hands_the_next_round_the_env_reads_of_the_inert_one(monkey
     assert "not a finding" in params["notes"]
 
 
-def test_the_inert_lead_claims_only_what_the_gate_observed(monkeypatch, tmp_path):
+def test_the_inert_lead_claims_only_what_the_gate_observed(tmp_path):
     """The gate never measures a throughput for a boot that did not serve.
 
     The note carries the gate's own observation -- no serving, the same wall as
@@ -1059,7 +1059,7 @@ def test_the_inert_lead_claims_only_what_the_gate_observed(monkeypatch, tmp_path
     assert "same wall with the same failure" in params["notes"]
 
 
-def test_build_params_notes_prior_patches_for_mandate(monkeypatch, tmp_path):
+def test_build_params_notes_prior_patches_for_mandate(tmp_path):
     """Stacked kept-patches appear in the specialist mandate note."""
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.kept_patches = [

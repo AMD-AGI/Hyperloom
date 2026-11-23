@@ -260,7 +260,7 @@ _LADDER_KIND_TO_RUNG: tuple[str, ...] = (
     "serve_flag / tokenizer_error -> Rung 1",
     "missing_model_arch (pure registration) / capability_disabled -> Rung 2",
     "missing_model_arch / missing_weight (absent here, present in another version) -> Rung 3",
-    "import_error / merged-PR closure -> Rung 2 (pure Python) or Rung 5 (compiled / build-backend files)",
+    "import_error -> Rung 2 (pure Python) or Rung 5 (compiled / build-backend files)",
     "hip_kernel_missing / hip_runtime_error / native unsupported_dtype / missing compiled symbol -> Rung 5",
     "resource_constraint (OOM / GPU count) -> NOT a code gap; cannot be patched",
     "accuracy_below_floor / eval_generation_pathology / eval_runtime_failure -> "

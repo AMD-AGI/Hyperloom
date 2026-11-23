@@ -701,7 +701,7 @@ async def test_escalate_builds_the_kept_ref(coord, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_escalate_without_a_kept_ref_leaves_the_ref_to_tag_autoselect(coord, monkeypatch):
+async def test_escalate_without_a_kept_ref_names_no_ref(coord, monkeypatch):
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)

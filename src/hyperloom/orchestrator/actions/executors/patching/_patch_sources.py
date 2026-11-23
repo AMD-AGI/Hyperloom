@@ -220,8 +220,8 @@ def _sole_patch_root(
 
     Only metadata covering the selected patch set can replace target
     resolution. Unselected patches cannot supply or contradict its root.
-    Localization patches outside the specialist workspace deliberately use
-    full-set content resolution: the specialist cannot attest their paths.
+    A patch outside the specialist workspace deliberately uses full-set
+    content resolution: the specialist cannot attest its path.
 
     Args:
         done_payload: The originating specialist's done payload, if any.

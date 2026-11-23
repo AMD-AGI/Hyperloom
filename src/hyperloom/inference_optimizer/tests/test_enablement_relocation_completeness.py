@@ -27,11 +27,11 @@ _OLD_PATH_PATTERN = re.compile(
     r"|agents/framework/enablement\.py"
     r"|phases\._enablement_artifacts"
     r"|phases/_enablement_artifacts"
-    r"|orchestrator\.framework\.(adapters|stack_actions|localization|build_actions|build_utils|targeted_build|client)"
-    r"|orchestrator/framework/(adapters|stack_actions|localization|build_actions|build_utils|targeted_build|client)\.py"
+    r"|orchestrator\.framework\.(adapters|stack_actions|build_actions|build_utils|targeted_build|client)"
+    r"|orchestrator/framework/(adapters|stack_actions|build_actions|build_utils|targeted_build|client)\.py"
     # Relative imports carry no package prefix, and a function-local one raises
     # only on the branch that runs it.
-    r"|from \.\.framework\.(adapters|stack_actions|localization|build_actions|build_utils|targeted_build|client)"
+    r"|from \.\.framework\.(adapters|stack_actions|build_actions|build_utils|targeted_build|client)"
     # ``from <package> import <module>`` never spells the module's dotted path,
     # so every pattern above -- each anchored on ``package.module`` or
     # ``package/module`` -- looks straight past the most ordinary way to import
@@ -42,7 +42,7 @@ _OLD_PATH_PATTERN = re.compile(
     # name covers a multi-name import that lists it second.
     r"|from [\w.]*phases import (?:[\w, ]+, *)?_enablement_artifacts\b"
     r"|from [\w.]*framework import (?:[\w, ]+, *)?"
-    r"(adapters|stack_actions|localization|build_actions|build_utils|targeted_build|client)\b"
+    r"(adapters|stack_actions|build_actions|build_utils|targeted_build|client)\b"
     r"|from [\w.]*agents\.framework import (?:[\w, ]+, *)?enablement(_ops)?\b"
 )
 
