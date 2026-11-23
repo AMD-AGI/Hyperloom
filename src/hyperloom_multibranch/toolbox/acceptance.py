@@ -6,10 +6,11 @@
 Steps: the request validates (done by its constructor, plus the toolbox's own: no preset ``request_id``, a
 ``retest_of`` that names an accepted request, a PROFILE that no live profile already covers); the parent recipe is read
 from the experiment repository, and an explore of a specialist branch names that branch's head; the delta applies,
-changes an explore's parent recipe, keeps the weight precision of the session's root recipe, and the environment
-compiles; the measurement surface matches the canonical one, and a test that carries the accuracy evaluation serves a
-context that evaluation can run in. Compile, points, surface and the evaluation's context come from hosted measurement
-(``hyperloom.measure``) through the one :class:`MeasurementPlanner` seam.
+changes an explore's parent recipe, keeps the weight precision of the session's root recipe, holds launch configuration
+only in a session that keeps no source changes, and the environment compiles; the measurement surface matches the
+canonical one, and a test that carries the accuracy evaluation serves a context that evaluation can run in. Compile,
+points, surface and the evaluation's context come from hosted measurement (``hyperloom.measure``) through the one
+:class:`MeasurementPlanner` seam.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ from hyperloom.measure.fake_gain import (
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
+from hyperloom_multibranch.contracts.toolbox import LAUNCH_CONFIG_ONLY_CODE, RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.agentx_checkpoint import CheckpointReferences
 from hyperloom_multibranch.toolbox.long_context import LongContextSetup, ServedLongContext, launch_served_context
 from hyperloom_multibranch.toolbox.long_context import decide as decide_long_context
@@ -177,6 +178,22 @@ def _check_weight_precision(root_commit: str, root: LaunchConfig, candidate: Rec
         )
 
 
+def _check_launch_config_only(parent: Recipe, candidate: Recipe) -> None:
+    """Refuse a candidate whose recipe holds a patch or a kernel artifact, or a component its parent lacks: the session
+    keeps server arguments and environment variables only. The recipe is judged, not the delta, so every test of the
+    session is held to it: a replay, a merge and FINAL as an explore."""
+    patches = sum(len(component.patches) for component in candidate.components)
+    added = {item.component for item in candidate.components} - {item.component for item in parent.components}
+    held = ((patches, "patch(es)"), (len(candidate.kernels), "kernel artifact(s)"), (len(added), "added component(s)"))
+    carried = [f"{count} {what}" for count, what in held if count]
+    if carried:
+        raise RequestRejected(
+            f"this session keeps launch configuration only (--no-source-changes) and the candidate's recipe holds "
+            f"{' and '.join(carried)}: test a change to server arguments or environment variables alone",
+            LAUNCH_CONFIG_ONLY_CODE,
+        )
+
+
 def _check_aiter_sources(accepted: object, missing: str | None) -> None:
     """Refuse a candidate that patches aiter's ``csrc`` or ``hsa`` when this toolbox cannot build the modules it touches
     (``missing`` says why), also when its launch rebuilds every module (``AITER_REBUILD``): each attempt of its test
@@ -264,6 +281,9 @@ class AcceptanceSetup:
 
     ``checkpoint`` is an AgentX session's checkpoint (:mod:`.agentx_checkpoint`): the tests it judges carry it, with
     their parent's reference. ``None`` (an InferenceX session's) judges none.
+
+    ``source_changes`` off is a session that keeps launch configuration only (``run --no-source-changes``): a candidate
+    whose recipe holds a patch, a kernel artifact or a component its parent lacks is refused as ``launch_config_only``.
     """
 
     repo: ExperimentRepo
@@ -276,6 +296,7 @@ class AcceptanceSetup:
     explore_accuracy: bool = True
     aiter_builds_missing: str | None = None
     checkpoint: CheckpointReferences | None = None
+    source_changes: bool = True
 
 
 @dataclass(frozen=True)
@@ -310,6 +331,7 @@ class Acceptance:
         self._explore_accuracy = setup.explore_accuracy
         self._aiter_builds_missing = setup.aiter_builds_missing
         self._checkpoint = setup.checkpoint
+        self._source_changes = setup.source_changes
         self._root: tuple[str, LaunchConfig] | None = None
 
     def with_required_accuracy(self, request: TestRequest) -> TestRequest:
@@ -342,6 +364,8 @@ class Acceptance:
             await self._check_parent_is_head(request)
             _check_upstream_label(recipe, request)
         candidate = self._check_delta(recipe, request)
+        if not self._source_changes:
+            _check_launch_config_only(recipe, candidate)
         digest = candidate.digest()
         if not replay:
             self._check_profile_exists(request, digest)
