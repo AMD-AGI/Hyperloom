@@ -10,10 +10,10 @@ branch opened without a focus shows) and the spent ones: those the playbook's ``
 the integration head as it stands were focused on and stopped without a commit, whoever stopped them, and those a
 branch focused on them gave up on at that head, its give-up quoting an EXHAUSTED record that finds no ceiling above the
 bar or every idea tested or claimed there; a commit of the integration head's recipe counts as that head. A branch whose
-specialist gave up after crashes before any test of it was judged explored nothing of its op and does not count toward
-the limit. A record alone is about one of the session's directions, not the op, and spends nothing, nor does one that
-waits on a tool or a capability, nor one of a branch the judge or the session's end stopped: only a give-up quoting it
-does. A spent op
+specialist gave up after crashes before any test of it was judged explored nothing of its op and counts only toward
+twice the limit. A record alone is about one of the session's directions, not the op, and spends nothing, nor does one
+that waits on a tool or a capability, nor one of a branch the judge or the session's end stopped: only a give-up quoting
+it does. A spent op
 opens again once the integration head moves, and an op of a direction of the map once its agent branch stops. With too
 little of EXPLORE left for a new branch's first commit, the playbook's ``last_open_minutes`` or else the median time a
 new branch took to it, it says that no branch should open. Shares taken from a commit the head builds on are named as that commit's, beside
@@ -44,6 +44,8 @@ from hyperloom_multibranch.blackboard.rsi.playbook import H0, Playbook
 #: How many ops the open areas list at most.
 OPEN_OPS = 5
 _MINUTE = 60.0
+#: How many times the playbook's ``failed_op_limit`` of crashed-out branches spends an op.
+_CRASHED_OUT_FACTOR = 2
 #: The reasons of an EXHAUSTED record that, quoted by a focused branch's give-up, say its op is done on the record's head.
 _DONE = frozenset({ExhaustedWhy.NO_CEILING_ABOVE_BAR, ExhaustedWhy.ALL_TESTED_OR_CLAIMED})
 
@@ -65,17 +67,21 @@ class OpenOp:
 class FocusHistory:
     """The branches this session opened on one op as their focus: how many, how many of them stopped without a
     commit, the commits they made and the best gain among those; ``exhausted`` is the record that spent the op when
-    one of them gave up on it on a commit of the integration head's recipe quoting it."""
+    one of them gave up on it on a commit of the integration head's recipe quoting it. ``crashed_out`` counts the
+    branches that stopped without a commit because their specialist gave up after crashes before any test of them was
+    judged; ``ended_without_commit`` leaves them out."""
 
     opened: int
     ended_without_commit: int
     commits: int = 0
     best_gain_pct: float | None = None
     exhausted: Exhausted | None = None
+    crashed_out: int = 0
 
     def render(self) -> str:
         made = "no commit" if self.best_gain_pct is None else f"commits {self.commits}, best {self.best_gain_pct:+.1f}%"
-        return f"opened {self.opened}, ended without a commit {self.ended_without_commit}, {made}"
+        crashed = f", crashed out before a judged test {self.crashed_out}" if self.crashed_out else ""
+        return f"opened {self.opened}, ended without a commit {self.ended_without_commit}{crashed}, {made}"
 
 
 @dataclass(frozen=True)
@@ -259,12 +265,22 @@ def stopped_on_focus(snapshot: BlackboardSnapshot, focus: str) -> tuple[StoppedO
     )
 
 
+def _crashed_out(snapshot: BlackboardSnapshot, ended: Sequence[BranchNode]) -> list[BranchNode]:
+    """The ``ended`` branches that crashed out: their specialist gave up after crashes before any test of them was
+    judged."""
+
+    judged = {record.request.branch for record in snapshot.records if record.judged}
+    return [node for node in ended if node.crashed_out and node.branch not in judged]
+
+
 def _spent(
     snapshot: BlackboardSnapshot, op: str, focused: Sequence[BranchNode], head: str, limit: int
 ) -> FocusHistory | None:
     """The history of the ``focused`` branches of ``op`` when one gave up on it on a commit of ``head``'s recipe, or
-    ``limit`` of those opened on one stopped without a commit, else ``None``. A branch whose specialist only crashed,
-    giving up before any test of it was judged, is not one that stopped without a commit: it never explored ``op``."""
+    ``limit`` of those opened on one stopped without a commit, or twice ``limit`` of them crashed out, else ``None``.
+    A branch crashed out when its specialist gave up after crashes before any test of it was judged: it explored
+    nothing of ``op``, so it counts only toward the higher limit, which keeps a session whose specialists crash at every
+    launch from refilling the same op until EXPLORE ends."""
 
     lineage = snapshot.lineage
     record = next(
@@ -278,19 +294,15 @@ def _spent(
         None,
     )
     committed = {commit.branch for commit in snapshot.committed}
-    judged = {record.request.branch for record in snapshot.records if record.judged}
-    bare = [
-        node
-        for node in focused
-        if node.stopped_at is not None
-        and node.branch not in committed
-        and not (node.crashed_out and node.branch not in judged)
-    ]
-    if record is None and sum(1 for node in bare if lineage.same_recipe(node.start_commit, head)) < limit:
+    ended = [node for node in focused if node.stopped_at is not None and node.branch not in committed]
+    crashed = _crashed_out(snapshot, ended)
+    bare = [node for node in ended if node not in crashed]
+    here = [sum(1 for node in nodes if lineage.same_recipe(node.start_commit, head)) for nodes in (bare, crashed)]
+    if record is None and here[0] < limit and here[1] < _CRASHED_OUT_FACTOR * limit:
         return None
     branches = {node.branch for node in focused}
     gains = [commit.gain_pct for commit in snapshot.committed if commit.branch in branches]
-    return FocusHistory(len(focused), len(bare), len(gains), max(gains, default=None), record)
+    return FocusHistory(len(focused), len(bare), len(gains), max(gains, default=None), record, len(crashed))
 
 
 def open_areas(

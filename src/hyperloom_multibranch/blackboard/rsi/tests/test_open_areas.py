@@ -192,6 +192,9 @@ def test_an_op_whose_focused_branches_on_the_head_ended_without_a_commit_is_spen
 
 CRASHED = "gave_up: its specialist gave up after 4 crashes"
 QUIET = "gave_up: its specialist gave up: its sessions in a row found nothing to test"
+#: The stop of a specialist that crashed once, was restarted and then found nothing to test twice: the writer states
+#: the idle give-up, whatever crashes came before it, so it reads as the quiet one.
+CRASHED_THEN_IDLE = QUIET
 
 
 def _ended(name: str, reason: str) -> BranchNode:
@@ -210,17 +213,32 @@ def _judged_on(snapshot: BlackboardSnapshot, branch_name: str) -> BlackboardSnap
     return dataclasses.replace(snapshot, records=(*snapshot.records, moved))
 
 
-def test_branches_whose_specialist_only_crashed_before_a_judged_test_do_not_spend_their_focus(
+def _crashed_out(snapshot: BlackboardSnapshot, count: int) -> BlackboardSnapshot:
+    """The session with ``count`` branches focused on the allreduce op that crashed out before a judged test."""
+
+    return _worked(snapshot, *(_ended(f"b{8 + index}", CRASHED) for index in range(count)))
+
+
+def test_branches_whose_specialist_only_crashed_before_a_judged_test_count_toward_twice_the_limit(
     snapshot: BlackboardSnapshot,
 ) -> None:
     crashed = _worked(snapshot, _ended("b8", CRASHED), _ended("b9", f"{CRASHED}, 2 of them with a lost heartbeat"))
     quiet = _worked(snapshot, _ended("b8", QUIET), _ended("b9", "judge: stalled"))
+    idle_after_crash = _worked(snapshot, _ended("b8", CRASHED_THEN_IDLE), _ended("b9", CRASHED_THEN_IDLE))
     mixed = _worked(snapshot, _ended("b8", CRASHED), _ended("b9", QUIET))
     tested = _judged_on(_worked(snapshot, _ended("b8", CRASHED), _ended("b9", QUIET)), "b8")
 
     found = {
         name: open_areas(worked, seconds_left=4 * HOUR, first_commit_minutes=42.0)
-        for name, worked in (("crashed", crashed), ("quiet", quiet), ("mixed", mixed), ("tested", tested))
+        for name, worked in (
+            ("crashed", crashed),
+            ("quiet", quiet),
+            ("idle_after_crash", idle_after_crash),
+            ("mixed", mixed),
+            ("tested", tested),
+            ("three", _crashed_out(snapshot, 3)),
+            ("four", _crashed_out(snapshot, 4)),
+        )
     }
     one_bare = open_areas(
         mixed, seconds_left=4 * HOUR, first_commit_minutes=42.0, playbook=replaced(H0, failed_op_limit=1)
@@ -228,9 +246,15 @@ def test_branches_whose_specialist_only_crashed_before_a_judged_test_do_not_spen
 
     assert ALLREDUCE in [item.op for item in found["crashed"].ops] and not found["crashed"].spent
     assert dict(found["quiet"].spent) == {ALLREDUCE: FocusHistory(2, 2)}
+    assert dict(found["idle_after_crash"].spent) == {ALLREDUCE: FocusHistory(2, 2)}
     assert ALLREDUCE in [item.op for item in found["mixed"].ops] and not found["mixed"].spent
-    assert dict(one_bare.spent) == {ALLREDUCE: FocusHistory(2, 1)}
+    assert dict(one_bare.spent) == {ALLREDUCE: FocusHistory(2, 1, crashed_out=1)}
     assert dict(found["tested"].spent) == {ALLREDUCE: FocusHistory(2, 2)}
+    assert ALLREDUCE in [item.op for item in found["three"].ops] and not found["three"].spent
+    assert dict(found["four"].spent) == {ALLREDUCE: FocusHistory(4, 0, crashed_out=4)}
+    assert found["four"].render().splitlines()[-1] == (
+        f"- {ALLREDUCE}: opened 4, ended without a commit 0, crashed out before a judged test 4, no commit"
+    )
 
 
 def test_only_a_give_up_after_crashes_reads_as_a_branch_that_crashed_out() -> None:
