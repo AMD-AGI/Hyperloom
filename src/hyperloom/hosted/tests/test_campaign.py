@@ -41,6 +41,7 @@ MINIMAL = {
     "hardware": {"gpu_type": "MI300X", "tp": 1},
     "budget": {"max_hours": 1},
     "placement": {"profile": "hosted-gpu"},
+    "multibranch": {"workload": "inferencex"},
 }
 
 
@@ -98,6 +99,7 @@ REFUSALS = [
     (_with(MINIMAL, "placement.max_parallel_tests", 0), "placement.max_parallel_tests must be an integer >= 1"),
     (_with(MINIMAL, "flow", "mesh"), "flow must be one of 'multibranch', got 'mesh'"),
     (_with(MINIMAL, "flow", "single"), "flow 'single' is retired; leave flow out or set it to 'multibranch'"),
+    (_with(MINIMAL, "multibranch", _DELETE), campaign.RETIRED_DEFAULT),
     (
         _with(LOCAL_MULTIBRANCH, "placement.profile", "hosted-cpu"),
         "placement.measurement 'local' measures on the application container's own cards:"
@@ -174,6 +176,19 @@ def test_the_retired_single_flow_is_refused_once_naming_why():
         parse_campaign({**MINIMAL, "flow": "single"})
 
     assert refused.value.problems == ("flow 'single' is retired; leave flow out or set it to 'multibranch'",)
+
+
+def test_an_unchanged_single_spec_without_flow_or_multibranch_is_refused_once_naming_the_retired_flow():
+    doc = _with(MINIMAL, "multibranch", _DELETE)
+    with pytest.raises(CampaignError) as refused:
+        parse_campaign(doc)
+
+    assert refused.value.problems == (
+        "a spec with neither flow nor multibranch ran the single flow, which is retired;"
+        " set flow to 'multibranch' and add a multibranch section with workload, and give workload.conc and"
+        " workload.precision",
+    )
+    assert parse_campaign({**doc, "flow": "multibranch"}).multibranch is None
 
 
 def test_a_multibranch_spec_measures_on_the_application_containers_own_cards_when_it_has_them():

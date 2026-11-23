@@ -22,10 +22,13 @@ it.
 
 - **The hosted single-session flow is retired.** `hyperloom hosted run` now
   only checks the campaign spec, runs the installer and hands the run to
-  `hyperloom-multibranch hosted run`. A spec with no `flow` is a multi-branch
-  one (before, it was the single-session flow, measured locally); a spec that
-  still says `"flow": "single"` ends the run with a final `exit.json`
-  (return code 2) naming the reason. The single flow's MCP host tools
+  `hyperloom-multibranch hosted run`. A spec must set `"flow": "multibranch"`
+  or carry a `multibranch` section; an unchanged 1.2.0 single spec (neither,
+  which ran the single-session flow, measured locally) and a spec that still
+  says `"flow": "single"` end the run with a final `exit.json` (return code 2)
+  naming the retired flow and what to add. `placement.measurement` now
+  defaults to `hosted`, and a single run in flight does not resume. See
+  [Upgrade](reference/upgrade.md). The single flow's MCP host tools
   (status, stop request), its progress events and its `hosted-gpu` /
   `hosted-cpu` plug profiles are removed, and with them the
   `hosted/control/stop.json` stop request the Coordinator read.

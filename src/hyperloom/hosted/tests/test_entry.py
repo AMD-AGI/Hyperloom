@@ -141,6 +141,20 @@ def test_a_spec_naming_the_retired_single_flow_is_refused_finally_naming_why(run
     assert run.handed.calls == [] and not (run.state / entry.INSTALL_LOG).exists()
 
 
+def test_an_unchanged_single_spec_of_1_2_0_without_flow_or_multibranch_is_refused_finally_naming_why(run):
+    doc = {key: value for key, value in MINIMAL.items() if key != "multibranch"}
+    _break_spec(run, doc)
+    assert entry.main(["run"]) == 2
+    assert _exit(run) == {
+        "final": True,
+        "returncode": 2,
+        "error": "campaign spec refused: a spec with neither flow nor multibranch ran the single flow, which is"
+        " retired; set flow to 'multibranch' and add a multibranch section with workload, and give workload.conc"
+        " and workload.precision",
+    }
+    assert run.handed.calls == [] and not (run.state / entry.INSTALL_LOG).exists()
+
+
 def test_the_installer_runs_before_the_exec_without_host_secrets(run):
     run.installer.write_text(
         f'#!/bin/bash\necho "installer $#" >> {run.work}/order\necho "${{HYPERLOOM_SANDBOX_KEY_DEV:-unset}}" >> {run.work}/order\n'

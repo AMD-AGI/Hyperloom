@@ -13,7 +13,8 @@ the run from that file's ``final`` field and nothing else:
 * no ``exit.json``, or ``final: false`` -- the process died.  Restarted.
 
 A spec may name its ``flow``; the only one is ``multibranch``, the default.  The retired ``single`` flow is refused, as
-is any other spec the shared validation refuses (:func:`hyperloom.hosted.campaign.parse_campaign`).
+is a spec with neither ``flow`` nor ``multibranch`` (written for the retired default) and any other spec the shared
+validation refuses (:func:`hyperloom.hosted.campaign.parse_campaign`).
 
 Before the hand-over, on every leg, the entry runs the packaged ``install.sh`` -- the installer the legacy launchers run
 at every pod start -- with its output in ``$HYPERLOOM_STATE_DIR/install.log``; an installer that fails ends the run

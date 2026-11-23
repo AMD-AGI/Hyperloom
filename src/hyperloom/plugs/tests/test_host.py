@@ -191,11 +191,11 @@ def test_describe_traces_the_manifest_without_expanding_variables() -> None:
     registry = PlugRegistry()
     registry.define(Socket("a", object))
     registry.register(Implementation("a", "impl", lambda ctx: object(), origin="vendor==1"))
-    manifest = ResolvedManifest("prof", {"a": SocketSetting("impl", {"token": "${SECRET}"}, "locked")})
+    manifest = ResolvedManifest("prof", {"a": SocketSetting("impl", {"token": "${SECRET}"}, "cli")})
     host = PlugHost(manifest, registry, session_dir=None, env={"SECRET": "s3cret"})
     traced = host.describe()
     assert traced["sockets"] == {
-        "a": {"impl": "impl", "origin": "vendor==1", "layer": "locked", "config": {"token": "${SECRET}"}}
+        "a": {"impl": "impl", "origin": "vendor==1", "layer": "cli", "config": {"token": "${SECRET}"}}
     }
     assert traced["profile"] == "prof" and traced["fingerprint"] == host.fingerprint()
     assert "s3cret" not in repr(traced)

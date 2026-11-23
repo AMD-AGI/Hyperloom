@@ -5,11 +5,12 @@
   "description": "What a hosted Hyperloom run is asked to do. Unknown fields are ignored. The platform that hosts the run never reads it; resources are requested separately. 'multibranch' is opaque here: it is handed untouched to the multibranch entry.",
   "type": "object",
   "required": ["schema", "model", "framework", "hardware", "budget", "placement"],
+  "anyOf": [{"required": ["flow"]}, {"required": ["multibranch"]}],
   "properties": {
     "schema": {"const": "hyperloom.campaign-spec/v1"},
     "name": {"type": "string"},
     "flow": {"const": "multibranch", "default": "multibranch", "description": "Optional; multibranch is the only flow. The retired 'single' is refused."},
-    "multibranch": {"description": "Opaque; not validated by this schema."},
+    "multibranch": {"description": "Opaque; not validated by this schema. A spec must name flow or carry this section: one with neither was written for the retired single flow and is refused."},
     "model": {
       "type": "object",
       "required": ["path"],

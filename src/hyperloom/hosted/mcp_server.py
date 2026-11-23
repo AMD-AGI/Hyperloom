@@ -132,7 +132,7 @@ class RegisteredTool:
 
 @dataclass(frozen=True)
 class McpServerConfig:
-    """Plain values from the caller; a hosted run takes ``port`` and ``host_token`` from its ``HostInfo``."""
+    """Plain values from the caller."""
 
     host: str = "127.0.0.1"
     port: int = 0

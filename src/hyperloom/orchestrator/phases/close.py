@@ -508,8 +508,7 @@ class ClosePhase(CoordinatorCollaborator):
 
         # Artifact package: bundle the curated result/report/analysis files into a single zip under
         # ``HYPERLOOM_SESSION_PACKAGE_DEST`` (``/workspace`` when unset, where the Claw sandbox sync ships it to object
-        # storage even when ``$USER_DATA_PATH`` is outside ``/workspace``).  A hosted run points it at
-        # ``<session dir>/archive`` on the shared storage instead.
+        # storage even when ``$USER_DATA_PATH`` is outside ``/workspace``).
         pkg_path: Path | None = None
         try:
             pkg_path = await self._do_artifact_package()

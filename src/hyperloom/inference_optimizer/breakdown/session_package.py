@@ -192,7 +192,7 @@ def _exported_state_bytes(path: Path) -> bytes:
 
 
 def _group_mode(root: Path) -> int | None:
-    """The mode asked of what is made below a destination root with the setgid bit (the hosted archive is ``2770``):
+    """The mode asked of what is made below a destination root with the setgid bit (a group-shared archive, ``2770``):
     the root's own, never wider than the shared modes (``2775``, so never writable by others); ``None`` for a root
     without it, which is written as one account's. Whether a mode asked is given or masked by the umask is
     :mod:`hyperloom_common.shared_storage`'s to decide (:func:`~hyperloom_common.shared_storage.parent_is_shared`),

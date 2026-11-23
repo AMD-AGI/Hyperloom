@@ -7,7 +7,8 @@ The contract is ``contracts/campaign_spec.v1.schema.json``.  This module does no
 time; :data:`FIELDS` is the same contract as a table, and a test holds the two together.  Unknown fields are ignored
 (a reader of one major version accepts what a later minor version adds).  ``multibranch`` is not looked at: it is kept
 as given for the multibranch entry.  ``flow`` may be left out; the only flow is ``multibranch``, and the retired
-``single`` is refused, naming why.
+``single`` is refused, naming why.  A spec with neither ``flow`` nor ``multibranch`` is one written for the retired
+default, the single flow, and is refused the same way.
 """
 
 from __future__ import annotations
@@ -21,8 +22,15 @@ from typing import Any
 SCHEMA = "hyperloom.campaign-spec/v1"
 FLOW = "flow"
 FLOW_MULTIBRANCH = "multibranch"
+MULTIBRANCH_SECTION = "multibranch"
 #: The legacy single-session flow, retired: a spec that still names it is refused with this reason.
 RETIRED_FLOWS = {"single": "flow 'single' is retired; leave flow out or set it to 'multibranch'"}
+#: A spec with neither ``flow`` nor ``multibranch`` relied on the retired default, the single flow: refused, naming it.
+RETIRED_DEFAULT = (
+    "a spec with neither flow nor multibranch ran the single flow, which is retired;"
+    " set flow to 'multibranch' and add a multibranch section with workload, and give workload.conc and"
+    " workload.precision"
+)
 MEASUREMENT_LOCAL = "local"
 MEASUREMENT_HOSTED = "hosted"
 #: The profile whose application container has cards of its own, the only one a multibranch run measures locally on.
@@ -251,6 +259,8 @@ def parse_campaign(doc: object) -> CampaignSpec:
     problems: list[str] = []
     if doc.get("schema") != SCHEMA:
         problems.append(f"schema must be {SCHEMA!r}, got {doc.get('schema')!r}")
+    if FLOW not in doc and MULTIBRANCH_SECTION not in doc:
+        problems.append(RETIRED_DEFAULT)
     _check_sections(doc, problems)
     values = _read_fields(doc, problems)
     _check_rules(values, problems)
@@ -261,7 +271,7 @@ def parse_campaign(doc: object) -> CampaignSpec:
     return CampaignSpec(
         measurement=values.pop("measurement", MEASUREMENT_HOSTED),
         max_parallel_tests=values.pop("max_parallel_tests", DEFAULT_MAX_PARALLEL_TESTS),
-        multibranch=doc.get("multibranch"),
+        multibranch=doc.get(MULTIBRANCH_SECTION),
         name=values.pop("name", None),
         **values,
     )
