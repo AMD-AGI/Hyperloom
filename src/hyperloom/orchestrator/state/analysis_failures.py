@@ -125,9 +125,22 @@ def remembered_trace_failure(state: Any, payload: Mapping[str, Any]) -> dict[str
     }
 
 
+def no_gpu_trace_reason(state: Any) -> str:
+    """Why no analysis of the session can record a GPU trace: what a parsed trace showed, else that its framework
+    runs under no torch profiler (and so ships no profile configuration); empty while tracing is presumed usable."""
+    if state.gpu_trace_unsupported_reason:
+        return str(state.gpu_trace_unsupported_reason)
+    from hyperloom.inference_optimizer import framework_registry
+
+    fw = str(state.framework or "")
+    if framework_registry.is_supported(fw) and not framework_registry.torch_profiled(fw):
+        return f"framework {fw!r} runs under no torch profiler, so it ships no profile configuration"
+    return ""
+
+
 def analysis_skip_reason(state: Any) -> str:
     """Why ``internal_analysis_params`` declined to build an analysis, for the record of the skipped run."""
-    return "gpu_trace_unsupported" if state.gpu_trace_unsupported_reason else "repeated_failure"
+    return "gpu_trace_unsupported" if no_gpu_trace_reason(state) else "repeated_failure"
 
 
 def _trace_input(payload: Mapping[str, Any]) -> str:

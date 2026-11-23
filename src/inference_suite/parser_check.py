@@ -6,6 +6,9 @@
 The parser runs in the serving interpreter with the launch environment, after every patch on that path has taken
 effect, so a flag a patch adds is known. A flag the parser still does not have is refused, never dropped, and the
 refusal names the layer that set it: a candidate's flag costs the candidate, a base or user flag stops the line.
+
+A native server has no parser this interpreter can run, so its launch is held to the flags its own ``--help`` lists
+instead; a flag the help marks removed is refused with the help's word on what replaced it.
 """
 
 from __future__ import annotations
@@ -19,10 +22,14 @@ from pathlib import Path
 
 from inference_suite.contracts.launch import Launch, LaunchArg, LayerSource
 from inference_suite.contracts.report import FailedStep
-from inference_suite.framework_probe import run_probe
+from inference_suite.framework_probe import native_help, run_probe
 from inference_suite.frameworks import Framework, framework_facts
 
 _DETAIL_CHARS = 600
+#: A ``--help`` entry opens at column 0 with its spellings, comma-separated: ``-kvu,  --kv-unified, -no-kvu, ...``.
+_HELP_SPELLING = re.compile(r"(-{1,2}[A-Za-z0-9][\w.+-]*)(,\s*)?")
+#: How llama.cpp's ``--help`` describes a flag it lists only to say it is gone.
+_REMOVED = "the argument has been removed"
 
 # ``parse_args``, not ``parse_known_args``: vLLM's FlexibleArgumentParser expands
 # ``--<group>-config.<field> <value>`` into the group's JSON inside ``parse_args`` only, so the
@@ -169,15 +176,88 @@ def _refused_flags(launch: Launch, answer: ParserAnswer) -> tuple[RefusedFlag, .
     return tuple(RefusedFlag(arg.flag, arg.source) for arg in launch.args if arg.flag in answer.rejected_option)
 
 
+@dataclass(frozen=True)
+class NativeFlags:
+    """The flags a native server's ``--help`` lists: those it takes, and those it lists as removed with its note."""
+
+    accepted: frozenset[str]
+    removed: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class HelpOption:
+    """One entry of a native server's ``--help``: every spelling it lists for the option, and what it says about it
+    on one line (the value placeholder first, when the option takes one). ``removed`` entries are listed only to say
+    the option is gone."""
+
+    spellings: tuple[str, ...]
+    help: str
+    removed: bool
+
+
+def help_options(text: str) -> tuple[HelpOption, ...]:
+    """The entries of the ``--help`` ``text`` of a native server, in the order it prints them."""
+    entries: list[tuple[list[str], list[str]]] = []
+    for line in text.splitlines():
+        if line[:1].isspace() and entries:
+            entries[-1][1].append(line)
+            continue
+        spellings: list[str] = []
+        rest = line
+        while (found := _HELP_SPELLING.match(rest)) is not None:
+            spellings.append(found[1])
+            rest = rest[found.end() :]
+            if found[2] is None:
+                break
+        if spellings:
+            entries.append((spellings, [rest]))
+    options: list[HelpOption] = []
+    for spellings, lines in entries:
+        described = " ".join(" ".join(lines).split())
+        options.append(HelpOption(tuple(spellings), described, removed=_REMOVED in described))
+    return tuple(options)
+
+
+def read_native_help(text: str) -> NativeFlags:
+    """The flags the ``--help`` ``text`` of a native server lists."""
+    accepted: set[str] = set()
+    removed: dict[str, str] = {}
+    for option in help_options(text):
+        if option.removed:
+            note = option.help[option.help.index(_REMOVED) :]
+            removed.update((spelling, note) for spelling in option.spellings)
+        else:
+            accepted.update(option.spellings)
+    return NativeFlags(frozenset(accepted), removed)
+
+
+def _check_native(launch: Launch, program: str, env: Mapping[str, str], *, cwd: Path) -> FlagRefusal | None:
+    flags = read_native_help(native_help(program, env, cwd=cwd))
+    refused = [arg for arg in launch.args if arg.flag not in flags.accepted]
+    if not refused:
+        return None
+    reasons = [
+        f"{arg.flag} was removed ({flags.removed[arg.flag]})"
+        if arg.flag in flags.removed
+        else f"{program} --help lists no {arg.flag}"
+        for arg in refused
+    ]
+    return FlagRefusal(flags=tuple(RefusedFlag(arg.flag, arg.source) for arg in refused), detail="; ".join(reasons))
+
+
 def check(launch: Launch, python: str, env: Mapping[str, str], *, cwd: Path) -> FlagRefusal | None:
     """Run the installed parser over ``launch``'s server flags in ``python`` with ``env``, started in ``cwd``; ``None``
-    when it accepts.
+    when it accepts. A native server's flags are held to its ``--help`` instead, whatever ``python`` is.
 
     Raises:
         ParserCheckError: The framework has no parser, or the parser's answer cannot be read.
-        FrameworkProbeError: The serving interpreter could not run the parser.
+        FrameworkProbeError: The serving interpreter could not run the parser, or the native server is not on the
+            launch ``PATH`` or cannot print its ``--help``.
     """
     framework = launch.framework.name
+    command = framework_facts(framework).server_command
+    if command is not None and command.native:
+        return _check_native(launch, command.entrypoint[0], env, cwd=cwd)
     probe = parser_probe(framework, [token for arg in launch.args for token in arg.tokens()])
     if probe is None:
         raise ParserCheckError(f"{framework.value} has no server parser to hold the launch to")
@@ -189,12 +269,16 @@ def check(launch: Launch, python: str, env: Mapping[str, str], *, cwd: Path) -> 
 
 __all__ = [
     "FlagRefusal",
+    "HelpOption",
+    "NativeFlags",
     "ParseStatus",
     "ParserAnswer",
     "ParserCheckError",
     "ParserProbe",
     "RefusedFlag",
     "check",
+    "help_options",
     "parser_probe",
     "read_answer",
+    "read_native_help",
 ]

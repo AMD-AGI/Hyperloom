@@ -257,6 +257,36 @@ def test_a_base_with_no_speculative_decoding_may_enable_it_with_a_simulated_acce
     refuse_unpinned_speculative_change(base_args, base_envs, candidate_args, candidate_envs)
 
 
+LLAMACPP_MTP = "-md /models/mtp-head.gguf --spec-type draft-mtp --spec-draft-n-max 5"
+
+
+@pytest.mark.parametrize(
+    ("candidate_args", "candidate_envs"),
+    [
+        pytest.param(LLAMACPP_MTP + " --spec-synth-len 4", {}, id="a-synthetic-length"),
+        pytest.param(LLAMACPP_MTP + " --spec-synth-rates 1,1,1,1", {}, id="synthetic-rates"),
+        pytest.param(LLAMACPP_MTP, {"LLAMA_ARG_SPEC_SYNTH_LEN": "4"}, id="a-synthetic-length-by-its-env"),
+    ],
+)
+@pytest.mark.parametrize("base_args", [LLAMACPP_MTP, "--spec-type draft-mtp", "--spec-draft-model /models/d.gguf"])
+def test_a_llama_server_candidate_may_not_declare_the_acceptance_of_a_draft_its_base_verifies(
+    base_args, candidate_args, candidate_envs
+):
+    with pytest.raises(SpeculativeDecodingPinnedError, match="verifies a real draft"):
+        refuse_unpinned_speculative_change(base_args, {}, candidate_args, candidate_envs)
+
+
+@pytest.mark.parametrize(
+    "candidate_args",
+    [
+        LLAMACPP_MTP + " --spec-draft-n-max 3",
+        "-md /models/mtp-head-small.gguf --spec-type draft-mtp --spec-draft-n-max 5",
+    ],
+)
+def test_a_llama_server_candidate_may_change_the_draft_its_base_verifies(candidate_args):
+    refuse_unpinned_speculative_change(LLAMACPP_MTP, {}, candidate_args, {})
+
+
 def test_the_refusal_names_what_changed():
     with pytest.raises(SpeculativeDecodingPinnedError) as refused:
         refuse_unpinned_speculative_change(

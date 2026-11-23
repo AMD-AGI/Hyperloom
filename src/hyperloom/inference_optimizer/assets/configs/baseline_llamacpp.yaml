@@ -1,0 +1,24 @@
+# Default benchmark point for $FRAMEWORK=llamacpp, resolved by default_baseline_config().
+# `benchmark.model` is a placeholder: the executor replaces it with --model / $MODEL_PATH, a directory holding the
+# one .gguf the server loads beside the Hugging Face tokenizer files the load client reads.
+
+benchmark:
+  framework: llamacpp
+  model: /models/Qwen-Qwen3-8B
+  precision: q8_0
+
+  envs:
+    # Last-resort fallbacks only; the CLI always projects the resolved
+    # workload (flag > resume-state > default) into these envs before launch.
+    TP: 1
+    CONC: 4
+    ISL: 1024
+    OSL: 1024
+    RANDOM_RANGE_RATIO: 1
+    MAX_MODEL_LEN: 8192
+
+  timeout_seconds: 3600
+
+  profiler:
+    torch_profiler:
+      enabled: false

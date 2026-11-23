@@ -30,7 +30,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
 from . import machine_state as _phase_state
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args, merge_cumulative_extra_server_args
 from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
-from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
+from ..state.analysis_failures import RECIPE_PARAM, no_gpu_trace_reason, repeated_roofline_failure, roofline_recipe
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import Task, TaskSpec, create_on_free_key
 from ..loop.time_budget import (
@@ -968,7 +968,7 @@ class PreludePhase(_WarmReplaySettleMixin, _WarmKernelPrepMixin, _WarmLaunchSkip
         from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 
         state = self.shared_state
-        unsupported = str(state.gpu_trace_unsupported_reason or "")
+        unsupported = no_gpu_trace_reason(state)
         if unsupported:
             log.error(
                 "internal-analysis (%s): not run -- %s; relying on static-source evidence for the rest of the session",

@@ -379,6 +379,14 @@ def test_identical_recipes_differ_in_nothing_and_a_new_base_image_is_a_differenc
     assert diff(recipe, _recipe(runtime_snapshot=None)).base_image_changed
 
 
+def test_an_appended_short_option_the_launch_already_sets_replaces_it_in_place() -> None:
+    recipe = _recipe(launch=LaunchConfig(server_args="-x one --alpha 5"))
+
+    changed = apply(recipe, RecipeDelta(config=ConfigDelta(server_args="-x two --alpha 4")))
+
+    assert changed.launch.server_args == "-x two --alpha 4"
+
+
 def test_a_recipe_that_names_nothing_unexpressed_keeps_its_document_and_digest() -> None:
     recipe = _recipe()
 

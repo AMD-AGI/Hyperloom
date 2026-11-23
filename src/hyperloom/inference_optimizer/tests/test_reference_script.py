@@ -48,6 +48,32 @@ def test_render_launches_the_frameworks_entrypoint(framework, command):
     assert _refeed(text, framework=framework).args == ("--tp", "8")
 
 
+def test_render_launches_a_native_servers_entrypoint():
+    text = render_reference_script(framework="llamacpp", launch=LaunchSettings(server_args="-ngl 99 -np 1"))
+    assert text.splitlines()[-1] == 'llama-server --model "$MODEL" -ngl 99 -np 1'
+
+
+def test_a_rendered_llamacpp_script_refeeds_as_reference_script():
+    args = "-ngl 99 -fa on -np 1 -c 32768 --jinja"
+    text = render_reference_script(
+        framework="llamacpp",
+        launch=LaunchSettings(server_args=args, envs={"GGML_VK_VISIBLE_DEVICES": "0"}),
+        target=ServingTarget(model="/models/M/weights.gguf"),
+    )
+    launch = _refeed(text, framework="llamacpp")
+    assert launch.args == tuple(args.split())
+    assert launch.env == {"MODEL": "/models/M/weights.gguf", "GGML_VK_VISIBLE_DEVICES": "0"}
+
+
+def test_render_names_the_model_file_a_native_server_loads(tmp_path):
+    (tmp_path / "weights.gguf").write_bytes(b"")
+    (tmp_path / "README.md").write_text("")
+    text = render_reference_script(
+        framework="llamacpp", launch=LaunchSettings(server_args=""), target=ServingTarget(model=str(tmp_path))
+    )
+    assert f"export MODEL={shlex.quote(str(tmp_path / 'weights.gguf'))}" in text.splitlines()
+
+
 def test_render_carries_validated_rocm_envs():
     # Regression: validated KEEP envs must survive into current_setting.sh.
     text = render_reference_script(

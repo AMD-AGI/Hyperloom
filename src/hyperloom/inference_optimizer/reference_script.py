@@ -17,6 +17,7 @@ from typing import Any
 
 from hyperloom.common.env_safety import is_allowed_external_env_key, is_credential_name
 from hyperloom.common.overlay import validate_overlay_pythonpath
+from hyperloom.inference_optimizer.framework_registry import native_server, served_model
 
 _CONTROLS_PREFIX = "# hyperloom-launch-controls: "
 
@@ -48,6 +49,9 @@ def _validate_launch_controls(controls: dict[str, Any]) -> dict[str, Any]:
 def _launch_command(framework: str) -> str:
     """The serving entrypoint the rendered script runs for ``framework``."""
     name = str(framework or "").strip().lower()
+    native = native_server(name)
+    if native is not None:
+        return f'{shlex.join(native.server_command.entrypoint)} {native.server_flags.model} "$MODEL"'
     if "atom" in name:
         return "python3 -m atom.entrypoints.openai_server"
     if "vllm" in name:
@@ -104,6 +108,28 @@ class ServingTarget:
     gpu_type: str | None = None
 
 
+def _exports(launch: LaunchSettings, target: ServingTarget) -> list[str]:
+    """The lines that export ``target``'s TP, context length and GPU type, then ``launch``'s envs and overlay."""
+    lines = []
+    for name, value in (("TP", target.tp), ("MAX_MODEL_LEN", target.max_model_len)):
+        if value and int(value) > 0:
+            lines.append(f"export {name}={int(value)}")
+    if target.gpu_type:
+        lines.append(f"export GPU_TYPE={shlex.quote(str(target.gpu_type))}")
+    for k, v in launch.envs.items():
+        if not str(k).strip():
+            continue
+        # The artifact is archived and uploaded, so a credential-shaped value is named but never written out.
+        if is_credential_name(k):
+            lines.append(f"# export {k}=<redacted; supply manually>")
+        else:
+            lines.append(f"export {k}={shlex.quote(str(v))}")
+    if launch.overlay_pythonpath:
+        prefix = shlex.quote(str(launch.overlay_pythonpath))
+        lines.append(f'export PYTHONPATH={prefix}"${{PYTHONPATH:+:$PYTHONPATH}}"')
+    return lines
+
+
 def render_reference_script(
     *,
     framework: str,
@@ -118,7 +144,7 @@ def render_reference_script(
     own setup did, and the launch follows only when it succeeds.
     """
     overlay_pythonpath, unset_envs = launch.overlay_pythonpath, launch.unset_envs
-    model, tp, max_model_len, gpu_type = target.model, target.tp, target.max_model_len, target.gpu_type
+    model = served_model(framework, target.model) if target.model else target.model
 
     lines: list[str] = ["#!/usr/bin/env bash"]
     controls = _validate_launch_controls(
@@ -153,22 +179,7 @@ def render_reference_script(
             lines.append(': "${MODEL:?set MODEL to the model path before running}"')
         # $SCRIPT_DIR stays outside the quotes so the shell still expands it.
         lines.append(f'bash "$SCRIPT_DIR"/{shlex.quote(setup_script)}')
-    for name, value in (("TP", tp), ("MAX_MODEL_LEN", max_model_len)):
-        if value and int(value) > 0:
-            lines.append(f"export {name}={int(value)}")
-    if gpu_type:
-        lines.append(f"export GPU_TYPE={shlex.quote(str(gpu_type))}")
-    for k, v in launch.envs.items():
-        if not str(k).strip():
-            continue
-        # The artifact is archived and uploaded, so a credential-shaped value is named but never written out.
-        if is_credential_name(k):
-            lines.append(f"# export {k}=<redacted; supply manually>")
-        else:
-            lines.append(f"export {k}={shlex.quote(str(v))}")
-    if overlay_pythonpath:
-        prefix = shlex.quote(str(overlay_pythonpath))
-        lines.append(f'export PYTHONPATH={prefix}"${{PYTHONPATH:+:$PYTHONPATH}}"')
+    lines += _exports(launch, target)
 
     args = _shell_ready_server_args(launch.server_args)
     lines.append("")

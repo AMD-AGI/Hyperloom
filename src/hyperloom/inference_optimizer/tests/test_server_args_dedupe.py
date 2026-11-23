@@ -5,7 +5,11 @@
 
 from __future__ import annotations
 
-from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args, merge_cumulative_extra_server_args
+from hyperloom.inference_optimizer.grid_server_args import (
+    dedupe_extra_server_args,
+    merge_cumulative_extra_server_args,
+    validate_server_args_shell_safe,
+)
 
 
 def test_dedupe_empty():
@@ -28,6 +32,22 @@ def test_dedupe_positional_token():
     assert out == "foo --tp 8"
 
 
+def test_dedupe_does_not_take_a_short_flag_as_a_boolean_flag_value():
+    # A base seeded twice into one string: "--plain" is boolean and "-x" takes the path.
+    base = "-a 99 -b on --plain -x /data/one.bin --alpha 5"
+    out = dedupe_extra_server_args(f"{base} {base} --alpha 3")
+    assert validate_server_args_shell_safe(out) == out
+    assert out == "-a 99 -b on --plain -x /data/one.bin --alpha 3"
+
+
+def test_dedupe_keeps_a_repeated_positional_token():
+    assert dedupe_extra_server_args("-x one two -y one two") == "-x one two -y one two"
+
+
+def test_dedupe_keeps_a_negative_number_as_a_value():
+    assert dedupe_extra_server_args("--seed -1 --seed -2") == "--seed -2"
+
+
 def test_dedupe_keeps_a_single_dash_flag_with_its_value():
     out = dedupe_extra_server_args("--trust-remote-code -tp 1 --trust-remote-code -tp 1 --trust-remote-code")
     assert out == "--trust-remote-code -tp 1"
@@ -36,11 +56,6 @@ def test_dedupe_keeps_a_single_dash_flag_with_its_value():
 def test_dedupe_keeps_the_last_value_of_a_single_dash_flag():
     out = dedupe_extra_server_args("-tp 1 --kv_cache_dtype fp8 -tp 2")
     assert out == "-tp 2 --kv_cache_dtype fp8"
-
-
-def test_dedupe_keeps_a_negative_number_as_a_value():
-    out = dedupe_extra_server_args("--seed -1 --seed -2")
-    assert out == "--seed -2"
 
 
 def test_dedupe_keeps_a_scientific_negative_number_as_a_value():

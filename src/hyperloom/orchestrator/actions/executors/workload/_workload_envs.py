@@ -459,13 +459,17 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
 
 
 def _seed_base_launch(bench: dict[str, Any], framework_env: str, base: ServerBase) -> None:
-    """Put ``base`` below the YAML and any per-task args (leftmost, so later merges win)."""
+    """Put ``base`` below the YAML and any per-task args (leftmost, so later merges win). A base flag the YAML already
+    names is not seeded again, so a materialized config re-materialized carries the base once."""
     envs = bench["envs"]
     if base.args:
-        from hyperloom.inference_optimizer.grid_server_args import compose_server_args
+        from hyperloom.inference_optimizer.grid_server_args import base_args_not_restated, compose_server_args
 
+        yaml_args = str(envs.get(framework_env, ""))
         envs[framework_env] = compose_server_args(
-            base_extra_args=base.args, variant_extra_args=str(envs.get(framework_env, "")), args_mode="replace"
+            base_extra_args=base_args_not_restated(base.args, yaml_args),
+            variant_extra_args=yaml_args,
+            args_mode="replace",
         )
     for name, value in base.env.items():
         envs.setdefault(name, value)  # never clobber YAML/CLI envs
@@ -841,9 +845,9 @@ class BenchmarkTarget:
 class MaterializeOptions:
     """Per-run choices for a materialized config beyond its launch layer and target.
 
-    ``server_base`` is the frozen base an AgentX launch is seeded with; ``None`` reads the current session's, and a
+    ``server_base`` is the frozen base a launch is seeded with; ``None`` reads the current session's, and a
     renderer outside a session (the multibranch toolbox) names its own and reads no session state, whose directory is
-    then the workspace root and its ``state.json`` another run's: its InferenceX point gets no base, on its TP's cards.
+    then the workspace root and its ``state.json`` another run's: its point runs on that base, on its TP's cards.
     """
 
     out_name: str = "baseline_config.with_envs.yaml"
@@ -981,7 +985,9 @@ def materialize_config_with_envs(
     _pin_workload_shape_envs(envs, in_session=options.server_base is None)
     framework_env = server_args_env_name(bench.get("framework"))
     window = _shape_request_window(bench)
-    _seed_base_launch(bench, framework_env, ServerBase() if options.server_base is not None else session_server_base())
+    _seed_base_launch(
+        bench, framework_env, session_server_base() if options.server_base is None else options.server_base
+    )
     _merge_caller_overrides(bench, framework_env, server_args, replace_args, launch.extra_envs)
     _settle_merged_server_args(bench, framework_env)
     _publish_scriptable_wiring(bench, window, options.establish_quality_ref)

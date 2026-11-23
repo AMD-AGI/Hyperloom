@@ -232,3 +232,24 @@ def test_an_explicitly_configured_value_is_never_clobbered(monkeypatch, tmp_path
         options=we.MaterializeOptions(flydsl_source_dirs=True),
     )
     assert from_extra["FLYDSL_EXTRA_SOURCE_DIRS"] == "/operator/extra"
+
+
+# ── the frozen base is seeded once, however often a config is re-materialized ──
+
+_LLAMACPP_BASE = "-ngl 99 -fa on -np 1 -c 32768 --jinja -md /models/mtp.gguf --spec-draft-n-max 5"
+
+
+def _materialize_twice(monkeypatch, tmp_path, framework, base, round_args):
+    _isolate(monkeypatch)
+    src = _write(tmp_path / "cfg.yaml", {"framework": framework, "model": "/m", "envs": {}})
+    options = we.MaterializeOptions(server_base=ServerBase(args=base))
+    baseline = we.materialize_config_with_envs(src, tmp_path / "baseline", options=options)
+    rendered = we.materialize_config_with_envs(
+        baseline, tmp_path / "round", launch=we.LaunchLayer(extra_server_args=round_args), options=options
+    )
+    return yaml.safe_load(rendered.read_text())["benchmark"]["envs"]
+
+
+def test_a_re_materialized_llamacpp_config_carries_the_base_once(monkeypatch, tmp_path):
+    envs = _materialize_twice(monkeypatch, tmp_path, "llamacpp", _LLAMACPP_BASE, "--spec-draft-n-max 3")
+    assert envs["EXTRA_LLAMACPP_ARGS"] == f"{_LLAMACPP_BASE} --spec-draft-n-max 3"

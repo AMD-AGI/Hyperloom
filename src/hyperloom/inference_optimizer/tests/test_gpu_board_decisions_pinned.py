@@ -49,6 +49,12 @@ def test_r9700_is_validated_for_vllm_only(framework):
     )
 
 
+def test_llamacpp_is_validated_on_w7900d_only():
+    assert gpu_types._board_framework_error("w7900d", "llamacpp") is None
+    assert gpu_types._board_framework_error("w7900", "llamacpp") is not None
+    assert gpu_types._board_framework_error("w7900d", "sglang") is not None
+
+
 def test_only_the_gfx1201_radeon_boards_pin_their_geak_identity():
     assert gpu_types.geak_identity_pin("r9700") == {"expected_target": "r9700", "expected_gfx": "gfx1201"}
     assert gpu_types.geak_identity_pin("r9600d") == {"expected_target": "r9600d", "expected_gfx": "gfx1201"}

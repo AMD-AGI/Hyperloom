@@ -640,3 +640,16 @@ def test_setup_skill_offers_the_codex_backend_with_its_own_side() -> None:
     assert f"`Use default ({_OFFICIAL_OPENAI_BASE_URL})`" in setup
     assert "OPENAI_API_KEY=<PLEASE_FILL_IN>" in setup
     assert f"`Use default ({DEFAULT_CODEX_MODEL})`" in setup
+
+
+def test_the_launch_block_names_workspace_as_the_session_package_destination():
+    """Under Claw the launch is its own tool call in a new shell, so the export must be in the launch block itself."""
+    (launch,) = [
+        block
+        for block in _bash_blocks((PKG_ROOT / "SKILL.md").read_text(encoding="utf-8"))
+        if any("-m hyperloom optimize --verbose" in line for line in block)
+    ]
+    exports = [i for i, line in enumerate(launch) if line.startswith("export HYPERLOOM_SESSION_PACKAGE_DEST=")]
+    start = next(i for i, line in enumerate(launch) if "-m hyperloom optimize --verbose" in line)
+    assert exports and exports[0] < start
+    assert launch[exports[0]] == 'export HYPERLOOM_SESSION_PACKAGE_DEST="${HYPERLOOM_SESSION_PACKAGE_DEST:-/workspace}"'

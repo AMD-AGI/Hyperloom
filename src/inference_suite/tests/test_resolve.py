@@ -780,3 +780,19 @@ def test_a_frozen_base_keeps_the_revisions_it_was_resolved_at():
     frozen = dataclasses.replace(_base(_fixed()), upstream=_base(_fixed()).upstream[:1])
 
     assert _base(_fixed(), _frozen_user_file(frozen)).upstream == frozen.upstream
+
+
+def test_a_llama_server_script_is_a_llamacpp_base_on_one_replica():
+    script = (
+        b"export GGML_CUDA_GRAPH_OPT=1\n"
+        b"/opt/llama.cpp/bin/llama-server -m /models/q/q8.gguf -ngl 99 -fa on -c 16384 -np 4 "
+        b"--host 0.0.0.0 --port 8080 --alias qwen --jinja > server.log 2>&1 &\n"
+    )
+    user_file = parse_user_file("launch.sh", script, framework="llamacpp")
+    base = _base(_fixed(framework="llamacpp", tp=1), dataclasses.replace(_snapshot(), user_file=user_file), gpus=1)
+
+    assert base.entrypoint == ("llama-server",)
+    assert base.args == ("-ngl", "99", "-fa", "on", "-c", "16384", "-np", "4", "--jinja")
+    assert base.topology == Topology(1)
+    assert {"--host", "--port", "--alias"} <= set(base.stripped)
+    assert "--metrics" in base.runner_owned.args

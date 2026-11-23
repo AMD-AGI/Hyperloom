@@ -196,6 +196,20 @@ def test_remove_server_args_keeps_a_sibling_json_value_parseable() -> None:
     assert tokens[2:] == ["--tp", "8"]
 
 
+@pytest.mark.parametrize(
+    ("args", "removal", "left"),
+    [
+        ("-ngl 99 --jinja -md /m.gguf", "--jinja", "-ngl 99 -md /m.gguf"),
+        ("--seed -1 --tp 8", "--seed", "--tp 8"),
+        ("-md /q8.gguf -bs -md /q4.gguf", "-md /q8.gguf", "-bs -md /q4.gguf"),
+        ("--jinja -md /m.gguf -np 1", "--jinja -md", "-np 1"),
+    ],
+)
+def test_remove_server_args_tells_a_short_flag_from_a_value(args, removal, left) -> None:
+    """llama.cpp spells its options with one dash; a removal names them as the server does."""
+    assert remove_server_args(args, [removal]) == left
+
+
 def test_remove_server_args_unbalanced_brace_drops_only_its_own_flag() -> None:
     """A stray ``}`` is not a JSON blob and must not take the tail with it."""
     out = remove_server_args("--foo a} --tp 8 --max-num-seqs 64", ["--foo"])

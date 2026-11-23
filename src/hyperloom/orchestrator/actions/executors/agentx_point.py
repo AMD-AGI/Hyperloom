@@ -22,7 +22,7 @@ from hyperloom_common.io import atomic_write_text
 from hyperloom_common.unified_diff import touched_paths
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 from hyperloom.orchestrator.state.base_launch import ServerBase
-from inference_suite.argv import removal_option_names, tokenize_server_args_preserving_json
+from inference_suite.argv import is_flag, removal_option_names, tokenize_server_args_preserving_json
 
 
 _ENCODING = "utf-8"
@@ -142,7 +142,7 @@ def apply_launch_changes(
     launch = agentx.setdefault("launch_overrides", {"version": 1})
     accepted_args = _launch_server_args(launch)
     accepted_envs = _launch_envs(benchmark, launch)
-    appended_options = {token.partition("=")[0] for token in launch.get("append_args", []) if token.startswith("--")}
+    appended_options = {token.partition("=")[0] for token in launch.get("append_args", []) if is_flag(token)}
     launch["append_args"] = _server_argv(
         dedupe_extra_server_args(
             compose_server_args(
@@ -155,8 +155,8 @@ def apply_launch_changes(
         changes.args,
     )
     launch["replace_args"] = changes.replace_args or launch.get("replace_args", False)
-    # A removal is matched against the base launch, before our options are appended, and is one bare long option
-    # name per entry -- so the value a spec is scoped to is dropped here, at the boundary that asks for it, and
+    # A removal is matched against the base launch, before our options are appended, and is one bare option name
+    # per entry -- so the value a spec is scoped to is dropped here, at the boundary that asks for it, and
     # never upstream: compose_server_args above still needs the scope to keep an option the variant re-adds.
     # A local-only ablation must not become a second removal there; options present in both layers must still
     # be removed from both.

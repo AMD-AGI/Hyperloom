@@ -1243,10 +1243,11 @@ a recipe for another board is used only when both share the gfx target and
 HBM size (`mi350x` / `mi355x` do; `mi300x` / `mi325x` do not), and its point
 is chosen for `--nodes` × `--gpus-per-node` (default 8) GPUs.
 
-`r9700` (Radeon AI PRO R9700, gfx1201), `r9600d` (Radeon AI PRO R9600D,
-gfx1201) and `w7900` / `w7900d` (Radeon PRO W7900 / W7900D, gfx1100) run with
-`--framework vllm` only: pass `--framework vllm`, since
-another framework (including the default) exits with code 2 at launch.
+`r9700` (Radeon AI PRO R9700, gfx1201), `r9600d` (Radeon AI PRO R9600D, gfx1201)
+and `w7900` (Radeon PRO W7900, gfx1100) run with `--framework vllm` only, and
+`w7900d` (Radeon PRO W7900D, gfx1100) with `vllm` or `llamacpp`. On these boards
+pass `--framework` explicitly, since another framework (including the default)
+exits with code 2 at launch.
 
 Do not set `HIP_VISIBLE_DEVICES` on the known ROCm stack unless the user asks;
 it can make `torch.cuda.is_available()` return false. Use
@@ -1319,6 +1320,8 @@ fi
 . "${INSTALL_SH%/*}/runtime_env.sh"
 load_dotenv_no_clobber
 export USER_DATA_PATH
+# The sandbox sync ships /workspace; without this the session package stays in <session dir>/archive.
+export HYPERLOOM_SESSION_PACKAGE_DEST="${HYPERLOOM_SESSION_PACKAGE_DEST:-/workspace}"
 # Resolve the launch interpreter in this shell; preflight loads generated runtime state.
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"

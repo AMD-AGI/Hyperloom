@@ -40,6 +40,7 @@ async def _refused_with(tmp_path: Path, repo: FakeRepo, kind: WorkloadKind, serv
         "--speculative-config.method suffix",
         '--speculative-config \'{"model": "[ngram]"}\'',
         "--speculative-algorithm NGRAM",
+        "--spec-type draft-mtp,ngram-mod",
     ],
 )
 async def test_an_inferencex_candidate_that_adds_a_context_copy_draft_is_refused(
@@ -110,3 +111,33 @@ async def test_an_inferencex_campaign_does_not_pin_a_simulated_draft(tmp_path: P
         tmp_path, _repo(SIMULATING, SIM_ENV), WorkloadKind.INFERENCEX, "--speculative-num-steps 5"
     )
     assert code is None
+
+
+# --- InferenceX: a draft the parent verifies keeps its measured acceptance ---
+
+LLAMACPP_MTP = "-md /models/mtp-head.gguf --spec-type draft-mtp --spec-draft-n-max 5"
+SYNTHETIC_LENGTH = "--spec-synth-len 4"
+
+
+@pytest.mark.parametrize("server_args", [SYNTHETIC_LENGTH, "--spec-synth-rates 1,1,1,1"])
+async def test_an_inferencex_candidate_that_simulates_the_acceptance_of_a_draft_its_parent_verifies_is_refused(
+    tmp_path: Path, server_args: str
+) -> None:
+    assert await _refused_with(tmp_path, _repo(LLAMACPP_MTP), WorkloadKind.INFERENCEX, server_args) == PINNED_CODE
+
+
+async def test_an_inferencex_candidate_that_simulates_it_through_the_server_s_environment_is_refused(
+    tmp_path: Path,
+) -> None:
+    rig = build(tmp_path, repo=_repo(LLAMACPP_MTP), workload_kind=WorkloadKind.INFERENCEX)
+    change = RecipeDelta(config=ConfigDelta(envs={"LLAMA_ARG_SPEC_SYNTH_LEN": "4"}))
+    with pytest.raises(RequestRejected) as refused:
+        await rig.toolbox.submit_test(req(change=change))
+    assert refused.value.code == PINNED_CODE
+
+
+@pytest.mark.parametrize("server_args", ["--spec-draft-n-max 3", "-md /models/mtp-head-small.gguf", "--threads 8"])
+async def test_an_inferencex_candidate_that_changes_the_draft_its_parent_verifies_is_accepted(
+    tmp_path: Path, server_args: str
+) -> None:
+    assert await _refused_with(tmp_path, _repo(LLAMACPP_MTP), WorkloadKind.INFERENCEX, server_args) is None
