@@ -30,7 +30,6 @@ _DEFAULT_BUDGET_SEC: dict[str, int] = {
     "sgl_kernel": 60 * 60,
     "vllm_source": 90 * 60,
     "framework_ext": 90 * 60,
-    "llamacpp": 60 * 60,
 }
 
 
