@@ -8,7 +8,7 @@
   "properties": {
     "schema": {"const": "hyperloom.campaign-spec/v1"},
     "name": {"type": "string"},
-    "flow": {"enum": ["single", "multibranch"], "default": "single"},
+    "flow": {"const": "multibranch", "default": "multibranch", "description": "Optional; multibranch is the only flow. The retired 'single' is refused."},
     "multibranch": {"description": "Opaque; not validated by this schema."},
     "model": {
       "type": "object",
@@ -76,7 +76,7 @@
       "required": ["profile"],
       "properties": {
         "profile": {"enum": ["hosted-gpu", "hosted-cpu"]},
-        "measurement": {"enum": ["local", "hosted"], "description": "Default: local for flow single, hosted for flow multibranch. Flow single accepts only local; flow multibranch accepts local (measured on the application container's own cards) only with profile hosted-gpu."},
+        "measurement": {"enum": ["local", "hosted"], "default": "hosted", "description": "local (measured on the application container's own cards) is accepted only with profile hosted-gpu."},
         "max_parallel_tests": {"type": "integer", "minimum": 1, "default": 8},
         "specialist_capacity": {"type": "integer", "minimum": 0}
       }

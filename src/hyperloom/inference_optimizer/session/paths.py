@@ -5,18 +5,16 @@
 
 from __future__ import annotations
 
-import errno
 import json
 import logging
 import os
 import hashlib
 import re
 import stat
-from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from hyperloom_common.shared_storage import SHARED_DIR_MODE, make_shared_dirs, ownership, writable_problems
+from hyperloom_common.shared_storage import SHARED_DIR_MODE, make_shared_dirs, ownership
 from hyperloom_common.timeutil import utc_now_compact
 
 log = logging.getLogger(__name__)
@@ -55,10 +53,8 @@ _SESSION_SKELETON: tuple[str, ...] = (
 #: Files whose presence means a directory holds a session that was started: a fresh session is never created there.
 SESSION_FILES: tuple[str, ...] = ("manifest.json", "state.json")
 
-#: The application-private result archive, created by a hosted run beside the skeleton above (not part of it).
+#: The application-private result archive of a session, beside the skeleton above (not part of it).
 ARCHIVE_DIRNAME = "archive"
-#: The archive's mode: the run's accounts (one group) share it, no one else may even read it.
-ARCHIVE_MODE = 0o2770
 
 #: Top-level session subdirectories that belong to the application alone: never copied into a sandbox, packaged or
 #: shown to a specialist.  Whatever copies a session directory elsewhere must leave these out.
@@ -148,55 +144,6 @@ def session_dir() -> Path:
     if pinned:
         return Path(pinned)
     return workspace_root()
-
-
-def hosted_session_dir(model_path: str | os.PathLike[str], run_created_at: datetime, run_id: str) -> Path:
-    """The session directory of one hosted run: ``<workspace>/<model>/<UTC creation time>-<sha256(run id)[:8]>``.
-
-    Both parts come from the run, so a restart of the same run lands in the same directory and another run never does.
-    """
-    stamp = run_created_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:8]
-    return workspace_root() / _sanitize_model_basename(model_path) / f"{stamp}-{digest}"
-
-
-def archive_root(session_dir: Path) -> Path:
-    """Where a hosted run archives its results: ``<session_dir>/archive``."""
-    return Path(session_dir) / ARCHIVE_DIRNAME
-
-
-def ensure_archive_root(session_dir: Path) -> Path:
-    """Create :func:`archive_root` with mode :data:`ARCHIVE_MODE` (the session directory, when missing, as
-    :func:`ensure_session_skeleton` makes it) and return it.
-
-    A run's legs may be different accounts of one group on shared storage, so an existing directory is accepted, whoever
-    made it, when this account can create and remove a file in it; it is never chmodded. Who owns it is not compared:
-    in a user namespace another account's directory shows as the overflow id.
-
-    Raises:
-        PermissionError: The archive is a link or not a directory, any account outside its group can read, write or
-            enter it, or this one cannot write it.
-    """
-    make_shared_dirs(session_dir)
-    root = archive_root(session_dir)
-    try:
-        make_shared_dirs(root, mode=ARCHIVE_MODE)
-    except OSError as exc:
-        if exc.errno not in (errno.EEXIST, errno.ELOOP):
-            raise
-        # what already stands there, a link included, is judged below
-    info = os.lstat(root)
-    if not stat.S_ISDIR(info.st_mode):
-        raise PermissionError(f"the archive {root} is not a directory (a link to one is refused too)")
-    if info.st_mode & stat.S_IRWXO:
-        raise PermissionError(
-            f"the archive {root} is open to accounts outside its group (mode {stat.S_IMODE(info.st_mode):04o}, "
-            f"not {ARCHIVE_MODE:04o})"
-        )
-    problems = writable_problems({"the archive": root})
-    if problems:
-        raise PermissionError(f"this account cannot write {problems[0]}")
-    return root
 
 
 def _make_dirs(path: Path, mode: int = SHARED_DIR_MODE) -> None:
@@ -421,7 +368,6 @@ def mn_profile_trace_root() -> Path:
 
 __all__ = [
     "ARCHIVE_DIRNAME",
-    "ARCHIVE_MODE",
     "AssetRootNotFound",
     "DEFAULT_SESSION_DIR",
     "ENV_CURRENT_SESSION_DIR",
@@ -434,12 +380,9 @@ __all__ = [
     "SESSION_FILES",
     "asset_prompt_references_dir",
     "asset_root",
-    "archive_root",
     "asset_system_prompts_dir",
     "db_path_for",
-    "ensure_archive_root",
     "ensure_session_skeleton",
-    "hosted_session_dir",
     "is_path_within",
     "make_session_dir",
     "mn_profile_trace_root",
@@ -455,8 +398,3 @@ __all__ = [
     "shared_db_path_for",
     "workspace_root",
 ]
-
-
-def stop_request_path(session_dir: Path) -> Path:
-    """The file whose presence is an operator's request to stop the run: ``<session>/hosted/control/stop.json``."""
-    return Path(session_dir) / "hosted" / "control" / "stop.json"

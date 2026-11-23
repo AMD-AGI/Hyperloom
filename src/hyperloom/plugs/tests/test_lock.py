@@ -75,7 +75,7 @@ def test_no_other_layer_reaches_a_locked_socket(tmp_path) -> None:
     registry = _registry(_Spy())
     overrides = tmp_path / "o.json"
     overrides.write_text(json.dumps({"schema": "hyperloom.plugs/v1", "sockets": {"events": {"impl": "local"}}}))
-    sources = ManifestSources(profile="hosted-gpu", overrides_path=overrides, cli_plugs=("events=local",), locked=LOCK)
+    sources = ManifestSources(overrides_path=overrides, cli_plugs=("events=local",), locked=LOCK)
     assert resolve_manifest(registry, sources).sockets["events"].impl == "spy"
 
 

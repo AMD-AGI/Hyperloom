@@ -52,9 +52,8 @@ The host decides from ``$HYPERLOOM_STATE_DIR/exit.json`` whether to start the ru
 directory as soon as it exists (:func:`record_session`), so a start that finds it takes that session over instead of
 starting another, once that session got through PRELUDE: resumed to its first deadline while its baseline holds, else
 finished as ``final-only`` does (:func:`hosted_restart_leg`); one that ended before its baseline was recorded is closed,
-which ends the measurement sandboxes it left, and the spec's session starts again. The two file names and their fields
-are the legacy entry's, ``hyperloom.hosted.entry``, which this package does not import: importing it loads the legacy
-flow's state.
+which ends the measurement sandboxes it left, and the spec's session starts again. ``exit.json`` is also
+the file ``hyperloom.hosted.entry`` writes when it refuses a run before the hand-over.
 """
 
 from __future__ import annotations
@@ -110,7 +109,7 @@ from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits, lease_shortfall
 from hyperloom_multibranch.toolbox.resume_guard import BaselineNotReusable, check_hosted_baseline_reusable
 
-# hyperloom/hosted/entry.py EXIT_FILE and SESSION_FILE
+# EXIT_FILE: hyperloom/hosted/entry.py EXIT_FILE
 EXIT_FILE = "exit.json"
 SESSION_FILE = "session.json"
 #: Seconds between the session's hard stop and the grant's end, for the process to write ``exit.json`` and exit.

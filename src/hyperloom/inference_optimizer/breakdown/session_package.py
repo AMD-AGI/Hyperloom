@@ -3,10 +3,9 @@
 
 """Bundle a session's consumer-facing artifacts into a single zip under the destination root.
 
-The root is ``HYPERLOOM_SESSION_PACKAGE_DEST``, ``/workspace`` when unset, so the Claw sandbox sync picks the zip up.  A
-hosted run (``hyperloom hosted run``) sets it to ``<session dir>/archive``, on the shared storage, whatever the host passed.
+The root is ``HYPERLOOM_SESSION_PACKAGE_DEST``, ``/workspace`` when unset, so the Claw sandbox sync picks the zip up.
 
-A root with the setgid bit (the hosted archive, ``2770``) is one the accounts of one group write in turn: the directories
+A root with the setgid bit (a group-shared archive, ``2770``) is one the accounts of one group write in turn: the directories
 made below it get its mode, and every file is a new one renamed into place with that mode less the execute bits, so the
 next account replaces it, never opens it (:mod:`hyperloom_common.shared_storage`).
 """

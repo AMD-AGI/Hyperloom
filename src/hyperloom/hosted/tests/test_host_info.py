@@ -56,7 +56,6 @@ def test_a_complete_environment_reads_into_typed_fields(env, tmp_path):
     assert info.input_file == tmp_path / "campaign.json"
     assert info.run_id == "run-1"
     assert info.run_created_at == datetime(2026, 10, 1, 12, 30, tzinfo=timezone.utc)
-    assert info.mcp_port == 8765
     assert info.sandbox_templates == {"runner": {"1": "r1", "8": "r8"}, "dev": "d"}
     assert (info.result_archive.bucket, info.result_archive.prefix) == ("results-bucket", "hl/runs")
     assert info.sandbox_keys.subrun.reveal() == _SECRETS[Var.SANDBOX_KEY_SUBRUN]
@@ -65,11 +64,17 @@ def test_a_complete_environment_reads_into_typed_fields(env, tmp_path):
     assert (info.source_repo, info.source_sha) == ("AMD-AGI/Hyperloom", "0123456789abcdef0123456789abcdef01234567")
 
 
-def test_events_dir_defaults_under_the_state_dir_and_an_explicit_one_wins(env, tmp_path):
-    assert read_host_info(env).events_dir == tmp_path / "state" / "events"
+def test_the_retired_events_and_mcp_inputs_are_not_read_but_still_taken_from_the_environment(env):
+    env[Var.EVENTS_DIR] = "relative/events"
+    env[Var.MCP_PORT] = "not a port"
+    env[Var.MCP_TOKEN] = "short"
+    retired = (Var.EVENTS_DIR, Var.MCP_HOST, Var.MCP_PORT, Var.MCP_TOKEN)
 
-    env[Var.EVENTS_DIR] = str(tmp_path / "elsewhere")
-    assert read_host_info(env).events_dir == tmp_path / "elsewhere"
+    info = take_host_info(env, require=_ALL_GROUPS)
+
+    assert info.run_id == "run-1"
+    assert not [name for name in retired if name in env]
+    assert set(retired) <= set(host_info.HOST_ONLY_VARS)
 
 
 def test_every_missing_required_input_is_named_in_one_error():
@@ -96,7 +101,7 @@ def test_the_profile_decides_what_is_required(env):
     for name in host_info._GROUP_VARS[HostGroup.SANDBOX]:
         del env[name]
 
-    read_host_info(env)  # default: run, state, input, MCP
+    read_host_info(env)  # default: run, state, input
 
     with pytest.raises(HostInfoError) as raised:
         read_host_info(env, require=(HostGroup.SANDBOX,))
@@ -143,16 +148,6 @@ def test_an_s3_archive_prefix_is_kept_as_written(env, value, prefix):
     assert read_host_info(env).result_archive.prefix == prefix
 
 
-def test_mcp_is_required_by_default_and_droppable(env):
-    del env[Var.MCP_PORT], env[Var.MCP_TOKEN]
-
-    with pytest.raises(HostInfoError) as raised:
-        read_host_info(env)
-    assert set(raised.value.missing) == {Var.MCP_PORT, Var.MCP_TOKEN}
-
-    assert read_host_info(env, require=()).mcp_port is None
-
-
 def test_a_role_key_is_required_only_for_a_hosted_role(env):
     del env[Var.SANDBOX_KEY_DEV]
 
@@ -164,13 +159,13 @@ def test_a_role_key_is_required_only_for_a_hosted_role(env):
 
 def test_missing_and_malformed_inputs_are_reported_together(env):
     del env[Var.RUN_ID]
-    env[Var.MCP_PORT] = "http"
+    env[Var.RUN_CREATED_AT] = "yesterday"
 
     with pytest.raises(HostInfoError) as raised:
         read_host_info(env)
 
     assert raised.value.missing == (Var.RUN_ID,)
-    assert set(raised.value.invalid) == {Var.MCP_PORT}
+    assert set(raised.value.invalid) == {Var.RUN_CREATED_AT}
 
 
 @pytest.mark.parametrize(
@@ -181,10 +176,6 @@ def test_missing_and_malformed_inputs_are_reported_together(env):
         (Var.SANDBOX_TEMPLATES, "{}", "must be a non-empty JSON object"),
         (Var.SANDBOX_TEMPLATES, '{"runner": 8}', "every entry must be a template name"),
         (Var.SANDBOX_TEMPLATES, '{"runner": {"1": ""}}', "every entry must be a template name"),
-        (Var.MCP_PORT, "0", "integer from 1 to 65535"),
-        (Var.MCP_PORT, "65536", "integer from 1 to 65535"),
-        (Var.MCP_PORT, "80.5", "integer from 1 to 65535"),
-        (Var.MCP_PORT, "-1", "integer from 1 to 65535"),
         (Var.RESULT_ARCHIVE, "https://b/p", "only s3://<bucket>/<prefix> or unset"),
         (Var.RESULT_ARCHIVE, "s3://", "bucket is not a valid"),
         (Var.RESULT_ARCHIVE, "s3://UPPER_bucket/p", "bucket is not a valid"),
@@ -205,8 +196,7 @@ def test_missing_and_malformed_inputs_are_reported_together(env):
         (Var.INPUT_FILE, "relative.json", "absolute path"),
         (Var.INPUT_FILE, "/nonexistent/campaign.json", "not an existing file"),
         (Var.STATE_DIR, "/nonexistent/state", "not an existing directory"),
-        (Var.MCP_TOKEN, "two words", "whitespace or control"),
-        (Var.MCP_TOKEN, "x" * 15, "at least 16 characters"),
+        (Var.SANDBOX_KEY_DEV, "two words", "whitespace or control"),
         (Var.SOURCE_SHA, "0123abc", "40-hex"),
         (Var.SOURCE_SHA, "0123456789ABCDEF0123456789abcdef01234567", "40-hex"),
         (Var.SOURCE_REPO, "two words", "whitespace or control"),
@@ -264,9 +254,8 @@ def test_take_removes_every_host_only_input_and_keeps_the_ones_others_read(env):
         "CLAW_SESSION_ID": "sess-9",
         "USER_DATA_PATH": "/data",
     }
-    assert info.mcp_token.reveal() == _SECRETS[Var.MCP_TOKEN]
+    assert info.sandbox_keys.dev.reveal() == _SECRETS[Var.SANDBOX_KEY_DEV]
     assert info.run_id == "run-1"
-    assert info.mcp_host == "0.0.0.0"
     assert set(host_info.SECRET_VARS) <= set(host_info.HOST_ONLY_VARS)
 
 
@@ -282,7 +271,7 @@ def test_take_leaves_the_environment_alone_when_the_read_fails(env):
 
 # -- a grant handed to a run no host started --------------------------------------------------------------------
 _HANDED_GRANT = (HostGroup.SANDBOX, HostGroup.MEASUREMENT_KEY, HostGroup.GRANT, HostGroup.SOURCE)
-_RUN_ONLY = (Var.INPUT_FILE, Var.RUN_ID, Var.STATE_DIR, Var.MCP_PORT, Var.MCP_TOKEN)
+_RUN_ONLY = (Var.INPUT_FILE, Var.RUN_ID, Var.STATE_DIR)
 
 
 def test_a_run_no_host_started_reads_its_grant_without_the_run_state_or_input(env):
@@ -291,7 +280,7 @@ def test_a_run_no_host_started_reads_its_grant_without_the_run_state_or_input(en
 
     info = take_host_info(env, require=_HANDED_GRANT, require_run=False)
 
-    assert (info.run_id, info.input_file, info.state_dir, info.events_dir) == (None, None, None, None)
+    assert (info.run_id, info.input_file, info.state_dir) == (None, None, None)
     assert info.run_created_at == datetime(2026, 10, 1, 12, 30, tzinfo=timezone.utc)
     assert info.grant_limits.max_gpus == 8
     assert info.sandbox_keys.measurement.reveal() == _SECRETS[Var.SANDBOX_KEY_MEASUREMENT]
@@ -317,10 +306,10 @@ def _surfaces(info):
     return {
         "repr": repr(info),
         "str": str(info),
-        "fstring": f"{info!r} {info} {info.mcp_token} {info.sandbox_keys} {info.archive_credentials}",
+        "fstring": f"{info!r} {info} {info.sandbox_keys.dev} {info.sandbox_keys} {info.archive_credentials}",
         "asdict": repr(dataclasses.asdict(info)),
         "deepcopy": repr(copy.deepcopy(info)),
-        "secret_format": format(info.mcp_token, ">40"),
+        "secret_format": format(info.sandbox_keys.dev, ">40"),
     }
 
 
@@ -335,7 +324,7 @@ def test_no_secret_value_appears_in_an_error_message(env):
     del env[Var.RUN_ID]
     env[Var.RESULT_ARCHIVE] = "bad"
     env[Var.E2B_API_URL] = "https://user:" + _SECRETS[Var.SANDBOX_KEY_DEV] + "@api.example.test"
-    env[Var.MCP_PORT] = _SECRETS[Var.MCP_TOKEN]
+    env[Var.RUN_CREATED_AT] = _SECRETS[Var.AWS_ACCESS_KEY_ID]
     env[Var.SANDBOX_TEMPLATES] = json.dumps({_SECRETS[Var.SANDBOX_KEY_SUBRUN]: 8})
     env[Var.MCP_PUBLIC_URL] = "https://app.example.test/?token=" + _SECRETS[Var.AWS_SESSION_TOKEN]
 
@@ -350,7 +339,7 @@ def test_a_secret_cannot_be_pickled(env):
     import pickle
 
     with pytest.raises(TypeError):
-        pickle.dumps(read_host_info(env).mcp_token)
+        pickle.dumps(read_host_info(env).sandbox_keys.dev)
 
 
 # ---- child processes never inherit them -----------------------------------------------------------------------

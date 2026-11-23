@@ -182,9 +182,9 @@ def test_the_factory_receives_expanded_config_and_the_session_dir(tmp_path) -> N
     got = {}
     registry.register(Implementation("a", "impl", lambda ctx: got.setdefault("ctx", ctx)))
     manifest = ResolvedManifest("t", {"a": SocketSetting("impl", {"dir": "${ROOT}/ev"}, "cli")})
-    PlugHost(manifest, registry, session_dir=tmp_path, host_info="info", env={"ROOT": "/r"}).start()
+    PlugHost(manifest, registry, session_dir=tmp_path, env={"ROOT": "/r"}).start()
     ctx = got["ctx"]
-    assert (ctx.socket, dict(ctx.config), ctx.session_dir, ctx.host_info) == ("a", {"dir": "/r/ev"}, tmp_path, "info")
+    assert (ctx.socket, dict(ctx.config), ctx.session_dir) == ("a", {"dir": "/r/ev"}, tmp_path)
 
 
 def test_describe_traces_the_manifest_without_expanding_variables() -> None:

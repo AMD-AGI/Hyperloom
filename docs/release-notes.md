@@ -20,6 +20,18 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **The hosted single-session flow is retired.** `hyperloom hosted run` now
+  only checks the campaign spec, runs the installer and hands the run to
+  `hyperloom-multibranch hosted run`. A spec with no `flow` is a multi-branch
+  one (before, it was the single-session flow, measured locally); a spec that
+  still says `"flow": "single"` ends the run with a final `exit.json`
+  (return code 2) naming the reason. The single flow's MCP host tools
+  (status, stop request), its progress events and its `hosted-gpu` /
+  `hosted-cpu` plug profiles are removed, and with them the
+  `hosted/control/stop.json` stop request the Coordinator read.
+  `HYPERLOOM_EVENTS_DIR` and `HYPERLOOM_MCP_HOST` / `_PORT` / `_TOKEN` are no
+  longer read or checked, and are still removed from the environment of every
+  child. `optimize --session-dir` stays.
 - **A hosted multi-branch run sets the AgentX window and the server boot
   budget.** The campaign spec's `multibranch` block takes
   `agentx_duration_sec` and `agentx_objective` (for `workload: agentx` only),

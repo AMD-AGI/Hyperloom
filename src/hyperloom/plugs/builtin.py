@@ -37,10 +37,7 @@ _SOCKETS = (
     Socket("credentials", object),
 )
 
-_IMPLEMENTATIONS = (
-    Implementation(_EVENTS, "local", lazy("hyperloom.plugs.events_local:create")),
-    Implementation(_EVENTS, "hosted", lazy("hyperloom.hosted.events:create")),
-)
+_IMPLEMENTATIONS = (Implementation(_EVENTS, "local", lazy("hyperloom.plugs.events_local:create")),)
 
 
 def builtin_registry() -> PlugRegistry:

@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 
 import pytest
 
 from hyperloom.plugs import ManifestError, ManifestSources, builtin_registry, resolve_manifest
+from hyperloom.plugs import manifest as manifest_module
 from hyperloom.plugs.manifest import (
     SCHEMA,
     SocketSetting,
@@ -36,8 +38,20 @@ def _base(**settings):
     return {k: SocketSetting(v[0], v[1], "builtin") for k, v in settings.items()}
 
 
-def test_builtin_profiles_are_local_hosted_gpu_and_hosted_cpu() -> None:
-    assert builtin_profile_names() == ("hosted-cpu", "hosted-gpu", "local")
+@pytest.fixture
+def custom_profile(tmp_path, monkeypatch):
+    """The shipped profiles and one more, ``custom``, which selects the ``custom`` events implementation."""
+    profiles = tmp_path / "profiles"
+    shutil.copytree(manifest_module._PROFILES_DIR, profiles)
+    (profiles / "custom.json").write_text(
+        json.dumps({"schema": SCHEMA, "profile": "custom", "sockets": {"events": {"impl": "custom"}}})
+    )
+    monkeypatch.setattr(manifest_module, "_PROFILES_DIR", profiles)
+    return "custom"
+
+
+def test_the_only_builtin_profile_is_local() -> None:
+    assert builtin_profile_names() == ("local",)
 
 
 def test_the_builtin_local_profile_is_always_the_base() -> None:
@@ -47,16 +61,16 @@ def test_the_builtin_local_profile_is_always_the_base() -> None:
     assert manifest.is_builtin_default
 
 
-def test_a_profile_layer_overrides_the_builtin_layer() -> None:
-    manifest = resolve_manifest(builtin_registry(), ManifestSources(profile="hosted-cpu"))
-    assert manifest.profile == "hosted-cpu"
-    assert manifest.sockets["events"].impl == "hosted"
+def test_a_profile_layer_overrides_the_builtin_layer(custom_profile) -> None:
+    manifest = resolve_manifest(builtin_registry(), ManifestSources(profile=custom_profile))
+    assert manifest.profile == "custom"
+    assert manifest.sockets["events"].impl == "custom"
     assert manifest.sockets["events"].layer == "profile"
     assert not manifest.is_builtin_default
 
 
 def test_an_unknown_profile_names_the_available_ones() -> None:
-    with pytest.raises(ManifestError, match="unknown profile 'nope'; available: hosted-cpu, hosted-gpu, local"):
+    with pytest.raises(ManifestError, match="unknown profile 'nope'; available: local"):
         resolve_manifest(builtin_registry(), ManifestSources(profile="nope"))
 
 
@@ -65,11 +79,11 @@ def test_a_profile_name_cannot_walk_out_of_the_profile_directory() -> None:
         resolve_manifest(builtin_registry(), ManifestSources(profile="../manifest"))
 
 
-def test_layers_apply_in_order_profile_manifest_overrides_cli(tmp_path) -> None:
+def test_layers_apply_in_order_profile_manifest_overrides_cli(tmp_path, custom_profile) -> None:
     manifest_file = _write(tmp_path, "m.json", _doc(events={"impl": "from-manifest"}))
     overrides = _write(tmp_path, "o.json", _doc(events={"impl": "from-overrides"}))
     registry = builtin_registry()
-    sources = ManifestSources(profile="hosted-cpu", manifest_path=manifest_file, overrides_path=overrides)
+    sources = ManifestSources(profile=custom_profile, manifest_path=manifest_file, overrides_path=overrides)
     assert resolve_manifest(registry, sources).sockets["events"].layer == "overrides"
     assert resolve_manifest(registry, sources).sockets["events"].impl == "from-overrides"
     cli = ManifestSources(**{**sources.__dict__, "cli_plugs": ("events=from-cli",)})
@@ -77,12 +91,12 @@ def test_layers_apply_in_order_profile_manifest_overrides_cli(tmp_path) -> None:
     assert resolve_manifest(registry, cli).sockets["events"].layer == "cli"
 
 
-def test_a_resumed_file_is_the_profile_layer_and_an_explicit_profile_still_overrides_it() -> None:
+def test_a_resumed_file_is_the_profile_layer_and_an_explicit_profile_still_overrides_it(custom_profile) -> None:
     resumed = {"schema": SCHEMA, "profile": "custom", "sockets": {"events": {"impl": "from-file"}}}
     registry = builtin_registry()
     assert resolve_manifest(registry, ManifestSources(resumed=resumed)).sockets["events"].impl == "from-file"
-    explicit = ManifestSources(resumed=resumed, profile="hosted-cpu")
-    assert resolve_manifest(registry, explicit).sockets["events"].impl == "hosted"
+    explicit = ManifestSources(resumed=resumed, profile=custom_profile)
+    assert resolve_manifest(registry, explicit).sockets["events"].impl == "custom"
 
 
 def test_rule_1_later_layers_override_per_socket() -> None:
@@ -209,8 +223,8 @@ def test_a_malformed_plug_config_flag_is_refused(bad) -> None:
         cli_document([], [bad])
 
 
-def test_cli_impl_and_config_in_one_layer_keep_the_config_with_the_new_impl() -> None:
-    sources = ManifestSources(profile="hosted-cpu", cli_plugs=("events=local",), cli_configs=("events.k=1",))
+def test_cli_impl_and_config_in_one_layer_keep_the_config_with_the_new_impl(custom_profile) -> None:
+    sources = ManifestSources(profile=custom_profile, cli_plugs=("events=local",), cli_configs=("events.k=1",))
     events = resolve_manifest(builtin_registry(), sources).sockets["events"]
     assert (events.impl, events.config) == ("local", {"k": 1})
 

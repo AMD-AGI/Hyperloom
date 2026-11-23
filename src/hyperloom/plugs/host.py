@@ -32,13 +32,11 @@ class PlugHost:
         registry: PlugRegistry,
         *,
         session_dir: Path | None,
-        host_info: object | None = None,
         env: Mapping[str, str] | None = None,
     ) -> None:
         self._manifest = manifest
         self._registry = registry
         self._session_dir = session_dir
-        self._host_info = host_info
         self._configs = expand_manifest(manifest, env)
         self._impls: dict[str, Implementation] = {}
         self._started: dict[str, object] = {}
@@ -89,7 +87,6 @@ class PlugHost:
             socket=socket,
             config=self._configs[socket],
             session_dir=self._session_dir,
-            host_info=self._host_info,
             get=lambda name, _impl=impl: self._dependency(_impl, name),
         )
         obj = impl.factory(context)

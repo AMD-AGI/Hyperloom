@@ -225,7 +225,7 @@ def _add_plug_arguments(opt: argparse.ArgumentParser) -> None:
         dest="plug_profile",
         default=None,
         metavar="NAME",
-        help="Built-in plug profile to load (local, hosted-gpu, hosted-cpu). Without it, and without the other plug "
+        help="Built-in plug profile to load (local). Without it, and without the other plug "
         "flags, nothing changes from a plain local run.",
     )
     opt.add_argument(

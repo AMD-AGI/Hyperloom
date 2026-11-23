@@ -42,11 +42,9 @@ def test_the_plug_flags_default_to_nothing_selected() -> None:
 
 
 def test_the_plug_flags_parse() -> None:
-    args = _args(
-        "--plug-profile", "hosted-gpu", "--manifest", "m.json", "--plug", "events=a", "--plug-config", "events.k=1"
-    )
+    args = _args("--plug-profile", "local", "--manifest", "m.json", "--plug", "events=a", "--plug-config", "events.k=1")
     assert (args.plug_profile, args.plug_manifest, args.plug, args.plug_config) == (
-        "hosted-gpu",
+        "local",
         "m.json",
         ["events=a"],
         ["events.k=1"],
@@ -133,12 +131,13 @@ def test_a_profile_naming_an_unset_variable_is_refused(tmp_path: Path, capsys, m
     assert "environment variable HYPERLOOM_EVENTS_DIR is not set" in capsys.readouterr().err
 
 
-def test_a_profile_whose_implementations_are_not_installed_is_refused_before_anything_starts(
-    tmp_path: Path, capsys, monkeypatch
+def test_a_manifest_whose_implementations_are_not_installed_is_refused_before_anything_starts(
+    tmp_path: Path, capsys
 ) -> None:
-    monkeypatch.setenv("HYPERLOOM_EVENTS_DIR", str(tmp_path))
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"schema": "hyperloom.plugs/v1", "sockets": {"measurement": {"impl": "hosted"}}}))
     with pytest.raises(SystemExit) as exc:
-        prepare_plug_host(_args("--plug-profile", "hosted-cpu"), tmp_path)
+        prepare_plug_host(_args("--manifest", str(manifest)), tmp_path)
     assert exc.value.code == 2
     assert (
         "plug configuration refused: socket 'measurement' has no implementation 'hosted'; available: (none)"
