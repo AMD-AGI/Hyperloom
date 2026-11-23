@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from hyperloom.common.deadline import Deadline
 
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
+from hyperloom.inference_optimizer.breakdown.stop_reasons import SOURCE_CHANGE_REFUSED_STOP_REASON
 
 from hyperloom.inference_optimizer.framework_paths import point_session_framework_root
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
@@ -127,11 +128,9 @@ class EnablementLane(CoordinatorCollaborator):
             if await self._round_has_live_work(round_row.holder_task_id):
                 await self._renew_enablement_round(round_row)
             return ""
-        # Each terminal below writes stop_reason, which routes the phase to CLOSE on the
+        # A terminal writes stop_reason, which routes the phase to CLOSE on the
         # next tick; returning keeps a new round from opening in the meantime.
-        if self._check_argv_terminal():
-            return ""
-        if self._check_environment_terminal():
+        if await self._reached_terminal():
             return ""
         stalled = await self.rounds.consecutive_stalled()
         if stalled >= _ENABLEMENT_MAX_ATTEMPTS:
@@ -182,6 +181,38 @@ class EnablementLane(CoordinatorCollaborator):
             spec_tid,
         )
         return spec_tid
+
+    async def _reached_terminal(self) -> bool:
+        """Whether the lane is at one of its terminals, each of which has then written ``stop_reason``."""
+        return (
+            self._check_argv_terminal()
+            or self._check_environment_terminal()
+            or await self._check_source_change_terminal()
+        )
+
+    async def _check_source_change_terminal(self) -> bool:
+        """Stop the run if the last round's fix was a change ``--no-source-changes`` refuses.
+
+        Returns:
+            bool: True when the last round delivered such a change. Another round would author one that is refused
+            again, so the lane ends here rather than at the attempt cap, and closes its own event as the cap does.
+        """
+        state = self.shared_state
+        refused = state.enablement.last_refused_source_changes
+        if not refused:
+            return False
+        if not state.stop_reason:
+            state.set_stop_reason(SOURCE_CHANGE_REFUSED_STOP_REASON)
+            state.save(self.session_dir)
+            await self.close_lane_event(
+                outcome=enablement_event.OUTCOME_STALLED, reason=SOURCE_CHANGE_REFUSED_STOP_REASON
+            )
+            log.error(
+                "ENABLEMENT: the last round's fix is %s, which --no-source-changes refuses; stopping the run "
+                "rather than authoring another change the session will not keep",
+                ", ".join(refused),
+            )
+        return True
 
     def _check_argv_terminal(self) -> bool:
         """Write server_argv_invalid to stop_reason if the last boot was refused by the parser.

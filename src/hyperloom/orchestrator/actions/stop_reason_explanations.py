@@ -11,6 +11,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     HOST_GPUS_UNAVAILABLE,
     INFERENCEX_CHECKOUT_MISSING_STOP_REASON,
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
+    SOURCE_CHANGE_REFUSED_STOP_REASON,
 )
 from ..measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
 
@@ -97,6 +98,11 @@ STOP_REASON_EXPLANATIONS: dict[str, str] = {
     ),
     "baseline_arg_error": "Two or more baseline attempts failed argument or configuration validation, so further baseline retries were stopped.",
     "enablement_attempts_exhausted": "The enablement loop stopped after too many consecutive rounds bought no ground. A bring-up that is still clearing new boot failures is bounded by the run's wall clock instead.",
+    SOURCE_CHANGE_REFUSED_STOP_REASON: (
+        "The run was started with --no-source-changes and the combo does not serve on launch configuration alone: "
+        "the fix the last enablement round delivered was a source, file or runtime change, which the flag refuses. "
+        "Start a run without the flag to let enablement keep such a change."
+    ),
     "baseline_accuracy_failed": "The baseline produced no accuracy result even though the accuracy test was expected to run (broken eval or missing quality gate). The run stopped rather than optimize against an unvalidated baseline.",
     AGENTX_PREFLIGHT_STOP_REASON: (
         "The MLPerf agentic client failed its execution preflight. Check the named missing dependency "

@@ -199,8 +199,10 @@ def _lane(session_dir: Path, **overrides: Any):
     # The round ledger's own surface: the cap, the lease and the settle all live on it.
     for name in (
         "enablement_admitted",
+        "_reached_terminal",
         "_check_argv_terminal",
         "_check_environment_terminal",
+        "_check_source_change_terminal",
         "enablement_in_flight",
         "_round_has_live_work",
         "_open_authoring_round",

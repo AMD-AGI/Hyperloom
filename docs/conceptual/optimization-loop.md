@@ -147,7 +147,11 @@ A KEEP in ENABLEMENT is graded on runnability and the accuracy floor, not
 throughput. The phase exits normally when `baseline_tput > 0`, the
 revalidation window is closed, and all in-flight enablement work is drained.
 It exits terminally on `server_argv_invalid`, `environment_fault`, or
-`enablement_attempts_exhausted` (eight consecutive failed rounds).
+`enablement_attempts_exhausted` (eight consecutive failed rounds). Under
+`--no-source-changes` it also exits on
+`enablement_blocked_by_no_source_changes`, at the first round whose fix is a
+source, file or runtime change: the session refuses that fix, and another round
+would author one that is refused again.
 
 Only the enablement lane authors rounds here; the LLM proposes `target_analysis`.
 A round that reaches its executor after the lane stopped taking rounds is skipped.

@@ -52,6 +52,7 @@
       "cycle_end_done",
       "emergency",
       "enablement_attempts_exhausted",
+      "enablement_blocked_by_no_source_changes",
       "environment_fault",
       "framework_agent_phase_done",
       "global_converged",

@@ -324,6 +324,20 @@ async def test_no_specialist_requested_build_starts_under_no_source_changes(coor
 
     assert [t for t in await coord.tasks.queued() if t.kind == "targeted_build"] == []
     assert coord.shared_state.enablement.last_specialist_task_id == ""
+    assert coord.shared_state.enablement.last_refused_source_changes == ["a targeted build"]
+
+
+@pytest.mark.asyncio
+async def test_a_build_request_switched_off_by_the_environment_is_not_a_refused_source_change(coord, monkeypatch):
+    """Only ``--no-source-changes`` turns a dropped build request into the lane's terminal."""
+    monkeypatch.setenv("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "1")
+
+    await coord.enablement_build.maybe_enqueue_specialist_requested_build(
+        task_id="spec-env-off",
+        payload={"needs_targeted_build": {"component": "aiter", "capability": "deepseek_v4_nsa"}},
+    )
+
+    assert coord.shared_state.enablement.last_refused_source_changes == []
 
 
 @pytest.mark.asyncio

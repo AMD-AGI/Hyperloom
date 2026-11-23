@@ -135,6 +135,14 @@ class EnablementBuild(CoordinatorCollaborator):
         """
         return _targeted_build_unavailable() or bool(getattr(self.shared_state, "no_source_changes", False))
 
+    def _note_refused_build_request(self, payload: dict[str, Any] | None) -> None:
+        """Record a specialist's build request that ``--no-source-changes`` refuses, for the lane to stop on."""
+        state = self.shared_state
+        if not getattr(state, "no_source_changes", False) or not isinstance(payload, dict):
+            return
+        if isinstance(payload.get("needs_targeted_build"), dict):
+            state.enablement.note_refused_build_request()
+
     async def maybe_escalate_to_targeted_build(
         self,
         launch_log: str,
@@ -231,6 +239,7 @@ class EnablementBuild(CoordinatorCollaborator):
 
         try:
             if self._targeted_builds_off():
+                self._note_refused_build_request(payload)
                 _consume_marker()
                 return
             if payload is None:
