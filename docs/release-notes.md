@@ -393,6 +393,15 @@ Session and report consumers have to follow these changes:
 
 - **TraceLens fusion findings reach forge-fuse and the specialists.** When TraceLens reports any, forge-fuse's discovery prompt and the specialist prompts include them, the fusion workspace holds `fusion_hints.json`, and the fusion result records its path as `fusion_hints`. They are advisory: which chains are fused, and whether discovery runs, is decided as before.
 
+- **The EXPLORE screen pre-filter is removed.** The opt-in reduced-GPU probe
+  that 1.2.0 added behind `HYPERLOOM_EXPLORE_SCREEN=1` is gone: on the one grid
+  it was measured against, the order of variants did not transfer to fewer
+  GPUs, and it was off by default. `HYPERLOOM_EXPLORE_SCREEN` and its
+  `_MARGIN_PCT`, `_GPUS`, `_MODEL`, `_LAYERS`, `_ATTENTION_BACKEND` and
+  `_TIMEOUT_SEC` settings are no longer read, and no variant is skipped as
+  `screen_decisively_slower`. The measurement store and the InferaSim
+  projection are unchanged, and so is a run that never set the switch.
+
 - **A report whose validated gain holds ends with a link to the repository.** `reports/final.md` of such a session closes with one sentence asking for a star on https://github.com/AMD-AGI/Hyperloom. `final.json` and every other report are unchanged.
 
 - **EXPLORE can drop variants before benchmarking them, on three opt-in pre-filters.**

@@ -686,17 +686,16 @@ from these benchmark limits and retain their existing contracts.
 
 ## EXPLORE pre-filters
 
-Three opt-in filters can remove variants from an EXPLORE round before any of
-them is benchmarked. All three are off by default; with every switch below
+Two opt-in filters can remove variants from an EXPLORE round before any of
+them is benchmarked. Both are off by default; with every switch below
 unset, a round runs exactly as it did before. They run once, before the first
-variant, in this order: measurement store, screen, projection.
+variant, in this order: measurement store, projection.
 
 A filter only removes variants. It never adds or reorders one, and none of its
 numbers reaches KEEP/REVERT, `current_best`, the journal or the knowledge base:
 every KEEP comes from a measured decision round. A removed variant is recorded
 in the round's `skipped_dup` with a reason (`measured_revert_before`,
-`screen_decisively_slower`, `projection_decisively_slower` or
-`projection_outranked`). It is not journaled or written to the tested ledger,
+`projection_decisively_slower` or `projection_outranked`). It is not journaled or written to the tested ledger,
 so a later round may propose it again.
 
 No filter ever drops a variant in a stack-revalidation round or a config replay
@@ -712,27 +711,6 @@ its default.
 |---|---|---|
 | `HYPERLOOM_MEASUREMENT_STORE` | unset (off) | Directory that records every decision round that REVERTed on performance, across sessions. A later variant whose exact launch REVERTed before is dropped (`measured_revert_before`) instead of measured again. A KEEP, an accuracy REVERT (`accuracy_drop` / `accuracy_unavailable`) and a failed round are never recorded, so they are always measured. The key covers the model, engine, GPU, workload signature, benchmark block, inherited args, warm or cold decision protocol, grading axis, KEEP threshold, image digest, engine / ROCm / aiter versions, the stack, the variant, the launch envs, and the content of every kernel overlay on `PYTHONPATH`. A launch is never keyed, and so always measured, when the image digest or engine version is unknown, a runtime override is in effect, or an overlay cannot be hashed. Safe to share between sessions; writes are atomic. |
 | `HYPERLOOM_MEASUREMENT_MAX_AGE_DAYS` | `14` | Records older than this many days are ignored. Negative values are treated as `0`, which ignores every record. |
-
-### Screen (reduced-GPU probe)
-
-A real engine probe on fewer GPUs, using Infera's vLLM benchmark script. The
-baseline probe is the round's stack, and each variant is probed on that stack,
-with the server args and envs the round would launch it with. It drops a variant only when the probe resolved the same kernels as the deployment
-did, read from both sides' logs; otherwise it returns the round untouched. A
-variant whose probe fails is kept. It needs at least three variants and
-`HYPERLOOM_INFERASIM_ROOT`. On the one grid it was measured against, the order
-did not transfer to fewer GPUs, so validate it on your deployment before relying
-on it.
-
-| Variable | Default | Description |
-|---|---|---|
-| `HYPERLOOM_EXPLORE_SCREEN` | off | Turns the screen on. |
-| `HYPERLOOM_EXPLORE_SCREEN_MARGIN_PCT` | `10` | Drop a variant that probes more than this many percent behind the probed stack (`screen_decisively_slower`). Measured on eight replicas, a gap this wide is one every replica reproduces. A non-positive value falls back to the default. |
-| `HYPERLOOM_EXPLORE_SCREEN_GPUS` | `1` | GPUs the probe runs on, capped at the deployment's TP. |
-| `HYPERLOOM_EXPLORE_SCREEN_MODEL` | the config's model | Model the probe loads, for example a smaller checkpoint of the same architecture. |
-| `HYPERLOOM_EXPLORE_SCREEN_LAYERS` | all | Truncate the probed model to this many hidden layers. |
-| `HYPERLOOM_EXPLORE_SCREEN_ATTENTION_BACKEND` | the deployment's | Attention backend pinned onto the probe. By default it is read from the deployment's `--attention-backend`, else from the kernels the session's own benchmark logged. A variant that sets the backend itself still wins. |
-| `HYPERLOOM_EXPLORE_SCREEN_TIMEOUT_SEC` | `1800` | Wall-clock limit for one probe. A probe that times out is kept. |
 
 ### Projection (InferaSim)
 
@@ -761,7 +739,7 @@ Without it every projection fails, and the round is benchmarked untouched.
 | `HYPERLOOM_EXPLORE_PROJECTION_MARGIN_PCT` | `15` | Simulate mode: drop a variant projected more than this many percent behind the stack (`projection_decisively_slower`). The default sits above the 9.7% median output-throughput error simulate mode scored on held-out AgentX configurations. A non-positive value falls back to the default. |
 | `HYPERLOOM_EXPLORE_PROJECTION_CALIBRATED_MARGIN_PCT` | `5` | The margin when both the stack and the variant are calibrated against an in-regime anchor (regime distance 0); otherwise the simulate margin applies. The default is a placeholder until the gap error between two calibrated configurations has been measured. |
 | `HYPERLOOM_EXPLORE_PROJECTION_TOP_K` | `5` | Of the variants that are not decisively behind, benchmark only the top K by projected gain; the rest are dropped (`projection_outranked`). `0` turns the cap off. On held-out AgentX stack ladders, the DES top 5 contained the best configuration 94% of the time, against 47% for the single top pick. |
-| `HYPERLOOM_INFERASIM_ROOT` | unset | Path to the Infera checkout; it is put first on `sys.path`. Required by the screen and by harvesting, and by the projection unless Infera is installed. |
+| `HYPERLOOM_INFERASIM_ROOT` | unset | Path to the Infera checkout; it is put first on `sys.path`. Required by harvesting, and by the projection unless Infera is installed. |
 | `HYPERLOOM_INFERASIM_MODE` | `auto` | `auto` projects the round in benchmark (calibrated) mode when the anchor store already holds an in-regime anchor for the stack, and in simulate mode otherwise. It is resolved once, on the stack, and never boots a server. `simulate` never reads an anchor. `benchmark` requires an anchor, harvests one on a miss, and fails closed (the variant is benchmarked) when none can be had. Any other value is an error, and the round is benchmarked untouched. |
 | `HYPERLOOM_INFERASIM_ESTIMATOR` | `des` | `des` replays a closed-loop client at the round's concurrency (10 requests per client, between 64 and 4,000). `analytical` selects the closed form, which ranked held-out configurations far worse. Any other value is an error. |
 | `HYPERLOOM_INFERASIM_MODEL` | inferred | InferaSim model preset to project, for example `gpt_oss_120B`. By default it is inferred from the model path: the most specific match wins, and a distilled checkpoint uses its student. With no match and neither this nor `HYPERLOOM_INFERASIM_WORKLOAD` set, the round is benchmarked. |
