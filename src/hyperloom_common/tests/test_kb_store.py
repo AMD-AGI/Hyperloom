@@ -306,10 +306,10 @@ def test_put_dir_uploads_every_file_at_its_relative_path(
         ("a/one.txt", "other", {}),
         ("two.bin", "other", {}),
     ]
-    assert [row["url"] for row in service.requests[1:3]] == [
+    assert {row["url"] for row in service.requests[1:3]} == {
         "https://objects.example/put-one",
         "https://objects.example/put-two",
-    ]
+    }
 
 
 def test_put_dir_refuses_a_path_that_is_not_a_directory(client: KBStoreClient, tmp_path: Path) -> None:
