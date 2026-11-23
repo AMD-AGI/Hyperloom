@@ -31,13 +31,17 @@ from hyperloom.measure.tests.bundle_factory import base_launch
 from hyperloom.orchestrator.state.base_launch import freeze_base
 from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom_multibranch import cli
-from hyperloom_multibranch.scheduling import hosted_run
+from hyperloom.common.agent_isolation import AccountIsolation
+from hyperloom.common.env_safety import RunAs
+from hyperloom_multibranch.scheduling import hosted_run, specialist_reach
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, FinalWork
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.settings import RunSettings
+from hyperloom_multibranch.scheduling.specialist_reach import ProbeResult
 from hyperloom_multibranch.tests.test_cli import (  # noqa: F401 - fixtures of the hosted entry
     ANOTHER_POD,
     EXPLORE_CAPS,
+    FINISHED_AS_RESTART,
     GRANT,
     IMAGE,
     IMAGE_VARS,
@@ -234,6 +238,32 @@ def test_a_restart_that_cannot_read_what_the_resume_checks_finishes_the_session_
     assert warning.getMessage().startswith(f"hosted run: finishing {layout.root} instead of resuming it: ")
     assert str(layout.blackboard) in warning.getMessage()
     assert host.exit_document()["final"] is True
+
+
+@pytest.mark.usefixtures("ready_environment", "rescheduled")
+def test_a_restart_whose_specialists_account_cannot_reach_the_session_finishes_it_rather_than_end_the_run(
+    host: Host,
+    agent_cli: list[RunSettings],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reschedule onto a node whose specialists' account cannot search the way to the session: the resume would fail
+    every specialist at its start, so the session is finished instead (FINAL and CLOSE start no specialist) and its
+    work is reported, rather than the run ending with the session neither resumed nor finished."""
+    layout, _ = _session_of(host, tmp_path)
+    layout.branches.mkdir()  # as every session makes it
+    account = RunAs("hl-specialist", os.getuid(), os.getgid(), (), "/")
+    monkeypatch.setattr(specialist_reach, "resolve_launch_isolation", lambda: AccountIsolation(account))
+    monkeypatch.setattr(specialist_reach, "run_as_account", lambda *_: ProbeResult(3, f"search\t{tmp_path}\n"))
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert agent_cli == [_settings()] and RESUMED_TO == [], "finished, not resumed"
+    assert FINISHED_AS_RESTART == [True]
+    [warning] = _warnings(caplog)
+    assert warning.getMessage().startswith(f"hosted run: finishing {layout.root} instead of resuming it: ")
+    assert f"cannot search {tmp_path}" in warning.getMessage()
 
 
 # -- a reschedule onto another account of the run's group ------------------------------------------------------------
