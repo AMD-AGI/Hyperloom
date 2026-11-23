@@ -85,11 +85,15 @@ _LAUNCH_ARGV_MARKERS: dict[str, str] = {
 
 def split_launch_flags(argv_tail: str) -> str:
     """Remove run-specific and profiling flags from a captured launch argv."""
+    return " ".join(_kept_launch_tokens(_launch_tokens(argv_tail)))
+
+
+def _launch_tokens(tail: str) -> list[str]:
+    """Split a launch tail as the shell would, or on whitespace when its quoting does not close."""
     try:
-        tokens = shlex.split(argv_tail)
+        return shlex.split(tail)
     except ValueError:
-        tokens = argv_tail.split()
-    return " ".join(_kept_launch_tokens(tokens))
+        return tail.split()
 
 
 def _kept_launch_tokens(tokens: list[str]) -> list[str]:
@@ -118,7 +122,8 @@ def _kept_launch_tokens(tokens: list[str]) -> list[str]:
     return kept
 
 
-#: A bare word of letters, perhaps ending a sentence: prose, not a flag value.
+#: A bare word of letters, perhaps ending a sentence. A flag's first operand may be one
+#: (``--dtype auto``); a further operand that is one is prose.
 _PROSE_WORD_RE = re.compile(r"[A-Za-z]+[.,;:!?]?")
 
 
@@ -131,7 +136,7 @@ def _reads_as_argv(tokens: list[str]) -> bool:
     a list flag's further operands (``--cuda-graph-bs 1 2 4``) are data, so a
     plain word there, or a bare token before any flag, is prose.
     """
-    operands = -1
+    operands = -1  # before any flag; then the bare operands of the last flag, ``=value`` counting as one
     for token in tokens:
         if token.startswith("-"):
             operands = 1 if "=" in token else 0
@@ -176,12 +181,9 @@ def launch_argv_from_log(path: str, framework: str) -> str:
                 # produced empty observed flags, every requested flag was read
                 # as absent, and the verdict was insufficient by construction
                 # rather than by evidence.
-                if not _names_a_model(tail):
+                tokens = _launch_tokens(tail)
+                if not _names_a_model(tokens):
                     continue
-                try:
-                    tokens = shlex.split(tail)
-                except ValueError:
-                    tokens = tail.split()
                 kept = _kept_launch_tokens(tokens)
                 if kept and _reads_as_argv(kept):
                     return " ".join(kept)
@@ -227,17 +229,13 @@ def _serve_subcommand_operand(tokens: list[str]) -> str:
     return ""
 
 
-def _names_a_model(tail: str) -> bool:
-    """Whether a candidate launch tail names the model the server will serve.
+def _names_a_model(tokens: list[str]) -> bool:
+    """Whether candidate launch tokens name the model the server will serve.
 
     Exact over tokens rather than a substring test: ``--model`` is a prefix of
     ``--model-len`` and of ``--model-loader-extra-config``, neither of which
     names a model.
     """
-    try:
-        tokens = shlex.split(tail)
-    except ValueError:
-        tokens = tail.split()
     return bool(_operand_for(tokens, _MODEL_OPERAND_FLAGS) or _serve_subcommand_operand(tokens))
 
 
@@ -286,10 +284,7 @@ def observed_model_binding_from_log(path: str, framework: str) -> dict[str, Any]
                 if start < 0 and serve_at < 0:
                     continue
                 tail = line[min(x for x in (start, serve_at) if x >= 0) :].strip()
-                try:
-                    tokens = shlex.split(tail)
-                except ValueError:
-                    tokens = tail.split()
+                tokens = _launch_tokens(tail)
                 binding = _binding_from_tokens(tokens)
                 if binding and _reads_as_argv(_kept_launch_tokens(tokens)):
                     return binding
