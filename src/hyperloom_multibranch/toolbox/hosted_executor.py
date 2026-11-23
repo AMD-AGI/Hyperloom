@@ -375,7 +375,7 @@ class HostedExecutor:
             )
             if failure is None
             else (),
-            cold_start_seconds=boot_seconds(call.output_dir),
+            cold_start_seconds=boot_seconds(call.output_dir) if failure is None else None,
             **_phase_fields(outcome.phases, span, finished, facts.gpu_count),
             **audit,
         )

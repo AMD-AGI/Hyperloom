@@ -148,16 +148,25 @@ SAMPLE_STAMPS = {
 }
 
 
-@pytest.mark.parametrize("mode", [OK, CANDIDATE])
-async def test_a_result_carries_the_boot_its_rounds_stamped_whether_or_not_the_test_succeeded(
-    tmp_path: Path, rig, mode: str
-) -> None:
+async def test_a_succeeded_result_carries_the_boot_its_rounds_stamped(tmp_path: Path, rig) -> None:
     r = rig()
-    tb, scripted = _toolbox(tmp_path, r, mode)
+    tb, scripted = _toolbox(tmp_path, r, OK)
     scripted.stamps = SAMPLE_STAMPS
     _, result = await _run(tb)
     assert result.cold_start_seconds == 80.5
     assert (await tb.toolbox.queue_state()).cold_start_seconds == 80.5
+
+
+@pytest.mark.parametrize("mode", [CANDIDATE, NODE_FAULT])
+async def test_a_failed_attempt_holding_the_stamp_reports_no_cold_start(tmp_path: Path, rig, mode: str) -> None:
+    r = rig()
+    tb, scripted = _toolbox(tmp_path, r, mode)
+    scripted.stamps = SAMPLE_STAMPS
+    tb.toolbox.record_cold_start(75.0)
+    _, result = await _run(tb)
+    assert result.validity is not Validity.SUCCEEDED
+    assert result.cold_start_seconds is None
+    assert (await tb.toolbox.queue_state()).cold_start_seconds == 75.0
 
 
 async def test_a_result_with_no_stamp_has_no_cold_start_and_the_queue_keeps_its_last_one(tmp_path: Path, rig) -> None:

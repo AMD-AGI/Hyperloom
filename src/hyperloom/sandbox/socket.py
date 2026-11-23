@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol
 
 __all__ = [
     "AVOID_NODES_KEY",
@@ -29,7 +29,6 @@ __all__ = [
     "CommandResult",
     "DirEntry",
     "EntryKind",
-    "ListsEntries",
     "Role",
     "Sandbox",
     "SandboxCreateFailed",
@@ -156,7 +155,7 @@ EntryKind = Literal["file", "dir", "link", "other"]
 
 @dataclass(frozen=True)
 class DirEntry:
-    """One entry of a directory as :meth:`ListsEntries.list_entries` reads it: never through a link.
+    """One entry of a directory as :meth:`Sandbox.list_entries` reads it: never through a link.
 
     Attributes:
         name: The entry's name in its directory.
@@ -189,6 +188,9 @@ class Sandbox(Protocol):
     def list_dir(self, path: str) -> list[str]:
         """Return the entry names of the directory ``path``, sorted."""
 
+    def list_entries(self, path: str) -> list[DirEntry]:
+        """The entries of the directory ``path``, sorted by name, each read without following a link."""
+
     def run(
         self,
         cmd: str,
@@ -204,14 +206,6 @@ class Sandbox(Protocol):
 
     def kill(self) -> None:
         """End the sandbox and everything running in it; safe to call again."""
-
-
-@runtime_checkable
-class ListsEntries(Protocol):
-    """A sandbox that can say what each entry of a directory is without following it (the local and E2B ones can)."""
-
-    def list_entries(self, path: str) -> list[DirEntry]:
-        """The entries of the directory ``path``, sorted by name, each read without following a link."""
 
 
 class SandboxProvider(Protocol):
