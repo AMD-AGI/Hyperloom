@@ -53,6 +53,18 @@ ANALYSIS_TIMEOUT_SEC = 7200
         click.option("--driver", default=None, help="Fresh campaign: validation/bench driver"),
         click.option("--workspace", "workspace_dir", required=True, help="Git workspace dir"),
         click.option(
+            "--import-name",
+            default=None,
+            help="The package the workspace is: the workspace holds that package's own "
+            "files at its root, as a checkout of a snapshot of an installed package "
+            "does, and is the directory of that name. The directory holding it then "
+            "goes first on the import path of everything the loop runs, so a driver "
+            "importing the package by name loads the tree being edited, and each "
+            "lane copy is laid out the same way. Whatever is linked beside the "
+            "workspace -- what the package is installed beside and finds by its own "
+            "location -- is linked beside each lane copy too.",
+        ),
+        click.option(
             "--snr-threshold",
             default=DEFAULT_SNR_THRESHOLD_DB,
             type=float,

@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from kernelforge.workflows.rewrite_controller.contracts import (
@@ -59,9 +60,15 @@ def operator_directory_name(value: object) -> str:
 
 @dataclass(frozen=True)
 class ControllerLayout:
-    """Canonical directories below one controller output root."""
+    """Canonical directories below one controller output root.
+
+    ``served_trees`` is the handoff's: the installed package a repository's checkout stands in for, where it names
+    one. Such a checkout stands one level below its task's workspace directory, under the package's name
+    (:meth:`checkout_dir`), so that directory is where the package is imported from.
+    """
 
     output_dir: Path
+    served_trees: Mapping[Path, Path] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "output_dir", Path(self.output_dir).expanduser().resolve())
@@ -125,9 +132,11 @@ class ControllerLayout:
         """
         return self.controller_root / "preparation" / operator_directory_name(operator_id)
 
-    def import_dir(self, operator_id: str) -> Path:
-        """Where one task's checkout stands under the import name of the package it is served as."""
-        return self.controller_root / "imports" / operator_directory_name(operator_id)
+    def checkout_dir(self, operator_id: str, repo_root: Path) -> Path:
+        """Where one task's private checkout of ``repo_root`` stands."""
+        workspace = self.workspace_dir(operator_id)
+        served_tree = self.served_trees.get(repo_root)
+        return workspace / served_tree.name if served_tree is not None else workspace
 
     @staticmethod
     def is_published_task_dir(path: Path) -> bool:

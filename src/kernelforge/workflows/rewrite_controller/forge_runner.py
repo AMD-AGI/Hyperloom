@@ -40,8 +40,6 @@ class ForgeLoopInvocation:
     workspace: Path
     result_json: Path
     deadline_unix: float
-    #: Goes first on the subprocess's ``PYTHONPATH``, so the workspace is the package the campaign imports.
-    import_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -83,13 +81,11 @@ def _local_src_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _child_environment(import_root: Path | None = None) -> dict[str, str]:
-    """The subprocess's environment: ``import_root`` first on ``PYTHONPATH`` when there is one, then this source tree."""
+def _child_environment() -> dict[str, str]:
     env = dict(os.environ)
     src_root = str(_local_src_root())
     current = [entry for entry in env.get("PYTHONPATH", "").split(os.pathsep) if entry]
-    first = [str(import_root)] if import_root is not None else []
-    env["PYTHONPATH"] = os.pathsep.join([*first, src_root, *(entry for entry in current if entry != src_root)])
+    env["PYTHONPATH"] = os.pathsep.join([src_root, *(entry for entry in current if entry != src_root)])
     return env
 
 
@@ -153,12 +149,13 @@ def build_forge_loop_invocation(
         command.extend(["--target-functions", ",".join(task.target_functions)])
     if task.world_size > 1:
         command.extend(["--nproc-per-node", str(task.world_size)])
+    if worktree.import_name:
+        command.extend(["--import-name", worktree.import_name])
     return ForgeLoopInvocation(
         command=tuple(command),
         workspace=worktree.workspace,
         result_json=result_json,
         deadline_unix=float(deadline_unix),
-        import_root=worktree.import_root,
     )
 
 
@@ -222,7 +219,7 @@ def run_forge_loop(
     process = subprocess.Popen(
         list(invocation.command),
         cwd=invocation.workspace,
-        env=_child_environment(invocation.import_root),
+        env=_child_environment(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

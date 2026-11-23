@@ -11,7 +11,7 @@ import logging
 import math
 import time
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -286,6 +286,7 @@ def run_controller(
             error,
         )
 
+    layout = replace(layout, served_trees=handoff.served_trees)
     try:
         # No recovery pass before analysis: the layout was just created, and an already-initialized output directory
         # is refused rather than resumed, so there is never a prior task workspace here to reclaim.
@@ -305,7 +306,6 @@ def run_controller(
         schedule = dispatch_prepared_tasks(
             layout,
             controller_deadline_unix=running.deadline_unix,
-            served_trees=handoff.served_trees,
             on_progress=lambda partial: _publish_running(
                 task_count=partial.task_count,
                 patch_count=len(published_operator_dirs(layout)),

@@ -317,38 +317,6 @@ def test_tasks_from_separate_repositories_each_get_their_own_base(
     assert result.repository_pins == {str(aiter): "a" * 40, str(sglang): "c" * 40}
 
 
-def test_each_task_is_dispatched_with_the_tree_its_repository_is_served_from(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    layout = ControllerLayout(tmp_path / "output")
-    snapshot = tmp_path / "vllm-snapshot"
-    checkout = tmp_path / "aiter"
-    snapshot.mkdir()
-    checkout.mkdir()
-    installed = tmp_path / "site-packages" / "vllm"
-    _publish_task(layout, repo_root=snapshot, kernel_name="paged_attention", priority=0, base_commit="a" * 40)
-    _publish_task(layout, repo_root=checkout, kernel_name="moe_stage1", priority=1, base_commit="c" * 40)
-    served: dict[str, Path | None] = {}
-
-    def _dispatch(task_dir, **kwargs):
-        task = scheduler.load_task(task_dir, record_state=False).task
-        assert task is not None
-        served[task.identity.kernel_name] = kwargs["served_tree"]
-        return _result(task, "succeeded")
-
-    monkeypatch.setattr(scheduler, "dispatch_single_task", _dispatch)
-
-    scheduler.dispatch_prepared_tasks(
-        layout,
-        controller_deadline_unix=20_000,
-        served_trees={snapshot: installed},
-        clock=lambda: 10_000,
-    )
-
-    assert served == {"paged_attention": installed, "moe_stage1": None}
-
-
 def test_a_different_shared_base_is_skipped_without_blocking_siblings(
     tmp_path: Path,
     monkeypatch,

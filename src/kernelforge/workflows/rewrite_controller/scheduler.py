@@ -8,10 +8,9 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import MappingProxyType
 
 from kernelforge.workflows.rewrite_controller.contracts import (
     TASK_STATUS_SKIPPED,
@@ -100,14 +99,10 @@ def dispatch_prepared_tasks(
     layout: ControllerLayout,
     *,
     controller_deadline_unix: float,
-    served_trees: Mapping[Path, Path] = MappingProxyType({}),
     clock: Callable[[], float] = time.time,
     on_progress: Callable[[ScheduleResult], None] | None = None,
 ) -> ScheduleResult:
-    """Validate and run all published tasks sequentially by priority.
-
-    ``served_trees`` is the handoff's: the installed package a repository's checkout stands in for, where it names one.
-    """
+    """Validate and run all published tasks sequentially by priority."""
     task_dirs = discover_task_dirs(layout)
     parsed_by_id, results = _parse_unique_tasks(task_dirs)
 
@@ -181,7 +176,6 @@ def dispatch_prepared_tasks(
                 layout=layout,
                 deadline_unix=task_deadline,
                 expected_base_commit=pinned_base,
-                served_tree=served_trees.get(task.repo_root),
             )
         )
         _report()

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from kernelforge.workflows.forge_loop.memory.lessons import SummaryOutcome
 from kernelforge.utils.git import git, git_async
+from kernelforge.utils.import_root import import_name_of, link_beside, linked_beside
 
 from kernelforge.utils.process_reaping import (
     ReapReport,
@@ -341,11 +342,17 @@ async def run_lanes(
     driver_relative = _lane_driver(source=source, driver=driver)
     await _require_room(source=source, parent=parent, lane_count=len(lanes))
     root = Path(tempfile.mkdtemp(prefix=LANE_ROOT_PREFIX, dir=str(parent)))
+    # A workspace imported by its directory's name is copied under that name, into a directory laid out like the one
+    # that holds it, so that what a lane imports by that name is the lane.
+    import_name = import_name_of(source)
     try:
-        lane_dirs = [root / lane.lane_id for lane in lanes]
+        lane_dirs = [root / lane.lane_id / import_name for lane in lanes]
         for lane_dir in lane_dirs:
             lane_dir.mkdir(parents=True)
         await asyncio.gather(*(_clone_lane(source, lane_dir) for lane_dir in lane_dirs))
+        if import_name:
+            for lane_dir in lane_dirs:
+                link_beside(lane_dir.parent, linked_beside(source.parent))
         # One sentinel for the whole campaign rather than for this round, so a lane queues behind an analysis-phase
         # probe as well as behind its siblings.
         lock = DeviceBenchmarkLock(campaign_device_lock_path(source))

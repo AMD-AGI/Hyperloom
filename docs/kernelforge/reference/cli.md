@@ -62,17 +62,13 @@ must be one of them; a draft naming any other checkout is refused.
 A repository the host snapshot from an installed package holds that package's
 files at its root, so nothing imports it by the package's name. The optional
 `"served_trees": {"<repository>": "<installed package directory>"}` names the
-package each such repository is served from. The controller then puts its
-checkout of the repository first on the import path of the campaign under that
-package's name, and links the package's compiled extension modules into it, so
-a driver that imports the package measures the checkout. A task whose checkout
-the name still does not resolve to fails before its campaign starts.
-
-The checkout is imported from the controller's own directory, not from where the
-package is installed, so a package that finds files beside itself by its own
-location does not find them there and stops importing. Name no served tree for
-such a package: a campaign on its repository then runs as it did without one,
-against the installed copy. Hyperloom names none for `aiter` and `aiter_meta`.
+package each such repository is served from. The controller then creates its
+checkout of the repository as a directory of the package's name, links the
+package's compiled extension modules into it, links the other served trees
+installed in the same directory beside it, and runs forge-loop with
+`--import-name`, so a driver that imports the package measures the checkout
+and a package that finds files beside itself finds them. A repository with no
+served tree is checked out as it always was.
 
 ## forge-loop
 
@@ -96,6 +92,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | Option | Default | Meaning |
 |:--|:--|:--|
 | `--workspace <dir>` | required | Git workspace the campaign runs in. |
+| `--import-name <package>` | none | The package the workspace is: it holds that package's own files at its root, as a checkout of a snapshot of an installed package does, and is the directory of that name. The directory holding it goes first on the import path of everything the loop runs, so a driver importing the package by name loads the tree being edited. Each lane copy is laid out the same way, with whatever is linked beside the workspace linked beside it too. |
 | `--resume` | off | Continue the campaign already stored in that exact workspace. |
 | `--kernel <file>` | none | The kernel file to optimize. This is the anchor the loop edits. |
 | `--driver <file>` | none | The validation/bench driver. |
