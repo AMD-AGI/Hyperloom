@@ -116,6 +116,14 @@ wrong type, the run ends for good (exit code 2), naming the field. A `boot_budge
 session sets, and the server's own start timeout follows it: a round sets that timeout to the budget plus 3600 s when
 that is above its usual 10800 s.
 
+### Launch configuration only
+
+`"options": {"source_changes": false}` in the campaign spec is `run --no-source-changes`: the session hands on a
+recipe that holds only server arguments and environment variables; see
+[Launch configuration only](run-multibranch.md#launch-configuration-only). A restart of the run keeps it, as it keeps
+the session's other settings. A spec that sets it together with `multibranch.autonomous_agents` ends the run for good
+(exit code 2), as `run` refuses the option beside `--autonomous-agent`.
+
 ### Starting the runner from the cache
 
 Start the runner with the step that `hyperloom.measure.runner.bootstrap.runner_template_step(...)` returns. It needs
