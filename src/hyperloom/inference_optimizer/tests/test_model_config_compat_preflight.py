@@ -26,6 +26,11 @@ def _write_config(model_dir: Path, *, with_tokenizer: bool = True, **fields) -> 
         (model_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
 
 
+def _write_corrupt_config(model_dir: Path) -> None:
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "config.json").write_text("{not valid json", encoding="utf-8")
+
+
 def _args(model: str, *, gpu_type: str | None = None) -> argparse.Namespace:
     return argparse.Namespace(model=model, isl=1024, osl=1024, gpu_type=gpu_type)
 
@@ -51,18 +56,19 @@ def _default_non_amd_gpu(monkeypatch):
 
 # _detect_incompatible_model_config
 def test_detect_reports_the_first_matching_detector(tmp_path):
-    """First match wins: on AMD a DeepSeek-V3.2 config reports its missing ROCm path, not the RoPE gap a later detector also sees."""
-    m = tmp_path / "deepseek_v32_rope_no_maxpos"
+    """First match wins: on AMD a bitsandbytes checkpoint reports its quant format, not the missing tokenizer a later detector also sees."""
+    m = tmp_path / "bnb_no_tokenizer"
     _write_config(
         m,
-        model_type="deepseek_v32",
-        architectures=["DeepseekV32ForCausalLM"],
-        rope_scaling={"type": "yarn", "factor": 40.0},
+        with_tokenizer=False,
+        model_type="llama",
+        max_position_embeddings=4096,
+        quantization_config={"quant_method": "bitsandbytes"},
     )
     reason = model_compat._detect_incompatible_model_config(str(m), gpu_type="mi300x")
     assert reason is not None
-    assert "AMD/ROCm" in reason
-    assert "RoPE" not in reason
+    assert "bitsandbytes" in reason
+    assert "tokenizer" not in reason
 
 
 def test_detect_healthy_config_returns_none(tmp_path):
@@ -84,48 +90,6 @@ def test_detect_diffusers_pipeline_blocks_without_config_json(tmp_path):
     assert reason is not None
     assert "Diffusers pipeline" in reason
     assert "causal LM" in reason
-
-
-def test_detect_null_use_cache_blocks_strict_config_validation(tmp_path):
-    m = tmp_path / "null_use_cache"
-    _write_config(
-        m,
-        model_type="qwen2",
-        max_position_embeddings=4096,
-        use_cache=None,
-    )
-
-    reason = model_compat._detect_incompatible_model_config(str(m))
-
-    assert reason is not None
-    assert "use_cache" in reason
-    assert "StrictDataclassFieldValidationError" in reason
-
-
-def test_detect_null_use_cache_in_text_config_blocks(tmp_path):
-    m = tmp_path / "nested_null_use_cache"
-    _write_config(
-        m,
-        model_type="wrapper",
-        max_position_embeddings=4096,
-        text_config={"model_type": "qwen2", "use_cache": None},
-    )
-
-    reason = model_compat._detect_incompatible_model_config(str(m))
-
-    assert reason is not None
-    assert "text_config.use_cache" in reason
-
-
-def test_detect_rope_with_maxpos_ok(tmp_path):
-    m = tmp_path / "rope_ok"
-    _write_config(
-        m,
-        model_type="llama",
-        max_position_embeddings=8192,
-        rope_scaling={"type": "yarn", "factor": 4.0},
-    )
-    assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
 def test_detect_missing_tokenizer_blocks(tmp_path):
@@ -177,39 +141,6 @@ def test_detect_with_tokenizer_ok(tmp_path):
         max_position_embeddings=32768,
     )
     (m / "tokenizer.json").write_text("{}", encoding="utf-8")
-    assert model_compat._detect_incompatible_model_config(str(m)) is None
-
-
-def test_detect_mistral_tokenizer_json_without_common_files_blocks(tmp_path):
-    m = tmp_path / "mistral_json_only"
-    _write_config(
-        m,
-        with_tokenizer=False,
-        model_type="mistral",
-        architectures=["MistralForCausalLM"],
-        max_position_embeddings=32768,
-    )
-    (m / "tokenizer.json").write_text("{}", encoding="utf-8")
-
-    reason = model_compat._detect_incompatible_model_config(str(m))
-
-    assert reason is not None
-    assert "MistralCommonBackend" in reason
-    assert "No tokenizer file found" in reason
-
-
-def test_detect_mistral_tokenizer_model_file_ok(tmp_path):
-    m = tmp_path / "mistral_tokenizer_model"
-    _write_config(
-        m,
-        with_tokenizer=False,
-        model_type="mistral",
-        architectures=["MistralForCausalLM"],
-        max_position_embeddings=32768,
-    )
-    (m / "tokenizer.json").write_text("{}", encoding="utf-8")
-    (m / "tokenizer.model").write_text("dummy", encoding="utf-8")
-
     assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
@@ -448,169 +379,9 @@ def test_detect_amd_unsupported_arch_not_blocked_off_amd(tmp_path):
     assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
-def test_detect_rope_without_maxpos_blocks(tmp_path):
-    m = tmp_path / "rope_no_maxpos"
-    _write_config(
-        m,
-        model_type="deepseek_v32",
-        rope_scaling={"factor": 4.0},
-    )
-    reason = model_compat._detect_incompatible_model_config(str(m))
-    assert reason is not None
-    assert "RoPE" in reason
-
-
-# Phi-3 su/longrope: transformers folds top-level rope_theta into rope_scaling, so Phi3Config sees 4 keys and raises
-# before any override can apply.
-def test_detect_phi3_su_canonical_three_fields_blocks(tmp_path):
-    m = tmp_path / "phi3_su"
-    _write_config(
-        m,
-        model_type="phi3",
-        architectures=["Phi3ForCausalLM"],
-        max_position_embeddings=131072,
-        rope_theta=10000.0,
-        rope_scaling={
-            "type": "su",
-            "short_factor": [1.05, 1.1],
-            "long_factor": [1.03, 1.05],
-        },
-    )
-    reason = model_compat._detect_incompatible_model_config(str(m))
-    assert reason is not None
-    assert "Phi-3" in reason
-    assert "rope_scaling" in reason
-
-
-def test_detect_phi3_longrope_blocks(tmp_path):
-    m = tmp_path / "phi3_longrope"
-    _write_config(
-        m,
-        model_type="phi3",
-        max_position_embeddings=131072,
-        rope_theta=10000.0,
-        rope_scaling={
-            "type": "longrope",
-            "short_factor": [1.05, 1.1],
-            "long_factor": [1.03, 1.05],
-        },
-    )
-    reason = model_compat._detect_incompatible_model_config(str(m))
-    assert reason is not None
-    assert "Phi-3" in reason
-
-
-def test_detect_phi3_yarn_rope_not_blocked(tmp_path):
-    # yarn is the non-longrope path and validates differently; do not block it.
-    m = tmp_path / "phi3_yarn"
-    _write_config(
-        m,
-        model_type="phi3",
-        max_position_embeddings=131072,
-        rope_scaling={"type": "yarn", "factor": 4.0},
-    )
-    assert model_compat._detect_incompatible_model_config(str(m)) is None
-
-
-def test_detect_phi3_longrope_without_rope_theta_not_blocked(tmp_path):
-    # Without a top-level rope_theta, transformers does not fold an extra key into rope_scaling, so the 3-key dict
-    # passes Phi3Config validation fine.
-    m = tmp_path / "phi3_longrope_no_theta"
-    _write_config(
-        m,
-        model_type="phi3",
-        max_position_embeddings=131072,
-        rope_scaling={
-            "type": "longrope",
-            "short_factor": [1.05, 1.1],
-            "long_factor": [1.03, 1.05],
-        },
-    )
-    assert model_compat._detect_incompatible_model_config(str(m)) is None
-
-
-def test_detect_non_phi3_su_rope_not_blocked(tmp_path):
-    # The Phi-3 validator is Phi3Config-specific; a non-phi3 model with a su/longrope-typed rope_scaling must not be
-    # caught by this gate.
-    m = tmp_path / "llama_su"
-    _write_config(
-        m,
-        model_type="llama",
-        max_position_embeddings=8192,
-        rope_scaling={"type": "su", "short_factor": [1.05], "extra": 1},
-    )
-    assert model_compat._detect_incompatible_model_config(str(m)) is None
-
-
-# sglang's gemma2 runtime reads config.hidden_act unconditionally; checkpoints shipping only hidden_activation crash
-# with AttributeError.
-def test_detect_gemma2_missing_hidden_act_blocks(tmp_path):
-    m = tmp_path / "gemma2_bad"
-    _write_config(
-        m,
-        model_type="gemma2",
-        architectures=["Gemma2ForCausalLM"],
-        max_position_embeddings=8192,
-        hidden_activation="gelu_pytorch_tanh",
-    )
-    reason = model_compat._detect_incompatible_model_config(str(m))
-    assert reason is not None
-    assert "Gemma2" in reason
-    assert "hidden_act" in reason
-
-
-def test_detect_gemma2_arch_only_missing_hidden_act_blocks(tmp_path):
-    m = tmp_path / "gemma2_arch_only"
-    _write_config(
-        m,
-        architectures=["Gemma2ForCausalLM"],
-        max_position_embeddings=8192,
-    )
-    reason = model_compat._detect_incompatible_model_config(str(m))
-    assert reason is not None
-    assert "Gemma2" in reason
-
-
-def test_detect_gemma2_with_hidden_act_ok(tmp_path):
-    m = tmp_path / "gemma2_ok"
-    _write_config(
-        m,
-        model_type="gemma2",
-        architectures=["Gemma2ForCausalLM"],
-        max_position_embeddings=8192,
-        hidden_act="gelu_pytorch_tanh",
-    )
-    assert model_compat._detect_incompatible_model_config(str(m)) is None
-
-
-def test_detect_gemma2_hidden_act_in_text_config_ok(tmp_path):
-    m = tmp_path / "gemma2_text_cfg"
-    _write_config(
-        m,
-        model_type="gemma2",
-        architectures=["Gemma2ForCausalLM"],
-        max_position_embeddings=8192,
-        text_config={"hidden_act": "gelu_pytorch_tanh"},
-    )
-    assert model_compat._detect_incompatible_model_config(str(m)) is None
-
-
-def test_detect_non_gemma2_missing_hidden_act_not_blocked(tmp_path):
-    # Only gemma2 reads config.hidden_act unconditionally in sglang; other model types that omit hidden_act must not
-    # be caught by this gate.
-    m = tmp_path / "llama_no_act"
-    _write_config(
-        m,
-        model_type="llama",
-        max_position_embeddings=8192,
-    )
-    assert model_compat._detect_incompatible_model_config(str(m)) is None
-
-
 def test_detect_corrupt_config_blocks(tmp_path):
     m = tmp_path / "corrupt"
-    m.mkdir(parents=True, exist_ok=True)
-    (m / "config.json").write_text("{not valid json", encoding="utf-8")
+    _write_corrupt_config(m)
     reason = model_compat._detect_incompatible_model_config(str(m))
     assert reason is not None
     assert "unparseable" in reason
@@ -620,17 +391,6 @@ def test_detect_absent_config_not_blocked(tmp_path):
     m = tmp_path / "no_config"
     m.mkdir(parents=True, exist_ok=True)
     assert model_compat._detect_incompatible_model_config(str(m)) is None
-
-
-def test_detect_rope_in_nested_text_config(tmp_path):
-    m = tmp_path / "nested"
-    m.mkdir(parents=True, exist_ok=True)
-    (m / "config.json").write_text(
-        json.dumps({"text_config": {"rope_theta": 10000.0}}),
-        encoding="utf-8",
-    )
-    reason = model_compat._detect_incompatible_model_config(str(m))
-    assert reason is not None
 
 
 def test_detect_dual_chunk_blocks_on_amd(tmp_path):
@@ -937,7 +697,7 @@ def test_detect_custom_automap_known_type_not_blocked(tmp_path):
 # _preflight_model_config_compat — persistence + return contract
 def test_preflight_blocks_and_persists(tmp_path, monkeypatch):
     model = tmp_path / "bad"
-    _write_config(model, model_type="x", rope_scaling={"factor": 2.0})
+    _write_corrupt_config(model)
     sd = tmp_path / "session"
     _seed_state(sd, monkeypatch)
 
@@ -989,7 +749,7 @@ def test_preflight_blocks_amd_unsupported_arch_from_args_gpu_type(
 def test_preflight_persists_under_strict_env(tmp_path, monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_STRICT_STOP_REASON", "1")
     model = tmp_path / "bad_strict"
-    _write_config(model, model_type="x", rope_parameters={"factor": 2.0})
+    _write_corrupt_config(model)
     sd = tmp_path / "session_strict"
     _seed_state(sd, monkeypatch)
 
@@ -1178,38 +938,6 @@ def test_gguf_with_pytorch_model_bin_not_blocked(tmp_path):
     assert model_compat._detect_incompatible_model_config(str(m)) is None
 
 
-def test_llama_sentencepiece_without_metadata_blocks(tmp_path):
-    m = tmp_path / "llama_sentencepiece_gap"
-    _write_config(
-        m,
-        with_tokenizer=False,
-        model_type="llama",
-        architectures=["LlamaForCausalLM"],
-        max_position_embeddings=4096,
-    )
-    (m / "tokenizer.model").write_text("dummy", encoding="utf-8")
-    (m / "pytorch_model.bin").write_text("dummy", encoding="utf-8")
-    reason = model_compat._detect_incompatible_model_config(str(m))
-    assert reason is not None
-    assert "tokenizer_config.json" in reason
-    assert "HFValidationError" in reason
-
-
-def test_llama_sentencepiece_with_tokenizer_config_ok(tmp_path):
-    m = tmp_path / "llama_sentencepiece_ok"
-    _write_config(
-        m,
-        with_tokenizer=False,
-        model_type="llama",
-        architectures=["LlamaForCausalLM"],
-        max_position_embeddings=4096,
-    )
-    (m / "tokenizer.model").write_text("dummy", encoding="utf-8")
-    (m / "tokenizer_config.json").write_text("{}", encoding="utf-8")
-    (m / "pytorch_model.bin").write_text("dummy", encoding="utf-8")
-    assert model_compat._detect_incompatible_model_config(str(m)) is None
-
-
 # Langfuse parity on fail-fast — pre-flight gates exit before the normal Langfuse flush point, so each must push the
 # breakdown to Langfuse itself.
 def _spy_langfuse_emit(monkeypatch) -> dict[str, list]:
@@ -1229,7 +957,7 @@ def _spy_langfuse_emit(monkeypatch) -> dict[str, list]:
 
 def test_model_config_fail_fast_emits_to_langfuse(tmp_path, monkeypatch):
     model = tmp_path / "bad_lf"
-    _write_config(model, model_type="x", rope_scaling={"factor": 2.0})
+    _write_corrupt_config(model)
     sd = tmp_path / "session_lf"
     _seed_state(sd, monkeypatch)
     calls = _spy_langfuse_emit(monkeypatch)
@@ -1273,7 +1001,7 @@ def test_context_window_fail_fast_emits_to_langfuse(tmp_path, monkeypatch):
 def test_emit_to_langfuse_is_best_effort(tmp_path, monkeypatch):
     # A Langfuse outage must never turn a clean fail-fast into a crash, nor mask the persisted stop reason.
     model = tmp_path / "bad_raise"
-    _write_config(model, model_type="x", rope_scaling={"factor": 2.0})
+    _write_corrupt_config(model)
     sd = tmp_path / "session_raise"
     _seed_state(sd, monkeypatch)
 

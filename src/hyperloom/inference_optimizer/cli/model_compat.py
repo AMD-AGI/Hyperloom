@@ -15,15 +15,11 @@ from .. import framework_registry
 from .. import gpu_types as _gpu_types
 from ...common.model_paths import resolve_local_model_dir
 from ..model_config_utils import (
-    GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
-    _MAXPOS_CONFIG_KEYS,
     _config_architectures,
     config_scopes,
     load_model_config_dict,
     _model_has_dual_chunk_attention,
 )
-
-_ROPE_CONFIG_KEYS = ("rope_scaling", "rope_parameters", "rope_theta")
 
 
 # minimax_m1: its lightning-attention kernel needs 128KB LDS but MI300X's per-CU shared-memory limit is 64KB → "out of
@@ -65,10 +61,6 @@ _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES = frozenset(
     }
 )
 
-_PHI3_ROPE_TYPES = frozenset({"su", "longrope"})
-
-
-_STRICT_BOOL_CONFIG_KEYS = ("use_cache",)
 
 _AMD_UNSUPPORTED_QUANT_ALGOS = frozenset({"nvfp4", "fp4"})
 
@@ -253,49 +245,6 @@ def _detect_private_quant(model_path: str, data: dict) -> str | None:
     return _detect_gguf_only_checkpoint(model_path)
 
 
-def _detect_phi3_rope_scaling_incompatible(data: dict) -> str | None:
-    """Return a reason when a Phi-3 su/longrope config crashes Phi3Config validation."""
-    model_type = str(data.get("model_type") or "").strip().lower()
-    arches = {a.lower() for a in _config_architectures(data)}
-    if model_type != "phi3" and "phi3forcausallm" not in arches:
-        return None
-    rope = data.get("rope_scaling")
-    if not isinstance(rope, dict):
-        return None
-    rope_type = str(rope.get("type") or "").strip().lower()
-    if rope_type not in _PHI3_ROPE_TYPES:
-        return None
-    # The crash only triggers when a top-level rope_theta exists: transformers folds it into rope_scaling, giving 4
-    # keys instead of the required 3.
-    if data.get("rope_theta") is None:
-        return None
-    return (
-        f"config.json is a Phi-3 model with rope_scaling.type='{rope_type}' "
-        f"and a top-level rope_theta={data['rope_theta']}; "
-        "Phi3Config._rope_scaling_validation requires a 3-key rope_scaling, but "
-        "transformers folds the top-level rope_theta into it at load, so the "
-        "validator sees 4 keys and raises ValueError at "
-        "AutoConfig.from_pretrained — before --json-model-override-args can "
-        "apply, so the engine crashes in init."
-    )
-
-
-def _detect_gemma2_missing_hidden_act(data: dict) -> str | None:
-    """Return a reason when a Gemma2 config omits hidden_act."""
-    model_type = str(data.get("model_type") or "").strip().lower()
-    arches = {a.lower() for a in _config_architectures(data)}
-    if model_type != "gemma2" and not (arches & _GEMMA2_ARCHITECTURES):
-        return None
-    if any(s.get("hidden_act") for s in config_scopes(data)):
-        return None
-    return (
-        "config.json is a Gemma2 model but lacks hidden_act (only "
-        "hidden_activation may be present); sglang's gemma2 runtime reads "
-        "config.hidden_act unconditionally and crashes with AttributeError "
-        "in engine init."
-    )
-
-
 def _detect_diffusers_pipeline_model(model_path: str) -> str | None:
     """Return a reason when the directory is a Diffusers pipeline, not an LLM."""
     idx = (resolve_local_model_dir(model_path) or Path(model_path)) / "model_index.json"
@@ -318,19 +267,6 @@ def _detect_diffusers_pipeline_model(model_path: str) -> str | None:
             "not a decoder-only causal LM; Hyperloom text-generation benchmarks "
             "cannot serve this model."
         )
-    return None
-
-
-def _detect_null_strict_bool_config(data: dict) -> str | None:
-    """Return a reason for config fields that strict HF validators require bool."""
-    for scope_name, scope in zip(("config", "text_config"), config_scopes(data)):
-        for key in _STRICT_BOOL_CONFIG_KEYS:
-            if key in scope and scope.get(key) is None:
-                return (
-                    f"{scope_name}.{key} is null, but HuggingFace/vLLM strict "
-                    "config validation expects a bool and raises "
-                    "StrictDataclassFieldValidationError before server init."
-                )
     return None
 
 
@@ -496,59 +432,6 @@ def _detect_missing_tokenizer_files(model_path: str, data: dict) -> str | None:
     )
 
 
-def _detect_mistral_common_tokenizer_gap(model_path: str, data: dict) -> str | None:
-    """Return a reason for Mistral checkpoints missing Mistral tokenizer files."""
-    model_type = str(data.get("model_type") or "").strip().lower()
-    arches = {str(a or "").strip() for a in _config_architectures(data)}
-    if model_type != "mistral" and "MistralForCausalLM" not in arches:
-        return None
-
-    auto_map = data.get("auto_map")
-    if isinstance(auto_map, dict) and auto_map.get("AutoTokenizer"):
-        return None
-
-    mdir = Path(model_path)
-    if not (mdir / "tokenizer.json").is_file():
-        return None
-    mistral_files = (
-        "tokenizer.model",
-        "tokenizer.model.v3",
-        "tekken.json",
-        "tokenizer_config.json",
-    )
-    if any((mdir / f).is_file() for f in mistral_files):
-        return None
-    return (
-        "Mistral checkpoint ships tokenizer.json but none of the tokenizer "
-        "metadata/files accepted by Transformers MistralCommonBackend "
-        f"({', '.join(mistral_files)}); sglang server init fails with "
-        '"No tokenizer file found".'
-    )
-
-
-def _detect_llama_sentencepiece_metadata_gap(model_path: str, data: dict) -> str | None:
-    """Return a reason for Llama checkpoints with bare SentencePiece tokenizer."""
-    model_type = str(data.get("model_type") or "").strip().lower()
-    arches = {str(a or "").strip() for a in _config_architectures(data)}
-    if model_type != "llama" and "LlamaForCausalLM" not in arches:
-        return None
-
-    auto_map = data.get("auto_map")
-    if isinstance(auto_map, dict) and auto_map.get("AutoTokenizer"):
-        return None
-
-    mdir = Path(model_path)
-    if not (mdir / "tokenizer.model").is_file():
-        return None
-    if (mdir / "tokenizer_config.json").is_file() or (mdir / "tokenizer.json").is_file():
-        return None
-    return (
-        "Llama checkpoint ships tokenizer.model but lacks tokenizer_config.json "
-        "or tokenizer.json; sglang falls back through a local-path tokenizer "
-        "resolution path that raises HFValidationError before server init."
-    )
-
-
 def _detect_amd_unsupported_architecture(data: dict) -> str | None:
     """Return a reason when the architecture has no AMD/ROCm runtime path."""
     model_type = str(data.get("model_type") or "").strip().lower()
@@ -560,26 +443,6 @@ def _detect_amd_unsupported_architecture(data: dict) -> str | None:
             f"(needs a vendor engine on NVIDIA Hopper/Blackwell, e.g. "
             f"DeepSeek Sparse Attention); it crashes in engine init on "
             f"this hardware."
-        )
-    return None
-
-
-def _detect_rope_without_max_position(data: dict) -> str | None:
-    """Return a reason when a RoPE block ships with no max-position field."""
-    scopes = config_scopes(data)
-    has_rope = any(s.get(k) for s in scopes for k in _ROPE_CONFIG_KEYS)
-    has_maxpos = any(
-        isinstance(s.get(k), int) and not isinstance(s.get(k), bool) and s.get(k) > 0
-        for s in scopes
-        for k in _MAXPOS_CONFIG_KEYS
-    )
-    if has_rope and not has_maxpos:
-        return (
-            "config.json declares a RoPE block "
-            f"({', '.join(_ROPE_CONFIG_KEYS)}) but no max-position field "
-            f"({', '.join(_MAXPOS_CONFIG_KEYS)}); transformers/vLLM rope "
-            "init dereferences a missing max_position_embeddings and crashes "
-            "in engine init (DeepSeek-V3.2-Exp class)."
         )
     return None
 
@@ -615,7 +478,7 @@ class DetectorSpec:
     """One entry in the model-config compatibility waterfall."""
 
     name: str
-    fn: Callable[..., str | None] | tuple[Callable[..., str | None], ...]
+    fn: Callable[..., str | None]
     args: tuple[str, ...] = ()
     skip_when_scriptable: bool = False
     amd_only: bool = False
@@ -627,90 +490,60 @@ def _run_compat_detector(
     model_path: str,
     data: dict,
 ) -> str | None:
-    """Invoke a spec's detector sub-chain, returning the first non-None reason."""
+    """Invoke a spec's detector with the arguments it names."""
     # Resolve a HF repo-id to its local cache dir ONCE so every disk-reading detector (hf_quant_config.json,
     # safetensors shards, tokenizer files, PEFT adapters, ...) sees a real directory.
     resolved_mp = str(resolve_local_model_dir(model_path) or model_path)
     available = {"model_path": resolved_mp, "data": data}
-    call_args = tuple(available[name] for name in spec.args)
-    fns = spec.fn if isinstance(spec.fn, tuple) else (spec.fn,)
-    for fn in fns:
-        reason = fn(*call_args)
-        if reason is not None:
-            return reason
-    return None
+    return spec.fn(*(available[name] for name in spec.args))
 
 
 # The model-config compatibility waterfall as an ordered table.
 _COMPAT_DETECTORS: tuple[DetectorSpec, ...] = (
-    DetectorSpec(  # 3
+    DetectorSpec(
         "amd_unsupported_quant",
         _detect_amd_unsupported_quant,
         args=("model_path",),
         amd_only=True,
     ),
-    DetectorSpec(  # 4
+    DetectorSpec(
         "amd_unsupported_architecture",
         _detect_amd_unsupported_architecture,
         args=("data",),
         amd_only=True,
     ),
-    DetectorSpec(  # 5
-        "null_strict_bool",
-        _detect_null_strict_bool_config,
-        args=("data",),
-    ),
-    DetectorSpec(  # 6
-        "rope_without_max_position",
-        _detect_rope_without_max_position,
-        args=("data",),
-    ),
-    DetectorSpec(  # 7
-        "phi3_rope_scaling",
-        _detect_phi3_rope_scaling_incompatible,
-        args=("data",),
-    ),
-    DetectorSpec(  # 8
-        "gemma2_hidden_act",
-        _detect_gemma2_missing_hidden_act,
-        args=("data",),
-    ),
-    DetectorSpec(  # 9
+    DetectorSpec(
         "unrecognized_architecture",
         _detect_unrecognized_architecture,
         args=("data",),
     ),
-    DetectorSpec(  # 10
+    DetectorSpec(
         "private_quant",
         _detect_private_quant,
         args=("model_path", "data"),
     ),
-    DetectorSpec(  # 11
+    DetectorSpec(
         "peft_adapter_only",
         _detect_peft_adapter_only_checkpoint,
         args=("model_path", "data"),
     ),
-    DetectorSpec(  # 12
+    DetectorSpec(
         "vocab_weight_shape",
         _detect_vocab_weight_shape_mismatch,
         args=("model_path", "data"),
     ),
-    DetectorSpec(  # 13 — tokenizer-artifact sub-chain (text-server only)
+    DetectorSpec(  # text-server only
         "tokenizer_artifacts",
-        (
-            _detect_missing_tokenizer_files,
-            _detect_mistral_common_tokenizer_gap,
-            _detect_llama_sentencepiece_metadata_gap,
-        ),
+        _detect_missing_tokenizer_files,
         args=("model_path", "data"),
         skip_when_scriptable=True,
     ),
-    DetectorSpec(  # 14
+    DetectorSpec(
         "unregistered_custom_autoconfig",
         _detect_unregistered_custom_autoconfig,
         args=("data",),
     ),
-    DetectorSpec(  # 15
+    DetectorSpec(
         "amd_dual_chunk_attention",
         _detect_amd_dual_chunk_attention,
         args=("model_path",),
@@ -728,12 +561,12 @@ def _detect_incompatible_model_config(
     if not model_path:
         return None
     is_scriptable_fw = framework_registry.is_scriptable(framework)
-    # Step 1: diffusers pipeline gate (before the config-absent short-circuit).
+    # Diffusers pipeline gate (before the config-absent short-circuit).
     if not is_scriptable_fw:
         pipeline_reason = _detect_diffusers_pipeline_model(model_path)
         if pipeline_reason is not None:
             return pipeline_reason
-    # Step 2: config.json absent (soft-degrade) / present-but-corrupt (block).
+    # config.json absent (soft-degrade) / present-but-corrupt (block).
     cfg_path = (resolve_local_model_dir(model_path) or Path(model_path)) / "config.json"
     if not cfg_path.is_file():
         return None
@@ -744,7 +577,7 @@ def _detect_incompatible_model_config(
             f"(corrupt JSON or not a JSON object); the framework would crash "
             f"at config load."
         )
-    # Steps 3-15: run the ordered registry, first non-None reason wins.
+    # The first detector in table order that returns a reason wins.
     is_amd = bool(_gpu_types._resolve_amd_gpu_type(gpu_type))
     for spec in _COMPAT_DETECTORS:
         if spec.amd_only and not is_amd:
