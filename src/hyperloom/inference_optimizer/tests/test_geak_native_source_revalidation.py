@@ -508,14 +508,9 @@ async def test_cancelled_covered_run_reuses_its_task_identity(coordinator, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_missing_declared_patch_fails_without_proxy_harness(coordinator, tmp_path, monkeypatch):
+async def test_missing_declared_patch_settles_unmeasured(coordinator, tmp_path):
     patch = _candidate(coordinator, tmp_path)
     patch.unlink()
-
-    async def forbidden(**kwargs):
-        raise AssertionError("native source failure must not use GEAK proxy harness")
-
-    monkeypatch.setattr(coordinator.phase_kernel, "_revalidate_on_geak_harness", forbidden)
     await coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None)
     assert coordinator.shared_state.geak_pending == {}
     assert coordinator.shared_state.geak_result["revalidation_status"] == "fallback_failed"

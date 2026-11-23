@@ -70,44 +70,6 @@ def _record_revalidations(coordinator) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_agentx_direct_dispatch_fallback_refuses_geak_replay(coordinator, tmp_path, monkeypatch) -> None:
-    c = coordinator
-    st = c.shared_state
-    _arm_kernel_to_sweep(st)
-    st.benchmark_mode = "agentx"
-    st.agentx_backend = "mlperf"
-    measured_in_suite_round(st, tmp_path / "measured")
-    st.baseline_tput = 100.0
-    st.current_best = {"action": "explore", "tput": 120.0}
-    st.cumulative_gain_validated = 20.0
-    st.geak_result = {
-        "status": "ok",
-        "throughput_speedup": 2.0,
-        "accepted_config": {},
-        "final_overlay": str(tmp_path / "missing-overlay"),
-    }
-    geak_dir = c.session_dir / "geak"
-    geak_dir.mkdir()
-    (geak_dir / "result.json").write_text(json.dumps(st.geak_result), encoding="utf-8")
-    before_best = dict(st.current_best)
-
-    async def _must_not_launch(**_kwargs):
-        raise AssertionError("Direct dispatch fallback must refuse canonical AgentX replay")
-
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _must_not_launch)
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
-    summary = c.writeback.geak_rebench_params(reason="unit")
-    assert summary["fallback"] == "geak_harness"
-    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-
-    assert st.current_best == before_best
-    assert st.cumulative_gain_validated == 20.0
-    assert "revalidation_task_id" not in st.geak_pending
-    assert st.geak_pending["revalidation_error"] == "geak_harness_unsupported_canonical_workload"
-    assert not any(entry.get("action") == "geak_e2e" for entry in st.optimization_stack)
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("bench_client", ["auto", "native", "inferencex"])
 @pytest.mark.asyncio
 async def test_agentx_2b_dispatch_uses_canonical_recipe_not_geak_client(coordinator, bench_client) -> None:
@@ -473,15 +435,53 @@ async def test_malformed_structured_environment_does_not_dispatch(coordinator, e
     "material",
     [{"final_patch": "/geak/final.patch"}, {"accepted_kernels": ["gemm"]}, {"accepted_heads": ["attention"]}],
 )
-async def test_artifact_only_result_requires_its_own_harness(coordinator, material) -> None:
-    coordinator.shared_state.geak_result = {"status": "ok", **material}
-    enqueued = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
-    assert enqueued == {"skipped": True, "reason": "geak_material_requires_harness", "fallback": "geak_harness"}
+async def test_artifact_without_an_overlay_settles_unpromoted(coordinator, monkeypatch, material) -> None:
+    """A product the rebench cannot launch is never credited: nothing differs from ``current_best`` to measure."""
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "explore", "tput": 110.0}
+    st.geak_result = {"status": "ok", **material}
+    st.geak_pending = {"status": "awaiting_rebench"}
+    before_best = dict(st.current_best)
+    _forbid_rebench(coordinator, monkeypatch)
+
+    assert coordinator.writeback.geak_rebench_params(reason="geak_e2e_win") == {
+        "skipped": True,
+        "reason": "geak_no_material",
+    }
+    await coordinator.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=None)
+
+    assert st.current_best == before_best
+    assert not any(entry.get("action") == "geak_e2e" for entry in st.optimization_stack)
+    assert st.geak_result["revalidation_status"] == "no_material"
+    assert st.geak_pending == {}
     assert not await coordinator.tasks.queued()
 
 
 @pytest.mark.asyncio
-async def test_recovered_empty_map_closes_without_fallback(coordinator, tmp_path, monkeypatch) -> None:
+async def test_an_unloadable_overlay_settles_unmeasured_and_names_the_overlay(
+    coordinator, tmp_path, monkeypatch
+) -> None:
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "explore", "tput": 120.0}
+    overlay = tmp_path / "overlay"
+    st.geak_result = {"status": "ok", "accepted_config": {}, "final_overlay": str(overlay)}
+    st.geak_pending = {"status": "awaiting_rebench"}
+    before_best = dict(st.current_best)
+    _forbid_rebench(coordinator, monkeypatch)
+
+    await coordinator.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=None)
+
+    assert st.current_best == before_best
+    assert not any(entry.get("action") == "geak_e2e" for entry in st.optimization_stack)
+    assert st.geak_result["revalidation_status"] == "no_material"
+    assert st.geak_result["revalidation_blocked_overlay"] == str(overlay)
+    assert st.geak_pending == {}
+
+
+@pytest.mark.asyncio
+async def test_recovered_empty_map_closes_unmeasured(coordinator, tmp_path) -> None:
     c = coordinator
     _arm_kernel_to_sweep(c.shared_state)
     geak_dir = tmp_path / "geak"
@@ -489,11 +489,6 @@ async def test_recovered_empty_map_closes_without_fallback(coordinator, tmp_path
     result = {"status": "ok", "final_throughput_tok_s": 116.0, "accepted_config": {"env_map": {}}}
     (geak_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
     c.shared_state.geak_result = {}
-
-    async def _must_not_fallback(**_kwargs):
-        pytest.fail("empty optimization must not launch a fallback")
-
-    monkeypatch.setattr(c.writeback, "validate_geak_via_geak_harness", _must_not_fallback)
     await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert c.shared_state.geak_result["revalidation_status"] == "no_material"
@@ -634,11 +629,7 @@ def _forbid_rebench(coordinator, monkeypatch) -> None:
     async def _must_not_measure(_task):
         pytest.fail("a GEAK config that restates current_best must not be benchmarked")
 
-    async def _must_not_replay(**_kwargs):
-        pytest.fail("a GEAK config that restates current_best must not be replayed")
-
     monkeypatch.setattr(coordinator.sub, "execute_covered", _must_not_measure)
-    monkeypatch.setattr(coordinator.writeback, "validate_geak_via_geak_harness", _must_not_replay)
 
 
 @pytest.mark.asyncio
@@ -962,7 +953,7 @@ async def test_crash_recovery_tombstones_no_promote_result(coordinator, tmp_path
 
 
 def _arm_settled_candidate(coordinator, tmp_path) -> dict:
-    """A session whose only GEAK product was already settled as incomparable."""
+    """A session whose only GEAK product the rebench already refused."""
     st = coordinator.shared_state
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
@@ -979,9 +970,8 @@ def _arm_settled_candidate(coordinator, tmp_path) -> dict:
     st.geak_result = {
         **settled,
         "returncode": 0,
-        "revalidation_status": "fallback_failed",
-        "revalidation_error_class": "incomparable",
-        "revalidation_error": "geak_harness_unsupported_canonical_workload",
+        "revalidation_status": "no_promote",
+        "revalidation_error": "graded_comparison_rejected",
     }
     st.geak_pending = {}
     coordinator.phase_kernel._record_geak_kernel_journey = lambda _result: None
@@ -991,7 +981,7 @@ def _arm_settled_candidate(coordinator, tmp_path) -> dict:
 def _assert_settled_candidate_survived(coordinator, tmp_path, revalidations: list[str]) -> None:
     st = coordinator.shared_state
     assert revalidations == []
-    assert st.geak_result["revalidation_error_class"] == "incomparable"
+    assert st.geak_result["revalidation_status"] == "no_promote"
     assert st.geak_pending.get("status") != "awaiting_rebench"
     # The runner's file is left for the next run to overwrite.
     assert (tmp_path / "geak" / "result.json").is_file()
@@ -1574,11 +1564,11 @@ async def test_a_spent_kernel_budget_waits_for_the_rebench_and_keeps_the_win(coo
 
 @pytest.mark.asyncio
 async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, tmp_path, monkeypatch) -> None:
-    """A refusal the replay cannot change is a verdict, not a missed handback.
+    """A refusal a rerun cannot change is a verdict, not a missed handback.
 
-    Under AgentX the GEAK harness declines the canonical workload outright, so
+    The rebench measured the candidate's own config below ``current_best``, so
     re-recovering the same ``result.json`` would re-run a revalidation whose
-    outcome is already known. The refusal is produced by the 2b -> 2a path
+    outcome is already known. The refusal is produced by the rebench ruling
     rather than hand-written.
     """
     c = coordinator
@@ -1596,8 +1586,6 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
     # The phase stamps the runner's exit code onto state; the file does not carry it.
     st.geak_result = {**result, "returncode": 0}
 
-    # A config-identity miss makes 2b inconclusive, which hands the candidate to
-    # the GEAK harness (2a), and that refuses the canonical AgentX workload.
     rebench, _ = await c.tasks.create_or_return_existing(
         TaskSpec(
             kind="explore",
@@ -1608,11 +1596,10 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
     )
     await c.writeback.promote_to_shared_state(
         rebench.kind,
-        {"output_throughput": 150.0, "best_variant": {"fingerprint": "mismatched-hash"}, "winners": []},
+        {"output_throughput": 110.0, "best_variant": {"fingerprint": "expected-hash"}, "winners": []},
         task=rebench,
     )
-    assert st.geak_result["revalidation_status"] == "fallback_failed"
-    assert st.geak_result["revalidation_error_class"] == "incomparable"
+    assert st.geak_result["revalidation_status"] == "no_promote"
 
     geak_dir = tmp_path / "geak"
     geak_dir.mkdir(exist_ok=True)
@@ -1626,7 +1613,7 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
     await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert revalidations == []
-    assert st.geak_result["revalidation_error_class"] == "incomparable"
+    assert st.geak_result["revalidation_status"] == "no_promote"
 
 
 @pytest.mark.asyncio

@@ -5,17 +5,12 @@
 
 from __future__ import annotations
 
-import functools
 import json
-import subprocess as sp
 import time
 
 import pytest
 
 from hyperloom_common import gpu_telemetry
-from hyperloom_common.gpu_telemetry import RecorderSources
-from hyperloom_common.power_sources import SysfsNode
-from hyperloom_common.tests.test_gpu_telemetry import _AmdSmi, _sysfs
 from inference_suite.contracts.layout import POWER
 from inference_suite.server_log import LogCursor
 from hyperloom.orchestrator.actions.executors.gpu._gpu_power import (
@@ -168,88 +163,6 @@ def _ready_line() -> str:
     return READY_MARKERS[0] + "\n"
 
 
-def test_replay_logs_drive_boot_and_measured_per_replica(tmp_path):
-    """Each replica boots its own server: a new log is a boot, its ready marker opens the measured phase."""
-    from hyperloom.orchestrator.actions.executors._geak_sweep import _replay_server_logs
-    from hyperloom.orchestrator.actions.executors.gpu._gpu_power import ServerLogPhaseDriver
-
-    phases = _PhaseLog()
-    driver = ServerLogPhaseDriver(phases, lambda: _replay_server_logs(tmp_path), cursor=LogCursor())
-    first = tmp_path / "replica_0" / "attempt_0" / "server.log"
-    first.parent.mkdir(parents=True)
-    first.write_text("loading weights\n")
-    driver.poll()
-    assert phases.phases == ["boot"]
-    with first.open("a") as fh:
-        fh.write(_ready_line())
-    driver.poll()
-    assert phases.phases[-1] == "measured"
-    second = tmp_path / "replica_1" / "attempt_0" / "server.log"
-    second.parent.mkdir(parents=True)
-    second.write_text("loading weights\n")
-    driver.poll()
-    assert phases.phases[-1] == "boot"
-    with second.open("a") as fh:
-        fh.write(_ready_line())
-    driver.stop()
-    assert phases.phases[-1] == "measured"
-
-
-@pytest.mark.parametrize(
-    ("env", "serving", "configured"),
-    [({}, (0, 1, 2, 3), None), ({"HIP_VISIBLE_DEVICES": "0,1,2,3"}, tuple(range(8)), [0, 1, 2, 3])],
-    ids=["unpinned", "masked-beside-another-server"],
-)
-def test_a_geak_replay_is_recorded_over_its_measured_phase(tmp_path, monkeypatch, env, serving, configured):
-    """TP4 on cards 0-3 of an eight-card host: power.json lands in the replay's output directory, and only the four
-    cards holding the model, or the four its mask names while another server holds cards 4-7, are its energy."""
-    from hyperloom.orchestrator.actions.executors import _geak_sweep
-    from hyperloom.orchestrator.actions.executors.gpu import _gpu_power
-
-    monkeypatch.setenv("HYPERLOOM_GPU_POWER_SAMPLING", "1")
-    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/amd-smi")
-    monkeypatch.setattr("hyperloom.common.gpu_power_settings.gpus_in_rocm_order", lambda: list(range(8)))
-    monkeypatch.setattr(gpu_telemetry, "MIN_INTERVAL_SEC", 0.01)
-    sources = RecorderSources(_AmdSmi(cards=8), SysfsNode(_sysfs(tmp_path / "sys", cards=8, serving=serving)))
-    monkeypatch.setattr(_gpu_power, "PowerRecorder", functools.partial(gpu_telemetry.PowerRecorder, sources=sources))
-    monkeypatch.setattr(_gpu_power, "_INTERVAL_ENV", "TEST_POWER_INTERVAL")
-    monkeypatch.setenv("TEST_POWER_INTERVAL", "0.05")
-    out_dir = tmp_path / "replay"
-    out_dir.mkdir()
-
-    def _replay() -> sp.CompletedProcess:
-        log_path = out_dir / "server.log"
-        log_path.write_text("loading weights\n")
-        time.sleep(0.3)
-        with log_path.open("a") as fh:
-            fh.write(_ready_line())
-        # The driver polls the logs each second.
-        time.sleep(1.6)
-        return sp.CompletedProcess(["bash"], 0, "", "")
-
-    entry: dict = {}
-    proc = _geak_sweep._run_with_power_sampling(_replay, out_dir, env, entry)
-    assert proc.returncode == 0
-    document = json.loads((out_dir / POWER).read_text())
-    assert document["scope"]["energy_gpus"] == [0, 1, 2, 3] and document["scope"]["gpus_configured"] == configured
-    assert document["energy"]["window"]["source"] == "server_log_poll"
-    assert document["energy"]["power_valid"] == 1, document["energy"]["reasons"]
-    assert entry["gpu_power_avg_w"] == pytest.approx((256 + 249 + 255 + 254) / 4, rel=1e-3)
-    assert set(entry["gpu_power_by_gpu_w"]) == {"0", "1", "2", "3"}
-
-
-def test_a_geak_replay_that_raises_records_no_power(tmp_path):
-    from hyperloom.orchestrator.actions.executors import _geak_sweep
-
-    def _replay():
-        raise TimeoutError("replay timed out")
-
-    entry: dict = {}
-    with pytest.raises(TimeoutError):
-        _geak_sweep._run_with_power_sampling(_replay, tmp_path, {}, entry)
-    assert entry == {"gpu_power_avg_w": None, "gpu_power_by_gpu_w": None}
-
-
 def _unlistable_logs() -> list[str]:
     raise PermissionError("replay output is not readable")
 
@@ -275,35 +188,6 @@ def test_a_phase_driver_bug_is_not_swallowed():
     driver = ServerLogPhaseDriver(_PhaseLog(), lambda: ["server.log"], cursor=_BrokenCursor())
     with pytest.raises(KeyError):
         driver.stop()
-
-
-def test_the_replay_recorder_is_finished_even_when_the_driver_fails(tmp_path, monkeypatch):
-    from hyperloom.orchestrator.actions.executors import _geak_sweep
-
-    finished: list[object] = []
-
-    class _Recorder:
-        def start(self):
-            pass
-
-        def finish(self, counts):
-            finished.append(counts)
-
-    class _FailingDriver:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def start(self):
-            pass
-
-        def stop(self):
-            raise KeyError("driver bug")
-
-    monkeypatch.setattr(_geak_sweep, "build_gpu_power_recorder", lambda path, env: _Recorder())
-    monkeypatch.setattr(_geak_sweep, "ServerLogPhaseDriver", _FailingDriver)
-    with pytest.raises(KeyError):
-        _geak_sweep._run_sampled(lambda: None, tmp_path, {})
-    assert finished == [None]
 
 
 def test_the_gpu_monitor_block_is_read_whole_by_the_gpu_metrics_reader(tmp_path):

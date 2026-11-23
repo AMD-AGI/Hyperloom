@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""GEAK acceptance follows native retention and the fresh replay's graded axes."""
+"""GEAK acceptance follows native retention and the rebench's graded axes."""
 
 from __future__ import annotations
 
@@ -133,9 +133,7 @@ def rebench_task(result):
         ("2b", 50.0, None, False),
     ],
 )
-async def test_geak_acceptance_requires_native_retention(
-    promotion, monkeypatch, lane, claimed_intvty, fresh_intvty, accepted
-):
+async def test_geak_acceptance_requires_native_retention(promotion, lane, claimed_intvty, fresh_intvty, accepted):
     coord, result, recorder = promotion
     recorder.begin(tput_before=110.0)
     state = coord.shared_state
@@ -166,27 +164,15 @@ async def test_geak_acceptance_requires_native_retention(
             e2e_norm_intvty_p90=fresh_intvty,
             e2e_norm_intvty_p50=fresh_intvty,
         )
-    sweep_calls = []
-
-    async def replay(**kwargs):
-        sweep_calls.append(kwargs)
-        return {"status": "succeeded", "promotion_measurement": measurement}
-
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", replay)
     if lane == "direct":
         returned = coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=True)
         assert returned is accepted
-    elif lane == "2a":
-        returned = await coord.writeback.validate_geak_via_geak_harness(reason="retention regression")
-        assert returned["validated"] is accepted
-        assert len(sweep_calls) == 1
     else:
         await coord.writeback.promote_to_shared_state(
             "explore",
             {"output_throughput": 120.0, "best_variant": measurement, "winners": []},
             task=rebench_task(result),
         )
-        assert not sweep_calls, "A conclusive retention veto must not trigger another harness"
     assert not state.geak_pending
     assert resume_pending(state) is (not accepted)
     if accepted:
@@ -221,8 +207,7 @@ async def test_geak_acceptance_requires_native_retention(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("via_orchestrator", [False, True])
-async def test_fallback_rejection_is_conclusive_and_not_validated(promotion, monkeypatch, via_orchestrator):
+async def test_a_rebench_below_current_best_is_conclusive_and_not_validated(promotion):
     coord, result, recorder = promotion
     recorder.begin(tput_before=110.0)
     state = coord.shared_state
@@ -232,23 +217,12 @@ async def test_fallback_rejection_is_conclusive_and_not_validated(promotion, mon
     before = deepcopy(state.current_best)
     before_gain = state.cumulative_gain_validated
 
-    async def replay(**kwargs):
-        return {"status": "succeeded", "promotion_measurement": {"output_throughput": 105.0, "accuracy": 0.9}}
+    await coord.writeback.promote_to_shared_state(
+        "explore",
+        {"output_throughput": 105.0, "best_variant": {"fingerprint": "candidate"}, "winners": []},
+        task=rebench_task(result),
+    )
 
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", replay)
-    if via_orchestrator:
-        await coord.writeback.promote_to_shared_state(
-            "explore",
-            {"output_throughput": 120.0, "best_variant": {"fingerprint": "different"}, "winners": []},
-            task=rebench_task(result),
-        )
-    else:
-        returned = await coord.writeback.validate_geak_via_geak_harness(reason="retention regression")
-        assert returned == {
-            "validated": False,
-            "status": "no_promote",
-            "reason": "graded_comparison_rejected",
-        }
     assert state.current_best == before
     assert state.cumulative_gain_validated == before_gain
     assert not state.kernel_integrate_attempts
@@ -302,12 +276,9 @@ def test_geak_promotion_retains_fresh_launch_controls(promotion, effective_flags
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("through_recheck", [False, True])
 @pytest.mark.parametrize("closed", [False, True])
 @pytest.mark.parametrize("journey_missing", [False, True])
-async def test_terminal_rejection_cannot_attribute_geak_claims(
-    promotion, monkeypatch, through_recheck, closed, journey_missing
-):
+async def test_terminal_rejection_cannot_attribute_geak_claims(promotion, closed, journey_missing):
     from hyperloom.inference_optimizer.tests.test_geak_gain_alignment import _journey_with_validated_keeps
     from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
         EVENT_SECTIONS,
@@ -336,18 +307,16 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(
     if closed:
         recorder.finish(KernelExit(tput_after=110.0))
 
-    async def fresh_replay(**_kwargs):
-        return {"status": "succeeded", "promotion_measurement": {"output_throughput": 150.0, "accuracy": 0.1}}
-
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", fresh_replay)
-    if through_recheck:
-        await coord.writeback.promote_to_shared_state(
-            "explore",
-            {"status": "succeeded", "output_throughput": None, "winners": []},
-            task=rebench_task(result),
-        )
-    else:
-        await coord.writeback.validate_geak_via_geak_harness(reason="native_recheck_unavailable")
+    await coord.writeback.promote_to_shared_state(
+        "explore",
+        {
+            "status": "succeeded",
+            "output_throughput": None,
+            "winners": [],
+            "per_variant_outcomes": [{"outcome": "REVERT", "reason": "accuracy_drop", "fingerprint": "candidate"}],
+        },
+        task=rebench_task(result),
+    )
     assert state.current_best["tput"] == 110.0
     assert state.geak_pending == {}
     assert state.geak_result["revalidation_status"] == "no_promote"

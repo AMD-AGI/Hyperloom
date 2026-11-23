@@ -1,20 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Ruling on a GEAK end-to-end win: the 2b rebench, and the 2a harness replay behind it."""
+"""Ruling on a GEAK end-to-end win from its rebench on the orchestrator harness."""
 
 from __future__ import annotations
 
 import logging as _logging
 from typing import Any, Mapping, NamedTuple
 
-from hyperloom_common.env import env_int
-from hyperloom.common.gain_math import accuracy_passed
 from hyperloom.common.overlay import overlay_is_loadable
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_FAILED,
-    REBENCH_FALLBACK,
-    REBENCH_FALLBACK_FAILED,
     REBENCH_NO_MATERIAL,
     REBENCH_NO_PROMOTE,
     REBENCH_VALIDATED,
@@ -33,7 +29,6 @@ from ..kernel.geak_config import (
     _geak_overlay_digest,
     _geak_result_has_artifact,
     _geak_revalidation_decision,
-    _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
     geak_candidate_launch,
     geak_spec_name,
@@ -68,11 +63,6 @@ class _RebenchDecision(NamedTuple):
     native_rejection: str
 
 
-class _ReplayRuling(NamedTuple):
-    decision: str
-    promoted: bool
-
-
 class _RebenchEngagement(NamedTuple):
     config_matched: bool | None
     overlay_loaded: bool | None
@@ -85,7 +75,6 @@ class _GeakProduct(NamedTuple):
     envs: Mapping[str, Any]
     controls: dict[str, Any]
     overlay: str
-    has_artifact: bool
 
 
 def _geak_rebench_grid_row(accepted: Mapping[str, Any], product: _GeakProduct, overlay: str) -> dict[str, Any]:
@@ -138,41 +127,6 @@ def _native_rejection_reason(result: Mapping[str, Any], expected_hash: str) -> s
     )
 
 
-class _ReplayRegime(NamedTuple):
-    conc: int
-    isl: int
-    osl: int
-
-
-class _ReplayOverlay(NamedTuple):
-    path: str
-    digest_before: str
-
-
-def _promotion_measurement(res: Mapping[str, Any]) -> Mapping[str, Any]:
-    measurement = res.get("promotion_measurement")
-    return measurement if isinstance(measurement, Mapping) else {}
-
-
-def _replay_regime(accepted: Mapping[str, Any]) -> _ReplayRegime:
-    regimes = accepted.get("validated_regimes") or []
-    first = regimes[0] if regimes and isinstance(regimes[0], dict) else {}
-    try:
-        return _ReplayRegime(
-            conc=int(first.get("conc") or 64),
-            isl=int(first.get("isl") or 1024),
-            osl=int(first.get("osl") or 1024),
-        )
-    except (TypeError, ValueError):
-        return _ReplayRegime(conc=64, isl=1024, osl=1024)
-
-
-def _overlay_survived_replay(overlay: _ReplayOverlay) -> bool:
-    if not overlay.path or not overlay_is_loadable(overlay.path):
-        return False
-    return not overlay.digest_before or _geak_overlay_digest(overlay.path) == overlay.digest_before
-
-
 class GeakRevalidation(CoordinatorCollaborator):
     def geak_rebench_params(self, *, reason: str) -> dict[str, Any]:
         from ..phases.geak_native_revalidation import source_rebench_params
@@ -202,7 +156,12 @@ class GeakRevalidation(CoordinatorCollaborator):
     def settle_geak_no_material(self) -> None:
         """Close a GEAK candidate that adds nothing to ``current_best``, revoking its provisional journey KEEPs."""
         state = self.shared_state
-        state.geak_result = {**state.geak_result, "revalidation_status": REBENCH_NO_MATERIAL}
+        settled = {**state.geak_result, "revalidation_status": REBENCH_NO_MATERIAL}
+        overlay = str(settled.get("final_overlay") or "")
+        if overlay and not overlay_is_loadable(_normalize_geak_overlay_dir(overlay)):
+            # The settlement holds only while this overlay stays unloadable.
+            settled["revalidation_blocked_overlay"] = overlay
+        state.geak_result = settled
         self._coord.phase_kernel.reject_geak_kernel_journey(
             state.geak_result,
             measured_tput=0.0,
@@ -221,11 +180,16 @@ class GeakRevalidation(CoordinatorCollaborator):
         )
         flags, envs = geak_candidate_launch(config, session_runner_owned(self.session_dir))
         overlay = _normalize_geak_overlay_dir(str(accepted.get("final_overlay") or "").strip())
-        has_artifact = _geak_result_has_artifact(accepted)
-        deployable = config.get("flags") or config.get("env") or "env_map" in config or controls or has_artifact
+        deployable = (
+            config.get("flags")
+            or config.get("env")
+            or "env_map" in config
+            or controls
+            or _geak_result_has_artifact(accepted)
+        )
         if not (admissible and deployable):
             return None
-        return _GeakProduct(flags=flags, envs=envs, controls=controls, overlay=overlay, has_artifact=has_artifact)
+        return _GeakProduct(flags=flags, envs=envs, controls=controls, overlay=overlay)
 
     def _geak_explore_rebench_params(
         self,
@@ -245,10 +209,6 @@ class GeakRevalidation(CoordinatorCollaborator):
             )
             overlay = ""
         if not overlay and self._geak_launch_restates_current_best(product.flags, product.envs, product.controls):
-            if product.overlay:
-                return {"skipped": True, "reason": "geak_overlay_unloadable", "fallback": "geak_harness"}
-            if product.has_artifact:
-                return {"skipped": True, "reason": "geak_material_requires_harness", "fallback": "geak_harness"}
             return {"skipped": True, "reason": "geak_no_material"}
         base_params = self._geak_rebench_base_params(product.controls)
         params: dict[str, Any] = {
@@ -333,8 +293,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         return base
 
     async def _rule_on_geak_rebench(self, result: dict, *, task: "Task") -> Verdict:
-        # Set by the validated promotion and by the harness replay; a ruling that
-        # reaches neither leaves the round unpromoted.
         promoted = False
         rebench = self._read_geak_rebench(result)
         ruling = self._geak_rebench_decision(result, task=task, rebench=rebench)
@@ -364,9 +322,8 @@ class GeakRevalidation(CoordinatorCollaborator):
             await self._refuse_rebench(
                 result, task=task, rebench=rebench, decision=decision, native_rejection=native_rejection
             )
-        elif decision == REBENCH_FALLBACK:
-            replay = await self._replay_via_geak_harness(result, task=task, rebench=rebench)
-            decision, promoted = replay.decision, replay.promoted
+        elif decision == REBENCH_FAILED:
+            self._close_inconclusive_rebench(result, task=task, rebench=rebench)
         expected_hash = str((task.params or {}).get("expected_cfg_hash") or "")
         self._record_geak_rebench_timeline(
             task=task,
@@ -443,13 +400,13 @@ class GeakRevalidation(CoordinatorCollaborator):
             if not overlay_loaded and decision == REBENCH_VALIDATED:
                 log.warning(
                     "geak 2b: overlay %r did not survive the run "
-                    "(loadable=%r digest expected=%r got=%r) -> 2a fallback",
+                    "(loadable=%r digest expected=%r got=%r) -> inconclusive",
                     expected_overlay,
                     overlay_is_loadable(expected_overlay),
                     expected_digest,
                     got_digest,
                 )
-                decision = REBENCH_FALLBACK
+                decision = REBENCH_FAILED
         return _OverlayReading(expected=expected_overlay, loaded=overlay_loaded, digest=got_digest, decision=decision)
 
     def _geak_rebench_decision(
@@ -471,7 +428,7 @@ class GeakRevalidation(CoordinatorCollaborator):
             current_best=current_grade.reference,
         )
         if not _grades_can_rule(result, measured, baseline_grade, current_grade):
-            decision = REBENCH_FALLBACK
+            decision = REBENCH_FAILED
         elif (not expected_hash or got_hash == expected_hash) and any(
             grade.graded_on_intvty and grade.verdict != "KEEP" for grade in (baseline_grade, current_grade)
         ):
@@ -584,6 +541,23 @@ class GeakRevalidation(CoordinatorCollaborator):
             )
         )
 
+    def _close_inconclusive_rebench(self, result: dict, *, task: "Task", rebench: _GeakRebench) -> None:
+        """Settle a rebench that measured something other than the candidate as failed, leaving it retryable."""
+        expected_hash = (task.params or {}).get("expected_cfg_hash")
+        log.warning(
+            "geak 2b rebench inconclusive (measured=%r got_hash=%r expected=%r)",
+            rebench.measured,
+            rebench.got_hash,
+            expected_hash,
+        )
+        self._close_failed_geak_revalidation(
+            {
+                "error_class": "rebench_inconclusive",
+                "error": f"measured={rebench.measured!r} cfg_hash={rebench.got_hash!r} expected={expected_hash!r}",
+            }
+        )
+        result["status"] = REBENCH_FAILED
+
     def _close_failed_geak_revalidation(self, result_payload: Mapping[str, Any]) -> None:
         geak_result = {
             **(self.shared_state.geak_result or {}),
@@ -622,194 +596,3 @@ class GeakRevalidation(CoordinatorCollaborator):
             final_error_class=final_error_class,
             final_error=final_error,
         )
-
-    async def validate_geak_via_geak_harness(self, *, reason: str) -> dict[str, Any]:
-        from hyperloom.common.perf_metric import agentx_enabled, is_agentx_mode
-
-        mode = str(self.shared_state.benchmark_mode or "").strip()
-        agentx = is_agentx_mode(mode) if mode else agentx_enabled()
-        if agentx:
-            return {
-                "validated": False,
-                "status": "incomparable",
-                "reason": "geak_harness_unsupported_canonical_workload",
-            }
-        accepted = self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
-        if str(accepted.get("status") or "") != "ok" and not _geak_has_accepted_kernel(accepted):
-            return {"validated": False, "skipped": True, "reason": "no_geak_result"}
-        # The overlay's identity is captured before the replay so it can be
-        # compared after; see :func:`_overlay_survived_replay`.
-        overlay_path = _normalize_geak_overlay_dir(str(accepted.get("final_overlay") or "").strip())
-        overlay = _ReplayOverlay(
-            path=overlay_path,
-            digest_before=_geak_overlay_digest(overlay_path) if overlay_path else "",
-        )
-        res = await self._replay_through_geak(accepted, mode)
-        accuracy_failure = self._replay_accuracy_failure(_promotion_measurement(res))
-        if accuracy_failure:
-            self._refuse_replay_on_accuracy(accepted, res, accuracy_failure)
-            return {"validated": False, "status": REBENCH_NO_PROMOTE, "reason": accuracy_failure}
-        if str(res.get("status") or "") == "succeeded":
-            return self._promote_replayed_geak_win(accepted, res, overlay, reason=reason)
-        if res.get("error"):
-            reason = str(res["error"])
-        log.warning(
-            "geak 2a fallback did not validate (status=%r reason=%s)",
-            res.get("status"),
-            reason,
-        )
-        return {"validated": False, "status": res.get("status"), "reason": reason}
-
-    async def _replay_through_geak(self, accepted: Mapping[str, Any], mode: str) -> dict[str, Any]:
-        from hyperloom_common.jsonio import read_json
-        from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
-        from ..actions.executors._geak_sweep import GeakSweepSpec, sweep_via_geak
-        from ..actions.executors.workload._agentx_switch import geak_metric_axis
-
-        regime = _replay_regime(accepted)
-        return await sweep_via_geak(
-            result=accepted,
-            handoff=read_json(self.session_dir / "geak" / "handoff.json", default={}, require_dict=True),
-            env_spec=self.build_env_spec(),
-            # A kernel-lane re-benchmark, not a dispatched action: it borrows the
-            # ``integrate`` workspace namespace under a task id that names it,
-            # as the stack re-validation and the GEAK integrate rebench do.
-            output_root=unique_runs_dir(self.session_dir, "integrate", "revalidate_geak"),
-            spec=GeakSweepSpec(
-                conc_values=[regime.conc],
-                isl_osl_configs=[f"{regime.isl}:{regime.osl}"],
-                variant_timeout_sec=env_int("SWEEP_VARIANT_TIMEOUT_SEC", default=2400),
-                repeats=3,
-                # The axis the handoff sent GEAK, so the replay measures what GEAK accepted on.
-                metric_axis=geak_metric_axis(benchmark_mode=mode, grading=self.shared_state.grading or None),
-            ),
-        )
-
-    def _replay_accuracy_failure(self, measurement: Mapping[str, Any]) -> str:
-        baseline_accuracy = float(self.shared_state.baseline_accuracy or 0.0)
-        if baseline_accuracy <= 0:
-            return ""
-        replay_accuracy = measurement.get("accuracy")
-        if (
-            isinstance(replay_accuracy, bool)
-            or not isinstance(replay_accuracy, (int, float))
-            or not 0.0 <= replay_accuracy <= 1.0
-        ):
-            return EVAL_KIND_ACCURACY_UNAVAILABLE
-        if not accuracy_passed(baseline_accuracy, float(replay_accuracy)):
-            return "accuracy_drop"
-        return ""
-
-    def _refuse_replay_on_accuracy(
-        self,
-        accepted: Mapping[str, Any],
-        res: Mapping[str, Any],
-        failure: str,
-    ) -> None:
-        self._coord.phase_kernel.reject_geak_promotion(
-            {
-                **accepted,
-                "fallback_result": res,
-                "failure_reason": failure,
-                "baseline_accuracy": float(self.shared_state.baseline_accuracy or 0.0),
-            },
-            measured_tput=_geak_sweep_measured_tput(res) or 0.0,
-            current_best_tput=float((self.shared_state.current_best or {}).get("tput") or 0.0),
-            reason=failure,
-        )
-        self.shared_state.save(self.session_dir)
-
-    def _promote_replayed_geak_win(
-        self,
-        accepted: Mapping[str, Any],
-        res: Mapping[str, Any],
-        overlay: _ReplayOverlay,
-        *,
-        reason: str,
-    ) -> dict[str, Any]:
-        measured = _geak_sweep_measured_tput(res)
-        if measured is None:
-            log.warning("geak 2a: succeeded sweep but no measurable throughput; candidate stays pending")
-            return {"validated": False, "status": res.get("status"), "reason": reason}
-        overlay_loaded = _overlay_survived_replay(overlay)
-        if overlay.path and not overlay_loaded:
-            log.warning(
-                "geak 2a: overlay %r is not loadable evidence "
-                "(loadable=%r digest before=%r after=%r) -> gain credited "
-                "to config, not to a kernel",
-                overlay.path,
-                overlay_is_loadable(overlay.path),
-                overlay.digest_before,
-                _geak_overlay_digest(overlay.path),
-            )
-        promoted = self._coord.phase_kernel.promote_geak_from_candidate(
-            accepted,
-            measured_tput=measured,
-            provenance="geak_same_harness_geak",
-            overlay_loaded=overlay_loaded,
-            measurement_provenance=_promotion_measurement(res) or res,
-        )
-        try:
-            self.shared_state.save(self.session_dir)
-        except OSError:
-            log.exception("geak 2a: SharedState.save failed")
-        if not promoted:
-            return {
-                "validated": False,
-                "status": REBENCH_NO_PROMOTE,
-                "reason": str(self.shared_state.geak_result.get("revalidation_error") or "promotion_rejected"),
-            }
-        return {"validated": True, "gain": float(self.shared_state.cumulative_gain_validated), "reason": reason}
-
-    async def _replay_via_geak_harness(
-        self,
-        result: dict,
-        *,
-        task: Task,
-        rebench: _GeakRebench,
-    ) -> _ReplayRuling:
-        measured, got_hash = rebench.measured, rebench.got_hash
-        promoted = False
-        decision = REBENCH_FALLBACK
-        log.warning(
-            "geak 2b revalidation inconclusive (measured=%r got_hash=%r expected=%r) -> GEAK-harness 2a fallback",
-            measured,
-            got_hash,
-            (task.params or {}).get("expected_cfg_hash"),
-        )
-        fallback_result: dict[str, Any]
-        try:
-            fallback_result = await self.validate_geak_via_geak_harness(reason="2b_inconclusive")
-        except Exception as exc:  # isolation boundary: one GEAK candidate's harness fallback
-            log.exception("geak 2a GEAK-harness fallback failed")
-            fallback_result = {
-                "validated": False,
-                "reason": repr(exc),
-            }
-        if not bool(fallback_result.get("validated")):
-            from ..phases.geak_rebench import INCOMPARABLE_REVALIDATION
-
-            geak_result = dict(self.shared_state.geak_result) if isinstance(self.shared_state.geak_result, dict) else {}
-            # 2a reports a refusal it will repeat for this workload
-            # as a typed status. Persist it beside the verdict: the
-            # reason text is for the report, and a later KERNEL entry
-            # needs to know the replay is settled, not merely broken.
-            refusal = str(fallback_result.get("status") or "")
-            geak_result["revalidation_status"] = (
-                REBENCH_NO_PROMOTE if refusal == REBENCH_NO_PROMOTE else REBENCH_FALLBACK_FAILED
-            )
-            geak_result["revalidation_error_class"] = refusal
-            geak_result["revalidation_error"] = str(
-                fallback_result.get("reason") or refusal or "GEAK harness fallback did not validate"
-            )[:500]
-            self.shared_state.geak_result = geak_result
-            self._record_geak_rebench_conclusion(
-                final_status=geak_result["revalidation_status"],
-                final_error=str(geak_result.get("revalidation_error") or ""),
-            )
-            self.shared_state.geak_pending = {}
-            result["status"] = refusal if refusal in {INCOMPARABLE_REVALIDATION, REBENCH_NO_PROMOTE} else "failed"
-        else:
-            promoted = True
-            decision = REBENCH_VALIDATED
-        return _ReplayRuling(decision=decision, promoted=promoted)

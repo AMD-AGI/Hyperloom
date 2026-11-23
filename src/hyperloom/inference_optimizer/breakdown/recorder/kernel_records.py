@@ -32,7 +32,7 @@ LEDGER_GEAK = "geak"
 
 #: ``geak_pending.status`` values left by a candidate whose revalidation ended
 #: without a verdict, so the win was abandoned rather than judged.
-GEAK_DROPPED_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_declined", "overlay_unloadable"})
+GEAK_DROPPED_STATUSES: frozenset[str] = frozenset({"rebench_cancelled"})
 
 __all__ = [
     "GEAK_DROPPED_STATUSES",

@@ -14,10 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from . import geak_rebench as _geak_rebench
 from hyperloom_common.coerce import first_str, to_float
 from hyperloom.common import gain_math
-from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_FALLBACK_FAILED, REBENCH_NO_PROMOTE
 from hyperloom.common.perf_metric import axis_of, graded_axes_of
 from hyperloom.orchestrator.lever import LEVER_CONFIG, LEVER_KERNEL
 from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
@@ -53,12 +51,6 @@ _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = 3.0
 def _covered_step(kind: str, params: dict[str, Any], *, idempotency_key: str) -> Task:
     """An unpersisted task for a step run under the ``kernel_agent`` task's lanes."""
     return Task(task_id=uuid.uuid4().hex, kind=kind, state="running", params=params, idempotency_key=idempotency_key)
-
-
-def _geak_decline_status(decline_reason: Any) -> str:
-    """Map a 2b decline reason to the status left on ``geak_pending``."""
-    reason = str(decline_reason or "").strip().lower()
-    return "overlay_unloadable" if reason == "geak_overlay_unloadable" else "rebench_declined"
 
 
 def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cycle: int) -> None:
@@ -144,8 +136,8 @@ class _GeakPromotionMixin:
 
         The 2b rebench runs as a step of the ``kernel_agent`` task, under the
         lanes it holds, and its result goes through the same promotion a
-        dispatched explore would. A candidate the grid cannot carry goes to the
-        GEAK-harness replay (2a) instead. ``handoff_cards`` are drained only
+        dispatched explore would. A candidate that launches nothing beyond
+        ``current_best`` settles unmeasured. ``handoff_cards`` are drained only
         when a measurement follows.
         """
         state = self.shared_state
@@ -166,9 +158,6 @@ class _GeakPromotionMixin:
         if params.get("origin") == ORIGIN:
             await revalidate_source(self._coord, params)
             return
-        if skip_reason is not None:
-            await self._revalidate_on_geak_harness(decline_reason=str(skip_reason))
-            return
         task = _covered_step("explore", params, idempotency_key=f"geak-revalidate-c{int(state.macro_cycle or 0)}")
         try:
             result = await self.sub.execute_covered(task)
@@ -184,34 +173,6 @@ class _GeakPromotionMixin:
             await self._coord.writeback.promote_to_shared_state("explore", result, task=task)
         else:
             await self._coord.writeback.handle_unpromotable_result(task, result)
-
-    async def _revalidate_on_geak_harness(self, *, decline_reason: str) -> None:
-        """Replay the candidate through GEAK's own harness (2a); record the decline when it does not validate."""
-        state = self.shared_state
-        log.warning("geak: 2b declined (%s); validating through the GEAK harness instead", decline_reason)
-        fb = await self._coord.writeback.validate_geak_via_geak_harness(reason=decline_reason)
-        # Both are verdicts 2a has already recorded.
-        if fb.get("validated") or fb.get("status") == REBENCH_NO_PROMOTE:
-            return
-        error = str(fb.get("reason") or decline_reason)[:500]
-        state.geak_pending = {
-            **(state.geak_pending or {}),
-            "status": _geak_decline_status(decline_reason),
-            "revalidation_error": error,
-        }
-        if (
-            not _geak_rebench.geak_harness_replays_workload(state)
-            and fb.get("status") == _geak_rebench.INCOMPARABLE_REVALIDATION
-        ):
-            state.geak_result = {
-                **state.geak_result,
-                "revalidation_status": REBENCH_FALLBACK_FAILED,
-                "revalidation_error_class": _geak_rebench.INCOMPARABLE_REVALIDATION,
-                "revalidation_error": error,
-                # This refusal is reusable only while its overlay remains unloadable.
-                "revalidation_blocked_overlay": str(state.geak_result.get("final_overlay") or ""),
-            }
-        state.save(self.session_dir)
 
     def _geak_win_already_recorded(self) -> bool:
         """Whether a GEAK e2e win is already in this session's state."""

@@ -42,21 +42,21 @@ def test_rejection_annotations_do_not_reopen_an_adjudicated_candidate(promotion)
 
 
 @pytest.mark.asyncio
-async def test_a_settled_agentx_candidate_is_not_re_promoted_on_the_next_kernel_entry(promotion, monkeypatch):
+async def test_a_settled_agentx_candidate_is_not_re_promoted_on_the_next_kernel_entry(promotion):
     """A settled candidate stays settled across a re-entry: the runner's timing never enters the record.
 
-    Under AgentX the GEAK harness cannot replay the workload, so recovery compares the persisted
-    ``geak_result`` against the ``result.json`` still on disk. Anything the phase merges into the
-    persisted value that the file does not carry -- the dispatch's ``runner_timeout_s``,
-    ``started_at`` and the rest -- makes that comparison fail, and the settled candidate is promoted
-    and re-measured on every entry.
+    Recovery compares the persisted ``geak_result`` against the ``result.json`` still on disk. Anything
+    the phase merges into the persisted value that the file does not carry -- the dispatch's
+    ``runner_timeout_s``, ``started_at`` and the rest -- makes that comparison fail, and the settled
+    candidate is promoted and re-measured on every entry.
     """
     coord, result, _recorder = promotion
     state = coord.shared_state
     state.benchmark_mode = "agentx"
     phase = coord.phase_kernel
-    # The replay refused because this overlay will not load; while that holds, the refusal is reusable.
-    result["final_overlay"] = str(coord.session_dir / "overlay-that-never-loaded")
+    # The candidate settles unmeasured because this overlay will not load; while that holds, the settlement stands.
+    overlay = coord.session_dir / "overlay-that-never-loaded"
+    result["final_overlay"] = str(overlay)
     geak_dir = coord.session_dir / "geak"
     geak_dir.mkdir(parents=True, exist_ok=True)
     (geak_dir / "result.json").write_text(json.dumps({**result, "returncode": 0}), encoding="utf-8")
@@ -74,13 +74,11 @@ async def test_a_settled_agentx_candidate_is_not_re_promoted_on_the_next_kernel_
     assert settled is not None
     state.geak_result = settled
 
-    async def refuse_as_incomparable(*, reason):
-        return {"validated": False, "status": "incomparable", "reason": f"declined: {reason}"}
-
-    monkeypatch.setattr(coord.writeback, "validate_geak_via_geak_harness", refuse_as_incomparable)
-    await phase._revalidate_on_geak_harness(decline_reason="geak_no_grid_material")
+    coord.writeback.settle_geak_no_material()
+    state.save(coord.session_dir)
     persisted = SharedState.load_or_init(coord.session_dir).geak_result
-    assert persisted["revalidation_error_class"] == "incomparable"
+    assert persisted["revalidation_status"] == "no_material"
+    assert persisted["revalidation_blocked_overlay"] == str(overlay)
 
     # Re-enter KERNEL: the same result.json, a clean exit, and a differently timed dispatch.
     state.geak_result = persisted
@@ -94,9 +92,14 @@ async def test_a_settled_agentx_candidate_is_not_re_promoted_on_the_next_kernel_
     )
 
     assert again is None, "an already-adjudicated result.json must not be promoted a second time"
-    # The verdict is left standing rather than retired by the skip that refused the replay.
-    assert state.geak_result["revalidation_error_class"] == "incomparable"
+    # The verdict is left standing rather than retired by the skip.
+    assert state.geak_result["revalidation_status"] == "no_material"
     assert not state.geak_pending.get("status") == "awaiting_rebench"
+
+    overlay.mkdir()
+    (overlay / "sitecustomize.py").write_text("", encoding="utf-8")
+    reopened = phase._settle_geak_runner_exit(exited_ok, handoff=handoff, agentx=True, facts=GeakRunnerFacts())
+    assert reopened is not None, "a candidate whose overlay became loadable is measured"
 
 
 def test_a_failed_runner_logs_the_error_from_its_result_json(promotion, caplog):
