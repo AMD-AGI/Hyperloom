@@ -3,10 +3,9 @@
 
 """Coverage for the SBD V6 ``warm_start`` event.
 
-Three readings are pinned. The lookup's outcome rides ``match_status`` rather than the event status, so
+Two readings are pinned. The lookup's outcome rides ``match_status`` rather than the event status, so
 a miss is a completed lookup and not a malfunction. The reads block covers T0's own open interval only,
-excluding the writes the audit log records with ``hit: True`` and the mid-session amendment reads. And
-``by_source`` and ``best_config_by_source`` are gone, having read keys no producer ever wrote.
+excluding the writes the audit log records with ``hit: True`` and the mid-session amendment reads.
 """
 
 from __future__ import annotations

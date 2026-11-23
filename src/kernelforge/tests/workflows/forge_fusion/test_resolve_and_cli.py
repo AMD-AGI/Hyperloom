@@ -223,8 +223,7 @@ def test_explicit_sandbox_mode_is_wired(
     monkeypatch,
     mode,
 ):
-    """An explicit ``mode`` reaches the runtime settings, bypass included, with HYPERLOOM_CODEX_EXTERNAL_SANDBOX unset."""
-    monkeypatch.delenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", raising=False)
+    """An explicit ``mode`` reaches the runtime settings, bypass included."""
     captured = {}
 
     def fake_resolve(provider, **kwargs):

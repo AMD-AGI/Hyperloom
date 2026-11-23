@@ -90,7 +90,6 @@ class LaunchAttempt:
     """One launch attempt: what it did, how long it took, what it left behind.
 
     Attributes:
-        name: Label carried into the recorded call.
         outcome: One of the module's four outcome constants.
         stage: Ladder stage the boot stopped at, for :data:`STAGE_FAILED`.
         message: Failure line to write instead of the stage's canonical one.
@@ -106,7 +105,6 @@ class LaunchAttempt:
             or the scriptable script's result document.
     """
 
-    name: str = ""
     outcome: str = READY
     stage: str = ""
     message: str = ""
@@ -174,11 +172,9 @@ class LaunchScenario:
 
     Attributes:
         attempts: The attempts, in the order they are served.
-        name: Label for the scenario as a whole.
     """
 
     attempts: tuple[LaunchAttempt, ...] = ()
-    name: str = ""
 
     def __post_init__(self) -> None:
         """Reject a scenario with nothing to play.

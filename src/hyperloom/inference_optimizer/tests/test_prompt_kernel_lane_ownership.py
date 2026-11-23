@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The assembled KERNEL_AGENT prompt agrees with the request-kind ownership tables.
-
-A retired lane leaves no entry in those tables, so every assertion derived from them passes while the prompt goes on
-teaching it. :func:`test_no_retired_request_kind_survives_in_the_prompt` therefore names the retired vocabulary
-directly instead of deriving it.
-"""
+"""The assembled KERNEL_AGENT prompt agrees with the request-kind ownership tables."""
 
 from __future__ import annotations
 

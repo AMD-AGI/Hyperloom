@@ -205,16 +205,9 @@ unmatched_ignore_imports_alerting = none
 name = hyperloom.common imports nothing from the project but hyperloom_common
 type = forbidden
 source_modules = hyperloom.common
+# A wildcard, not a list: a hyperloom package added later is forbidden without an edit here.
 forbidden_modules =
-    hyperloom.cli
-    hyperloom.orchestrator
-    hyperloom.inference_optimizer
-    hyperloom.agents
-    hyperloom.contracts
-    hyperloom.hosted
-    hyperloom.measure
-    hyperloom.plugs
-    hyperloom.sandbox
+    hyperloom.*
     kernelforge
 ignore_imports =
     hyperloom.**.tests.** -> **

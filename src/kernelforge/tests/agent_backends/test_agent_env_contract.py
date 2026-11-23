@@ -18,11 +18,9 @@ from kernelforge.config import Config, resolve_agent_model, resolve_agent_reason
 _MODEL_VARS = (
     "FORGE_AGENT_MODEL",
     "FORGE_CLAUDE_MODEL",
-    "CLAUDE_CONTEXT_WINDOW",
     "FORGE_CODEX_MODEL",
     "CLAUDE_MODEL",
     "CODEX_MODEL",
-    "KERNEL_AGENTS_MODEL",
 )
 _EFFORT_VARS = ("FORGE_AGENT_REASONING_EFFORT", "HYPERLOOM_REASONING_EFFORT")
 
