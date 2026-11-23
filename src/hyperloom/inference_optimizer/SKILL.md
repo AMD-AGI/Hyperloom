@@ -747,7 +747,7 @@ when the file is absent, invalid, or stale.
 ```bash
 python3 -m hyperloom optimize \
   --model "$MODEL_PATH" \
-  --framework vllm \           # sglang (default) / vllm / atom / xdit / custom
+  --framework vllm \           # sglang (default) / vllm / atom / xdit / llamacpp / custom
   --gpu-type MI300X \          # or omit for rocm-smi auto-detect
   --model-class moe_mla \      # dense / moe_mla / moe_swa / moe_mla_nsa; categorical key for atom seed grid + framework gap token + recipe key + prompt label
   --isl 512 --osl 512 \        # workload shape — pass whatever the prompt states; omitting them uses defaults ISL=1024/OSL=1024
@@ -769,7 +769,7 @@ and the operator's stated value is lost:
 | Surface | CLI flag | Notes |
 |---|---|---|
 | Model path | `--model` | required |
-| Framework | `--framework` | `sglang` (default) / `vllm` / `atom` / `xdit` / `custom` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server); `custom` is an operator-supplied workload and **additionally requires `--framework-path` and `--benchmark-scripts-dir`** (see below) |
+| Framework | `--framework` | `sglang` (default) / `vllm` / `atom` / `xdit` / `llamacpp` / `custom` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server); llamacpp runs the `llama-server` on `PATH`, takes its base launch from `--reference-script` only, and records no profile or roofline; `custom` is an operator-supplied workload and **additionally requires `--framework-path` and `--benchmark-scripts-dir`** (see below) |
 | Custom source tree | `--framework-path` | **Required for `--framework custom`.** The workload's own checkout; patches are authored against it. |
 | Custom bench scripts | `--benchmark-scripts-dir` | **Required for `--framework custom`.** Holds the entrypoint, looked up as `custom_<gpu-type>.sh`. Every knob it reads must be forwarded as `--extra-env`; the throughput unit is whatever its report declares. May also hold `levers.json` — the adapter's declared explore grid (see below). |
 | Declared levers (`custom`) | `<benchmark-scripts-dir>/levers.json` | Optional. A JSON **list** of explore variants the adapter declares for itself — `{"name": ..., "extra_envs": {...}}` (an object), or any of `extra_args` / `remove_args` / `unset_envs` / `args_mode: "replace"`. `custom` has no framework source to infer knobs from, so without this its seed grid is empty and EXPLORE has nothing to sweep until the model guesses. Declarations seed **ahead of** model proposals (a model variant of the same name wins) and are not re-seeded once their name appears in the explore ledger's `tested` rows. A malformed file — or one whose variant normalizes to nothing a restart could apply — fails the launch with exit 2; it never degrades to an empty grid. |
@@ -1157,7 +1157,8 @@ What this controls:
 - Which workload YAML the executors default to —
   `baseline_<framework>.yaml` and `profile_<framework>.yaml`, one pair
   per framework registered in `framework_registry`
-  (`sglang`, `vllm`, `atom`, `xdit`, `custom`).
+  (`sglang`, `vllm`, `atom`, `xdit`, `custom`); `llamacpp` ships
+  `baseline_llamacpp.yaml` alone, as its server runs under no torch profiler.
   `framework_registry.shipped_config_name()` names the file for
   `$FRAMEWORK`; an unregistered name is refused at launch and on resume.
 - Which framework-specific seed grid the `explore` action falls

@@ -437,7 +437,7 @@ class ClosePhase(CoordinatorCollaborator):
         await self._record_close_step("langfuse_flush", status="done")
 
     async def _do_artifact_package(self) -> Path | None:
-        """Bundle session artifacts into a zip under ``/workspace``.
+        """Bundle session artifacts into a zip under the package destination.
 
         Returns the package path (or None when nothing was written) so the caller
         can pass it directly to the post-sequencer close-section rebuild.

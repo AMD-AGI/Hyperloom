@@ -642,14 +642,26 @@ def test_setup_skill_offers_the_codex_backend_with_its_own_side() -> None:
     assert f"`Use default ({DEFAULT_CODEX_MODEL})`" in setup
 
 
-def test_the_launch_block_names_workspace_as_the_session_package_destination():
-    """Under Claw the launch is its own tool call in a new shell, so the export must be in the launch block itself."""
+@pytest.mark.parametrize(
+    ("exported", "destination"),
+    [({}, "/workspace"), ({"HYPERLOOM_SESSION_PACKAGE_DEST": "/data/packages"}, "/data/packages")],
+)
+def test_the_launch_block_sends_the_session_package_to_workspace_unless_a_destination_is_exported(
+    tmp_path: Path, exported: dict[str, str], destination: str
+) -> None:
+    """Under Claw the launch is its own tool call in a new shell, so the launch block itself names the destination."""
     (launch,) = [
         block
         for block in _bash_blocks((PKG_ROOT / "SKILL.md").read_text(encoding="utf-8"))
         if any("-m hyperloom optimize --verbose" in line for line in block)
     ]
-    exports = [i for i, line in enumerate(launch) if line.startswith("export HYPERLOOM_SESSION_PACKAGE_DEST=")]
     start = next(i for i, line in enumerate(launch) if "-m hyperloom optimize --verbose" in line)
-    assert exports and exports[0] < start
-    assert launch[exports[0]] == 'export HYPERLOOM_SESSION_PACKAGE_DEST="${HYPERLOOM_SESSION_PACKAGE_DEST:-/workspace}"'
+
+    observed = _run_recipe(
+        "\n".join(launch[:start]),
+        tmp_path,
+        {"USER_DATA_PATH": str(tmp_path / "data"), "MODEL_PATH": "/models/m", **exported},
+        observed=("HYPERLOOM_SESSION_PACKAGE_DEST",),
+    )
+
+    assert observed == {"HYPERLOOM_SESSION_PACKAGE_DEST": destination}
