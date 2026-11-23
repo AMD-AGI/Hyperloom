@@ -481,11 +481,9 @@ class _GeakDispatchMixin:
     def _geak_result_path(self) -> Path:
         return self.session_dir / "geak" / "result.json"
 
-    def _geak_settled_replay(self, candidate: dict[str, Any], *, agentx: bool) -> bool:
+    def _geak_settled_replay(self, candidate: dict[str, Any]) -> bool:
         """Whether ``candidate`` is a result this session already settled."""
-        return _geak_rebench.geak_candidate_is_adjudicated(
-            self.shared_state.geak_result, candidate, harness_can_replay=not agentx
-        )
+        return _geak_rebench.geak_candidate_is_adjudicated(self.shared_state.geak_result, candidate)
 
     def _settle_geak_skip(self, result: dict[str, Any]) -> None:
         # A settled verdict is left standing: a later failure records itself without
@@ -628,7 +626,7 @@ class _GeakDispatchMixin:
                 facts=facts,
             )
             return None
-        if agentx and self._geak_settled_replay(result, agentx=agentx):
+        if agentx and self._geak_settled_replay(result):
             # The runner left the candidate this session already settled, so it shipped no product: recording it
             # would retire the verdict and re-enqueue the revalidation that produced it. The file stays for the
             # next run to overwrite.
@@ -685,7 +683,7 @@ class _GeakDispatchMixin:
             # the phase as a timeout.
             facts = _facts()
             flushed = read_json(self._geak_result_path(), {}, require_dict=True)
-            settled = bool(flushed) and agentx and self._geak_settled_replay(flushed, agentx=agentx)
+            settled = bool(flushed) and agentx and self._geak_settled_replay(flushed)
             if flushed.get("status") == "ok" and not settled:
                 log.info(
                     "GEAK flushed an OK result.json under SIGTERM grace; promoting the recovered win despite the cap."
@@ -749,11 +747,7 @@ class _GeakDispatchMixin:
         # ``_geak_win_already_recorded`` so a prior cycle's result.json does not short-circuit a fresh entry. A
         # result this session already settled is not recovered; new candidate evidence remains eligible.
         recovered = read_json(self._geak_result_path(), {}, require_dict=True)
-        if (
-            recovered.get("status") != "ok"
-            or self._geak_win_already_recorded()
-            or self._geak_settled_replay(recovered, agentx=agentx)
-        ):
+        if recovered.get("status") != "ok" or self._geak_win_already_recorded() or self._geak_settled_replay(recovered):
             return False
         log.info(
             "GEAK result.json exists but state has no recorded win (crash before handback); promoting recovered result."
@@ -814,7 +808,7 @@ class _GeakDispatchMixin:
     async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
         """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run)."""
         state = self.shared_state
-        agentx = not _geak_rebench.geak_harness_replays_workload(state)
+        agentx = _geak_rebench.geak_session_is_agentx(state)
         handoff = self._open_geak_handoff(agentx=agentx)
         if handoff is None:
             return

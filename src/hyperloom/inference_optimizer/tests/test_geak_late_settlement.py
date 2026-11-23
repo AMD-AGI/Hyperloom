@@ -35,10 +35,8 @@ def test_rejection_annotations_do_not_reopen_an_adjudicated_candidate(promotion)
     settled = SharedState.load_or_init(coord.session_dir).geak_result
     assert settled["kernel_event_id"] == kernel_event.kernel_event_id(0)
     assert settled["final_validation"]["decision"] == "REJECTED"
-    assert geak_candidate_is_adjudicated(settled, raw, harness_can_replay=False)
-    assert not geak_candidate_is_adjudicated(
-        settled, {**raw, "final_throughput_tok_s": 160.0}, harness_can_replay=False
-    )
+    assert geak_candidate_is_adjudicated(settled, raw)
+    assert not geak_candidate_is_adjudicated(settled, {**raw, "final_throughput_tok_s": 160.0})
 
 
 @pytest.mark.asyncio
