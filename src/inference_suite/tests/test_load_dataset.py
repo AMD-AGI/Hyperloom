@@ -161,6 +161,11 @@ def test_a_prompt_holding_a_unicode_line_separator_is_one_line_of_the_file(tmp_p
     assert dataset_client.read_prompts(path, None) == prompts
 
 
+def test_a_dataset_the_client_can_send_and_a_workload_without_one_are_not_refused(dataset: Path):
+    assert fixed.dataset_refusal(_workload(dataset)) is None
+    assert fixed.dataset_refusal(_FIXED) is None
+
+
 def test_percentiles_interpolate_as_numpy_does():
     values = [4.0, 1.0, 3.0, 2.0, 10.0]
     assert [dataset_client.percentile(values, p) for p in (50, 90, 99)] == pytest.approx([3.0, 7.6, 9.76])
