@@ -253,3 +253,16 @@ def _materialize_twice(monkeypatch, tmp_path, framework, base, round_args):
 def test_a_re_materialized_llamacpp_config_carries_the_base_once(monkeypatch, tmp_path):
     envs = _materialize_twice(monkeypatch, tmp_path, "llamacpp", _LLAMACPP_BASE, "--spec-draft-n-max 3")
     assert envs["EXTRA_LLAMACPP_ARGS"] == f"{_LLAMACPP_BASE} --spec-draft-n-max 3"
+
+
+def test_a_re_materialized_config_carries_the_session_base_once(monkeypatch, tmp_path):
+    _isolate(monkeypatch)
+    base = "-tp 1 --trust-remote-code --max-num-seqs 64"
+    monkeypatch.setattr(we, "session_server_base", lambda: ServerBase(args=base))
+    src = _write(tmp_path / "cfg.yaml", {"framework": "vllm", "model": "/m", "envs": {}})
+    baseline = we.materialize_config_with_envs(src, tmp_path / "baseline")
+    rendered = we.materialize_config_with_envs(
+        baseline, tmp_path / "round", launch=we.LaunchLayer(extra_server_args="--enable-prefix-caching")
+    )
+    envs = yaml.safe_load(rendered.read_text())["benchmark"]["envs"]
+    assert envs["EXTRA_VLLM_ARGS"] == f"{base} --enable-prefix-caching"
