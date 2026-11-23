@@ -14,7 +14,10 @@ from typing import Any
 from hyperloom_common.coerce import first_text
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero, graded_gate_row
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, GradingAnchor
-from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
+from hyperloom.orchestrator.measurement.runtime_findings import (
+    KEEP_REASON_CORRECTNESS_FIX,
+    KEEP_REASON_EXPORT_LANDED,
+)
 
 from ....state.failure_evidence import FAILURE_ATTRIBUTION_ENVIRONMENT, classify_failure_attribution
 from ....state.shared_state import SharedState, resolve_anchor_with_drift, resolve_graded_comparison
@@ -73,6 +76,13 @@ class PerfGateMixin:
             await self._run_patch_accuracy_round(attempt, params, bench_result, gate_evidence)
         verdict = _weigh_gate(attempt, params, bench_result, gate_evidence, throughput)
         measured = verdict.measured
+        if verdict.export_regression and shared_state is not None:
+            # Counted here rather than on the KEEP path: the refusal turns exactly the
+            # rounds this figure describes into REVERTs, so leaving it to
+            # ``_record_export_gate`` -- which only sees KEEPs -- would report zero
+            # attempts for a run that spent every round failing to export. The two cannot
+            # double-count: a refused candidate never reaches promotion as a KEEP.
+            shared_state.export_attempts += 1
 
         switch_manifest: list[dict[str, Any]] = list(attempt.switch_manifest)
 
@@ -127,6 +137,7 @@ class PerfGateMixin:
             verdict.accuracy_reason,
             f"correctness fix {verdict.fix_finding} refused: {'; '.join(fix_refusals)}" if fix_refusals else "",
             eval_probe_summary(gate_evidence.get("eval_probe")),
+            verdict.export_regression,
         )
         return _perf_revert(
             attempt,
@@ -169,6 +180,9 @@ class PerfGateMixin:
         if verdict.correctness_fix:
             reason = f"correctness fix {fix_finding} verified at {_fix_axis(verdict.graded)} delta {measured.delta_pct:+.2f}%"
             keep_reason, resolves_finding = KEEP_REASON_CORRECTNESS_FIX, fix_finding
+        elif verdict.export_landing:
+            reason = f"first ahead-of-time export accepted on correctness at delta {measured.delta_pct:+.2f}%"
+            keep_reason, resolves_finding = KEEP_REASON_EXPORT_LANDED, ""
         else:
             reason = f"throughput delta {measured.delta_pct:+.2f}% >= {measured.keep_threshold_pct:.2f}%"
             keep_reason, resolves_finding = "", ""
@@ -515,6 +529,116 @@ class _GateVerdict:
     fix_finding: str
     fix_refusals: list[str]
     correctness_fix: bool
+    export_landing: bool = False
+    export_regression: str = ""
+
+
+def _export_landing_keep(
+    *,
+    shared_state: Any,
+    throughput: _ThroughputGrade,
+    accuracy_clear: bool,
+    workspace: str = "",
+) -> bool:
+    """Whether a correct-but-slower first export should KEEP anyway.
+
+    An eager configuration is not a deliverable once ``aoti.enabled`` is declared, so the
+    first export is accepted on correctness and becomes the grading anchor; phase two
+    then measures export against export with no further special casing. Without this the
+    export gate deadlocks: the module exports, loses on throughput, is reverted, and the
+    gate it was supposed to open stays shut for the whole campaign.
+
+    Throughput is the *only* thing waived. The refusals mirror ``_correctness_fix_refusals``,
+    the sibling carve-out: an operator's latency or power budget is a declared constraint,
+    not a preference, and an unverified or incomparable measurement is not evidence that
+    the export is correct.
+
+    Args:
+        workspace: The graded leg's own run directory, not the attempt's ``output_root``.
+            ``read_evidence`` sums every process below the path it is given, and the task
+            root holds more than the candidate: the switch-off parity leg runs the same
+            patch with the switches *unset*, so it reports ``invoked=0`` by design, and
+            the root is keyed by task id and reused, so an earlier attempt's counters are
+            still sitting there. Either would waive throughput for a module that never
+            exported.
+    """
+    # Imported here, not at module scope: the measurement and framework packages reach
+    # back into this one.
+    from hyperloom.common.optimization_scope import aoti_config
+    from ....measurement.aoti_evidence import read_evidence
+
+    graded, delta_pct = throughput.graded, throughput.delta_pct
+    if not isinstance(delta_pct, (int, float)):
+        return False
+    if not getattr(graded, "comparable", False) or getattr(graded, "veto_reason", ""):
+        return False
+    if not accuracy_clear:
+        return False
+    if shared_state is None or bool(getattr(shared_state, "export_landed", False)):
+        return False
+    try:
+        config = aoti_config()
+    except ValueError:
+        return False
+    if config is None or not config.enabled:
+        return False
+    # The run's counters, not the module's source -- the same evidence that opens the
+    # gate. A module that names the entry points in the ``except`` arm of a fallback to
+    # eager parses exactly like one that exports, and would otherwise have its throughput
+    # waived every round: the KEEP lands, the counters still read invoked=0 so the gate
+    # stays shut, and the next round waives a slower module again.
+    if not workspace:
+        return False
+    return read_evidence(workspace).exported
+
+
+def _weigh_export(
+    shared_state: Any,
+    throughput: _ThroughputGrade,
+    *,
+    workspace: str,
+    accuracy_clear: bool,
+    eligible: bool,
+) -> tuple[bool, str]:
+    """The export half of the gate: whether a first export KEEPs, and whether one was given up.
+
+    The refusal vetoes everything above it, including a correctness fix: a fix that gives
+    up the export has not fixed the thing this run exists to produce.
+    """
+    from ....measurement.aoti_evidence import export_regression_refusal
+
+    landing = eligible and _export_landing_keep(
+        shared_state=shared_state,
+        throughput=throughput,
+        accuracy_clear=accuracy_clear,
+        workspace=workspace,
+    )
+    return landing, export_regression_refusal(shared_state, workspace)
+
+
+def _measurement(
+    bench_result: dict[str, Any],
+    params: dict[str, Any],
+    throughput: _ThroughputGrade,
+    accuracy_pass: bool | None,
+) -> _PatchMeasurement:
+    """The record of what this attempt measured, whatever the gate then decides about it."""
+    base_tput, keep_threshold_pct = throughput.basis.base_tput, throughput.basis.keep_threshold_pct
+    graded = throughput.graded
+    return _PatchMeasurement(
+        bench_result=bench_result,
+        new_tput=bench_result.get("output_throughput"),
+        delta_pct=throughput.delta_pct,
+        base_tput=base_tput,
+        keep_threshold_pct=keep_threshold_pct,
+        accuracy_pass=accuracy_pass,
+        measured_against=_measured_against(params, base_tput=base_tput),
+        gates=(
+            (graded_gate_row(graded, keep_threshold_pct, graded.veto_reason or graded.refused_by),)
+            if bench_result.get("status") == "succeeded"
+            else ()
+        ),
+    )
 
 
 def _weigh_gate(
@@ -526,7 +650,6 @@ def _weigh_gate(
 ) -> _GateVerdict:
     """Weigh the graded throughput, the accuracy gate and any correctness-fix claim."""
     shared_state = attempt.shared_state
-    base_tput, keep_threshold_pct = throughput.basis.base_tput, throughput.basis.keep_threshold_pct
     graded, delta_pct = throughput.graded, throughput.delta_pct
 
     accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
@@ -549,20 +672,18 @@ def _weigh_gate(
         ) + _fix_accuracy_refusals(accuracy_pass)
         if not fix_refusals:
             gate_pass = correctness_fix = True
-    measured = _PatchMeasurement(
-        bench_result=bench_result,
-        new_tput=bench_result.get("output_throughput"),
-        delta_pct=delta_pct,
-        base_tput=base_tput,
-        keep_threshold_pct=keep_threshold_pct,
-        accuracy_pass=accuracy_pass,
-        measured_against=_measured_against(params, base_tput=base_tput),
-        gates=(
-            (graded_gate_row(graded, keep_threshold_pct, graded.veto_reason or graded.refused_by),)
-            if bench_result.get("status") == "succeeded"
-            else ()
-        ),
+    export_landing, export_regression = _weigh_export(
+        shared_state,
+        throughput,
+        workspace=str(bench_result.get("workspace") or ""),
+        # None means no verdict was recorded, which is not the same as passing.
+        accuracy_clear=not acc_block and accuracy_pass is True,
+        eligible=not gate_pass and not correctness_fix,
     )
+    gate_pass = gate_pass or export_landing
+    if export_regression:
+        gate_pass = correctness_fix = export_landing = False
+    measured = _measurement(bench_result, params, throughput, accuracy_pass)
     return _GateVerdict(
         measured=measured,
         graded=graded,
@@ -573,6 +694,8 @@ def _weigh_gate(
         fix_finding=fix_finding,
         fix_refusals=fix_refusals,
         correctness_fix=correctness_fix,
+        export_landing=export_landing,
+        export_regression=export_regression,
     )
 
 

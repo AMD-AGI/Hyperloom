@@ -398,7 +398,7 @@ The interpreter is recorded absolute but deliberately unresolved, so a virtual e
 hyperloom script check --workspace "$WS"
 ```
 
-Run it after editing anything in a prepared workspace, and after moving one. It reports **every** problem it finds and exits non-zero, rather than stopping at the first: the recorded script, working directory and interpreter still exist, the script still matches the checksum `prepare` pinned, the entrypoint resolves, and `optimization_scope.json` still names a module inside the workspace.
+Run it after editing anything in a prepared workspace, and after moving one. It reports **every** problem it finds and exits non-zero, rather than stopping at the first: the recorded script, working directory and interpreter still exist, the script still matches the checksum `prepare` pinned, the entrypoint resolves, and `optimization_scope.json` still names a module inside the workspace. When an `aoti` block is present it validates exactly as the campaign's own gate will, naming any field still holding a `--aoti` placeholder. With `aoti.enabled` it also warns — never fails — when `TMPDIR` has less room than one export attempt needs, or the ROCm development headers are absent; a workspace is often prepared somewhere other than where it runs.
 
 `--calibrate-autocast bfloat16` sets the tolerance from the model itself: "allow as much extra error as bfloat16 costs this model", measured on your model rather than guessed. `--error-limit` sets it directly instead.
 
@@ -422,6 +422,107 @@ def capture(output):
 `capture` runs next to the model and decides what is worth keeping -- the number of detections, the transcript, whatever your `score` reads. `score` runs in the separate process that never loads the candidate, so a candidate cannot soften its own mark. Whatever units `score` returns are the units of `--error-limit` and of `--calibrate-autocast`.
 
 The file is copied into the frozen benchmark directory and its checksum recorded, so editing it after preparation stops the run rather than quietly changing what passes. Everything else is unchanged: the clock, the hidden held-out inputs, the input perturbation and the output-buffer check all still apply.
+
+### Ask for an ahead-of-time export
+
+Schema 2 adds an optional `aoti` block. Declaring it changes what the campaign is for: instead of source rewrites alone, the accepted module compiles the model with `torch.export` and `torch._inductor.aoti_compile_and_package`, and the deliverable is a module that produces that artifact.
+
+`hyperloom script prepare --aoti` writes the block for you rather than leaving you to hand-edit JSON and remember the version bump:
+
+```bash
+hyperloom script prepare --workspace "$WS" --script model_run.py --python /path/to/model/env/python \
+  --error-limit 0.0123 --aoti
+```
+
+It sets `schema_version` to `2`, writes the block below with `null` where you have to decide, and lists the inputs the recorded calls actually passed the model — with each name spelled the way your script spells it, which is the part that is otherwise guesswork:
+
+```text
+Inputs recorded (4 calls):
+  input_ids                (1, 310)           axis 1: observed 310 to 512
+  pixels                   (1, 3, 224, 224)
+Fill in benchmark/optimization_scope.json, then run: hyperloom script check --workspace /work/ws
+```
+
+Observed sizes are reported as observed and never written in as values. The recorded calls show the sizes that happened to be exercised, not the sizes that are *meant* to vary — only you know that, and a range is permanent once compiled. If nothing varied, it says so and suggests nothing.
+
+The `null` fields are deliberate: the launch refuses while any remain, naming each one. A skeleton that passed validation would be worse than no skeleton, because it would run a campaign against a range nobody chose. If every input is fixed, replace `dynamic_dims` with `[]`.
+
+For unattended runs, `--aoti FILE` merges a declaration you keep under review beside your model script, sets the version, and validates it immediately — a typo costs seconds instead of surfacing at the first round. The file holds the block itself, must say whether it is `enabled`, and its sha256 is pinned in `script_workload.json` beside the script's, so the declaration a run used stays reproducible:
+
+```bash
+hyperloom script prepare --workspace "$WS" --script model_run.py ... --aoti aoti_scope.json
+```
+
+```json
+{
+  "schema_version": 2,
+  "file": "/absolute/workspace/optimization/hyperloom_optimize.py",
+  "aoti": {
+    "enabled": true,
+    "pin_all_others": true,
+    "dynamic_dims": [
+      {
+        "input": "observation.language.tokens",
+        "dim": 1,
+        "min": 8,
+        "max": 128,
+        "derivation": "tokenizer output over the deployed instruction set; longest observed 31, margin to 128"
+      }
+    ]
+  }
+}
+```
+
+| Field | |
+|---|---|
+| `enabled` | bool, default `false`. Everything below is inert without it. |
+| `pin_all_others` | bool, default `true`. Any input size you do not list is locked to the size used during benchmarking. Leave this on -- every size you allow to vary gives the compiler more to cope with, and more chances for it to give up. |
+| `dynamic_dims[].input` | the observation key as your **driver** spells it, not the agent's wrapper argument. |
+| `dynamic_dims[].dim` | 0-indexed axis in that tensor's shape. |
+| `dynamic_dims[].min` / `max` | inclusive bounds, `min >= 1` and `min < max`. |
+| `dynamic_dims[].derivation` | required, free text: how the bound was measured. |
+
+The ranges are yours to set, and the agent is not allowed to change them. Each one is fixed into the compiled model for good: in production, an input outside the range you gave is a straight failure, not something that quietly falls back. Write `derivation` because months later nobody can tell a measured limit from a guess. If a size never varies in production, leave it out and let it be locked.
+
+An `aoti` block under `"schema_version": 1` is refused rather than ignored, because `prepare` writes version 1 without `--aoti` and adding the block by hand while leaving the version alone is the likely way to ask for an export — ignoring it would spend the whole campaign with the gate shut and then report an ordinary close. A malformed block fails the launch for the same reason: otherwise the agent is never told to export while the gate stays shut on the same unreported error, and the whole campaign is wasted.
+
+**Other work waits for the export.** Until one accepted change actually compiles the model, Hyperloom refuses to start the other kinds of work (`explore`, `sweep`, `profile`, `roofline`) and logs `rule='export_gate'` each time. Those refusals are the feature working, not a fault: searching before then spends budget optimizing a path the deliverable will not take.
+
+The first compiled version is accepted even if it is *slower* than the original, uncompiled model, and is recorded as `keep_reason: export_landed`. It is accepted because it is correct, not because it is fast: you asked for a compiled model, so an uncompiled one is not something you can ship, however quick it is. Everything proposed after that is compared against the compiled version. Throughput is the only thing waived -- a declared latency or power budget still holds, and an unverified or incomparable measurement is not evidence of correctness.
+
+**Do not let the module quietly fall back.** If compiling fails, let it fail. A module that catches the error and runs the original model instead still looks like a success -- the benchmark passes and a time is recorded -- but that time describes the original model, not the compiled one. Hyperloom counts whether the compiled model actually *ran*, not whether the source mentions the entry points, so a fallback leaves the run blocked instead of finishing with a result you cannot ship.
+
+That count is taken over the timed region and compared against the harness's own calls into your module, so it is not enough to run the package once. A module that loads the package to check it works, or runs it for one shape and serves the rest from the original model, is refused the same way an outright fallback is: the number that gets reported has to describe the thing you will deploy, on every call.
+
+**Budget for at least two patch specialists.** Under the gate the run depends entirely on them, and they have a 60-minute floor. Two is the minimum that allows one failure and one fix.
+
+If the run ends without an export, `stop_reason` is `export_never_landed` whatever else ended it, with the original preserved as `ungated_close_reason` and the number of attempts in `export_attempts`.
+
+**A candidate whose benchmark did not export never becomes the accepted configuration**, whatever its throughput, from the first round onward. `current_best` is what the run reports and what it ships, so an eager module occupying it would make every figure afterwards describe a path the deployment never takes. This also means an export, once landed, cannot be lost: the first export is accepted on correctness alone and is often slower than eager, so an eager candidate would otherwise beat it on the numbers and take the slot back.
+
+That holds whichever kind of work produced the candidate. Once an export lands the gate opens and `explore` runs again, and one of the arms it builds deliberately unsets the switch your module gates the export behind, to measure what that switch is worth. Without the export it is usually the faster arm. The check therefore sits in the one place every kind of work writes `current_best` through, rather than in the patch lane alone.
+
+Missing counters are treated differently before and after the first landing, because what they prove differs. Until an export lands they are ambiguous — the module declining to export and the start-up shim never running look identical — so they are not read as a verdict. The landing settles it: that KEEP proves the shim runs and writes, so counters going missing afterwards are a harness regression and the candidate is refused.
+
+Each refused round counts toward `export_attempts`. Note also that consecutive rounds without an adoption count toward the framework arm's plateau — `DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK`, 5, with no override today — so a model needing more than five attempts before it can export will exhaust the source arm rather than keep trying, and the run closes `export_never_landed`. Budget is not the binding constraint there; the streak is.
+
+A module that exports needs more than a copy at the destination, and `reports/deployment.json` records it under `runtime_requirements`:
+
+| Key | |
+|---|---|
+| `compiles_on_first_call` | export never runs during capture, so the package is built at the destination on the first call -- minutes, not milliseconds. `accepted_performance.tput` describes steady state only; the `aoti_first_call_compiles` warning says the same. |
+| `writable_cache_dir` | `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` must point at writable local disk. |
+| `local_tmpdir` | `TMPDIR` must be local disk. On a network filesystem the build's cleanup fails and every load unpacks the whole package there. |
+| `rocm_devel_headers` | building needs the ROCm development package; loading does not. |
+| `pinned_toolchain` | the package is tied to the torch and ROCm build it compiled against. A platform upgrade forces a recompile and a fresh run of your accuracy gate. |
+
+The settings prelude deliberately does not carry the cache paths -- they are absolute and would not be portable -- so the module resolves them itself at the destination.
+
+#### Profiling an exported module
+
+A profile leg of an `aoti` workload is told where to write its torch trace through `HYPERLOOM_PROFILE_TRACE_DIR`; the two framework-specific spellings the shipped scriptable scripts read are not set for a custom harness, which reads neither.
+
+An AOTInductor module compiles its launches into a shared object, so a plain trace loses roughly half its kernels -- measured 767 against 1466 events, and 7.2 against 13.1 ms of captured GPU time, on SmolVLA/gfx1151 at identical end-to-end latency. The missing kernels are the Inductor-generated ones, which is exactly the region you exported. Profile legs therefore ask Inductor for per-launch scopes; the overhead is under 1.5% (n=3 per arm), so this is not a speed-for-visibility trade.
 
 ## Use the optimized model without Hyperloom
 
