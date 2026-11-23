@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""GitHub Search backend for perf PR candidate discovery, and the strict search of GitHub's pull requests.
+"""The strict search of GitHub's pull requests.
 
-``search_perf_prs`` is best-effort: a GitHub that cannot be asked reads as "nothing found". The
-strict search (``search_issues``) is for a caller that must tell the two apart: it raises :class:`GitHubUnavailable`,
-which says why, and an empty answer means GitHub answered with none.
+``search_issues`` is for a caller that must tell a GitHub that cannot be asked from one that found nothing: it raises
+:class:`GitHubUnavailable`, which says why, and an empty answer means GitHub answered with none.
 """
 
 from __future__ import annotations
@@ -19,10 +18,6 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
-
-from hyperloom.common.github_urls import repo_slug as parse_repo_slug
-
-from ._shared import GitHubPr
 
 _ENCODING = "utf-8"
 
@@ -53,43 +48,6 @@ MAX_OR_TERMS = 6
 def _build_query(repo: str, *, terms: tuple[str, ...]) -> str:
     """Compose a GitHub Search query scoped to ``repo`` that ORs the first ``MAX_OR_TERMS`` of ``terms``."""
     return f"repo:{repo} is:pr (" + " OR ".join(terms[:MAX_OR_TERMS]) + ")"
-
-
-def search_perf_prs(
-    repo_url: str,
-    *,
-    limit: int = 5,
-    terms: tuple[str, ...],
-    timeout_sec: float = 10.0,
-) -> list[GitHubPr]:
-    """Return PRs in every state matching ``terms`` via the GitHub Search API."""
-    try:
-        repo = parse_repo_slug(repo_url)
-    except ValueError:
-        return []
-    query = _build_query(repo, terms=terms)
-    url = "https://api.github.com/search/issues?" + urllib.parse.urlencode({"q": query, "per_page": str(limit)})
-    req = urllib.request.Request(url, headers=_auth_headers("application/vnd.github+json"))
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - fixed GitHub HTTPS API URL.
-            data = json.loads(resp.read().decode(_ENCODING))
-    except (OSError, http.client.HTTPException, ValueError):  # best-effort policy
-        return []
-    out: list[GitHubPr] = []
-    for item in data.get("items") or []:
-        if not isinstance(item, dict):
-            continue
-        number = item.get("number")
-        if not isinstance(number, int):
-            continue
-        out.append(
-            GitHubPr(
-                number=number,
-                title=str(item.get("title") or ""),
-                html_url=str(item.get("html_url") or ""),
-            )
-        )
-    return out[:limit]
 
 
 _API = "https://api.github.com"
@@ -219,6 +177,5 @@ __all__ = [
     "SearchAnswer",
     "build_query",
     "search_issues",
-    "search_perf_prs",
     "token_configured",
 ]

@@ -36,7 +36,6 @@ def req(**params: object) -> ToolRequest:
 
 def test_a_search_asks_github_for_the_callers_terms() -> None:
     search = build_search({"repo_url": REPO, "keywords": "moe, gemm", "limit": 3, "states": ["merged"]})
-    assert search.request.search_modes == ("github",)
     assert search.request.keywords == ("moe", "gemm")
     assert (search.request.max_search_candidates, search.states) == (3, ("merged",))
 

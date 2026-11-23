@@ -1,38 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for hyperloom.agents.framework.sources.github. Hermetic - monkeypatches urlopen; verifies best-effort policy (returns [] on failure) and query composition."""
+"""Tests for hyperloom.agents.framework.sources.github. Hermetic - monkeypatches urlopen; verifies query composition and that a failed search is raised."""
 
 from __future__ import annotations
 
 import email.message
 import http.client
 import io
-import json
 import urllib.error
 
 import pytest
 
 from hyperloom.agents.framework.sources import github as gh
-from hyperloom.agents.framework.sources._shared import GitHubPr
-
-
-class _FakeResp:
-    """Tiny urllib response stand-in usable as a context manager."""
-
-    def __init__(self, status: int, body: bytes):
-        self.status = status
-        self._body = body
-        self.headers = {"Content-Type": "application/json"}
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        return None
-
-    def read(self) -> bytes:
-        return self._body
 
 
 def _install_urlopen(monkeypatch, handler) -> None:
@@ -63,65 +43,11 @@ def test_build_query_stays_within_the_search_operator_limit() -> None:
     assert "(glm5 OR next OR glm OR flash OR model OR architecture)" in q
 
 
-def test_search_perf_prs_sends_the_given_terms(monkeypatch) -> None:
-    """The composed query reaches the Search API with the caller's terms."""
-    captured: dict[str, str] = {}
-
-    def _open(req):
-        captured["url"] = req.get_full_url()
-        return _FakeResp(200, b'{"items": []}')
-
-    _install_urlopen(monkeypatch, _open)
-    gh.search_perf_prs("https://github.com/ROCm/vllm.git", terms=("deepseekv4",))
-    assert "deepseekv4" in captured["url"]
-    assert "throughput" not in captured["url"]
-    # Best-match order: a recency sort would bury the PRs that match the terms best.
-    assert "sort=" not in captured["url"]
-
-
 def test_build_query_searches_every_pr_state() -> None:
     """The search carries no is:open qualifier, so merged and closed PRs are found too."""
     q = gh._build_query("sgl-project/sglang", terms=gh.PERF_TERMS)
     assert "is:open" not in q
     assert "is:pr" in q
-
-
-# search_perf_prs --------------------------------------------------------
-
-
-def test_search_perf_prs_parses_items(monkeypatch) -> None:
-    """A normal GitHub-Search-shaped response is mapped to GitHubPr list."""
-    body = json.dumps(
-        {
-            "items": [
-                {"number": 11, "title": "fp8 fix", "html_url": "u11"},
-                {"number": 12, "title": "rocm tune", "html_url": "u12"},
-            ]
-        }
-    ).encode("utf-8")
-    _install_urlopen(monkeypatch, lambda req: _FakeResp(200, body))
-    out = gh.search_perf_prs("https://github.com/sgl-project/sglang.git", limit=5, terms=gh.PERF_TERMS)
-    assert out == [
-        GitHubPr(number=11, title="fp8 fix", html_url="u11"),
-        GitHubPr(number=12, title="rocm tune", html_url="u12"),
-    ]
-
-
-def test_search_perf_prs_best_effort_on_failure(monkeypatch) -> None:
-    """Network / rate-limit errors must return [] (no exception)."""
-
-    def boom(req):
-        raise urllib.error.HTTPError(req.get_full_url(), 403, "rate", {}, io.BytesIO(b""))
-
-    _install_urlopen(monkeypatch, boom)
-    out = gh.search_perf_prs("https://github.com/sgl-project/sglang.git", limit=5, terms=gh.PERF_TERMS)
-    assert out == []
-
-
-def test_search_perf_prs_non_github_returns_empty() -> None:
-    """A non-GitHub remote should silently return [] (no network call)."""
-    out = gh.search_perf_prs("https://gitlab.com/foo/bar.git", terms=gh.PERF_TERMS)
-    assert out == []
 
 
 # search_issues: a failure is raised, never an empty answer -------------------------------------------------

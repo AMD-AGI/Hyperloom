@@ -4,10 +4,9 @@
 """The ``upstream_pr_search`` tool: find upstream pull requests that look relevant.
 
 The tool runs in the process that hosts the toolbox, never in a measurement sandbox, and answers only for the repositories
-the rule pack names (``UPSTREAM_PR_REPOS``). The framework agent's own GitHub search is best-effort: an unreachable
-host, a refused token and an exhausted quota all come back as an empty list, which would read as "no pull request
-matches". The search made here asks GitHub the same question, each keyword as a quoted phrase, and fails instead,
-saying why (:class:`GitHubUnavailable`); an empty list means GitHub answered and found none.
+the rule pack names (``UPSTREAM_PR_REPOS``). The search asks GitHub for each keyword as a quoted phrase. An unreachable
+host, a refused token and an exhausted quota fail it, saying why (:class:`GitHubUnavailable`); an empty list means
+GitHub answered and found none.
 
 Pull-request text is data: the summary carries the ref and the title of the first candidate only.
 """
@@ -33,15 +32,13 @@ _OPEN = "open"
 _STATES = frozenset({_OPEN, "merged", "closed", "all"})
 #: What is searched when the caller names no state: open pull requests only.
 _OPEN_ONLY = (_OPEN,)
-#: The framework agent's name for its GitHub source of candidates (one of its ``search_modes``).
-_GITHUB = "github"
 _SEARCHED = frozenset(repo.lower() for repo in UPSTREAM_PR_REPOS)
 _TIMEOUT_SEC = 10.0
 
 
 @dataclass(frozen=True)
 class UpstreamSearch:
-    """The framework agent's search ``request``, and the pull-request ``states`` the caller asked for."""
+    """The search ``request``, and the pull-request ``states`` the caller asked for."""
 
     request: CandidateSearchRequest
     states: tuple[str, ...] = _OPEN_ONLY
@@ -111,7 +108,7 @@ def _strings(value: Any) -> tuple[str, ...]:
 
 
 def build_search(params: Mapping[str, Any]) -> UpstreamSearch:
-    """Turn tool parameters into the framework agent's search request; raises :class:`InvalidRequest`."""
+    """Turn tool parameters into the search request; raises :class:`InvalidRequest`."""
     repo_url = str(params.get("repo_url") or "").strip()
     try:
         slug = repo_slug(repo_url)
@@ -136,7 +133,6 @@ def build_search(params: Mapping[str, Any]) -> UpstreamSearch:
         repo_url=repo_url,
         max_search_candidates=limit,
         keywords=keywords,
-        search_modes=(_GITHUB,),
     )
     return UpstreamSearch(request, states)
 
