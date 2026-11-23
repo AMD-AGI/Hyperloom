@@ -175,9 +175,14 @@ The same mark bounds what a session may stop while it runs. A host that runs
 several campaigns has the same driver, profiler and scratch-script names in each
 of them, so a kill that chooses its targets by name is never scoped to the
 session that issues it. The Implementer's in-session hooks and the Analysis
-session's deny `pkill`, `killall`, and a `kill` whose targets come from `pgrep`,
-`pidof`, `ps` or a pipe, in the shell and inside an inline program. The denial
-names what to run instead: `python -m kernelforge.utils.session_kill
+session's deny `pkill` and `killall`, a `kill` given no process of its own, and
+any command that both searches processes by name (`pgrep`, `pidof`, `ps`) and
+runs `kill`, however the search reaches it: a substitution, quoted or not, a
+pipe, a loop or a variable. An inline program is denied the same way when it
+names `pkill` or `killall`, or searches by name and sends a signal. The check
+reads one command at a time, so it stops the habit rather than the intent: a
+search in one command and a `kill` of the PIDs it printed in the next is not
+seen. The denial names what to run instead: `python -m kernelforge.utils.session_kill
 '<pattern>'` signals the processes carrying the calling session's mark whose
 command line matches, and never the shell or the agent CLI that ran it; a
 `kill` of a named PID is left alone. The Implementer's prompt states the same

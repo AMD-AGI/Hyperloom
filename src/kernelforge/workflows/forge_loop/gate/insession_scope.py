@@ -49,12 +49,21 @@ _BASH_CMD_WRAPPERS = frozenset(
 )
 # Verbs that choose the processes they signal by name or pattern, out of every process on the host.
 _PATTERN_KILL_VERBS = frozenset({"pkill", "killall", "killall5", "skill"})
-# Verbs whose output is a list of processes found by name; a ``kill`` fed from one is a pattern kill in two steps.
+# Verbs whose output is a list of processes found by name; a ``kill`` in the same command is a pattern kill in two
+# steps, however the list reaches it: a substitution, quoted or not, a pipe, a loop or a variable.
 _PROCESS_SEARCH_VERBS = frozenset({"pgrep", "pidof", "ps"})
+# Words that open a command without being one; the command is what follows them.
+_SHELL_KEYWORDS = frozenset({"if", "then", "elif", "else", "while", "until", "do", "!", "{", "("})
 # ``kill`` options that only ask a question, so naming no process with them signals nothing.
 _KILL_QUERY_OPTIONS = frozenset({"-l", "-L", "--list", "--table", "--help", "--version", "-V"})
 # The same verbs named inside an inline program, where no shell word carries them.
 _INLINE_PATTERN_KILL = re.compile(r"\b(?:pkill|killall)\b")
+# A process search run from inside an inline program: as a word of an argument list or a command string, or psutil's.
+_INLINE_PROCESS_SEARCH = re.compile(
+    r"\b(?:pgrep|pidof)\b|[\"']ps[\"']|\bps\s+(?:-|aux\b|ax\b)|\bpsutil\.(?:process_iter|pids)\b"
+)
+# A signal sent from inside an inline program.
+_INLINE_SIGNAL = re.compile(r"\bkill(?:pg)?\b|\.send_signal\b|\.terminate\b")
 # A shell variable assignment, which is what precedes a command's verb.
 _SHELL_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # In-process (python/perl) WRITE APIs — there is no shell verb to key off, so these are detected textually and paired
@@ -440,27 +449,82 @@ def inline_programs(command: str) -> tuple[list[str], str]:
 
 def _kill_names_no_process(args: Sequence[str]) -> bool:
     """Whether a ``kill`` is given no process of its own: its targets then come from a pipe or are every process."""
-    if any(arg in _KILL_QUERY_OPTIONS for arg in args):
-        return False
     named = list(args[args.index("--") + 1 :]) if "--" in args else [arg for arg in args if not arg.startswith("-")]
     return not named
 
 
-def _shell_kill_reason(text: str) -> str:
-    for verb, args in _simple_commands(text):
-        if verb in _PATTERN_KILL_VERBS:
-            return f"`{verb}` chooses its targets by name out of every process on the host"
+def _closing_parenthesis(text: str, start: int) -> int:
+    """Where the parenthesis opened just before ``start`` closes, or the end of the text when it never does."""
+    depth = 1
+    for position in range(start, len(text)):
+        depth += (text[position] == "(") - (text[position] == ")")
+        if not depth:
+            return position
+    return len(text)
+
+
+def _substitution_payloads(text: str) -> list[tuple[str, int, int]]:
+    """The shell text a command runs to produce one of its words or streams, as ``(source, start, end)``.
+
+    These are the outermost ``$(...)``, ``<(...)``, ``>(...)`` and backtick spans, whether or not double quotes
+    surround them; a nested one is part of its parent's source. Single quotes make the text literal, so nothing
+    inside them is one.
+    """
+    payloads: list[tuple[str, int, int]] = []
+    position, in_single, in_double = 0, False, False
+    while position < len(text):
+        character = text[position]
+        if character == "'" and not in_double:
+            in_single = not in_single
+        elif character == '"' and not in_single:
+            in_double = not in_double
+        elif character == "`" and not in_single:
+            closing = text.find("`", position + 1)
+            closing = len(text) if closing < 0 else closing
+            payloads.append((text[position + 1 : closing], position, min(closing + 1, len(text))))
+            position = closing
+        elif character in "$<>" and text.startswith("(", position + 1) and not in_single:
+            closing = _closing_parenthesis(text, position + 2)
+            payloads.append((text[position + 2 : closing], position, min(closing + 1, len(text))))
+            position = closing
+        position += 1
+    return payloads
+
+
+def _shell_commands(text: str) -> Iterator[tuple[str, list[str]]]:
+    """Every simple command shell text runs: after a keyword, inside a substitution and in a ``sh -c`` word included."""
+    payloads = _substitution_payloads(text)
+    # Each substitution stands in the outer command as one opaque word, so the outer command still has the word it
+    # was given and the substitution's own punctuation does not run into the operators around it.
+    outer = list(text)
+    for _source, start, end in payloads:
+        outer[start:end] = "x" * (end - start)
+    for verb, args in _simple_commands("".join(outer)):
+        while verb in _SHELL_KEYWORDS and args:
+            verb, args = os.path.basename(_unquote(args[0])), args[1:]
+        yield verb, args
         if verb in _SHELL_VERBS:
-            nested = _shell_kill_reason(_short_option_value(args, "c"))
-            if nested:
-                return nested
-        if verb != "kill":
-            continue
-        search = next((word for word in map(_unquote, args) if word in _PROCESS_SEARCH_VERBS), "")
-        if search:
-            return f"`kill` takes its targets from `{search}`, a search by name over every process on the host"
-        if _kill_names_no_process(args):
-            return "`kill` names no process, so its targets come from a search or are every process"
+            yield from _shell_commands(_short_option_value(args, "c"))
+    for source, _start, _end in payloads:
+        yield from _shell_commands(source)
+
+
+def _shell_kill_reason(text: str) -> str:
+    commands = list(_shell_commands(text))
+    pattern_kill = next((verb for verb, _args in commands if verb in _PATTERN_KILL_VERBS), "")
+    if pattern_kill:
+        return f"`{pattern_kill}` chooses its targets by name out of every process on the host"
+    kills = [args for verb, args in commands if verb == "kill" and not _KILL_QUERY_OPTIONS.intersection(args)]
+    if not kills:
+        return ""
+    search = next((verb for verb, _args in commands if verb in _PROCESS_SEARCH_VERBS), "")
+    if search:
+        return (
+            f"this command runs `kill` and `{search}`, a search by name over every process on the host, so what it "
+            "signals is not limited to this session"
+        )
+    if any(_kill_names_no_process(args) for args in kills):
+        return "`kill` names no process, so its targets come from a search or are every process"
     return ""
 
 
@@ -473,4 +537,10 @@ def host_wide_kill_reason(command: str) -> str:
         found = _INLINE_PATTERN_KILL.search(source)
         if found:
             return f"an inline program runs `{found.group(0)}`, which chooses its targets by name"
+        search = _INLINE_PROCESS_SEARCH.search(source)
+        if search and _INLINE_SIGNAL.search(source):
+            return (
+                f"an inline program searches processes by name (`{search.group(0)}`) and sends a signal, so what "
+                "it signals is not limited to this session"
+            )
     return _shell_kill_reason(remainder)

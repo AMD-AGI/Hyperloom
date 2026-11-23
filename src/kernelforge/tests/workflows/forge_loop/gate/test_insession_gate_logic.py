@@ -176,11 +176,24 @@ def test_on_pre_bash_denies_protected_write(tmp_path):
         "killall python3",
         "timeout 60 python3 sweep.py || pkill -f sweep.py",
         "kill -9 $(pgrep -f rocprofv3) 2>/dev/null",
+        'kill -9 "$(pgrep -f bench.py)"',
+        "kill -9 `pgrep -f bench.py`",
+        'kill -9 "`pidof rocprofv3`"',
+        "for p in $(pgrep -f bench.py); do kill $p; done",
+        'pids="$(pgrep -f bench.py)"; kill $pids',
+        "while read p; do kill $p; done < <(pgrep -f bench.py)",
+        "if pgrep -f bench.py > /dev/null; then kill $(cat bench.pid); fi",
+        'timeout 30 bash -c "kill -9 $(pidof rocprofv3)"',
         "pgrep -f bench | xargs -r kill",
         "ps aux | grep sweep | awk '{print $2}' | xargs kill -9",
         "bash -c 'pkill python'",
         "kill -9 -1",
         "python3 -c \"import subprocess; subprocess.run(['pkill', '-f', 'bench'])\"",
+        'python3 -c "import os, subprocess; [os.kill(int(p), 9) for p in '
+        "subprocess.check_output(['pgrep', '-f', 'bench.py']).split()]\"",
+        "python3 - <<'PY'\nimport os, signal, subprocess\n"
+        "for pid in subprocess.run(['ps', '-eo', 'pid,cmd'], capture_output=True, text=True).stdout.split():\n"
+        "    os.kill(int(pid), signal.SIGKILL)\nPY",
     ],
 )
 def test_on_pre_bash_denies_a_kill_that_chooses_its_targets_by_name(tmp_path, command):
@@ -202,7 +215,13 @@ def test_on_pre_bash_denies_a_kill_that_chooses_its_targets_by_name(tmp_path, co
         "kill -9 $!",
         "kill %1",
         "kill -TERM $(cat sweep.pid)",
+        'kill "$(cat sweep.pid)"',
+        "kill `cat sweep.pid`",
         "kill $(jobs -p)",
+        "python3 bench.py & pid=$!; sleep 2; kill $pid; wait",
+        "echo 'kill $(pgrep bench) is denied'",
+        "grep -n pgrep notes.txt; kill 4242",
+        "python3 - <<'PY'\nimport subprocess\nrun = subprocess.Popen(['python3', 'bench.py'])\nrun.terminate()\nPY",
         "kill -l",
         "pgrep -f sweep.py",
         "ps aux | grep rocprofv3",
