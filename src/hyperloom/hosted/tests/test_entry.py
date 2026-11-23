@@ -112,7 +112,8 @@ def test_a_spec_without_a_flow_execs_into_the_multibranch_command_with_the_envir
     ]
     environment = run.handed.calls[0][2]
     bin_dir = str(Path(sys.executable).parent)
-    assert environment.pop("PATH").split(os.pathsep)[0] == bin_dir  # the installer's interpreter resolves the command
+    path = environment.pop("PATH")
+    assert path.split(os.pathsep)[0] == bin_dir  # the installer's interpreter resolves the command
     before.pop("PATH", None)
     runtime = environment.pop(entry.ENV_RUNTIME_DIR)
     assert Path(runtime).parent == run.container_tmp
