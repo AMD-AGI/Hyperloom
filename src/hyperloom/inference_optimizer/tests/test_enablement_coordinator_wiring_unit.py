@@ -1398,7 +1398,7 @@ async def test_rearm_authored_lane_perf_framework_increments_counter(session_dir
 @pytest.mark.asyncio
 async def test_rearm_authored_lane_perf_framework_stamps_terminal_at_cap(session_dir):
     """After _AUTHORED_LANE_MAX_ATTEMPTS, the next call stamps a terminal row."""
-    from hyperloom.orchestrator.phases.framework import _AUTHORED_LANE_MAX_ATTEMPTS
+    from hyperloom.orchestrator.phases.framework_reauthor import _AUTHORED_LANE_MAX_ATTEMPTS
 
     coord = _make_coord_with_phase(session_dir)
     cand_id = "https://github.com/example/repo/pull/100"

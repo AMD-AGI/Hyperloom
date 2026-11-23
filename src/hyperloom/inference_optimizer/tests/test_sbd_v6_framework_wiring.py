@@ -759,7 +759,7 @@ def test_a_source_proposal_keeps_every_kb_read_that_shaped_it(session_dir: Path)
     """The discovery and the authoring specialist each saw a read; the proposal the attempt joins keeps both."""
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.phases.framework import _forward_integrate_source
+    from hyperloom.orchestrator.phases.framework_proposals import _forward_integrate_source
 
     discovery_ref = {"id": "exp-00000000000000000000000000000001", "purpose": "representative"}
     authoring_ref = {"id": "exp-00000000000000000000000000000002", "purpose": "representative"}
