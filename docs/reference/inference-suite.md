@@ -182,11 +182,12 @@ the file: set `NUM_PROMPTS` or the cap to send all of it. A concurrency sweep se
 own count per rung. Token counts are the server's `usage`; a request without one fails. The
 client saves the keys a fixed round reads in `client/inferencex_result.json`.
 Exported in the environment of `hyperloom optimize` or
-`hyperloom-multibranch run`, both names reach every rendered point. The client opens
-the file where the round runs, once its server is up: a confined runner of a
-`hyperloom-multibranch run` test reads it only in a tree its sandbox shows, such as
-the model directory or the Hugging Face hub cache, and a file the client cannot read
-fails the round as `client_failed`.
+`hyperloom-multibranch run`, both names reach every rendered point. The file is read
+where the round runs, first by the round before it starts its server: a file it
+cannot read, or a kept line that holds no prompt, fails the round as
+`config_invalid`. A confined runner of a `hyperloom-multibranch run` test reads it
+only in a tree its sandbox shows, such as the model directory or the Hugging Face
+hub cache.
 
 ## Server lifecycle
 

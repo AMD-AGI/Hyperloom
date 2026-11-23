@@ -23,7 +23,7 @@ from inference_suite.contracts.config import FixedWorkload, PromptDataset, Serve
 from inference_suite.contracts.launch import ClientInvocation
 from inference_suite.contracts.layout import RunLayout
 from inference_suite.contracts.report import FailedStep, FixedMetrics, ReportError
-from inference_suite.load import exit_stop, inherited_env, read_result
+from inference_suite.load import dataset_client, exit_stop, inherited_env, read_result
 from inference_suite.runtime.phases import Phase, PhaseClock
 from inference_suite.runtime.process import spawn
 from inference_suite.runtime.server import Server
@@ -105,6 +105,19 @@ def warmup_pass(workload: FixedWorkload) -> ClientPass | None:
 def fixed_client_env(tool: ClientTool) -> dict[str, str]:
     """The env the client gets beyond what the round inherits; ``launch.json`` records it."""
     return {"PYTHONPATH": tool.package_root}
+
+
+def dataset_refusal(workload: FixedWorkload) -> Stop | None:
+    """Why the client cannot send ``workload``'s prompt dataset, if it cannot; the round asks before its server
+    starts."""
+    dataset = workload.dataset
+    if dataset is None:
+        return None
+    try:
+        dataset_client.read_prompts(Path(dataset.path), dataset.max_prompts)
+    except (OSError, ValueError) as exc:
+        return Stop(FailedStep.CONFIG_INVALID, f"{_WHAT} cannot send the prompt dataset {dataset.path}: {exc}")
+    return None
 
 
 def client_argv(
@@ -355,6 +368,7 @@ __all__ = [
     "MeasuredWindow",
     "OutputActivity",
     "client_argv",
+    "dataset_refusal",
     "fixed_client_env",
     "fixed_metrics",
     "measured_invocation",
