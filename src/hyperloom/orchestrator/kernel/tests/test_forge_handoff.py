@@ -346,4 +346,3 @@ def test_the_handoff_names_the_installed_package_a_snapshot_is_served_from(tmp_p
     bundle = read_handoff(handoff_dir)
     assert bundle.repositories == (checkout.resolve(), snapshot.resolve())
     assert bundle.served_trees == {snapshot.resolve(): installed}
-
