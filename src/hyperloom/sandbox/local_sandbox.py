@@ -47,7 +47,14 @@ from hyperloom.sandbox.templates import RESERVED_ENV_NAMES, LocalTemplate
 
 log = logging.getLogger(__name__)
 
-__all__ = ["WORK_DIR", "LocalSandbox", "SandboxPlan", "SandboxRuntime"]
+__all__ = [
+    "SGLANG_JIT_CACHE_ENV",
+    "SGLANG_JIT_CACHE_PREFIX",
+    "WORK_DIR",
+    "LocalSandbox",
+    "SandboxPlan",
+    "SandboxRuntime",
+]
 
 #: The working directory every sandbox starts in, under the root the file API shows (``/work``).
 WORK_DIR = "work"
@@ -55,6 +62,13 @@ WORK_DIR = "work"
 #: Parent environment names a sandbox process inherits; everything else (keys,
 #: tokens, job topology) is dropped.
 _INHERITED_ENV = ("PATH", "LANG", "LC_ALL", "PYTHONPATH", "VIRTUAL_ENV")
+#: Where SGLang's JIT kernel cache goes instead of below ``HOME`` (``fs/work``), which lies in the session directory:
+#: SGLang publishes a build by renaming its staging directory, and an NFS server refuses to rename a directory that
+#: holds an open file, so a session directory on NFS failed every test's server at its first JIT build. ``/tmp`` is a
+#: confined sandbox's private scratch, deleted with it, and the host's otherwise, where :meth:`LocalSandbox.kill`
+#: deletes it; either is local, and the cache was the sandbox's own before.
+SGLANG_JIT_CACHE_ENV = "SGLANG_JIT_CACHE_DIR"
+SGLANG_JIT_CACHE_PREFIX = "/tmp/hl-sglang-jit-"
 _READER_JOIN_SEC = 2.0
 _CHUNK = 1 << 20
 
@@ -130,6 +144,7 @@ class LocalSandbox:
     def _build_base_env(self, create_envs: Mapping[str, str], platform_envs: Mapping[str, str]) -> dict[str, str]:
         env = {k: os.environ[k] for k in _INHERITED_ENV if k in os.environ}
         env["HOME"] = str(self.fs / WORK_DIR)
+        env[SGLANG_JIT_CACHE_ENV] = f"{SGLANG_JIT_CACHE_PREFIX}{self.sandbox_id}"
         env.update(self.template.envs)
         env.update(create_envs)
         env.update(platform_envs)
@@ -209,6 +224,8 @@ class LocalSandbox:
             self._leftovers = wait_exited(self._leftovers) | reaped_now
             reaped = self._leftovers.clean
             shutil.rmtree(self.directory, ignore_errors=True)
+            if self._confined is None:
+                shutil.rmtree(f"{SGLANG_JIT_CACHE_PREFIX}{self.sandbox_id}", ignore_errors=True)
             self._on_end(self, reaped)
         if not reaped:
             raise SandboxUnavailable(
