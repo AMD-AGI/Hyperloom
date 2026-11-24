@@ -299,6 +299,7 @@ def _pending_sentinel(
     return {
         "specialist_task_id": attempt.specialist_task_id,
         "task_id": attempt.task_id,
+        "covered_step": attempt.covered_step,
         "patches": [str(patch) for patch in deliverable.patch_paths],
         "artifacts": [
             {"target": str(spec.target), "rel_target": spec.rel_target} for spec in deliverable.artifact_specs

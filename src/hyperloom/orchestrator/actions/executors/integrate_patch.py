@@ -61,7 +61,11 @@ class IntegratePatchExecutor(
         """Apply a specialist's patches/config changes and benchmark them."""
         params = dict(ctx.task.params or {})
         extra = getattr(ctx, "extra", None) or {}
-        attempt = IntegrateAttempt(task_id=ctx.task.task_id, phase_deadline=extra.get("phase_deadline"))
+        attempt = IntegrateAttempt(
+            task_id=ctx.task.task_id,
+            phase_deadline=extra.get("phase_deadline"),
+            covered_step=bool(extra.get("covered_step")),
+        )
 
         early = await self._stage_resolve(attempt, params, extra)
         if early is not None:
