@@ -119,6 +119,7 @@ async def test_source_candidate_is_measured_as_a_covered_step_with_no_critic_pro
     assert not coordinator.state.pending_proposals
     assert adopted[0]["measured_tput"] == 120.0
     assert adopted[0]["overlay_loaded"] is False
+    assert coordinator.shared_state.geak_result["revalidation_status"] == "validated"
     assert coordinator.shared_state.geak_result["canonical_revalidation"] == canonical
     assert coordinator.shared_state.geak_pending == {}
 

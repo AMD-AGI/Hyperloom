@@ -39,7 +39,7 @@ from ._integrate_results import (
     _perf_revert,
     _revert_status,
 )
-from ._integrate_vocabulary import BENCH_UNMEASURED_CLASS
+from ._integrate_vocabulary import BENCH_UNMEASURED_CLASS, RESULT_GRADED
 from ..patching._patch_git import _uncommitted_revert
 from ..patching._patch_sources import _done_field
 
@@ -220,7 +220,7 @@ class PerfGateMixin:
             attempt.specialist_task_id,
             parity.get("reason"),
         )
-        return parity, _perf_revert(
+        revert = _perf_revert(
             attempt,
             measured,
             status="reverted",
@@ -228,6 +228,9 @@ class PerfGateMixin:
             error_class="switch_off_parity_inconclusive" if inconclusive else "switch_off_parity_failed",
             switch_off_parity=parity,
         )
+        if inconclusive:
+            revert[RESULT_GRADED] = False
+        return parity, revert
 
     def _capture_source_layer(
         self,

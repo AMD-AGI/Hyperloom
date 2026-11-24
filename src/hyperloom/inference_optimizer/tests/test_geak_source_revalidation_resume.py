@@ -161,6 +161,7 @@ async def _measure(coord) -> None:
     try:
         await coord.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None)
     except (RuntimeError, asyncio.CancelledError):
+        # The bench stub ends some measurements by raising or cancelling; what the step left behind is under test.
         pass
 
 
