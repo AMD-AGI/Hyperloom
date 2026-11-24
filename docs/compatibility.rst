@@ -1,6 +1,6 @@
 .. meta::
-   :description: Compatibility matrix for Hyperloom: supported AMD Instinct GPUs, inference frameworks (SGLang, vLLM, Atom, xDiT), container images, and component dependencies.
-   :keywords: Hyperloom, compatibility, AMD Instinct, MI300X, MI325X, MI355X, SGLang, vLLM, Atom, xDiT, ROCm, container images, GPU support
+   :description: Compatibility matrix for Hyperloom: supported AMD Instinct GPUs, inference frameworks (SGLang, vLLM, Atom, xDiT, llama.cpp), container images, and component dependencies.
+   :keywords: Hyperloom, compatibility, AMD Instinct, MI300X, MI325X, MI355X, SGLang, vLLM, Atom, xDiT, llama.cpp, ROCm, container images, GPU support
 
 ******************************
 Hyperloom compatibility matrix
@@ -43,7 +43,8 @@ The following table lists the minimum requirements for running Hyperloom.
 +=====================+========================================================+
 | AMD Instinct™ GPU   | MI300X, MI325X, MI355X                                 |
 +---------------------+--------------------------------------------------------+
-| AMD Radeon™ GPU     | Radeon AI PRO R9700 (gfx1201), vLLM and llama.cpp only |
+| AMD Radeon™ GPU     | Radeon AI PRO R9700 (gfx1201), vLLM and llama.cpp;     |
+|                     | Radeon PRO W7900D (gfx1100), llama.cpp                 |
 +---------------------+--------------------------------------------------------+
 | Operating System    | Ubuntu 24.04 (recommended); Ubuntu 22.04 (legacy)      |
 +---------------------+--------------------------------------------------------+
@@ -53,6 +54,7 @@ The following table lists the minimum requirements for running Hyperloom.
 +---------------------+--------------------------------------------------------+
 | Inference Framework | SGLang (>= 0.5.12), vLLM (>= 0.21.0),                  |
 |                     | ATOM (preinstalled or setup-installed; see below),     |
+|                     | llama.cpp (built from your checkout; see below),       |
 |                     | plus ``custom``                                        |
 |                     | benchmark script                                       |
 +---------------------+--------------------------------------------------------+
@@ -129,6 +131,9 @@ The following inference frameworks are supported:
    * - ATOM
      - 7.2.4 (recorded image stack)
      - AMD out-of-tree engine, launched as ``python3 -m atom.entrypoints.openai_server``. Supports Docker, direct execution in a preinstalled ATOM/ROCm torch environment, or a bare-metal source install with ``--install-framework atom``. The recorded image-based stack used ``rocm/atom-dev:v0.1.7-rc0`` on MI355X. ATOM v0.1.6 is the minimum: every round passes ``--served-model-name``, which older servers do not take, so the pre-launch flag check refuses them as ``flag_unknown``. An AgentX profile on v0.1.6 records no tensor shapes (``ATOM_PROFILER_RECORD_SHAPES`` arrived in v0.1.7). Other builds require local validation. An unset or empty ``KERNEL_OPT_BACKEND_ORDER`` resolves to GEAK here as it does for every framework, and explicit values are preserved.
+   * - llama.cpp
+     - The image's own (HIP build)
+     - Served by a ``llama-server`` the session builds from the checkout ``--framework-path`` (or ``FRAMEWORK_REPO_PATH``) names, with HIP on for the card's architecture; no image or wheel is installed. Run with GGUF models on Radeon PRO W7900D (gfx1100), in single-branch and multi-branch sessions, and on Radeon AI PRO R9700 (gfx1201), in a multi-branch session; a single-branch session has not been run on R9700. Pass ``--framework llamacpp --gpu-type w7900d`` (or ``r9700``) and the base launch as ``--reference-script``. See :doc:`/how-to/framework-from-checkout`.
    * - ``custom``
      - Host-defined
      - Escape hatch for your own benchmark script; Hyperloom does not manage the server lifecycle. Requires ``--framework-path`` (or ``FRAMEWORK_REPO_PATH``) and ``--benchmark-scripts-dir`` (or ``HYPERLOOM_BYPASS_SCRIPTS_DIR``); the CLI exits with status 2 when either is missing.
