@@ -427,7 +427,7 @@ _COMPAT_DETECTORS: tuple[DetectorSpec, ...] = (
         _detect_vocab_weight_shape_mismatch,
         args=("model_path", "data"),
     ),
-    DetectorSpec(  # text-server only
+    DetectorSpec(
         "tokenizer_artifacts",
         _detect_missing_tokenizer_files,
         args=("model_path", "data"),

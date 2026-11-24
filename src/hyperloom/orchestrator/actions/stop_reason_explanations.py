@@ -93,8 +93,8 @@ STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "model_context_window_too_small": "Preflight gate: the model's max context window cannot hold the requested ISL + OSL.",
     "unsupported_model_arch": "Preflight gate: the model architecture (e.g. multimodal / vision) is unsupported.",
     "model_config_incompatible": (
-        "Preflight gate: the model directory is not a loadable text-generation checkpoint (corrupt config.json, "
-        "missing tokenizer files, an adapter without base weights, or a weight format no loader handles)."
+        "Preflight gate: the model directory is not a loadable text-generation checkpoint "
+        "(e.g. corrupt config.json, no tokenizer files, an unsupported weight format)."
     ),
     "baseline_arg_error": "Two or more baseline attempts failed argument or configuration validation, so further baseline retries were stopped.",
     "enablement_attempts_exhausted": "The enablement loop stopped after too many consecutive rounds bought no ground. A bring-up that is still clearing new boot failures is bounded by the run's wall clock instead.",

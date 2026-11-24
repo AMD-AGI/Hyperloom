@@ -83,7 +83,6 @@ _SUPPORTED_MODEL_TYPES = frozenset(
     }
 )
 
-
 _UNSUPPORTED_CONFIG_KEYS = (
     "vision_config",
     "image_token_id",
