@@ -670,7 +670,11 @@ concurrency ladder, one arm each, and produces the throughput-vs-
 interactivity curve. The ladder is sized for the workload: powers of two
 down from 256 for a synthetic run, `1,4,8,10,14,20,28` for an agentic one,
 where a request carries orders of magnitude more prompt and the same card
-saturates far lower. Override either with `--conc-sweep-concs`. Under
+saturates far lower. Override either with `--conc-sweep-concs`. When
+either arm's server args set a request-slot count (llama.cpp's `-np` /
+`--parallel`), the ladder drops every concurrency above it, since the server
+only queues the rest; with none left, SWEEP declines with
+`concs_exceed_server_slots`. Under
 native AgentX, concurrency is fixed for the session and
 `--enable-conc-sweep` is rejected at startup. Start a separate session for each
 CONC. The independent MLPerf backend keeps its optional sweep, disabled by

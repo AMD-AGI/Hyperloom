@@ -66,6 +66,9 @@ from ._rung_outcomes import (
     _deadline_skip_result,
     _raised_result,
 )
+from hyperloom.inference_optimizer import framework_registry
+from hyperloom.inference_optimizer.grid_server_args import compose_server_args
+from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 from .conc_sweep_report import (
     ArmCurves,
     budget_limited_without_valid_pair,
@@ -888,6 +891,32 @@ def _decline_before_start(
     return None
 
 
+def _server_slots(state: SharedState, optimized: _Arm) -> int | None:
+    """The most requests either arm's server runs at once, ``None`` when either sets no cap."""
+    base_args = read_baseline_server_args(state)
+    optimized_args = compose_server_args(
+        inherited_args=base_args,
+        variant_extra_args=optimized.args,
+        remove_args=optimized.controls.get("remove_args"),
+        args_mode=str(optimized.controls.get("args_mode") or "append"),
+    )
+    slots = [framework_registry.request_slots(state.framework, args) for args in (base_args, optimized_args)]
+    return None if None in slots else max(slot for slot in slots if slot is not None)
+
+
+def _within_slots(concs: list[int], slots: int | None) -> list[int]:
+    """``concs`` up to the servers' request ``slots``: a server queues requests past its slots, so a rung above them
+    measures the same batch behind a longer queue."""
+    if slots is None or all(conc <= slots for conc in concs):
+        return concs
+    log.info(
+        "conc_sweep: the servers run at most %d request slots; dropping concs %s",
+        slots,
+        [c for c in concs if c > slots],
+    )
+    return [conc for conc in concs if conc <= slots]
+
+
 async def _sweep_arms(run: _SweepRun, grid_source: str) -> None:
     """Record the budget and plan, then run the baseline arm and the optimized arm on the rungs it reached.
 
@@ -1038,6 +1067,10 @@ async def run_conc_sweep(
     declined = _decline_before_start(recorder, state, optimized, concs, total_budget_sec)
     if declined is not None:
         return declined
+    slots = _server_slots(state, optimized)
+    concs = _within_slots(concs, slots)
+    if not concs:
+        return _declined(recorder, "concs_exceed_server_slots", server_slots=slots)
     # Positive past the decline above.
     isl = int(state.isl)
     osl = int(state.osl)

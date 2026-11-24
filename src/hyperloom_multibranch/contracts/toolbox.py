@@ -87,7 +87,7 @@ REJECTION_CODES = (
     "unknown_retest",  # ``retest_of`` names no accepted request
     "branch_stopped",  # the queue policy lists the branches that may submit and this one is not among them
     "speculative_context_copy_on_synthetic",  # an InferenceX candidate introduces or changes a context-copy draft
-    "speculative_decoding_pinned",  # an AgentX candidate changes the draft or simulated acceptance its parent pins
+    "speculative_decoding_pinned",  # a candidate simulates the acceptance of a draft its parent verifies, or an AgentX one changes the draft or simulated acceptance its parent pins
     "unsupported_kind",  # the toolbox's backend does not run this kind of test (a local backend: profile, repro), or has no cards to lease
     "profile_exists",  # a PROFILE of this commit and recipe is already queued, running or measured: ``existing_request_id``
     "empty_delta",  # an explore test whose delta changes nothing

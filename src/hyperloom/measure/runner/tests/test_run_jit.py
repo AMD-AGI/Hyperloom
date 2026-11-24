@@ -51,6 +51,9 @@ from hyperloom.measure.runner.tests.test_run import (  # noqa: F401 - fixtures
 )
 from hyperloom.measure.tests.test_local_backend import _Grid, _Server
 
+#: The version of every distribution in the rig's bases tree: what a root over it records, and what the farm's probe of
+#: the server's interpreter is told, whatever the interpreter running the tests has installed.
+IMAGE_VERSION = "0"
 HASH_DIR = "0123456789abcdef0123456789abcdef"
 MODULE = b"\x7fELF module_gemm built from the tree"
 BUILD_LOG = (
@@ -150,6 +153,7 @@ class Rig:
         monkeypatch.setattr(runner_jit, "locate_package", self._locate)
         monkeypatch.setattr(own_jit, "locate_package", self._locate)
         monkeypatch.setattr(farm_module, "locate_package", self._locate)
+        monkeypatch.setattr(farm_module, "installed_version", lambda dist_name, python, cwd: IMAGE_VERSION)
         _Server(monkeypatch)
 
     def _make_bases(self) -> None:
@@ -201,7 +205,7 @@ class Rig:
             "id": import_name,
             "kind": "package",
             "import_name": import_name,
-            "dist": {"name": import_name, "version": "0"},
+            "dist": {"name": import_name, "version": IMAGE_VERSION},
             "entries": [entry],
         }
 

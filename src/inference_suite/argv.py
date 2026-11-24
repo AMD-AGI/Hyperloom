@@ -55,14 +55,14 @@ def parse_removal_specs(remove_args: Any) -> list[tuple[str, str | None]]:
         i = 0
         while i < len(spec_tokens):
             tok = spec_tokens[i]
-            if not tok.startswith("--"):
+            if not is_flag(tok):
                 i += 1
                 continue
             if "=" in tok:
                 flag, _, value = tok.partition("=")
                 parsed.append((flag, value))
                 i += 1
-            elif i + 1 < len(spec_tokens) and not spec_tokens[i + 1].startswith("--"):
+            elif i + 1 < len(spec_tokens) and is_flag_value(tok, spec_tokens[i + 1]):
                 parsed.append((tok, spec_tokens[i + 1]))
                 i += 2
             else:
@@ -72,7 +72,7 @@ def parse_removal_specs(remove_args: Any) -> list[tuple[str, str | None]]:
 
 
 def removal_option_names(remove_args: Any) -> list[str]:
-    """The bare long option names a removal spec names, in order, each one once.
+    """The bare option names a removal spec names, in order, each one once, spelled as the server spells them.
 
     Only for a consumer whose contract is option names, such as an AgentX point's ``launch_overrides.remove_args``:
     the value a spec is scoped to is dropped here, so this must not stand in for a removal composed against
@@ -88,13 +88,13 @@ def removal_option_names(remove_args: Any) -> list[str]:
 def _removed_token_count(tokens: list[str], index: int, removals: set[tuple[str, str | None]]) -> int:
     """Count the tokens at *index* that *removals* deletes; 0 when the token survives."""
     tok = tokens[index]
-    if not tok.startswith("--"):
+    if not is_flag(tok):
         return 0
     flag, sep, value = tok.partition("=")
     drops_flag = (flag, None) in removals
     if sep and (drops_flag or (flag, value) in removals):
         return 1
-    if index + 1 < len(tokens) and not tokens[index + 1].startswith("--"):
+    if index + 1 < len(tokens) and is_flag_value(flag, tokens[index + 1]):
         if drops_flag or (flag, tokens[index + 1]) in removals:
             return 2
     return 1 if drops_flag else 0
@@ -282,6 +282,17 @@ def is_flag(token: str) -> bool:
     return token.startswith("-") and not token[1:2].isdigit() and token.strip("-") != ""
 
 
+def is_flag_value(flag: str, token: str) -> bool:
+    """Whether ``token``, following ``flag``, is its value rather than a flag of its own.
+
+    A boolean long flag must not take the short flag after it: llama.cpp's ``--jinja -md`` keeps ``-md`` and its path.
+    vLLM reads a dotted flag's next word as its value even when it begins with ``-``.
+    """
+    if token.startswith("--"):
+        return False
+    return "." in flag or not is_flag(token)
+
+
 def canonical_flag_name(flag: str) -> str:
     """``flag`` with no leading dashes, lowercase and underscores as dashes: one key per argparse destination."""
     return flag.lstrip("-").lower().replace("_", "-")
@@ -376,6 +387,7 @@ __all__ = [
     "compact_json_server_args",
     "flag_occurrences",
     "is_flag",
+    "is_flag_value",
     "json_object",
     "last_alias_value",
     "normalize_argv",

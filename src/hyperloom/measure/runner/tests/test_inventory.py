@@ -62,13 +62,14 @@ def test_a_missing_directory_is_refused(tmp_path):
 
 
 def _farm(tmp_path, entries):
+    import importlib.metadata
     import sys
 
     from hyperloom.measure.farm import build_farm
     from hyperloom.measure.spec import EnvRoot
 
     blobs = {"sha256:" + hashlib.sha256(d).hexdigest(): d for d in (b"x = 1\n",)}
-    root = EnvRoot("yaml", "package", "yaml", "PyYAML", "0", tuple(entries))
+    root = EnvRoot("yaml", "package", "yaml", "PyYAML", importlib.metadata.version("PyYAML"), tuple(entries))
     return build_farm([root], tmp_path / "farm", python=sys.executable, read_blob=blobs.__getitem__)
 
 

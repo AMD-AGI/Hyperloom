@@ -841,3 +841,13 @@ def test_below_a_root_of_one_account_the_zip_is_the_accounts_alone(tmp_path: Pat
     _build_session(sd)
     out = package_session_artifacts(sd, session_id="s")
     assert out is not None and stat.S_IMODE(out.stat().st_mode) == 0o600
+
+
+def test_without_a_named_destination_the_package_stays_with_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(ENV_PACKAGE_DEST_ROOT)
+    sd = tmp_path / "session"
+    _build_session(sd)
+
+    assert package_session_artifacts(sd, session_id="sid-1") == sd / "archive" / PACKAGE_SUBDIR / "sid-1.zip"

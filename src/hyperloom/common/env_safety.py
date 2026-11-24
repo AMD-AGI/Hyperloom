@@ -249,7 +249,7 @@ DOTENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
 # assets/runtime_env.sh; test_dotenv_allow_list.py holds the two equal and FRAMEWORK's values to the registry.
 DOTENV_NOT_PRIVATE_LENT_VALUES: Mapping[str, frozenset[str]] = MappingProxyType(
     {
-        "FRAMEWORK": frozenset({"atom", "custom", "sglang", "vllm", "xdit"}),
+        "FRAMEWORK": frozenset({"atom", "custom", "llamacpp", "sglang", "vllm", "xdit"}),
         "HF_DATASETS_OFFLINE": frozenset({"0", "1"}),
         "HF_HUB_OFFLINE": frozenset({"0", "1"}),
         "HYPERLOOM_DOTENV_CREDENTIALS": frozenset({"kernel-agent-env"}),

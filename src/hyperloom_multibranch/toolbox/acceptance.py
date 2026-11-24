@@ -26,10 +26,11 @@ from hyperloom.common.outside_facts import AITER_META_WHEEL_DIR
 from hyperloom.measure.compile import BaseImageMismatchError, BlobStore, CompiledEnvironment
 from hyperloom.measure.eval_context import EvalContextError
 from hyperloom.measure.jit.key import build_surface
-from hyperloom.measure.points import AcceptedMeasurement
+from hyperloom.measure.points import AcceptedMeasurement, ProfileUnsupported
 from hyperloom.measure.fake_gain import (
     CONTEXT_COPY_REFUSAL,
     SPECULATIVE_DECODING_PINNED,
+    declared_acceptance_refusal,
     launch_context_copy_refusal,
     pinned_speculative_refusal,
 )
@@ -484,15 +485,21 @@ class Acceptance:
     def _check_fake_gain(self, parent: Recipe, candidate: Recipe) -> None:
         """Refuse a candidate whose gain main refuses as fake: its launch is compared with its parent's.
 
-        InferenceX runs a synthetic benchmark, where a context-copy draft is refused (#1904); AgentX runs real
-        datasets, where a draft whose acceptance length the parent simulates stays pinned (#1885).
+        InferenceX runs a synthetic benchmark, where a context-copy draft is refused (#1904) and so is a simulated
+        acceptance in place of a draft the parent verifies; AgentX runs real datasets, where a draft whose acceptance
+        length the parent simulates stays pinned as well (#1885).
         """
         if self._workload is WorkloadKind.INFERENCEX:
-            reason, code = launch_context_copy_refusal(parent.launch, candidate.launch), CONTEXT_COPY_REFUSAL
+            refusals = (
+                (launch_context_copy_refusal, CONTEXT_COPY_REFUSAL),
+                (declared_acceptance_refusal, SPECULATIVE_DECODING_PINNED),
+            )
         else:
-            reason, code = pinned_speculative_refusal(parent.launch, candidate.launch), SPECULATIVE_DECODING_PINNED
-        if reason:
-            raise RequestRejected(reason, code)
+            refusals = ((pinned_speculative_refusal, SPECULATIVE_DECODING_PINNED),)
+        for refusal, code in refusals:
+            reason = refusal(parent.launch, candidate.launch)
+            if reason:
+                raise RequestRejected(reason, code)
 
     def _plan(self, recipe: Recipe, request: TestRequest) -> object:
         try:
@@ -505,5 +512,7 @@ class Acceptance:
             raise RequestRejected(str(error), "base_image_mismatch") from error
         except EvalContextError as error:
             raise RequestRejected(str(error), CONTEXT_BELOW_EVAL_CODE) from error
+        except ProfileUnsupported as error:
+            raise RequestRejected(str(error), "unsupported_kind") from error
         except RecipeError as error:
             raise RequestRejected(f"the environment does not compile: {error}", DELTA_NOT_APPLICABLE_CODE) from error

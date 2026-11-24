@@ -8,8 +8,9 @@ curve by model, method and draft length), so what is drafted and how acceptance 
 belong to the golden layer; how fast the draft runs stays open.
 
 :func:`real_acceptance` is the golden layer with only the simulation taken out (sglang's ``SGLANG_SIMULATE_ACC_*``
-environment, vLLM's synthetic rejection sampling in ``--speculative-config``, ATOM's forced acceptance flags): the
-same draft, accepting what the target model really accepts, so the server answers with the model's own text.
+environment, vLLM's synthetic rejection sampling in ``--speculative-config``, ATOM's forced acceptance flags,
+llama-server's synthetic acceptance options and their environment): the same draft, accepting what the target model
+really accepts, so the server answers with the model's own text.
 """
 
 from __future__ import annotations
@@ -38,10 +39,16 @@ GOLDEN_OWNED_FLAGS = frozenset(
         "num-speculative-tokens",
         "method",
         "draft-model",
+        "spec-type",
+        "spec-draft-model",
+        "model-draft",
+        "md",
+        "spec-draft-n-max",
     }
 )
-#: ATOM's forced acceptance, ``--spec-decode-acceptance-length`` or ``--spec-decode-acceptance-rate``.
-SIMULATED_FLAG_PREFIXES = ("spec-decode-acceptance",)
+#: ATOM's forced acceptance, ``--spec-decode-acceptance-length`` or ``--spec-decode-acceptance-rate``, and
+#: llama-server's, ``--spec-synth-len`` or ``--spec-synth-rates``, which accepts drafted tokens unverified.
+SIMULATED_FLAG_PREFIXES = ("spec-decode-acceptance", "spec-synth")
 GOLDEN_OWNED_FLAG_PREFIXES = (*SIMULATED_FLAG_PREFIXES, "speculative-acceptance")
 # InferenceX does not simulate acceptance once vLLM's adaptive verification is on, so turning it on
 # silently drops the golden acceptance length.
@@ -58,7 +65,9 @@ GOLDEN_OWNED_SPEC_CONFIG_KEYS = frozenset(
         "enable_adaptive_verification",
     }
 )
-GOLDEN_OWNED_ENV_PREFIXES = ("SGLANG_SIMULATE_ACC_",)
+#: The variables llama-server reads its synthetic acceptance options from; any of them simulates.
+SIMULATED_ENV_PREFIXES = ("LLAMA_ARG_SPEC_SYNTH_",)
+GOLDEN_OWNED_ENV_PREFIXES = ("SGLANG_SIMULATE_ACC_", *SIMULATED_ENV_PREFIXES)
 #: vLLM's ``--speculative-config`` keys that simulate acceptance: the synthetic sampler and the length it forces.
 #: ``rejection_sample_method`` simulates only when it names the synthetic sampler.
 SIMULATED_SPEC_CONFIG_KEYS = (_REJECTION_SAMPLER, _SYNTHETIC_LENGTH)
@@ -119,8 +128,9 @@ def _without_simulation(flag: str, values: list[str]) -> list[str] | None:
 def real_acceptance(args: Sequence[str], env: Mapping[str, str]) -> tuple[tuple[str, ...], dict[str, str]]:
     """The golden layer ``args`` and ``env`` less its acceptance simulation, every other key kept: no
     ``SGLANG_SIMULATE_ACC_*`` variable, in vLLM's ``--speculative-config`` (the JSON object, or its per-key flags)
-    no synthetic ``rejection_sample_method`` and no ``synthetic_acceptance_length``, and no ATOM
-    ``--spec-decode-acceptance-*`` flag. The draft, its length and its method stay as the golden layer names them."""
+    no synthetic ``rejection_sample_method`` and no ``synthetic_acceptance_length``, no ATOM
+    ``--spec-decode-acceptance-*`` flag, and no llama-server ``--spec-synth-*`` flag or ``LLAMA_ARG_SPEC_SYNTH_*``
+    variable. The draft, its length and its method stay as the golden layer names them."""
     kept: list[str] = []
     for flag, values in _groups(args):
         if not is_flag(flag):
@@ -138,6 +148,7 @@ __all__ = [
     "GOLDEN_OWNED_FLAGS",
     "GOLDEN_OWNED_FLAG_PREFIXES",
     "GOLDEN_OWNED_SPEC_CONFIG_KEYS",
+    "SIMULATED_ENV_PREFIXES",
     "SIMULATED_SPEC_CONFIG_KEYS",
     "golden_owned_settings",
     "is_golden_owned_flag",

@@ -161,3 +161,10 @@ def test_a_death_excerpt_cut_anywhere_carries_no_surrounding_whitespace(tmp_path
         for max_chars in range(40, 1200, 7):
             excerpt = server_log.death_excerpt(str(path), max_chars=max_chars)
             assert excerpt is not None and excerpt == excerpt.strip(), (path.name, max_chars)
+
+
+def test_scan_increment_detects_llama_server_ready(tmp_path):
+    log_path = tmp_path / "server.log"
+    for line in ("main: server is listening on http://127.0.0.1:8080", "srv  server_on_li: listening on http://h:1"):
+        log_path.write_text(f"{line}\n")
+        assert server_log._scan_increment(str(log_path), 0).saw_ready is True
