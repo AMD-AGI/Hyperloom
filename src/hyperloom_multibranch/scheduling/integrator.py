@@ -59,8 +59,7 @@ is judged on.
 When EXPLORE ends, :meth:`Integrator.finish_round` ends the rounds: no merge test starts any more, and the round under
 way takes back each merge test the rule gate has not asked a confirm for. A merge waiting for its confirm goes on to
 its end, so a gain measured once already still reaches the integration head FINAL reads, and of two that end the
-round merges the one it would have merged before; the caller says how long it waits for the merge tests, and how
-long after them for the round's regression set.
+round merges the one it would have merged before; the caller says how long it waits for the tests and for the set.
 
 A caller with no time left for that cancels the round instead, and no regression set runs after that. So a round that
 holds a merge that may be merged while its other tests run puts the regression set to it as its test ends, and a
@@ -1042,9 +1041,8 @@ class Integrator:
 
         No merge test starts from now on. The round takes back each merge test the gate has not asked a confirm for,
         as a cancelled round does, and goes on with those waiting for their confirm: their gain was measured once
-        already, and the integration head FINAL reads lacks it unless they end. The caller bounds this wait, by one test
-        while a merge test is left (:meth:`unfinished`) and by the session's deadline once the round has only its
-        regression set and its merge left, and cancels the round and awaits :meth:`abandon` after it either way.
+        already, and the integration head FINAL reads lacks it unless they end. The caller bounds this wait, longer with
+        no merge test left (:meth:`unfinished`), and cancels the round and awaits :meth:`abandon` after it either way.
         """
 
         self._ended = True

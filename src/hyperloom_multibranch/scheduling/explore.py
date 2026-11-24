@@ -36,10 +36,9 @@ of its own, in rounds as wide as the integration branch's K. When EXPLORE ends, 
 exploration (:meth:`~hyperloom_multibranch.scheduling.stops.SessionStopper.end_exploration`): every specialist branch
 stops and its tests are withdrawn, so their cards are free. Then the integrator starts no more merge tests and takes
 back those still at their first reading; a merge whose first reading the rule gate already judged a gain, and whose
-confirm is queued or running, gets the time of one test for that confirm to end (:func:`confirm_seconds`), and one
-whose confirm does not end in it is named in a warning. A round whose merge tests ended in that time goes on to run its
-regression set and land its merge, up to a tick short of the session's deadline or the caller's cap, so that gain is
-on the integration head FINAL reads. Then that task is cancelled and
+confirm is queued or running, gets the time of one test for that confirm to end (:func:`confirm_seconds`), else it is
+named in a warning. A round whose merge tests ended in that time still runs its regression set and lands its merge, up
+to a tick short of the session's deadline or the caller's cap, so FINAL reads that gain. Then that task is cancelled and
 the integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and no
 merge test competes with FINAL's measurements; a profile of the integration head still running is cancelled before
 that, taking its test back. Under ``--max-gpu-hours`` EXPLORE also ends, at a tick, once the session's tests have used the GPU
@@ -215,14 +214,12 @@ def spent_gpu_seconds(progress: Iterable[BranchProgress]) -> float:
 
 
 def confirm_seconds(window: ExploreWindow, ended: SessionStopReason, now: float, cap: float) -> float:
-    """The clock seconds the merge tests waiting for their confirm get to end once EXPLORE ``ended`` at ``now``: one
-    test of the workload, or none where that test would end past the session's deadline or past ``cap``, what the
-    window's :attr:`~ExploreWindow.final_cap` last said, or where EXPLORE ended out of GPU hours or of cards to
-    measure on.
+    """The clock seconds a round's merge tests waiting for their confirm get once EXPLORE ``ended`` at ``now``: one test
+    of the workload, or none where that test would end past the session's deadline or past ``cap``, what the window's
+    :attr:`~ExploreWindow.final_cap` last said, or where EXPLORE ended out of GPU hours or of cards to measure on.
 
-    That one test bounds the merge tests only. A round whose merge tests ended in it still runs its regression set
-    and lands its merge, and that is bounded by the same deadline and ``cap``: it is cancelled one tick short of
-    them, so FINAL still starts before the deadline."""
+    It bounds the merge tests only: a round whose merge tests ended in it still runs its regression set and lands its
+    merge, until one tick short of that deadline and ``cap``, so FINAL still starts before the deadline."""
 
     fits = now + window.test_seconds <= min(window.session_deadline, cap)
     return window.test_seconds if fits and ended not in ENDS_WITHOUT_CONFIRM else 0.0
@@ -274,8 +271,7 @@ class Explorer:
     async def run(self, window: ExploreWindow) -> SessionStopReason:
         """Explore until the deadline or the judge's soft stop, then end exploration, in this order: the specialist
         branches stop and their tests are withdrawn, a merge waiting for its confirm gets :func:`confirm_seconds` on
-        the cards that freed and, once confirmed, the time its regression set takes within the session's deadline and
-        the caller's cap, and the integrator is stopped. All of it is done before this returns.
+        the cards that freed, then its regression set runs, and the integrator is stopped, all before this returns.
 
         The user branches open before the opening judge call; the opening batch opens nothing more when that call
         asks for the soft stop or answers only once EXPLORE is over, and opens one branch when it fails and no
@@ -328,8 +324,7 @@ class Explorer:
                     seconds,
                 )
                 return
-            # No merge test is left, so the round is in its regression set; cancelled there, it logs each merge itself.
-            # It is cancelled a tick short of the deadline: a session still in EXPLORE at its deadline runs no FINAL.
+            # The round is in its regression set. A tick short: a session in EXPLORE at its deadline runs no FINAL.
             latest = min(window.session_deadline, self._cap) - EXPLORE_TICK_SECONDS
             with contextlib.suppress(asyncio.TimeoutError):
                 await self._clock.wait_for(self._integrator.finish_round(), latest - self._clock.now())
