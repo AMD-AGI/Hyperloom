@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import importlib
 import inspect
@@ -27,7 +29,7 @@ from kernelforge.roofline_ceiling.contract import load_report
 from kernelforge.roofline_ceiling.estimate import estimate_ceiling as real_estimate_ceiling
 from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR
 from kernelforge.workflows.forge_loop.campaign.run_state import RunState
-from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop, LoopAgents
+from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop
 from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationInfrastructureError
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
     _make_loop,
@@ -158,9 +160,9 @@ def test_one_reader_loads_the_ceiling_for_the_whole_loop():
 
 
 def _planning_context(*case_ids):
-    from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, OrchestrationContext
+    from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, EvidenceContext
 
-    return OrchestrationContext(
+    return EvidenceContext(
         analysis_commit="abc123",
         workspace="/w",
         gpu_target="gfx950",
@@ -252,7 +254,7 @@ def test_a_specialist_scoped_to_one_case_still_sees_the_campaign_standing(tmp_pa
 
 
 def _supervisor_payload(loop, context):
-    loop._build_orchestration_context = lambda: context
+    loop._build_evidence_context = lambda: context
     loop._analysis_bundle = None
     loop._active_analysis_context = None
     loop._latest_optimization_plan_path = ""
@@ -496,7 +498,7 @@ def test_the_progress_is_logged_with_each_iteration_header(tmp_path, monkeypatch
     loop, _ = _make_loop(tmp_path, monkeypatch, baseline_case_times={"case": 1.0})
     loop._ceiling_report_path = str(_publish(_report((("case", 0.5),)), tmp_path / "ceiling"))
 
-    asyncio.run(loop.run(LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     lines = capsys.readouterr().out.splitlines()
     header = next(i for i, line in enumerate(lines) if line.startswith("--- Iteration 1 "))

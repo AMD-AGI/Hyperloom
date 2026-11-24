@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import json
 import subprocess
@@ -13,7 +15,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.campaign.run_state import PHASE_STALLED, BestRecord, LoopStateStore, RunState
 from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
 from kernelforge.workflows.forge_loop.iteration import locked_run
@@ -89,7 +90,7 @@ def test_intervention_reset_is_persisted_before_agent_runs(tmp_path, monkeypatch
         raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=cancelled_agent, supervisor_fn=supervisor)))
+        asyncio.run(loop.run(lane_agents(cancelled_agent, supervisor_fn=supervisor)))
 
     persisted = LoopStateStore(str(workspace)).load()
     assert loop.run_state.stall.no_improvement_iters == 0
@@ -146,7 +147,7 @@ def test_empty_supervisor_expires_prior_ruling_without_resetting_stall(
         )
 
     monkeypatch.setattr(loop, "run_one_iteration", reverted_iteration)
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent, supervisor_fn=empty_supervisor)))
+    asyncio.run(loop.run(lane_agents(editing_agent, supervisor_fn=empty_supervisor)))
 
     assert loop.monitor.intervention_count == 0
     assert loop.run_state.stall.no_improvement_iters == 3
@@ -215,11 +216,7 @@ def test_free_form_supervisor_ruling_still_creates_fresh_plan_each_iteration(
 
     monkeypatch.setattr(loop, "_run_orchestration", orchestration)
     monkeypatch.setattr(loop, "run_one_iteration", reverted_iteration)
-    asyncio.run(
-        loop.run(
-            runner_module.LoopAgents(agent_fn=editing_agent, orchestration_service=object(), supervisor_fn=supervisor)
-        )
-    )
+    asyncio.run(loop.run(lane_agents(editing_agent, orchestration_service=object(), supervisor_fn=supervisor)))
 
     assert orchestration_calls == [1, 2, 3]
     assert len(histories) == 3

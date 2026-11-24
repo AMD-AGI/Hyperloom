@@ -6,16 +6,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any
 
 
-class CandidateOrigin(str, Enum):
-    """Where the candidate a unit measured came from, recorded as its ``candidate_origin`` provenance."""
-
-    SESSION = "session"
-    LANE = "lane"
-    MERGE = "merge"
+# Every candidate is what a round's sessions left on the canonical tree; recorded as a unit's ``candidate_origin``
+# provenance.
+CANDIDATE_ORIGIN = "session"
 
 
 @dataclass(frozen=True)

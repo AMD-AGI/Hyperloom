@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 from dataclasses import replace
 from pathlib import Path
@@ -56,7 +58,7 @@ def test_a_contended_workspace_skips_the_canonical_measurement(
 
     monkeypatch.setattr(loop, "run_one_iteration", unexpected_validation)
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=contended_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(contended_agent, supervisor_fn=_unused_supervisor)))
 
     assert validation_calls == []
     # Unmeasured means unkept: HEAD stays at the last state a benchmark ever
@@ -140,8 +142,8 @@ def test_one_contended_lane_costs_the_whole_round_its_measurement(
 
     asyncio.run(
         loop.run(
-            runner_module.LoopAgents(
-                agent_fn=_no_change_agent,
+            lane_agents(
+                _no_change_agent,
                 agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
                 orchestration_service=object(),
                 supervisor_fn=_unused_supervisor,
@@ -205,8 +207,8 @@ def test_a_leaked_probe_costs_the_round_its_measurement(tmp_path, monkeypatch):
 
     asyncio.run(
         loop.run(
-            runner_module.LoopAgents(
-                agent_fn=_no_change_agent,
+            lane_agents(
+                _no_change_agent,
                 agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
                 orchestration_service=_ProbeLeakingService(),
                 supervisor_fn=_unused_supervisor,
@@ -257,7 +259,7 @@ def test_a_hazard_outlives_the_iteration_that_found_it(tmp_path, monkeypatch):
 
     asyncio.run(
         loop.run(
-            runner_module.LoopAgents(agent_fn=agent, supervisor_fn=_unused_supervisor),
+            lane_agents(agent, supervisor_fn=_unused_supervisor),
             callbacks=runner_module.LoopCallbacks(on_iteration=free_the_device_after_the_second_refusal),
         )
     )
@@ -290,7 +292,7 @@ def test_a_hazard_nothing_clears_stops_the_run_rather_than_spinning(
     _fake_device(monkeypatch, {4321: 99})
     monkeypatch.setattr(iteration_phases, "processes_under", lambda _dir: {4321})
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_contended_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_contended_agent, supervisor_fn=_unused_supervisor)))
 
     decisions = [
         event.get("decision")

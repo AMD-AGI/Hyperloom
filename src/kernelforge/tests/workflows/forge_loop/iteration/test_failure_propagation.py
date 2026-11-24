@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import subprocess
 from dataclasses import replace
@@ -47,7 +49,7 @@ def test_a_snapshot_write_failure_records_degradation_and_continues(
         fail_snapshot,
     )
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     events = [event for event in LoopStateStore(str(workspace)).read_events() if event["type"] == "pr_refs_refreshed"]
     assert len(events) == 1
@@ -73,7 +75,7 @@ def test_a_pr_event_write_failure_cannot_abort_the_campaign(
 
     monkeypatch.setattr(LoopStateStore, "append_event", fail_pr_event)
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert "warning: event not recorded" in capsys.readouterr().out
 
@@ -302,7 +304,7 @@ def _run_verdict(tmp_path, monkeypatch, failure, **sink_fields):
         session_sink.update(plan="candidate", end_reason="candidate_submitted", **sink_fields)
         return "candidate"
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(agent, supervisor_fn=_unused_supervisor)))
     return loop
 
 
@@ -334,7 +336,7 @@ def _site_keep_commit(tmp_path, monkeypatch, failure):
 
     monkeypatch.setattr(loop, "run_one_iteration", successful_iteration)
     monkeypatch.setattr(loop, "_git_commit", _raiser(failure))
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(editing_agent, supervisor_fn=_unused_supervisor)))
     return loop, workspace
 
 

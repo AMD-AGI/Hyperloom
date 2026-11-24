@@ -26,7 +26,6 @@ from kernelforge.workflows.forge_loop.bootstrap.preparation import (
 from kernelforge.workflows.forge_loop.bootstrap.reporter import _Implementer, _RunReporter
 from kernelforge.workflows.forge_loop.bootstrap.request import (
     ForgeLoopRequest,
-    SpecialistProbeOptions,
     validate_roofline_target,
 )
 from kernelforge.workflows.forge_loop.bootstrap.run_context import _ForgeDeadline, _ForgeRun
@@ -284,7 +283,6 @@ def _resolve_campaign(request: ForgeLoopRequest, workspace: Path, agent_relay) -
 
 
 def _session_config(
-    probe: SpecialistProbeOptions,
     campaign: CampaignConfig,
     workspace: Path,
     knowledge_config: KnowledgeConfig,
@@ -292,16 +290,6 @@ def _session_config(
 ) -> Config:
     """The Config this session runs under: the campaign's GPU and producer, plus only the overrides asked for."""
     overrides = {"gpu_target": campaign.gpu_target, "gpu_type": campaign.gpu_type, "producer": campaign.producer}
-    # Only what was actually asked for: an override present with a None value still wins over ``Config.from_env``'s
-    # environment lookup, which is what made the FORGE_SPECIALIST_PROBE* variables dead on this path.
-    for _name, _value in (
-        ("specialist_probe", probe.specialist_probe),
-        ("specialist_probe_max", probe.specialist_probe_max),
-        ("specialist_probe_budget_sec", probe.specialist_probe_budget_sec),
-        ("specialist_probe_scratch_root", probe.specialist_probe_scratch_root),
-    ):
-        if _value is not None:
-            overrides[_name] = _value
     overrides.update(agent_runtime_overrides)
     if campaign.gpu_target:
         os.environ["GPU_TARGET"] = campaign.gpu_target
@@ -447,13 +435,11 @@ class _PreparedCampaign:
 
 @dataclass(frozen=True)
 class _SearchPlan:
-    """What the search starts with: the implementer setup, the planning roles, and what the KB and assembly gave."""
+    """What the search starts with: the implementer setup, and what the KB and assembly gave."""
 
     setup: ImplementerSetup
     source_files: list[str]
-    specialist_definitions: dict
     profiling_enabled: bool
-    critic_enabled: bool
     warm_start: _WarmStart
     assembly: _AssemblyPreparation
 
@@ -559,14 +545,10 @@ def _run_campaign(inputs: _RunInputs) -> dict:
     run.iter_config.program_md = warm_start.program_md
 
     profiling = _profiling_plan(bool(request.roles.profiling and long_horizon), opened.resolution.campaign.gpu_target)
-    from kernelforge.workflows.forge_loop.roles.orchestration import default_specialist_definitions
-
     plan = _SearchPlan(
         setup=_implementer_setup(run, assembly.source_files, session_timeout_sec, profiling.implementer),
         source_files=assembly.source_files,
-        specialist_definitions=default_specialist_definitions(),
         profiling_enabled=profiling.analysis,
-        critic_enabled=bool(long_horizon),
         warm_start=warm_start,
         assembly=assembly,
     )
@@ -606,7 +588,7 @@ def _agent_session(inputs: _RunInputs, opened: _OpenedCampaign) -> _AgentSession
         os.environ.get("FORGE_PROFILE_TIMEOUT_SEC"), request.roles.profile_timeout_sec
     )
     config = _session_config(
-        request.probe, campaign, workspace, inputs.knowledge_config, opened.agent_runtime_overrides
+        campaign, workspace, inputs.knowledge_config, opened.agent_runtime_overrides
     )
     try:
         session_relay = resolve_session_relay(campaign.agent_relay, config)
@@ -629,10 +611,8 @@ def _agent_session(inputs: _RunInputs, opened: _OpenedCampaign) -> _AgentSession
 def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig) -> IterationConfig:
     """The loop's configuration: the campaign's task and measurement semantics, and this invocation's budget."""
     from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationConfig
-    from kernelforge.workflows.forge_loop.search.search_policy import stall_thresholds
 
     request, workspace, deadline = inputs.request, inputs.workspace, inputs.deadline
-    stall = stall_thresholds(planned_rounds=request.loop_shape.lanes > 1)
     # Measurement semantics come from the campaign, never from this invocation's defaults.
     iter_config = IterationConfig(
         kernel_file=str((workspace / campaign.kernel_path).resolve()),
@@ -660,9 +640,6 @@ def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig) -> Iteration
         bench_repeat=campaign.bench_repeat,
         case_aggregate=campaign.case_aggregate,
         lanes=request.loop_shape.lanes,
-        merge_stacking=request.loop_shape.merge_stacking,
-        supervise_after=stall.supervise_after,
-        diversify_after=stall.diversify_after,
         # New files a KEEP may carry; a REVERT removes exactly the same set. From the campaign, so a resumed session
         # can still ship or remove the new file an earlier session was configured to.
         commit_new_paths=list(campaign.commit_new_paths),
@@ -800,8 +777,6 @@ def _start_actors(
         lane_binding=LaneBinding(iter_config.workspace_dir, iter_config.driver_script, plan.source_files),
         lanes=request.loop_shape.lanes,
         program_md=iter_config.program_md,
-        specialist_definitions=plan.specialist_definitions,
-        critic_enabled=plan.critic_enabled,
         usage=run.usage,
         supervisor_backend=request.roles.supervisor_backend,
     )
@@ -817,19 +792,6 @@ def _start_actors(
         raise ForgeLoopError(f"Agent startup availability check failed: {error}") from error
 
 
-def _announce_planning(plan: _SearchPlan) -> None:
-    """Print the planning roles a multi-lane campaign runs."""
-    print(f"  Orchestration: enabled with parallel specialists ({', '.join(sorted(plan.specialist_definitions))})")
-    print(
-        "  Plan Critic: "
-        + (
-            "enabled (long-horizon, same backend/model; skips rounds that continue a kept route)"
-            if plan.critic_enabled
-            else "disabled (requires --max-hours > 2)"
-        )
-    )
-
-
 def _search(
     run: _ForgeRun, loop_runner: IterationLoop, session: _AgentSession, actors: SearchActorStartup, plan: _SearchPlan
 ) -> _RunReporter:
@@ -843,12 +805,13 @@ def _search(
         usage=run.usage,
         timeout_sec=session.profile_timeout_sec,
         profiling_enabled=plan.profiling_enabled,
+        lanes=run.request.loop_shape.lanes,
     )
     print("  Analysis Agent: " + ("profiled" if plan.profiling_enabled else "static-only"))
-    if start_bundle.orchestration_service is None:
-        print("  Orchestration: off (one lane; the Implementer chooses its direction from the Analysis evidence)")
-    else:
-        _announce_planning(plan)
+    print(
+        f"  Lanes: up to {run.request.loop_shape.lanes} per round, one for each focus the Analysis divides its "
+        "evidence into; each session chooses its own direction"
+    )
 
     reporter = _RunReporter(
         run=run,
@@ -861,9 +824,8 @@ def _search(
         loop_runner.run(
             LoopAgents(
                 agent_fn=start_bundle.agent_fn,
-                agent_factory=start_bundle.agent_factory if run.request.loop_shape.lanes > 1 else None,
+                agent_factory=start_bundle.agent_factory,
                 analysis_service=analysis_service,
-                orchestration_service=start_bundle.orchestration_service,
                 supervisor_fn=start_bundle.supervisor_fn,
                 search_actors=actors.loop_search_actors,
             ),

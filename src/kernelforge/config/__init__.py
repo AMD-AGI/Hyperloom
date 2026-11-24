@@ -92,31 +92,6 @@ def _env_json_object(name: str) -> dict:
     return value
 
 
-def _specialist_probe_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
-    """The specialist-probe fields of :meth:`Config.from_env`, from ``overrides`` or their env vars."""
-    return {
-        "specialist_probe": overrides.get("specialist_probe", env_flag("FORGE_SPECIALIST_PROBE", default=True)),
-        "specialist_probe_max": int(
-            overrides.get(
-                "specialist_probe_max",
-                os.getenv("FORGE_SPECIALIST_PROBE_MAX", "6"),
-            )
-        ),
-        "specialist_probe_budget_sec": float(
-            overrides.get(
-                "specialist_probe_budget_sec",
-                os.getenv("FORGE_SPECIALIST_PROBE_BUDGET_SEC", "600"),
-            )
-        ),
-        "specialist_probe_scratch_root": str(
-            overrides.get(
-                "specialist_probe_scratch_root",
-                os.getenv("FORGE_SPECIALIST_PROBE_SCRATCH_ROOT", ""),
-            )
-        ),
-    }
-
-
 class KnowledgeStoreMode(str, Enum):
     """Supported durable experience-store transports."""
 
@@ -295,20 +270,6 @@ class Config:
     # prompt as an on-demand index (hardware / common_methodology / flydsl).
     local_knowledge_dir: Path = field(default=None)
 
-    # Bounded scratch measurement for the read-only planning specialists (see
-    # workflows.forge_loop.roles.specialists.SpecialistProbeConfig). On by default: a
-    # specialist that can only argue about a dispatch constant is the failure
-    # this answers, and the probe's own budgets are what make it safe. The two
-    # budgets are the analysis PHASE's, shared by every specialist of the round.
-    specialist_probe: bool = True
-    specialist_probe_max: int = 6
-    specialist_probe_budget_sec: float = 600.0
-    # Where the round scratch trees are created. Empty derives it from
-    # experiments_dir; it must be absolute -- a relative value would resolve
-    # against whatever the process CWD happens to be -- and it must lie outside
-    # the canonical workspace, which is the one place the probe refuses to run.
-    specialist_probe_scratch_root: str = ""
-
     knowledge_config: KnowledgeConfig | None = field(default=None)
 
     # Experimental / off by default: inject framework/mori/ into the forge-loop
@@ -361,19 +322,6 @@ class Config:
         self.agent_fallback_provider = (self.agent_fallback_provider or "").strip().lower()
         if self.agent_timeout_sec <= 0:
             raise ValueError("agent_timeout_sec must be greater than zero")
-        if self.specialist_probe_max <= 0:
-            raise ValueError("specialist_probe_max must be greater than zero")
-        if self.specialist_probe_budget_sec <= 0:
-            raise ValueError("specialist_probe_budget_sec must be greater than zero")
-        if (
-            self.specialist_probe_scratch_root
-            and not Path(self.specialist_probe_scratch_root).expanduser().is_absolute()
-        ):
-            raise ValueError(
-                "specialist_probe_scratch_root must be an absolute path: "
-                f"{self.specialist_probe_scratch_root!r} would resolve against "
-                "whatever the process working directory happens to be"
-            )
         if not isinstance(self.agent_options, dict):
             raise ValueError("agent_options must be a dict")
         if self.experiments_dir is None:
@@ -440,7 +388,6 @@ class Config:
             if "agent_options" in overrides
             else _env_json_object("FORGE_AGENT_OPTIONS_JSON"),
             max_turns=int(overrides.get("max_turns", 500)),
-            **_specialist_probe_overrides(overrides),
             knowledge_config=overrides.get("knowledge_config"),
             include_mori_kb=overrides.get("include_mori_kb"),
             defer_knowledge_maps=overrides.get("defer_knowledge_maps"),

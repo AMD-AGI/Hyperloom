@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import hashlib
 import json
@@ -16,7 +18,6 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.workflows.forge_loop.iteration import fanout
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore
 from kernelforge.workflows.forge_loop.iteration import campaign_runtime
 from kernelforge.workflows.forge_loop.iteration import lane_runtime
@@ -148,8 +149,8 @@ def test_a_lane_records_its_lesson_while_its_copy_still_exists(tmp_path, monkeyp
     monkeypatch.setattr(loop, "_run_orchestration", _plan)
     asyncio.run(
         loop.run(
-            runner_module.LoopAgents(
-                agent_fn=_no_change_agent,
+            lane_agents(
+                _no_change_agent,
                 agent_factory=factory,
                 orchestration_service=object(),
                 supervisor_fn=_unused_supervisor,
@@ -219,8 +220,8 @@ def test_a_single_lane_runs_the_ordinary_session(tmp_path, monkeypatch):
 
     asyncio.run(
         loop.run(
-            runner_module.LoopAgents(
-                agent_fn=_no_change_agent,
+            lane_agents(
+                _no_change_agent,
                 agent_factory=_lane_agent_factory({}),
                 orchestration_service=object(),
                 supervisor_fn=_unused_supervisor,
@@ -253,8 +254,8 @@ def test_more_than_one_lane_fans_the_round_out(tmp_path, monkeypatch):
 
     asyncio.run(
         loop.run(
-            runner_module.LoopAgents(
-                agent_fn=_no_change_agent,
+            lane_agents(
+                _no_change_agent,
                 agent_factory=_lane_agent_factory({}),
                 orchestration_service=object(),
                 supervisor_fn=_unused_supervisor,
@@ -280,8 +281,8 @@ def _fan_out_iteration(tmp_path, monkeypatch, rounds, **plan_kwargs):
 
     asyncio.run(
         loop.run(
-            runner_module.LoopAgents(
-                agent_fn=_no_change_agent,
+            lane_agents(
+                _no_change_agent,
                 agent_factory=_lane_agent_factory({}),
                 orchestration_service=object(),
                 supervisor_fn=_unused_supervisor,

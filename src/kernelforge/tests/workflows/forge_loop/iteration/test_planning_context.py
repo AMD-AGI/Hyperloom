@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import json
 from dataclasses import replace
@@ -13,7 +15,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
 from kernelforge.workflows.forge_loop.campaign.run_state import BestRecord, LoopStateStore, RoundCost, RunState
 from kernelforge.workflows.forge_loop.campaign.unmeasured_lanes import UnmeasuredLane, UnmeasuredLaneArchive
@@ -42,7 +43,7 @@ def test_a_session_is_handed_what_its_gate_scores_against(tmp_path, monkeypatch)
         session_sink["plan"] = "inspect only"
         return "No source change was needed."
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(agent, supervisor_fn=_unused_supervisor)))
 
     assert seen == [GateScoring({"case": 2.0}, 1.0)]
 
@@ -76,11 +77,7 @@ def test_optimization_plan_path_is_injected_before_implementer(
 
     monkeypatch.setattr(loop, "_run_orchestration", run_orchestration)
     asyncio.run(
-        loop.run(
-            runner_module.LoopAgents(
-                agent_fn=agent_fn, orchestration_service=orchestration_service, supervisor_fn=_unused_supervisor
-            )
-        )
+        loop.run(lane_agents(agent_fn, orchestration_service=orchestration_service, supervisor_fn=_unused_supervisor))
     )
 
     assert captured["iteration"] == 1
@@ -105,7 +102,7 @@ def test_orchestration_context_uses_current_scored_cases(tmp_path, monkeypatch):
     )
     loop._best_case_times = {"case-a": 0.8, "case-b": 1.5}
 
-    context = loop._build_orchestration_context()
+    context = loop._build_evidence_context()
 
     assert context.analysis_commit == head
     assert [case.case_id for case in context.cases] == ["case-a", "case-b"]
@@ -136,7 +133,7 @@ def test_orchestration_context_publishes_the_campaign_editable_sources(
         gpu_target="gfx942",
     )
 
-    context = loop._build_orchestration_context()
+    context = loop._build_evidence_context()
 
     assert list(context.editable_sources) == [kernel, tuned_csv, sibling]
     assert context.to_prompt_dict()["editable_sources"] == [
@@ -158,7 +155,7 @@ def test_orchestration_context_editable_sources_cover_a_single_file_task(
         gpu_target="gfx942",
     )
 
-    context = loop._build_orchestration_context()
+    context = loop._build_evidence_context()
 
     assert list(context.editable_sources) == [str((workspace / "kernel.py"))]
 
@@ -168,13 +165,13 @@ def test_lessons_are_orchestration_evidence_and_handoff_is_audit_only(
     monkeypatch,
 ):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
     loop.config = SimpleNamespace(
         experiments_dir=workspace / "forge_experiments",
         gpu_target="gfx942",
     )
 
-    context = loop._build_orchestration_context()
+    context = loop._build_evidence_context()
     evidence = {item.kind: item for item in context.evidence_refs}
 
     assert evidence["lesson_directory"].path.endswith("forge_experiments/lessons")
@@ -193,7 +190,7 @@ def test_planning_cites_lane_candidates_the_tree_moved_past_once_there_are_any(t
     loop.run_state = RunState(head_commit=loop._git("rev-parse", "HEAD").splitlines()[0])
     loop.config = SimpleNamespace(experiments_dir=workspace / "forge_experiments", gpu_target="gfx942")
 
-    assert "unmeasured_lane_candidates" not in {ref.kind for ref in loop._build_orchestration_context().evidence_refs}
+    assert "unmeasured_lane_candidates" not in {ref.kind for ref in loop._build_evidence_context().evidence_refs}
 
     UnmeasuredLaneArchive(workspace).record(
         UnmeasuredLane(
@@ -207,7 +204,7 @@ def test_planning_cites_lane_candidates_the_tree_moved_past_once_there_are_any(t
             diff="--- a/kernel.py\n+++ b/kernel.py\n",
         )
     )
-    evidence = {ref.kind: ref for ref in loop._build_orchestration_context().evidence_refs}
+    evidence = {ref.kind: ref for ref in loop._build_evidence_context().evidence_refs}
 
     cited = evidence["unmeasured_lane_candidates"]
     assert cited.path == str((workspace / "forge_experiments" / "unmeasured_lanes" / "index.jsonl").resolve())
@@ -228,7 +225,7 @@ def test_implementer_receives_partial_analysis_artifact_catalog(
     catalog = workspace / "forge_experiments" / "analysis" / "catalog.json"
     catalog.parent.mkdir(parents=True)
     catalog.write_text("{}")
-    base = loop._build_orchestration_context()
+    base = loop._build_evidence_context()
     loop._active_analysis_context = replace(
         base,
         source_map_path=str(workspace / "source_map.md"),
@@ -428,7 +425,7 @@ def test_planning_is_handed_the_search_policy_this_iteration_decided(tmp_path, m
         experiments_dir=workspace / "forge_experiments",
         gpu_target="gfx942",
     )
-    loop._active_analysis_context = loop._build_orchestration_context()
+    loop._active_analysis_context = loop._build_evidence_context()
     loop.run_state.search_mode = SEARCH_MODE_DIVERSIFY
     loop.run_state.search_reason_codes = ["NO_IMPROVEMENT_STALL"]
     loop.run_state.search_objective = OBJECTIVE_DISCOVER_NEW_MECHANISM
@@ -543,8 +540,8 @@ def test_planning_is_handed_the_ruling_the_supervisor_left_this_iteration(tmp_pa
     monkeypatch.setattr(loop, "run_one_iteration", reverted_iteration)
     asyncio.run(
         loop.run(
-            runner_module.LoopAgents(
-                agent_fn=editing_agent,
+            lane_agents(
+                editing_agent,
                 analysis_service=AnalysisService(),
                 orchestration_service=OrchestrationService(),
                 supervisor_fn=supervisor,
@@ -730,13 +727,7 @@ def test_handoff_records_optimization_plan_path(
         return "No code change needed."
 
     monkeypatch.setattr(loop, "_run_orchestration", create_plan)
-    asyncio.run(
-        loop.run(
-            runner_module.LoopAgents(
-                agent_fn=agent_fn, orchestration_service=object(), supervisor_fn=_unused_supervisor
-            )
-        )
-    )
+    asyncio.run(loop.run(lane_agents(agent_fn, orchestration_service=object(), supervisor_fn=_unused_supervisor)))
 
     handoff = json.loads((workspace / "forge_experiments" / "handoffs" / "iter_001.json").read_text())
     assert handoff["canonical_verdict"] == "NO_CHANGES"

@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 from kernelforge.agent_backends import AgentRunResult
 from kernelforge.workflows.forge_loop.roles.analysis import AnalysisAgentService
-from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, OrchestrationContext
+from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, EvidenceContext
 
 
 def _workspace(tmp_path):
@@ -48,8 +48,8 @@ def _workspace(tmp_path):
     return workspace, kernel, driver
 
 
-def _context(workspace: Path) -> OrchestrationContext:
-    return OrchestrationContext(
+def _context(workspace: Path) -> EvidenceContext:
+    return EvidenceContext(
         analysis_commit="abc123",
         workspace=str(workspace),
         gpu_target="gfx942",

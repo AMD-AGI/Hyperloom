@@ -15,19 +15,14 @@ from pathlib import Path
 from kernelforge.utils.git import git
 from kernelforge.kernel_backends.constants import resolve_language_dirs
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
-from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, EvidenceRef, OrchestrationContext
+from kernelforge.workflows.forge_loop.roles.analysis_bundle import read_lane_focuses
+from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, EvidenceRef, EvidenceContext
 from hyperloom_common.io import DURABLE, atomic_write_text
 
 
 log = logging.getLogger(__name__)
 
 ANALYSIS_DIFF_TIMEOUT_SEC = 60.0
-UNMEASURED_LANE_EVIDENCE = "unmeasured_lane_candidates"
-_UNMEASURED_LANES = (
-    "Lane candidates that were implemented but never measured: the canonical tree moved before their turn. Each "
-    "directory holds the diff against the commit its round was built on, the plan and the lane session's own record; "
-    "any numbers in that record are the lane's own, not canonical measurements."
-)
 
 
 @dataclass(frozen=True)
@@ -122,7 +117,7 @@ class AnalysisEvidenceMixin:
             or "uncommitted"
         )
 
-    def _build_orchestration_context(self):
+    def _build_evidence_context(self):
         """Build the immutable evidence context for the current canonical commit.
 
         It carries none of the loop's own state: the Supervisor and the search policy move after Analysis resolves,
@@ -144,13 +139,13 @@ class AnalysisEvidenceMixin:
             )
             for case_id in scored_case_ids or sorted(self._baseline_case_times)
         )
-        evidence_refs = self._orchestration_evidence_refs(
+        evidence_refs = self._evidence_refs(
             workspace, source_map_path, cumulative_diff.path, canonical_commit
         )
-        knowledge_index = self._orchestration_knowledge_index()
+        knowledge_index = self._knowledge_index()
 
         return self._with_evidence_standing(
-            OrchestrationContext(
+            EvidenceContext(
                 analysis_commit=canonical_commit,
                 workspace=str(workspace),
                 gpu_target=self.config.gpu_target,
@@ -170,7 +165,7 @@ class AnalysisEvidenceMixin:
             )
         )
 
-    def _orchestration_knowledge_index(self) -> str:
+    def _knowledge_index(self) -> str:
         """The local knowledge index for this backend, or "" when there is none or it cannot be built."""
         knowledge_index = ""
         local_knowledge_root = getattr(self.config, "local_knowledge_dir", None)
@@ -214,10 +209,10 @@ class AnalysisEvidenceMixin:
             cumulative_diff_error=cumulative_diff.error,
         )
 
-    def _orchestration_evidence_refs(
+    def _evidence_refs(
         self, workspace: Path, source_map_path: Path, cumulative_diff_path: str, canonical_commit: str
     ) -> tuple[EvidenceRef, ...]:
-        """The artifacts a planning context cites as evidence, each one only while it exists."""
+        """The artifacts an evidence context cites, each one only while it exists."""
         experiments = workspace / "forge_experiments"
         refs = [
             EvidenceRef(kind=kind, path=str(path.resolve()), summary=summary)
@@ -225,7 +220,6 @@ class AnalysisEvidenceMixin:
                 ("source_map", source_map_path, "Current source map or anchor source."),
                 ("candidate_archive", experiments / "candidates" / "index.jsonl", "Current index evidence."),
                 ("run_state", experiments / "run_state.json", "Current run state evidence."),
-                (UNMEASURED_LANE_EVIDENCE, ExperimentsLayout.of(workspace).unmeasured_lane_index, _UNMEASURED_LANES),
             )
             if path.is_file()
         ]
@@ -430,7 +424,6 @@ class AnalysisEvidenceMixin:
             "latest_lesson",
             "lesson_directory",
             "run_state",
-            UNMEASURED_LANE_EVIDENCE,
         }
         refs.update((ref.path, ref) for ref in previous.evidence_refs if ref.kind not in superseded_kinds)
         if stale:
@@ -507,9 +500,21 @@ class AnalysisEvidenceMixin:
                 )
         return refs
 
+    def _lane_focuses(self) -> list[str]:
+        """The focuses the Analysis evidence in force divides the work into; empty when it divides nothing.
+
+        A KEEP leaves the evidence in force until the next Analysis replaces it, so the lanes keep their focuses
+        across the rounds in between.
+        """
+        context = self._active_analysis_context
+        if context is None:
+            return []
+        root = next((ref.path for ref in context.evidence_refs if ref.kind == "analysis_bundle"), "")
+        return read_lane_focuses(Path(root)) if root else []
+
     def _build_supervisor_evidence_context(self, iteration: int) -> str:
         """Serialize current profiling and search evidence for stall review."""
-        context = self._build_orchestration_context()
+        context = self._build_evidence_context()
         if self._analysis_bundle is not None and self._analysis_bundle.analysis_commit == context.analysis_commit:
             context = self._analysis_bundle.apply(context)
         elif (
@@ -517,10 +522,10 @@ class AnalysisEvidenceMixin:
             and self._active_analysis_context.analysis_commit == context.analysis_commit
         ):
             context = self._active_analysis_context
-        # After the bundle is applied, which rebuilds the context: the roofline standing is the planner's view too, and
-        # the loop state is the one in force while the Supervisor reviews.
+        # After the bundle is applied, which rebuilds the context: the roofline standing is part of the Supervisor's
+        # view, and the loop state is the one in force while it reviews.
         context = self._with_loop_state(self._with_ceiling_standing(context))
-        orchestration_root = Path(self.ic.workspace_dir).resolve() / "forge_experiments" / "orchestration"
+        rounds_root = ExperimentsLayout.of(Path(self.ic.workspace_dir).resolve()).rounds
         latest_lesson_path = ""
         if getattr(self, "lessons", None) is not None:
             lesson_iterations = self.lessons.existing_iterations()
@@ -532,10 +537,10 @@ class AnalysisEvidenceMixin:
                 1,
                 self.ic.supervise_cooldown if self.ic.supervise_cooldown > 0 else self.ic.supervise_after,
             ),
-            "latest_optimization_plan": (self._latest_optimization_plan_path or None),
-            "orchestration_context": context.to_prompt_dict(),
+            "evidence_context": context.to_prompt_dict(),
             "artifact_paths": {
-                "orchestration_root": str(orchestration_root),
+                # What each round's lanes left: a patch and its stop check's per-case times.
+                "rounds_root": str(rounds_root),
                 "candidate_archive": str(Path(self.ic.workspace_dir).resolve() / "forge_experiments" / "candidates"),
                 "lessons": str(Path(self.ic.workspace_dir).resolve() / "forge_experiments" / "lessons"),
                 "latest_lesson": latest_lesson_path,

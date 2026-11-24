@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run several Implementer lanes side by side, one isolated workspace each."""
+"""A round's lanes: one workspace copy each, sessions run side by side on one queued device."""
 
 from __future__ import annotations
 
@@ -12,261 +12,150 @@ import tempfile
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from kernelforge.workflows.forge_loop.memory.lessons import SummaryOutcome
+
+from kernelforge.utils import device_queue
 from kernelforge.utils.git import git, git_async
 from kernelforge.utils.import_root import import_name_of, link_beside, linked_beside
-
 from kernelforge.utils.process_reaping import (
     ReapReport,
     install_child_subreaper,
     reap_processes_under,
 )
-
+from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
+from kernelforge.workflows.forge_loop.roles.implementer_method import MAX_COMMAND_MINUTES
 
 log = logging.getLogger(__name__)
 
-SERIALIZED_DRIVER_NAME = "forge_lane_driver.py"
-DEVICE_LOCK_SENTINEL = ".forge-device-bench.lock"
+DEVICE_QUEUE_SUFFIX = ".forge-device-queue"
 LANE_ROOT_PREFIX = "forge-lanes-"
-_LANE_RATIONALE_PREFIX, _LANE_RATIONALE_SUFFIX = "lane ", " of a fan-out round"
 
 
-def lane_rationale(lane_id: str) -> str:
-    """The rationale a lane's candidate is archived with, which says only which lane of its round produced it."""
-    return f"{_LANE_RATIONALE_PREFIX}{lane_id}{_LANE_RATIONALE_SUFFIX}"
-
-
-def is_lane_rationale(text: str) -> bool:
-    """Whether ``text`` is a rationale ``lane_rationale`` wrote."""
-    lane_id = text.removeprefix(_LANE_RATIONALE_PREFIX).removesuffix(_LANE_RATIONALE_SUFFIX)
-    return lane_id.isdecimal() and text == lane_rationale(lane_id)
-
-
-def campaign_device_lock_path(workspace: str | Path) -> Path:
-    """The sentinel the fan-out lanes and the analysis-phase probes lock."""
+def campaign_device_queue_path(workspace: str | Path) -> Path:
+    """The queue every lane of a campaign waits in for the device, beside the workspace so no lane copy carries it."""
     workspace = Path(workspace).expanduser().resolve()
-    return workspace.parent / f"{workspace.name}{DEVICE_LOCK_SENTINEL}"
+    return workspace.parent / f"{workspace.name}{DEVICE_QUEUE_SUFFIX}"
 
 
 @dataclass(frozen=True)
-class LanePlan:
-    """One lane's assignment for this round."""
+class LaneAssignment:
+    """One lane of a round: its number, and the focus the round's Analysis gave it ("" when it gave none)."""
 
     lane_id: str
-    plan: str
+    focus: str = ""
 
 
 @dataclass(frozen=True)
+class LaneSeat:
+    """Where one lane works: its workspace copy, and the runner and queue through which it reaches the device."""
+
+    assignment: LaneAssignment
+    lane_dir: Path
+    device_runner: Path
+    queue_root: Path
+    usage_log: Path
+
+
+@dataclass
 class LaneResult:
-    """What one lane produced, measured later and separately."""
+    """What one lane's session left: its diff against the round's base, and what the session handed back."""
 
-    lane_id: str
-    plan: str
+    assignment: LaneAssignment
+    lane_dir: Path
     diff: str = ""
+    rationale: str = ""
+    # The session's hand-back: its plan line, end reason, gate verdict and measurement, and the callable that resumes
+    # it for its record.
+    sink: dict = field(default_factory=dict)
     error: str = ""
-    agent_profile_id: str = ""
-    # The session's record, or why it has none, taken while the lane copy still
-    # exists. The round deletes that copy on return, so the measuring iteration
-    # and a later process read it from the queue rather than resuming the session.
-    lesson: SummaryOutcome = field(default_factory=SummaryOutcome)
-    # The iteration that planned the round and the commit its lanes were copied from, which ``diff`` applies to.
-    round_iteration: int = 0
-    base_commit: str = ""
-    # What this lane's teardown found, carried structured rather than folded
-    # into ``error``. The two say different things to different readers: the
-    # error is why THIS lane produced nothing, which costs the round one
-    # candidate, while the report is about the device every lane and the
-    # canonical measurement share, which costs the round its measurement. A
-    # lane that failed for a reason of its own still has to report the second,
-    # so it cannot be encoded in the first.
+    # What this lane's teardown found. It is about the device every lane and the canonical measurement share, so a
+    # lane that failed for a reason of its own still reports it.
     reaped: ReapReport | None = None
 
     @property
-    def produced_candidate(self) -> bool:
-        return bool(self.diff.strip()) and not self.error
+    def lane_id(self) -> str:
+        return self.assignment.lane_id
+
+    @property
+    def changed(self) -> bool:
+        """Whether the lane left a candidate the round may use."""
+        return bool(self.diff.strip()) and not self.error and self.sink.get("integrity_violation") is not True
+
+    @property
+    def verified(self) -> bool:
+        """Whether the lane's own stop check found its candidate correct and measured it."""
+        return self.changed and self.sink.get("gate_passed") is True and self.score is not None
+
+    @property
+    def score(self) -> float | None:
+        """The mean case speedup the lane's stop check measured, when it measured one."""
+        value = self.sink.get("mean_case_speedup")
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
     @property
     def contended(self) -> bool:
         """Whether this lane's teardown left the device unsafe to measure on."""
         return self.reaped is not None and self.reaped.contended
 
-    def to_dict(self) -> dict:
-        """The queue record: what a later process needs in order to measure this candidate."""
-        return {
-            "lane_id": self.lane_id,
-            "plan": self.plan,
-            "diff": self.diff,
-            "agent_profile_id": self.agent_profile_id,
-            "lesson": self.lesson.text,
-            "lesson_reason": self.lesson.reason,
-            "round_iteration": self.round_iteration,
-            "base_commit": self.base_commit,
-        }
 
-    @classmethod
-    def from_dict(cls, entry: dict) -> "LaneResult":
-        """One queued candidate. An entry holding neither a lesson nor its reason restores with a reason saying so.
-
-        A queue written before the round and base commit were recorded restores with neither.
-        """
-        text, reason = str(entry.get("lesson") or ""), str(entry.get("lesson_reason") or "")
-        if not text and not reason:
-            reason = "the lane queue held no record for this lane"
-        return cls(
-            lane_id=str(entry["lane_id"]),
-            plan=str(entry["plan"]),
-            diff=str(entry["diff"]),
-            agent_profile_id=str(entry.get("agent_profile_id") or ""),
-            lesson=SummaryOutcome(text=text, reason=reason),
-            round_iteration=int(entry.get("round_iteration") or 0),
-            base_commit=str(entry.get("base_commit") or ""),
-        )
-
-
-_SERIALIZED_DRIVER = '''\
-"""Run this lane's measurement driver while holding the shared device lock.
-
-Generated for one fan-out round by kernelforge.workflows.forge_loop.iteration.fanout. Every lane of the
-round has one of these and they all lock the same campaign-wide sentinel -- the
-one an analysis-phase probe locks too -- so the lanes think in parallel (the
-long pole, measured in hours) while every run that touches the device queues
-behind the others on it, measured in minutes.
-
-This file only queues the run: it passes every argument to the driver unchanged,
-writes nothing of its own to stdout, and returns the driver's exit status. Read
-{driver_name} itself for what is measured and how.
-"""
-
-import fcntl
-import subprocess
-import sys
-
-DRIVER = {driver!r}
-SENTINEL = {sentinel!r}
-
-
-def main() -> int:
-    # One flock-able sentinel, held exclusively for the whole driver run. flock
-    # is what reaches across processes: the agent CLI, the shell it ran this
-    # from and this wrapper are all separate processes, so an in-process lock
-    # would serialize nothing. The driver runs as a child in this process group
-    # rather than in a session of its own, so a group-scoped teardown -- how a
-    # shell enforces a command timeout -- reaches the driver as well, instead of
-    # leaving it running once the kernel has dropped this process's lock.
-    with open(SENTINEL, "r+") as handle:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            # Say so rather than looking hung: the wait is another lane's whole
-            # benchmark and there is no output until it finishes.
-            sys.stderr.write(
-                "[device] another lane holds the device; waiting for it\\n"
-            )
-            sys.stderr.flush()
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            completed = subprocess.run([sys.executable, DRIVER, *sys.argv[1:]])
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    return completed.returncode
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-'''
-
-
-class DeviceBenchmarkLock:
-    """The lock a lane's driver run has to take before it touches the device."""
-
-    def __init__(self, sentinel: str | Path) -> None:
-        self.sentinel = Path(sentinel)
-        self.sentinel.touch(exist_ok=True)
-
-    async def install(self, *, lane_dir: Path, driver: Path) -> Path:
-        """Write one lane's serialized driver, invisible to the lane's git."""
-        wrapper = lane_dir / SERIALIZED_DRIVER_NAME
-        wrapper.write_text(
-            _SERIALIZED_DRIVER.format(
-                driver=str(driver),
-                driver_name=driver.name,
-                sentinel=str(self.sentinel),
-            )
-        )
-        exclude = Path(await _git("rev-parse", "--git-path", "info/exclude", cwd=lane_dir))
-        if not exclude.is_absolute():
-            exclude = lane_dir / exclude
-        exclude.parent.mkdir(parents=True, exist_ok=True)
-        with exclude.open("a", encoding="utf-8") as handle:
-            handle.write(f"/{SERIALIZED_DRIVER_NAME}\n")
-        return wrapper
-
-
-async def _tree_bytes(source: Path) -> int:
-    """Disk footprint of the tree every lane is given a full copy of."""
+async def _run(*command: str) -> str:
+    """Run one filesystem command, failing with its own words."""
     process = await asyncio.create_subprocess_exec(
-        "du",
-        "-sB1",
-        str(source),
+        *command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
     )
     stdout, stderr = await process.communicate()
     if process.returncode != 0:
-        raise RuntimeError(f"could not size workspace {source}: {stderr.decode(errors='replace')[-400:]}")
-    fields = stdout.decode(errors="replace").split(maxsplit=1)
+        raise RuntimeError(f"`{' '.join(command[:2])}` failed: {stderr.decode(errors='replace')[-400:]}")
+    return stdout.decode(errors="replace")
+
+
+async def _tree_bytes(tree: Path) -> int:
+    """Disk footprint of one tree."""
+    fields = (await _run("du", "-sB1", str(tree))).split(maxsplit=1)
     if not fields or not fields[0].isdigit():
-        raise RuntimeError(
-            f"could not size workspace {source}: unreadable du output {stdout.decode(errors='replace')[:200]!r}"
-        )
+        raise RuntimeError(f"could not size {tree}: unreadable du output")
     return int(fields[0])
 
 
-def _available_bytes(directory: Path) -> int:
-    """Free space on the filesystem that will hold the lane copies."""
-    return shutil.disk_usage(directory).free
-
-
-async def _require_room(*, source: Path, parent: Path, lane_count: int) -> None:
+async def _require_room(*, source: Path, skip: Path, parent: Path, lane_count: int) -> None:
     """Refuse the round unless every lane copy fits where it is going."""
-    needed = await _tree_bytes(source) * lane_count
-    available = _available_bytes(parent)
+    needed = await _tree_bytes(source)
+    if skip.exists():
+        needed = max(0, needed - await _tree_bytes(skip))
+    needed *= lane_count
+    available = shutil.disk_usage(parent).free
     if available < needed:
         raise RuntimeError(
-            f"not enough room for {lane_count} lane copies of {source} under "
-            f"{parent}: {needed} B needed "
-            f"({needed / 1024**3:.1f} GiB), {available} B available "
-            f"({available / 1024**3:.1f} GiB)"
+            f"not enough room for {lane_count} lane copies of {source} under {parent}: {needed} B needed "
+            f"({needed / 1024**3:.1f} GiB), {available} B available ({available / 1024**3:.1f} GiB)"
         )
 
 
-async def _copy_workspace(source: Path, destination: Path) -> None:
-    """Clone a workspace including the untracked build state a bench needs."""
-    process = await asyncio.create_subprocess_exec(
-        "cp",
-        "-a",
-        f"{source}/.",
-        str(destination),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
-    )
-    _stdout, stderr = await process.communicate()
-    if process.returncode != 0:
-        raise RuntimeError(f"could not clone workspace into {destination}: {stderr.decode(errors='replace')[-400:]}")
+async def _copy_tree(source: Path, destination: Path, skip: Path) -> None:
+    """Clone a workspace, untracked build state included, leaving out ``skip``.
+
+    ``skip`` is the Analysis evidence: it is the bulk of a long campaign's workspace, a session reads it by the
+    absolute path its prompt names, and no lane writes it.
+    """
+    whole = []
+    for entry in source.iterdir():
+        if entry == skip:
+            continue
+        if entry in skip.parents:
+            inner = destination / entry.name
+            inner.mkdir()
+            await _copy_tree(entry, inner, skip)
+        else:
+            whole.append(str(entry))
+    if whole:
+        await _run("cp", "-a", *whole, str(destination))
 
 
 async def _git(*args: str, cwd: Path) -> str:
     """Run one git command in a lane copy, failing loudly with git's own words."""
     return (await git_async(*args, cwd=cwd)).stdout.strip()
-
-
-async def _head_branch(lane_dir: Path) -> str:
-    """The branch HEAD names, or empty when HEAD is detached."""
-    # A detached HEAD is a normal answer here and reported as a non-zero exit.
-    completed = await git_async("symbolic-ref", "--quiet", "HEAD", cwd=lane_dir, check=False)
-    return completed.stdout.strip()
 
 
 async def _isolate_lane_repository(lane_dir: Path) -> None:
@@ -275,7 +164,8 @@ async def _isolate_lane_repository(lane_dir: Path) -> None:
     if not marker.is_file():
         return
     head = await _git("rev-parse", "HEAD", cwd=lane_dir)
-    branch = await _head_branch(lane_dir)
+    # A detached HEAD is a normal answer here and reported as a non-zero exit.
+    branch = (await git_async("symbolic-ref", "--quiet", "HEAD", cwd=lane_dir, check=False)).stdout.strip()
     objects = Path(await _git("rev-parse", "--git-path", "objects", cwd=lane_dir))
     if not objects.is_absolute():
         objects = lane_dir / objects
@@ -295,118 +185,115 @@ async def _isolate_lane_repository(lane_dir: Path) -> None:
     await _git("reset", "--quiet", "--mixed", head, cwd=lane_dir)
 
 
-async def _clone_lane(source: Path, lane_dir: Path) -> None:
-    """Give one lane a workspace copy it can edit without touching another."""
-    await _copy_workspace(source, lane_dir)
-    await _isolate_lane_repository(lane_dir)
+async def _install_device_runner(seat: LaneSeat) -> None:
+    """Put the device runner and its configuration in one lane, invisible to the lane's git."""
+    lane_dir = seat.lane_dir
+    shutil.copyfile(device_queue.__file__, seat.device_runner)
+    device_queue.write_runner_config(
+        lane_dir / device_queue.RUNNER_CONFIG_NAME,
+        queue_root=seat.queue_root,
+        usage_log=seat.usage_log,
+        lane=seat.assignment.lane_id,
+        hold_limit_sec=MAX_COMMAND_MINUTES * 60,
+        environment=device_queue.visible_device_environment(),
+    )
+    exclude = Path(await _git("rev-parse", "--git-path", "info/exclude", cwd=lane_dir))
+    if not exclude.is_absolute():
+        exclude = lane_dir / exclude
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open("a", encoding="utf-8") as handle:
+        handle.write(f"/{device_queue.RUNNER_NAME}\n/{device_queue.RUNNER_CONFIG_NAME}\n")
 
 
-def _lane_driver(*, source: Path, driver: str) -> Path:
-    """The driver's path within a workspace, checked for a lane to be given it."""
-    relative = Path(driver)
-    resolved = (source / relative).resolve()
-    if relative.is_absolute() or source not in resolved.parents or not resolved.is_file():
-        raise RuntimeError(
-            f"lanes cannot be given their own copy of the driver {driver!r}: it "
-            f"is not a file inside the campaign workspace {source}"
-        )
-    return relative
+def lane_diff(lane_dir: Path, new_paths: Sequence[str] = ()) -> str:
+    """The lane's edits against the round's base: tracked changes, and the new files in ``new_paths``.
+
+    The new files are added to a scratch copy of the index, so the lane's own index is left as the session had it.
+    """
+    if not new_paths:
+        return git("diff", "HEAD", "--", ".", cwd=lane_dir).stdout
+    index = Path(git("rev-parse", "--git-path", "index", cwd=lane_dir).stdout.strip())
+    if not index.is_absolute():
+        index = lane_dir / index
+    with tempfile.TemporaryDirectory(prefix="forge-lane-index-") as scratch:
+        scratch_index = Path(scratch) / "index"
+        shutil.copy2(index, scratch_index)
+        env = {"GIT_INDEX_FILE": str(scratch_index)}
+        git("add", "--", *new_paths, cwd=lane_dir, env=env)
+        return git("diff", "HEAD", "--", ".", cwd=lane_dir, env=env).stdout
 
 
-async def _reap_lane_processes(lane_dir: Path) -> ReapReport:
-    """Kill whatever is still running inside a lane whose session has ended."""
-    return await reap_processes_under(lane_dir, description=f"left running in lane {lane_dir}")
+class LaneRound:
+    """The workspace copies of one round, kept until the round's sessions have written their records."""
 
+    def __init__(self, *, workspace_dir: str, parent_dir: str, lanes: Sequence[LaneAssignment]) -> None:
+        self.source = Path(workspace_dir).resolve()
+        self.parent = Path(parent_dir).resolve()
+        self.lanes = list(lanes)
+        self.root: Path | None = None
+        self.seats: list[LaneSeat] = []
 
-def _tracked_diff(lane_dir: Path) -> str:
-    """The lane's staged and unstaged edits, in the form the archive stores."""
-    return git("diff", "HEAD", "--", ".", cwd=lane_dir).stdout
-
-
-async def run_lanes(
-    *,
-    workspace_dir: str,
-    lanes: Sequence[LanePlan],
-    session: Callable[[LanePlan, Path, Path], Awaitable[SummaryOutcome]],
-    parent_dir: str,
-    driver: str,
-) -> list[LaneResult]:
-    """Run every lane's session concurrently and return each lane's own diff."""
-    if not lanes:
-        return []
-    # Before the first lane process exists: it is what makes a lane's orphaned benchmark still identifiable as this
-    # campaign's when its shell is gone.
-    install_child_subreaper()
-    source = Path(workspace_dir).resolve()
-    parent = Path(parent_dir).resolve()
-    driver_relative = _lane_driver(source=source, driver=driver)
-    await _require_room(source=source, parent=parent, lane_count=len(lanes))
-    root = Path(tempfile.mkdtemp(prefix=LANE_ROOT_PREFIX, dir=str(parent)))
-    # A workspace imported by its directory's name is copied under that name, into a directory laid out like the one
-    # that holds it, so that what a lane imports by that name is the lane.
-    import_name = import_name_of(source)
-    try:
-        lane_dirs = [root / lane.lane_id / import_name for lane in lanes]
-        for lane_dir in lane_dirs:
-            lane_dir.mkdir(parents=True)
-        await asyncio.gather(*(_clone_lane(source, lane_dir) for lane_dir in lane_dirs))
-        if import_name:
-            for lane_dir in lane_dirs:
-                link_beside(lane_dir.parent, linked_beside(source.parent))
-        # One sentinel for the whole campaign rather than for this round, so a lane queues behind an analysis-phase
-        # probe as well as behind its siblings.
-        lock = DeviceBenchmarkLock(campaign_device_lock_path(source))
-        serialized_drivers = [
-            await lock.install(lane_dir=lane_dir, driver=lane_dir / driver_relative) for lane_dir in lane_dirs
+    async def open(self) -> list[LaneSeat]:
+        """Copy the workspace once per lane and give each copy its device runner."""
+        # Before the first lane process exists: it is what makes a lane's orphaned benchmark still identifiable as
+        # this campaign's when its shell is gone.
+        install_child_subreaper()
+        layout = ExperimentsLayout.of(self.source)
+        await _require_room(source=self.source, skip=layout.analysis, parent=self.parent, lane_count=len(self.lanes))
+        self.root = Path(tempfile.mkdtemp(prefix=LANE_ROOT_PREFIX, dir=str(self.parent)))
+        # A workspace imported by its directory's name is copied under that name, into a directory laid out like the
+        # one that holds it, so that what a lane imports by that name is the lane.
+        import_name = import_name_of(self.source)
+        queue_root = campaign_device_queue_path(self.source)
+        self.seats = [
+            LaneSeat(
+                assignment=lane,
+                lane_dir=(lane_dir := self.root / lane.lane_id / import_name),
+                device_runner=lane_dir / device_queue.RUNNER_NAME,
+                queue_root=queue_root,
+                usage_log=layout.device_usage,
+            )
+            for lane in self.lanes
         ]
+        for seat in self.seats:
+            seat.lane_dir.mkdir(parents=True)
+        await asyncio.gather(*(self._prepare(seat, layout.analysis) for seat in self.seats))
+        if import_name:
+            for seat in self.seats:
+                link_beside(seat.lane_dir.parent, linked_beside(self.source.parent))
+        return self.seats
 
-        async def _one(
-            lane: LanePlan,
-            lane_dir: Path,
-            serialized_driver: Path,
-        ) -> LaneResult:
-            # Assigned before the guard and returned on both paths: the report is the round's, not this lane's, so it
-            # has to survive a lane that failed for a reason of its own -- and a session that raised is exactly the
-            # lane most likely to have left something running.
-            reaped: ReapReport | None = None
+    async def _prepare(self, seat: LaneSeat, skip: Path) -> None:
+        await _copy_tree(self.source, seat.lane_dir, skip)
+        await _isolate_lane_repository(seat.lane_dir)
+        await _install_device_runner(seat)
+
+    async def run(self, session: Callable[[LaneSeat], Awaitable[tuple[str, dict]]]) -> list[LaneResult]:
+        """Run every lane's session concurrently; each result carries what the session and its teardown left."""
+        return list(await asyncio.gather(*(self._run_lane(seat, session) for seat in self.seats)))
+
+    async def _run_lane(self, seat: LaneSeat, session) -> LaneResult:
+        result = LaneResult(assignment=seat.assignment, lane_dir=seat.lane_dir)
+        try:
             try:
-                try:
-                    lesson = await session(lane, lane_dir, serialized_driver)
-                finally:
-                    reaped = await _reap_lane_processes(lane_dir)
-                # Outside the guard above on purpose: a lane whose session already failed has to report why it failed,
-                # not what its teardown found afterwards.
-                if reaped.contended:
-                    raise RuntimeError(
-                        f"lane workspace could not be cleared, so its candidate cannot be trusted: {reaped.describe()}"
-                    )
-                # Reading the diff belongs inside the same guard: a lane whose result cannot be read is lost for a
-                # different reason, but it is just as lost, and reporting it as an empty diff would file a session
-                # that cost hours as a deliberate no-op.
-                diff = _tracked_diff(lane_dir)
-            except Exception as error:  # isolation boundary: one fan-out lane
-                log.warning("fanout lane %s lost: %s", lane.lane_id, error, exc_info=True)
-                return LaneResult(
-                    lane_id=lane.lane_id,
-                    plan=lane.plan,
-                    error=f"{type(error).__name__}: {error}",
-                    reaped=reaped,
+                result.rationale, result.sink = await session(seat)
+            finally:
+                # A session that raised is exactly the lane most likely to have left something running.
+                result.reaped = await reap_processes_under(
+                    seat.lane_dir, description=f"left running in lane {seat.lane_dir}"
                 )
-            return LaneResult(
-                lane_id=lane.lane_id,
-                plan=lane.plan,
-                diff=diff,
-                lesson=lesson,
-                reaped=reaped,
-            )
+            if result.reaped.contended:
+                raise RuntimeError(
+                    f"lane workspace could not be cleared, so its candidate cannot be trusted: "
+                    f"{result.reaped.describe()}"
+                )
+        except Exception as error:  # isolation boundary: one lane of a round
+            log.warning("lane %s lost: %s", seat.assignment.lane_id, error, exc_info=True)
+            result.error = f"{type(error).__name__}: {error}"
+        return result
 
-        return list(
-            await asyncio.gather(
-                *(
-                    _one(lane, lane_dir, serialized_driver)
-                    for lane, lane_dir, serialized_driver in zip(lanes, lane_dirs, serialized_drivers)
-                )
-            )
-        )
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+    def close(self) -> None:
+        """Remove the round's copies."""
+        if self.root is not None:
+            shutil.rmtree(self.root, ignore_errors=True)
+            self.root = None

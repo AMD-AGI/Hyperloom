@@ -5,9 +5,10 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore, RunState, make_event
 from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
@@ -171,7 +172,7 @@ def test_resume_replay_advances_the_relay_streak_only_for_the_active_profiles_se
 
 def test_resume_advances_past_abruptly_started_event(tmp_path, monkeypatch):
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent)))
+    asyncio.run(first.run(lane_agents(_no_change_agent)))
     store = LoopStateStore(str(workspace))
     state = store.load()
     interrupted_iteration = state.next_iteration
@@ -194,7 +195,7 @@ def test_resume_advances_past_abruptly_started_event(tmp_path, monkeypatch):
         "_time_remaining",
         lambda: _AMPLE_BUDGET_SEC if len(resumed.results) < 1 else 0.0,
     )
-    results = asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=_no_change_agent)))
+    results = asyncio.run(resumed.run(lane_agents(_no_change_agent)))
 
     assert [result.iteration for result in results] == [interrupted_iteration + 1]
     assert LoopStateStore(str(workspace)).load().next_iteration == (interrupted_iteration + 2)

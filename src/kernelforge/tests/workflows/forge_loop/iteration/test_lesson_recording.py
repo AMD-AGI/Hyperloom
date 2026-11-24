@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import logging
 import json
 from pathlib import Path
 
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.memory.lessons import SummaryOutcome
 from kernelforge.workflows.forge_loop.campaign.run_state import RunState
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
@@ -386,7 +387,7 @@ def test_an_unreadable_kernel_reaches_the_prompt_as_unchecked(tmp_path, monkeypa
         session_sink["summarize"] = summarizer
         return "rationale"
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
+    asyncio.run(loop.run(lane_agents(agent_fn)))
 
     assert len(prompts) == 2
     assert "were not checked against the current kernel" in prompts[1]
@@ -801,7 +802,7 @@ def test_an_unscored_case_does_not_reopen_a_stored_negative_in_the_prompt(tmp_pa
         session_sink["plan"] = "inspect only"
         return "No source change was needed."
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
+    asyncio.run(loop.run(lane_agents(agent_fn)))
 
     assert loop._scored_case_ids() == ["decode-t1", "prefill-t16384"]
     assert prompts and "swept split-K" in prompts[0]
@@ -1139,7 +1140,7 @@ def test_lesson_flows_from_one_iteration_into_the_next_prompt(tmp_path, monkeypa
         session_sink["summarize"] = summarizer
         return "rationale"
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
+    asyncio.run(loop.run(lane_agents(agent_fn)))
 
     # The first iteration produced a document with both authors' halves.
     first = (workspace / "forge_experiments" / "lessons" / "iter_001.md").read_text()
@@ -1189,7 +1190,7 @@ def test_the_insight_list_and_every_measured_negative_reach_the_sessions_that_fo
         session_sink["summarize"] = summarizer
         return "rationale"
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
+    asyncio.run(loop.run(lane_agents(agent_fn)))
 
     flush, probe = (
         "a quick bench agrees with the driver only after a 1 GiB read flush",
@@ -1259,7 +1260,7 @@ def test_prompt_omits_the_digest_once_lessons_exist(tmp_path, monkeypatch):
         session_sink["summarize"] = summarizer
         return "rationale"
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
+    asyncio.run(loop.run(lane_agents(agent_fn)))
 
     # The archive digest's own header would appear verbatim if it were inlined.
     assert "Solution archive — your lineage so far" not in prompts[1]

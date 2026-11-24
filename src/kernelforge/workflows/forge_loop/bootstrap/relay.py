@@ -48,21 +48,18 @@ class SearchActorBuildContext:
     lane_binding: LaneBinding
     lanes: int
     program_md: str
-    specialist_definitions: dict
-    critic_enabled: bool
     usage: Any = None
     supervisor_backend: str = ""
     # This session's relay; ``None`` for a campaign without relay, whose one actor may fall back to another provider.
     relay: AgentRelayConfig | None = None
 
     def build(self, profile: AgentProfile) -> SearchActorBundle:
-        """Build and probe the profile-bound implementation services, and the planning service a multi-lane round needs."""
+        """Build and probe the profile-bound services: the canonical session, the lane factory and the Supervisor."""
         from kernelforge.workflows.forge_loop.bootstrap.lanes import (
             _make_lane_agent_factory,
             _require_lane_provider_capabilities,
         )
         from kernelforge.workflows.forge_loop.roles.agent import make_agent_fn
-        from kernelforge.workflows.forge_loop.roles.orchestration import make_orchestration_service
         from kernelforge.workflows.forge_loop.roles.supervisor import make_supervisor_fn
 
         actor_config = self._profile_config(profile) if self.relay is not None else self.config
@@ -77,18 +74,6 @@ class SearchActorBuildContext:
             setup=setup,
             usage=self.usage,
         )
-        # Planning divides a round's evidence among lanes. One lane has nothing to divide: its session reads the
-        # Analysis evidence and chooses its own direction.
-        orchestration = (
-            make_orchestration_service(
-                config=actor_config,
-                usage=self.usage,
-                definitions=self.specialist_definitions,
-                enable_plan_critic=self.critic_enabled,
-            )
-            if self.lanes > 1
-            else None
-        )
         supervisor_provider = self.supervisor_backend or profile.provider
         supervisor = make_supervisor_fn(
             program_md=self.program_md,
@@ -97,7 +82,7 @@ class SearchActorBuildContext:
             usage=self.usage,
             config=self._supervisor_config(supervisor_provider, profile, actor_config),
         )
-        return SearchActorBundle(effective_profile, actor_fn, orchestration, lane_factory, supervisor)
+        return SearchActorBundle(effective_profile, actor_fn, lane_factory, supervisor)
 
     def _profile_config(self, profile: AgentProfile) -> Config:
         return config_for_profile(self.config, profile, primary_provider=self.relay.primary_profile.provider)

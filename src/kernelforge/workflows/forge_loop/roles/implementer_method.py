@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 # What a session has read, built and measured is paid for again by the next one, so a session whose gate requires
-# performance keeps working until its clock or its own measurements tell it to finish. Its first direction is the
-# round's plan when the round planned one, and otherwise the one it expects most from, structural changes included.
+# performance keeps working until its clock or its own measurements tell it to finish. Its direction is its own to
+# choose: the one it expects most from, structural changes included, inside its lane's focus when the round gave one.
 #
 # How such a session paces itself. The wrap-up minute is this fraction of its wall-clock budget; the rest covers the
 # session's final check and the gate's own correctness and benchmark runs.
@@ -23,14 +23,13 @@ AMPLE_TIME_MINUTES = 20
 MAX_COMMAND_MINUTES = 4
 
 PERFORMANCE_WORKING_METHOD = """\
-2. Fix this session's direction before the first edit. When this invocation
-   names a required optimization plan, that plan is the direction: read it and
-   work it. When it leaves the direction to you, choose it from the evidence in
-   this prompt — where each scored case spends its time, what earlier sessions
-   tried and what they measured — and pick the ONE direction you expect to move
-   the score most: a mechanism (restructure a loop, fuse two passes, change the
-   data layout, specialize per case), not a single constant. Take the larger
-   expected gain even when it means restructuring the kernel. Either way, a
+2. Fix this session's direction before the first edit. Choose it from the
+   evidence in this prompt — where each scored case spends its time, what
+   earlier sessions tried and what they measured — and pick the ONE direction
+   you expect to move the score most: a mechanism (restructure a loop, fuse two
+   passes, change the data layout, specialize per case), not a single constant.
+   Take the larger expected gain even when it means restructuring the kernel.
+   When this invocation names a focus for this lane, choose inside it. A
    direction may need twenty or thirty minutes of work before its first
    measurement: the session is long enough for that, and tuning constants
    follows a structural change, it does not replace one. State the direction
@@ -85,6 +84,10 @@ PERFORMANCE_WORKING_METHOD = """\
    every direction worth measuring has been measured. In the last case name, in
    your final message, each direction you did not take and the measurement that
    rules it out. A first improvement is none of these three.
+{finish}"""
+
+# How a session finishes when its stop needs a candidate that beats the current best.
+_FINISH_ON_GAIN = """\
 7. Submit the best version, not the last one. Make sure the workspace holds
    exactly the best version you measured, and run correctness and the benchmark
    on it once more; the gate that judges your stop then repeats correctness and
@@ -99,6 +102,29 @@ PERFORMANCE_WORKING_METHOD = """\
    micro-tweaks inside the noise band — if a direction is not beating best,
    switch to a materially different one rather than resubmitting near-ties.
 """
+
+# How a lane finishes when other lanes work the same round: what it gained on some cases is merged with theirs, so
+# its stop needs a correct candidate, not one that beats the current best.
+_FINISH_AS_ONE_LANE = """\
+7. Submit the best version, not the last one. Other sessions are working from
+   the same starting point right now, each on its own focus, and a merge
+   session combines the results afterwards. So a version that is faster on the
+   cases of your focus is worth submitting even when its overall score is no
+   higher than the starting point's. Make sure the workspace holds exactly the
+   best version you measured for your focus, and run correctness and the
+   benchmark on it once more; the gate that judges your stop then repeats
+   correctness and takes three benchmark measurements, which the merge reads
+   case by case. In your final message, name the cases it gained on and the
+   cases it lost on, with the numbers. If nothing you measured gained on any
+   case, restore every file to how the session found it and say so in the
+   `PLAN:` line.
+8. There is NO hard edit budget — make as many changes to non-protected tracked
+   implementation files as a direction needs. What IS bounded is fruitless
+   stopping: each time you STOP with a kernel that fails correctness, the gate
+   sends you back to fix it, and after {max_blocks} such rejected stops it
+   ends the session and hands off.
+"""
+
 
 # A correctness-only gate (the PORT phase) has no performance to search for: the first correct kernel is the result.
 CORRECTNESS_ONLY_WORKING_METHOD = """\
@@ -120,8 +146,13 @@ CORRECTNESS_ONLY_WORKING_METHOD = """\
 """
 
 
+def performance_method(*, gain_required: bool) -> str:
+    """The working method of a session that searches for performance, ending the way its stop is judged."""
+    return PERFORMANCE_WORKING_METHOD.replace("{finish}", _FINISH_ON_GAIN if gain_required else _FINISH_AS_ONE_LANE)
+
+
 def render_method(template: str, *, driver_run: str, max_blocks: int) -> str:
-    """One of the two working methods above, with the driver command and every threshold it names filled in."""
+    """A working method with the driver command and every threshold it names filled in."""
     return template.format(
         driver_run=driver_run,
         max_blocks=max_blocks,

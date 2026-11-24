@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import json
 import math
@@ -389,7 +391,7 @@ def test_a_high_scoring_measurement_reaches_the_event_stream_as_a_keep(
 
     monkeypatch.setattr(loop, "run_one_iteration", fast_iteration)
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=fast_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(fast_agent, supervisor_fn=_unused_supervisor)))
 
     events = [
         event for event in LoopStateStore(str(workspace)).read_events() if event.get("type") == "iteration_result"
@@ -827,14 +829,14 @@ def test_loop_startup_rejects_a_drifted_pristine_baseline(tmp_path, monkeypatch)
     _write_reference(workspace, {"case": 0.25})
 
     with pytest.raises(BaselineReferenceError):
-        asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+        asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
 
 def test_loop_startup_accepts_a_matching_pristine_baseline(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     _write_reference(workspace, {"case": 1.02})
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert [
         event.get("decision")
@@ -851,7 +853,7 @@ def test_loop_startup_says_when_the_anchor_is_unverified(
     """A run against an unverified anchor must not look like a checked one."""
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert "the pristine anchor every speedup divides by is unverified" in (capsys.readouterr().out)
 
@@ -866,7 +868,7 @@ def test_loop_startup_reports_how_many_of_its_cases_the_reference_backed(
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=measured)
     _write_reference(workspace, {"k001": 1.0})
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert "agrees with the task reference on 1 of 12 measured case(s)" in (capsys.readouterr().out)
 
@@ -880,7 +882,7 @@ def test_loop_startup_names_the_reference_entries_it_could_not_read(
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     _write_partly_readable_reference(workspace, {"case": 1.0}, ["ghost"])
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert "could not read 1 of the 2 entries" in capsys.readouterr().out
 
@@ -895,7 +897,7 @@ def test_loop_startup_announces_a_widened_drift_tolerance(
     _write_reference(workspace, {"case": 1.4})
     monkeypatch.setenv(DRIFT_TOLERANCE_ENV, "0.5")
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     output = capsys.readouterr().out
     assert "drift tolerance widened to 50%" in output

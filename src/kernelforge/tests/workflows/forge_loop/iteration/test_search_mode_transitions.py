@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 
 import pytest
@@ -497,7 +499,7 @@ def test_repeated_empty_diffs_escalate_before_the_generic_stall_threshold(
         observed_modes.append(loop.run_state.search_mode)
         return "No source change was needed."
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=stuck_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(stuck_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -513,7 +515,7 @@ def test_single_empty_diff_does_not_escalate(tmp_path, monkeypatch):
     """One session that found nothing to change is not proof of a dead end."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     state = LoopStateStore(str(workspace)).load()
 
@@ -546,7 +548,7 @@ def test_the_empty_diff_streak_survives_a_reworded_plan_headline(
         observed_modes.append(loop.run_state.search_mode)
         return "No source change was needed."
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=reworded_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(reworded_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -580,7 +582,7 @@ def test_api_outage_does_not_break_the_empty_diff_streak(tmp_path, monkeypatch):
             return "agent session ended with an API error"
         return "No source change was needed."
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=flaky_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(flaky_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -613,7 +615,7 @@ def test_a_crashed_session_does_not_break_the_empty_diff_streak(
             raise RuntimeError("SDK stream died mid-session")
         return "No source change was needed."
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=crashing_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(crashing_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -652,7 +654,7 @@ def test_an_outage_run_cannot_push_the_first_empty_diff_out_of_the_window(
             return "agent session ended with an API error"
         return "No source change was needed."
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=outage_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(outage_agent, supervisor_fn=_unused_supervisor)))
 
     reopened = LoopStateStore(str(workspace))
     live = reopened.load()

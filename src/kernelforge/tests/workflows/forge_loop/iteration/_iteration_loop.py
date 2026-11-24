@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from kernelforge.evaluation.scoring import CaseAggregate
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore, RunState
+from kernelforge.workflows.forge_loop.iteration.iteration_types import LoopAgents
 from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop, IterationResult
 from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 from kernelforge.workflows.forge_loop.iteration import attempt_verdict
@@ -88,6 +89,15 @@ def _make_loop(
         lambda: _AMPLE_BUDGET_SEC if len(loop.results) < session_count else 0.0,
     )
     return loop, workspace
+
+
+def lane_agents(agent_fn, **services) -> LoopAgents:
+    """The loop's agents around one fake session.
+
+    The same callable serves as a lane's session, where it is handed the kernel of the lane's own copy, and as the
+    canonical session that merges a round's lanes.
+    """
+    return LoopAgents(agent_fn=agent_fn, agent_factory=lambda _seat, *, gain_required: agent_fn, **services)
 
 
 async def _unused_supervisor(**_kwargs):

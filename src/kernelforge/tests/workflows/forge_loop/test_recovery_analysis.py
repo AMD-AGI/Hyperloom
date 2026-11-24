@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import json
 from pathlib import Path
 
 import pytest
 
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore, RunState, make_event
 from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
 from kernelforge.workflows.forge_loop.roles.analysis import AnalysisAgentService, AnalysisSources
@@ -88,7 +89,7 @@ def test_keep_archive_failure_is_non_fatal_and_clears_pending_journal(
         lambda _archive, _record: (_ for _ in ()).throw(OSError("simulated archive failure")),
     )
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent)))
+    asyncio.run(loop.run(lane_agents(editing_agent)))
 
     pending_path = workspace / "forge_experiments" / "pending_keep.json"
     assert not pending_path.is_file()

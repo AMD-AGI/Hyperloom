@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import json
 import subprocess
@@ -14,7 +16,6 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.utils.git import GitError
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.tests.workflows.forge_loop._experiment_records import persisted_experiments
 from kernelforge.workflows.forge_loop.campaign.reporting import KeepBundle, KeepIdentity, KeepScore
 from kernelforge.workflows.forge_loop.campaign.run_state import SESSION_PAUSED, BestRecord, LoopStateStore, RunState
@@ -121,11 +122,7 @@ def test_resume_propagates_complete_ruling_to_planner_and_implementer(
     )
 
     asyncio.run(
-        loop.run(
-            runner_module.LoopAgents(
-                agent_fn=agent, orchestration_service=OrchestrationService(), supervisor_fn=_unused_supervisor
-            )
-        )
+        loop.run(lane_agents(agent, orchestration_service=OrchestrationService(), supervisor_fn=_unused_supervisor))
     )
 
     assert loop._supervisor_ruling == ruling
@@ -227,7 +224,7 @@ def test_run_fails_before_agent_without_baseline_cases(
         RuntimeError,
         match="requires pristine per-case timings",
     ):
-        asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent)))
+        asyncio.run(loop.run(lane_agents(agent)))
 
     assert called is False
 
@@ -278,7 +275,7 @@ def test_resume_restores_baselines_before_best_publication_reconcile(
     monkeypatch.setattr(loop, "_reconcile_best_publication", inspect_reconcile)
     monkeypatch.setattr(loop, "_time_remaining", lambda: 0.0)
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent)))
 
     assert observed == [(0.8, 1.0)]
 
@@ -455,7 +452,7 @@ def test_resume_publication_diff_failure_degrades_persistence_without_propagatin
 
 def test_two_loop_instances_resume_global_iteration_and_fresh_budget(tmp_path, monkeypatch):
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(first.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     first_state = LoopStateStore(str(workspace)).load()
     first_experiment = first.experiment
@@ -475,9 +472,7 @@ def test_two_loop_instances_resume_global_iteration_and_fresh_budget(tmp_path, m
         "_time_remaining",
         lambda: _AMPLE_BUDGET_SEC if len(second.results) < 1 else 0.0,
     )
-    second_results = asyncio.run(
-        second.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
-    )
+    second_results = asyncio.run(second.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     resumed = LoopStateStore(str(workspace)).load()
     assert [result.iteration for result in second_results] == [2]
@@ -530,7 +525,7 @@ def test_validated_warm_start_is_immediately_recoverable_without_keep(
     loop.ic.warm_start_commit = warm_commit
     loop.ic.warm_start_solution_slug = "kernelforge-exp/op/run"
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     state = LoopStateStore(str(workspace)).load()
     manifest = json.loads((workspace / "forge_experiments" / "best" / "manifest.json").read_text())
@@ -619,7 +614,7 @@ def test_validated_warm_start_reuses_cli_prepublication(
         pytest.fail("runner must not republish a CLI-published warm-start")
 
     monkeypatch.setattr(loop, "_publish_best_result", duplicate_publication)
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     persisted_manifest = json.loads((workspace / "forge_experiments" / "best" / "manifest.json").read_text())
     assert persisted_manifest == manifest
@@ -628,7 +623,7 @@ def test_validated_warm_start_reuses_cli_prepublication(
 
 def test_fresh_run_rejects_existing_campaign_without_modifying_state(tmp_path, monkeypatch):
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(first.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
     state_path = workspace / "forge_experiments" / "run_state.json"
     before = state_path.read_bytes()
 
@@ -638,9 +633,7 @@ def test_fresh_run_rejects_existing_campaign_without_modifying_state(tmp_path, m
         config=object(),
     )
     with pytest.raises(ValueError, match="--resume"):
-        asyncio.run(
-            duplicate_fresh.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
-        )
+        asyncio.run(duplicate_fresh.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert state_path.read_bytes() == before
 
@@ -648,7 +641,7 @@ def test_fresh_run_rejects_existing_campaign_without_modifying_state(tmp_path, m
 def test_a_rejected_fresh_run_persists_no_pr_references(tmp_path, monkeypatch):
     """Deferred PR writes must not survive an invocation the guard rejects."""
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(first.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     def tree() -> dict:
         """Every workspace file, git included, so nothing can slip through."""
@@ -669,9 +662,7 @@ def test_a_rejected_fresh_run_persists_no_pr_references(tmp_path, monkeypatch):
         config=object(),
     )
     with pytest.raises(ValueError, match="--resume"):
-        asyncio.run(
-            duplicate_fresh.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
-        )
+        asyncio.run(duplicate_fresh.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert tree() == before
     assert not (workspace / "forge_experiments" / "pr_refs").exists()
@@ -692,7 +683,7 @@ def test_resume_rejects_identity_mismatch_without_modifying_state(
     error,
 ):
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(first.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
     state_path = workspace / "forge_experiments" / "run_state.json"
     before = state_path.read_bytes()
     experiment_count = len(persisted_experiments(first.tracker.dir))
@@ -705,9 +696,7 @@ def test_resume_rejects_identity_mismatch_without_modifying_state(
         resume=True,
     )
     with pytest.raises(ValueError, match=error):
-        asyncio.run(
-            mismatched.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
-        )
+        asyncio.run(mismatched.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert state_path.read_bytes() == before
     assert len(persisted_experiments(first.tracker.dir)) == experiment_count
@@ -715,7 +704,7 @@ def test_resume_rejects_identity_mismatch_without_modifying_state(
 
 def test_resume_rejects_head_mismatch_without_modifying_state(tmp_path, monkeypatch):
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(first.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
     state_path = workspace / "forge_experiments" / "run_state.json"
     before = state_path.read_bytes()
 
@@ -735,8 +724,6 @@ def test_resume_rejects_head_mismatch_without_modifying_state(tmp_path, monkeypa
         resume=True,
     )
     with pytest.raises(ValueError, match="HEAD mismatch"):
-        asyncio.run(
-            mismatched.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
-        )
+        asyncio.run(mismatched.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert state_path.read_bytes() == before

@@ -24,7 +24,6 @@ from kernelforge.workflows.forge_loop.iteration.iteration_types import (
     _decision_label,
 )
 from kernelforge.evaluation.jit_rebuild import force_jit_rebuild
-from kernelforge.workflows.forge_loop.campaign.run_state import make_event
 from kernelforge.workflows.forge_loop.iteration.scoring_runtime import _bench_failure_detail
 
 
@@ -81,7 +80,6 @@ class AttemptVerdictMixin:
                 kept=False,
             )
 
-        measurement_started = time.time()
         print("  [validate] Running full correctness suite...")
         report = await run_validation_pipeline(
             driver_script=self.ic.driver_script,
@@ -93,7 +91,6 @@ class AttemptVerdictMixin:
             print(f"  [validate] Stage {result.stage} {result.stage_name}: {result.status_label}{snr_str}")
         if not report.all_passed:
             print(f"  [validate] FAILED at stage {report.failed_stage} — skipping bench")
-            self._observe_measurement(measurement_started)
             return IterationResult(
                 iteration=iteration,
                 duration_sec=time.time() - iter_start,
@@ -105,7 +102,6 @@ class AttemptVerdictMixin:
             )
 
         bench_result = await self._bench_attempt(benchmark_measurement)
-        self._observe_measurement(measurement_started)
         self.last_case_bandwidth = dict(bench_result.get("case_bandwidth") or {})
         return await self._decide_iteration_keep(iteration, iter_start, report, bench_result)
 
@@ -219,10 +215,9 @@ class AttemptVerdictMixin:
                 plan=session_sink.get("plan", ""),
             )
 
-        # The verdict is now known, so ask the just-finished implementer session to record what it explored, then
-        # stamp the measured outcome onto the same document.
+        # The verdict is now known, so ask the round's sessions to record what they explored, then stamp the
+        # measured outcome onto the same document.
         decision_label = _decision_label(result)
-        self._report_merge_outcome(result, frame, decision_label)
         iteration_diff_summary = (
             self._diff_summary(commit_hash) if commit_hash else self._diff_summary_from_diff(attempt.attempt_diff)
         )
@@ -231,7 +226,7 @@ class AttemptVerdictMixin:
             decision=decision_label,
             session_sink=session_sink,
             diff_summary=iteration_diff_summary,
-            lane_record=attempt.lane_record,
+            sessions=attempt.sessions,
         )
 
         # Record this iteration into the cross-iteration experience ledger.
@@ -255,7 +250,6 @@ class AttemptVerdictMixin:
         self._record_iteration_handoff(
             iteration=iteration,
             decision=decision_label,
-            optimization_plan_path=attempt.optimization_plan_path,
             session_sink=session_sink,
             archived_path=archived_path,
         )
@@ -280,27 +274,6 @@ class AttemptVerdictMixin:
             decision="KEEP" if result.kept else "REVERT",
             notes=frame.session_sink.get("plan", ""),
         )
-
-    def _report_merge_outcome(self, result: IterationResult, frame: _IterationFrame, decision_label: str) -> None:
-        """Say how a stacked merge of two earlier iterations measured, recording it when it was kept."""
-        merge_pair, merge_diff = frame.merge
-        if merge_diff and merge_pair is not None:
-            print(
-                f"  [merge] iterations {merge_pair[0].iteration}+"
-                f"{merge_pair[1].iteration} measured stacked: {decision_label}"
-            )
-            if decision_label == "KEEP":
-                # How often the mechanism changed an outcome, which is the other of the two numbers
-                # ``merge_attempt_staged`` carries.
-                self.state_store.append_event(
-                    make_event(
-                        "merge_attempt_kept",
-                        frame.iteration,
-                        first_iteration=merge_pair[0].iteration,
-                        second_iteration=merge_pair[1].iteration,
-                        mean_case_speedup=result.mean_case_speedup,
-                    )
-                )
 
     async def _decide_iteration_keep(
         self,
@@ -339,16 +312,12 @@ class AttemptVerdictMixin:
         # the same command, while reading a task configuration whose shape the engine has no business knowing.
         canonical_summary = ""
         if improved and runs_task_suite_acceptance(self.ic.kernel_backend):
-            canonical_started = time.time()
             canonical = await accept_candidate(
                 self.ic.workspace_dir,
                 timeout_cap_sec=self.ic.validate_stage_timeout_sec,
                 candidate_label=f"iteration {iteration}",
                 kernel_backend=self.ic.kernel_backend,
             )
-            # The suite only runs for a candidate the round produced, so it is part of that round's measurement and
-            # has to be priced into the next round's admission alongside the validate-and-bench cycle.
-            self._observe_measurement(canonical_started)
             canonical_summary = f"\n  Canonical correctness suite: {canonical.detail}"
             if canonical.numerical_evidence is not None:
                 bench_result["numerical_validation"] = canonical.numerical_evidence

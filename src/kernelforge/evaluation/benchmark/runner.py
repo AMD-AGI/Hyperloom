@@ -14,6 +14,7 @@ import shutil
 import statistics
 import sys
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable
@@ -113,6 +114,8 @@ class BenchRun:
     warmup_iters: int = 10
     bench_iters: int = 30
     repeat: int = 1
+    # Laid over this process's environment for the driver, for a workspace that keeps its own build caches.
+    env: Mapping[str, str] | None = None
 
 
 def bench_command(run: BenchRun) -> list[str]:
@@ -408,6 +411,7 @@ async def bench_wallclock(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
+        env=None if run.env is None else {**os.environ, **run.env},
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import json
 from pathlib import Path
@@ -17,7 +19,6 @@ from kernelforge.workflows.forge_loop.campaign.run_state import (
     ORCHESTRATION_CIRCUIT_OPEN,
     LoopStateStore,
 )
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop, IterationResult
 from kernelforge.workflows.forge_loop.policy.round_budget import (
     ADMISSION_SESSION_SEC,
@@ -63,9 +64,7 @@ def test_a_session_without_a_plan_is_told_to_choose_its_direction_from_the_evide
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
     histories: list[str] = []
 
-    asyncio.run(
-        loop.run(runner_module.LoopAgents(agent_fn=_recording_agent(histories), supervisor_fn=_unused_supervisor))
-    )
+    asyncio.run(loop.run(lane_agents(_recording_agent(histories), supervisor_fn=_unused_supervisor)))
 
     assert len(histories) == 1
     assert histories[0].startswith("## Direction (yours to choose)")
@@ -92,9 +91,7 @@ def test_a_stalled_search_sends_the_session_to_a_different_mechanism_and_leaves_
         ),
     )
 
-    asyncio.run(
-        loop.run(runner_module.LoopAgents(agent_fn=_recording_agent(histories), supervisor_fn=_unused_supervisor))
-    )
+    asyncio.run(loop.run(lane_agents(_recording_agent(histories), supervisor_fn=_unused_supervisor)))
 
     assert "choose a mechanism materially different from the ones already tried" in histories[0]
     assert LoopStateStore(str(workspace)).load().diversification_cycle_completed is False
@@ -146,9 +143,7 @@ def test_a_self_directed_loop_turns_after_one_session_without_a_new_best_and_is_
         return "No source change was needed."
 
     search_actors = _relay_with_one_runnable_profile(agent, supervisor) if relay else None
-    asyncio.run(
-        loop.run(runner_module.LoopAgents(agent_fn=agent, supervisor_fn=supervisor, search_actors=search_actors))
-    )
+    asyncio.run(loop.run(lane_agents(agent, supervisor_fn=supervisor, search_actors=search_actors)))
 
     assert modes == [SEARCH_MODE_EXPLOIT] + [SEARCH_MODE_DIVERSIFY] * 3
     assert reviewed_at == [3]
@@ -202,7 +197,7 @@ def test_a_stalled_search_without_planning_hands_the_supervisors_ruling_to_the_n
         )
 
     monkeypatch.setattr(loop, "run_one_iteration", reverted_iteration)
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent, supervisor_fn=supervisor)))
+    asyncio.run(loop.run(lane_agents(editing_agent, supervisor_fn=supervisor)))
 
     assert len(histories) == 3
     assert len(evidence) == 1
@@ -226,9 +221,7 @@ def test_a_loop_without_planning_is_not_refused_for_the_price_of_a_plan(tmp_path
     monkeypatch.setattr(loop, "_time_remaining", lambda: remaining if not loop.results else 0.0)
     histories: list[str] = []
 
-    asyncio.run(
-        loop.run(runner_module.LoopAgents(agent_fn=_recording_agent(histories), supervisor_fn=_unused_supervisor))
-    )
+    asyncio.run(loop.run(lane_agents(_recording_agent(histories), supervisor_fn=_unused_supervisor)))
 
     assert len(histories) == 1
     state = LoopStateStore(str(workspace)).load()
@@ -245,20 +238,14 @@ def test_a_campaign_stopped_on_failed_orchestration_resumes_without_a_planner(tm
 
     monkeypatch.setattr(first, "_run_orchestration", failed_planning)
     asyncio.run(
-        first.run(
-            runner_module.LoopAgents(
-                agent_fn=_no_change_agent, orchestration_service=object(), supervisor_fn=_unused_supervisor
-            )
-        )
+        first.run(lane_agents(_no_change_agent, orchestration_service=object(), supervisor_fn=_unused_supervisor))
     )
     assert LoopStateStore(str(workspace)).load().orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN
 
     resumed = IterationLoop(first.ic, first.tracker, config=first.config, resume=True)
     monkeypatch.setattr(resumed, "_time_remaining", lambda: _AMPLE_BUDGET_SEC if not resumed.results else 0.0)
     histories: list[str] = []
-    asyncio.run(
-        resumed.run(runner_module.LoopAgents(agent_fn=_recording_agent(histories), supervisor_fn=_unused_supervisor))
-    )
+    asyncio.run(resumed.run(lane_agents(_recording_agent(histories), supervisor_fn=_unused_supervisor)))
 
     state = LoopStateStore(str(workspace)).load()
     assert len(histories) == 1

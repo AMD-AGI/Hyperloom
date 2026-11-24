@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import re
 import subprocess
@@ -12,7 +14,6 @@ from dataclasses import replace
 
 import pytest
 
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.campaign.reporting import _round_budget_lines
 from kernelforge.workflows.forge_loop.policy.round_budget import (
     ADMISSION_SESSION_SEC,
@@ -103,8 +104,8 @@ def _round_admission_loop(
 
     asyncio.run(
         loop.run(
-            runner_module.LoopAgents(
-                agent_fn=_no_change_agent,
+            lane_agents(
+                _no_change_agent,
                 agent_factory=_lane_agent_factory({}),
                 orchestration_service=object(),
                 supervisor_fn=_unused_supervisor,
@@ -240,7 +241,7 @@ def test_a_resumed_campaign_reports_a_planning_share_within_its_definition(
         lambda: 0.0 if loop.results else 12 * 3600.0,
     )
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     summary = loop._round_budget_summary()
     share = summary["planning_share_pct"]
@@ -287,8 +288,8 @@ def test_a_finished_round_records_what_its_planning_cost(tmp_path, monkeypatch):
 
     asyncio.run(
         loop.run(
-            runner_module.LoopAgents(
-                agent_fn=_no_change_agent,
+            lane_agents(
+                _no_change_agent,
                 agent_factory=_lane_agent_factory({}),
                 orchestration_service=object(),
                 supervisor_fn=_unused_supervisor,
@@ -308,7 +309,7 @@ def test_an_iteration_that_did_not_plan_records_no_round_cost(tmp_path, monkeypa
     """A campaign with no orchestration never learns that planning is free."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert loop.results
     assert LoopStateStore(str(workspace)).load().round_costs.rounds == 0

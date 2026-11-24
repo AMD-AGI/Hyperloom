@@ -17,8 +17,9 @@ from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 from kernelforge.workflows.forge_loop.roles.contracts import (
     CaseEvidence,
     EvidenceRef,
-    OrchestrationContext,
+    EvidenceContext,
 )
+from kernelforge.workflows.forge_loop.roles.analysis_prompts import LANE_PARTITION_FILE
 from kernelforge.workflows.forge_loop.roles.analysis_session import _sha256
 
 
@@ -61,7 +62,7 @@ class AnalysisBundle:
     cases: tuple[CaseEvidence, ...]
     outcome: AnalysisOutcome | None = None
 
-    def apply(self, context: OrchestrationContext) -> OrchestrationContext:
+    def apply(self, context: EvidenceContext) -> EvidenceContext:
         """Return an orchestration context backed by this bundle."""
         source_map = self.root / "source_map.md"
         report = self.root / "report.md"
@@ -90,7 +91,7 @@ class AnalysisBundle:
                     f"{', '.join(artifact['available_information'])}."
                 ),
             )
-        return OrchestrationContext(
+        return EvidenceContext(
             analysis_commit=context.analysis_commit,
             workspace=context.workspace,
             gpu_target=context.gpu_target,
@@ -110,6 +111,27 @@ class AnalysisBundle:
             cumulative_diff_path=context.cumulative_diff_path,
             cumulative_diff_error=context.cumulative_diff_error,
         )
+
+
+_LANE_HEADING = re.compile(r"^#{1,6}\s*lane\s+\d+\b.*$", re.IGNORECASE | re.MULTILINE)
+
+
+def read_lane_focuses(bundle_root: Path) -> list[str]:
+    """The focuses a published Analysis divided its evidence into, in lane order; empty when it divided nothing.
+
+    A focus is the text under one ``## Lane N`` heading of the bundle's partition file. The loop reads nothing else
+    of it: what a focus says is between the Analysis Agent and the session that works on it.
+    """
+    try:
+        text = (bundle_root / LANE_PARTITION_FILE).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    headings = list(_LANE_HEADING.finditer(text))
+    sections = [
+        text[heading.end() : following.start() if following is not None else len(text)].strip()
+        for heading, following in zip(headings, [*headings[1:], None])
+    ]
+    return [section for section in sections if section]
 
 
 class AnalysisBundleError(RuntimeError):
@@ -204,7 +226,7 @@ def _case_directory(case_id: str) -> str:
     return f"{readable}-{digest}"
 
 
-def _analysis_cases(context: OrchestrationContext) -> tuple[AnalysisCase, ...]:
+def _analysis_cases(context: EvidenceContext) -> tuple[AnalysisCase, ...]:
     return tuple(
         AnalysisCase(case_id=case.case_id, directory=_case_directory(case.case_id), latency_ms=case.latency_ms)
         for case in context.cases
@@ -225,7 +247,7 @@ def _source_digest(paths: tuple[Path, ...]) -> str:
 class _BundleIdentity:
     """What a bundle must answer for: the orchestration context, its cases, and the driver and source digests."""
 
-    context: OrchestrationContext
+    context: EvidenceContext
     cases: tuple[AnalysisCase, ...]
     driver_digest: str
     source_digest: str
@@ -364,7 +386,7 @@ def _validated_manifest(root: Path, identity: _BundleIdentity) -> tuple[dict, di
 
 def _validated_session_metadata(
     root: Path,
-    context: OrchestrationContext,
+    context: EvidenceContext,
     manifest: dict,
     *,
     completed: list,
