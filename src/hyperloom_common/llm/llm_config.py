@@ -12,7 +12,7 @@ import sys
 import time
 from contextlib import AbstractContextManager, AsyncExitStack, ExitStack
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, MutableMapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from hyperloom_common.env import is_truthy
@@ -124,6 +124,35 @@ def with_synthesized_anthropic_keys(env: Mapping[str, str]) -> dict[str, str]:
         source.setdefault("ANTHROPIC_API_KEY", fallback_key)
         source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
     return source
+
+
+#: What a custom header may reference. Every child inherits the expanded header, so expanding any other name would
+#: hand a child the value of a secret its environment allowlist strips, such as ``${GITHUB_TOKEN}``.
+HEADER_REF_ALLOWLIST = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"})
+
+
+def expand_custom_header_env_refs(environ: MutableMapping[str, str] | None = None) -> None:
+    """Resolve the credential ``${VAR}`` references in the ``*_CUSTOM_HEADERS`` settings of ``environ`` in place.
+
+    Child processes (specialists, the Critic, GEAK) forward these verbatim, and an agent CLI sends them
+    verbatim, so an unexpanded ``${ANTHROPIC_API_KEY}`` reaches the gateway as literal text and is rejected.
+    References resolve against the same view ``claude_sdk_env_options`` uses, so a key it would fill in from the
+    other Anthropic credential is not erased here. A reference outside :data:`HEADER_REF_ALLOWLIST` is left as
+    written, which is what children received before this expansion existed. ``environ`` defaults to ``os.environ``.
+    """
+    environ = os.environ if environ is None else environ
+    source = with_synthesized_anthropic_keys(environ)
+    for key in ("ANTHROPIC_CUSTOM_HEADERS", "OPENAI_CUSTOM_HEADERS"):
+        raw = environ.get(key)
+        if not raw or "${" not in raw:
+            continue
+        environ[key] = expand_env_refs(raw, source, only=HEADER_REF_ALLOWLIST)
+        if "${" in environ[key]:
+            log.warning(
+                "%s references a variable outside %s; child processes receive that reference unexpanded",
+                key,
+                ", ".join(sorted(HEADER_REF_ALLOWLIST)),
+            )
 
 
 CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
@@ -1088,6 +1117,7 @@ __all__ = [
     "AnthropicMessageResult",
     "CLAUDE_GATEWAY_SIGNAL_KEYS",
     "CLAUDE_OAUTH_TOKEN_ENV",
+    "HEADER_REF_ALLOWLIST",
     "ChatCompletionResult",
     "DEFAULT_ANTHROPIC_BASE_URL",
     "DEFAULT_ANTHROPIC_VERSION",
@@ -1119,6 +1149,7 @@ __all__ = [
     "derive_openai_base_url",
     "dual_protocol_endpoint_pair",
     "endpoint_default_model",
+    "expand_custom_header_env_refs",
     "get_anthropic_client",
     "get_async_anthropic_client",
     "get_async_openai_client",
