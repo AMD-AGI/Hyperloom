@@ -402,7 +402,7 @@ class GeakRebenchAttempt:
     decision_reason: str | None = None
     status: str | None = None
     #: The config fingerprint and overlay digest the verdict compared to decide
-    #: ``validated`` versus ``fallback``.
+    #: ``validated`` versus ``no_promote``.
     engagement: dict[str, Any] | None = None
 
     def row(self) -> dict[str, Any]:

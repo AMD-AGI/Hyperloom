@@ -14,7 +14,7 @@ from __future__ import annotations
 REBENCH_VALIDATED = "validated"
 REBENCH_NO_MATERIAL = "no_material"
 REBENCH_NO_PROMOTE = "no_promote"
-#: The rebench failed, or measured something other than the candidate.
+#: The revalidation itself failed.
 REBENCH_FAILED = "failed"
 #: The candidate's declared source could not be measured.
 REBENCH_FALLBACK_FAILED = "fallback_failed"
