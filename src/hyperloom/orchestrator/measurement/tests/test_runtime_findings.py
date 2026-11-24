@@ -397,10 +397,14 @@ LLAMA_SERVER_LOG = (
     f"{_SLOT} draft acceptance = 0.47872 (  360 accepted /   752 generated), mean len =  3.38\n"
 )
 _TIMING_LINES = [
-    "9.01.100.000 I slot print_timing: id 0 | task 12 | eval time = 12621.18 ms / 512 tokens ( 24.70 ms per token, "
-    "40.49 tokens per second)",
-    "9.01.100.000 I slot print_timing: id 0 | task 12 | draft acceptance = 0.47872 ( 360 accepted / 752 generated), "
-    "mean len = 3.38",
+    (
+        "9.01.100.000 I slot print_timing: id 0 | task 12 | eval time = 12621.18 ms / 512 tokens ( 24.70 ms per token, "
+        "40.49 tokens per second)"
+    ),
+    (
+        "9.01.100.000 I slot print_timing: id 0 | task 12 | draft acceptance = 0.47872 ( 360 accepted / 752 generated), "
+        "mean len = 3.38"
+    ),
 ]
 
 
