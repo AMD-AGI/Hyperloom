@@ -4,7 +4,9 @@
 """``hyperloom conc-sweep SESSION_DIR``: the concurrency sweep of a finished session, run apart from its optimization.
 
 The sweep holds the session's lock, so it refuses a session another process is running, and SIGINT or SIGTERM cancel
-it: the points already measured stay in the report, which then reads ``cancelled``.
+it: the points already measured stay in the report, which then reads ``cancelled``. It pins the session as the
+process's current one, which every round resolves its frozen base from, and packages the session again once its report
+is written.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
 from collections.abc import Iterator
@@ -19,12 +22,17 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from hyperloom.inference_optimizer.breakdown import package_session_artifacts
 from hyperloom.inference_optimizer.cli.bootstrap import hosted_grant_end_unix
 from hyperloom.inference_optimizer.session.lock import SessionAlreadyRunning, SessionLock
+from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 from .report import SETTLED
 from .runner import run_conc_sweep
+
+log = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -43,11 +51,25 @@ def _cancelled_by_signals(scope: CancelScope) -> Iterator[None]:
 
 
 async def sweep_session(session_dir: Path) -> dict[str, Any]:
-    """Run the sweep of the session in ``session_dir`` under its lock, warned at a hosted run's grant end; raises
-    ``SessionAlreadyRunning``."""
+    """Run the sweep of the session in ``session_dir`` under its lock, warned at a hosted run's grant end, then package
+    the session so the package carries the report; raises ``SessionAlreadyRunning``."""
+    os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
     scope = CancelScope()
     with SessionLock(session_dir), use_cancel_scope(scope), _cancelled_by_signals(scope):
-        return await run_conc_sweep(session_dir, grant_end_unix=hosted_grant_end_unix())
+        payload = await run_conc_sweep(session_dir, grant_end_unix=hosted_grant_end_unix())
+    _package(session_dir)
+    return payload
+
+
+def _package(session_dir: Path) -> None:
+    session_id = SharedState.load_or_init(session_dir).session_id
+    try:
+        path = package_session_artifacts(session_dir, session_id=session_id)
+    except (OSError, ValueError):
+        log.exception("conc_sweep: session package failed (non-fatal)")
+        return
+    if path is not None:
+        log.info("conc_sweep: session package %s", path)
 
 
 def main(argv: list[str] | None = None) -> int:

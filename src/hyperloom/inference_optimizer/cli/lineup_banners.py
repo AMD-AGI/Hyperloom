@@ -27,7 +27,7 @@ def print_lineup_banners(args: argparse.Namespace, *, no_kernel: bool, no_framew
             "WARNING: --no-framework-agent and --no-kernel are both set; the "
             "run collapses to baseline -> CYCLE_END over an empty "
             "optimization_stack (no config or source search, no KERNEL "
-            "rewrites). CYCLE_END only re-validates the baseline recipe. "
+            "rewrites). CYCLE_END only settles that empty stack and measures nothing. "
             "Continuing as requested.",
             file=sys.stderr,
         )

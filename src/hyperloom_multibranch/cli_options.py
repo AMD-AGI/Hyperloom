@@ -255,7 +255,7 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
     run.add_argument(
         "--enable-conc-sweep",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="After CLOSE, sweep the root and the commit FINAL chose over the base's InferenceX recipe concurrencies.",
     )
     run.add_argument(

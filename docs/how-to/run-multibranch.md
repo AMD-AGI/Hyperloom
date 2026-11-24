@@ -118,7 +118,7 @@ value but `on`, `off` or empty is refused when the toolbox is built.
   `--[no-]make-before-break` (hosted only, default on: where the grant fits at least three tests at TP, a finished
   test's sandbox is kept until the next test's runs, so that the cluster does not give its node to another job, and one
   test fewer runs at once; off runs every test the grant fits).
-- **Concurrency sweep:** `--enable-conc-sweep` and `--conc-sweep-concs C1,C2,...` (see
+- **Concurrency sweep:** `--[no-]enable-conc-sweep` (on by default) and `--conc-sweep-concs C1,C2,...` (see
   [Concurrency sweep after CLOSE](#concurrency-sweep-after-close)).
 - **Directions:** `--specialist-prompt FILE` and `--reference NAME=DIR`, each repeatable.
 - **Third-party agents:** `--autonomous-agent SOURCE` (repeatable; a URL carrying credentials is refused),
@@ -176,7 +176,7 @@ A session that cannot be resumed but stopped before FINAL can still be finished 
 
 ## Concurrency sweep after CLOSE
 
-`run --enable-conc-sweep` (hosted: `multibranch.conc_sweep: true`) sweeps the closed session's root and the commit
+`run` (on by default; `--no-enable-conc-sweep`, hosted `multibranch.conc_sweep: false`, turns it off) sweeps the closed session's root and the commit
 FINAL chose once CLOSE has run, apart from `--max-hours` and `--max-gpu-hours`; `conc-sweep SESSION_DIR` runs the same
 sweep by hand, measured on this machine. It runs only when FINAL chose a commit other than the root whose reproduction
 gained over the baseline. The points are every concurrency the InferenceX recipe of the frozen base publishes for the

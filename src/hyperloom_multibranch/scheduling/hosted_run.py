@@ -10,7 +10,7 @@ the legacy entry validated, a multi-branch session needs ``multibranch.workload`
 ``multibranch.reference_script`` ``--reference-script``, ``multibranch.max_branches`` ``--max-branches``,
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
 ``--autonomous-agent``, ``multibranch.make_before_break`` (``true`` by default) ``--make-before-break`` or
-``--no-make-before-break``, ``multibranch.conc_sweep`` (``false`` by default) ``--enable-conc-sweep``,
+``--no-make-before-break``, ``multibranch.conc_sweep`` (``true`` by default) ``--no-enable-conc-sweep`` when ``false``,
 ``multibranch.conc_sweep_concs`` ``--conc-sweep-concs``, ``multibranch.agentx_duration_sec`` ``--agentx-duration-sec`` and
 ``multibranch.agentx_objective`` ``--agentx-objective`` (an ``agentx`` workload only), ``multibranch.boot_budget_sec``
 ``--boot-budget-sec``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what runs at once
@@ -257,8 +257,9 @@ def _conc_sweep_concs(concs: object) -> str | None:
 
 
 def _switches(section: Mapping[str, Any]) -> list[str]:
-    """The on/off options of ``section``: ``multibranch.make_before_break`` as ``--[no-]make-before-break``, nothing
-    when the spec leaves it to ``run``'s default (on), and ``multibranch.conc_sweep`` as ``--enable-conc-sweep``."""
+    """The on/off options of ``section``: ``multibranch.make_before_break`` as ``--[no-]make-before-break`` and
+    ``multibranch.conc_sweep`` as ``--[no-]enable-conc-sweep``, nothing when the spec leaves either to ``run``'s
+    default (on)."""
 
     keep = _make_before_break(section)
     sweep = section.get("conc_sweep")
@@ -266,7 +267,7 @@ def _switches(section: Mapping[str, Any]) -> list[str]:
         raise HostedRefused("multibranch.conc_sweep must be true or false")
     return [
         *([] if keep is None else ["--make-before-break" if keep else "--no-make-before-break"]),
-        *(["--enable-conc-sweep"] if sweep else []),
+        *([] if sweep is None else ["--enable-conc-sweep" if sweep else "--no-enable-conc-sweep"]),
     ]
 
 

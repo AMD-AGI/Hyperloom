@@ -294,6 +294,7 @@ _VALUE_FLAGS: tuple[tuple[str, str], ...] = (
 _OFF_FLAGS: tuple[tuple[str, str], ...] = (
     ("kernel", "--no-kernel"),
     ("framework_agent", "--no-framework-agent"),
+    ("conc_sweep", "--no-enable-conc-sweep"),
 )
 
 
@@ -308,8 +309,6 @@ def optimize_args(spec: CampaignSpec, *, plug_profile: str | None = None, sessio
     args += [f"{flag}={getattr(spec, attr)}" for attr, flag in _VALUE_FLAGS if getattr(spec, attr) is not None]
     args += [f"--extra-env={key}={value}" for key, value in (spec.extra_env or {}).items()]
     args += [flag for attr, flag in _OFF_FLAGS if getattr(spec, attr) is False]
-    if spec.conc_sweep:
-        args.append("--enable-conc-sweep")
     if plug_profile is not None:
         args.append(f"--plug-profile={plug_profile}")
     if session_dir is not None:

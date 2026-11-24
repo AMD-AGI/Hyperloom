@@ -20,6 +20,7 @@ from typing import Any, Mapping
 
 from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.model_paths import resolve_session_model_path
+from hyperloom.common.overlay import is_safe_path_entry, overlay_is_loadable
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, agentx_replay_session, is_agentx_mode
 from hyperloom.inference_optimizer.framework_registry import is_scriptable
 from hyperloom.inference_optimizer.grading import resolved_grading
@@ -194,6 +195,7 @@ class _Sweep:
             arm.name: {
                 "extra_server_args": arm.args,
                 "extra_envs": arm.envs,
+                "overlay": arm.overlay,
                 "points": [self.measured[arm.name][conc] for conc in sorted(self.measured[arm.name])],
             }
             for arm in self.arms
@@ -255,12 +257,20 @@ def _skipped(state: SharedState, session_dir: Path, reason: str) -> dict[str, An
 
 
 def _resume(sweep: _Sweep) -> None:
-    """Keep the points an earlier run of the same sweep measured, so only the rest are run."""
+    """Keep the points an earlier run of the same sweep measured on the same launch of each arm, so only the rest
+    are run."""
     earlier = read_summary(reports_dir(sweep.session_dir))
     if not earlier or earlier.get("concs") != list(sweep.points.concs):
         return
     for arm in sweep.arms:
-        for point in earlier[arm.name]["points"]:
+        section = earlier[arm.name]
+        if (section.get("extra_server_args"), section.get("extra_envs"), section.get("overlay")) != (
+            arm.args,
+            arm.envs,
+            arm.overlay,
+        ):
+            continue
+        for point in section["points"]:
             if point["status"] == _SUCCEEDED:
                 sweep.measured[arm.name][point["conc"]] = point
 
@@ -349,6 +359,8 @@ async def run_conc_sweep(session_dir: Path, *, grant_end_unix: float | None = No
     optimized = optimized_arm(state)
     if optimized is None or state.cumulative_gain_validated <= 0:
         return _skipped(state, session_dir, "no_optimization")
+    if optimized.overlay and not (is_safe_path_entry(optimized.overlay) and overlay_is_loadable(optimized.overlay)):
+        return _skipped(state, session_dir, "optimized_overlay_unavailable")
     frozen = frozen_base(session_dir)
     points = sweep_points(None if frozen is None else frozen.launch, state.conc, state.conc_sweep_concs)
     if points is None:

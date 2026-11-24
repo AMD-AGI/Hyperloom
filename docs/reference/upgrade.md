@@ -238,22 +238,26 @@ dispatches a `conc_sweep` task. Update anything that matches on the old names:
   `--conc-sweep-total-budget-sec`. The share SWEEP held moves to the
   optimisation phases: `FRAMEWORK_AGENT` defaults to 0.40 and `KERNEL_AGENT` to
   0.50, what a session with the sweep off already ran with.
-* The concurrency sweep runs after the session closes, with `--enable-conc-sweep`
-  or `hyperloom conc-sweep SESSION_DIR`.
 * Its exit is `cycle_end_done` (also the stop reason when no further cycle
   runs); the SWEEP stop reasons no longer occur.
 * Its predicate input is `cycle_end_result` (`settled`, `reloop`) instead of
   `sweep_result`.
 * A session that reached it reports `outcome.stage_reached` `cycle_end` where it
   reported `conc_sweep`.
+* The workflow-evaluation contract is `hyperloom.workflow_evaluation.v4`
+  (`workflow_contract.v4.json`); a consumer that matches the version string or
+  the SWEEP vocabulary moves to it.
 
-Sessions no longer write `reports/conc_sweep_summary.json`,
-`reports/conc_sweep_curve.png`, the `conc_sweep_summary` and
-`conc_sweep_curve_png` keys of `final.json`, the `conc_sweep` timeline event of
-`session_breakdown.json`, or the sweep's result in `state.json`.
-`--enable-conc-sweep` and `--conc-sweep-concs` are still accepted and recorded
-in `state.json`, but no sweep runs during the session. A session recorded in
-`SWEEP` does not resume: finish it under the build that started it.
+The concurrency sweep runs after CLOSE instead of inside the session.
+`--enable-conc-sweep` is on by default (`--no-enable-conc-sweep` turns it off),
+and `hyperloom conc-sweep SESSION_DIR` runs it by hand. It writes the same files:
+`reports/conc_sweep_summary.json`, `reports/conc_sweep_raw.csv`,
+`reports/conc_sweep_curve.png` and the `conc_sweep_summary` /
+`conc_sweep_curve_png` keys of `final.json`, and packages the session again so
+the package carries them. The `conc_sweep` timeline event of
+`session_breakdown.json` and the sweep's result in `state.json` are gone. A
+session recorded in `SWEEP` does not resume: finish it under the build that
+started it.
 
 ### Recommended: commands that stay outside `hyperloom.cli`
 

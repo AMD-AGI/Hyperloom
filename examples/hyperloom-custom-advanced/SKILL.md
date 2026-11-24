@@ -121,7 +121,7 @@ Collect these required values:
   `MAX_MODEL_LEN` / `PROFILE_OSL`.
 - Objective and budget: `MAX_HOURS` plus `TARGET_GAIN`.
 - Optional phase budget percentages for `PRELUDE`, `FRAMEWORK_AGENT`,
-  `KERNEL_AGENT`, `CYCLE_END`, and `CLOSE`.
+  `KERNEL_AGENT`, and `CLOSE`.
 
 ## Default Values
 
@@ -160,8 +160,7 @@ resolved values in the launch plan before starting the optimizer.
   - `PHASE_BUDGET_CLOSE_PCT=0.02`: final report, state closeout, and summary
     generation.
 - Phase toggles default to enabled: kernel, framework agent, framework local
-  exploration, and roofline. The post-session concurrency sweep is off unless
-  `--enable-conc-sweep` is given.
+  exploration, roofline, and the post-session concurrency sweep.
 
 Collect these optional advanced values:
 

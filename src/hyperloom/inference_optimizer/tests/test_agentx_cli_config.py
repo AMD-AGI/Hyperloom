@@ -106,7 +106,7 @@ def test_standard_cli_generates_native_yaml_and_candidate_controls(tmp_path, mon
     assert bench["agentx"]["mode"] == "canonical"
     assert bench["profiler"]["torch_profiler"] == {"enabled": False}
     assert "benchmark_script" not in bench
-    assert args.enable_conc_sweep is False
+    assert args.enable_conc_sweep is True
     assert agentx_enabled()
     assert default_baseline_config() == source
     candidate = materialize_benchmark_config(

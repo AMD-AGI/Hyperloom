@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://hyperloom.amd.com/schema/session_breakdown.v6.workflow-evaluation.v3.json",
-  "title": "Hyperloom SBD V6 workflow-evaluation v3 profile",
+  "$id": "https://hyperloom.amd.com/schema/session_breakdown.v6.workflow-evaluation.v4.json",
+  "title": "Hyperloom SBD V6 workflow-evaluation v4 profile",
   "type": "object",
   "required": [
     "schema_version",
@@ -33,10 +33,10 @@
           ],
           "properties": {
             "workflow_contract_version": {
-              "const": "hyperloom.workflow_evaluation.v3"
+              "const": "hyperloom.workflow_evaluation.v4"
             },
             "contract_digest": {
-              "const": "c78e8eeaf35d8d30495070294ef6e8f1ee783f4825fb986632202be65b6e01c2"
+              "const": "e0554a629a1527d6b5e88c253540d14395a6160c7734a0866d3a576ecc411e88"
             },
             "run_flags": {
               "type": "object",

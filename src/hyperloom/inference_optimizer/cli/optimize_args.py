@@ -639,10 +639,10 @@ def add_conc_sweep_arguments(opt: argparse.ArgumentParser) -> None:
         "--enable-conc-sweep",
         dest="enable_conc_sweep",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Once the session closes, sweep its baseline and its optimized launch over the concurrencies of the "
         "base's InferenceX recipe and write reports/conc_sweep_summary.json + conc_sweep_raw.csv; "
-        "`hyperloom conc-sweep SESSION_DIR` runs the same sweep by hand. Off by default.",
+        "`hyperloom conc-sweep SESSION_DIR` runs the same sweep by hand. On by default.",
     )
     opt.add_argument(
         "--conc-sweep-concs",

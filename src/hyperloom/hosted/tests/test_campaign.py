@@ -232,10 +232,12 @@ def test_the_minimal_spec_leaves_everything_else_to_optimize():
     ]
 
 
-def test_the_conc_sweep_is_asked_for_only_when_the_spec_turns_it_on():
+def test_the_conc_sweep_is_turned_off_only_when_the_spec_says_false():
+    unset = optimize_args(parse_campaign(MINIMAL))
     on = optimize_args(parse_campaign(_with(MINIMAL, "options", {"conc_sweep": True})))
     off = optimize_args(parse_campaign(_with(MINIMAL, "options", {"conc_sweep": False})))
-    assert "--enable-conc-sweep" in on and "--enable-conc-sweep" not in off
+    assert "--no-enable-conc-sweep" not in unset and "--no-enable-conc-sweep" not in on
+    assert "--no-enable-conc-sweep" in off
 
 
 def test_the_plug_profile_and_session_dir_are_appended_when_given():

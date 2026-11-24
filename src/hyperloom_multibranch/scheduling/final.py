@@ -485,8 +485,11 @@ def sweep_plan(layout: SessionLayout, settings: RunSettings) -> SweepPlan | str:
 
 
 def sweep_unfinished(layout: SessionLayout, settings: RunSettings) -> bool:
-    """Whether the session in ``layout`` closed, asked for a conc sweep, and that sweep has not run its course."""
+    """Whether the session in ``layout`` closed after a FINAL that chose, asked for a conc sweep, and that sweep has
+    not run its course; a session that ended before FINAL chose is finished first."""
     if not (settings.conc_sweep and layout.report.is_file()):
+        return False
+    if not (read_json_strict(layout.report, require_dict=True).get("final") or {}).get("chosen"):
         return False
     summary = read_summary(layout.reports)
     return summary is None or summary["status"] not in SETTLED
@@ -609,11 +612,14 @@ class ConcSweep:
         write_report(self.payload(), self.layout.reports)
 
     def _resume(self) -> None:
-        """Keep the points an earlier run of the same sweep measured, so only the rest are run."""
+        """Keep the points an earlier run of the same sweep measured on the same commit of each arm, so only the rest
+        are run."""
         earlier = read_summary(self.layout.reports)
         if not earlier or earlier.get("concs") != list(self.plan.points.concs):
             return
-        for arm in (BASELINE, OPTIMIZED):
+        for arm, commit in ((BASELINE, self.root), (OPTIMIZED, self.plan.chosen)):
+            if earlier[arm].get("commit") != commit:
+                continue
             for point in earlier[arm]["points"]:
                 if point["status"] == _SUCCEEDED:
                     self.measured[arm][point["conc"]] = point

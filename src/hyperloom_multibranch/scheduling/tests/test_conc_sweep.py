@@ -161,6 +161,19 @@ def test_an_arm_that_failed_leaves_the_sweep_failed_and_a_later_run_measures_onl
     assert payload["status"] == "succeeded"
 
 
+def test_a_later_run_measures_again_the_arm_whose_commit_changed(tmp_path: Path, inferencex_base: None):
+    layout = _layout(tmp_path)
+    asyncio.run(_sweep(layout, _settings(), _Tests()).run(_never()))
+    settings, tests = _settings(), _Tests()
+    plan = replace(final.sweep_plan(layout, settings), chosen="beef")
+    sweep = final.ConcSweep(plan, "root", layout, settings.workload, tests, settings.caps.max_parallel_tests, 600.0)
+
+    payload = asyncio.run(sweep.run(_never()))
+
+    assert [r.parent_commit for r in tests.requests] == ["beef"]
+    assert (payload["status"], payload["optimized"]["commit"]) == ("succeeded", "beef")
+
+
 def test_a_stop_signal_takes_the_tests_back_and_keeps_what_landed(tmp_path: Path, inferencex_base: None):
     layout, tests = _layout(tmp_path), _Tests()
     tests.held = True

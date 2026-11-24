@@ -156,6 +156,36 @@ class TestTheChartFollowsTheGradedAxis:
         assert xs == [pytest.approx(500.0)]
         assert ys == [pytest.approx(20000.0)]
 
+    @pytest.mark.parametrize(
+        ("metric", "expected"),
+        [
+            ("e2e_norm_intvty_p90", ([447.2], [25984.8 / 4.0])),
+            ("output_throughput", ([183.44 / 8.0], [183.44 / 4.0])),
+        ],
+    )
+    def test_a_swept_rung_lands_on_the_pair_its_axis_is_read_on(
+        self, metric: str, expected: tuple[list[float], list[float]]
+    ):
+        """The row a round becomes carries both pairs, so either chart draws it rather than dropping it."""
+        from hyperloom.orchestrator.actions.executors.grid._grid_runner import VariantResult
+        from hyperloom.orchestrator.conc_sweep import plot
+        from hyperloom.orchestrator.conc_sweep.report import point_from_variant
+
+        point = point_from_variant(
+            VariantResult(
+                name="optimized_conc8",
+                extra_server_args="",
+                extra_envs={"CONC": "8"},
+                status="succeeded",
+                output_throughput=183.44,
+                total_token_throughput=25984.8,
+                intvty_p90=447.2,
+            ),
+            arm="optimized",
+        )
+        xs, ys, concs = plot._arm_series([point], 4.0, plot._axes_for_metric(metric, tp_eff=4.0))
+        assert (xs, ys, concs) == (*expected, [8.0])
+
 
 class TestTheCurveFollowsTheLadder:
     """A ladder is joined in the order it was walked, and a rung only one arm measured says so."""

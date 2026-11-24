@@ -165,6 +165,16 @@ def test_a_point_that_failed_leaves_the_sweep_partial(session_dir: Path, grid: S
     assert payload["status"] == "partial" and payload["summary"]["successful_pairs"] == 3
 
 
+def test_an_optimized_overlay_that_cannot_load_skips_the_sweep(session_dir: Path, grid: SimpleNamespace):
+    missing = session_dir / "overlay-gone"
+    _state(session_dir, current_best={"extra_server_args": "", "extra_envs": {}, "final_overlay": str(missing)})
+
+    payload = asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert (payload["status"], payload["skip_reason"]) == ("skipped", "optimized_overlay_unavailable")
+    assert grid.calls == []
+
+
 def test_a_later_run_measures_only_the_points_not_yet_measured(session_dir: Path, grid: SimpleNamespace):
     _state(session_dir)
     grid.failing.add("optimized_conc32")
@@ -176,6 +186,23 @@ def test_a_later_run_measures_only_the_points_not_yet_measured(session_dir: Path
 
     assert [call["name"] for call in grid.calls] == ["optimized_conc32"]
     assert payload["status"] == "succeeded"
+
+
+def test_a_later_run_measures_again_the_arm_whose_launch_changed(session_dir: Path, grid: SimpleNamespace):
+    _state(session_dir)
+    asyncio.run(runner.run_conc_sweep(session_dir))
+    grid.calls.clear()
+    _state(session_dir, current_best={"extra_server_args": "--max-num-seqs 64", "extra_envs": {}})
+
+    payload = asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert [call["name"] for call in grid.calls] == [
+        "optimized_conc16",
+        "optimized_conc4",
+        "optimized_conc8",
+        "optimized_conc32",
+    ]
+    assert [point["conc"] for point in payload["baseline"]["points"]] == [4, 8, 16, 32]
 
 
 def test_a_cancel_keeps_the_points_measured_before_it(

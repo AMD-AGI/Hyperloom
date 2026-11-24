@@ -17,11 +17,10 @@ def _parse(*extra: str):
     return parser.parse_args(["optimize", *extra])
 
 
-def test_the_post_session_conc_sweep_is_off_unless_asked_for():
-    assert _parse().enable_conc_sweep is False
+def test_the_post_session_conc_sweep_is_on_unless_turned_off():
+    assert _parse().enable_conc_sweep is True
     assert _parse("--enable-conc-sweep").enable_conc_sweep is True
     assert _parse("--no-enable-conc-sweep").enable_conc_sweep is False
-    assert SharedState().conc_sweep_enabled is False
 
 
 def test_the_operators_points_are_parsed_distinct_and_ascending():

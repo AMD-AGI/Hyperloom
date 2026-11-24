@@ -197,8 +197,8 @@ pipeline, or downstream integration on top of this file — see
 
 ## Sweep concurrency after the session
 
-`--enable-conc-sweep` runs a concurrency sweep once the session closes, apart
-from its time budget; `hyperloom conc-sweep SESSION_DIR` runs the same sweep by
+A concurrency sweep runs once the session closes, apart from its time budget
+(on by default; `--no-enable-conc-sweep` turns it off); `hyperloom conc-sweep SESSION_DIR` runs the same sweep by
 hand on a finished session. It runs only when the session kept a validated
 gain, and measures the baseline and the optimized launch, one after the other,
 at every concurrency the session's InferenceX recipe publishes for its workload

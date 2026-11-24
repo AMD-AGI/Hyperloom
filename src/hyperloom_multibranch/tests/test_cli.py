@@ -207,6 +207,7 @@ def test_run_defaults() -> None:
         max_llm_usd=0.0,
         caps=RosterCaps(max_branches=4, max_k_per_branch=2, max_parallel_tests=4),
         judge_interval_seconds=600.0,
+        conc_sweep=True,
     )
 
 
@@ -1598,20 +1599,22 @@ def test_a_resume_whose_specialists_account_cannot_reach_the_session_is_refused_
     assert f"cannot search {tmp_path}" in capsys.readouterr().err
 
 
-def test_a_hosted_restart_sweeps_a_closed_session_until_its_conc_sweep_settles(tmp_path: Path) -> None:
+def test_a_hosted_restart_finishes_a_session_before_final_and_sweeps_one_final_chose_in(tmp_path: Path) -> None:
     layout = _ended_before_final(tmp_path / "session")
-    settings = _settings("--enable-conc-sweep")
-    _manifest(layout, settings=encode(settings))
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     _write(state_dir / "session.json", {"session_dir": str(layout.root)})
 
     earlier = take_over_earlier_session(state_dir)
+    assert earlier.sweep is None and earlier.finish is not None
+
+    _report(layout, final={"chosen": {"commit": "c9"}})
+    earlier = take_over_earlier_session(state_dir)
     assert earlier.sweep is not None and earlier.sweep.root == layout.root and earlier.finish is None
 
-    write_skipped(layout, settings.workload, NO_OPTIMIZATION)
-    earlier = take_over_earlier_session(state_dir)
-    assert earlier.sweep is None and earlier.finish is not None
+    write_skipped(layout, _settings().workload, NO_OPTIMIZATION)
+    with pytest.raises(ValueError, match="already chose c9"):
+        take_over_earlier_session(state_dir)
 
 
 def _hosted_ended_before_final(root: Path) -> PersistedRun:
@@ -2711,6 +2714,7 @@ def test_a_restart_over_a_session_that_already_chose_ends_the_run_for_good(
     host: Host, agent_cli: list[RunSettings], tmp_path: Path
 ) -> None:
     layout = _ended_before_final(tmp_path / "MB-20300102T030405Z-0123abcd")
+    _manifest(layout, settings=encode(_settings("--no-enable-conc-sweep")))
     _report(layout, final={"chosen": {"commit": "c9"}})
     (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
 
