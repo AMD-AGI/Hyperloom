@@ -23,7 +23,7 @@ from hyperloom.measure.jit.key import dataset_key
 from hyperloom.measure.jit.publish import publish_contributions
 from hyperloom.measure.runner.dataset_cache import dataset_plan, model_files
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
-from hyperloom.measure.runner.tests.test_run import _sheet, env, key, runner  # noqa: F401 - fixtures
+from hyperloom.measure.runner.tests.test_run import _sheet, env, key  # noqa: F401 - fixtures
 from hyperloom.measure.runner.tests.test_run_jit import Rig, _arm, _OutHandle
 from hyperloom.measure.spec import MeasurementSpec
 from hyperloom.measure.tests.test_local_backend import _Grid
