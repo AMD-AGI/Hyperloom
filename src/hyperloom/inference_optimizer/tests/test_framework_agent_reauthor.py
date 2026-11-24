@@ -9,11 +9,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.roles import (
-    Backend,
-    MockBackend,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.roles import Backend
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -119,7 +116,7 @@ async def test_needs_review_with_evidence_reauthors_once(coord: Coordinator) -> 
 async def test_reauthor_guard_caps_and_suffixes(coord: Coordinator) -> None:
     """The first 3 needs_review verdicts re-author with incrementing ``reauthor:{n}`` idempotency suffixes; the 4th hits the cap and does not re-author."""
     from types import SimpleNamespace
-    from hyperloom.orchestrator.phases.framework import _AUTHORED_LANE_MAX_ATTEMPTS
+    from hyperloom.orchestrator.phases.framework_reauthor import _AUTHORED_LANE_MAX_ATTEMPTS
 
     created: list[dict[str, Any]] = []
 

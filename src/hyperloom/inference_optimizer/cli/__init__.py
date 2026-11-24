@@ -29,7 +29,6 @@ from .backends import (
     CriticSetup,
     ModelRouting,
     _build_backends,
-    _build_proposal_scorer,
     _orchestration_banner,
     _resolve_orchestration_backend,
 )
@@ -746,8 +745,6 @@ def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
             )
             sys.exit(2)
         _validate_agent_runtime(critic_agent_root)
-        # Default WORKSPACE_PATH for critic-agent runtime: SKILL static-asset root (repo root), not artefact dir.
-        os.environ.setdefault("WORKSPACE_PATH", str(Path(__file__).resolve().parents[4]))
     return _AgentLineup(
         no_kernel=no_kernel,
         no_framework_agent=no_framework_agent,
@@ -983,8 +980,6 @@ def _build_coordinator(
         advisory=AdvisoryServices(
             # KnowledgePlane facade (None when --degraded-pr).
             knowledge_plane=knowledge_plane,
-            # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
-            proposal_scorer=_build_proposal_scorer(args, session_dir),
         ),
     )
 

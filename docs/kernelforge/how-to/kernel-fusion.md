@@ -146,7 +146,8 @@ benchmark and the serving smoke both have to import the framework from its real
 install path, so it edits the live tree and isolates the git side instead. For
 the same reason a fusion campaign always runs `--lanes 1`: a lane is a workspace
 copy measured on its own, and a lane's edit would never reach the tree the
-benchmark imports.
+benchmark imports. A single-lane campaign has no planning stage, so the
+Implementer chooses each session's direction from the Analysis report.
 
 Every git call the campaign makes is pointed at a repository under the run's
 output directory (`shadow.git`) with the framework tree as its work tree. No

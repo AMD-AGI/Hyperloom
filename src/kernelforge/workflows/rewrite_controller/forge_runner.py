@@ -149,6 +149,8 @@ def build_forge_loop_invocation(
         command.extend(["--target-functions", ",".join(task.target_functions)])
     if task.world_size > 1:
         command.extend(["--nproc-per-node", str(task.world_size)])
+    if worktree.import_name:
+        command.extend(["--import-name", worktree.import_name])
     return ForgeLoopInvocation(
         command=tuple(command),
         workspace=worktree.workspace,

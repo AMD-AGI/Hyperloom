@@ -129,7 +129,7 @@ async def test_runner_prepare_reads_the_custom_definition_from_shared_state(tmp_
 
 def _coordinator(session_dir: Path, state: SharedState):
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
-    from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 
     state.save(session_dir)
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])

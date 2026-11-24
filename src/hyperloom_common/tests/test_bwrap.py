@@ -219,7 +219,7 @@ def host_dev(monkeypatch: pytest.MonkeyPatch, *nodes: str) -> None:
     """A host ``/dev`` holding only ``nodes`` (other paths are read as they are), read by the real note."""
     exists = os.path.exists
     monkeypatch.setattr(
-        bwrap.os.path, "exists", lambda path: path in nodes if path.startswith("/dev/") else exists(path)
+        bwrap.os.path, "exists", lambda path: path in nodes if str(path).startswith("/dev/") else exists(path)
     )
     monkeypatch.setattr(bwrap, "_dev_notes", HOST_DEV_NOTES)
 

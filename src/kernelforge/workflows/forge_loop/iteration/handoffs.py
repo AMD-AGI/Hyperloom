@@ -20,7 +20,7 @@ class IterationHandoff:
     canonical_verdict: str
     search_mode: str = "EXPLOIT"
     search_reason_codes: tuple[str, ...] = ()
-    search_objective: str = "IMMEDIATE_CANONICAL_GAIN"
+    search_objective: str = "CANONICAL_GAIN"
     search_mode_residence_remaining: int = 0
     diversification_cycle_complete: bool = False
     optimization_plan_path: str = ""

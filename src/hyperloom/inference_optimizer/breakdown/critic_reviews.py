@@ -94,7 +94,7 @@ def normalize_framework_reviews(
     """Return compact V6 Framework review rows from one Critic iteration."""
     judge = to_mapping(judge_bundle)
     normalized_review_path = str(review_path or "").replace("\\", "/") or None
-    phase = _first(judge.get("phase"), _nested(request, "context", "phase"), _nested(judge, "merged_context", "phase"))
+    phase = _first(judge.get("phase"), _nested(request, "context", "phase"))
     review_phase = str(phase or "").strip().upper()
     if review_phase and review_phase not in _FRAMEWORK_PHASES:
         return []
@@ -146,8 +146,6 @@ def normalize_framework_reviews(
                         proposal.get("macro_cycle"),
                         _nested(request, "context", "macro_cycle"),
                         _nested(request, "context", "cycle"),
-                        _nested(judge, "merged_context", "macro_cycle"),
-                        _nested(judge, "merged_context", "cycle"),
                     )
                 ),
             }

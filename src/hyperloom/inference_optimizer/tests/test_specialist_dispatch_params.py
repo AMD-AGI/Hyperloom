@@ -679,17 +679,6 @@ def test_freeform_max_turns_above_cap_rejected(gate, orchestration_role):
         )
 
 
-async def test_a_padded_proposal_name_keeps_its_score_under_that_name():
-    """The score table looks a variant up by its proposal_set name, so the scorer must not strip it."""
-    from hyperloom.inference_optimizer.tests.test_proposal_scorer_coverage_unit import _FakeClient
-    from hyperloom.orchestrator.scoring.proposal_scorer import ProposalScorer
-
-    client = _FakeClient({"m": '{"scores": {"proposal_0": {"score": 5, "reason": "ok"}}}'})
-    scorer = ProposalScorer(models=("m",), client_factory=lambda: client)
-    out = await scorer.score(gap={"domain": "d"}, proposals=[{"name": " x "}])
-    assert list(out["models"]["m"]) == [" x "]
-
-
 def test_resolve_specialist_max_turns_zero_uses_default():
     from hyperloom.orchestrator.specialists.runner import resolve_specialist_max_turns
 
@@ -702,7 +691,7 @@ def test_resolve_specialist_max_turns_zero_uses_default():
 # --------------------------------------------------------------------------- # Tool surface: TaskKill and
 # SlashCommand are denied. --------------------------------------------------------------------------- #
 def test_specialists_are_denied_only_the_process_cleanup_tools():
-    """specialist.md's containment model: every tool except these two, so patch authoring and KB writes stay open."""
+    """A specialist gets every tool except these two, so patch authoring and KB writes stay open."""
     from hyperloom.orchestrator.specialists.runner import SPECIALIST_TOOL_DENYLIST
 
     assert SPECIALIST_TOOL_DENYLIST == frozenset({"KillShell", "SlashCommand"})

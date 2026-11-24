@@ -133,3 +133,32 @@ def test_a_failing_probe_is_an_error_even_after_printing_an_object(tmp_path: Pat
 def test_the_probe_answer_is_its_last_printed_object(tmp_path: Path) -> None:
     program = "import json, sys; print('banner'); print(json.dumps({'args': sys.argv[1:]}))"
     assert run_probe(sys.executable, program, ("a", "b"), {}, cwd=tmp_path) == {"args": ["a", "b"]}
+
+
+def _native_server(root: Path, printed: str, *, code: int = 0) -> dict[str, str]:
+    """A stand-in ``llama-server`` on a PATH of its own, printing ``printed`` to stderr as llama.cpp does."""
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    program = bin_dir / "llama-server"
+    program.write_text(f"#!/bin/sh\nprintf %s {printed!r} >&2\nexit {code}\n")
+    program.chmod(0o755)
+    return {"PATH": str(bin_dir)}
+
+
+def test_a_native_server_reports_its_own_version_whatever_the_interpreter(tmp_path: Path) -> None:
+    env = _native_server(tmp_path, "version: 1.0.0-dev (build 12439, commit 8bfd64b5a)\nbuilt with GNU 13.3.0\n")
+    install = probe_install(str(tmp_path / "no-python"), Framework.LLAMACPP, env, cwd=tmp_path)
+
+    assert install.version == "1.0.0-dev"
+    assert install.executable == install.origin == str((tmp_path / "bin" / "llama-server").resolve())
+
+
+def test_a_native_server_missing_from_the_launch_path_is_an_error(tmp_path: Path) -> None:
+    with pytest.raises(FrameworkProbeError, match="not on the launch PATH"):
+        probe_install(sys.executable, Framework.LLAMACPP, {"PATH": str(tmp_path)}, cwd=tmp_path)
+
+
+def test_a_native_server_that_prints_no_version_is_an_error(tmp_path: Path) -> None:
+    env = _native_server(tmp_path, "error: unknown argument", code=1)
+    with pytest.raises(FrameworkProbeError, match="exited 1 with no version: error: unknown argument"):
+        probe_install(sys.executable, Framework.LLAMACPP, env, cwd=tmp_path)

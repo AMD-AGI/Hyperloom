@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from kernelforge.evaluation.scoring import CaseAggregate
 from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore
 from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
@@ -257,6 +258,37 @@ async def test_iteration_keeps_winning_mean_despite_one_regressed_case(monkeypat
 
     assert result.kept is expected_keep
     assert result.bench_detail["mean_case_speedup"] == pytest.approx((2.0 + 2.0 / 3.0) / 2.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "aggregate,expected_keep,expected_score",
+    [(CaseAggregate.ARITHMETIC, True, 2.1), (CaseAggregate.GEOMETRIC, False, 0.8**0.5)],
+)
+async def test_a_large_gain_paid_for_by_one_case_is_judged_by_the_campaigns_aggregate(
+    monkeypatch, aggregate, expected_keep, expected_score
+):
+    """One case 4x faster and one 5x slower: an arithmetic win, a geometric loss."""
+    case_times = {"small": 0.25, "large": 5.0}
+    loop, _benchmark_calls = _measurement_loop(
+        monkeypatch,
+        {
+            "success": True,
+            "median_ms": 2.625,
+            "case_times": case_times,
+            "unscored_cases": [],
+            "measurement_count": 3,
+            "measurements": [{"success": True, "case_times": case_times, "unscored_cases": []} for _ in range(3)],
+            "message": "three measurements",
+        },
+    )
+    loop.ic.case_aggregate = aggregate
+    loop.ic.pristine_baseline_wall_ms = 1.0
+
+    result = await loop.run_one_iteration(1)
+
+    assert result.kept is expected_keep
+    assert result.bench_detail["mean_case_speedup"] == pytest.approx(expected_score)
 
 
 def test_agent_error_is_reduced_and_persisted(tmp_path, monkeypatch):

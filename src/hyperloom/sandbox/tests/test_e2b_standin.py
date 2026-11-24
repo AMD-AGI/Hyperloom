@@ -95,7 +95,11 @@ def test_sandboxes_are_isolated_from_each_other_and_from_this_machine(standin: S
     first.write_file(f"/work/{marker}", b"x")
     first.write_file(f"/tmp/{marker}", b"x")
     first.write_file(f"/dev/shm/{marker}", b"x")
-    assert second.list_dir("/work") == [] and second.list_dir("/tmp") == [] and second.list_dir("/dev/shm") == []
+    assert (
+        [e.name for e in second.list_entries("/work")] == []
+        and [e.name for e in second.list_entries("/tmp")] == []
+        and [e.name for e in second.list_entries("/dev/shm")] == []
+    )
     assert not any(Path(d, marker).exists() for d in ("/work", "/tmp", "/dev/shm"))
     assert first.run("ls /in /out /work").exit_code == 0
     first.kill()
@@ -104,7 +108,7 @@ def test_sandboxes_are_isolated_from_each_other_and_from_this_machine(standin: S
 
 def test_a_sandbox_shows_none_of_this_machines_etc_beyond_what_programs_need(standin: StandIn) -> None:
     sandbox = _provider(standin).create("dev", role="dev", timeout_sec=60, metadata={})
-    shown = set(sandbox.list_dir("/etc"))
+    shown = {e.name for e in sandbox.list_entries("/etc")}
     assert shown <= {
         "passwd",
         "group",
@@ -116,14 +120,14 @@ def test_a_sandbox_shows_none_of_this_machines_etc_beyond_what_programs_need(sta
         "ld.so.conf.d",
     }
     assert sandbox.run("test -e /etc/shadow -o -e /etc/ssh -o -e /root/.ssh").exit_code != 0
-    assert set(sandbox.list_dir("/dev")) <= {"null", "zero", "full", "random", "urandom", "tty", "shm"}
+    assert {e.name for e in sandbox.list_entries("/dev")} <= {"null", "zero", "full", "random", "urandom", "tty", "shm"}
     sandbox.kill()
 
 
 def test_the_templates_start_command_runs_inside_the_sandbox(standin: StandIn) -> None:
     sandbox = _provider(standin).create("sealed", role="measurement", timeout_sec=60, metadata={})
     deadline = time.monotonic() + 10
-    while "started" not in sandbox.list_dir("/out") and time.monotonic() < deadline:
+    while "started" not in [e.name for e in sandbox.list_entries("/out")] and time.monotonic() < deadline:
         time.sleep(0.05)
     assert sandbox.read_file("/out/started") == b"ready\n"
     sandbox.kill()
@@ -185,7 +189,7 @@ def test_a_sealed_template_takes_only_the_create_environment_it_lists_and_names_
             metadata={},
             options=CreateOptions(envs={"REPO": "https://source.invalid/repo.git", "SHA": "ab" * 20}),
         )
-        assert _wait_until(lambda: "seen" in made.list_dir("/out"), 10)
+        assert _wait_until(lambda: "seen" in [e.name for e in made.list_entries("/out")], 10)
         assert made.read_file("/out/seen").decode().split() == ["https://source.invalid/repo.git", "ab" * 20]
         for template, role, envs, refused in (
             ("listed", "measurement", {"REPO": "r", "SHA": "s", "TOKEN": "secret-value"}, "TOKEN"),

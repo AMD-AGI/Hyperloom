@@ -35,6 +35,8 @@ from hyperloom_multibranch.contracts.blackboard.vocab import (
     CommitOrigin,
     Conclusion,
     DedupStatus,
+    GAVE_UP_AFTER_CRASHES,
+    GAVE_UP_CAUSE,
     FrontierBasis,
     InboxKind,
     LearningKind,
@@ -619,6 +621,13 @@ class BranchNode:
     driver: BranchDriver = BranchDriver.SPECIALIST
     probations: tuple[Probation, ...] = ()
     focus: str = ""
+
+    @property
+    def crashed_out(self) -> bool:
+        """Whether the branch stopped because its specialist gave up after its process crashed again and again."""
+
+        cause, _, said = (self.stop_reason or "").partition(": ")
+        return cause == GAVE_UP_CAUSE and said.startswith(f"{GAVE_UP_AFTER_CRASHES} ")
 
 
 @dataclass(frozen=True)

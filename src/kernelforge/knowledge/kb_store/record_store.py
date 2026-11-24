@@ -17,8 +17,8 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Iterator, Mapping, Protocol
 
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import KernelRecipeIdentity
-from kernelforge.knowledge.kb_store.remote_client import KBStoreClient, KBStoreError
 from hyperloom_common.io import DURABLE, atomic_write_bytes, fsync_directory, fsync_tree_directories
+from hyperloom_common.kb_store import KBStoreClient, KBStoreError, Upload
 
 CHAMPION_METRIC = "speedup"
 MEASURED_SPEEDUP_KEY = "measured_speedup"
@@ -399,7 +399,6 @@ class KBStoreRewriteRecords:
 
     def __init__(self, client: KBStoreClient) -> None:
         self._client = client
-        self._download_lock = threading.RLock()
 
     @property
     def configured(self) -> bool:
@@ -512,41 +511,9 @@ class KBStoreRewriteRecords:
             if knowledge is None:
                 raise RewriteRecordError("candidate session has no knowledge document")
 
-            with self._download_lock:
-                listing = self._client.list_session_files(canonical_id, candidate.session_id)
-                expected = _manifest_paths(listing)
-
-                # The upstream SDK lists internally.
-                original_listing = self._client.list_session_files
-
-                def validated_listing(
-                    requested_canonical_id: str,
-                    requested_session_id: str,
-                    *,
-                    kind: str = "",
-                ) -> dict[str, Any]:
-                    if (
-                        requested_canonical_id == canonical_id
-                        and requested_session_id == candidate.session_id
-                        and not kind
-                    ):
-                        return dict(listing)
-                    return original_listing(
-                        requested_canonical_id,
-                        requested_session_id,
-                        kind=kind,
-                    )
-
-                self._client.list_session_files = validated_listing  # type: ignore[method-assign]
-                try:
-                    self._client.download_session(
-                        canonical_id,
-                        candidate.session_id,
-                        staging,
-                        include_values=False,
-                    )
-                finally:
-                    self._client.list_session_files = original_listing  # type: ignore[method-assign]
+            listing = self._client.list_session_files(canonical_id, candidate.session_id)
+            expected = _manifest_paths(listing)
+            self._client.download_session(canonical_id, candidate.session_id, staging, listing=listing)
             actual = _safe_files(staging / "files")
             if actual != expected:
                 raise RewriteRecordError(
@@ -581,7 +548,7 @@ class KBStoreRewriteRecords:
         rel = safe_rel_path(rel_path)
         with tempfile.TemporaryDirectory(prefix="rewrite-read-") as temporary:
             destination = Path(temporary)
-            self._client.download_session(canonical_id, session_id, destination, include_values=False)
+            self._client.download_session(canonical_id, session_id, destination)
             path = destination / "files" / rel
             if not path.is_file() or path.is_symlink():
                 return b""
@@ -595,20 +562,13 @@ class KBStoreRewriteRecords:
         files: Mapping[str, Path],
     ) -> None:
         for rel_path, source in files.items():
-            self._client.put_file(
-                canonical_id,
-                session_id,
-                safe_rel_path(rel_path),
-                source,
-                kind=ARTIFACT_KIND,
-                meta={"schema": "kernelforge-rewrite-v1"},
-            )
+            upload = Upload(safe_rel_path(rel_path), source, ARTIFACT_KIND, {"schema": "kernelforge-rewrite-v1"})
+            self._client.put_files(canonical_id, session_id, [upload])
         existing = _knowledge_of(self._client.get_session(canonical_id, session_id)) or {}
-        self._client.put_knowledge(
+        self._client.replace_knowledge(
             canonical_id,
+            session_id,
             _with_preserved_measurement(knowledge, recorded=existing.get(MEASURED_SPEEDUP_KEY)),
-            session_id=session_id,
-            mode="replace",
         )
 
     def record_measured_speedup(
@@ -618,11 +578,10 @@ class KBStoreRewriteRecords:
         measured_speedup: float,
     ) -> None:
         """Merge the measured value into the candidate's own session document."""
-        self._client.put_knowledge(
+        self._client.merge_knowledge(
             canonical_id,
+            validate_session_id(session_id),
             {MEASURED_SPEEDUP_KEY: _checked_measured_speedup(measured_speedup)},
-            session_id=validate_session_id(session_id),
-            mode="merge",
         )
 
     def champion_speedup(self, canonical_id: str) -> float | None:

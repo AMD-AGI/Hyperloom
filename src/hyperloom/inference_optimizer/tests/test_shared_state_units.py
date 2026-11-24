@@ -13,11 +13,11 @@ import pytest
 from hyperloom.orchestrator.state.kernel_decision_settings import _DEFAULT_ATTEMPTS_HISTORY
 from hyperloom.orchestrator.state.shared_state import (
     ActionAttempt,
-    _DEFAULT_LAST_FAILURES,
     SharedState,
     inject_stack_base_params,
     resolve_grading_anchor_tput,
 )
+from hyperloom.orchestrator.state._shared_state.action_records import _DEFAULT_LAST_FAILURES
 
 
 def _at(unix: float) -> datetime:
@@ -1018,7 +1018,7 @@ def test_record_failure_evidence_is_idempotent_last_wins():
 
 
 def test_record_failure_evidence_caps_at_default():
-    from hyperloom.orchestrator.state.shared_state import _DEFAULT_LAST_FAILURES
+    from hyperloom.orchestrator.state._shared_state.action_records import _DEFAULT_LAST_FAILURES
 
     s = SharedState()
     for i in range(_DEFAULT_LAST_FAILURES + 5):

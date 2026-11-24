@@ -519,7 +519,7 @@ runtime_env_write_kernel_agent_credentials() {
 # the values it may carry there, DOTENV_NOT_PRIVATE_LENT_VALUES in hyperloom/common/env_safety.py, which says why so
 # few. test_dotenv_allow_list.py holds the two equal and runtime_env_dotenv_lent to
 # is_lent_not_private_dotenv_assignment.
-RUNTIME_ENV_DOTENV_NOT_PRIVATE_LENT="FRAMEWORK=atom,custom,sglang,vllm,xdit HF_DATASETS_OFFLINE=0,1 HF_HUB_OFFLINE=0,1 \
+RUNTIME_ENV_DOTENV_NOT_PRIVATE_LENT="FRAMEWORK=atom,custom,llamacpp,sglang,vllm,xdit HF_DATASETS_OFFLINE=0,1 HF_HUB_OFFLINE=0,1 \
 HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env \
 HYPERLOOM_FRAMEWORK_ENV=isolated,shared HYPERLOOM_LLM_MODE=anthropic,deepseek,openai HYPERLOOM_RUN_MODE=baremetal,docker"
 

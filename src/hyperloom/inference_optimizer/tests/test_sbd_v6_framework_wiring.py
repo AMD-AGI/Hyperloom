@@ -23,7 +23,7 @@ from hyperloom.orchestrator.actions.executors.integrate._integrate_vocabulary im
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
-from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.phases.framework_records import ProgressStamp
 from hyperloom.orchestrator.loop.verdicts import CriticRuling
 
@@ -759,7 +759,7 @@ def test_a_source_proposal_keeps_every_kb_read_that_shaped_it(session_dir: Path)
     """The discovery and the authoring specialist each saw a read; the proposal the attempt joins keeps both."""
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.phases.framework import _forward_integrate_source
+    from hyperloom.orchestrator.phases.framework_proposals import _forward_integrate_source
 
     discovery_ref = {"id": "exp-00000000000000000000000000000001", "purpose": "representative"}
     authoring_ref = {"id": "exp-00000000000000000000000000000002", "purpose": "representative"}

@@ -14,8 +14,8 @@ import pytest
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.proposal_bench import UNTESTED_BACKLOG_CAP
-from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
 
 @pytest.fixture

@@ -66,11 +66,12 @@ template's values to the paths inside the sandbox.
 
 | Variable | Required | What it points at |
 | --- | --- | --- |
-| `HYPERLOOM_RUNNER_CACHE` | no | Where the template mounts the runner cache. Default `/runner-cache`. For a v2 sheet the runner uses the inference_suite staging `cache_build` published in `inference-suite/<staging key>/` (see [The inference_suite staging](#the-inference_suite-staging)) offline and builds none, so the whole cache can be read-only. It must hold the same directory the app host's `HYPERLOOM_RUNNER_CACHE` names. How the sandbox starts from it is described below the table. |
+| `HYPERLOOM_RUNNER_CACHE` | no | Where the template mounts the runner cache. Default `/runner-cache`. For a v2 sheet the runner uses the inference_suite staging `cache_build` published in `inference-suite/<staging key>/` (see [The inference_suite staging](#the-inference_suite-staging)) offline and builds none, so the whole cache can be read-only. A read-only cache keeps no InferenceX commit in `tools/InferenceX.git`: every test then logs a warning and fetches InferenceX from `INFERENCEX_REPO` (or upstream) again, so leave `tools/` writable where that fetch is slow or can fail. It must hold the same directory the app host's `HYPERLOOM_RUNNER_CACHE` names. How the sandbox starts from it is described below the table. |
 | `HYPERLOOM_SOURCE_SHA`, `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256` | set by the hosted multi-branch entry | The hosted multi-branch entry passes both on every create; the template must list them in its accepted create environment. |
 | `HYPERLOOM_FRAMEWORK_SNAPSHOT`, `HYPERLOOM_FRAMEWORK_SESSION_SHA256` | set by the hosted multi-branch entry | When the app host has the image's aiter tables, the hosted multi-branch entry snapshots them below `<session_dir>/framework` and passes both on every create; the template must list them in its accepted create environment, and the sandbox must see the session directory at the same path. Without the snapshot, a test that adds tuned rows to a default table is refused as `spec_rejected`. |
 | `INFERENCEX_REPO` | no | Where the runner fetches InferenceX (default: upstream on GitHub). A sandbox without egress needs a mirror it can read, for example a bare repository on the shared storage. A path or `file://` URL may name a mirror another account owns: the runner fetches from its resolved path, and that fetch alone runs with a global git config of its own whose `safe.directory` names that path and its `.git`, so no system-wide `safe.directory` is needed. |
 | `HYPERLOOM_JIT_CACHE` | no | A read-only directory of compiled kernels shared between tests. Unset: every test builds its kernels cold, which is slower but measures the same. A test that patches aiter's `csrc` or `hsa` is refused without it, because it needs its own JIT directory. |
+| `HYPERLOOM_WEIGHT_PREFETCH` | no | `1` reads the model's checkpoint into the page cache while each server boots, for a model on a network file system. Unset, it is off. With it on, the round that boots the server leaves `weight_prefetch.json` in its run_dir. See [Checkpoint prefetch](../reference/environment-variables.md#checkpoint-prefetch). |
 
 The sandbox serves the model at the path the campaign spec names, so the template must mount the model storage at
 that same path.
@@ -119,6 +120,16 @@ Start the runner with the step that `hyperloom.measure.runner.bootstrap.runner_t
 `bootstrap.sh` against that manifest, runs the checked copy, and returns at once so the sandbox turns ready. A plain
 `sh <cache>/<HYPERLOOM_SOURCE_SHA>/bootstrap.sh` step is safe only when no account but the builder can write the cache:
 the script is what checks the manifest, so it cannot check itself.
+
+The step makes `/in`, `/out` and `/scratch` (or the directories the template names); the runner only reads the in
+directory, but it must be able to write the out and scratch directories. On an image whose root is read-only the
+platform must bind those writable into the sandbox. A scratch or in directory the step cannot make, or a scratch
+directory it cannot write, ends the start with a `runner_start_failed` status that names it; when the out directory
+itself cannot be made or written, no status can be left there, so the step prints the reason on stderr and exits 1. The
+runner's boot log goes to `/runner-boot.log` (or the template's `boot_log`) when the step can write it, else to
+`runner-boot.log` in the out directory; when neither can be written the start ends with that reason. A template embeds
+the step when it is built, so an existing template keeps the old step, and its boot log at `/runner-boot.log`, until it
+is rebuilt.
 
 The script reads the entry's `source.tar` once and unpacks it into the sandbox's scratch directory only when those bytes
 are the archive the manifest records. It copies the wheels there, checking each against the manifest as it copies,

@@ -16,6 +16,7 @@ from hyperloom_multibranch.blackboard.rsi.frontier import StopRule
 from hyperloom_multibranch.blackboard.rsi.playbook import (
     CHALLENGER_SHARE,
     CHAMPION_KEY,
+    CRASHED_OUT_FACTOR,
     FALLBACK_KEY,
     H0,
     MAX_RULES,
@@ -69,6 +70,19 @@ def test_the_numbers_and_rules_set_the_stop_rule_and_the_judges_text() -> None:
         H0.render()
     )
     assert "The scheduler cuts an open past either." in capped.render()
+
+
+def test_the_judge_reads_the_crash_out_rule_of_a_spent_op_at_the_limits_the_open_areas_apply() -> None:
+    limit = H0.numbers.failed_op_limit
+    assert (limit, CRASHED_OUT_FACTOR) == (2, 2)
+    for playbook, bare in ((H0, limit), (replaced(H0, failed_op_limit=3), 3)):
+        text = playbook.render()
+        assert (
+            f"- spent: an op {bare} branches opened on the integration head were focused on and ended without a "
+            f"commit, not counting those that crashed out, or {CRASHED_OUT_FACTOR * bare} such branches crashed out "
+            "(their specialist gave up after crashes before any test of them was judged)"
+        ) in text
+        assert "an op offered after fewer crash-outs than that is still open." in text
 
 
 def test_a_challenger_session_plays_the_champion_from_its_first_breach_on_and_records_it() -> None:

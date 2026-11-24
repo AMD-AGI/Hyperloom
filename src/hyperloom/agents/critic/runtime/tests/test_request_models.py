@@ -10,7 +10,6 @@ import pytest
 from hyperloom.agents.critic.runtime.request_models import (
     CriticRequest,
     Proposal,
-    _optional_list,
     _optional_str,
     _require_str,
     parse_request,
@@ -28,9 +27,7 @@ def test_parse_coordinator_inbox_with_raw_prompt():
     assert isinstance(req, CriticRequest)
     assert req.session_id == "sess_1"
     assert req.raw_prompt is not None
-    assert req.proposals == []
     assert req.context == {}
-    assert req.decision_id is None
 
 
 def test_parse_coordinator_inbox_requires_raw_prompt():
@@ -43,84 +40,21 @@ def test_parse_missing_session_rejected():
         parse_request({"raw_prompt": "x"})
 
 
-def test_parse_proposal_normalises_action_and_gain():
-    req = parse_request(
-        {
-            "session_id": "s",
-            "raw_prompt": "x",
-            "proposals": [
-                {
-                    "msg_id": "abc",
-                    "from_agent": "orchestration",
-                    "seq": 12,
-                    "payload": {
-                        "action_name": "kernel_opt",
-                        "predicted_gain_pct": 4.2,
-                        "extra": "ok",
-                    },
-                }
-            ],
-        }
+def test_proposal_from_payload_normalises_action_and_gain():
+    p = Proposal.from_payload(
+        msg_id="abc",
+        from_agent="orchestration",
+        payload={"action_name": "kernel_opt", "predicted_gain_pct": 4.2, "extra": "ok"},
+        seq=12,
     )
-    assert len(req.proposals) == 1
-    p = req.proposals[0]
-    assert isinstance(p, Proposal)
-    assert p.msg_id == "abc"
-    assert p.from_agent == "orchestration"
     assert p.action_name == "kernel_opt"
     assert p.predicted_gain_pct == pytest.approx(4.2)
     assert p.payload["extra"] == "ok"
     assert p.seq == 12
 
 
-def test_parse_proposal_rejects_non_dict_payload():
-    with pytest.raises(RequestValidationError, match="payload"):
-        parse_request(
-            {
-                "session_id": "s",
-                "raw_prompt": "x",
-                "proposals": [{"msg_id": "abc", "from_agent": "o", "payload": "no"}],
-            }
-        )
-
-
-def test_parse_proposal_rejects_non_int_seq():
-    with pytest.raises(RequestValidationError, match="seq"):
-        parse_request(
-            {
-                "session_id": "s",
-                "raw_prompt": "x",
-                "proposals": [{"msg_id": "abc", "from_agent": "o", "seq": "12"}],
-            }
-        )
-
-
-def test_parse_proposal_missing_msg_id():
-    with pytest.raises(RequestValidationError, match="msg_id"):
-        parse_request(
-            {
-                "session_id": "s",
-                "raw_prompt": "x",
-                "proposals": [{"from_agent": "o"}],
-            }
-        )
-
-
 def test_proposal_to_dict_carries_parse_defaults():
-    req = parse_request(
-        {
-            "session_id": "s",
-            "raw_prompt": "x",
-            "proposals": [
-                {
-                    "msg_id": "m1",
-                    "from_agent": "o",
-                    "payload": {"action_name": "baseline"},
-                }
-            ],
-        }
-    )
-    d = req.proposals[0].to_dict()
+    d = Proposal.from_payload(msg_id="m1", from_agent="o", payload={"action_name": "baseline"}, seq=None).to_dict()
     assert d["msg_id"] == "m1"
     assert d["action_name"] == "baseline"
     assert d["predicted_gain_pct"] is None
@@ -131,21 +65,9 @@ def test_require_and_optional_validators() -> None:
         _require_str({"k": 5}, "k", where="t")
     with pytest.raises(RequestValidationError):
         _optional_str({"k": 5}, "k", where="t")
-    with pytest.raises(RequestValidationError):
-        _optional_list({"k": 5}, "k", where="t")
     assert _optional_str({}, "k", where="t") is None
-    assert _optional_list({}, "k", where="t") == []
 
 
 def test_parse_request_errors() -> None:
     with pytest.raises(RequestValidationError):
         parse_request("not a dict")  # type: ignore[arg-type]
-
-    with pytest.raises(RequestValidationError):
-        parse_request(
-            {
-                "session_id": "s1",
-                "raw_prompt": "do something",
-                "proposals": ["not-an-object"],
-            }
-        )

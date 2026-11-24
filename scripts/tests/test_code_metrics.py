@@ -227,9 +227,9 @@ def test_loosening_the_config_relative_to_base_fails(repo: Repo) -> None:
     pyproject = repo.path / "pyproject.toml"
     text = pyproject.read_text(encoding="utf-8")
     text = text.replace("cyclomatic-complexity = 20\n", "cyclomatic-complexity = 25\n")
-    text = text.replace(
-        'exclude = [\n    "src/hyperloom/orch', 'exclude = [\n    "src/hyperloom/agents",\n    "src/hyperloom/orch', 1
-    )
+    metrics_start = text.index("[tool.hyperloom.code_metrics]")
+    exclude_start = text.index("exclude = [\n", metrics_start) + len("exclude = [\n")
+    text = text[:exclude_start] + '    "src/hyperloom/agents",\n' + text[exclude_start:]
     pyproject.write_text(text, encoding="utf-8")
     code, report = repo.gate("--base-ref", base)
     assert code == 1

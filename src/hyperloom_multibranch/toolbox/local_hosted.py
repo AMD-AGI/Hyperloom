@@ -52,6 +52,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
+from hyperloom.agents.framework.sources.github import token_configured
 from hyperloom.common.confinement import credential_paths
 from hyperloom.common.outside_facts.rule_pack import PACK_ENV, rule_pack_identity
 from hyperloom.measure.archive import ResultArchive
@@ -71,7 +72,7 @@ from hyperloom.measure.framework.base import (
     load_snapshot,
 )
 from hyperloom.measure.jit.native.config import BUILD_STORE_ENV, BUILD_TRUST_ENV
-from hyperloom.measure.local_templates import host_hf_env, image_env, local_runner_template
+from hyperloom.measure.local_templates import host_hf_env, host_prefetch_env, image_env, local_runner_template
 from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
@@ -646,11 +647,12 @@ def _snapshot_source(envs: Mapping[str, str]) -> tuple[Path, ...]:
 
 def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTemplate:
     """The runner template: the image's variables, the host's Hugging Face settings
-    (:func:`~hyperloom.measure.local_templates.host_hf_env`) and tool repositories (:func:`host_tool_repos`),
+    (:func:`~hyperloom.measure.local_templates.host_hf_env`), its checkpoint prefetch switch
+    (:func:`~hyperloom.measure.local_templates.host_prefetch_env`) and tool repositories (:func:`host_tool_repos`),
     ``runner_envs`` over them, and the variable that names the session's rule pack. ``runner_envs`` add to the image's variables, never
     replace them: without ``ROCM_PATH`` and ``LD_LIBRARY_PATH`` the runner cannot import torch on an image whose ROCm
     libraries are not in the loader's path."""
-    envs = {**image_env(), **host_hf_env(), **host_tool_repos(), **(options.runner_envs or {})}
+    envs = {**image_env(), **host_hf_env(), **host_prefetch_env(), **host_tool_repos(), **(options.runner_envs or {})}
     template = local_runner_template(f"runner-{session.tp}", gpus=session.tp, python=options.python, envs=envs)
     pack = rule_pack_envs(Path(session.session_dir) / _RULE_PACK)
     return replace(template, envs={**template.envs, **pack})
@@ -716,6 +718,14 @@ def _local_tools(leases: BranchLeases, options: LocalOptions) -> Sequence[AsyncT
     tuner = (
         (kernel_tune_tool(leases, Path(options.framework_configs or image_configs())),) if leases.can_lease(1) else ()
     )
+    if token_configured():
+        logger.info("upstream PR search asks GitHub with this host's token")
+    else:
+        logger.warning(
+            "upstream PR search has no GitHub token: neither GITHUB_TOKEN nor GH_TOKEN is set in this process's "
+            "environment, so it asks GitHub anonymously, which allows this address few requests "
+            '(docs/how-to/run-multibranch.md, "Upstream pull-request search")'
+        )
     return (tracelens_tool(leases), roofline_tool(leases), UpstreamPrSearch(), *tuner)
 
 

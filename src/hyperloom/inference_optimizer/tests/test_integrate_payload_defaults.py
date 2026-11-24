@@ -129,6 +129,42 @@ class TestFillIntegrateDefaultsFromState:
             "SHARED": "candidate",
         }
 
+    def test_current_best_overlay_is_on_the_candidates_import_path(self, session_dir):
+        """A kept recipe that is loaded from a directory on the import path (a TunableOp candidate's hook) has to be
+        loaded in the launch a later candidate is measured on, or that candidate is graded against a throughput it
+        was never given the means to reach."""
+        state = _seed_state(session_dir, current_best_envs={"HL_TUNABLEOP_MODE": "candidate"})
+        state.current_best["final_overlay"] = "/session/gemm/runtime_sitecustomize"
+        state.save(session_dir)
+
+        out = integrate_payload._fill_integrate_defaults_from_state(
+            {"kernel_id": "k_abc", "runtime_override": {"path_prefix": "/candidate/bin"}}, session_dir=session_dir
+        )
+
+        assert out["runtime_override"] == {
+            "path_prefix": "/candidate/bin",
+            "pythonpath_prefix": "/session/gemm/runtime_sitecustomize",
+        }
+
+    def test_a_candidate_naming_its_own_import_directory_keeps_it(self, session_dir):
+        state = _seed_state(session_dir, current_best_args="--page-size 16")
+        state.current_best["final_overlay"] = "/session/kept/overlay"
+        state.save(session_dir)
+        requested = {"pythonpath_prefix": "/candidate/overlay"}
+
+        out = integrate_payload._fill_integrate_defaults_from_state(
+            {"kernel_id": "k_abc", "runtime_override": requested}, session_dir=session_dir
+        )
+
+        assert out["runtime_override"] == requested
+
+    def test_no_overlay_leaves_the_runtime_override_unset(self, session_dir):
+        _seed_state(session_dir, current_best_args="--page-size 16")
+
+        out = integrate_payload._fill_integrate_defaults_from_state({"kernel_id": "k_abc"}, session_dir=session_dir)
+
+        assert "runtime_override" not in out
+
     @pytest.mark.parametrize(
         "remove_args,unset_envs",
         [

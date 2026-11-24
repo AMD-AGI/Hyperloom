@@ -7,8 +7,8 @@ PRELUDE roots the session and measures its baseline (:mod:`.prelude`); EXPLORE t
 test and one CLOSE grace are left before the deadline. EXPLORE and CLOSE score the branches with the frontier's
 defaults for the session's budget. Once the baseline is established, a session with an RSI archive plays the
 scheduling playbook ``--playbook`` asks for, the champion of the pool beside it or a playbook on trial, as the session's id draws under
-``auto``, recorded under ``playbook`` in ``policy_versions``. The FINAL candidates are fixed while every branch still stands,
-then exploration ends and FINAL validates them. With the review on, a session whose component agents are given a map pauses before their branches open until a person approves it (:mod:`.review`); the pause moves the
+``auto``, recorded under ``playbook`` in ``policy_versions``. EXPLORE ends exploration itself, the specialist branches first
+(:meth:`Explorer.run <hyperloom_multibranch.scheduling.explore.Explorer.run>`); the FINAL candidates are read after that and FINAL validates them. With the review on, a session whose component agents are given a map pauses before their branches open until a person approves it (:mod:`.review`); the pause moves the
 deadline, and EXPLORE's end, by its length. A map a mapping branch makes is reviewed in EXPLORE, while the clock runs,
 and its shares open only with ``--agent-share-minutes`` left before their cutoff. A failed PRELUDE, a run asked to stop once its component agents' directions are mapped,
 a map a person rejected, an EXPLORE that ran out of cards to measure on, a stop signal, the session deadline
@@ -585,6 +585,7 @@ class Session:
             prelude.start_commit,
             explore_end,
             budget.deadline,
+            prelude.longest_root_test,
             explore_gpu_seconds(self._settings.max_gpu_hours),
             self._settings.max_llm_usd or math.inf,
             self._settings.user_directions,
@@ -595,11 +596,8 @@ class Session:
         )
         reason = await self._explorer().run(window)
         if reason is SessionStopReason.NO_MEASUREMENT_CARDS:
-            await self._stopper.end_exploration(reason)
             return SessionOutcome(reason, None, None, NO_CARDS_LEFT)
-        candidates = await self._final_candidates()
-        await self._stopper.end_exploration(reason)
-        return await self._final(candidates, reason)
+        return await self._final(await self._final_candidates(), reason)
 
     async def _record_versions(self) -> None:
         """The policy versions the session runs, once PRELUDE settled its playbook: in the manifest, and with the
@@ -946,7 +944,7 @@ class Session:
             self._play,
             self._layout.manifest,
         )
-        return Explorer(self._context, self._branches, self._integrator, steering)
+        return Explorer(self._context, self._branches, self._integrator, steering, self._stopper)
 
     def _closer(self) -> Closer:
         dashboard = self._dashboard(self._scoring())

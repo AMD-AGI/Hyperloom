@@ -33,7 +33,7 @@ def _job(tmp_path: Path, rig: Rig, script: str, *, kind: TestKind = TestKind.REP
     case = case_attachment(rig.config.spec.blobs, script)
     purpose = Purpose.REPRO if kind is TestKind.REPRO else Purpose.EXPLORE
     request = req(kind=kind, purpose=purpose, attachments=(case,) if kind is TestKind.REPRO else ())
-    return TestJob(request.accepted("b1-000001"), 1, (), 2, 2, AcceptedMeasurement(None, (point,)))  # type: ignore[arg-type]
+    return TestJob(request.accepted("b1-000001"), 1, (), 2, AcceptedMeasurement(None, (point,)))  # type: ignore[arg-type]
 
 
 async def _repro(tmp_path: Path, rig: Rig, script: str = "exit 1\n", **fake: object):  # type: ignore[no-untyped-def]

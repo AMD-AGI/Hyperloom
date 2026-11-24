@@ -13,8 +13,10 @@ ready timeout is the exception: recipes raise it for a slow start, and a round's
 environment, so the guard's value replaces whatever a layer below set.
 
 The server runs as the framework's server module under ``server.framework_python``, the interpreter the version probe
-and the parser check run, never the base's entrypoint through ``PATH``. A base whose entrypoint is not its framework's
-server command names a program the round would not run, so it is refused.
+and the parser check run, never the base's entrypoint through ``PATH``; a native server (llama.cpp's) runs as its
+entrypoint, the program its version probe ran. A base whose entrypoint is not its framework's server command names a
+program the round would not run, so it is refused. The guard names the model as the server loads it: the model
+directory, or the one model file in it for a framework that loads a file.
 """
 
 from __future__ import annotations
@@ -41,7 +43,7 @@ from inference_suite.contracts.launch import (
     VersionCheck,
 )
 from inference_suite.contracts.report import FailedStep
-from inference_suite.frameworks import Framework, ServerFlags, framework_facts
+from inference_suite.frameworks import Framework, ModelFileError, ServerCommand, ServerFlags, framework_facts
 from inference_suite.golden import (
     GOLDEN_OWNED_ENV_PREFIXES,
     golden_owned_settings,
@@ -258,9 +260,13 @@ def ready_timeout_sec(boot_budget_sec: float | None) -> int:
 
 
 def _guard(
-    server: ServerConfig, server_flags: ServerFlags, ready_timeout_env: str | None, boot_budget_sec: float | None
+    server: ServerConfig,
+    server_flags: ServerFlags,
+    model: str,
+    ready_timeout_env: str | None,
+    boot_budget_sec: float | None,
 ) -> tuple[tuple[str, ...], dict[str, EnvValue]]:
-    args = [server_flags.model, server.model_path, server_flags.host, server.host, server_flags.port, str(server.port)]
+    args = [server_flags.model, model, server_flags.host, server.host, server_flags.port, str(server.port)]
     if server_flags.served_model_name is not None:
         args += [server_flags.served_model_name, server.served_model_name]
     env: dict[str, EnvValue] = {
@@ -282,6 +288,22 @@ def _golden_layer(use: GoldenUse, base: BaseLaunch) -> tuple[tuple[str, ...], Ma
     return golden.args, golden.env
 
 
+def _entrypoint_refusal(base: BaseLaunch, framework: Framework, command: ServerCommand) -> Refusal | None:
+    """Why ``base`` is refused when its entrypoint is not ``framework``'s server ``command``; ``None`` when it is."""
+    if base.entrypoint == command.entrypoint:
+        return None
+    runs = (
+        "it from the launch PATH"
+        if command.module is None
+        else f"{shlex.join(command.module)} under server.framework_python"
+    )
+    detail = (
+        f"the base runs {shlex.join(base.entrypoint)}, not {framework.value}'s {shlex.join(command.entrypoint)}; "
+        f"the round runs {runs}, so name the install there"
+    )
+    return Refusal(FailedStep.CONFIG_INVALID, LayerSource.BASE, detail)
+
+
 def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch | Refusal:
     """The launch ``config`` runs on ``base``, or why none can run.
 
@@ -299,13 +321,7 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
     server_flags, command = spec.server_flags, spec.server_command
     if server_flags is None or command is None:
         raise LaunchError(f"{framework.value} runs no server, so it has no launch to compose")
-    if base.entrypoint != command.entrypoint:
-        detail = (
-            f"the base runs {shlex.join(base.entrypoint)}, not {framework.value}'s {shlex.join(command.entrypoint)}; "
-            f"the round runs {shlex.join(command.module)} under server.framework_python, so name the install there"
-        )
-        return Refusal(FailedStep.CONFIG_INVALID, LayerSource.BASE, detail)
-    refusal = _first_refusal(server, base, _owned(base))
+    refusal = _entrypoint_refusal(base, framework, command) or _first_refusal(server, base, _owned(base))
     if refusal is not None:
         return refusal
 
@@ -316,7 +332,16 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
     if golden is not None:
         composer.add_args(golden[0], LayerSource.GOLDEN)
         composer.set_env(golden[1], LayerSource.GOLDEN)
-    guard_args, guard_env = _guard(server, server_flags, spec.ready_timeout_env, config.deadlines.boot_budget_sec)
+    try:
+        guard_args, guard_env = _guard(
+            server,
+            server_flags,
+            spec.served_model(server.model_path),
+            spec.ready_timeout_env,
+            config.deadlines.boot_budget_sec,
+        )
+    except ModelFileError as error:
+        return Refusal(FailedStep.CONFIG_INVALID, LayerSource.GUARD, str(error))
     composer.add_args(guard_args, LayerSource.GUARD)
     composer.set_env(guard_env, LayerSource.GUARD)
     composer.apply_runner(server.runner, spec.metrics_flag if config.telemetry.kv else None)

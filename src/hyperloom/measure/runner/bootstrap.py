@@ -100,8 +100,10 @@ sandbox, the one that answers readiness and through which the application delive
 in the foreground never ends, so the agent never starts, the sandbox never turns ready and the spec never arrives. Use
 :func:`runner_template_step`, which makes the directories, runs the template's own preparation and then starts the
 checked line in the background (``nohup ... &``) with its output in ``runner-boot.log`` next to the scratch directory,
-and returns at once. The runner then waits for the spec for ``--spec-wait-sec`` seconds, :data:`TEMPLATE_SPEC_WAIT_SEC`
-unless the step's arguments name another.
+and returns at once. On an image whose root is read-only the step still starts: the boot log goes to
+``runner-boot.log`` in the out directory, and an out or scratch directory it cannot make or write ends the start naming
+it, since only the platform can provide them, by binding them writable. The runner then waits for the spec for
+``--spec-wait-sec`` seconds, :data:`TEMPLATE_SPEC_WAIT_SEC` unless the step's arguments name another.
 
 A template step must also reach ``sh`` as written. A platform may expand variables in a step's text before any shell
 parses it, whatever quotes surround them (Kubernetes turns ``$$`` into ``$`` and ``$(NAME)`` into a value in a
@@ -310,16 +312,37 @@ _BOOT_LOG = "/runner-boot.log"
 
 #: What the template step's payload runs when the start fails before anything wrote ``status.json``: the line or the
 #: template's preparation ended with code ``$1`` and nothing reported why. It writes the start failure the application
-#: reads, with the boot log's tail as the reason, into ``HYPERLOOM_OUT_DIR`` or, when that is empty, the template's out
-#: directory, so the application ends the test at once instead of waiting for a status that never comes.
+#: reads, with the reason the step found (``hl_why``) or else the boot log's tail, into ``HYPERLOOM_OUT_DIR`` or, when
+#: that is empty, the template's out directory, so the application ends the test at once instead of waiting for a status
+#: that never comes.
 _START_FAILED = (
     "hl_start_failed() { o=${HYPERLOOM_OUT_DIR:-@OUT@}; "
     'if [ ! -e "$o/status.json" ]; then '
-    "t=$(tail -c 600 @BOOT@ 2>/dev/null | LC_ALL=C tr '\\n\\t' '  ' | LC_ALL=C tr -cd ' -~' | tr -d '\"\\\\'); "
+    't=$({ if [ -n "${hl_why:-}" ]; then printf %s "$hl_why"; else tail -c 600 "${hl_boot:-}" 2>/dev/null; fi; } '
+    "| LC_ALL=C tr '\\n\\t' '  ' | LC_ALL=C tr -cd ' -~' | tr -d '\"\\\\'); "
     'mkdir -p "$o"; '
     'printf \'{"error_class": "runner_start_failed", "message": "runner start, exit %s before status.json was '
     'written: %s", "state": "failed"}\\n\' "$1" "$t" >"$o/.status.json.tmp" '
     '&& mv "$o/.status.json.tmp" "$o/status.json"; fi; return "$1"; }'
+)
+
+#: Makes each of its arguments; all but the first (the in directory, which the runner only reads) must then be writable:
+#: they are where the runner and the application write, and on an image whose root is read-only only the platform can
+#: provide them, by binding them.
+_MAKE_DIRS = (
+    'hl_dirs() { hl_w=; for hl_d in "$@"; do if ! mkdir -p "$hl_d" 2>/dev/null || { [ -n "$hl_w" ] && [ ! -w "$hl_d" ]; }; '
+    'then hl_why="@NAME@: cannot make or write the directory $hl_d (the image root is read-only or not writable by this '
+    'account): the platform must bind $hl_d writable into the sandbox"; echo "$hl_why" >&2; return 1; fi; hl_w=1; '
+    "done; }"
+)
+
+#: Sets ``hl_boot`` to the template's boot log when it can be written, else to ``runner-boot.log`` in the out directory,
+#: so a read-only image root does not end the start. When neither can be written the start ends with that reason.
+_PICK_BOOT_LOG = (
+    'hl_log() { o=${HYPERLOOM_OUT_DIR:-@OUT@}; hl_t=@BOOT@; for hl_boot in "$hl_t" "$o/runner-boot.log"; do '
+    '{ true >>"$hl_boot"; } 2>/dev/null && return 0; done; '
+    'hl_why="@NAME@: cannot write the boot log $hl_t or runner-boot.log in the out directory $o"; '
+    'echo "$hl_why" >&2; return 1; }'
 )
 
 
@@ -356,15 +379,19 @@ def runner_template_payload(
     whose defaults the script's are), runs ``pre`` (the template's own preparation, one line of ``sh``, run in the
     foreground and only when the directories were made), then starts :func:`runner_start_shell_line` with
     ``runner_args`` under ``nohup`` in the background, with ``env`` set for it alone and its output in ``boot_log``
-    (``runner-boot.log`` next to the scratch directory, never inside the runner's own). A step that never returned
-    would keep the sandbox from ever turning ready (see the module's documentation), and so would a background part
-    that held the step's stdin, stdout or stderr: a platform reading the step's output to its end would wait for the
-    runner, so the background part has its own. ``runner_args`` get
-    ``--spec-wait-sec`` :data:`TEMPLATE_SPEC_WAIT_SEC` unless they name it.
+    (``runner-boot.log`` next to the scratch directory, never inside it). Each of ``dirs`` but the first (the in
+    directory, which the runner only reads) must be writable once made, or the start fails naming it. When
+    ``boot_log`` cannot be written (a read-only image root), the log is ``runner-boot.log`` in the out directory. A step
+    that never returned would keep the sandbox from ever turning ready (see the module's documentation), and so would a
+    background part that held the step's stdin, stdout or stderr: a platform reading the step's output to its end would
+    wait for the runner, so the background part has its own. ``runner_args`` get ``--spec-wait-sec``
+    :data:`TEMPLATE_SPEC_WAIT_SEC` unless they name it.
 
-    A start that fails before anything wrote ``status.json`` (the directories, ``pre``, or the started line ending
-    non-zero without one) leaves a ``runner_start_failed`` status with the boot log's tail in ``HYPERLOOM_OUT_DIR``,
-    or in the second of ``dirs`` (``/out`` when there is none) when that is empty.
+    A start that fails before anything wrote ``status.json`` (the directories, the boot log, ``pre``, or the started
+    line ending non-zero without one) leaves a ``runner_start_failed`` status with what the step found or the boot log's
+    tail in ``HYPERLOOM_OUT_DIR``, or in the second of ``dirs`` (``/out`` when there is none) when that is empty. When
+    that out directory itself cannot be made or written, no status can be left: the step prints the reason on stderr
+    and exits 1, as before.
 
     Raises:
         ValueError: ``pre`` spans lines, or a name in ``env`` is not a shell variable name.
@@ -376,11 +403,17 @@ def runner_template_payload(
         raise ValueError(f"not shell variable names: {', '.join(map(repr, bad))}")
     assignments = "".join(f"{name}={shlex.quote(value)} " for name, value in (env or {}).items())
     start = shlex.quote(runner_start_shell_line(*_with_spec_wait(runner_args)))
-    failed = _START_FAILED.replace("@OUT@", shlex.quote(dirs[1] if len(dirs) > 1 else _TEMPLATE_DIRS[1])).replace(
-        "@BOOT@", shlex.quote(boot_log)
+    out = shlex.quote(dirs[1] if len(dirs) > 1 else _TEMPLATE_DIRS[1])
+    functions = "; ".join(
+        part.replace("@OUT@", out).replace("@BOOT@", shlex.quote(boot_log)).replace("@NAME@", _NAME)
+        for part in (_START_FAILED, _MAKE_DIRS, _PICK_BOOT_LOG)
     )
-    background = f'( ({assignments}nohup sh -c {start} >{shlex.quote(boot_log)} 2>&1 || hl_start_failed "$?") </dev/null >/dev/null 2>&1 &)'
-    made = "mkdir -p " + " ".join(shlex.quote(directory) for directory in dirs)
+    background = (
+        f'( ({assignments}nohup sh -c {start} >"$hl_boot" 2>&1 || hl_start_failed "$?") </dev/null >/dev/null 2>&1 &)'
+    )
+    made = " ".join(("hl_dirs", *(shlex.quote(directory) for directory in dirs)))
     return (
-        f"{failed}; {{ " + " && ".join(part for part in (made, pre, background) if part) + '; } || hl_start_failed "$?"'
+        f"{functions}; {{ "
+        + " && ".join(part for part in (made, "hl_log", pre, background) if part)
+        + '; } || hl_start_failed "$?"'
     )

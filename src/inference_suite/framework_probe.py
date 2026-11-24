@@ -6,12 +6,16 @@
 A probe runs ``framework_python`` with the launch environment, in the directory the server starts in
 (:attr:`~inference_suite.contracts.RunLayout.framework_cwd`), so it resolves the packages, and the patches on the path,
 that the server will. The install it reports is what the version check (D6) holds to the recipe, and the
-parser check (D7) runs its program through the same probe.
+parser check (D7) runs its program through the same probe. A native server is asked instead: its program, found on the
+launch environment's ``PATH``, reports its version itself, and its ``--help`` is the flag list D7 holds a launch to.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
+import shutil
 import subprocess  # nosec B404 - the probe runs the interpreter the config names
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -22,6 +26,9 @@ from inference_suite.frameworks import Framework, framework_facts
 #: Starting an interpreter on a shared filesystem can take seconds; the install probe imports nothing.
 PROBE_TIMEOUT_S = 60.0
 _DETAIL_CHARS = 600
+#: llama.cpp's ``--version`` line: ``version: 1.0.0-dev (build 12439, commit 8bfd64b5a)``, ``version: 6789 (8bfd64b5a)``
+#: before it numbered releases.
+_NATIVE_VERSION = re.compile(r"^version: (\S+)", re.MULTILINE)
 
 _INSTALL_PROGRAM = """\
 import importlib.metadata, importlib.util, json, os, sys
@@ -97,12 +104,81 @@ def run_probe(
     return answer
 
 
+def _native_executable(program: str, env: Mapping[str, str]) -> str:
+    executable = shutil.which(program, path=env.get("PATH"))
+    if executable is None:
+        raise FrameworkProbeError(f"{program} is not on the launch PATH")
+    return executable
+
+
+def _run_native(executable: str, option: str, env: Mapping[str, str], *, cwd: Path) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(  # nosec B603 - argv[0] is the framework's server program
+            [executable, option],
+            env=dict(env),
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise FrameworkProbeError(f"{executable} {option} ran past {PROBE_TIMEOUT_S:g} s") from error
+    except OSError as error:
+        raise FrameworkProbeError(f"{executable} could not run: {error}") from error
+
+
+#: ``--help`` text by the binary's real path and mtime, so a rebuilt server is read again.
+_NATIVE_HELP: dict[tuple[str, int], str] = {}
+
+
+def native_help(program: str, env: Mapping[str, str], *, cwd: Path) -> str:
+    """What the native server ``program``, as ``env``'s ``PATH`` resolves it, prints for ``--help``.
+
+    Raises:
+        FrameworkProbeError: When ``program`` is not on the launch ``PATH``, or its ``--help`` fails or prints nothing.
+    """
+    executable = os.path.realpath(_native_executable(program, env))
+    key = (executable, os.stat(executable).st_mtime_ns)
+    if key not in _NATIVE_HELP:
+        completed = _run_native(executable, "--help", env, cwd=cwd)
+        printed = completed.stdout + completed.stderr
+        if completed.returncode != 0 or not printed.strip():
+            tail = printed.strip()[-_DETAIL_CHARS:]
+            raise FrameworkProbeError(f"{executable} --help exited {completed.returncode}: {tail}")
+        _NATIVE_HELP[key] = printed
+    return _NATIVE_HELP[key]
+
+
+def _probe_native(program: str, env: Mapping[str, str], *, cwd: Path) -> FrameworkInstall:
+    """The native server ``program`` as ``env``'s ``PATH`` resolves it, and the version its ``--version`` prints."""
+    executable = _native_executable(program, env)
+    completed = _run_native(executable, "--version", env, cwd=cwd)
+    printed = completed.stdout + completed.stderr
+    found = _NATIVE_VERSION.search(printed)
+    if completed.returncode != 0 or found is None:
+        tail = printed.strip()[-_DETAIL_CHARS:]
+        raise FrameworkProbeError(f"{executable} --version exited {completed.returncode} with no version: {tail}")
+    return FrameworkInstall(
+        executable=os.path.realpath(executable),
+        python="",
+        origin=os.path.realpath(executable),
+        version=found[1],
+        import_roots={},
+    )
+
+
 def probe_install(
     python: str, framework: Framework, env: Mapping[str, str], *, cwd: Path, packages: Sequence[str] = ()
 ) -> FrameworkInstall:
     """The install of ``framework`` that ``python`` imports in ``env``, started in ``cwd``, and where it imports
-    ``framework``'s package and each of ``packages`` from."""
-    package = framework_facts(framework).python_package
+    ``framework``'s package and each of ``packages`` from; a native server's program as ``env`` resolves it,
+    whatever ``python`` is, with no import roots."""
+    facts = framework_facts(framework)
+    if facts.server_command is not None and facts.server_command.native:
+        return _probe_native(facts.server_command.entrypoint[0], env, cwd=cwd)
+    package = facts.python_package
     if package is None:
         raise FrameworkProbeError(f"{framework.value} ships no package to probe")
     answer = run_probe(python, _INSTALL_PROGRAM, (package, *packages), env, cwd=cwd)
@@ -119,4 +195,11 @@ def probe_install(
     )
 
 
-__all__ = ["PROBE_TIMEOUT_S", "FrameworkInstall", "FrameworkProbeError", "probe_install", "run_probe"]
+__all__ = [
+    "PROBE_TIMEOUT_S",
+    "FrameworkInstall",
+    "FrameworkProbeError",
+    "native_help",
+    "probe_install",
+    "run_probe",
+]

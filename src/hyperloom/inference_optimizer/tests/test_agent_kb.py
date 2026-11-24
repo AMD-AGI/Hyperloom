@@ -9,9 +9,7 @@ import json
 from pathlib import Path
 
 from hyperloom.orchestrator.knowledge.agent_kb import KernelAgentKB
-from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
-    KnowledgeSections,
-)
+from hyperloom.orchestrator.knowledge.remote_recipe.sections import KnowledgeSections
 
 
 def _kb(tmp_path: Path) -> KernelAgentKB:

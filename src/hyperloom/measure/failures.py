@@ -75,6 +75,13 @@ CARDS_UNOBSERVABLE = "cards_unobservable"
 DISK_FULL = "disk_full"
 _DISK_FULL_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT})
 
+#: The candidate's framework files were compiled against one version of the framework and the sandbox's interpreter has
+#: another installed (``hyperloom.measure.farm.FrameworkVersionMismatch``): laying them would mix two releases in one
+#: package, so the runner refuses the test before it lays anything. The candidate is not to blame, and every sandbox of
+#: the same image has the same version: an infrastructure failure that is not retried
+#: (``hyperloom_multibranch.toolbox.attempts``) and not held against the node.
+FRAMEWORK_VERSION_MISMATCH = "framework_version_mismatch"
+
 #: No sandbox started within the runner's start timeout (``hyperloom.measure.hosted``): the platform short of sandboxes,
 #: or on a local host every card held by a process outside the toolbox. Retried like any infrastructure failure.
 RUNNER_START_TIMEOUT = "runner_start_timeout"
@@ -154,6 +161,7 @@ INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
         "preflight_mismatch",
         FOREIGN_PROCESS_ON_CARD,
         DISK_FULL,
+        FRAMEWORK_VERSION_MISMATCH,
         "node_fault",
         "no_spec",
         "sandbox_create_failed",

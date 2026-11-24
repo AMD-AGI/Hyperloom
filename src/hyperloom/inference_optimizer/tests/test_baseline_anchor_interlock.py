@@ -12,8 +12,9 @@ import pytest
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
+from hyperloom.orchestrator.roles import Backend
 from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
 ANCHOR = 55.23
 HIGHER_REBASELINE = 55.43
