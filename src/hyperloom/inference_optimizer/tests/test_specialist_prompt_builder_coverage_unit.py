@@ -173,10 +173,19 @@ def test_scope_domains_with_extra_tags():
 
 
 def test_scope_freeform():
-    inp = _rich_inputs(scope="freeform", task_description="optimize the kv cache")
-    sys_p, _ = build_specialist_prompts(inp)
+    sys_p, _ = build_specialist_prompts(_rich_inputs(scope="freeform", task_description="optimize the kv cache"))
     assert "Free-form mandate" in sys_p
-    assert "optimize the kv cache" in sys_p
+
+
+@pytest.mark.parametrize("scope", ["domain", "domains", "freeform"])
+def test_task_description_reaches_the_prompt_for_every_scope(scope):
+    """A domain-scoped specialist once got only its domain focus and drifted off the task orchestration gave it."""
+    task = "MARKER-H01 unpack W4A16 scalars\nkeep the RMSNorm path untouched"
+    _, user_p = build_specialist_prompts(
+        _rich_inputs(scope=scope, extra_focus_tags=("compiler_specialist",), task_description=task)
+    )
+    mandate = user_p[: user_p.index("## 2. HARDWARE CONTEXT")]
+    assert "> MARKER-H01 unpack W4A16 scalars\n> keep the RMSNorm path untouched" in mandate
 
 
 def test_gpu_autonomy_block_and_auto_retry():

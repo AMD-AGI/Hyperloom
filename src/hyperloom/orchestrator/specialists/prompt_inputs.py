@@ -122,7 +122,7 @@ class SpecialistPromptInputs:
     # single-domain / cross-domain / freeform prompting.
     scope: str = "domain"
     mode: str = MODE_PATCH
-    # Free-form task description (only populated when scope == 'freeform').
+    # Orchestration's task for this dispatch; §0 renders it for every scope.
     task_description: str = ""
 
     # Coordinator-injected note for a bounded auto-retry of a prior transient
