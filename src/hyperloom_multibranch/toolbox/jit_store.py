@@ -7,11 +7,17 @@ The runners load what the cache holds as compiled code, and the snapshots prove 
 host's account may write it: :func:`private_jit_store` refuses a directory another account owns or could change, and a
 link there. The local toolbox and the hosted one both build their store with :func:`session_jit_store`, which also
 prunes it (:mod:`hyperloom.measure.jit.prune`) as the session starts.
+
+A store the check refuses does not stop the session: both toolboxes are built inside it, where a hosted run that raises
+is started again into the same refusal. The session runs without the cache instead (nothing published, every test
+builds cold, which measures the same), logs one warning naming the store and why, and records it in
+:data:`JIT_STORE_NOTE` of the session directory.
 """
 
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -19,10 +25,12 @@ from pathlib import Path
 from hyperloom.measure.jit.prune import prune_logged
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom_common.fs_utils import is_private_dir
+from hyperloom_common.io import SHARED, atomic_write_json
 from hyperloom_multibranch.toolbox.build_preflight import changeable_by_others
 
 __all__ = [
     "JIT_STORE_ENV",
+    "JIT_STORE_NOTE",
     "JitStoreNotPrivate",
     "named_jit_store",
     "private_jit_store",
@@ -31,6 +39,10 @@ __all__ = [
 
 #: The host environment variable that names the shared compiled-code cache when the toolbox's options do not.
 JIT_STORE_ENV = "HYPERLOOM_JIT_STORE"
+#: The file of the session directory that says the compiled-code cache was refused, and why.
+JIT_STORE_NOTE = "jit_store.json"
+
+log = logging.getLogger(__name__)
 
 
 class JitStoreNotPrivate(ValueError):
@@ -75,13 +87,29 @@ def private_jit_store(root: Path) -> Path:
     return root
 
 
-def session_jit_store(root: Path) -> DirJitStore:
+def session_jit_store(root: Path, session_dir: Path) -> DirJitStore | None:
     """The store at ``root`` a session publishes to, checked (:func:`private_jit_store`) and pruned of what no test has
     used for long; a prune that fails is logged and the session goes on.
 
-    Raises:
-        JitStoreNotPrivate: As :func:`private_jit_store`; nothing was pruned.
+    ``None`` when the check refuses it: the session runs without the cache, and says so once in the log and in
+    :data:`JIT_STORE_NOTE` of ``session_dir`` (see the module). Nothing was pruned then.
     """
-    store = DirJitStore(private_jit_store(root))
+    try:
+        store = DirJitStore(private_jit_store(root))
+    except JitStoreNotPrivate as exc:
+        log.warning(
+            "jit cache: the session runs without the compiled-code cache %s, nothing is published: %s", root, exc
+        )
+        _note_refused(root, session_dir, str(exc))
+        return None
     prune_logged(store)
     return store
+
+
+def _note_refused(root: Path, session_dir: Path, reason: str) -> None:
+    try:
+        atomic_write_json(
+            session_dir / JIT_STORE_NOTE, {"store": str(root), "published": False, "reason": reason}, options=SHARED
+        )
+    except OSError as exc:
+        log.warning("jit cache: %s was not written (%s)", session_dir / JIT_STORE_NOTE, type(exc).__name__)

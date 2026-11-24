@@ -4,14 +4,15 @@
 """Pruning the shared compiled-code cache: what no test has used for long, or what is past the size bound, goes; what a
 test may still be reading, and what another key still lists, stays.
 
-Every time is given, never read from the clock: a key's time is its directory's, which the tests set as the host's
-stamp of its last use would.
+Every time is given, never read from the clock, except where the logged prune is run: a key's time is its directory's,
+which the tests set as the host's stamp of its last use would.
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -134,6 +135,77 @@ def test_over_the_size_bound_the_least_recently_used_keys_past_the_grace_are_ret
     assert done.retired == 2, "two of 1000 bytes each go: 4000 bytes down to 2000"
     live = sorted(path.name[:1] for path in (store.root / "snapshots" / "aiter_jit").iterdir())
     assert live == ["3", "4"], "the two used longest ago go first"
+
+
+def _six_idle_keys(tmp_path) -> DirJitStore:
+    """Six keys of 1000 bytes each, last used five to ten days ago (the first longest ago), every blob stored long ago."""
+    store = DirJitStore(tmp_path / "store")
+    for index in range(6):
+        key = str(index + 1) * 64
+        module = bytes([index]) * 1000
+        _publish(store, tmp_path / key[:1], key, {f"module_{index}.so": module})
+        _age(_blob(store, module), NOW - 20 * DAY)
+        _age(_key_dir(store, key), NOW - (10 - index) * DAY)
+    return store
+
+
+def _live(store: DirJitStore) -> list[str]:
+    return sorted(path.name[:1] for path in (store.root / "snapshots" / "aiter_jit").iterdir())
+
+
+@pytest.mark.parametrize("starts", [2, 3])
+def test_starts_inside_the_grace_retire_for_size_only_until_the_live_keys_fit_though_retired_blobs_are_still_stored(
+    tmp_path, starts
+) -> None:
+    """A retired key's blobs stay stored for the grace: the bound is on what the live keys list, so the starts after the
+    first, an hour apart, find the store within it and retire nothing more."""
+    store = _six_idle_keys(tmp_path)
+    limits = PruneLimits(max_idle_sec=30 * DAY, max_bytes=4500, grace_sec=2 * DAY)
+
+    done = [prune(store, limits, now=NOW + start * 3600) for start in range(starts)]
+
+    assert [run.retired for run in done] == [2] + [0] * (starts - 1), "6000 live bytes down to 4000, then nothing"
+    assert _live(store) == ["3", "4", "5", "6"], "the two used longest ago go, the rest stay live"
+    assert sum(1 for _ in (store.root / "blobs").rglob("*") if _.is_file()) == 6, "retired blobs wait out the grace"
+
+
+def test_a_blob_two_keys_list_counts_once_and_retiring_one_of_them_frees_none_of_it(tmp_path) -> None:
+    store = DirJitStore(tmp_path / "store")
+    shared = b"\x01" * 1000
+    for index, key in enumerate(("1" * 64, "2" * 64, "3" * 64)):
+        own = bytes([index + 2]) * 1000
+        files = {f"module_{index}.so": own} | ({"module_shared.so": shared} if index < 2 else {})
+        _publish(store, tmp_path / key[:1], key, files)
+        _age(_key_dir(store, key), NOW - (10 - index) * DAY)
+
+    done = prune(store, PruneLimits(max_idle_sec=30 * DAY, max_bytes=3000, grace_sec=2 * DAY), now=NOW)
+
+    assert done.retired == 1 and _live(store) == ["2", "3"], "4000 live bytes; retiring key 1 frees only its own 1000"
+
+
+def test_a_prune_out_of_time_stops_and_says_where_and_removes_no_blob(store, caplog) -> None:
+    caplog.set_level("INFO", logger="hyperloom.measure.jit.prune")
+    for key in (OLD_KEY, FRESH_KEY):  # the logged prune reads the clock
+        _age(_key_dir(store, key), time.time() - 20 * DAY)
+
+    done = prune_logged(store, PruneLimits(max_idle_sec=14 * DAY, max_bytes=10**9, grace_sec=2 * DAY, budget_sec=0))
+
+    assert done is not None and done.stopped_at == "reading the live keys" and done.blobs == 0
+    assert done.retired == 1, "the idle key it read before the budget ran out is retired; the other waits"
+    assert all(_blob(store, data).is_file() for data in (OLD, FRESH, SHARED))
+    assert "stopped reading the live keys after its 0 s budget, the rest waits for the next start" in caplog.text
+
+
+def test_a_prune_that_removes_nothing_still_says_so_in_one_line(tmp_path, caplog) -> None:
+    caplog.set_level("INFO", logger="hyperloom.measure.jit.prune")
+    store = DirJitStore(tmp_path / "store")
+    (store.root / "snapshots").mkdir(parents=True)
+
+    done = prune_logged(store, LIMITS)
+
+    assert done is not None and (done.retired, done.removed, done.blobs, done.stopped_at) == (0, 0, 0, None)
+    (line,) = [record.getMessage() for record in caplog.records if "pruned in" in record.getMessage()]
+    assert f"{store.root} pruned in" in line and "0 key(s) retired, 0 removed, 0 blob(s) of 0 bytes removed" in line
 
 
 def test_a_key_used_within_the_grace_is_never_retired_for_size(tmp_path) -> None:

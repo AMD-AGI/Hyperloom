@@ -260,6 +260,9 @@ class HostedOptions:
     the same directory, read-only, and names it ``HYPERLOOM_JIT_CACHE``: this host cannot see that mount, so the template
     and this option must name one directory. The directory must be this account's own, which only it can write (made
     0700 when missing), as the runners load what it holds as compiled code; a runner reads it as this account or root.
+    A directory that is not (another account's, or below one another account can change) is not refused: the session
+    runs without publishing, logs one warning naming it and why, and records it in ``jit_store.json`` of the session
+    directory (:func:`~.jit_store.session_jit_store`).
     """
 
     policy: QueuePolicy | None = None
@@ -544,11 +547,11 @@ def _acceptance_with_prompts(
     return named
 
 
-def _session_jit_store(options: HostedOptions) -> DirJitStore | None:
+def _session_jit_store(options: HostedOptions, session_dir: Path) -> DirJitStore | None:
     """The compiled-code cache this host publishes to (:attr:`HostedOptions.jit_store`), checked and pruned; ``None``
-    when neither the options nor ``HYPERLOOM_JIT_STORE`` name one."""
+    when neither the options nor ``HYPERLOOM_JIT_STORE`` name one, or the check refuses it."""
     root = named_jit_store(options.jit_store, os.environ)
-    return session_jit_store(root) if root is not None else None
+    return session_jit_store(root, session_dir) if root is not None else None
 
 
 def build_hosted_toolbox(
@@ -586,8 +589,6 @@ def build_hosted_toolbox(
         options: Everything else, see :class:`HostedOptions`.
 
     Raises:
-        JitStoreNotPrivate: The compiled-code cache the options or ``HYPERLOOM_JIT_STORE`` name is not this account's own
-            directory that only it can write; nothing has been started.
         ShortPromptsNotStaged: ``HYPERLOOM_SHORT_PROMPTS`` names a set that is not staged in this host's runner cache; nothing
             has been started.
         ValueError: When the templates have no runner template for ``tp`` (or no ``dev`` one, when the session lends
@@ -596,7 +597,7 @@ def build_hosted_toolbox(
     """
 
     directory = Path(inputs.session_dir)
-    jit_store = _session_jit_store(options)
+    jit_store = _session_jit_store(options, directory)
     acceptance = _acceptance_with_prompts(acceptance, options, os.environ, spec.model_dir)
     native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest)
     acceptance = with_native_plan(acceptance, native)

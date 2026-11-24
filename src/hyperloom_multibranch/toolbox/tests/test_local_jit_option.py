@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 """The shared compiled-code cache of the local toolbox: the directory named, else this account's below this host's
-temporary directory, and never a link there nor one another account owns or can write.
+temporary directory, and never a link there nor one another account owns or can write: such a store is not used, and the
+session runs without the cache.
 
 What is proved here is the wiring only: which directory the host publishes to and the runner reads. That a cache serves
 a test and is published to is proved by the measure package's own tests, and on a GPU by the toolbox's measured runs.
@@ -10,6 +11,7 @@ a test and is published to is proved by the measure package's own tests, and on 
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
@@ -20,10 +22,10 @@ from typing import Any
 import pytest
 
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
+from hyperloom_multibranch.toolbox.jit_store import JIT_STORE_NOTE
 from hyperloom_multibranch.toolbox.local_hosted import (
     DEFAULT_JIT_STORE,
     JIT_STORE_ENV,
-    JitStoreNotPrivate,
     LocalHostedToolbox,
     LocalOptions,
     jit_store_root,
@@ -159,13 +161,17 @@ def _another_accounts(directory: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(os, "getuid", lambda: uid + 1)
 
 
-def _refused_build(tmp_path: Path, **extra: Any) -> str:
-    """Why building a toolbox with ``extra`` options was refused; nothing below the session was started."""
-    blackboard = lineage_blackboard(tmp_path / "blackboard")
-    with pytest.raises(JitStoreNotPrivate) as refused:
-        _toolbox_of(blackboard, tmp_path, tmp_path / "session", "a" * 40, **extra)
-    assert not (tmp_path / "session" / "sandboxes").exists(), "nothing was started"
-    return str(refused.value)
+async def _refused_build(tmp_path: Path, **extra: Any) -> str:
+    """Why the store of a toolbox built with ``extra`` options was refused. The toolbox is built all the same, inside a
+    session a hosted run would start again into the same refusal had it raised: it publishes nothing, its runners are
+    not told the store, even where the runner environment names one, and the session records why."""
+    runner_envs = {JIT_CACHE_ENV: str(tmp_path / "named-by-the-runner-environment")}
+    toolbox, branch_env = await _closing_build(tmp_path, runner_envs=runner_envs, **extra)
+    assert toolbox.backend._config.jit_store is None, "nothing is published"
+    assert JIT_CACHE_ENV not in _runner_env(toolbox) and JIT_CACHE_ENV not in branch_env, "nor read"
+    note = json.loads((tmp_path / "session" / JIT_STORE_NOTE).read_text())
+    assert note["published"] is False
+    return str(note["reason"])
 
 
 async def test_a_store_another_account_owns_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -174,7 +180,7 @@ async def test_a_store_another_account_owns_is_refused(tmp_path: Path, monkeypat
     _another_accounts(store, monkeypatch)
 
     assert re.search(
-        f"{re.escape(str(store))} is not a directory of this account's", _refused_build(tmp_path, jit_store=store)
+        f"{re.escape(str(store))} is not a directory of this account's", await _refused_build(tmp_path, jit_store=store)
     )
 
 
@@ -184,7 +190,7 @@ async def test_a_store_its_group_or_others_can_write_is_refused(tmp_path: Path, 
     store.mkdir()
     store.chmod(mode)
 
-    assert f"{store} is not a directory of this account's that only it can write" in _refused_build(
+    assert f"{store} is not a directory of this account's that only it can write" in await _refused_build(
         tmp_path, jit_store=store
     )
     assert stat.S_IMODE(store.stat().st_mode) == mode, "and it is left as it is"
@@ -199,7 +205,7 @@ async def test_a_store_below_a_directory_its_group_or_others_can_write_is_refuse
     store = above / "store"
     store.mkdir(mode=0o700)
 
-    refused = _refused_build(tmp_path, jit_store=store)
+    refused = await _refused_build(tmp_path, jit_store=store)
     assert f"could change the compiled-code cache {store}: {above} (mode {mode:04o}" in refused
     assert "can be written by its group or others" in refused
 
@@ -212,7 +218,7 @@ async def test_a_store_below_a_directory_another_account_owns_is_refused(tmp_pat
     store.mkdir(mode=0o700)
     os.chown(above, _NOBODY, _NOBODY)
 
-    assert f"{above} (mode 0755, owner uid {_NOBODY}" in _refused_build(tmp_path, jit_store=store)
+    assert f"{above} (mode 0755, owner uid {_NOBODY}" in await _refused_build(tmp_path, jit_store=store)
 
 
 async def test_a_store_below_a_sticky_directory_anyone_can_write_is_accepted(tmp_path: Path) -> None:
@@ -234,7 +240,7 @@ async def test_a_default_store_planted_before_the_toolbox_made_it_is_refused_not
     planted.mkdir()
     planted.chmod(0o777)  # as another account on the host would leave it, to put its own snapshots in
 
-    assert str(planted) in _refused_build(tmp_path)
+    assert str(planted) in await _refused_build(tmp_path)
 
 
 def _theirs(path: Path) -> None:
@@ -262,7 +268,7 @@ async def test_a_link_planted_at_the_default_name_is_refused_not_followed(
     _theirs(theirs)
     _theirs(planted)
 
-    assert f"{planted} is not a directory of this account's" in _refused_build(tmp_path)
+    assert f"{planted} is not a directory of this account's" in await _refused_build(tmp_path)
     assert planted.is_symlink() and target.exists() == target_made, "the link is left as it is, nothing made through it"
 
 
@@ -272,4 +278,4 @@ async def test_a_named_store_that_is_a_link_is_refused_even_to_a_directory_of_th
     store = tmp_path / "store"
     store.symlink_to(own)
 
-    assert f"{store} is not a directory of this account's" in _refused_build(tmp_path, jit_store=store)
+    assert f"{store} is not a directory of this account's" in await _refused_build(tmp_path, jit_store=store)

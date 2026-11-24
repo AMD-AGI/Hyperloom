@@ -5,7 +5,8 @@
 compiles into, and the prune at the session's start.
 
 The runners read the same directory where their template mounts it; this host cannot see that mount, so what is proved
-here is the host's side: which directory it publishes to, that it refuses one another account could change, that a
+here is the host's side: which directory it publishes to, that it publishes nothing to one another account could change
+and goes on, that a
 verified result's compiles reach it through the hosted executor and backend, and that its result records the cache
 states.
 """
@@ -13,6 +14,7 @@ states.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import stat
 from dataclasses import replace
@@ -29,7 +31,7 @@ from hyperloom.measure.tests.hosted_fixtures import make_rig, point_yaml
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.hosted_toolbox import HostedOptions
-from hyperloom_multibranch.toolbox.jit_store import JIT_STORE_ENV, JitStoreNotPrivate
+from hyperloom_multibranch.toolbox.jit_store import JIT_STORE_ENV, JIT_STORE_NOTE
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.tests.helpers import build, req
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
@@ -72,19 +74,25 @@ def test_the_option_wins_over_the_host_environment(tmp_path: Path, monkeypatch: 
 
 
 @pytest.mark.parametrize("mode", [0o770, 0o707])
-def test_a_store_its_group_or_others_can_write_is_refused_before_anything_starts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+def test_a_store_its_group_or_others_can_write_is_not_published_to_and_the_session_starts_without_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, mode: int
 ) -> None:
-    """The runners load what it holds as compiled code: whoever else can write it could feed them."""
+    """The runners load what it holds as compiled code: whoever else can write it could feed them. The toolbox is built
+    inside the session, where a hosted run that raised would be started again into the same refusal: the session goes
+    on without publishing, and says so once in its log and in its directory."""
     store = tmp_path / "jit-store"
     store.mkdir()
     store.chmod(mode)
     monkeypatch.setenv(JIT_STORE_ENV, str(store))
 
-    with pytest.raises(JitStoreNotPrivate, match="only it can write"):
-        _toolbox(None, tmp_path)
+    toolbox = _toolbox(None, tmp_path)
 
+    assert toolbox.backend._config.jit_store is None, "nothing is published"
     assert stat.S_IMODE(store.stat().st_mode) == mode and not any(store.iterdir()), "and it is left as it is"
+    (warning,) = [record.getMessage() for record in caplog.records if "jit cache" in record.getMessage()]
+    assert f"runs without the compiled-code cache {store}" in warning and "only it can write" in warning
+    note = json.loads((tmp_path / "session" / JIT_STORE_NOTE).read_text())
+    assert note["store"] == str(store) and note["published"] is False and "only it can write" in note["reason"]
 
 
 def test_building_the_toolbox_prunes_a_key_no_test_has_used_for_long(
@@ -150,3 +158,24 @@ async def test_a_hosted_result_given_the_cache_read_only_publishes_nothing(tmp_p
 
     assert result.validity is Validity.SUCCEEDED and result.jit_cache == (JitCacheState(AITER_JIT.name, "hit"),)
     assert not (store.root / "blobs").exists() and not (store.root / "snapshots").exists()
+
+
+async def test_a_session_that_published_and_never_found_the_cache_warm_says_so_as_it_closes(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Nothing on the host sees the template's mount: a session whose runners never read what it published may be
+    publishing where they do not look."""
+    store = DirJitStore(tmp_path / "jit-store")
+
+    await _measured(tmp_path, store, fake_jit="true")
+
+    (warning,) = [record.getMessage() for record in caplog.records if "found the cache warm" in record.getMessage()]
+    assert f"published 1 contribution(s) to {store.root}" in warning
+
+
+async def test_a_session_whose_tests_found_the_cache_warm_closes_without_that_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    await _measured(tmp_path, DirJitStore(tmp_path / "jit-store"), fake_jit="read_only")
+
+    assert "found the cache warm" not in caplog.text

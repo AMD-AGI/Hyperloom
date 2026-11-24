@@ -10,14 +10,21 @@ when the key was last used.
 
 :func:`prune` works in two steps, so a test that is reading an entry never loses it:
 
-1. A key unused for :data:`MAX_IDLE_SEC`, or, while the store holds more than :data:`MAX_STORE_BYTES`, the least
-   recently used keys unused for at least :data:`RETIRE_GRACE_SEC`, are *retired*: the key's directory is moved below
+1. A key unused for :data:`MAX_IDLE_SEC`, or, while the blobs the live keys list come to more than
+   :data:`MAX_STORE_BYTES`, the least recently used keys unused for at least :data:`RETIRE_GRACE_SEC`, are *retired*: the key's directory is moved below
    ``retired/`` in one rename. No new test finds it from then on; a test that already read its list keeps finding the
    files it names, since no blob is removed in this step.
 2. A retired key is removed only :data:`RETIRE_GRACE_SEC` after it was retired, longer than any test runs, and a blob
    only when no snapshot of a live or a still-retired key lists it and it was stored more than that long ago (so a
    publisher that stored it and has not yet renamed its list into place keeps it). A publisher's leftover
    (``.incoming-*``) of that age is removed too.
+
+The size bound is measured on what the live keys list, not on every stored blob: a retired key's blobs stay stored for
+the grace, and counting them would make every later start inside it retire another batch of live keys.
+
+A prune runs as a session starts, so it stops once it has taken :data:`PRUNE_BUDGET_SEC`: what it did by then stands,
+the rest waits for the next start, and a blob is removed only once every key has been read. It always logs one line
+saying what it did (:func:`prune_logged`).
 
 A test that read a key just before it was retired and publishes after it extends it under the same key again: the files
 it took from the cache are still stored, as the retired list names them. Two hosts may prune one store at once: every
@@ -32,7 +39,7 @@ import os
 import shutil
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
@@ -51,6 +58,7 @@ from hyperloom.measure.jit_kinds import KINDS, CacheKind
 __all__ = [
     "MAX_IDLE_SEC",
     "MAX_STORE_BYTES",
+    "PRUNE_BUDGET_SEC",
     "RETIRED_DIR",
     "RETIRE_GRACE_SEC",
     "PruneLimits",
@@ -66,12 +74,15 @@ _DAY = 24 * 3600
 #: A key no accepted result has named for this long is retired: two weeks covers a campaign that pauses over a weekend
 #: and comes back to the same image.
 MAX_IDLE_SEC = 14 * _DAY
-#: Past this many stored bytes the least recently used keys are retired until the rest fit. An aiter tree's modules
+#: Past this many bytes listed by the live keys the least recently used keys are retired until the rest fit. An aiter tree's modules
 #: are a few GiB at most, so this keeps dozens of image and tree combinations.
 MAX_STORE_BYTES = 200 * 1024**3
 #: How long a retired key, and a blob nothing lists, stay before they are removed: longer than any test runs (the boot
 #: budget is at most six hours and the measured window a few more), so no test still reading one loses it.
 RETIRE_GRACE_SEC = 2 * _DAY
+#: How long one prune may take before it stops: it runs on the session's start, on a store that may be on a network
+#: file system, with one lstat per stored blob and one read per snapshot list.
+PRUNE_BUDGET_SEC = 60.0
 #: Where retired keys wait, below the store's root, as ``<retired at>-<kind>-<key>-<nonce>``.
 RETIRED_DIR = "retired"
 _KINDS_BY_NAME = {kind.name: kind for kind in KINDS}
@@ -84,17 +95,20 @@ class PruneLimits:
     max_idle_sec: float = MAX_IDLE_SEC
     max_bytes: int = MAX_STORE_BYTES
     grace_sec: float = RETIRE_GRACE_SEC
+    budget_sec: float = PRUNE_BUDGET_SEC
 
 
 @dataclass
 class Pruned:
-    """What one :func:`prune` did: keys retired and removed, blobs and bytes removed, and what it could not do."""
+    """What one :func:`prune` did: keys retired and removed, blobs and bytes removed, what it could not do, and the
+    step it stopped at when its time budget ran out (``None`` when it finished)."""
 
     retired: int = 0
     removed: int = 0
     blobs: int = 0
     bytes: int = 0
     problems: list[str] = field(default_factory=list)
+    stopped_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -119,28 +133,36 @@ def note_used(store: DirJitStore, kind: str, key: str | None, now: float | None 
 def prune(store: DirJitStore, limits: PruneLimits = PruneLimits(), now: float | None = None) -> Pruned:
     """Retire the keys unused too long or past the size bound, then remove what was retired long enough ago and the blobs
     nothing lists any more (see the module)."""
-    run = _Run(store.root, limits, time.time() if now is None else now)
+    run = _Run(store.root, limits, time.time() if now is None else now, time.monotonic() + limits.budget_sec)
     if (store.root / SNAPSHOTS_DIR).is_dir():
         run.prune()
     return run.done
 
 
 def prune_logged(store: DirJitStore, limits: PruneLimits = PruneLimits()) -> Pruned | None:
-    """:func:`prune`, said in the log; ``None`` when the store could not be read at all, which is logged too."""
+    """:func:`prune`, said in one line of the log even when it removed nothing; ``None`` when the store could not be
+    read at all, which is logged too."""
+    started = time.monotonic()
     try:
         done = prune(store, limits)
     except OSError as exc:
         log.warning("jit cache: %s was not pruned (%s)", store.root, type(exc).__name__)
         return None
-    if done.retired or done.removed or done.blobs:
-        log.info(
-            "jit cache: %s pruned: %d key(s) retired, %d removed, %d blob(s) of %d bytes removed",
-            store.root,
-            done.retired,
-            done.removed,
-            done.blobs,
-            done.bytes,
-        )
+    stopped = (
+        ""
+        if done.stopped_at is None
+        else f"; stopped {done.stopped_at} after its {limits.budget_sec:.0f} s budget, the rest waits for the next start"
+    )
+    log.info(
+        "jit cache: %s pruned in %.1f s: %d key(s) retired, %d removed, %d blob(s) of %d bytes removed%s",
+        store.root,
+        time.monotonic() - started,
+        done.retired,
+        done.removed,
+        done.blobs,
+        done.bytes,
+        stopped,
+    )
     for problem in done.problems:
         log.warning("jit cache: %s", problem)
     return done
@@ -153,27 +175,52 @@ class _Run:
     root: Path
     limits: PruneLimits
     at: float
+    deadline: float
     done: Pruned = field(default_factory=Pruned)
 
     def prune(self) -> None:
-        stored = _stored_blobs(self.root)
-        kept = self._retire(list(_live_keys(self.root)), stored)
-        listed = set().union(*(key.blobs for key in kept), *self._waiting_blobs())
+        live = []
+        for key in _live_keys(self.root):
+            live.append(key)
+            if self._out_of_time("reading the live keys"):
+                self._retire_idle(live)  # a key's idleness is its own; the size bound and the blobs need every key
+                return
+        kept = self._retire_idle(live)
+        stored = _stored_blobs(self.root, self._out_of_time)
+        if self.done.stopped_at is not None:
+            return
+        kept = self._retire_for_size(kept, stored)
+        waiting = []
+        for blobs in self._waiting_blobs():
+            waiting.append(blobs)
+            if self._out_of_time("reading the retired keys"):
+                return
+        listed = set().union(*(key.blobs for key in kept), *waiting)
         for sha256, (path, size, stored_at) in stored.items():
             if sha256 in listed or self.at - stored_at <= self.limits.grace_sec:
                 continue
+            if self._out_of_time("removing blobs"):
+                return
             if self._remove(path):
                 self.done.blobs, self.done.bytes = self.done.blobs + 1, self.done.bytes + size
         self._remove_leftovers()
 
-    def _retire(self, live: list[_Key], stored: dict[str, tuple[Path, int, float]]) -> list[_Key]:
-        """Retire the idle keys, then the least recently used ones past the grace while the store is over its size; the
-        keys left live."""
-        kept = []
-        for key in live:
-            if self.at - key.used <= self.limits.max_idle_sec or not self._retired(key):
-                kept.append(key)
-        total = sum(size for _, size, _ in stored.values())
+    def _out_of_time(self, step: str) -> bool:
+        """Whether the budget has run out, noting ``step`` as where the prune stopped the first time it has."""
+        if self.done.stopped_at is None and time.monotonic() >= self.deadline:
+            self.done.stopped_at = step
+        return self.done.stopped_at is not None
+
+    def _retire_idle(self, live: list[_Key]) -> list[_Key]:
+        """Retire the keys unused for longer than the idle bound; the keys left live."""
+        return [key for key in live if self.at - key.used <= self.limits.max_idle_sec or not self._retired(key)]
+
+    def _retire_for_size(self, kept: list[_Key], stored: dict[str, tuple[Path, int, float]]) -> list[_Key]:
+        """Retire the least recently used keys past the grace while what the live keys list is over the size bound; the
+        keys left live. A retired key's blobs stay stored for the grace, so the bound counts only the live keys' blobs:
+        a later start inside the grace finds the rest within it and retires nothing more."""
+        kept = list(kept)
+        total = sum(stored[sha][1] for sha in set().union(*(key.blobs for key in kept)) if sha in stored)
         for key in sorted(kept, key=lambda key: key.used):
             if total <= self.limits.max_bytes or self.at - key.used <= self.limits.grace_sec:
                 break
@@ -256,10 +303,13 @@ def _listed(directory: Path, kind: CacheKind, key: str) -> frozenset[str]:
     return frozenset(found)
 
 
-def _stored_blobs(root: Path) -> dict[str, tuple[Path, int, float]]:
-    """Each stored blob by its hash: its path, size and when it was stored."""
+def _stored_blobs(root: Path, out_of_time: Callable[[str], bool]) -> dict[str, tuple[Path, int, float]]:
+    """Each stored blob by its hash: its path, size and when it was stored; stops, with what it read, once
+    ``out_of_time`` says the budget has run out."""
     blobs: dict[str, tuple[Path, int, float]] = {}
     for shard in _children(root / BLOBS_DIR):
+        if out_of_time("reading the stored blobs"):
+            return blobs
         for path in _children(shard):
             try:
                 info = path.lstat()

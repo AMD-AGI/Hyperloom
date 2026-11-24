@@ -64,7 +64,7 @@ from hyperloom.measure.hosted_log import (
 )
 from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
 from hyperloom.measure.jit.prune import note_used
-from hyperloom.measure.jit.publish import publish_contributions
+from hyperloom.measure.jit.publish import PublishTally, publish_contributions
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.phases import ACQUIRED, LANDED, RUNNER_DONE, HostTimeline
@@ -344,6 +344,7 @@ class HostedMeasurementBackend:
         self._stops = _Stops()
         self._live = LiveOutputs(clock)
         self._seen = SeenProgress()
+        self._jit_tally = PublishTally()
 
     # -- lifecycle ----------------------------------------------------------------------------------------------
 
@@ -382,9 +383,12 @@ class HostedMeasurementBackend:
         }
 
     def close(self) -> None:
-        """Stop accepting tests and close every authoritative sandbox still running."""
+        """Stop accepting tests and close every authoritative sandbox still running; a session that published to the
+        compiled-code cache and never found it warm says so (:class:`~hyperloom.measure.jit.publish.PublishTally`)."""
         self._stops.close()
         self._pool.close()
+        if self._config.jit_store is not None:
+            self._jit_tally.warn_if_never_hit(self._config.jit_store)
 
     @property
     def pool(self) -> SandboxPool:
@@ -768,12 +772,14 @@ class HostedMeasurementBackend:
         store, facts = self._config.jit_store, verified.result.jit_cache
         if store is None or facts is None:
             return
+        published = 0
         try:
             scratch = staging / "jit"
             scratch.mkdir()
-            publish_contributions(store, _handle(attempt.runner), facts, scratch)
+            published = publish_contributions(store, _handle(attempt.runner), facts, scratch)
         except OSError as exc:
             log.warning("jit cache: nothing was published (%s)", type(exc).__name__)
+        self._jit_tally.note(facts, published)
         for kind in facts.kinds:  # the keys this test read or filled are in use: pruning keeps them
             note_used(store, kind.kind, kind.key)
 

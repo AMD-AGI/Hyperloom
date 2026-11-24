@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import threading
 from pathlib import Path
 
 from hyperloom.measure.jit_kinds import kind_named
@@ -27,12 +28,43 @@ from hyperloom.measure.jit.store import (
 from hyperloom.measure.manifest import JitCacheFacts, JitContribution
 from hyperloom.sandbox.socket import Sandbox, SandboxError
 
-__all__ = ["STAGING_PATH", "publish_contributions"]
+__all__ = ["STAGING_PATH", "PublishTally", "publish_contributions"]
 
 log = logging.getLogger(__name__)
 
 #: Where the runner stages its contributions, below the sandbox's output directory.
 STAGING_PATH = "/out/jit-cache"
+#: The state a signed result states for a kind its test found in the cache.
+_HIT = "hit"
+
+
+class PublishTally:
+    """How many contributions a session published and how many of its tests found the cache warm, so that a session that
+    only ever published says, as it closes, that its runners may not read the directory it publishes to: nothing on the
+    host can see the template's mount of it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._published = 0
+        self._hits = 0
+
+    def note(self, facts: JitCacheFacts, published: int) -> None:
+        with self._lock:
+            self._published += published
+            self._hits += sum(1 for kind in facts.kinds if kind.state == _HIT)
+
+    def warn_if_never_hit(self, store: DirJitStore) -> None:
+        """Log one warning when contributions were published and no test found any kind warm; once per tally."""
+        with self._lock:
+            published, hits = self._published, self._hits
+            self._published = 0
+        if published and not hits:
+            log.warning(
+                "jit cache: this session published %d contribution(s) to %s and none of its tests found the cache warm; "
+                "check that the runners' template mounts that directory as their cache and can read it",
+                published,
+                store.root,
+            )
 
 
 def publish_contributions(store: DirJitStore, handle: Sandbox, facts: JitCacheFacts, scratch: Path) -> int:

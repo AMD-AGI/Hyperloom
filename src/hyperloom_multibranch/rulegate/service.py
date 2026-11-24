@@ -9,10 +9,8 @@ it asked for before instead of paying for another.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import replace
 from typing import Protocol
 
 from hyperloom.contracts.measurement import TestResult, Validity
@@ -23,12 +21,10 @@ from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardErro
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, RecordedValue, TestRecord
 from hyperloom_multibranch.contracts.toolbox import Toolbox
 from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
-from hyperloom_multibranch.rulegate.cache_states import cache_states_differ
+from hyperloom_multibranch.rulegate.cache_states import with_cache_states
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
 from hyperloom_multibranch.rulegate.regression import ended
 from hyperloom_multibranch.rulegate.rules import Rule, repeats, retest_request
-
-logger = logging.getLogger(__name__)
 
 
 class GateBlackboard(RecordSearch, SnapshotQuery, CommitQuery, GateRecords, Protocol):
@@ -76,19 +72,9 @@ class GateService:
 
     async def _flagged(self, judgement: Judgement, recorded: RecordedValue) -> Judgement:
         """``judgement`` with the kinds of compiled-code cache its tests met in another state than the tests behind the
-        parent's value (:func:`~.cache_states.cache_states_differ`); a test that cannot be read back is left out."""
+        parent's value (:func:`~.cache_states.with_cache_states`); a test that cannot be read back is left out."""
         candidates = await self._results(judgement.request_ids)
-        parents = await self._results(recorded.request_ids)
-        differ = cache_states_differ(candidates, parents)
-        if not differ:
-            return judgement
-        logger.warning(
-            "%s met the compiled-code cache otherwise than its parent's tests (%s): its boot, and any kernel first built "
-            "after warm-up, differ",
-            judgement.request_ids[0] if judgement.request_ids else "the candidate",
-            "; ".join(differ),
-        )
-        return replace(judgement, cache_states_differ=differ)
+        return with_cache_states(judgement, candidates, await self._results(recorded.request_ids))
 
     async def _results(self, request_ids: Sequence[str]) -> list[TestResult]:
         found = []
