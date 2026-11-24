@@ -44,9 +44,9 @@ def test_the_commit_is_fetched_into_its_own_directory_and_reused(upstream, tmp_p
     repo, commit = upstream
     monkeypatch.setenv("INFERENCEX_REPO", str(repo))
 
-    first = ensure_inferencex(commit, tmp_path / "cache")
+    first = ensure_inferencex(commit, tmp_path / "cache", tmp_path / "store")
     (first / "marker").write_text("x")
-    second = ensure_inferencex(commit, tmp_path / "cache")
+    second = ensure_inferencex(commit, tmp_path / "cache", tmp_path / "store")
 
     assert first == second == tmp_path / "cache" / f"InferenceX-{commit}"
     assert _git(first, "rev-parse", "HEAD") == commit
@@ -55,7 +55,7 @@ def test_the_commit_is_fetched_into_its_own_directory_and_reused(upstream, tmp_p
 
 def test_a_hash_that_is_not_a_full_commit_is_refused(tmp_path):
     with pytest.raises(ToolError, match="not a full commit hash"):
-        ensure_inferencex("main", tmp_path)
+        ensure_inferencex("main", tmp_path, tmp_path / "store")
 
 
 def test_a_tree_without_the_expected_files_is_refused_and_leaves_nothing(upstream, tmp_path, monkeypatch):
@@ -67,7 +67,7 @@ def test_a_tree_without_the_expected_files_is_refused_and_leaves_nothing(upstrea
     monkeypatch.setenv("INFERENCEX_REPO", str(repo))
 
     with pytest.raises(ToolError, match="not the expected tree"):
-        ensure_inferencex(_git(repo, "rev-parse", "HEAD"), tmp_path / "cache")
+        ensure_inferencex(_git(repo, "rev-parse", "HEAD"), tmp_path / "cache", tmp_path / "store")
     assert list((tmp_path / "cache").iterdir()) == []
 
 
@@ -81,10 +81,10 @@ def test_a_tree_that_keeps_its_benchmark_library_below_inferencex_e2e_is_accepte
     commit = _git(repo, "rev-parse", "HEAD")
     monkeypatch.setenv("INFERENCEX_REPO", str(repo))
 
-    tree = ensure_inferencex(commit, tmp_path / "cache")
+    tree = ensure_inferencex(commit, tmp_path / "cache", tmp_path / "store")
 
     assert (tree / "inferencex-e2e" / "benchmarks" / "benchmark_lib.sh").is_file()
-    assert ensure_inferencex(commit, tmp_path / "cache") == tree
+    assert ensure_inferencex(commit, tmp_path / "cache", tmp_path / "store") == tree
 
 
 def test_a_tree_of_the_layout_inference_suite_stages_from_is_accepted(tmp_path, monkeypatch):
@@ -97,7 +97,7 @@ def test_a_tree_of_the_layout_inference_suite_stages_from_is_accepted(tmp_path, 
     _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "one")
     monkeypatch.setenv("INFERENCEX_REPO", str(repo))
 
-    tree = ensure_inferencex(_git(repo, "rev-parse", "HEAD"), tmp_path / "cache")
+    tree = ensure_inferencex(_git(repo, "rev-parse", "HEAD"), tmp_path / "cache", tmp_path / "store")
 
     assert (tree / "inferencex-e2e" / CLIENT_FILE).is_file()
 
@@ -107,7 +107,7 @@ def test_an_unknown_commit_is_refused(upstream, tmp_path, monkeypatch):
     monkeypatch.setenv("INFERENCEX_REPO", str(repo))
 
     with pytest.raises(ToolError, match="git fetch failed"):
-        ensure_inferencex("a" * 40, tmp_path / "cache")
+        ensure_inferencex("a" * 40, tmp_path / "cache", tmp_path / "store")
 
 
 #: A git that refuses a fetch from a repository on this machine unless its global configuration (or the system's, which
@@ -148,7 +148,7 @@ def test_a_local_repository_is_trusted_for_its_fetch_alone(upstream, tmp_path, m
     repo, commit = upstream
     monkeypatch.setenv("INFERENCEX_REPO", f"{prefix}{repo}")
 
-    tree = ensure_inferencex(commit, tmp_path / "cache")
+    tree = ensure_inferencex(commit, tmp_path / "cache", tmp_path / "store")
 
     assert _git(tree, "rev-parse", "HEAD") == commit
     # nothing that runs after the fetch trusts it: no trust left in the checkout, none in the runner's home
@@ -165,7 +165,7 @@ def test_a_local_repository_reached_through_a_link_is_fetched_from_and_trusted_w
     link.symlink_to(repo)
     monkeypatch.setenv("INFERENCEX_REPO", str(link))
 
-    assert _git(ensure_inferencex(commit, tmp_path / "cache"), "rev-parse", "HEAD") == commit
+    assert _git(ensure_inferencex(commit, tmp_path / "cache", tmp_path / "store"), "rev-parse", "HEAD") == commit
 
 
 def test_a_repository_another_account_owns_is_fetched_by_a_git_that_checks_its_owner(upstream, tmp_path, monkeypatch):
@@ -183,7 +183,7 @@ def test_a_repository_another_account_owns_is_fetched_by_a_git_that_checks_its_o
     monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
     monkeypatch.setenv("INFERENCEX_REPO", str(repo))
 
-    assert _git(ensure_inferencex(commit, tmp_path / "cache"), "rev-parse", "HEAD") == commit
+    assert _git(ensure_inferencex(commit, tmp_path / "cache", tmp_path / "store"), "rev-parse", "HEAD") == commit
 
 
 @pytest.fixture
@@ -289,7 +289,9 @@ def test_a_store_that_cannot_be_written_costs_a_warning_and_the_test_still_gets_
     assert commit in record.getMessage() and str(store) in record.getMessage()
 
 
-def test_an_object_changed_in_the_store_is_refused_and_the_commit_fetched_again(upstream, tmp_path, monkeypatch):
+def test_an_object_changed_in_the_store_is_refused_with_a_warning_and_the_commit_fetched_again(
+    upstream, tmp_path, monkeypatch, caplog
+):
     repo, commit = upstream
     monkeypatch.setenv("INFERENCEX_REPO", str(repo))
     store = tmp_path / "runner-cache" / tools.TOOL_CHECKOUTS_DIR / tools.INFERENCEX_STORE
@@ -299,6 +301,9 @@ def test_an_object_changed_in_the_store_is_refused_and_the_commit_fetched_again(
     loose.chmod(0o644)
     loose.write_bytes(zlib.compress(b"blob 9\x00tampered\n"))
 
-    second = ensure_inferencex(commit, tmp_path / "scratch-2", store)
+    with caplog.at_level(logging.WARNING, logger=tools.__name__):
+        second = ensure_inferencex(commit, tmp_path / "scratch-2", store)
 
     assert (second / "benchmarks" / "benchmark_lib.sh").read_text() == "# lib\n"
+    (record,) = caplog.records
+    assert commit in record.getMessage() and str(store) in record.getMessage()

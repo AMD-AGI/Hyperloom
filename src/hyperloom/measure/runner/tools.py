@@ -9,7 +9,7 @@ checks the commit out into a directory of its own, fetched by hash and checked o
 host fetched are kept in a git object store below the runner cache (:data:`INFERENCEX_STORE`), which every later test
 fetches from instead of the network. The server under test can write that store, so a test never runs from it: git
 hashes every object it receives, and an object that is not the one the commit names fails the fetch, which then goes to
-the network. The inference_suite staging is never built here: ``cache_build`` publishes it
+the network with a warning. The inference_suite staging is never built here: ``cache_build`` publishes it
 as ``<runner cache>/inference-suite/<staging key>/`` (:func:`inference_suite.staging_key`) on a host with network, and
 the runner only verifies it and compares its normalised manifest with the one the sheet carries.
 """
@@ -109,7 +109,7 @@ def _has_marker(tree: Path, markers: tuple[Path, ...]) -> bool:
     return any((tree / marker).is_file() for marker in markers)
 
 
-def _checkout(tool: _Tool, repo: str, commit: str, cache_dir: Path, store: Path | None) -> Path:
+def _checkout(tool: _Tool, repo: str, commit: str, cache_dir: Path, store: Path) -> Path:
     if not _COMMIT.fullmatch(commit):
         raise ToolError(f"{tool.name}: {commit!r} is not a full commit hash")
     destination = cache_dir / f"{tool.name}-{commit}"
@@ -118,7 +118,7 @@ def _checkout(tool: _Tool, repo: str, commit: str, cache_dir: Path, store: Path 
     scratch = cache_dir / f".{tool.name}-{commit}.{os.getpid()}.tmp"
     cache_dir.mkdir(parents=True, exist_ok=True)
     try:
-        from_store = store is not None and _fetch_from_store(scratch, store, commit)
+        from_store = _fetch_from_store(scratch, store, commit)
         if not from_store:
             _remove(scratch)
             _new_repository(scratch)
@@ -127,7 +127,7 @@ def _checkout(tool: _Tool, repo: str, commit: str, cache_dir: Path, store: Path 
         if _head(scratch) != commit or not _has_marker(scratch, tool.markers):
             expected = " or ".join(str(marker) for marker in tool.markers)
             raise ToolError(f"{tool.name} at {commit} is not the expected tree (no {expected})")
-        if store is not None and not from_store:
+        if not from_store:
             _keep(store, scratch, commit)
         if destination.exists():
             _remove(destination)
@@ -186,14 +186,16 @@ def _fetch_from_store(scratch: Path, store: Path, commit: str) -> bool:
     """Whether ``commit`` came from ``store`` into a fresh repository at ``scratch``.
 
     The file:// transport makes git hash every object it receives instead of linking the store's files, so an object
-    the server under test rewrote in the store fails the fetch rather than reaching the checkout.
+    the server under test rewrote in the store fails the fetch rather than reaching the checkout. A store that fails
+    the fetch is warned about with git's reason, which tells one that lacks the commit from one that was changed.
     """
     if not _is_repository(store):
         return False
     _new_repository(scratch)
     try:
         _git(*_SHALLOW_FETCH, store.resolve().as_uri(), commit, cwd=scratch)
-    except ToolError:
+    except ToolError as exc:
+        log.warning("%s was not fetched from %s, so it is fetched from the network: %s", commit, store, exc)
         return False
     return True
 
@@ -229,7 +231,7 @@ def _remove(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
-def ensure_inferencex(commit: str, cache_dir: Path, store: Path | None = None) -> Path:
+def ensure_inferencex(commit: str, cache_dir: Path, store: Path) -> Path:
     """A clean InferenceX checkout at ``commit`` below ``cache_dir``, this test's own; fetched from ``store`` (the
     host's :data:`INFERENCEX_STORE`) when it holds the commit intact, else from ``INFERENCEX_REPO`` or upstream."""
     return _checkout(_INFERENCEX, os.environ.get("INFERENCEX_REPO") or INFERENCEX_REPO, commit, cache_dir, store)
