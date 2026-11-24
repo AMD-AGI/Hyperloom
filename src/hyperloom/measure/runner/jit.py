@@ -65,7 +65,7 @@ from hyperloom.measure.jit.native.config import BuildStoreConfigError, store_fro
 from hyperloom.measure.jit.native.laying import NamedBuild, NativeLayError, SheetBuilds, sheet_builds
 from hyperloom.measure.jit.native.record import COMPILE_ENV_PREFIX, BuildRecord
 from hyperloom.measure.jit.prewarmed import unlike_prewarmed
-from hyperloom.measure.jit.session import GivenModules, JitCacheSession, KindPlan
+from hyperloom.measure.jit.session import GivenModules, JitCacheSession, KindPlan, files_below
 from hyperloom.measure.framework.table_modules import file_identity, stale_table_modules
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.round_marks import boot_parts
@@ -242,7 +242,11 @@ def _plans(inputs: _Inputs) -> tuple[list[KindPlan], dict[str, str]]:
     if TRITON.name not in disabled:
         plans.append(KindPlan(TRITON, triton_key(inputs.machine), read_only=_patched_read_only(inputs, "Triton's")))
     if FLYDSL.name not in disabled:
-        plans.append(_flydsl_plan(inputs))
+        flydsl = _flydsl_plan(inputs)
+        if isinstance(flydsl, str):
+            disabled[FLYDSL.name] = flydsl
+        else:
+            plans.append(flydsl)
     aiter_kinds = [kind for kind in (AITER_JIT, AITER_CPP) if kind.name not in disabled]
     if aiter_kinds:
         found = _aiter_plans(inputs, aiter_kinds)
@@ -268,11 +272,22 @@ def _patched_read_only(inputs: _Inputs, whose: str) -> str | None:
     return None
 
 
-def _flydsl_plan(inputs: _Inputs) -> KindPlan:
-    """FlyDSL's kind: keyed by the machine, the patches to what a launch is built from and the FlyDSL and plugin variables
-    of every server, and read only for a test that runs any patched code, as for Triton: a launch is stored as a pickle,
-    which runs code when it is loaded, so only a test whose server runs the image's own code may add one. The image's
-    prebuilt launches of aiter's kernels are linked into the test's directory, which the redirected cache would hide."""
+def _flydsl_plan(inputs: _Inputs) -> KindPlan | str:
+    """FlyDSL's kind: keyed by the machine, the patches to what a launch is built from and the FlyDSL variables of every
+    server, and read only for a test that runs any patched code, as for Triton: a launch is stored as a pickle, which runs
+    code when it is loaded, so only a test whose server runs the image's own code may add one. The image's prebuilt
+    launches of aiter's kernels are linked into the test's directory, which the redirected cache would hide.
+
+    The reason the kind is not used when the image ships prebuilt launches none of which is in a layout the kind admits
+    (a FlyDSL release whose layout this version does not know): redirecting the cache would hide them from the server, and
+    nothing it compiled would be stored either, so aiter's own directory is left in place."""
+    prebuilt = _flydsl_prebuilt(inputs)
+    shipped = files_below(prebuilt) if prebuilt is not None else []
+    if shipped and not any(FLYDSL.admits(relative) for relative in shipped):
+        return (
+            f"none of the {len(shipped)} files of the image's prebuilt FlyDSL launches ({prebuilt}) is in a layout this "
+            f"runner knows (FlyDSL 0.4.x or 0.5.x), so {FLYDSL.env_var} is left to aiter's default"
+        )
     environment = inputs.spec.environment
     covered = [
         (root.import_name, e.path, e.op, e.blob or "", e.mode or "")
@@ -282,7 +297,7 @@ def _flydsl_plan(inputs: _Inputs) -> KindPlan:
     ]
     runtime = environment.runtime.manifest_sha256 if environment.runtime is not None else None
     key = flydsl_key(inputs.machine, tree_identity(covered, runtime, ()), inputs.servers or (inputs.environment,))
-    return KindPlan(FLYDSL, key, _flydsl_prebuilt(inputs), _patched_read_only(inputs, "FlyDSL's"))
+    return KindPlan(FLYDSL, key, prebuilt, _patched_read_only(inputs, "FlyDSL's"))
 
 
 def _flydsl_prebuilt(inputs: _Inputs) -> Path | None:

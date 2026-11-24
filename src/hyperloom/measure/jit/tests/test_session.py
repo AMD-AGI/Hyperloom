@@ -647,3 +647,29 @@ def test_a_prebuilt_directory_that_is_gone_links_nothing(store, tmp_path) -> Non
     session.seed()
 
     assert list(_dirs(session)["FLYDSL_RUNTIME_CACHE_DIR"].iterdir()) == []
+
+
+#: A launch in FlyDSL 0.5.x's layout (``<function>/<sha256>.pkl``, v0.5.0 to v0.5.4), as aiter on ``main`` ships them.
+PREBUILT_LAUNCH_05 = f"gemm_a16w16/{'6' * 64}.pkl"
+
+
+def test_prebuilt_launches_in_flydsl_05s_layout_are_linked_and_what_flydsl_adds_beside_them_is_contributed(
+    store, tmp_path
+) -> None:
+    image = tmp_path / "image" / "aiter" / "jit" / "flydsl_cache"
+    _write(image, PREBUILT_LAUNCH_05, b"prebuilt pickle")
+    _write(image, PREBUILT_LAUNCH_05.replace(".pkl", ".lock"), b"")
+    _write(image, f"gemm_a16w16/.{'6' * 64}.pkl.x1y2z3.tmp", b"half written")
+    session = _session(store, tmp_path, "one", plans=[KindPlan(FLYDSL, FLYDSL_KEY, prebuilt=image)])
+    session.seed()
+    own = _dirs(session)["FLYDSL_RUNTIME_CACHE_DIR"]
+
+    assert sorted(p.relative_to(own).as_posix() for p in own.rglob("*") if p.is_file()) == [PREBUILT_LAUNCH_05]
+    assert (own / PREBUILT_LAUNCH_05).is_symlink() and not (own / "gemm_a16w16").is_symlink()
+    beside = f"gemm_a16w16/{'7' * 64}.pkl"
+    _write(own, beside, b"a call compiled beside the prebuilt one")
+    session.collect()
+
+    (kind,) = session.report(NO_BUILDS).kinds
+    assert kind.contribution is not None and kind.contribution.files == 1
+    assert _listed(tmp_path, "one", "flydsl") == [beside]

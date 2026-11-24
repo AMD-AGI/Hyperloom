@@ -387,9 +387,8 @@ FLYDSL_ENV = {"SGLANG_AMD_MONO_K31_WIDE": "1", "FLYDSL_COMPILE_OPT_LEVEL": "3", 
     ("package", "path"),
     [
         ("flydsl", "compiler/jit_function.py"),
-        ("sgl_amd_mono", "kimi_k31/gfx950/chain.py"),
-        ("sgl_amd_mono", "common/plan.py"),
         ("aiter", "ops/flydsl/gemm.py"),
+        ("aiter", "ops/flydsl/kernels/moe_mxfp4.py"),
         ("sglang", "kernels/plugin_kernels/amd/__init__.py"),
         ("sglang", "srt/kernel_plugins/amd/binding.py"),
         ("sglang", "srt/monokernels/kimi.py"),
@@ -414,6 +413,7 @@ def test_a_patch_to_any_source_a_flydsl_launch_is_built_from_is_covered_and_chan
         ("aiter", "ops/mha.py"),
         ("sglang", "srt/layers/linear.py"),
         ("vllm", "srt/models/x.py"),
+        ("sgl_amd_mono", "kimi_k31/gfx950/chain.py"),
     ],
 )
 def test_a_patch_elsewhere_is_not_a_flydsl_source(package, path) -> None:
@@ -430,9 +430,16 @@ def test_a_patch_elsewhere_is_not_a_flydsl_source(package, path) -> None:
         ("FLYDSL_EXTRA_SOURCE_DIRS", "/opt/flydsl"),
         ("ARCH", "gfx942"),
         ("COMPILE_ONLY", "1"),
+        ("AITER_FLYDSL_MOE_EXPERT_SCHEDULING_MODE", "1"),
+        ("AITER_FLYDSL_KERNARG_PRELOAD", "0"),
+        ("AITER_FLYDSL_AOT_CACHE", "0"),
+        ("MXFP4_G2_BHOIST", "1"),
+        ("MXFP4_G2_PREFETCH_IDS", "0"),
+        ("HSA_OVERRIDE_GFX_VERSION", "9.5.0"),
+        ("COMPILE_OPT_LEVEL", "2"),
     ],
 )
-def test_a_flydsl_or_plugin_variable_changes_the_flydsl_key(name, value) -> None:
+def test_a_variable_of_flydsl_the_plugin_or_aiters_flydsl_kernels_changes_the_flydsl_key(name, value) -> None:
     assert flydsl_key(MACHINE, TREE, [FLYDSL_ENV]) != flydsl_key(MACHINE, TREE, [{**FLYDSL_ENV, name: value}])
 
 
@@ -444,6 +451,8 @@ def test_a_flydsl_or_plugin_variable_changes_the_flydsl_key(name, value) -> None
         ("HOME", "/home/other"),
         ("SGLANG_ENABLE_X", "1"),
         ("AITER_JIT_DIR", "/elsewhere"),
+        ("AITER_TUNE_GEMM", "1"),
+        ("XMXFP4_G2_BHOIST", "1"),
     ],
 )
 def test_a_location_or_a_variable_flydsl_never_reads_leaves_the_flydsl_key(name, value) -> None:
@@ -454,8 +463,13 @@ def test_a_location_or_a_variable_flydsl_never_reads_leaves_the_flydsl_key(name,
 def test_the_flydsl_key_holds_every_servers_variables_and_the_machine() -> None:
     base = flydsl_key(MACHINE, TREE, [FLYDSL_ENV])
     other_point = {**FLYDSL_ENV, "SGLANG_AMD_MONO_K31_WIDE": "0"}
+    aiter_point = {**FLYDSL_ENV, "AITER_FLYDSL_STAGE2_FP8": "1"}
 
     assert flydsl_key(MACHINE, TREE, [FLYDSL_ENV, other_point]) not in {base, flydsl_key(MACHINE, TREE, [other_point])}
+    assert flydsl_key(MACHINE, TREE, [FLYDSL_ENV, aiter_point]) not in {
+        base,
+        flydsl_key(MACHINE, TREE, [FLYDSL_ENV, other_point]),
+    }, "a second point's aiter FlyDSL variable splits the key"
     assert flydsl_key(MACHINE, TREE, [FLYDSL_ENV, FLYDSL_ENV]) == base, "two points alike are one environment"
     assert flydsl_key(Machine(MACHINE.image_digest, "gfx942", "MI300X", None), TREE, [FLYDSL_ENV]) != base
     assert base not in {aiter_key(MACHINE, TREE, BuildSurface()), triton_key(MACHINE)}, "the kinds never share a key"

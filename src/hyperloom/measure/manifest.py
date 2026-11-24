@@ -289,8 +289,9 @@ class JitKindFacts:
 
 @dataclass(frozen=True)
 class JitCacheFacts:
-    """What the runner signs of the shared compiled-code cache: each kind, and how much aiter built while the server ran
-    (``builds_seen`` is zero when everything it needed was found built)."""
+    """What the runner signs of the shared compiled-code cache: each kind, how many modules aiter built while the server
+    ran (``builds_seen`` is zero when everything it needed was found built), and the seconds spent compiling
+    (``jit_compile_sec``: aiter's builds and the monokernel plugin's FlyDSL build)."""
 
     kinds: tuple[JitKindFacts, ...]
     builds_seen: int
