@@ -13,8 +13,10 @@ attempts into the request's single result:
   A retry after a failure that is not the node's (:data:`WAITED_INFRA_REASONS`: cards a process outside the test held,
   a platform short of sandboxes, a failure never held against its node) waits first, longer each time
   (:class:`InfraBackoff`), so a minute in which the cards or the platform are busy does not spend every attempt; the
-  wait never runs past the time its branch can still have a test measured (``latest_start``), and the retry may land
-  on the same node again, since that failure does not put its node in the avoid set. Cards a process outside the test
+  wait never runs past the time its branch can still have a test measured (``latest_start``). Of those, a failure that
+  says nothing about the node (:data:`UNAVOIDED_INFRA_REASONS`) does not put its node in the avoid set, so the retry may
+  land on the same node again; a runner that did not start in time still does, since a slow or faulty node (an image
+  pull, a GPU that does not come up) is one way to get there. Cards a process outside the test
   held do not report their node either: the card guard refuses every attempt that meets such a process, so moving
   elsewhere buys nothing a wait does not. A retry after any other infrastructure failure goes at once, since the
   avoid set and the quarantine already move it to another node. An infrastructure
@@ -152,12 +154,20 @@ _UNREPORTED_INFRA_REASONS = ONCE_RETRIED_INFRA_REASONS | _UNQUARANTINED_INFRA_RE
 #: Infrastructure failures a retry waits out first (:class:`InfraBackoff`): the ones that are not the node's. Cards a
 #: process outside the test held (:data:`FOREIGN_PROCESS_ON_CARD`) or a platform with no sandbox to give
 #: (:data:`RUNNER_START_TIMEOUT`, :data:`CAPACITY_UNAVAILABLE`) may be free a minute later, and a failure never held
-#: against its node (:data:`NODE_BLAMELESS_INFRA_REASONS`) is not escaped by moving elsewhere, so none of them puts its
-#: node in the next attempt's avoid set (:func:`_facts_nodes`). Any other infrastructure failure is held against its
-#: node, and the avoid set and the quarantine already send the retry to another one, so it goes at once: a wait would
-#: only keep the test's dispatch slot and its branch's K idle.
+#: against its node (:data:`NODE_BLAMELESS_INFRA_REASONS`) is not escaped by moving elsewhere. Any other infrastructure
+#: failure is held against its node, and the avoid set and the quarantine already send the retry to another one, so it
+#: goes at once: a wait would only keep the test's dispatch slot and its branch's K idle.
 WAITED_INFRA_REASONS: frozenset[str] = NODE_BLAMELESS_INFRA_REASONS | frozenset(
     {FOREIGN_PROCESS_ON_CARD, RUNNER_START_TIMEOUT, CAPACITY_UNAVAILABLE}
+)
+#: Infrastructure failures that do not put their node in the next attempt's avoid set (:func:`_facts_nodes`), since
+#: they say nothing about the node: cards a process outside the test held (:data:`FOREIGN_PROCESS_ON_CARD`), which the
+#: card guard refuses on every node, a platform with no capacity to give (:data:`CAPACITY_UNAVAILABLE`), and a failure
+#: never held against its node (:data:`NODE_BLAMELESS_INFRA_REASONS`). A runner that did not start in time
+#: (:data:`RUNNER_START_TIMEOUT`) is waited out but still avoids its node: a slow or faulty node (an image pull, a GPU
+#: that does not come up) is one way to get there.
+UNAVOIDED_INFRA_REASONS: frozenset[str] = NODE_BLAMELESS_INFRA_REASONS | frozenset(
+    {FOREIGN_PROCESS_ON_CARD, CAPACITY_UNAVAILABLE}
 )
 #: The kinds whose result holds no measured round: a profile names its traces, a repro its verdict.
 UNMEASURED_KINDS = (TestKind.PROFILE, TestKind.REPRO)
@@ -284,13 +294,18 @@ def _mark_same_node(result: TestResult, avoided: set[str]) -> TestResult:
 
 
 def _facts_nodes(attempts: list[Attempt]) -> list[str]:
-    """The nodes the next attempt avoids: the node of the attempt just before it, when that attempt failed for a reason
-    held against its node, and none when its infrastructure failure was not the node's (:data:`WAITED_INFRA_REASONS`),
-    whose retry waits instead and may run on the same node. An earlier attempt's node is not carried on: a node a
-    reported failure held against it stays out through the quarantine (``avoid``), and one that only this test saw fail
-    is free again for any attempt after the next one."""
+    """The nodes the next attempt avoids: the node of the attempt just before it, unless its infrastructure failure said
+    nothing about the node (:data:`UNAVOIDED_INFRA_REASONS`), whose retry may run on the same node. An earlier attempt's
+    node is not carried on: a node a reported failure held against it stays out through the quarantine (``avoid``), and
+    one that only this test saw fail is free again for any attempt after the next one."""
     last = attempts[-1] if attempts else None
-    return [last.node] if last is not None and last.node and not _waited(last) else []
+    return [last.node] if last is not None and last.node and not _unavoided(last) else []
+
+
+def _unavoided(attempt: Attempt) -> bool:
+    return (
+        attempt.failure_class is FailureClass.INFRA and _reason_name(attempt.failure_reason) in UNAVOIDED_INFRA_REASONS
+    )
 
 
 def _waited(attempt: Attempt) -> bool:
