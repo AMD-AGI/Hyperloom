@@ -822,7 +822,6 @@ def _stack_action_row(action: Any) -> dict[str, Any] | None:
     if not row:
         return None
     return {
-        "kind": str(row.get("kind") or ""),
         "framework": str(row.get("framework") or ""),
         "capability": str(row.get("capability") or ""),
         "acquisition_method": str(row.get("acquisition_method") or ""),

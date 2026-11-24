@@ -134,7 +134,6 @@ class RuntimeRequest:
 class EnablementStackAction:
     """A candidate attempt-runtime acquisition the enablement loop may run."""
 
-    kind: str
     framework: str
     gap_id: str
     capability: str
@@ -149,7 +148,6 @@ class EnablementStackAction:
     def to_state(self) -> dict[str, Any]:
         """Serialize to a plain dict for task params / shared state."""
         return {
-            "kind": self.kind,
             "framework": self.framework,
             "gap_id": self.gap_id,
             "capability": self.capability,
@@ -172,7 +170,6 @@ class EnablementStackAction:
         if method not in _ACQUISITION_METHODS:
             method = "none"
         return cls(
-            kind=str(d.get("kind") or "runtime_candidate"),
             framework=str(d.get("framework") or "").strip().lower(),
             gap_id=str(d.get("gap_id") or ""),
             capability=str(d.get("capability") or ""),

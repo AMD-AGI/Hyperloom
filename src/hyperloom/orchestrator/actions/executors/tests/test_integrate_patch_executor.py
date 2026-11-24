@@ -496,7 +496,6 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
         "get_adapter",
         lambda _framework: SimpleNamespace(
             build_stack_action=lambda _request: EnablementStackAction(
-                kind="runtime_candidate",
                 framework="vllm",
                 gap_id="gap.enablement.missing_model_arch",
                 capability="missing_model_arch",

@@ -903,7 +903,6 @@ async def test_a_runtime_only_round_is_benched_and_its_verdict_decides_the_runti
         "get_adapter",
         lambda _fw: SimpleNamespace(
             build_stack_action=lambda _request: EnablementStackAction(
-                kind="runtime_candidate",
                 framework="vllm",
                 gap_id="gap.enablement.missing_model_arch",
                 capability="missing_model_arch",

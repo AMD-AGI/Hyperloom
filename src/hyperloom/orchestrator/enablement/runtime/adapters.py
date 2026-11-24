@@ -209,7 +209,6 @@ class _VenvProvisionMixin(BaseAdapter):
         """An editable checkout of ``request.ref`` with its packages beside it, or the packages alone."""
         capability = request.capability or "runtime"
         action = EnablementStackAction(
-            kind="runtime_candidate",
             framework=self.framework,
             gap_id=f"gap.enablement.{capability}",
             capability=capability,

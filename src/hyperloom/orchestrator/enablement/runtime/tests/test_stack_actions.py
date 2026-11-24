@@ -17,7 +17,6 @@ from hyperloom.orchestrator.enablement.runtime.stack_actions import (
 
 def test_stack_action_round_trip():
     a = EnablementStackAction(
-        kind="runtime_candidate",
         framework="vllm",
         gap_id="gap.enablement.missing_model_arch",
         capability="deepseek_v4",
@@ -34,7 +33,6 @@ def test_stack_action_round_trip():
 def test_stack_action_from_state_defaults():
     b = EnablementStackAction.from_state({"framework": "SGLang"})
     assert b.framework == "sglang"  # lowercased
-    assert b.kind == "runtime_candidate"
     assert b.acquisition_method == "none"
     assert b.packages == ()
 

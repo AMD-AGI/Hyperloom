@@ -154,7 +154,6 @@ def test_an_interpreter_without_torch_fails_before_pip(tmp_path):
 
 def _wheel_action() -> EnablementStackAction:
     return EnablementStackAction(
-        kind="runtime_candidate",
         framework="vllm",
         gap_id="gap.enablement.missing_model_arch",
         capability="deepseek_v4",

@@ -57,7 +57,6 @@ def _attempt(task_id: str = "t-1", *, kept: dict | None = None, request: dict | 
 
 def _candidate(framework: str = "vllm") -> dict:
     return EnablementStackAction(
-        kind="runtime_candidate",
         framework=framework,
         gap_id="gap.enablement.missing_model_arch",
         capability="deepseek_v4",
