@@ -1,11 +1,11 @@
 ---
 myst:
   html_meta:
-    "description": "KernelForge deployment modes: Claude Code in-session live-stream and the autonomous forge-loop."
-    "keywords": "KernelForge, deployment modes, Claude Code, in-session, forge-loop, autonomous loop, billing"
+    "description": "Learn how to run KernelForge in Claude Code in-session mode for interactive optimization or in autonomous forge-loop mode for overnight unattended optimization."
+    "keywords": "KernelForge, deployment modes, Claude Code, in-session, forge-loop, autonomous loop, billing, subscription, API credits"
 ---
 
-# Deployment modes
+# KernelForge deployment modes
 
 KernelForge can run in two modes that differ in where the agent runs, how much
 human oversight the run gets, and how the run is billed.
@@ -25,6 +25,8 @@ ahead of the subscription token.
 
 ## Autonomous loop — overnight optimization
 
+Run unattended optimization overnight with a fixed budget:
+
 ```bash
 kernelforge forge-loop --workspace <W> \
     --kernel <f> --driver <f> --snr-threshold 30 --max-hours 8
@@ -38,7 +40,7 @@ iterations with `touch <workspace>/.stop`. See
 ## Comparison
 
 | | Claude Code (default) | Autonomous loop |
-|:--|:--:|:--:|
+|:--|:--|:--|
 | Agent runs on | Your machine (docker) | Your machine |
 | GPU tools run on | Container | Your machine |
 | Human oversight | Live in chat | None (overnight) |

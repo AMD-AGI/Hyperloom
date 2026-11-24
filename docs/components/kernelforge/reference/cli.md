@@ -1,11 +1,11 @@
 ---
 myst:
   html_meta:
-    "description": "KernelForge CLI reference: the kernelforge forge-loop, forge-rewrite-by-flydsl, forge-fuse and gemm-tune commands."
-    "keywords": "KernelForge, CLI, kernelforge, forge-loop, forge-rewrite-by-flydsl, forge-fuse, gemm-tune, FlyDSL"
+    "description": "Complete option reference for the KernelForge CLI: forge-loop, forge-rewrite-by-flydsl, forge-fuse, gemm-tune, roofline-ceiling, and export-runs subcommands."
+    "keywords": "KernelForge, CLI, kernelforge, forge-loop, forge-rewrite-by-flydsl, forge-fuse, gemm-tune, roofline-ceiling, export-runs, FlyDSL"
 ---
 
-# CLI reference
+# KernelForge CLI reference
 
 KernelForge installs exactly one CLI, `kernelforge`; everything below is a
 subcommand of it.
@@ -23,6 +23,8 @@ One option lives on `kernelforge` itself rather than on any subcommand:
 | `--version` | Print the installed KernelForge version and exit. |
 
 ## Core
+
+Signatures for all subcommands:
 
 ```bash
 kernelforge forge-loop --workspace <W> --kernel <f> --driver <f> [options]
@@ -46,7 +48,7 @@ local/remote environment contract and durable local layout.
 Initializes one fresh autonomous kernel-rewrite controller run. It validates the
 Hyperloom handoff, runs one long-lived opportunity-analysis Agent, atomically
 publishes complete operator tasks, and dispatches them sequentially through
-named-kernel `forge-loop` campaigns. The Agent may inspect existing trace and
+named-kernel `forge-loop` campaigns. The Agent can inspect existing trace and
 source evidence but cannot run shell commands, profiling, or serving benchmarks.
 
 | Option | Default | Meaning |
@@ -85,11 +87,11 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--invocation-spec-file <file>` | none | Hyperloom invocation-spec JSON used by task preparation. |
 | `--task-type <name>` | `''` | `repository` or `image_kernel` enable multi-file / whole-repo handling; any other value keeps single-file behavior. |
 | `--source-files <a,b>` | `''` | Comma/newline-separated implementation entry points used for orientation, profiling, JIT hints and KB identity. Not an edit allowlist — `--kernel` remains the anchor. |
-| `--target-functions <a,b>` | `''` | Comma-separated target kernel/function hints, used for PMC filtering, source mapping and agent orientation. Does not restrict which functions may be edited. |
+| `--target-functions <a,b>` | `''` | Comma-separated target kernel/function hints, used for PMC filtering, source mapping and agent orientation. Does not restrict which functions can be edited. |
 | `--operator-name <name>` | `''` | Logical operator identity used by profiling and the experience page key. |
 | `--framework <name>` | inferred | Framework identity for the experience KB slug: `vllm`, `sglang`, `aiter`, or `standalone` for a framework-less file. Authoritative when given. |
 | `--kernel-backend <name>` | inferred | Kernel backend override. An unsupported backend falls back to `flydsl`. |
-| `--commit-new-path <glob>` | none | Workspace-relative path or glob naming a file the agent may CREATE and still have committed with a KEEP. Repeatable. Untracked files are otherwise never staged and never removed by a REVERT. `*` does not cross a directory separator and `**` is rejected; name each level. Protected measurement paths are never admitted. Immutable per campaign. |
+| `--commit-new-path <glob>` | none | Workspace-relative path or glob naming a file the agent can CREATE and still have committed with a KEEP. Repeatable. Untracked files are otherwise never staged and never removed by a REVERT. `*` does not cross a directory separator and `**` is rejected; name each level. Protected measurement paths are never admitted. Immutable per campaign. |
 | `--snr-threshold <dB>` | `30.0` | Threshold the driver's correctness suite must clear, stored immutably. A KEEP needs this and a measured gain over the incumbent; the assembly backend adds the task's own acceptance suite on top. |
 | `--prepare-task` / `--no-prepare-task` | on | Pre-loop preflight of the driver against the loop's stdout contract; on failure one agent authors or repairs the measurement driver (never the kernel), then it is re-checked. Skipped on `--resume`. |
 | `--baseline-json <file>` | none | JSON file holding a scoring anchor measured outside this loop: `{"wall_ms": <float>, "case_times": {"<case id>": <ms>}}`. Every speedup the run reports then divides by those per-case times, and they are the wall time published beside it. The loop still benches the kernel it starts from, but as the search start and first incumbent rather than as the anchor — so the KEEP bar begins at that kernel's own score, not at 1.0x. Use it when the starting kernel already replaced something else and the run should be graded against the original: `forge-rewrite` passes its source kernel's timings this way. Omitted, the loop anchors on its own first bench. |
@@ -108,14 +110,14 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--gpu-target <arch>` | auto-detect | ROCm compilation architecture, e.g. `gfx950`. When omitted it is read from `GPU_TARGET`, then `rocminfo`, and the run refuses to start when neither names exactly one GPU. Also exported to the environment. |
+| `--gpu-target <arch>` | auto-detect | ROCm compilation architecture, such as `gfx950`. When omitted it is read from `GPU_TARGET`, then `rocminfo`, and the run refuses to start when neither names exactly one GPU. Also exported to the environment. |
 | `--gpu-type <sku>` | from the arch | Hardware SKU used in knowledge-base identities. When omitted it follows the resolved GPU arch (`gfx950` → `mi355x`, `gfx942` → `mi300x`). |
-| `--nproc-per-node <n>` | `1` | Ranks the driver self-launches via torchrun, for collective tasks such as all-reduce. Above 1, EVERY rank is profiled in its own rocprofv3 session — wrapping the driver would only profile the launcher process, which runs no kernel. |
+| `--nproc-per-node <n>` | `1` | Ranks the driver self-launches using torchrun, for collective tasks such as all-reduce. Above 1, EVERY rank is profiled in its own rocprofv3 session — wrapping the driver would only profile the launcher process, which runs no kernel. |
 | `--bench-repeat <n>` | `1` | How many times each bench repeats its measurement in-process, reporting the per-case median. Above 1 shrinks run-to-run spread and requires a driver that accepts `--repeat`; the flag is omitted entirely when this is 1. |
 | `--aiter-cache-max-gb <g>` | `4.0` | Per-attempt AITER cache soft limit in GiB. LRU pruning targets 75% of the limit; `0` disables in-run pruning. |
 | `--profiling` / `--no-profiling` | on | Allow Analysis hardware profiling and Implementer self-profiling guidance on long-horizon runs (>2 hours). Shorter runs keep Analysis static-only regardless. `--no-profiling` disables collection for every duration. |
 | `--roofline-ceiling <on\|off>` | `off` | Whether the campaign has a per-shape theoretical achievable latency to measure its attainment against. `off` skips it entirely, including any report already sitting in the workspace. `on` estimates one on a fresh campaign once the baseline has fixed the scored case set and its per-case times, which costs a profiler pass and an analyst session, typically tens of minutes; on `--resume` it reuses the ceiling this campaign already estimated, so the target stays fixed for the campaign, and estimates again only when that report can no longer be read or no longer covers every scored case. While the campaign has a ceiling, every iteration logs the incumbent's mean attainment against it; the planner, its specialists and plan critic, and the supervisor receive each case's attainment, the mean, the target and how to read them; and the implementer receives the same standing as a table. Without one, none of it is injected anywhere. Session-scoped: pass it on every `--resume` that should keep the ceiling. |
-| `--roofline-target <fraction>` | `0.0` (off) | Stop the campaign once mean per-case attainment reaches this fraction of the estimated ceiling, e.g. `0.86`. Attainment is `ceiling / measured` per case, averaged with equal weight across scored cases — the same aggregate a KEEP is scored by. The gate fires only when every scored case has a figure: a case whose ceiling sits below its measured latency, or that the ceiling never answered, is excluded from the mean, and a mean over a subset is not the objective it claims to report. Requires a ceiling, and refuses a value above `1.0`. A ceiling is an estimate whose arithmetic nothing checks, so this is off by default — and it never enters the KEEP decision, which stays a measurement against the incumbent. |
+| `--roofline-target <fraction>` | `0.0` (off) | Stop the campaign once mean per-case attainment reaches this fraction of the estimated ceiling, such as `0.86`. Attainment is `ceiling / measured` per case, averaged with equal weight across scored cases — the same aggregate a KEEP is scored by. The gate fires only when every scored case has a figure: a case whose ceiling sits below its measured latency, or that the ceiling never answered, is excluded from the mean, and a mean over a subset is not the objective it claims to report. Requires a ceiling, and refuses a value above `1.0`. A ceiling is an estimate whose arithmetic nothing checks, so this is off by default — and it never enters the KEEP decision, which stays a measurement against the incumbent. |
 
 ### Rounds and lanes
 
@@ -124,8 +126,8 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--lanes <n>` | `3` | Implementer lanes per round (1–8). Above 1 the round's analysis is partitioned into that many non-overlapping plans, each run concurrently in its own workspace copy and measured on its own. Lanes run concurrently, so a lane costs a session rather than a share of the round's wall clock, and three is what the three specialist analyses divide into. The partition returns fewer when the evidence supports fewer. Needs a provider declaring `session_env`; refused on one that does not, because lanes sharing a build cache measure each other's binaries. A provider without `stop_hooks` runs and is warned: it loses in-session denial, so a lane can waste its session or void the round, but it cannot misreport one. |
 | `--merge-stacking` / `--no-merge-stacking` | on | Once consecutive iterations stop producing a new best, spend one iteration measuring two archived rejected gains applied together, chosen for winning on different cases. Costs a measurement but no Implementer session. Applies at every `--lanes` setting; turn it off to compare against a run that predates it. |
 | `--specialist-probe` / `--no-specialist-probe` | on | Let the read-only planning specialists measure one variant per probe in a scratch tree instead of only arguing about a dispatch constant. Each probe re-runs the workspace driver for one case with declared constants overridden, queues on the same device lock the fan-out lanes take, and never touches the canonical tree. Falls back to `FORGE_SPECIALIST_PROBE`. |
-| `--specialist-probe-max <n>` | `6` | Probes ONE analysis round may make in total, shared across every specialist it dispatches. Every call counts, including a refused one. Falls back to `FORGE_SPECIALIST_PROBE_MAX`. |
-| `--specialist-probe-budget-sec <s>` | `600` | Seconds on the device ONE analysis round may spend probing, shared across its specialists, and cut down further at call time so no probe leaves a specialist without time to write its analysis. Falls back to `FORGE_SPECIALIST_PROBE_BUDGET_SEC`. |
+| `--specialist-probe-max <n>` | `6` | Probes ONE analysis round can make in total, shared across every specialist it dispatches. Every call counts, including a refused one. Falls back to `FORGE_SPECIALIST_PROBE_MAX`. |
+| `--specialist-probe-budget-sec <s>` | `600` | Seconds on the device ONE analysis round can spend probing, shared across its specialists, and cut down further at call time so no probe leaves a specialist without time to write its analysis. Falls back to `FORGE_SPECIALIST_PROBE_BUDGET_SEC`. |
 | `--specialist-probe-scratch-root <dir>` | under `--experiments-dir` | Where round scratch trees are created. Must be absolute and outside the workspace; defaults to a sibling of the workspace when the default would land inside it. Falls back to `FORGE_SPECIALIST_PROBE_SCRATCH_ROOT`. |
 
 ### Agent provider
@@ -163,7 +165,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 
 ## forge-rewrite-by-flydsl
 
-Ports a source kernel (Triton, HIP, CUDA or C++) into an equivalent FlyDSL
+Ports a source kernel (Triton, HIP, CUDA, or C++) into an equivalent FlyDSL
 kernel in a correctness-only PORT phase, then hands the FlyDSL kernel to
 `forge-loop` for optimization. With an existing framework git base, the final
 20 minutes are reserved for one session that turns the verified best FlyDSL
@@ -205,16 +207,16 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--framework <name>` | inferred | Apply-back target: `aiter`, `vllm` or `sglang`. Inferred from the source path when omitted. |
+| `--framework <name>` | inferred | Apply-back target: `aiter`, `vllm`, or `sglang`. Inferred from the source path when omitted. |
 | `--applyback-import-module <mod>` | inferred | Import target required to load before and after apply-back. Repeatable; defaults to the source module inferred from its package. |
 | `--applyback` / `--no-applyback` | on | Integrate the optimized kernel back into the framework repository and publish the patch. Disabling it delivers only the standalone kernel: the stage is skipped, its 20-minute reserve returns to the search, and `success` no longer depends on a patch the caller did not ask for. `applyback_required` is then `false`, and `best_commit` names the standalone selection instead of an apply-back commit. |
 | `--max-applyback-attempts <n>` | `2` | Maximum clean-room framework integration sessions. |
 
-### Hardware, provider and output
+### Hardware, provider, and output
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--gpu-target <arch>` | auto-detect | ROCm compilation architecture, e.g. `gfx950`. When omitted it is read from `GPU_TARGET`, then `rocminfo`, and the rewrite refuses to start when neither names exactly one GPU. Also exported to the environment. |
+| `--gpu-target <arch>` | auto-detect | ROCm compilation architecture, such as `gfx950`. When omitted it is read from `GPU_TARGET`, then `rocminfo`, and the rewrite refuses to start when neither names exactly one GPU. Also exported to the environment. |
 | `--gpu-type <sku>` | from the arch | Hardware SKU for rewrite KB identities. When omitted it follows the resolved GPU arch (`gfx950` → `mi355x`, `gfx942` → `mi300x`). |
 | `--model <name>` | provider default | LLM model; overrides `CLAUDE_MODEL`/`CODEX_MODEL`/`DSH_MODEL`. |
 | `--permission-mode <v>` | `acceptEdits` | Claude permission mode. |
@@ -249,23 +251,23 @@ without reaching an agent, so the selection can be checked before anything is sp
 |:--|:--|:--|
 | `--trace <file>` | `''` | Decode kineto trace (`*.trace.json[.gz]`), captured with CUDA graphs disabled. |
 | `--model-path <dir>` | `''` | Model directory; must contain `config.json`. |
-| `--framework <name>` | none | `sglang`, `vllm` or `vllm-aiter`. |
+| `--framework <name>` | none | `sglang`, `vllm`, or `vllm-aiter`. |
 | `--output-dir <dir>` | `''` | Manifest and logs. |
 | `--framework-root <dir>` | auto-detect | Explicit framework source root, else the installed package is located. |
 | `--decode-batch <n>` | `16` | Representative decode batch size (T) for shapes. |
 | `--decode-steps <n>` | `0` | Decode steps captured in the trace, used to normalize kernels/step. |
-| `--attn-tp <n>` | `1` | Attention tensor-parallel size, mirroring the model's `attn_tp_size`. Local shape dims are divided by it, e.g. `n_local_heads = num_attention_heads // attn_tp`, and for DeepSeek-V4 `n_local_groups = o_groups // attn_tp`. With `--enable-dp-attention` the workload's serving `--tp` is DP, so `attn_tp` is `1`; without it, set `attn_tp` to the attention shard count. |
+| `--attn-tp <n>` | `1` | Attention tensor-parallel size, mirroring the model's `attn_tp_size`. Local shape dims are divided by it, for example `n_local_heads = num_attention_heads // attn_tp`, and for DeepSeek-V4 `n_local_groups = o_groups // attn_tp`. With `--enable-dp-attention` the workload's serving `--tp` is DP, so `attn_tp` is `1`; without it, set `attn_tp` to the attention shard count. |
 
 ### Discovery and authoring
 
 | Option | Default | Meaning |
 |:--|:--|:--|
 | `--discover <mode>` | `patterns` | `patterns` (template library), `llm` (the LLM reads trace and source, autonomous), or `anchored` (fuse around the kernel `--fuse-kernel` names). |
-| `--repo-scope` / `--no-repo-scope` | off | Give discovery and authoring the whole framework repository instead of one resolved file. Discovery embeds no source, explores the tree with its own read/search tools, and may return a fusion whose call sites span several files; authoring may edit all of them. Use when the chain is not in the arch-class model file and you do not want to name its location. Requires `--discover llm` or `--discover anchored`. |
+| `--repo-scope` / `--no-repo-scope` | off | Give discovery and authoring the whole framework repository instead of one resolved file. Discovery embeds no source, explores the tree with its own read/search tools, and might return a fusion whose call sites span several files; authoring might edit all of them. Use when the chain is not in the arch-class model file and you do not want to name its location. Requires `--discover llm` or `--discover anchored`. |
 | `--fuse-kernel <name>` | `''` | Full GPU kernel name, exactly as the trace spells it. Fusion is then built around that kernel and whatever the trace shows running beside it, instead of a ranked guess. Implies `--discover anchored`. A name the trace does not contain is a usage error listing the closest ones; a fragment is not a name. |
 | `--fusion-hints <file>` | `''` | JSON list of unfused kernel runs another profiler flagged (Hyperloom writes TraceLens' `fusion_optimizations` here). Each entry may carry `kind`, `operation`, `projected_e2e_pct` and `members[]` with `kernel_names` and `kernel_launcher_path`. `llm` discovery shows them to the model as advisory leads to verify against the trace and source; they never pick the recipe and do not bypass the launch-bound diagnosis. Requires `--discover llm`; an unreadable or malformed file is a usage error. |
 | `--dry-run` | off | Diagnose and locate only; emit a manifest with a recipe skeleton, no authoring or validation. |
-| `--author` / `--no-author` | on | Author the fused kernel via the LLM. Non-dry-run only. |
+| `--author` / `--no-author` | on | Author the fused kernel using the LLM. Non-dry-run only. |
 | `--fuse-all-confirmed` | off | Author ALL source-confirmed patterns together rather than only the top one, and A/B all their flags. A compile-pass candidate cannot be authored with them, so it is claimed alone and the rest wait for a later round. |
 | `--agent-backend <name>` | `auto` | `auto`, `claude`, `codex` or `deepseek`, for discovery and authoring. `deepseek` is never chosen by `auto`: name it here or with `INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`. |
 | `--agent-sandbox-mode <v>` | `workspace-write` | `workspace-write`, `read-only` or `bypass`. Use `bypass` only when an external sandbox already enforces isolation. |
@@ -274,7 +276,7 @@ without reaching an agent, so the selection can be checked before anything is sp
 | `--max-recipes <n>` | `0` | Cap how many ranked recipes to try. `0` means uncapped, so every discovered recipe is considered; Hyperloom passes the count its fusion lane budget pays for. |
 | `--deadline-unix <t>` | `0` | Absolute time the run must finish by. Recipes run one after another, so each recipe's forge-loop is handed its own `--deadline-unix`: an even share of the time left, less a closing reserve for the export and manifest. `0` leaves each loop its default budget; Hyperloom passes the end of its fusion lane budget. |
 | `--gpu <id>` | `0` | HIP device id for authoring and A/B. |
-| `--gpu-target <arch>` | auto-detect | Canonical GPU arch the author writes for, e.g. `gfx950`; detected via `rocminfo` when omitted. |
+| `--gpu-target <arch>` | auto-detect | Canonical GPU arch the author writes for, such as `gfx950`; detected using `rocminfo` when omitted. |
 
 ### A/B validation and serving smoke
 
@@ -283,7 +285,7 @@ without reaching an agent, so the selection can be checked before anything is sp
 | `--validate` / `--no-validate` | on | Run the A/B decode validation. Non-dry-run only. |
 | `--ab-isl <n>` | `512` | A/B input length. |
 | `--ab-osl <n>` | `128` | A/B output length. |
-| `--server-extra <args>` | `''` | Extra serving args for the smoke launch, e.g. `--kv-cache-dtype fp8`. A model whose engine refuses to start without a flag can never reach the kernel the smoke exists to exercise. |
+| `--server-extra <args>` | `''` | Extra serving args for the smoke launch, such as `--kv-cache-dtype fp8`. A model whose engine refuses to start without a flag can never reach the kernel the smoke exists to exercise. |
 | `--tp <n>` | `1` | Tensor-parallel size for the serving smoke; must match the session. |
 | `--block-size <n>` | `0` (omit) | vLLM KV `--block-size` for the serving smoke. Required for sparse-attention models that reject the default block size. |
 | `--max-model-len <n>` | `0` (smoke default 4096) | Serving-smoke max model / context length. |
@@ -319,10 +321,10 @@ Model and target:
 | Option | Default | Meaning |
 |:--|:--|:--|
 | `--model-path <dir>` | required | Model directory; must contain `config.json`. |
-| `--framework <name>` | required | `sglang`, `vllm` or `vllm-aiter` (vllm with `VLLM_ROCM_USE_AITER=1`). |
+| `--framework <name>` | required | `sglang`, `vllm`, or `vllm-aiter` (vllm with `VLLM_ROCM_USE_AITER=1`). |
 | `--precision <p>` | required | `bf16`, `fp8`, `fp4`, `int8` or `awq`. |
 | `--quant-type <q>` | `auto` | `auto`, `none`, `per_token`, `blockscale`, `bpreshuffle`, `awq`, `gptq`, `fp4` or `mxfp4`. |
-| `--gpu-type <sku>` | `auto` | `auto` detects via `rocminfo`; otherwise `mi300x`, `mi355x`, `gfx942`, … |
+| `--gpu-type <sku>` | `auto` | `auto` detects using `rocminfo`; otherwise `mi300x`, `mi355x`, `gfx942`, … |
 | `--output-dir <dir>` | required | Output directory for all artifacts. |
 
 Shape sources, in descending priority — `--demand` wins, then
@@ -369,7 +371,7 @@ of its search or execution options.
 | Option | Default | Meaning |
 |:--|:--|:--|
 | `--model-path <dir>` | required | Model directory; must contain `config.json`. |
-| `--framework <name>` | required | `sglang`, `vllm` or `vllm-aiter`. |
+| `--framework <name>` | required | `sglang`, `vllm`, or `vllm-aiter`. |
 | `--precision <p>` | required | `bf16`, `fp8`, `fp4`, `int8` or `awq`. |
 | `--quant-type <q>` | `auto` | As for `run`. |
 | `--gpu-type <sku>` | `auto` | As for `run`. |
@@ -407,7 +409,7 @@ committing a campaign's budget to the kernel.
 A campaign that wants a ceiling estimates its own, with `forge-loop
 --roofline-ceiling on`. That path is the cheaper one: the ceiling is derived
 once the baseline has already fixed the scored case set and measured each case
-over repeated runs, so it needs no discovery pass of its own and its sanity
+over repeated runs, so it needs no discovery pass of its own and its confidence
 reference is the campaign's median rather than a single run.
 
 This command reports no attainment ratio. It has no baseline to divide by
@@ -446,7 +448,7 @@ configuration file, and cases the driver tags `unscored` get no ceiling.
 | `--config <file>` | `<W>/config.yaml` | Task configuration supplying `performance_command` and `source_file_path`. |
 | `--performance-command <cmd>` | config.yaml `performance_command` | Shell command that runs the timed benchmark. |
 | `--output-dir <dir>` | `<W>/forge_experiments/roofline_ceiling` | Where the report, the document and the evidence are published. |
-| `--arch <gfx>` | detected | Target architecture, e.g. `gfx950`. Detected via `rocminfo` when omitted; a marketing name such as `MI355X` is accepted. |
+| `--arch <gfx>` | detected | Target architecture, such as `gfx950`. Detected via `rocminfo` when omitted; a marketing name such as `MI355X` is accepted. |
 | `--agent-provider <name>` | auto-selected | Agent provider for the analyst session. |
 | `--agent-model <name>` | provider default | Analyst model. |
 | `--agent-timeout-sec <s>` | `3600` | Wall-clock budget for the analyst session. |

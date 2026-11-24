@@ -1,17 +1,19 @@
 ---
 myst:
   html_meta:
-    "description": "How to run a KernelForge optimization campaign: prepare a git workspace, launch kernelforge forge-loop on a kernel and its driver, and review the measured result."
+    "description": "Learn to run a KernelForge optimization campaign: prepare a git workspace, launch forge-loop on a kernel and its driver, and review the measured result."
     "keywords": "KernelForge, run campaign, kernelforge forge-loop, workspace, driver, kernel backend, gfx950, forge_experiments"
 ---
 
-# Run a campaign
+# Run a KernelForge optimization campaign
 
 A campaign is one `kernelforge forge-loop` run over one kernel. Each iteration
 proposes a change, measures it against the task's driver, and keeps it only if
 the measurement improves.
 
 ## Prerequisites
+
+Before running a campaign, ensure you have the following.
 
 - Hyperloom installed (`pip install -e ".[forge]"`; see
   {doc}`Quickstart </components/kernelforge/install/quickstart>`).
@@ -31,7 +33,7 @@ and restore everything else, so the campaign needs a workspace that is a git
 repository with an initial commit. A workspace holds:
 
 | File | Role | Needed |
-|:-----|:-----|:-------|
+|-------|-------|---------|
 | kernel source | What the loop optimizes — the `--kernel` anchor | required |
 | `driver.py` | Correctness oracle and benchmark; protected, never edited | required |
 | `graph_harness.py` | CUDA/HIP graph timing harness the driver benches through | recommended |
@@ -43,6 +45,8 @@ up exactly this and launches the loop; copying the closest one is the fastest
 way to start a new task.
 
 ## Run the loop
+
+Use the following command to launch a forge-loop campaign.
 
 ```bash
 W=/tmp/forge_run

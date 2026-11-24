@@ -5,19 +5,21 @@ myst:
     "keywords": "KernelForge, optimization loop, PMC, wait/MFMA ratio, SNR gate, occupancy, VGPR, roofline, measurement-driven"
 ---
 
-# Optimization loop
+# KernelForge optimization loop
 
 Every kernel backend follows the same enforced development loop. Skipping a step is
 blocked by the system, so no change is ever accepted without measured evidence.
 
 ## The enforced loop
 
+Each step runs in fixed order; the system blocks any attempt to skip one.
+
 1. **Build** — compile the kernel; stale artifacts are auto-cleaned so an edit
    cannot be silently benchmarked against old code.
 2. **SNR pre-filter** — run the correctness driver; a change must clear the
-   signal-to-noise threshold (default 30 dB) before it can be benchmarked.
+   signal-to-noise ratio (SNR) threshold (default 30 dB) before it can be benchmarked.
 3. **Benchmark** — measure wall-clock and kernel time (median over iterations).
-4. **Register check** — read the candidate's VGPR usage from the build and record
+4. **Register check** — read the candidate's VGPR (vector general-purpose register) usage from the build and record
    it with the measurements. Hardware counters are not read per candidate: the
    Analysis Agent profiles the current best, and planning reads that evidence.
 5. **Accept** (assembly only) — run the task's own `compile_command`, then its
@@ -31,16 +33,16 @@ blocked by the system, so no change is ever accepted without measured evidence.
 
 ## PMC-guided optimization
 
-Decisions are grounded in hardware counters rather than guesswork. The
+Decisions are grounded in performance monitoring counters (PMC) rather than guesswork. The
 wait/MFMA ratio is a primary signal:
 
 | wait/MFMA ratio | Diagnosis | Action |
-|:---------------:|:----------|:-------|
+|-----------------|:----------|:-------|
 | < 5 | Compute-bound | Reduce MFMA count (tile shape, warp config) |
-| 5–10 | Balanced | Profile deeper (LDS vs VMEM stalls) |
-| > 10 | Memory-bound | Reduce HBM traffic (occupancy, prefetch) |
+| 5–10 | Balanced | Profile deeper — check for local data share (LDS) or vector memory (VMEM) stalls |
+| > 10 | Memory-bound | Reduce HBM (high-bandwidth memory) traffic (occupancy, prefetch) |
 
-The `registers` tool predicts VGPR/SGPR usage and occupancy **before** building,
+The `registers` tool predicts vector and scalar general-purpose register (VGPR/SGPR) usage and occupancy **before** building,
 so an occupancy cliff (for example VGPR crossing 256) is caught before it costs
 a build-bench cycle.
 
@@ -52,7 +54,7 @@ knowledge base and tooling:
 - Stale `.so` artifacts — the build tool auto-cleans and verifies deployment.
 - A `BLOCK_M=64` sparse-attention configuration that silently corrupts data —
   a hard constraint in the knowledge base.
-- An AGPR inline-asm register drop that produces silently wrong output — blocked
+- An AGPR (accumulator general-purpose register) inline-asm register drop that produces silently wrong output — blocked
   by the SNR pre-filter below 30 dB.
 
 ## Autonomous loop

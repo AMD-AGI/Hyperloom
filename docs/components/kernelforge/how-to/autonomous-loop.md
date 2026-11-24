@@ -1,16 +1,18 @@
 ---
 myst:
   html_meta:
-    "description": "How to run the KernelForge autonomous overnight optimization loop with specialist plan synthesis, canonical validation, git keep/revert, and stalled-search supervision."
+    "description": "How to run the KernelForge autonomous overnight loop with specialist plan synthesis, canonical validation, git keep/revert, and stalled-search supervision."
     "keywords": "KernelForge, autonomous loop, overnight optimization, kernelforge forge-loop, supervisor, validation pipeline, git commit revert"
 ---
 
-# Autonomous overnight loop
+# KernelForge autonomous overnight loop
 
 The autonomous loop runs unattended for hours, proposing one change per
 iteration and keeping only measured improvements.
 
 ## Run the loop
+
+Start an unattended forge-loop session with the following command.
 
 ```bash
 kernelforge forge-loop \
@@ -46,12 +48,12 @@ Each iteration:
 2. The specialists produce independent Markdown analyses. One partition call
    then reads all of them and divides the round into at most `--lanes` lanes
    (default 3), naming each lane's ground in the terms an edit lands in — files,
-   functions and mechanisms — and each lane synthesizes its own plan from that
+   functions, and mechanisms — and each lane synthesizes its own plan from that
    ground and the whole round's evidence. The lanes are implemented
    concurrently, each in its own workspace copy, and their candidates are
    measured one per iteration. `--lanes 1`, or evidence that supports only one
    direction, fuses the analyses into a single plan instead: Orchestration
-   compares their expected value, evidence, feasibility, cost, dependencies and
+   compares their expected value, evidence, feasibility, cost, dependencies, and
    risks, and synthesizes one. Concurrent lanes need an agent provider that
    declares `session_env`; one that does not is refused by name and must be
    given `--lanes 1`, because lanes sharing one build cache load each other's
@@ -108,7 +110,7 @@ Each iteration:
 6. The final plan is published at
    `<workspace>/forge_experiments/orchestration/iter_NNN/optimization_plan.md`.
    A round of several lanes publishes lane 1's there and the rest beside it as
-   `lane_002.md`, `lane_003.md` and so on, with `lane_plans.json` written last
+   `lane_002.md`, `lane_003.md`, and so on, with `lane_plans.json` written last
    to mark the round complete.
 7. The writable Implementer reads that plan, edits the kernel sources, and
    exercises its in-session correctness and performance gate. Each Implementer
@@ -157,7 +159,7 @@ improved by the code-level 5% threshold from the evidence score, or
 immediately before a Supervisor intervention when the evidence does not match
 the current canonical. Until then, planning agents receive the previous bundle,
 current timings, and the cumulative diff between the evidence and canonical
-commits. That diff may span multiple accepted KEEP commits.
+commits. That diff might span multiple accepted KEEP commits.
 
 Hardware profiling uses the same long-horizon gate: sessions at or below two
 hours keep Analysis static-only and omit Implementer self-profiling guidance.
@@ -305,7 +307,7 @@ the reason. When only one profile passes, the log says model relay is off for
 the session and how to turn it on.
 
 A blockage is three consecutive non-improving search iterations produced by the
-active profile. Infrastructure, API, device-contention and integrity failures,
+active profile. Infrastructure, API, device-contention, and integrity failures,
 and outcomes no profile produced (such as a stacked merge), do not count; a
 KEEP ends the blockage. Every blockage takes the first of these the session can
 run, checked against the startup check:
@@ -373,6 +375,6 @@ bench cycle on it.
 Per-iteration lesson documents are free-form factual records written by resuming
 the same Implementer session read-only. They record attempted actions and
 observed results, not recommendations to future iterations. Supervisor rulings
-may reject subjective conclusions in older lessons, while objective validation
+might reject subjective conclusions in older lessons, while objective validation
 and benchmark facts remain authoritative. Neither lesson nor Supervisor output
 is required to follow a machine-readable response schema.

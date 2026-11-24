@@ -1,16 +1,18 @@
 ---
 myst:
   html_meta:
-    "description": "How to extend KernelForge: add a new kernel backend agent, a new MCP tool, or new knowledge-base entries."
+    "description": "Learn how to extend KernelForge: add a new kernel backend agent, register a new MCP tool, or add knowledge-base entries to influence future kernel optimization."
     "keywords": "KernelForge, extending, add kernel backend, add MCP tool, knowledge base, kernel_backends/base.py"
 ---
 
-# Add a kernel backend, tool, or knowledge
+# Add backends, tools, and knowledge sources to KernelForge
 
 KernelForge is designed to be extended. The three most common extension points
 are a new kernel backend, a new GPU tool, and new knowledge.
 
 ## Add a new kernel backend agent
+
+Follow these steps to register a new kernel backend in KernelForge.
 
 1. Create `src/kernelforge/kernel_backends/mybackend/` with:
    - `__init__.py`
@@ -23,6 +25,8 @@ are a new kernel backend, a new GPU tool, and new knowledge.
 `--kernel-backend mybackend` then selects it.
 
 ## Add a GPU toolchain helper
+
+Follow these steps to add a new GPU tool function to the evaluation or utility layer.
 
 1. Create the helper under `src/kernelforge/evaluation/` when it measures or
    validates a kernel, or under `src/kernelforge/utils/` when it is a

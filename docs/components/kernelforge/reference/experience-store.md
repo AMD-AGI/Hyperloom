@@ -1,10 +1,11 @@
 ---
 myst:
   html_meta:
-    "description": "Configure KernelForge experience storage for durable local files or the remote KB Store."
+    "description": "Configure KernelForge experience storage with local files or the remote KB Store. Covers KNOWLEDGE_STORE_MODE, KB_STORE_URL, and local directory layout."
+    "keywords": "KernelForge, experience store, knowledge store, KB Store, KNOWLEDGE_STORE_MODE, KB_STORE_URL, KB_STORE_TOKEN, KNOWLEDGE_LOCAL_ROOT, forge-loop"
 ---
 
-# Knowledge stores
+# KernelForge knowledge stores
 
 KernelForge persists forge-loop experience pages and `optimizes` links through
 one local/remote store contract. This store is separate from the packaged
@@ -15,6 +16,8 @@ location and is never copied into the experience store.
 authors from scratch and writes only its own output directory.
 
 ## Environment contract
+
+The following environment variables control where KernelForge stores and retrieves experience data.
 
 | Variable | Default | Meaning |
 |:--|:--|:--|

@@ -5,7 +5,7 @@ myst:
     "keywords": "KernelForge, architecture, forge-loop, kernel backends, Composable Kernel, Triton, HIP, hipBLASLt, FlyDSL, AITER, fusion, knowledge base"
 ---
 
-# Architecture
+# KernelForge architecture
 
 KernelForge is organized around one **iteration loop** per kernel. A campaign
 (`kernelforge forge-loop`) owns a git workspace, the kernel it optimizes and
@@ -16,6 +16,8 @@ inside that workspace; the loop, not the agent, owns the measurements that
 decide whether a change survives.
 
 ## Loop components
+
+The following table describes each component in a forge-loop campaign.
 
 | Component | Role |
 |:----------|:-----|
@@ -40,12 +42,12 @@ the kernel the loop is editing.
 | KernelBackend | Backend expertise |
 |:-------|:------------------|
 | `ck` | Composable Kernel C++ templates: tile shapes, pipelines, instance factories |
-| `flydsl` | MLIR-based DSL for MFMA-heavy compute: layouts, warp shapes |
+| `flydsl` | MLIR-based DSL for matrix-fused multiply-accumulate (MFMA)-heavy compute: layouts, warp shapes |
 | `triton` | Triton JIT kernels: block sizes, warps, stages, autotuning |
 | `gluon` | Gluon, Triton's low-level dialect: explicit layouts, hand-authored software pipeline, register budget, MFMA intrinsics |
 | `aiter` | Pre-built AITER operators: dispatch, JIT integration, baselines |
-| `hip` | Raw HIP C++ and HipKittens: MFMA intrinsics, AGPR management, register pinning |
-| `hipblaslt` | Dense GEMM via hipBLASLt: TensileLite solutions, FP8, fused epilogues |
+| `hip` | Raw HIP C++ and HipKittens: MFMA intrinsics, AGPR (accumulator general-purpose register) management, register pinning |
+| `hipblaslt` | Dense GEMM using hipBLASLt: TensileLite solutions, FP8, fused epilogues |
 | `fusion` | Decode-path kernel fusion for sglang and vLLM: CUDA-graph-safe Triton kernels |
 | `ave` | [AveLang](https://github.com/causalflow-ai/avelang) GPU kernels: register tiling, LDS layouts, memory access and synchronization |
 
@@ -59,7 +61,7 @@ measurement surface, and the loop protects it: an implementer edit or shell
 write that touches it is refused while the session can still be saved.
 
 The kernel sources are the opposite: the anchor named by `--kernel` and any
-tracked implementation file outside the protected surface may be edited. What
+tracked implementation file outside the protected surface can be edited. What
 the agent cannot do is change how it is graded.
 
 See the {doc}`Optimization loop </components/kernelforge/conceptual/optimization-loop>` for the gates

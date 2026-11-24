@@ -1,4 +1,4 @@
-# Forge-loop long-horizon state
+# KernelForge long-horizon state
 
 Forge-loop stores durable control state under
 `<workspace>/forge_experiments/`. Files are the source of truth; prompts contain

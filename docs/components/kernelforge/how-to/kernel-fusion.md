@@ -1,11 +1,11 @@
 ---
 myst:
   html_meta:
-    "description": "Fuse launch-bound decode chains in sglang or vLLM with kernelforge forge-fuse, from trace diagnosis through the serving smoke."
+    "description": "Learn to fuse launch-bound decode chains in sglang or vLLM using KernelForge forge-fuse: trace diagnosis, kernel selection, authoring, and serving smoke validation."
     "keywords": "KernelForge, kernel fusion, forge-fuse, decode, launch-bound, sglang, vLLM, CUDA graph, Triton, ROCm"
 ---
 
-# Fuse a launch-bound decode path
+# Fuse a launch-bound decode path in KernelForge
 
 `kernelforge forge-fuse` attacks a different bottleneck from the rest of
 KernelForge. The other kernel backends make one kernel faster. Fusion assumes the
@@ -21,7 +21,7 @@ already amortized the launches you are trying to count and the tail vanishes
 from the trace.
 
 The diagnosis reports `launch_bound_share`, the fraction of GPU-busy time spent
-outside GEMM, attention and MoE. Below 0.10 the workload is compute dominated
+outside GEMM, attention, and MoE. Below 0.10 the workload is compute dominated
 and no decode fusion will pay. The predicted end-to-end gain discounts that
 share for what CUDA-graph replay already recovers; below 3% an authoring
 campaign is not worth its time.
@@ -30,6 +30,8 @@ Both numbers rank candidates rather than veto them. A modest share with one
 clearly fusible chain beats a large share with nothing fusible in it.
 
 ## Running it
+
+Use the following command to run forge-fuse on a captured trace:
 
 ```bash
 kernelforge forge-fuse \
@@ -91,7 +93,7 @@ returning nothing.
 ## Giving it the whole repository
 
 Everything above assumes one implementation file: the run resolves the model's
-source, embeds it in the discovery prompt, and the author may edit that file
+source, embeds it in the discovery prompt, and the author can edit that file
 plus the fused module. When the interesting chain is not in that file,
 `--repo-scope` removes the assumption:
 
@@ -115,6 +117,8 @@ it only applies to `--discover llm` and `--discover anchored`; pattern
 discovery has no agent to give a repository to.
 
 ## What happens
+
+The following steps describe the forge-fuse pipeline from diagnosis to export.
 
 1. **Diagnose** the trace into a launch-bound share and a predicted gain.
 2. **Discover** which chain to fuse: by matching the pattern library
@@ -184,8 +188,10 @@ against the fused arm whenever eager is timed first.
 
 ## Output
 
+The following table describes the artifacts that forge-fuse writes to the output directory.
+
 | Artifact | What it holds |
-|:--|:--|
+|---|---|
 | `fusion_manifest.json` | The verdict, diagnosis, recipe, validation and artifacts |
 | `fusion_experience.md` | What each attempted recipe taught, carried into the next |
 | `driver_<pattern>.py` | The generated driver the loop scored |
@@ -203,12 +209,12 @@ default block size and would otherwise fail for a reason that has nothing to do
 with the kernel. The gate acts on the stage the smoke stopped at, not on the
 wording of its message: only an actual GPU fault (or a decode that hangs) is
 evidence against the kernel and reverts the KEEP. A boot that ran out of memory,
-a rejected config or a probe that could not reach a live server leaves the KEEP
+a rejected config, or a probe that could not reach a live server leaves the KEEP
 and its patch in place for e2e integrate to judge, and the run still exits zero
 so the caller does not read a deferral as a failure.
 
 The manifest is the stable machine-readable output; `verdict` is one of
-`candidate`, `no_opportunity`, `llm_unavailable` or `anchor_resolved`, and exit
+`candidate`, `no_opportunity`, `llm_unavailable`, or `anchor_resolved`, and exit
 code 3 means the run never reached the model. The last two both mean the run has
 no opinion about the kernel rather than a negative one: `llm_unavailable` because
 the model was never reached, `anchor_resolved` because a `--fuse-kernel --dry-run`

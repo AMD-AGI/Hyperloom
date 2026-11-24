@@ -1,11 +1,11 @@
 ---
 myst:
   html_meta:
-    "description": "How to debug KernelForge task preparation: the audit trail forge-loop writes for every prep attempt, what each artifact proves, and the budget knobs that decide whether preparation gets a fair chance."
+    "description": "Learn to debug KernelForge task preparation failures by reading the audit trail, understanding preflight artifacts, and adjusting the preparation budget knobs."
     "keywords": "KernelForge, task preparation, forge-loop, prepare-task, driver contract, preflight, audit trail, FORGE_PREPARE_MIN_RETRY, debugging"
 ---
 
-# Debug task preparation
+# Debug task preparation in KernelForge
 
 Before a campaign starts, `forge-loop` checks the driver against the driver
 contract it enforces at run time. If it does not conform, a
@@ -72,7 +72,9 @@ deadline rather than by these knobs. A retry that would start with less than
 budget for nothing, and the failure message names the deadline as the lever.
 The first attempt always runs, however little time is left.
 
-## Other knobs
+## Additional preflight variables
+
+The following variables control timeouts for individual preflight stages and driver isolation behavior.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -90,7 +92,7 @@ preparation stages its directory transactionally and publishes the result back,
 so a failed attempt cannot leak edits outside the workspace.
 
 Machine-generated caches next to the driver (`__pycache__`, `flydsl_cache`,
-`jit_cache`, `build`) are excluded from that transaction. They must be: the
+`jit_cache`, and `build`) are excluded from that transaction. They must be: the
 driver writes to its JIT cache every time it compiles a kernel, and treating
 that as transaction state makes an otherwise-successful preparation fail with
 `external artifact directory changed outside the staging transaction`. Add any

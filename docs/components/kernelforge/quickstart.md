@@ -1,15 +1,24 @@
-# Quick Start Guide
+---
+myst:
+  html_meta:
+    "description": "Get started with KernelForge: install, configure, and run your first kernel optimization campaign on AMD Instinct hardware with the forge-loop command."
+    "keywords": "KernelForge, quickstart, forge-loop, GPU kernel, kernel optimization, ROCm, AMD Instinct, gfx950, Triton, campaign, install"
+---
+
+# KernelForge quickstart
 
 This guide walks through a complete kernel development workflow — from installation to a fully optimized kernel with experiment history and extracted lessons.
 
 ## Prerequisites
+
+Before installing KernelForge, verify the following requirements are met.
 
 | Requirement | Version | Check |
 |------------|---------|-------|
 | Python | ≥ 3.10 | `python3 --version` |
 | ROCm | ≥ 6.0 | `rocminfo \| head -5` |
 | rocprofv3 | (included with ROCm) | `rocprofv3 --version` |
-| GPU | MI300X / MI355X | `rocm-smi --showproductname` |
+| GPU | AMD Instinct™ MI300X or MI355X | `rocm-smi --showproductname` |
 | Claude auth | API key, subscription token, **or** Claude Code Max | `echo $ANTHROPIC_API_KEY` / `echo $CLAUDE_CODE_OAUTH_TOKEN` **or** `claude --version` |
 | Codex auth (instead of Claude) | OpenAI-side key and endpoint | `echo $OPENAI_API_KEY` / `echo $OPENAI_BASE_URL` |
 
@@ -67,7 +76,7 @@ The CLI defaults the endpoint here too, so this one variable is the whole
 configuration. Leave `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` unset — the
 CLI resolves either of them first, and the run would bill to the key instead.
 
-**API-credit billing.** Just the key; the CLI defaults to `api.anthropic.com`, so
+**API-credit billing.** Only the key is required; the CLI defaults to `api.anthropic.com`, so
 `ANTHROPIC_BASE_URL` is optional:
 
 ```bash
@@ -107,7 +116,7 @@ export ANTHROPIC_CUSTOM_HEADERS='Ocp-Apim-Subscription-Key: ${MY_SUBSCRIPTION_KE
 One header per line as `Name: value`, or a JSON object, with `${VAR}` expanded from
 the environment so the secret lives in one place. `OPENAI_CUSTOM_HEADERS` is the
 equivalent for the OpenAI line; both forms work on either. Comma-separated pairs on
-a single line are *not* split — a header value may legitimately contain commas — so
+a single line are *not* split — a header value can legitimately contain commas — so
 `user: alice, x-foo: bar` becomes one header whose value is `alice, x-foo: bar`.
 
 Or create a `.env` file (see `.env.example`).
@@ -163,7 +172,7 @@ Each iteration:
 4. The benchmark scores the candidate against the pristine baseline over three independent measurements
 5. A measured improvement is git-committed and becomes the new best; every other candidate is reverted
 
-The injected backend prompt enforces the development loop:
+The injected backend prompt enforces the following development loop, where SNR (signal-to-noise ratio) is the correctness gate and PMC (performance monitoring counter) is the hardware-counter analysis step:
 ```
 READ → PREDICT → BUILD → TEST (SNR gate) → BENCH → PMC → ANALYZE → DECIDE → LOG
 ```
@@ -256,7 +265,7 @@ kernelforge forge-loop \
 kernelforge forge-loop --workspace /work/aiter-amd --resume
 ```
 
-An operator that spans several files, or lives in an existing checkout such as AITER, is the same command plus the paths that seed orientation and profiling — `--kernel` stays the anchor, and the agent may edit any tracked implementation file outside the protected measurement surface:
+An operator that spans several files, or lives in an existing checkout such as AITER, is the same command plus the paths that seed orientation and profiling — `--kernel` stays the anchor, and the agent can edit any tracked implementation file outside the protected measurement surface:
 
 ```bash
 kernelforge forge-loop \
@@ -287,7 +296,7 @@ supervisor after three consecutive iterations without a new best. Interventions
 remain available for the full time budget. The supervisor adds API
 calls only while stuck; bench remains the final gate on every accepted edit.
 
-## Example Tasks
+## Example tasks
 
 Paths below are relative to `src/kernelforge/examples/` in a checkout. From
 an installed wheel, `python -c "from kernelforge.config.resources import resource_path;
@@ -309,7 +318,7 @@ written to.
 
 The two rewrite tasks use the other command, `kernelforge forge-rewrite-by-flydsl`: it ports a source kernel to FlyDSL correctness-first, then hands the correct FlyDSL kernel to the same optimization loop and reports source vs. FlyDSL speedup.
 
-## Writing Your Own Task
+## Writing your own task
 
 A task is a directory of files plus a launch script:
 
@@ -335,6 +344,8 @@ The full contract — every mode, every line, and the rules for multi-rank and s
 
 ## Troubleshooting
 
+The following sections address common issues when running KernelForge.
+
 ### Agent doesn't find kernel source files
 
 Set the workspace to the repo root that owns the kernel, and give `--kernel` and `--driver` paths inside it:
@@ -346,7 +357,7 @@ kernelforge forge-loop --workspace /work/aiter-amd \
 
 ### Build fails with "stale .cuda.o"
 
-This is a known CK pitfall (header dependencies not tracked). The build tool automatically cleans stale objects, but if you're building manually:
+This is a known Composable Kernel (CK) pitfall (header dependencies not tracked). The build tool automatically cleans stale objects, but if you're building manually:
 ```bash
 rm -f aiter/jit/build/module_*/build/*.cuda.o
 ```
@@ -375,7 +386,9 @@ touch /work/aiter-amd/.stop
 
 The loop checks for that file at the next iteration boundary, then finalizes normally — the best kept commit, the result JSON, and the lessons are all written. Remove the file to resume with `--resume`.
 
-## Next Steps
+## Next steps
+
+These resources cover additional KernelForge features and task templates.
 
 - Read the shipped knowledge base under `src/kernelforge/knowledge/local_wiki/resources/` to understand what the agent knows
 - Browse the [runnable examples](https://github.com/AMD-AGI/Hyperloom/tree/main/src/kernelforge/examples) for task templates and the full driver contract

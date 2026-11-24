@@ -1,12 +1,19 @@
+---
+myst:
+  html_meta:
+    "description": "KernelForge measured campaign results: sparse attention, MoE mxfp4 inference, and Sage attention kernels optimized on AMD Instinct MI355X GPUs."
+    "keywords": "KernelForge, measured results, benchmark, sparse attention, MoE, mxfp4, Sage attention, forge-loop, AMD Instinct, MI355X, Composable Kernel, CK, FlyDSL, Triton, TFLOPS"
+---
+
 <!--
 SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 SPDX-License-Identifier: MIT
 -->
 
-# Measured results
+# KernelForge measured results
 
 Campaign results from forge's standalone period, kept because they are
-measurements: each number came off an MI355X and is what the loop's own
+measurements: each number came off an AMD Instinct™ MI355X GPU and is what the loop's own
 KEEP/REVERT gate accepted. They are a record of what forge achieved on these
 kernels, not a promise about yours.
 
@@ -17,7 +24,7 @@ shape.
 
 ## Sparse linear attention -- CK backend
 
-Full forward + backward attention kernel, written from scratch to beat the
+Full forward + backward attention kernel written in Composable Kernel (CK) from scratch, beating the
 published Triton autotuned baseline. `B=1 H=24 S=65536 D=128`, sparsity 0.90.
 
 | Config | Stage | Triton (published) | CK (forge) | Speedup |
@@ -29,10 +36,10 @@ published Triton autotuned baseline. `B=1 H=24 S=65536 D=128`, sparsity 0.90.
 | C (`BLKQ=128`) | backward | 46.71 ms | 33.84 ms | 1.38x |
 | C (`BLKQ=128`) | **total** | 58.12 ms | 42.68 ms | **1.33x** |
 
-The backward kernel took six optimization phases -- split pipeline, constexpr
-masks, bf16 delta preprocessing, occupancy-2 for both the dkdv and dq
-sub-kernels -- each one validated against hardware counters. VGPR count went
-296 -> 238 with zero spills, which is what moved occupancy from 1 to 2.
+The backward kernel took six optimization phases — split pipeline, constexpr
+masks, bf16 delta preprocessing, and occupancy-2 for both the dkdv and dq
+sub-kernels — each one validated against hardware counters. Vector general-purpose register (VGPR) count went
+296 → 238 with zero spills, which is what moved occupancy from 1 to 2.
 
 ## Kimi-K2 MoE mxfp4 inference
 
@@ -51,15 +58,15 @@ prefill shape. `TP=4 E=384 topk=8 hidden=7168`.
 
 Absolute savings scale with sequence length: 414 us per layer at 8K tokens,
 which comes straight off time-to-first-token for long prompts. Steady state
-above 4096 tokens is ~1.22x; the remaining gap is the MFMA scheduler.
+above 4096 tokens is ~1.22x; the remaining gap is the Matrix Fused Multiply-Add (MFMA) scheduler.
 
 ## Sage attention sparse forward
 
 A fully autonomous campaign -- agents ran overnight on a SLURM cluster with no
 human in the loop.
 
-- The Triton campaign reached **1.15x** (1169 -> 1363 TFLOPS).
-- Hardware-counter evidence put the ceiling at HBM bandwidth and named CK int8
+- The Triton campaign reached **1.15x** (1169 → 1363 TFLOPS).
+- Hardware-counter evidence put the ceiling at High Bandwidth Memory (HBM) bandwidth and named CK int8
   as the path past it.
 - The follow-on CK campaign started from a complete int8 integration package
   (7 of 7 pieces).

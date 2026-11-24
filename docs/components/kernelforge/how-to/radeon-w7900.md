@@ -10,9 +10,9 @@ SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 SPDX-License-Identifier: MIT
 -->
 
-# Radeon PRO W7900 (gfx1100)
+# KernelForge on Radeon PRO W7900 (gfx1100)
 
-KernelForge was built on AMD Instinct (CDNA) GPUs. A Radeon PRO W7900 is an RDNA 3 board, ISA gfx1100, and
+KernelForge was built on AMD Instinct™ (CDNA) GPUs. A Radeon PRO W7900 is an RDNA 3 board, ISA gfx1100, and
 `forge-loop` runs on it with the differences below. Everything else — the driver contract, the SNR gate, the
 benchmark and the keep-or-revert decision — is architecture-neutral and unchanged. Everything here applies to
 the **W7900D** as well: the same gfx1100 silicon at a lower boost clock (2156 MHz against 2500 MHz), registered
@@ -20,8 +20,10 @@ as its own board (`w7900d`) with its own peaks.
 
 ## What differs from an Instinct run
 
-| | Instinct (gfx942 / gfx950) | W7900 (gfx1100) |
-|:--|:--|:--|
+The following table summarizes the differences between running forge-loop on AMD Instinct and W7900 hardware.
+
+| | AMD Instinct (gfx942 / gfx950) | W7900 (gfx1100) |
+|---|---|---|
 | Kernel backends | all ten | `triton`, `hip`, `hipblaslt`, `ck` |
 | Hardware knowledge the agents read | `hardware/` (MI350) | `hardware/rdna3/` |
 | Matrix instructions | MFMA, AGPR accumulators | WMMA, accumulators in VGPRs |
@@ -29,11 +31,11 @@ as its own board (`w7900d`) with its own peaks.
 | Profiling on long runs | profiled Analysis Agent; implementer self-profiles with rocprof-compute | static-only Analysis Agent (rocprof-compute does not support gfx1100); implementer self-profiles with rocprofv3 |
 | Experience-KB records | `mi300x` / `mi355x` | `w7900` (W7900 and W7900D) |
 
-- A fresh campaign that names `aiter`, `flydsl`, `assembly`, `gluon`, `fusion` or `ave` on gfx1100 is refused
+- A fresh campaign that names `aiter`, `flydsl`, `assembly`, `gluon`, `fusion`, or `ave` on gfx1100 is refused
   before any GPU work, with the list of backends that do build for it. The backend is also inferred from the
   kernel source when `--kernel-backend` is omitted, so the same refusal applies to an inferred one.
 - Every agent prompt on gfx1100 carries a short architecture note at the head of its knowledge block. It maps
-  the Instinct vocabulary of the backend guidance (MFMA, AGPR, wave64, FP8, HBM) onto RDNA 3 and is inlined even
+  the AMD Instinct vocabulary of the backend guidance (MFMA, AGPR, wave64, FP8, HBM) onto RDNA 3 and is inlined even
   when the knowledge maps themselves are deferred to pointers.
 - The per-candidate register check disassembles for gfx1100 and reports VGPR and LDS against RDNA 3's occupancy
   steps instead of CDNA's.
@@ -57,7 +59,7 @@ GPU_TARGET=gfx1100 src/kernelforge/examples/triton-softmax-forge-loop/run_exampl
 
 ## Measure on a steady clock
 
-A workstation board raises and lowers its clocks with load and temperature far more than an Instinct part,
+A workstation board raises and lowers its clocks with load and temperature far more than an AMD Instinct part,
 and the keep decision asks a candidate to beat the incumbent by as little as 0.1%. Navi 31 does not support
 performance determinism (`rocm-smi --setperfdeterminism` fails), so the closest setting is to hold the
 performance level high for the length of the campaign:
@@ -77,6 +79,8 @@ that run for hundreds of microseconds, and budget at least two hours: the 30-min
 per-round admission leave a 1.5-hour campaign room for about one round.
 
 ## Not covered on gfx1100
+
+The following features and tools are not supported on gfx1100.
 
 - `forge-fuse`, `kernel-rewrite-controller` and `gemm-tune` drive vLLM, SGLang or AITER, none of which this
   change validates on gfx1100.

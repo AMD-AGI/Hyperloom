@@ -1,7 +1,8 @@
 ---
 myst:
   html_meta:
-    "description": "Optimize compiler-emitted AMDGPU assembly through the original kernel launcher."
+    "description": "Learn how to run KernelForge assembly campaigns to optimize compiler-emitted AMDGPU instructions using FlyDSL, Triton, Gluon, or standalone HIP kernels."
+    "keywords": "KernelForge, assembly campaign, AMDGPU assembly, FlyDSL, Triton, Gluon, HIP, kernel optimization, ROCm, numerical validation, HSACO, forge-loop"
 ---
 
 <!--
@@ -9,7 +10,7 @@ SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 SPDX-License-Identifier: MIT
 -->
 
-# Assembly campaigns
+# KernelForge assembly campaigns
 
 Use `forge-loop --kernel-backend assembly` to optimize the current implementation's
 compiler-emitted instructions. There is no LLM PORT phase or separate rewrite
@@ -54,7 +55,7 @@ adapter contract.
 | CK / AITER / hipBLASLt / fusion | Select an actual kernel that meets one of these contracts. This does not automatically extract kernels from arbitrary linked libraries or Python extensions. |
 
 That all these implementations eventually execute machine code does not make
-their packaging, specialization, ABI or dispatch interchangeable. Only add a
+their packaging, specialization, ABI, or dispatch interchangeable. Only add a
 backend adapter when it can export and replace the actual executed kernel.
 
 ## Programmatic preparation
@@ -94,7 +95,7 @@ launched; source execution would incorrectly double atomic accumulations.
 Triton's launcher retains constexpr handling, argument ordering, launch metadata
 and current-stream forwarding. Its original JIT-cache object is left intact.
 
-The GPU validation environment uses Triton 3.7.0, ROCm 7.2 and MI355X. Other
+The GPU validation environment uses Triton 3.7.0, ROCm 7.2, and AMD Instinct™ MI355X. Other
 compiler versions must pass the same preparation gates before a campaign runs.
 
 The manifest binds the Triton version and compilation hash, including target,
@@ -182,7 +183,7 @@ numerical_validation:
       error_floor: 0.0
 ```
 
-List every required input/seed, output and execution mode as a distinct case.
+List every required input/seed, output, and execution mode as a distinct case.
 Include graph replay when the serving path uses it. Existing checks for indices,
 padding, input preservation, changed inputs and supported streams still belong
 in the authoritative correctness suite. The framework checks declared coverage;
@@ -258,7 +259,7 @@ without a handwritten seed or a performance claim.
 
 The [Triton vector-add example](../../../examples/triton2asm-vector-add/README.md)
 uses a normal bracket launch. `test_assembly_triton_gpu.py` exercises Triton,
-Gluon and a standalone HIP build through the same preparation gates, then replays
+Gluon, and a standalone HIP build through the same preparation gates, then replays
 each patch in a fresh checkout. These tests require their respective compilers.
 
 ```bash
@@ -267,7 +268,7 @@ pytest -q src/kernelforge/tests/kernel_backends/assembly/test_assembly_campaign_
   src/kernelforge/tests/kernel_backends/assembly/test_assembly_triton_gpu.py
 ```
 
-These optional tests require ROCm PyTorch, FlyDSL and a compatible GPU. They verify
+These optional tests require PyTorch for ROCm, FlyDSL, and a compatible GPU. They verify
 build-failure and wrong-result rejection and replay the complete patch in a clean
 checkout. A skip is not GPU validation. CPU tests cover capture provenance,
 specialization refusal, frozen files, rollback, result selection and resume.
