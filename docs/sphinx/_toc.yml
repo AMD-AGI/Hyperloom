@@ -35,23 +35,20 @@ subtrees:
         title: AgentKernelArena
       - file: components/kernelforge/what-is-kernelforge.md
         title: KernelForge
-        subtrees:
-        - caption: Install
+        entries:
+        - file: components/kernelforge/quickstart.md
+          title: Quickstart
           entries:
-          - file: components/kernelforge/quickstart.md
-            title: Quickstart
           - file: components/kernelforge/install/quickstart.md
             title: Install
-        - caption: Conceptual
+        - file: components/kernelforge/conceptual/architecture.md
+          title: Architecture
           entries:
-          - file: components/kernelforge/conceptual/architecture.md
-            title: Architecture
           - file: components/kernelforge/conceptual/optimization-loop.md
             title: Optimization loop
-        - caption: How to
+        - file: components/kernelforge/how-to/run-a-campaign.md
+          title: Run a campaign
           entries:
-          - file: components/kernelforge/how-to/run-a-campaign.md
-            title: Run a campaign
           - file: components/kernelforge/how-to/autonomous-loop.md
             title: Autonomous overnight loop
           - file: components/kernelforge/how-to/kernel-fusion.md
@@ -64,10 +61,9 @@ subtrees:
             title: Run on a Radeon PRO W7900
           - file: components/kernelforge/how-to/extending.md
             title: Add a kernel backend, tool, or knowledge
-        - caption: Reference
+        - file: components/kernelforge/reference/cli.md
+          title: CLI reference
           entries:
-          - file: components/kernelforge/reference/cli.md
-            title: CLI reference
           - file: components/kernelforge/reference/experience-store.md
             title: Experience store
           - file: components/kernelforge/reference/deployment-modes.md
