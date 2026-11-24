@@ -18,7 +18,6 @@ file that ran and carries the base's arguments, so a reader can tell the build a
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Collection, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -42,12 +41,6 @@ __all__ = [
 
 SERVER_OPTIONS_FILE = "server_options.json"
 _SCHEMA = 1
-#: How a help line names the environment variable the server reads the option from when its arguments do not
-#: give it.
-_ENV = re.compile(r"\(env: (\w+)\)")
-#: How the long spelling of a switch's negation begins. The help lists a switch and its negation as one entry,
-#: so the spellings of such an entry do not all mean the same.
-_NEGATION = "--no-"
 
 
 @dataclass(frozen=True)
@@ -62,13 +55,6 @@ class ServerOption:
     def name(self) -> str:
         """The longest spelling, the one a review or a message cites."""
         return max(self.spellings, key=len)
-
-    @property
-    def env(self) -> str | None:
-        """The environment variable the server reads the option from, as its help line names it; ``None`` when it
-        names none."""
-        named = _ENV.search(self.help)
-        return named.group(1) if named else None
 
 
 @dataclass(frozen=True)
@@ -88,24 +74,6 @@ class OptionInventory:
     def option(self, spelling: str) -> ServerOption | None:
         """The option ``spelling`` is a spelling of; ``None`` when the server lists none."""
         return next((option for option in self.options if spelling in option.spellings), None)
-
-    def spelled_as(self, args: str, like: str) -> str:
-        """``args`` with each option ``like`` spells another way spelled as ``like`` spells it, so that the two
-        compare by what they set; ``args`` itself when it has none. A switch listed with its negation keeps its
-        spelling, and so does an option ``like`` spells in two ways, which has no one spelling to take."""
-        spelled = _spelled(like)
-        tokens = _tokens(args)
-        respelled = [self._spelled_among(token, spelled) for token in tokens]
-        return " ".join(respelled) if respelled != tokens else args
-
-    def _spelled_among(self, token: str, spelled: frozenset[str]) -> str:
-        """``token`` under the one spelling in ``spelled`` of the option it spells another way; else ``token``."""
-        flag, equals, value = token.partition("=")
-        option = self.option(flag)
-        if option is None or flag in spelled or any(name.startswith(_NEGATION) for name in option.spellings):
-            return token
-        theirs = [name for name in option.spellings if name in spelled]
-        return f"{theirs[0]}{equals}{value}" if len(theirs) == 1 else token
 
 
 def _tokens(args: str) -> list[str]:

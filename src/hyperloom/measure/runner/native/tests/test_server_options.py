@@ -13,7 +13,6 @@ import pytest
 from hyperloom.measure.runner.native.server_options import (
     SERVER_OPTIONS_FILE,
     OptionInventory,
-    ServerOption,
     build_inventory,
     inventory_path,
     read_inventory,
@@ -99,39 +98,3 @@ def test_an_inventory_of_another_schema_is_refused(tmp_path):
 
     with pytest.raises(ValueError, match="schema"):
         read_inventory(path)
-
-
-_SPELLINGS = (
-    ("-bs", "--backend-sampling"),
-    ("-ctxcp", "--ctx-checkpoints", "--swa-checkpoints"),
-    ("--jinja", "--no-jinja"),
-    ("-kvo", "--kv-offload", "-nkvo", "--no-kv-offload"),
-)
-_ALIASES = OptionInventory("llama-server", "0" * 64, "", tuple(ServerOption(entry, "", False) for entry in _SPELLINGS))
-
-
-@pytest.mark.parametrize(
-    ("args", "like", "spelled"),
-    [
-        ("-bs", "--jinja --backend-sampling", "--backend-sampling"),
-        ("--cache-ram 0 -ctxcp 0", "--ctx-checkpoints 8 -t 4", "--cache-ram 0 --ctx-checkpoints 0"),
-        ("-ctxcp=0", "--ctx-checkpoints=8", "--ctx-checkpoints=0"),
-    ],
-    ids=["switch", "valued", "inline-value"],
-)
-def test_an_option_another_launch_spells_otherwise_is_spelled_as_that_launch_spells_it(args, like, spelled):
-    assert _ALIASES.spelled_as(args, like) == spelled
-
-
-@pytest.mark.parametrize(
-    ("args", "like"),
-    [
-        ("-bs -ctxcp 0 --keep 8", "--cache-ram 0"),
-        ("-ctxcp 0", "-ctxcp 8 --ctx-checkpoints 4"),
-        ("--swa-checkpoints 0", "-ctxcp 8 --ctx-checkpoints 4"),
-        ("-nkvo", "--kv-offload"),
-    ],
-    ids=["not-set-there", "same-spelling", "two-spellings-there", "short-negation"],
-)
-def test_arguments_keep_a_spelling_the_inventory_cannot_match_to_one_of_another_launch(args, like):
-    assert _ALIASES.spelled_as(args, like) == args
