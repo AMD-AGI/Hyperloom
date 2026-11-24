@@ -139,9 +139,7 @@ class AnalysisEvidenceMixin:
             )
             for case_id in scored_case_ids or sorted(self._baseline_case_times)
         )
-        evidence_refs = self._evidence_refs(
-            workspace, source_map_path, cumulative_diff.path, canonical_commit
-        )
+        evidence_refs = self._evidence_refs(workspace, source_map_path, cumulative_diff.path, canonical_commit)
         knowledge_index = self._knowledge_index()
 
         return self._with_evidence_standing(

@@ -109,9 +109,7 @@ def _relay_with_one_runnable_profile(agent, supervisor) -> SearchActorPool:
 
 
 @pytest.mark.parametrize("relay", [False, True], ids=["no relay", "relay with one runnable profile"])
-def test_the_loop_turns_after_one_round_without_a_new_best_and_is_reviewed_after_two(
-    tmp_path, monkeypatch, relay
-):
+def test_the_loop_turns_after_one_round_without_a_new_best_and_is_reviewed_after_two(tmp_path, monkeypatch, relay):
     """The stall lasts until a new best: every session in it is sent to a different mechanism, the third under a ruling.
 
     The review comes at the same session whether the loop schedules the Supervisor itself or reaches it through a

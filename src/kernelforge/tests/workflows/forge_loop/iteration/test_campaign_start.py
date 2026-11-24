@@ -11,7 +11,6 @@ import asyncio
 import json
 import subprocess
 from dataclasses import replace
-from types import SimpleNamespace
 
 import pytest
 
@@ -23,7 +22,6 @@ from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop
 from kernelforge.workflows.forge_loop.search.supervisor import SupervisionMonitor
 from kernelforge.workflows.forge_loop.iteration import campaign_runtime
 from kernelforge.workflows.forge_loop.iteration import best_publication
-from kernelforge.workflows.forge_loop.roles.supervisor import latest_supervisor_ruling_path
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
     _AMPLE_BUDGET_SEC,
     _make_loop,

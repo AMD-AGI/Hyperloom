@@ -8,10 +8,8 @@ from __future__ import annotations
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
 
 import asyncio
-import json
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -158,5 +156,3 @@ def test_empty_supervisor_expires_prior_ruling_without_resetting_stall(
     assert stale_ruling not in histories[1]
     assert loop._supervisor_ruling == ""
     assert not locked_run.latest_supervisor_ruling_path(str(workspace)).exists()
-
-

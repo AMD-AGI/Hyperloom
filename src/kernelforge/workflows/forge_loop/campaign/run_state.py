@@ -54,6 +54,7 @@ _TERMINAL_SESSION_STATUSES = {
     SESSION_INTERRUPTED,
 }
 
+
 @dataclass
 class BestRecord:
     """The current best kept iteration (the loop's KEEP anchor)."""

@@ -13,7 +13,6 @@ import random
 import statistics
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -60,7 +59,6 @@ from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
     _unused_supervisor,
 )
 from kernelforge.workflows.forge_loop.iteration import iteration_types
-from kernelforge.workflows.forge_loop.iteration import scoring_runtime
 from kernelforge.tests.conftest import patch_iteration_name
 
 # A modest speedup, well inside anything the loop has ever argued about.

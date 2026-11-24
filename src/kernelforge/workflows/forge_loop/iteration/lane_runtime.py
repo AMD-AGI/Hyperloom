@@ -282,7 +282,9 @@ class LaneRuntimeMixin:
         if not focus:
             return direction
         others = "\n".join(
-            f"- lane {other.lane_id}: {other.focus}" for other in assignments if other.lane_id != seat.assignment.lane_id
+            f"- lane {other.lane_id}: {other.focus}"
+            for other in assignments
+            if other.lane_id != seat.assignment.lane_id
         )
         return (
             f"{direction}\n\n"

@@ -566,5 +566,3 @@ def test_supervisor_banner_names_the_schedule_that_governs_it(tmp_path):
 
     assert "relay blockage" in loop._supervisor_banner()
     assert "stalls" not in loop._supervisor_banner()
-
-

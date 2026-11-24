@@ -587,9 +587,7 @@ def _agent_session(inputs: _RunInputs, opened: _OpenedCampaign) -> _AgentSession
     profile_timeout_sec = _profile_timeout_override(
         os.environ.get("FORGE_PROFILE_TIMEOUT_SEC"), request.roles.profile_timeout_sec
     )
-    config = _session_config(
-        campaign, workspace, inputs.knowledge_config, opened.agent_runtime_overrides
-    )
+    config = _session_config(campaign, workspace, inputs.knowledge_config, opened.agent_runtime_overrides)
     try:
         session_relay = resolve_session_relay(campaign.agent_relay, config)
     except ValueError as error:

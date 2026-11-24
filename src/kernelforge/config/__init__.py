@@ -11,7 +11,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
 
 from hyperloom_common.llm import llm_config
 from hyperloom_common.env import env_bool, env_flag
