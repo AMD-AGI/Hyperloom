@@ -58,10 +58,11 @@ silently ignored, so drop it.
 
 ### Required: `session_breakdown.json` drops `ensemble_scores`
 
-The schema stays `v6.1`, but a Framework run row no longer carries
-`ensemble_scores`. Only a run launched with `--proposal-scoring` wrote it, and a
-breakdown that holds it no longer validates against the packaged schema.
-Consumers that read it should stop.
+The schema stays `v6.1`, but neither a specialist round's action row nor a
+Framework run row carries `ensemble_scores` any more. Only a run launched with
+`--proposal-scoring` wrote it. The action row is closed to other properties, so
+a breakdown whose action row holds the key no longer validates against the
+packaged schema. Consumers that read it should stop.
 
 ---
 
