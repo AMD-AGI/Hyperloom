@@ -232,7 +232,7 @@ class OrchestrationContext:
     supervisor_guidance: str = ""
     search_mode: str = "EXPLOIT"
     search_reason_codes: tuple[str, ...] = ()
-    search_objective: str = "IMMEDIATE_CANONICAL_GAIN"
+    search_objective: str = "CANONICAL_GAIN"
     search_mode_residence_remaining: int = 0
     evidence_refs: tuple[EvidenceRef, ...] = ()
     # ``analysis_commit`` remains the canonical commit for compatibility.

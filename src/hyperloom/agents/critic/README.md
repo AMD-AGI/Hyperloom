@@ -11,7 +11,6 @@ reasons over the bundle with the Critic SKILL prompts, writes
 
 | Variable | Purpose |
 |---|---|
-| `WORKSPACE_PATH` | Skill-asset root the runtime resolves prompts against (NOT an artefact root). Hyperloom sets this to `$REPO_ROOT` automatically; defaults to `/workspace` for standalone use. |
 | `CRITIC_SESSION_MEMORY_DIR` | Persistent volume for per-session memory (default `/var/lib/critic-session-memory`). Mount as PVC. |
 
 ## Exit codes
@@ -19,7 +18,7 @@ reasons over the bundle with the Critic SKILL prompts, writes
 | Code | Meaning |
 |---|---|
 | `0` | Logical success. |
-| `2` | Adapter bug; surface to the host so the SKILL can produce `needs_review`. |
+| `2` | The request, the review or session memory failed validation; nothing was marked reviewed. `CriticAgentBackend` raises `BackendError`, the Coordinator records a `backend_error` observation and backs off, and the same proposals are reviewed again on the next turn. Repeated failures record `backend_unhealthy`; an hour of them stops the session with that stop reason. |
 
 The CLI emits a single JSON object on stdout (or to `--out`) for every
 command, so the host can parse the response without regex.
@@ -30,7 +29,7 @@ When developing locally without a Hyperloom session, you can drive the
 same flow by hand:
 
 ```bash
-echo '{"session_id": "local", "raw_prompt": "..."}' > req.json
+echo '{"session_id": "local", "raw_prompt": "...", "context": {"model": "...", "framework": "..."}}' > req.json
 python -m hyperloom.agents.critic.runtime.cli prepare-review --request req.json --out judge.json
 # craft review.json based on judge.json + skill prompts
 python -m hyperloom.agents.critic.runtime.cli commit-review --request req.json --review review.json --out emit.json

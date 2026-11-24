@@ -19,7 +19,8 @@ from kernelforge.workflows.rewrite_controller.controller import ControllerRunErr
     type=click.Path(exists=True, file_okay=False, dir_okay=True, readable=True, path_type=Path),
     help=(
         "Directory containing workload.md, serving-context.md, trace-evidence.md, and repositories.json "
-        '({"repositories": ["<absolute Git top-level>", ...]}, at least one).'
+        '({"repositories": ["<absolute Git top-level>", ...]}, at least one; optionally "served_trees": '
+        '{"<repository>": "<installed package directory>"} for a snapshot of an installed package).'
     ),
 )
 @click.option(

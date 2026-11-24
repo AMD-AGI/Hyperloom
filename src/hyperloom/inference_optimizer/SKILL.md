@@ -863,7 +863,6 @@ node; do not stop for an extra confirmation. After IR-2, smoke-test the
 CLI:
 
 ```bash
-export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 # TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens
 # to ${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha> and pin it
 # to a fixed SHA. Only export it as an operator override to point at a
@@ -1049,6 +1048,11 @@ wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is accepted for compatibility; baseline uses the first value.
 Use `--conc-sweep-concs` to override the synthetic ladder SWEEP measures (`256,128,64,32,16,8,4,2`). Native AgentX uses `HYPERLOOM_AGENTX=1` with the ordinary workload flags, or `--benchmark-config` for an AgentX workload YAML. Hyperloom archives the resolved workload as `benchmark.yaml`; CONC is fixed per session, so start a separate session to measure another concurrency.
 
+Concurrency sweeps apply only to serving workloads. For server-less PyTorch
+workloads (`custom` and `xdit`), SWEEP records `non_serving_workload` and proceeds
+to CLOSE. Optimize the declared forward-pass workload; do not propose request
+concurrency as an optimization for these models.
+
 Native AgentX supports one node and SGLang, vLLM or ATOM; an ATOM session takes its base from InferenceX's ATOM agentic entries. It rejects `--enable-conc-sweep`,
 `--isl`, `--osl`, `--profile-osl`, `--max-model-len`, `--quantize` and
 `--quantize-scheme`. `--reference-script` is its base launch, ahead of the
@@ -1117,8 +1121,7 @@ so it is kept in one place.
 | Var | Purpose | Default |
 |---|---|---|
 | `CRITIC_AGENT_ROOT` | Path to the directory containing `runtime/cli.py`. | in-tree `$REPO_ROOT/src/hyperloom/agents/critic/` |
-| `CRITIC_SESSION_MEMORY_DIR` | Where the runtime persists per-session decisions / reviewed_msg_ids. | `$SESSION_DIR/critic-session-memory` (auto-set by the optimizer; co-located with the Coordinator session and cleaned up alongside it). |
-| `WORKSPACE_PATH` | Skill root the critic-agent runtime resolves prompt assets against. | `$REPO_ROOT` (auto-set). |
+| `CRITIC_SESSION_MEMORY_DIR` | Where the runtime persists per-session reviewed_msg_ids. | `$SESSION_DIR/critic-session-memory` (auto-set by the optimizer; co-located with the Coordinator session and cleaned up alongside it). |
 
 CLI startup checks that `CRITIC_AGENT_ROOT` resolves to a real directory
 with `runtime/cli.py`, then runs `python -m hyperloom.agents.critic.runtime.cli --help`
@@ -1267,8 +1270,7 @@ where a draft/MTP path exists, benchmarked with chat-formatted prompts.
 To override shipped configs without editing them, materialize a per-run asset
 root and `export INFERENCE_OPTIMIZER_ASSET_ROOT="$ASSET_ROOT"` (env var, not a
 CLI flag; `asset_root()` raises `AssetRootNotFound` if the dir is missing).
-`mkdir -p "$ASSET_ROOT/assets/configs"`, `ln -sfn` `actions/` from
-`$REPO_ROOT/src/hyperloom/inference_optimizer/` and `orchestrator/` from
+`mkdir -p "$ASSET_ROOT/assets/configs"`, `ln -sfn` `orchestrator/` from
 `$REPO_ROOT/src/hyperloom/`, then
 copy + edit the relevant `baseline_*.yaml` / `profile_*.yaml`. Reach for this
 only when `_workload_envs.materialize_config_with_envs` defaults don't fit

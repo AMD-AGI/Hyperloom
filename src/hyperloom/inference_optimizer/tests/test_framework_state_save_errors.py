@@ -15,7 +15,7 @@ import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.pending_proposal import PendingProposal
-from hyperloom.orchestrator.phases.framework import _AUTHORED_LANE_MAX_ATTEMPTS
+from hyperloom.orchestrator.phases.framework_reauthor import _AUTHORED_LANE_MAX_ATTEMPTS
 from hyperloom.orchestrator.phases.framework_records import ProgressStamp
 
 from .conftest import make_coordinator
@@ -119,7 +119,7 @@ async def test_a_failed_state_write_is_logged_and_the_step_returns(coord, monkey
     err = OSError("disk full")
     _fail_save_on(coord, monkeypatch, call=call, exc=err)
 
-    with caplog.at_level(logging.DEBUG, logger="hyperloom.orchestrator.phases.framework"):
+    with caplog.at_level(logging.DEBUG, logger="hyperloom.orchestrator.phases"):
         await driver(coord)
 
     assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]

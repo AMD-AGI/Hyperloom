@@ -24,7 +24,7 @@ from hyperloom.sandbox.reaper import ONE_REAP_SEC
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkRequest
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
+from hyperloom_multibranch.contracts.blackboard.records import BranchNode, LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import LineageKind
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -80,19 +80,41 @@ def test_the_toolbox_close_fits_one_sandbox_reap() -> None:
 
 
 def test_the_stop_of_a_gave_up_branch_names_the_counts_the_runtime_kept() -> None:
-    crashed = SpecialistStatus(running=False, crashes=4, lost=0, gave_up=True, judge_failed=False)
+    crashed = SpecialistStatus(running=False, crashes=4, lost=0, gave_up=True, judge_failed=False, crashed_out=True)
+    idle = replace(crashed, crashes=0, crashed_out=False)
 
     assert gave_up_reason(crashed) == "its specialist gave up after 4 crashes"
     assert gave_up_reason(replace(crashed, crashes=3, lost=3)).endswith("3 crashes, 3 of them with a lost heartbeat")
-    assert gave_up_reason(replace(crashed, crashes=0)).endswith("its sessions in a row found nothing to test")
+    assert gave_up_reason(idle).endswith("its sessions in a row found nothing to test")
+    assert gave_up_reason(replace(idle, crashes=1)) == gave_up_reason(idle)
     exhausted = "no_ceiling_above_bar: TP1 has no all-reduce; worth again if the TP grows"
-    assert gave_up_reason(replace(crashed, crashes=0, exhausted=exhausted)) == f"its specialist gave up: {exhausted}"
+    assert gave_up_reason(replace(idle, crashes=1, exhausted=exhausted)) == f"its specialist gave up: {exhausted}"
     finished = replace(crashed, crashes=0, finished="the agent finished its run: deadline")
     assert gave_up_reason(finished) == "the agent finished its run: deadline"
     unready = replace(crashed, crashes=0, unready="attempt 1: the onboarding model's call failed: API Error: 400")
     assert gave_up_reason(unready) == (
         "its specialist could not be started: attempt 1: the onboarding model's call failed: API Error: 400"
     )
+
+
+def test_the_lineage_reads_only_the_stop_of_a_give_up_after_crashes_as_a_branch_that_crashed_out() -> None:
+    crashed = SpecialistStatus(running=False, crashes=4, lost=0, gave_up=True, judge_failed=False, crashed_out=True)
+    idle = replace(crashed, crashes=0, crashed_out=False)
+    stops = {
+        BranchStop(StopCause.GAVE_UP, gave_up_reason(crashed), 1.0): True,
+        BranchStop(StopCause.GAVE_UP, gave_up_reason(replace(crashed, lost=2)), 1.0): True,
+        BranchStop(StopCause.GAVE_UP, gave_up_reason(idle), 1.0): False,
+        BranchStop(StopCause.GAVE_UP, gave_up_reason(replace(idle, crashes=1)), 1.0): False,
+        BranchStop(StopCause.GAVE_UP, gave_up_reason(replace(idle, unready="no account")), 1.0): False,
+        BranchStop(StopCause.JUDGE, gave_up_reason(crashed), 1.0): False,
+    }
+
+    read = {
+        stop: BranchNode("b1", LineageKind.OPEN, "c0", "c0", stop_reason=stop.summary, stopped_at=1.0).crashed_out
+        for stop in stops
+    }
+
+    assert read == stops
 
 
 class KeepingToolbox(DownToolbox):

@@ -146,6 +146,8 @@ class _RunReporter:
             "case_bandwidth": dict(getattr(loop_runner, "last_case_bandwidth", {}) or {}),
             "total_speedup": total_speedup,
             "incremental_speedup": incremental_speedup,
+            # Which mean of per-case speedups every score above is.
+            "case_aggregate": self.run.campaign.case_aggregate.value,
             "experiment_id": exp_id,
             "campaign_id": getattr(loop_runner.run_state, "campaign_id", ""),
             "session_index": getattr(loop_runner.run_state, "session_index", 0),

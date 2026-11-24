@@ -6,12 +6,10 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from hyperloom_common.io import JsonFormat, JsonLineFormat, WriteOptions
-from hyperloom_common.io import append_jsonl as _common_append_jsonl
+from hyperloom_common.io import JsonFormat, WriteOptions
 from hyperloom_common.io import atomic_write_json as _common_atomic_write_json
 from hyperloom_common.jsonio import read_json_strict as _common_read_json_strict
 from hyperloom_common.timeutil import now_iso
@@ -20,41 +18,6 @@ from .errors import SessionMemoryError
 
 
 DEFAULT_SESSION_MEMORY_DIR = "/var/lib/critic-session-memory"
-
-_UNKNOWN_VALUES: frozenset[str] = frozenset({"", "unknown", "null", "none"})
-
-# Keys whose stored value can be filled in for the next request.
-_MERGEABLE_CONTEXT_KEYS: tuple[str, ...] = (
-    "model",
-    "framework",
-    "model_family",
-    "workload",
-    "precision",
-    "scale",
-    "objective",
-    "baseline_tput",
-    "baseline_label",
-    "current_best",
-    "session_label",
-)
-
-
-def _is_missing(value: Any) -> bool:
-    """Return ``True`` if value should be treated as absent."""
-    if value is None:
-        return True
-    if isinstance(value, str) and value.strip().lower() in _UNKNOWN_VALUES:
-        return True
-    return False
-
-
-# ---------------------------------------------------------------------------
-@dataclass
-class MergeResult:
-    """Result of merging an incoming context against stored memory."""
-
-    merged: dict[str, Any] = field(default_factory=dict)
-    missing_keys: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -83,59 +46,9 @@ class SessionMemory:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def _context_path(self, session_id: str) -> Path:
-        """Return the path to the session's ``context.json``."""
-        return self.session_dir(session_id) / "context.json"
-
-    def _decisions_path(self, session_id: str) -> Path:
-        """Return the path to the session's ``decisions.jsonl``."""
-        return self.session_dir(session_id) / "decisions.jsonl"
-
     def _reviewed_path(self, session_id: str) -> Path:
         """Return the path to the session's ``reviewed_msg_ids.json``."""
         return self.session_dir(session_id) / "reviewed_msg_ids.json"
-
-    # Context
-    def load_context(self, session_id: str) -> dict[str, Any]:
-        """Load the stored context for a session."""
-        path = self._context_path(session_id)
-        return _read_object(path, default={})
-
-    def save_context(self, session_id: str, context: dict[str, Any]) -> None:
-        """Persist ``context`` as the session's full context."""
-        if not isinstance(context, dict):
-            raise SessionMemoryError(f"context must be a dict, got {type(context).__name__}")
-        self._ensure_session_dir(session_id)
-        _common_atomic_write_json(
-            self._context_path(session_id),
-            context,
-            fmt=JsonFormat(sort_keys=False, ensure_ascii=False),
-            options=WriteOptions(),
-        )
-
-    def merge_context(self, session_id: str, incoming: dict[str, Any]) -> MergeResult:
-        """Merge ``incoming`` against stored context with explicit-wins semantics, and persist the result."""
-        if not isinstance(incoming, dict):
-            raise SessionMemoryError(f"incoming context must be a dict, got {type(incoming).__name__}")
-        merged: dict[str, Any] = dict(self.load_context(session_id))
-        for key, value in incoming.items():
-            if not _is_missing(value):
-                merged[key] = value
-        missing = [key for key in _MERGEABLE_CONTEXT_KEYS if _is_missing(merged.get(key))]
-        self.save_context(session_id, merged)
-        return MergeResult(merged=merged, missing_keys=missing)
-
-    # Decisions
-    def append_decision(self, session_id: str, decision_review: dict[str, Any]) -> None:
-        """Append a decision review record to the session's decisions log."""
-        if not isinstance(decision_review, dict):
-            raise SessionMemoryError("decision_review must be a dict")
-        self._ensure_session_dir(session_id)
-        record = {
-            "ts": now_iso(timespec="microseconds"),
-            "decision_review": decision_review,
-        }
-        _common_append_jsonl(self._decisions_path(session_id), record, fmt=JsonLineFormat(ensure_ascii=False))
 
     # Already-reviewed proposals
     def mark_reviewed(
@@ -143,8 +56,6 @@ class SessionMemory:
         session_id: str,
         msg_id: str,
         verdict: str,
-        *,
-        decision_id: str | None = None,
     ) -> None:
         """Record that a proposal message was reviewed with a verdict."""
         if not msg_id or not verdict:
@@ -155,7 +66,6 @@ class SessionMemory:
         data[msg_id] = {
             "verdict": verdict,
             "ts": now_iso(timespec="microseconds"),
-            "decision_id": decision_id,
         }
         _common_atomic_write_json(
             path, data, fmt=JsonFormat(sort_keys=False, ensure_ascii=False), options=WriteOptions()
@@ -184,6 +94,5 @@ def _read_object(path: Path, *, default: dict[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "DEFAULT_SESSION_MEMORY_DIR",
-    "MergeResult",
     "SessionMemory",
 ]
