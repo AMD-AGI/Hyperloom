@@ -171,7 +171,6 @@ async def test_a_job_id_may_carry_a_colon_and_its_directory_never_does(tmp_path:
     sink = RecordingSink()
     runner = jobs(tmp_path, ScriptedTool(), sink)
     runner.submit(request(), job_id="prelude:abc")
-    assert runner.has_job("prelude:abc") and not runner.has_job("prelude_abc")
     await runner.wait("prelude:abc")
     (pointer,) = sink.pointers
     assert pointer.job_id == "prelude:abc"

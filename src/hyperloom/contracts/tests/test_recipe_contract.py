@@ -301,6 +301,7 @@ def test_a_delta_document_keeps_the_recipe_delta_shape_and_its_fingerprint_names
         lambda: KernelArtifact.from_document({**GEMM.to_document(), "kind": "attention"}),
         lambda: KernelArtifact(KernelKind.GEMM, "t", "kernel/x.bin", "e" * 64, {"bad": {1, 2}}),
         lambda: RecipeDelta(components=(ComponentChange("vllm"), ComponentChange("vllm"))),
+        lambda: Recipe.from_document("not an object"),
         lambda: Recipe.from_document(
             {"schema_version": RECIPE_SCHEMA_VERSION, "base_image_digest": IMAGE, "kernels": "x"}
         ),

@@ -11,11 +11,8 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.kernel import kernel_decisions as kd
-from hyperloom.orchestrator.roles import (
-    MockBackend,
-    MockCriticBackend,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.roles import MockCriticBackend
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.denial import PolicyDenied

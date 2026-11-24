@@ -801,11 +801,8 @@ async def test_the_profile_runs_as_a_child_task_of_the_roofline(tmp_path):
 # N10: Coordinator persists roofline executor SharedState mutations to state.json.
 import json
 
-from hyperloom.orchestrator.roles import (
-    MockBackend,
-    MockCriticBackend,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.roles import MockCriticBackend
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir

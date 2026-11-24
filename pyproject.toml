@@ -237,7 +237,7 @@ exclude = [
     "kernelforge.examples.*",
     "kernelforge.knowledge.local_wiki.resources",
     "kernelforge.knowledge.local_wiki.resources.*",
-    # Scripted launch/specialist backends and a virtual clock: scaffolding a
+    # Scripted launch backends and a virtual clock: scaffolding a
     # test drives, not a runtime component. Nothing in the shipped tree imports
     # it, and the production launch boundary it substitutes
     # (``actions/executors/launch_backend.py``) ships as normal.
