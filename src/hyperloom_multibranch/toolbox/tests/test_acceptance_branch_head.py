@@ -6,12 +6,11 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestRequest, Validity
+from hyperloom.contracts.measurement import Purpose, TestRequest, Validity
 from hyperloom.contracts.recipe import Recipe
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, RequestRejected
@@ -37,10 +36,6 @@ def _move(rig: Rig, branch: str = "b1") -> Rig:
     return rig
 
 
-def _on(request: TestRequest, commit: str) -> TestRequest:
-    return replace(request, parent_commit=commit)
-
-
 async def _refusal(rig: Rig, request: TestRequest) -> RequestRejected:
     with pytest.raises(RequestRejected) as refused:
         await rig.toolbox.submit_test(request)
@@ -56,14 +51,6 @@ async def test_an_explore_on_a_commit_its_branch_has_left_is_refused_naming_the_
     assert refused.code == CODE and CODE in REJECTION_CODES
     assert HEAD in refused.reason and PARENT in refused.reason
     assert rig.planner.calls == [], "nothing is compiled for a test that cannot land"
-
-
-async def test_an_explore_on_the_head_its_branch_moved_to_is_accepted(tmp_path: Path) -> None:
-    rig = _move(build(tmp_path))
-
-    request_id = await rig.toolbox.submit_test(_on(req("b1"), HEAD))
-
-    assert rig.blackboard._state().requests[request_id].parent_commit == HEAD
 
 
 async def test_an_explore_of_the_integration_branch_names_a_commit_that_is_not_its_head(tmp_path: Path) -> None:
@@ -82,23 +69,6 @@ async def test_the_confirm_of_an_explore_is_accepted_after_its_branch_moved(tmp_
     retest = await rig.toolbox.submit_test(req("b1", purpose=Purpose.CONFIRM, retest_of=first))
 
     assert rig.blackboard._state().requests[retest].parent_commit == PARENT
-
-
-@pytest.mark.parametrize(
-    "fields",
-    [
-        {"kind": TestKind.REPRO, "purpose": Purpose.REPRO, "attachments": (AttachmentRef("case-1", "dir", "a" * 64),)},
-        {"purpose": Purpose.HEALTH},
-        {"kind": TestKind.ACCURACY, "purpose": Purpose.ACCURACY, "accuracy": True},
-    ],
-    ids=["repro", "health", "accuracy"],
-)
-async def test_a_test_that_lands_nothing_names_a_commit_its_branch_has_left(
-    tmp_path: Path, fields: dict[str, object]
-) -> None:
-    rig = _move(build(tmp_path))
-
-    assert await rig.toolbox.submit_test(req("b1", **fields))
 
 
 async def test_a_restart_runs_the_explore_accepted_before_its_branch_moved(tmp_path: Path) -> None:

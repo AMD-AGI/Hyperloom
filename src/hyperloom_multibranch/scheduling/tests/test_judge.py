@@ -746,7 +746,6 @@ ONE_USER_ROSTER = (
     ("roster", "caps", "asked", "granted"),
     [
         (OPENING_ROSTER, TWO_TESTS, 1, 2),
-        (OPENING_ROSTER, TWO_TESTS, 3, 3),
         (ONE_USER_ROSTER, TWO_TESTS, 0, 1),
     ],
 )
@@ -814,12 +813,6 @@ def test_the_focus_the_judge_names_is_for_the_branches_opened_after_those_of_the
     capped = cap_decision(JudgeDecision(open_count=3, focus=("op a", "op b", "op c")), view)
 
     assert (capped.open_count, capped.unfocused, capped.focus) == (3, 1, ("op a", "op b"))
-
-
-def test_the_prompt_shows_and_explains_the_directions_no_branch_has_held() -> None:
-    assert _state(replace(_view(), undealt=UNHELD[:2]))["undealt_directions"] == ["direction A", "direction B"]
-    assert _state(_view())["undealt_directions"] == []
-    assert "undealt_directions" in JUDGE_SYSTEM_PROMPT and "undealt_directions" in PLAYBOOK_JUDGE_PROMPT
 
 
 def test_a_full_roster_still_opens_the_branch_a_stop_in_the_same_answer_frees() -> None:

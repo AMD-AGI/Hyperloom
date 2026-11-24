@@ -109,7 +109,9 @@ async def test_a_retest_is_the_callers_next_step(setup):
     assert (await blackboard.record("r1")).judgement is None
 
 
-async def test_a_provisional_gain_whose_branch_left_its_parent_is_recorded_without_a_retest(setup):
+async def test_a_provisional_gain_whose_branch_left_its_parent_is_recorded_unretested_and_as_no_accuracy_failure(
+    setup,
+):
     blackboard, repo, measured = setup
     verifier = RecordingVerifier()
     gate = RuleGate(blackboard, repo, RecordingScheduler(AdmissionStatus.ACCEPTED), verifier)

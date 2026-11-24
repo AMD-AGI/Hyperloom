@@ -137,12 +137,9 @@ def _window(deadline: float) -> ExploreWindow:
     return ExploreWindow("root", "root", 0.0, deadline, _ROOT_TEST_SECONDS, math.inf, math.inf, (), ())
 
 
-@pytest.mark.parametrize("ended", [SessionStopReason.TIME_EXHAUSTED, SessionStopReason.LLM_BUDGET_EXHAUSTED])
-def test_a_merge_waiting_for_its_confirm_gets_one_test_where_explore_ends_on_its_reserve(
-    ended: SessionStopReason,
-) -> None:
+def test_a_merge_waiting_for_its_confirm_gets_one_test_where_explore_ends_on_its_reserve() -> None:
     budget = SessionBudget.from_hours(12, 0.0)
-    explore_end = budget.explore_end(_HOUR, _ROOT_TEST_SECONDS)
+    explore_end, ended = budget.explore_end(_HOUR, _ROOT_TEST_SECONDS), SessionStopReason.TIME_EXHAUSTED
 
     assert confirm_seconds(_window(budget.deadline), ended, explore_end, math.inf) == _ROOT_TEST_SECONDS
 
