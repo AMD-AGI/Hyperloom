@@ -180,10 +180,7 @@ class _GeakPromotionMixin:
             }
             state.save(self.session_dir)
             raise
-        if self._coord.writeback.is_promotable_result("explore", result):
-            await self._coord.writeback.promote_to_shared_state("explore", result, task=task)
-        else:
-            await self._coord.writeback.handle_unpromotable_result(task, result)
+        await self._coord.writeback.settle_covered_result(task, result)
 
     async def _revalidate_on_geak_harness(self, *, decline_reason: str) -> None:
         """Replay the candidate through GEAK's own harness (2a); record the decline when it does not validate."""

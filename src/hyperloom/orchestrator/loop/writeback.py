@@ -221,6 +221,13 @@ class WritebackCollaborator(
             self._drain_agent_keep_outbox()
         return outcome
 
+    async def settle_covered_result(self, task: "Task", result: dict[str, Any]) -> None:
+        """Settle a step run through ``execute_covered`` as the dispatcher settles a queued task of its kind."""
+        if self.is_promotable_result(task.kind, result):
+            await self.promote_to_shared_state(task.kind, result, task=task)
+        else:
+            await self.handle_unpromotable_result(task, result)
+
     _PROMOTE_HANDLERS: dict[str, str] = {
         "baseline": "_promote_baseline",
         "replay_warm_recipe": "_promote_replay_warm_recipe",

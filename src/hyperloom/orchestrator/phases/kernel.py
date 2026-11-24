@@ -209,14 +209,16 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         stack_len = int(self.shared_state.cumulative_gain_validated_stack_len or 0)
         return f"kernel_entry_g{stack_len}_{hashlib.sha256(identity).hexdigest()[:12]}"
 
-    def _adopt_reprofile_snapshot(self, *, anchor_tput: float, snapshot_id_before: int, snapshots_before: int) -> bool:
+    def _reprofile_evidence(self) -> tuple[int, str]:
+        """A landed reprofile adds a roofline snapshot (roofline kind) or adopts a new trace (either kind)."""
         state = self.shared_state
-        landed = (
-            int(state.roofline_snapshot_id or 0) != snapshot_id_before
-            or len(state.roofline_snapshots or []) != snapshots_before
-        )
+        return len(state.roofline_snapshots or []), str(state.last_profile_trace or "")
+
+    def _adopt_reprofile_snapshot(self, *, anchor_tput: float, evidence_before: tuple[int, str]) -> bool:
+        state = self.shared_state
+        landed = self._reprofile_evidence() != evidence_before
         if not landed:
-            log.warning("kernel-entry reprofile produced no new snapshot; the phase targets the existing trace")
+            log.warning("kernel-entry reprofile produced no new trace; the phase targets the existing trace")
             return landed
         # The anchor is the projection the trace was taken at, the quantity the watermark compares it with.
         state.last_roofline_tput = anchor_tput
@@ -253,8 +255,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             _note_reprofile(KernelReprofile(ran=False, skipped_reason="within_tolerance"))
             return
         trigger = "config_changed" if config_changed else ("workload_changed" if workload_changed else "gain")
-        snapshot_id_before = int(self.shared_state.roofline_snapshot_id or 0)
-        snapshots_before = len(self.shared_state.roofline_snapshots or [])
+        evidence_before = self._reprofile_evidence()
         idempotency_reason = self._reprofile_idempotency_reason(profile_signature, cur)
         task_kind = self._coord.phase_prelude.internal_analysis_kind()
         params = self._coord.phase_prelude.internal_analysis_params(
@@ -266,7 +267,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             task_kind=task_kind,
             trigger=trigger,
             idempotency_reason=idempotency_reason,
-            snapshot_id_before=snapshot_id_before,
+            snapshot_id_before=int(self.shared_state.roofline_snapshot_id or 0),
         )
         if params is None or denied is not None:
             skipped_reason = denied.rule if denied else analysis_skip_reason(self.shared_state)
@@ -276,14 +277,13 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         # that task rather than a task of its own.
         reprofile_task = _covered_step(task_kind, params, idempotency_key=f"internal-analysis-{idempotency_reason}")
         try:
-            await self.sub.execute_covered(reprofile_task)
+            result = await self.sub.execute_covered(reprofile_task)
         except (OSError, RuntimeError, ValueError):  # the kernel-entry reprofile step, recorded as dispatch_failed
             log.exception("kernel-entry reprofile failed; the phase proceeds on the existing snapshot")
             _note_reprofile(replace(attempt, ran=True, skipped_reason="dispatch_failed"))
             return
-        snapshot_landed = self._adopt_reprofile_snapshot(
-            anchor_tput=cur, snapshot_id_before=snapshot_id_before, snapshots_before=snapshots_before
-        )
+        await self._coord.writeback.settle_covered_result(reprofile_task, result)
+        snapshot_landed = self._adopt_reprofile_snapshot(anchor_tput=cur, evidence_before=evidence_before)
         _note_reprofile(
             replace(
                 attempt,
