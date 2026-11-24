@@ -77,9 +77,9 @@ measurement, NOT a failure — do not retry it.
   attempt buys nothing.
   `send_message` with `body_md='blocked: subprocess repeatedly nonzero
   baseline'`, quoting the failure excerpt rather than a diagnosis. Explore
-  variants may be re-proposed, except one carrying a change that stopped a
-  server before it was ready (`known_dead_change`); read the failure log
-  first.
+  variants may be re-proposed, except one carrying a change the framework
+  refused at start on a configuration error (`known_dead_change`); read the
+  failure log first.
 * **RULE F3 — `policy_denial_streak` is a pure fact, not a lock.** The
   `mcp__inference_optimizer_context__why_denied` context tool (and the
   `Recent policy denials` block in the state projection) shows repeated

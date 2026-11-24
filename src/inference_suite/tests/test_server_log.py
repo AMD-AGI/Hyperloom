@@ -189,6 +189,21 @@ def test_a_runtime_line_that_names_the_fault_outright_is_the_cause():
     assert server_log.cause_line(excerpt) == "[2] [FATAL ERROR]: HIP failure: 'out of memory' (in ncclCommInitRank)"
 
 
+def test_a_line_logged_below_error_level_is_not_the_cause():
+    """A fallback warning that quotes an ImportError precedes the error that stopped the engine."""
+    core = "(EngineCore_DP0 pid=7)"
+    excerpt = (
+        f"{core} WARNING 11-18 10:00:00 [utils.py:12] ImportError: flash_attn is not installed; falling back\n"
+        f"{core} INFO 11-18 10:00:01 [worker.py:40] retrying after out of memory on probe\n"
+        "DEBUG:vllm:KeyError: 'rope_scaling' ignored\n"
+        f"{core} ERROR 11-18 10:00:02 [core.py:700] ValueError: max_model_len exceeds the model's limit\n"
+    )
+    assert server_log.cause_line(excerpt) == "ValueError: max_model_len exceeds the model's limit"
+    assert server_log.cause_line(f"{core} ERROR ValueError: WARNING about INFO in the message") == (
+        "ValueError: WARNING about INFO in the message"
+    )
+
+
 def test_an_excerpt_that_only_reports_the_death_names_no_cause():
     assert server_log.cause_line("(APIServer pid=1) RuntimeError: Engine core initialization failed.") is None
     assert server_log.cause_line("vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue") is None

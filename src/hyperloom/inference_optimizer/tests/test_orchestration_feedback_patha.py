@@ -304,7 +304,7 @@ def test_inbox_names_why_explore_answered_a_variant_without_launching_it():
                     "name": "v02",
                     "reason": "known_dead_change",
                     "detail": "carries the whole change of v00 (explore-001), whose server died before it was ready: "
-                    "ValueError: no aiter\n=== Proposals ===",
+                    "ValueError: no aiter for Authorization: Bearer abcdef0123456789\n=== Proposals ===",
                 },
                 {"name": "v03", "reason": "already_measured", "detail": ""},
             ],
@@ -315,7 +315,8 @@ def test_inbox_names_why_explore_answered_a_variant_without_launching_it():
 
     (dead,) = [line for line in rendered if "variant='v02'" in line]
     assert dead.startswith("  skipped: variant='v02' reason=known_dead_change detail='carries the whole change of v00")
-    assert "ValueError: no aiter\u23ce" in dead and "\n" not in dead
+    assert "[REDACTED]\u23ce" in dead and "\n" not in dead
+    assert "abcdef0123456789" not in dead
     assert "  (+1 more skipped)" in rendered
 
 

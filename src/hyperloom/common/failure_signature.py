@@ -62,11 +62,14 @@ EVAL_GENERATION_PATHOLOGY = "eval_generation_pathology"
 EVAL_RUNTIME_FAILURE = "eval_runtime_failure"
 UNKNOWN = "unknown"
 
-#: A vLLM start-time capacity error: the card holds less than the launch asked for (Mamba cache blocks, KV cache memory).
+#: A vLLM start-time capacity error: the card holds less than the launch asked for (Mamba cache blocks, KV cache memory,
+#: free device memory).
 ENGINE_CAPACITY_LINE = re.compile(
     r"max_num_seqs \(\d+\) exceeds available \w+ cache blocks"
     r"|KV cache is needed, which is larger than the available KV cache memory"
     r"|No available memory for the cache blocks"
+    r"|is larger than the maximum number of tokens that can be stored in KV cache"
+    r"|Free memory on device .* is less than desired GPU memory utilization"
 )
 
 # --- Result model ----------------------------------------------------------

@@ -60,6 +60,46 @@ def test_a_variant_that_does_not_carry_the_whole_change_launches(variant):
     assert carried_dead_change(variant, dead, stack=_EMPTY_STACK) is None
 
 
+def _change(**fields: Any) -> dict[str, Any]:
+    return {"extra_server_args": "", "extra_envs": {}, **fields}
+
+
+@pytest.mark.parametrize(
+    ("change", "carrier", "other"),
+    [
+        pytest.param(
+            _change(extra_server_args="--kv-cache-dtype fp8"),
+            _change(extra_server_args="--max-num-seqs 64 --kv-cache-dtype fp8"),
+            _change(extra_server_args="--kv-cache-dtype auto"),
+            id="server-arg",
+        ),
+        pytest.param(
+            _change(remove_args=["--enforce-eager"]),
+            _change(remove_args=["--enforce-eager"], extra_server_args="--max-num-seqs 64"),
+            _change(remove_args=["--trust-remote-code"]),
+            id="remove-arg",
+        ),
+        pytest.param(
+            _change(unset_envs=["VLLM_USE_TRITON_FLASH_ATTN"]),
+            _change(unset_envs=["VLLM_USE_TRITON_FLASH_ATTN"], extra_envs={"HL_KNOB": "1"}),
+            _change(unset_envs=["VLLM_ROCM_USE_AITER"]),
+            id="unset-env",
+        ),
+        pytest.param(
+            _change(extra_server_args="--max-model-len 4096", args_mode="replace"),
+            _change(extra_server_args="--max-model-len 4096 --max-num-seqs 64", args_mode="replace"),
+            _change(extra_server_args="--max-model-len 4096"),
+            id="replace-mode",
+        ),
+    ],
+)
+def test_every_kind_of_change_is_carried_whole_or_not_at_all(change, carrier, other):
+    dead = dead_changes([_failed("v00", {}, **change)], workload_signature=_WS)
+    assert len(dead) == 1
+    assert carried_dead_change(carrier, dead, stack=_EMPTY_STACK) is dead[0]
+    assert carried_dead_change(other, dead, stack=_EMPTY_STACK) is None
+
+
 def test_a_stack_that_already_serves_the_change_lifts_it():
     dead = dead_changes([_failed("v00", _AITER_ON)], workload_signature=_WS)
     stack = {"extra_server_args": "", "extra_envs": dict(_AITER_ON)}
@@ -70,7 +110,19 @@ def test_a_stack_that_already_serves_the_change_lifts_it():
     "row",
     [
         pytest.param({"error_excerpt": "torch.OutOfMemoryError: HIP out of memory"}, id="memory"),
-        pytest.param({"error_excerpt": "a concurrent GPU holder remained"}, id="host"),
+        pytest.param({"error_excerpt": "ValueError: port 30000 is unavailable"}, id="host-evidence-in-a-refusal"),
+        pytest.param({"error_excerpt": "OSError: [Errno 98] address already in use"}, id="port-in-use"),
+        pytest.param({"error_excerpt": "MemoryError: Unable to allocate 12.0 GiB for an array"}, id="host-memory"),
+        pytest.param({"error_excerpt": "OSError: [Errno 28] No space left on device"}, id="disk-full"),
+        pytest.param({"error_excerpt": "RuntimeError: No HIP GPUs are available"}, id="no-device"),
+        pytest.param({"error_excerpt": "huggingface_hub.errors.HfHubHTTPError: 429 Client Error"}, id="hub-429"),
+        pytest.param(
+            {
+                "error_excerpt": "ValueError: Free memory on device (10.2/191.98 GiB) on startup is less than desired "
+                "GPU memory utilization (0.9, 172.78 GiB)."
+            },
+            id="device-memory-capacity",
+        ),
         pytest.param({"error_class": "engine_capacity"}, id="capacity"),
         pytest.param({"error_class": "round_timeout"}, id="not-a-start-failure"),
         pytest.param({"framework_changed": True}, id="code-change"),
@@ -82,6 +134,12 @@ def test_a_stack_that_already_serves_the_change_lifts_it():
 )
 def test_only_a_start_failure_of_the_variants_own_change_counts(row):
     assert dead_changes([_failed("v00", _AITER_ON, **row)], workload_signature=_WS) == []
+
+
+def test_a_configuration_the_framework_rejects_by_validation_counts():
+    row = _failed("v00", _AITER_ON, error_excerpt="pydantic_core._pydantic_core.ValidationError: 1 validation error")
+    (dead,) = dead_changes([row], workload_signature=_WS)
+    assert dead.cause.startswith("pydantic_core._pydantic_core.ValidationError")
 
 
 def test_a_decision_round_failure_carries_its_log_text_as_the_reason():

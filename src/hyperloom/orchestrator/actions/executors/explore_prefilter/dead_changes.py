@@ -3,8 +3,8 @@
 
 """The changes this session saw stop a server before it was ready, and the variants that would launch one again.
 
-A start death counts only when its log names the fault; it then holds for the rest of the session, a later source patch
-included. The experience corpus's attribution is left as conservative as ``classify_failure_attribution`` makes it.
+A start death counts only when the framework refused the configuration (``_CONFIG_REFUSALS``); it then holds for the rest
+of the session, a later source patch included. The experience corpus's attribution is left as it was.
 """
 
 from __future__ import annotations
@@ -32,6 +32,18 @@ KNOWN_DEAD_CHANGE: str = "known_dead_change"
 # The root cause a server that exited before it was ready reads as when nothing names memory, capacity or the host.
 _ENGINE_INIT = "engine_core_init"
 
+# Exceptions a framework raises when it rejects the configuration it was given. A host fault (OSError, MemoryError, a
+# RuntimeError with no device, a hub HTTP error) is not one, so it never retires a change.
+_CONFIG_REFUSALS: frozenset[str] = frozenset(
+    {"ValueError", "NotImplementedError", "AssertionError", "TypeError", "ValidationError"}
+)
+
+
+def _exception_name(cause: str) -> str:
+    """The unqualified exception name a cause line starts with, empty for a runtime line that names none."""
+    head, sep, _ = cause.partition(":")
+    return head.rsplit(".", 1)[-1].strip() if sep else ""
+
 
 @dataclass(frozen=True)
 class DeadChange:
@@ -57,14 +69,19 @@ def _items_of(change: Mapping[str, Any]) -> frozenset[tuple[str, ...]]:
 
 
 def _start_death_cause(row: Mapping[str, Any]) -> str | None:
-    """The fault line of a row whose server exited before it was ready on its own change, else None.
+    """The fault line of a row whose server exited before it was ready because the framework refused its change.
 
-    A log that names no fault (an exit code alone) cannot tell the change from memory, capacity or the host.
+    A log that names no fault (an exit code alone), or one whose fault is not a configuration refusal, cannot tell the
+    change from memory, capacity or the host, so it yields None.
     """
     error_class = str(row.get("error_class") or "")
     excerpt = failure_text(row)
-    cause = cause_line(excerpt)
-    if not cause or error_class != SERVER_INIT_DEAD or row.get("framework_changed"):
+    cause = cause_line(excerpt) or ""
+    if (
+        _exception_name(cause) not in _CONFIG_REFUSALS
+        or error_class != SERVER_INIT_DEAD
+        or row.get("framework_changed")
+    ):
         return None
     if classify_root_cause_type(error_class, excerpt) != _ENGINE_INIT:
         return None

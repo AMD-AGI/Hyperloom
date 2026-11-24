@@ -56,6 +56,9 @@ _EXCEPTION_LINE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)\s*:"
 #: Text that names a fault outright on a line that names no exception (the HIP runtime's ``[FATAL ERROR]`` lines).
 _FAULT_NAMES: tuple[str, ...] = ("out of memory", "fatal error")
 
+#: A log level below error ahead of the fault on a line, as vLLM, SGLang and stdlib logging print it.
+_BELOW_ERROR_LEVEL = re.compile(r"\b(?:DEBUG|INFO|WARN|WARNING)\b")
+
 #: Lines after a fatal marker that may carry its terminating exception; a vLLM start-failure traceback on Python 3.14
 #: runs 62.
 _MARKER_WINDOW_LINES: int = 120
@@ -155,16 +158,23 @@ def cause_line(excerpt: str | None) -> str | None:
     """Return the first line of ``excerpt`` that names a fault and is not an engine death's own report of itself.
 
     An exception line is cut to start at the exception name, dropping the pid, level and source prefix of the framework.
+    A line logged below error level (a fallback warning naming an ImportError) is not a fault.
     """
     consequences = (*_ENGINE_BOOTSTRAP_MARKERS, *_FATAL_ENGINE_MARKERS)
     for line in str(excerpt or "").splitlines():
         if any(marker in line for marker in consequences):
             continue
-        if found := _EXCEPTION_LINE.search(line):
-            return line[found.start() :].strip()
-        if any(name in line.lower() for name in _FAULT_NAMES):
-            return line.strip()
+        found = _EXCEPTION_LINE.search(line)
+        start = found.start() if found else _fault_name_start(line)
+        if start < 0 or _BELOW_ERROR_LEVEL.search(line, 0, start):
+            continue
+        return line[start:].strip() if found else line.strip()
     return None
+
+
+def _fault_name_start(line: str) -> int:
+    lowered = line.lower()
+    return min((at for at in (lowered.find(name) for name in _FAULT_NAMES) if at >= 0), default=-1)
 
 
 def _cause_first_excerpt(head: str, window: list[str], *, max_chars: int) -> str | None:

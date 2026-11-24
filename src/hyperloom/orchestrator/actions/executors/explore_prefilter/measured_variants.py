@@ -13,6 +13,8 @@ from hyperloom.inference_optimizer.canonical_fingerprint import workload_signatu
 from ....policy.denial import PolicyDenied
 
 from ..grid._grid_base import DEFAULT_KEEP_THRESHOLD_PCT
+from ._remeasure import is_stack_revalidation
+from .dead_changes import DeadChange, carried_dead_change, dead_changes
 from .._proposal_identity import (
     BaseControls,
     content_fingerprint,
@@ -134,7 +136,7 @@ def stack_of_measured(against: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def explore_grid_already_covered(params: Mapping[str, Any], active: Iterable[Any], ledger: Any) -> PolicyDenied | None:
-    """Deny an explore grid every variant of which is already measured, queued or running on this same stack.
+    """Deny an explore grid every variant of which is already measured, queued, running or a known-dead change.
 
     ``active`` is the queued and running tasks. Two grids that differ only in variant names launch the same work, so
     the comparison is by launch, not by grid content. A grid with one genuinely new variant is admitted; the executor
@@ -155,17 +157,40 @@ def explore_grid_already_covered(params: Mapping[str, Any], active: Iterable[Any
         for key in _launch_keys(task.params or {})
     }
     grid = list(params.get("grid") or ())
-    if not all(
-        key in pending or measured_verdict(ledger, key[0], variant=raw, now=now) for key, raw in zip(keys, grid)
-    ):
-        return None
+    dead = _session_dead_changes(params, ledger, now.workload_signature)
+    carrying_dead: list[str] = []
+    for key, raw in zip(keys, grid):
+        if key in pending or measured_verdict(ledger, key[0], variant=raw, now=now):
+            continue
+        if not carried_dead_change(_change_of(raw), dead, stack=now.stack):
+            return None
+        carrying_dead.append(str(raw.get("name") or ""))
     names = [str(v.get("name") or "") for v in grid]
-    return PolicyDenied(
-        f"delegate{{action_name='explore'}} adds nothing new: {', '.join(names)} already measured, queued or "
-        "running on the current stack",
-        rule="explore_grid_already_covered",
-        hint="Read the measured verdicts in explore_search, or propose a variant that changes the launch.",
+    reason = (
+        f"delegate{{action_name='explore'}} adds nothing new: {', '.join(names)} already measured, queued or running "
+        "on the current stack"
     )
+    if carrying_dead:
+        reason += f", or carrying a change the framework refused at start ({', '.join(carrying_dead)})"
+    return PolicyDenied(
+        reason,
+        rule="explore_grid_already_covered",
+        hint="Read the measured verdicts and the start failures in explore_search, or propose a variant that changes "
+        "the launch.",
+    )
+
+
+def _session_dead_changes(params: Mapping[str, Any], ledger: Any, workload: str) -> list[DeadChange]:
+    """The ledger's dead changes, none for a stack revalidation, which re-measures on purpose."""
+    tested = (ledger or {}).get("tested") if isinstance(ledger, Mapping) else None
+    if is_stack_revalidation(dict(params)) or not isinstance(tested, Mapping):
+        return []
+    return dead_changes(tested.values(), workload_signature=workload)
+
+
+def _change_of(raw: Mapping[str, Any]) -> dict[str, Any]:
+    fields = normalize_proposal(raw)
+    return {"extra_server_args": fields["extra_args"], "extra_envs": fields["extra_envs"], **controls_of(fields)}
 
 
 def _launch_keys(params: Mapping[str, Any]) -> list[tuple[str, str]]:

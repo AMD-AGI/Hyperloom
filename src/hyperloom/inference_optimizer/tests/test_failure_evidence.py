@@ -37,9 +37,20 @@ _KV_EMPTY_LINE = (
     "ValueError: No available memory for the cache blocks. Try increasing `gpu_memory_utilization` "
     "when initializing the engine."
 )
+_KV_TOKENS_LINE = (
+    "ValueError: The model's max seq len (131072) is larger than the maximum number of tokens that can be stored "
+    "in KV cache (65536). Try increasing `gpu_memory_utilization` or decreasing `max_model_len` when initializing "
+    "the engine."
+)
+_FREE_DEVICE_MEMORY_LINE = (
+    "ValueError: Free memory on device (10.2/191.98 GiB) on startup is less than desired GPU memory utilization "
+    "(0.9, 172.78 GiB). Decrease GPU memory utilization or reduce GPU memory used by other processes."
+)
 
 
-@pytest.mark.parametrize("text", [_MAMBA_CAPACITY_LINE, _KV_MEMORY_LINE, _KV_EMPTY_LINE])
+@pytest.mark.parametrize(
+    "text", [_MAMBA_CAPACITY_LINE, _KV_MEMORY_LINE, _KV_EMPTY_LINE, _KV_TOKENS_LINE, _FREE_DEVICE_MEMORY_LINE]
+)
 def test_an_engine_capacity_error_is_recognised(text):
     assert is_engine_capacity_error(text)
 
