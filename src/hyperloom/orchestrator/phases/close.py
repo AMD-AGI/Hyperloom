@@ -506,9 +506,8 @@ class ClosePhase(CoordinatorCollaborator):
         # to final counts and patch_breakdown_langfuse splices it back into session_breakdown.json.
         await self._run_close_step("langfuse_flush", self._do_langfuse_flush())
 
-        # Artifact package: bundle the curated result/report/analysis files into a single zip under
-        # ``HYPERLOOM_SESSION_PACKAGE_DEST`` (``<session dir>/archive`` when unset; a Claw sandbox names ``/workspace``,
-        # which its sync ships to object storage).
+        # Artifact package: bundle the curated result/report/analysis files into a single zip under the destination
+        # ``session_package._dest_root`` resolves.
         pkg_path: Path | None = None
         try:
             pkg_path = await self._do_artifact_package()

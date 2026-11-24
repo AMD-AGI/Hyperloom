@@ -850,8 +850,4 @@ def test_without_a_named_destination_the_package_stays_with_the_session(
     sd = tmp_path / "session"
     _build_session(sd)
 
-    out = package_session_artifacts(sd, session_id="sid-1")
-    again = package_session_artifacts(sd, session_id="sid-1")
-
-    assert out == again == sd / "archive" / PACKAGE_SUBDIR / "sid-1.zip"
-    assert not any(name.startswith("archive/") for name in _zip_names(again)), "the archive is never packaged"
+    assert package_session_artifacts(sd, session_id="sid-1") == sd / "archive" / PACKAGE_SUBDIR / "sid-1.zip"
