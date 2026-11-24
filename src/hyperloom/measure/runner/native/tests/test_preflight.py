@@ -31,7 +31,7 @@ def tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, tuple[st
 
 
 def test_each_tool_is_recorded_by_the_first_line_it_prints(tools: dict, tmp_path: Path) -> None:
-    checked = native_preflight(tools, 0.0, tmp_path / "scratch", "gfx1100")
+    checked = native_preflight(tools, 0.0, tmp_path / "scratch")
 
     assert checked.problem is None
     assert dict(checked.toolchain) == {"cmake": "cmake version 3.28.3", "hip_clang": "AMD clang version 24.0.0git"}
@@ -41,13 +41,13 @@ def test_each_tool_is_recorded_by_the_first_line_it_prints(tools: dict, tmp_path
 def test_a_tool_that_does_not_run_is_the_machines_problem(tools: dict, tmp_path: Path, script: str | None) -> None:
     ninja = _tool(tmp_path, "ninja", script) if script else "no-such-ninja-tool"
 
-    checked = native_preflight({**tools, "ninja": (ninja, "--version")}, 0.0, tmp_path, "gfx1100")
+    checked = native_preflight({**tools, "ninja": (ninja, "--version")}, 0.0, tmp_path)
 
     assert checked.problem == f"preflight_toolchain: ninja ({ninja}) does not run on this machine"
     assert checked.toolchain == {}
 
 
 def test_too_little_disk_is_the_machines_problem(tools: dict, tmp_path: Path) -> None:
-    checked = native_preflight(tools, 1e9, tmp_path, "gfx1100")
+    checked = native_preflight(tools, 1e9, tmp_path)
 
     assert checked.problem is not None and checked.problem.startswith("preflight_disk: insufficient disk")
