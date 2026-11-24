@@ -3,8 +3,8 @@
 
 """What a native build checks of its machine before it compiles: a failed check is the machine's, never the candidate's.
 
-:func:`native_preflight` checks a recipe that builds no Python extension and so needs no torch: disk for one candidate,
-the GPU architecture, and that each build tool the recipe runs answers its version, which the record keeps.
+:func:`native_preflight` checks a recipe that builds no Python extension and so needs no torch: disk for one candidate
+and that each build tool the recipe runs answers its version, which the record keeps.
 """
 
 from __future__ import annotations
@@ -30,9 +30,9 @@ class Preflight:
     toolchain: Mapping[str, str]
 
 
-def native_preflight(tools: Mapping[str, tuple[str, ...]], disk_gb: float, scratch: Path, gfx_arch: str) -> Preflight:
-    """Disk for one candidate below ``scratch``, a GPU architecture, and each of ``tools`` (its name in the record, the
-    command that prints its version) on this machine; the first line each prints is the toolchain's fact."""
+def native_preflight(tools: Mapping[str, tuple[str, ...]], disk_gb: float, scratch: Path) -> Preflight:
+    """Disk for one candidate below ``scratch`` and each of ``tools`` (its name in the record, the command that prints
+    its version) on this machine; the first line each prints is the toolchain's fact."""
     try:
         disk_preflight(scratch, 1, per_candidate_gb=disk_gb)
     except DiskPreflightError as exc:

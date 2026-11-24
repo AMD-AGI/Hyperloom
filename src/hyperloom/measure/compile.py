@@ -773,7 +773,7 @@ class EnvironmentCompiler:
 
     blobs: BlobStore
     active_image_digest: str
-    locator: PackageLocator = locate_source
+    locator: PackageLocator = field(default=locate_source)
     layouts: Mapping[str, ComponentLayout] = field(default_factory=lambda: COMPONENT_LAYOUTS)
     #: The native builds a stack needs; without one a stack that changes a native source is refused by its layout.
     native: NativePlan | None = None
