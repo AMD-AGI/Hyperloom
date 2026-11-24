@@ -386,6 +386,20 @@ async def test_an_agentx_session_profile_names_its_objective_and_has_no_roofline
     assert result.profile.agentx_objective is AgentXObjective.TOTAL_TOKEN_THROUGHPUT
 
 
+@pytest.mark.parametrize(("workload", "recorded"), [(WORKLOAD, "/data/prompts.jsonl"), (AGENTX, "")])
+async def test_the_session_profile_records_the_prompt_dataset_a_fixed_workload_sends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload: Workload, recorded: str
+) -> None:
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
+    monkeypatch.setenv("DATASET_PATH", "/data/prompts.jsonl")
+    layout = _layout(tmp_path)
+
+    result = await _run(_prelude(layout, _peers(layout)), workload)
+
+    assert result.profile.dataset == recorded
+    assert await _blackboard(layout).session_profile() == result.profile
+
+
 async def test_a_prelude_whose_backend_cannot_analyse_the_root_profile_records_it_and_goes_on(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     peers = _peers(layout)

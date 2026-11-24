@@ -61,6 +61,13 @@ def test_a_resume_that_sends_another_prompt_dataset_than_the_seed_recorded_is_re
     assert "prompt dataset" in cb.measurement_state_is_stale(state)
 
 
+def test_an_agentx_session_records_no_prompt_dataset_its_rounds_do_not_send(tmp_path, monkeypatch, native_benchmark):
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
+    monkeypatch.setenv("DATASET_PATH", "/data/prompts.jsonl")
+    state = _seed_and_reload(tmp_path)
+    assert (state.prompt_dataset, cb.measurement_state_is_stale(state)) == ("", "")
+
+
 def test_a_state_written_before_the_switch_is_refused(tmp_path):
     (tmp_path / "state.json").write_text('{"benchmark_mode": "synthetic", "agentx_epoch": 1}', encoding="utf-8")
     assert "epoch 0" in cb.measurement_state_is_stale(SharedState.load_or_init(tmp_path))

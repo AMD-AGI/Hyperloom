@@ -119,7 +119,9 @@ def agentx_enabled(env: Mapping[str, str] | None = None) -> bool:
 
 def prompt_dataset(env: Mapping[str, str] | None = None) -> str:
     """The prompt dataset the fixed rounds send, as given: ``DATASET_PATH`` exported, else set in the bound YAML's
-    envs. Empty when they send random prompts."""
+    envs. Empty when they send random prompts, and for AgentX, whose rounds replay traces whatever it is set to."""
+    if agentx_enabled(env):
+        return ""
     envs = configured_benchmark(env).get("envs")
     bound = envs.get(DATASET_PATH_ENV) if isinstance(envs, Mapping) else None
     return str((os.environ if env is None else env).get(DATASET_PATH_ENV) or bound or "").strip()
