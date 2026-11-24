@@ -17,9 +17,6 @@ _VERDICT_ADVISORY_LIST_KEYS: tuple[str, ...] = (
     "kb_evidence",
     "packet_evidence",
 )
-# The verdict that ends a proposal's life, and the one that lets it through carrying the Critic's notes.
-_REJECT_VERDICT: str = "reject"
-_ADVISE_VERDICT: str = "advise"
 
 _VERDICT_ADVISORY_TEXT_KEYS: tuple[str, ...] = (
     "advice_text",
@@ -64,8 +61,8 @@ def serialize_verdict_advisory(payload: dict[str, Any]) -> dict[str, Any]:
 # Priority a batch of per-variant verdicts collapses by: one approved variant carries the proposal, otherwise one
 # reject sinks it, and advice outranks a request for more review. :func:`collapse_verdict_map` applies this to the
 # proceedable subset first so a genuine reject cannot sink siblings that may still run.
-_VERDICT_COLLAPSE_ORDER: tuple[str, ...] = ("approve", _REJECT_VERDICT, _ADVISE_VERDICT, "needs_review")
-_PROCEEDABLE_VERDICTS: frozenset[str] = frozenset({"approve", _ADVISE_VERDICT})
+_VERDICT_COLLAPSE_ORDER: tuple[str, ...] = ("approve", "reject", "advise", "needs_review")
+_PROCEEDABLE_VERDICTS: frozenset[str] = frozenset({"approve", "advise"})
 
 
 def collapse_verdicts(verdicts: Iterable[str]) -> str:

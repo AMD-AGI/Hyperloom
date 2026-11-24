@@ -96,14 +96,14 @@ def normalize_framework_reviews(
         return []
 
     proposals = {str(row["msg_id"]): row for row in dict_rows(judge.get("proposals")) if row.get("msg_id")}
-    effective: dict[str, dict[str, Any]] = {}
+    emitted: dict[str, dict[str, Any]] = {}
     for intent in dict_rows(_nested(emit, "intent_envelope", "intents")):
         if intent.get("intent_type") != "review_verdict":
             continue
         payload = to_mapping(intent.get("payload"))
         target = str(payload.get("target_proposal_msg_id") or "")
         if target:
-            effective[target] = payload
+            emitted[target] = payload
 
     rows: list[dict[str, Any]] = []
     for verdict_row in dict_rows(review.get("review_verdicts")):
@@ -128,7 +128,7 @@ def normalize_framework_reviews(
                 "variant_name": _first(payload.get("variant_name"), params.get("variant_name")),
                 "arm": arm,
                 "target_action": target_action,
-                **_ruling(verdict_row, effective.get(proposal_id, {})),
+                **_ruling(verdict_row, emitted.get(proposal_id, {})),
                 "ts": str(_first(verdict_row.get("ts"), emit.get("ts"), review.get("ts")) or ""),
                 "review_path": normalized_review_path,
                 "phase": review_phase,
