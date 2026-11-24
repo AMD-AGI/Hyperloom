@@ -15,6 +15,8 @@ from .env_safety import assert_forward_env_keys
 
 # Default sshd port baked into the image's mn-sshd-init.sh.
 DEFAULT_SSH_PORT = 2233
+#: The user every SSH target is reached as.
+SSH_USER = "root"
 
 
 def _ssh_common_opts(known_hosts: Path) -> list[str]:
@@ -47,7 +49,7 @@ class SshTarget:
             _ssh_identity(self.key_path),
             "-p",
             str(self.port),
-            f"root@{self.host}",
+            f"{SSH_USER}@{self.host}",
         ]
 
 
