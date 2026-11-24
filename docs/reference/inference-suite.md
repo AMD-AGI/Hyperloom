@@ -131,7 +131,9 @@ the server starts. A `llama-server` missing from `PATH` or whose `--help` fails
 stops the round (`framework_version_unknown`). Its model directory holds the one `.gguf` the server loads,
 which the guard passes as `--model`, beside the
 Hugging Face tokenizer files the load client reads. No recipe source knows it, so
-its base is the operator's launch script.
+its base is the operator's launch script. An eval reads the context the server
+serves from the launch's `-c` / `--ctx-size`, else from the model directory's
+`config.json`; a round with neither stops as `eval_context_too_short`.
 
 ## Launch layers
 

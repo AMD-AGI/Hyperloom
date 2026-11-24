@@ -81,17 +81,26 @@ class RequestSlotsFlag:
 
 
 @dataclass(frozen=True)
-class ServerFlags:
-    """The flags that carry a round's runtime facts to the server; ``None`` when the server takes no such flag.
+class ContextLengthFlag:
+    """The server option that sets the context the server serves, every spelling of it, the one the runner writes
+    first; without it the server serves the model's native context."""
 
-    ``context_length`` sets the context the server serves; without it the server serves the model's native one.
-    """
+    aliases: tuple[str, ...]
+
+    def value(self, args: Sequence[str]) -> str | None:
+        """The context ``args`` set last, as they spell it; ``None`` when they set none."""
+        return last_alias_value(argv_flag_occurrences(args), frozenset(map(canonical_flag_name, self.aliases)))
+
+
+@dataclass(frozen=True)
+class ServerFlags:
+    """The flags that carry a round's runtime facts to the server; ``None`` when the server takes no such flag."""
 
     model: str
     host: str
     port: str
     served_model_name: str | None
-    context_length: str
+    context_length: ContextLengthFlag
 
     def guarded(self) -> tuple[str, ...]:
         """The flags the runner's guard sets on every round: the model, the address and the served name."""
@@ -244,6 +253,8 @@ _MODEL_FLAG = "--model"
 _HOST_FLAG = "--host"
 _PORT_FLAG = "--port"
 _SERVED_MODEL_NAME_FLAG = "--served-model-name"
+#: The context option vLLM and ATOM share.
+_MAX_MODEL_LEN = ContextLengthFlag(("--max-model-len",))
 #: The expert-parallel switch vLLM and ATOM share.
 _VLLM_STYLE_EP_SWITCH = "--enable-expert-parallel"
 
@@ -251,7 +262,9 @@ _FACTS: dict[Framework, FrameworkFacts] = {
     Framework.SGLANG: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package=Framework.SGLANG.value,
-        server_flags=ServerFlags("--model-path", _HOST_FLAG, _PORT_FLAG, _SERVED_MODEL_NAME_FLAG, "--context-length"),
+        server_flags=ServerFlags(
+            "--model-path", _HOST_FLAG, _PORT_FLAG, _SERVED_MODEL_NAME_FLAG, ContextLengthFlag(("--context-length",))
+        ),
         server_command=ServerCommand(("python3", "-m", "sglang.launch_server"), ("-m", "sglang.launch_server")),
         expert_parallel=ExpertParallelFlag("--ep-size", ("--ep-size", "--expert-parallel-size", "--ep"), True),
         data_parallel=DataParallelFlag(("--data-parallel-size", "--dp-size"), shares_tp=("--enable-dp-attention",)),
@@ -264,7 +277,7 @@ _FACTS: dict[Framework, FrameworkFacts] = {
     Framework.VLLM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package=Framework.VLLM.value,
-        server_flags=ServerFlags(_MODEL_FLAG, _HOST_FLAG, _PORT_FLAG, _SERVED_MODEL_NAME_FLAG, "--max-model-len"),
+        server_flags=ServerFlags(_MODEL_FLAG, _HOST_FLAG, _PORT_FLAG, _SERVED_MODEL_NAME_FLAG, _MAX_MODEL_LEN),
         # The ``vllm`` console script is ``vllm.entrypoints.cli.main:main``.
         server_command=ServerCommand(("vllm", "serve"), ("-m", "vllm.entrypoints.cli.main", "serve")),
         expert_parallel=ExpertParallelFlag(_VLLM_STYLE_EP_SWITCH, (_VLLM_STYLE_EP_SWITCH, "-ep"), False),
@@ -277,7 +290,7 @@ _FACTS: dict[Framework, FrameworkFacts] = {
     Framework.ATOM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package=Framework.ATOM.value,
-        server_flags=ServerFlags(_MODEL_FLAG, _HOST_FLAG, "--server-port", _SERVED_MODEL_NAME_FLAG, "--max-model-len"),
+        server_flags=ServerFlags(_MODEL_FLAG, _HOST_FLAG, "--server-port", _SERVED_MODEL_NAME_FLAG, _MAX_MODEL_LEN),
         server_command=ServerCommand(
             ("python3", "-m", "atom.entrypoints.openai_server"), ("-m", "atom.entrypoints.openai_server")
         ),
@@ -287,7 +300,9 @@ _FACTS: dict[Framework, FrameworkFacts] = {
     Framework.LLAMACPP: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package=None,
-        server_flags=ServerFlags(_MODEL_FLAG, _HOST_FLAG, _PORT_FLAG, "--alias", "--ctx-size"),
+        server_flags=ServerFlags(
+            _MODEL_FLAG, _HOST_FLAG, _PORT_FLAG, "--alias", ContextLengthFlag(("--ctx-size", "-c"))
+        ),
         server_command=ServerCommand(("llama-server",), None),
         metrics_flag="--metrics",
         model_file=".gguf",
@@ -304,6 +319,7 @@ def framework_facts(framework: Framework) -> FrameworkFacts:
 
 
 __all__ = [
+    "ContextLengthFlag",
     "DataParallelFlag",
     "ExpertParallelFlag",
     "Framework",
