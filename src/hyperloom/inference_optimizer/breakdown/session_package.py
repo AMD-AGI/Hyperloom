@@ -4,8 +4,8 @@
 """Bundle a session's consumer-facing artifacts into a single zip under the destination root.
 
 The root is ``HYPERLOOM_SESSION_PACKAGE_DEST``, else the session's own archive (``<session dir>/archive``), on the storage
-the session is on. The ``SKILL.md`` launch names a writable ``/workspace``, which the Claw sandbox sync ships; a hosted
-run (``hyperloom hosted run``) names the archive, made shared by the run's accounts, whatever the host passed.
+the session is on. A deployment that collects packages elsewhere names that place in the environment; a hosted run
+(``hyperloom hosted run``) names the archive, made shared by the run's accounts, whatever the host passed.
 
 A root with the setgid bit (the hosted archive, ``2770``) is one the accounts of one group write in turn: the directories
 made below it get its mode, and every file is a new one renamed into place with that mode less the execute bits, so the

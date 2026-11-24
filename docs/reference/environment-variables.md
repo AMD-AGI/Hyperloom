@@ -1148,7 +1148,7 @@ Primary switch (default **off**) for live Langfuse trace push.
   packager also copies `reports/trace/*.jsonl` and, with the loose mode on by
   default (`HYPERLOOM_SESSION_PACKAGE_LOOSE`), drops them under the package
   destination `HYPERLOOM_SESSION_PACKAGE_DEST`: `<session dir>/archive/` when it is unset
-  (the `SKILL.md` launch block sets a writable `/workspace`, which a Claw sandbox's sync ships), and the same
+  (a deployment whose sync collects another directory sets the variable to it), and the same
   directory, mode 2770,
   the run's group, on the shared storage, in a hosted run, where the entry sets it whatever the
   host passed. If a session might
