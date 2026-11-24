@@ -172,12 +172,15 @@ opened now needs to show a trend: the frontier's trend window, or its specialist
 starts its first tests wait through, when that is longer. cold_start is the recent sandbox cold start in seconds, or
 "unknown" until the session's first test has waited through one, and min_useful_seconds is then the trend window
 alone. When explore_remaining_seconds is below min_useful_seconds, a branch opened now is unlikely to show anything.
-toolbox_headroom is how many more tests the toolbox would start at once, less the tests running and queued: under the
+idle_test_slots is how many more tests the toolbox would start at once beside those running: under the
 max_parallel_tests cap, and under the tests the measurement cards leave room for, which the sandbox an autonomous
-branch holds takes cards away from. At 0 the tests running and queued are as many as run at once; below 0, that many
-more wait for a card. It says how long a test submitted now waits, not whether a branch opened now can work: a
-specialist reads source, writes its change and has it built without a card, and its tests take their turn in the queue
-all the branches share. A K above 1 runs that many of a branch's tests at once only while cards are free.
+branch holds takes cards away from. queued_tests is how many tests wait for a card, and a branch's tests_running and
+tests_queued count its own. Tests that wait while slots are idle belong to branches at their K.
+The queue starts confirm, reproduction and merge tests before explore tests, and among explore tests the branches take
+turns, K turns each: a branch opened now takes its turn however many tests the other branches have queued, so queued
+tests are no reason to leave a branch slot free. They say how long a test submitted now waits, not whether a branch
+opened now can work: a specialist reads source, writes its change and has it built without a card. A K above 1 runs
+that many of a branch's tests at once only while cards are free.
 spend is what the session has used so far. gpu_hours_used is the GPU time of every test of this session that has a
 result, a failed one and the baseline measured on the root commit included, plus the card time any lease holds outside
 the tests (an autonomous branch's sandbox, a dev sandbox, a tool's job, or the dossier pass's cards, charged to the

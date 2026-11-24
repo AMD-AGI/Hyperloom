@@ -5,16 +5,17 @@
 
 Whether a branch may be opened at all is the roster's answer (its free slots, a closed roster, a stopping session).
 The signals here are what the judge weighs, never a cap the scheduler enforces: whether a branch opened now has the
-time to show progress and how long its tests would wait, as the least EXPLORE time a new branch needs to show a trend
-and how many more tests the toolbox would run at once. A branch opened after the opening batch is briefed on a focus:
-the op the judge names for it, or else one of the ops the session ranks for a new branch.
+time to show progress and how long its tests would wait, as the least EXPLORE time a new branch needs to show a trend,
+how many more tests the toolbox would start at once and how many tests wait for a card. A branch opened after the
+opening batch is briefed on a focus: the op the judge names for it, or else one of the ops the session ranks for a new
+branch.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, QueueState, Toolbox
@@ -29,12 +30,17 @@ MB_MIN_USEFUL_COLD_STARTS = 2
 @dataclass(frozen=True)
 class WideningSignals:
     """``cold_start_seconds`` is ``None`` before the toolbox's first sandbox cold start, and ``min_useful_seconds``
-    then leaves the cold starts out, so it reads low. ``toolbox_headroom`` is negative while more tests wait than the
-    cap in force leaves room for."""
+    then leaves the cold starts out, so it reads low. ``idle_test_slots`` is how many more tests the toolbox would
+    start at once and ``queued_tests`` how many wait for a card: both are above 0 while the tests that wait belong to
+    branches at their K. ``running_by_branch`` and ``queued_by_branch`` count each branch's own, a branch with none
+    left out."""
 
     min_useful_seconds: float
     cold_start_seconds: float | None
-    toolbox_headroom: int
+    idle_test_slots: int
+    queued_tests: int
+    running_by_branch: Mapping[str, int] = field(default_factory=dict)
+    queued_by_branch: Mapping[str, int] = field(default_factory=dict)
 
 
 def min_useful_seconds(frontier: FrontierPolicy, queue_state: QueueState) -> float:
@@ -46,18 +52,19 @@ def min_useful_seconds(frontier: FrontierPolicy, queue_state: QueueState) -> flo
     return max(frontier.window_seconds, start_up)
 
 
-def toolbox_headroom(
+def idle_test_slots(
     caps: RosterCaps, queue_state: QueueState, capacity: MeasurementCapacity, cards_per_test: int
 ) -> int:
-    """Tests the toolbox would still start at once, net of what runs and waits: under the session's global cap, and
-    under the tests the measurement cards allow at once, since a branch sandbox's lease holds cards no test runs on.
-    A toolbox with no card pool of its own reads under the cap alone.
+    """Tests the toolbox would still start at once beside those running: under the session's global cap, and under
+    the tests the measurement cards allow at once, since a branch sandbox's lease holds cards no test runs on; 0 while
+    a lease holds cards the running tests were started under. A toolbox with no card pool of its own reads under the
+    cap alone.
     """
 
     allowed = caps.max_parallel_tests
     if capacity.known:
         allowed = min(allowed, capacity.measurement_cards // cards_per_test)
-    return allowed - queue_state.running - queue_state.queued
+    return max(allowed - queue_state.running, 0)
 
 
 def refill_focus(
@@ -115,7 +122,10 @@ class Widening:
         return WideningSignals(
             min_useful_seconds=min_useful_seconds(self._frontier, state),
             cold_start_seconds=state.cold_start_seconds,
-            toolbox_headroom=toolbox_headroom(self._roster.caps, state, capacity, self._cards_per_test),
+            idle_test_slots=idle_test_slots(self._roster.caps, state, capacity, self._cards_per_test),
+            queued_tests=state.queued,
+            running_by_branch=state.running_by_branch,
+            queued_by_branch=state.queued_by_branch,
         )
 
 
@@ -123,7 +133,7 @@ __all__ = [
     "MB_MIN_USEFUL_COLD_STARTS",
     "Widening",
     "WideningSignals",
+    "idle_test_slots",
     "min_useful_seconds",
     "refill_focus",
-    "toolbox_headroom",
 ]

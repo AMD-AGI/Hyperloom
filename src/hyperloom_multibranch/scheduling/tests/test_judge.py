@@ -119,7 +119,14 @@ OPENING_ROSTER = (_entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION),)
 CAPS = RosterCaps(max_branches=4, max_k_per_branch=2, max_parallel_tests=8)
 #: A session whose cards hold two tests at once, and one whose cards hold one.
 TWO_TESTS, ONE_TEST = replace(CAPS, max_parallel_tests=2), replace(CAPS, max_parallel_tests=1)
-WIDENING = WideningSignals(min_useful_seconds=1350.0, cold_start_seconds=90.0, toolbox_headroom=3)
+WIDENING = WideningSignals(
+    min_useful_seconds=1350.0,
+    cold_start_seconds=90.0,
+    idle_test_slots=3,
+    queued_tests=4,
+    running_by_branch={"b01": 1},
+    queued_by_branch={"b01": 4},
+)
 
 
 def _view(
@@ -568,9 +575,20 @@ def _state(view: JudgeView) -> dict[str, object]:
 def test_prompt_shows_and_explains_whether_a_branch_opened_now_would_pay_off() -> None:
     state = _state(_view())
 
-    assert (state["min_useful_seconds"], state["cold_start"], state["toolbox_headroom"]) == (1350, 90, 3)
-    for field in ("min_useful_seconds", "cold_start", "toolbox_headroom"):
+    assert (state["min_useful_seconds"], state["cold_start"]) == (1350, 90)
+    for field in ("min_useful_seconds", "cold_start"):
         assert field in JUDGE_SYSTEM_PROMPT
+
+
+def test_prompt_shows_idle_slots_apart_from_queued_tests_and_each_branchs_own() -> None:
+    state = _state(_view())
+    rows = {row["branch"]: row for row in state["branches"]}
+
+    assert (state["idle_test_slots"], state["queued_tests"]) == (3, 4)
+    assert (rows["b01"]["tests_running"], rows["b01"]["tests_queued"]) == (1, 4)
+    assert (rows["b02"]["tests_running"], rows["b02"]["tests_queued"]) == (0, 0)
+    for field in ("idle_test_slots", "queued_tests", "tests_running", "tests_queued"):
+        assert field in JUDGE_SYSTEM_PROMPT and field in PLAYBOOK_JUDGE_PROMPT
 
 
 def test_prompt_says_the_cold_start_is_unknown_before_the_first_one() -> None:

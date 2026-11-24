@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Whether a branch opened now would still pay off: the least useful EXPLORE time and the toolbox's headroom."""
+"""Whether a branch opened now would still pay off: the least useful EXPLORE time, the toolbox's idle slots and its queue."""
 
 from __future__ import annotations
 
@@ -20,9 +20,9 @@ from hyperloom_multibranch.scheduling.widening import (
     MB_MIN_USEFUL_COLD_STARTS,
     Widening,
     WideningSignals,
+    idle_test_slots,
     min_useful_seconds,
     refill_focus,
-    toolbox_headroom,
 )
 from hyperloom_multibranch.toolbox.tests.helpers import ScriptedExecutor, build, ok, req
 
@@ -39,6 +39,7 @@ def _queue(*, running: int = 0, queued: int = 0, cold_start: float | None = None
     return QueueState(
         queued_by_priority={0: 0, 1: 0, 2: queued, 3: 0, 4: 0},
         running_by_branch={"b01": running} if running else {},
+        queued_by_branch={"b01": queued} if queued else {},
         cold_start_seconds=cold_start,
     )
 
@@ -63,21 +64,24 @@ def test_before_the_first_cold_start_the_cold_starts_are_left_out() -> None:
     assert min_useful_seconds(short_window, _queue()) == SPECIALIST_START_SECONDS
 
 
-@pytest.mark.parametrize(("running", "queued", "headroom"), [(0, 0, 8), (5, 1, 2), (8, 3, -3)])
-def test_headroom_is_the_global_cap_less_what_runs_and_waits(running: int, queued: int, headroom: int) -> None:
-    assert toolbox_headroom(CAPS, _queue(running=running, queued=queued), _cards(16), 2) == headroom
+@pytest.mark.parametrize(("running", "queued", "idle"), [(0, 0, 8), (5, 1, 3), (5, 40, 3), (8, 3, 0)])
+def test_idle_slots_are_the_global_cap_less_what_runs_however_many_tests_wait(
+    running: int, queued: int, idle: int
+) -> None:
+    assert idle_test_slots(CAPS, _queue(running=running, queued=queued), _cards(16), 2) == idle
 
 
-def test_the_cards_a_branch_sandbox_holds_bound_the_headroom_below_the_cap() -> None:
+def test_the_cards_a_branch_sandbox_holds_bound_the_idle_slots_below_the_cap() -> None:
     """A lease takes cards out of measurement, and the judge is told how many tests are left, not the cap."""
 
-    assert toolbox_headroom(CAPS, _queue(), _cards(16, leased=8), 2) == 4
-    assert toolbox_headroom(CAPS, _queue(running=2), _cards(16, leased=8), 2) == 2
-    assert toolbox_headroom(CAPS, _queue(), _cards(16, leased=12), 4) == 1
+    assert idle_test_slots(CAPS, _queue(), _cards(16, leased=8), 2) == 4
+    assert idle_test_slots(CAPS, _queue(running=2), _cards(16, leased=8), 2) == 2
+    assert idle_test_slots(CAPS, _queue(), _cards(16, leased=12), 4) == 1
+    assert idle_test_slots(CAPS, _queue(running=2), _cards(16, leased=12), 4) == 0
 
 
 def test_a_toolbox_with_no_card_pool_reads_under_the_cap_alone() -> None:
-    assert toolbox_headroom(CAPS, _queue(running=1), MeasurementCapacity.unknown(), 2) == 7
+    assert idle_test_slots(CAPS, _queue(running=1), MeasurementCapacity.unknown(), 2) == 7
 
 
 class _Toolbox:
@@ -97,9 +101,18 @@ def test_signals_read_the_queue_the_toolbox_reports_now(tmp_path: Path) -> None:
     roster = Roster(CAPS, tmp_path / "MB-roster.json", Clock(now=lambda: 0.0))
     widening = Widening(toolbox, roster, frontier, cards_per_test=2)
 
-    assert asyncio.run(widening.signals()) == WideningSignals(SPECIALIST_START_SECONDS, None, 5)
+    assert asyncio.run(widening.signals()) == WideningSignals(
+        SPECIALIST_START_SECONDS,
+        None,
+        idle_test_slots=6,
+        queued_tests=1,
+        running_by_branch={"b01": 2},
+        queued_by_branch={"b01": 1},
+    )
     toolbox.state = _queue(running=2, cold_start=100.0)
-    assert asyncio.run(widening.signals()) == WideningSignals(SPECIALIST_START_SECONDS + 200.0, 100.0, 6)
+    assert asyncio.run(widening.signals()) == WideningSignals(
+        SPECIALIST_START_SECONDS + 200.0, 100.0, idle_test_slots=6, queued_tests=0, running_by_branch={"b01": 2}
+    )
 
 
 def test_the_cold_start_the_real_toolbox_measured_is_what_the_signals_carry_to_the_judge(tmp_path: Path) -> None:
