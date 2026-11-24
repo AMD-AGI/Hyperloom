@@ -15,7 +15,7 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 from hyperloom.orchestrator.policy.specialist_in_flight import SPECIALIST_DOMAIN_IN_FLIGHT
-from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.specialists.in_flight import held_domain, in_flight_domains
 from hyperloom.orchestrator.specialists.profile import SCOPE_DOMAIN, resolve_specialist_profile
 

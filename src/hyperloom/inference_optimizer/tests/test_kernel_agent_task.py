@@ -186,7 +186,8 @@ async def test_resumed_entry_reuses_a_live_task_and_replaces_a_settled_one(coord
 async def _next_leg(coord):
     """Stop ``coord`` and reopen its session the way a restarted run does."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+    from hyperloom.orchestrator.roles import MockCriticBackend
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     coord.shared_state.save(coord.session_dir)
     await coord.stop()

@@ -5,11 +5,11 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.orchestrator.mcp_tool_names import CONTEXT_TOOL_NAMES, qualified_context_tool_name
-from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles.mcp_context_tools import (
     CONTEXT_TOOL_SPECS,
     ContextProvider,
 )
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.conversation import _first_present, _format_inbox_event
 from hyperloom.orchestrator.bus.message_bus import Message

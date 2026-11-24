@@ -18,8 +18,7 @@ Mapping (trace -> phase span -> agent span -> generation)::
     Trace                 = one session
       phase span          = PRELUDE / ENABLEMENT / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / ...
         agent span        = component (orchestration / kernel_agent /
-                            specialist / critic / geak / forge /
-                            proposal_scorer / ...)
+                            specialist / critic / geak / forge / ...)
           Generation      = one LLM call (llm_calls.jsonl; prompt/response
                             paired from conversations.jsonl when available)
       Score               = one decision (decision_trace.jsonl), attached to
@@ -28,8 +27,8 @@ Mapping (trace -> phase span -> agent span -> generation)::
                             ``langfuse_mapping.decision_to_scores``:
                               - decision_outcome (CATEGORICAL:
                                 KEEP/REVERT/no_promote/skipped)
-                              - gain_pct / predicted_gain_pct /
-                                proposal_score (NUMERIC) when present
+                              - gain_pct / predicted_gain_pct (NUMERIC)
+                                when present
 
 Source files (under the session dir)
 -------------------------------------

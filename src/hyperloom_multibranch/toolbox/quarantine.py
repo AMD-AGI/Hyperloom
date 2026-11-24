@@ -18,7 +18,7 @@ it out, so the node is in service again without an operator.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import replace
 
 from hyperloom_multibranch.contracts.blackboard.records import QuarantineEvent
@@ -49,12 +49,6 @@ class Quarantine:
     @property
     def nodes(self) -> frozenset[str]:
         return frozenset(self._nodes)
-
-    @property
-    def failures(self) -> Mapping[str, int]:
-        """How many failures were reported against each node this session, quarantined or not."""
-
-        return dict(self._failures)
 
     def count_failure(self, node: str) -> int:
         """Count one failure reported against ``node`` and return how many it has now."""
@@ -110,15 +104,3 @@ class Quarantine:
             kept = tuple(gpu for gpu in event.gpu_ids if gpu not in back)
             if kept:
                 await self._health.record_quarantine(replace(event, gpu_ids=kept))
-
-    async def lift(self, node: str, reason: str) -> bool:
-        if node not in self._nodes:
-            return False
-        lost = [event for event in await self.cards() if event.node == node]
-        await self._health.record_quarantine(QuarantineEvent(node=node, action=QuarantineAction.LIFT, reason=reason))
-        for (
-            event
-        ) in lost:  # lifting a node returns its card sets in the blackboard; cards lost for good are not returned
-            await self._health.record_quarantine(event)
-        self._nodes.discard(node)
-        return True

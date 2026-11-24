@@ -11,12 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.roles import (
-    MockBackend,
-    MockCriticBackend,
-    MockTurn,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.roles import MockCriticBackend
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
 from hyperloom.inference_optimizer.cli import preflight_env as cli_preflight_env

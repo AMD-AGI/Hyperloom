@@ -19,12 +19,8 @@ async def _build_coord(tmp_path: Path):
     """Build a minimal Coordinator rooted at ``tmp_path``."""
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
-    from hyperloom.orchestrator.roles.mock_backend import (
-        MockBackend,
-        MockTurn,
-        ScriptedPlan,
-    )
     from hyperloom.orchestrator.state.shared_state import SharedState
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 
     state = SharedState(session_id="pump-tick-heartbeat")
     state.save(tmp_path)

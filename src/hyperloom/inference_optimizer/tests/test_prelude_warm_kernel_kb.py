@@ -16,9 +16,7 @@ from hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches import 
     revert_warm_kernel_patches,
 )
 from hyperloom.orchestrator.knowledge.agent_kb import KernelAgentKB
-from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
-    KnowledgeSections,
-)
+from hyperloom.orchestrator.knowledge.remote_recipe.sections import KnowledgeSections
 from hyperloom.orchestrator.phases import prelude_warm_kernel as prelude_warm_kernel_mod
 from hyperloom.orchestrator.phases.prelude import PreludePhase
 

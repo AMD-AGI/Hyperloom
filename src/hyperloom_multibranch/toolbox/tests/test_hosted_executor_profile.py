@@ -34,7 +34,7 @@ def _job(tmp_path: Path, kind: TestKind, **fake: object) -> TestJob:
     point = point_yaml(tmp_path, "planned.yaml", **fake)
     purpose = Purpose.PROFILE if kind is TestKind.PROFILE else Purpose.EXPLORE
     accepted = AcceptedMeasurement(None, (point,))  # type: ignore[arg-type]
-    return TestJob(req(kind=kind, purpose=purpose).accepted("b1-000001"), 1, (), 2, 2, accepted)
+    return TestJob(req(kind=kind, purpose=purpose).accepted("b1-000001"), 1, (), 2, accepted)
 
 
 async def _profile(tmp_path: Path, rig: Rig, **fake: object) -> tuple[HostedExecutor, TestResult]:
