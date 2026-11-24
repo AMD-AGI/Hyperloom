@@ -2192,9 +2192,27 @@ def test_a_launch_asks_its_low_model_over_the_side_orchestration_runs_on(monkeyp
     assert "low model 'gpt-5.4-mini' answered over the openai protocol" in capsys.readouterr().out
 
 
+def test_a_deepseek_launch_asks_its_low_model_over_the_protocol_the_harness_speaks(monkeypatch, capsys):
+    """The harness reaches its gateway over the OpenAI-compatible protocol, whichever side credentials rank first."""
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://claude-gw.example/anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://deepseek-gw.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv(cli.llm_config.AGENT_BACKEND_ENV, "deepseek")
+    for installed in ("claude_agent_sdk_installed", "codex_agent_sdk_installed", "deepseek_harness_sdk_installed"):
+        monkeypatch.setattr(cli.llm_config, installed, lambda: True)
+    sent = _record_critic_probes(monkeypatch)
+    args = _make_args(low_model="deepseek-v4-flash")
+
+    model_catalog._probe_low_model(args, codex_follows_claude=False, claude_follows_codex=False)
+
+    assert sent == [("openai", "deepseek-v4-flash")]
+    assert "low model 'deepseek-v4-flash' answered over the openai protocol" in capsys.readouterr().out
+
+
 def test_a_low_model_that_cannot_answer_stops_the_launch(monkeypatch, capsys):
     sent = _record_critic_probes(monkeypatch, fail=True)
-    monkeypatch.setattr(model_catalog, "critic_on_codex_side", lambda **kw: False)
+    monkeypatch.setattr(model_catalog, "_resolve_orchestration_backend", lambda **kw: "claude")
     args = _make_args(low_model="claude-haiku-5-5")
 
     with pytest.raises(SystemExit) as exc_info:

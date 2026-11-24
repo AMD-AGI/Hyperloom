@@ -16,6 +16,7 @@ from hyperloom_common.env import env_bool
 from hyperloom_common.llm.llm_config import CLAUDE_OAUTH_TOKEN_ENV
 from hyperloom_common.llm.llm_headers import parse_custom_headers
 from .backends import (
+    _resolve_orchestration_backend,
     critic_review_target,
     critic_on_codex_side,
 )
@@ -450,16 +451,17 @@ def _probe_low_model(args: argparse.Namespace, *, codex_follows_claude: bool, cl
     """Send ``--low-model`` one real request before the session starts; exit rc=2 when it cannot answer.
 
     Orchestration runs on it from the first tick and has no fallback model, so it is held to the orchestration
-    allowlist and asked over the side orchestration runs on.
+    allowlist and asked over the protocol the orchestration backend speaks: Anthropic's for the Claude CLI, the
+    OpenAI-compatible one for Codex and the DeepSeek Harness.
     """
     model = args.low_model
     if not model:
         return
     _reject_unusable_claude_model(model, allow_custom=_custom_orch_model_allowed(), flag="--low-model")
-    on_codex = critic_on_codex_side(
+    backend = _resolve_orchestration_backend(
         codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
     )
-    protocol = "openai" if on_codex else "anthropic"
+    protocol = "anthropic" if backend == llm_config.AGENT_BACKEND_CLAUDE else "openai"
     last_error = _probe_model_reply(protocol, model, component="orchestration")
     if last_error is None:
         print(f"Preflight: low model {model!r} answered over the {protocol} protocol")
