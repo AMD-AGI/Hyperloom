@@ -29,6 +29,7 @@ __all__ = [
     "probed_cards",
     "publish_session_card",
     "read_cards",
+    "rocr_uuids",
     "session_card",
     "session_gfx",
 ]
@@ -53,12 +54,12 @@ _TORCH_PROBE = (
     "import json, os; "
     "[os.environ.pop(v, None) for v in ('ROCR_VISIBLE_DEVICES', 'HIP_VISIBLE_DEVICES', 'CUDA_VISIBLE_DEVICES')]; "
     "import torch; "
-    "facts = ('name', 'gcnArchName', 'multi_processor_count', 'total_memory', 'clock_rate'); "
+    "facts = ('name', 'gcnArchName', 'total_memory'); "
     "cards = map(torch.cuda.get_device_properties, range(torch.cuda.device_count())); "
     "print(json.dumps({'torch': [{f: getattr(c, f, None) for f in facts} for c in cards]}))"
 )
-#: The commands a machine is asked for its cards with, most complete first. rocm-smi reports no compute-unit count,
-#: bandwidth or clock; torch no bandwidth.
+#: The commands a machine is asked for its cards with. Only amd-smi reports compute units, bandwidth and clock: torch
+#: counts an RDNA card's compute units by half.
 PROBES = (
     "amd-smi static --json",
     "rocm-smi --showproductname --showmeminfo vram --json",
@@ -88,13 +89,8 @@ class GpuCard:
     engine_clock_mhz: int | None
 
     def same_kind(self, other: GpuCard) -> bool:
-        """Whether ``other`` has this card's arch, compute units, memory and top engine clock."""
-        return (self.gfx, self.compute_units, self.memory_mib, self.engine_clock_mhz) == (
-            other.gfx,
-            other.compute_units,
-            other.memory_mib,
-            other.engine_clock_mhz,
-        )
+        """Whether ``other`` has this card's arch, compute units and memory."""
+        return (self.gfx, self.compute_units, self.memory_mib) == (other.gfx, other.compute_units, other.memory_mib)
 
     def peak_tflops(self, precision: str) -> float | None:
         """Vendor dense peak in TFLOPS; ``None`` without compute units, an engine clock or a rate for the arch."""
@@ -174,14 +170,26 @@ def read_cards() -> list[GpuCard]:
     raise AmdSmiError("; ".join(reasons))
 
 
+def rocr_uuids() -> list[str]:
+    """What a UUID device mask calls each card (``gpu-<serial>``, lower case), by ROCm device number.
+
+    Raises:
+        AmdSmiError: ``amd-smi`` cannot be read.
+    """
+    rows = {row["gpu"]: _block(row, "asic") for row in amd_smi.gpu_rows(amd_smi.read_amd_smi_json("static"))}
+    serials = (_text(rows[index].get("asic_serial")) for index in amd_smi.gpus_in_rocm_order())
+    return ["gpu-" + serial.lower().removeprefix("0x") for serial in serials]
+
+
 def one_kind(cards: Iterable[GpuCard]) -> GpuCard:
-    """The card that stands for all of ``cards``; raises ``ValueError`` listing the kinds unless there is exactly one."""
+    """The card that stands for all of ``cards``, a named one when any is; raises ``ValueError`` listing the kinds
+    unless there is exactly one."""
     cards = list(cards)
     kinds = [card for index, card in enumerate(cards) if not any(card.same_kind(seen) for seen in cards[:index])]
     if len(kinds) != 1:
         counted = "; ".join(f"{sum(map(kind.same_kind, cards))}x {kind.describe()}" for kind in kinds)
         raise ValueError(f"the GPUs are not one kind of card: {counted or 'there is none'}")
-    return kinds[0]
+    return next((card for card in cards if board_label(card.name)), cards[0])
 
 
 def publish_session_card(card: GpuCard | None) -> None:
@@ -246,15 +254,14 @@ def _torch_card(facts: dict[str, Any]) -> GpuCard:
     gfx, memory_bytes = _text(facts.get("gcnArchName")).lower().split(":")[0], _positive_int(facts.get("total_memory"))
     if not (gfx and memory_bytes):
         raise AmdSmiError("torch reports a card without its arch or memory size")
-    clock_khz = _positive_int(facts.get("clock_rate"))
     return GpuCard(
         name=_text(facts.get("name")),
         device_id="",
         gfx=gfx,
-        compute_units=_positive_int(facts.get("multi_processor_count")),
+        compute_units=None,
         memory_mib=memory_bytes >> 20,
         memory_bandwidth_gbps=None,
-        engine_clock_mhz=clock_khz // 1000 if clock_khz else None,
+        engine_clock_mhz=None,
     )
 
 
@@ -307,5 +314,6 @@ def _positive_int(value: Any) -> int | None:
 
 
 def _engine_clock_mhz(clock: Any) -> int | None:
+    """The top level of the system clock. A lower level is the live reading, which can exceed it under load."""
     levels = _block(_block(clock if isinstance(clock, dict) else {}, "sys"), "frequency_levels")
-    return max((mhz for level in levels.values() if (mhz := _positive_int(level))), default=None)
+    return _positive_int(list(levels.values())[-1]) if levels else None

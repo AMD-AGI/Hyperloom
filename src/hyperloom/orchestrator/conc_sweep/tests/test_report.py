@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import csv
+import dataclasses
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -294,8 +295,11 @@ class TestTheCurveCarriesBothAxisPairs:
         assert rows[0]["total_token_throughput"] == "25984.8"
 
 
-def test_returns_none_when_the_session_read_no_card(monkeypatch, stub_meta: ModelMeta) -> None:
+@pytest.mark.parametrize("card", [None, dataclasses.replace(MI355X_CARD, memory_bandwidth_gbps=None)])
+def test_returns_none_when_the_session_has_no_card_bandwidth(monkeypatch, stub_meta: ModelMeta, card) -> None:
     monkeypatch.delenv(SESSION_CARD_ENV)
+    if card is not None:
+        publish_card(monkeypatch, card)
     block = build_roofline_ceiling(
         _make_state(), ArmCurves(baseline=[], optimized=[]), concs=[1, 8], isl=1024, osl=1024
     )

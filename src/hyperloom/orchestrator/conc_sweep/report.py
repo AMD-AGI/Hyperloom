@@ -160,7 +160,7 @@ def build_roofline_ceiling(
     isl: int,
     osl: int,
 ) -> dict[str, Any] | None:
-    """Per-conc decode roofline alongside the measured curves; ``None`` when the session read no card."""
+    """Per-conc decode roofline alongside the measured curves; ``None`` when the session's card gives no bandwidth."""
     model_path = str(getattr(state, "model_path", "") or "")
     precision = str(getattr(state, "precision", "") or "") or "bf16"
     meta = load_model_meta(model_path, precision_hint=precision)
@@ -169,7 +169,7 @@ def build_roofline_ceiling(
     card = session_card()
     gpu_type = str(getattr(state, "gpu_type", "") or "")
     num_gpus = int(getattr(state, "tp", 0) or 0)
-    if card is None or num_gpus <= 0:
+    if card is None or not card.memory_bandwidth_gbps or num_gpus <= 0:
         return None
 
     t_cmp = compute_compute_bound_ceiling_tok_per_sec(

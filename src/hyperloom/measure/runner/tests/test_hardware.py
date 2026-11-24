@@ -176,8 +176,8 @@ def test_another_kind_of_card_is_refused_whatever_its_name_says():
     assert _kind_problems(MI300X_CARD, MI325X_CARD) != []
     # a name that matches the sheet's does not make a different card the same
     assert _kind_problems(dataclasses.replace(MI325X_CARD, name=MI355X_CARD.name), MI355X_CARD) != []
-    # nor does a lower top engine clock pass for the sheet's
-    assert _kind_problems(dataclasses.replace(MI355X_CARD, engine_clock_mhz=2100), MI355X_CARD) != []
+    # a clock reading is not what makes a kind: under load a card can read above its top level
+    assert _kind_problems(dataclasses.replace(MI355X_CARD, engine_clock_mhz=2402), MI355X_CARD) == []
 
 
 def test_a_sheet_without_a_card_is_not_compared_with_the_machine_s_cards():

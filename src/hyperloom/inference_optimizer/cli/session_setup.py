@@ -19,7 +19,7 @@ from hyperloom_common.amd_smi import AmdSmiError
 from hyperloom_common.gpu_card import GpuCard
 from hyperloom.common.gpu_partition import PartitionModel
 from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled
-from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS, parse_device_list
+from hyperloom.common.visible_devices import HIP_LEVEL_VARS, ROCR_LEVEL_VARS, effective_mask_tokens
 
 from .. import framework_registry
 from ..session.lock import SessionAlreadyRunning, SessionLock
@@ -105,7 +105,8 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
 
 
 def _read_session_card(nodes: int) -> GpuCard | None:
-    """The card this session runs on, a remote node's for a multi-node run; exits 2 when its cards are not one kind."""
+    """The card this session runs on, a remote node's for a multi-node run: the first one, with a WARN when its cards
+    are not one kind."""
     try:
         if nodes >= 2:
             from ..multi_node._internal.gpu_probe import remote_cards
@@ -119,29 +120,38 @@ def _read_session_card(nodes: int) -> GpuCard | None:
     try:
         card = gpu_card.one_kind(cards)
     except ValueError as exc:
-        print(f"ERROR: {exc}; narrow the visible-device mask to one kind of card", file=sys.stderr)
-        sys.exit(2)
+        card = cards[0]
+        print(f"WARN: {exc}; the session takes the first", file=sys.stderr)
     print(f"GPU card        : {card.describe()}")
     return card
 
 
 def _visible_cards(cards: list[GpuCard]) -> list[GpuCard]:
-    """The cards the visible-device mask names; all of them when it names no number."""
-    mask = next((raw for name in VISIBLE_DEVICE_VARS if (raw := os.environ.get(name, "").strip())), "")
-    numbers = parse_device_list(mask)
-    return [cards[number] for number in numbers if number < len(cards)] if numbers else cards
+    """The cards the device masks leave this process: a ROCr-level mask picks among the machine's, by ROCm number or
+    UUID, and a HIP-level mask among those. Exits 2 on a mask naming a card the machine does not have."""
+    seen = list(range(len(cards)))
+    for level in (ROCR_LEVEL_VARS, HIP_LEVEL_VARS):
+        tokens = next((found for var in level if (found := effective_mask_tokens(os.environ.get(var)))), [])
+        uuids = gpu_card.rocr_uuids() if any(not token.isdigit() for token in tokens) else []
+        try:
+            seen = [seen[int(t)] if t.isdigit() else uuids.index(t.lower()) for t in tokens] or seen
+        except (IndexError, ValueError):
+            mask = ",".join(tokens)
+            print(f"ERROR: the visible-device mask {mask!r} names a GPU this machine does not have", file=sys.stderr)
+            sys.exit(2)
+    return [cards[index] for index in seen]
 
 
 def _session_label(given: str, card: GpuCard | None) -> str:
-    """The name the session files its results under: the one given, else the card's own."""
-    own = gpu_card.board_label(card.name) if card else ""
-    if card and given and own and given != own:
+    """The name the session files its results under: the one given, else the card's model designation, else its arch."""
+    named = gpu_card.board_label(card.name) if card else ""
+    if given and named and given != named:
         print(
-            f"WARN: the GPU type is given as {given!r}, but the card calls itself {own!r} ({card.name}); "
+            f"WARN: the GPU type is given as {given!r}, but the card calls itself {named!r} ({card.name}); "
             f"this session's results are filed under {given!r}",
             file=sys.stderr,
         )
-    return given or own
+    return given or named or (card.gfx if card else "")
 
 
 def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> None:

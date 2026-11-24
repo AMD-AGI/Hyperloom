@@ -783,6 +783,14 @@ def test_breakdown_from_state_reports_the_decode_ceiling(tmp_path, monkeypatch):
     assert bd.peak_tok_per_sec == pytest.approx(min(bd.mem_tok_per_sec, bd.cmp_tok_per_sec))
 
 
+def test_a_card_that_reports_no_bandwidth_has_no_ceiling(tmp_path, monkeypatch):
+    """The compute side alone would pass a memory-bound run off as compute-bound."""
+    publish_card(monkeypatch, dataclasses.replace(MI325X_CARD, memory_bandwidth_gbps=None))
+    model = _write_model(tmp_path / "m", _DENSE_CFG, weight_bytes=8 * 1024**2)
+
+    assert rc.compute_roofline_breakdown_from_state(_state(tmp_path, _serving_benchmark(model))) == rc._EMPTY_BREAKDOWN
+
+
 def test_breakdown_from_state_is_empty_when_the_model_is_unreadable(tmp_path):
     st = _state(tmp_path, _serving_benchmark(tmp_path / "absent"))
     assert rc.compute_roofline_breakdown_from_state(st) == rc._EMPTY_BREAKDOWN

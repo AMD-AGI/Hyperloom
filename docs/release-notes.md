@@ -186,23 +186,26 @@ it.
   card        : AMD Instinct MI325X (gfx942, 304 CUs, 262128 MiB, 2100 MHz)`).
   Its arch, compute units, memory, bandwidth and top engine clock replace the
   per-board rows, so a card needs no registration. The session asks `amd-smi
-  static --json` first, then `rocm-smi` (name, arch and memory only, so no
-  vendor peak, AITER CSV check or partition sizing), then torch's device
-  properties (`gcnArchName`; no bandwidth); a multi-node run asks a remote node
-  the same way. Child processes read the card from `HYPERLOOM_GPU_CARD` and the
-  manifest archives it as `gpu_card`. A host none of the three can describe
-  prints `GPU card        : none read (<reasons>)` and runs without
-  arch-specific launch rows, gates or vendor peaks. Visible cards of more than
-  one kind exit 2 at launch, listing each kind: narrow the visible-device mask.
+  static --json` first, then `rocm-smi`, then torch's device properties
+  (`gcnArchName`); the last two give only the name, arch and memory, so such a
+  card has no vendor peak, AITER CSV check or partition sizing. A multi-node
+  run asks a remote node the same way. Child processes read the card from
+  `HYPERLOOM_GPU_CARD` and the manifest archives it as `gpu_card`. A host none
+  of the three can describe prints `GPU card        : none read (<reasons>)`
+  and runs without arch-specific launch rows or gates. When the visible cards
+  are not one kind (arch, compute units, memory) the launch warns, listing each
+  kind, and takes the first; a device mask may name cards by ROCm number or
+  UUID.
 - **`--gpu-type` accepts any name and is taken as given.** It names the label
   results, recipes and KB rows are filed under (the flag, then
   `TARGET_GPU_TYPE`, then `GPU_TYPE`). A detected board no longer overrides it;
   a `WARN` names both when it differs from the card's own label. Without a name
   the label is the model designation in the card's market name (`AMD Instinct
-  MI355X` is `mi355x`; `MI300XL` and `R9700S` are labels of their own). A
-  session with neither a card nor a name exits 2 asking for `--gpu-type`.
-  `sglang`, `atom` and `xdit` no longer exit 2 on an R9700, R9600D, W7900 or
-  W7900D with `currently validated only for vllm`.
+  MI355X` is `mi355x`; `MI300XL` and `R9700S` are labels of their own), or the
+  card's arch when the driver gives it no model name. A session with neither a
+  card nor a name exits 2 asking for `--gpu-type`. `sglang`, `atom` and `xdit`
+  no longer exit 2 on an R9700, R9600D, W7900 or W7900D with `currently
+  validated only for vllm`.
 - **A recipe serves only the board it names.** InferenceX points, SGLang
   cookbook cells and headings, and ATOM catalog runners and headings match the
   session's GPU type by name. Boards sharing an arch and memory size no longer
@@ -232,7 +235,11 @@ it.
   compute peak is the measured `max_achievable_tflops` in TraceLens'
   `<LABEL>.json` when the checkout has one, else the card's vendor peak
   (compute units × top engine clock × the arch's rate); before, only MI300X and
-  MI325X had measured peaks. A session without a card has no analytic ceiling.
+  MI325X had measured peaks. A card that reports no bandwidth, which includes
+  the Radeon boards, has no analytic ceiling, where the board table gave one;
+  the roofline TraceLens computes from a profile is unaffected. On Radeon the
+  driver's top clock level is below the boost clock AMD's published peak uses,
+  so the vendor peak computed there is 19% to 30% under the published figure.
   **Upgrade note:** in a `TRACELENS_ROOT` checkout you maintain, delete any
   `<LABEL>.json` an earlier Hyperloom wrote with vendor peaks; it is now read
   as measured.
@@ -248,11 +255,11 @@ it.
   again. Remote searches no longer send `hardware_in`.
 - **The hosted runner checks the card by its facts.** A measurement sheet's
   `hardware` gains `card` (null when the session read none). The runner
-  compares each visible GPU's arch, compute units, memory and top engine clock
-  with it, instead of matching the GPU type against a device-id table and the
-  market name. **Upgrade note:** a runner from an earlier release refuses the
-  new sheets with `spec.hardware: unknown key 'card'`; move the app and its
-  runners together.
+  compares each visible GPU's arch, compute units and memory with it, instead
+  of matching the GPU type against a device-id table and the market name.
+  **Upgrade note:** a runner from an earlier release refuses the new sheets
+  with `spec.hardware: unknown key 'card'`; move the app and its runners
+  together.
 - **Multi-branch sessions take any `--gpu-type` and read their card**: locally
   from the machine, hosted from the recording of `amd-smi static --json` that
   `HYPERLOOM_RUNNER_GPU_CARD` names on the app host. The session stops before

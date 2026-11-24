@@ -6,6 +6,7 @@
 import argparse
 import asyncio
 import os
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -128,15 +129,55 @@ def test_a_host_whose_cards_cannot_be_read_runs_without_a_card(monkeypatch, caps
     assert "none read (amd-smi static could not run (test))" in capsys.readouterr().out
 
 
-def test_mixed_cards_refuse_the_session_and_list_each_kind(monkeypatch, capsys):
+def test_cards_of_two_kinds_warn_listing_each_and_the_session_takes_the_first(monkeypatch, capsys):
     _host(monkeypatch, MI325X_CARD, MI355X_CARD)
+
+    cli._resolve_target_gpu(_args(), nodes=1)
+
+    assert gpu_card.session_card() == MI325X_CARD
+    err = capsys.readouterr().err
+    assert err.startswith("WARN:") and "AMD Instinct MI325X" in err and "AMD Instinct MI355X" in err
+
+
+@pytest.mark.parametrize(
+    ("masks", "card"),
+    [
+        ({"ROCR_VISIBLE_DEVICES": "GPU-BBBB"}, MI355X_CARD),
+        ({"ROCR_VISIBLE_DEVICES": "1,0", "HIP_VISIBLE_DEVICES": "1"}, MI325X_CARD),
+        ({"HIP_VISIBLE_DEVICES": "1"}, MI355X_CARD),
+    ],
+    ids=["uuid", "hip-within-rocr", "hip-alone"],
+)
+def test_a_device_mask_names_cards_by_uuid_and_a_hip_mask_picks_among_those_rocr_left(monkeypatch, masks, card):
+    _host(monkeypatch, MI325X_CARD, MI355X_CARD)
+    monkeypatch.setattr(gpu_card, "rocr_uuids", lambda: ["gpu-aaaa", "gpu-bbbb"])
+    for name, value in masks.items():
+        monkeypatch.setenv(name, value)
+
+    cli._resolve_target_gpu(_args(), nodes=1)
+
+    assert gpu_card.session_card() == card
+
+
+@pytest.mark.parametrize("mask", ["5", "GPU-CCCC"])
+def test_a_mask_naming_a_card_the_machine_does_not_have_exits_two(monkeypatch, capsys, mask):
+    _host(monkeypatch, MI325X_CARD, MI355X_CARD)
+    monkeypatch.setattr(gpu_card, "rocr_uuids", lambda: ["gpu-aaaa", "gpu-bbbb"])
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", mask)
 
     with pytest.raises(SystemExit) as exc:
         cli._resolve_target_gpu(_args(), nodes=1)
 
     assert exc.value.code == 2
-    err = capsys.readouterr().err
-    assert "AMD Instinct MI325X" in err and "AMD Instinct MI355X" in err
+    assert f"the visible-device mask {mask!r} names a GPU this machine does not have" in capsys.readouterr().err
+
+
+def test_a_card_without_a_model_designation_is_filed_under_its_arch(monkeypatch):
+    _host(monkeypatch, replace(MI355X_CARD, name="AMD Radeon Graphics", gfx="gfx1201"))
+
+    cli._resolve_target_gpu(args := _args(), nodes=1)
+
+    assert args.gpu_type == os.environ["GPU_TYPE"] == "gfx1201"
 
 
 def test_the_visible_device_mask_picks_the_cards_by_rocm_number(monkeypatch):

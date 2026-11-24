@@ -1231,10 +1231,9 @@ full env-var set, and `docs/reference/session-breakdown.md` for the emitted
 
 Every start and resume reads the GPUs with `amd-smi static`, else `rocm-smi`,
 else torch's `gcnArchName`; a multi-node session reads a remote node's the same
-way. The cards the
-first set visible-device mask names (all of them without one) must be one kind
-(same arch, compute units, memory and top engine clock), or the launch exits 2
-listing each kind. That card's arch and facts decide everything that depends
+way. When the cards the visible-device masks leave are not one kind (same arch,
+compute units and memory), the launch warns, listing each kind, and takes the
+first. That card's arch and facts decide everything that depends
 on the hardware: the default launch row, FP4 quantization, roofline peaks,
 partition sizing and Recipe KB arch matching. There is no list of supported
 boards, so a GPU Hyperloom has not seen before still runs.
@@ -1242,7 +1241,8 @@ boards, so a GPU Hyperloom has not seen before still runs.
 The GPU type is the label results, recipes and benchmark scripts are filed
 under. Pass `--gpu-type` or `$GPU_TYPE` only when the prompt names the GPU;
 without either, it is the card's market name reduced to its model designation
-(`AMD Instinct MI355X` → `mi355x`, `AMD Radeon AI PRO R9700` → `r9700`).
+(`AMD Instinct MI355X` → `mi355x`, `AMD Radeon AI PRO R9700` → `r9700`), or its
+arch when the driver gives the card no model name.
 
 ```bash
 python3 -m hyperloom optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2

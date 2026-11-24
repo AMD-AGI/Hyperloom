@@ -398,7 +398,10 @@ def test_catalog_probe_keeps_anthropic_side_when_it_has_its_own_key(clean_creds_
     [
         pytest.param("", MI355X_CARD, "mi355x", id="card-only"),
         pytest.param("mi300x", None, "mi300x", id="given-only"),
-        pytest.param("", replace(MI355X_CARD, name="AMD Radeon Graphics"), "", id="a-card-without-a-designation"),
+        pytest.param("", replace(MI355X_CARD, name="AMD Radeon Graphics"), "gfx950", id="no-designation-so-its-arch"),
+        pytest.param(
+            "r9700", replace(MI355X_CARD, name="AMD Radeon Graphics"), "r9700", id="given-for-an-unnamed-card"
+        ),
     ],
 )
 def test_session_label_without_a_disagreement_is_silent(given, card, label, capsys):

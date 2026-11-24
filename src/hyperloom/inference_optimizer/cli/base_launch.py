@@ -137,8 +137,8 @@ def _session_launch(
     board = (getattr(args, "gpu_type", None) or "").strip()
     if not board:
         _refuse(
-            "the base launch is resolved for a GPU label, and the session has none: no card was read, or the card "
-            "reports no product name; pass --gpu-type"
+            "the base launch is resolved for a GPU label, and the session has none because no card was read; "
+            "pass --gpu-type"
         )
     fixed = workload is Workload.FIXED
     return SessionLaunch(

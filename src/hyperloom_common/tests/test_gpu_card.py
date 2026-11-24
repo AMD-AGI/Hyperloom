@@ -17,6 +17,7 @@ from hyperloom_common.gpu_card import (
     probed_cards,
     publish_session_card,
     read_cards,
+    rocr_uuids,
     session_card,
     session_gfx,
 )
@@ -119,13 +120,22 @@ def test_bare_numbers_and_value_unit_readings_parse_alike():
     assert cards_of([bare]) == cards_of([_row()]) == {0: _MI325X}
 
 
-def test_cards_that_differ_only_in_name_are_one_kind():
-    renamed = dataclasses.replace(_MI325X, name="AMD Instinct MI325X VF", device_id="74b9", memory_bandwidth_gbps=None)
+def test_cards_that_differ_in_name_bandwidth_or_clock_are_one_kind_named_by_one_that_has_a_label():
+    unnamed = dataclasses.replace(
+        _MI325X, name="AMD Radeon Graphics", memory_bandwidth_gbps=None, engine_clock_mhz=2102
+    )
 
-    assert one_kind([_MI325X, renamed]) is _MI325X
+    assert one_kind([unnamed, _MI325X]) is _MI325X
+    assert one_kind([unnamed]) is unnamed
 
 
-@pytest.mark.parametrize("field", ["gfx", "compute_units", "memory_mib", "engine_clock_mhz"])
+def test_the_clock_is_the_top_level_not_a_live_reading_above_it():
+    levels = {"Level 0": {"value": "500"}, "Level 1": {"value": "2402"}, "Level 2": {"value": "2400"}}
+
+    assert cards_of([_row(clock={"sys": {"frequency_levels": levels}})])[0].engine_clock_mhz == 2400
+
+
+@pytest.mark.parametrize("field", ["gfx", "compute_units", "memory_mib"])
 def test_a_card_differing_in_a_computing_fact_is_another_kind(field):
     assert not _MI325X.same_kind(dataclasses.replace(_MI325X, **{field: "gfx950" if field == "gfx" else 1}))
 
@@ -182,17 +192,9 @@ _ROCM_SMI = {
     },
 }
 _TORCH = {
-    "torch": [
-        {
-            "name": "AMD Instinct MI325X",
-            "gcnArchName": "gfx942:sramecc+:xnack-",
-            "multi_processor_count": 304,
-            "total_memory": 262128 << 20,
-            "clock_rate": 2100000,
-        }
-    ]
+    "torch": [{"name": "AMD Instinct MI325X", "gcnArchName": "gfx942:sramecc+:xnack-", "total_memory": 262128 << 20}]
 }
-_TORCH_MI325X = dataclasses.replace(_MI325X, device_id="", memory_bandwidth_gbps=None)
+_TORCH_MI325X = GpuCard("AMD Instinct MI325X", "", "gfx942", None, 262128, None, None)
 
 
 def test_rocm_smi_describes_its_cards_in_rocm_order_without_compute_units_or_clock():
@@ -206,7 +208,7 @@ def test_rocm_smi_describes_its_cards_in_rocm_order_without_compute_units_or_clo
     assert cards[0].describe() == "AMD Instinct MI355X (gfx950, 294912 MiB)"
 
 
-def test_torch_describes_a_card_but_for_its_bandwidth_among_other_lines():
+def test_torch_describes_a_cards_name_arch_and_memory_among_other_lines():
     assert probed_cards(f"[INFO] started {{attempt: 1}}\n{json.dumps(_TORCH)}\n[INFO] done\n") == [_TORCH_MI325X]
 
 
@@ -215,6 +217,13 @@ def test_output_that_describes_no_card_or_one_without_its_arch_is_refused():
         probed_cards("amd-smi: command not found\n")
     with pytest.raises(AmdSmiError, match="rocm-smi reports a card without its arch"):
         probed_cards(json.dumps({"card0": {"Card Series": "AMD Instinct MI300X", "VRAM Total Memory (B)": "1048576"}}))
+
+
+def test_a_uuid_device_mask_names_a_card_by_its_serial_in_rocm_order(monkeypatch):
+    static = [_row(0, asic={"asic_serial": "0x41311B60902C6BF9"}), _row(1, asic={"asic_serial": "0x93E19F9622C13CBB"})]
+    _amd_smi_answers(monkeypatch, static=static, listed=[{"gpu": 0, "node_id": 5}, {"gpu": 1, "node_id": 2}])
+
+    assert rocr_uuids() == ["gpu-93e19f9622c13cbb", "gpu-41311b60902c6bf9"]
 
 
 def _probes_answer(monkeypatch, answers):

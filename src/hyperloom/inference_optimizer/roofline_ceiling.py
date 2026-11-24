@@ -626,6 +626,9 @@ def compute_roofline_breakdown_from_state(
     """The run's ceiling: img/s for xDiT, none for other scriptable workloads, else the decode ceiling + T_mem/T_cmp sides."""
     runtime = resolve_runtime_workload(state, arm=arm)
     # Diffusion (xDiT) uses a distinct images/sec ceiling; other scriptable workloads have none.
+    # Without the memory side, the compute side alone would pass a memory-bound run off as compute-bound.
+    if runtime.card is None or not runtime.card.memory_bandwidth_gbps:
+        return _EMPTY_BREAKDOWN
     if (runtime.framework or "").strip().lower() == "xdit":
         return _compute_diffusion_breakdown_from_state(state, runtime)
     if framework_registry.is_scriptable(runtime.framework):

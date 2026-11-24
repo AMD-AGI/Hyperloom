@@ -460,11 +460,14 @@ the cluster hand-off. It asks, in turn, until one describes a card:
 2. `rocm-smi --showproductname --showmeminfo vram --json`: name, arch and
    memory. No compute-unit count, bandwidth or clock, so there is no vendor
    peak, AITER CSV check or partition sizing.
-3. torch's device properties (`gcnArchName`): every fact but the bandwidth.
+3. torch's device properties (`gcnArchName`): name, arch and memory, as
+   `rocm-smi`.
 
-The cards must be one kind (same arch, compute units, memory size and top
-engine clock), or the launch exits 2 listing each kind. When none of the three
-describes a card the session prints each one's reason and runs without a card:
+When the visible cards are not one kind (same arch, compute units and memory
+size) the launch warns, listing each kind, and takes the first card. A device
+mask may name cards by ROCm number or UUID; one naming a card the machine does
+not have exits 2. When none of the three describes a card the session prints
+each one's reason and runs without a card:
 it uses no arch-specific launch row, opens no arch-specific gate and has no
 vendor peak. Nothing in Hyperloom keeps a list of boards; every hardware fact
 comes from the card.
@@ -473,7 +476,8 @@ The GPU type (`--gpu-type`, `TARGET_GPU_TYPE`, `GPU_TYPE`) is only the label
 results, recipes and scripts are filed under. Any name is taken as given, and
 one that differs from the card's own label is kept with a warning naming both.
 Without one, the label is the card's market name reduced to its model
-designation (`AMD Instinct MI355X` becomes `mi355x`).
+designation (`AMD Instinct MI355X` becomes `mi355x`), or its arch (`gfx1201`)
+when the driver gives the card no model name.
 
 | Variable | Set by | Description |
 |----------|--------|-------------|
