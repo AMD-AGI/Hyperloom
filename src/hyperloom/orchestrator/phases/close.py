@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 import asyncio
+import json
 import hashlib
 import sqlite3
 import time
@@ -45,6 +46,8 @@ _CLOSE_STEP_WAIT_FLOOR_SEC: float = 60.0
 
 # Ceiling on the same wait.
 _CLOSE_STEP_WAIT_CEILING_SEC: float = 600.0
+
+_SINGLE_FILE_DELIVERABLE_STEP: str = "single_file_deliverable"
 
 # Steps the workflow contract lets CLOSE skip or fail without the close-out counting as incomplete.
 _OPTIONAL_CLOSE_STEPS: frozenset[str] = frozenset(
@@ -436,6 +439,31 @@ class ClosePhase(CoordinatorCollaborator):
         record_session_breakdown(self.session_dir)
         await self._record_close_step("langfuse_flush", status="done")
 
+    async def _do_single_file_deliverable(self) -> None:
+        """Export the accepted single-file module, when the session declared one.
+
+        A refusal is recorded with its reason rather than concealed: the packaged
+        artifacts must not imply an export that does not exist. A session that declared
+        no scope asked for no export, and ``skipped`` is what says so -- ``failed`` is
+        read by the close verdict, which would degrade every campaign that never wanted
+        one.
+        """
+        if self.shared_state.framework != "custom":
+            return
+        from hyperloom.orchestrator.deployment.deliverable import single_file_deliverable
+
+        deployment = await asyncio.to_thread(single_file_deliverable, self.session_dir, self.shared_state.to_dict())
+        if deployment is None:
+            await self._record_close_step(
+                _SINGLE_FILE_DELIVERABLE_STEP, status="skipped", detail="no single-file optimization scope declared"
+            )
+            return
+        await self._record_close_step(
+            _SINGLE_FILE_DELIVERABLE_STEP,
+            status="done" if deployment["status"] == "exported" else "failed",
+            detail=json.dumps({"status": deployment["status"], "reasons": deployment["reasons"]}),
+        )
+
     async def _do_artifact_package(self) -> Path | None:
         """Bundle session artifacts into a zip under ``/workspace``.
 
@@ -505,6 +533,9 @@ class ClosePhase(CoordinatorCollaborator):
         # Langfuse flush + receipt splice: must run before the artifact package so flush_session flips the receipt
         # to final counts and patch_breakdown_langfuse splices it back into session_breakdown.json.
         await self._run_close_step("langfuse_flush", self._do_langfuse_flush())
+
+        # Standalone inference export: must run before the artifact package, which ships ``deployment/``.
+        await self._run_close_step(_SINGLE_FILE_DELIVERABLE_STEP, self._do_single_file_deliverable())
 
         # Artifact package: bundle the curated result/report/analysis files into a single zip under
         # ``HYPERLOOM_SESSION_PACKAGE_DEST`` (``/workspace`` when unset, where the Claw sandbox sync ships it to object

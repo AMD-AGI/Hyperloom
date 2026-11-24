@@ -41,7 +41,9 @@ _PROBE_SCRIPT = (
     "for dist in m.distributions():\n"
     "    name=(dist.metadata['Name'] if dist.metadata else '') or ''\n"
     "    if name:\n"
-    "        d[name]=dist.version or ''\n"
+    # version(name), not dist.version: for a name installed twice on the path, the
+    # iteration yields both and the last wins, which is not the one an import resolves.
+    "        d[name]=m.version(name) or ''\n"
     "print(json.dumps({'interpreter_tag': sys.version.split()[0], 'interpreter': sys.executable, "
     "'distributions': d}))\n"
 )

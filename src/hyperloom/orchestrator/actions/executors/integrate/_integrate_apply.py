@@ -14,6 +14,7 @@ from typing import Any
 
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
+from ....framework.optimization_scope import artifacts_refused_by_scope
 from ....specialists.patch_safety import is_unified_diff, patch_escapes_tree
 from ..patching._apply_feedback import ApplyFeedback, PatchApplyResult
 from ..framework_change._enablement_config import _established_enablement_config, _merge_established_server_args
@@ -159,6 +160,39 @@ def _applied_no_bench_result(attempt: IntegrateAttempt, deliverable: _Deliverabl
     }
 
 
+def _unusable_artifact_refusal(attempt: IntegrateAttempt, deliverable: _Deliverable) -> dict[str, Any] | None:
+    """Refuse an attempt whose artifacts cannot be used where they would land, or ``None``.
+
+    Both checks run before anything is backed up, so a refusal leaves the tree untouched.
+    """
+    refused = artifacts_refused_by_scope([spec.rel_target for spec in deliverable.artifact_specs])
+    if refused:
+        return _apply_failed(
+            attempt,
+            "artifact_refused_by_single_file_scope",
+            refused,
+            artifacts_applied=[],
+            artifact_errors=refused,
+            reason=(
+                "A single-file workload delivers one module, so an installed artifact would join the "
+                "measured configuration without reaching the operator; put the optimization in the module"
+            ),
+        )
+    if deliverable.artifact_runtime_errors:
+        return _apply_failed(
+            attempt,
+            "artifact_not_runtime_ready",
+            deliverable.artifact_runtime_errors,
+            artifacts_applied=[],
+            artifact_errors=deliverable.artifact_runtime_errors,
+            reason=(
+                "AITER GEMM model-config artifacts must contain measured, "
+                "non-placeholder rows for the target GPU architecture and CU count"
+            ),
+        )
+    return None
+
+
 class ApplyStageMixin:
     """Open the mutation window, apply the patch series to the live tree, and refuse the attempt when it does not apply."""
 
@@ -190,18 +224,9 @@ class ApplyStageMixin:
 
         deliverable = _Deliverable.resolve(attempt, params)
         attempt.switch_manifest = deliverable.switch_manifest
-        if deliverable.artifact_runtime_errors:
-            return _apply_failed(
-                attempt,
-                "artifact_not_runtime_ready",
-                deliverable.artifact_runtime_errors,
-                artifacts_applied=[],
-                artifact_errors=deliverable.artifact_runtime_errors,
-                reason=(
-                    "AITER GEMM model-config artifacts must contain measured, "
-                    "non-placeholder rows for the target GPU architecture and CU count"
-                ),
-            )
+        unusable = _unusable_artifact_refusal(attempt, deliverable)
+        if unusable is not None:
+            return unusable
 
         if not (deliverable.patch_paths or _changes_beyond_patches(attempt, deliverable)):
             if params.get("enablement_launch_only"):
