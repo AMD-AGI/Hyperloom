@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import threading
 import time
@@ -20,6 +21,7 @@ from hyperloom.measure.bundle import RejectReason, ResultRejected
 from hyperloom.measure.failures import SANDBOX_ACQUIRE_TIMEOUT
 from hyperloom.measure.hosted import STOPPED_RETURNCODE, HostedMeasurementBackend, HostedStartError
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED
+from hyperloom.measure.hosted_logs import INDEX_FILE, PREFIX
 from hyperloom.measure.manifest import encode_manifest
 from hyperloom.measure.returncodes import (
     HOSTED_INFRA_FAILURE_RC,
@@ -72,6 +74,11 @@ def rig(tmp_path: Path):
 def _run(rig_: Rig, tmp: Path, task: str = "req-1", **fake):
     call = make_call(tmp, task, point=point_yaml(tmp, f"{task}.yaml", **fake))
     return call, rig_.backend.run_test(call)
+
+
+def _landed(output_dir: Path) -> list[str]:
+    """What is in an attempt's output directory besides the runner logs a failed attempt keeps (``hosted-*``)."""
+    return sorted(x.name for x in output_dir.iterdir() if not x.name.startswith(PREFIX)) if output_dir.exists() else []
 
 
 def _spec_of(rig_: Rig, request_id: str, attempt: int = 1) -> MeasurementSpec:
@@ -277,7 +284,7 @@ def test_a_result_that_does_not_verify_is_rejected_and_lands_nowhere(rig, tmp_pa
     assert outcome.returncode == HOSTED_RESULT_REJECTED_RC
     assert outcome.failure_class is None and outcome.failure_reason == "result_rejected"
     assert f"({reject})" in outcome.stderr, outcome.stderr
-    assert not call.output_dir.exists() or not any(call.output_dir.iterdir()), "nothing was written to the output dir"
+    assert _landed(call.output_dir) == [], "no result file was written to the output dir"
     assert not (tmp_path / "archive").exists() or not any((tmp_path / "archive").iterdir()), "nothing was archived"
     record = r.backend.journal.latest("req-1")
     assert record.extra["verdict"] == "result_rejected" and record.extra["reject"] == reject
@@ -290,7 +297,7 @@ def test_a_failed_round_under_an_outcome_that_says_success_is_rejected_before_an
     call, outcome = _run(r, tmp_path, fake_accuracy=0.95, fake_accuracy_returncode=1)
     assert outcome.returncode == HOSTED_RESULT_REJECTED_RC
     assert "(manifest_invalid)" in outcome.stderr, outcome.stderr
-    assert not call.output_dir.exists() or not any(call.output_dir.iterdir()), "nothing was written to the output dir"
+    assert _landed(call.output_dir) == [], "no result file was written to the output dir"
     assert not (tmp_path / "archive").exists() or not any((tmp_path / "archive").iterdir()), "nothing was archived"
 
 
@@ -302,13 +309,118 @@ def test_nothing_is_downloaded_from_a_manifest_whose_signature_fails(rig, tmp_pa
     def spying_create(*args, **kwargs):
         sandbox = real_create(*args, **kwargs)
         original = sandbox.copy_out
-        sandbox.copy_out = lambda path, dest: (copied.append(path), original(path, dest))[1]
+
+        def copy_out(path: str, dest: Path) -> int:
+            if not _saved_log(dest):
+                copied.append(path)
+            return original(path, dest)
+
+        sandbox.copy_out = copy_out
         return sandbox
 
     r.provider.create = spying_create
     _, outcome = _run(r, tmp_path, fake_mode="wrong_key")
     assert outcome.returncode == HOSTED_RESULT_REJECTED_RC
-    assert copied == [], "the file list of an unsigned manifest is never used to fetch files"
+    assert copied == [], "the file list of an unsigned manifest is never used to fetch files (only its logs are kept)"
+
+
+def _saved_log(dest: Path) -> bool:
+    """Whether a copy is one of the runner logs a failed attempt keeps, not a file of the result being read."""
+    return any(part.startswith(PREFIX) for part in dest.parts)
+
+
+def _copying(rig_: Rig, short_copies: int) -> list[tuple[str, int]]:
+    """Make the sandboxes the rig creates copy the report short its first ``short_copies`` times, the way a transfer
+    that ends early without an error does; every copy is listed as (path, bytes received)."""
+    copied: list[tuple[str, int]] = []
+    real_create = rig_.provider.create
+
+    def create(*args, **kwargs):
+        sandbox = real_create(*args, **kwargs)
+        original = sandbox.copy_out
+
+        def copy_out(path: str, dest: Path) -> int:
+            received = original(path, dest)
+            if _saved_log(dest):
+                return received
+            if path.endswith(REPORT_PATH) and sum(p == path for p, _ in copied) < short_copies:
+                received -= 3
+                dest.write_bytes(dest.read_bytes()[:received])
+            copied.append((path, received))
+            return received
+
+        sandbox.copy_out = copy_out
+        return sandbox
+
+    rig_.provider.create = create
+    return copied
+
+
+def _report_copies(copied: list[tuple[str, int]]) -> list[int]:
+    return [received for path, received in copied if path.endswith(REPORT_PATH)]
+
+
+def test_a_file_whose_copy_comes_back_short_is_copied_again_and_the_result_lands(rig, tmp_path, caplog) -> None:
+    r = rig()
+    copied = _copying(r, short_copies=1)
+    with caplog.at_level(logging.WARNING, logger="hyperloom.measure.hosted"):
+        call, outcome = _run(r, tmp_path, fake_throughput=4321.5)
+    assert outcome.returncode == 0, outcome.stderr
+    short, whole = _report_copies(copied)
+    assert short == whole - 3
+    assert json.loads((call.output_dir / REPORT_PATH).read_text())["fixed"]["output_throughput"] == 4321.5
+    said = [x.getMessage() for x in caplog.records if REPORT_PATH in x.getMessage()]
+    assert said == [f"{REPORT_PATH}: copy 1 received {short} bytes, the manifest lists {whole}; copying it again"]
+    assert r.backend.journal.latest("req-1").extra["verified"] is True
+
+
+def test_a_file_whose_every_copy_comes_back_short_is_refused_with_both_sizes_and_its_logs_kept(rig, tmp_path) -> None:
+    r = rig()
+    copied = _copying(r, short_copies=3)
+    call, outcome = _run(r, tmp_path)
+    assert outcome.returncode == HOSTED_RESULT_REJECTED_RC
+    received = _report_copies(copied)
+    assert len(received) == 3 and len(set(received)) == 1, "the first copy and two more, then verification decides"
+    listed = received[0] + 3
+    detail = f"{REPORT_PATH}: {received[0]} bytes read, the manifest lists {listed}"
+    assert f"(file_size_mismatch): {detail}" in outcome.stderr, outcome.stderr
+    record = r.backend.journal.latest("req-1")
+    assert record.extra["reject"] == "file_size_mismatch" and record.extra["detail"] == detail
+    assert _landed(call.output_dir) == [], "nothing of the refused result lands"
+    assert (call.output_dir / "hosted-server.log").read_bytes() == b"server up\nserver down\n", "the logs are kept"
+    assert (call.output_dir / INDEX_FILE).is_file()
+    assert r.provider.find({}, role="measurement") == []
+
+
+def test_a_refusal_stays_a_refusal_when_the_logs_cannot_be_saved(rig, tmp_path) -> None:
+    r = rig()
+    _copying(r, short_copies=3)
+    real_create = r.provider.create
+
+    def create(*args, **kwargs):
+        sandbox = real_create(*args, **kwargs)
+
+        def gone(path: str):
+            raise SandboxGone("the sandbox ended")
+
+        sandbox.list_entries = gone
+        return sandbox
+
+    r.provider.create = create
+    _, outcome = _run(r, tmp_path)
+    assert outcome.returncode == HOSTED_RESULT_REJECTED_RC
+    assert "(file_size_mismatch)" in outcome.stderr, outcome.stderr
+    assert r.backend.journal.latest("req-1").extra["reject"] == "file_size_mismatch"
+
+
+def test_a_file_whose_copy_comes_back_whole_is_copied_once(rig, tmp_path) -> None:
+    r = rig()
+    copied = _copying(r, short_copies=0)
+    _, outcome = _run(r, tmp_path)
+    assert outcome.returncode == 0, outcome.stderr
+    paths = [path for path, _ in copied]
+    assert len(_report_copies(copied)) == 1
+    assert len(paths) == len(set(paths)), "no file is copied twice"
 
 
 def test_a_file_the_manifest_does_not_list_is_never_fetched_or_landed(rig, tmp_path) -> None:
