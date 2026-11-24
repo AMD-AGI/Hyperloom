@@ -33,6 +33,8 @@ from hyperloom.sandbox.reaper import Leftovers, kill_launchers, reap_sandbox_pro
 from hyperloom.sandbox.rooted import open_rooted
 from hyperloom.sandbox.socket import (
     CommandResult,
+    DirEntry,
+    EntryKind,
     OutputSinks,
     RunSettings,
     Role,
@@ -320,8 +322,8 @@ class LocalSandbox:
                 total += len(chunk)
         return total
 
-    def list_dir(self, path: str) -> list[str]:
-        """List entry names of a directory, sorted.
+    def list_entries(self, path: str) -> list[DirEntry]:
+        """The entries of a directory, sorted by name, each read without following a link.
 
         Raises:
             SandboxDenied: By the sealed policy, or for a path that escapes the root.
@@ -330,7 +332,14 @@ class LocalSandbox:
         """
         fd = self._open(self._gate(path, write=False), os.O_RDONLY | os.O_DIRECTORY)
         try:
-            return sorted(os.listdir(fd))
+            entries = []
+            for name in sorted(os.listdir(fd)):
+                try:
+                    facts = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue  # removed since the listing
+                entries.append(DirEntry(name, _kind(facts.st_mode), facts.st_size))
+            return entries
         finally:
             os.close(fd)
 
@@ -538,3 +547,11 @@ def _drain(stream: IO[bytes] | None, sink: list[str], callback: Callable[[str], 
         sink.append(line)
         if callback is not None:
             callback(line)
+
+
+def _kind(mode: int) -> EntryKind:
+    if stat.S_ISLNK(mode):
+        return "link"
+    if stat.S_ISDIR(mode):
+        return "dir"
+    return "file" if stat.S_ISREG(mode) else "other"

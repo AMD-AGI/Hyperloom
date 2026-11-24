@@ -16,7 +16,9 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -24,7 +26,7 @@ import e2b
 import pytest
 
 from hyperloom.sandbox import CreateOptions, OutputSinks, RunSettings
-from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy, _LineSink
+from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy, _E2BSandbox, _LineSink
 from hyperloom.sandbox.socket import (
     IDEMPOTENCY_KEY,
     PENDING_TIMEOUT_KEY,
@@ -759,3 +761,24 @@ def test_chunks_reach_the_callback_as_whole_lines() -> None:
     sink.flush()
     assert lines == ["hello\n", "world\n", "\n", "last"]
     _LineSink(None).feed("ignored")
+
+
+def test_list_entries_reads_a_link_as_a_link_whatever_the_service_says_it_points_at() -> None:
+    def entry(name: str, kind: e2b.FileType | None, size: int, target: str | None = None) -> e2b.EntryInfo:
+        when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        return e2b.EntryInfo(name, kind, f"/out/files/{name}", size, 0, "rw-r--r--", "u", "g", when, target)
+
+    listed = [
+        entry("z.log", e2b.FileType.FILE, 7),
+        entry("escape", e2b.FileType.DIR, 0, "/etc"),
+        entry("round", e2b.FileType.DIR, 4096),
+        entry("odd", None, -1),
+    ]
+    handle = SimpleNamespace(sandbox_id="sbx-1", files=SimpleNamespace(list=lambda path: listed))
+    sandbox = _E2BSandbox(handle, control=None)  # type: ignore[arg-type]
+    assert [(e.name, e.kind, e.size) for e in sandbox.list_entries("/out/files")] == [
+        ("escape", "link", 0),
+        ("odd", "other", 0),
+        ("round", "dir", 4096),
+        ("z.log", "file", 7),
+    ]

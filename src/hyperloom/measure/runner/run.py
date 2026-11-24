@@ -32,6 +32,7 @@ from hyperloom.measure.docs import DocumentError
 from hyperloom.measure.failures import (
     DISK_FULL,
     FOREIGN_PROCESS_ON_CARD,
+    FRAMEWORK_VERSION_MISMATCH,
     Disposition,
     FailureClassification,
     FailureEvidence,
@@ -60,6 +61,7 @@ from hyperloom.measure.attachments import AttachmentError, place_attachments
 from hyperloom.measure.farm import (
     Farm,
     FarmError,
+    FrameworkVersionMismatch,
     build_farm,
     built_roots,
     inherited_environment,
@@ -339,6 +341,9 @@ def _prepare(ctx: _Context, spec: MeasurementSpec) -> tuple[list[Path], Path, Fa
         if farm is not None:
             for point in points:
                 verify_farm(farm, server_environment(yaml.safe_load(point.read_text())), python=python, cwd=ctx.work)
+    except FrameworkVersionMismatch as exc:
+        # Before the generic refusal: the sheet is sound, the image this sandbox runs is not the one it was compiled on.
+        raise RunnerFailure(FRAMEWORK_VERSION_MISMATCH, str(exc)) from exc
     except (AttachmentError, FarmError, NativeLayError, ValueError) as exc:
         raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
     return points, inferencex, farm

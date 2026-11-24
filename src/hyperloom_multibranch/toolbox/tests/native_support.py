@@ -29,6 +29,8 @@ ACT_CU = "native/src/act.cu"
 BASE_CU = "__global__ void act() {}\n"
 PY_FILE = f"native/python/{COMPONENT}/ops.py"
 BASE_PY = "SCALE = 1\n"
+#: The version the image records for its package: what a root over it is compiled against.
+VERSION = "1.0"
 FACTORY = f"{__name__}:stand_in_recipe"
 LAYOUT = ComponentLayout(
     COMPONENT,
@@ -109,7 +111,7 @@ class Image:
     name: str = COMPONENT
 
     def package(self) -> PackageBase:
-        return PackageBase(self.name, self.site / self.name, self.name, "1.0")
+        return PackageBase(self.name, self.site / self.name, self.name, VERSION)
 
 
 def image(root: Path, name: str = COMPONENT, files: dict[str, str] | None = None) -> Image:
@@ -128,6 +130,12 @@ def image(root: Path, name: str = COMPONENT, files: dict[str, str] | None = None
     )
     python.chmod(0o755)
     return Image(site, str(python), name)
+
+
+def installed_version(dist_name: str, python: str, cwd: Path) -> str:
+    """The farm's probe of the server's interpreter for the image: it has the version :meth:`Image.package` records,
+    whatever the interpreter running the tests (which the image's interpreter runs) has installed."""
+    return VERSION
 
 
 def upstream(root: Path) -> Path:

@@ -49,6 +49,7 @@ from hyperloom.measure.failures import (
     classify_test_failure,
 )
 from hyperloom.measure.hosted_live import LiveOutputs, finite_number
+from hyperloom.measure.hosted_logs import SeenProgress, save_runner_files, write_progress
 from hyperloom.measure.hosted_log import (
     STATE_FINISHED,
     STATE_SENT,
@@ -139,7 +140,6 @@ _LANDING_SEC = "landing_sec"
 #: How long a test whose result landed waits for its runner to exit, where the sandbox can tell, before its sandbox is
 #: handed over to the next test; one whose runner is still there is released instead.
 _RUNNER_EXIT_WAIT_SEC = 30.0
-_LOG_SUFFIX = ".log"
 
 
 class HostedStartError(RuntimeError):
@@ -344,6 +344,7 @@ class HostedMeasurementBackend:
         self._journal: MeasurementJournal | None = None
         self._stops = _Stops()
         self._live = LiveOutputs(clock)
+        self._seen = SeenProgress()
 
     # -- lifecycle ----------------------------------------------------------------------------------------------
 
@@ -420,6 +421,7 @@ class HostedMeasurementBackend:
         finally:
             self._stops.end(call.task_id)
             self._live.forget(call.task_id)
+            self._seen.forget(call.task_id)
         return replace(outcome, phases=timeline.compose(outcome.phases))
 
     def _attempt(self, call: TestCall, stop: threading.Event, timeline: HostTimeline) -> TestOutcome:
@@ -661,24 +663,24 @@ class HostedMeasurementBackend:
             if status is not None:
                 return status
             if exited is not None:
-                self._save_logs(handle, Path(call.output_dir))
+                self._save_logs(handle, call)
                 detail = f"the runner exited with code {exited} without writing status.json"
                 return _infra(
                     call, HOSTED_INFRA_FAILURE_RC, RUNNER_EXITED, detail, facts=_facts_of(attempt.runner, None)
                 )
             if config.should_stop() or attempt.stop.is_set():
-                self._save_logs(handle, Path(call.output_dir))
+                self._save_logs(handle, call)
                 return _refusal(call, STOPPED_RETURNCODE, STOPPED_REASON, "the run is stopping")
             silent = silence.silent_for(self._clock())
             if silent is not None:
-                self._save_logs(handle, Path(call.output_dir))
+                self._save_logs(handle, call)
                 detail = f"no output for {silent:.0f}s before the server was ready"
                 return _infra(
                     call, HOSTED_INFRA_FAILURE_RC, HUNG_BEFORE_READY, detail, facts=_facts_of(attempt.runner, None)
                 )
             if self._timed_out(attempt):
                 attempt.timeline.mark(RUNNER_DONE)
-                self._save_logs(handle, Path(call.output_dir))
+                self._save_logs(handle, call)
                 evidence = status_evidence(handle, STATUS_PATH)
                 ending = {"verdict": "timeout", "runner_status": evidence}
                 self._record_end(attempt, HOSTED_INFRA_FAILURE_RC, None, "timeout", ending)
@@ -701,6 +703,7 @@ class HostedMeasurementBackend:
             return last_output
         silence.observe(progress, self._clock())
         self._live.note(call.task_id, progress)
+        self._seen.note(call.task_id, progress, self._clock())
         latest = finite_number((progress or {}).get("last_output_unix")) or 0.0
         if latest > last_output and call.on_output is not None:
             call.on_output()
@@ -713,7 +716,7 @@ class HostedMeasurementBackend:
         call = attempt.call
         error_class = str(status.get("error_class") or "runner_failed")
         verdict = classify_test_failure(returncode=0, error_class=error_class)
-        self._save_logs(_handle(attempt.runner), Path(call.output_dir))
+        self._save_logs(_handle(attempt.runner), call)
         rc = HOSTED_INFRA_FAILURE_RC if verdict.disposition is Disposition.FAILED else HOSTED_SPEC_REJECTED_RC
         if verdict.disposition is Disposition.PROGRAM_ERROR and error_class != "spec_rejected":
             rc = HOSTED_RESULT_REJECTED_RC
@@ -1011,14 +1014,16 @@ class HostedMeasurementBackend:
         except Exception:
             log.exception("the events socket refused %s", event)
 
-    @staticmethod
-    def _save_logs(handle: Sandbox, output: Path) -> None:
-        """Best effort: keep the logs the runner wrote, so a failed or timed-out test can be diagnosed."""
+    def _save_logs(self, handle: Sandbox, call: TestCall) -> None:
+        """Best effort: keep the last progress read and the runner's logs, so a failed or timed-out test can be
+        diagnosed (:mod:`.hosted_logs`)."""
+        output = Path(call.output_dir)
         try:
-            names = [n for n in handle.list_dir(FILES_ROOT) if n.endswith(_LOG_SUFFIX)]
-            output.mkdir(parents=True, exist_ok=True)
-            for name in names:
-                handle.copy_out(f"{FILES_ROOT}/{name}", output / f"hosted-{name}")
+            write_progress(output, self._seen.get(call.task_id), self._clock())
+        except OSError:
+            log.warning("the last progress of %s could not be saved", call.task_id, exc_info=True)
+        try:
+            save_runner_files(handle, FILES_ROOT, output)
         except FileNotFoundError:
             log.debug("the runner wrote no files directory, so there are no logs to save")  # it failed before measuring
         except (SandboxError, OSError):
