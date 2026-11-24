@@ -169,9 +169,8 @@ def test_the_event_is_on_the_timeline_before_the_measurement_finishes(tmp_path: 
 def test_the_window_starts_when_the_action_started_not_when_it_ended(tmp_path: Path) -> None:
     recorder = _recorder()
     opened = _events(tmp_path)[0]["start_time"]
-    index = recorder.begin_run()
+    recorder.begin_run()
     recorder.record_round(
-        run_index=index,
         round_=BaselineRound(
             label=ROUND_SINGLE,
             started_at="2026-09-02T15:07:09+00:00",
@@ -180,7 +179,7 @@ def test_the_window_starts_when_the_action_started_not_when_it_ended(tmp_path: P
             result=_measured(),
         ),
     )
-    recorder.end_run(run_index=index, result=_measured())
+    recorder.end_run(result=_measured())
     recorder.finish(_measured())
 
     # The closing write reuses the opening write's start, so the window the timeline publishes begins where the action
@@ -199,9 +198,8 @@ def test_the_window_starts_when_the_action_started_not_when_it_ended(tmp_path: P
 
 def test_a_measured_baseline_closes_succeeded_with_its_numbers(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run()
+    recorder.begin_run()
     recorder.record_round(
-        run_index=index,
         round_=BaselineRound(
             label=ROUND_SINGLE,
             started_at="2026-09-02T15:07:09+00:00",
@@ -209,7 +207,7 @@ def test_a_measured_baseline_closes_succeeded_with_its_numbers(tmp_path: Path) -
             result=_measured(),
         ),
     )
-    recorder.end_run(run_index=index, result=_measured())
+    recorder.end_run(result=_measured())
     recorder.finish(_measured())
 
     event = _events(tmp_path)[0]
@@ -228,9 +226,8 @@ def test_a_measured_baseline_closes_succeeded_with_its_numbers(tmp_path: Path) -
 
 def test_the_discarded_warmup_is_recorded_beside_the_pass_that_counted(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run()
+    recorder.begin_run()
     recorder.record_round(
-        run_index=index,
         round_=BaselineRound(
             label=ROUND_WARMUP,
             started_at="2026-09-02T15:07:09+00:00",
@@ -239,7 +236,6 @@ def test_the_discarded_warmup_is_recorded_beside_the_pass_that_counted(tmp_path:
         ),
     )
     recorder.record_round(
-        run_index=index,
         round_=BaselineRound(
             label=ROUND_MEASURE,
             started_at="2026-09-02T15:10:31+00:00",
@@ -247,7 +243,7 @@ def test_the_discarded_warmup_is_recorded_beside_the_pass_that_counted(tmp_path:
             result=_measured(),
         ),
     )
-    recorder.end_run(run_index=index, result=_measured(warmup_round_tput=9000.0))
+    recorder.end_run(result=_measured(warmup_round_tput=9000.0))
     recorder.finish(_measured(warmup_round_tput=9000.0))
 
     rounds = _actions(tmp_path)[0]["runs"][0]["rounds"]
@@ -259,11 +255,10 @@ def test_the_discarded_warmup_is_recorded_beside_the_pass_that_counted(tmp_path:
 
 def test_rounds_that_start_in_the_same_second_keep_the_order_they_ran_in(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run()
+    recorder.begin_run()
     same_second = "2026-09-02T15:07:09+00:00"
     for label in (ROUND_WARMUP, ROUND_MEASURE, ROUND_ACCURACY):
         recorder.record_round(
-            run_index=index,
             round_=BaselineRound(
                 label=label,
                 started_at=same_second,
@@ -271,7 +266,7 @@ def test_rounds_that_start_in_the_same_second_keep_the_order_they_ran_in(tmp_pat
                 result=_measured(),
             ),
         )
-    recorder.end_run(run_index=index, result=_measured())
+    recorder.end_run(result=_measured())
     recorder.finish(_measured())
 
     rounds = _actions(tmp_path)[0]["runs"][0]["rounds"]
@@ -283,9 +278,9 @@ def test_rounds_that_start_in_the_same_second_keep_the_order_they_ran_in(tmp_pat
 
 def test_a_pass_refused_before_it_booted_still_leaves_a_row(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run()
+    recorder.begin_run()
     refused = _failed(error_class="session_time_exhausted", error="the run's clock refused the round")
-    recorder.end_run(run_index=index, result=refused)
+    recorder.end_run(result=refused)
     recorder.finish(refused)
 
     action = _actions(tmp_path)[0]
@@ -297,9 +292,8 @@ def test_a_pass_refused_before_it_booted_still_leaves_a_row(tmp_path: Path) -> N
 
 def test_a_baseline_standing_on_its_cold_warmup_closes_degraded(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run()
+    recorder.begin_run()
     recorder.record_round(
-        run_index=index,
         round_=BaselineRound(
             label=ROUND_WARMUP,
             started_at="2026-09-02T15:07:09+00:00",
@@ -311,7 +305,7 @@ def test_a_baseline_standing_on_its_cold_warmup_closes_degraded(tmp_path: Path) 
         output_throughput=9000.0,
         measure_round_dropped={"reason": "measure_round_reaped_by_the_run"},
     )
-    recorder.end_run(run_index=index, result=cold)
+    recorder.end_run(result=cold)
     recorder.finish(cold)
 
     assert _events(tmp_path)[0]["status"] == "degraded"
@@ -322,9 +316,8 @@ def test_a_baseline_standing_on_its_cold_warmup_closes_degraded(tmp_path: Path) 
 
 def test_a_failed_baseline_names_the_class_it_failed_with(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run()
+    recorder.begin_run()
     recorder.record_round(
-        run_index=index,
         round_=BaselineRound(
             label=ROUND_SINGLE,
             started_at="2026-09-02T15:07:09+00:00",
@@ -332,7 +325,7 @@ def test_a_failed_baseline_names_the_class_it_failed_with(tmp_path: Path) -> Non
             result=_failed(),
         ),
     )
-    recorder.end_run(run_index=index, result=_failed())
+    recorder.end_run(result=_failed())
     recorder.finish(_failed())
 
     event = _events(tmp_path)[0]
@@ -438,9 +431,8 @@ def test_each_action_is_assembled_under_its_own_task_id(tmp_path: Path) -> None:
 
 def test_a_killed_session_leaves_an_interrupted_event_with_its_rows(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run()
+    recorder.begin_run()
     recorder.record_round(
-        run_index=index,
         round_=BaselineRound(
             label=ROUND_WARMUP,
             started_at="2026-09-02T15:07:09+00:00",
@@ -462,10 +454,9 @@ def test_a_killed_session_leaves_an_interrupted_event_with_its_rows(tmp_path: Pa
 
 def test_assembling_the_same_rows_twice_gives_the_same_event(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run()
+    recorder.begin_run()
     for label in (ROUND_WARMUP, ROUND_MEASURE):
         recorder.record_round(
-            run_index=index,
             round_=BaselineRound(
                 label=label,
                 started_at="2026-09-02T15:07:09+00:00",
@@ -473,7 +464,7 @@ def test_assembling_the_same_rows_twice_gives_the_same_event(tmp_path: Path) -> 
                 result=_measured(),
             ),
         )
-    recorder.end_run(run_index=index, result=_measured())
+    recorder.end_run(result=_measured())
     recorder.finish(_measured())
 
     parts = event_parts(BASELINE_EVENT_SECTIONS)
@@ -502,7 +493,7 @@ async def test_the_executor_records_the_rounds_it_actually_ran(tmp_path: Path) -
     executor = object.__new__(BaselineExecutor)
     executor.shared_state = None
 
-    async def _run_once(ctx, *, recorder=None, run_index=0, **_kwargs):
+    async def _run_once(ctx, *, recorder=None):
         for label in (ROUND_WARMUP, ROUND_MEASURE):
             await executor._run_reported_round(
                 BenchmarkAttempt(
@@ -515,7 +506,6 @@ async def test_the_executor_records_the_rounds_it_actually_ran(tmp_path: Path) -
                     params={},
                     ctx=ctx,
                     recorder=recorder,
-                    run_index=run_index,
                 ),
                 label=label,
                 config_path=Path("/cfg.yaml"),
@@ -550,7 +540,7 @@ async def test_the_baseline_event_carries_the_per_gpu_output_the_session_anchors
     executor = object.__new__(BaselineExecutor)
     executor.shared_state = None
 
-    async def _run_once(ctx, *, recorder=None, run_index=0, **_kwargs):
+    async def _run_once(ctx, *, recorder=None):
         return _measured(output_throughput=1056.82)
 
     executor._run_once = _run_once  # type: ignore[method-assign]
@@ -572,7 +562,7 @@ async def test_an_inner_step_measurement_records_into_the_event_that_asked_for_i
     executor = object.__new__(BaselineExecutor)
     executor.shared_state = None
 
-    async def _run_once(_ctx, *, recorder=None, run_index=0, **_kwargs):
+    async def _run_once(_ctx, *, recorder=None):
         assert recorder is not None
         assert recorder.event_id == host
         return _measured()
@@ -596,7 +586,7 @@ async def test_an_executor_raise_closes_the_event_it_opened(tmp_path: Path) -> N
     executor = object.__new__(BaselineExecutor)
     executor.shared_state = None
 
-    async def _run_once(_ctx, *, recorder=None, run_index=0, **_kwargs):
+    async def _run_once(_ctx, *, recorder=None):
         raise FileNotFoundError("baseline config not found")
 
     executor._run_once = _run_once  # type: ignore[method-assign]
@@ -619,9 +609,8 @@ async def test_an_executor_raise_closes_the_event_it_opened(tmp_path: Path) -> N
 def test_the_measurement_says_where_its_latency_came_from(tmp_path: Path) -> None:
     recorder = _recorder()
     measured = _measured(ttft_e2el_source="rescued_raw_result", tpot_source="derived_from_e2el_ttft")
-    index = recorder.begin_run()
+    recorder.begin_run()
     recorder.record_round(
-        run_index=index,
         round_=BaselineRound(
             label=ROUND_MEASURE,
             started_at="2026-09-02T15:07:09+00:00",
@@ -629,7 +618,7 @@ def test_the_measurement_says_where_its_latency_came_from(tmp_path: Path) -> Non
             result=measured,
         ),
     )
-    recorder.end_run(run_index=index, result=measured)
+    recorder.end_run(result=measured)
     recorder.finish(measured)
 
     action = _actions(tmp_path)[0]
@@ -702,9 +691,8 @@ def _evidence(**overrides: Any) -> dict[str, Any]:
 
 def test_the_launch_reports_the_args_it_resolved(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run()
+    recorder.begin_run()
     recorder.record_invocation(
-        run_index=index,
         invocation=BaselineInvocation(
             framework_args="--attention-backend aiter",
             extra_envs={"RUN_EVAL": "false"},
@@ -714,7 +702,7 @@ def test_the_launch_reports_the_args_it_resolved(tmp_path: Path) -> None:
             args_mode="append",
         ),
     )
-    recorder.end_run(run_index=index, result=_measured())
+    recorder.end_run(result=_measured())
     recorder.finish(_measured())
 
     action = _actions(tmp_path)[0]
@@ -729,10 +717,8 @@ def test_the_launch_reports_the_args_it_resolved(tmp_path: Path) -> None:
 
 def test_an_empty_arg_string_is_an_answer_rather_than_a_gap(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run()
-    recorder.record_invocation(
-        run_index=index, invocation=BaselineInvocation(framework_args="", config_path="/w/baseline.yaml")
-    )
+    recorder.begin_run()
+    recorder.record_invocation(invocation=BaselineInvocation(framework_args="", config_path="/w/baseline.yaml"))
     recorder.finish(_measured())
 
     invocation = _actions(tmp_path)[0]["invocation"]
@@ -742,11 +728,9 @@ def test_an_empty_arg_string_is_an_answer_rather_than_a_gap(tmp_path: Path) -> N
 
 def test_the_observed_flags_do_not_overwrite_what_was_requested(tmp_path: Path) -> None:
     recorder = _recorder()
-    index = recorder.begin_run()
-    recorder.record_invocation(
-        run_index=index, invocation=BaselineInvocation(framework_args="--attention-backend aiter")
-    )
-    recorder.end_run(run_index=index, result=_measured())
+    recorder.begin_run()
+    recorder.record_invocation(invocation=BaselineInvocation(framework_args="--attention-backend aiter"))
+    recorder.end_run(result=_measured())
     recorder.finish(_measured(launch_evidence=_evidence(), server_log_path="/w/measure_round/server.log"))
 
     invocation = _actions(tmp_path)[0]["invocation"]
@@ -803,7 +787,7 @@ async def test_the_executor_reads_the_counters_off_the_session(tmp_path: Path) -
     executor = object.__new__(BaselineExecutor)
     executor.shared_state = None
 
-    async def _run_once(_ctx, *, recorder=None, run_index=0, **_kwargs):
+    async def _run_once(_ctx, *, recorder=None):
         return _measured()
 
     executor._run_once = _run_once  # type: ignore[method-assign]
@@ -827,7 +811,7 @@ async def test_a_profile_run_opens_no_baseline_event(tmp_path: Path) -> None:
     executor = ProfileExecutor(session_dir=tmp_path)
     recorders: list[Any] = []
 
-    async def _run_once(_ctx, *, recorder=None, run_index=0, **_kwargs):
+    async def _run_once(_ctx, *, recorder=None):
         recorders.append(recorder)
         return _measured()
 

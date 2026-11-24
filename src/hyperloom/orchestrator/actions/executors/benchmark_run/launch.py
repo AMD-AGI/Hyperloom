@@ -203,13 +203,7 @@ def _suite_round_failure(
 class _BenchmarkLaunchMixin:
     """Attempt setup and the measured round's result of a benchmark run."""
 
-    async def _run_once(
-        self,
-        ctx: RunnerContext,
-        *,
-        recorder: Any = None,
-        run_index: int = 0,
-    ) -> dict[str, Any]:
+    async def _run_once(self, ctx: RunnerContext, *, recorder: Any = None) -> dict[str, Any]:
         """Resolve what this baseline attempt runs with, write its config, and run its rounds."""
         params = ctx.task.params
         config_path = self._attempt_config_path(params)
@@ -251,7 +245,6 @@ class _BenchmarkLaunchMixin:
         # own log back.
         if recorder is not None:
             recorder.record_invocation(
-                run_index=run_index,
                 invocation=BaselineInvocation(
                     framework_args=server_args,
                     extra_envs=base_extra_envs,
@@ -272,7 +265,6 @@ class _BenchmarkLaunchMixin:
                 params=params,
                 ctx=ctx,
                 recorder=recorder,
-                run_index=run_index,
             ),
             output_dir,
         )

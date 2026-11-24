@@ -627,7 +627,6 @@ class _BenchmarkRoundsMixin:
             if recorder is None:
                 return
             recorder.record_round(
-                run_index=attempt.run_index,
                 round_=BaselineRound(
                     label=label,
                     started_at=started_at,

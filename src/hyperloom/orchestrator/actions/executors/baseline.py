@@ -190,18 +190,15 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
 
     async def _run_pass(self, ctx: RunnerContext, *, recorder: Any) -> dict[str, Any]:
         """Run :meth:`_run_once`, recorded as the action's run row."""
-        index = recorder.begin_run() if recorder is not None else 0
+        if recorder is None:
+            return await self._run_once(ctx)
+        recorder.begin_run()
         try:
-            result = await self._run_once(ctx, recorder=recorder, run_index=index)
+            result = await self._run_once(ctx, recorder=recorder)
         except BaseException as exc:
-            if recorder is not None:
-                recorder.end_run(
-                    run_index=index,
-                    result={"status": "failed", "error_class": type(exc).__name__, "error": repr(exc)},
-                )
+            recorder.end_run(result={"status": "failed", "error_class": type(exc).__name__, "error": repr(exc)})
             raise
-        if recorder is not None:
-            recorder.end_run(run_index=index, result=result)
+        recorder.end_run(result=result)
         return result
 
     async def _attempt_refusal(self, attempt: BenchmarkAttempt, output_dir: Path, shared_state: Any) -> dict | None:
