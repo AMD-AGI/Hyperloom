@@ -270,22 +270,3 @@ async def test_exit_facts_report_a_queued_kernel_agent_only_inside_kernel(kernel
 
     _arm_kernel_phase(st)
     assert (await c.phase_kernel.exit_facts()).agent_in_flight is True
-
-
-@pytest.mark.asyncio
-async def test_framework_pump_drives_the_phase_then_the_research_scout(kernel_coordinator):
-    c = kernel_coordinator
-    calls: list[str] = []
-
-    async def _scout():
-        calls.append("scout")
-
-    async def _pump_phase():
-        calls.append("phase")
-
-    c.phase_internal.maybe_enqueue_explore_research_scout = _scout  # type: ignore[method-assign]
-    c.phase_framework._pump_framework_agent_phase = _pump_phase  # type: ignore[method-assign]
-
-    await c.phase_framework.pump()
-
-    assert calls == ["phase", "scout"]

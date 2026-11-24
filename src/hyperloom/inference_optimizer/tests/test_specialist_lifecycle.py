@@ -375,16 +375,12 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
 
 
 # 8. SharedState.save failures around the specialist bookkeeping
-def _record_result_run(coord):
+async def _record_task_result(coord) -> None:
     task = _StubTask(task_id="task-1", params={})
     coord.tasks.register(task)
-
-    def run():
-        return coord.specialist_dispatch.record_specialist_result(
-            task=task, done_payload=_done_payload(), source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-1"
-        )
-
-    return run
+    await coord.specialist_dispatch.record_specialist_result(
+        task=task, done_payload=_done_payload(), source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-1"
+    )
 
 
 def _save_raising(exc: Exception):
@@ -396,12 +392,11 @@ def _save_raising(exc: Exception):
 
 @pytest.mark.asyncio
 async def test_save_os_error_is_logged_and_the_bookkeeping_stays(coord, caplog):
-    run = _record_result_run(coord)
     err = OSError("no space left on device")
     coord.shared_state.save = _save_raising(err)
 
     with caplog.at_level("ERROR"):
-        await run()
+        await _record_task_result(coord)
 
     assert [r["round_id"] for r in coord.shared_state.specialist_rounds] == ["task-1"]
     assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
@@ -409,8 +404,7 @@ async def test_save_os_error_is_logged_and_the_bookkeeping_stays(coord, caplog):
 
 @pytest.mark.asyncio
 async def test_save_serialization_defect_propagates(coord):
-    run = _record_result_run(coord)
     coord.shared_state.save = _save_raising(TypeError("Object of type set is not JSON serializable"))
 
     with pytest.raises(TypeError, match="not JSON serializable"):
-        await run()
+        await _record_task_result(coord)
