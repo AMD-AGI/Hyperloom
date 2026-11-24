@@ -17,7 +17,7 @@ import pytest
 
 from hyperloom.measure.runner.tests import test_run_jit as base
 from hyperloom.measure.runner.tests.test_run_jit import FLYDSL_LAUNCH, Rig, _arm, _keys, _kind, _states
-from hyperloom.measure.runner.tests.test_run import env, key, runner  # noqa: F401 - fixtures
+from hyperloom.measure.runner.tests.test_run import env, key  # noqa: F401 - fixtures
 
 VARIABLE = "FLYDSL_RUNTIME_CACHE_DIR"
 PREBUILT_LAUNCH = f"gemm_a16w16_gfx950_{'1' * 32}/{'2' * 16}.pkl"
