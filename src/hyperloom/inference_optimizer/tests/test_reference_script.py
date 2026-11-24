@@ -40,17 +40,13 @@ def test_render_round_trip():
         ("sglang", "python3 -m sglang.launch_server --model-path=$MODEL --tp 8"),
         ("vllm", "vllm serve $MODEL --tp 8"),
         ("atom", "python3 -m atom.entrypoints.openai_server --tp 8"),
+        ("llamacpp", 'llama-server --model "$MODEL" --tp 8'),
     ],
 )
 def test_render_launches_the_frameworks_entrypoint(framework, command):
     text = render_reference_script(framework=framework, launch=LaunchSettings(server_args="--tp 8"))
     assert text.endswith(command + "\n")
     assert _refeed(text, framework=framework).args == ("--tp", "8")
-
-
-def test_render_launches_a_native_servers_entrypoint():
-    text = render_reference_script(framework="llamacpp", launch=LaunchSettings(server_args="-ngl 99 -np 1"))
-    assert text.splitlines()[-1] == 'llama-server --model "$MODEL" -ngl 99 -np 1'
 
 
 def test_a_rendered_llamacpp_script_refeeds_as_reference_script():

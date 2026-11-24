@@ -49,12 +49,12 @@ def test_r9700_is_validated_for_vllm_and_llamacpp_only(framework):
     )
 
 
-@pytest.mark.parametrize("product", ["r9700", "w7900d"])
-def test_llamacpp_is_validated_on_r9700_and_w7900d_only(product):
-    assert gpu_types._board_framework_error(product, "llamacpp") is None
-    assert gpu_types._board_framework_error(product, "sglang") is not None
-    assert gpu_types._board_framework_error("w7900", "llamacpp") is not None
-    assert gpu_types._board_framework_error("r9600d", "llamacpp") is not None
+def test_llamacpp_is_validated_on_r9700_and_w7900d_only():
+    radeon = ("r9700", "r9600d", "w7900", "w7900d")
+    assert [board for board in radeon if gpu_types._board_framework_error(board, "llamacpp") is None] == [
+        "r9700",
+        "w7900d",
+    ]
 
 
 def test_only_the_gfx1201_radeon_boards_pin_their_geak_identity():

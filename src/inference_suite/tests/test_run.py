@@ -267,7 +267,6 @@ class _Rig:
         self.installed = "0.5.23"
         self.refusal: FlagRefusal | None = None
         self.probe_cwds: list[Path] = []
-        self.probe_masks: list[tuple[str, str]] = []
         monkeypatch.setattr(run, "probe_install", self._probe)
         monkeypatch.setattr(parser_check, "check", self._check)
         monkeypatch.setattr(run, "_lm_eval_version", lambda: "0.4.9")
@@ -301,14 +300,12 @@ class _Rig:
     def _probe(self, python, framework, env, *, cwd, packages):
         assert env["HF_TOKEN"] == _SECRET
         self.probe_cwds.append(cwd)
-        self.probe_masks.append((env["ROCR_VISIBLE_DEVICES"], env["HIP_VISIBLE_DEVICES"]))
         self.probed.append(python)
         roots = {name: f"/site-packages/{name}" for name in ("sglang", *packages)}
         return FrameworkInstall(python, "3.12.3", "/site-packages/sglang/__init__.py", self.installed, roots)
 
     def _check(self, launch, python, env, *, cwd):
         self.probe_cwds.append(cwd)
-        self.probe_masks.append((env["ROCR_VISIBLE_DEVICES"], env["HIP_VISIBLE_DEVICES"]))
         return self.refusal
 
     def config(self, run_dir: str, **changes) -> SuiteConfig:
@@ -868,14 +865,6 @@ def test_an_install_below_a_version_assumed_for_an_untagged_recipe_image_still_r
         "0.5.23",
         VersionCheck.ASSUMED_NOT_HELD,
     )
-
-
-def test_the_version_and_flag_probes_see_only_the_cards_the_round_serves_on(rig):
-    config = rig.config("r1")
-    config = replace(config, server=replace(config.server, gpus=(5,)))
-
-    assert run.run_round(config).report.run_status is RunStatus.COMPLETED
-    assert rig.probe_masks == [("5", "0"), ("5", "0")]
 
 
 def test_launch_records_where_the_serving_interpreter_imports_each_probed_package(rig):

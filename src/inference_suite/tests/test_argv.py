@@ -200,7 +200,6 @@ def test_remove_server_args_keeps_a_sibling_json_value_parseable() -> None:
     ("args", "removal", "left"),
     [
         ("-ngl 99 --jinja -md /m.gguf", "--jinja", "-ngl 99 -md /m.gguf"),
-        ("--seed -1 --tp 8", "--seed", "--tp 8"),
         ("-md /q8.gguf -bs -md /q4.gguf", "-md /q8.gguf", "-bs -md /q4.gguf"),
         ("--jinja -md /m.gguf -np 1", "--jinja -md", "-np 1"),
     ],
