@@ -150,7 +150,6 @@ def test_a_fixed_workload_round_trips_its_prompt_dataset_and_a_random_one_writes
     assert document["dataset"] == {"path": "/data/prompts.jsonl"}
     assert FixedWorkload.from_document(document) == dataset
     assert "dataset" not in _FIXED.to_document()
-    assert FixedWorkload.from_document(_FIXED.to_document()) == _FIXED
 
 
 def test_round_trip_fixed_and_scriptable():

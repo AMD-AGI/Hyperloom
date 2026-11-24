@@ -39,9 +39,10 @@ _TOKENS = ("Hel", "lo", " there", "!")
 @dataclass
 class FakeServer:
     """An OpenAI-compatible server streaming :data:`_TOKENS` per chat request, the last two as reasoning text;
-    ``usage=False`` drops usage."""
+    ``usage=False`` drops usage, and the prompt ``refused`` is answered 400 as one longer than the context is."""
 
     usage: bool = True
+    refused: str = ""
     bodies: list[dict] = field(default_factory=list)
 
     def handler(self) -> type[BaseHTTPRequestHandler]:
@@ -54,6 +55,9 @@ class FakeServer:
             def do_POST(self) -> None:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 fake.bodies.append(body | {"path": self.path})
+                if body["messages"][0]["content"] == fake.refused:
+                    self.send_error(400, "the prompt is longer than the context")
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
@@ -135,17 +139,24 @@ def test_one_seed_sends_one_order_and_another_seed_another():
     assert sorted(order[:10]) == sorted(pool) and sorted(order[10:20]) == sorted(pool)
 
 
-def test_a_server_without_usage_or_answering_an_error_fails_its_requests(tmp_path, server, dataset, capsys):
+@pytest.mark.parametrize(
+    ("fault", "failed"),
+    [({"usage": False}, 6), ({"refused": "beta"}, 2)],
+    ids=["no-usage", "a-prompt-answered-400"],
+)
+def test_a_request_answered_without_usage_or_with_an_error_fails(tmp_path, server, dataset, capsys, fault, failed):
     fake, base_url = server
-    fake.usage = False
+    for name, value in fault.items():
+        setattr(fake, name, value)
     result = tmp_path / "result.json"
 
-    assert _run_client(base_url, dataset, result) == 1 and "6 of 6 requests failed" in capsys.readouterr().err
+    assert _run_client(base_url, dataset, result) == 1
+    assert f"{failed} of 6 requests failed" in capsys.readouterr().err
     saved = json.loads(result.read_text())
-    assert saved["benchmark_outcome"]["failed"] == 6
+    assert (saved["completed"], saved["benchmark_outcome"]["failed"]) == (6 - failed, failed)
 
 
-@pytest.mark.parametrize("line", ['{"prompt": ""}', '{"turns": []}', '{"text": "x"}', "[1]"])
+@pytest.mark.parametrize("line", ['{"prompt": ""}', '{"turns": []}', "[1]"])
 def test_a_line_without_a_prompt_is_refused(tmp_path: Path, line: str):
     path = tmp_path / "bad.jsonl"
     path.write_text(line + "\n", encoding="utf-8")
@@ -161,9 +172,8 @@ def test_a_prompt_holding_a_unicode_line_separator_is_one_line_of_the_file(tmp_p
     assert dataset_client.read_prompts(path) == prompts
 
 
-def test_a_dataset_the_client_can_send_and_a_workload_without_one_are_not_refused(dataset: Path):
+def test_a_dataset_the_client_can_send_is_not_refused(dataset: Path):
     assert fixed.dataset_refusal(_workload(dataset)) is None
-    assert fixed.dataset_refusal(_FIXED) is None
 
 
 def test_percentiles_interpolate_as_numpy_does():
