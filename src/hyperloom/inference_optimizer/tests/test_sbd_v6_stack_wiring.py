@@ -307,20 +307,20 @@ def test_the_lift_carries_the_backend_onto_the_row(session_dir):
         ({"env_map": {"VLLM_ROCM_USE_AITER": "1"}}, "env"),
     ],
 )
-@pytest.mark.parametrize("overlay_loaded", [None, False])
+@pytest.mark.parametrize("claimed_kernels", [[], ["unloaded_candidate"]])
 def test_geak_config_promotion_records_engine_without_kernel_credit(
-    session_dir, accepted_config, operation_kind, overlay_loaded
+    session_dir, accepted_config, operation_kind, claimed_kernels
 ):
     with session_scope(session_dir):
         coord = _coord(session_dir)
         result = {
             "status": "ok",
             "accepted_config": accepted_config,
-            "accepted_kernels": ["unloaded_candidate"] if overlay_loaded is False else [],
+            "accepted_kernels": claimed_kernels,
         }
 
         assert coord.phase_kernel.promote_geak_from_candidate(
-            result, measured_tput=1100.0, measurement_provenance={"tput": 1100.0}, overlay_loaded=overlay_loaded
+            result, measured_tput=1100.0, measurement_provenance={"tput": 1100.0}, overlay_loaded=False
         )
 
         entry = coord.shared_state.optimization_stack[0]
@@ -366,7 +366,7 @@ def test_refused_geak_config_promotion_records_no_adoption(session_dir, measured
         result = {"status": "ok", "accepted_config": {"flags": "--attention-backend aiter"}}
 
         assert not coord.phase_kernel.promote_geak_from_candidate(
-            result, measured_tput=measured, measurement_provenance={"tput": measured}
+            result, measured_tput=measured, measurement_provenance={"tput": measured}, overlay_loaded=False
         )
 
         assert coord.shared_state.optimization_stack == []

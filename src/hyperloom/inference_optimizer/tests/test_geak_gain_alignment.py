@@ -516,7 +516,7 @@ def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None
     coord.phase_kernel._record_geak_candidate(result)
     assert coord.shared_state.geak_pending.get("status") == "awaiting_rebench"
     coord.phase_kernel.promote_geak_from_candidate(
-        result, measured_tput=measured, measurement_provenance={"tput": measured}
+        result, measured_tput=measured, measurement_provenance={"tput": measured}, overlay_loaded=False
     )
     ss = coord.shared_state
     expected_pct = (measured - base) / base * 100.0

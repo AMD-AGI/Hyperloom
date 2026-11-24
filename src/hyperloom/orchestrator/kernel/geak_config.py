@@ -121,7 +121,7 @@ def _geak_rebench_confirms(
     baseline: Any,
     got_hash: str,
     expected_hash: str,
-    current_best: Any = None,
+    current_best: Any,
 ) -> bool:
     """Whether a rebench measured the candidate's own config engaged over baseline and above ``current_best``."""
     if not (

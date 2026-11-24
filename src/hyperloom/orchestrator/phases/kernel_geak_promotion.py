@@ -395,8 +395,7 @@ class _GeakPromotionMixin:
         *,
         measured_tput: float,
         measurement_provenance: Mapping[str, Any],
-        provenance: str = "geak_e2e_promote",
-        overlay_loaded: bool | None = None,
+        overlay_loaded: bool,
     ) -> bool:
         """Promote a GEAK candidate on the rebench round that measured it and return whether the lift succeeded.
 
@@ -440,7 +439,7 @@ class _GeakPromotionMixin:
         self._record_geak_lift_attribution(
             result,
             measured=measured,
-            provenance=provenance,
+            provenance="geak_orch_harness_validated",
             overlay_loaded=overlay_loaded,
             pre_geak_tput=pre_geak_tput,
         )

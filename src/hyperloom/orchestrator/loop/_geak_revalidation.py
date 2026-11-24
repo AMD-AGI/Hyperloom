@@ -464,7 +464,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         return self._coord.phase_kernel.promote_geak_from_candidate(
             promotion_result,
             measured_tput=float(rebench.measured),
-            provenance="geak_orch_harness_validated",
             overlay_loaded=overlay_loaded,
             measurement_provenance={**variant, **measurement},
         )
