@@ -40,11 +40,6 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         "This file names the old spellings in order to forbid them.",
     ),
     (
-        "src/kernelforge/tests/agent_backends/test_agent_env_contract.py",
-        r"KERNEL_AGENTS_MODEL",
-        "The test that asserts the alias is no longer read has to name it.",
-    ),
-    (
         "docs/release-notes.md",
         r"kernel-agents",
         "Release notes naming the retired console script, so an operator whose script "

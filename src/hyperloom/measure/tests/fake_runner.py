@@ -186,8 +186,6 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
             {"point": 0, "phase": "warmup", "dir": f"variant_00_warmup/{bench}", "returncode": 0},
             {"point": 0, "phase": "measure", "dir": f"variant_00_test/{bench}", "returncode": 0},
         ]
-    if config.get("fake_inventory"):
-        files["farm_inventory.json"] = json.dumps(config["fake_inventory"]).encode()
     if "fake_accuracy" in config:
         score = config["fake_accuracy"]
         values = [] if score is None else [{"task": "gsm8k", "metric": "exact_match,flexible-extract", "score": score}]

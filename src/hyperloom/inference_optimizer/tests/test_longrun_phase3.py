@@ -43,7 +43,8 @@ async def test_old_running_rows_without_death_evidence_are_retained(conn, ttl):
 @pytest.fixture
 def cyclic_coordinator(session_dir):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+    from hyperloom.orchestrator.roles import MockCriticBackend
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
@@ -227,8 +228,8 @@ async def test_phase_transition_preserves_close_report_task(cyclic_coordinator):
 async def _build_minimal_coord(tmp_path: Path, monkeypatch):
     """Build a minimal Coordinator with no real GPU pool (capacity=0)."""
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
-    from hyperloom.orchestrator.roles.mock_backend import MockBackend, ScriptedPlan
     from hyperloom.orchestrator.state.shared_state import SharedState
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     for _var in (
         "TP",

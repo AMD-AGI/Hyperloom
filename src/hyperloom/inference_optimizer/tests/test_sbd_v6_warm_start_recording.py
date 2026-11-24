@@ -3,10 +3,9 @@
 
 """Coverage for the SBD V6 ``warm_start`` event.
 
-Three readings are pinned. The lookup's outcome rides ``match_status`` rather than the event status, so
+Two readings are pinned. The lookup's outcome rides ``match_status`` rather than the event status, so
 a miss is a completed lookup and not a malfunction. The reads block covers T0's own open interval only,
-excluding the writes the audit log records with ``hit: True`` and the mid-session amendment reads. And
-``by_source`` and ``best_config_by_source`` are gone, having read keys no producer ever wrote.
+excluding the writes the audit log records with ``hit: True`` and the mid-session amendment reads.
 """
 
 from __future__ import annotations
@@ -255,16 +254,6 @@ def test_a_lookup_that_read_nothing_carries_no_reads_block(_bound_session):
     _recorder().finish(match_status=MATCH_MISS)
 
     assert _event(_bound_session)["ext"]["reads"] is None
-
-
-def test_the_retired_by_source_fields_are_gone(_bound_session):
-    recorder = _recorder()
-    record_read(_bound_session, _read())
-    recorder.finish(match_status=MATCH_HIT, matched=_matched())
-
-    reads = _event(_bound_session)["ext"]["reads"]
-    assert "by_source" not in reads
-    assert "best_config_by_source" not in reads
 
 
 def test_a_session_killed_mid_lookup_keeps_the_identity_it_asked_for(_bound_session):

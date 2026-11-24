@@ -1074,7 +1074,7 @@ def _artifact_read(_tmp_path, _monkeypatch, failure: Exception) -> bytes:
 def _publication(tmp_path, monkeypatch, failure: Exception) -> dict:
     store = _use_in_memory_kb_store(monkeypatch)
     spec, driver = _spec(tmp_path)
-    monkeypatch.setattr(store, "put_knowledge", _raiser(failure))
+    monkeypatch.setattr(store, "replace_knowledge", _raiser(failure))
     target = kb.RewriteKbTarget(spec, str(driver), _remote_config(tmp_path))
     return kb.write_flydsl_kb_solution(target, FlydslMeasurement(10.0, 5.0, 2))
 

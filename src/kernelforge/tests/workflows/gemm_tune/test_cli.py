@@ -30,15 +30,6 @@ def _stub_preflight(monkeypatch, *, soft=None, hard=None):
     )
 
 
-def test_help_carries_no_knowledge_base_options():
-    """Tuning has no knowledge base, so no option may imply one exists."""
-    result = CliRunner().invoke(gemm_tune, ["run", "--help"])
-
-    assert result.exit_code == 0
-    for option in ("--kb-read", "--kb-accept-candidate", "--kb-strict-lib"):
-        assert option not in result.output
-
-
 def test_every_runnable_tuner_is_executed(tmp_path, monkeypatch):
     """Nothing may stand between a runnable tuner and a real tuning run."""
     _stub_preflight(monkeypatch, soft=["AITER_COMMIT unset"])

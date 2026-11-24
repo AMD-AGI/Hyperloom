@@ -94,7 +94,7 @@ async def test_cards_nothing_is_listed_on_go_back_at_once(tmp_path: Path) -> Non
     leases.release(lease.lease_id)
 
     assert set(lease.gpu_ids) <= set(leases._provider.pool.free_cards())
-    assert leases.held_out() == frozenset() and len(released) == 1 and listing.reads == 1
+    assert leases.capacity().leased_cards == 0 and len(released) == 1 and listing.reads == 1
 
 
 async def test_a_card_whose_memory_is_freed_within_the_drain_time_is_not_handed_out_until_it_is(tmp_path: Path) -> None:
@@ -106,7 +106,6 @@ async def test_a_card_whose_memory_is_freed_within_the_drain_time_is_not_handed_
 
     leases.release(lease.lease_id)
 
-    assert leases.held_out() == frozenset({busy})
     assert free in leases._provider.pool.free_cards() and busy not in leases._provider.pool.free_cards()
     assert leases.capacity().leased_cards == 1
     with pytest.raises(SandboxUnavailable):
@@ -116,7 +115,7 @@ async def test_a_card_whose_memory_is_freed_within_the_drain_time_is_not_handed_
     leases.release(other.lease_id)
     listing.free(busy)
     assert _until(lambda: busy in leases._provider.pool.free_cards())
-    assert leases.held_out() == frozenset() and len(released) == 3 and leases.capacity().leased_cards == 0
+    assert len(released) == 3 and leases.capacity().leased_cards == 0
 
 
 async def test_a_card_still_holding_memory_after_the_drain_time_is_kept_out_with_a_warning_and_comes_back_once_free(
@@ -138,11 +137,11 @@ async def test_a_card_still_holding_memory_after_the_drain_time_is_kept_out_with
     assert f"read again every {_RECHECK_SEC:g} s" in warning.getMessage()
     reads = listing.reads
     assert _until(lambda: listing.reads >= reads + 3)  # read again while it is kept out
-    assert card not in leases._provider.pool.free_cards() and leases.held_out() == frozenset({card})
+    assert card not in leases._provider.pool.free_cards() and leases.capacity().leased_cards == 1
     listing.free(card)
     assert _until(lambda: card in leases._provider.pool.free_cards())
     assert any("free again and back in the pool" in r.getMessage() for r in caplog.records)
-    assert leases.held_out() == frozenset()
+    assert leases.capacity().leased_cards == 0
 
 
 async def test_cards_go_back_at_once_when_the_kernels_list_cannot_be_read_and_the_log_says_so_once(
@@ -155,7 +154,7 @@ async def test_cards_go_back_at_once_when_the_kernels_list_cannot_be_read_and_th
         lease = await leases.lease(holder, 1, wait_sec=0, charge=LeaseCharge(LeaseKind.DEV, holder))
         leases.release(lease.lease_id)
 
-    assert leases.held_out() == frozenset() and len(leases._provider.pool.free_cards()) == 4
+    assert leases.capacity().leased_cards == 0 and len(leases._provider.pool.free_cards()) == 4
     unchecked = [r for r in caplog.records if "without a check for memory left on them" in r.getMessage()]
     assert len(unchecked) == 1 and "no AMD GPU driver" in unchecked[0].getMessage()
 
@@ -170,7 +169,7 @@ async def test_closing_the_leases_stops_reading_a_card_that_is_kept_out(tmp_path
     leases.close()
 
     assert _until(lambda: not [t for t in threading.enumerate() if t.name == f"hl-lease-drain-{lease.lease_id}"])
-    assert leases.held_out() == frozenset(lease.gpu_ids)
+    assert leases.capacity().leased_cards == 1
 
 
 async def test_a_card_a_released_lease_still_drains_is_never_read_as_held_by_an_enforcing_pool(

@@ -31,10 +31,6 @@ from hyperloom.orchestrator.state.round_store import (
 )
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
-#: The round: two blockers peeled one per attempt, then a boot that serves.
-#: Written as a stack rather than three logs because what is under test is that
-#: the round keeps going, not the wording of any one failure.
-
 
 def _ctx(task_id: str) -> RunnerContext:
     from hyperloom.orchestrator.state.task_registry import Task
@@ -154,15 +150,6 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         gpu_lanes=shim,
     )
     return shim
-
-
-#: A round that never gets anywhere: the same wall, attempt after attempt, and
-#: no clean boot at the end. Written as explicit attempts rather than a blocker
-#: stack because the point is that nothing is peeled.
-
-#: The same wall, alternating between one the launcher rejected on its own
-#: arguments and one the engine hit after doing real work. Each class has its
-#: own terminal, and neither sequence on its own reaches three of a kind.
 
 
 async def _seed_failed_rounds(rounds: RoundStore, n: int) -> None:

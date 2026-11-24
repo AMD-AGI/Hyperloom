@@ -43,7 +43,6 @@ DEFAULT_PRIORITY: Mapping[Purpose, int] = {
 #: A queued test's slack, per K, before the branch's next submit is refused with backpressure.
 DEFAULT_QUEUE_FACTOR = 4
 DEFAULT_K = 2
-DEFAULT_K_KEY = "*"
 BRANCH_STOPPED = "branch_stopped"
 
 
@@ -51,9 +50,8 @@ BRANCH_STOPPED = "branch_stopped"
 class QueuePolicy:
     """What the scheduler sets: tests a branch runs at once, tests in flight overall, a priority per purpose.
 
-    ``per_branch_k`` is the default K, an int; ``branch_k`` overrides it per branch. A mapping given as
-    ``per_branch_k`` is also read, as a K per branch: its ``"*"`` entry is the default, the rest are overrides. A
-    branch's K is also its share of the starts inside a priority: a branch of twice the K takes twice the turns.
+    ``per_branch_k`` is the default K; ``branch_k`` overrides it per branch. A branch's K is also its share of the
+    starts inside a priority: a branch of twice the K takes twice the turns.
 
     priority_override maps a purpose's value to a priority and applies to requests that name none.
     max_queued_per_branch is the backpressure limit; None means DEFAULT_QUEUE_FACTOR times K.
@@ -71,7 +69,7 @@ class QueuePolicy:
     refused as ``branch_stopped``. ``None`` leaves who may submit to ``branch_k`` and ``listed_branches_only``.
     """
 
-    per_branch_k: int | Mapping[str, int] = 2
+    per_branch_k: int = DEFAULT_K
     global_concurrency: int = 8
     priority_override: Mapping[str, int] = field(default_factory=dict)
     max_queued_per_branch: int | None = None
@@ -85,12 +83,6 @@ class QueuePolicy:
             not isinstance(self.open_branches, frozenset) or not all(isinstance(b, str) for b in self.open_branches)
         ):
             raise ValueError(f"open_branches must be a frozenset of branch ids, got {self.open_branches!r}")
-        if isinstance(self.per_branch_k, Mapping):
-            # A K per branch, the default under ``DEFAULT_K_KEY``.
-            overrides = {k: v for k, v in self.per_branch_k.items() if k != DEFAULT_K_KEY}
-            default = self.per_branch_k.get(DEFAULT_K_KEY, DEFAULT_K)
-            object.__setattr__(self, "per_branch_k", default)
-            object.__setattr__(self, "branch_k", {**overrides, **self.branch_k})
         if self.per_branch_k < 1 or self.global_concurrency < 1 or any(k < 1 for k in self.branch_k.values()):
             raise ValueError("every K and global_concurrency must be at least 1")
         for purpose, priority in self.priority_override.items():
@@ -103,7 +95,7 @@ class QueuePolicy:
     def k_for(self, branch: str) -> int:
         """The K of ``branch``: its override, else the default."""
 
-        return self.branch_k.get(branch, self.per_branch_k)  # type: ignore[arg-type]
+        return self.branch_k.get(branch, self.per_branch_k)
 
     def queue_limit_for(self, branch: str) -> int:
         if self.max_queued_per_branch is not None:
@@ -115,12 +107,6 @@ class QueuePolicy:
             return request.priority
         override = self.priority_override.get(request.purpose.value)
         return override if override is not None else DEFAULT_PRIORITY[request.purpose]
-
-
-def sandbox_priority(priority: int) -> int:
-    """The three agent-sandbox.io/priority tiers: 0 and 1 map to 0, 2 and 3 to 1, 4 to 2."""
-
-    return {0: 0, 1: 0, 2: 1, 3: 1, 4: 2}[priority]
 
 
 #: Purposes that never take a slot of their branch's K: confirm-retests and reproduction checks (the retest that
