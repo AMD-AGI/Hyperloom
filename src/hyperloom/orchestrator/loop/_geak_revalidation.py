@@ -283,7 +283,9 @@ class GeakRevalidation(CoordinatorCollaborator):
         if decision == REBENCH_NO_PROMOTE:
             await self._refuse_rebench(result, task=task, rebench=rebench, native_rejection=native_rejection)
         elif decision == REBENCH_FAILED:
-            self._close_unmeasured_rebench(result, rebench=rebench)
+            log.warning("geak 2b rebench returned no measurement")
+            self._close_failed_geak_revalidation({"error_class": "rebench_no_measurement"})
+            result["status"] = REBENCH_FAILED
         expected_hash = str((task.params or {}).get("expected_cfg_hash") or "")
         self._record_geak_rebench_timeline(
             task=task,
@@ -388,7 +390,7 @@ class GeakRevalidation(CoordinatorCollaborator):
             judged_candidate = not expected_hash or reverted.get("fingerprint") == expected_hash
             reason = str(reverted.get("reason") or "native_gate_rejected") if judged_candidate else ""
             return _RebenchDecision(decision=REBENCH_NO_PROMOTE, native_rejection=reason)
-        if rebench.measured <= 0 or str(result.get("status") or "succeeded") not in {"succeeded", "ok"}:
+        if rebench.measured <= 0:
             return _RebenchDecision(decision=REBENCH_FAILED, native_rejection="")
         baseline_grade = resolve_graded_comparison(self.shared_state, rebench.measurement, against_baseline=True)
         current_grade = resolve_graded_comparison(self.shared_state, rebench.measurement)
@@ -500,15 +502,6 @@ class GeakRevalidation(CoordinatorCollaborator):
                 },
             )
         )
-
-    def _close_unmeasured_rebench(self, result: dict, *, rebench: _GeakRebench) -> None:
-        """Settle a rebench round that returned no measurement as failed, leaving the candidate retryable."""
-        status = str(result.get("status") or "succeeded")
-        log.warning("geak 2b rebench returned no measurement (status=%s measured=%r)", status, rebench.measured)
-        self._close_failed_geak_revalidation(
-            {"error_class": "rebench_no_measurement", "error": f"status={status} measured={rebench.measured!r}"}
-        )
-        result["status"] = REBENCH_FAILED
 
     def _close_failed_geak_revalidation(self, result_payload: Mapping[str, Any]) -> None:
         geak_result = {
