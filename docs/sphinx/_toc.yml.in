@@ -25,8 +25,6 @@ subtrees:
     title: Components
     subtrees:
     - entries:
-      - url: https://rocm.docs.amd.com/projects/intellikit/en/latest/
-        title: IntelliKit
       - url: https://rocm.docs.amd.com/projects/tracelens/en/latest/
         title: TraceLens
       - url: https://rocm.docs.amd.com/projects/geak/en/latest/

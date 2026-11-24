@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Diagnose and fix common Hyperloom failures: LLM gateway 401s, Ray GPU issues, VRAM exhaustion, TraceLens CLI errors, KB write failures, and session resume problems."
-        "keywords": "Hyperloom, troubleshooting, LLM gateway, Ray, VRAM, OOM, GEAK, TraceLens, IntelliKit, KB, LLM inference, AMD GPU, session resume, debugging"
+        "keywords": "Hyperloom, troubleshooting, LLM gateway, Ray, VRAM, OOM, GEAK, TraceLens, KB, LLM inference, AMD GPU, session resume, debugging"
 ---
 # Troubleshooting Hyperloom
 
