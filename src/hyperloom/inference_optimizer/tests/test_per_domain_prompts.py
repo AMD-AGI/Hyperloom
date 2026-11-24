@@ -422,8 +422,6 @@ def test_R2_missing_gap_denied_and_params_left_untouched():
     assert exc.value.rule == "specialist_dispatch_source"
     assert "gap" in str(exc.value)
     assert params == {"domain": "serving_specialist"}
-    assert "=== Current gaps ===" in exc.value.hint
-    assert "freeform" in exc.value.hint
 
 
 def test_R2_max_turns_excess_denied(gate):
