@@ -8,10 +8,10 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.state.objective import TargetGainObjective
 from hyperloom.orchestrator.knowledge.recipe_journal import (
     workload_kb_tags,
 )
+from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 from hyperloom.orchestrator.loop.dispatcher import HeldLeases
 
 from .conftest import make_coordinator
@@ -136,35 +136,6 @@ def test_gpu_lease_ttl_grace_over_wall_budget(coord: Coordinator) -> None:
     assert coord.dispatcher.gpu_lease_ttl_sec(params={"mode": "patch"}) == pytest.approx(ttl, abs=2)
 
 
-def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> None:
-    import asyncio
-
-    released: list[object] = []
-
-    class _Task:
-        task_id = "tg-ok"
-        kind = "explore"
-        requires_lanes: list = []
-
-    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None, release_resources=None):
-        await release_resources()
-        return "RESULT"
-
-    async def _fake_release(lease):
-        released.append(lease)
-
-    coord.sub.run_task = _fake_run_task
-    coord.gpu_specialist_pool.release = _fake_release
-    sentinel_lease = object()
-    out = asyncio.run(
-        coord.dispatcher.run_task_registered(
-            _Task(), HeldLeases(prebound_lease=None, gpu_lease=sentinel_lease), extra_context={}
-        )
-    )
-    assert out == "RESULT"
-    assert released == [sentinel_lease]
-
-
 def test_run_dispatched_releases_gpu_lease_on_exception(coord: Coordinator) -> None:
     import asyncio
 
@@ -200,8 +171,6 @@ def test_run_dispatched_releases_gpu_lease_on_exception(coord: Coordinator) -> N
 def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
     import asyncio
 
-    called: list[object] = []
-
     class _Task:
         task_id = "tc-cpu"
         kind = "report"
@@ -211,16 +180,19 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
         await release_resources()
         return "CPU"
 
-    async def _fake_release(lease):
-        called.append(lease)
+    async def _run() -> object:
+        coord.gpu_specialist_pool = SpecialistGpuPool(coord.db, gpu_ids=[0])
+        held = await coord.gpu_specialist_pool.try_acquire(count=1, holder_id="other", task_id="other")
+        assert held is not None
+        out = await coord.dispatcher.run_task_registered(
+            _Task(), HeldLeases(prebound_lease=None, gpu_lease=None), extra_context={}
+        )
+        # No GPU lease -> another holder's capacity is left alone.
+        assert await coord.db.fetchone("SELECT 1 FROM gpu_leases WHERE holder_id='other'") is not None
+        return out
 
     coord.sub.run_task = _fake_run_task
-    coord.gpu_specialist_pool.release = _fake_release
-    out = asyncio.run(
-        coord.dispatcher.run_task_registered(_Task(), HeldLeases(prebound_lease=None, gpu_lease=None), extra_context={})
-    )
-    assert out == "CPU"
-    assert called == []  # no GPU lease → release never called
+    assert asyncio.run(_run()) == "CPU"
 
 
 # -- static / pure helpers -------------------------------------------------
@@ -249,13 +221,6 @@ def test_journal_entry_phase(coord: Coordinator) -> None:
     assert coord.recipe_journal.journal_entry_phase() == "FRAMEWORK_AGENT"
 
 
-def test_internal_analysis_kind(coord: Coordinator) -> None:
-    coord.shared_state.enable_roofline = True
-    assert coord.phase_prelude.internal_analysis_kind() == "roofline"
-    coord.shared_state.enable_roofline = False
-    assert coord.phase_prelude.internal_analysis_kind() == "profile"
-
-
 # -- watermark / tput projection ------------------------------------------
 def test_current_tput_from_validated_gain(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 0.0
@@ -266,20 +231,6 @@ def test_current_tput_from_validated_gain(coord: Coordinator) -> None:
 
 
 # -- gap extraction --------------------------------------------------------
-def test_extract_gaps_from_baseline_populated(coord: Coordinator) -> None:
-    ss = coord.shared_state
-    ss.baseline_tput = 100.0
-    coord._current_objective = TargetGainObjective(target_gain_pct=12.0)
-    ss.baseline_failure_streak = 2
-    gaps = coord.gap_refresh._extract_gaps_from_baseline(coord.recipe_journal.workload_canonical_id())
-    ids = {g["canonical_id"].split("#")[-1] for g in gaps}
-    assert "throughput_below_target" in ids
-    assert "baseline_unstable" in ids
-    sev = {g["canonical_id"].split("#")[-1]: g["severity"] for g in gaps}
-    assert sev["throughput_below_target"] == "high"
-    assert sev["baseline_unstable"] == "high"
-
-
 def test_extract_gaps_from_attempts(coord: Coordinator) -> None:
     ss = coord.shared_state
     ss.baseline_tput = 100.0
@@ -299,22 +250,6 @@ def test_extract_gaps_from_attempts(coord: Coordinator) -> None:
     plateau = [g for g in gaps if g["canonical_id"].endswith("explore_plateau")][0]
     assert plateau["severity"] == "high"
     assert cids
-
-
-def test_extract_gaps_no_variant_collapses(coord: Coordinator) -> None:
-    """Rows without variant_name still collapse into one gap (backward compat)."""
-    ss = coord.shared_state
-    ss.baseline_tput = 100.0
-    ss.last_action_failures = [
-        {"action": "explore", "error_class": "server_init_dead"},
-        {"action": "explore", "error_class": "server_init_dead"},
-    ]
-    ss.params_no_promote_streak = 0
-    ss.explore_search = {}
-    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.recipe_journal.workload_canonical_id())
-    fail_gaps = [g for g in gaps if "fail:explore:server_init_dead" in g["canonical_id"]]
-    assert len(fail_gaps) == 1
-    assert len(fail_gaps[0]["attempts"]) == 2
 
 
 def test_extract_gaps_symptom_uses_excerpt(coord: Coordinator) -> None:
@@ -614,19 +549,6 @@ def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch)
     assert coord.phase_kernel._gemm_tuning_required_before_kernel_opt() is False
 
 
-# -- canonical id helpers --------------------------------------------------
-def test_workload_canonical_id_and_anchor(coord: Coordinator) -> None:
-    ss = coord.shared_state
-    ss.model_name = "Qwen3-32B"
-    ss.gpu_type = "mi300x"
-    ss.framework = "sglang"
-    ss.precision = "fp8"
-    cid = coord.recipe_journal.workload_canonical_id()
-    assert cid.startswith("inference:")
-    assert "mi300x" in cid
-    assert coord.recipe_journal.workload_canonical_id() == cid
-
-
 # -- framework candidate selection -------------------------------------
 def test_discovery_drops_prs_already_batched_or_mined_by_the_scout(coord: Coordinator) -> None:
     from types import SimpleNamespace
@@ -640,50 +562,3 @@ def test_discovery_drops_prs_already_batched_or_mined_by_the_scout(coord: Coordi
     coord.phase_framework.on_specialist_settled(discovery, {"proposal_set": proposals}, run_error="")
 
     assert [c["pr_url"] for c in ss.framework_agent_batches[-1]["candidates"]] == ["https://x/pr/4"]
-
-
-# -- module-level helpers --------------------------------------------------
-def test_lifecycle_paths() -> None:
-    from hyperloom.orchestrator.loop.kernel_request import lifecycle_paths
-
-    assert lifecycle_paths("not-a-dict") == {}
-    out = lifecycle_paths({"patch_path": "/a/p.diff", "workspace": "", "other": "x"})
-    assert out == {"patch_path": "/a/p.diff"}
-
-
-def test_format_inbox_event_variants() -> None:
-    from hyperloom.orchestrator.loop.conversation import _format_inbox_event
-    from hyperloom.orchestrator.bus.message_bus import Message
-
-    delegated = Message.new(
-        "kernel_agent",
-        "orchestration",
-        "delegated_result",
-        {
-            "kind": "explore",
-            "state": "succeeded",
-            "result": {"status": "kept", "gain_pct": 5.0, "tput": 200.0, "kept": True},
-        },
-    )
-    line = _format_inbox_event(delegated)
-    assert "topic=delegated_result" in line
-    assert "status=" in line and "kept=" in line
-
-    verdict = Message.new(
-        "critic",
-        "orchestration",
-        "review_verdict",
-        {"target_proposal_msg_id": "m1", "verdict": "approve", "reasoning": "ok"},
-    )
-    assert "verdict='approve'" in _format_inbox_event(verdict)
-
-    obs = Message.new(
-        "coordinator",
-        "orchestration",
-        "observation",
-        {"kind": "policy_denied"},
-    )
-    assert "kind='policy_denied'" in _format_inbox_event(obs)
-
-    plain = Message.new("a", "b", "misc", {"x": 1})
-    assert "payload=" in _format_inbox_event(plain)

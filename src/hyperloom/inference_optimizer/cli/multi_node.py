@@ -193,8 +193,7 @@ def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path | None
         external_has_server_control,
         external_has_ssh_control,
     )
-    from ..multi_node.cli import _save_state
-    from hyperloom.orchestrator.actions.executors._multi_node_env import export_ray_address_to_os
+    from ..multi_node.cluster_access import _save_state
 
     if not _hand_off_service_url():
         print(
@@ -219,7 +218,6 @@ def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path | None
         print(f"ERROR: cannot write multi-node state: {exc}", file=sys.stderr)
         sys.exit(2)
     os.environ["BENCHMARK_BASE_URL"] = ext_state["service_url"]
-    export_ray_address_to_os()
     # Report server *control*, not SSH specifically: rayjob restarts through the Ray dashboard with no SSH at all, so
     # keying this on SSH labelled a fully controllable rayjob cluster "benchmark-only" and gave the genuinely
     # uncontrollable one the same words -- exactly backwards on the one line an operator reads to find out whether the
@@ -287,7 +285,8 @@ def _reject_unusable_backend(ext_state: dict[str, Any]) -> None:
 
 def _prepare_adopted_cluster(args: argparse.Namespace, backend: str, *, head_ip: str) -> None:
     """Make an adopted cluster usable by this session."""
-    from ..multi_node.cli import cmd_bootstrap, install_geak_on_pods_best_effort, resolve_poll_timeout_s
+    from ..multi_node.cli import cmd_bootstrap, install_geak_on_pods_best_effort
+    from ..multi_node.cluster_access import resolve_poll_timeout_s
 
     if backend == "rayjob":
         if not head_ip:

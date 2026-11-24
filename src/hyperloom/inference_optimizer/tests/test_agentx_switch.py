@@ -12,7 +12,7 @@ import sys
 
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _workload_envs as we
+from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 
 _AGENTX_ENV_KEYS = (
     "HYPERLOOM_AGENTX",
@@ -101,7 +101,7 @@ def test_switch_off_omits_workload_spec(tmp_path, monkeypatch):
 
 def test_runtime_overrides_off_keeps_the_point_script(monkeypatch):
     _clear_env(monkeypatch)  # HYPERLOOM_AGENTX cleared => OFF
-    from hyperloom.orchestrator.actions.executors._benchmark_runtime import (
+    from hyperloom.orchestrator.actions.executors.workload._benchmark_runtime import (
         apply_runtime_benchmark_overrides,
     )
 
@@ -114,9 +114,9 @@ def test_runtime_overrides_off_keeps_the_point_script(monkeypatch):
 _PROBE_OFF = """
 import sys
 from pathlib import Path
-from hyperloom.orchestrator.actions.executors import _grid_runner  # noqa: F401
+from hyperloom.orchestrator.actions.executors.grid import _grid_runner  # noqa: F401
 from hyperloom.common.perf_metric import agentx_enabled
-from hyperloom.orchestrator.actions.executors import _workload_envs as we
+from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 
 assert not agentx_enabled()
 we.materialize_config_with_envs(

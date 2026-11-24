@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.config import Config
-from kernelforge.workflows.forge_loop.memory import knowledge_integration as experience_integration
+from kernelforge.workflows.forge_loop.memory import kb_warmstart as warmstart
 from kernelforge.knowledge.kb_store import writer as experience_sink
 from kernelforge.config import KnowledgeConfig, KnowledgeStoreMode
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
@@ -95,7 +95,6 @@ def test_a_run_without_a_configured_store_turns_every_call_into_a_no_op(
     assert kb.active is False
     assert kb.reason == "not_configured"
     assert kb.read_top_n(tmp_path / "top") == []
-    assert kb.prior_file("any", "kernel.py") == b""
     assert kb.write_candidate({"metric": {}}) == {
         "written": False,
         "reason": "not_configured",
@@ -108,7 +107,7 @@ def _failing_kb(tmp_path, failure: Exception) -> KernelRecipeKB:
 
     spec, _driver = _spec(tmp_path)
     config = _remote_config(tmp_path)
-    store = SimpleNamespace(candidates=fail, search_identities=fail, read_bytes=fail)
+    store = SimpleNamespace(candidates=fail, search_identities=fail)
     return KernelRecipeKB(store, _resolved_identity(spec, config), SOFTMAX_IDENTITY, config=config)
 
 
@@ -120,7 +119,6 @@ _EXPECTED_STORE_FAILURES = [
 _STORE_READS = {
     "read_top_n": lambda kb, tmp_path: kb.read_top_n(tmp_path / "top"),
     "fallback_canonical_ids": lambda kb, tmp_path: kb.fallback_canonical_ids(),
-    "prior_file": lambda kb, tmp_path: kb.prior_file("session", "kernel.py"),
 }
 
 
@@ -135,11 +133,6 @@ def test_an_expected_store_failure_cold_starts_a_read_and_records_why(tmp_path, 
 
     assert _STORE_READS[read](kb, tmp_path) == []
     assert kb.reason == f"{type(failure).__name__}: {failure}"
-
-
-@pytest.mark.parametrize("failure", _EXPECTED_STORE_FAILURES, ids=_failure_id)
-def test_an_unreadable_artifact_is_a_miss(tmp_path, failure):
-    assert _STORE_READS["prior_file"](_failing_kb(tmp_path, failure), tmp_path) == b""
 
 
 @pytest.mark.parametrize("read", _STORE_READS)
@@ -300,8 +293,6 @@ def test_a_file_list_becomes_artifacts_named_after_the_files(tmp_path, monkeypat
     assert outcome["files"] == ["kernel.py"]
     stored = store.files[(SOFTMAX_IDENTITY, outcome["session_id"])]
     assert stored["kernel.py"] == artifact
-    assert kb.prior_file(outcome["session_id"], "kernel.py") == artifact
-    assert kb.prior_file(outcome["session_id"], "missing.py") == b""
 
 
 def test_a_mapping_names_the_artifacts_when_the_names_matter(tmp_path, monkeypatch):
@@ -617,8 +608,6 @@ def test_records_survive_on_the_local_backend_too(tmp_path):
     assert recipe["producer"] == "flydsl"
     assert recipe["champion"] is True
     assert (bundle.files_dir / "kernel.py").read_bytes() == artifact
-    assert kb.prior_file(outcome["session_id"], "kernel.py") == artifact
-    assert kb.prior_file(outcome["session_id"], "missing.py") == b""
 
 
 def test_local_materialization_rejects_symlink_artifacts(tmp_path):
@@ -703,7 +692,7 @@ def test_a_refused_measured_write_back_redacts_the_error_that_opened_the_store(
 
     monkeypatch.setattr(agent_kb_module, "create_rewrite_record_store", refuse_to_open)
 
-    writeback = experience_integration._record_measured_speedup(
+    writeback = warmstart._record_measured_speedup(
         _remote_config_with_token(tmp_path, token),
         {
             "solution_slug": f"{SOFTMAX_IDENTITY}/kda-attn-session",

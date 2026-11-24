@@ -134,7 +134,7 @@ def test_claude_is_given_no_schema_for_a_free_form_session(tmp_path) -> None:
 
 
 class _Guard:
-    def verify(self) -> list[str]:
+    def verify_or_rollback(self) -> list[str]:
         return []
 
     def count_target_edits(self) -> int:

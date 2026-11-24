@@ -48,7 +48,7 @@ class OriginFinder:
         self._packages = packages
         self._notes = notes
 
-    def find_spec(self, fullname, path=None, target=None):  # type: ignore[no-untyped-def]
+    def find_spec(self, fullname, path=None, target=None):
         if fullname not in self._packages:
             return None
         spec = next((found for found in self._others(fullname, path, target) if found is not None), None)
@@ -57,7 +57,7 @@ class OriginFinder:
             return spec
         notes = self._notes
 
-        def exec_module(module):  # type: ignore[no-untyped-def]
+        def exec_module(module):
             note_import(notes, fullname, getattr(module, "__file__", None))
             execute(module)
 
@@ -67,7 +67,7 @@ class OriginFinder:
             note_import(notes, fullname, spec.origin)
         return spec
 
-    def _others(self, fullname, path, target):  # type: ignore[no-untyped-def]
+    def _others(self, fullname, path, target):
         for finder in list(sys.meta_path):
             find = getattr(finder, "find_spec", None)
             if finder is not self and find is not None:

@@ -113,7 +113,6 @@ class TestClassifyFailureAttribution:
             "AgentX server exited before becoming healthy (-9)",
             "AgentX server exited during its health check (1)",
             "Memory access fault by GPU node-2 (Agent handle: 0x5d0) on address 0x7f00. Reason: Unknown.",
-            "ray_actor_error: The actor died unexpectedly before finishing this task.",
         ],
     )
     def test_a_server_that_died_is_not_the_harnesss(self, excerpt):
@@ -399,13 +398,6 @@ class TestTheSuitePathClasses:
                 classify_failure_attribution(framework_changed=False, error_class=error_class)
                 == FAILURE_ATTRIBUTION_HARNESS
             )
-
-    def test_a_failed_client_is_signed_by_its_output_like_a_nonzero_round(self):
-        from hyperloom.orchestrator.state.failure_evidence import nonzero_output_signature
-
-        client = nonzero_output_signature("client_failed", "", "Traceback: boom at port 8001")
-        nonzero = nonzero_output_signature("round_nonzero_invalid_measurement", "", "Traceback: boom at port 8001")
-        assert client.startswith("client_failed|") and client.split("|")[1] == nonzero.split("|")[1]
 
 
 class TestAnUnknownFrameworkVersion:

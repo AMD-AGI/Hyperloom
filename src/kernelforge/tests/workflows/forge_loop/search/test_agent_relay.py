@@ -28,6 +28,7 @@ from kernelforge.workflows.forge_loop.search.agent_relay import (
 from kernelforge.workflows.forge_loop.campaign.run_state import RunState
 from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop
 from kernelforge.workflows.forge_loop.search.search_actors import SearchActorBundle, SearchActorPool
+from kernelforge.workflows.forge_loop.search.search_policy import PLANNED_ROUND_STALL, SELF_DIRECTED_STALL
 
 
 def _profiles() -> tuple[AgentProfile, ...]:
@@ -298,9 +299,11 @@ class _StateStore:
         self.saved.append(state.to_dict())
 
 
-def _loop_for_boundary(tmp_path, *, streak: int) -> IterationLoop:
+def _loop_for_boundary(
+    tmp_path, *, streak: int, supervise_after: int = PLANNED_ROUND_STALL.supervise_after
+) -> IterationLoop:
     loop = object.__new__(IterationLoop)
-    loop.ic = SimpleNamespace(workspace_dir=str(tmp_path))
+    loop.ic = SimpleNamespace(workspace_dir=str(tmp_path), supervise_after=supervise_after)
     loop.run_state = RunState()
     loop.run_state.agent_relay = AgentRelayState(
         active_profile_id="claude_opus",
@@ -318,11 +321,7 @@ def _loop_for_boundary(tmp_path, *, streak: int) -> IterationLoop:
 def _search_actor_pool() -> SearchActorPool:
     profiles = _profiles()
     return SearchActorPool(
-        config=AgentRelayConfig(
-            primary_profile_id="claude_opus",
-            profiles=profiles,
-            blockage_threshold=3,
-        ),
+        config=AgentRelayConfig(primary_profile_id="claude_opus", profiles=profiles),
         availability=_snapshot(),
         bundles={
             profile.profile_id: SearchActorBundle(
@@ -377,6 +376,20 @@ def test_iteration_boundary_uses_supervisor_when_no_alternate_is_available(tmp_p
     assert bundle.profile.profile_id == "claude_opus"
     assert force_supervisor is True
     assert loop.run_state.agent_relay.intervention_kind == INTERVENTION_SUPERVISOR
+
+
+def test_a_blockage_is_the_stall_count_of_the_sessions_loop_shape(tmp_path):
+    """The same streak blocks a search whose sessions choose their own direction and leaves a planned one running."""
+    streak = SELF_DIRECTED_STALL.supervise_after
+    assert streak < PLANNED_ROUND_STALL.supervise_after
+    interventions = {}
+    for shape, stall in (("self-directed", SELF_DIRECTED_STALL), ("planned", PLANNED_ROUND_STALL)):
+        loop = _loop_for_boundary(tmp_path, streak=streak, supervise_after=stall.supervise_after)
+        pool = _search_actor_pool()
+        loop._search_actors = pool
+        interventions[shape] = loop._prepare_search_actor(streak + 1, pool).profile.profile_id
+
+    assert interventions == {"self-directed": "codex_gpt", "planned": "claude_opus"}
 
 
 def test_keep_after_a_switch_keeps_the_intervention_in_its_provenance(tmp_path):

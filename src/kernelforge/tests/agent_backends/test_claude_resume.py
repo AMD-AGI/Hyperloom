@@ -11,7 +11,6 @@ import pytest
 from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL
 from kernelforge.agent_backends.base import AgentToolPolicy
 from kernelforge.agent_backends.claude import (
-    ClaudeBackend,
     ClaudeBackendError,
     _supports_adaptive_thinking,
 )
@@ -258,7 +257,7 @@ def test_resume_honours_this_turns_policy_not_the_original():
     kwargs = captured["options"].kwargs
     assert kwargs["allowed_tools"] == ["Read", "Grep", "Glob"]
     assert kwargs["max_turns"] == 4
-    assert kwargs["system_prompt"] == "summarizer role"
+    assert captured["system_prompt"] == "summarizer role"
 
 
 def test_provider_omits_max_turns_for_time_limited_session():
@@ -357,7 +356,7 @@ def test_a_read_only_resume_describes_the_session_tools_but_permits_only_reading
 
     kwargs = captured["options"].kwargs
     assert kwargs["resume"] == "sess-1"
-    assert kwargs["system_prompt"] == "implementer system prompt"
+    assert captured["system_prompt"] == "implementer system prompt"
     assert kwargs["tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]
     assert kwargs["allowed_tools"] == ["Read", "Grep", "Glob"]
     assert _denied_tools(kwargs) == {"Edit", "Write", "Bash"}
@@ -449,21 +448,20 @@ def test_an_operator_setting_for_nonessential_traffic_wins(monkeypatch):
     assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in captured["options"].kwargs.get("env", {})
 
 
-def test_summarizer_is_none_without_a_session_id():
-    summarize = _make_session_summarizer(backend=_RecordingBackend(), spec=_spec(), session_id="", usage=None)
-    assert summarize is None
+class _NonResumableBackend(_RecordingBackend):
+    capabilities = SimpleNamespace(resumable=False)
 
 
-def test_summarizer_is_none_for_a_non_resumable_provider():
-    backend = _RecordingBackend()
-    backend.capabilities = SimpleNamespace(resumable=False)
-    summarize = _make_session_summarizer(backend=backend, spec=_spec(), session_id="s", usage=None)
-    assert summarize is None
-
-
-def test_summarizer_is_none_when_the_backend_cannot_resume():
-    backend = SimpleNamespace(capabilities=SimpleNamespace(resumable=True))
-    summarize = _make_session_summarizer(backend=backend, spec=_spec(), session_id="s", usage=None)
+@pytest.mark.parametrize(
+    ("backend", "session_id"),
+    [
+        pytest.param(_RecordingBackend(), "", id="without-a-session-id"),
+        pytest.param(_NonResumableBackend(), "s", id="non-resumable-provider"),
+        pytest.param(SimpleNamespace(capabilities=SimpleNamespace(resumable=True)), "s", id="backend-cannot-resume"),
+    ],
+)
+def test_summarizer_is_none_unless_the_session_can_be_resumed(backend, session_id):
+    summarize = _make_session_summarizer(backend=backend, spec=_spec(), session_id=session_id, usage=None)
     assert summarize is None
 
 
@@ -534,10 +532,6 @@ def test_a_session_that_stays_in_its_target_reports_what_it_changed(tmp_path):
     assert result.file_changes == ["kernel.py"]
     assert result.target_edit_count == 1
     assert kernel.read_text() == "VALUE = 1\n"
-
-
-def test_the_backend_declares_the_guard_it_now_runs():
-    assert ClaudeBackend.capabilities.workspace_guard is True
 
 
 # ── a prefix shared with sibling sessions ─────────────────────────────────────

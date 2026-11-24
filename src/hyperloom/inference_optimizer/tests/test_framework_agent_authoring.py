@@ -20,7 +20,7 @@ from hyperloom.orchestrator.state.task_registry import TaskNotFound
 
 from ._optimize_fixtures import optimize_state
 from .conftest import make_coordinator
-from hyperloom.orchestrator.phases.framework import AuthoringRetry
+from hyperloom.orchestrator.phases.framework_reauthor import AuthoringRetry
 
 
 @pytest.fixture(autouse=True)
@@ -215,7 +215,7 @@ def test_materialize_unknown_route_dispatches_both_tracks(
 
 
 def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_path: Path):
-    from hyperloom.orchestrator.phases.framework import _forward_integrate_source
+    from hyperloom.orchestrator.phases.framework_proposals import _forward_integrate_source
 
     stub = _stub(tmp_path)
 
@@ -765,31 +765,6 @@ def test_config_levers_helper_extracts_from_proposal_set():
     assert (
         _framework_config_levers_from_done({"patches_written": [], "proposal_set": [{"name": "research-only"}]}) == {}
     )
-
-
-def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
-    """A config-lever deliverable (proposal_set with extra_args/extra_envs and no patch) is routed to integrate_patch, so the empty-outcome bridge must NOT stamp an authored_empty row for it."""
-    stub = _stub(tmp_path)
-    task = SimpleNamespace(
-        task_id="spec-cfg",
-        params={
-            "framework_agent_authoring": True,
-            "framework_agent_candidate_id": "https://github.com/ROCm/vllm/pull/1014",
-            "framework_batch_id": "b1",
-        },
-    )
-    done_payload = {
-        "patches_written": [],
-        "proposal_set": [{"name": "shared-expert-fusion", "extra_envs": {"VLLM_FUSE_SHARED_EXPERTS": "1"}}],
-        "summary": "PR maps to a config lever on this build",
-    }
-
-    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
-        task=task,
-        done_payload=done_payload,
-    )
-
-    assert stub.shared_state.framework_agent_phase_progress == []
 
 
 def test_authoring_specialist_same_framework_no_cross(tmp_path: Path):

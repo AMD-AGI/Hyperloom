@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from kernelforge.workflows.forge_fusion import serving_gate
-from kernelforge.workflows.forge_fusion.validate import SmokeVerdict
+from kernelforge.workflows.forge_fusion.serving_smoke import SmokeVerdict
 from kernelforge.workflows.forge_fusion.validate import fused_symbol_invocation_evidence as evidence
 
 _IMPORT_ONLY = """\

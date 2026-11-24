@@ -20,6 +20,8 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
 )
 from hyperloom.orchestrator.actions.cancel_channel import cancel_scope_listener
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.phases.controller_settlement import CONTROLLER_TERMINAL_STATUSES
+from hyperloom.orchestrator.phases import phase_predicates, phase_transitions
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 from .conftest import make_mock_critic_coordinator
@@ -129,7 +131,7 @@ async def test_entering_kernel_enqueues_one_lane_holding_task_and_returns(coord,
 
     c.sub.register_executor("kernel_agent", _must_not_run)
     monkeypatch.setattr(
-        phase_machine_mod._phase_state,
+        phase_machine_mod.phase_transitions,
         "compute_next_phase",
         lambda *_args, **_kwargs: (ps.PHASE_KERNEL_AGENT, "test_enter_kernel", {"source": "test"}),
     )
@@ -327,7 +329,7 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
                 setattr(
                     st,
                     "kernel_rewrite_controller_result",
-                    {"status": sorted(ps.CONTROLLER_TERMINAL_STATUSES)[0], "macro_cycle": 0},
+                    {"status": sorted(CONTROLLER_TERMINAL_STATUSES)[0], "macro_cycle": 0},
                 ),
             ),
             "kernel_controller_done",
@@ -335,8 +337,8 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
         (
             "idle streak",
             lambda st: (
-                setattr(st, "kernel_idle_ticks", ps._kernel_idle_max_ticks()),
-                setattr(st, "kernel_idle_since_unix", time.time() - ps._kernel_idle_min_seconds() - 1.0),
+                setattr(st, "kernel_idle_ticks", phase_predicates._kernel_idle_max_ticks()),
+                setattr(st, "kernel_idle_since_unix", time.time() - phase_predicates._kernel_idle_min_seconds() - 1.0),
             ),
             "kernel_no_more_leverage",
         ),
@@ -348,13 +350,13 @@ def test_kernel_agent_in_flight_blocks_every_leverage_exit(label, arm, reason):
     arm(st)
 
     # Without in-flight flag: the leverage exit fires.
-    out_without_flag = ps.compute_next_phase(st)
+    out_without_flag = phase_transitions.compute_next_phase(st)
     assert out_without_flag is not None and out_without_flag[1] == reason, label
 
-    inputs = ps.workflow_predicate_inputs(st, in_flight=ps.WorkInFlight(kernel=True))
+    inputs = phase_predicates.workflow_predicate_inputs(st, in_flight=phase_predicates.WorkInFlight(kernel=True))
     assert inputs["pending_work"]["kernel_agent_in_flight"] is True
-    assert ps.compute_next_phase(st, in_flight=ps.WorkInFlight(kernel=True)) is None, label
-    assert ps.replay_next_phase(inputs) is None, label
+    assert phase_transitions.compute_next_phase(st, in_flight=phase_predicates.WorkInFlight(kernel=True)) is None, label
+    assert phase_transitions.replay_next_phase(inputs) is None, label
 
 
 def test_kernel_agent_in_flight_never_blocks_a_budget_exit():
@@ -362,11 +364,11 @@ def test_kernel_agent_in_flight_never_blocks_a_budget_exit():
     _arm_kernel_phase(st)
     _spend_the_phase_budget(st)
 
-    transition = ps.compute_next_phase(st, in_flight=ps.WorkInFlight(kernel=True))
+    transition = phase_transitions.compute_next_phase(st, in_flight=phase_predicates.WorkInFlight(kernel=True))
 
     assert transition is not None
     assert transition[1] == "kernel_phase_budget_exhausted"
-    assert ps.replay_next_phase(transition[2]["predicate_inputs"]) == transition
+    assert phase_transitions.replay_next_phase(transition[2]["predicate_inputs"]) == transition
 
 
 @pytest.mark.asyncio
@@ -379,9 +381,11 @@ async def test_kernel_holds_while_its_task_is_in_flight_and_leaves_once_it_settl
     task = await _create_kernel_agent(c)
     await c.tasks.transition(task.task_id, "running")
 
-    for _ in range(ps._kernel_idle_max_ticks() * 5):
+    for _ in range(phase_predicates._kernel_idle_max_ticks() * 5):
         await c.phase_machine.advance_phase_if_needed()
-        st.kernel_idle_since_unix = datetime.now(timezone.utc).timestamp() - ps._kernel_idle_min_seconds() * 10
+        st.kernel_idle_since_unix = (
+            datetime.now(timezone.utc).timestamp() - phase_predicates._kernel_idle_min_seconds() * 10
+        )
 
     assert st.phase == ps.PHASE_KERNEL_AGENT
     assert st.kernel_idle_ticks == 0

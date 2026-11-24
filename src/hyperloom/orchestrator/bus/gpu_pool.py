@@ -5,11 +5,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any
 
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS, parse_device_list
 
@@ -18,9 +16,6 @@ from .storage.connection import SqliteConnection
 
 log = logging.getLogger(__name__)
 
-
-# Reserved synthetic gpu_id base for single-node Ray pending-observation slots.
-_RAY_OBS_ID_BASE = 100000
 
 # Lease TTL grace over how long the holder is expected to run: a GPU agent's wall budget, or an action's expected cost.
 GPU_LEASE_TTL_GRACE = 0.1
@@ -143,7 +138,7 @@ class SpecialistGpuPool:
                     (holder_id, task_id),
                 )
             placeholders = ",".join("?" * len(self.gpu_ids))
-            cur.execute(  # nosec B608 - placeholders string is generated from configured GPU id count.
+            cur.execute(
                 f"SELECT gpu_id FROM gpu_leases WHERE gpu_id IN ({placeholders})",  # nosec B608 - generated placeholders only.
                 list(self.gpu_ids),
             )
@@ -159,35 +154,6 @@ class SpecialistGpuPool:
                 )
         return GpuLease(holder_id=holder_id, task_id=task_id, gpu_ids=tuple(selected))
 
-    async def try_acquire_ray_observation(
-        self,
-        *,
-        holder_id: str,
-        task_id: str,
-        pending_limit: int,
-    ) -> GpuLease | None:
-        """Admit a GPU specialist under single-node Ray by COUNT, not physical id."""
-        limit = max(1, int(pending_limit or 1))
-        async with self.db.transaction() as cur:
-            cur.execute(
-                "SELECT gpu_id FROM gpu_leases WHERE gpu_id >= ?",
-                (_RAY_OBS_ID_BASE,),
-            )
-            used = {int(r["gpu_id"]) for r in cur.fetchall()}
-            slot: int | None = None
-            for i in range(limit):
-                cand = _RAY_OBS_ID_BASE + i
-                if cand not in used:
-                    slot = cand
-                    break
-            if slot is None:
-                return None
-            cur.execute(
-                "INSERT INTO gpu_leases(gpu_id, holder_id, task_id) VALUES (?, ?, ?)",
-                (slot, holder_id, task_id),
-            )
-        return GpuLease(holder_id=holder_id, task_id=task_id, gpu_ids=(slot,))
-
     async def release(self, lease: GpuLease | None) -> None:
         """Release the GPUs held by a lease."""
         if lease is None or not lease.gpu_ids:
@@ -195,39 +161,10 @@ class SpecialistGpuPool:
         placeholders = ",".join("?" * len(lease.gpu_ids))
         params = list(lease.gpu_ids) + [lease.holder_id]
         async with self.db.transaction() as cur:
-            cur.execute(  # nosec B608 - placeholders string is generated from lease GPU id count.
+            cur.execute(
                 f"DELETE FROM gpu_leases WHERE gpu_id IN ({placeholders}) AND holder_id=?",  # nosec B608 - generated placeholders only.
                 params,
             )
-
-    async def release_execution(self, lease: GpuLease | None, specialist_lease: Any, task_id: str) -> bool:
-        """Return an execution's slot, and report whether its worker confirmed cleanup.
-
-        The answer is evidence for the execution's terminal row, not an admission
-        decision: the task it belongs to is over either way, so the slot goes back
-        even when the specialist's close cannot confirm it -- or raises, which is
-        why the pool release sits in a ``finally``.
-
-        Args:
-            lease: The pool lease the execution was admitted on.
-            specialist_lease: The Ray specialist lease to close, if the execution had one.
-            task_id: The task the slot was held for, for the log line.
-
-        Returns:
-            Whether the worker confirmed that its physical cleanup finished.
-        """
-        confirmed = True
-        try:
-            if specialist_lease is not None:
-                closed = await asyncio.to_thread(specialist_lease.close)
-                if closed is not True:
-                    log.warning(
-                        "gpu pool: task=%s GPU cleanup unconfirmed; returning the slot and recording it", task_id
-                    )
-                    confirmed = False
-        finally:
-            await self.release(lease)
-        return confirmed
 
 
 __all__ = [

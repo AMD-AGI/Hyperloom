@@ -103,6 +103,17 @@ def test_per_key_speculative_config_flags_that_simulate_go_and_the_others_stay()
     assert env == {"SGLANG_OTHER": "1"}
 
 
+@pytest.mark.parametrize("simulation", ["--spec-decode-acceptance-length", "--spec_decode_acceptance_rate"])
+def test_on_atom_the_forced_acceptance_flag_goes_and_the_draft_stays(simulation: str):
+    args, env = real_acceptance(
+        ("--method", "mtp", "--num-speculative-tokens", "3", simulation, "0.75", "--draft-model", "/models/draft"),
+        {},
+    )
+
+    assert args == ("--method", "mtp", "--num-speculative-tokens", "3", "--draft-model", "/models/draft")
+    assert env == {}
+
+
 def test_the_launch_records_its_golden_use_and_forces_no_acceptance():
     launch = _launch(_base())
     document = json.loads(json.dumps(launch.to_document()))

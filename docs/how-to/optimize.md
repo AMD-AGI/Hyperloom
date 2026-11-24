@@ -212,7 +212,7 @@ HYPERLOOM_AGENTX=1 hyperloom optimize \
   --max-hours 12
 ```
 
-This path is **single-node** SGLang or vLLM: run Hyperloom inside your serving
+This path is **single-node** SGLang, vLLM or ATOM: run Hyperloom inside your serving
 image. `--docker-image IMAGE` records that runtime image; it does not launch a
 container. Custom models require an explicit `--docker-image`.
 
@@ -227,7 +227,9 @@ concurrency stays fixed for the session.
 
 AgentX rejects `--enable-conc-sweep`, `--isl`, `--osl`, `--profile-osl`,
 `--max-model-len`, `--quantize` and `--quantize-scheme`.
-It also rejects multi-node execution and frameworks other than SGLang/vLLM.
+It also rejects multi-node execution and frameworks other than SGLang, vLLM and ATOM.
+An ATOM session takes its base from InferenceX's ATOM agentic entries; ATOM's own catalog serves
+fixed workloads only.
 Through `--extra-env`, `ISL`, `OSL`, `RANDOM_RANGE_RATIO`, `MAX_MODEL_LEN`,
 `EP_SIZE` and keys beginning with `AIPERF_`, `AGENTX_` or `AGENTIC_` are unsupported;
 use `--ep` for expert parallelism. Prepare any quantized checkpoint before this run,

@@ -4,6 +4,7 @@
 """Autonomous multi-operator coordination for KernelForge rewrite campaigns."""
 
 from kernelforge.workflows.rewrite_controller.contracts import (
+    REPOSITORIES_FILENAME,
     SERVING_CONTEXT_FILENAME,
     TRACE_EVIDENCE_FILENAME,
     WORKLOAD_FILENAME,
@@ -82,6 +83,7 @@ __all__ = [
     "PUBLICATION_FILENAME",
     "PUBLICATION_SCHEMA_VERSION",
     "REPORT_FILENAME",
+    "REPOSITORIES_FILENAME",
     "OpportunityAnalysisAgent",
     "OpportunityAnalysisResult",
     "PublicationError",

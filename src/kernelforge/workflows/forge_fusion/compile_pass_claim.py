@@ -14,7 +14,7 @@ from typing import Optional
 
 from .emit import FusionFiles, export_artifacts
 from .models import CompilePassOutcome, FusionArtifacts, Recipe
-from .validate import DecodeLoad, SmokeServer, serving_smoke
+from .serving_smoke import DecodeLoad, SmokeServer, serving_smoke
 from .vllm_passes import TargetRuntime, enable_pass_in_source, resolve_target_runtime, verify_pass_enabled
 
 log = logging.getLogger("forge_fusion")

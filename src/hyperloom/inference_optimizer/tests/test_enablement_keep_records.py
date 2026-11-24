@@ -19,12 +19,12 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.enablement.recipe.section import collect_enablement
-from hyperloom.orchestrator.actions.executors._patch_snapshot import (
+from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import (
     _git_commit_kept,
     replayed_stack_ops,
 )
 from hyperloom.orchestrator.actions.executors._git import _git_head_sha
-from hyperloom.orchestrator.actions.executors._server_argv import ConfigUnreadable
+from hyperloom.orchestrator.actions.executors.serving._server_argv import ConfigUnreadable
 from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.enablement.lane import _rearm_on_kept
@@ -1056,7 +1056,7 @@ def test_an_advanced_round_carries_its_base_to_the_keep_that_follows(repo: Path,
     Pins the durable ``base_sha_by_root`` write: drop it from
     ``_note_pre_mutation_head`` and this goes red.
     """
-    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors.patching._patch_sources import _note_pre_mutation_head
 
     true_base = _git_head_sha(repo)
     state = SimpleNamespace(enablement=EnablementRound(framework_root=str(repo)))
@@ -1097,7 +1097,7 @@ def executor_keep_records(tmp_path: Path, attempt, repo: Path):
 def test_an_ordinary_patch_round_does_not_seed_the_enablement_base(repo: Path):
     """The head before an unrelated patch is not the tree the enablement stack
     applies to, so a non-enablement round must not claim the base."""
-    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors.patching._patch_sources import _note_pre_mutation_head
 
     state = SimpleNamespace(enablement=EnablementRound())
     _note_pre_mutation_head(IntegrateAttempt(task_id=PROBE_TASK, shared_state=state), repo, enablement=False)
@@ -1105,7 +1105,7 @@ def test_an_ordinary_patch_round_does_not_seed_the_enablement_base(repo: Path):
 
 
 def test_the_recorded_base_is_never_replaced_by_a_later_reading(repo: Path):
-    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors.patching._patch_sources import _note_pre_mutation_head
 
     state = SimpleNamespace(enablement=EnablementRound())
     _note_pre_mutation_head(IntegrateAttempt(task_id=PROBE_TASK, shared_state=state), repo, enablement=True)
@@ -1366,7 +1366,7 @@ def test_the_base_reading_is_saved_before_the_mutation_that_invalidates_it(repo:
     next thing that happens. Left for the rearm, a round that commits its patch
     and then dies resumes with the entry absent and HEAD already moved -- the
     exact state this map exists to prevent."""
-    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors.patching._patch_sources import _note_pre_mutation_head
 
     saved: list[Path] = []
     state = SimpleNamespace(
@@ -1384,7 +1384,7 @@ def test_the_base_reading_is_saved_before_the_mutation_that_invalidates_it(repo:
 def test_a_failing_save_does_not_stop_the_round(repo: Path, tmp_path: Path):
     """A record that cannot be written is still on the in-memory state, and the
     rearm saves again; a failed write must not cost the round."""
-    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors.patching._patch_sources import _note_pre_mutation_head
 
     def _boom(*_a, **_k):
         raise OSError("disk full")
@@ -1515,7 +1515,7 @@ def test_a_patch_on_a_root_with_no_base_commit_declares_its_overlay(tmp_path: Pa
 def test_a_base_less_root_refuses_an_ambiguous_strip_level(tmp_path: Path):
     """Two levels producing different, equally plausible inventories means there
     is no reading of the patch the capture can stand behind."""
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import overlay_inventory_without_base
+    from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import overlay_inventory_without_base
 
     plain = tmp_path / "amb"
     (plain / "pkg").mkdir(parents=True)
@@ -1530,7 +1530,7 @@ def test_a_base_less_root_refuses_a_symlink_target(tmp_path: Path):
     """``shutil.copy2`` captures a link as a regular file, so the snapshot
     cannot represent one honestly -- the same refusal the git-backed path makes
     from the tree mode."""
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import overlay_inventory_without_base
+    from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import overlay_inventory_without_base
 
     plain = tmp_path / "lnk"
     plain.mkdir()
@@ -1556,7 +1556,7 @@ def test_a_base_less_root_refuses_a_delete_only_patch(tmp_path: Path):
     match byte for byte -- there is nothing that identifies which reading of
     the patch applies, so the targets stay unknown rather than guessed.
     """
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import overlay_inventory_without_base
+    from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import overlay_inventory_without_base
 
     plain = _git_tree(tmp_path / "delonly")
     patch = _patch(tmp_path, "d.patch", "--- a/gone\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n")
@@ -1570,7 +1570,7 @@ def test_a_base_less_root_never_certifies_deleting_an_unrelated_path(tmp_path: P
     -p0 and reports ``a/gone`` deleted -- a path that never existed -- while
     leaving the real ``gone`` untouched.
     """
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import overlay_inventory_without_base
+    from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import overlay_inventory_without_base
 
     plain = _git_tree(tmp_path / "wrongpath")
     (plain / "gone").write_text("x\n", encoding="utf-8")
@@ -1582,7 +1582,7 @@ def test_a_base_less_root_records_a_plain_unified_deletion(tmp_path: Path):
     """A git-format patch says ``delete mode 100644 p``; a plain unified one
     says ``delete p``. Matching only the first loses the deletion entirely and
     the overlay would then leave the file in place on replay."""
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import overlay_inventory_without_base
+    from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import overlay_inventory_without_base
 
     plain = _git_tree(tmp_path / "plaindel")
     (plain / "mod.py").write_text("a = 2\n", encoding="utf-8")
@@ -1601,7 +1601,7 @@ def test_a_base_less_root_keeps_a_tab_bearing_name_whole(tmp_path: Path):
     that also exists here, so the capture would take the wrong one. The name
     is C-quoted as git writes it: unquoted, git reads the tab as the start of
     a header timestamp and the patch never names ``real<TAB>part`` at all."""
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import overlay_inventory_without_base
+    from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import overlay_inventory_without_base
 
     plain = _git_tree(tmp_path / "tabname")
     (plain / "real").write_text("decoy\n", encoding="utf-8")
@@ -1613,7 +1613,7 @@ def test_a_base_less_root_keeps_a_tab_bearing_name_whole(tmp_path: Path):
 def test_a_base_less_root_refuses_an_undecodable_name(tmp_path: Path):
     """``errors="replace"`` turns an undecodable byte into U+FFFD, which can
     name a real, unrelated file instead of the patch's actual target."""
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import _numstat_paths
+    from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import _numstat_paths
 
     assert _numstat_paths(b"1\t0\tbad\xff\x00") is None
     assert _numstat_paths(b"1\t0\tfine.py\x00") == ["fine.py"]
@@ -1623,7 +1623,7 @@ def test_a_base_less_root_refuses_a_patch_that_declares_a_symlink(tmp_path: Path
     """``new file mode 120000`` is how a patch says it writes a LINK. The live
     entry cannot answer this -- a regular file may sit at that path today --
     and capturing it would record a regular file for a link-creating patch."""
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import overlay_inventory_without_base
+    from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import overlay_inventory_without_base
 
     plain = _git_tree(tmp_path / "declared")
     (plain / "keep").write_text("k\n", encoding="utf-8")
@@ -1956,7 +1956,7 @@ def test_the_replay_isolation_root_is_private_and_not_a_predictable_path():
     import os as _os
     import stat as _stat
     import tempfile as _tempfile
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import (
+    from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import (
         _isolated_git_env,
         _isolation_root,
     )
@@ -2077,7 +2077,7 @@ def test_policy_files_are_readable_whatever_the_umask(repo: Path, tmp_path: Path
     this suite is developed on and only fails in CI.
     """
     import stat as _stat
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import (
+    from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import (
         _checkout_base_tree,
         _isolation_root,
         _repo_prefix,
@@ -2107,7 +2107,7 @@ def test_a_nested_apply_root_is_created_traversably_at_every_level(repo: Path, t
     component is made without execute and the next cannot be created beneath
     it. Each component has to be repaired as it is made."""
     import stat as _stat
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import _mkdir_private
+    from hyperloom.orchestrator.actions.executors.patching._patch_snapshot import _mkdir_private
 
     # Created before the mask is applied and repaired, exactly as production
     # does: the replay root comes from ``mkdtemp`` and is chmod'd 0700 before

@@ -62,6 +62,23 @@ def test_the_install_names_the_interpreter_package_origin_and_version(tmp_path: 
     assert install.version == "0.5.23.dev4"
 
 
+def test_the_install_names_where_each_requested_package_is_imported_from(tmp_path: Path) -> None:
+    env = _site(tmp_path, version="0.1")
+    (tmp_path / "kernels").mkdir()
+    (tmp_path / "kernels" / "__init__.py").write_text("")
+    (tmp_path / "single.py").write_text("")
+
+    install = probe_install(
+        sys.executable, Framework.XDIT, env, cwd=tmp_path, packages=("kernels", "single", "not_installed")
+    )
+
+    assert install.import_roots == {
+        _PACKAGE: str((tmp_path / _PACKAGE).resolve()),
+        "kernels": str((tmp_path / "kernels").resolve()),
+        "single": str((tmp_path / "single.py").resolve()),
+    }
+
+
 def test_a_package_with_no_distribution_metadata_has_no_version(tmp_path: Path) -> None:
     assert probe_install(sys.executable, Framework.XDIT, _site(tmp_path, version=None), cwd=tmp_path).version is None
 
@@ -81,6 +98,7 @@ def test_a_checkout_in_the_callers_directory_does_not_shadow_an_editable_install
     install = probe_install(sys.executable, Framework.XDIT, env, cwd=run_dir)
 
     assert install.origin == str((tmp_path / "checkout" / "python" / _PACKAGE / "__init__.py").resolve())
+    assert install.import_roots == {_PACKAGE: str((tmp_path / "checkout" / "python" / _PACKAGE).resolve())}
     with pytest.raises(FrameworkProbeError, match=f"cannot import {_PACKAGE}"):
         probe_install(sys.executable, Framework.XDIT, env, cwd=workspace)
 

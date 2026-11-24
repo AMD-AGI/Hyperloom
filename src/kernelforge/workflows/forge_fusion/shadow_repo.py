@@ -31,7 +31,7 @@ SHADOW_GIT_DIRNAME = "shadow.git"
 #: reset can still be undone by whoever killed it.
 _SHADOW_RECORD = "forge-shadow.json"
 
-#: forge-fuse's own in-worktree staging directory (see ``author.FUSION_SCRATCH_DIRNAME``).
+#: forge-fuse's own in-worktree staging directory (see ``author_guard.FUSION_SCRATCH_DIRNAME``).
 #: Named here rather than imported to keep this module free of the authoring stack.
 _FUSION_SCRATCH_DIRNAME = ".forge_fusion"
 

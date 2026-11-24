@@ -22,7 +22,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import (
 from hyperloom.inference_optimizer.breakdown.recorder import recorder as recorder_module
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts, event_parts
 from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EventHeader
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import make_kernel_recorder
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_recorder import make_kernel_recorder
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelExit
 from hyperloom.inference_optimizer.breakdown.recorder.sections import KERNEL_EVENT_SECTIONS
 from hyperloom.inference_optimizer.session.session_binding import (
@@ -530,7 +530,7 @@ def test_finalize_binds_the_session_itself_so_a_re_export_can_run_it(tmp_path):
 
 
 def test_recording_without_a_bound_session_fails_instead_of_guessing_a_path():
-    # This is also the backstop for a subprocess: the ContextVar is unset inside a Ray actor, and two processes
+    # This is also the backstop for a subprocess: the ContextVar is unset inside a child process, and two processes
     # upserting one fragment lose writes.
     assert not session_is_bound()
     with pytest.raises(SessionNotBoundError):

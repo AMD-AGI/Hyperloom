@@ -20,18 +20,9 @@ from .._internal.env_safety import filter_forward_env
 from .._internal.log import info, warn, err
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
 from .._internal.ssh_client import RemoteScript
-
-
-class _MnCliProxy:
-    """Lazy proxy preserving ``inf._mn_cli`` monkeypatch compatibility."""
-
-    def __getattr__(self, name: str) -> Any:
-        from .. import cli as mn_cli
-
-        return getattr(mn_cli, name)
-
-
-_mn_cli = _MnCliProxy()
+from .. import cluster_access as _mn_cli
+from ..pod_entrypoints import KERNEL_NODE_OPS_DEPS, LAUNCHER_DEPS, SHAPE_GATE_DEPS, extract_pod_json
+from ..pod_entrypoints import read_bundled_pod_python_script, read_pod_script
 
 
 def _infera_target_for_host(state: dict[str, Any], ip: str) -> dict[str, Any]:
@@ -132,7 +123,7 @@ def _infera_fanout_launch(
 ) -> tuple[int, list[dict]]:
     """Ship + run launch_infera_node.py on each GPU pod over SSH."""
     poll_timeout = options.poll_timeout
-    script = _mn_cli._read_bundled_pod_python_script("launch_infera_node.py", _mn_cli._LAUNCHER_DEPS)
+    script = read_bundled_pod_python_script("launch_infera_node.py", LAUNCHER_DEPS)
     forward_env = _collect_forward_env()
     if forward_env:
         info(f"{label}: forwarding {len(forward_env)} tuning env vars to SSH child")
@@ -155,7 +146,7 @@ def _infera_fanout_launch(
             results.append({"podIP": ip, "sshPort": port, "rc": 124, "error": "timeout"})
             rc_total = 1
             continue
-        parsed = _mn_cli._extract_pod_json(cp.stdout or "")
+        parsed = extract_pod_json(cp.stdout or "")
         rec = {"podIP": ip, "sshPort": port, "rc": cp.returncode, "summary": parsed}
         if target.get("podId"):
             rec["podId"] = target["podId"]
@@ -481,7 +472,7 @@ def _infera_ssh_node_op(
     """Ship kernel_node_ops.py to one pod over SSH and run one subcommand."""
     ip = target["podIP"]
     port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
-    script = _mn_cli._read_bundled_pod_python_script("kernel_node_ops.py", _mn_cli._KERNEL_NODE_OPS_DEPS)
+    script = read_bundled_pod_python_script("kernel_node_ops.py", KERNEL_NODE_OPS_DEPS)
     try:
         cp = _mn_cli._infera_ssh_run_script(
             state,
@@ -492,7 +483,7 @@ def _infera_ssh_node_op(
         )
     except subprocess.TimeoutExpired:
         return None, {"rc": 124, "stderr": f"timeout after {timeout}s", "podIP": ip, "sshPort": port}
-    return _mn_cli._extract_pod_json(cp.stdout or ""), {
+    return extract_pod_json(cp.stdout or ""), {
         "rc": cp.returncode,
         "stderr": (cp.stderr or "")[-1500:],
         "podIP": ip,
@@ -532,7 +523,7 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
         )
         return _mn_cli.EXIT_CONFIG_ERROR
     gpu_targets = infera_support.gpu_ssh_targets_from_state(state)
-    script = _mn_cli._read_bundled_pod_python_script("apply_tracelens_patch_multinode.py", _mn_cli._SHAPE_GATE_DEPS)
+    script = read_bundled_pod_python_script("apply_tracelens_patch_multinode.py", SHAPE_GATE_DEPS)
     op_args = f"--local --tracelens-root {shlex.quote(str(tracelens_root))}"
     if args.sglang_version_pin:
         op_args += f" --sglang-version-pin {shlex.quote(str(args.sglang_version_pin))}"
@@ -560,7 +551,7 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
         except subprocess.TimeoutExpired:
             failures.append({"host": ip, "sshPort": port, "error": f"timeout after {timeout}s"})
             continue
-        parsed = _mn_cli._extract_pod_json(cp.stdout) or {}
+        parsed = extract_pod_json(cp.stdout) or {}
         pods = parsed.get("per_pod")
         if str(parsed.get("status")) in ("applied", "skipped") and pods:
             for r in pods:
@@ -753,7 +744,7 @@ def cmd_install_geak(args: argparse.Namespace) -> int:
     if not geak_src:
         err("install-geak: cannot resolve GEAK source dir; pass --geak-src or set $HYPERLOOM_ROOT / $USER_DATA_PATH")
         return _mn_cli.EXIT_CONFIG_ERROR
-    script = _mn_cli._read_pod_script("install_geak_node.sh")
+    script = read_pod_script("install_geak_node.sh")
     gpu_targets = infera_support.gpu_ssh_targets_from_state(state)
     info(f"install-geak (infera): geak_src={geak_src} pods={len(gpu_targets)}")
     results: list[dict] = []
@@ -774,7 +765,7 @@ def cmd_install_geak(args: argparse.Namespace) -> int:
             results.append({"host": ip, "sshPort": port, "status": "failed", "reason": "timeout"})
             rc_total = 1
             continue
-        parsed = _mn_cli._extract_pod_json(cp.stdout or "") or {
+        parsed = extract_pod_json(cp.stdout or "") or {
             "status": "failed",
             "reason": (cp.stderr or "")[-500:],
         }

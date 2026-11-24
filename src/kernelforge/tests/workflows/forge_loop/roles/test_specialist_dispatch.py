@@ -16,7 +16,10 @@ from pydantic import ValidationError
 
 from kernelforge.agent_backends import AgentProviderUnavailableError, AgentRunResult
 from kernelforge.workflows.forge_loop.roles.contracts import EvidenceRef
-from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationAgent, OrchestrationInfrastructureError
+from kernelforge.workflows.forge_loop.roles.orchestration_agent import (
+    OrchestrationAgent,
+    OrchestrationInfrastructureError,
+)
 from kernelforge.workflows.forge_loop.roles.plan_requests import dispatch_answer_model
 from kernelforge.workflows.forge_loop.roles import specialists as specialists_module
 from kernelforge.workflows.forge_loop.roles.specialists import (

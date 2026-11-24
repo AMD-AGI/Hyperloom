@@ -8,10 +8,11 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer import roofline_ceiling as rc
+from hyperloom.inference_optimizer import roofline_model_meta as rmm
 
 
 def _split(cfg: dict, layers: int, experts: int) -> tuple[int, int]:
-    return rc._derive_moe_layer_counts(cfg, layers, experts)
+    return rmm._derive_moe_layer_counts(cfg, layers, experts)
 
 
 class TestTheLayerSplit:
@@ -74,7 +75,7 @@ class TestTheLayerSplit:
         assert _split({"moe_layer_freq": False}, 8, 64) == (8, 0)
 
 
-def _flash_meta(**over) -> rc.ModelMeta:
+def _flash_meta(**over) -> rmm.ModelMeta:
     """GLM-5.3-Flash's real decoder shape."""
     base = dict(
         weight_bytes=64 * 1024**3,
@@ -94,7 +95,7 @@ def _flash_meta(**over) -> rc.ModelMeta:
         dense_ffn_layers=3,
     )
     base.update(over)
-    return rc.ModelMeta(**base)
+    return rmm.ModelMeta(**base)
 
 
 def _breakdown(meta):
@@ -151,7 +152,7 @@ class TestThePerfModelUsesTheSplit:
         assert ops["moe_fused"].flops == pytest.approx(all_layers.flops)
 
     def test_a_dense_model_is_unaffected(self):
-        dense = rc.ModelMeta(
+        dense = rmm.ModelMeta(
             weight_bytes=16 * 1024**3,
             num_layers=32,
             num_kv_heads=8,
@@ -164,7 +165,7 @@ class TestThePerfModelUsesTheSplit:
             num_attention_heads=32,
             dense_ffn_layers=32,
         )
-        undecided = rc.ModelMeta(**{**dense.__dict__, "dense_ffn_layers": 0})
+        undecided = rmm.ModelMeta(**{**dense.__dict__, "dense_ffn_layers": 0})
 
         a = {o.name: o.flops for o in _breakdown(dense).ops}
         b = {o.name: o.flops for o in _breakdown(undecided).ops}
@@ -202,7 +203,7 @@ class TestLoadModelMetaFillsTheSplit:
             total_size=700 * 1024**3,
         )
 
-        meta = rc.load_model_meta(root)
+        meta = rmm.load_model_meta(root)
 
         assert meta is not None
         assert (meta.moe_layers, meta.dense_ffn_layers) == (42, 3)
@@ -222,8 +223,8 @@ class TestLoadModelMetaFillsTheSplit:
             "torch_dtype": "bfloat16",
         }
         total = 700 * 1024**3
-        no_prefix = rc.load_model_meta(_write_config(tmp_path / "a", cfg, total))
-        prefix = rc.load_model_meta(_write_config(tmp_path / "b", {**cfg, "first_k_dense_replace": 3}, total))
+        no_prefix = rmm.load_model_meta(_write_config(tmp_path / "a", cfg, total))
+        prefix = rmm.load_model_meta(_write_config(tmp_path / "b", {**cfg, "first_k_dense_replace": 3}, total))
 
         assert no_prefix is not None and prefix is not None
         assert prefix.expert_weight_bytes == pytest.approx(no_prefix.expert_weight_bytes * 42 / 45, rel=1e-6)
@@ -245,7 +246,7 @@ class TestLoadModelMetaFillsTheSplit:
             total_size=14 * 1024**3,
         )
 
-        meta = rc.load_model_meta(root)
+        meta = rmm.load_model_meta(root)
 
         assert meta is not None
         assert (meta.moe_layers, meta.dense_ffn_layers) == (0, 32)

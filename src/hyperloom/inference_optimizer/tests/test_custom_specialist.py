@@ -17,13 +17,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hyperloom.inference_optimizer.cli import (
-    _apply_custom_specialist_resume,
     OrchestrationPromptContext,
     _build_orchestration_prompt,
     _custom_specialist_conflict,
     _load_custom_specialist_args,
     main,
 )
+from hyperloom.inference_optimizer.cli.custom_specialist import _apply_custom_specialist_resume
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.phases.dispatch_order import in_dispatch_order
@@ -689,6 +689,16 @@ async def test_the_general_bench_leaves_custom_proposals_out():
     (call,) = fp._coord.tasks.created
     assert [v["name"] for v in call["params"]["grid"]] == ["serving-a"]
     assert "operator_priority" not in call["params"]
+
+
+async def test_a_closed_candidate_track_still_benches_what_specialists_proposed():
+    """The track closing ends the source arm's supply; a proposal already returned is still measured."""
+    fp = _framework(rounds=[_bench_round("spec-serving", "serving_specialist", "serving-a")], phase_done=True)
+
+    await fp._maybe_bench_untested_proposals()
+
+    (call,) = fp._coord.tasks.created
+    assert [v["name"] for v in call["params"]["grid"]] == ["serving-a"]
 
 
 @pytest.mark.parametrize(

@@ -16,6 +16,7 @@ from unittest import mock
 
 import pytest
 
+from hyperloom_common.llm.llm_config import DEFAULT_CODEX_MODEL
 from kernelforge.agent_backends import create_registered_backend
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
@@ -432,13 +433,18 @@ def _spec(repo: Path, kernel: Path, driver: Path, timeout: int = 2) -> AgentRunS
 def _backend(fake: Path) -> CodexBackend:
     """Build a Codex backend with a deterministic fake gateway."""
     return CodexBackend(
-        codex_bin=str(fake),
-        gateway={
-            "base_url": "https://gateway.example.invalid/v1",
-            "key_env": "FAKE_CODEX_API_KEY",
-            "headers": {"user": "test-user"},
-        },
-        bypass_sandbox=True,
+        runtime=AgentRuntimeConfig(
+            provider="codex",
+            model=DEFAULT_CODEX_MODEL,
+            executable=str(fake),
+            options={
+                "gateway": {
+                    "base_url": "https://gateway.example.invalid/v1",
+                    "key_env": "FAKE_CODEX_API_KEY",
+                    "headers": {"user": "test-user"},
+                },
+            },
+        )
     )
 
 
@@ -1103,7 +1109,9 @@ def test_implementer_leaves_the_takeaway_to_the_lesson_turn(
     assert spec.additional_directories == []
     assert "## Reasoning log" not in spec.user_prompt
     assert "reasoning log" not in spec.system_prompt.lower()
-    assert "land in time.\n\n## Prior experience" in spec.user_prompt
+    # Nothing stands between the session's time budget and the prior experience it is handed.
+    budget_closing = "at that moment." if insession_gate else "land in time."
+    assert f"{budget_closing}\n\n## Prior experience" in spec.user_prompt
     assert "You do NOT write a takeaway" in spec.system_prompt
     assert "separate turn" in spec.system_prompt
     assert spec.system_prompt.index("starting with `PLAN:`") < spec.system_prompt.index("You do NOT write a takeaway")
@@ -2013,7 +2021,7 @@ def test_codex_verify_rejection_survives_a_failing_second_rollback(
         failing_second_rollback,
     )
 
-    with caplog.at_level("WARNING", logger="kernelforge.agent_backends.codex"):
+    with caplog.at_level("WARNING", logger="kernelforge.agent_backends.workspace_guard"):
         with pytest.raises(WorkspaceSafetyError, match="forge_driver.py"):
             asyncio.run(_backend(fake).run(_author_spec(repo, kernel, driver)))
 
@@ -2389,17 +2397,6 @@ def test_codex_backend_rolls_back_partial_edit_on_timeout(
     assert _git(repo, "status", "--porcelain") == ""
 
 
-def test_the_guard_does_not_hold_the_repositorys_own_bookkeeping(tmp_path: Path) -> None:
-    """`.git` moves on its own; snapshotting it makes git housekeeping a rejection."""
-    repo, _kernel, _driver = _make_repo(tmp_path)
-    guard = WorkspaceGuard(replace(_read_only_spec(repo), read_only_resume=True))
-
-    guard.prepare()
-
-    assert guard.snapshots
-    assert not [path for path in guard.snapshots if ".git" in Path(path).parts]
-
-
 def test_git_housekeeping_during_a_session_is_not_a_violation(tmp_path: Path) -> None:
     """git rewrites its own bookkeeping unprompted -- refreshing a stale stat cache rewrites the index, and a build touching files is enough to cause it."""
     repo, _kernel, _driver = _make_repo(tmp_path)
@@ -2430,11 +2427,14 @@ def _fake_cli(path: Path, version_line: str) -> str:
     return str(path)
 
 
-def _gateway_backend(**kwargs) -> CodexBackend:
+def _gateway_backend(executable: str = "") -> CodexBackend:
     return CodexBackend(
-        gateway={"base_url": "https://gateway.example.invalid/v1", "key_env": "FAKE_CODEX_API_KEY"},
-        bypass_sandbox=True,
-        **kwargs,
+        runtime=AgentRuntimeConfig(
+            provider="codex",
+            model=DEFAULT_CODEX_MODEL,
+            executable=executable,
+            options={"gateway": {"base_url": "https://gateway.example.invalid/v1", "key_env": "FAKE_CODEX_API_KEY"}},
+        )
     )
 
 
@@ -2463,7 +2463,7 @@ def test_agent_cli_variable_naming_a_codex_runtime_is_used(tmp_path, monkeypatch
 def test_an_explicit_pin_to_another_providers_cli_still_fails(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_CODEX_API_KEY", "key")
     monkeypatch.delenv("FORGE_AGENT_CLI", raising=False)
-    backend = _gateway_backend(codex_bin=_fake_cli(tmp_path / "claude", "2.1.0 (Claude Code)"))
+    backend = _gateway_backend(executable=_fake_cli(tmp_path / "claude", "2.1.0 (Claude Code)"))
 
     with pytest.raises(CodexUnavailableError, match="does not appear to be Codex"):
         backend.preflight()

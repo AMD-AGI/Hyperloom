@@ -15,7 +15,7 @@
 # Phase 5  runtime env     — persist bare-metal runtime vars into .env
 #
 # Scope: bare-metal base setup only. Open-source deps and the optimizer runtime
-# (io pkg, InferenceX, kernel-agent Ray/GEAK/TraceLens, fa) are installed
+# (io pkg, InferenceX, kernel-agent GEAK/TraceLens, fa) are installed
 # by the inference_optimizer skill, not here. It STOPS before launching.
 
 set -euo pipefail
@@ -36,7 +36,7 @@ KERNEL_AGENT_ENV_FILE=""
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
 
 HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
-HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.1.5}"
+HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.2.0}"
 ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 # Installed name must outrank the vendor library in ldconfig's ordering.
@@ -63,9 +63,10 @@ SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
 # below 2.11 and so cannot resolve against a ROCm 10 stack at all; 0.5.19 moved
 # that dependency into runtime_common unpinned, which leaves the installer's
 # ROCm torch constraint as the version pip solves for.
-# vLLM installs 0.33.0+rocm72 from the wheels.vllm.ai pip index. The rocm72
-# variant puts the vLLM ROCm layer at 7.2; the docker route instead uses the
-# ROCm 10.0 vllm/vllm-openai-rocm image, so the two paths no longer share a ROCm level. AITER_REF
+# vLLM 0.34.0 is built from source on a ROCm 10 host. wheels.vllm.ai publishes
+# 0.34.0 for ROCm 10 only (rocm100), so the ROCm 7.2.x wheel route has nothing to
+# install and stops before any change; 0.33.0 still has a rocm72 wheel. The docker
+# route uses the ROCm 10.0 vllm/vllm-openai-rocm image. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
 SGLANG_REF="${SGLANG_REF:-297e54fd105e974cdf401e5b4d20253a22c16f90}"
@@ -80,12 +81,12 @@ SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-}"
 SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
-VLLM_VERSION="${VLLM_VERSION:-0.33.0}"
+VLLM_VERSION="${VLLM_VERSION:-0.34.0}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm72}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
 VLLM_INSTALL_METHOD="${VLLM_INSTALL_METHOD:-auto}"
 VLLM_REPO="${VLLM_REPO:-https://github.com/vllm-project/vllm.git}"
-VLLM_SOURCE_REF="${VLLM_SOURCE_REF:-4ba787ec9959e566d3b587a796dff07673324da5}"
+VLLM_SOURCE_REF="${VLLM_SOURCE_REF:-62d4bc3c7e33b1b6c906e233e6af2d3506c482ca}"
 # The source checkout is a depth-1 fetch of a commit SHA and carries no tags, so
 # setuptools_scm would otherwise stamp the build 0.1.dev1 instead of the release.
 VLLM_PRETEND_VERSION="${VLLM_PRETEND_VERSION:-${VLLM_VERSION}}"
@@ -205,7 +206,7 @@ die() { echo "[install-baremetal ERROR] $*" >&2; exit 1; }
 
 IMAGE_HINT="Provision the ROCm framework base first (SGLang: lmsysorg/sglang-rocm:v0.5.23-rocm10-mi30x|mi35x-*; \
 vLLM bare-metal: Ubuntu 24.04+ host with ROCm torch, or use docker mode with \
-vllm/vllm-openai-rocm:v0.33.0-rocm100), then re-run."
+vllm/vllm-openai-rocm:v0.34.0-rocm100), then re-run."
 
 is_interactive() { [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; }
 
@@ -1148,6 +1149,34 @@ assert_vllm_glibc_compatible() {
   fi
 }
 
+# The wheel route installs vllm==${VLLM_VERSION}+${VLLM_ROCM_VARIANT} from the
+# index below, and an index that carries no such release is a 404. Stop on it
+# before any venv or pip change; check-only and dry-run run this too.
+assert_vllm_wheel_published() {
+  local url="${VLLM_ROCM_INDEX%/}/vllm/" status
+  status="$("$1" - "$url" <<'PY'
+import sys
+import urllib.error
+import urllib.request
+
+try:
+    urllib.request.urlopen(sys.argv[1], timeout=30)
+    print(200)
+except urllib.error.HTTPError as e:
+    print(e.code)
+except Exception:
+    print(0)
+PY
+)"
+  case "$status" in
+    200) ;;
+    404)
+      die "no vLLM ROCm wheel at ${url}: vllm==${VLLM_VERSION}+${VLLM_ROCM_VARIANT} is not published (this ROCm 7.2.x host takes the wheel route, and upstream ships vLLM 0.34.0 for ROCm 10 only). Use docker mode, a ROCm 10 host (vLLM is built from source there), or set VLLM_VERSION=0.33.0 and VLLM_ROCM_VARIANT=rocm72 before running setup."
+      ;;
+    *) warn "could not check ${url} (status ${status}); the install reports a missing wheel itself" ;;
+  esac
+}
+
 # Install vLLM from the official ROCm wheel index without replacing ROCm torch.
 # vLLM's ROCm torch build links against system OpenMPI (libmpi.so.40 /
 # libmpi_cxx.so.40), which most container base images do not ship. Debian
@@ -1425,6 +1454,7 @@ install_vllm_framework() {
     install_vllm_from_source "$base_py"
     return $?
   fi
+  assert_vllm_wheel_published "$base_py"
   if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     ensure_openmpi_runtime
   fi

@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Parse the Coordinator-style ``compose_prompt`` text into structured fields."""
+"""Parse the proposals out of the Coordinator-style ``compose_prompt`` text."""
 
 from __future__ import annotations
 
 import ast
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 from .request_models import Proposal
@@ -27,7 +27,6 @@ _INBOX_ROW_RE = re.compile(
 )
 
 # Section titles we recognise.
-_SHARED_STATE_TITLE = "Shared session state"
 _INBOX_PREFIX = "Inbox for "
 
 
@@ -41,37 +40,6 @@ class _InboxRow:
     from_agent: str
     topic: str
     payload: dict[str, Any] | None
-
-
-@dataclass
-class ParsedPrompt:
-    """The shared session state and the proposals a Coordinator-style prompt carries."""
-
-    shared_state: dict[str, str] = field(default_factory=dict)
-    proposals: list[Proposal] = field(default_factory=list)
-
-
-# Shared-state token parser
-_TOKEN_RE = re.compile(r"(?P<key>[A-Za-z_][A-Za-z0-9_]*)=")
-
-
-def _parse_shared_state(text: str) -> dict[str, str]:
-    """Best-effort ``key=value`` token parser."""
-    out: dict[str, str] = {}
-    cleaned = " ".join(line.strip() for line in text.splitlines() if line.strip())
-    if not cleaned:
-        return out
-    matches = list(_TOKEN_RE.finditer(cleaned))
-    for i, m in enumerate(matches):
-        key = m.group("key")
-        value_start = m.end()
-        value_end = matches[i + 1].start() if i + 1 < len(matches) else len(cleaned)
-        value = cleaned[value_start:value_end].strip()
-        # Trim trailing punctuation that is clearly a separator (comma, semicolon).
-        while value.endswith((",", ";")):
-            value = value[:-1].rstrip()
-        out[key] = value
-    return out
 
 
 # Payload parser
@@ -116,15 +84,12 @@ def _iter_sections(text: str) -> Iterable[tuple[str | None, list[str]]]:
 
 
 # ---------------------------------------------------------------------------
-def parse_inbox_prompt(text: str) -> ParsedPrompt:
-    """Parse a Coordinator-style prompt into :class:`ParsedPrompt`."""
-    parsed = ParsedPrompt()
+def parse_inbox_prompt(text: str) -> list[Proposal]:
+    """Return the proposals in a Coordinator-style prompt's inbox sections."""
+    proposals: list[Proposal] = []
     for title, lines in _iter_sections(text):
         if title is None:
             # Preamble before any section header — treat as ignorable.
-            continue
-        if title == _SHARED_STATE_TITLE:
-            parsed.shared_state = _parse_shared_state("\n".join(lines))
             continue
         if title.startswith(_INBOX_PREFIX):
             for raw_line in lines:
@@ -133,12 +98,12 @@ def parse_inbox_prompt(text: str) -> ParsedPrompt:
                     continue
                 row = _parse_inbox_row(raw_line)
                 if row is not None and row.topic == "proposal" and isinstance(row.payload, dict):
-                    parsed.proposals.append(
+                    proposals.append(
                         Proposal.from_payload(
                             msg_id=row.msg_id, from_agent=row.from_agent, payload=dict(row.payload), seq=row.seq
                         )
                     )
-    return parsed
+    return proposals
 
 
 def _parse_inbox_row(raw: str) -> _InboxRow | None:
@@ -156,6 +121,5 @@ def _parse_inbox_row(raw: str) -> _InboxRow | None:
 
 
 __all__ = [
-    "ParsedPrompt",
     "parse_inbox_prompt",
 ]

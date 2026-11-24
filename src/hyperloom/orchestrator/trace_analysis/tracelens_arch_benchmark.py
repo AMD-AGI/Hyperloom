@@ -25,7 +25,7 @@ from hyperloom.common.visible_devices import (
 try:
     import torch
 except ImportError:
-    torch = None  # type: ignore[assignment,misc]
+    torch = None
 
 MICROBENCH_WARMUP = 20
 MICROBENCH_REP = 50

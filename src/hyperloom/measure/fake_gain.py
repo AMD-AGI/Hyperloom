@@ -5,8 +5,9 @@
 
 Main refuses three gains that a measurement can show without the candidate being better: a context-copying
 speculative draft on a synthetic benchmark, a change of a draft whose acceptance length is simulated, and an AgentX
-baseline served with the prefix cache off. Its flow does that in the explore and baseline executors; a test launched
-through ``hyperloom.measure`` never reaches them. This module re-exports the checks without copying their logic.
+baseline served with the prefix cache off. Its flow does that in the explore and baseline executors, and refuses the
+context-copying draft in the integrate bench and the PRELUDE warm replay too; a test launched through
+``hyperloom.measure`` never reaches them. This module re-exports the checks without copying their logic.
 
 ``FAKE_GAINS`` is the catalog of the known fake gains. The rule: each newly found fake gain lands as a check, a row
 here and a test together; the test sends a minimal example through the real enforcement point named in the row.
@@ -14,7 +15,6 @@ here and a test together; the test sends a minimal example through the real enfo
 
 from __future__ import annotations
 
-import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,16 +104,16 @@ def _suite_round_refusal(run_dir: Path, log: str | None) -> str:
         return ""
     framework = folder.launch.framework.name.value
     return _cacheless_refusal(
+        run_dir,
         {
             "framework": framework,
-            "requested_server_args": shlex.join(folder.launch.argv),
             "observed_server_config": observed_server_config_from_log(log, framework) if log else {},
-        }
+        },
     )
 
 
-def _cacheless_refusal(evidence: dict[str, Any]) -> str:
-    measured: dict[str, Any] = {"status": "succeeded", "launch_evidence": evidence}
+def _cacheless_refusal(run_dir: Path, evidence: dict[str, Any]) -> str:
+    measured: dict[str, Any] = {"status": "succeeded", "workspace": str(run_dir), "launch_evidence": evidence}
     refuse_cacheless_agentx_baseline(measured)
     return str(measured.get("error") or "") if measured["status"] != "succeeded" else ""
 

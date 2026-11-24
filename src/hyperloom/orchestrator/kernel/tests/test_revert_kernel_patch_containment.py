@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 
 from hyperloom.orchestrator.kernel import apply_kernel_patch as apk
+from hyperloom.orchestrator.kernel import patch_restore
 
 
 def _write_manifest(backup_dir: Path, manifest: dict) -> Path:
@@ -80,7 +81,7 @@ def test_tampered_backup_path_is_skipped(tmp_path, caplog):
             }
         },
     )
-    with caplog.at_level(logging.WARNING, logger=apk.log.name):
+    with caplog.at_level(logging.WARNING, logger=patch_restore.log.name):
         res = apk.revert_kernel_patch(mf)
     assert res["status"] == "partial"
     assert res["skipped_untrusted_backups"] == [
@@ -149,7 +150,7 @@ def test_source_backups_tampered_backup_path_is_skipped(tmp_path, caplog):
             ]
         },
     )
-    with caplog.at_level(logging.WARNING, logger=apk.log.name):
+    with caplog.at_level(logging.WARNING, logger=patch_restore.log.name):
         res = apk.revert_kernel_patch(mf)
     assert res["status"] == "partial"
     assert res["skipped_untrusted_backups"] == [
@@ -166,7 +167,7 @@ def test_source_backups_tampered_backup_path_is_skipped(tmp_path, caplog):
 
 def test_retrying_partial_revert_invalidates_bytecode_from_unrestored_source(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setattr(apk.tempfile, "gettempdir", lambda: str(tmp_path / "cache_tmp"))
+    monkeypatch.setattr(patch_restore.tempfile, "gettempdir", lambda: str(tmp_path / "cache_tmp"))
     backup_dir = tmp_path / "backup"
     backup_dir.mkdir()
     framework = tmp_path / "framework"

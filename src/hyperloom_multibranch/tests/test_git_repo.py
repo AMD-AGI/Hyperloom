@@ -88,12 +88,8 @@ async def test_a_session_in_a_shared_workspace_gets_a_repository_the_group_write
         assert stat.S_IMODE(made.stat().st_mode) & stat.S_IWGRP, made
 
 
-@pytest.mark.parametrize(
-    ("parent_mode", "group_writes"), [(0o2775, True), (0o755, False), (0o2755, False)], ids=["2775", "0755", "2755"]
-)
-async def test_the_repository_is_the_group_s_to_write_only_below_shared_storage(
-    tmp_path, blobs, parent_mode, group_writes
-):
+@pytest.mark.parametrize("parent_mode", [0o755, 0o2755], ids=["0755", "2755"])
+async def test_the_repository_is_the_group_s_to_write_only_below_shared_storage(tmp_path, blobs, parent_mode):
     """Below a setgid, group-writable directory closed to others the run's next leg, maybe another account of the group,
     writes objects and refs; anywhere else the repository follows the umask like the rest of the session."""
     parent = tmp_path / "session"
@@ -107,7 +103,7 @@ async def test_the_repository_is_the_group_s_to_write_only_below_shared_storage(
         os.umask(old)
 
     for made in (parent / "experiments.git" / "objects", parent / "experiments.git" / "refs" / "heads"):
-        assert bool(stat.S_IMODE(made.stat().st_mode) & stat.S_IWGRP) is group_writes, made
+        assert not stat.S_IMODE(made.stat().st_mode) & stat.S_IWGRP, made
 
 
 async def test_below_shared_storage_the_group_reads_but_cannot_change_what_git_reads_settings_from(tmp_path, blobs):

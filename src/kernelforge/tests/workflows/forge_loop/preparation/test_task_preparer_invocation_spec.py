@@ -13,24 +13,28 @@ from click.testing import CliRunner
 from kernelforge.agent_backends.base import AgentRuntimeConfig
 from kernelforge.cli import main
 from kernelforge.workflows.forge_loop.preparation import task_preparer
+from kernelforge.workflows.forge_loop.preparation import task_scaffold
 from kernelforge.workflows.forge_loop.preparation import task_preparer_prompts
 from kernelforge.workflows.forge_loop.preparation import task_preflight
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 
 
 @pytest.mark.asyncio
-async def test_preflight_requires_complete_profiling_contract(
+async def test_preflight_judges_a_driver_by_its_two_measurement_modes_alone(
     tmp_path,
     monkeypatch,
 ):
+    """A driver conforms on correctness, benchmark and graph timing; it is asked for no profiling mode."""
     driver = tmp_path / "driver.py"
     driver.write_text("# driver\n", encoding="utf-8")
-    captured = {}
+    stages = []
 
     async def fake_correctness(**_kwargs):
+        stages.append("correctness")
         return {"passed": True, "snr_db": 60.0, "message": "ok"}
 
     async def fake_bench(_run, **_kwargs):
+        stages.append("bench")
         return {
             "success": True,
             "median_ms": 1.0,
@@ -39,24 +43,24 @@ async def test_preflight_requires_complete_profiling_contract(
         }
 
     async def fake_graph(*_args, **_kwargs):
+        stages.append("graph")
         return 10, ""
 
-    async def fake_profile(path, **_kwargs):
-        captured["driver"] = path
-        return True, "verified"
+    async def refuse_any_other_driver_run(*argv, **_kwargs):
+        raise AssertionError(f"preflight ran the driver outside its three stages: {argv}")
 
     monkeypatch.setattr(task_preflight, "test_correctness", fake_correctness)
     monkeypatch.setattr(task_preflight, "bench_wallclock", fake_bench)
     monkeypatch.setattr(task_preflight, "_count_graph_replays", fake_graph)
-    monkeypatch.setattr(task_preflight, "_check_profile_contract", fake_profile)
+    monkeypatch.setattr(task_preflight.asyncio, "create_subprocess_exec", refuse_any_other_driver_run)
 
     result = await task_preflight._preflight_async(
-        str(driver), task_preflight.DriverContract(snr_threshold=30.0, require_graph=True, require_profile=True), 3, 10
+        str(driver), task_preflight.DriverContract(snr_threshold=30.0, require_graph=True), 3, 10
     )
 
     assert result.ok is True
-    assert result.profile_ok is True
-    assert captured == {"driver": str(driver)}
+    assert stages == ["correctness", "bench", "graph"]
+    assert set(result.details) == {"correctness", "bench", "graph"}
 
 
 def _passing_stages(monkeypatch, case_times: dict[str, float]):
@@ -160,10 +164,10 @@ def test_declared_case_ids_reads_the_driver_contract(tmp_path):
         encoding="utf-8",
     )
 
-    assert task_preparer.declared_case_ids(spec) == ["case_001", "case_002"]
+    assert task_scaffold.declared_case_ids(spec) == ["case_001", "case_002"]
     # No spec at all is the documented "no declared suite", not a failure.
-    assert task_preparer.declared_case_ids(None) == []
-    assert task_preparer.declared_case_ids("") == []
+    assert task_scaffold.declared_case_ids(None) == []
+    assert task_scaffold.declared_case_ids("") == []
 
 
 def test_a_spec_that_declares_no_suite_disables_the_gate(tmp_path):
@@ -171,7 +175,7 @@ def test_a_spec_that_declares_no_suite_disables_the_gate(tmp_path):
     spec = tmp_path / "invocation_spec_gemm.json"
     spec.write_text(json.dumps({"schema_version": 1, "tests": {}}), encoding="utf-8")
 
-    assert task_preparer.declared_case_ids(spec) == []
+    assert task_scaffold.declared_case_ids(spec) == []
 
 
 @pytest.mark.parametrize(
@@ -193,7 +197,7 @@ def test_an_unusable_explicit_spec_fails_instead_of_disabling_the_gate(
         spec.write_text(contents, encoding="utf-8")
 
     with pytest.raises(ValueError, match=str(spec.name)):
-        task_preparer.declared_case_ids(spec)
+        task_scaffold.declared_case_ids(spec)
 
 
 def test_prepare_agent_does_not_receive_shell_access(tmp_path, monkeypatch):
@@ -445,17 +449,17 @@ def test_materializes_only_valid_object_specs(tmp_path):
     payload = {"schema_version": 1, "kernel": {"name": "scaled_gemm"}}
     source.write_text(json.dumps(payload), encoding="utf-8")
 
-    destination, canonical = task_preparer._materialize_invocation_spec(
+    destination, canonical = task_scaffold._materialize_invocation_spec(
         str(source),
         ref_dir,
     )
 
-    assert destination == ref_dir / task_preparer.INVOCATION_SPEC_FILENAME
+    assert destination == ref_dir / task_scaffold.INVOCATION_SPEC_FILENAME
     assert json.loads(destination.read_text(encoding="utf-8")) == payload
     assert json.loads(canonical) == payload
 
     source.write_text("[]", encoding="utf-8")
-    destination, canonical = task_preparer._materialize_invocation_spec(
+    destination, canonical = task_scaffold._materialize_invocation_spec(
         str(source),
         ref_dir,
     )
@@ -473,7 +477,7 @@ def test_existing_durable_spec_with_the_same_payload_is_left_untouched(tmp_path)
     existing = durable_dir / "invocation_spec_gemm.json"
     existing.write_text('{"kernel": {"name": "gemm"}, "schema_version": 1}', encoding="utf-8")
 
-    destination, canonical = task_preparer._materialize_invocation_spec(
+    destination, canonical = task_scaffold._materialize_invocation_spec(
         str(source),
         durable_dir,
     )
@@ -492,7 +496,7 @@ def test_a_conflicting_file_beside_the_driver_is_never_overwritten(tmp_path):
     occupied = durable_dir / "invocation_spec_gemm.json"
     occupied.write_text("the caller's own notes, not JSON\n", encoding="utf-8")
 
-    destination, canonical = task_preparer._materialize_invocation_spec(
+    destination, canonical = task_scaffold._materialize_invocation_spec(
         str(source),
         durable_dir,
     )
@@ -512,7 +516,7 @@ def test_a_symlinked_destination_is_never_written_through(tmp_path):
     source = tmp_path / "invocation_spec_gemm.json"
     source.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
 
-    destination, canonical = task_preparer._materialize_invocation_spec(
+    destination, canonical = task_scaffold._materialize_invocation_spec(
         str(source),
         durable_dir,
     )
@@ -549,7 +553,7 @@ def test_prepare_agent_gets_the_spec_inline_and_it_is_restored(tmp_path, monkeyp
     materialized = workspace / source_spec.name
 
     def fake_materialize_reference(_workspace):
-        ref_dir = workspace / task_preparer.REFERENCE_SUBDIR
+        ref_dir = workspace / task_scaffold.REFERENCE_SUBDIR
         ref_dir.mkdir(exist_ok=True)
         (ref_dir / "CONTRACT.md").write_text("driver contract\n", encoding="utf-8")
         return ref_dir
@@ -624,12 +628,12 @@ def test_prepare_agent_gets_the_spec_inline_and_it_is_restored(tmp_path, monkeyp
     assert "./invocation_spec_scaled_gemm.json" in prompt
     # The durable spec has to be introduced before the temporary bundle, wherever either block ends up: it is the
     # authoritative input, so a reference-bundle path above it competes for the agent's attention.
-    assert prompt.index("Invocation specification") < prompt.index(task_preparer.REFERENCE_SUBDIR)
+    assert prompt.index("Invocation specification") < prompt.index(task_scaffold.REFERENCE_SUBDIR)
     assert captured["expected_case_ids"] == ["case_001"]
     # The specification is a durable task artifact: the driver may read it at runtime, so it outlives preparation and
     # enters the pristine commit.
     assert json.loads(materialized.read_text(encoding="utf-8")) == payload
-    assert not (workspace / task_preparer.REFERENCE_SUBDIR).exists()
+    assert not (workspace / task_scaffold.REFERENCE_SUBDIR).exists()
 
 
 def test_failed_external_preparation_rolls_back_driver_helpers_and_source(
@@ -700,7 +704,7 @@ def test_failed_external_preparation_rolls_back_driver_helpers_and_source(
     assert driver.read_text(encoding="utf-8") == "ORIGINAL_DRIVER\n"
     assert helper.read_text(encoding="utf-8") == "ORIGINAL_HELPER\n"
     assert not (output_dir / "new_helper.py").exists()
-    assert not (workspace / task_preparer.REFERENCE_SUBDIR).exists()
+    assert not (workspace / task_scaffold.REFERENCE_SUBDIR).exists()
 
 
 def test_external_driver_uses_add_dir_without_kernel_repo_commit(tmp_path, monkeypatch):

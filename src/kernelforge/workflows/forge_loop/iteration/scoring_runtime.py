@@ -145,23 +145,28 @@ class ScoringMixin:
             and measurement.get("best_mean_case_speedup") == self.best_mean_case_speedup
         )
 
+    async def _run_build(self, tail_limit: int) -> str | None:
+        """Run the configured build; the tail of its output when it fails, None when it passes or there is none."""
+        if not self.ic.build_command:
+            return None
+        proc = await asyncio.create_subprocess_exec(
+            *self.ic.build_command,
+            cwd=self.ic.build_dir or self.ic.workspace_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        stdout, stderr = await communicate_process_group(proc, timeout=self.ic.build_timeout_sec)
+        if proc.returncode == 0:
+            return None
+        return _build_failure_tail(stdout, stderr, tail_limit)
+
     async def _measure_baseline(self) -> float | None:
         """Bench the pristine kernel before any agent edit — the speedup anchor."""
-        if self.ic.build_command:
-            proc = await asyncio.create_subprocess_exec(
-                *self.ic.build_command,
-                cwd=self.ic.build_dir or self.ic.workspace_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
-            stdout, stderr = await communicate_process_group(
-                proc,
-                timeout=self.ic.build_timeout_sec,
-            )
-            if proc.returncode != 0:
-                print(f"  Baseline build FAILED: {_build_failure_tail(stdout, stderr, 300)}")
-                return None
+        build_failure = await self._run_build(tail_limit=300)
+        if build_failure is not None:
+            print(f"  Baseline build FAILED: {build_failure}")
+            return None
         bench_result = await measure_wallclock(
             BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
             measurements=KEEP_MEASUREMENT_COUNT,
@@ -190,6 +195,7 @@ class ScoringMixin:
                 baseline_case_times,
                 self._baseline_case_times or baseline_case_times,
                 unscored_cases,
+                aggregate=self.ic.case_aggregate,
             )
         except CaseCoverageError as error:
             print(f"  Baseline bench FAILED: {error}")
@@ -333,6 +339,7 @@ class ScoringMixin:
                 self._best_case_times,
                 self._baseline_case_times,
                 self._unscored_cases,
+                aggregate=self.ic.case_aggregate,
             )
             or 1.0
         )
@@ -361,6 +368,7 @@ class ScoringMixin:
                 bench_result,
                 self._baseline_case_times,
                 expected_measurements=KEEP_MEASUREMENT_COUNT,
+                aggregate=self.ic.case_aggregate,
             )
         except CaseCoverageError as error:
             bench_result["success"] = False
@@ -405,7 +413,7 @@ class ScoringMixin:
             for case_id, times in _measurement_case_times(bench_result).items()
             if case_id in baseline
         }
-        base = attribute_sigma(series, baseline)
+        base = attribute_sigma(series, baseline, self.ic.case_aggregate)
         if base is None:
             return replace(idle, detail="per-case times resolve no spread to attribute")
         if base.dominant_case is None:
@@ -486,7 +494,7 @@ class ScoringMixin:
                 break
             for case_id in series:
                 series[case_id].extend(extra_series[case_id])
-            refreshed = attribute_sigma(series, baseline)
+            refreshed = attribute_sigma(series, baseline, self.ic.case_aggregate)
             if refreshed is None:
                 stopped = "re-measure produced no usable spread"
                 break

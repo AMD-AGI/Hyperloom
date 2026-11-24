@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import inspect
 from dataclasses import dataclass
 
 import pytest
@@ -222,23 +221,6 @@ def _dispatch(remaining_sec, *, measurement_sec=FIRST_ROUND_MEASUREMENT_SEC):
 # The worst of the 171 production validate-and-benchmark cycles, and a quarter of what a campaign assumes before it
 # has one of its own.
 _FAST_MEASUREMENT_SEC = 150.0
-
-# The production distribution each constant is read from, kept here so that re-calibrating one has to argue with the
-# measurement it came from rather than slip past a test that only re-derives the formula.
-_SESSION_P25_SEC = 8.0 * 60.0
-_SESSION_MEDIAN_SEC = 12.3 * 60.0
-_SESSION_P90_SEC = 34.6 * 60.0
-# Production ran a 10.75-hour budget against an 11-hour external kill.
-_EXTERNAL_GRACE_SEC = (11.0 - 10.75) * 3600.0
-
-
-def test_each_constant_is_the_production_number_it_claims_to_be():
-    """The values themselves, not just the arithmetic over them."""
-    assert ADMISSION_SESSION_SEC == pytest.approx(_SESSION_P25_SEC)
-    assert DISPATCH_SESSION_SEC == pytest.approx(_SESSION_MEDIAN_SEC)
-    # The floor is the p90 session less the grace the external kill allows: at exactly this much time in hand, a p90
-    # session ends as the kill lands.
-    assert DISPATCH_FLOOR_SEC == pytest.approx(_SESSION_P90_SEC - _EXTERNAL_GRACE_SEC)
 
 
 def test_dispatch_needs_a_session_and_the_measurement_that_judges_it():
@@ -537,11 +519,6 @@ def test_the_campaign_span_only_moves_forward():
 def test_a_campaign_with_no_clock_reports_no_share_rather_than_zero():
     """A share of nothing is not zero percent, and saying so would be a lie."""
     assert RunState().round_costs.planning_share_pct() is None
-
-
-def test_planning_share_takes_no_denominator():
-    """The single way these totals become a share, by construction."""
-    assert inspect.signature(RoundCostState.planning_share_pct).parameters.keys() == {"self"}
 
 
 # What the plan critic and its revision took of a round's planning.

@@ -3,20 +3,16 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from types import SimpleNamespace
-
-from kernelforge.workflows.rewrite_controller.handoff import read_handoff
-from kernelforge.workflows.rewrite_controller.opportunity_agent import (
-    _additional_directories,
-)
 
 from hyperloom.inference_optimizer.session.session_paths import (
     forge_cycle_dir,
     next_forge_attempt_dir,
 )
+from hyperloom.orchestrator.kernel.campaign_baseline import RepoBaseline
 from hyperloom.orchestrator.kernel.forge_handoff import build_workload_md, write_forge_handoff
+from kernelforge.workflows.rewrite_controller import read_handoff
 
 
 class _State(SimpleNamespace):
@@ -84,6 +80,7 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
     handoff_dir = write_forge_handoff(
         state,
         handoff_dir=tmp_path / "handoff",
+        repositories={},
         env_spec={
             "config": {
                 "server_launch_flags": "--tp 8 --mem-fraction-static 0.9",
@@ -295,7 +292,7 @@ def test_write_forge_handoff_survives_missing_trace_artifacts(tmp_path: Path) ->
         },
     )
 
-    handoff_dir = write_forge_handoff(state, handoff_dir=tmp_path / "handoff")
+    handoff_dir = write_forge_handoff(state, handoff_dir=tmp_path / "handoff", repositories={})
 
     assert (handoff_dir / "workload.md").is_file()
     assert (handoff_dir / "serving-context.md").is_file()
@@ -303,37 +300,6 @@ def test_write_forge_handoff_survives_missing_trace_artifacts(tmp_path: Path) ->
     assert f"`{missing_candidates.resolve()}` (missing)" in evidence
     assert "Profile raw trace:** not provided" in evidence
     assert "Kernel source resolution:" in evidence
-
-
-def test_handoff_exposes_configured_git_source_roots_without_trace(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    framework_repo = tmp_path / "sglang"
-    framework_repo.mkdir()
-    (framework_repo / ".git").mkdir()
-    nested_source = framework_repo / "python" / "sglang"
-    nested_source.mkdir(parents=True)
-    aiter_repo = tmp_path / "aiter"
-    aiter_repo.mkdir()
-    (aiter_repo / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
-    non_git = tmp_path / "site-packages"
-    non_git.mkdir()
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
-        os.pathsep.join((str(nested_source), str(aiter_repo), str(non_git))),
-    )
-    state = _state(framework_repo_path=str(framework_repo))
-
-    handoff_dir = write_forge_handoff(state, handoff_dir=tmp_path / "handoff")
-
-    serving = (handoff_dir / "serving-context.md").read_text(encoding="utf-8")
-    assert serving.count(str(framework_repo.resolve())) == 1
-    assert str(aiter_repo.resolve()) in serving
-    assert str(non_git.resolve()) not in serving
-    additional = _additional_directories(read_handoff(handoff_dir))
-    assert str(framework_repo.resolve()) in additional
-    assert str(aiter_repo.resolve()) in additional
 
 
 def test_each_kernel_entry_gets_its_own_attempt_directory(tmp_path: Path) -> None:
@@ -357,3 +323,26 @@ def test_a_foreign_directory_does_not_disturb_attempt_numbering(tmp_path: Path) 
     (cycle / "attempt-not-a-number").mkdir()
 
     assert next_forge_attempt_dir(session, 0) == cycle / "attempt-1"
+
+
+def test_the_handoff_names_the_installed_package_a_snapshot_is_served_from(tmp_path: Path) -> None:
+    """A checkout is served from itself; a snapshot of an installed package from that package, which the controller
+    reads back as the tree its campaign checkout has to stand in for."""
+    checkout = tmp_path / "aiter"
+    snapshot = tmp_path / "tree_snapshots" / "vllm.campaign"
+    installed = tmp_path / "site-packages" / "vllm"
+    for directory in (checkout, snapshot, installed):
+        directory.mkdir(parents=True)
+
+    handoff_dir = write_forge_handoff(
+        _state(),
+        handoff_dir=tmp_path / "handoff",
+        repositories={
+            str(checkout): RepoBaseline(commit="a" * 40, deploy_root=checkout),
+            str(snapshot): RepoBaseline(commit="b" * 40, deploy_root=installed),
+        },
+    )
+
+    bundle = read_handoff(handoff_dir)
+    assert bundle.repositories == (checkout.resolve(), snapshot.resolve())
+    assert bundle.served_trees == {snapshot.resolve(): installed}

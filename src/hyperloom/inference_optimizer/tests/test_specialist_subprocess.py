@@ -29,8 +29,6 @@ from hyperloom.orchestrator.specialists.tests._agent_fixtures import FORGES_ITS_
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
-from hyperloom.orchestrator.actions.executors._ray_serving import RayInfeasibleError
-
 from hyperloom.orchestrator.specialists.runner import SpecialistRunner
 from hyperloom.orchestrator.specialists import subprocess_, wall_budget
 from hyperloom.orchestrator.specialists import launch_env
@@ -46,10 +44,11 @@ from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
     ReapWatch,
-    SpecialistSpawn,
 )
 from hyperloom.orchestrator.specialists import worktrees
 from hyperloom.orchestrator.specialists.worktrees import HeldWorktree, PinnedGit, _setup_worktree
+from hyperloom.orchestrator.specialists.subprocess_types import SpecialistSpawn, SpecialistSubprocessResult
+from hyperloom.orchestrator.specialists import subprocess_harvest
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -167,9 +166,9 @@ async def test_the_runner_hands_the_dispatcher_the_tasks_model_to_read(tmp_path,
     runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=session_dir)
     spawns: list[SpecialistSpawn] = []
 
-    async def run(spawn: SpecialistSpawn) -> subprocess_.SpecialistSubprocessResult:
+    async def run(spawn: SpecialistSpawn) -> SpecialistSubprocessResult:
         spawns.append(spawn)
-        return subprocess_.SpecialistSubprocessResult(exit_code=0)
+        return SpecialistSubprocessResult(exit_code=0)
 
     runner.subprocess_dispatcher.run = run
     ctx = _make_runner_ctx("t-model")
@@ -188,9 +187,9 @@ async def test_the_runner_hands_the_dispatcher_the_admin_dir_the_repository_reco
     runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=tmp_path / "session")
     spawns: list[SpecialistSpawn] = []
 
-    async def run(spawn: SpecialistSpawn) -> subprocess_.SpecialistSubprocessResult:
+    async def run(spawn: SpecialistSpawn) -> SpecialistSubprocessResult:
         spawns.append(spawn)
-        return subprocess_.SpecialistSubprocessResult(exit_code=0)
+        return SpecialistSubprocessResult(exit_code=0)
 
     runner.subprocess_dispatcher.run = run
     ctx = _make_runner_ctx("t-admin")
@@ -281,9 +280,9 @@ async def test_an_integrate_in_flight_holds_the_snapshot(tmp_path: Path):
     runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=session_dir)
     seen: list[str] = []
 
-    async def run(spawn: SpecialistSpawn) -> subprocess_.SpecialistSubprocessResult:
+    async def run(spawn: SpecialistSpawn) -> SpecialistSubprocessResult:
         seen.append((spawn.worktree / "envs.py").read_text(encoding="utf-8"))
-        return subprocess_.SpecialistSubprocessResult(exit_code=0)
+        return SpecialistSubprocessResult(exit_code=0)
 
     runner.subprocess_dispatcher.run = run
     ctx = _make_runner_ctx("t-before")
@@ -1042,199 +1041,17 @@ def test_wall_budget_extension_stops_at_the_room_its_dispatch_left():
         wall_budget.clear_wall_budget_extension("capped-task")
 
 
-# ── P2/T4: needs_gpu specialist runs inside a GpuSpecialistLease actor ────────
-class _FakeGpuSpecialistLease:
-    """Fake GpuSpecialistLease: start_async() writes done.json + log, then 'exits'."""
-
-    def __init__(self, workspace: Path):
-        self._workspace = workspace
-        self.started: dict[str, Any] | None = None
-        self.env: dict[str, str] | None = None
-        self.alive = True
-        self.stopped = False
-
-    def start_async(self, launch) -> None:
-        # §3.3 non-blocking start: record + stage the done file, mark the pid ready so poll_started() returns
-        # immediately on the next tick.
-        self.started = {
-            "cmd": launch.cmd,
-            "cwd": launch.cwd,
-            "log_path": launch.log_path,
-            "stdin_path": launch.stdin_path,
-        }
-        self.env = dict(launch.env or {})
-        Path(launch.log_path).write_text("stream-json log line\n", encoding="utf-8")
-        # Graceful done — the reaper harvests this and exits.
-        (self._workspace / "specialist_done.json").write_text(json.dumps({"proposal_set": []}), encoding="utf-8")
-        self.alive = False
-        self._pid = 9999
-
-    def poll_started(self) -> int | None:
-        return getattr(self, "_pid", None)
-
-    def is_alive(self) -> bool:
-        return self.alive
-
-    def exit_code(self) -> int | None:
-        return None if self.alive else 0
-
-    def stop(self) -> bool:
-        self.stopped = True
-        self.alive = False
-        return True
-
-    def close(self) -> bool:
-        self.alive = False
-        return True
-
-
 @pytest.mark.asyncio
-async def test_run_routes_through_gpu_lease_and_strips_devices(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """With a gpu_lease, run() launches inside the actor (no local Popen) and strips *_VISIBLE_DEVICES so Ray owns the card assignment (P2/T4)."""
-    workspace = tmp_path / "ws"
-    lease = _FakeGpuSpecialistLease(workspace)
-
-    # Any local Popen on the Ray path is a bug — make it explode.
-    import hyperloom.orchestrator.specialists.subprocess_ as sp
-
-    def _boom(*_a, **_k):
-        raise AssertionError("local Popen must not run when a gpu_lease is set")
-
-    monkeypatch.setattr(sp.subprocess, "Popen", _boom)
-    # Pretend the parent has serving GPU visibility that must NOT leak through.
-    # The env allowlist already blocks every mask name; the pop below is the
-    # second barrier, and it is asserted over the whole mask set so widening
-    # the allowlist cannot quietly re-open a spelling it does not cover.
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "6,7")
-    monkeypatch.setenv("HSA_VISIBLE_DEVICES", "6,7")
-    monkeypatch.setenv("GPU_DEVICE_ORDINAL", "6,7")
-
-    cfg = SpecialistSubprocessConfig(poll_interval_seconds=0.05)
-    disp = SpecialistSubprocessDispatcher(config=cfg)
-    result = await disp.run(
-        SpecialistSpawn(
-            task_id="t-gpu",
-            workspace=workspace,
-            worktree=None,
-            worktree_base=None,
-            system_prompt="sys",
-            user_prompt="usr",
-            disallowed_tools=frozenset(),
-            gpu_ids=(0, 1),
-            deadline=Deadline.after(60.0),
-            gpu_lease=lease,
-        )
-    )
-
-    assert lease.started is not None, "the subprocess must run inside the lease actor"
-    assert str(lease.started["log_path"]).endswith("process.log")
-    # Ray owns the visible devices — the caller env must not pin them.
-    assert not (GPU_MASK_ENV_NAMES & lease.env.keys())
-    # The logical count is still advertised for specialist tooling.
-    assert lease.env.get("INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS") == "0,1"
-    assert result.done_payload is not None
-    assert result.exit_code == 0
-
-
-class _RayActorError(Exception):
-    """Stand-in for ``ray.exceptions.RayActorError``; ray is not a test dependency."""
-
-
-class _InfeasibleGpuLease(_FakeGpuSpecialistLease):
-    def start_async(self, launch) -> None:
-        self.fault = RayInfeasibleError("ray_cluster_infeasible: cluster has 0 GPU(s), 1 requested")
-        raise self.fault
-
-
-class _DeadActorGpuLease(_FakeGpuSpecialistLease):
-    def start_async(self, launch) -> None:
-        self.started = {"cmd": launch.cmd}
-
-    def poll_started(self) -> int | None:
-        self.fault = _RayActorError("The actor died unexpectedly before finishing this task.")
-        raise self.fault
-
-
-@pytest.mark.parametrize(
-    ("lease_cls", "message", "error"),
-    [
-        (
-            _InfeasibleGpuLease,
-            "specialist GPU actor submit failed: ",
-            "failed to submit specialist GPU actor: "
-            "RayInfeasibleError('ray_cluster_infeasible: cluster has 0 GPU(s), 1 requested')",
-        ),
-        (
-            _DeadActorGpuLease,
-            "specialist GPU actor start failed: ",
-            "specialist GPU actor start failed: "
-            "_RayActorError('The actor died unexpectedly before finishing this task.')",
-        ),
-    ],
-)
-@pytest.mark.asyncio
-async def test_a_gpu_actor_that_cannot_launch_fails_the_specialist_with_its_stack(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    lease_cls,
-    message,
-    error,
-):
-    workspace = tmp_path / "ws"
-    lease = lease_cls(workspace)
-    monkeypatch.setattr(
-        subprocess_.subprocess,
-        "Popen",
-        lambda *_a, **_k: pytest.fail("gpu_lease path must not spawn locally"),
-    )
-
-    with caplog.at_level(logging.WARNING, logger=subprocess_.log.name):
-        result = await SpecialistSubprocessDispatcher(
-            config=SpecialistSubprocessConfig(poll_interval_seconds=0.05)
-        ).run(
-            SpecialistSpawn(
-                task_id="t-gpu-fail",
-                workspace=workspace,
-                worktree=None,
-                worktree_base=None,
-                system_prompt="sys",
-                user_prompt="usr",
-                disallowed_tools=frozenset(),
-                deadline=Deadline.after(60.0),
-                gpu_lease=lease,
-            )
-        )
-
-    assert (result.done_payload, result.exit_code, result.elapsed_seconds) == (None, None, 0.0)
-    assert result.process_log_path == str(workspace / "process.log")
-    assert result.error == error
-    (record,) = [r for r in caplog.records if r.getMessage().startswith(message)]
-    assert record.exc_info[1] is lease.fault
-
-
-@pytest.mark.asyncio
-async def test_run_clears_stale_wall_budget_extension(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
+async def test_run_clears_stale_wall_budget_extension(tmp_path: Path):
     """A reused task_id must not inherit a previous run's granted extension."""
     workspace = tmp_path / "ws"
-    lease = _FakeGpuSpecialistLease(workspace)
-    monkeypatch.setattr(
-        subprocess_.subprocess,
-        "Popen",
-        lambda *_a, **_k: pytest.fail("gpu_lease path must not spawn locally"),
-    )
+    fake_claude = make_fake_claude(tmp_path / "bin", behavior="done_only")
 
     # A grant left over from a prior dispatch of the same task id.
     wall_budget.grant_wall_budget_extension("t-reused", 9999)
     assert wall_budget.wall_budget_extension("t-reused") == 9999.0
 
-    cfg = SpecialistSubprocessConfig(poll_interval_seconds=0.05)
+    cfg = SpecialistSubprocessConfig(claude_executable=str(fake_claude), model="", poll_interval_seconds=0.05)
     disp = SpecialistSubprocessDispatcher(config=cfg)
     result = await disp.run(
         SpecialistSpawn(
@@ -1246,56 +1063,12 @@ async def test_run_clears_stale_wall_budget_extension(
             user_prompt="usr",
             disallowed_tools=frozenset(),
             deadline=Deadline.after(60.0),
-            gpu_lease=lease,
         )
     )
 
     assert result.exit_code == 0
     # Cleared on entry and again when the run finished.
     assert wall_budget.wall_budget_extension("t-reused") == 0.0
-
-
-def test_kill_on_ray_lease_process_delegates_to_actor():
-    """_kill on a _RayLeaseProcess reaps via the actor, not killpg."""
-    from hyperloom.orchestrator.specialists.subprocess_ import _RayLeaseProcess
-
-    lease = _FakeGpuSpecialistLease(Path("/tmp"))
-    lease.alive = True
-    handle = _RayLeaseProcess(lease, pid=1234)
-    assert handle.poll() is None  # alive
-    SpecialistSubprocessDispatcher._kill(handle)
-    assert lease.stopped is True
-    # After reap the actor reports not-alive; poll latches the exit code.
-    assert handle.poll() == 0
-
-
-@pytest.mark.parametrize("raw", ["not-a-number", ""])
-def test_ray_specialist_pending_deadline_invalid_env_falls_back(
-    monkeypatch: pytest.MonkeyPatch,
-    raw: str,
-):
-    """A malformed scheduling-timeout override cannot make dispatch crash."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_SPECIALIST_SCHED_TIMEOUT_SEC", raw)
-    assert subprocess_._ray_specialist_pending_deadline_sec() == 300.0
-
-
-def test_ray_lease_process_dead_actor_without_exit_code_is_latched():
-    """An unreachable Ray actor is a terminal failure, not an endless poll."""
-    from hyperloom.orchestrator.actions.executors._ray_serving import _RAY_ACTOR_DIED_RC
-    from hyperloom.orchestrator.specialists.subprocess_ import _RayLeaseProcess
-
-    class _DeadLease:
-        def is_alive(self):
-            return False
-
-        def exit_code(self):
-            return None
-
-    handle = _RayLeaseProcess(_DeadLease(), pid=1234)
-    assert handle.poll() == _RAY_ACTOR_DIED_RC
-    # The terminal value is latched; a second poll does not query the lease.
-    handle._lease = None
-    assert handle.poll() == _RAY_ACTOR_DIED_RC
 
 
 def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_path: Path):
@@ -1453,7 +1226,7 @@ async def test_partial_checkpoint_published_while_alive(
     assert elapsed >= 0.0
 
 
-# ---- _collect_patches: git diff harvest ------------------------------------
+# ---- collect_patches: git diff harvest ------------------------------------
 def _make_git_worktree_pair(tmp_path: Path) -> tuple[Path, Path]:
     import subprocess as _sp
 
@@ -1474,7 +1247,7 @@ def _make_git_worktree_pair(tmp_path: Path) -> tuple[Path, Path]:
 def test_collect_patches_harvests_git_diff_when_worktree_modified(tmp_path: Path):
     base, wt = _make_git_worktree_pair(tmp_path)
     (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, roots = subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     )
     assert len(patches) == 1
@@ -1489,7 +1262,7 @@ def test_collect_patches_harvests_a_file_the_specialist_created(tmp_path: Path):
     (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
     (wt / "added.py").write_text("fresh = 3\n", encoding="utf-8")
 
-    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, _roots = subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     )
 
@@ -1505,7 +1278,7 @@ def test_collect_patches_keeps_its_own_output_out_of_the_harvest(tmp_path: Path)
     (wt / "patches").mkdir()
     (wt / "patches" / "stray.patch").write_text("--- a/z\n+++ b/z\n", encoding="utf-8")
 
-    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, _roots = subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     )
 
@@ -1527,7 +1300,7 @@ def test_collect_patches_falls_back_to_disk_scan_when_git_is_unusable(tmp_path: 
 
     monkeypatch.setattr(_sp, "run", _boom)
 
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, roots = subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(admin)
     )
 
@@ -1541,7 +1314,7 @@ def test_collect_patches_falls_back_to_disk_scan_when_no_changes(tmp_path: Path)
     ws.mkdir()
     (ws / "patches").mkdir()
     (ws / "patches" / "manual.patch").write_text("--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-a\n+b\n", encoding="utf-8")
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, roots = subprocess_harvest.collect_patches(
         wt, ws, worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     )
     assert any("manual.patch" in p for p in patches)
@@ -1553,26 +1326,18 @@ def test_collect_patches_no_worktree_falls_back_to_disk_scan(tmp_path: Path):
     ws.mkdir()
     (ws / "patches").mkdir()
     (ws / "patches" / "p.patch").write_text("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n", encoding="utf-8")
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(None, ws, pinned=None)
+    patches, roots = subprocess_harvest.collect_patches(None, ws, pinned=None)
     assert len(patches) == 1
     assert roots == {}
 
 
-def test_a_ray_actor_names_no_local_process_group_for_the_operator_log():
-    """An actor's ids come from the node Ray placed it on, so they mean nothing here.
-
-    Nothing reclaims a lane from this number -- no reaper probes it -- but it is
-    printed to the operator who has to clear one by hand, so a number that names
-    a process on a different host would send them to the wrong machine. None is
-    the honest answer for an actor; a local specialist leads its own group and
-    can say so.
-    """
+def test_a_local_specialist_names_its_own_process_group_for_the_operator_log():
+    """Nothing reclaims a lane from this number -- no reaper probes it -- but it is printed to the operator who has to
+    clear one by hand; a local specialist leads its own group and can say so."""
     local = subprocess_._local_tree_pgid(type("_P", (), {"pid": 4242})())
-    actor = subprocess_._local_tree_pgid(subprocess_._RayLeaseProcess(object(), 4242))
 
     # A local specialist leads its own group, so its root pid IS the group id.
     assert local == 4242
-    assert actor is None
     # Nothing to report is also the answer when the cleanup never spawned a root.
     assert subprocess_._local_tree_pgid(None) is None
 
@@ -1658,7 +1423,7 @@ def _tier(name: str) -> Any:
 @pytest.mark.parametrize("tier", ["none", "account", "bwrap"])
 async def test_each_tier_spawns_the_specialist_its_own_way(tmp_path, monkeypatch, tier):
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
-    monkeypatch.setattr(subprocess_, "resolve_launch_isolation", lambda lease: _tier(tier))
+    monkeypatch.setattr(subprocess_, "resolve_launch_isolation", lambda: _tier(tier))
     argvs: list[list[str]] = []
     real_local = launch_env.PreparedLaunch.local
     monkeypatch.setattr(
@@ -1688,7 +1453,7 @@ async def test_each_tier_spawns_the_specialist_its_own_way(tmp_path, monkeypatch
 
 async def test_a_sandbox_shows_the_model_and_gives_a_gpu_task_its_devices(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
-    monkeypatch.setattr(subprocess_, "resolve_launch_isolation", lambda lease: _tier("bwrap"))
+    monkeypatch.setattr(subprocess_, "resolve_launch_isolation", lambda: _tier("bwrap"))
     kfd = tmp_path / "kfd"
     kfd.touch()
     monkeypatch.setattr(launch_env, "GPU_DEVICES", (kfd,))
@@ -1711,7 +1476,7 @@ async def test_a_claude_without_a_login_a_sandbox_can_show_runs_unconfined_unles
 ):
     for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(subprocess_, "resolve_launch_isolation", lambda lease: _tier("bwrap"))
+    monkeypatch.setattr(subprocess_, "resolve_launch_isolation", lambda: _tier("bwrap"))
     monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process(hosted=required))
     launched: list[tuple[object, list[str]]] = []
     real_local = launch_env.PreparedLaunch.local
@@ -1755,13 +1520,6 @@ async def test_specialist_user_that_cannot_be_used_fails_the_task_without_spawni
     assert popen_kwargs == []
     assert "specialist isolation refused" in (result.error or "")
     assert needle in (result.error or "")
-
-
-async def test_specialist_user_is_refused_on_the_ray_gpu_actor_path(tmp_path, monkeypatch, restore_umask):
-    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", "nobody")
-    result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch, gpu_lease=object())
-    assert popen_kwargs == []
-    assert "Ray GPU actor" in (result.error or "")
 
 
 _DEMOTE_USER = "nobody"
@@ -1893,7 +1651,6 @@ _needs_demote_account = pytest.mark.skipif(not _account_exists(_DEMOTE_USER), re
 @pytest.mark.parametrize(
     ("user", "spawn_kwargs"),
     [
-        pytest.param(_DEMOTE_USER, {"gpu_lease": object()}, marks=_needs_demote_account, id="ray_path_refuses"),
         pytest.param(_DEMOTE_USER, {}, marks=_needs_demote_account, id="names_a_user"),
         pytest.param("", {}, id="no_user"),
     ],
@@ -1911,7 +1668,7 @@ def test_harvest_through_a_symlinked_patches_dir_writes_nothing_outside(tmp_path
     outside = tmp_path / "outside"
     outside.mkdir()
     (wt / "patches").symlink_to(outside)
-    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, _roots = subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     )
     assert patches == []
@@ -1925,7 +1682,7 @@ def test_harvest_over_a_symlinked_patch_name_does_not_truncate_its_target(tmp_pa
     victim.write_text("precious", encoding="utf-8")
     (wt / "patches").mkdir()
     (wt / "patches" / "_worktree_diff.patch").symlink_to(victim)
-    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(
+    patches, _roots = subprocess_harvest.collect_patches(
         wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
     )
     assert victim.read_text(encoding="utf-8") == "precious"
@@ -1939,7 +1696,7 @@ def test_a_symlinked_patch_file_is_not_collected(tmp_path: Path):
     target.write_text("--- a/x\n+++ b/x\n", encoding="utf-8")
     (ws / "patches" / "good.patch").write_text("--- a/y\n+++ b/y\n", encoding="utf-8")
     (ws / "patches" / "link.patch").symlink_to(target)
-    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(None, ws, pinned=None)
+    patches, _roots = subprocess_harvest.collect_patches(None, ws, pinned=None)
     assert [Path(p).name for p in patches] == ["good.patch"]
 
 
@@ -1948,10 +1705,10 @@ def test_a_symlinked_done_file_is_not_read(tmp_path: Path):
     app_only.write_text('{"app_secret": "value"}', encoding="utf-8")
     done = tmp_path / "specialist_done.json"
     done.symlink_to(app_only)
-    assert SpecialistSubprocessDispatcher._read_done(done) is None
+    assert subprocess_harvest.read_done(done) is None
     done.unlink()
     done.write_text('{"summary": "ok"}', encoding="utf-8")
-    assert SpecialistSubprocessDispatcher._read_done(done) == {"summary": "ok"}
+    assert subprocess_harvest.read_done(done) == {"summary": "ok"}
 
 
 def test_the_codex_config_is_not_written_through_a_planted_link(tmp_path: Path):
@@ -2162,7 +1919,7 @@ def test_a_worktree_made_under_umask_007_is_readable_to_git_once_prepared(tmp_pa
 
 
 def test_the_done_file_the_integrator_reads_is_not_followed_through_a_link(tmp_path: Path):
-    from hyperloom.orchestrator.actions.executors._patch_sources import _read_done_payload
+    from hyperloom.orchestrator.actions.executors.patching._patch_sources import _read_done_payload
 
     app_only = tmp_path / "app_only.json"
     app_only.write_text('{"app_secret": 1}', encoding="utf-8")
@@ -2188,15 +1945,15 @@ def test_the_round_archive_does_not_copy_a_file_a_child_linked_to(tmp_path: Path
 
 
 def test_a_claimed_patch_path_through_a_planted_directory_link_is_not_accepted(tmp_path: Path):
-    from hyperloom.orchestrator.specialists.runner import _resolve_claimed_patch
+    from hyperloom.orchestrator.specialists.patch_claims import resolve_claimed_patch
 
     wt = tmp_path / "wt"
     (wt / "real").mkdir(parents=True)
     (wt / "real" / "a.patch").write_text("--- a/x\n+++ b/x\n", encoding="utf-8")
     (wt / "patches").symlink_to(wt / "real")
-    assert _resolve_claimed_patch("real/a.patch", [wt]) == str(wt / "real" / "a.patch")
-    assert _resolve_claimed_patch("patches/a.patch", [wt]) is None
-    assert _resolve_claimed_patch(str(wt / "patches" / "a.patch"), [wt]) is None
+    assert resolve_claimed_patch("real/a.patch", [wt]) == str(wt / "real" / "a.patch")
+    assert resolve_claimed_patch("patches/a.patch", [wt]) is None
+    assert resolve_claimed_patch(str(wt / "patches" / "a.patch"), [wt]) is None
 
 
 def test_the_archive_does_not_copy_an_applied_patch_the_child_replaced_with_a_link(tmp_path: Path):
@@ -2224,7 +1981,7 @@ def test_a_snapshot_refreshed_between_two_demoted_tasks_stays_readable_to_git(re
     import shutil
     import tempfile
 
-    from hyperloom.orchestrator.specialists.tree_snapshot import snapshot_tree
+    from hyperloom.inference_optimizer.tree_snapshot import snapshot_tree
 
     base = Path(tempfile.mkdtemp(prefix="d16s."))
     try:
@@ -2348,7 +2105,7 @@ def test_the_harvest_does_not_run_a_program_a_child_planted_in_a_replaced_dot_gi
     subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True, capture_output=True)
     marker.unlink(missing_ok=True)
     # Through the admin dir the repository records, what `.git` became is never read.
-    assert "+new = 2" in SpecialistSubprocessDispatcher._harvest_worktree_diff(wt, admin=admin)
+    assert "+new = 2" in subprocess_harvest._harvest_worktree_diff(wt, admin=admin)
     assert worktree_head(wt, admin=admin) == head and len(head) == 40
     assert worktree_head(wt) == ""
     assert not marker.exists()
@@ -2399,7 +2156,7 @@ echo changed >> mod.py
             **kwargs,
         )
         assert done.returncode == 0, done.stderr
-        assert "+changed" in SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree, admin=admin)
+        assert "+changed" in subprocess_harvest._harvest_worktree_diff(worktree, admin=admin)
         assert worktree_head(worktree) == ""
         assert not marker.exists()
         # The second shape: a gitfile that names an admin dir the child made itself, with a matching back pointer.
@@ -2427,7 +2184,7 @@ echo "gitdir: {workspace}/fake/.git/worktrees/w" > .git
             **kwargs,
         )
         assert done.returncode == 0, done.stderr
-        assert "+changed" in SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree, admin=admin)
+        assert "+changed" in subprocess_harvest._harvest_worktree_diff(worktree, admin=admin)
         assert worktree_head(worktree) == ""
         assert not marker.exists()
     finally:
@@ -2438,7 +2195,7 @@ def test_the_harvest_still_works_on_an_untouched_worktree(tmp_path: Path):
     base, wt = _make_git_worktree_pair(tmp_path)
     admin = recorded_admin_dir(base, wt)
     (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
-    assert "+new = 2" in SpecialistSubprocessDispatcher._harvest_worktree_diff(wt, admin=admin)
+    assert "+new = 2" in subprocess_harvest._harvest_worktree_diff(wt, admin=admin)
     assert len(worktree_head(wt)) == 40
     assert worktree_head(wt, admin=admin) == worktree_head(wt)
 
@@ -2583,7 +2340,7 @@ printf '[submodule "vendored"]\\n\\tpath = vendored\\n\\turl = ./vendored\\n\\ti
     subprocess.run(["/bin/sh", "-c", planted], check=True, capture_output=True)
     (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
 
-    diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(wt, admin=recorded_admin_dir(base, wt))
+    diff = subprocess_harvest._harvest_worktree_diff(wt, admin=recorded_admin_dir(base, wt))
 
     assert not marker.exists()
     assert "+new = 2" in diff
@@ -2607,7 +2364,7 @@ def test_the_harvest_does_not_run_git_in_a_repository_the_worktree_tracks(tmp_pa
     (nested / "f.txt").write_text("b\n", encoding="utf-8")
     (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
 
-    diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(wt, admin=recorded_admin_dir(base, wt))
+    diff = subprocess_harvest._harvest_worktree_diff(wt, admin=recorded_admin_dir(base, wt))
 
     assert not marker.exists()
     assert "+new = 2" in diff

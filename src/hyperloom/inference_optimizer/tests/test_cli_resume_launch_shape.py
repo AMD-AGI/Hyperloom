@@ -595,7 +595,7 @@ def test_state_archived_with_the_retired_backend_field_still_loads():
 
 
 def test_restore_operator_paths_fills_env_from_state(monkeypatch):
-    from hyperloom.inference_optimizer.cli import _restore_operator_supplied_paths_from_state
+    from hyperloom.inference_optimizer.cli.session_setup import _restore_operator_supplied_paths_from_state
 
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
@@ -614,7 +614,7 @@ def test_restore_operator_paths_fills_env_from_state(monkeypatch):
 
 
 def test_restore_operator_paths_leaves_env_when_cli_repasses(monkeypatch):
-    from hyperloom.inference_optimizer.cli import _restore_operator_supplied_paths_from_state
+    from hyperloom.inference_optimizer.cli.session_setup import _restore_operator_supplied_paths_from_state
 
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")

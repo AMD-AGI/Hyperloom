@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperloom-inference_optimizer"
-version = "1.1.5"
+version = "1.2.0"
 description = "Inference Optimizer — two-role (Orchestration/Critic) autonomous LLM inference optimization runtime for AMD GPU platforms. Kernel optimization is handled by programmatic Python handlers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -290,10 +290,8 @@ hyperloom = [
 "hyperloom.inference_optimizer" = [
     "SKILL.md",
     "README.md",
-    "actions/*.md",
     # Release-contract shell installers + configs.
     "assets/*.sh",
-    "assets/*.py",
     "assets/*.example",
     "assets/configs/*.yaml",
     # Workload template for the InferaSim projection EXPLORE pre-filters with.
@@ -317,7 +315,6 @@ hyperloom = [
     "SKILL.md",
     "README.md",
     "actions/*.md",
-    "references/*.md",
 ]
 "hyperloom.agents.quantization" = [
     "SKILL.md",
@@ -429,13 +426,17 @@ omit = [
     "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/*",
     # CLI drivers.
     "src/hyperloom/inference_optimizer/cli/__init__.py",
+    "src/hyperloom/inference_optimizer/cli/session_resume.py",
+    "src/hyperloom/inference_optimizer/cli/session_setup.py",
     "src/hyperloom/inference_optimizer/multi_node/cli.py",
+    "src/hyperloom/inference_optimizer/multi_node/cluster_access.py",
+    "src/hyperloom/inference_optimizer/multi_node/pod_entrypoints.py",
     "src/hyperloom/inference_optimizer/multi_node/scripts/*",
     # Multi-node internals (SSH, probes, Ray dashboard, state hand-off).
     "src/hyperloom/inference_optimizer/multi_node/_internal/*",
     # Subprocess wrappers + multi-node server lifecycle.
     "src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py",
-    "src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py",
+    "src/hyperloom/orchestrator/actions/executors/serving/_multi_node_server_lifecycle.py",
     "src/hyperloom/orchestrator/actions/executors/_multi_node_env.py",
     # Breakdown LLM HTTP client.
     "src/hyperloom/inference_optimizer/breakdown/reporters/llm_client.py",
@@ -443,11 +444,13 @@ omit = [
     "src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py",
     "src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py",
     "src/hyperloom/orchestrator/kernel/apply_kernel_patch.py",
+    "src/hyperloom/orchestrator/kernel/patch_restore.py",
+    "src/hyperloom/orchestrator/kernel/patch_snapshot.py",
+    "src/hyperloom/orchestrator/kernel/patch_source_check.py",
     "src/hyperloom/orchestrator/kernel/patch_jit_cache.py",
     "src/hyperloom/orchestrator/kernel/patch_rebuild.py",
-    # GEAK runner and Ray cluster lifecycle (subprocess submit).
+    # GEAK runner (subprocess submit).
     "src/hyperloom/orchestrator/kernel/geak_runner.py",
-    "src/hyperloom/orchestrator/actions/executors/_ray_runtime.py",
     # quantization_agent CLI driver (argparse entrypoint).
     "src/hyperloom/agents/quantization/cli.py",
     # OOB server-side runtime (CLI, HTTP server, scheduler, auth proxy, agent
@@ -457,12 +460,11 @@ omit = [
     "OOB/scheduler.py",
     "OOB/auth_proxy.py",
     "OOB/backends/*",
-    # Local-host metrics probes (rocm-smi / nvidia-smi / ps / df / ray status).
     # lm-eval model class, imported only inside the eval process; CI does not install lm-eval.
     "src/inference_suite/eval/model.py",
     # TraceLens server patcher (git apply / patch --fuzz subprocess pipeline).
     "src/hyperloom/orchestrator/actions/executors/_server_patcher.py",
-    "src/hyperloom/orchestrator/actions/executors/_patch_laying.py",
+    "src/hyperloom/orchestrator/actions/executors/patching/_patch_laying.py",
     # Breakdown collectors — exercised end-to-end by the reporter tests.
     "src/hyperloom/inference_optimizer/breakdown/collectors/*",
     # Operator CLIs, not library code.

@@ -22,7 +22,7 @@ from hyperloom_common.tests._bwrap_host import usable_bwrap
 
 from hyperloom_common.tests.shared_accounts import theirs
 from hyperloom.common import agent_isolation, confinement
-from hyperloom.common.agent_isolation import HOST_LAYER_ENV, NO_LAYER_BWRAP, RAY_ACTOR_PATH, IsolationRefused
+from hyperloom.common.agent_isolation import HOST_LAYER_ENV, NO_LAYER_BWRAP, IsolationRefused
 from hyperloom.common.env_safety import RunAs
 from hyperloom.hosted import entry, host_info
 from hyperloom.hosted.host_info import Var
@@ -793,15 +793,15 @@ def test_a_layer_named_with_whitespace_around_it_is_probed_at_the_path_inside_it
 
 
 @pytest.mark.parametrize(
-    ("problems", "warned"),
-    [(("bwrap: setting up uid map: Permission denied",), True), ((), False)],
+    "problems",
+    [("bwrap: setting up uid map: Permission denied",), ()],
     ids=["layer-bubblewrap-denied", "layer-bubblewrap-confines"],
 )
-def test_a_run_whose_specialists_have_an_account_goes_on_and_warns_once_where_the_ray_path_would_refuse(
-    run, monkeypatch, isolation, caplog, problems, warned
+def test_a_run_whose_specialists_have_an_account_goes_on_without_probing_bubblewrap_or_warning(
+    run, monkeypatch, isolation, caplog, problems
 ):
-    """The account isolates every specialist but those of the Ray GPU actor path, which only bubblewrap can confine:
-    start-up probes the layer's bubblewrap too, and says so where it cannot, without ending the run."""
+    """The account isolates every specialist, so start-up neither probes the layer's bubblewrap nor says anything
+    about it, whatever that bubblewrap could do."""
     account = RunAs(user="hl-specialist", uid=2000, gid=2000, groups=(2000,), home="/home/hl", drop_tool="/bin/setpriv")
     monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", account.user)
     monkeypatch.setattr(agent_isolation, "resolve_run_as", lambda name: account if name == account.user else None)
@@ -810,17 +810,8 @@ def test_a_run_whose_specialists_have_an_account_goes_on_and_warns_once_where_th
     fake = FakeOptimize(monkeypatch)
     with caplog.at_level(logging.WARNING, logger=agent_isolation.__name__):
         assert entry.main(["run"]) == 0
-    bwrap = run.layer / "bin" / "bwrap"
-    assert len(fake.calls) == 1 and isolation.asked == [str(bwrap)] and isolation.started_then == [False]
-    said = [record.getMessage() for record in caplog.records if record.name == agent_isolation.__name__]
-    assert said == (
-        [
-            f"specialists run as the account {account.user}, but {RAY_ACTOR_PATH} and bubblewrap cannot confine one"
-            f" here, so that path refuses its specialists: bubblewrap ({bwrap}, 0.13.1): {problems[0]}"
-        ]
-        if warned
-        else []
-    )
+    assert len(fake.calls) == 1 and isolation.asked == []
+    assert [record.getMessage() for record in caplog.records if record.name == agent_isolation.__name__] == []
 
 
 def test_a_host_where_no_tier_can_isolate_an_agent_ends_the_run_finally_naming_both(run, monkeypatch, isolation):

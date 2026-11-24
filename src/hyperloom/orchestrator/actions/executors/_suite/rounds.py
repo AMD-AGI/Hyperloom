@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run a point as an inference_suite round, locally or in a Ray serving lease's actor.
+"""Run a point as an inference_suite round in this process.
 
 Every point of a session that froze a base launch runs on inference_suite (:func:`suite_route`). A client-only round --
 multi-node, or one whose session or point names a ``BENCHMARK_BASE_URL`` -- holds its server as ``external``: it
-measures the server at that URL, which something else starts and stops, and samples no local GPU. A round with a Ray
-serving lease runs in the lease's actor on the GPUs Ray placed it on. :func:`run_suite_round` writes each round into a
-fresh run_dir below its round directory, so an attempt retried in the same directory never meets the run_dir before it.
+measures the server at that URL, which something else starts and stops, and samples no local GPU.
+:func:`run_suite_round` writes each round into a fresh run_dir below its round directory, so an attempt retried in the
+same directory never meets the run_dir before it.
 
 :func:`run_accuracy_suite_round` serves the launch an AgentX point ran for the D9 accuracy round: on a server of its
 own, without the base's golden layer, eval only, into ``<slot>/accuracy``.
@@ -15,60 +15,51 @@ own, without the base's golden layer, eval only, into ``<slot>/accuracy``.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
-import subprocess
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from types import MappingProxyType
 
 import yaml
 
 from hyperloom_common.env import env_flag
 from hyperloom.common.env_safety import scrub_benchmark_process_env
+from hyperloom.common.ports import pick_server_port
 from hyperloom.inference_optimizer.session.paths import resolve_dep_dir
 from hyperloom.orchestrator.state.base_launch import frozen_base
-from inference_suite import EXIT_REFUSED, RoundResult, manifest_sha256, run_round
+from inference_suite import RoundResult, manifest_sha256, run_round
 from inference_suite.contracts import (
     BaseLaunch,
     ConfigError,
     FailedStep,
     Lifecycle,
     LifecycleMode,
-    Report,
-    RunLayout,
     RunPaths,
     SuiteConfig,
     Telemetry,
 )
 
 from ...cancel_channel import cancel_scope_listener
-from ...stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
 from .._accuracy_gate import ACCURACY_DIR
-from .._agentx_checkpoint import AgentxCheckpoint, SuiteRoundCheckpoint
+from ..workload._agentx_checkpoint import AgentxCheckpoint, SuiteRoundCheckpoint
 from .._benchmark_interpreter import _resolve_probe_python
 from .._failed_step import failed_step_error_class
-from .._gpu_pin import session_cards_mask
-from .._gpu_power import round_gpu_telemetry
+from ..gpu._gpu_pin import session_cards_mask
+from ..gpu._gpu_power import round_gpu_telemetry
 from .._multi_node_env import client_only_server_url
-from .._ray_backend import SuiteLeasedRound, strip_visible_devices_from_config
-from .._ray_serving import ServingLease
 from .._subprocess_kill import (
-    AGENTX_EARLY_STOP_ERROR_CLASS,
-    AGENTX_EARLY_STOP_RETURNCODE,
-    ORCHESTRATOR_CANCELLED_RETURNCODE,
-    SESSION_TIME_EXHAUSTED_RETURNCODE,
     AgentxCheckpointMissed,
     resolve_benchmark_timeouts,
+    resolve_boot_budget_sec,
     session_deadline_to_remaining_sec,
 )
 from .config import (
     CHECK_SERVER_PHASE,
     _GPU_MASK_ENV,
+    _PORT_ENV,
     _RUN_PHASE_ENV,
     _SERVER_ONLY_PHASE,
     _UTF8,
@@ -88,12 +79,6 @@ _KV_METRICS_ENV = "INFERENCE_OPTIMIZER_KV_METRICS"
 TOOL_CACHE_DIR = "inference-suite-tools"
 TOOL_CACHE_ENV = "INFERENCE_SUITE_TOOL_CACHE"
 RUN_DIR_PREFIX = "suite_run_"
-#: The config a leased round runs from, beside its run_dir: the run_dir must be empty when the round starts.
-LEASED_CONFIG_SUFFIX = ".config.yaml"
-#: A leased round Ray never ran: its actor could not be placed, answered no more, or outlived its wait.
-RAY_ROUND_UNPLACED_CLASS = "ray_round_unplaced"
-#: How far past the round's own deadlines, session deadline included, the process running a leased round is reaped.
-_LEASED_BACKSTOP_SLACK_SEC = 300.0
 
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # The round masks the server's GPUs itself; a host mask inherited beneath it would renumber them.
@@ -112,17 +97,6 @@ class SuiteRoundRefused(ValueError):
 
 def _refused_at(step: FailedStep, detail: str) -> SuiteRoundRefused:
     return SuiteRoundRefused(failed_step_error_class(step), detail)
-
-
-#: The error classes of a leased round whose actor exited without a report, by its exit code.
-_UNRUN_LEASED_CLASSES: Mapping[int, str] = MappingProxyType(
-    {
-        EXIT_REFUSED: failed_step_error_class(FailedStep.CONFIG_INVALID),
-        ORCHESTRATOR_CANCELLED_RETURNCODE: ORCHESTRATOR_CANCELLED_CLASS,
-        SESSION_TIME_EXHAUSTED_RETURNCODE: SESSION_TIME_EXHAUSTED_CLASS,
-        AGENTX_EARLY_STOP_RETURNCODE: AGENTX_EARLY_STOP_ERROR_CLASS,
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -147,7 +121,6 @@ class SuiteRound:
     ``warmup`` marks a discarded round, which draws its prompts with the warmup seed so it cannot prime the measured
     round's prefix cache. ``boot_only`` marks a round that only brings the server up, running the point as a
     ``HYPERLOOM_RUN_PHASE=server`` point: no load and no eval. ``env_drop`` names host variables the round's server and client do not inherit.
-    ``serving_lease`` is the Ray lease whose actor runs the round on the GPUs it holds, ``None`` to run it here.
     ``checkpoint`` stops an AgentX round that trails its reference; its ruling lands in ``round_dir``.
     """
 
@@ -157,7 +130,6 @@ class SuiteRound:
     warmup: bool = False
     deadline_unix: int | None = None
     env_drop: frozenset[str] = frozenset()
-    serving_lease: ServingLease | None = None
     boot_only: bool = False
     checkpoint: AgentxCheckpoint | None = None
 
@@ -174,21 +146,25 @@ def _read_point(config_path: Path) -> Mapping[str, object]:
     return yaml.safe_load(config_path.read_text(encoding=_UTF8)) or {}
 
 
-def _round_point(config_path: Path, lease: ServingLease | None, cards: int) -> Mapping[str, object]:
-    """The point a round runs: a leased one without GPU masks, a local one on the session's cards when it names none.
+def _round_point(config_path: Path, cards: int) -> Mapping[str, object]:
+    """The point a round runs: on the session's cards when it names no GPU mask, and on a free port when it names none.
 
-    Ray places a leased round on GPUs of its choosing, so no host mask may size it. A local server drops the masks it
-    inherits and runs on its GPU ids as absolute cards, so a point without a mask (an AgentX point never carries one)
-    runs on the front of the session's mask rather than on ``0..cards-1``.
+    A local server drops the masks it inherits and runs on its GPU ids as absolute cards, so a point without a mask (an
+    AgentX point never carries one) runs on the front of the session's mask rather than on ``0..cards-1``.
+
+    A point naming no ``PORT`` would boot on the launcher's default, which another round on this machine, or a
+    co-tenant on a shared host, may already hold. A round whose server outlives it -- the server lifecycle's -- names
+    the port ``inject_lifecycle`` pinned, and keeps it.
     """
-    if lease is not None:
-        return _read_point(strip_visible_devices_from_config(config_path))
     document = _read_point(config_path)
     bench = _bench(document)
     envs = _envs(bench)
-    if envs.get(_GPU_MASK_ENV, "").strip():
-        return document
-    return {**document, "benchmark": {**bench, "envs": {**envs, _GPU_MASK_ENV: ",".join(session_cards_mask(cards))}}}
+    filled = dict(bench.get("envs") or {})
+    if not envs.get(_PORT_ENV, "").strip():
+        filled[_PORT_ENV] = str(pick_server_port())
+    if not envs.get(_GPU_MASK_ENV, "").strip():
+        filled[_GPU_MASK_ENV] = ",".join(session_cards_mask(cards))
+    return {**document, "benchmark": {**bench, "envs": filled}}
 
 
 def _server_phase_point(document: Mapping[str, object]) -> Mapping[str, object]:
@@ -278,6 +254,10 @@ def _settings(
 ) -> RoundSettings:
     if route.manifest_sha256 is None:
         raise _refused_at(FailedStep.STAGING_MISSING, f"{route.tool_cache} holds no staging manifest")
+    try:
+        boot_budget = resolve_boot_budget_sec()
+    except ValueError as exc:
+        raise _refused_at(FailedStep.CONFIG_INVALID, str(exc)) from exc
     return RoundSettings(
         base_path=str(route.base_path),
         paths=RunPaths(str(run_dir), str(route.tool_cache), route.manifest_sha256),
@@ -288,23 +268,22 @@ def _settings(
         env_inherit=inherited_env_names({k: v for k, v in os.environ.items() if k not in env_drop}),
         deadline_unix=deadline,
         server_url=route.server_url,
+        boot_budget_sec=boot_budget,
     )
 
 
 def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable[[], None]) -> RoundResult:
     """Run ``request`` on inference_suite; ``on_poll`` is called each time the round asks whether to stop.
 
-    The action's cancel scope, when one is published, cancels the round. A round with a serving lease runs in the
-    lease's actor, which hears the cancel scope itself and is out of reach of ``on_poll``.
+    The action's cancel scope, when one is published, cancels the round.
 
     Raises:
-        SuiteRoundRefused: When the point does not translate, the tool cache holds no staging manifest, or the lease's
-            actor ran no round.
+        SuiteRoundRefused: When the point does not translate, or the tool cache holds no staging manifest.
     """
     run_dir = _next_run_dir(request.round_dir)
     settings = _settings(route, run_dir, request.lifecycle, request.deadline_unix, request.env_drop)
     try:
-        point = _round_point(request.config_path, request.serving_lease, route.base.cards)
+        point = _round_point(request.config_path, route.base.cards)
         if request.boot_only:
             point = _server_phase_point(point)
         config = suite_config(point, route.base, settings)
@@ -318,7 +297,7 @@ def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable
     if request.checkpoint is not None:
         checkpoint = SuiteRoundCheckpoint(request.checkpoint, slot=request.round_dir, run_dir=Path(run_dir))
         checkpoint.clear()
-    return _run_config(config, request.serving_lease, on_poll, checkpoint)
+    return _run_config(config, on_poll, checkpoint)
 
 
 def external_agentx_config(
@@ -343,14 +322,13 @@ def external_agentx_config(
 class AccuracyRound:
     """The D9 accuracy round of one slot: the AgentX point the slot ran, and the slot it writes ``accuracy/`` into.
 
-    ``timeout_sec`` bounds the round's boot and its eval each; ``serving_lease`` is the Ray lease whose actor runs it.
+    ``timeout_sec`` bounds the round's boot and its eval each.
     """
 
     config_path: Path
     slot: Path
     timeout_sec: float
     deadline_unix: int | None = None
-    serving_lease: ServingLease | None = None
 
 
 def run_accuracy_suite_round(route: SuiteRoute, request: AccuracyRound, *, on_poll: Callable[[], None]) -> RoundResult:
@@ -359,8 +337,8 @@ def run_accuracy_suite_round(route: SuiteRoute, request: AccuracyRound, *, on_po
     Readers find the round at that fixed path, so a slot run again replaces the round an earlier attempt left there.
 
     Raises:
-        SuiteRoundRefused: When the point has no accuracy round (:func:`accuracy_config`), the tool cache holds no
-            staging manifest, or the lease's actor ran no round.
+        SuiteRoundRefused: When the point has no accuracy round (:func:`accuracy_config`), or the tool cache holds no
+            staging manifest.
     """
     run_dir = request.slot / ACCURACY_DIR
     if run_dir.exists():
@@ -368,24 +346,19 @@ def run_accuracy_suite_round(route: SuiteRoute, request: AccuracyRound, *, on_po
     settings = _settings(route, run_dir, Lifecycle(LifecycleMode.OWN), request.deadline_unix)
     try:
         config = accuracy_config(
-            _round_point(request.config_path, request.serving_lease, route.base.cards),
+            _round_point(request.config_path, route.base.cards),
             route.base,
             settings,
             request.timeout_sec,
         )
     except ConfigError as exc:
         raise _refused_at(FailedStep.CONFIG_INVALID, str(exc)) from exc
-    return _run_config(config, request.serving_lease, on_poll)
+    return _run_config(config, on_poll)
 
 
 def _run_config(
-    config: SuiteConfig,
-    lease: ServingLease | None,
-    on_poll: Callable[[], None],
-    checkpoint: SuiteRoundCheckpoint | None = None,
+    config: SuiteConfig, on_poll: Callable[[], None], checkpoint: SuiteRoundCheckpoint | None = None
 ) -> RoundResult:
-    if lease is not None:
-        return _run_leased(config, lease, checkpoint)
     judge = None if checkpoint is None else checkpoint.judge()
     stopped_by_checkpoint = ""
     with cancel_scope_listener() as scope:
@@ -403,47 +376,7 @@ def _run_config(
         return run_round(config, cancel=cancel)
 
 
-def _leased_round(
-    config: SuiteConfig, config_path: Path, checkpoint: SuiteRoundCheckpoint | None = None
-) -> SuiteLeasedRound:
-    deadlines = config.deadlines
-    remaining = (
-        None if deadlines.deadline_unix is None else deadlines.deadline_unix - time.time() + _LEASED_BACKSTOP_SLACK_SEC
-    )
-    return SuiteLeasedRound(
-        config_path=str(config_path),
-        run_dir=config.paths.run_dir,
-        env=dict(os.environ),
-        timeout=deadlines.boot_sec + deadlines.round_sec + deadlines.eval_sec + _LEASED_BACKSTOP_SLACK_SEC,
-        session_remaining_sec=remaining,
-        checkpoint=checkpoint,
-    )
-
-
-def _run_leased(config: SuiteConfig, lease: ServingLease, checkpoint: SuiteRoundCheckpoint | None) -> RoundResult:
-    """Run ``config`` in ``lease``'s actor, which holds the round's GPUs in Ray, and read back the report it wrote.
-
-    Raises:
-        SuiteRoundRefused: When the actor ran no round: the CLI refused its config, a cancel came before it started,
-            or Ray could not place it; or when a stop killed the CLI before it wrote its report.
-    """
-    run_dir = Path(config.paths.run_dir)
-    config_path = run_dir.with_name(f"{run_dir.name}{LEASED_CONFIG_SUFFIX}")
-    config_path.write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding=_UTF8)
-    try:
-        returncode, _stdout, stderr = lease.run_session_kill(_leased_round(config, config_path, checkpoint))
-    except subprocess.TimeoutExpired as exc:
-        raise SuiteRoundRefused(RAY_ROUND_UNPLACED_CLASS, str(exc)) from exc
-    layout = RunLayout(run_dir)
-    if not layout.report.is_file():
-        error_class = _UNRUN_LEASED_CLASSES.get(returncode, RAY_ROUND_UNPLACED_CLASS)
-        raise SuiteRoundRefused(error_class, stderr.strip() or f"the leased round exited {returncode} with no report")
-    return RoundResult(Report.from_document(json.loads(layout.report.read_text(encoding=_UTF8))), layout)
-
-
 __all__ = [
-    "LEASED_CONFIG_SUFFIX",
-    "RAY_ROUND_UNPLACED_CLASS",
     "RUN_DIR_PREFIX",
     "TOOL_CACHE_DIR",
     "TOOL_CACHE_ENV",

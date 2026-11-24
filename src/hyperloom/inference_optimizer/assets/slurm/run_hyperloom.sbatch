@@ -267,11 +267,8 @@ case "$RUNTIME" in
     CA_MOUNT=()
     [ -n "${HL_CA_BUNDLE_HOST:-}" ] && [ -f "${HL_CA_BUNDLE_HOST}" ] \
       && CA_MOUNT=(-v "${HL_CA_BUNDLE_HOST}:${HL_CA_BUNDLE_CONTAINER}:ro")
-    # --ulimit lifts the container's open-files hard cap so the Ray raylet's fd
-    # preflight can raise soft nofile high enough to stay up (issue #433).
     docker run --rm --init \
       --name "hl-${KEY}-${SLURM_JOB_ID:-$$}" \
-      --ulimit "nofile=${HL_NOFILE:-1048576}:${HL_NOFILE:-1048576}" \
       --device=/dev/kfd --device=/dev/dri \
       --security-opt seccomp=unconfined --group-add video --ipc=host \
       --shm-size="${HL_SHM_SIZE:-64g}" \

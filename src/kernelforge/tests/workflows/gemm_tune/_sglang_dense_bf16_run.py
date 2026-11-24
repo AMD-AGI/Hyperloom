@@ -88,8 +88,8 @@ def _prep(tmp_path, monkeypatch, *, tuned_rows, profile_rows=(), rc=1, root=None
     """Wire the tuner so run() executes without aiter, and capture its argv."""
     monkeypatch.setattr(sd, "probe_script", surface or _permissive_surface)
     monkeypatch.setattr(sd, "resolve_aiter_root", lambda: root or _aiter_root(tmp_path))
-    monkeypatch.setattr(sd, "_compute_nk_shapes", lambda geometry, tp: list(_NK))
-    monkeypatch.setattr(sd, "_compute_m_values", lambda conc, thorough=False: list(_M))
+    monkeypatch.setattr(sd, "compute_dense_nk_shapes", lambda geometry, tp: list(_NK))
+    monkeypatch.setattr(sd, "compute_dense_m_values", lambda conc, thorough=False: list(_M))
     captured: dict = {}
 
     def _fake_run(cmd, **kwargs):

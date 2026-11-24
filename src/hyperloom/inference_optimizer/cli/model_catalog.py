@@ -52,7 +52,7 @@ def _probe_llm_catalog(
         return None
 
     try:
-        import httpx  # type: ignore[import-not-found]
+        import httpx
     except ImportError:
         # httpx should already be installed; return None so the caller decides.
         print(

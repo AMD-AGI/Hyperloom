@@ -48,7 +48,7 @@ class Intent:
 
 
 # Per-intent payload required-field map
-_PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
+PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.SEND_MESSAGE: ("topic",),
     IntentType.DELEGATE: ("action_name",),
     IntentType.PROPOSE_ACTION: ("action_name", "predicted_gain_pct"),
@@ -112,7 +112,7 @@ def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
         if not isinstance(payload, dict):
             raise IntentValidationError(f"intents[{i}].payload must be object, got {type(payload).__name__}")
         payload = _without_unset_fields(payload)
-        for required in _PAYLOAD_REQUIRED[it]:
+        for required in PAYLOAD_REQUIRED[it]:
             if required not in payload:
                 raise IntentValidationError(
                     f"intents[{i}] (type={it.value}) missing required payload field: {required!r}"
@@ -209,6 +209,7 @@ __all__ = [
     "ALLOWED_VERDICTS",
     "DEFAULT_IDLE_BODY",
     "EXTEND_LEASE_MAX_SEC",
+    "PAYLOAD_REQUIRED",
     "Intent",
     "IntentType",
     "IntentValidationError",

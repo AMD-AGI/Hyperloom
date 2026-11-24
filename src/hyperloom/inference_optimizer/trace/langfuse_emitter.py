@@ -315,7 +315,7 @@ class LangfuseEmitter:
             "scores_sent": 0,  # decision Scores created (span + trace)
             "spans_opened": 0,  # phase + agent spans created
             "breakdown_recorded": 0,  # 1 once the full SBD JSON was attached
-            "kb_spans_sent": 0,  # non-LLM spans (recipe-KB / critic priors / specialist intel / forge / gemm)
+            "kb_spans_sent": 0,  # non-LLM spans (recipe-KB / specialist intel / forge / gemm)
             "recipe_audit_read": 0,  # recipe_snapshot/.audit.jsonl read rows swept
             "recipe_write_audit_read": 0,  # of which were recipe-KB writes
             "specialist_intel_read": 0,  # specialist_intel.jsonl rows swept
@@ -352,7 +352,7 @@ class LangfuseEmitter:
             )
             return False
         try:
-            from langfuse import get_client  # type: ignore[import-not-found]
+            from langfuse import get_client
         except ImportError as exc:
             self._disabled_reason = "sdk_missing"
             log.warning(

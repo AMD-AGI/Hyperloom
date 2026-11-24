@@ -16,6 +16,7 @@ from inference_suite.telemetry.kv_poll import (
     aggregate_series,
     canonical_label_key,
     parse_prometheus_text,
+    running_requests,
     sample_from_families,
 )
 
@@ -279,6 +280,28 @@ def test_prefix_cache_counters_are_read():
     assert aggregate_series(sg.cached_tokens_total) == 4600439.0
 
 
+def test_sglang_prompt_tokens_are_read_beside_cached_tokens():
+    """SGLang labels the prompt counter by streaming and the cached one by cache tier: neither is a shard, so each
+    sums across its series into the prompt tokens served and the cached tokens among them."""
+    text = (
+        'sglang:prompt_tokens_total{is_streaming="false",model_name="glm"} 900.0\n'
+        'sglang:prompt_tokens_total{is_streaming="true",model_name="glm"} 100.0\n'
+        'sglang:cached_tokens_total{cache_source="device",model_name="glm"} 900.0\n'
+        'sglang:cached_tokens_total{cache_source="host",model_name="glm"} 50.0\n'
+    )
+    sample = sample_from_families(parse_prometheus_text(text))
+
+    assert aggregate_series(sample.prompt_tokens_total) == 1000.0
+    assert aggregate_series(sample.cached_tokens_total) == 950.0
+
+
+def test_prompt_tokens_only_sample_is_not_discarded():
+    sample = sample_from_families(parse_prometheus_text('sglang:prompt_tokens_total{is_streaming="false"} 1000.0\n'))
+
+    assert sample.has_readings()
+    assert aggregate_series(sample.prompt_tokens_total) == 1000.0
+
+
 def test_prefix_cache_only_sample_is_not_discarded():
     text = 'vllm:prefix_cache_queries_total{engine="0"} 1000.0\nvllm:prefix_cache_hits_total{engine="0"} 529.0\n'
     sample = sample_from_families(parse_prometheus_text(text))
@@ -286,6 +309,25 @@ def test_prefix_cache_only_sample_is_not_discarded():
     assert sample.has_readings()
     assert aggregate_series(sample.prefix_cache_queries) == 1000.0
     assert aggregate_series(sample.prefix_cache_hits) == 529.0
+
+
+# The gauges ATOM's exporter (atom/metrics/exporter.py at ROCm/ATOM 9cc9498b) serves: one running count, already
+# summed over its data-parallel ranks.
+ATOM_METRICS = """\
+# HELP atom:requests_running Number of requests currently running.
+# TYPE atom:requests_running gauge
+atom:requests_running 12.0
+# HELP atom:kv_cache_usage_ratio KV cache usage ratio.
+# TYPE atom:kv_cache_usage_ratio gauge
+atom:kv_cache_usage_ratio 0.42
+"""
+
+
+def test_atom_running_requests_are_read_from_its_own_gauge():
+    families = parse_prometheus_text(ATOM_METRICS)
+
+    assert running_requests(families) == 12.0
+    assert sample_from_families(families).engine == "atom"
 
 
 def test_canonical_label_key_is_order_independent():

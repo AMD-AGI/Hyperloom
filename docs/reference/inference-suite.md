@@ -104,8 +104,15 @@ the installed framework:
   parser, after every patch on the server's path has taken effect. A flag the parser
   does not know is refused, never dropped (`flag_unknown`). A candidate's flag fails
   the candidate; a flag from the base or the operator stops the session.
+- **Import roots.** The same probe records, under `framework.import_roots` in
+  `launch.json`, the directory the interpreter imports the framework package from,
+  and each package the server config names in `import_packages` that it can import.
+  Hyperloom names the kernel libraries (`aiter`, `aiter_meta`, `sgl_kernel`): a
+  kernel rewrite is written against those trees, and a kernel integration that
+  wrote into another copy of one of them is reverted (`patch_outside_served_roots`).
 
-A round against a server it did not start (`external`) runs neither check.
+A round against a server it did not start (`external`) runs none of these probes,
+and records no import roots.
 
 The server runs in the same interpreter the checks ask: `<framework_python> -m
 sglang.launch_server`, `-m vllm.entrypoints.cli.main serve` or `-m
@@ -130,9 +137,13 @@ that set each flag and environment variable and what it overrode:
    and the framework's own ready timeout (`VLLM_ENGINE_READY_TIMEOUT_S`,
    `SGLANG_WARMUP_TIMEOUT`) at 10800 s, the largest value an InferenceX recipe
    sets and above Hyperloom's default boot limit, so a slow start ends at the
-   round's `boot_sec` as `server_boot_timeout`, not at the framework's 600 s;
+   round's `boot_sec` as `server_boot_timeout`, not at the framework's 600 s.
+   A round whose test has a boot budget (`deadlines.boot_budget_sec`, from a
+   run's `--boot-budget-sec`) sets it to the budget plus 3600 s when that is
+   longer, the same headroom over the boot limit, so the 10800 s is not above
+   such a round's boot;
 6. the runner's layer: the environment and floors a host needs, and the
-   framework's metrics switch (`--enable-metrics` for SGLang; vLLM needs none)
+   framework's metrics switch (`--enable-metrics` for SGLang; vLLM and ATOM need none)
    when the round samples KV telemetry;
 7. the profiler layer of a profile round.
 
@@ -252,6 +263,7 @@ One round writes one run directory and leaves it unchanged once the round ends.
 | `report.json` | What the round measured, or the step it failed at (`inference-suite-report/2`). Written last. |
 | `server.log` | The server's log. A `boot` or `reuse` round copies the bytes logged during the round and records their range. |
 | `server_ready_at` | `<ready unix time> <boot seconds>`; `0` boot seconds for a reused server. |
+| `server_boot_active_at` | `<unix time>`: the last time the booting server was seen working without a log line: its processes used at least a quarter of a CPU, or grew their resident memory (`VmRSS`) or the bytes they read (`rchar` + `read_bytes`) by at least 64 MiB per 10 s. The round rewrites it on each such sighting, so a watcher of the run directory sees the boot write. Memory or read growth is progress: it restarts the silence like a log line, and only the boot budget bounds it (memory is read because pre-faulting a file mapped from a network filesystem grows neither IO counter). A boot that neither logs, grows nor uses a quarter of a CPU for `pre_ready_silence_sec` ends as `server_silent_before_ready`; so does one that neither logs nor grows for 3600 s however busy its processes are, as a spinning collective is busy too. A reading that cannot be taken never counts. |
 | `server.pid` | An `own` round's pidfile while its server runs; `boot` and `reuse` keep theirs in `pid_dir`. |
 | `phase_marks.json` | The instants the round passed from one phase to the next. |
 | `kv_metrics.json`, `agentx_timeline.jsonl` | KV-cache samples and the AgentX request timeline. |

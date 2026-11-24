@@ -14,7 +14,6 @@ from typing import Any, NamedTuple
 from kernelforge.knowledge import KERNEL_RECIPE_PRODUCERS, normalize_operator_name
 
 from hyperloom_common.coerce import to_float, to_int
-from hyperloom_common.env import env_flag
 
 from .patch_landing import (
     INTEGRATING_STACK_ACTIONS,
@@ -37,14 +36,6 @@ from ..state.kernel_decision_settings import (
 )
 
 log = logging.getLogger(__name__)
-
-# "Honest E2E" hardening flags.
-_HONEST_E2E_UMBRELLA_ENV = "HL_HONEST_E2E"
-
-
-def _honest_flag(specific_env: str) -> bool:
-    """Resolve a per-fix honest-E2E flag against the umbrella flag."""
-    return env_flag(specific_env, default=env_flag(_HONEST_E2E_UMBRELLA_ENV, default=True))
 
 
 def _kernel_integration_id(

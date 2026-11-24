@@ -50,6 +50,16 @@ def test_repeat_above_one_passes_the_flag(tmp_path):
     assert argv[argv.index("--repeat") + 1] == "3"
 
 
+def test_bench_case_times_remain_available_for_scoring(tmp_path):
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('mean_ms: 5.0')\nprint('case_ms: small 2.0')\nprint('case_ms: dominant 8.0')\n")
+
+    result = asyncio.run(bench_wallclock(BenchRun(str(driver))))
+
+    assert result["success"]
+    assert result["case_times"] == {"small": 2.0, "dominant": 8.0}
+
+
 def test_three_measurements_aggregate_diagnostics_by_per_case_median(monkeypatch):
     """Keep case medians while reporting only the final bandwidth snapshot."""
     results = iter(
@@ -164,22 +174,22 @@ def test_gate_measurement_defaults_are_legacy():
 
 def test_warmstart_baseline_uses_the_same_repeat_as_the_loop(tmp_path):
     """A single-shot baseline vs repeat-and-median candidates is a free win."""
-    from kernelforge.workflows.forge_loop.memory import knowledge_integration as ei
+    from kernelforge.workflows.forge_loop.memory import kb_warmstart as warmstart
 
     drv = tmp_path / "drv.py"
     drv.write_text(_ARGV_DRIVER)
-    ei._bench_once(str(drv), bench_repeat=3)
+    warmstart._bench_once(str(drv), bench_repeat=3)
     argv = json.loads(pathlib.Path(str(drv) + ".argv").read_text())
     assert argv[argv.index("--repeat") + 1] == "3"
 
 
 def test_warmstart_baseline_defaults_to_single_shot(tmp_path):
     """Unchanged for tasks that don't configure repeats."""
-    from kernelforge.workflows.forge_loop.memory import knowledge_integration as ei
+    from kernelforge.workflows.forge_loop.memory import kb_warmstart as warmstart
 
     drv = tmp_path / "drv.py"
     drv.write_text(_ARGV_DRIVER)
-    ei._bench_once(str(drv))
+    warmstart._bench_once(str(drv))
     argv = json.loads(pathlib.Path(str(drv) + ".argv").read_text())
     assert "--repeat" not in argv
 
@@ -312,7 +322,7 @@ def test_forge_loop_can_actually_call_kb_warmstart():
     import textwrap
 
     from kernelforge.workflows.forge_loop.bootstrap import warm_start
-    from kernelforge.workflows.forge_loop.memory.knowledge_integration import kb_warmstart
+    from kernelforge.workflows.forge_loop.memory.kb_warmstart import kb_warmstart
 
     accepted = set(inspect.signature(kb_warmstart).parameters)
     tree = ast.parse(textwrap.dedent(inspect.getsource(warm_start._read_kb_warm_start)))

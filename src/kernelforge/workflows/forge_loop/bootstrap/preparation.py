@@ -25,7 +25,7 @@ def _persist_declared_spec(invocation_spec_file: str, driver: str) -> None:
     """Place the declared invocation spec beside the driver that reads it."""
     if not invocation_spec_file:
         return
-    from kernelforge.workflows.forge_loop.preparation.task_preparer import _materialize_invocation_spec
+    from kernelforge.workflows.forge_loop.preparation.task_scaffold import _materialize_invocation_spec
 
     destination, _ = _materialize_invocation_spec(
         invocation_spec_file,
@@ -87,6 +87,22 @@ def _exit_failed_preparation(run: _ForgeRun, prep: PrepareResult) -> NoReturn:
     raise TaskPreparationFailed(detail)
 
 
+def _driver_contract(iter_config, expected_case_ids):
+    """What the campaign's driver has to satisfy before the loop measures anything with it."""
+    from kernelforge.workflows.forge_loop.preparation.loaded_sources import declared_source_modules
+    from kernelforge.workflows.forge_loop.preparation.task_preflight import DriverContract
+
+    return DriverContract(
+        snr_threshold=iter_config.snr_threshold,
+        require_graph=True,
+        require_ranks=iter_config.nproc_per_node,
+        expected_case_ids=expected_case_ids,
+        sources=declared_source_modules(
+            iter_config.workspace_dir, [iter_config.kernel_file, *iter_config.source_files]
+        ),
+    )
+
+
 def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
     """Make the driver conform to the measurement contract, or leave with the reason it cannot.
 
@@ -95,7 +111,7 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
     measuring against a driver nobody vouched for.
     """
     from kernelforge.workflows.forge_loop.preparation import task_preparer
-    from kernelforge.workflows.forge_loop.preparation.task_preflight import DriverContract
+    from kernelforge.workflows.forge_loop.preparation.task_scaffold import declared_case_ids
 
     iter_config = run.iter_config
     invocation_spec_file = run.request.task_context.invocation_spec_file or ""
@@ -111,20 +127,14 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
     # conforming", it just measures less than the task asks for, and accepting it here skips the only step that
     # would have repaired it.
     try:
-        expected_case_ids = task_preparer.declared_case_ids(invocation_spec_file)
+        expected_case_ids = declared_case_ids(invocation_spec_file)
     except ValueError as exc:
         # Continuing would switch the driver's case check off and spend the whole run measuring a suite the
         # operator never got to state.
         raise ForgeLoopError(str(exc)) from exc
     pf = task_preparer.preflight_task(
         driver=iter_config.driver_script,
-        contract=DriverContract(
-            snr_threshold=iter_config.snr_threshold,
-            require_graph=True,
-            require_profile=True,
-            require_ranks=iter_config.nproc_per_node,
-            expected_case_ids=expected_case_ids,
-        ),
+        contract=_driver_contract(iter_config, expected_case_ids),
         deadline_unix=prep_deadline,
     )
     if pf.ok:

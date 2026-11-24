@@ -4,10 +4,9 @@
 """A sandboxed specialist's network: a namespace of its own, where it reaches only what its launch names.
 
 bubblewrap's ``--unshare-net`` leaves the sandbox its own loopback and nothing else, so nothing that listens on this
-host is reachable from it: not the run's Ray head (whose dashboard Jobs API, client server and workers run what they
-are sent as the app), not another agent's server. What the specialist needs comes in over Unix sockets in its scratch
-``/tmp``, which a relay inside the sandbox (:data:`RELAY`, started ahead of the agent, which it then becomes) serves
-on that loopback:
+host is reachable from it, another agent's server included. What the specialist needs comes in over Unix sockets in
+its scratch ``/tmp``, which a relay inside the sandbox (:data:`RELAY`, started ahead of the agent, which it then
+becomes) serves on that loopback:
 
 - each loopback endpoint the launch names (an HTTP MCP server, an LLM gateway on this host), at the same port, relayed
   to that port here and nowhere else;

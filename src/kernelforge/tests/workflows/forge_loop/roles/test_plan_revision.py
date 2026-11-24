@@ -16,7 +16,8 @@ from kernelforge.workflows.forge_loop.roles.contracts import (
     SpecialistRound,
     SynthesizedPlan,
 )
-from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationAgent, OrchestrationService
+from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationService
+from kernelforge.workflows.forge_loop.roles.orchestration_agent import OrchestrationAgent
 from kernelforge.workflows.forge_loop.roles.plan_prompts import (
     LANE_SYNTHESIS_SYSTEM_PROMPT,
     REVISION_SYSTEM_PROMPT,
@@ -209,6 +210,7 @@ async def test_a_resumed_revision_carries_only_what_the_session_lacks() -> None:
     assert payload["critic_verdict"] == "REVISE"
     assert "existing GEMM" in payload["critic_review"]
     assert payload["revision_instructions"] == REVISION_SYSTEM_PROMPT.strip()
+    assert PLAN_SUMMARY_RULE.strip() in payload["revision_instructions"]
     # The rest of the bundle is already in the resumed session.
     for absent in (
         "context",
@@ -234,6 +236,8 @@ async def test_a_fresh_revision_carries_the_whole_bundle() -> None:
     )
 
     assert revised.mode == "fresh"
+    assert backend.specs[0].system_prompt == REVISION_SYSTEM_PROMPT
+    assert PLAN_SUMMARY_RULE in backend.specs[0].system_prompt
     payload = json.loads(backend.specs[0].user_prompt)
     for present in (
         "revision_instructions",
@@ -286,34 +290,6 @@ async def test_dispatch_is_not_asked_for_a_summary_line() -> None:
     await agent.plan_dispatch(_context(), _definitions())
 
     assert PLAN_SUMMARY_RULE not in backend.specs[0].system_prompt
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("resumable", [True, False])
-async def test_a_revised_plan_writes_its_own_summary_line(resumable) -> None:
-    """A REPLACE changes the plan's goal, so the revision restates the line rather than keeping the draft's."""
-    backend = (_ResumableQueuedBackend if resumable else _QueuedBackend)(["# Revised plan"])
-    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
-    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
-
-    await agent.revise_optimization_plan(
-        _context(),
-        SpecialistRound(dispatch, (await _outcome("memory", "The scale stream is re-read."),), _coverage(["memory"])),
-        draft=SynthesizedPlan(
-            text="Summary: The draft's goal.\n# Draft plan",
-            session_id="synthesis-session" if resumable else "",
-            system_prompt=SYNTHESIS_SYSTEM_PROMPT,
-        ),
-        critic=PlanCriticOutcome(verdict="REPLACE", review="Compare the existing GEMM path."),
-    )
-
-    instructions = json.loads(backend.resumes[0][2] if resumable else backend.specs[0].user_prompt)[
-        "revision_instructions"
-    ]
-    assert PLAN_SUMMARY_RULE.strip() in instructions
-    assert "for the plan as revised, not for the draft" in instructions
-    if not resumable:
-        assert "for the plan as revised, not for the draft" in backend.specs[0].system_prompt
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,7 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors._suite.config import RoundSettings, fixed_workload, suite_config
 from hyperloom.orchestrator.actions.executors._suite.rounds import point_server
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     BenchmarkTarget,
     LaunchLayer,
     materialize_config_with_envs,
@@ -67,7 +67,7 @@ _VLLM_ARGV = (
 )
 _ATOM_ARGV = (
     *("-tp", "2", "--max-model-len", "8192", "--trust-remote-code", "--model", _MODEL, "--host", "127.0.0.1"),
-    *("--server-port", "8888"),
+    *("--server-port", "8888", "--served-model-name", _MODEL),
 )
 #: The server environment every framework gets from ``_point``: its non-knob variables and the round's GPU masks.
 _POINT_ENV = {
@@ -215,6 +215,7 @@ def test_the_point_knobs_become_the_config_fields() -> None:
         (4, 5),
         "/opt/venv/bin/python",
     )
+    assert config.server.import_packages == ("aiter", "aiter_meta", "sgl_kernel")
     assert (config.deadlines.boot_sec, config.deadlines.round_sec, config.deadlines.silence_sec) == (7200, 7200, 600)
     assert config.server.base.digest == _base("sglang").digest()
     assert SuiteConfig.from_document(json.loads(json.dumps(config.to_document()))) == config
@@ -409,7 +410,7 @@ def test_a_round_without_an_external_server_keeps_its_own_lifecycle_and_telemetr
     assert (config.server.host, config.telemetry.gpu.enabled) == ("127.0.0.1", True)
 
 
-#: What the AgentX switch writes into an MLPerf point (``_workload_envs.apply_agentx_switch``).
+#: What the AgentX switch writes into an MLPerf point (``_agentx_switch.apply_agentx_switch``).
 _MLPERF_ENVS = {
     "HYPERLOOM_AGENTIC_BACKEND": "mlperf",
     "MLPERF_AGENTIC_MODEL": "kimi-k3",

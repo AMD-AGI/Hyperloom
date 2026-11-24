@@ -206,7 +206,7 @@ def _run_git(args: tuple[str, ...], cwd: Path) -> tuple[int, str, str]:
 def _installed_sglang_version(sglang_module: Any) -> str:
     """The installed SGLang version: ``sglang.version``, then pip metadata, then the module attribute."""
     try:
-        from sglang.version import __version__ as module_version  # type: ignore[import-not-found]
+        from sglang.version import __version__ as module_version
 
         version = (module_version or "").strip()
     except ImportError:
@@ -232,7 +232,7 @@ def _sglang_anchor_path(sglang_module: Any) -> Path | None:
     if sglang_module.__file__:  # editable layout
         return Path(sglang_module.__file__)
     try:
-        import sglang.srt.managers.scheduler_profiler_mixin as _spm  # type: ignore[import-not-found]
+        import sglang.srt.managers.scheduler_profiler_mixin as _spm
 
         if _spm.__file__:
             return Path(_spm.__file__)
@@ -351,7 +351,7 @@ def _apply_on_pod(
     result = _new_pod_result()
     try:
         try:
-            import sglang  # type: ignore[import-not-found]
+            import sglang
         except (ImportError, OSError) as e:
             result["status"] = "failed"
             result["error"] = f"sglang not importable: {e}"

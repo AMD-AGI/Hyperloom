@@ -19,10 +19,11 @@ unwinding of the cancelled phases and CLOSE share it. An unhandled error brings 
 starts, and so does a first signal that arrives during CLOSE; CLOSE is cut short if it still runs then. A second signal,
 whenever it arrives, cuts the unwinding and CLOSE short at once. A CLOSE cut short releases what the session holds,
 closing the toolbox within its own short bound and killing every registered process, and writes the report.
-A session that ended before FINAL, killed with its machine before CLOSE included, is read back by :func:`persisted_run`
-and taken up again by :meth:`Session.finish`, which runs FINAL and CLOSE alone on a budget that is already spent,
-carrying the stop reason that session ended with: the roster and the branches are the ones that session persisted,
-and only its report, dashboard and breakdown are written again. One that ended before PRELUDE recorded its baseline
+A session that ended before FINAL, killed with its machine before CLOSE included, is read back by
+:func:`~hyperloom_multibranch.scheduling.resumption.persisted_run` and taken up again by :meth:`Session.finish`, which
+runs FINAL and CLOSE alone on a budget that is already spent, carrying the stop reason that session ended with: the
+roster and the branches are the ones that session persisted, and only its report, dashboard, breakdown and manifest
+are written again. One that ended before PRELUDE recorded its baseline
 (:func:`recorded_baseline`) has no candidate: the finish withdraws its unfinished tests and CLOSE reports why nothing was
 chosen. One whose PRELUDE recorded its baseline can be continued instead, without PRELUDE, by :meth:`Session.resume`
 (:mod:`~hyperloom_multibranch.scheduling.resumption`).
@@ -34,8 +35,9 @@ import asyncio
 import contextlib
 import logging
 import math
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+import os
+from collections.abc import Awaitable
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -44,11 +46,9 @@ from hyperloom.common.outside_facts.image_check import ImageCheckReport, run_ima
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.versions import socket_versions
-from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom_multibranch.contracts.fork import ShareRequest
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.blackboard.interfaces import NotRecorded, UsageSink
-from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, LineageEvent, ManifestFingerprint
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent, ManifestFingerprint
 from hyperloom_multibranch.contracts.blackboard.records import SessionProfile
 from hyperloom_multibranch.contracts.blackboard.vocab import LineageKind, UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
@@ -69,7 +69,6 @@ from hyperloom_multibranch.blackboard.rsi.playbook import (
     session_playbook,
 )
 from hyperloom_multibranch.blackboard.rsi.session import FRONTIER_LOG, archived_history
-from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.agent_map import SharedMap
 from hyperloom_multibranch.scheduling.agent_plans import (
     AGENT_SOURCES_UNREAD,
@@ -91,23 +90,21 @@ from hyperloom_multibranch.scheduling.agent_plans import (
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.budget import ExploreCap, HardStop, SessionBudget, budget_seconds
 from hyperloom_multibranch.scheduling.budget import explore_gpu_seconds
-from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.checkpoint_tally import CheckpointScope
-from hyperloom_multibranch.scheduling.close import CloseReport, Closer, ended_before_final
+from hyperloom_multibranch.scheduling.close import CloseReport, Closer
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog, downtime_until
 from hyperloom_multibranch.scheduling.events import IntegrationProfiler, SessionEvents
 from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering
+from hyperloom_multibranch.blackboard.knowledge.breakdown import claw_session_id, leg_claw_session_id
 from hyperloom_multibranch.scheduling.exports import CloseAuthoring, ExportServices, ExportSources, SessionExports
-from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, session_candidates
+from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalSelector, session_candidates
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import BundlingIntegrator, Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, Judge, session_grace
 from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION, PLAYBOOK_JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
-from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.contracts.llm import Completion
 from hyperloom_multibranch.scheduling.llm import recorded
 from hyperloom_multibranch.scheduling.manifest import (
     CodeVersion,
@@ -125,7 +122,6 @@ from hyperloom_multibranch.scheduling.prelude import (
     PreludeServices,
     WarmStartSource,
 )
-from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.reference import copy_references
 from hyperloom_multibranch.scheduling.review import (
     MADE_BY_USER,
@@ -143,6 +139,7 @@ from hyperloom_multibranch.scheduling.review import (
 )
 from hyperloom_multibranch.scheduling.root_shares import RootShares, ShareSources, root_shares
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests
+from hyperloom_multibranch.scheduling.resumption import recorded_baseline
 from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster, final_quota
 from hyperloom_multibranch.scheduling.settings import PlaybookMode, RunSettings
 from hyperloom_multibranch.scheduling.stops import (
@@ -151,6 +148,12 @@ from hyperloom_multibranch.scheduling.stops import (
     SessionStopReason,
     StopReport,
     StopSignals,
+)
+from hyperloom_multibranch.scheduling.session_types import (
+    COMPLETED_REASONS,
+    SessionHost,
+    SessionOutcome,
+    SessionServices,
 )
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.widening import Widening
@@ -188,17 +191,6 @@ JUDGE_PROMPT_KEY = "judge_prompt"
 LESSONS_KEY = "lessons"
 #: Seconds in a minute, the unit of the agents' time options.
 MINUTE = 60.0
-#: Stop reasons a session ends with when it ran its course, a budget spent as set included; any other one, or an
-#: error, is a failed session.
-COMPLETED_REASONS = frozenset(
-    {
-        SessionStopReason.TIME_EXHAUSTED,
-        SessionStopReason.GPU_HOURS_EXHAUSTED,
-        SessionStopReason.LLM_BUDGET_EXHAUSTED,
-        SessionStopReason.JUDGE_STOPPED,
-        SessionStopReason.FINISHED_AFTER_RESTART,
-    }
-)
 CUT_SHORT = "CLOSE was cut short after a stop signal"
 NO_CARDS_LEFT = "the toolbox has fewer usable cards than one test needs, so FINAL could not run"
 #: Why FINAL over a session that ended before its baseline was recorded chose nothing.
@@ -206,61 +198,6 @@ NO_BASELINE = "no candidate: the session ended before PRELUDE recorded its basel
 #: Why a session that was to stop after its map kept none.
 NO_AGENT_TO_MAP = "no map: no agent named is a component agent whose directions could be mapped"
 NO_MAP = "no map: the dossier pass set none and none could be generated from the root's shares"
-
-
-@dataclass(frozen=True)
-class SessionOutcome:
-    """How the session ended; ``close`` is ``None`` only while CLOSE has not run.
-
-    The session completed (exit code 0) only when it ran its course without an error, FINAL chose a commit, and the
-    stop left no process and no test behind; or when, asked to stop after its map, it kept one without an error and the
-    stop left nothing behind; or when a person rejected its agent map at its review and the stop left nothing behind.
-    """
-
-    stop_reason: SessionStopReason
-    final: FinalChoice | None
-    close: CloseReport | None
-    error: str
-
-    @property
-    def completed(self) -> bool:
-        clean = not self.error and self.close is not None and self.close.stop.clean
-        if self.stop_reason in (SessionStopReason.MAPPED, SessionStopReason.REVIEW_REJECTED):
-            return clean
-        chose = self.final is not None and self.final.chosen is not None
-        return self.stop_reason in COMPLETED_REASONS and chose and clean
-
-    @property
-    def exit_code(self) -> int:
-        return 0 if self.completed else 1
-
-
-@dataclass(frozen=True)
-class SessionHost:
-    """Where and when the session runs: its directory, the registry of every process it starts itself (production
-    passes a registry on ``layout.pids``) and its clock."""
-
-    layout: SessionLayout
-    processes: ProcessRegistry
-    clock: Clock
-
-
-@dataclass(frozen=True)
-class SessionServices:
-    """What the session calls out to besides its peers: the completions the judge and the patch resolver ask, the
-    Recipe KB PRELUDE reads the warm-start leads from and CLOSE writes the final recipe back to (``None`` when none is
-    configured), what builds the critic the rule gate asks whether a proven correctness fix matters under the
-    workload, on the scheduler's blackboard handle its spend is recorded through, and the completion CLOSE asks to change
-    the scheduling playbook and to curate the RSI lesson pool, with ``author_model`` the model it runs on;
-    ``resolver_model`` is the model the patch resolver runs on, which every patch it writes names."""
-
-    judge_completion: Completion
-    resolver_completion: Completion
-    recipe_kb: RemoteRecipeClient | None
-    critic: Callable[[UsageSink], FixReviewer]
-    author_completion: Completion
-    author_model: str
-    resolver_model: str
 
 
 class Session:
@@ -445,7 +382,8 @@ class Session:
     async def finish(self, ended: SessionStopReason, *, restart: bool = False) -> SessionOutcome:
         """Run FINAL and CLOSE over the directory a session that ended for ``ended`` before FINAL left behind, and
         report as that session would have; the manifest and the blackboard that session wrote are this one's input, so
-        this opens no session of its own and only its report, dashboard and breakdown are written again. It ends for
+        this opens no session of its own and only its report, dashboard and breakdown are written again, and the
+        manifest, which names the Claw session this leg runs under (:meth:`_write_leg_manifest`). It ends for
         ``ended`` however FINAL goes: the session did not run its course, and a FINAL run after the fact does not
         make it so; except that for the ``restart`` of a hosted run, which its host starts again after a preemption, a
         FINAL that chose ends it for ``finished_after_restart`` when ``ended`` is not in :data:`COMPLETED_REASONS`.
@@ -460,7 +398,9 @@ class Session:
 
         landed = await recorded_baseline(self._blackboard) is not None
         candidates = await self._final_candidates() if landed else None
-        self._agent_isolation = read_manifest(self._layout.manifest).agent_isolation
+        manifest = read_manifest(self._layout.manifest)
+        self._agent_isolation = manifest.agent_isolation
+        self._write_leg_manifest(manifest)
         total = budget_seconds(self._settings.max_hours)
         budget = SessionBudget(self._clock.now() - total, total)
         self._in_final = True
@@ -494,9 +434,20 @@ class Session:
 
         manifest = read_manifest(self._layout.manifest)
         downtime = downtime_until(self._layout.decisions, self._clock.now())
-        replace(manifest, deadline=deadline).write(self._layout.manifest)
+        self._write_leg_manifest(replace(manifest, deadline=deadline))
         self._phase("resume", ended=ended.value, downtime_seconds=downtime, deadline=deadline)
         return SessionBudget(manifest.started_at, deadline - manifest.started_at)
+
+    def _write_leg_manifest(self, manifest: SessionManifest) -> None:
+        """Write ``manifest`` for the leg this process runs over the session, a ``run --resume`` or a ``final-only``,
+        naming the Claw session that leg runs under (:func:`leg_claw_session_id`), the recorded one when it is given
+        none. A leg that relabels the session, a ``final-only`` over a closed one included, logs the old and the new
+        id."""
+
+        claw = leg_claw_session_id(manifest.claw_session_id, os.environ)
+        if claw != manifest.claw_session_id:
+            logger.info("the session's Claw session id changes from %s to %s", manifest.claw_session_id, claw)
+        replace(manifest, claw_session_id=claw).write(self._layout.manifest)
 
     async def _run_and_close(
         self, work: Awaitable[SessionOutcome], ending: SessionOutcome, budget: SessionBudget, hard_stop: HardStop
@@ -1120,6 +1071,7 @@ class Session:
             policy_versions=self._policy_versions(),
             image_check=ImageCheckSummary(image_check.summary()),
             agent_isolation=self._agent_isolation,
+            claw_session_id=claw_session_id(os.environ),
         ).write(self._layout.manifest)
 
 
@@ -1130,26 +1082,6 @@ def _pooled_choice(challenger: bool) -> PlaybookChoice | None:
     return session_playbook(pool, challenger=challenger) if pool is not None else None
 
 
-@dataclass(frozen=True)
-class PersistedRun:
-    """A session directory that ended without FINAL, as :meth:`Session.finish` takes it again; ``ended`` is the stop
-    reason that session reported, or :data:`SessionStopReason.KILLED` when it was killed before it could report one,
-    and the second report carries it."""
-
-    layout: SessionLayout
-    settings: RunSettings
-    ended: SessionStopReason
-
-
-async def recorded_baseline(blackboard: LocalBlackboard) -> BaselineRecord | None:
-    """The baseline the rule gate wrote on ``blackboard``, ``None`` while it has written none."""
-
-    try:
-        return await blackboard.baseline()
-    except NotRecorded:
-        return None
-
-
 def _checkpoint_scope(settings: RunSettings) -> CheckpointScope | None:
     """The AgentX checkpoint the session ran under; an InferenceX session has none."""
     workload = settings.workload
@@ -1158,49 +1090,10 @@ def _checkpoint_scope(settings: RunSettings) -> CheckpointScope | None:
     return CheckpointScope(settings.agentx_early_stop, workload.agentx_objective)
 
 
-def persisted_run(root: Path) -> PersistedRun:
-    """The session in ``root``, read back from what :meth:`Session._write_manifest` and CLOSE left there, or from what
-    a session that was killed left without a CLOSE; raises ValueError naming what keeps FINAL from running over it.
-    Only the build it ran on may read back what it measured. Creates nothing. Blocks."""
-
-    persisted = persisted_session(root)
-    ran_on, here = read_manifest(persisted.layout.manifest).code_version, code_version()
-    if ran_on != here:
-        raise ValueError(
-            f"the session in {root} ran on {ran_on} and this build is {here}; FINAL and CLOSE read back what that "
-            "build persisted, so run them from it"
-        )
-    return persisted
-
-
-def persisted_session(root: Path) -> PersistedRun:
-    """:func:`persisted_run` on any build: for a session that recorded no baseline, which a restart only closes, so
-    nothing it measured is read back."""
-
-    if not root.is_dir():
-        raise ValueError(f"{root} is not a directory")
-    layout = SessionLayout(root)
-    try:
-        manifest = read_manifest(layout.manifest)
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise ValueError(f"{root} is no multi-branch session that ran: {exc}") from exc
-    if not layout.root_recipe.is_file():
-        raise ValueError(f"the session in {root} committed no root, so FINAL has nothing to validate")
-    return PersistedRun(layout, manifest.settings, ended_before_final(layout))
-
-
 __all__ = [
-    "COMPLETED_REASONS",
     "JUDGE_PROMPT_KEY",
     "LESSONS_KEY",
     "NO_BASELINE",
     "NO_CARDS_LEFT",
-    "PersistedRun",
     "Session",
-    "SessionHost",
-    "SessionOutcome",
-    "SessionServices",
-    "persisted_run",
-    "persisted_session",
-    "recorded_baseline",
 ]

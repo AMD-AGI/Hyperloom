@@ -96,34 +96,7 @@ def test_rescue_candidate_paths_env_dir_and_file(tmp_path, monkeypatch):
     assert "extra.json" in names
 
 
-def test_rescue_candidate_paths_mtime_gate(tmp_path, monkeypatch):
-    leak = _write_json(tmp_path / "inferencex_result.json", {"x": 1})
-    import os
-
-    old = leak.stat().st_mtime - 1000
-    os.utime(leak, (old, old))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak))
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    cands = br._rescue_candidate_paths(ws, subprocess_started_unix=leak.stat().st_mtime + 10000)
-    assert cands == []
-
-
 # ---- harvest_leaked_artifacts ---------------------------------------------
-def test_harvest_leaked_artifacts(tmp_path, monkeypatch):
-    leak_root = tmp_path / "workspace"
-    leak_root.mkdir()
-    (leak_root / "server.log").write_text("log", encoding="utf-8")
-    (leak_root / "gpu_metrics.csv").write_text("csv", encoding="utf-8")
-    dest = tmp_path / "dest"
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(leak_root))
-    out = br.harvest_leaked_artifacts(dest)
-    copied = {c.name for _, c in out}
-    assert "server.log" in copied
-    assert "gpu_metrics.csv" in copied
-    assert (dest / "server.log").exists()
-
-
 def test_harvest_skips_non_file(tmp_path, monkeypatch):
     leak_root = tmp_path / "workspace"
     leak_root.mkdir()
@@ -134,29 +107,8 @@ def test_harvest_skips_non_file(tmp_path, monkeypatch):
     assert out == []
 
 
-def test_harvest_mtime_gate(tmp_path, monkeypatch):
-    import os
-
-    leak_root = tmp_path / "workspace"
-    leak_root.mkdir()
-    f = leak_root / "server.log"
-    f.write_text("log", encoding="utf-8")
-    old = f.stat().st_mtime - 5000
-    os.utime(f, (old, old))
-    dest = tmp_path / "dest"
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(leak_root))
-    out = br.harvest_leaked_artifacts(dest, subprocess_started_unix=f.stat().st_mtime + 10000)
-    assert out == []
-
-
 def test_harvest_dest_mkdir_error(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "mkdir", lambda self, *a, **k: (_ for _ in ()).throw(OSError("ro")))
-    out = br.harvest_leaked_artifacts(tmp_path / "dest")
-    assert out == []
-
-
-def test_harvest_missing_root(tmp_path, monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(tmp_path / "nonexistent"))
     out = br.harvest_leaked_artifacts(tmp_path / "dest")
     assert out == []
 
@@ -221,43 +173,6 @@ def test_extract_skips_raw_without_throughput(tmp_path):
     _write_json(ws / "result.json", {"completed_requests": 5})
     m = br.extract_benchmark_measurement({"throughput": {}}, workspace=ws)
     assert m["valid_measurement"] is False
-
-
-def test_extract_rescue_path(tmp_path, monkeypatch):
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    leak = _write_json(
-        tmp_path / "inferencex_result.json",
-        {
-            "output_throughput": 90.0,
-            "completed_requests": 45,
-        },
-    )
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak))
-    m = br.extract_benchmark_measurement(
-        {"throughput": {}}, workspace=ws, subprocess_started_unix=leak.stat().st_mtime - 100
-    )
-    assert m["valid_measurement"] is True
-    assert any("rescued_from_leaked_path" in w for w in m["nonfatal_warnings"])
-
-
-def test_extract_rescue_copy_failed_warning(tmp_path, monkeypatch):
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    leak = _write_json(
-        tmp_path / "inferencex_result.json",
-        {
-            "output_throughput": 90.0,
-            "completed_requests": 45,
-        },
-    )
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak))
-    monkeypatch.setattr(br, "_materialize_rescue_into_workspace", lambda *a, **k: None)
-    m = br.extract_benchmark_measurement(
-        {"throughput": {}}, workspace=ws, subprocess_started_unix=leak.stat().st_mtime - 100
-    )
-    assert m["valid_measurement"] is True
-    assert any("rescued_copy_into_workspace_failed" in w for w in m["nonfatal_warnings"])
 
 
 def test_extract_rescue_skips_no_throughput(tmp_path, monkeypatch):

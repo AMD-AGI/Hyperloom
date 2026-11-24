@@ -20,7 +20,7 @@ from hyperloom.orchestrator.state.task_registry import TaskNotFound
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from ._optimize_fixtures import optimize_state
 from .conftest import make_coordinator
-from hyperloom.orchestrator.phases.framework import AuthoringRetry
+from hyperloom.orchestrator.phases.framework_reauthor import AuthoringRetry
 
 
 def test_the_capped_phases_spend_the_session_on_the_work_phases():
@@ -180,7 +180,7 @@ def test_a_failed_local_explore_specialist_is_retried(tmp_path: Path):
 
 def test_a_repeatedly_failing_local_explore_specialist_stops(tmp_path: Path):
     """Retrying is bounded: exhausting all attempts stops dispatching."""
-    from hyperloom.orchestrator.phases.framework import _LOCAL_EXPLORE_MAX_ATTEMPTS
+    from hyperloom.orchestrator.phases.framework_local_explore import _LOCAL_EXPLORE_MAX_ATTEMPTS
 
     stub = _stub(tmp_path, local_explore=True)
     stub.shared_state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
@@ -268,8 +268,32 @@ def test_pump_falls_back_to_exit_when_arm_disabled(tmp_path: Path):
     assert stub.shared_state.framework_agent_phase_done is True
 
 
+def test_rounds_that_return_only_config_proposals_still_run_the_arm_dry(tmp_path: Path):
+    """A round that lands no patch is charged to the source lever whatever else it returned, so the streak bounds an
+    arm whose specialists keep answering with the same server flag."""
+    from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH
+
+    stub = _stub(tmp_path, local_explore=True)
+    state = stub.shared_state
+    state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
+    done = {"proposal_set": [{"name": "fp8-kv", "extra_args": "--kv-cache-dtype fp8"}]}
+
+    for _ in range(2 * _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK):
+        asyncio.run(stub.phase_framework._pump_framework_agent_phase())
+        if state.framework_agent_phase_done:
+            break
+        task = stub.tasks._queued[-1]
+        stub.tasks.settle_queued()
+        stub.phase_framework._record_framework_agent_authoring_empty_outcome(task=task, done_payload=done)
+
+    assert len(stub.tasks.created) == _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
+    assert state.framework_agent_phase_done is True
+    charged = [row["outcome"] for row in state.attempts if row["lever_kind"] == LEVER_SOURCE_PATCH]
+    assert charged == ["handed_to_explore"] * _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
+
+
 def test_forward_enablement_carriers_eval_origin():
-    from hyperloom.orchestrator.phases.framework import _forward_enablement_carriers
+    from hyperloom.orchestrator.phases.framework_proposals import _forward_enablement_carriers
 
     src = {
         "enablement_origin": "eval",
@@ -288,7 +312,7 @@ def test_forward_enablement_carriers_eval_origin():
 
 
 def test_forward_enablement_carriers_boot_origin_noop():
-    from hyperloom.orchestrator.phases.framework import _forward_enablement_carriers
+    from hyperloom.orchestrator.phases.framework_proposals import _forward_enablement_carriers
 
     dst: dict[str, Any] = {}
     _forward_enablement_carriers({}, dst)
@@ -302,8 +326,8 @@ def test_forward_enablement_carriers_boot_origin_noop():
 def test_dispatched_verdict_reaches_the_integrate_task():
     """The integrate task derives its rungs from the verdict, so a boot-origin round must carry it."""
     from hyperloom.common.failure_signature import classify_failure
-    from hyperloom.orchestrator.actions.executors._enablement_config import _enablement_gap
-    from hyperloom.orchestrator.phases.framework import _forward_enablement_carriers
+    from hyperloom.orchestrator.actions.executors.framework_change._enablement_config import _enablement_gap
+    from hyperloom.orchestrator.phases.framework_proposals import _forward_enablement_carriers
 
     signature = classify_failure("ValueError: Model architectures ['Glm5ForCausalLM'] are not supported for now.")
     dst: dict[str, Any] = {"enablement": True}
@@ -317,7 +341,7 @@ def test_dispatched_verdict_reaches_the_integrate_task():
 def test_a_resource_constraint_verdict_acquires_no_code():
     """An OOM is the host being too small, so the integrate task has no gap to acquire code for."""
     from hyperloom.common.failure_signature import RESOURCE_CONSTRAINT, classify_failure
-    from hyperloom.orchestrator.actions.executors._enablement_config import _enablement_gap
+    from hyperloom.orchestrator.actions.executors.framework_change._enablement_config import _enablement_gap
 
     signature = classify_failure("RuntimeError: Out of memory on GPU. Tried to allocate 80 GiB")
     assert signature.kind == RESOURCE_CONSTRAINT

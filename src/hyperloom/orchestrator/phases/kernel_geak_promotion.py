@@ -21,9 +21,9 @@ from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_F
 from hyperloom.common.perf_metric import axis_of, graded_axes_of
 from hyperloom.orchestrator.lever import LEVER_CONFIG, LEVER_KERNEL
 from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
-from ..actions.executors._workload_envs import GEAK_METRIC_OUTPUT
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
-    kernel_event_id,
+from ..actions.executors.workload._agentx_switch import GEAK_METRIC_OUTPUT
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_rows import (
     record_geak_attempts,
     reject_geak_attempts,
 )
@@ -81,7 +81,7 @@ def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cyc
     """
     if not kernel_id:
         return
-    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_rows import record_integrate_verdict
 
     record_integrate_verdict(
         macro_cycle=macro_cycle,

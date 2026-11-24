@@ -12,11 +12,11 @@ import pytest
 
 from kernelforge.agent_backends import AgentRunResult
 from kernelforge.workflows.forge_loop.roles.analysis import (
-    AnalysisBundleError,
     AnalysisConfigurationError,
     AnalysisSources,
     IncrementalAnalysisInput,
 )
+from kernelforge.workflows.forge_loop.roles.analysis_bundle import AnalysisBundleError
 from kernelforge.workflows.forge_loop.roles.analysis_protection import AnalysisProtection
 from kernelforge.workflows.forge_loop.roles.analysis_session import (
     AnalysisAttemptLimitError,
@@ -169,6 +169,32 @@ class _MarkdownOnlyBackend:
             (case_root / "profile" / "raw.txt").write_text("raw\n")
             (case_root / "analysis.md").write_text(f"# {item['case_id']}\n\nMeasured analysis.\n")
         return AgentRunResult(text="markdown analysis complete")
+
+
+async def test_analysis_protection_refuses_a_kill_that_chooses_its_targets_by_name(tmp_path) -> None:
+    """A profiler left running is stopped by naming it, not by matching every such profiler on the host."""
+    workspace, kernel, driver = _workspace(tmp_path)
+    staging = workspace / "forge_experiments" / "analysis" / "work" / "abc"
+    staging.mkdir(parents=True)
+    protection = AnalysisProtection(
+        workspace=workspace,
+        staging_root=staging,
+        protected_paths=(kernel, driver),
+        deadline_monotonic=time.monotonic() + 60,
+    )
+
+    denied = await protection._on_pre_bash(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "timeout --signal=TERM --kill-after=5s 30s pkill -f rocprofv3"},
+        },
+        None,
+        None,
+    )
+
+    decision = denied["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert "kernelforge.utils.session_kill '<pattern>'" in decision["permissionDecisionReason"]
 
 
 async def test_analysis_protection_only_allows_artifact_writes(

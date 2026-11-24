@@ -24,12 +24,9 @@ class TestTheRecordFormat:
     def test_matches_what_torch_recorded(self):
         for (m, n, k), tail in self.OBSERVED.items():
             line = tunableop_untuned_line(m, n, k, "GemmTunableOp_BFloat16_TN")
+            # N before M is the one thing easy to get backwards, and it would silently tune the transpose of every
+            # requested shape.
             assert line == f"GemmTunableOp_BFloat16_TN,{tail}"
-
-    def test_n_comes_before_m(self):
-        # The one thing easy to get backwards, and it would silently tune the transpose of every requested shape.
-        line = tunableop_untuned_line(16, 1536, 7168, "op")
-        assert line.startswith("op,tn_1536_16_7168")
 
 
 def _demand_file(tmp_path, shapes):

@@ -142,7 +142,7 @@ async def test_policy_denial_records_target_proposal_message_id(session_dir):
     from hyperloom.inference_optimizer.breakdown.recorder import phase_event
     from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseEntry, PhaseExit
     from hyperloom.inference_optimizer.session.session_binding import session_scope
-    from hyperloom.orchestrator.phases.machine_state import workflow_predicate_inputs
+    from hyperloom.orchestrator.phases.phase_predicates import workflow_predicate_inputs
     from hyperloom.orchestrator.policy.denial import PolicyDenied
 
     coordinator = _silent_coordinator(session_dir)
@@ -496,7 +496,7 @@ async def test_delegate_explore_grid_is_admitted_while_rewrite_levers_await_attr
         c.shared_state.baseline_tput = 800.0
         await c.router.handle_delegate("orchestration", _explore("round-a", ("folded", "--folded 2")))
         monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors.explore.framework_lever_grid",
+            "hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload.framework_lever_grid",
             lambda _state: [{"name": "lever_off", "extra_envs": {"HL_X": "0"}}],
         )
         await c.router.handle_delegate("orchestration", _explore("round-b", ("folded_again", "--folded 2")))

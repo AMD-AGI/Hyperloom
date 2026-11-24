@@ -17,7 +17,7 @@ from kernelforge.tests.workflows.rewrite_controller.conftest import _git
 
 
 def _repo(tmp_path: Path) -> tuple[Path, str]:
-    repo = tmp_path / "repo"
+    repo = tmp_path.resolve() / "repo"
     repo.mkdir()
     _git(repo, "init")
     (repo / "kernel.py").write_text("VALUE = 1\n", encoding="utf-8")
@@ -62,12 +62,25 @@ def _newest_staged_mtime(staged: Path) -> float:
     return max(path.stat().st_mtime for path in (staged, *staged.rglob("*")))
 
 
+def test_a_draft_naming_a_repository_the_host_did_not_declare_is_refused(tmp_path: Path) -> None:
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+    served = tmp_path / "served"
+
+    result = publish_staged_task(layout, staged, (served,))
+
+    assert result.published is False
+    assert f"use one of: {served}" in result.reason
+    assert staged.is_dir()
+
+
 def test_publish_pins_live_head_and_moves_complete_task_atomically(tmp_path: Path) -> None:
     repo, head = _repo(tmp_path)
     layout = ControllerLayout(tmp_path / "output")
     staged = _staged(layout, repo)
 
-    result = publish_staged_task(layout, staged)
+    result = publish_staged_task(layout, staged, (repo,))
 
     assert result.published is True
     assert not staged.exists()
@@ -81,8 +94,9 @@ def test_publish_pins_the_hosts_gpu_over_the_drafts(tmp_path: Path, monkeypatch)
     monkeypatch.setenv("GPU_TARGET", "gfx942")
     repo, _head = _repo(tmp_path)
     layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
 
-    result = publish_staged_task(layout, _staged(layout, repo))
+    result = publish_staged_task(layout, staged, (repo,))
 
     assert result.published is True
     assert result.operator_id.endswith(":mi300x")
@@ -98,7 +112,7 @@ def test_publish_accepts_a_draft_without_a_gpu(tmp_path: Path) -> None:
     del draft["identity"]["gpu"]
     (staged / "task.json").write_text(json.dumps(draft), encoding="utf-8")
 
-    result = publish_staged_task(layout, staged)
+    result = publish_staged_task(layout, staged, (repo,))
 
     assert result.published is True
     payload = json.loads((layout.task_dir(result.operator_id) / "task.json").read_text(encoding="utf-8"))
@@ -110,8 +124,9 @@ def test_publish_refuses_when_the_host_gpu_is_unknown(tmp_path: Path, monkeypatc
     monkeypatch.setattr("kernelforge.workflows.forge_loop.campaign.campaign_config.detect_arch", lambda: "")
     repo, _head = _repo(tmp_path)
     layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
 
-    result = publish_staged_task(layout, _staged(layout, repo))
+    result = publish_staged_task(layout, staged, (repo,))
 
     assert result.published is False
     assert "GPU_TARGET" in result.reason
@@ -134,7 +149,7 @@ def test_publish_normalizes_harmless_agent_identity_variations(tmp_path: Path) -
     )
     task_json.write_text(json.dumps(payload), encoding="utf-8")
 
-    result = publish_staged_task(layout, staged)
+    result = publish_staged_task(layout, staged, (repo,))
 
     assert result.published is True
     published = json.loads((layout.task_dir(result.operator_id) / "task.json").read_text(encoding="utf-8"))
@@ -164,7 +179,7 @@ def test_the_published_identity_states_the_derived_kernel_name(tmp_path: Path) -
     payload["operator_name"] = "backend::Fused.MoE-Kernel"
     task_json.write_text(json.dumps(payload), encoding="utf-8")
 
-    result = publish_staged_task(layout, staged)
+    result = publish_staged_task(layout, staged, (repo,))
 
     assert result.published is True
     assert result.operator_id.split(":")[2] == "fused_moe"
@@ -186,7 +201,7 @@ def test_a_kernel_belonging_to_no_package_is_published_under_one_word_for_that(
     layout = ControllerLayout(tmp_path / "output")
     staged = _staged(layout, repo)
 
-    result = publish_staged_task(layout, staged)
+    result = publish_staged_task(layout, staged, (repo,))
 
     assert result.published is True
     assert result.operator_id.split(":")[3] == "unknown"
@@ -203,7 +218,7 @@ def test_a_framework_alias_is_published_as_the_package_it_names(tmp_path: Path) 
     payload["identity"]["framework"] = "aiter_meta"
     task_json.write_text(json.dumps(payload), encoding="utf-8")
 
-    result = publish_staged_task(layout, staged)
+    result = publish_staged_task(layout, staged, (repo,))
 
     assert result.published is True
     assert result.operator_id.split(":")[3] == "aiter"
@@ -211,7 +226,7 @@ def test_a_framework_alias_is_published_as_the_package_it_names(tmp_path: Path) 
 
 def _packaged_repo(tmp_path: Path, relative: str) -> tuple[Path, str]:
     """A repository whose kernel sits inside a framework package."""
-    repo = tmp_path / "repo"
+    repo = tmp_path.resolve() / "repo"
     repo.mkdir()
     _git(repo, "init")
     kernel = repo / relative
@@ -242,7 +257,7 @@ def test_a_framework_none_of_the_paths_sit_under_is_refused(tmp_path: Path) -> N
     layout = ControllerLayout(tmp_path / "output")
     staged = _staged_in(layout, repo, "sglang/kernels/fused_moe.py", "vllm")
 
-    result = publish_staged_task(layout, staged)
+    result = publish_staged_task(layout, staged, (repo,))
 
     assert result.published is False
     assert "none of this task's paths sit under" in result.reason
@@ -264,7 +279,7 @@ def test_a_path_under_two_packages_keeps_whichever_the_task_declared(tmp_path: P
     layout = ControllerLayout(tmp_path / "output")
     staged = _staged_in(layout, repo, relative, "sglang")
 
-    result = publish_staged_task(layout, staged)
+    result = publish_staged_task(layout, staged, (repo,))
 
     assert result.published is True
     assert result.operator_id.split(":")[3] == "sglang"
@@ -279,7 +294,7 @@ def test_a_path_under_no_known_package_witnesses_nothing(tmp_path: Path) -> None
     layout = ControllerLayout(tmp_path / "output")
     staged = _staged_in(layout, repo, "kernel.py", "torch")
 
-    result = publish_staged_task(layout, staged)
+    result = publish_staged_task(layout, staged, (repo,))
 
     assert result.published is True
     assert result.operator_id.split(":")[3] == "torch"
@@ -307,6 +322,7 @@ def test_a_framework_that_is_not_even_a_word_is_refused_with_the_sweep_intact(tm
         result.source_dir.name: result
         for result in publish_complete_staged_tasks(
             layout,
+            (repo,),
             quiescent_sec=5.0,
             now=lambda: written_at + 5.0,
         )
@@ -315,34 +331,6 @@ def test_a_framework_that_is_not_even_a_word_is_refused_with_the_sweep_intact(tm
     assert results["broken"].published is False
     assert results["broken"].reason
     assert results["intact"].published is True
-
-
-def test_publish_rejects_a_repo_path_below_git_toplevel(tmp_path: Path) -> None:
-    """The refusal names the top level, the one thing the agent cannot resolve."""
-    repo, _head = _repo(tmp_path)
-    nested = repo / "nested"
-    nested.mkdir()
-    layout = ControllerLayout(tmp_path / "output")
-    staged = _staged(layout, nested)
-
-    result = publish_staged_task(layout, staged)
-
-    assert result.published is False
-    assert "Git top-level" in result.reason
-    assert f"use {repo.resolve()}" in result.reason
-    assert staged.is_dir()
-
-
-def test_a_repo_root_outside_git_is_told_what_to_pass(tmp_path: Path) -> None:
-    layout = ControllerLayout(tmp_path / "output")
-    loose = tmp_path / "loose"
-    loose.mkdir()
-    staged = _staged(layout, loose)
-
-    result = publish_staged_task(layout, staged)
-
-    assert result.published is False
-    assert "Pass the Git top-level of the repository that holds kernel_path" in result.reason
 
 
 def test_publish_rejects_source_files_outside_the_pinned_repo(
@@ -356,7 +344,7 @@ def test_publish_rejects_source_files_outside_the_pinned_repo(
     payload["source_files"].append("python/other_repo/source.py")
     task_json.write_text(json.dumps(payload), encoding="utf-8")
 
-    result = publish_staged_task(layout, staged)
+    result = publish_staged_task(layout, staged, (repo,))
 
     assert result.published is False
     assert "source path is not tracked" in result.reason
@@ -372,9 +360,9 @@ def test_publish_rejects_duplicate_operator_without_deleting_new_draft(tmp_path:
     layout = ControllerLayout(tmp_path / "output")
     first = _staged(layout, repo, "first")
     duplicate = _staged(layout, repo, "duplicate")
-    assert publish_staged_task(layout, first).published is True
+    assert publish_staged_task(layout, first, (repo,)).published is True
 
-    result = publish_staged_task(layout, duplicate)
+    result = publish_staged_task(layout, duplicate, (repo,))
 
     assert result.published is False
     assert "is already published" in result.reason
@@ -391,7 +379,7 @@ def test_a_staged_task_still_being_written_is_left_alone(tmp_path: Path) -> None
 
     # Default window against real time: the files were just written, which is what a scan landing in the same poll
     # tick as the agent's write sees.
-    results = publish_complete_staged_tasks(layout)
+    results = publish_complete_staged_tasks(layout, (repo,))
 
     assert results == ()
     assert staged.is_dir()
@@ -406,6 +394,7 @@ def test_a_quiescent_staged_task_is_published(tmp_path: Path) -> None:
 
     results = publish_complete_staged_tasks(
         layout,
+        (repo,),
         quiescent_sec=5.0,
         now=lambda: written_at + 5.0,
     )
@@ -427,12 +416,14 @@ def test_a_refused_draft_is_not_revalidated_until_it_changes(tmp_path: Path) -> 
 
     first = publish_complete_staged_tasks(
         layout,
+        (repo,),
         quiescent_sec=0.0,
         now=lambda: written_at + 5.0,
         refused=refused,
     )
     second = publish_complete_staged_tasks(
         layout,
+        (repo,),
         quiescent_sec=0.0,
         now=lambda: written_at + 6.0,
         refused=refused,
@@ -454,6 +445,7 @@ def test_a_revised_draft_is_offered_again_after_a_refusal(tmp_path: Path) -> Non
 
     publish_complete_staged_tasks(
         layout,
+        (repo,),
         quiescent_sec=0.0,
         now=lambda: _newest_staged_mtime(staged) + 5.0,
         refused=refused,
@@ -462,6 +454,7 @@ def test_a_revised_draft_is_offered_again_after_a_refusal(tmp_path: Path) -> Non
     os.utime(broken, (_newest_staged_mtime(staged) + 10.0,) * 2)
     retried = publish_complete_staged_tasks(
         layout,
+        (repo,),
         quiescent_sec=0.0,
         now=lambda: _newest_staged_mtime(staged) + 15.0,
         refused=refused,
@@ -483,6 +476,7 @@ def test_a_refusal_is_written_beside_the_draft_that_earned_it(tmp_path: Path) ->
 
     publish_complete_staged_tasks(
         layout,
+        (repo,),
         quiescent_sec=0.0,
         now=lambda: _newest_staged_mtime(staged) + 5.0,
     )
@@ -501,8 +495,8 @@ def test_writing_the_refusal_does_not_make_the_draft_look_revised(tmp_path: Path
     refused: dict[str, float] = {}
     clock = _newest_staged_mtime(staged) + 5.0
 
-    first = publish_complete_staged_tasks(layout, quiescent_sec=0.0, now=lambda: clock, refused=refused)
-    second = publish_complete_staged_tasks(layout, quiescent_sec=0.0, now=lambda: clock + 1.0, refused=refused)
+    first = publish_complete_staged_tasks(layout, (repo,), quiescent_sec=0.0, now=lambda: clock, refused=refused)
+    second = publish_complete_staged_tasks(layout, (repo,), quiescent_sec=0.0, now=lambda: clock + 1.0, refused=refused)
 
     assert [result.published for result in first] == [False]
     assert second == ()
@@ -513,7 +507,7 @@ def test_a_published_draft_leaves_no_pending_refusal(tmp_path: Path) -> None:
     layout = ControllerLayout(tmp_path / "output")
     staged = _staged(layout, repo)
 
-    assert publish_staged_task(layout, staged).published is True
+    assert publish_staged_task(layout, staged, (repo,)).published is True
     assert pending_rejections(layout.agent_staging_root) == {}
 
 
@@ -524,7 +518,7 @@ def test_publish_rejects_a_symlinked_staging_directory(tmp_path: Path) -> None:
     link = layout.agent_staging_root / "linked"
     link.symlink_to(real, target_is_directory=True)
 
-    result = publish_staged_task(layout, link)
+    result = publish_staged_task(layout, link, (repo,))
 
     assert result.published is False
     assert result.reason == "staged task is not a safe directory"

@@ -521,6 +521,10 @@ def _kv_metrics(queried: float, hit: float) -> str:
     return json.dumps({"prefix_cache": {"prefix_cache_queries_delta": queried, "prefix_cache_hits_delta": hit}})
 
 
+def _sglang_kv_metrics(prompt: float, cached: float) -> str:
+    return json.dumps({"prefix_cache": {"prompt_tokens_total_delta": prompt, "cached_tokens_total_delta": cached}})
+
+
 def _run_dir(round_dir: Path, kv_metrics: str | None) -> Path:
     """The run_dir a round of ``round_dir`` lands, named as ``run_suite_round`` names it, with its report and
     ``kv_metrics``."""
@@ -596,6 +600,21 @@ async def test_an_agentx_point_is_weighted_by_the_prompt_tokens_its_baselines_se
     assert "computed prompt tokens per request, 7600 (152000 less the 95.0% its prefix cache served)" in source
 
 
+async def test_an_sglang_agentx_point_is_weighted_by_the_prompt_tokens_its_baselines_server_computed(
+    stack: Stack, tmp_path: Path
+) -> None:
+    """SGLang counts the prompt tokens it served and the cached ones among them, not lookups and hits: 950 of 1000
+    cached is the same 95% split."""
+    await _with_baseline(stack, tmp_path, AGENTX_READING, _sglang_kv_metrics(1000.0, 950.0))
+    profile = await _profile_with_points(stack, tmp_path, {"variant_00_test/config.yaml": AGENTX_POINT})
+
+    params = await _workload_params(stack, profile)
+
+    source = params.pop("measured_lengths_source")
+    assert params == {"split_conc": "16", "measured_isl": "7600", "measured_osl": "100"}
+    assert "computed prompt tokens per request, 7600 (152000 less the 95.0% its prefix cache served)" in source
+
+
 @pytest.mark.parametrize("listed", [True, False], ids=["rounds-listed", "layout-only"])
 async def test_an_agentx_baseline_whose_only_split_is_its_warmups_weights_by_its_mean_prompt_tokens(
     stack: Stack, tmp_path: Path, listed: bool
@@ -629,7 +648,9 @@ def test_the_measuring_rounds_are_the_ones_the_runner_lists(tmp_path: Path) -> N
     [
         None,
         json.dumps({"prefix_cache": {"cached_tokens_total_delta": 9.0}}),
+        json.dumps({"prefix_cache": {"prompt_tokens_total_delta": 1000.0}}),
         _kv_metrics(1000.0, 1000.0),
+        _sglang_kv_metrics(1000.0, 1000.0),
         "{",
     ],
 )

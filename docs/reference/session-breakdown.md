@@ -26,7 +26,9 @@ The authoritative source of truth for the wire shape is
 [`src/hyperloom/inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema.py),
 with the FRAMEWORK_AGENT and KERNEL timeline events in
 [`schema_framework.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_framework.py) and
-[`schema_kernel.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_kernel.py) beside it.
+[`schema_kernel.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_kernel.py), the concurrency sweep in
+[`schema_conc_sweep.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_conc_sweep.py), and the enablement, phase and stack sections in
+[`schema_phase.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_phase.py) beside it.
 This page describes the contract from a consumer's perspective.
 
 ---
@@ -723,3 +725,5 @@ Use the following resources for related reference information.
 * [`src/hyperloom/inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema.py): TypedDict source of truth.
 * [`src/hyperloom/inference_optimizer/breakdown/schema_framework.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_framework.py): FRAMEWORK_AGENT timeline event shapes.
 * [`src/hyperloom/inference_optimizer/breakdown/schema_kernel.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_kernel.py): KERNEL timeline event shapes.
+* [`src/hyperloom/inference_optimizer/breakdown/schema_conc_sweep.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_conc_sweep.py): concurrency sweep shapes.
+* [`src/hyperloom/inference_optimizer/breakdown/schema_phase.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_phase.py): enablement, phase and stack shapes.

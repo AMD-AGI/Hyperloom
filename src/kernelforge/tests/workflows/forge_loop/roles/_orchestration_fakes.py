@@ -17,7 +17,8 @@ from kernelforge.workflows.forge_loop.roles.contracts import (
     SpecialistAssignment,
     SpecialistDefinition,
 )
-from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationAgent, OrchestrationService
+from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationService
+from kernelforge.workflows.forge_loop.roles.orchestration_agent import OrchestrationAgent
 from kernelforge.workflows.forge_loop.roles.specialists import SpecialistAgent, SpecialistPool
 
 

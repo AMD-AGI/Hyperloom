@@ -6,39 +6,48 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
 from kernelforge.workflows.gemm_tune.aiter_preflight import classify, collect, is_aligned, serve_aiter_path
 
 
-def test_is_aligned_exact_and_editable_subpath():
-    assert is_aligned("/opt/aiter", "/opt/aiter") is True
-    assert is_aligned("/opt/aiter/aiter", "/opt/aiter") is True  # editable install
-    assert is_aligned("/opt/aiter/aiter", "/opt/aiter/") is True
+@pytest.mark.parametrize(
+    ("serve", "root", "aligned"),
+    [
+        ("/opt/aiter", "/opt/aiter", True),
+        ("/opt/aiter/aiter", "/opt/aiter", True),
+        ("/opt/aiter/aiter", "/opt/aiter/", True),
+        ("/usr/local/lib/python3.12/dist-packages/aiter", "/root/aiter-src", False),
+        ("/opt/aiter-other/aiter", "/opt/aiter", False),
+    ],
+    ids=[
+        "exact",
+        "editable-install",
+        "editable-install-trailing-slash",
+        "different-trees",
+        "prefix-not-a-path-boundary",
+    ],
+)
+def test_is_aligned_for_a_source_tree(serve, root, aligned):
+    assert is_aligned(serve, root) is aligned
 
 
-def test_is_aligned_rejects_different_trees():
-    assert is_aligned("/usr/local/lib/python3.12/dist-packages/aiter", "/root/aiter-src") is False
-    # prefix must be a path boundary, not a substring
-    assert is_aligned("/opt/aiter-other/aiter", "/opt/aiter") is False
-
-
-def test_is_aligned_accepts_wheel_sibling_aiter_meta_layout():
+@pytest.mark.parametrize(
+    ("serve", "root", "aligned"),
+    [
+        ("/usr/local/lib/python3.12/dist-packages/aiter", "/usr/local/lib/python3.12/dist-packages/aiter_meta", True),
+        ("/usr/local/lib/python3.12/dist-packages/aiter", "/usr/local/lib/python3.12/dist-packages/aiter_meta/", True),
+        ("/opt/venv/lib/aiter", "/usr/lib/aiter_meta", False),
+        ("/opt/sp/aiter", "/opt/sp/aiter_meta_old", False),
+    ],
+    ids=["sibling-aiter-meta", "sibling-aiter-meta-trailing-slash", "aiter-meta-of-another-tree", "similar-name"],
+)
+def test_is_aligned_for_a_wheel_layout(serve, root, aligned):
     # The wheel ships `aiter` (importable) and `aiter_meta` (csrc/tuners) as siblings, and resolve_aiter_root() picks
     # aiter_meta on purpose.
-    sp = "/usr/local/lib/python3.12/dist-packages"
-    assert is_aligned(f"{sp}/aiter", f"{sp}/aiter_meta") is True
-    assert is_aligned(f"{sp}/aiter", f"{sp}/aiter_meta/") is True
-
-
-def test_is_aligned_wheel_rule_does_not_leak_across_trees():
-    # aiter_meta must be a sibling of the serving package, not any aiter_meta.
-    assert is_aligned("/opt/venv/lib/aiter", "/usr/lib/aiter_meta") is False
-    # a root that merely ends in a similar name is still rejected
-    assert is_aligned("/opt/sp/aiter", "/opt/sp/aiter_meta_old") is False
+    assert is_aligned(serve, root) is aligned
 
 
 def test_classify_aligned_clean():
@@ -148,20 +157,17 @@ def test_collect_no_serve_aiter_is_hard(monkeypatch):
     assert any("not importable" in h for h in st["hard"])
 
 
-def test_serve_aiter_path_none_when_absent(monkeypatch):
-    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
-    assert serve_aiter_path() is None
+def _loaded_without_a_spec(name):
+    raise ValueError(f"{name}.__spec__ is None")
 
 
-def test_serve_aiter_path_none_for_namespace_spec(monkeypatch):
-    # namespace package -> spec.origin is None -> not a resolvable single location
-    monkeypatch.setattr(importlib.util, "find_spec", lambda name: SimpleNamespace(origin=None))
-    assert serve_aiter_path() is None
-
-
-def test_serve_aiter_path_none_when_loaded_module_has_no_spec(monkeypatch):
-    # find_spec raises ValueError for a sys.modules entry whose __spec__ is None.
-    monkeypatch.setitem(sys.modules, "aiter", ModuleType("aiter"))
+@pytest.mark.parametrize(
+    "find_spec",
+    [lambda name: None, lambda name: SimpleNamespace(origin=None), _loaded_without_a_spec],
+    ids=["absent", "namespace-package", "loaded-module-without-a-spec"],
+)
+def test_serve_aiter_path_none_without_a_single_location(monkeypatch, find_spec):
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
     assert serve_aiter_path() is None
 
 

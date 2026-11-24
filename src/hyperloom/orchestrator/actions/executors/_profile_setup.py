@@ -21,7 +21,7 @@ from dataclasses import replace
 from functools import cache
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping, NamedTuple
+from typing import Any, Callable, Mapping, NamedTuple
 
 from hyperloom_common.env import env_bool, env_flag, is_truthy
 from hyperloom.common.workload_defaults import DEFAULT_CONC, DEFAULT_OSL
@@ -633,6 +633,10 @@ _AGENTX_PROFILE_KEYS = frozenset(
 )
 _AGENTX_CAPTURE_STEPS = 20
 _AGENTX_CAPTURE_SEC = 300.0
+#: ATOM's profiler takes no step bound, so its window is the whole capture, and the replay slows while it records.
+#: 30 s keeps that well inside the 5% of a 900 s replay the AgentX client lets go uncovered; a point that sets
+#: ``capture_timeout_seconds`` gets the window it names.
+_ATOM_AGENTX_CAPTURE_SEC = 30.0
 #: What an annotated SGLang AgentX capture sets: shapes and stacks
 #: in the trace, and the CUDA-graph replays profiled unless the server runs eager.
 _SGLANG_ANNOTATION_ENV = MappingProxyType(
@@ -660,14 +664,15 @@ def agentx_profile(bench: Mapping[str, Any], framework: Framework) -> ProfileCon
     refuse_agentx_keys(settings, _AGENTX_PROFILE_KEYS, "profiler.torch_profiler")
     if settings.get("num_profiles", 1) != 1:
         raise ConfigError(f"the AgentX point asks for {settings['num_profiles']} captures; a round opens one")
-    annotated = framework is Framework.SGLANG and settings.get("detailed_annotations") is True
+    spelling = _AGENTX_PROFILES[framework]
+    annotated = spelling.annotates_on_start and settings.get("detailed_annotations") is True
     return ProfileConfig(
         enabled=True,
         start_body={"detailed_annotations": True} if annotated else None,
         delay_iters=0,
         max_iters=settings.get("num_steps", _AGENTX_CAPTURE_STEPS),
         agentx_open_after_sec=settings.get("start_seconds", 0.0),
-        agentx_duration_sec=settings.get("capture_timeout_seconds", _AGENTX_CAPTURE_SEC),
+        agentx_duration_sec=settings.get("capture_timeout_seconds", spelling.default_capture_sec),
     )
 
 
@@ -678,6 +683,53 @@ def _graph_disabled(user: LaunchDelta, base: BaseLaunch) -> bool:
     return canonical_flag_name(_SGLANG_EAGER_FLAG) in ran - removed
 
 
+def _sglang_annotation(user: LaunchDelta, base: BaseLaunch) -> LaunchDelta:
+    graph = () if _graph_disabled(user, base) else (_SGLANG_GRAPH_PROFILE_FLAG,)
+    return LaunchDelta(args_add=graph, env_set=_SGLANG_ANNOTATION_ENV)
+
+
+def _vllm_profiler_config(patched: bool) -> LaunchDelta:
+    fields = vllm_profiler_fields(patched=patched).items()
+    return LaunchDelta(
+        args_add=tuple(token for name, value in fields for token in (f"--profiler-config.{name}", value))
+    )
+
+
+def _vllm_annotation(user: LaunchDelta, base: BaseLaunch) -> LaunchDelta:
+    return _vllm_profiler_config(patched=True)
+
+
+def _atom_annotation(user: LaunchDelta, base: BaseLaunch) -> LaunchDelta:
+    # Only the light knobs: --mark-trace writes a capture trace for every captured batch size at boot (two hours on
+    # DeepSeek-V4.1-Flash), and ATOM_PROFILER_MORE's stacks and memory stall a replay that runs on through the window.
+    env = {"ATOM_PROFILER_RECORD_SHAPES": "1"}
+    if _atom_tracelens_caps().detailed_annotation:
+        env["ATOM_ENABLE_DETAILED_ANNOTATION"] = "1"
+    return LaunchDelta(env_set=env)
+
+
+class _AgentxProfileSpelling(NamedTuple):
+    """How one framework's server is profiled in an AgentX round."""
+
+    #: What its server adds to its own layer ``user`` on ``base`` when the point asks for annotations.
+    annotation: Callable[[LaunchDelta, BaseLaunch], LaunchDelta]
+    #: What it adds when the point asks for none.
+    plain: LaunchDelta = LaunchDelta()
+    #: Whether it takes the annotations in the ``/start_profile`` body as well as from its launch.
+    annotates_on_start: bool = False
+    #: The window it records when the point sets no ``capture_timeout_seconds``.
+    default_capture_sec: float = _AGENTX_CAPTURE_SEC
+
+
+_AGENTX_PROFILES: Mapping[Framework, _AgentxProfileSpelling] = MappingProxyType(
+    {
+        Framework.SGLANG: _AgentxProfileSpelling(_sglang_annotation, annotates_on_start=True),
+        Framework.VLLM: _AgentxProfileSpelling(_vllm_annotation, plain=_vllm_profiler_config(patched=False)),
+        Framework.ATOM: _AgentxProfileSpelling(_atom_annotation, default_capture_sec=_ATOM_AGENTX_CAPTURE_SEC),
+    }
+)
+
+
 def _agentx_profile_layer(
     bench: Mapping[str, Any], framework: Framework, user: LaunchDelta, base: BaseLaunch
 ) -> LaunchDelta:
@@ -685,16 +737,8 @@ def _agentx_profile_layer(
     settings = torch_profiler(bench)
     if not settings.get("enabled"):
         return LaunchDelta()
-    annotated = settings.get("detailed_annotations") is True
-    if framework is Framework.VLLM:
-        fields = vllm_profiler_fields(patched=annotated).items()
-        return LaunchDelta(
-            args_add=tuple(token for name, value in fields for token in (f"--profiler-config.{name}", value))
-        )
-    if not annotated:
-        return LaunchDelta()
-    graph = () if _graph_disabled(user, base) else (_SGLANG_GRAPH_PROFILE_FLAG,)
-    return LaunchDelta(args_add=graph, env_set=_SGLANG_ANNOTATION_ENV)
+    spelling = _AGENTX_PROFILES[framework]
+    return spelling.annotation(user, base) if settings.get("detailed_annotations") is True else spelling.plain
 
 
 def profiled_server(server: ServerConfig, bench: Mapping[str, Any], base: BaseLaunch) -> ServerConfig:

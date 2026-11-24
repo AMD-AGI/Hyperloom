@@ -7,11 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import re
-import shutil
 import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
@@ -27,8 +25,8 @@ from kernelforge.workflows.forge_loop.preparation.external_artifacts import (
     ExternalArtifactError,
     ExternalArtifactTransaction,
 )
-from kernelforge.config.resources import resource_path
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.workflows.forge_loop.preparation.loaded_sources import declared_source_modules
 from kernelforge.workflows.forge_loop.preparation.task_preflight import (
     DriverContract,
     PreflightResult,
@@ -36,16 +34,26 @@ from kernelforge.workflows.forge_loop.preparation.task_preflight import (
 )
 from kernelforge.workflows.forge_loop.preparation.task_preparer_audit import PrepareAudit
 from kernelforge.workflows.forge_loop.preparation.task_preparer_prompts import (
-    DRIVER_CONTRACT_SPEC,
-    REFERENCE_DRIVER_TEMPLATE,
-    RETRY_HEADING_NO_EDIT,
     _SYSTEM_PROMPT,
     PromptBrief,
     RetryNote,
     _build_prompt,
     _distributed_contract_note,
     _invocation_spec_note,
+    _preflight_retry_prompt,
     _reference_note,
+    _timeout_retry_prompt,
+)
+from kernelforge.workflows.forge_loop.preparation.task_scaffold import (
+    _driver_is_inside,
+    _external_staging_note,
+    _materialize_reference,
+    _place_dist_harness,
+    _place_graph_harness,
+    _place_invocation_spec,
+    _preparation_audit_dir,
+    _safe_rmtree,
+    _stage_external_driver,
 )
 
 log = logging.getLogger(__name__)
@@ -67,13 +75,6 @@ _SALVAGE_RESERVE_SEC: float = float(os.environ.get("FORGE_SALVAGE_RESERVE", "120
 # Preflight bench is a quick format check, not a real measurement — keep it cheap.
 PREFLIGHT_WARMUP = 3
 PREFLIGHT_ITERS = 10
-
-# The prep agent reads REAL reference example files (not just prompt text).
-REFERENCE_SUBDIR = ".forge_task_reference"
-INVOCATION_SPEC_FILENAME = "invocation_spec.json"
-MAX_INVOCATION_SPEC_BYTES = 1024 * 1024
-_INVOCATION_SPEC_NAME_RE = re.compile(r"^invocation_spec_[A-Za-z0-9._-]+\.json$")
-_REFERENCE_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.log", "forge_experiments", ".git")
 
 
 def preflight_task(
@@ -218,150 +219,10 @@ def _remove_new_untracked(workspace: Path, pre_untracked: set[str]) -> None:
             (workspace / rel).unlink()
 
 
-def _safe_rmtree(path: Path | None) -> None:
-    """Remove a tree best-effort; the caller checks whether it actually went."""
-    if path is None:
-        return
-    shutil.rmtree(path, ignore_errors=True)
-
-
 def _safe_unlink(path: Path) -> None:
     with contextlib.suppress(OSError):
         if path.is_file():
             path.unlink()
-
-
-def _dist_harness_text() -> str | None:
-    """Return the shipped distributed harness's own source.
-
-    Read from this package rather than from the reference examples the way
-    ``graph_harness`` is: the examples tree is authoring scaffolding that
-    preparation deletes, while a multi-rank driver imports this module on every
-    later run of the loop, so it has to come from something the wheel carries.
-    """
-    try:
-        return (Path(__file__).parent / "dist_harness.py").read_text(encoding="utf-8")
-    except OSError:
-        return None
-
-
-def _find_reference_harness(ref_dir: Path | None) -> str | None:
-    """Return the text of a capture-guarded graph harness from the reference tree."""
-    if ref_dir is None or not ref_dir.is_dir():
-        return None
-    for cand in sorted(ref_dir.rglob("graph_harness.py")):
-        try:
-            text = cand.read_text()
-        except OSError:
-            continue
-        if "def cuda_graph_bench" in text and "dirty" in text:
-            return text
-    return None
-
-
-def _materialize_reference(workspace: Path) -> Path | None:
-    """Make the shipped reference examples available for the agent to Read."""
-    ref_dir = workspace / REFERENCE_SUBDIR
-    _safe_rmtree(ref_dir)
-
-    examples = resource_path("examples", missing_ok=True)
-    try:
-        if examples and Path(examples).is_dir():
-            shutil.copytree(examples, ref_dir, ignore=_REFERENCE_IGNORE)
-            return ref_dir
-    except OSError:
-        _safe_rmtree(ref_dir)
-
-    # Fallback: no examples tree resolved — materialize the compact contract and a driver template so the agent still
-    # has real files to Read.
-    try:
-        ref_dir.mkdir(parents=True, exist_ok=True)
-        (ref_dir / "CONTRACT.md").write_text(DRIVER_CONTRACT_SPEC)
-        (ref_dir / "driver_template.py").write_text(REFERENCE_DRIVER_TEMPLATE.lstrip("\n"))
-        return ref_dir
-    except OSError:
-        _safe_rmtree(ref_dir)
-        return None
-
-
-def _materialize_invocation_spec(
-    source_file: str,
-    durable_dir: Path | None,
-) -> tuple[Path | None, str]:
-    """Place the invocation spec where the prepared driver can keep reading it."""
-    if not source_file or durable_dir is None:
-        return None, ""
-    try:
-        source = Path(source_file).expanduser().resolve()
-        if not source.is_file() or source.stat().st_size > MAX_INVOCATION_SPEC_BYTES:
-            return None, ""
-        payload = json.loads(source.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            return None, ""
-        destination_name = source.name if _INVOCATION_SPEC_NAME_RE.fullmatch(source.name) else INVOCATION_SPEC_FILENAME
-        destination = durable_dir / destination_name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.is_symlink():
-            log.warning(
-                "invocation specification destination %s is a symbolic link; "
-                "leaving it alone rather than writing through it",
-                destination,
-            )
-            return None, ""
-        if destination.exists():
-            with contextlib.suppress(OSError, ValueError, json.JSONDecodeError):
-                existing = destination.read_text(encoding="utf-8")
-                if json.loads(existing) == payload:
-                    return destination, existing
-            log.warning(
-                "invocation specification destination %s already holds different "
-                "content; leaving it alone rather than replacing it",
-                destination,
-            )
-            return None, ""
-        canonical = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-        destination.write_text(canonical, encoding="utf-8")
-        return destination, canonical
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
-        return None, ""
-
-
-def _place_invocation_spec(invocation_spec_file: str, driver_dir: Path) -> tuple[Path | None, str]:
-    """Place the caller's invocation spec beside the driver, warning when a supplied one cannot be used."""
-    spec_path, canonical_spec = _materialize_invocation_spec(invocation_spec_file, driver_dir)
-    if invocation_spec_file and spec_path is None:
-        # Not a default: an explicitly supplied spec that cannot be used costs the prompt's case table, the driver's
-        # durable runtime input and the committed-alongside check all at once, and the caller asked for it.
-        log.warning(
-            "could not materialize the invocation specification %s beside the "
-            "driver; preparation continues without its case table, without a "
-            "durable runtime input for the driver, and without the check that the "
-            "spec is committed with it",
-            invocation_spec_file,
-        )
-    return spec_path, canonical_spec
-
-
-def declared_case_ids(spec_path: Path | str | None) -> list[str]:
-    """Case ids the task declares its driver must benchmark, sorted."""
-    if not spec_path:
-        return []
-    try:
-        payload = json.loads(Path(spec_path).read_text(encoding="utf-8"))
-    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError(
-            f"could not read the invocation specification {spec_path} ({type(exc).__name__}: {exc})"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise ValueError(f"invocation specification {spec_path} is not a JSON object")
-    tests = payload.get("tests")
-    contract = tests.get("driver_contract") if isinstance(tests, dict) else None
-    selectors = contract.get("case_selectors") if isinstance(contract, dict) else None
-    if not isinstance(selectors, list):
-        return []
-    return sorted(
-        {str(selector["CASE_ID"]) for selector in selectors if isinstance(selector, dict) and selector.get("CASE_ID")}
-    )
 
 
 def _ensure_agent_git_workspace(workspace: Path) -> None:
@@ -527,32 +388,6 @@ def _build_evidence(
     return "\n".join(parts)
 
 
-def summarize_agent_progress(progress_log: list[str]) -> str:
-    """Compact "what did it actually do" line from a streamed progress sink."""
-    if not progress_log:
-        return "no tool activity was recorded"
-    non_streaming = any(entry.startswith("progress: not supported") for entry in progress_log)
-    counts: dict[str, int] = {}
-    for entry in progress_log:
-        if entry.startswith("tool: "):
-            name = entry[6:].split(" ", 1)[0]
-            counts[name] = counts.get(name, 0) + 1
-    parts = []
-    if counts:
-        parts.append(
-            "tool calls: "
-            + ", ".join(f"{name}x{count}" for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
-        )
-    elif non_streaming:
-        parts.append("backend does not support progress streaming")
-    else:
-        parts.append("no tool calls at all")
-    tail = list(progress_log[-6:])
-    if tail:
-        parts.append("last steps:\n" + "\n".join(f"  {entry}" for entry in tail))
-    return "; ".join(parts[:1]) + ("\n" + parts[1] if len(parts) > 1 else "")
-
-
 @dataclass(frozen=True)
 class PreparationTask:
     """The task preparation makes conform: its workspace, kernel, driver, guidance, sources and driver contract."""
@@ -636,9 +471,9 @@ async def prepare_task(
         snr_threshold=task.snr_threshold,
         # A produced driver must actually time under a CUDA/HIP graph, not eagerly (nor silently fall back to eager).
         require_graph=True,
-        require_profile=True,
         require_ranks=task.nproc_per_node,
         expected_case_ids=list(task.expected_case_ids),
+        sources=declared_source_modules(task.workspace_dir, [task.kernel, *task.source_files]),
     )
     start = time.monotonic()
     run = _AttemptRun(config, usage, audit, contract, _preflight_deadline(deadline_sec, deadline_unix))
@@ -656,82 +491,6 @@ def _preparation_wall(deadline_sec: float, deadline_unix: float) -> float:
     if deadline_unix <= 0:
         return deadline_sec
     return min(deadline_sec, max(0.0, deadline_unix - time.time()))
-
-
-def _driver_is_inside(workspace: Path, driver_input_path: Path, driver_path: Path) -> bool:
-    """Whether the driver lives in the workspace both lexically and after resolution.
-
-    Both have to hold: a path that only looks internal, or only resolves
-    internal, is a symlink out of the tree and is staged like any other
-    external driver.
-    """
-    for candidate in (driver_input_path, driver_path):
-        try:
-            candidate.relative_to(workspace)
-        except ValueError:
-            return False
-    return True
-
-
-@dataclass(frozen=True)
-class _AuditDirs:
-    """Where a preparation's experiments live, and its audit trail when that directory could be created."""
-
-    experiments_dir: Path | None
-    audit_dir: Path | None
-
-
-def _preparation_audit_dir(config: Config) -> _AuditDirs:
-    """Where this preparation writes its experiments and its audit trail, as far as each resolves.
-
-    They are reported separately because they fail separately: a directory that
-    cannot be created costs the audit trail, while the experiments path it sits
-    under is still the one the external-artifact transaction has to exclude --
-    that tree changes while the agent runs, which is what the exclusion is for.
-    """
-    experiments_dir: Path | None = None
-    try:
-        experiments_dir = Path(config.experiments_dir)
-        audit_dir = experiments_dir / "task_preparation"
-        audit_dir.mkdir(parents=True, exist_ok=True)
-    except (AttributeError, OSError, TypeError, ValueError):
-        return _AuditDirs(experiments_dir, None)
-    return _AuditDirs(experiments_dir, audit_dir)
-
-
-def _stage_external_driver(
-    workspace: Path,
-    *,
-    driver_input_path: Path,
-    driver_path: Path,
-    audit_dirs: _AuditDirs,
-    read_only_paths: list[Path],
-) -> tuple[ExternalArtifactTransaction | None, str]:
-    """Stage a driver that lives outside the workspace, or say why it cannot be staged."""
-    external_exclusions = [workspace]
-    experiments_dir, audit_dir = audit_dirs.experiments_dir, audit_dirs.audit_dir
-    if experiments_dir is not None:
-        try:
-            experiments_rel = experiments_dir.resolve().relative_to(driver_path.parent)
-            if experiments_rel.parts:
-                # Runtime logs/results can change while the agent is running.
-                external_exclusions.append(driver_path.parent / experiments_rel.parts[0])
-            elif audit_dir is not None:
-                external_exclusions.append(audit_dir)
-        except (OSError, ValueError):
-            # Keep the conservative workspace exclusion when the external experiments path cannot be relativized
-            # safely.
-            pass
-    try:
-        transaction = ExternalArtifactTransaction(
-            driver_path=driver_input_path,
-            excluded_paths=external_exclusions,
-            passthrough_paths=[workspace],
-            read_only_paths=read_only_paths,
-        )
-    except ExternalArtifactError as exc:
-        return None, f"could not stage external driver artifacts: {exc}"
-    return transaction, ""
 
 
 class _SourceGuard:
@@ -784,56 +543,6 @@ class _SourceGuard:
             f"could not restore the protected source after preparation: {named}; the workspace still holds "
             "the prep agent's edits to it, so the task was not prepared"
         )
-
-
-def _place_graph_harness(
-    harness_path: Path,
-    *,
-    ref_dir: Path | None,
-    driver_external: bool,
-    reference_prefix: str,
-) -> tuple[str | None, str]:
-    """Pre-place a correct, capture-guarded ``graph_harness.py`` beside the driver.
-
-    The agent can then import a known-good ``cuda_graph_bench`` (accepting
-    ``dirty``/``verify``) instead of writing its own -- a self-written harness
-    can silently mismatch its driver calls and degrade graph timing to eager.
-    A harness the caller already placed is left alone.
-    """
-    canonical_harness = None if harness_path.is_file() else _find_reference_harness(ref_dir)
-    if canonical_harness is None:
-        return None, reference_prefix
-    harness_path.write_text(canonical_harness)
-    harness_display = str(harness_path) if driver_external else "./graph_harness.py"
-    return canonical_harness, (
-        "## Graph timing harness (already available beside the driver)\n"
-        f"`{harness_display}` is a correct, capture-guarded harness. Import it —\n"
-        "`from graph_harness import cuda_graph_bench` (it accepts optional\n"
-        "`dirty`/`verify`). Do NOT rewrite it. Only implement custom timing in the\n"
-        "driver if this operator genuinely cannot be captured into a static-input\n"
-        "graph.\n\n" + reference_prefix
-    )
-
-
-def _place_dist_harness(dist_harness_path: Path, nproc_per_node: int) -> str | None:
-    """Place ``dist_harness.py`` before the agent is asked for anything.
-
-    A multi-rank task measures inside it or it is not measured. A missing
-    packaged source is not fatal here, so the failure is reported by preflight,
-    against the driver, in the same shape as every other distributed refusal.
-    """
-    if nproc_per_node <= 1:
-        return None
-    canonical_dist_harness = _dist_harness_text()
-    if canonical_dist_harness is None:
-        log.error(
-            "could not read the packaged dist_harness source; this %d-rank task has no harness to "
-            "measure inside and its driver will be refused",
-            nproc_per_node,
-        )
-        return None
-    dist_harness_path.write_text(canonical_dist_harness, encoding="utf-8")
-    return canonical_dist_harness
 
 
 @dataclass(frozen=True)
@@ -1055,19 +764,6 @@ def _lay_out_scaffolding(
     brief = PromptBrief(evidence, driver_rel, invocation_note, _distributed_contract_note(task.nproc_per_node))
     protected_files = _agent_protected_files(layout, protected, task)
     return _Scaffolding(layout, scaffold, brief, protected_files, ref_dir, canonical_harness is not None)
-
-
-def _external_staging_note(driver_path: Path) -> str:
-    """The prompt section that confines an external driver's edits to its staging directory."""
-    return (
-        "## Transactional external driver staging\n"
-        f"The driver and every helper it imports MUST be written under the "
-        f"isolated staging directory "
-        f"`{driver_path.parent.resolve()}`. The kernel workspace is source evidence only; "
-        "changes are published to the caller's artifact directory only after "
-        "deterministic validation succeeds. Existing task metadata and invocation "
-        "specifications are read-only.\n\n"
-    )
 
 
 async def _run_attempts(
@@ -1299,59 +995,6 @@ def _attempt_budget(attempts: int, *, deadline_sec: float, start: float) -> _Att
     is_last_attempt = attempts + 1 >= PREPARE_MAX_ATTEMPTS
     timeout = spendable if is_last_attempt else min(spendable, float(PER_ATTEMPT_CAP_SEC))
     return _AttemptBudget(may_start=True, timeout_sec=timeout)
-
-
-def _jit_timeout_hint(pf: PreflightResult) -> str:
-    """Say when every preflight failure was a timeout, which usually means slow JIT rather than a broken driver."""
-    if not pf.all_failures_are_timeouts:
-        return ""
-    return (
-        "\nNOTE: Every failure above is a TIMEOUT, not a crash. "
-        "This usually means the driver is structurally correct "
-        "but the first execution triggered slow JIT compilation "
-        "(CK/aiter kernels can take 44s+ per module). Do NOT "
-        "rewrite the driver from scratch — verify it is "
-        "structurally correct and resubmit; the next preflight "
-        "run benefits from a warm JIT cache.\n"
-    )
-
-
-def _timeout_retry_prompt(
-    pf: PreflightResult,
-    *,
-    driver_rel: str,
-    driver_edited: bool,
-    elapsed_s: float,
-    progress_log: list[str],
-) -> RetryNote:
-    """What the next attempt is told after this one ran out of time."""
-    if driver_edited:
-        return RetryNote(
-            "Agent timed out, then deterministic preflight failed:\n" + pf.detail_report() + _jit_timeout_hint(pf)
-        )
-    return RetryNote(
-        f"Your previous attempt ran for {elapsed_s:.0f}s and timed out "
-        f"having made NO edit at all to `{driver_rel}` — the file is "
-        "byte-identical to before. Reading and planning is not "
-        "progress here. Open the driver and WRITE the fix as your "
-        "first substantive action, then verify; if you cannot finish "
-        "the whole contract in the time you have, still leave the "
-        "best driver you can on disk rather than nothing.\n"
-        f"What you spent that time on — {summarize_agent_progress(progress_log)}\n"
-        "The deterministic check on that unchanged driver reported:\n" + pf.detail_report(),
-        RETRY_HEADING_NO_EDIT,
-    )
-
-
-def _preflight_retry_prompt(pf: PreflightResult, *, driver_rel: str, driver_edited: bool) -> RetryNote:
-    """What the next attempt is told after this one finished but left a driver that does not conform."""
-    if driver_edited:
-        return RetryNote("Deterministic preflight after your edit:\n" + pf.detail_report() + _jit_timeout_hint(pf))
-    return RetryNote(
-        f"You finished without editing `{driver_rel}` at all. The "
-        "deterministic check therefore ran the SAME driver again:\n" + pf.detail_report(),
-        RETRY_HEADING_NO_EDIT,
-    )
 
 
 def _close_external_transaction(external_transaction, guard: "_SourceGuard") -> str:

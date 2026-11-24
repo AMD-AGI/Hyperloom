@@ -18,7 +18,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
 from hyperloom.orchestrator.actions.executors.benchmark_run.warm_patches import restore_warm_kernel_snapshots
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.phases import prelude as prelude_mod
+from hyperloom.orchestrator.phases import prelude_warm_settle as warm_settle_mod
 from hyperloom.orchestrator.phases import prelude_warm_kernel as prelude_warm_kernel_mod
 from hyperloom.orchestrator.phases.prelude import PRELUDE_ARM_DROPPED
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -724,8 +724,10 @@ async def test_warm_replay_skips_when_best_config_empty(tmp_path):
     assert coord.shared_state.warm_replay_outcome["reason"] == "best_config_empty"
 
 
-def _vllm_baseline(tmp_path: Path, coord: Coordinator) -> None:
-    """Point the stub at a real vLLM baseline config the replay would be appended to."""
+def _vllm_baseline(
+    tmp_path: Path, coord: Coordinator, args: str = "--kv-cache-dtype fp8 --enable-prefix-caching --max-num-seqs 64"
+) -> None:
+    """Point the stub at a real vLLM baseline config launching ``args``, which the replay would be appended to."""
     config = tmp_path / "baseline_config.with_envs.yaml"
     config.write_text(
         json.dumps(
@@ -734,7 +736,7 @@ def _vllm_baseline(tmp_path: Path, coord: Coordinator) -> None:
                     "framework": "vllm",
                     "envs": {
                         "VLLM_ROCM_USE_AITER": "1",
-                        "EXTRA_VLLM_ARGS": "--kv-cache-dtype fp8 --enable-prefix-caching --max-num-seqs 64",
+                        "EXTRA_VLLM_ARGS": args,
                     },
                 }
             }
@@ -805,6 +807,43 @@ async def test_warm_replay_runs_a_recipe_that_changes_the_baseline(tmp_path):
     assert [call["params"]["extra_server_args"] for call in coord.tasks.calls] == [
         "--kv-cache-dtype fp8 --max-num-seqs 128"
     ]
+
+
+_NGRAM_GPU_DRAFT = '--speculative-config {"method":"ngram_gpu","num_speculative_tokens":2,"prompt_lookup_max":5}'
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_skips_a_recipe_that_introduces_a_copying_draft(tmp_path):
+    """A recipe whose best config adds a context-copying draft would carry it into current_best on a synthetic run."""
+    recipe = _warm_recipe_t1(extra_server_args=f"--max-num-seqs 128 {_NGRAM_GPU_DRAFT}")
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
+    _vllm_baseline(tmp_path, coord)
+
+    assert await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0) is None
+
+    assert coord.tasks.calls == []
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == "skipped"
+    assert outcome["reason"].startswith("speculative_context_copy_on_synthetic: ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("benchmark_mode", "baseline_args"),
+    [
+        pytest.param("agentx", "--max-num-seqs 64", id="agentx"),
+        pytest.param("synthetic", f"--max-num-seqs 64 {_NGRAM_GPU_DRAFT}", id="draft-the-baseline-runs"),
+    ],
+)
+async def test_warm_replay_runs_a_copying_draft_the_rule_does_not_cover(tmp_path, benchmark_mode, baseline_args):
+    recipe = _warm_recipe_t1(extra_server_args=f"--max-num-seqs 128 {_NGRAM_GPU_DRAFT}")
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
+    _vllm_baseline(tmp_path, coord, baseline_args)
+    coord.shared_state.benchmark_mode = benchmark_mode
+
+    assert await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0) is not None
+
+    assert len(coord.tasks.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -1001,6 +1040,25 @@ def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     assert coord.shared_state.cumulative_gain_validated_stack_len == 1
     assert coord.shared_state.current_best["action"] == "replay_warm_recipe"
     assert coord.shared_state.current_best["tput"] == 738.0
+
+
+def test_promote_warm_replay_reproduced_with_envs_only_pushes_stack(tmp_path):
+    """Envs alone are a configuration to replay: a replay whose params carry no server args is still adopted."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "expected_gain_pct": 25.0,
+        "replay_task_id": "task-warm-replay-prelude",
+    }
+    task = _StubTask(params={"extra_envs": {"VLLM_ROCM_USE_AITER": "1"}, "baseline_tput_anchor": 600.0})
+
+    coord.phase_prelude.promote_warm_replay({"status": "succeeded", "output_throughput": 738.0}, task=task)
+
+    assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
+    assert len(coord.shared_state.optimization_stack) == 1
+    entry = coord.shared_state.optimization_stack[0]
+    assert entry["extra_server_args"] == ""
+    assert entry["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
 
 
 def test_promote_warm_replay_refused_by_the_lift_is_not_reproduced(tmp_path):
@@ -2091,7 +2149,7 @@ def test_combined_replay_revert_rolls_back_recipe_and_kernel(tmp_path, monkeypat
         lambda target, sha, manifest=None: recipe_rollbacks.append((target, sha)) or {"ok": True, "errors": []},
     )
     monkeypatch.setattr(
-        prelude_mod,
+        warm_settle_mod,
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []},
     )
@@ -2368,7 +2426,7 @@ def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(tmp_path, monk
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
     kernel_rollbacks: list[list[dict]] = []
     monkeypatch.setattr(
-        prelude_mod,
+        warm_settle_mod,
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []},
     )
@@ -2555,7 +2613,7 @@ def test_rollback_restores_a_nogit_tree_from_its_backups(tmp_path, monkeypatch):
     )
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     monkeypatch.setattr(
-        prelude_mod,
+        warm_settle_mod,
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: {"ok": True, "errors": []},
     )
@@ -2584,7 +2642,7 @@ def test_rollback_of_an_unmutated_tree_is_a_no_op(tmp_path, monkeypatch):
     """An overlay already present is applied as a no-op, so there is nothing to undo."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     monkeypatch.setattr(
-        prelude_mod,
+        warm_settle_mod,
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: {"ok": True, "errors": []},
     )
@@ -2651,7 +2709,7 @@ def test_rollback_restores_every_tree_the_replay_patched(tmp_path, monkeypatch):
     )
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     monkeypatch.setattr(
-        prelude_mod,
+        warm_settle_mod,
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: {"ok": True, "errors": []},
     )
@@ -3284,7 +3342,7 @@ def test_a_promoted_warm_replay_patch_is_reinstalled_on_a_fresh_tree(tmp_path):
 
 def test_a_candidate_after_a_promoted_warm_replay_still_benches_its_overlays(tmp_path):
     """Every integrate_patch candidate stashes a dirty tree first, so the adopted overlays have to be committed."""
-    from hyperloom.orchestrator.actions.executors._patch_git import _git_stash_if_dirty
+    from hyperloom.orchestrator.actions.executors.patching._patch_git import _git_stash_if_dirty
 
     coord, tree, result, params = _replayed_on_a_git_tree(tmp_path)
     stock_head = _tree_git(tree, "rev-parse", "HEAD").strip()

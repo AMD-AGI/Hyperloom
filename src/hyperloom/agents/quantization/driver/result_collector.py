@@ -117,7 +117,7 @@ def _resolve_quantized_dir(workspace: Path) -> tuple[Path | None, bool, str | No
         return None, False, None
 
     try:
-        import yaml  # type: ignore[import-not-found]
+        import yaml
     except ImportError:
         return None, True, "pyyaml_missing"
 
@@ -182,7 +182,7 @@ def collect_artifacts(workspace: Path) -> CollectedArtifacts:
     qdir, manifest_present, manifest_err = _resolve_quantized_dir(workspace)
 
     quantized_dir_exists = bool(qdir and qdir.is_dir())
-    has_config = bool(quantized_dir_exists and (qdir / "config.json").is_file())  # type: ignore[union-attr]
+    has_config = bool(quantized_dir_exists and (qdir / "config.json").is_file())
     has_weights = bool(quantized_dir_exists and _has_glob(qdir, _WEIGHT_GLOBS))  # type: ignore[arg-type]
     has_tokenizer = bool(quantized_dir_exists and _has_any(qdir, _TOKENIZER_FILES))  # type: ignore[arg-type]
 

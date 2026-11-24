@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable
 
+from kernelforge.evaluation.scoring import CaseAggregate
 from kernelforge.utils.process_group import kill_process_group
 
 # Optional bench-mode companion to the driver contract's --warmup/--iters, asking the driver to time ONE declared case
@@ -256,8 +257,9 @@ def calculate_mean_case_speedup(
     case_times: dict[str, float] | None,
     baseline_case_times: dict[str, float] | None,
     unscored_cases: set[str] | list[str] | None = None,
+    aggregate: CaseAggregate = CaseAggregate.ARITHMETIC,
 ) -> float | None:
-    """Return the equal-weight arithmetic mean of per-case speedups."""
+    """Return the equal-weight mean of per-case speedups under ``aggregate``."""
     if not baseline_case_times:
         return None
     if not case_times:
@@ -292,7 +294,7 @@ def calculate_mean_case_speedup(
     if not speedups:
         # Every case excluded means there is nothing to score against.
         raise CaseCoverageError("no scored cases remain after exclusions")
-    mean_case_speedup = sum(speedups) / len(speedups)
+    mean_case_speedup = aggregate.combine(speedups)
     return mean_case_speedup if mean_case_speedup > 0.0 else None
 
 
@@ -301,6 +303,7 @@ def calculate_measurement_case_speedups(
     baseline_case_times: dict[str, float] | None,
     *,
     expected_measurements: int,
+    aggregate: CaseAggregate = CaseAggregate.ARITHMETIC,
 ) -> list[float]:
     """Score every independent benchmark run against one fixed pristine baseline."""
     if not isinstance(benchmark, dict) or not benchmark.get("success"):
@@ -318,6 +321,7 @@ def calculate_measurement_case_speedups(
             measurement.get("case_times"),
             baseline_case_times,
             measurement.get("unscored_cases"),
+            aggregate=aggregate,
         )
         if score is None:
             raise CaseCoverageError(f"measurement {index} has no mean case speedup")

@@ -6,14 +6,11 @@
 from __future__ import annotations
 
 import logging as _logging
-from copy import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Collection, Mapping, NamedTuple
 
-from hyperloom_common.coerce import first_float, recorded_float, to_float, to_int, to_mapping, to_str_list
-from hyperloom_common.io import JsonLineFormat, append_jsonl
+from hyperloom_common.coerce import first_float, recorded_float, to_float, to_int, to_mapping
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     ARM_CONFIG,
@@ -38,6 +35,15 @@ from ..state.attempt_ledger import AttemptRow, record_attempt_row
 from .config import KnowledgeStoreMode
 from ._config_timeline import _NON_ATTEMPT_OUTCOMES, _record_config_attempts
 from ._recipe_attrs import attempt_provenance, recipe_attrs_from_state, workload_kb_tags
+from .recipe_amend import (
+    amended_recipe_extras,
+    amended_recipe_fields,
+    appended,
+    extract_kept_best_config,
+    kb_best_config_overrides_for_keep,
+    rows_not_superseded,
+)
+from .remote_publish import REMOTE_VALIDATION_ERROR, RemoteRecipeAudit, record_remote_recipe_audit, remote_result_type
 
 if TYPE_CHECKING:
     from ..loop.coordinator import Coordinator
@@ -51,66 +57,9 @@ _SEVERITY_CRASH: str = "crash"
 _SEVERITY_REGRESS: str = "regress"
 
 
-# Stable ``result_type`` codes for the reasons the remote KB Store returns.
-# Use an exact lookup so a reason token cannot collide with the same text inside
-# an exception name or explanatory message.
-_REMOTE_RESULT_TYPES: dict[str, str] = {
-    "no_new_keep_or_pure_warm_replay": _close_out.RESULT_NO_NEW_KEEP,
-    "nonfinite_optimized_throughput": _close_out.RESULT_INVALID_THROUGHPUT,
-    "missing_optimized_throughput": _close_out.RESULT_MISSING_THROUGHPUT,
-    "invalid_recipe_scope": _close_out.RESULT_INVALID_SCOPE,
-    "invalid_recipe_selection_profile": _close_out.RESULT_INVALID_SELECTION_PROFILE,
-    "empty_replay_material": _close_out.RESULT_EMPTY_REPLAY_MATERIAL,
-    "not_better_than_champion": _close_out.RESULT_NOT_BETTER,
-    "champion_not_promoted": _close_out.RESULT_CHAMPION_NOT_PROMOTED,
-}
-
-# The one exception class meaning the store rejected the bundle, rather than
-# that we never reached the store at all.
-_REMOTE_VALIDATION_ERROR = "RemoteRecipeValidationError"
-
-
 #: Explore outcomes the journal collapses into a plain revert.
 _MEASURED_LOSS_OUTCOMES: frozenset[str] = frozenset({OUTCOME_REVERT, "FAILED"})
 
-
-#: Recipe fields an amend carries forward when the caller does not override
-#: them, each with the empty value ``put_recipe`` falls back to.
-PRESERVED_RECIPE_FIELDS: Mapping[str, Any] = MappingProxyType(
-    {
-        "best_config": {},
-        "best_throughput": 0.0,
-        "what_worked": [],
-        "what_failed": [],
-        "remaining_gaps": [],
-        "last_profiled": "",
-        "stack_fingerprint": {},
-        "sessions": [],
-        "authority": "EXPERIENTIAL",
-        "confidence": 0.85,
-        "evidence_refs": [],
-    }
-)
-
-#: Row keys ``put_recipe`` owns; everything else on a live row is a session
-#: extra and survives the amend untouched.
-_RECIPE_OWNED_KEYS: frozenset[str] = frozenset(PRESERVED_RECIPE_FIELDS) | frozenset(
-    {
-        "canonical_id",
-        "version",
-        "created_at",
-        "updated_at",
-        "model",
-        "hardware",
-        "framework",
-        "framework_name",
-        "framework_version",
-        "precision",
-        "pitfalls",
-        "lessons",
-        "provenance",
-    }
-)
 
 #: Per-variant measurement detail the journal row carries beyond the headline
 #: gain and throughput.
@@ -142,19 +91,6 @@ class FactRecord:
     variant_name: str | None = None
 
 
-@dataclass(frozen=True)
-class RemoteRecipeAudit:
-    """The outcome of one remote Recipe KB publish attempt, as an audit row records it."""
-
-    status: str
-    canonical_id: str
-    session_id: str
-    primary_metric: str = ""
-    primary_value: float = 0.0
-    reason: str = ""
-    error: Exception | None = None
-
-
 class _FrameworkIdentity(NamedTuple):
     name: str
     version: str
@@ -165,23 +101,6 @@ class _VariantMeasurement(NamedTuple):
     gain_pct: float | None
     throughput_after: float | None
     detail: dict[str, Any]
-
-
-def _remote_result_type(status: str, reason: str) -> str:
-    """The ``close_out.RESULT_*`` code for a remote KB Store write result.
-
-    ``status`` is consulted only when the store's own reason token is
-    unrecognized.
-    """
-    known = _REMOTE_RESULT_TYPES.get(str(reason or "").strip())
-    if known:
-        return known
-    verdict = str(status or "").strip().lower()
-    if verdict == "written":
-        return _close_out.RESULT_WRITTEN
-    if verdict in {"skipped", "disabled"}:
-        return _close_out.RESULT_SKIPPED_OTHER
-    return _close_out.RESULT_TRANSPORT_FAILED
 
 
 def _predicted_gain(*sources: dict[str, Any] | None) -> float | None:
@@ -197,10 +116,6 @@ def _predicted_gain(*sources: dict[str, Any] | None) -> float | None:
         if val is not None and val != 0.0:
             return val
     return None
-
-
-def _extra_server_args(payload: Mapping[str, Any]) -> str:
-    return " ".join(to_str_list(payload.get("extra_server_args")))
 
 
 def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any]) -> None:
@@ -239,50 +154,6 @@ def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any])
         empty=not measured,
         workspace=str(result_dict.get("workspace") or ""),
     )
-
-
-def rows_not_superseded(live_rows: Any, superseding: Any, *keys: str) -> list[dict[str, Any]]:
-    def identity(row: Mapping[str, Any]) -> tuple[str, ...]:
-        return tuple(str(row.get(key) or "") for key in keys)
-
-    claimed = {identity(row) for row in superseding or [] if isinstance(row, dict)}
-    return [dict(row) for row in live_rows or [] if isinstance(row, dict) and identity(row) not in claimed]
-
-
-def appended(live_facts: Any, addition: Mapping[str, Any] | None) -> list[Any]:
-    facts = list(live_facts or [])
-    if addition is not None:
-        facts.append(addition)
-    return facts
-
-
-def amended_recipe_fields(live: Mapping[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
-    # An absent or empty live value falls back to the field's own default, so
-    # ``put_recipe`` never sees ``None`` where it declares a container.
-    merged: dict[str, Any] = {}
-    for field, default in PRESERVED_RECIPE_FIELDS.items():
-        if field in overrides:
-            merged[field] = overrides[field]
-            continue
-        live_value = live.get(field)
-        merged[field] = type(default)(live_value) if live_value else copy(default)
-    return merged
-
-
-def amended_recipe_extras(live: Mapping[str, Any], overrides: Mapping[str, Any], state: Any) -> dict[str, Any]:
-    # The architecture tags are re-stamped from config.json each time because a
-    # row written before the architecture was read carries none.
-    extras = {key: value for key, value in live.items() if key not in _RECIPE_OWNED_KEYS}
-    extras.update(overrides.get("extras") or {})
-    architectures = state.model_architectures or []
-    if isinstance(architectures, list):
-        named = [str(name).strip() for name in architectures if str(name or "").strip()]
-        if named:
-            extras["architectures"] = named
-    model_type = str(state.model_type or "").strip()
-    if model_type:
-        extras["model_type"] = model_type
-    return extras
 
 
 def _framework_identity(state: Any) -> _FrameworkIdentity:
@@ -539,7 +410,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         try:
             if lesson is not None:
                 live = self.read_local_recipe_row()
-                recipe_overrides = self.kb_best_config_overrides_for_keep(
+                recipe_overrides = kb_best_config_overrides_for_keep(
                     live=live,
                     best_config_candidate=fact.best_config_candidate,
                     throughput_after=fact.throughput_after,
@@ -621,7 +492,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 change=change,
                 gain_pct=gain_pct,
                 throughput_after=throughput_after,
-                best_config_candidate=self.extract_kept_best_config(
+                best_config_candidate=extract_kept_best_config(
                     task=task,
                     result_dict=result_dict,
                 ),
@@ -739,7 +610,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 change=change,
                 gain_pct=measurement.gain_pct,
                 throughput_after=measurement.throughput_after,
-                best_config_candidate=self.extract_kept_best_config(
+                best_config_candidate=extract_kept_best_config(
                     task=task,
                     variant_attrs=change_attrs,
                 ),
@@ -753,61 +624,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 variant_name=variant_name,
             )
         )
-
-    def _record_remote_recipe_audit(self, source: str, audit: RemoteRecipeAudit) -> None:
-        """Append one best-effort, secret-free KB Store publish audit row."""
-        try:
-            from .remote_recipe.audit import publish_error_fields
-            from hyperloom.inference_optimizer.session.session_paths import (
-                recipe_snapshot_audit_jsonl,
-            )
-
-            row: dict[str, Any] = {
-                "ts": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
-                "op": "write",
-                "method": "write",
-                "mode": "remote",
-                "backend": "kb-store",
-                "remote": "kb-store",
-                "resolution": audit.status,
-                "success": audit.status in {"written", "skipped"},
-                "generator": source,
-                "phase": "CLOSE",
-                "status": audit.status,
-                "reason": audit.reason,
-                "request": {
-                    "canonical_id": audit.canonical_id or None,
-                    "session_id": audit.session_id or None,
-                },
-                "result": {
-                    "canonical_id": audit.canonical_id,
-                    "session_id": audit.session_id,
-                    "created": audit.status == "written",
-                },
-                "provenance": {
-                    "component": "remote_recipe",
-                    "source": source,
-                },
-            }
-            if audit.primary_metric:
-                row["result"].update(
-                    {
-                        "primary_metric": audit.primary_metric,
-                        "primary_value": audit.primary_value,
-                    }
-                )
-            if audit.primary_metric == "optimized_throughput":
-                row["result"]["best_throughput"] = audit.primary_value
-            if audit.error is not None:
-                row["error"] = publish_error_fields(audit.error)
-            append_jsonl(
-                recipe_snapshot_audit_jsonl(self.session_dir),
-                row,
-                make_parents=True,
-                fmt=JsonLineFormat(sort_keys=True),
-            )
-        except OSError:
-            log.debug("Remote Recipe KB audit append failed", exc_info=True)
 
     def ensure_recipe_finalized(
         self,
@@ -998,14 +814,10 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             canonical_id = self.workload_canonical_id()
             written = write_final_remote_recipe(state, canonical_id, session_id, client=RemoteRecipeClient.from_env())
         except (KBStoreError, OSError, ValueError) as exc:
-            self._record_remote_recipe_audit(
+            record_remote_recipe_audit(
+                self.session_dir,
                 source,
-                RemoteRecipeAudit(
-                    status="error",
-                    canonical_id=canonical_id,
-                    session_id=session_id,
-                    error=exc,
-                ),
+                RemoteRecipeAudit(status="error", canonical_id=canonical_id, session_id=session_id, error=exc),
             )
             log.exception("Remote Recipe KB finalize failed (non-fatal)")
             return {
@@ -1015,7 +827,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     backend="kb-store",
                     result_type=(
                         _close_out.RESULT_BUNDLE_BUILD_FAILED
-                        if type(exc).__name__ == _REMOTE_VALIDATION_ERROR
+                        if type(exc).__name__ == REMOTE_VALIDATION_ERROR
                         else _close_out.RESULT_TRANSPORT_FAILED
                     ),
                 ),
@@ -1029,7 +841,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             canonical_id,
             written.session_id,
         )
-        self._record_remote_recipe_audit(
+        record_remote_recipe_audit(
+            self.session_dir,
             source,
             RemoteRecipeAudit(
                 status=written.status,
@@ -1045,7 +858,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 status=written.status,
                 reason=written.reason,
                 backend="kb-store",
-                result_type=_remote_result_type(written.status, written.reason),
+                result_type=remote_result_type(written.status, written.reason),
             ),
             "canonical_id": str(getattr(written, "canonical_id", "") or canonical_id),
             "session_id": str(getattr(written, "session_id", "") or session_id),
@@ -1152,65 +965,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         row = self.recipe_kb.get_authoritative_recipe(canonical_id=self.workload_canonical_id()) or {}
         self._local_recipe_cache = (tick, row)
         return row
-
-    @staticmethod
-    def extract_kept_best_config(
-        *,
-        task: "Task",
-        variant_attrs: dict[str, Any] | None = None,
-        result_dict: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Build a replayable ``best_config`` from a KEEP'd task or explore variant."""
-        params = task.params if isinstance(getattr(task, "params", None), dict) else {}
-        attrs = variant_attrs if isinstance(variant_attrs, dict) else {}
-
-        args = _extra_server_args(attrs)
-        if not args.strip():
-            args = _extra_server_args(params)
-        if not args.strip() and isinstance(result_dict, dict):
-            args = _extra_server_args(result_dict)
-
-        envs_raw = attrs.get("extra_envs") or params.get("extra_envs") or {}
-        if not envs_raw and isinstance(result_dict, dict):
-            envs_raw = result_dict.get("extra_envs") or {}
-        envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
-
-        if not args.strip() and not envs:
-            return {}
-
-        best_config: dict[str, Any] = {}
-        if args.strip():
-            best_config["extra_server_args"] = args.strip()
-        if envs:
-            best_config["extra_envs"] = envs
-        return best_config
-
-    @staticmethod
-    def kb_best_config_overrides_for_keep(
-        *,
-        live: Mapping[str, Any],
-        best_config_candidate: Mapping[str, Any],
-        throughput_after: float | None,
-    ) -> dict[str, Any]:
-        """Decide whether a KEEP amend should also stamp ``best_config`` on the recipe row."""
-        if not best_config_candidate:
-            return {}
-
-        live_bc = live.get("best_config") if isinstance(live.get("best_config"), Mapping) else {}
-        live_has_config = bool(
-            _extra_server_args(live_bc).strip()
-            or (isinstance(live_bc.get("extra_envs"), Mapping) and live_bc.get("extra_envs"))
-        )
-        live_tput = recorded_float(live.get("best_throughput"))
-        new_tput = recorded_float(throughput_after)
-        if not live_has_config or (new_tput > 0.0 and new_tput >= live_tput):
-            overrides: dict[str, Any] = {
-                "best_config": dict(best_config_candidate),
-            }
-            if new_tput > 0.0:
-                overrides["best_throughput"] = new_tput
-            return overrides
-        return {}
 
     def kb_amend_recipe(
         self,

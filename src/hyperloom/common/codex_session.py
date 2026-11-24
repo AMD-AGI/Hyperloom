@@ -122,7 +122,7 @@ def _effective_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
 def load_codex_sdk() -> Any:
     """Import ``openai_codex`` lazily and return the module."""
     try:
-        import openai_codex  # type: ignore[import-not-found]
+        import openai_codex
     except ImportError as exc:
         raise CodexSessionUnavailableError(
             "openai_codex is not installed; install the Codex SDK "

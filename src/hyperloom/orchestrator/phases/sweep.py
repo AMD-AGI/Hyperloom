@@ -12,6 +12,8 @@ from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec
 from ..state.orchestration_memory import CYCLE_DIRECTIVE_REQUEST, build_cycle_memory
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
+from . import phase_transitions
+from hyperloom.inference_optimizer.framework_registry import is_scriptable
 
 if TYPE_CHECKING:
     from .machine import Transition
@@ -53,7 +55,7 @@ class SweepPhase(CoordinatorCollaborator):
             or state.orchestration_memory.get("for_cycle") == state.macro_cycle
         ):
             return
-        feasible, _ = _phase_state.cycle_reloop_decision(state)
+        feasible, _ = phase_transitions.cycle_reloop_decision(state)
         if not feasible:
             return
         replies: list[Any] = []
@@ -90,6 +92,8 @@ class SweepPhase(CoordinatorCollaborator):
             await self._coord.phase_kernel_stack.drain_pending_keep_integrates()
         # Validate the stack for positive NEEDS_REVIEW kernels.
         await self._coord.phase_kernel_stack.maybe_validate_positive_needs_review_stack()
+        if self._skip_conc_sweep_for_non_serving_workload(from_phase):
+            return
         if not state.conc_sweep_enabled:
             log.info(
                 "SWEEP entry (from=%s): conc_sweep disabled; recording terminal skip.",
@@ -137,6 +141,24 @@ class SweepPhase(CoordinatorCollaborator):
             # Verbatim: None records "the workload picks", which is not the same statement as an empty ladder.
             auto_conc_sweep_concs=task.params.get("concs"),
         )
+
+    def _skip_conc_sweep_for_non_serving_workload(self, from_phase: str) -> bool:
+        """Record a terminal skip for a workload with no request concurrency; True when skipped."""
+        framework = self.shared_state.framework
+        if not is_scriptable(framework):
+            return False
+        # One forward pass of the operator's own script: every rung would measure the same thing.
+        log.info(
+            "SWEEP entry (from=%s): %s is a non-serving workload; recording terminal skip.",
+            from_phase or "<unknown>",
+            framework,
+        )
+        self._record_terminal_conc_sweep(
+            "skipped",
+            "non_serving_workload",
+            auto_conc_sweep_skipped="non_serving_workload",
+        )
+        return True
 
     def _skip_conc_sweep_without_new_gain(self, from_phase: str) -> bool:
         """Record a terminal skip when no validated gain landed since the last ``conc_sweep``; True when skipped."""
@@ -248,7 +270,7 @@ class SweepPhase(CoordinatorCollaborator):
     def _grant_conc_sweep(self, task: Task, *, was_existing: bool, budget: int | None) -> None:
         """Grant the phase's budget exits' deferral to the sweep it is waiting on."""
         state = self.shared_state
-        now_unix = _phase_state._now_unix(state)
+        now_unix = _phase_state.state_now_unix(state)
         if not was_existing and budget is not None and budget > 0:
             # The phase granted this budget, so its own budget exits must not cut the sweep short of it: they defer
             # until the grant (and the lease grace that bounds the task anyway) runs out.

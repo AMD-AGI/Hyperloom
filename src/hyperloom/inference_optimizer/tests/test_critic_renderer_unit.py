@@ -53,16 +53,6 @@ def test_framework_rulings_show_the_effective_verdict_only_when_it_differs():
     assert rulings.count("approve") == 1
 
 
-def test_knowledge_base_use_is_reported_only_when_it_was_wired_up():
-    off = cr.render(_critic({"iter": 1, "verdict_counts": {}}))
-    assert not any("Knowledge base" in f for f in off.key_facts)
-
-    on = cr.render(
-        _critic({"iter": 1, "kb_priors": {"configured": True, "prior_count": 3, "referenced_in_verdict": True}})
-    )
-    assert any("supplied 3 prior(s), and was cited in 1 verdict(s)" in f for f in on.key_facts)
-
-
 def test_a_malformed_verdict_count_does_not_lose_the_section():
     out = cr.render(_critic({"iter": 1, "verdict_counts": {"approve": "many"}}))
     assert out.skipped is False

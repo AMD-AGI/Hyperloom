@@ -107,6 +107,7 @@ _SGL_CAPACITY_GB = "sglang:kv_cache_memory_usage_gb"
 # and carries a ``pid`` label; the two names differ by one word and reading the wrong one turns 48 retracts into 1.
 _SGL_RETRACT_TOTAL = "sglang:num_retracted_requests_total"
 _SGL_CACHED_TOKENS = "sglang:cached_tokens_total"
+_SGL_PROMPT_TOKENS = "sglang:prompt_tokens_total"
 
 # Occupancy, vLLM. ``gpu_cache_usage_perc`` is the pre-rename spelling, kept so an older image still reports.
 _VLLM_USAGE = ("vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc")
@@ -208,10 +209,10 @@ def families_from_aiperf_record(metrics: Any) -> ParsedFamilies:
             )
     # aiperf names a counter by its Prometheus *family*, which drops the ``_total`` the exposition writes on the sample
     # itself: the text carries ``vllm:num_preemptions_total`` and the export says ``vllm:num_preemptions``. Every
-    # cumulative counter this module reads is spelled the exposition way, so without the alias all three -- preemptions,
-    # SGLang retractions, cached tokens -- come back empty on this path, and an empty counter is indistinguishable from
-    # a round that never retracted. Aliasing here rather than widening every constant keeps one spelling in the lookups
-    # and confines the difference to the source that has it. The lists are shared, not copied.
+    # cumulative counter this module reads is spelled the exposition way, so without the alias all four --
+    # preemptions, SGLang retractions, cached and prompt tokens -- come back empty on this path, and an empty counter is
+    # indistinguishable from a round that never retracted. Aliasing here rather than widening every constant keeps one
+    # spelling in the lookups and confines the difference to the source that has it. The lists are shared, not copied.
     for name, samples in list(families.items()):
         if not name.endswith("_total"):
             families.setdefault(f"{name}_total", samples)
@@ -418,7 +419,7 @@ def aggregate_series(grouped: dict[str, dict[str, float]]) -> float | None:
 
 
 #: Each engine's gauge of the requests in its running batch.
-RUNNING_REQUEST_GAUGES = ("sglang:num_running_reqs", "vllm:num_requests_running")
+RUNNING_REQUEST_GAUGES = ("sglang:num_running_reqs", "vllm:num_requests_running", "atom:requests_running")
 
 
 def running_requests(families: ParsedFamilies) -> float | None:
@@ -469,7 +470,7 @@ class KvSample:
 
     ts: float  # wall clock, for lining up with externally collected data
     mono: float  # monotonic clock, for intervals within the run
-    engine: str = ""  # "sglang", "vllm", or "" when unrecognised
+    engine: str = ""  # "sglang", "vllm", "atom", or "" when unrecognised
     active_pool_usage: float | None = None
     physical_pool_usage: float | None = None  # SGLang only; vLLM cannot express it
     used_tokens: float | None = None
@@ -493,6 +494,8 @@ class KvSample:
     prefix_cache_hits: dict[str, dict[str, float]] = field(default_factory=dict)  # vLLM
     # SGLang. Empty when prefix caching is off -- the metric is not emitted at all, rather than emitted as zero.
     cached_tokens_total: dict[str, dict[str, float]] = field(default_factory=dict)
+    # SGLang. Every prompt token of a request, cached or computed: what ``cached_tokens_total`` is a share of.
+    prompt_tokens_total: dict[str, dict[str, float]] = field(default_factory=dict)
 
     def has_readings(self) -> bool:
         """Whether this scrape carried any KV signal at all.
@@ -517,6 +520,7 @@ class KvSample:
             or self.prefix_cache_queries
             or self.prefix_cache_hits
             or self.cached_tokens_total
+            or self.prompt_tokens_total
         )
 
 
@@ -536,6 +540,8 @@ def _detect_engine(families: ParsedFamilies) -> str:
             return "sglang"
         if name.startswith("vllm:"):
             return "vllm"
+        if name.startswith("atom:"):
+            return "atom"
     return ""
 
 
@@ -615,6 +621,7 @@ def sample_from_families(
         prefix_cache_queries=_series(families, _VLLM_PREFIX_QUERIES),
         prefix_cache_hits=_series(families, _VLLM_PREFIX_HITS),
         cached_tokens_total=_series(families, _SGL_CACHED_TOKENS),
+        prompt_tokens_total=_series(families, _SGL_PROMPT_TOKENS),
     )
 
 

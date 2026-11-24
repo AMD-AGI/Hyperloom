@@ -402,7 +402,7 @@ def _add_model_context_arguments(opt: argparse.ArgumentParser) -> None:
             "Categorical model-class key. It is the deterministic key for "
             "several consumers: the atom explore seed grid "
             "(action_executors/explore.py), the framework-agent gap search "
-            "token (action_executors/_framework_gap_composer.py), the recipe "
+            "token (action_executors/framework_change/_framework_gap_composer.py), the recipe "
             "key, and the orchestration prompt label. Recognised values "
             "(case-insensitive, with -/+/space tolerated): dense / moe_mla / "
             "moe_swa / moe_mla_nsa. When unset, Coordinator boot infers and "

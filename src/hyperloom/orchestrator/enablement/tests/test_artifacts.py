@@ -32,7 +32,7 @@ from hyperloom.orchestrator.enablement.artifacts import (
     write_setting_script,
 )
 from hyperloom.orchestrator.specialists.patch_safety import vet_patches
-from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSubprocessDispatcher
+from hyperloom.orchestrator.specialists import subprocess_harvest
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 
@@ -298,7 +298,7 @@ def _collected_and_vetted_round(tmp_path, target, before, after):
         )
     )
     patch = Path(_patch(worktree, "patches/manual.patch", diff))
-    collected, _roots = SpecialistSubprocessDispatcher._collect_patches(worktree, workspace, worktree, pinned=None)
+    collected, _roots = subprocess_harvest.collect_patches(worktree, workspace, worktree, pinned=None)
     assert collected == [str(patch)]
     kept, dropped, _grounding, _spans_roots = vet_patches(collected, base_checkout=worktree)
     payload = {"patches_written": kept, "setup_commands": ["pip install local-runtime==1.0"]}

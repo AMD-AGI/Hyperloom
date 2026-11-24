@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from ..actions.executors._grid_runner import GridVariant, VariantResult
+from ..actions.executors.grid._grid_runner import GridVariant, VariantResult
 from ..actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     STOPPED_BY_THE_RUN,

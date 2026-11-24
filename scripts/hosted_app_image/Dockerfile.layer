@@ -24,6 +24,15 @@
 #
 # start.sh makes the specialist account only where it runs as root, the image has setpriv (util-linux) and the
 # account can be switched to; elsewhere the specialists run under bin/bwrap, which needs neither.
+#
+# Where the container's root mount is unbindable (apptainer) and start.sh cannot make it private (no CAP_SYS_ADMIN,
+# or a start that is not root), bubblewrap runs only under bin/unshare beside it, never an unshare from the image's
+# PATH: as root under `unshare --mount`, as any other uid under `unshare --user --map-current-user --mount
+# --propagation private`. That needs a static unshare (util-linux) at /layer/bin/unshare whose --help lists --user,
+# --map-current-user, --mount and --propagation (the probe reads the options, never the version; 2.37.2 lists them),
+# which this image does not build: a deployment there adds one to the layer directory, or the specialists are refused.
+# The sandbox's /dev is a tmpfs with each standard node the container has bound into it, never bwrap's --dev, which
+# fails where the container's /dev lacks one (apptainer --containall has no /dev/full).
 ARG BWRAP_BUILD_IMAGE=alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4
 ARG BASE_IMAGE=busybox:1.37
 

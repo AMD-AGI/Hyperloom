@@ -140,6 +140,14 @@ def test_a_sheet_carries_the_silence_timeout_and_the_deadline_it_was_given(tmp_p
     assert (procedure.timeout_sec, procedure.silence_timeout_sec, procedure.deadline_unix) == (90.0, 30.0, 1234.0)
 
 
+def test_the_sheet_carries_the_boot_budget_it_was_given_and_none_otherwise(tmp_path):
+    given = _procedure(tmp_path, boot_budget_sec=5400)
+
+    assert given.boot_budget_sec == 5400.0 and given.to_document()["boot_budget_sec"] == 5400.0
+    assert _procedure(tmp_path).boot_budget_sec is None
+    assert "boot_budget_sec" not in _procedure(tmp_path).to_document(), "a sheet without one reads as it always did"
+
+
 def test_the_sheet_holds_the_measured_round_to_the_checkpoint_it_was_given_and_to_none_otherwise(tmp_path):
     plan = CheckpointPlan(50.0, EarlyStopMode.ENFORCE)
 

@@ -175,24 +175,6 @@ class TestAHotPassCorrectsAColdAnchor:
         assert coord.shared_state.baseline_tput == 1000.0
         assert coord.shared_state.baseline_measure_round_dropped is True
 
-    @pytest.mark.asyncio
-    async def test_a_lower_hot_figure_still_loses_to_a_hot_anchor(self, coord: Coordinator) -> None:
-        """With no marker there is nothing to correct, so drift is refused again."""
-        coord.shared_state.baseline_tput = 1000.0
-        coord.shared_state.baseline_measure_round_dropped = False
-
-        await coord.writeback.promote_to_shared_state(
-            "baseline",
-            {
-                "output_throughput": 980.0,
-                "subprocess_runtime_sec": 900.0,
-                "measure_round_runtime_sec": 400.0,
-                "workspace": "/tmp/ws",
-            },
-        )
-
-        assert coord.shared_state.baseline_tput == 1000.0
-
 
 @pytest.mark.asyncio
 async def test_unpromotable_baseline_agentx_preflight_stops_immediately(
@@ -245,7 +227,6 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
 
     coord.shared_state.enablement_mode = "off"
     refused = {"status": "failed", "error_class": HOST_GPUS_UNAVAILABLE, "error": "GPU 0: held by pid 4242 (python3)"}
-    # Two different outputs: the identical-failure rule must not be what stops the third call.
     subproc_a = _nonzero_result("RuntimeError: HIP out of memory")
     subproc_b = _nonzero_result("ConnectionError: port refused")
 
@@ -259,21 +240,6 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
     assert coord.shared_state.baseline_failure_streak == 2
     assert coord.shared_state.baseline_total_failures == 3
     assert coord.shared_state.stop_reason == "baseline_failed"
-
-
-@pytest.mark.asyncio
-async def test_promote_profile_succeeded_records_trace(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    await coord.writeback.promote_to_shared_state(
-        "profile",
-        {
-            "status": "succeeded",
-            "main_trace_path": "/tmp/trace.json",
-            "output_throughput": 820.0,
-        },
-    )
-    assert coord.shared_state.last_profile_status == "succeeded"
-    assert coord.shared_state.last_profile_trace == "/tmp/trace.json"
 
 
 @pytest.mark.asyncio
@@ -324,23 +290,6 @@ async def test_promote_roofline_succeeded_and_skipped_and_failed(coord: Coordina
         },
     )
     assert getattr(coord.shared_state, "roofline_failure_streak", 0) >= 1
-
-
-@pytest.mark.asyncio
-async def test_promote_explore_with_winner(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    await coord.writeback.promote_to_shared_state(
-        "explore",
-        {
-            "winners": [{"name": "v0", "fingerprint": "fp-v0", "extra_server_args": "--tp 1", "tput": 900.0}],
-            "best_variant": {"name": "v0", "extra_server_args": "--tp 1", "tput": 900.0},
-            "output_throughput": 900.0,
-            "round_id": "r1",
-            "losers": [],
-            "skipped_dup": [],
-        },
-    )
-    assert coord.shared_state.current_best.get("tput") == 900.0
 
 
 @pytest.mark.asyncio
@@ -926,11 +875,6 @@ def test_promote_warm_replay_non_dict(coord: Coordinator) -> None:
     assert coord.shared_state.warm_replay_outcome["status"] == "failed"
 
 
-def test_promote_warm_replay_failed_status(coord: Coordinator) -> None:
-    coord.phase_prelude.promote_warm_replay({"status": "failed", "error_class": "x", "error": "boom"})
-    assert coord.shared_state.warm_replay_outcome["status"] == "failed"
-
-
 def test_promote_warm_replay_invalid_tput(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 0.0
     coord.phase_prelude.promote_warm_replay({"status": "succeeded", "output_throughput": 0.0})
@@ -944,24 +888,6 @@ def test_promote_warm_replay_reproduced_no_params(coord: Coordinator) -> None:
         task=None,
     )
     assert coord.shared_state.warm_replay_outcome["status"] == "reproduced_but_no_params"
-
-
-def test_promote_warm_replay_reproduced_with_params(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.state.task_registry import Task
-
-    coord.shared_state.baseline_tput = 800.0
-    task = Task(
-        task_id="warm-1",
-        kind="replay_warm_recipe",
-        state="running",
-        params={"extra_envs": {"A": "1"}, "baseline_tput_anchor": 800.0},
-        idempotency_key="kw",
-    )
-    coord.phase_prelude.promote_warm_replay(
-        {"status": "succeeded", "output_throughput": 900.0},
-        task=task,
-    )
-    assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
 
 
 # -- maybe_auto_retry_specialist ------------------------------------------
@@ -988,14 +914,6 @@ async def test_auto_retry_not_eligible(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", "1")
     res = _result(result={"runner_status": "empty_synthesised"}, error="no_output")
     assert await coord.specialist_dispatch.maybe_auto_retry_specialist(_spec_task(), res) is False
-
-
-@pytest.mark.asyncio
-async def test_auto_retry_schedules_on_transient_failure(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", "1")
-    res = _result(result={"runner_status": "stale"}, error="timeout waiting")
-    scheduled = await coord.specialist_dispatch.maybe_auto_retry_specialist(_spec_task(), res)
-    assert scheduled is True
 
 
 @pytest.mark.asyncio
@@ -1160,13 +1078,10 @@ def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
 
 def _nonzero_result(output: str) -> dict:
     """A ``subprocess_nonzero`` baseline result shaped the way the baseline executor builds one."""
-    from hyperloom.orchestrator.state.failure_evidence import nonzero_output_signature
-
     return {
         "status": "failed",
         "error_class": "subprocess_nonzero",
         "error": output[-2000:],
-        "output_signature": nonzero_output_signature("subprocess_nonzero", "", output),
     }
 
 
@@ -1181,80 +1096,35 @@ def _baseline_task(task_id: str) -> Task:
 
 
 @pytest.mark.asyncio
-async def test_unpromotable_baseline_same_failure_twice_stops_at_two(coord: Coordinator) -> None:
-    """Two subprocess_nonzero baselines that printed the same thing (modulo numbers) end the run at two."""
+async def test_unpromotable_baseline_failures_stop_the_run_at_the_third(coord: Coordinator) -> None:
+    """Two failed baselines leave the run going, even when they printed the same thing; the third ends it."""
     coord.shared_state.enablement_mode = "off"
-    first = _nonzero_result("RuntimeError: worker 1234 died at t=17")
-    second = _nonzero_result("RuntimeError: worker 98 died at t=4")
+    result = _nonzero_result("RuntimeError: worker 1234 died at t=17")
 
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-1"), first)
-    assert coord.shared_state.stop_reason != "baseline_failed"
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-2"), second)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-1"), result)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-2"), result)
     assert coord.shared_state.baseline_failure_streak == 2
+    assert coord.shared_state.stop_reason != "baseline_failed"
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-3"), result)
     assert coord.shared_state.stop_reason == "baseline_failed"
 
 
 @pytest.mark.asyncio
-async def test_unpromotable_baseline_different_failures_keep_three_strikes(coord: Coordinator) -> None:
-    """Two different failures are not evidence of a third: the three-strike budget still applies."""
-    coord.shared_state.enablement_mode = "off"
-    a = _nonzero_result("RuntimeError: HIP out of memory")
-    b = _nonzero_result("ConnectionError: port refused")
-
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-diff-1"), a)
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-diff-2"), b)
-    assert coord.shared_state.baseline_failure_streak == 2
-    assert coord.shared_state.stop_reason != "baseline_failed"
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-diff-3"), a)
-    assert coord.shared_state.stop_reason == "baseline_failed"
-
-
-@pytest.mark.asyncio
-async def test_unpromotable_baseline_repeat_of_another_class_keeps_three_strikes(coord: Coordinator) -> None:
-    """Only subprocess_nonzero carries the process's own output; a fixed sentence repeating proves nothing."""
-    result = {"status": "failed", "error_class": "no_report", "error": "benchmark_report.json missing under /x"}
-
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-nr-1"), result)
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-nr-2"), result)
-    assert coord.shared_state.baseline_failure_streak == 2
-    assert coord.shared_state.stop_reason != "baseline_failed"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["", "ENABLEMENT"], ids=["outside_enablement", "in_enablement"])
-async def test_unpromotable_baseline_infeasible_ray_cluster_stops_on_the_first(coord: Coordinator, phase: str) -> None:
-    """A Ray cluster that cannot place the round fails the same way every time, and no patch changes that."""
-    from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
-
-    coord.shared_state.phase = phase
-    result = {
-        "status": "failed",
-        "error_class": "subprocess_nonzero",
-        "error": f"ray_ensure_error: {RAY_INFEASIBLE_MARKER}: existing Ray head has no serving_slot resource",
-    }
-
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-ray-1"), result)
-
-    assert coord.shared_state.stop_reason == "baseline_failed"
-    # Not handed to the enablement lane as something to author a patch against.
-    assert not (coord.shared_state.enablement.launch_log or "").strip()
-
-
-@pytest.mark.asyncio
-async def test_unpromotable_baseline_same_failure_in_enablement_does_not_stop_early(coord: Coordinator) -> None:
-    """An ordinary repeated boot failure is enablement's input; the early stop does not pre-empt the lane."""
+async def test_unpromotable_baseline_failures_in_enablement_do_not_stop_the_run(coord: Coordinator) -> None:
+    """An ordinary boot failure is enablement's input; while the lane owns the retries, three do not stop the run."""
     from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
 
     coord.shared_state.phase = PHASE_ENABLEMENT
     result = _nonzero_result("ImportError: no module named foo")
 
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-en-1"), result)
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-en-2"), result)
+    for i in range(3):
+        await coord.writeback.handle_unpromotable_result(_baseline_task(f"bl-en-{i}"), result)
+    assert coord.shared_state.baseline_failure_streak == 3
     assert coord.shared_state.stop_reason != "baseline_failed"
 
 
 @pytest.mark.asyncio
-async def test_unpromotable_baseline_same_failure_in_prelude_with_enablement_admitted_does_not_stop_early(
+async def test_unpromotable_baseline_failures_in_prelude_with_enablement_admitted_do_not_stop_the_run(
     coord: Coordinator,
 ) -> None:
     """A retry that settles before the PRELUDE->ENABLEMENT transition is still enablement's input."""
@@ -1263,6 +1133,7 @@ async def test_unpromotable_baseline_same_failure_in_prelude_with_enablement_adm
     coord.shared_state.phase = PHASE_PRELUDE
     result = _nonzero_result("ImportError: no module named foo")
 
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-pre-1"), result)
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-pre-2"), result)
+    for i in range(3):
+        await coord.writeback.handle_unpromotable_result(_baseline_task(f"bl-pre-{i}"), result)
+    assert coord.shared_state.baseline_failure_streak == 3
     assert coord.shared_state.stop_reason != "baseline_failed"

@@ -10,7 +10,7 @@ SEARCH_MODE_EXPLOIT = "EXPLOIT"
 SEARCH_MODE_DIVERSIFY = "DIVERSIFY"
 SEARCH_MODES = frozenset({SEARCH_MODE_EXPLOIT, SEARCH_MODE_DIVERSIFY})
 
-OBJECTIVE_IMMEDIATE_CANONICAL_GAIN = "IMMEDIATE_CANONICAL_GAIN"
+OBJECTIVE_CANONICAL_GAIN = "CANONICAL_GAIN"
 OBJECTIVE_DISCOVER_NEW_MECHANISM = "DISCOVER_NEW_MECHANISM"
 
 # One empty diff can be a session that honestly found nothing worth changing.
@@ -28,6 +28,27 @@ MARGINAL_GAIN_WINDOW = 6
 
 # How many recent outcomes are scanned to fill that window.
 MARGINAL_GAIN_SCAN_WINDOW = 16
+
+
+@dataclass(frozen=True)
+class StallThresholds:
+    """Iterations without a new best before the search changes direction, and before the Supervisor reviews it."""
+
+    diversify_after: int
+    supervise_after: int
+
+
+# A planned round spreads one plan over the iterations that measure its lanes, so several of them pass before the
+# plan itself has been judged.
+PLANNED_ROUND_STALL = StallThresholds(diversify_after=3, supervise_after=3)
+# A session that chose its own direction is a whole round: one that ends without a new best is a direction that did
+# not pay, and a second in a row is a search that needs another view.
+SELF_DIRECTED_STALL = StallThresholds(diversify_after=1, supervise_after=2)
+
+
+def stall_thresholds(*, planned_rounds: bool) -> StallThresholds:
+    """The thresholds for a loop that plans its rounds, or for one whose sessions choose their own direction."""
+    return PLANNED_ROUND_STALL if planned_rounds else SELF_DIRECTED_STALL
 
 
 @dataclass(frozen=True)
@@ -73,10 +94,16 @@ class SearchPolicyEngine:
         state: SearchState,
         *,
         stall_threshold: int,
+        diversify_after: int | None = None,
         recent: RecentProgress = RecentProgress(),
     ) -> SearchPolicyDecision:
-        """Return a deterministic mode with stable reason codes."""
+        """Return a deterministic mode with stable reason codes.
+
+        ``stall_threshold`` sizes the residence a published diversified plan is given; ``diversify_after`` is how
+        many iterations without a new best turn the search away from the current line, and defaults to it.
+        """
         threshold = max(1, int(stall_threshold))
+        diversify_at = threshold if diversify_after is None else max(1, int(diversify_after))
         residence = max(0, int(state.residence_iterations_remaining))
         empty_diffs = max(0, int(recent.consecutive_no_changes))
         window_gain_ratio = recent.window_gain_ratio
@@ -96,7 +123,7 @@ class SearchPolicyEngine:
         elif state.diversification_cycle_completed:
             mode = SEARCH_MODE_EXPLOIT
             reason = "DIVERSIFY_PLAN_CREATED"
-        elif state.no_improvement_iters >= threshold:
+        elif state.no_improvement_iters >= diversify_at:
             mode = SEARCH_MODE_DIVERSIFY
             reason = "NO_IMPROVEMENT_STALL"
         elif window_gain is not None and window_gain < MARGINAL_GAIN_FLOOR:
@@ -126,6 +153,6 @@ class SearchPolicyEngine:
         return SearchPolicyDecision(
             mode=mode,
             reason_codes=(reason,),
-            objective_kind=OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
+            objective_kind=OBJECTIVE_CANONICAL_GAIN,
             residence_iterations_remaining=next_residence,
         )

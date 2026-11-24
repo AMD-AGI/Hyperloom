@@ -11,11 +11,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-import yaml
 
 from hyperloom.common.launch_log_evidence import observed_server_config_from_log
-from hyperloom.orchestrator.actions.executors import _agentx_prefix_cache as pc
-from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
+from hyperloom.orchestrator.actions.executors.workload import _agentx_prefix_cache as pc
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -47,15 +45,24 @@ def _vllm(tmp_path: Path, non_default_args: str) -> dict[str, Any]:
     }
 
 
-def _atom(requested_server_args: str) -> dict[str, Any]:
+def _atom(tmp_path: Path, args: str) -> dict[str, Any]:
+    """A succeeded ATOM measurement whose round's launch.json records ``args`` above the base."""
+    from hyperloom.measure.tests.test_fake_gain import _agentx, _framework_launch, _suite_round
+
+    entrypoint = ("python3", "-m", "atom.entrypoints.openai_server")
+    groups: list[list[str]] = []
+    for token in args.split():
+        if token.startswith("--"):
+            groups.append([token])
+        else:
+            groups[-1].append(token)
+    launch = _framework_launch("atom", entrypoint, *(tuple(group) for group in groups))
     return {
         "status": "succeeded",
         "server_log_path": "",
-        "launch_evidence": {
-            "framework": "atom",
-            "observed_server_config": {},
-            "requested_server_args": requested_server_args,
-        },
+        "workspace": str(_suite_round(tmp_path, _agentx(), None, launch)),
+        # The config's server args carry only the layers above the frozen base; the check must not read them.
+        "launch_evidence": {"framework": "atom", "observed_server_config": {}, "requested_server_args": ""},
     }
 
 
@@ -94,32 +101,27 @@ def test_vllm(tmp_path, non_default_args, refused):
 
 
 @pytest.mark.parametrize(
-    ("requested_server_args", "refused"),
+    ("args", "refused"),
     [
-        ("", True),
-        ("--level 2 --kv_cache_dtype fp8", True),
-        ("--level 2 --enable_prefix_caching", False),
-        ("--enable-prefix-caching", False),
+        # ATOM caches prefixes unless the launch turns it off.
+        ("", False),
+        ("--level 2 --kv_cache_dtype fp8", False),
+        ("--enable_prefix_caching", False),
+        ("--no-enable_prefix_caching", True),
+        ("--level 2 --no-enable-prefix-caching", True),
+        # The engine keeps the last spelling of the switch.
+        ("--enable_prefix_caching --no-enable-prefix-caching", True),
+        ("--no-enable_prefix_caching --enable-prefix-caching", False),
     ],
 )
-def test_atom(requested_server_args, refused):
-    assert bool(pc.prefix_cache_off_evidence(_atom(requested_server_args))) is refused
+def test_atom_is_judged_on_the_argv_its_round_launched(tmp_path, args, refused):
+    assert bool(pc.prefix_cache_off_evidence(_atom(tmp_path, args))) is refused
 
 
-@pytest.mark.parametrize(
-    ("extra_atom_args", "refused"), [("--level 2", True), ("--level 2 --enable_prefix_caching", False)]
-)
-def test_atom_reads_the_server_args_the_materialized_config_launches_with(tmp_path, extra_atom_args, refused):
-    config = tmp_path / "benchmark.yaml"
-    config.write_text(
-        yaml.safe_dump(
-            {"benchmark": {"framework": "atom", "model": "m", "envs": {"EXTRA_ATOM_ARGS": extra_atom_args}}}
-        ),
-        encoding="utf-8",
-    )
-    evidence = build_launch_evidence(RequestedLaunch(config, "atom"), actual_server_log=None, slot=tmp_path)
-    measured = {"status": "succeeded", "server_log_path": "", "launch_evidence": evidence}
-    assert bool(pc.prefix_cache_off_evidence(measured)) is refused
+def test_an_atom_round_that_left_no_launch_is_left_alone(tmp_path):
+    measured = _atom(tmp_path, "--no-enable_prefix_caching")
+    measured["workspace"] = str(tmp_path / "elsewhere")
+    assert pc.prefix_cache_off_evidence(measured) == ""
 
 
 def test_an_unrecorded_launch_is_left_alone():
@@ -157,7 +159,7 @@ def _no_ambient_agentx(monkeypatch):
     [
         (lambda p: _sglang(True), "disable_radix_cache=True"),
         (lambda p: _vllm(p, "{'enable_prefix_caching': False}"), "enable_prefix_caching=False"),
-        (lambda p: _atom("--level 2"), "without --enable_prefix_caching"),
+        (lambda p: _atom(p, "--level 2 --no-enable_prefix_caching"), "with --no-enable_prefix_caching"),
     ],
 )
 def test_an_agentx_baseline_measured_with_the_cache_off_is_refused(tmp_path, build, says):

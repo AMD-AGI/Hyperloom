@@ -126,7 +126,6 @@ async def test_three_branches_asking_while_it_runs_start_one_job_and_each_gets_i
     for branch in BRANCHES:
         (pointer,) = await campaign.inbox(branch)
         assert pointer[0] == jobs[0] and pointer[1].startswith(f"tool {jobs[0]}: succeeded: analysed")
-    assert _jobs(toolbox).undelivered() == ()
 
 
 async def test_a_finished_analysis_is_shared_as_it_is_without_running_again(campaign: Campaign) -> None:

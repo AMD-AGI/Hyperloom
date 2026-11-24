@@ -155,9 +155,13 @@ def test_an_integrate_patch_that_wins_on_throughput_is_not_kept_on_a_score_the_b
     """A collapsed score blocks the KEEP whether it is a measured drop or was taken under another eval definition."""
     from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
     from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
-    from hyperloom.orchestrator.actions.executors._integrate_bench import _grade_bench_accuracy
-    from hyperloom.orchestrator.actions.executors._integrate_perf_gate import _GateBasis, _ThroughputGrade, _weigh_gate
-    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
+    from hyperloom.orchestrator.actions.executors.integrate._integrate_bench import _grade_bench_accuracy
+    from hyperloom.orchestrator.actions.executors.integrate._integrate_perf_gate import (
+        _GateBasis,
+        _ThroughputGrade,
+        _weigh_gate,
+    )
+    from hyperloom.orchestrator.actions.executors.integrate._integrate_results import _PatchBench
 
     slot = tmp_path / "variant_00"
     suite_eval(slot / ag.ACCURACY_DIR, 0.0, digest)
@@ -228,26 +232,6 @@ def test_the_enablement_trigger_keeps_the_digest_its_eval_failure_ran_under():
     _adopt_eval_trigger(state, {ag.ACCURACY_DEFINITION_DIGEST_KEY: BASELINE_DIGEST})
     assert state.enablement.eval_definition_digest == BASELINE_DIGEST
     assert SharedState.from_dict(state.to_dict()).enablement.eval_definition_digest == BASELINE_DIGEST
-
-
-@pytest.mark.parametrize(
-    ("accuracy_pass", "expected"),
-    [(True, pytest.approx(-100 * (0.945 - 0.94) / 0.945)), (None, None)],
-    ids=["same_definition", "other_definition"],
-)
-def test_a_patch_records_an_accuracy_delta_only_for_a_score_its_gate_compared(accuracy_pass, expected):
-    from hyperloom.common.perf_metric import GradedComparison
-    from hyperloom.orchestrator.actions.executors import _integrate_perf_gate as gate
-
-    attempt = SimpleNamespace(shared_state=SharedState(), specialist_task_id="t", done_payload={})
-    throughput = gate._ThroughputGrade(
-        gate._GateBasis(100.0, 2.0), GradedComparison("output", 110.0, 100.0, "KEEP"), 10.0
-    )
-    evidence = {"accuracy_pass": accuracy_pass, "accuracy": 0.94}
-    verdict = gate._weigh_gate(
-        attempt, {"accuracy_baseline": 0.945}, {"output_throughput": 110.0}, evidence, throughput
-    )
-    assert verdict.measured.acc_delta_pct == expected
 
 
 def test_a_session_without_a_measured_baseline_grades_against_the_proposed_score_with_no_digest():

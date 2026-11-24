@@ -10,31 +10,13 @@ import kernelforge.workflows.forge_loop.gate.insession_gate as gate_module
 import pytest
 from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement, GateScope
 from kernelforge.workflows.forge_loop.gate.insession_gate import InSessionGate
+from kernelforge.workflows.forge_loop.gate.insession_scope import _python_command_payloads
 from kernelforge.utils.git import GitError
+from kernelforge.tests.workflows.forge_loop.gate._gate_workspace import committed_task_workspace
 
 
 def _gate(tmp_path: Path) -> tuple[InSessionGate, Path]:
-    workspace = tmp_path / "ws"
-    scripts = workspace / "scripts"
-    source = workspace / "aiter" / "csrc"
-    scripts.mkdir(parents=True)
-    source.mkdir(parents=True)
-
-    (workspace / "config.yaml").write_text("task_type: image_kernel\n")
-    (workspace / "forge_driver.py").write_text("print('driver')\n")
-    (scripts / "task_runner.py").write_text("print('runner')\n")
-    kernel = source / "kernel.cu"
-    kernel.write_text("__global__ void kernel() {}\n")
-    # The gate diffs the session's edits against HEAD, so its workspace is a repo that has one.
-    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True, capture_output=True)
-    subprocess.run(["git", "add", "-A"], cwd=workspace, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "base"],
-        cwd=workspace,
-        check=True,
-        capture_output=True,
-    )
-
+    workspace, kernel = committed_task_workspace(tmp_path)
     gate = InSessionGate(
         GateMeasurement(driver_script=str(workspace / "forge_driver.py"), snr_threshold=30.0),
         GateScope(kernel_file=str(kernel), target_files=[str(kernel)]),
@@ -249,7 +231,7 @@ def test_python_c_payload_scanner_rejects_long_unterminated_quotes():
         "python -c '" + "\\&" * 10_000,
     )
 
-    assert all(not gate_module._python_command_payloads(command) for command in commands)
+    assert all(not _python_command_payloads(command) for command in commands)
 
 
 @pytest.mark.parametrize(
@@ -264,7 +246,7 @@ def test_python_c_payload_scanner_rejects_long_unterminated_quotes():
     ],
 )
 def test_python_c_payload_follows_the_options_before_it(command, payload):
-    found = [source for source, _start, _end in gate_module._python_command_payloads(command)]
+    found = [source for source, _start, _end in _python_command_payloads(command)]
 
     assert found == ([payload] if payload else [])
 
@@ -272,7 +254,7 @@ def test_python_c_payload_follows_the_options_before_it(command, payload):
 def test_a_long_option_run_before_python_c_still_yields_its_payload():
     command = "python\t" + "-A\x7f-A " * 20_000 + "-c 'x=1'"
 
-    assert [source for source, _start, _end in gate_module._python_command_payloads(command)] == ["x=1"]
+    assert [source for source, _start, _end in _python_command_payloads(command)] == ["x=1"]
 
 
 def test_candidate_diff_fingerprint_failure_is_fail_closed(

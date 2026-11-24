@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.common.gpu_partition import PartitionLayout, PartitionModel, layout_for
-from hyperloom.orchestrator.actions.executors import _partition_shape as ps
+from hyperloom.orchestrator.actions.executors.gpu import _partition_shape as ps
 
 
 @pytest.fixture(autouse=True)
@@ -428,13 +428,13 @@ class TestFrameworkFanout:
 
     @pytest.mark.parametrize("scriptable", ["xdit", "custom", "XDiT"])
     def test_a_scriptable_framework_can_place_work_per_partition(self, scriptable):
-        from hyperloom.inference_optimizer.cli import _partition_fanout_supported
+        from hyperloom.inference_optimizer.cli.session_setup import _partition_fanout_supported
 
         assert _partition_fanout_supported(scriptable) == (True, "")
 
     @pytest.mark.parametrize("serving", ["vllm", "sglang", "atom"])
     def test_a_serving_framework_is_refused_with_a_reason(self, serving):
-        from hyperloom.inference_optimizer.cli import _partition_fanout_supported
+        from hyperloom.inference_optimizer.cli.session_setup import _partition_fanout_supported
 
         supported, detail = _partition_fanout_supported(serving)
         assert supported is False
@@ -443,7 +443,7 @@ class TestFrameworkFanout:
     @pytest.mark.parametrize("unresolved", [None, "", "   "])
     def test_an_unresolved_framework_says_so_rather_than_passing_silently(self, unresolved):
         """A truthiness guard here reads as "checked and fine" while meaning "not checked"."""
-        from hyperloom.inference_optimizer.cli import _partition_fanout_supported
+        from hyperloom.inference_optimizer.cli.session_setup import _partition_fanout_supported
 
         supported, detail = _partition_fanout_supported(unresolved)
         assert supported is False
@@ -455,16 +455,16 @@ class TestCliExport:
 
     @pytest.fixture
     def export(self, card, monkeypatch):
-        from hyperloom.inference_optimizer import cli
+        from hyperloom.inference_optimizer.cli import session_setup
 
-        monkeypatch.setattr(cli.os, "environ", dict(cli.os.environ), raising=False)
+        monkeypatch.setattr(session_setup.os, "environ", dict(session_setup.os.environ), raising=False)
 
         def call(layout=CPX_36, *, declared_mode=None, streams_per_partition=None, model_path=None, **kw):
             card(layout)
             kw.setdefault("framework", "xdit")
-            model = cli.PartitionModel(model_path, kw.pop("precision", None), kw.pop("shared_state", None))
-            return cli._export_partition_shape(
-                cli.PartitionRequest(declared_mode, streams_per_partition), model=model, **kw
+            model = session_setup.PartitionModel(model_path, kw.pop("precision", None), kw.pop("shared_state", None))
+            return session_setup._export_partition_shape(
+                session_setup.PartitionRequest(declared_mode, streams_per_partition), model=model, **kw
             )
 
         return call
@@ -530,30 +530,30 @@ class TestCliExport:
 
     def test_a_resume_re_checks_rather_than_trusts_the_archive(self, export):
         """A card can be repartitioned while a session is stopped."""
-        from hyperloom.inference_optimizer import cli
+        from hyperloom.inference_optimizer.cli import session_setup
 
         args = type("A", (), {"compute_partition_mode": None, "streams_per_partition": None})()
         state = type("S", (), {"compute_partition": {"mode": "CPX", "streams_per_partition": 4}})()
-        cli._restore_partition_shape_from_state(args, state)
+        session_setup._restore_partition_shape_from_state(args, state)
 
         assert (args.compute_partition_mode, args.streams_per_partition) == ("CPX", 4)
         with pytest.raises(SystemExit):
             export(layout=SPX_288, declared_mode=args.compute_partition_mode)
 
     def test_a_resume_flag_overrides_the_archive(self, export):
-        from hyperloom.inference_optimizer import cli
+        from hyperloom.inference_optimizer.cli import session_setup
 
         args = type("A", (), {"compute_partition_mode": "DPX", "streams_per_partition": 1})()
         state = type("S", (), {"compute_partition": {"mode": "CPX", "streams_per_partition": 4}})()
-        cli._restore_partition_shape_from_state(args, state)
+        session_setup._restore_partition_shape_from_state(args, state)
 
         assert (args.compute_partition_mode, args.streams_per_partition) == ("DPX", 1)
 
     def test_a_resume_of_an_unpartitioned_session_restores_nothing(self, export):
-        from hyperloom.inference_optimizer import cli
+        from hyperloom.inference_optimizer.cli import session_setup
 
         args = type("A", (), {"compute_partition_mode": None, "streams_per_partition": None})()
-        cli._restore_partition_shape_from_state(args, type("S", (), {"compute_partition": {}})())
+        session_setup._restore_partition_shape_from_state(args, type("S", (), {"compute_partition": {}})())
 
         assert (args.compute_partition_mode, args.streams_per_partition) == ("", None)
 
@@ -580,25 +580,25 @@ class TestCliExport:
         assert exit_info.value.code == 2
 
     def test_the_runtime_handoff_is_published_only_where_something_reads_it(self, export):
-        from hyperloom.inference_optimizer import cli
+        from hyperloom.inference_optimizer.cli import session_setup
 
         export(framework="xdit")
-        assert cli.os.environ.get(ps.PARTITION_MODE_ENV) == "CPX"
+        assert session_setup.os.environ.get(ps.PARTITION_MODE_ENV) == "CPX"
 
     def test_a_serving_framework_is_handed_no_fan_out_instruction(self, export):
         """Stating a concurrency nothing will drive is the contradiction here."""
-        from hyperloom.inference_optimizer import cli
+        from hyperloom.inference_optimizer.cli import session_setup
 
         assert export(framework="sglang")["mode"] == "CPX"
-        assert ps.PARTITION_STREAMS_ENV not in cli.os.environ
-        assert ps.PARTITION_TOTAL_STREAMS_ENV not in cli.os.environ
+        assert ps.PARTITION_STREAMS_ENV not in session_setup.os.environ
+        assert ps.PARTITION_TOTAL_STREAMS_ENV not in session_setup.os.environ
 
     def test_a_serving_framework_still_publishes_the_topology(self, export):
         """Otherwise the platform fingerprint loses the mode -- the whole point."""
-        from hyperloom.inference_optimizer import cli
+        from hyperloom.inference_optimizer.cli import session_setup
 
         export(framework="sglang")
-        assert cli.os.environ.get(ps.PARTITION_MODE_ENV) == "CPX"
+        assert session_setup.os.environ.get(ps.PARTITION_MODE_ENV) == "CPX"
 
     def test_the_summary_carries_what_the_env_cannot(self, export):
         """The published variables are a lossy subset: no provenance, no memory."""
@@ -612,10 +612,10 @@ class TestCliExport:
 
     def test_a_multi_node_session_publishes_nothing(self, export):
         """Not even the topology: it would be the wrong node's."""
-        from hyperloom.inference_optimizer import cli
+        from hyperloom.inference_optimizer.cli import session_setup
 
         export(nodes=4)
-        assert ps.PARTITION_MODE_ENV not in cli.os.environ
+        assert ps.PARTITION_MODE_ENV not in session_setup.os.environ
 
     def test_a_multi_node_assertion_exits_rather_than_going_unchecked(self, export):
         """Same rule as an unreadable card: unverifiable is not satisfied."""
@@ -625,11 +625,11 @@ class TestCliExport:
 
     def test_an_explicit_zero_on_resume_still_reaches_the_guard(self, export):
         """Falsiness here would read the mistake as "omitted" and paper over it."""
-        from hyperloom.inference_optimizer import cli
+        from hyperloom.inference_optimizer.cli import session_setup
 
         args = type("A", (), {"compute_partition_mode": None, "streams_per_partition": 0})()
         state = type("S", (), {"compute_partition": {"mode": "CPX", "streams_per_partition": 4}})()
-        cli._restore_partition_shape_from_state(args, state)
+        session_setup._restore_partition_shape_from_state(args, state)
 
         assert args.streams_per_partition == 0
         with pytest.raises(SystemExit) as exit_info:

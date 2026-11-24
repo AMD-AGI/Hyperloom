@@ -156,7 +156,8 @@ class AnalysisEvidenceMixin:
                 gpu_target=self.config.gpu_target,
                 objective=(
                     "Preserve correctness and complete benchmark case coverage while "
-                    "maximizing equal-weight mean incumbent-to-candidate case speedup."
+                    f"maximizing the equal-weight {self.ic.case_aggregate.value} mean of incumbent-to-candidate "
+                    "case speedups."
                 ),
                 program_context=(self.ic.program_md or f"Optimize the kernel at {self.ic.kernel_file}."),
                 source_map_path=str(source_map_path),
@@ -266,13 +267,13 @@ class AnalysisEvidenceMixin:
 
     def _published_analysis_bundle_root(self, commit: str) -> Path | None:
         """Return the published analysis generation directory for one commit."""
-        from kernelforge.workflows.forge_loop.roles.analysis import AnalysisAgentService
+        from kernelforge.workflows.forge_loop.roles.analysis_bundle import _published_generation_root
 
         if not self._looks_like_git_commit(commit):
             return None
         workspace = Path(self.ic.workspace_dir).resolve()
         commit_root = workspace / "forge_experiments" / "analysis" / commit
-        return AnalysisAgentService._published_generation_root(commit_root)
+        return _published_generation_root(commit_root)
 
     def _nearest_published_analysis_commit(self, start_commit: str) -> str:
         """Walk Git ancestors until a published analysis bundle is found."""

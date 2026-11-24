@@ -12,17 +12,16 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _integrate_bench as integrate_bench
-from hyperloom.orchestrator.actions.executors import _ray_serving
-from hyperloom.orchestrator.actions.executors._grid_runner import (
+from hyperloom.orchestrator.actions.executors.integrate import _integrate_bench as integrate_bench
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import (
     GridRecipe,
     GridVariant,
     VariantResult,
     _build_variant_yaml,
 )
-from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
-from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer
-from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
+from hyperloom.orchestrator.actions.executors.workload._launch_evidence import RequestedLaunch, build_launch_evidence
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import LaunchLayer
+from hyperloom.orchestrator.actions.executors.integrate._integrate_results import _PatchBench
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.loop._integrate_promotion import _integrate_keep_variant
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -72,7 +71,6 @@ def _fake_grid(monkeypatch, config_path: Path, *, tput: float | None = None) -> 
 
     monkeypatch.setattr(integrate_bench, "run_grid", fake_run_grid)
     monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
-    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     return grids
 
 

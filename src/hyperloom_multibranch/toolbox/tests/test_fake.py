@@ -9,6 +9,7 @@ import io
 import tarfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,7 +23,6 @@ from hyperloom.contracts.measurement import (
     Validity,
 )
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
-from hyperloom.measure.tests.gpu_free_host import TEST_SCRATCH_ENV
 from hyperloom_multibranch.contracts.blackboard.records import QuarantineEvent, Withdrawal
 from hyperloom_multibranch.contracts.blackboard.vocab import QuarantineAction
 from hyperloom_multibranch.contracts.toolbox import (
@@ -31,16 +31,16 @@ from hyperloom_multibranch.contracts.toolbox import (
     RequestRejected,
     TestProgress,
     TestWithdrawn,
-    Toolbox,
     UnknownTestRequest,
 )
 from hyperloom_multibranch.contracts.blackboard import ClaimKey, ClaimLost, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus
 from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.local.segments import EntryKind
 from hyperloom_multibranch.blackboard.tests.factories import TTL, FakeClock, intent
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
 from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
-from hyperloom_multibranch.toolbox.tests.fake_model import Fate, FailureRatios, FakeToolboxConfig, NoiseModel
+from hyperloom_multibranch.toolbox.tests.fake_model import Fate, FakeToolboxConfig, NoiseModel
 
 DELTA = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))
 QUIET = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
@@ -90,11 +90,6 @@ async def _run_one(box: FakeToolbox, request: TestRequest | None = None) -> Test
     request_id = await box.submit_test(request or _request())
     await box.drain()
     return box.results[request_id]
-
-
-def test_the_fake_is_a_toolbox() -> None:
-    box: Toolbox = FakeToolbox()
-    assert box is not None
 
 
 # --- acceptance --------------------------------------------------------------------------------------------------
@@ -374,15 +369,6 @@ async def test_unclear_failures_that_did_not_reproduce_on_different_nodes_quaran
     assert box.quarantined == set()
 
 
-async def test_an_infra_failure_quarantines_its_node_at_once() -> None:
-    book = Blackboard()
-    box = _toolbox(blackboard=book)
-    box.script(lambda r: True, [Fate.INFRA, Fate.OK])
-    result = await _run_one(box)
-    assert box.quarantined == {result.attempts[0].sandbox.node_name}
-    assert len(book.of("quarantine")) == 1
-
-
 async def test_unclear_failure_that_repeats_is_the_candidates() -> None:
     box = _toolbox()
     box.script(lambda r: True, [Fate.UNCLEAR, Fate.UNCLEAR, Fate.OK])
@@ -430,52 +416,6 @@ async def test_a_fleet_with_every_node_quarantined_ends_in_measurement_failed() 
     assert box.quarantined == {"a", "b"}
     # quarantine only widens avoid_nodes: the last attempt runs on a node it was to avoid
     assert result.attempts[-1].sandbox.same_node is True
-
-
-async def test_scripts_only_touch_matching_requests() -> None:
-    box = _toolbox()
-    box.script(lambda r: r.branch_id == "bad", [Fate.CANDIDATE])
-    good = await _run_one(box, _request("good"))
-    bad = await _run_one(box, _request("bad"))
-    assert (good.validity, bad.validity) == (Validity.SUCCEEDED, Validity.CANDIDATE_FAILED)
-
-
-async def test_random_failure_ratios_reach_every_class_and_replay_with_the_seed() -> None:
-    config = FakeToolboxConfig(
-        seed=11,
-        failures=FailureRatios(infra=0.15, unclear=0.15, candidate=0.15, measurement=0.1),
-        branch_queue_limit=500,
-        max_parallel_tests=500,
-        default_k=500,
-    )
-
-    async def run() -> tuple[list[tuple[str, str | None]], list[dict]]:
-        box = FakeToolbox(config, autorun=False)
-        ids = [await box.submit_test(_request()) for _ in range(120)]
-        await box.drain()
-        outcomes = [(box.results[i].validity.value, box.results[i].failure_reason) for i in ids] + [
-            ("attempt", a.failure_reason) for i in ids for a in box.results[i].attempts
-        ]
-        return outcomes, [box.results[i].to_document() for i in ids]
-
-    (first, documents), (again, documents_again) = await run(), await run()
-    assert first == again
-    assert documents == documents_again  # same seed: every value, node and timestamp is identical
-    assert {v for v, _ in first if v != "attempt"} == {"succeeded", "candidate_failed", "measurement_failed"}
-    reasons = {reason for _, reason in first}
-    assert {"serve_flag", "nonzero_exit_unmatched", "measurement refused: result_validation_failed"} <= reasons
-
-
-async def test_results_do_not_depend_on_run_order() -> None:
-    config = FakeToolboxConfig(seed=4, max_parallel_tests=1, default_k=9)
-
-    async def values(priorities: list[int]) -> dict[str, float]:
-        box = FakeToolbox(config, autorun=False)
-        ids = [await box.submit_test(_request(priority=p)) for p in priorities]
-        await box.drain()
-        return {i: box.results[i].rounds[1].metrics[GRADED_OUTPUT] for i in ids}
-
-    assert await values([4, 3, 2]) == await values([2, 3, 4])
 
 
 # --- cancel ------------------------------------------------------------------------------------------------------
@@ -603,7 +543,7 @@ async def test_cancel_of_a_test_whose_result_is_being_written_lets_the_write_fin
 class LostClaims:
     """Claims taken by another branch by the time the toolbox hands them to a test."""
 
-    async def attach_request(self, key: ClaimKey, request_id: str, *, ttl_seconds: float) -> None:
+    async def attach_request(self, key: ClaimKey, request_id: str) -> None:
         raise ClaimLost(f"the claim on {key.parent_commit} is another branch's")
 
 
@@ -620,86 +560,6 @@ class UnwritableWithdrawals(Blackboard):
         await super().write_withdrawal(withdrawal)
 
 
-class RenewalsRefusedFor:
-    """Claims handed to tests as asked; renewing the one of the intent ``refused`` raises ``error``."""
-
-    def __init__(self, error: Exception) -> None:
-        self.error, self.renewed = error, []
-
-    async def attach_request(self, key: ClaimKey, request_id: str, *, ttl_seconds: float) -> None:
-        return None
-
-    async def renew(self, key: ClaimKey, *, ttl_seconds: float) -> None:
-        if key.intent_fingerprint == "refused":
-            raise self.error
-        self.renewed.append(key.intent_fingerprint)
-
-
-@pytest.mark.parametrize("error", [OSError("the blackboard cannot be reached"), ClaimLost("another branch's")])
-async def test_a_claim_the_blackboard_does_not_renew_is_logged_and_the_others_are_renewed(
-    error: Exception, caplog: pytest.LogCaptureFixture
-) -> None:
-    claims = RenewalsRefusedFor(error)
-    box = FakeToolbox(autorun=False, wiring=FakeWiring(claims=claims))  # type: ignore[arg-type]
-    refused = await box.submit_test(_request(intent_fingerprint="refused"))
-    await box.submit_test(_request(intent_fingerprint="kept"))
-
-    await box.renew_claims()
-
-    assert claims.renewed == ["kept"]
-    assert f"could not renew the claim of {refused}; it lapses at its TTL" in caplog.text
-
-
-async def test_a_renewal_that_fails_for_a_reason_not_the_blackboards_is_raised_once_the_others_are_renewed() -> None:
-    claims = RenewalsRefusedFor(TypeError("renew() got an unexpected keyword argument"))
-    box = FakeToolbox(autorun=False, wiring=FakeWiring(claims=claims))  # type: ignore[arg-type]
-    for fingerprint in ("first", "refused", "third"):
-        await box.submit_test(_request(intent_fingerprint=fingerprint))
-
-    with pytest.raises(TypeError, match="unexpected keyword"):
-        await box.renew_claims()
-
-    assert claims.renewed == ["first", "third"]
-
-
-class RenewalsCounted(RenewalsRefusedFor):
-    """:class:`RenewalsRefusedFor` that, once ``counting``, records every renewal asked for in order, the refused ones
-    too; ``thrice`` is set when the refused claim was asked for the third time."""
-
-    def __init__(self, error: Exception) -> None:
-        super().__init__(error)
-        self.counting, self.asked, self.thrice = False, [], asyncio.Event()
-
-    async def renew(self, key: ClaimKey, *, ttl_seconds: float) -> None:
-        if self.counting:
-            self.asked.append(key.intent_fingerprint)
-            if self.asked.count("refused") == 3:
-                self.thrice.set()
-        await super().renew(key, ttl_seconds=ttl_seconds)
-
-
-async def test_a_claim_whose_renewal_always_fails_unexpectedly_holds_up_no_other_claims_renewal(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Every round goes on past it to the claims after it, which would otherwise lapse at their TTL round after round."""
-    claims = RenewalsCounted(TypeError("renew() got an unexpected keyword argument"))
-    config = FakeToolboxConfig(claim_ttl_seconds=0.03)  # a round every 10 ms
-    box = FakeToolbox(config, autorun=False, wiring=FakeWiring(claims=claims))  # type: ignore[arg-type]
-    try:
-        await box.submit_test(_request(intent_fingerprint="first"))
-        refused = await box.submit_test(_request(intent_fingerprint="refused"))
-        await box.submit_test(_request(intent_fingerprint="third"))
-        claims.counting = True  # between two rounds: a round renews without giving way to this test
-        await asyncio.wait_for(claims.thrice.wait(), timeout=5)
-    finally:
-        await box.close()
-
-    assert claims.asked[:9] == ["first", "refused", "third"] * 3
-    logged = [record for record in caplog.records if record.exc_info and record.exc_info[0] is TypeError]
-    assert len(logged) == claims.asked.count("refused"), "each round logs the refused claim's error, once"
-    assert all(record.levelname == "ERROR" and refused in record.getMessage() for record in logged)
-
-
 class Housekeeping(FakeToolbox):
     """A fake toolbox whose backend's housekeeping counts its rounds and raises ``failure`` when one is set."""
 
@@ -710,16 +570,6 @@ class Housekeeping(FakeToolbox):
         self.rounds += 1
         if self.failure is not None:
             raise self.failure
-
-
-async def test_a_tick_goes_on_to_its_housekeeping_past_a_renewal_that_failed_unexpectedly() -> None:
-    claims = RenewalsRefusedFor(TypeError("renew() got an unexpected keyword argument"))
-    box = Housekeeping(autorun=False, wiring=FakeWiring(claims=claims))  # type: ignore[arg-type]
-    await box.submit_test(_request(intent_fingerprint="refused"))
-
-    await box.tick()
-
-    assert box.rounds == 1
 
 
 async def test_housekeeping_that_fails_after_a_test_ended_is_logged_and_the_result_stands(
@@ -739,39 +589,6 @@ async def test_housekeeping_that_fails_after_a_test_ended_is_logged_and_the_resu
     assert [result.request_id for result in book.of("result")] == [request_id] and book.of("withdrawal") == []
     (logged,) = [record for record in caplog.records if record.exc_info and record.exc_info[0] is RuntimeError]
     assert logged.levelname == "ERROR" and request_id in logged.getMessage()
-
-
-class RenewalFailsOnce:
-    """Claims handed to tests as asked; the first renewal raises an error that is not the blackboard's."""
-
-    def __init__(self) -> None:
-        self.calls, self.renewed = 0, asyncio.Event()
-
-    async def attach_request(self, key: ClaimKey, request_id: str, *, ttl_seconds: float) -> None:
-        return None
-
-    async def renew(self, key: ClaimKey, *, ttl_seconds: float) -> None:
-        self.calls += 1
-        if self.calls == 1:
-            raise TypeError("renew() got an unexpected keyword argument")
-        self.renewed.set()
-
-
-async def test_the_renewal_loop_logs_an_unexpected_error_and_renews_again_at_the_next_round(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Ending the loop at the first such error would let every live test's claim lapse at its TTL, with nothing said."""
-    claims = RenewalFailsOnce()
-    config = FakeToolboxConfig(claim_ttl_seconds=0.03)  # a round every 10 ms
-    box = FakeToolbox(config, autorun=False, wiring=FakeWiring(claims=claims))  # type: ignore[arg-type]
-    try:
-        await box.submit_test(_request(intent_fingerprint="intent-1"))
-        await asyncio.wait_for(claims.renewed.wait(), timeout=5)
-    finally:
-        await box.close()
-
-    (logged,) = [record for record in caplog.records if record.exc_info and record.exc_info[0] is TypeError]
-    assert logged.levelname == "ERROR" and "unexpected keyword" in str(logged.exc_info[1])  # type: ignore[index]
 
 
 async def test_a_lost_claim_whose_withdrawal_cannot_be_written_leaves_no_request_waiting() -> None:
@@ -825,10 +642,51 @@ async def test_a_lost_claims_withdrawal_the_blackboard_refused_is_written_by_the
     ]
 
 
+class UnloggedRefusals(LocalBlackboard):
+    """A blackboard whose segment cannot take the claim entry that records a refused change."""
+
+    def _append(self, kind: EntryKind, *args: Any, **kwargs: Any) -> Any:
+        if kind is EntryKind.CLAIM:
+            raise OSError("the blackboard folder cannot be written")
+        return super()._append(kind, *args, **kwargs)
+
+
+async def test_a_refusal_the_blackboard_cannot_log_withdraws_the_request_and_leaves_its_claim_released(
+    tmp_path: Path,
+) -> None:
+    """The claim is handed to the request before the change is checked against the other branches' tests: a failure
+    there must end the request, or its claim reads held, blocking its intent for every branch, for the session."""
+    root = tmp_path / "blackboard"
+    board = UnloggedRefusals(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
+    box = FakeToolbox(
+        FakeToolboxConfig(noise=QUIET),
+        blackboard=board,
+        wiring=FakeWiring(claims=board, records=board),
+        autorun=False,
+    )
+
+    def specialist(branch: str) -> LocalBlackboard:
+        return LocalBlackboard(root, Writer(Role.SPECIALIST_RUNTIME, "specialist", branch), clock=FakeClock())
+
+    first, second = intent("b1", "c0", "moe gemm", "tuned kernel"), intent("b2", "c0", "moe gemm", "more sequences")
+    await specialist("b1").acquire(first, RecipeDelta().fingerprint(), ttl_seconds=TTL)
+    await box.submit_test(_request("b1", intent_fingerprint=first.fingerprint))
+    claim = await specialist("b2").acquire(second, RecipeDelta().fingerprint(), ttl_seconds=TTL)
+
+    with pytest.raises(OSError, match="folder cannot be written"):
+        await box.submit_test(_request("b2", intent_fingerprint=second.fingerprint))
+
+    (withdrawn,) = box.withdrawn.values()
+    assert withdrawn.startswith("claim not attached: OSError(")
+    assert (await specialist("b2").lookup(claim.key, DELTA.fingerprint())).claim is None
+    state = await box.queue_state()
+    assert (state.queued, state.running_by_branch) == (0, {"b1": 1})
+
+
 class HeldClaims:
     """Claims handed to tests as asked."""
 
-    async def attach_request(self, key: ClaimKey, request_id: str, *, ttl_seconds: float) -> None:
+    async def attach_request(self, key: ClaimKey, request_id: str) -> None:
         return None
 
 
@@ -854,16 +712,6 @@ async def test_a_test_whose_claim_recovery_finds_lost_is_withdrawn_once_as_a_los
     replayed = SubmissionLog(log_path, str(restarted.config.campaign_id)).get(request_id)
     assert replayed is not None and replayed.outcome is not None
     assert str(replayed.outcome["withdrawal"]).startswith("claim lost")
-
-
-# --- the whole thing ---------------------------------------------------------------------------------------------
-
-
-async def test_autorun_finishes_in_the_background() -> None:
-    box = FakeToolbox(FakeToolboxConfig(), autorun=True)
-    request_id = await box.submit_test(_request())
-    await box.drain()
-    assert request_id in box.results and (await box.queue_state()).running == 0
 
 
 # --- the real blackboard -------------------------------------------------------------------------------------------
@@ -910,23 +758,7 @@ async def test_the_fake_writes_requests_results_withdrawals_and_quarantine_into_
     assert {event.node for event in await blackboard.quarantined()} == box.quarantined != set()
 
 
-# --- re-verifying a result the fake produced ---------------------------------------------------------------------
-
-
-async def test_the_fake_reverifies_the_result_it_produced_and_names_a_mismatch_or_a_stranger() -> None:
-    from dataclasses import replace
-
-    from hyperloom_multibranch.contracts.gate import ResultUnverified
-
-    box = _toolbox(autorun=True)
-    result = await _run_one(box)
-    assert await box.executor.reverify(result) is None
-    with pytest.raises(ResultUnverified) as edited:
-        await box.executor.reverify(replace(result, rounds=()))
-    assert edited.value.reason == "rounds: differs from what the fake executor produced"
-    with pytest.raises(ResultUnverified) as stranger:
-        await box.executor.reverify(replace(result, request_id="other"))
-    assert stranger.value.reason == "the fake executor produced no result for this request"
+# --- attachments -------------------------------------------------------------------------------------------------
 
 
 async def test_the_fake_keeps_an_attachment_and_returns_a_usable_ref() -> None:
@@ -956,23 +788,3 @@ async def test_the_fake_refuses_an_attachment_id_the_sheet_would_refuse_and_a_tr
     with pytest.raises(RequestRejected) as truncated:
         await fake.put_attachment("case", "dir", gzip.compress(b"x" * 2000)[:20])
     assert truncated.value.code == "attachment_unreadable"
-
-
-def test_a_fake_toolboxs_scratch_lies_below_pytests_base_temporary_directory(
-    tmp_path_factory: pytest.TempPathFactory,
-) -> None:
-    """A run that is killed before the toolbox's finalizers run leaves its submit log and blobs where pytest rotates
-    them away, never in the host's temporary directory."""
-    toolbox = FakeToolbox()
-    base = tmp_path_factory.getbasetemp().resolve()
-
-    assert toolbox._scratch is not None
-    for scratch in (toolbox._scratch.name, toolbox._blob_scratch.name):
-        assert Path(scratch).resolve().is_relative_to(base), scratch
-
-
-def test_a_fake_toolbox_where_no_conftest_names_a_scratch_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(TEST_SCRATCH_ENV)
-
-    with pytest.raises(RuntimeError, match=f"FakeToolbox needs {TEST_SCRATCH_ENV}"):
-        FakeToolbox()

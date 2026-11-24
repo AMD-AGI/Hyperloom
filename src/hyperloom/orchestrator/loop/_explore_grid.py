@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from ..actions.executors.explore import runnable_grid_variants
+from ..actions.executors.explore_prefilter.grid_payload import runnable_grid_variants
 from ..policy.denial import PolicyDenied
 
 __all__ = ["EXPLORE_ACTION_NAME", "EXPLORE_GRID_MISSING", "explore_grid_denial"]

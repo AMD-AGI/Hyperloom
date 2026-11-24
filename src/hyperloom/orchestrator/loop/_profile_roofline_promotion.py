@@ -101,7 +101,7 @@ class ProfileRooflineMixin:
         # "which host-side work is redundant", which no kernel timeline can, and
         # a run whose trace was unusable can still have produced good evidence.
         # So promote it on its own, outside the trace_path branch.
-        from ..actions.executors._framework_rewrite_evidence import promote_evidence_path
+        from ..actions.executors.framework_change._framework_rewrite_evidence import promote_evidence_path
 
         evidence_path = promote_evidence_path(self.shared_state, result)
         if evidence_path:

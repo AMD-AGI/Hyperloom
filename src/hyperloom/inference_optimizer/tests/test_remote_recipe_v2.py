@@ -54,7 +54,8 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     build_publishable_recipe_config,
     has_replay_material,
 )
-from hyperloom.orchestrator.knowledge.recipe_journal import RecipeJournalCollaborator, _remote_result_type
+from hyperloom.orchestrator.knowledge.recipe_journal import RecipeJournalCollaborator
+from hyperloom.orchestrator.knowledge.remote_publish import remote_result_type
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
@@ -1974,7 +1975,7 @@ def test_agentx_selection_rejects_incomplete_baseline_axes(tmp_path: Path) -> No
     assert result.status == "skipped"
     assert result.reason == "invalid_recipe_selection_profile"
     assert store.calls == []
-    assert _remote_result_type(result.status, result.reason) == _close_out.RESULT_INVALID_SELECTION_PROFILE
+    assert remote_result_type(result.status, result.reason) == _close_out.RESULT_INVALID_SELECTION_PROFILE
 
 
 def test_agentx_warm_replay_accepts_three_dimension_scope() -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hyperloom.orchestrator.actions.executors import PatchedServer
-from hyperloom.orchestrator.actions.executors import _patch_laying as laying
+from hyperloom.orchestrator.actions.executors.patching import _patch_laying as laying
 from hyperloom.orchestrator.actions.executors import _server_patcher as sp
 
 
@@ -199,7 +199,7 @@ def test_stock_relocated_marker_install_is_not_mistaken_for_patched(tmp_path, mo
 def test_graph_capture_sentinel_relocates_at_0_32(tmp_path):
     legacy = sp._vllm_graph_capture_sentinel("0.31.0", tmp_path)
     assert legacy == ((tmp_path / "vllm" / "profiler" / "graph_capture.py", sp._VLLM_GRAPH_CAPTURE_MARKERS),)
-    for version in ("0.32.0", "0.33.0", "0.33.0+rocm100"):
+    for version in ("0.32.0", "0.33.0", "0.33.0+rocm100", "0.34.0", "0.34.0+rocm100"):
         got = sp._vllm_graph_capture_sentinel(version, tmp_path)
         assert got == (
             (tmp_path / "vllm" / "profiler" / "graph_capture.py", ("graph_capture_profiler",)),

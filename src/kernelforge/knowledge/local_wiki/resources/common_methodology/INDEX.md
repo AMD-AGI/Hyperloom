@@ -66,7 +66,7 @@ pick a lever → apply → re-benchmark A/B.** Paths are relative to this folder
 | Task / symptom | Read in this order |
 |---|---|
 | "Where do I even start on this kernel?" | `profiling/measure_protocol.md` (baseline) → `profiling/measure_roofline.md` → `profiling/measure_triage.md` → then a lever below |
-| "Actually profile this kernel now / get its SoL+roofline / `rocprof-compute` won't run" | `profiling/measure_rocpc_workflow.md`, then run `python3 profiling/rocpc_profile.py --driver <driver> [--roofline]` → classify with `profiling/measure_triage.md` |
+| "Actually profile this kernel now / get its SoL+roofline / `rocprof-compute` won't run" | `profiling/measure_rocpc_workflow.md`, then run `python3 profiling/rocpc_profile.py [--roofline] -- <command ...>` → classify with `profiling/measure_triage.md` |
 | "Classify it: compute / BW / occupancy / latency" | `profiling/measure_triage.md` → `optimization/lever_bottleneck_class.md` → `profiling/measure_roofline.md` |
 | "Build / read a roofline on MI350X·MI355X" | `profiling/measure_roofline.md` → `optimization/lever_bottleneck_class.md` |
 | "Compute-bound GEMM — feed the matrix cores" | `optimization/lever_mfma_sched.md` → `optimization/lever_prefetch.md` → `optimization/lever_lds_banks.md` → `optimization/lever_occupancy.md` |

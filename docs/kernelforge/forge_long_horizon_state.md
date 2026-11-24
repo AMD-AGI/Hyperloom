@@ -14,6 +14,7 @@ forge_experiments/
   pending_keep.json
   candidates/
   lessons/
+  insights.md
   handoffs/
   analysis/
     work/<commit>/
@@ -115,12 +116,14 @@ campaign identity and cumulative state.
 
 ## Planning artifacts
 
-Each iteration runs:
+A campaign at `--lanes 1` has no planning stage and writes none of these
+artifacts. Each iteration of a campaign with more than one lane runs:
 
 1. Evidence-scoped specialist dispatch.
 2. Parallel read-only specialist analysis.
-3. Orchestration synthesis: one plan per lane at `--lanes N`, one fused plan at
-   `--lanes 1`.
+3. Orchestration synthesis: one plan per lane, or one fused plan when the
+   evidence supports a single direction or the budget narrowed the round to one
+   lane.
 4. For sessions longer than two hours, one same-model, independent Critic
    review. `REVISE`/`REPLACE` permits one Orchestration revision without
    rerunning specialists. The revision resumes the original synthesis session
@@ -340,7 +343,10 @@ artifact from the current partial checkpoint.
 
 When a refresh is admitted, the Analysis Agent receives the cumulative diff and
 previous published bundle so it can update only affected profiling and analysis
-artifacts. The diff may span multiple accepted KEEP commits. Each canonical
+artifacts: it re-profiles only the cases whose measurements the change
+invalidates, once each, keeps the parent evidence for the rest, and rewrites
+`report.md` as the brief for the new canonical. The diff may span multiple
+accepted KEEP commits. Each canonical
 commit may start at most two Analysis sessions across resume; the
 `AnalysisSessionJournal` is the sole owner of that budget. The refresh policy
 prevents duplicate calls within one planning iteration, retries a failed
@@ -373,6 +379,25 @@ direction status, suppression list, or PR adoption classification. A
 `REVERT_PERF` records only that the concrete candidate missed the KEEP
 threshold; it never suppresses the broader direction.
 
+Only the most recent lesson documents fit a prompt in full, so two things carry
+the earlier ones forward. The next session is shown a list of measured
+negatives with one line for every past iteration that recorded any: what its
+`NEGATIVES` line says measured worse, the constants and cases it was measured
+under, and whether that still stands. A line is `IN SCOPE` while those
+conditions hold, `RE-OPENABLE` once a pinned constant has moved or a scored case
+was not measured, and `UNSCOPED` when the conditions were never recorded. The
+session is asked to check its direction against the list before choosing it.
+
+The same lesson turn also maintains `insights.md`, the campaign's insight list:
+at most 12 one-sentence facts about the kernel and about measuring it, each with
+the measurement behind it -- what makes a quick bench agree with the driver, a
+bound that was measured, how the toolchain compiles a construct, a correctness
+condition a change has to keep. The turn is shown the list as it stands and
+returns it as it should stand, on `INSIGHT:` lines that are taken out of the
+lesson document and replace the stored list whole; a reply with no such line
+leaves the list unchanged. Every later session reads the whole list. Lane
+records are written side by side in their round and do not touch it.
+
 Every Supervisor attempt is archived verbatim in
 `supervisor/intervention_iter_NNN.md`. A non-empty review also atomically
 replaces `supervisor/latest.md`, which is loaded on resume and passed verbatim to
@@ -398,11 +423,22 @@ historical lesson records.
 
 The pristine baseline uses per-case medians from three independent measurements
 and never changes. Every candidate is measured three times; each run is scored
-independently with the equal-weight arithmetic mean:
+independently with the equal-weight mean of its per-case speedups. Which mean is
+the campaign's `--case-aggregate`, fixed when the campaign is created:
 
 ```text
-mean(pristine_case_ms / candidate_run_case_ms)
+arithmetic (default): mean(pristine_case_ms / candidate_run_case_ms)
+geometric:            geomean(pristine_case_ms / candidate_run_case_ms)
 ```
+
+Every case weighs the same under both. The arithmetic mean counts a large gain
+on one case in full; the geometric mean counts its ratio, so a 4x on one case
+and a 0.25x on another cancel. The in-session gate, the KEEP decision, the
+Implementer's instructions, the planning objective and every published score
+use the campaign's aggregate, and the result names it as `case_aggregate`.
+Choose the one whoever consumes the result scores by: a campaign that
+optimizes one mean and is graded on the other keeps candidates its grader
+scores lower.
 
 Drivers must emit complete, unique `case_ms` coverage for every scored case.
 The mean of the three run scores must be at least
@@ -417,7 +453,9 @@ current best, both so three near-identical measurements cannot drive it to zero
 and because a gain under 0.1% is not worth the KEEP even when it is real.
 
 `sigma` is the sample standard deviation of the three scores, except when one
-case supplies the majority of the objective's variance while carrying less than
+case supplies the majority of the objective's variance (under the geometric
+aggregate, of the variance of its logarithm, which splits between cases the
+same way) while carrying less than
 its equal share of the suite's wall time. Three aggregate scores estimate that
 case's spread to within 50% of itself, and the margin then charges the draw to
 every candidate: on one campaign a 10 us case holding 87% of the variance drew a

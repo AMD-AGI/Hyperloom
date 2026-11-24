@@ -19,7 +19,7 @@ def sglang_shape_mode() -> str:
     """Return ``"sitecustomize"`` for SGLang >= 0.5.18 (no-patch shape tool), else ``"patched"``."""
     version = ""
     try:
-        import sglang  # type: ignore[import-not-found]
+        import sglang
 
         version = (getattr(sglang, "__version__", "") or "").strip()
     except (ImportError, OSError):

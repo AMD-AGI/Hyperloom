@@ -13,11 +13,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
-    ROUTE_GEAK,
-    make_kernel_recorder,
-    record_geak_attempts,
-)
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_GEAK
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_recorder import make_kernel_recorder
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_rows import record_geak_attempts
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelExit
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope

@@ -54,6 +54,13 @@ generic `FRAMEWORK_REPO_PATH`: a session is single-framework by construction
 (the CLI locks `$FRAMEWORK` for the run), so the prefix resolves no possible
 collision and only forces you to rename variables when you switch frameworks.
 
+`--framework-path` and `--benchmark-scripts-dir` set `FRAMEWORK_REPO_PATH` and
+`HYPERLOOM_BYPASS_SCRIPTS_DIR` only when those are not already exported: a
+non-empty exported value wins over the flag, so unset a stale one before
+launch. The same variable serves a shipped framework you build from source: an
+editable `vllm` or `sglang` checkout is as invisible to the source probe as a
+custom one, so point `FRAMEWORK_REPO_PATH` (or `--framework-path`) at it.
+
 ```{warning}
 Hyperloom **commits into this tree**. Each accepted candidate lands as a commit
 whose message looks like `hyperloom KEEP <id> (+12.34%)`. Point the flag at a
@@ -259,6 +266,8 @@ then measures every dependent rewrite against a permanently cold cache, losing
 the bundle rather than the lever.
 
 ## Other requirements
+
+**No concurrency sweep.** A scriptable workload runs one forward pass of your script, so there is no request concurrency to vary: every rung of the ladder would measure the same thing. SWEEP records a terminal skip with `non_serving_workload` rather than spending its budget on a curve whose shape means nothing.
 
 **GPU type.** `--gpu-type` accepts `mi300x`, `mi308x`, `mi325x`, `mi355x`,
 `r9700`, `r9600d`, `w7900`, `w7900d` and `radeon8060s` (Strix Halo). The entrypoint name uses the board as

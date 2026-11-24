@@ -13,12 +13,12 @@ from pathlib import Path
 from typing import Any, BinaryIO, Iterator, NamedTuple
 
 from hyperloom_common.coerce import to_str_list
+from hyperloom_common.env import env_flag
 
 from . import patch_jit_cache
 from ..actions.executors._kernel_agent_tool import HandlerResult
 from ._integrate_outcomes import _FRAMEWORK_APPLYBACK_ARTIFACT_KIND, _FailureVerdict, _integrate_failure
 from ._integrate_payload import _is_paired_gemm_measurement
-from .kernel_decisions import _honest_flag
 
 log = logging.getLogger(__name__)
 
@@ -26,12 +26,12 @@ log = logging.getLogger(__name__)
 def _vram_guarded_server_args(extra_args: str) -> str:
     """Optionally cap ``--gpu-memory-utilization`` for the integrate re-baseline.
 
-    When ``HL_INTEGRATE_VRAM_GUARD`` is on and the caller has not already pinned
+    Unless ``HL_INTEGRATE_VRAM_GUARD=0`` or the caller has already pinned
     ``--gpu-memory-utilization``, append a conservative cap
     (``HL_INTEGRATE_VRAM_UTIL_CAP``, default 0.90) so a re-baseline server cannot
-    OOM. A strict no-op when the flag is off or a util is already specified.
+    OOM.
     """
-    if not _honest_flag("HL_INTEGRATE_VRAM_GUARD"):
+    if not env_flag("HL_INTEGRATE_VRAM_GUARD", default=True):
         return extra_args
     # ``--gpu-memory-utilization`` is vLLM-only; apply the cap only for vLLM.
     framework = (os.environ.get("FRAMEWORK") or "").strip().lower()
@@ -283,9 +283,7 @@ def _integrate_rebaseline(
     from ..loop.sub_agent_runner import RunnerContext
     from ..state.task_registry import Task
 
-    # VRAM barrier (HL_HONEST_E2E umbrella, default ON; opt out with
-    # HL_HONEST_E2E=0 or HL_INTEGRATE_VRAM_GUARD=0): cap re-baseline util on
-    # vLLM so the integrate server cannot OOM on a tighter node.
+    # Cap re-baseline util on vLLM so the integrate server cannot OOM on a tighter node.
     extra_args = _vram_guarded_server_args(str(payload.get("extra_server_args") or "").strip())
     # A fusion sibling's kernel_id is its operator name (``llm:<recipe>``), which
     # only reaches this handler now that fusion lands through the generic queue.
@@ -364,7 +362,7 @@ async def _multi_node_restart_failure(
     # from a timed-out Forge driver.
     _sweep_integrate_aiter_locks(reason="integrate server startup")
     from ..actions.executors._multi_node_env import round_server_env
-    from ..actions.executors._multi_node_server_lifecycle import (
+    from ..actions.executors.serving._multi_node_server_lifecycle import (
         RoundServer,
         ServerRestartFailed,
         restart_server_for_round,

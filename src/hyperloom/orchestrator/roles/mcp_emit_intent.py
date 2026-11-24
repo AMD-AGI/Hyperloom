@@ -13,9 +13,9 @@ from typing import Any, Callable, Iterable
 from hyperloom.inference_optimizer.protocol.intent import (
     ALLOWED_VERDICTS,
     EXTEND_LEASE_MAX_SEC,
+    PAYLOAD_REQUIRED,
     IntentType,
     IntentValidationError,
-    _PAYLOAD_REQUIRED,  # type: ignore[attr-defined]
     validate_envelope,
 )
 from hyperloom.orchestrator.mcp_tool_names import (
@@ -53,7 +53,7 @@ def payload_contract(allowed_intents: Iterable[IntentType]) -> str:
     """Describe the required payload keys of each allowed intent type."""
     parts: list[str] = []
     for intent_type in _ordered_intents(allowed_intents):
-        fields = _PAYLOAD_REQUIRED.get(intent_type, ())
+        fields = PAYLOAD_REQUIRED.get(intent_type, ())
         parts.append(f"{intent_type.value}:{{{','.join(fields)}}}")
     return ", ".join(parts)
 

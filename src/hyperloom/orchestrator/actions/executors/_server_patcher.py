@@ -23,7 +23,7 @@ from hyperloom_common.unified_diff import parse_unified_diff
 from hyperloom.inference_optimizer.session import paths
 
 from ._git import _git_head_sha
-from ._patch_laying import PatchedServer, _ensure_patched, _ensure_patched_in_place, _lay_in, _PatchPlan
+from .patching._patch_laying import PatchedServer, _ensure_patched, _ensure_patched_in_place, _lay_in, _PatchPlan
 
 log = logging.getLogger(__name__)
 
@@ -366,7 +366,7 @@ def kernel_shape_tool_dir() -> Path | None:
 def _detect_installed_sglang_version() -> str | None:
     """Return the locally-installed SGLang version, or ``None`` if unimportable."""
     try:
-        import sglang  # type: ignore[import-not-found]
+        import sglang
     except (ImportError, OSError):
         return None
     return (getattr(sglang, "__version__", "") or "").strip() or None
@@ -677,7 +677,7 @@ def _discover_vllm_install() -> tuple[str, Path] | None:
     version = ""
     install_root: Path | None = None
     try:
-        import vllm  # type: ignore[import-not-found]
+        import vllm
 
         version = (getattr(vllm, "__version__", "") or "").strip()
         install_root = Path(vllm.__file__).resolve().parent.parent
@@ -771,7 +771,7 @@ def _discover_sglang_plan() -> _PatchPlan | None:
         return None
 
     try:
-        import sglang  # type: ignore[import-not-found]
+        import sglang
     except (ImportError, OSError, RuntimeError) as e:
         log.warning("_server_patcher: sglang not importable (%s); skip patch", e)
         return None
@@ -904,7 +904,7 @@ def _discover_sglang_gc_plan(version: str) -> _PatchPlan | None:
         return None
 
     try:
-        import sglang  # type: ignore[import-not-found]
+        import sglang
     except (ImportError, OSError, RuntimeError) as e:
         log.warning("_server_patcher: sglang not importable (%s); skip graph-capture patch", e)
         return None

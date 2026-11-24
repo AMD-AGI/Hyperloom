@@ -231,6 +231,25 @@ def test_prefix_cache_counters_are_bracketed_not_snapshotted(tmp_path):
     assert window["prefix_cache_queries_delta_by_phase"]["measured"] == 400.0
 
 
+def test_sglang_prompt_tokens_are_bracketed_per_phase_beside_cached_tokens(tmp_path):
+    """The prompt tokens are the denominator of the cached ones, so both need the same measured window."""
+    reads = [(0.0, 0.0), (1000.0, 0.0), (1000.0, 0.0), (5000.0, 3800.0)]
+    poller = _StubPoller(
+        [_sample(prompt_tokens_total=_grouped(a=p), cached_tokens_total=_grouped(a=c)) for p, c in reads]
+    )
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=poller, min_interval_sec=0.0)
+    rec.note_phase("warmup", 0.0)
+    rec.tick(1.0)
+    rec.note_phase("measured", 2.0)
+    rec.tick(3.0)
+
+    summary = rec.summary()
+    window = summary["prefix_cache"]
+    assert (window["prompt_tokens_total_delta"], window["cached_tokens_total_delta"]) == (4000.0, 3800.0)
+    assert window["prompt_tokens_total_delta_by_phase"] == {"boot": 0.0, "warmup": 1000.0, "measured": 4000.0}
+    assert summary["samples"][-1]["counters_by_series"]["prompt_tokens_total"] == _grouped(a=5000.0)
+
+
 def test_prefix_cache_counters_add_across_independent_engines(tmp_path):
     """Two vLLM engines serving 200 lookups each did 400, not 200. Taking the
     max across series before diffing halved every cache figure on a DP
@@ -553,7 +572,7 @@ def test_counters_resolve_under_aiperfs_family_naming(tmp_path):
     Observed on a live AgentX round: of 47 families in one record, exactly one
     ended in ``_total``, and vLLM's preemption counter -- written
     ``vllm:num_preemptions_total`` in the exposition this module reads everywhere
-    else -- appears as ``vllm:num_preemptions``. Without the alias all three
+    else -- appears as ``vllm:num_preemptions``. Without the alias the
     cumulative counters come back empty on this path, and an empty counter looks
     exactly like a round that never retracted.
     """
@@ -564,12 +583,14 @@ def test_counters_resolve_under_aiperfs_family_naming(tmp_path):
             "vllm:num_preemptions": [{"labels": {"engine": "0"}, "value": 7.0}],
             "sglang:num_retracted_requests": [{"labels": {"tp_rank": "0"}, "value": 48.0}],
             "sglang:cached_tokens": [{"labels": {}, "value": 4600439.0}],
+            "sglang:prompt_tokens": [{"labels": {"is_streaming": "false"}, "value": 4742721.0}],
         }
     )
 
     assert families["vllm:num_preemptions_total"] == [({"engine": "0"}, 7.0)]
     assert families["sglang:num_retracted_requests_total"] == [({"tp_rank": "0"}, 48.0)]
     assert families["sglang:cached_tokens_total"] == [({}, 4600439.0)]
+    assert families["sglang:prompt_tokens_total"] == [({"is_streaming": "false"}, 4742721.0)]
     # The name aiperf actually used still resolves too.
     assert families["vllm:num_preemptions"] == [({"engine": "0"}, 7.0)]
 

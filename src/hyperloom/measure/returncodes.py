@@ -3,9 +3,9 @@
 
 """Return codes only the hosted measurement implementation produces.
 
-They continue the negative sentinel range the local flow already uses (-910 to -917 in
-``_subprocess_kill`` and ``_ray_serving``), so no process exit status can collide with them. Downstream code treats
-them as ordinary non-zero return codes; :mod:`hyperloom.measure.failures` decides what each one means.
+They continue past the negative sentinels the local flow already uses (down to -919 in ``_subprocess_kill``), so no
+process exit status can collide with them. Downstream code treats them as ordinary non-zero return codes;
+:mod:`hyperloom.measure.failures` decides what each one means.
 """
 
 from __future__ import annotations

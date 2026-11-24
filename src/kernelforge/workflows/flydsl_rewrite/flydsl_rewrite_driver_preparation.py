@@ -468,9 +468,7 @@ operator semantics. {invocation_note}
 3. `--bench-mode` times only the FlyDSL candidate and prints the same case ids
    and timing keys. Candidate loading must be lazy: while the supplied candidate
    is still a skeleton this mode must fail without printing a timing.
-4. Accept `--warmup` and `--iters`. Also implement `--profile-run` as a
-   candidate-only invocation without reference work or timing output so the
-   later optimizer can profile the driver without rewriting it.
+4. Accept `--warmup` and `--iters`.
 5. Load source and candidate from the producer-owned absolute paths above.
    Add the source directory to `sys.path` before executing the source module so
    its local imports remain valid. Do not rely on a hard-coded module name.

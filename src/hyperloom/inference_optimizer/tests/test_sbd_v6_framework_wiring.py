@@ -19,7 +19,7 @@ import pytest
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.actions.executors._integrate_vocabulary import RESULT_BENCHED
+from hyperloom.orchestrator.actions.executors.integrate._integrate_vocabulary import RESULT_BENCHED
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
@@ -307,6 +307,48 @@ def test_terminal_row_settles_the_proposal(session_dir: Path):
     terminal = _events(session_dir)[0]["ext"]["proposals"][0]["terminal"]
     assert terminal["disposition"] == "dropped"
     assert terminal["reason"] == "apply_failed"
+
+
+def test_a_config_only_authoring_round_is_handed_to_explore_and_charged_to_its_lever(session_dir: Path):
+    """Explore benches the round's proposals under their own rows; the candidate itself reached no measurement."""
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
+
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.phase_framework._open_framework_timeline()
+
+    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
+        task=SimpleNamespace(
+            task_id="spec-cfg",
+            params={
+                "framework_agent_authoring": True,
+                "framework_agent_candidate_id": "https://github.com/ROCm/vllm/pull/1014",
+                "framework_batch_id": "b1",
+            },
+        ),
+        done_payload={
+            "patches_written": [],
+            "proposal_set": [
+                {"name": "shared-expert-fusion", "extra_envs": {"VLLM_FUSE_SHARED_EXPERTS": "1"}},
+                {"name": "research-notes"},
+            ],
+        },
+    )
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
+
+    (row,) = coord.shared_state.framework_agent_phase_progress
+    assert row["status"] == "handed_to_explore"
+    assert row["rationale"] == "config proposals left to explore: shared-expert-fusion"
+    terminal = _events(session_dir)[0]["ext"]["proposals"][0]["terminal"]
+    assert (terminal["disposition"], terminal["reason"]) == ("dropped", "handed_to_explore")
+    (attempt,) = coord.shared_state.attempts
+    assert (attempt["lever_kind"], attempt["outcome"], attempt["adopted"]) == (
+        LEVER_UPSTREAM_PR,
+        "handed_to_explore",
+        False,
+    )
 
 
 def test_critic_denial_records_the_review_and_the_drop(session_dir: Path):
@@ -717,7 +759,7 @@ def test_a_source_proposal_keeps_every_kb_read_that_shaped_it(session_dir: Path)
     """The discovery and the authoring specialist each saw a read; the proposal the attempt joins keeps both."""
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.phases.framework import _forward_integrate_source
+    from hyperloom.orchestrator.phases.framework_proposals import _forward_integrate_source
 
     discovery_ref = {"id": "exp-00000000000000000000000000000001", "purpose": "representative"}
     authoring_ref = {"id": "exp-00000000000000000000000000000002", "purpose": "representative"}
@@ -1346,11 +1388,6 @@ def test_the_review_carries_what_it_was_grounded_in(session_dir: Path):
         macro_cycle=0,
         proposal_id=msg_id,
         artifacts={"review_path": "critic-workdir/3/review.json"},
-        kb={
-            "persist_requested": True,
-            "priors": {"prior_count": 2, "referenced_in_verdict": True},
-            "write": {"trigger": "review_verdict", "status": "dead_lettered", "detail": "kb unreachable"},
-        },
     )
     coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
@@ -1358,9 +1395,6 @@ def test_the_review_carries_what_it_was_grounded_in(session_dir: Path):
     # Merged onto the ruling the verdict seam already wrote, not beside it.
     assert review["verdict"] == "reject"
     assert review["artifacts"]["review_path"].endswith("review.json")
-    assert review["kb"]["persist_requested"] is True
-    assert review["kb"]["priors"]["prior_count"] == 2
-    assert review["kb"]["write"]["status"] == "dead_lettered"
 
 
 def test_evidence_for_a_cycle_with_no_event_is_dropped_quietly(session_dir: Path):

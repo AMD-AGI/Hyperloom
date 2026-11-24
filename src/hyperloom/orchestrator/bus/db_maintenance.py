@@ -75,7 +75,7 @@ async def prune_tasks(
     keep_done = max(0, int(keep_done))
     placeholders = ",".join("?" * len(_PRUNABLE_TASK_STATES))
     async with db.transaction() as cur:
-        cur.execute(  # nosec B608 - placeholders string is generated solely from fixed state count.
+        cur.execute(
             f"DELETE FROM tasks WHERE state IN ({placeholders}) "  # nosec B608 - generated placeholders only.
             f"AND task_id NOT IN ("
             f"  SELECT task_id FROM tasks WHERE state IN ({placeholders}) "

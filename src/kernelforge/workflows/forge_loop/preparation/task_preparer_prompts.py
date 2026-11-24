@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 from pathlib import Path
+
+if TYPE_CHECKING:
+    from kernelforge.workflows.forge_loop.preparation.task_preflight import PreflightResult
 
 
 #: Above this the spec is referenced by path instead of inlined in the prompt.
@@ -237,8 +240,8 @@ def _build_prompt(brief: PromptBrief, reference_note: str, retry_note: RetryNote
         retry = (
             f"\n## {retry_note.heading}\n"
             f"{retry_note.failure}\n"
-            "Fix the driver so all preflight checks pass (correctness, benchmark, "
-            "graph timing, and profiling contract). Do not stop until "
+            "Fix the driver so all preflight checks pass (correctness, benchmark "
+            "and graph timing). Do not stop until "
             f"`python {driver_rel}` prints a correctness metric AND timing.\n"
         )
     return f"""\
@@ -282,12 +285,90 @@ Rules:
 {DRIVER_CONTRACT_SPEC}
 {retry}
 When done, ensure `python {driver_rel}` runs the complete correctness suite and
-prints an `SNR:`/`allclose:` line,
+prints an `SNR:`/`allclose:` line, and
 `python {driver_rel} --bench-mode --warmup 3 --iters 10` runs the complete
-benchmark suite and prints `wall_ms:`/`median_ms:` plus `case_ms:` lines, and
-`python {driver_rel} --profile-run` runs only the driver-selected profile case's
-target kernel; all commands must exit 0.
+benchmark suite and prints `wall_ms:`/`median_ms:` plus `case_ms:` lines; both
+commands must exit 0.
 """
+
+
+def summarize_agent_progress(progress_log: list[str]) -> str:
+    """Compact "what did it actually do" line from a streamed progress sink."""
+    if not progress_log:
+        return "no tool activity was recorded"
+    non_streaming = any(entry.startswith("progress: not supported") for entry in progress_log)
+    counts: dict[str, int] = {}
+    for entry in progress_log:
+        if entry.startswith("tool: "):
+            name = entry[6:].split(" ", 1)[0]
+            counts[name] = counts.get(name, 0) + 1
+    parts = []
+    if counts:
+        parts.append(
+            "tool calls: "
+            + ", ".join(f"{name}x{count}" for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+        )
+    elif non_streaming:
+        parts.append("backend does not support progress streaming")
+    else:
+        parts.append("no tool calls at all")
+    tail = list(progress_log[-6:])
+    if tail:
+        parts.append("last steps:\n" + "\n".join(f"  {entry}" for entry in tail))
+    return "; ".join(parts[:1]) + ("\n" + parts[1] if len(parts) > 1 else "")
+
+
+def _jit_timeout_hint(pf: PreflightResult) -> str:
+    """Say when every preflight failure was a timeout, which usually means slow JIT rather than a broken driver."""
+    if not pf.all_failures_are_timeouts:
+        return ""
+    return (
+        "\nNOTE: Every failure above is a TIMEOUT, not a crash. "
+        "This usually means the driver is structurally correct "
+        "but the first execution triggered slow JIT compilation "
+        "(CK/aiter kernels can take 44s+ per module). Do NOT "
+        "rewrite the driver from scratch — verify it is "
+        "structurally correct and resubmit; the next preflight "
+        "run benefits from a warm JIT cache.\n"
+    )
+
+
+def _timeout_retry_prompt(
+    pf: PreflightResult,
+    *,
+    driver_rel: str,
+    driver_edited: bool,
+    elapsed_s: float,
+    progress_log: list[str],
+) -> RetryNote:
+    """What the next attempt is told after this one ran out of time."""
+    if driver_edited:
+        return RetryNote(
+            "Agent timed out, then deterministic preflight failed:\n" + pf.detail_report() + _jit_timeout_hint(pf)
+        )
+    return RetryNote(
+        f"Your previous attempt ran for {elapsed_s:.0f}s and timed out "
+        f"having made NO edit at all to `{driver_rel}` — the file is "
+        "byte-identical to before. Reading and planning is not "
+        "progress here. Open the driver and WRITE the fix as your "
+        "first substantive action, then verify; if you cannot finish "
+        "the whole contract in the time you have, still leave the "
+        "best driver you can on disk rather than nothing.\n"
+        f"What you spent that time on — {summarize_agent_progress(progress_log)}\n"
+        "The deterministic check on that unchanged driver reported:\n" + pf.detail_report(),
+        RETRY_HEADING_NO_EDIT,
+    )
+
+
+def _preflight_retry_prompt(pf: PreflightResult, *, driver_rel: str, driver_edited: bool) -> RetryNote:
+    """What the next attempt is told after this one finished but left a driver that does not conform."""
+    if driver_edited:
+        return RetryNote("Deterministic preflight after your edit:\n" + pf.detail_report() + _jit_timeout_hint(pf))
+    return RetryNote(
+        f"You finished without editing `{driver_rel}` at all. The "
+        "deterministic check therefore ran the SAME driver again:\n" + pf.detail_report(),
+        RETRY_HEADING_NO_EDIT,
+    )
 
 
 _SYSTEM_PROMPT = """\
@@ -296,11 +377,8 @@ is to make a task benchmarkable by forge-loop by writing a correct measurement
 driver (plus any helper files it needs). You NEVER modify the kernel or source
 files under optimization — only the measurement scaffolding. Time on the GPU
 (graph timing strongly preferred); the caller runs deterministic verification
-after every edit attempt. The finished driver MUST also expose the complete
-profiling contract: benchmark mode prints `case_ms: <case_id> <ms>` for every
-case the task declares, and `--profile-run` lets the driver select one
-representative case and run only its target kernel without a reference
-implementation or timing output.
+after every edit attempt. The finished driver MUST also report per-case timing:
+benchmark mode prints `case_ms: <case_id> <ms>` for every case the task declares.
 
 The driver you leave behind is committed and then re-run unchanged for hours. It
 may only depend at runtime on itself, the helpers you write beside it, and the
@@ -358,11 +436,6 @@ id is not one it declares. This is what makes "hold the code, vary one dispatch
 constant, time one shape" cost seconds instead of a full suite; a driver that
 ignores the flag still measures correctly, it just makes every such question cost
 the whole suite.
-Profiling — `python driver.py --profile-run`
-selects one representative case inside the driver and runs only its target
-kernel (no reference/correctness path), performs
-only enough warmup to settle JIT selection, launches 1-3 profiled iterations,
-synchronizes, and exits 0 without printing timing data.
 
 Rules:
 - Case definitions come from the task's real harness/config; do not invent
@@ -405,7 +478,7 @@ than settling for eager timing.
 
 
 REFERENCE_DRIVER_TEMPLATE = r'''
-"""Measurement driver — correctness (SNR) + graph-timed benchmark + profiling."""
+"""Measurement driver — correctness (SNR) + graph-timed benchmark."""
 from __future__ import annotations
 
 import argparse
@@ -416,7 +489,8 @@ from pathlib import Path
 import torch
 
 from graph_harness import cuda_graph_bench
-# Import the kernel's STABLE public entry point (adapt this import + call):
+# Import the kernel's STABLE public entry point (adapt this import + call). It has to load from this workspace:
+# preflight refuses a driver that loaded a source file of the campaign from another copy, such as an installed one.
 from your_kernel_module import your_entry_point  # noqa: F401
 
 _SEED = 0
@@ -484,22 +558,10 @@ def _run_bench(dims, case_id, warmup, iters, device):
     return 0
 
 
-def _run_profile(dims, device):
-    x = _make_inputs(dims, "full", device)
-    for _ in range(3):
-        your_entry_point(x)
-    torch.cuda.synchronize()
-    for _ in range(3):
-        your_entry_point(x)
-    torch.cuda.synchronize()
-    return 0
-
-
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--bench-mode", action="store_true")
     p.add_argument("--bench-case", default="")
-    p.add_argument("--profile-run", action="store_true")
     p.add_argument("--warmup", type=int, default=10)
     p.add_argument("--iters", type=int, default=30)
     args, _ = p.parse_known_args()
@@ -507,10 +569,6 @@ def main():
     if not torch.cuda.is_available():
         print("error: no GPU"); return 1
     device = "cuda"
-
-    if args.profile_run:
-        profile_dims = next(iter(CASES.values()))
-        return _run_profile(profile_dims, device)
 
     if args.bench_mode:
         selected = CASES

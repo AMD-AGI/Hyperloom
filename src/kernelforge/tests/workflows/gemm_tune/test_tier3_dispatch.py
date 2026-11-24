@@ -224,24 +224,21 @@ def uncapturable_adapter(monkeypatch: pytest.MonkeyPatch):
 
 # ── the config a candidate carries ───────────────────────────────────────────
 class TestReadingACandidatesConfig:
-    def test_ints_and_bools_come_back_typed_not_as_strings(self):
-        assert parse_config("solidx=17;async_copy=True;b_to_lds=False") == {
-            "solidx": 17,
-            "async_copy": True,
-            "b_to_lds": False,
-        }
-
-    def test_anything_not_an_int_or_bool_stays_a_string(self):
-        assert parse_config("kernelName=some_asm_kernel") == {"kernelName": "some_asm_kernel"}
-
-    def test_surrounding_whitespace_is_not_part_of_the_key_or_value(self):
-        assert parse_config(" tile_m = 128 ; tile_n = 64 ") == {"tile_m": 128, "tile_n": 64}
+    @pytest.mark.parametrize(
+        ("config", "parsed"),
+        [
+            ("solidx=17;async_copy=True;b_to_lds=False", {"solidx": 17, "async_copy": True, "b_to_lds": False}),
+            ("kernelName=some_asm_kernel", {"kernelName": "some_asm_kernel"}),
+            (" tile_m = 128 ; tile_n = 64 ", {"tile_m": 128, "tile_n": 64}),
+            ("", {}),
+        ],
+        ids=["ints-and-bools-typed", "anything-else-a-string", "surrounding-whitespace-stripped", "empty"],
+    )
+    def test_a_config_reads_as_typed_key_value_pairs(self, config, parsed):
+        assert parse_config(config) == parsed
 
     def test_a_field_with_no_equals_is_skipped_rather_than_guessed(self):
         assert parse_config("solidx=3;garbage;tile_m=16") == {"solidx": 3, "tile_m": 16}
-
-    def test_an_empty_config_is_an_empty_dict(self):
-        assert parse_config("") == {}
 
 
 # ── the measurement the module docstring exists for ──────────────────────────
@@ -265,15 +262,14 @@ class TestHowErrorIsMeasured:
 
 # ── operands and graph capture ───────────────────────────────────────────────
 class TestOperandsAreBuiltOncePerShape:
-    def test_the_same_shape_reuses_its_operands_so_timing_is_not_allocation(self, adapter):
-        first = adapter._ops((2, 3, 4))
-        second = adapter._ops((2, 3, 4))
+    def test_a_shapes_baseline_and_candidates_share_one_seeded_allocation(self, adapter, monkeypatch):
+        _install_aiter(monkeypatch)
+        adapter.make_baseline("2x3x4")
+        adapter.make_dispatch("2x3x4")({"backend": "torch"})
+        adapter.make_baseline("8x3x4")
 
-        assert first is second
-        assert adapter.fake_torch.seeds == [0], "operands must be reproducible"
-
-    def test_a_different_shape_gets_its_own_operands(self, adapter):
-        assert adapter._ops((2, 3, 4)) is not adapter._ops((8, 3, 4))
+        # One reproducible allocation per shape, so timing a candidate does not time an allocation.
+        assert adapter.fake_torch.seeds == [0, 0]
 
 
 class TestGraphCapture:
@@ -294,11 +290,9 @@ class TestGraphCapture:
         with pytest.raises(CaptureFailed):
             uncapturable_adapter.make_baseline("2x3x4")
 
-    def test_the_baseline_is_the_unmodified_matmul_under_the_same_capture(self, adapter):
-        assert adapter.make_baseline("2x3x4")() == "replayed"
-
-    def test_sync_is_the_devices_own_barrier(self, adapter):
-        assert adapter.sync() == adapter.fake_torch.cuda.synchronize
+    def test_sync_waits_on_the_device(self, adapter):
+        adapter.sync()()
+        assert adapter.fake_torch.cuda.synchronised == 1
 
 
 # ── dispatching each backend ─────────────────────────────────────────────────
@@ -307,9 +301,29 @@ class TestWhatCanAndCannotBeDispatched:
         _install_aiter(monkeypatch)
         assert adapter._build((2, 3, 4), {"backend": "torch"}) is not None
 
-    def test_hipblaslt_without_a_solution_index_is_not_dispatchable(self, adapter, monkeypatch):
+    @pytest.mark.parametrize(
+        "cand",
+        [
+            {"backend": "hipblaslt", "config": ""},
+            {"backend": "hipblaslt", "config": "solidx=9"},
+            {"backend": "aiter_asm", "config": "splitK=4"},
+            {"backend": "aiter_opus", "config": "splitK=1"},
+            {"backend": "who_knows"},
+        ],
+        ids=[
+            "hipblaslt-without-a-solution-index",
+            "solidx-hipblaslt-never-offered",
+            "asm-without-a-kernel-name",
+            "opus-without-a-kernel-id",
+            "unknown-backend",
+        ],
+    )
+    def test_a_candidate_without_what_its_backend_needs_is_not_dispatchable(self, adapter, monkeypatch, cand):
+        # The unoffered solidx is not a typo-catcher: hipb_mm on an index outside
+        # the solution list aborts from C++ with INVALID_VALUE, which no `except`
+        # here can catch.
         _install_aiter(monkeypatch)
-        assert adapter._build((2, 3, 4), {"backend": "hipblaslt", "config": ""}) is None
+        assert adapter._build((2, 3, 4), cand) is None
 
     def test_hipblaslt_creates_the_handle_before_the_first_call(self, adapter, monkeypatch):
         """hipb_mm on a handle nobody created aborts from C++, uncatchably."""
@@ -317,30 +331,24 @@ class TestWhatCanAndCannotBeDispatched:
 
         call = adapter._build((2, 3, 4), {"backend": "hipblaslt", "config": "solidx=7"})
 
-        assert call is not None
+        assert call is not None and call() is not None
         assert calls["create_extension"] == 1
         assert calls["findallsols"] == 1
         adapter._build((2, 3, 4), {"backend": "hipblaslt", "config": "solidx=7"})
         assert calls["findallsols"] == 1, "the handle is created once, not per candidate"
 
-    def test_a_solidx_hipblaslt_never_offered_is_refused(self, adapter, monkeypatch):
-        # Not a typo-catcher: hipb_mm on an index outside the solution list
-        # aborts from C++ with INVALID_VALUE, which no `except` here can catch.
-        _install_aiter(monkeypatch, sols=(7,))
-        assert adapter._build((2, 3, 4), {"backend": "hipblaslt", "config": "solidx=9"}) is None
-
-    def test_the_asm_backend_without_a_kernel_name_is_not_dispatchable(self, adapter, monkeypatch):
+    @pytest.mark.parametrize(
+        "cand",
+        [
+            {"backend": "aiter_asm", "config": "kernelName=k1;splitK=4"},
+            {"backend": "aiter_flydsl", "config": "tile_m=128;tile_n=64;tile_k=32;stages=4"},
+        ],
+        ids=["asm-with-a-kernel-name", "flydsl-from-its-tile-config"],
+    )
+    def test_a_backend_given_what_it_needs_dispatches(self, adapter, monkeypatch, cand):
         _install_aiter(monkeypatch)
-        assert adapter._build((2, 3, 4), {"backend": "aiter_asm", "config": "splitK=4"}) is None
-
-    def test_the_asm_backend_with_a_kernel_name_dispatches(self, adapter, monkeypatch):
-        _install_aiter(monkeypatch)
-        call = adapter._build((2, 3, 4), {"backend": "aiter_asm", "config": "kernelName=k1;splitK=4"})
+        call = adapter._build((2, 3, 4), cand)
         assert call is not None and call() is not None
-
-    def test_opus_without_a_kernel_id_is_not_dispatchable(self, adapter, monkeypatch):
-        _install_aiter(monkeypatch)
-        assert adapter._build((2, 3, 4), {"backend": "aiter_opus", "config": "splitK=1"}) is None
 
     def test_opus_initialises_its_workspace_before_dispatch(self, adapter, monkeypatch):
         calls = _install_aiter(monkeypatch)
@@ -349,18 +357,6 @@ class TestWhatCanAndCannotBeDispatched:
 
         assert call is not None and call() is not None
         assert calls["workspace_init"] == 1
-
-    def test_the_flydsl_backend_dispatches_from_its_tile_config(self, adapter, monkeypatch):
-        _install_aiter(monkeypatch)
-        call = adapter._build(
-            (2, 3, 4),
-            {"backend": "aiter_flydsl", "config": "tile_m=128;tile_n=64;tile_k=32;stages=4"},
-        )
-        assert call is not None and call() is not None
-
-    def test_an_unknown_backend_is_absent_rather_than_approximated(self, adapter, monkeypatch):
-        _install_aiter(monkeypatch)
-        assert adapter._build((2, 3, 4), {"backend": "who_knows"}) is None
 
     def test_a_backend_that_raises_while_building_is_not_dispatchable(self, adapter, monkeypatch):
         _install_aiter(monkeypatch, raises=True)
@@ -385,17 +381,12 @@ class TestWhatCanAndCannotBeDispatched:
 
         assert adapter._build((2, 3, 4), {"backend": "hipblaslt", "config": "solidx=7"}) is None
 
-    def test_torch_is_imported_lazily_so_the_module_loads_off_gpu(self):
-        """The module must stay importable without torch; ``_torch`` is the seam."""
-        torch = pytest.importorskip("torch")
-        assert _Bf16DenseAdapter._torch() is torch
+    def test_the_check_after_a_dispatch_judges_the_candidate_just_dispatched(self, adapter, monkeypatch):
+        _install_aiter(monkeypatch, asm_result=_T([100.0, 2.0, 3.0]))
+        call = adapter.make_dispatch("2x3x4")({"backend": "aiter_asm", "config": "kernelName=k1"})
 
-    def test_dispatch_records_which_candidate_is_in_play_for_the_checker(self, adapter, monkeypatch):
-        _install_aiter(monkeypatch)
-        dispatch = adapter.make_dispatch("2x3x4")
-
-        assert dispatch({"backend": "torch"})() == "replayed"
-        assert adapter._in_play["2x3x4"] == {"backend": "torch"}
+        assert call() == "replayed"
+        assert adapter.make_correctness("2x3x4")(call) is False
 
     def test_an_undispatchable_candidate_yields_no_callable(self, adapter, monkeypatch):
         _install_aiter(monkeypatch)
@@ -448,20 +439,19 @@ class TestCorrectness:
         assert len(built) == CORRECTNESS_TRIALS
         assert len({id(ops) for ops in built}) == CORRECTNESS_TRIALS, "inputs were reused between trials"
 
-    def test_the_timing_operands_survive_the_check_that_borrowed_the_slot(self, adapter, monkeypatch):
+    def test_a_check_hands_the_timing_operands_back_to_the_next_candidate(self, adapter, monkeypatch):
         _install_aiter(monkeypatch)
-        saved = adapter._ops((2, 3, 4))
+        torch = adapter.fake_torch
+        multiplied = []
+        real_matmul = torch.matmul
+        monkeypatch.setattr(torch, "matmul", lambda a, b: multiplied.append(a) or real_matmul(a, b))
+        dispatch, check = adapter.make_dispatch("2x3x4"), adapter.make_correctness("2x3x4")
 
-        adapter._is_correct((2, 3, 4), {"backend": "torch"})
+        check(dispatch({"backend": "torch"}))
+        timed_first = multiplied[0]
+        dispatch({"backend": "torch"})
 
-        assert adapter._ops((2, 3, 4)) is saved
-
-    def test_a_shape_with_no_timing_operands_leaves_none_behind(self, adapter, monkeypatch):
-        _install_aiter(monkeypatch)
-
-        adapter._is_correct((2, 3, 4), {"backend": "torch"})
-
-        assert (2, 3, 4) not in adapter._operands
+        assert multiplied[-1] is timed_first
 
 
 # ── the deployed bf16 table ──────────────────────────────────────────────────

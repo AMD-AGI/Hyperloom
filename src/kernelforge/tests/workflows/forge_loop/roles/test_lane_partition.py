@@ -10,10 +10,10 @@ from dataclasses import replace
 
 import pytest
 
-from kernelforge.workflows.forge_loop.roles import orchestration as orchestration_module
+from kernelforge.workflows.forge_loop.roles import orchestration_agent as orchestration_agent_module
 from kernelforge.agent_backends import AgentProviderUnavailableError, AgentRunResult
 from kernelforge.workflows.forge_loop.roles.contracts import DispatchPlan, SpecialistRound
-from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationAgent
+from kernelforge.workflows.forge_loop.roles.orchestration_agent import OrchestrationAgent
 from kernelforge.tests.workflows.forge_loop.roles._orchestration_fakes import (
     GROUND_A,
     GROUND_B,
@@ -213,7 +213,7 @@ async def test_a_joint_lane_with_no_fallback_is_said_out_loud(caplog) -> None:
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
-    with caplog.at_level("WARNING", logger=orchestration_module.log.name):
+    with caplog.at_level("WARNING", logger=orchestration_agent_module.log.name):
         results = await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     assert [result.text for result in results] == ["# Lane A", "# Lane B"]
@@ -268,7 +268,7 @@ async def test_an_unowned_widest_move_is_in_the_round_s_output(caplog) -> None:
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
-    with caplog.at_level("WARNING", logger=orchestration_module.log.name):
+    with caplog.at_level("WARNING", logger=orchestration_agent_module.log.name):
         results = await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     assert [result.text for result in results] == ["# Lane A", "# Lane B"]
@@ -301,7 +301,7 @@ async def test_a_widest_move_naming_a_lane_the_round_lacks_is_unowned(
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
-    with caplog.at_level("WARNING", logger=orchestration_module.log.name):
+    with caplog.at_level("WARNING", logger=orchestration_agent_module.log.name):
         await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     diagnostics = agent.structured_output_diagnostics["partition"]
@@ -318,7 +318,7 @@ async def test_a_partition_that_named_no_widest_move_reports_that(caplog) -> Non
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
-    with caplog.at_level("WARNING", logger=orchestration_module.log.name):
+    with caplog.at_level("WARNING", logger=orchestration_agent_module.log.name):
         await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     diagnostics = agent.structured_output_diagnostics["partition"]
@@ -339,7 +339,7 @@ async def test_a_partition_answered_in_no_usable_shape_collapses_the_round(caplo
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     specialists = await _compute_and_memory_round()
 
-    with caplog.at_level("WARNING", logger=orchestration_module.log.name):
+    with caplog.at_level("WARNING", logger=orchestration_agent_module.log.name):
         results = await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
     assert [result.text for result in results] == ["# The one lane"]
@@ -441,8 +441,8 @@ async def test_the_partition_divides_what_it_was_given_without_reading_more() ->
     partition, lane = backend.specs[0], backend.specs[1]
     assert partition.tool_policy.read is False
     assert partition.tool_policy.search is False
-    assert partition.tool_policy.max_turns == orchestration_module.ROUND_PARTITION_MAX_TURNS
-    assert partition.timeout_sec == orchestration_module.ROUND_PARTITION_TIMEOUT_SEC
+    assert partition.tool_policy.max_turns == orchestration_agent_module.ROUND_PARTITION_MAX_TURNS
+    assert partition.timeout_sec == orchestration_agent_module.ROUND_PARTITION_TIMEOUT_SEC
     # The partition no longer names an effort of its own; the runtime settles it.
     assert partition.reasoning_effort == ""
     assert lane.reasoning_effort == ""

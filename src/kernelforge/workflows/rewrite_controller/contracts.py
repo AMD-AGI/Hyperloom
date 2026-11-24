@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ STATE_FILENAME = "state.json"
 WORKLOAD_FILENAME = "workload.md"
 SERVING_CONTEXT_FILENAME = "serving-context.md"
 TRACE_EVIDENCE_FILENAME = "trace-evidence.md"
+REPOSITORIES_FILENAME = "repositories.json"
 
 TASK_STATUS_READY = "ready"
 TASK_STATUS_RUNNING = "running"
@@ -56,12 +58,20 @@ class TaskStateError(ValueError):
 
 @dataclass(frozen=True)
 class HandoffBundle:
-    """The three Markdown documents supplied by Hyperloom."""
+    """The three Markdown documents supplied by Hyperloom, and the repositories a task may name as its ``repo_root``.
+
+    ``served_trees`` names, for a repository whose checkout is to stand in for an installed package, that package's
+    directory: the server imports the repository's files from there, and the controller makes its checkout the package
+    a campaign imports. A repository absent from it is given no tree to stand in for, because it is itself what the
+    server imports or because its package cannot be imported from another directory; its checkout is left as it is.
+    """
 
     root: Path
     workload: str
     serving_context: str
     trace_evidence: str
+    repositories: tuple[Path, ...]
+    served_trees: Mapping[Path, Path] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -156,6 +166,7 @@ __all__ = [
     "HandoffBundle",
     "HandoffContractError",
     "KernelRewriteTask",
+    "REPOSITORIES_FILENAME",
     "SERVING_CONTEXT_FILENAME",
     "STATE_FILENAME",
     "TASK_FILENAME",

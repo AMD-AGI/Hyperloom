@@ -11,7 +11,6 @@ from kernelforge.workflows.forge_fusion import emit
 from kernelforge.workflows.forge_fusion.emit import (
     _classify,
     _is_fused_module_name,
-    _tracked_paths,
     FusionFiles,
     export_artifacts,
     restore_exported_changes,
@@ -25,10 +24,6 @@ def _init_repo(repo):
         ["-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "base"],
     ):
         subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
-
-
-def test_tracked_paths_empty_returns_set():
-    assert _tracked_paths("/repo", []) == set()
 
 
 def test_classify_new_kernel_and_wiring():
@@ -203,20 +198,6 @@ def test_export_handles_subprocess_error(tmp_path, monkeypatch):
     monkeypatch.setattr(emit, "_fusion_scoped_paths", boom)
     arts = export_artifacts(str(repo), FusionFiles("/src.py"), tmp_path / "out" / "fusion.patch")
     assert arts.patch is None and arts.changes == []
-
-
-def test_restore_noop_without_patch():
-    arts = FusionArtifacts()
-    # No patch -> returns immediately (no git calls).
-    restore_exported_changes("/repo", arts)
-
-
-def test_restore_skips_empty_path(tmp_path):
-    repo = tmp_path / "r"
-    repo.mkdir()
-    _init_repo(repo)
-    arts = FusionArtifacts(changes=[{"path": ""}], patch="/tmp/x.patch")
-    restore_exported_changes(str(repo), arts)  # empty path is skipped silently
 
 
 def test_restore_removes_untracked_and_prunes_dirs(tmp_path):

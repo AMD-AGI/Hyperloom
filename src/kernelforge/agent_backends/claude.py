@@ -14,12 +14,13 @@ import re
 import shutil
 import subprocess
 import sys
-from contextlib import suppress
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL
 from hyperloom_common.llm.llm_stability_env import apply_llm_stability_env
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
@@ -31,7 +32,7 @@ from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentRuntimeConfig,
 )
-from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
+from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
 from hyperloom_common.llm.llm_headers import format_custom_headers
 from kernelforge.agent_backends.gateway import (
     normalize_anthropic_base_url,
@@ -40,8 +41,10 @@ from kernelforge.agent_backends.gateway import (
 from kernelforge.agent_backends.structured_output import output_json_schema
 from kernelforge.utils.process_reaping import (
     ReapReport,
+    SessionMark,
     install_child_subreaper,
     reap_processes_under,
+    reap_session_processes,
 )
 
 log = logging.getLogger(__name__)
@@ -120,9 +123,38 @@ def _is_turn_cap_error(error: Exception) -> bool:
     return "maximum number of turns" in lowered or "max_turns" in lowered
 
 
+async def _reap_session_processes(mark: SessionMark, cwd: str) -> ReapReport:
+    """Kill whatever an ended session started and left running, wherever it is working."""
+    return await reap_session_processes(mark, directory=cwd, description=f"left running by a session in {cwd}")
+
+
 async def _reap_workspace_processes(cwd: str) -> ReapReport:
     """Kill whatever a timed-out session left running inside its workspace."""
     return await reap_processes_under(cwd, description=f"left running by a timed-out session in {cwd}")
+
+
+async def _end_session_processes(agen: Any, mark: SessionMark, cwd: str) -> str:
+    """Tear the CLI down and end what the session started; returns what could not be cleared, empty when nothing.
+
+    A session that stopped on its own can leave as much behind as one that was cut off: a detached benchmark, a
+    profiler working outside the workspace. Left alone it holds the GPU or the device lock, and stalls or corrupts
+    every measurement after it.
+    """
+    # ``async for`` does not close its iterator on exit (PEP 533 was deferred), so close it to tear the CLI down.
+    with suppress(RuntimeError, OSError):  # SDK generator close; the reap below is what matters
+        await agen.aclose()
+    report = await _reap_session_processes(mark, cwd)
+    return report.describe() if report.contended else ""
+
+
+async def _contended_workspace(cwd: str) -> str:
+    """What still makes the workspace of a session cut off mid-turn unsafe to measure in, empty when nothing.
+
+    The session's own processes are already gone. This looks at the directory instead: whatever else of this
+    campaign's is working there is ended, and what is not this campaign's is reported, never signalled.
+    """
+    report = await _reap_workspace_processes(cwd)
+    return report.describe() if report.contended else ""
 
 
 class ClaudeBackendError(AgentProviderError):
@@ -224,6 +256,37 @@ def _sdk_hooks(hooks: AgentHooks, hook_type: Any) -> dict[str, list[Any]]:
         if entries:
             translated[name] = [_hook_matcher(entry, hook_type) for entry in entries]
     return translated
+
+
+def _sdk_reads_prompt_files() -> bool:
+    """Whether the installed SDK can hand the CLI its system prompt as a file."""
+    try:
+        from claude_agent_sdk import types as sdk_types
+    except ImportError:
+        return False
+    return hasattr(sdk_types, "SystemPromptFile")
+
+
+@contextmanager
+def _system_prompt_off_the_command_line(spec: AgentRunSpec) -> Iterator[AgentRunSpec]:
+    """Give the CLI its system prompt in a private file for the length of one query, instead of as an argument.
+
+    A command line is visible to every process on the host and is what a kill by pattern is matched against. The
+    system prompt names the driver, the profiler and the tools a session uses, so a session elsewhere on the host
+    that kills one of those by name would otherwise match this CLI as well.
+    """
+    if not spec.system_prompt or "system_prompt" in spec.provider_options or not _sdk_reads_prompt_files():
+        yield spec
+        return
+    handle, path = tempfile.mkstemp(prefix="forge-system-prompt-", suffix=".md")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(spec.system_prompt)
+        on_disk = {"type": "file", "path": path}
+        yield replace(spec, provider_options={**spec.provider_options, "system_prompt": on_disk})
+    finally:
+        with suppress(OSError):
+            os.unlink(path)
 
 
 def _load_claude_sdk() -> tuple[Any, Any]:
@@ -432,22 +495,6 @@ def _session_end_reason(*, timed_out: bool, stream_error: Exception | None, subt
     return subtype, "sdk_no_result", ""
 
 
-def _verified_file_changes(guard: WorkspaceGuard):
-    """What the guard says the session changed, rolling the workspace back when it cannot say.
-
-    ``verify()`` restores the baseline itself before raising, so this covers the
-    paths that fail earlier and must not mask them.
-    """
-    try:
-        return guard.verify()
-    except Exception:
-        try:
-            guard.rollback()
-        except (WorkspaceSafetyError, OSError, subprocess.SubprocessError):
-            log.warning("workspace rollback after a failed verify also failed", exc_info=True)
-        raise
-
-
 def _note_session_timeout(spec: AgentRunSpec, session_id: str) -> None:
     """Log and record a session that hit its deadline after it established ``session_id``."""
     log.warning(
@@ -508,7 +555,7 @@ def _session_result(
         workspace_contention=contention,
         structured_output=transcript.structured_output,
     )
-    result.file_changes = _verified_file_changes(guard)
+    result.file_changes = guard.verify_or_rollback()
     result.target_edit_count = guard.count_target_edits()
     result.edit_count = result.target_edit_count
     return result
@@ -518,27 +565,11 @@ class ClaudeBackend:
     """Execute Forge sessions through the Claude Agent SDK."""
 
     name = "claude"
-    capabilities = AgentCapabilities(
-        writable=True,
-        resumable=True,
-        stop_hooks=True,
-        native_subagents=True,
-        mcp=True,
-        probe=True,
-        session_env=True,
-        workspace_guard=True,
-        shared_prompt_cache=True,
-    )
+    capabilities: AgentCapabilities
 
-    def __init__(
-        self,
-        runtime: AgentRuntimeConfig | None = None,
-    ) -> None:
+    def __init__(self, runtime: AgentRuntimeConfig) -> None:
         """Resolve SDK symbols when the backend is selected."""
-        self.runtime = runtime or AgentRuntimeConfig(
-            provider=self.name,
-            model=DEFAULT_CLAUDE_MODEL,
-        )
+        self.runtime = runtime
         _prepare_claude_environment()
         self._query, self._options_type = _load_claude_sdk()
         self.fallback_reason = ""
@@ -791,7 +822,8 @@ class ClaudeBackend:
     async def run(self, spec: AgentRunSpec, usage: Any = None) -> AgentRunResult:
         """Run one Claude SDK query and normalize its streamed messages."""
         spec = spec.resolved(self.runtime)
-        return await self._query_once(spec, _first_prompt(spec), usage=usage)
+        with _system_prompt_off_the_command_line(spec) as launch:
+            return await self._query_once(launch, _first_prompt(spec), usage=usage)
 
     async def resume(
         self,
@@ -804,12 +836,13 @@ class ClaudeBackend:
         if not session_id.strip():
             raise ClaudeBackendError("Claude resume requires a session ID")
         spec = spec.resolved(self.runtime)
-        result = await self._query_once(
-            spec,
-            feedback,
-            usage=usage,
-            resume_session_id=session_id.strip(),
-        )
+        with _system_prompt_off_the_command_line(spec) as launch:
+            result = await self._query_once(
+                launch,
+                feedback,
+                usage=usage,
+                resume_session_id=session_id.strip(),
+            )
         if not result.session_id:
             result.session_id = session_id.strip()
         return result
@@ -832,6 +865,9 @@ class ClaudeBackend:
         guard = WorkspaceGuard(spec, dirty_baseline_default=True)
         guard.prepare()
         provider_options = self._provider_options(spec)
+        # Inherited by every process the CLI starts, which is how the session's leftovers are found once it ends.
+        mark = SessionMark()
+        provider_options["env"] = {**provider_options.get("env", {}), **mark.environment}
         if resume_session_id:
             provider_options["resume"] = resume_session_id
         options = self._options_type(**provider_options)
@@ -842,10 +878,9 @@ class ClaudeBackend:
         # answers nor caps.
         stream_error: Exception | None = None
         timed_out = False
-        # Independent of ``timed_out``: the CLI subprocess and any detached benchmark children exist the moment the
-        # deadline fires, even before a session id is established, so they must be torn down on that path too --
-        # otherwise a hung init leaks the process group and keeps the GPU.
-        reap_on_exit = False
+        # Independent of ``timed_out``: a session cut off by its deadline or a cancellation, even before a session id
+        # is established, says nothing about the state it left its workspace in.
+        cut_off = False
         # Set on the paths that leave without a result.
         rollback_on_exit = False
         # What the reap could not clear out of the workspace.
@@ -860,7 +895,7 @@ class ClaudeBackend:
                     await _consume_stream(agen, spec, usage, transcript)
             except Exception as exc:
                 if deadline.expired():
-                    reap_on_exit = True
+                    cut_off = True
                     if not transcript.session_id:
                         rollback_on_exit = True
                         raise ClaudeTimeoutError(
@@ -876,22 +911,14 @@ class ClaudeBackend:
                     stream_error = exc
                     _note_stream_failure(spec, transcript.session_id, exc)
         except asyncio.CancelledError:
-            # The subprocess and any detached benchmark children are running regardless of whether a session id was
-            # established; reap them so they do not hold the GPU past this point.
-            reap_on_exit = True
+            cut_off = True
             if not transcript.session_id:
                 rollback_on_exit = True
             raise
         finally:
-            if reap_on_exit:
-                # ``async for`` does not close its iterator on exit (PEP 533 was deferred), so close it to tear the
-                # CLI down, then reap any detached benchmark child that outlived it -- an orphan holding the GPU
-                # corrupts the canonical measurement that follows.
-                with suppress(RuntimeError, OSError):  # SDK generator close; the reap below is what matters
-                    await agen.aclose()
-                report = await _reap_workspace_processes(spec.cwd)
-                if report.contended:
-                    contention = report.describe()
+            contention = await _end_session_processes(agen, mark, spec.cwd)
+            if cut_off:
+                contention = "; ".join(filter(None, (contention, await _contended_workspace(spec.cwd))))
             if rollback_on_exit:
                 guard.rollback()
 

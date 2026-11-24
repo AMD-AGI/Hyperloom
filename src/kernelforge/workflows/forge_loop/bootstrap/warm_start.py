@@ -10,11 +10,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from kernelforge.workflows.forge_loop.bootstrap.errors import ForgeLoopError
+from kernelforge.workflows.forge_loop.memory.kb_warmstart import WarmStartHarness, kb_warmstart
 from kernelforge.workflows.forge_loop.memory.knowledge_integration import (
-    WarmStartHarness,
     WarmStartRollbackError,
     kb_reference_program_md,
-    kb_warmstart,
     mark_kb_reference_rejected,
 )
 from kernelforge.workflows.forge_loop.campaign.recovery import (
@@ -141,6 +140,7 @@ def _read_kb_warm_start(run: _ForgeRun, program_md: str, kb_warmstart_enabled: b
                     iter_config.driver_script,
                     snr_threshold=iter_config.snr_threshold,
                     bench_repeat=iter_config.bench_repeat,
+                    case_aggregate=iter_config.case_aggregate,
                 ),
             )
         except WarmStartRollbackError as error:

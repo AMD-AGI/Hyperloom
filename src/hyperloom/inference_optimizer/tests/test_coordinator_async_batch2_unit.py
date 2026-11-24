@@ -27,14 +27,16 @@ from hyperloom.orchestrator.roles.mcp_context_tools import ContextProvider, _mak
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.actions.executors.explore import STACK_REVALIDATE_SOURCE
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.reactor_turn import trace_mcp_setup
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 from hyperloom.orchestrator.loop._promote_outcome import IntegrateRecoveryIncomplete
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.actions.executors import _patch_artifacts as patch_artifacts
-from hyperloom.orchestrator.actions.executors import _patch_sources as patch_sources
+from hyperloom.orchestrator.actions.executors.patching import _patch_artifacts as patch_artifacts
+from hyperloom.orchestrator.actions.executors.patching import _patch_sources as patch_sources
 from hyperloom.orchestrator.loop.verdicts import CriticRuling
+from hyperloom.orchestrator.phases import phase_transitions
 
 
 def _idle_intent() -> Intent:
@@ -170,7 +172,7 @@ def test_trace_mcp_setup_persists_diagnostics(coord: Coordinator) -> None:
         },
     )
 
-    coord._trace_mcp_setup(agent_name="orchestration", backend=backend)
+    trace_mcp_setup(coord.session_dir, agent_name="orchestration", backend=backend)
 
     setup = json.loads((coord.session_dir / "agents" / "orchestration" / "mcp_setup.json").read_text())
     assert setup["emit_intent"]["registered"] is True
@@ -515,7 +517,7 @@ async def test_resume_commits_the_reinstalled_source_layer_on_a_git_tree(coord: 
 @pytest.mark.asyncio
 async def test_a_candidate_after_resume_still_sees_the_kept_source_layer(coord: Coordinator, tmp_path: Path) -> None:
     from hyperloom.orchestrator.actions.executors._git import _git_head_sha
-    from hyperloom.orchestrator.actions.executors._patch_git import _git_reset_clean, _git_stash_if_dirty
+    from hyperloom.orchestrator.actions.executors.patching._patch_git import _git_reset_clean, _git_stash_if_dirty
 
     tree = _git_framework_tree(tmp_path)
     _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})])
@@ -983,7 +985,7 @@ def crashed_integrate_window(coord: Coordinator, pending_candidate):
     writes before the bus sees anything. ``outcome_status=None`` is the crash
     that happened first: the phase is on disk, the runner never finished.
     """
-    from hyperloom.orchestrator.actions.executors._patch_git import restore_pending_integrate
+    from hyperloom.orchestrator.actions.executors.patching._patch_git import restore_pending_integrate
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     async def crash(*, keep: bool, outcome_status: str | None = None, cleanup_confirmed: bool = True):
@@ -1159,7 +1161,7 @@ def lost_execution_integrate(coord: Coordinator, pending_candidate, tmp_path: Pa
                 "task_id": candidate.task.task_id,
                 "state": "cancelled",
                 "result": {},
-                "error": "Operator confirmed the entire task process tree and remote workers/Ray actors stopped.",
+                "error": "Operator confirmed the entire task process tree and remote workers stopped.",
                 "error_class": "operator_confirmed_stopped",
             },
         }
@@ -1876,7 +1878,7 @@ async def test_resume_consistency_replays_pending_integrate_with_kept_result(coo
 
 @pytest.mark.asyncio
 async def test_resume_refuses_legacy_patch_without_task_evidence(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.actions.executors import _patch_git as patch_git
+    from hyperloom.orchestrator.actions.executors.patching import _patch_git as patch_git
 
     reversed_calls: list[str] = []
 
@@ -2513,11 +2515,9 @@ async def test_handle_intent_broadcasts_an_alert(coord: Coordinator) -> None:
 # -- advance_phase_if_needed -----------------------------------------------
 @pytest.mark.asyncio
 async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypatch) -> None:
-    import hyperloom.orchestrator.phases.machine_state as ps
-
     coord.shared_state.phase = "PRELUDE"
     monkeypatch.setattr(
-        ps,
+        phase_transitions,
         "compute_next_phase",
         lambda *a, **k: ("FRAMEWORK_AGENT", "optimize_no_more_leverage", {"evidence": "llm_escalation"}),
     )
@@ -2537,7 +2537,7 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
     coord.shared_state.phase = "SWEEP"
     coord.shared_state.stop_reason = ""
     monkeypatch.setattr(
-        ps, "compute_next_phase", lambda *a, **k: (ps.PHASE_CLOSE, "target_reached", {"terminal": True})
+        phase_transitions, "compute_next_phase", lambda *a, **k: (ps.PHASE_CLOSE, "target_reached", {"terminal": True})
     )
 
     async def _entered(*, from_phase, to_phase, reason="", evidence=None):
@@ -2561,11 +2561,9 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
 async def test_advance_phase_hint_discarded_on_a_transition_it_did_not_drive(
     coord: Coordinator, monkeypatch, prior: str, target: str, reason: str
 ) -> None:
-    import hyperloom.orchestrator.phases.machine_state as ps
-
     coord.shared_state.phase = prior
     coord.shared_state.pending_escalate_hint = "skip_to_kernel"
-    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: (target, reason, {}))
+    monkeypatch.setattr(phase_transitions, "compute_next_phase", lambda *a, **k: (target, reason, {}))
 
     async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
@@ -2583,12 +2581,11 @@ async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: C
     """The complementary case: a hint-driven transition must record consumption, not a discard, so the two are
     distinguishable in the breakdown.
     """
-    import hyperloom.orchestrator.phases.machine_state as ps
 
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.pending_escalate_hint = "skip_to_kernel"
     monkeypatch.setattr(
-        ps,
+        phase_transitions,
         "compute_next_phase",
         lambda *a, **k: ("KERNEL_AGENT", "skip_to_kernel", {"hint": "skip_to_kernel"}),
     )

@@ -11,11 +11,12 @@ import pytest
 from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore, RunState, make_event
 from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
-from kernelforge.workflows.forge_loop.roles.analysis import (
-    AnalysisAgentService,
+from kernelforge.workflows.forge_loop.roles.analysis import AnalysisAgentService, AnalysisSources
+from kernelforge.workflows.forge_loop.roles.analysis_bundle import (
     AnalysisBundleError,
-    AnalysisSources,
     _case_directory,
+    _has_valid_profile_evidence,
+    _published_generation_root,
 )
 from kernelforge.tests.workflows.forge_loop.roles._analysis_fakes import _BundleBackend, _context, _service, _workspace
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import _make_loop
@@ -117,7 +118,7 @@ def test_failed_analysis_attempt_does_not_advance_published_commit(tmp_path):
         asyncio.run(failing.ensure_bundle(context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)])))
 
     commit_root = workspace / "forge_experiments" / "analysis" / context.analysis_commit
-    assert AnalysisAgentService._published_generation_root(commit_root) is None
+    assert _published_generation_root(commit_root) is None
 
 
 @pytest.mark.asyncio
@@ -130,7 +131,7 @@ async def test_profiled_upgrade_preserves_prior_generation(tmp_path) -> None:
         profiling_enabled=False,
     ).ensure_bundle(context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]))
     commit_root = workspace / "forge_experiments" / "analysis" / context.analysis_commit
-    first_generation = AnalysisAgentService._published_generation_root(commit_root)
+    first_generation = _published_generation_root(commit_root)
     assert first_generation is not None
     assert first_generation.name.startswith("generation-")
 
@@ -140,7 +141,7 @@ async def test_profiled_upgrade_preserves_prior_generation(tmp_path) -> None:
         profiling_enabled=True,
     ).ensure_bundle(context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]))
 
-    second_generation = AnalysisAgentService._published_generation_root(commit_root)
+    second_generation = _published_generation_root(commit_root)
     assert second_generation is not None
     assert second_generation != first_generation
     assert first_generation.is_dir()
@@ -201,11 +202,11 @@ async def test_fake_agent_command_rows_do_not_mark_profiled(tmp_path) -> None:
         + "\n"
     )
 
-    assert not AnalysisAgentService._has_valid_profile_evidence(work_root, case)
+    assert not _has_valid_profile_evidence(work_root, case)
 
     (profile_root / "raw.txt").write_text("raw profile\n")
     (case_root / "normalized_metrics.json").write_text(json.dumps({"metrics": {"x": 1}}))
-    assert AnalysisAgentService._has_valid_profile_evidence(work_root, case)
+    assert _has_valid_profile_evidence(work_root, case)
     framework_rows = [
         json.loads(line) for line in (work_root / "framework_commands.jsonl").read_text().splitlines() if line.strip()
     ]

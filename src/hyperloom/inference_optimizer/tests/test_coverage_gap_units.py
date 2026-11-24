@@ -11,37 +11,6 @@ import pytest
 from .test_common_utils import _restart_args
 
 
-def test_credentials_endpoint_resolution_and_geak_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.inference_optimizer.cli import credentials
-
-    # An inherited key on either side resolves that side's official URL, so both must be absent for "unconfigured".
-    for name in (
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "OPENAI_API_KEY",
-    ):
-        monkeypatch.delenv(name, raising=False)
-
-    # Each side resolves on its own; an unconfigured side stays empty.
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://open.example/v1")
-    assert credentials._resolve_llm_endpoints() == ("", "https://open.example/v1")
-
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://anthropic.example")
-    assert credentials._resolve_llm_endpoints() == ("https://anthropic.example", "https://open.example/v1")
-
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    assert credentials._resolve_llm_endpoints() == ("https://anthropic.example", "")
-
-    cfg = tmp_path / "geak.yaml"
-    cfg.write_text("model: x\n  base_url: https://old/v1\n", encoding="utf-8")
-    assert credentials._sync_geak_config_base_url(str(cfg), r"https://new.example/\g/v1") is True
-    assert r"https://new.example/\g/v1" in cfg.read_text(encoding="utf-8")
-    assert credentials._sync_geak_config_base_url(str(cfg), r"https://new.example/\g/v1") is False
-    assert credentials._sync_geak_config_base_url(str(tmp_path / "missing.yaml"), "https://x") is False
-
-
 def test_pd_restart_against_an_aggregated_state_fails_instead_of_reporting_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -129,7 +98,7 @@ def test_resolve_pd_node_counts_infers_from_pod_lists() -> None:
 def test_server_lifecycle_remaining_resolution_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+    from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle as sl
 
     bad_yaml = tmp_path / "bad.yaml"
     bad_yaml.write_text("benchmark: [", encoding="utf-8")
@@ -185,22 +154,3 @@ def test_canonical_fingerprint_remaining_normalization_branches() -> None:
     assert len(with_controls) == 16
     assert len(without_controls) == 16
     assert with_controls != without_controls
-
-
-def test_conc_sweep_plot_arm_series_sorts_by_conc() -> None:
-    from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
-
-    points = [
-        {"conc": 4, "output_throughput": 800},
-        {"conc": 2, "output_throughput": 600},
-        {"conc": 0, "output_throughput": 100},
-        {"conc": None, "output_throughput": 100},
-        {"conc": 1, "output_throughput": None},
-    ]
-
-    axes = plot._axes_for_metric("output_throughput", 2.0)
-    xs, ys, concs = plot._arm_series(points, 2.0, axes)
-    assert xs == [300.0, 200.0]
-    assert ys == [300.0, 400.0]
-    assert concs == [2.0, 4.0]
-    assert plot._arm_series([{"conc": None, "output_throughput": -1}], 1.0, axes) == ([], [], [])

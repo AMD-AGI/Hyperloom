@@ -187,15 +187,6 @@ class KernelRecipeKB:
             self.reason = sanitize_read_error(error, secrets=self._config_secrets())
             return []
 
-    def prior_file(self, session_id: str, rel_path: str) -> bytes:
-        """Fetch one artifact's byte-exact contents on demand."""
-        if not self.active:
-            return b""
-        try:
-            return self._store.read_bytes(self.canonical_id, session_id, rel_path)
-        except (KBStoreError, RewriteRecordError, OSError):
-            return b""
-
     # -- write ---------------------------------------------------------------
 
     def write_candidate(

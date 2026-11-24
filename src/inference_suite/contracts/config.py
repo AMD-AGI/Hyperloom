@@ -23,6 +23,12 @@ from inference_suite.contracts.base_launch import _ENV_NAME, _OPTION, BaseLaunch
 CONFIG_SCHEMA = "inference-suite-config/1"
 DEFAULT_MAX_TOKENS_CAP = 4096
 DEFAULT_PRE_READY_SILENCE_SEC = 1800
+#: The longest a booting server's log may stay silent while its processes keep using CPU. CPU use cannot tell a boot
+#: that works without a line from a collective that spins (an RCCL busy-wait burns CPU through a deadlock), so it
+#: extends the pre-ready silence limit only this far, never below that limit. The slowest healthy silent phase measured
+#: is about 1600 s for a boot alone and 2000 to 2300 s for two boots sharing a host; this sits above both and still stops
+#: a spin long before the boot budget.
+PRE_READY_BUSY_SILENCE_SEC = 3600
 #: The only client environment an AgentX round passes through, and the fast mode it must pin off.
 AGENTX_CLIENT_ENV_PREFIX = "AIPERF_"
 AGENTX_FAST_MODE_ENV = "AIPERF_EXPERIMENTAL_FAST"
@@ -227,6 +233,7 @@ _SERVER_KEYS = (
     "framework_python",
     "source_files",
     "absent_source_files",
+    "import_packages",
     "env",
 )
 
@@ -238,7 +245,8 @@ class ServerConfig:
     ``user`` and ``candidate`` stay separate layers so a refused flag can be told apart: a candidate's is the
     candidate's failure, a user's or base's stops the line. ``source_files`` are re-hashed before launch;
     ``env_inherit`` names the host environment the server may see. ``framework_python`` is the one interpreter the
-    server runs in and the version probe and parser check read.
+    server runs in and the version probe and parser check read. ``import_packages`` are packages beside the
+    framework's own whose import roots the probe records.
     """
 
     base: BaseRef
@@ -254,6 +262,7 @@ class ServerConfig:
     runner: RunnerLayer = field(default_factory=RunnerLayer)
     source_files: Mapping[str, str] = field(default_factory=dict)
     absent_source_files: tuple[str, ...] = ()
+    import_packages: tuple[str, ...] = ()
     env_inherit: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -274,6 +283,7 @@ class ServerConfig:
         both = sorted(set(absent) & set(self.source_files))
         if both:
             raise ConfigError(f"source files both present and absent: {', '.join(both)}")
+        _FIELDS.string_tuple(self.import_packages, "the import packages")
         _env_names(self.env_inherit, "the inherited env")
 
     def to_document(self) -> dict[str, object]:
@@ -291,6 +301,7 @@ class ServerConfig:
             "framework_python": self.framework_python,
             "source_files": _sorted(self.source_files),
             "absent_source_files": list(self.absent_source_files),
+            "import_packages": list(self.import_packages),
             "env": {"inherit": list(self.env_inherit)},
         }
 
@@ -312,6 +323,7 @@ class ServerConfig:
             framework_python=fields.get("framework_python"),
             source_files=fields.get("source_files", {}),
             absent_source_files=_FIELDS.strings(fields.get("absent_source_files", ()), "the absent source files"),
+            import_packages=_FIELDS.strings(fields.get("import_packages", ()), "the import packages"),
             env_inherit=_FIELDS.strings(env.get("inherit", ()), "the inherited env"),
         )
 
@@ -677,11 +689,17 @@ class Lifecycle:
 
 
 _DEADLINE_KEYS = ("boot_sec", "round_sec", "eval_sec", "silence_sec", "pre_ready_silence_sec", "deadline_unix")
+#: The optional key a config carries only when its round has a boot budget.
+_BOOT_BUDGET_KEY = "boot_budget_sec"
 
 
 @dataclass(frozen=True)
 class Deadlines:
-    """The round's time budgets; aiter JIT builds do not count against ``boot_sec``."""
+    """The round's time budgets; aiter JIT builds do not count against ``boot_sec``.
+
+    ``boot_budget_sec`` is the boot budget the test that runs the round gave its server (a run's ``--boot-budget-sec``),
+    ``None`` for none: the guard then holds the framework's own ready timeout past it (``compose.ready_timeout_sec``).
+    """
 
     boot_sec: float
     round_sec: float
@@ -689,20 +707,27 @@ class Deadlines:
     silence_sec: float
     pre_ready_silence_sec: float = DEFAULT_PRE_READY_SILENCE_SEC
     deadline_unix: int | None = None
+    boot_budget_sec: float | None = None
 
     def __post_init__(self) -> None:
         for name in _DEADLINE_KEYS[:-1]:
             _positive(getattr(self, name), f"the {name} deadline")
         _FIELDS.optional_integer(self.deadline_unix, "the absolute deadline", minimum=0)
+        if self.boot_budget_sec is not None:
+            _positive(self.boot_budget_sec, "the boot budget")
 
     def to_document(self) -> dict[str, object]:
-        return {key: getattr(self, key) for key in _DEADLINE_KEYS}
+        document = {key: getattr(self, key) for key in _DEADLINE_KEYS}
+        if self.boot_budget_sec is not None:
+            document[_BOOT_BUDGET_KEY] = self.boot_budget_sec
+        return document
 
     @classmethod
     def from_document(cls, document: object) -> Deadlines:
-        fields = _FIELDS.known(document, _DEADLINE_KEYS, "the deadlines")
+        fields = _FIELDS.known(document, (*_DEADLINE_KEYS, _BOOT_BUDGET_KEY), "the deadlines")
         required = {key: fields.get(key) for key in _DEADLINE_KEYS[:4]}
-        return cls(**required, **{key: fields[key] for key in _DEADLINE_KEYS[4:] if key in fields})
+        optional = (*_DEADLINE_KEYS[4:], _BOOT_BUDGET_KEY)
+        return cls(**required, **{key: fields[key] for key in optional if key in fields})
 
 
 @dataclass(frozen=True)
@@ -848,6 +873,7 @@ __all__ = [
     "CONFIG_SCHEMA",
     "DEFAULT_MAX_TOKENS_CAP",
     "DEFAULT_PRE_READY_SILENCE_SEC",
+    "PRE_READY_BUSY_SILENCE_SEC",
     "AgentxWorkload",
     "BaseRef",
     "ConfigError",

@@ -13,9 +13,10 @@ from types import MappingProxyType, SimpleNamespace
 import pytest
 
 from hyperloom.common.env_safety import OPERATOR_EXTRA_ENV_VAR
-from hyperloom.orchestrator.actions.executors import _grid_runner, _multi_node_env, profile
-from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as lifecycle
-from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
+from hyperloom.orchestrator.actions.executors.grid import _grid_runner
+from hyperloom.orchestrator.actions.executors import _multi_node_env, profile
+from hyperloom.orchestrator.actions.executors.serving import _multi_node_server_lifecycle as lifecycle
+from hyperloom.orchestrator.actions.executors.grid._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.kernel import _integrate_rebaseline
 from hyperloom.orchestrator.state import base_launch

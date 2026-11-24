@@ -31,7 +31,7 @@ from kernelforge.workflows.forge_loop.campaign.run_state import (
     make_event,
 )
 from kernelforge.workflows.forge_loop.iteration.fanout import lane_rationale
-from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationInfrastructureError
+from kernelforge.workflows.forge_loop.roles.orchestration_agent import OrchestrationInfrastructureError
 from kernelforge.utils.process_reaping import processes_under
 
 log = logging.getLogger(__name__)
@@ -221,7 +221,8 @@ class IterationPhasesMixin:
         iteration, session_sink = frame.iteration, frame.session_sink
         print("  [agent] Querying agent for kernel modification...")
         self._bind_session_producer(session_sink, self.run_state.agent_relay.active_profile_id)
-        plan = _RoundPlan()
+        # Without a planning service the session chooses its own direction, so the round's plan is the session.
+        plan = _RoundPlan(executable=True)
         if agents.orchestration_service is not None:
             plan = await self._orchestrated_plan(
                 frame,
@@ -544,7 +545,7 @@ class IterationPhasesMixin:
         resume would re-plan the round this one already spent.
         """
         iteration, session_sink = frame.iteration, frame.session_sink
-        optimization_plan_path, optimization_plan_created = round_plan.path, round_plan.executable
+        optimization_plan_path, optimization_plan_created = round_plan.path, round_plan.published
         self.results.append(result)
         self._apply_iteration_planning_state(
             optimization_plan_created=optimization_plan_created,

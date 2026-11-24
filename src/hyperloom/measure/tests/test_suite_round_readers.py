@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.contracts.measurement import SandboxFacts
-from hyperloom.measure import consistency, hosted, local
+from hyperloom.measure import consistency, hosted, local_outcome
 from hyperloom.measure.accuracy import read_accuracy
 from hyperloom.measure.socket import RoundOutcome, TestOutcome
 from hyperloom.orchestrator.actions.executors import VariantResult
@@ -66,7 +66,7 @@ def test_the_accuracy_pass_exit_code_of_a_run_dir_is_its_reports(tmp_path, eval_
     codes = ExitCodes(client=0, eval=eval_code)
     run_dir = _run_dir(tmp_path / "suite_run_0", _report(profile=None, codes=codes))
 
-    assert local._eval_returncode(_variant(run_dir, 7)) == expected
+    assert local_outcome._eval_returncode(_variant(run_dir, 7)) == expected
 
 
 def test_the_consistency_check_measures_a_run_dir_from_its_report(tmp_path):

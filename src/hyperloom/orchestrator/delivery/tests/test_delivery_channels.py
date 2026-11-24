@@ -11,14 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._nogit_patch import (
+from hyperloom.orchestrator.actions.executors.patching._nogit_patch import (
     _apply_patch_no_git,
     _reverse_applies_cleanly,
 )
 from hyperloom.orchestrator.delivery import file_digest, ledger
 from hyperloom.orchestrator.delivery.deliverable import declared_targets
-from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSubprocessDispatcher
 from hyperloom_common.git_safety import recorded_admin_dir
+from hyperloom.orchestrator.specialists import subprocess_harvest
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -26,14 +26,14 @@ def _git(cwd: Path, *args: str) -> None:
 
 
 def test_the_harvest_excludes_the_specialists_own_scratch_copies() -> None:
-    pathspec = SpecialistSubprocessDispatcher._harvest_pathspec(())
+    pathspec = subprocess_harvest._harvest_pathspec(())
     assert pathspec[0] == "."
     assert ":(exclude)patches" in pathspec
     assert ":(exclude)artifacts" in pathspec
 
 
 def test_declared_targets_scope_the_harvest_pathspec() -> None:
-    assert SpecialistSubprocessDispatcher._harvest_pathspec(["pkg/mod.py"]) == ["pkg/mod.py"]
+    assert subprocess_harvest._harvest_pathspec(["pkg/mod.py"]) == ["pkg/mod.py"]
 
 
 def test_the_round_declaration_scopes_the_harvest() -> None:
@@ -66,9 +66,7 @@ def test_an_uncommitted_worktree_edit_is_still_harvested(tmp_path: Path) -> None
     (worktree / "patches").mkdir()
     (worktree / "patches" / "copy_of_mod.py").write_text("base\n", encoding="utf-8")
 
-    diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(
-        worktree, admin=recorded_admin_dir(repo, worktree), base=base
-    )
+    diff = subprocess_harvest._harvest_worktree_diff(worktree, admin=recorded_admin_dir(repo, worktree), base=base)
     assert "pkg/mod.py" in diff
     assert "pkg/added.py" in diff
     assert "copy_of_mod.py" not in diff
@@ -124,7 +122,7 @@ def test_a_near_miss_is_not_accepted_as_already_applied(tmp_path: Path) -> None:
 
 
 def test_a_revert_that_leaves_a_patched_file_behind_is_named(tmp_path: Path) -> None:
-    from hyperloom.orchestrator.actions.executors._patch_git import restore_pending_integrate
+    from hyperloom.orchestrator.actions.executors.patching._patch_git import restore_pending_integrate
 
     root = tmp_path / "wheel"
     root.mkdir()

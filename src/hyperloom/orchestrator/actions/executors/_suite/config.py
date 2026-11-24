@@ -56,6 +56,7 @@ from hyperloom.common.outside_facts import (
     ENV_RUN_EVAL,
     ENV_TP,
 )
+from hyperloom.inference_optimizer.framework_paths import KERNEL_LIBRARY_PACKAGES
 from hyperloom.inference_optimizer.framework_registry import extra_args_env
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv, remove_server_args
 from inference_suite.contracts import (
@@ -88,8 +89,8 @@ from inference_suite.contracts import (
 )
 from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 
-from .._gpu_pin import ROCR_AUTOFILL_ENV
-from .._workload_envs import QUALITY_REF_ENVS
+from ..gpu._gpu_pin import ROCR_AUTOFILL_ENV
+from ..workload._workload_envs import QUALITY_REF_ENVS
 from .._profile_setup import (
     _DELAY_ITERATIONS,
     _MAX_ITERATIONS,
@@ -186,6 +187,8 @@ class RoundSettings:
     ``base_path`` is where the frozen base the round composes on is stored; ``silence_sec`` bounds how long the
     server may log nothing once ready; ``env_inherit`` names the host environment the server and client may see;
     ``server_url`` is the server a client-only round measures, which a point's own ``BENCHMARK_BASE_URL`` overrides.
+    ``boot_budget_sec`` is the boot budget of the test the round belongs to (``Deadlines.boot_budget_sec``), ``None``
+    for none.
     """
 
     base_path: str
@@ -197,6 +200,7 @@ class RoundSettings:
     env_inherit: tuple[str, ...] = ()
     deadline_unix: int | None = None
     server_url: str | None = None
+    boot_budget_sec: float | None = None
 
 
 @dataclass(frozen=True)
@@ -355,6 +359,7 @@ def _server(
         gpus=_gpus(point, base.cards),
         framework_python=settings.framework_python,
         user=user,
+        import_packages=KERNEL_LIBRARY_PACKAGES,
         env_inherit=settings.env_inherit,
     )
 
@@ -787,6 +792,7 @@ def _deadlines(point: _Point, settings: RoundSettings) -> Deadlines:
         eval_sec=point.timeout_sec,
         silence_sec=settings.silence_sec,
         deadline_unix=settings.deadline_unix,
+        boot_budget_sec=settings.boot_budget_sec,
     )
 
 

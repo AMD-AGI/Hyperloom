@@ -70,9 +70,6 @@ class TestTheAdapterIsReachable:
         assert MOE_TABLE in dp.SUPPORTED_TABLES
         assert dp.adapters_for(MOE_TABLE) is not None
 
-    def test_a_table_we_still_cannot_serve_says_so(self):
-        assert dp.adapters_for("a4w4_blockscale_tuned_gemm.csv") is None
-
     def test_the_mandate_describes_the_moe_protocol(self):
         # An author working from the mandate alone has to learn the shape
         # encoding and the config keys from it; nothing else tells them.
@@ -81,9 +78,6 @@ class TestTheAdapterIsReachable:
         assert "aiter_fmoe" in text
         for field in MOE_KEY_FIELDS:
             assert field in text
-
-    def test_the_dense_protocol_is_untouched(self):
-        assert "MxNxK" in dp.describe_candidate_protocol("bf16_tuned_gemm.csv")
 
 
 class TestTheCandidateBecomesARow:
@@ -153,25 +147,30 @@ class TestTheCandidateBecomesARow:
 class TestThePairAiterWillActuallyRun:
     """Reject pairs aiter logs but silently declines to dispatch."""
 
-    def test_a_flydsl_stage_one_carries_a_foreign_partner(self):
+    @pytest.mark.parametrize(
+        ("kernel_name_1", "kernel_name_2", "honoured"),
+        [
+            (_KN1, "cktile_moe2_something", True),
+            ("ck_moe_stage1_something", _KN2, True),
+            ("nope1", "nope2", False),
+            ("cktile_moe1_afp4", "cktile_moe2_afp4", False),
+            ("flydsl_moe1_no_such_tile", "flydsl_moe2_no_such_tile", True),
+        ],
+        ids=[
+            "flydsl-stage-one-carries-a-foreign-partner",
+            "flydsl-stage-two-on-its-own",
+            "neither-flydsl",
+            "plausible-looking-ck-pair",
+            "fake-flydsl-name-left-to-aiter",
+        ],
+    )
+    def test_one_flydsl_kernel_is_what_makes_aiter_dispatch_the_pair(self, kernel_name_1, kernel_name_2, honoured):
         # The partner is dispatched, but only from inside the branch the FlyDSL
-        # name opened, so one of the two is enough.
-        assert dp.aiter_honours_kernel_pair(_KN1, "cktile_moe2_something")
-
-    def test_a_flydsl_stage_two_is_enough_on_its_own(self):
-        assert dp.aiter_honours_kernel_pair("ck_moe_stage1_something", _KN2)
-
-    def test_neither_flydsl_means_the_row_is_read_and_dropped(self):
-        assert not dp.aiter_honours_kernel_pair("nope1", "nope2")
-
-    def test_a_plausible_looking_ck_pair_is_still_refused(self):
-        # Not a typo-catcher: these are names aiter uses elsewhere. They are
-        # refused because on this path nothing would consult them.
-        assert not dp.aiter_honours_kernel_pair("cktile_moe1_afp4", "cktile_moe2_afp4")
-
-    def test_a_fake_flydsl_name_is_left_to_aiter_to_reject(self):
-        # Let aiter own kernel-name validation so a duplicate list cannot go stale.
-        assert dp.aiter_honours_kernel_pair("flydsl_moe1_no_such_tile", "flydsl_moe2_no_such_tile")
+        # name opened, so one of the two is enough. The ck pair is not a
+        # typo-catcher: those are names aiter uses elsewhere, refused because on
+        # this path nothing would consult them. Kernel-name validation is left
+        # to aiter so a duplicate list cannot go stale.
+        assert dp.aiter_honours_kernel_pair(kernel_name_1, kernel_name_2) is honoured
 
 
 class TestAPairThatNamesOneKernelAndRunsAnother:

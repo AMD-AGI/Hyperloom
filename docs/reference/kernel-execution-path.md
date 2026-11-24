@@ -113,12 +113,26 @@ alone.
 The controller runs last and unconditionally — no trace, candidate count or
 source-resolution verdict gates it, because choosing operators is its job rather
 than Hyperloom's. Hyperloom writes it a Markdown handoff (`workload.md`,
-`serving-context.md`, `trace-evidence.md`), runs
+`serving-context.md`, `trace-evidence.md`) and `repositories.json`, runs
 `python -m kernelforge.cli kernel-rewrite-controller` as a bounded subprocess,
 and integrates whatever patches it publishes through
-`integrate_controller_patches`. Communication operators ride this path like any
-other operator; a task declares its rank count and the controller passes
-`--nproc-per-node` down to forge-loop.
+`integrate_controller_patches`.
+
+The repositories are the trees the server imports (`served_source_trees`),
+each sealed at a base commit before the controller starts
+(`seal_campaign_baseline`). A served checkout is rewritten in place; an
+installed package is rewritten in a worktree of the session's snapshot of it,
+the history its specialists branch off. `repositories.json` names the installed
+package each such snapshot is served from (`served_trees`), and the controller
+creates its checkout of the snapshot under that package's name with the other
+served trees linked beside it, so what a campaign imports and times by the
+package's name is the checkout it edits; forge-loop's driver preflight refuses
+a driver that loaded a source file of the campaign from any other copy.
+Integration refuses a publication
+naming any other repository and deploys a validated patch onto the served tree,
+so the E2E measurement runs the patched code. Communication operators ride
+this path like any other operator; a task declares its rank count and the
+controller passes `--nproc-per-node` down to forge-loop.
 
 Results are synthesized as `kernel_agent → orchestration` response messages with
 `source="kernel_entry_auto"` so orchestration's inbox looks the same as if the
@@ -219,7 +233,7 @@ export USER_DATA_PATH="${USER_DATA_PATH:-$REPO_ROOT/session}"
 bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
 ```
 
-`install.sh` is idempotent. It sets up TraceLens, GEAK, Ray, and writes the
+`install.sh` is idempotent. It sets up TraceLens and GEAK and writes the
 env file. Optimizer preflight loads that file in process; do not source it over
 the launching shell's selections. Re-run installation after a venv rebuild or
 when the prepared runtime is no longer valid.

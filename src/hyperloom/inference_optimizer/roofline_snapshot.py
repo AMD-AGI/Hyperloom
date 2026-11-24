@@ -211,7 +211,8 @@ def _clamp_within(raw: float | None) -> tuple[float | None, float | None]:
 
 def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str) -> None:
     """Add ``roofline_provenance`` (+ ``perfmodel_breakdown`` when the PerfModel succeeds) for *arm*."""
-    from .roofline_ceiling import compute_roofline_from_perfmodel, load_model_meta, resolve_runtime_workload
+    from .roofline_ceiling import compute_roofline_from_perfmodel, resolve_runtime_workload
+    from .roofline_model_meta import load_model_meta
 
     runtime = resolve_runtime_workload(state, arm=arm)
     if framework_registry.is_scriptable(runtime.framework):

@@ -123,12 +123,12 @@ the tool directly must pass the root its output lands under
 
 Every session's `storage/coordinator.db` now records schema version 8, and
 there are no in-place migrations. `optimize --resume-from` on a session whose
-database records an older version, which is every session started by 1.1.4 or
+database records an older version, which is every session started by 1.1.5 or
 earlier, exits 2 at resume admission, before `state.json` or the database is
 touched:
 
 ```text
-ERROR: --resume-from coordinator.db is at schema version 6, older than this build's 8:
+ERROR: --resume-from coordinator.db is at schema version 7, older than this build's 8:
 sessions created before this release cannot be resumed. Finish the session under the
 build that started it, or start a new session.
 ```
@@ -154,12 +154,76 @@ or the `bypass` route produced; read `ceiling_available` instead of
 Versioning in [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
 The trace certificate's `production_*` keys go with them; read `selected_role`.
 
+### Required: the Critic's knowledge-base client is removed
+
+`python -m hyperloom.agents.critic.runtime.cli replay-dead-letter` is removed
+and exits 2 as an unknown subcommand; there was never anything to replay.
+
+These are no longer read and are silently ignored, so drop them:
+
+* `CRITIC_KB_CLIENT_MODE` and `KB_BASE_URL`; `optimize` no longer exits 2 on
+  an unknown mode, or on `live` without a base URL.
+* `KB_READ_ENABLED`, `KB_WRITE_ENABLED`, `KB_TIMEOUT_MS`, `KB_RETRY_MAX`,
+  `KB_DEAD_LETTER_DIR` and `KB_SERVICE_TOKEN`.
+* `CRITIC_PRIOR_CACHE_TTL_SECONDS`, `CRITIC_KB_PRIOR_LIMIT`,
+  `CRITIC_KB_BREAKER_THRESHOLD` and `CRITIC_KB_BREAKER_COOLDOWN_SECONDS`.
+
+`session_breakdown.json` drops `kb_priors` from critic iteration rows and `kb`
+from `critic_review` on framework proposals. Consumers that read them should
+stop.
+
+### Required: the Critic stops writing unread session memory
+
+`critic-session-memory/<session_id>/decisions.jsonl` and `context.json` are no
+longer written. Every verdict is still in `critic-workdir/<NNNNNN>/emit.json`,
+which keeps the newest 50 turns, and the applied ones are in the session
+breakdown's phase-event `proposal` rows under `critic_review`.
+`judge_bundle.json` renames `merged_context` to `context` and drops
+`missing_context`; it, `emit.json` and the `reviewed_msg_ids.json` entries
+drop the always-null `decision_id`. Consumers that read them should stop.
+
+`python -m hyperloom.agents.critic.runtime.cli` ignores a request's
+`proposals`, `options` and `decision_id`, and no longer fills an empty
+`context` from the prompt's `Shared session state` section: a request
+without `context` now lists `model` and `framework` in `required_context`.
+Pass `context` explicitly.
+
+`hyperloom optimize` no longer sets `WORKSPACE_PATH`, which nothing read.
+
 ### Required: quantization failure exits 4
 
 A failed `--quantize` prelude now exits 4 instead of 3; exit 3 means only
 that another optimizer holds the session lock. Launchers that branch on the
 exit code should treat 4 as a non-retryable failure. See also
 [operations.md](operations.md) for the full exit-code table.
+
+### Required: stop the local Ray head and end running sessions
+
+A single-node `hyperloom optimize` no longer uses Ray: serving rounds and GPU
+specialists run as local subprocesses, and GPU specialists get their GPUs from
+the session's GPU pool. The installer no longer installs Ray or starts a Ray
+head, and preflight no longer checks Ray. A head that an earlier installer
+started keeps running until you stop it, so run this once on each host or
+container that ran an earlier version:
+
+```bash
+ray stop --force
+```
+
+There is no migration for a session in flight: end running `optimize` sessions
+before upgrading. These environment variables are no longer read and can be
+removed from `.env` and launchers: `INFERENCE_OPTIMIZER_RAY_EXEC`,
+`INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT`,
+`INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY`,
+`INFERENCE_OPTIMIZER_RAY_ROUND_WAIT_SEC`, `INFERENCE_OPTIMIZER_RAY_NUM_GPUS`,
+`INFERENCE_OPTIMIZER_RAY_SPECIALIST_SCHED_TIMEOUT_SEC`,
+`HYPERLOOM_RAY_{CONNECT_PROBE,READY,STATUS,STOP,INIT}_TIMEOUT_SEC`,
+`HL_RAY_HEAD_PORT`, `RAY_MIN_NOFILE`, `RAY_VERSION`, `RAY_NUM_GPUS` and
+`SKIP_RAY_START`. The failure classes `ray_round_unplaced`,
+`ray_cluster_infeasible` and `ray_actor_error` and the return codes -913 and
+-916 no longer occur, and `session_breakdown.json` no longer reports the
+conc-sweep arm strategy `serving_lease_held` or the `ensure_ray` install step.
+Multi-node runs (RayJob through the Ray Dashboard) are unchanged.
 
 ### Recommended: commands that stay outside `hyperloom.cli`
 
@@ -174,7 +238,7 @@ only the optimizer-family commands moved under `hyperloom`):
 | `hyperloom-kb-serve`, `hyperloom-kb-collect`, `python -m hyperloom_kb` | Experience KB service and collect CLI |
 | `hyperloom-kb` / `python -m hyperloom_kb.cli` | Operate an Experience KB service: health, labels, restore, exclusions, list, export |
 | `python -m hyperloom.inference_optimizer.experience_kb_service {init-env,ensure,...}` | Per-workspace Experience KB sidecar, with every `hyperloom-kb` command (setup skill, optimizer SKILL) |
-| `python -m hyperloom.agents.critic.runtime.cli {prepare-review,commit-review,replay-dead-letter}` | Critic backend subprocess (not operator-facing) |
+| `python -m hyperloom.agents.critic.runtime.cli {prepare-review,commit-review}` | Critic backend subprocess (not operator-facing) |
 | Kernel agent tool modules (`tracelens_analysis`, …) | Orchestrator subprocess scripts with their own `__main__` |
 | `multi_node/scripts/*.py` on remote pods | Payload scripts SSH'd by `hyperloom multi-node`, not local `-m` entry points |
 

@@ -24,7 +24,8 @@ from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
     record_close_settled,
     record_close_step,
 )
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_FORGE, make_kernel_recorder
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_FORGE
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_recorder import make_kernel_recorder
 from hyperloom.inference_optimizer.breakdown.recorder.phase_records import (
     ActionDispatch,
     ActionSettlement,
@@ -41,11 +42,8 @@ from hyperloom.inference_optimizer.breakdown.workflow_contract import (
 )
 from hyperloom.inference_optimizer.session.manifest import write_manifest
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.phases.machine_state import (
-    record_phase_transition,
-    workflow_predicate_inputs,
-    PhaseFlags,
-)
+from hyperloom.orchestrator.phases.machine_state import record_phase_transition
+from hyperloom.orchestrator.phases.phase_predicates import workflow_predicate_inputs, PhaseFlags
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 

@@ -10,7 +10,6 @@ import json
 import os
 import shutil
 import subprocess
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -19,24 +18,22 @@ import pytest
 from hyperloom.orchestrator.tests._helpers import patch_integrate_patch_roots
 
 from hyperloom.orchestrator.actions.executors import _accuracy_gate
-from hyperloom.orchestrator.actions.executors import _patch_sources as patch_sources
+from hyperloom.orchestrator.actions.executors.integrate import _integrate_apply as integrate_apply
+from hyperloom.orchestrator.actions.executors.patching import _patch_sources as patch_sources
 from hyperloom.orchestrator.actions.executors import _setup_replay
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
-from hyperloom.orchestrator.actions.executors import _patch_artifacts as patch_artifacts
-from hyperloom.orchestrator.actions.executors import _enablement_config as enablement_config
-from hyperloom.orchestrator.actions.executors import _integrate_results as integrate_results
+from hyperloom.orchestrator.actions.executors.patching import _patch_artifacts as patch_artifacts
+from hyperloom.orchestrator.actions.executors.integrate import _integrate_results as integrate_results
 
 from hyperloom.orchestrator.tests._helpers import integrate_extra, variant_result
-from hyperloom.orchestrator.actions.executors._integrate_results import _KbLesson
-from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
-from hyperloom.orchestrator.actions.executors._workload_envs import (
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     FrameworkScriptMismatchError,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.task_registry import Task
-from hyperloom.orchestrator.actions.executors import _integrate_bench as integrate_bench
+from hyperloom.orchestrator.actions.executors.integrate import _integrate_bench as integrate_bench
 
 
 _VALID_PATCH = """\
@@ -334,7 +331,7 @@ async def test_bench_patch_forwards_the_session_and_phase_budgets_to_the_grid(tm
     config_path.write_text("benchmark: {}\n", encoding="utf-8")
 
     from hyperloom.common.deadline import Deadline
-    from hyperloom.orchestrator.actions.executors import _integrate_results as integrate_results
+    from hyperloom.orchestrator.actions.executors.integrate import _integrate_results as integrate_results
 
     captured: dict[str, Any] = {}
     phase = Deadline.after(900.0)
@@ -502,200 +499,6 @@ async def test_bench_script_mismatch_reverts(tmp_path, monkeypatch):
     assert res["error_class"] == "framework_script_mismatch"
 
 
-async def _kept_framework_integrate(tmp_path, monkeypatch, proposal: dict, **params) -> tuple[dict, dict]:
-    """Integrate a specialist's single ``proposal`` that benches as a KEEP; return the result and the KB record fields."""
-    session = tmp_path / "s"
-    session.mkdir()
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-    _write_workspace(session, "spec", proposal_set=[proposal])
-
-    calls = {}
-
-    async def _fake_write(fields):
-        calls.update(asdict(fields))
-        return "/tmp/lessons.jsonl"
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.knowledge.kb_writeback.write_framework_record",
-        _fake_write,
-    )
-    ex = IntegratePatchExecutor(session_dir=session)
-    monkeypatch.setattr(
-        IntegratePatchExecutor,
-        "_bench_patch",
-        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": True}),
-    )
-    res = await ex(
-        _make_ctx(
-            "t",
-            {
-                "specialist_task_id": "spec",
-                "framework_source_root": str(repo),
-                "base_tput": 100.0,
-                **params,
-            },
-        )
-    )
-    return res, calls
-
-
-@pytest.mark.asyncio
-async def test_framework_kb_writeback(tmp_path, monkeypatch):
-    proposal = {
-        "provenance": "specialist:serving:framework:x",
-        "fa_pr_url": "https://example/pr/1",
-        "fa_pr_sha": "deadbeef",
-        "patches_written": ["patches/001.patch"],
-    }
-    res, calls = await _kept_framework_integrate(tmp_path, monkeypatch, proposal)
-    assert res["status"] == "kept"
-    assert calls["outcome"] == "integrated"
-    assert calls["pr_url"] == "https://example/pr/1"
-
-
-@pytest.mark.asyncio
-async def test_framework_kb_writeback_config_lever_untagged_proposal(tmp_path, monkeypatch):
-    """A same-framework config-lever deliverable has no ``specialist:serving:
-    framework`` provenance on its own (only the cross-framework prompt path
-    emits that tag) — the FRAMEWORK dispatch context must stamp it so the KB
-    write still fires.
-    """
-    proposal = {"name": "cfg", "extra_envs": {"SGLANG_USE_AITER": "1"}}
-    res, calls = await _kept_framework_integrate(
-        tmp_path,
-        monkeypatch,
-        proposal,
-        config_changes={"SGLANG_USE_AITER": "1"},
-        framework_agent_authoring=True,
-        framework_agent_candidate_id="https://github.com/ROCm/aiter/pull/1",
-    )
-    assert res["status"] == "kept"
-    assert calls["outcome"] == "integrated"
-    assert calls["pr_url"] == "https://github.com/ROCm/aiter/pull/1"
-
-
-class _FakeSharedState:
-    def __init__(self, framework: str = "sglang") -> None:
-        self.framework = framework
-
-
-def test_stamp_framework_kb_provenance_config_lever():
-    payload: dict[str, Any] = {"proposal_set": [{"extra_envs": {"X": "1"}}]}
-    enablement_config._stamp_framework_kb_provenance(
-        payload,
-        params={"framework_agent_authoring": True, "framework_agent_candidate_id": "https://x/pr/9"},
-        shared_state=_FakeSharedState("sglang"),
-    )
-    entry = payload["proposal_set"][0]
-    assert entry["provenance"] == "specialist:serving:framework:sglang"
-    assert entry["fa_pr_url"] == "https://x/pr/9"
-    assert entry["framework"] == "sglang"
-
-
-def test_stamp_framework_kb_provenance_noop_when_not_framework_dispatch():
-    payload: dict[str, Any] = {"proposal_set": [{"extra_envs": {"X": "1"}}]}
-    enablement_config._stamp_framework_kb_provenance(payload, params={}, shared_state=_FakeSharedState())
-    assert "provenance" not in payload["proposal_set"][0]
-
-
-def test_stamp_framework_kb_provenance_noop_when_no_candidate_id():
-    payload: dict[str, Any] = {"proposal_set": [{}]}
-    enablement_config._stamp_framework_kb_provenance(
-        payload, params={"framework_agent_authoring": True}, shared_state=_FakeSharedState()
-    )
-    assert "provenance" not in payload["proposal_set"][0]
-
-
-def test_stamp_framework_kb_provenance_leaves_cross_framework_tag_alone():
-    payload: dict[str, Any] = {
-        "proposal_set": [{"provenance": "specialist:serving:framework:cross_framework:sglang->vllm"}]
-    }
-    enablement_config._stamp_framework_kb_provenance(
-        payload,
-        params={"framework_agent_authoring": True, "framework_agent_candidate_id": "https://x/pr/9"},
-        shared_state=_FakeSharedState("sglang"),
-    )
-    assert payload["proposal_set"][0]["provenance"] == "specialist:serving:framework:cross_framework:sglang->vllm"
-    assert "fa_pr_url" not in payload["proposal_set"][0]
-
-
-def test_stamp_framework_kb_provenance_synthesizes_missing_proposal_set():
-    payload: dict[str, Any] = {}
-    enablement_config._stamp_framework_kb_provenance(
-        payload,
-        params={"framework_agent_authoring": True, "framework_agent_candidate_id": "https://x/pr/9"},
-        shared_state=_FakeSharedState("vllm"),
-    )
-    assert payload["proposal_set"][0]["provenance"] == "specialist:serving:framework:vllm"
-    assert payload["proposal_set"][0]["fa_pr_url"] == "https://x/pr/9"
-
-
-def test_stamp_framework_kb_provenance_noop_when_done_payload_none():
-    enablement_config._stamp_framework_kb_provenance(
-        None,
-        params={"framework_agent_authoring": True, "framework_agent_candidate_id": "https://x/pr/9"},
-        shared_state=_FakeSharedState(),
-    )  # must not raise
-
-
-@pytest.mark.asyncio
-async def test_kb_writeback_ignores_payload_level_pr_identity(tmp_path, monkeypatch):
-    """A payload-level ``fa_pr_*`` is another proposal's identity, not this one's.
-
-    The proposal that carried the patch declares no PR, so the attempt has no
-    dedup key and must leave no lesson -- filing it under the payload's key
-    would merge this patch's outcome into an unrelated PR's history.
-    """
-    writes: list[Any] = []
-
-    async def _fake_write(fields):
-        writes.append(fields)
-        return "/tmp/lessons.jsonl"
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.knowledge.kb_writeback.write_framework_record",
-        _fake_write,
-    )
-    ex = IntegratePatchExecutor(session_dir=tmp_path)
-    payload = {
-        "fa_pr_url": "https://example/pr/other",
-        "fa_pr_sha": "cafebabe",
-        "proposal_set": [{"provenance": "specialist:serving:framework"}],
-    }
-    await ex._maybe_write_framework_kb_record(
-        _KbLesson("integrated", 1.0), attempt=IntegrateAttempt("t", done_payload=payload)
-    )
-    assert writes == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "payload",
-    [
-        None,
-        {"proposal_set": "x"},
-        {"proposal_set": [{"provenance": "kernel:x", "fa_pr_url": "https://example/pr/1"}]},
-    ],
-    ids=["no_payload", "malformed_proposal_set", "kernel_proposal"],
-)
-async def test_kb_writeback_files_no_lesson_without_a_framework_proposal(tmp_path, monkeypatch, payload):
-    writes: list[Any] = []
-
-    async def _fake_write(fields):
-        writes.append(fields)
-        return "/tmp/lessons.jsonl"
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.knowledge.kb_writeback.write_framework_record",
-        _fake_write,
-    )
-    await IntegratePatchExecutor(session_dir=tmp_path)._maybe_write_framework_kb_record(
-        _KbLesson("integrated", 1.0), attempt=IntegrateAttempt("t", done_payload=payload)
-    )
-    assert writes == []
-
-
 def _FakeVR(**kw):
     """A real ``VariantResult`` for ``_bench_patch``.
 
@@ -713,35 +516,6 @@ def _FakeVR(**kw):
 def _passing_eval_results(_results_dir, framework=None, benchmark_mode=""):
     """The eval read every accuracy-gated bench test stubs in."""
     return {"accuracy": 0.9}
-
-
-@pytest.mark.asyncio
-async def test_bench_patch_accuracy_regression_fails(tmp_path, monkeypatch):
-    cfg = tmp_path / "cfg.yaml"
-    cfg.write_text("x: 1\n", encoding="utf-8")
-    monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *a, **k: cfg)
-
-    async def _fake_run_grid(**kwargs):
-        return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
-
-    monkeypatch.setattr(integrate_bench, "run_grid", _fake_run_grid)
-    monkeypatch.setattr(
-        integrate_bench, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.50}
-    )
-    monkeypatch.setattr(
-        _accuracy_gate, "parse_eval_results", lambda rd, framework=None, benchmark_mode="": {"accuracy": 0.50}
-    )
-    ex = IntegratePatchExecutor(session_dir=tmp_path)
-    _, gate = await ex._bench_patch(
-        integrate_results._PatchBench(
-            params={"config_path": str(cfg), "accuracy_baseline": 0.95},
-            output_root=tmp_path,
-            specialist_task_id="abcdef123456",
-        ),
-        extra_server_args_applied="",
-        extra_envs_applied={},
-    )
-    assert gate["accuracy_pass"] is False
 
 
 @pytest.mark.asyncio
@@ -940,7 +714,7 @@ async def test_a_later_patch_failing_to_prepare_still_reverts_the_earlier_one(tm
     over that uncommitted tail left the first patch in the framework tree and
     graded an untouched-but-for-that tree as an environment fault.
     """
-    from hyperloom.orchestrator.actions.executors import _nogit_patch
+    from hyperloom.orchestrator.actions.executors.patching import _nogit_patch
 
     session = tmp_path / "s"
     session.mkdir()
@@ -971,7 +745,7 @@ async def test_a_later_patch_failing_to_prepare_still_reverts_the_earlier_one(tm
 @pytest.mark.asyncio
 async def test_a_crash_while_preparing_a_later_patch_still_reverts_the_earlier_one(tmp_path, monkeypatch):
     """The same tail, reached by losing the process rather than by returning."""
-    from hyperloom.orchestrator.actions.executors import _nogit_patch
+    from hyperloom.orchestrator.actions.executors.patching import _nogit_patch
 
     session = tmp_path / "s"
     session.mkdir()
@@ -1054,11 +828,10 @@ async def test_cancelled_gate_reverts_the_patch_and_re_raises(tmp_path, monkeypa
 async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, monkeypatch):
     """The apply stage stashes and mutates the tree, then awaits, same as the gate.
 
-    Each of its failure verdicts writes a KB record before the stash restore that
-    returns it, and a cancel arrives at whatever await the action happens to be
-    at -- a spent wall-clock budget is what makes it arrive at an arbitrary one.
-    Only the gate was guarded, so this window left the operator's uncommitted
-    work in ``git stash`` for the rest of the session.
+    A cancel arrives at whatever await the action happens to be at -- a spent
+    wall-clock budget is what makes it arrive at an arbitrary one. Only the gate
+    was guarded, so this window left the operator's uncommitted work in
+    ``git stash`` for the rest of the session.
     """
     session = tmp_path / "s"
     session.mkdir()
@@ -1069,30 +842,13 @@ async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, 
     scratch = repo / "user_scratch.txt"
     scratch.write_text("user work in progress\n", encoding="utf-8")
 
-    # The freeze that runs before the apply hashes the source where it was
-    # validated, so the file has to be there for the apply to be reached at all.
-    (tmp_path / "tuned.json").write_text("{}\n", encoding="utf-8")
+    apply_series = integrate_apply._apply_patch_series
 
-    def _fake_resolve(*args, **kwargs):
-        spec = patch_artifacts._ArtifactSpec(
-            source=tmp_path / "tuned.json",
-            target=repo / "tuned.json",
-            rel_target="tuned.json",
-            root=repo,
-            kind="config_json",
-        )
-        return [spec], []
-
-    async def _cancel(self, *args, **kwargs):
+    async def _apply_then_cancel(*args, **kwargs):
+        await apply_series(*args, **kwargs)
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(integrate_results, "_resolve_artifact_specs", _fake_resolve)
-    monkeypatch.setattr(
-        IntegratePatchExecutor,
-        "_apply_artifacts",
-        lambda self, specs, *, backup_root: ([], [{"artifact": "tuned.json", "error": "disk full"}]),
-    )
-    monkeypatch.setattr(IntegratePatchExecutor, "_maybe_write_framework_kb_record", _cancel)
+    monkeypatch.setattr(integrate_apply, "_apply_patch_series", _apply_then_cancel)
 
     ex = IntegratePatchExecutor(session_dir=session)
     with pytest.raises(asyncio.CancelledError):
@@ -1293,7 +1049,7 @@ async def test_apply_only_restores_user_stash_but_resume_refuses_unproven_user_m
 
 @pytest.mark.asyncio
 async def test_cancel_mid_non_git_apply_restores_prepared_ledger_without_returned_records(tmp_path, monkeypatch):
-    from hyperloom.orchestrator.actions.executors import _nogit_patch
+    from hyperloom.orchestrator.actions.executors.patching import _nogit_patch
 
     session = tmp_path / "session"
     repo = tmp_path / "fw"

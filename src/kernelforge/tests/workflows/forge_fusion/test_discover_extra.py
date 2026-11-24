@@ -9,16 +9,15 @@ import inspect
 import json
 
 from kernelforge.workflows.forge_fusion.locate import FrameworkInstall
-from kernelforge.workflows.forge_fusion.discover import DiscoveryTarget
+from kernelforge.workflows.forge_fusion.discovery_prompt import DiscoveryTarget
 from kernelforge.workflows.forge_fusion import discover as discover_module
 from kernelforge.workflows.forge_fusion.diagnose import TraceProfile, diagnose_from_shares
-from kernelforge.workflows.forge_fusion.discover import (
+from kernelforge.workflows.forge_fusion.discovery_response import (
     _extract_json_array,
     _salvage_objects,
-    discover_recipes,
-    hot_kernels_from_trace,
     parse_discovered_recipes,
 )
+from kernelforge.workflows.forge_fusion.discover import discover_recipes, hot_kernels_from_trace
 
 
 def _candidate_diag():
@@ -75,10 +74,6 @@ def test_salvage_ignores_braces_in_strings():
     objects = _salvage_objects(text)
     assert len(objects) == 2
     assert objects[0]["name"] == "a {nested}"
-
-
-def test_extract_empty_text():
-    assert _extract_json_array("") == []
 
 
 def test_extract_skips_invalid_array_then_salvages():

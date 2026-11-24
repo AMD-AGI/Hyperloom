@@ -138,7 +138,18 @@ def test_system_prompt_orders_writing_before_further_reading():
     assert "ONE reference driver" in prompt
     assert "unchanged is a total loss" in prompt
     # The ordering must come after the contract it is ordering work against.
-    assert prompt.index("profiling contract") < prompt.index("Working order")
+    assert prompt.index("case_ms: <case_id> <ms>") < prompt.index("Working order")
+
+
+def test_the_agent_is_not_asked_to_author_a_profiling_mode():
+    """Profiling is the profiling agent's to set up; the driver contract carries no mode for it."""
+    for text in (
+        task_preparer_prompts._SYSTEM_PROMPT,
+        task_preparer_prompts.DRIVER_CONTRACT_SPEC,
+        task_preparer_prompts.REFERENCE_DRIVER_TEMPLATE,
+    ):
+        assert "--profile-run" not in text
+        assert "profil" not in text.lower()
 
 
 def test_reference_template_covers_the_full_contract():
@@ -146,8 +157,7 @@ def test_reference_template_covers_the_full_contract():
     tmpl = task_preparer_prompts.REFERENCE_DRIVER_TEMPLATE
 
     assert "case_ms:" in tmpl
-    assert "--profile-run" in tmpl
-    assert "--profile-case" not in tmpl
+    assert "--bench-case" in tmpl
     assert "--shape" not in tmpl
     assert "CASES" in tmpl
 

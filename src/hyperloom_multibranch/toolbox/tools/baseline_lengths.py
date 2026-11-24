@@ -14,13 +14,14 @@ The mean prompt tokens per request are the baseline's input throughput x duratio
 per request the same of its output throughput (each figure the mean over its measured rounds, as the baseline records
 it). The hit rate is the share of the prompt tokens the server looked up in its prefix cache that it found there, summed
 over the measured phase of each measuring round the baseline tests landed (the ``kv_metrics.json`` in the round's
-inference_suite run_dir, vLLM's ``prefix_cache_queries`` and ``prefix_cache_hits`` counters). The measuring rounds are
+inference_suite run_dir: vLLM's ``prefix_cache_queries`` and ``prefix_cache_hits`` counters, or SGLang's
+``prompt_tokens_total`` and ``cached_tokens_total``, as SGLang looks every prompt token up). The measuring rounds are
 the ones the runner's ``rounds.json`` lists in the ``measure`` phase; a test landed without that list is read from the
 grid's layout, every run_dir of a variant slot other than a held test's warm-up and evaluation slots (a warm-up run
-nested in a slot sits a level further down, in ``warmup_round/``, and is not one of the slot's run_dirs). A baseline whose rounds record no such split (SGLang counts
-the tokens it found, not those it looked up) is weighted by the mean prompt tokens per request, which counts the cached
-prefix as prefill work, and the source says so. A baseline without these figures gives no lengths, and the mix stays
-degraded: a length is never guessed.
+nested in a slot sits a level further down, in ``warmup_round/``, and is not one of the slot's run_dirs). A baseline
+whose rounds record no such split (neither engine's pair, or one counter of a pair alone) is weighted by the mean prompt
+tokens per request, which counts the cached prefix as prefill work, and the source says so. A baseline without these
+figures gives no lengths, and the mix stays degraded: a length is never guessed.
 """
 
 from __future__ import annotations
@@ -44,8 +45,13 @@ _SLOT_GLOB = "variant_*"
 _UNMEASURED_SLOTS = frozenset(variant_slot(Path(), 0, role).name for role in (ROLE_WARMUP, ROLE_EVAL))
 #: The baseline's mean prompt tokens per second and completed requests, as its measured rounds report them.
 INPUT_THROUGHPUT, COMPLETED_REQUESTS = "input_throughput", "completed_requests"
-#: Where ``kv_metrics.json`` keeps the prefix-cache counters' increments over the round's measured phase.
-_PREFIX_CACHE, _QUERIED, _HIT = "prefix_cache", "prefix_cache_queries_delta", "prefix_cache_hits_delta"
+#: Where ``kv_metrics.json`` keeps the prefix-cache counters' increments over the round's measured phase, and each
+#: engine's pair of them that splits the prompt into the tokens looked up and those found: vLLM's, then SGLang's.
+_PREFIX_CACHE = "prefix_cache"
+_SPLITS = (
+    ("prefix_cache_queries_delta", "prefix_cache_hits_delta"),
+    ("prompt_tokens_total_delta", "cached_tokens_total_delta"),
+)
 _KV_MAX_BYTES = 64 << 20
 _ENCODING = "utf-8"
 
@@ -63,17 +69,20 @@ class PrefixCacheReading:
 
 
 def _round_counts(path: Path) -> PrefixCacheReading | None:
-    """The prefix-cache counts of one round's ``kv_metrics.json``; ``None`` when it records no lookup and hit both."""
+    """The prefix-cache counts of one round's ``kv_metrics.json``; ``None`` when it records neither engine's pair."""
     try:
         if path.stat().st_size > _KV_MAX_BYTES:
             return None
         window = json.loads(path.read_text(encoding=_ENCODING)).get(_PREFIX_CACHE)
     except (OSError, ValueError, AttributeError):
         return None
-    counts = [window.get(key) if isinstance(window, dict) else None for key in (_QUERIED, _HIT)]
-    if not all(isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c) for c in counts):
+    if not isinstance(window, dict):
         return None
-    return PrefixCacheReading(float(counts[0]), float(counts[1]))
+    for keys in _SPLITS:
+        counts = [window.get(key) for key in keys]
+        if all(isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c) for c in counts):
+            return PrefixCacheReading(float(counts[0]), float(counts[1]))
+    return None
 
 
 def _listed_run_dirs(landed: Path, listing: Path) -> list[Path]:

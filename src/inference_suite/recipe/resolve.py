@@ -55,15 +55,7 @@ from inference_suite.golden import GOLDEN_OWNED_ENV_PREFIXES, GOLDEN_OWNED_SPEC_
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL
 from inference_suite.recipe.atom_catalog import atom_catalog_launches
 from inference_suite.recipe.defaults import TABLE_PATH, default_table
-from inference_suite.recipe.golden_curve import (
-    _SGLANG_SIMULATION,
-    _SIMULATION_TOKEN_MODE,
-    GoldenLength,
-    GoldenTable,
-    _sglang_draft,
-    _vllm_draft,
-    with_golden,
-)
+from inference_suite.recipe.golden_curve import GoldenLength, GoldenTable, launch_draft, with_golden
 from inference_suite.recipe.image_version import NO_RECIPE_IMAGE, recipe_image_facts
 from inference_suite.recipe.inferencex import AGENTX_TRACE_ENV, agentx_trace, inferencex_launches
 from inference_suite.recipe.model import (
@@ -97,7 +89,6 @@ _RUNNER_OWNED = {"sglang": SGLANG_RUNNER_OWNED, "vllm": VLLM_RUNNER_OWNED, "atom
 _RUNNER_OWNED_ENV = frozenset({"CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"})
 _TOPOLOGY = {"sglang": SGLANG_TOPOLOGY, "vllm": VLLM_TOPOLOGY, "atom": ATOM_TOPOLOGY}
 _NO_KV_OFFLOADING = "none"
-_SGLANG_METHOD, _SGLANG_TOKEN_MODE = _SGLANG_SIMULATION[1:]
 
 
 @dataclass(frozen=True)
@@ -269,24 +260,15 @@ def _split_args(args: Sequence[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
 def _golden_acceptance(
     launch: SourceLaunch, golden: SourceGolden, args: tuple[str, ...], env: Mapping[str, str]
 ) -> GoldenAcceptance:
-    occurrences = argv_flag_occurrences(args)
-    if launch.framework == "sglang":
-        spec, _ = _sglang_draft(occurrences)
-        method, token_mode = env.get(_SGLANG_METHOD), env.get(_SGLANG_TOKEN_MODE)
-    elif launch.framework == "vllm":
-        spec, _ = _vllm_draft(occurrences)
-        # vLLM's synthetic sampler streams the drafted tokens it accepts, as sglang's real-draft-token mode does.
-        method, token_mode = spec.get("rejection_sample_method"), _SIMULATION_TOKEN_MODE
-    else:
-        raise RecipeSourceError(f"a {launch.framework} launch simulates no golden acceptance")
+    draft = launch_draft(launch.framework, args, env)
     return GoldenAcceptance(
         value=golden.value,
-        method=method,
-        token_mode=token_mode,
-        spec_method=spec.get("method"),
-        draft_length=spec.get("num_speculative_tokens"),
+        method=draft.simulation,
+        token_mode=draft.token_mode,
+        spec_method=draft.spec.get("method"),
+        draft_length=draft.spec.get("num_speculative_tokens"),
         curve=golden.curve,
-        draft_model=spec.get("model") or None,
+        draft_model=draft.spec.get("model") or None,
         args=args,
         env=env,
     )

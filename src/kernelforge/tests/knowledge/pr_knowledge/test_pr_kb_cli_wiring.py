@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-import inspect
 import subprocess
+from types import SimpleNamespace
 
 import pytest
-from click.testing import CliRunner
 
 from hyperloom_common.env import EnvValueError
 from kernelforge.cli import forge_loop
+from kernelforge.config import Config
 from kernelforge.workflows.forge_loop.bootstrap import run as forge_loop_run
-from kernelforge.workflows.forge_loop.bootstrap.relay import SearchActorBuildContext
+from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationConfig
 from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
+from kernelforge.knowledge.pr_knowledge.references import PRRefsResult, refs_dir
+from kernelforge.knowledge.pr_knowledge.search import PRReference
 from kernelforge.workflows.forge_loop.bootstrap.pr_references import (
     _collect_pr_references,
     _git_remote_url,
@@ -75,35 +77,30 @@ def test_switch_is_independent_of_the_experience_kb_flag():
     assert names["pr_kb"].default is None
 
 
-def test_pr_context_is_wired_only_to_the_implementer():
-    """Keep external PR text out of measured Analysis and planning evidence."""
-    implementer = inspect.getsource(forge_loop_run._implementer_setup)
-    search = inspect.getsource(forge_loop_run._search)
-    analysis = search[
-        search.index("analysis_service = make_analysis_agent_service(") : search.index('print("  Analysis Agent: "')
-    ]
-    # Each Agent profile builds its own planning chain and supervisor; only its implementer receives the setup.
-    actor_source = inspect.getsource(SearchActorBuildContext.build)
-    orchestration = actor_source[
-        actor_source.index("orchestration = make_orchestration_service(") : actor_source.index(
-            "supervisor = make_supervisor_fn("
-        )
-    ]
-    supervisor = actor_source[actor_source.index("supervisor = make_supervisor_fn(") :]
+def test_the_collected_pr_context_reaches_the_implementer_task(monkeypatch, tmp_path):
+    from kernelforge.knowledge.pr_knowledge import references as pr_monitor_refs
 
-    assert "pre_task_context=pr_task_context" in implementer
-    assert "pr_kb_repo=pr_kb_repo" in implementer
-    assert "pr_task_context" not in analysis
-    assert "setup" not in orchestration
-    assert "setup" not in supervisor
+    found = PRRefsResult(
+        prompt_context="PR CONTEXT",
+        references=(PRReference(repo="ROCm/aiter", number=1),),
+        repo="ROCm/aiter",
+    )
+    monkeypatch.setattr(pr_monitor_refs, "collect_references", lambda **_kwargs: found)
+    run = SimpleNamespace(
+        iter_config=IterationConfig(kernel_file="kernel.py", driver_script="driver.py", workspace_dir=str(tmp_path)),
+        config=Config(workspace=str(tmp_path), agent_backend="codex"),
+        campaign=SimpleNamespace(kernel_backend="aiter", source_files=(), operator_name=""),
+        deadline=SimpleNamespace(remaining=lambda reserve: 3600.0, finalize_reserve_sec=0.0),
+        request=SimpleNamespace(
+            budget=SimpleNamespace(max_hours=1.0),
+            roles=SimpleNamespace(permission_mode=None),
+            knowledge=SimpleNamespace(pr_kb=True),
+        ),
+    )
 
+    task = forge_loop_run._implementer_setup(run, ["kernel.py"], 600, False).task
 
-def test_help_text_mentions_the_default_being_off():
-    result = CliRunner().invoke(forge_loop, ["--help"])
-
-    assert result.exit_code == 0
-    assert "--pr-kb" in result.output
-    assert "--no-pr-kb" in result.output
+    assert (task.pre_task_context, task.pr_kb_repo) == ("PR CONTEXT", "ROCm/aiter")
 
 
 def test_remote_url_is_read_from_the_workspace(tmp_path):
@@ -153,26 +150,6 @@ def test_degraded_reason_is_surfaced_alongside_an_ok_reason():
 
     assert fields["reason"] == "ok"
     assert fields["degraded_reason"] == "service_unreachable"
-
-
-def test_position_a_never_writes_events_itself(tmp_path):
-    """Do not create the campaign sentinel before loop initialization."""
-    _pr_refs_event_fields("", {"candidates": 1})
-
-    assert not (tmp_path / "forge_experiments" / "events.jsonl").exists()
-
-
-def test_loop_appends_the_event_only_after_the_campaign_guard():
-    """Append the event only after campaign initialization."""
-    from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop
-
-    assert "pr_kb_event" in set(IterationConfig.__dataclass_fields__)
-    assert "already contains a campaign" in inspect.getsource(IterationLoop._restore_or_begin_campaign)
-    assert "pr_refs_refreshed" in inspect.getsource(IterationLoop._persist_pr_knowledge)
-    source = inspect.getsource(IterationLoop._begin_locked_run)
-    guard = source.index("self._restore_or_begin_campaign(")
-    append = source.index("self._persist_pr_knowledge()")
-    assert append > guard, "the event append must follow the fresh-campaign guard"
 
 
 def test_a_failed_lookup_degrades_instead_of_raising(monkeypatch, tmp_path):
@@ -248,22 +225,27 @@ def test_an_unexpected_failure_is_not_swallowed(monkeypatch, tmp_path):
         )
 
 
-def test_the_event_append_cannot_abort_the_campaign():
-    """A failed observability write may only print, never propagate."""
-    from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop
+def test_the_caller_has_the_result_before_provenance_is_written(tmp_path):
+    provenance = refs_dir(str(tmp_path)) / "provenance.json"
+    provenance_at_publication = []
+    run = SimpleNamespace(
+        deadline=SimpleNamespace(remaining=lambda reserve: 0.0),
+        usage=SimpleNamespace(totals=dict),
+        tracker=None,
+        request=SimpleNamespace(
+            artifacts=SimpleNamespace(result_json=""),
+            campaign=SimpleNamespace(workspace_dir=str(tmp_path)),
+        ),
+        iter_config=SimpleNamespace(pr_reference_labels=("ROCm/aiter#1",)),
+        publish_result=lambda _result: provenance_at_publication.append(provenance.exists()),
+    )
+    loop_runner = SimpleNamespace(_checkpoint_llm_usage=lambda: None, experiment=None)
+    reporter = SimpleNamespace(
+        publish_final_best=lambda llm_summary: {},
+        build_result=lambda kb_experience: {"best_iteration": 1, "experiment_id": "exp-1"},
+    )
 
-    source = inspect.getsource(IterationLoop._persist_pr_knowledge)
-    append = source.index("pr_refs_refreshed")
-    handler = source.index("except (OSError, ValueError)", append)
-    following = source.index("self.ic.pr_kb_event = {}", append)
+    forge_loop_run._publish(run, loop_runner, reporter)
 
-    assert handler < following, "the append must be guarded before it is cleared"
-
-
-def test_result_is_emitted_before_provenance_is_written():
-    source = inspect.getsource(forge_loop_run._publish)
-    result = source.index("result = reporter.build_result(")
-    emitted = source.index("run.publish_result(result)", result)
-    provenance = source.index("_write_pr_provenance(", emitted)
-
-    assert emitted < provenance
+    assert provenance_at_publication == [False]
+    assert provenance.exists()

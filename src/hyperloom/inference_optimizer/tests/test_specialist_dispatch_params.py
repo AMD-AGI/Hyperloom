@@ -9,13 +9,12 @@ import pytest
 
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.policy.denial import PolicyDenied
-from hyperloom.orchestrator.policy.gate import (
-    KNOWLEDGE_DOMAIN_TAG_SET,
-    PolicyGate,
+from hyperloom.orchestrator.policy.gate import PolicyGate
+from hyperloom.orchestrator.policy.validators import (
     SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS,
     SPECIALIST_FREEFORM_WAVE_MAX,
 )
-from hyperloom.orchestrator.specialists.domains import SPECIALIST_DOMAINS
+from hyperloom.orchestrator.specialists.domains import KNOWLEDGE_DOMAIN_TAG_SET, SPECIALIST_DOMAINS
 from hyperloom.orchestrator.specialists.profile import (
     DEFAULT_BENCH,
     DEFAULT_MODE,
@@ -97,7 +96,7 @@ def test_bench_falsy_values(falsy):
 
 
 def test_reserves_benchmark_lane_only_for_bench_capable():
-    """Only bench-capable patch specialists hold the whole-machine serving_slot."""
+    """Only bench-capable patch specialists reserve the benchmark lane."""
     assert resolve_specialist_profile({"mode": "patch", "bench": True}).reserves_benchmark_lane is True
     authoring = {"framework_agent_authoring": True, "domain": "serving_specialist"}
     assert resolve_specialist_profile(authoring).reserves_benchmark_lane is False
@@ -703,7 +702,7 @@ def test_resolve_specialist_max_turns_zero_uses_default():
 # --------------------------------------------------------------------------- # Tool surface: TaskKill and
 # SlashCommand are denied. --------------------------------------------------------------------------- #
 def test_specialists_are_denied_only_the_process_cleanup_tools():
-    """specialist.md's containment model: every tool except these two, so patch authoring and KB writes stay open."""
+    """A specialist gets every tool except these two, so patch authoring and KB writes stay open."""
     from hyperloom.orchestrator.specialists.runner import SPECIALIST_TOOL_DENYLIST
 
     assert SPECIALIST_TOOL_DENYLIST == frozenset({"KillShell", "SlashCommand"})

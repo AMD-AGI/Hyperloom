@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.orchestrator.actions.executors._apply_feedback import (
+from hyperloom.orchestrator.actions.executors.patching._apply_feedback import (
     ApplyFeedback,
     build_apply_feedback,
     read_patch_source_context,

@@ -35,14 +35,14 @@ def test_baremetal_defaults_match_compat_doc():
     sglang_ref = _default("SGLANG_REF", sh)  # e.g. v0.5.17
     sglang_rocm_extra = _sglang_extra_for_rocm72(sh)  # e.g. rocm724
 
-    # compatibility.rst documents e.g. "v0.29.0 (rocm723)" and the pip spec "vllm==0.29.0+rocm723"; keep both in
-    # lockstep with the script defaults.
-    assert "v%s (%s)" % (vllm_version, vllm_variant) in doc, (
-        "docs/compatibility.rst must document vLLM 'v%s (%s)' to match "
-        "install_baremetal.sh defaults" % (vllm_version, vllm_variant)
+    # compatibility.rst documents e.g. "v0.34.0 source build" and the wheel-route override
+    # "VLLM_ROCM_VARIANT=rocm72"; keep both in lockstep with the script defaults.
+    assert "v%s source build" % vllm_version in doc, (
+        "docs/compatibility.rst must document vLLM 'v%s source build' to match "
+        "install_baremetal.sh defaults" % vllm_version
     )
-    assert "vllm==%s+%s" % (vllm_version, vllm_variant) in doc, (
-        "docs/compatibility.rst pip spec must be 'vllm==%s+%s'" % (vllm_version, vllm_variant)
+    assert "VLLM_ROCM_VARIANT=%s" % vllm_variant in doc, (
+        "docs/compatibility.rst must document the wheel-route override 'VLLM_ROCM_VARIANT=%s'" % vllm_variant
     )
 
     vllm_source_ref = _default("VLLM_SOURCE_REF", sh)

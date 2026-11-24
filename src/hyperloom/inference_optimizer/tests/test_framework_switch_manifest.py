@@ -11,7 +11,7 @@ import pytest
 
 from hyperloom.common.env_safety import BLOCKED_EXTERNAL_ENV_NAMES
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
-from hyperloom.orchestrator.actions.executors import _framework_switch_manifest as manifest
+from hyperloom.orchestrator.actions.executors.framework_change import _framework_switch_manifest as manifest
 
 
 def _entry(switch: str, **kwargs: Any) -> dict[str, Any]:
@@ -540,7 +540,7 @@ def _entry_parsed(switch: str) -> dict[str, Any]:
 
 def test_dormant_levers_seed_additive_variants():
     """Code kept inert is turned on one dependency-closed bundle at a time."""
-    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import framework_lever_grid
 
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=False)
@@ -552,7 +552,7 @@ def test_dormant_levers_seed_additive_variants():
 
 def test_active_levers_seed_leave_one_out_variants():
     """A stack that already won is attributed by removing one lever at a time."""
-    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import framework_lever_grid
 
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=True)
@@ -564,7 +564,7 @@ def test_active_levers_seed_leave_one_out_variants():
 
 def test_already_attributed_levers_are_not_re_benched():
     """A lever with a number spends no further legs."""
-    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import framework_lever_grid
 
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=False)
@@ -575,7 +575,7 @@ def test_already_attributed_levers_are_not_re_benched():
 
 def test_an_attributed_enabler_still_turns_on_for_its_dependents():
     """Attribution decides which arms are left to run, never which envs a bundle sets."""
-    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import framework_lever_grid
 
     switches, _ = manifest.parse_manifest([_entry("HL_X", enables=["HL_Y"]), _entry("HL_Y")])
     state = _state()
@@ -591,7 +591,7 @@ def test_an_attributed_enabler_still_turns_on_for_its_dependents():
 
 def test_the_combination_arm_runs_until_every_one_of_its_levers_is_attributed():
     """The full stack is offered while any dormant lever is pending, and always switches every dormant lever on."""
-    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import framework_lever_grid
 
     switches, _ = manifest.parse_manifest([_entry("HL_A"), _entry("HL_B")])
     state = _state()
@@ -610,7 +610,7 @@ def test_the_combination_arm_runs_until_every_one_of_its_levers_is_attributed():
 
 def test_an_attributed_lever_still_counts_toward_the_stack_a_drop_leaves():
     """Dropping X and the Y it enables still leaves Z on, so the arm attributes X rather than restating the base."""
-    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import framework_lever_grid
 
     switches, _ = manifest.parse_manifest([_entry("HL_X", enables=["HL_Y"]), _entry("HL_Y"), _entry("HL_Z")])
     state = _state()
@@ -627,7 +627,7 @@ def test_an_attributed_lever_still_counts_toward_the_stack_a_drop_leaves():
 
 def test_no_levers_means_no_seeding():
     """The seeder is inert for every framework that has no authored rewrites."""
-    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import framework_lever_grid
 
     assert framework_lever_grid(None) == []
     assert framework_lever_grid(_state()) == []
@@ -635,21 +635,21 @@ def test_no_levers_means_no_seeding():
 
 def test_lever_variants_survive_the_payload_parser():
     """The parsed variant keeps the name attribution joins on and the unset the leg needs, or attribution is lost."""
-    from hyperloom.orchestrator.actions.executors.explore import (
-        _framework_lever_attributions,
-        _grid_variants_from_payload,
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import (
+        framework_lever_attributions,
+        grid_variants_from_payload,
         framework_lever_grid,
     )
 
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=True)
     payload = framework_lever_grid(state)
-    variants = _grid_variants_from_payload(payload)
+    variants = grid_variants_from_payload(payload)
     assert len(variants) == len(payload)
     assert all(v.unset_envs for v in variants)
 
     outcomes = [{"variant_name": v.name, "outcome": "REVERT", "metrics": {"gain_pct": -2.0}} for v in variants]
-    attributed = _framework_lever_attributions(outcomes, payload)
+    attributed = framework_lever_attributions(outcomes, payload)
     assert {row["switch"] for row in attributed} == {str(v.get("framework_lever")) for v in payload}
     # leave_one_out: dropping a lever that cost 2% credits it with +2%.
     assert all(row["gain_pct"] == pytest.approx(2.0) for row in attributed)
@@ -660,11 +660,11 @@ def test_lever_variants_survive_the_payload_parser():
 
 def test_additive_attribution_takes_the_measured_gain_directly():
     """Switching a lever on measures its contribution as-is."""
-    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import framework_lever_attributions
 
     seeds = [{"name": "fwlever_hl_a", "framework_lever": "HL_A", "framework_lever_source": "additive"}]
     outcomes = [{"variant_name": "fwlever_hl_a", "outcome": "KEEP", "metrics": {"gain_pct": 6.2}}]
-    assert _framework_lever_attributions(outcomes, seeds) == [
+    assert framework_lever_attributions(outcomes, seeds) == [
         {
             "switch": "HL_A",
             "gain_pct": 6.2,
@@ -677,7 +677,7 @@ def test_additive_attribution_takes_the_measured_gain_directly():
 
 def test_leave_one_out_attribution_negates_the_measured_gain():
     """Removing a lever measures the negative of its contribution."""
-    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import framework_lever_attributions
 
     seeds = [
         {
@@ -687,34 +687,34 @@ def test_leave_one_out_attribution_negates_the_measured_gain():
         }
     ]
     outcomes = [{"variant_name": "fwlever_drop_hl_a", "outcome": "REVERT", "metrics": {"gain_pct": -8.0}}]
-    assert _framework_lever_attributions(outcomes, seeds)[0]["gain_pct"] == pytest.approx(8.0)
+    assert framework_lever_attributions(outcomes, seeds)[0]["gain_pct"] == pytest.approx(8.0)
 
 
 def test_a_combination_variant_attributes_to_nothing():
     """The full-stack leg is a combination test, not one rewrite's number."""
-    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import framework_lever_attributions
 
     seeds = [{"name": "fwlever_all", "framework_lever": "", "framework_lever_source": "additive"}]
     outcomes = [{"variant_name": "fwlever_all", "outcome": "KEEP", "metrics": {"gain_pct": 12.0}}]
-    assert _framework_lever_attributions(outcomes, seeds) == []
+    assert framework_lever_attributions(outcomes, seeds) == []
 
 
 def test_an_unmeasured_variant_attributes_to_nothing():
     """A failed or killed leg produces no number, so it records none."""
-    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import framework_lever_attributions
 
     seeds = [{"name": "fwlever_hl_a", "framework_lever": "HL_A", "framework_lever_source": "additive"}]
     outcomes = [{"variant_name": "fwlever_hl_a", "outcome": "FAILED", "metrics": {}}]
-    assert _framework_lever_attributions(outcomes, seeds) == []
+    assert framework_lever_attributions(outcomes, seeds) == []
 
 
 def test_non_lever_variants_are_ignored():
     """An ordinary config variant in the same round is not a lever attribution."""
-    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import framework_lever_attributions
 
     seeds = [{"name": "fwlever_hl_a", "framework_lever": "HL_A", "framework_lever_source": "additive"}]
     outcomes = [{"variant_name": "myfw_hw_queues_2", "outcome": "KEEP", "metrics": {"gain_pct": 3.0}}]
-    assert _framework_lever_attributions(outcomes, seeds) == []
+    assert framework_lever_attributions(outcomes, seeds) == []
 
 
 # two-tier verdict in integrate_patch
@@ -816,11 +816,7 @@ async def _run_rewrite_integrate(
             {"accuracy_pass": accuracy_pass, "timed_out": False},
         )
 
-    async def _noop_kb(*_args, **_kwargs):
-        return None
-
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
-    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
 
     task_params: dict[str, Any] = {
         "specialist_task_id": "t-spec-rw",
@@ -1142,16 +1138,6 @@ async def test_a_parity_leg_that_produced_no_measurement_is_not_called_a_parity_
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
-def test_both_parity_outcomes_are_writable_to_the_framework_kb():
-    """A verdict the KB rejects is a verdict that never reaches the next session."""
-    from hyperloom.orchestrator.knowledge import kb_writeback
-
-    assert kb_writeback.OUTCOME_REVERTED_SWITCH_OFF_PARITY in kb_writeback.ALLOWED_OUTCOMES
-    assert kb_writeback.OUTCOME_REVERTED_PARITY_INCONCLUSIVE in kb_writeback.ALLOWED_OUTCOMES
-    # The two must stay distinct: one is a property of the patch, the other of the run.
-    assert kb_writeback.OUTCOME_REVERTED_SWITCH_OFF_PARITY != kb_writeback.OUTCOME_REVERTED_PARITY_INCONCLUSIVE
-
-
 @pytest.mark.asyncio
 async def test_parity_noise_inside_the_band_is_tolerated(tmp_path, monkeypatch):
     """Run-to-run variance must not be mistaken for a behavioural change."""
@@ -1253,7 +1239,7 @@ async def test_a_patch_without_switches_spends_no_parity_leg(tmp_path, monkeypat
 @pytest.mark.asyncio
 async def test_a_raising_parity_leg_does_not_read_as_a_pass(tmp_path, monkeypatch):
     """A probe that cannot run has proved nothing, so it must not wave the patch through."""
-    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
+    from hyperloom.orchestrator.actions.executors.integrate._integrate_results import _PatchBench
     from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 
     executor = IntegratePatchExecutor(session_dir=tmp_path)
@@ -1273,7 +1259,7 @@ async def test_a_raising_parity_leg_does_not_read_as_a_pass(tmp_path, monkeypatc
 @pytest.mark.asyncio
 async def test_parity_without_a_base_is_reported_as_not_run(tmp_path):
     """No base to compare against means the check was skipped, not that it passed."""
-    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
+    from hyperloom.orchestrator.actions.executors.integrate._integrate_results import _PatchBench
     from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 
     verdict = await IntegratePatchExecutor(session_dir=tmp_path)._switch_off_parity(
@@ -1286,7 +1272,7 @@ async def test_parity_without_a_base_is_reported_as_not_run(tmp_path):
 @pytest.mark.asyncio
 async def test_parity_can_be_switched_off_explicitly(tmp_path):
     """An operator debugging the harness can take the extra leg out."""
-    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
+    from hyperloom.orchestrator.actions.executors.integrate._integrate_results import _PatchBench
     from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 
     verdict = await IntegratePatchExecutor(session_dir=tmp_path)._switch_off_parity(

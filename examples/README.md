@@ -42,7 +42,7 @@ From the agent terminal in that workspace, install the published release wheel
 into the current directory:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.1.5 --target .
+pip install hyperloom-inference-optimizer==1.2.0 --target .
 ```
 
 It is normal for the current directory to contain many Python package directories
@@ -107,7 +107,9 @@ Requirements:
 - **Base Python on this GPU host** — the interpreter `install_baremetal.sh`
   resolves, not a child venv:
   - Python 3.10+ for SGLang and general operation.
-  - **Exactly Python 3.12** when setup installs vLLM from a ROCm 7.2.x wheel.
+  - **Exactly Python 3.12** when setup installs vLLM from a ROCm 7.2.x wheel
+    (vLLM 0.34.0 has none, so that route needs
+    `VLLM_VERSION=0.33.0 VLLM_ROCM_VARIANT=rocm72`).
     The ROCm 10.0 source-build route accepts Python >= 3.10, < 3.15.
     The isolated framework venv is created from the selected base interpreter,
     so it does not relax either requirement.

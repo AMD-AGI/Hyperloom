@@ -26,7 +26,7 @@ from hyperloom.inference_optimizer.multi_node import TopologyHandoffError
 from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 from hyperloom.inference_optimizer.multi_node import pd_session
 from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
-from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as lifecycle
+from hyperloom.orchestrator.actions.executors.serving import _multi_node_server_lifecycle as lifecycle
 from hyperloom.inference_optimizer.session.base_launch import read_base_launch
 
 _NODES = {
