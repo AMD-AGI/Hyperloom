@@ -213,7 +213,10 @@ point, and draws `reports/conc_sweep_curve.png` (interactivity against
 throughput per GPU) at the end. Its `status` is `succeeded`, `partial`,
 `failed`, `skipped` (with `skip_reason`) or `cancelled` (SIGINT or SIGTERM;
 the measured points stay). A later run measures only the points not yet
-measured. Multi-node and MLPerf sessions are skipped.
+measured on the same launch of each arm. Multi-node and MLPerf sessions are
+skipped, and so is a session whose retained overlay cannot load
+(`optimized_overlay_unavailable`). The session package is rebuilt after the
+sweep so it carries the report.
 
 ## Troubleshooting
 

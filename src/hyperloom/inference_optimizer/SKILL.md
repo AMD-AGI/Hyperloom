@@ -1757,5 +1757,5 @@ Report concise status:
 - last kernel optimized, correctness, micro speedup, E2E gain, decision
 - any new `experience_kb_injections` entry: each injected Experience's summary and its section of `prompt_block`
 - whether the process is still running or stopped and why
-- with `--enable-conc-sweep`, the sweep's `status`, points and best speedup from `reports/conc_sweep_summary.json`;
+- unless the sweep is off (`--no-enable-conc-sweep`), the sweep's `status`, points and best speedup from `reports/conc_sweep_summary.json`;
   the sweep runs after CLOSE (`hyperloom conc-sweep SESSION_DIR` reruns the points not yet measured)

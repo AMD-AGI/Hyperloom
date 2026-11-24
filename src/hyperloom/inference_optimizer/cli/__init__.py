@@ -1069,8 +1069,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
 
 def sweeps_after_close(state: Any, stop_reason: str | None) -> bool:
-    """Whether the session's conc sweep runs once it closed: asked for, CLOSE ran, and no signal stopped it."""
-    return state.conc_sweep_enabled and state.close_sequence_done and stop_reason not in ABORTED_STOP_REASONS
+    """Whether the session's conc sweep runs once it closed: asked for, CLOSE ran, and neither a signal nor a
+    supervisor restart, which ends a leg and not the session, stopped it."""
+    ended = stop_reason not in ABORTED_STOP_REASONS and stop_reason != SUPERVISOR_RESTART_REASON
+    return state.conc_sweep_enabled and state.close_sequence_done and ended
 
 
 async def _close_optimize_run(coordinator: Any, session_lock: Any, session_dir: Path, stop_reason: str | None) -> None:

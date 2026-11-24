@@ -37,6 +37,7 @@ def test_the_operators_points_are_parsed_distinct_and_ascending():
     [
         (True, True, "time_exhausted", True),
         (True, True, "signal", False),
+        (True, True, "supervisor_restart_requested", False),
         (True, False, "time_exhausted", False),
         (False, True, "time_exhausted", False),
     ],

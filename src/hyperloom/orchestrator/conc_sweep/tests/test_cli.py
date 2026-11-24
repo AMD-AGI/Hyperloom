@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,8 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 @pytest.fixture
 def session_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
+    monkeypatch.setenv(ENV_CURRENT_SESSION_DIR, "")
+    monkeypatch.delenv(ENV_CURRENT_SESSION_DIR)
     path = tmp_path / "workspace" / "model" / "20261124T000000Z-abcd1234"
     (path / "reports").mkdir(parents=True)
     SharedState(session_id="abcd1234").save(path)
@@ -41,6 +43,21 @@ def test_a_standalone_sweep_resolves_its_rounds_to_its_own_session(
     asyncio.run(cli.sweep_session(session_dir))
 
     assert [path.resolve() for path in resolved] == [session_dir.resolve()]
+
+
+def test_a_relative_session_dir_is_pinned_as_an_absolute_one(
+    session_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def run_conc_sweep(path: Path, *, grant_end_unix: float | None) -> dict[str, Any]:
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(cli, "run_conc_sweep", run_conc_sweep)
+    monkeypatch.setattr(cli, "package_session_artifacts", lambda *_, **__: None)
+    monkeypatch.chdir(session_dir.parent)
+
+    asyncio.run(cli.sweep_session(Path(session_dir.name)))
+
+    assert os.environ[ENV_CURRENT_SESSION_DIR] == str(session_dir.resolve())
 
 
 def test_the_session_is_packaged_again_once_the_report_is_written(

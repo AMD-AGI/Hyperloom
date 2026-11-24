@@ -91,7 +91,6 @@ from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.scheduling.budget import (
     MB_CLOSE_GRACE_CAP_SECONDS,
     MB_SECONDS_PER_HOUR,
-    ExploreCap,
     FinalWork,
 )
 from hyperloom_multibranch.scheduling.final import sweep_unfinished
@@ -559,13 +558,6 @@ def grant_tests_end_by(host: HostInfo) -> float | None:
     return None if end is None else end.tests_end_by
 
 
-def grant_explore_cap(host: HostInfo) -> ExploreCap | None:
-    """:meth:`GrantEnd.explore_cap` of ``host``'s grant, ``None`` without a grant runtime."""
-
-    end = grant_end(host)
-    return None if end is None else end.explore_cap
-
-
 def arm_grant_stop(seconds: float) -> threading.Timer:
     """Send this process SIGTERM in ``seconds``, the stop signal a session ends on; returns the started timer."""
 
@@ -723,11 +715,11 @@ def hosted_restart_leg(
     persisted: PersistedRun,
     finish: Callable[..., int],
     resume: Callable[..., int],
-    explore_cap: ExploreCap | None = None,
+    grant: GrantEnd | None = None,
 ) -> Callable[..., int]:
     """What a restart of the run runs over ``persisted``, the ``finish`` of :func:`take_over_earlier_session`:
     ``resume`` (``cli.resume``) with ``until`` bound to :func:`hosted_resume_deadline`'s, so its budget counts
-    from the run's first start, and ``cap`` to ``explore_cap`` (the grant's, :func:`grant_explore_cap`), when the
+    from the run's first start, and ``grant`` to the grant's end (:func:`grant_end`), when the
     session was measured in the grant's sandboxes and its baseline still measures what a test measured now would
     (:func:`~hyperloom_multibranch.toolbox.resume_guard.check_hosted_baseline_reusable`: the same build,
     ``MEASUREMENT_EPOCH``, image, base launch and runner template cards; not the node or the account, which a
@@ -750,7 +742,7 @@ def hosted_restart_leg(
         log.warning("hosted run: finishing %s instead of resuming it: %s", root, exc)
         return finish
     log.info("hosted run: resuming %s up to the deadline its first start set", root)
-    return partial(resume, until=deadline, cap=explore_cap)
+    return partial(resume, until=deadline, grant=grant)
 
 
 #: What reading back an earlier session fails with when this account cannot read what it left: a file an earlier leg of
@@ -841,7 +833,6 @@ __all__ = [
     "final_reserve_seconds",
     "grant_deadline",
     "grant_end",
-    "grant_explore_cap",
     "grant_tests_end_by",
     "grant_tests_that_fit",
     "hosted_restart_leg",

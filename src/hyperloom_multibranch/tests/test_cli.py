@@ -946,7 +946,12 @@ def agent_cli(agent_binaries: None, monkeypatch: pytest.MonkeyPatch) -> list[Run
         return 0
 
     def final_only(
-        persisted: PersistedRun, peer_factory: PeerFactory, services: object, *, restart: bool = False
+        persisted: PersistedRun,
+        peer_factory: PeerFactory,
+        services: object,
+        *,
+        restart: bool = False,
+        grant: GrantEnd | None = None,
     ) -> int:
         runs.append(persisted.settings)
         FINISHED_AS_RESTART.append(restart)
@@ -957,11 +962,11 @@ def agent_cli(agent_binaries: None, monkeypatch: pytest.MonkeyPatch) -> list[Run
         peer_factory: PeerFactory,
         services: object,
         until: float,
-        cap: ExploreCap | None,
+        grant: GrantEnd | None,
     ) -> int:
         runs.append(persisted.settings)
         RESUMED_TO.append(until)
-        EXPLORE_CAPS.append(cap)
+        EXPLORE_CAPS.append(None if grant is None else grant.explore_cap)
         return 0
 
     EXPLORE_CAPS.clear()
@@ -1454,7 +1459,9 @@ def test_a_final_only_holds_the_session_against_a_second_one_and_releases_it(
     layout = _ended_before_final(tmp_path / "MB-20300102T030405Z-0123abcd")
     persisted = persisted_run(layout.root)
 
-    async def while_it_runs(run: PersistedRun, peer_factory: object, services: object, leg: object) -> int:
+    async def while_it_runs(
+        run: PersistedRun, peer_factory: object, services: object, leg: object, grant_end_unix: float | None
+    ) -> int:
         assert layout.final_only_lock.read_text(encoding="utf-8") == f"{os.getpid()}\n"
         assert cli.final_only(run, peer_factory, services) == cli.EXIT_USAGE
         assert cli.resume(run, peer_factory, services, 3600.0, None) == cli.EXIT_USAGE
@@ -1597,6 +1604,28 @@ def test_a_resume_whose_specialists_account_cannot_reach_the_session_is_refused_
 
     assert agent_cli == [] and RESUMED_TO == [], "not resumed"
     assert f"cannot search {tmp_path}" in capsys.readouterr().err
+
+
+def test_a_restart_leg_warns_its_conc_sweep_at_the_grants_tests_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    persisted = persisted_run(_ended_before_final(tmp_path / "session").root)
+    ends: list[float | None] = []
+
+    async def run_leg(
+        run: PersistedRun, peer_factory: object, services: object, leg: object, grant_end_unix: float | None
+    ) -> int:
+        ends.append(grant_end_unix)
+        return 0
+
+    monkeypatch.setattr(cli, "_run_leg", run_leg)
+    grant = GrantEnd(at=10_000.0)
+
+    cli.final_only(persisted, None, None, restart=True, grant=grant)  # type: ignore[arg-type]
+    cli.resume(persisted, None, None, 3600.0, grant)  # type: ignore[arg-type]
+    cli.resume(persisted, None, None, 3600.0, None)  # type: ignore[arg-type]
+
+    assert ends == [grant.tests_end_by, grant.tests_end_by, None]
 
 
 def test_a_hosted_restart_finishes_a_session_before_final_and_sweeps_one_final_chose_in(tmp_path: Path) -> None:
@@ -2390,7 +2419,14 @@ def test_a_restart_that_finishes_a_preempted_session_ends_the_run_as_its_final_w
     (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
     finishes: list[tuple[SessionStopReason, bool]] = []
 
-    def finish(persisted: PersistedRun, peer_factory: PeerFactory, services: object, *, restart: bool = False) -> int:
+    def finish(
+        persisted: PersistedRun,
+        peer_factory: PeerFactory,
+        services: object,
+        *,
+        restart: bool = False,
+        grant: GrantEnd | None = None,
+    ) -> int:
         finishes.append((persisted.ended, restart))
         ended = SessionStopReason.FINISHED_AFTER_RESTART if restart and chose else persisted.ended
         _report(persisted.layout, stop_reason=ended.value, final={"chosen": {"commit": "c9"}} if chose else None)
@@ -2601,7 +2637,9 @@ def test_a_restart_that_cannot_read_the_session_before_its_baseline_leaves_it_an
     (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
     left = {path: path.read_bytes() for path in layout.root.rglob("*") if path.is_file() and path != state}
 
-    async def closing(persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object) -> int:
+    async def closing(
+        persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object, grant_end_unix: float | None
+    ) -> int:
         frozen_base(persisted.layout.toolbox)  # what building the close's peers reads first
         raise AssertionError("the session could be read")
 
@@ -2641,7 +2679,9 @@ def test_a_restart_refused_a_file_outside_the_session_it_closes_ends_the_run(
     (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
     outside = tmp_path / "workspace-cache" / "index.json"
 
-    async def closing(persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object) -> int:
+    async def closing(
+        persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object, grant_end_unix: float | None
+    ) -> int:
         raise PermissionError(errno.EACCES, "Permission denied", str(outside))
 
     monkeypatch.setattr(cli, "final_only", CLOSING)

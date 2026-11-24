@@ -53,6 +53,7 @@ def _cancelled_by_signals(scope: CancelScope) -> Iterator[None]:
 async def sweep_session(session_dir: Path) -> dict[str, Any]:
     """Run the sweep of the session in ``session_dir`` under its lock, warned at a hosted run's grant end, then package
     the session so the package carries the report; raises ``SessionAlreadyRunning``."""
+    session_dir = session_dir.resolve()
     os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
     scope = CancelScope()
     with SessionLock(session_dir), use_cancel_scope(scope), _cancelled_by_signals(scope):

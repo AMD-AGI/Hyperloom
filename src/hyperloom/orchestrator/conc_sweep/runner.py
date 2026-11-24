@@ -196,6 +196,7 @@ class _Sweep:
                 "extra_server_args": arm.args,
                 "extra_envs": arm.envs,
                 "overlay": arm.overlay,
+                "controls": dict(arm.controls),
                 "points": [self.measured[arm.name][conc] for conc in sorted(self.measured[arm.name])],
             }
             for arm in self.arms
@@ -264,11 +265,13 @@ def _resume(sweep: _Sweep) -> None:
         return
     for arm in sweep.arms:
         section = earlier[arm.name]
-        if (section.get("extra_server_args"), section.get("extra_envs"), section.get("overlay")) != (
-            arm.args,
-            arm.envs,
-            arm.overlay,
-        ):
+        launch = (
+            section.get("extra_server_args"),
+            section.get("extra_envs"),
+            section.get("overlay"),
+            section.get("controls"),
+        )
+        if launch != (arm.args, arm.envs, arm.overlay, dict(arm.controls)):
             continue
         for point in section["points"]:
             if point["status"] == _SUCCEEDED:

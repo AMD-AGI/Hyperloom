@@ -205,6 +205,23 @@ def test_a_later_run_measures_again_the_arm_whose_launch_changed(session_dir: Pa
     assert [point["conc"] for point in payload["baseline"]["points"]] == [4, 8, 16, 32]
 
 
+def test_a_later_run_measures_again_the_arm_whose_launch_controls_changed(session_dir: Path, grid: SimpleNamespace):
+    best = {"extra_server_args": "--enable-torch-compile", "extra_envs": {}}
+    _state(session_dir, current_best=best)
+    asyncio.run(runner.run_conc_sweep(session_dir))
+    grid.calls.clear()
+    _state(session_dir, current_best={**best, "remove_args": ["--max-running-requests"]})
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert [call["name"] for call in grid.calls] == [
+        "optimized_conc16",
+        "optimized_conc4",
+        "optimized_conc8",
+        "optimized_conc32",
+    ]
+
+
 def test_a_cancel_keeps_the_points_measured_before_it(
     session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ):
