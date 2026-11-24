@@ -43,6 +43,7 @@ from hyperloom_multibranch.toolbox.attempts import (
     NODE_BLAMELESS_INFRA_REASONS,
     RUNNER_START_TIMEOUT,
     WAITED_INFRA_REASONS,
+    UNAVOIDED_INFRA_REASONS,
     RUNNER_LOST,
     RUNNER_START_FAILED,
     SANDBOX_CREATE_FAILED,
@@ -212,6 +213,29 @@ async def test_a_waited_failure_does_not_lift_the_avoid_a_node_held_failure_put_
     result, executor, reported = await _run((PORT_REASON, FOREIGN_REASON, PORT_REASON, CAPACITY_REASON))
     assert [job.avoid_nodes for job in executor.jobs] == [(), ("n1",), ("n1",), ("n1", "n3")]
     assert reported == ["n1", "n3", "n4"], "the busy cards of n2 do not report their node"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [FOREIGN_REASON, CAPACITY_REASON, f"{RUNNER_LOST}: the sandbox is gone"],
+    ids=["busy_cards", "no_capacity", "node_blameless"],
+)
+async def test_a_failure_that_says_nothing_about_the_node_puts_no_node_in_the_avoid_set(reason) -> None:
+    _, executor, _ = await _run(reason)
+    assert [job.avoid_nodes for job in executor.jobs] == [()] * 4, "the retry may land on the same node"
+
+
+async def test_a_runner_start_timeout_waits_and_still_puts_its_node_in_the_next_attempt_s_avoid_set() -> None:
+    _, executor, _ = await _run(START_TIMEOUT_REASON)
+    assert executor.clock.waits == [60.0, 120.0, 240.0]
+    assert [job.avoid_nodes for job in executor.jobs][1:] == [("n1",), ("n1", "n2"), ("n1", "n2", "n3")], (
+        "a slow or faulty node (an image pull, a GPU that does not come up) is one way a runner does not start in time"
+    )
+
+
+def test_the_unavoided_names_are_the_waited_ones_less_the_runner_start_timeout() -> None:
+    assert UNAVOIDED_INFRA_REASONS == NODE_BLAMELESS_INFRA_REASONS | {"foreign_process_on_card", "capacity_unavailable"}
+    assert WAITED_INFRA_REASONS - UNAVOIDED_INFRA_REASONS == {"runner_start_timeout"}
 
 
 async def test_an_infrastructure_retry_never_waits_past_the_latest_start_and_goes_at_once_after_it() -> None:
