@@ -60,6 +60,7 @@ class AiterRig:
         locate = lambda name, python, cwd: self.package.parent / name  # noqa: E731
         monkeypatch.setattr(aiter_modules, "locate_package", locate)
         monkeypatch.setattr(farm_module, "locate_package", locate)
+        monkeypatch.setattr(farm_module, "installed_version", standin.installed_version)
         key = signing.generate_private_key()
         self.store = BuildStore(tmp / "store", Trust((TrustedKey(signing.public_key_pem(key), 1),), 1))
         self.machine = machine = BuildMachine(IMAGE, BUILDER, "gfx942", sys.executable)
