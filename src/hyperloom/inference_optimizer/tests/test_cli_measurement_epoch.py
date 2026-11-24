@@ -16,7 +16,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 def _isolated(monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.orchestrator.policy import gate as policy
 
-    for key in ("HYPERLOOM_BENCHMARK_CONFIG", "HYPERLOOM_AGENTX", "HYPERLOOM_AGENTIC_BACKEND"):
+    for key in ("HYPERLOOM_BENCHMARK_CONFIG", "HYPERLOOM_AGENTX", "HYPERLOOM_AGENTIC_BACKEND", "DATASET_PATH"):
         monkeypatch.setenv(key, "")
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
@@ -47,6 +47,18 @@ def test_an_agentx_session_records_inferencex_and_resumes(tmp_path, monkeypatch,
     state = _seed_and_reload(tmp_path)
     assert (state.measurement_epoch, state.agentx_backend) == (cb.MEASUREMENT_EPOCH, "inferencex")
     assert cb.measurement_state_is_stale(state) == ""
+
+
+@pytest.mark.parametrize(("seeded", "resumed"), [("/data/prompts.jsonl", ""), ("", "/data/prompts.jsonl")])
+def test_a_resume_that_sends_another_prompt_dataset_than_the_seed_recorded_is_refused(
+    tmp_path, monkeypatch, seeded, resumed
+):
+    monkeypatch.setenv("DATASET_PATH", seeded)
+    state = _seed_and_reload(tmp_path)
+    assert (state.prompt_dataset, cb.measurement_state_is_stale(state)) == (seeded, "")
+
+    monkeypatch.setenv("DATASET_PATH", resumed)
+    assert "prompt dataset" in cb.measurement_state_is_stale(state)
 
 
 def test_a_state_written_before_the_switch_is_refused(tmp_path):

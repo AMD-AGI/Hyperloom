@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Any
 from hyperloom_common.io import SHARED, atomic_write_json
 from hyperloom_common.jsonio import read_jsonl
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
-from hyperloom.common.perf_metric import GRADED_OUTPUT
+from hyperloom.common.perf_metric import GRADED_OUTPUT, prompt_dataset
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
@@ -394,6 +394,7 @@ def _session_profile(
         osl=None if shape is None else shape.osl,
         kernel_optimizer=workload.kernel_optimizer.value,
         agentx_objective=workload.agentx_objective,
+        dataset="" if shape is None else prompt_dataset(),
     )
 
 

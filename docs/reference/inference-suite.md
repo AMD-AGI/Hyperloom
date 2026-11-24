@@ -192,10 +192,25 @@ of the file: set `NUM_PROMPTS` to the file's line count to send all of it, and p
 shorter file to send fewer. A concurrency sweep sets its own count per rung. A session
 with a dataset serves the model's own context window, as an AgentX session does, in
 place of `ISL` + `OSL` plus headroom, since the prompts carry their own lengths;
-`MAX_MODEL_LEN` still overrides it. A prompt longer than the window fails its request,
-and the pass fails above a 5 % failed share. Token counts are the server's `usage`; a
-request without one fails. The client saves the keys a fixed round reads in
+`MAX_MODEL_LEN` still overrides it. A prompt the server answers with a 4xx status, as it
+does one longer than the window, fails the pass and so the round: the metrics would
+describe the rest of the file only. The client's stderr names each such prompt's line
+and status, and `benchmark_outcome.refused` of the result lists them. Any other failed
+request fails the pass above a 5 % failed share. Token counts are the server's `usage`;
+a request without one fails. The client saves the keys a fixed round reads in
 `client/inferencex_result.json`.
+A `hyperloom optimize` session records the dataset it was seeded with, the path as
+given, in `prompt_dataset` of its `state.json`. A resume whose `DATASET_PATH` is
+another file, or none where the session recorded one, is refused, as a resume in
+another benchmark mode is. `ISL` and `OSL` do not describe such a session's requests,
+so the stores keyed on them leave it out: it publishes and reads no Experience, and
+the Recipe KB neither warm-starts it nor takes its recipe (CLOSE records
+`prompt_dataset_identity_unsupported`). A `hyperloom-multibranch run` session records
+the dataset in its session profile: its Experiences and learnings carry it as the
+`dataset` condition, an Experience measured on another dataset or on random prompts
+is recalled as one to re-verify and never as a prior, and likewise one measured on a
+dataset for a session that sends none; its Recipe KB warm start and write-back are
+skipped.
 Exported in the environment of `hyperloom optimize` or
 `hyperloom-multibranch run`, the name reaches every rendered point. The file is read
 where the round runs, first by the round before it starts its server: a file it

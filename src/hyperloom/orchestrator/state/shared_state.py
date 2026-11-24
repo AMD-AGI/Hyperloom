@@ -304,6 +304,10 @@ class SharedState(
     conc_sweep_enabled: bool = True
     # Which benchmark workload this session measures: "agentx" (agentic trace replay) or "synthetic" (ISL/OSL).
     benchmark_mode: str = ""
+    # The DATASET_PATH file the session's fixed rounds send in place of random prompts, as given; empty when none.
+    # The path and not a digest of the file: the file is read where a round runs, which need not be this host.
+    # Compared on resume, and no store keyed on ISL/OSL files a session that records one.
+    prompt_dataset: str = ""
     # Generation of the measurement path this session was measured on; resume refuses one below the build's epoch.
     measurement_epoch: int = 0
     # Which AgentX client measured this session: "inferencex" or "mlperf"; empty outside AgentX. Compared on resume so
@@ -316,7 +320,6 @@ class SharedState(
     # HYPERLOOM_PERF_NOISE_PCT, and a resume is a new process: a shell that lost the variable would flip the axis
     # mid-run, and a lost noise band would silently widen a 3.5% guard back to the 5% default. The KEEP/REVERT rule
     # has to be the one the session started with. Empty on sessions predating the field, which fall back to deriving.
-    # "prompt_dataset" (bool) is recorded beside them: whether the session's fixed rounds send a DATASET_PATH file.
     grading: dict[str, Any] = field(default_factory=dict)
     # Stamped once when the run objective is first met.
     target_reached_at: str = ""

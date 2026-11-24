@@ -60,13 +60,15 @@ THROUGHPUT_OBJECTIVE = "output_throughput"
 AGENTX_INTERACTIVITY_OBJECTIVE = "agentx_interactivity"
 AGENTX_TOTAL_OBJECTIVE = "agentx_total_throughput"
 SUMMARY_CHARS = 160
+DATASET_KEY = "dataset"
 _PENDING = frozenset({Conclusion.SPLIT_REQUESTED, Conclusion.SPLIT_PENDING, Conclusion.DIAGNOSIS_PENDING})
 _REASONS = frozenset({BranchLogType.HYPOTHESIS, BranchLogType.ATTEMPT})
 _SETTLED = frozenset({HypothesisStatus.CONFIRMED, HypothesisStatus.FALSIFIED})
 
 
 def experience_identity(profile: SessionProfile) -> dict[str, object]:
-    """The session's conditions, keyed as the ``inference-recipe-v1`` declaration names them."""
+    """The session's conditions, keyed as the ``inference-recipe-v1`` declaration names them, and the prompt dataset
+    its fixed rounds send under :data:`DATASET_KEY`, which no declaration names and an identity keeps."""
 
     identity: dict[str, object | None] = {
         "model": profile.model,
@@ -80,6 +82,7 @@ def experience_identity(profile: SessionProfile) -> dict[str, object]:
         "conc": profile.conc,
         "isl": profile.isl,
         "osl": profile.osl,
+        DATASET_KEY: profile.dataset,
     }
     return {key: value for key, value in identity.items() if value not in (None, "")}
 
@@ -317,6 +320,7 @@ __all__ = [
     "candidate_row",
     "change_document",
     "cited_learning",
+    "DATASET_KEY",
     "experience_identity",
     "export_document",
     "intent_conditions",

@@ -20,6 +20,7 @@ INTVTY_V1 = "intvty_v1"
 _AGENTX_ENV = "HYPERLOOM_AGENTX"
 #: The JSONL file of real prompts a fixed round sends in place of InferenceX's random ones.
 DATASET_PATH_ENV = "DATASET_PATH"
+_PROMPT_DATASET_FIELD = "prompt_dataset"
 
 # The value ``SharedState.benchmark_mode`` carries for an AgentX session, stamped at seed so it outlives the shell
 # that started the run.
@@ -116,17 +117,32 @@ def agentx_enabled(env: Mapping[str, str] | None = None) -> bool:
     return is_agentx(configured_benchmark(env)) or env_bool(_AGENTX_ENV, env=env)
 
 
-def prompt_dataset_enabled(env: Mapping[str, str] | None = None) -> bool:
-    """Whether the fixed rounds send a prompt dataset: ``DATASET_PATH`` is exported or set in the bound YAML's envs."""
+def prompt_dataset(env: Mapping[str, str] | None = None) -> str:
+    """The prompt dataset the fixed rounds send, as given: ``DATASET_PATH`` exported, else set in the bound YAML's
+    envs. Empty when they send random prompts."""
     envs = configured_benchmark(env).get("envs")
     bound = envs.get(DATASET_PATH_ENV) if isinstance(envs, Mapping) else None
-    return bool(str((os.environ if env is None else env).get(DATASET_PATH_ENV) or bound or "").strip())
+    return str((os.environ if env is None else env).get(DATASET_PATH_ENV) or bound or "").strip()
+
+
+def recorded_prompt_dataset(state: Any) -> str:
+    """The prompt dataset *state* (a ``SharedState`` or its mapping) records its fixed rounds send; empty when none."""
+    recorded = (
+        state.get(_PROMPT_DATASET_FIELD) if isinstance(state, Mapping) else getattr(state, _PROMPT_DATASET_FIELD, "")
+    )
+    return str(recorded or "").strip()
+
+
+def prompt_dataset_session(state: Any) -> bool:
+    """Whether *state* records a session whose fixed rounds send a prompt dataset. ISL and OSL do not describe its
+    requests, so no store keyed on them files it."""
+    return bool(recorded_prompt_dataset(state))
 
 
 def request_lengths_from_data(env: Mapping[str, str] | None = None) -> bool:
     """Whether a round's requests take their lengths from a corpus (AgentX traces, a prompt dataset), so that ISL and
     OSL do not bound them."""
-    return agentx_enabled(env) or prompt_dataset_enabled(env)
+    return agentx_enabled(env) or bool(prompt_dataset(env))
 
 
 def is_agentx_mode(benchmark_mode: Any) -> bool:
@@ -618,7 +634,9 @@ __all__ = [
     "constraint_veto_reason",
     "latency_veto_reason",
     "power_veto_reason",
-    "prompt_dataset_enabled",
+    "prompt_dataset",
+    "prompt_dataset_session",
+    "recorded_prompt_dataset",
     "request_lengths_from_data",
     "output_tput_of",
     "parse_intvty_noise_pct",

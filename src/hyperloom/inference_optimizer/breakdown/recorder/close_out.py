@@ -43,6 +43,7 @@ _SEQUENCE_SCHEMA_VERSION = workflow_contract()["close_sequence"]["sequence_schem
 RESULT_WRITTEN = "written"
 RESULT_KB_DISABLED = "kb_disabled"
 RESULT_AGENTX_BLOCKED = "agentx_blocked"
+RESULT_DATASET_BLOCKED = "prompt_dataset_blocked"
 RESULT_INVALID_SCOPE = "invalid_scope"
 RESULT_CONFIGURATION_FAILED = "configuration_failed"
 RESULT_TRANSPORT_FAILED = "transport_failed"
@@ -562,6 +563,7 @@ __all__ = [
     "RooflineProgress",
     "WriteBackSettlement",
     "RESULT_AGENTX_BLOCKED",
+    "RESULT_DATASET_BLOCKED",
     "RESULT_BUNDLE_BUILD_FAILED",
     "RESULT_CHAMPION_NOT_PROMOTED",
     "RESULT_CONFIGURATION_FAILED",

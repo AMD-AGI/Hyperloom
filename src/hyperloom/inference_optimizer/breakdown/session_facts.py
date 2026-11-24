@@ -101,7 +101,7 @@ def grading_block(state: Any) -> dict[str, Any]:
     recorded axis is absence, not the exporting process's environment. A live
     object without a recorded axis still uses :func:`resolved_grading`.
     """
-    from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT
+    from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, prompt_dataset_session
     from hyperloom.inference_optimizer.grading import recorded_grading, resolved_grading
 
     grading = recorded_grading(state.get("grading")) if isinstance(state, Mapping) else resolved_grading(state)
@@ -113,7 +113,7 @@ def grading_block(state: Any) -> dict[str, Any]:
         "objective": GRADED_INTVTY if on_intvty else GRADED_OUTPUT,
         "tput_guard": {"enabled": on_intvty, "noise_pct": noise},
     }
-    if (_field(state, "grading", None) or {}).get("prompt_dataset"):
+    if prompt_dataset_session(state):
         block["prompt_dataset"] = True
     return block
 
