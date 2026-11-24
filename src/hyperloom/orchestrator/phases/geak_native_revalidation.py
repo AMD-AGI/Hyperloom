@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
+    REBENCH_FAILED,
     REBENCH_FALLBACK_FAILED,
     REBENCH_NO_PROMOTE,
     REBENCH_VALIDATED,
@@ -21,6 +22,7 @@ from hyperloom_common.io import atomic_write_json
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.common.overlay import overlay_is_loadable
 from hyperloom.common.perf_metric import agentx_replay_session
+from hyperloom.orchestrator.actions.executors.integrate._integrate_vocabulary import RESULT_BENCHED
 from hyperloom.orchestrator.kernel.geak_config import geak_spec_is_env
 from hyperloom.orchestrator.state.task_registry import Task
 from .geak_rebench import source_digest, overlay_source_files, verify_source_artifacts
@@ -115,6 +117,7 @@ def prepare_source_revalidation(
         "source_phase": "KERNEL_AGENT",
         "domain": "kernel",
         "provenance": ORIGIN,
+        "require_accuracy_for_keep": True,
         "overlay_pythonpath": overlay,
         "native_geak_artifact_digest": digest,
         "native_geak_files": {path: source_digest(Path(path)) for path in staged},
@@ -184,11 +187,22 @@ def _record_canonical_adoption(coord: Any, params: dict[str, Any], measurement: 
         )
 
 
+def _unkept_status(result: dict[str, Any]) -> str:
+    """The status of a product the integration did not keep: a verdict only when its bench was graded.
+
+    The executor marks every result that reached the bench, and reports a bench the run stopped or the environment
+    kept from measuring as ``failed``; neither that nor a result from before the bench judged the product.
+    """
+    graded = bool(result.get(RESULT_BENCHED)) and result.get("status") != "failed"
+    return REBENCH_NO_PROMOTE if graded else REBENCH_FAILED
+
+
 async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
     """Measure a staged source product through the transactional integration and promotion paths.
 
-    The measurement is the gate: the integration keeps the product on measured throughput and accuracy and reverts
-    it otherwise, so only a product that cannot be deployed as staged ends here unmeasured.
+    The measurement is the gate: a product whose bench was graded settles as validated or not promoted. One the
+    integration did not measure settles as failed, which is no verdict: the next KERNEL entry measures it again
+    if GEAK reported it as a win, and runs GEAK afresh otherwise.
     """
     try:
         verify_source_artifacts(params)
@@ -233,8 +247,8 @@ async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
     _finish(
         coord,
         record,
-        status=REBENCH_VALIDATED if kept else REBENCH_NO_PROMOTE,
-        error=str(result.get("reason") or ""),
+        status=REBENCH_VALIDATED if kept else _unkept_status(result),
+        error=str(result.get("error") or result.get("reason") or ""),
         measurement=measurement,
     )
 

@@ -6,13 +6,28 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors.benchmark_run.accuracy import AccuracyRoundOutcome
+from hyperloom.orchestrator.actions.executors.integrate import _integrate_bench
+from hyperloom.orchestrator.actions.executors.integrate._integrate_vocabulary import (
+    BENCH_UNMEASURED_CLASS,
+    RESULT_BENCHED,
+)
+from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
+from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
 from hyperloom.orchestrator.phases.geak_native_revalidation import ORIGIN, source_rebench_params
+from hyperloom.orchestrator.phases.geak_rebench import geak_candidate_is_adjudicated
+from hyperloom.orchestrator.tests._helpers import init_git_repo, patch_integrate_patch_roots
 from .test_geak_revalidation_dispatch import coordinator as coordinator
+
+_INCUMBENT = {"tput": 110.0, "extra_server_args": "--incumbent", "extra_envs": {"SGLANG_USE_AITER": "0"}}
+_BUDGET_STOP = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS]
+_APPLY_ERRORS = [{"patch": "final.patch", "stderr": "error: patch failed: kernel.py:1"}]
 
 
 def _candidate(c, tmp_path):
@@ -21,7 +36,7 @@ def _candidate(c, tmp_path):
     state.agentx_backend = "inferencex"
     state.baseline_config_path = str(tmp_path / "native.yaml")
     state.baseline_tput = 100.0
-    state.current_best = {"tput": 110.0, "extra_server_args": "--incumbent", "extra_envs": {"SGLANG_USE_AITER": "0"}}
+    state.current_best = copy.deepcopy(_INCUMBENT)
     directory = tmp_path / "geak-eval"
     directory.mkdir()
     patch = directory / "final.patch"
@@ -109,20 +124,168 @@ async def test_source_candidate_is_measured_as_a_covered_step_with_no_critic_pro
     assert coordinator.shared_state.geak_pending == {}
 
 
-@pytest.mark.asyncio
-async def test_unkept_measurement_settles_no_promote_without_promotion(coordinator, tmp_path):
+async def _settle(coordinator, tmp_path, result):
+    """Settle the candidate on ``result`` from the integration; return the product as GEAK reported it."""
     _candidate(coordinator, tmp_path)
-    before = dict(coordinator.shared_state.current_best)
+    reported = dict(coordinator.shared_state.geak_result)
 
     async def integrate(ctx):
-        return {"status": "reverted", "reason": "canonical replay did not improve"}
+        return dict(result)
 
     coordinator.sub.register_executor("integrate_patch", integrate)
     await coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None)
-    assert coordinator.shared_state.geak_pending == {}
-    assert coordinator.shared_state.current_best == before
-    assert coordinator.shared_state.geak_result["revalidation_status"] == "no_promote"
-    assert not coordinator.shared_state.optimization_stack
+    return reported
+
+
+@pytest.mark.asyncio
+async def test_unkept_measurement_settles_no_promote_without_promotion(coordinator, tmp_path):
+    measured = {RESULT_BENCHED: True, "status": "reverted", "reason": "canonical replay did not improve"}
+    reported = await _settle(coordinator, tmp_path, measured)
+    state = coordinator.shared_state
+    assert state.geak_pending == {}
+    assert state.current_best == _INCUMBENT
+    assert state.geak_result["revalidation_status"] == "no_promote"
+    assert state.geak_result["revalidation_error"] == "canonical replay did not improve"
+    assert not state.optimization_stack
+    assert geak_candidate_is_adjudicated(state.geak_result, reported, harness_can_replay=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "error"),
+    [
+        pytest.param(
+            {
+                RESULT_BENCHED: True,
+                "status": "failed",
+                "error_class": _BUDGET_STOP.error_class,
+                "error": _BUDGET_STOP.interrupted,
+            },
+            _BUDGET_STOP.interrupted,
+            id="session_budget_stopped_the_bench",
+        ),
+        pytest.param(
+            {
+                RESULT_BENCHED: True,
+                "status": "failed",
+                "error_class": BENCH_UNMEASURED_CLASS,
+                "error": "port 8000 is in use",
+            },
+            "port 8000 is in use",
+            id="environment_kept_the_bench_from_measuring",
+        ),
+        pytest.param(
+            {
+                "status": "failed",
+                "error_class": "integrate_restore_incomplete",
+                "error": "previous integration still requires recovery",
+            },
+            "previous integration still requires recovery",
+            id="earlier_integration_left_unrestored",
+        ),
+        pytest.param(
+            {"status": "skipped", "skipped_reason": "multi_node_unsupported", "reason": "not supported multi-node"},
+            "not supported multi-node",
+            id="multi_node_skip",
+        ),
+        pytest.param(
+            {"status": "apply_failed", "error_class": "git_apply_failed", "error": _APPLY_ERRORS},
+            str(_APPLY_ERRORS),
+            id="patch_did_not_apply",
+        ),
+    ],
+)
+async def test_unmeasured_integration_settles_failed_and_stays_open(coordinator, tmp_path, result, error):
+    reported = await _settle(coordinator, tmp_path, result)
+    state = coordinator.shared_state
+    assert state.geak_result["revalidation_status"] == "failed"
+    assert state.geak_result["revalidation_error"] == error
+    assert state.geak_pending == {}
+    assert state.current_best == _INCUMBENT
+    assert not state.optimization_stack
+    assert not geak_candidate_is_adjudicated(state.geak_result, reported, harness_can_replay=False)
+
+
+def _framework_tree(tmp_path, monkeypatch):
+    """A git framework tree the staged patch applies to, registered where the integration looks for one."""
+    repo = tmp_path / "framework"
+    init_git_repo(repo, seed_file="kernel.py", seed_text="old\n")
+    patch_integrate_patch_roots(monkeypatch, tmp_path)
+    return repo
+
+
+@pytest.mark.asyncio
+async def test_bench_stopped_by_the_session_budget_leaves_the_candidate_open(coordinator, tmp_path, monkeypatch):
+    _candidate(coordinator, tmp_path)
+    reported = dict(coordinator.shared_state.geak_result)
+    repo = _framework_tree(tmp_path, monkeypatch)
+
+    async def stopped_bench(self, bench, **kwargs):
+        return {"status": "failed", "error_class": SESSION_TIME_EXHAUSTED_CLASS}, {}
+
+    monkeypatch.setattr(IntegratePatchExecutor, "_bench_patch", stopped_bench)
+    coordinator.sub.register_executor("integrate_patch", IntegratePatchExecutor(session_dir=coordinator.session_dir))
+    await coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None)
+    state = coordinator.shared_state
+    assert state.geak_result["revalidation_status"] == "failed"
+    assert state.geak_result["revalidation_error"] == _BUDGET_STOP.interrupted
+    assert state.current_best == _INCUMBENT
+    assert (repo / "kernel.py").read_text() == "old\n"
+    assert not geak_candidate_is_adjudicated(state.geak_result, reported, harness_can_replay=False)
+
+
+def _agentx_round(intvty_p50: float) -> dict:
+    """One valid AgentX round of the session's workload, equal on every guard axis."""
+    return {
+        "output_throughput": 110.0,
+        "total_throughput": 1100.0,
+        "e2e_norm_intvty_p90": 4.0,
+        "e2e_norm_intvty_p50": intvty_p50,
+        "duration_seconds": 3600.0,
+        "request_error_rate": 0.0,
+        "valid_measurement": True,
+        "diagnostic_only": False,
+        "workload_identity": "traces",
+    }
+
+
+@pytest.mark.asyncio
+async def test_source_candidate_whose_accuracy_round_yields_no_score_is_reverted(coordinator, tmp_path, monkeypatch):
+    """In a session with a baseline accuracy, clearing the performance bar alone does not keep a source product."""
+    _candidate(coordinator, tmp_path)
+    state = coordinator.shared_state
+    state.baseline_accuracy = 0.9
+    state.current_best = {**state.current_best, **_agentx_round(10.0)}
+    framework = _framework_tree(tmp_path, monkeypatch)
+    slot = tmp_path / "variant_00"
+    rounds = []
+    results = []
+
+    async def bench(self, bench_leg, **kwargs):
+        cleared = {"status": "succeeded", "workspace": str(slot / "benchmark_1"), **_agentx_round(13.0)}
+        return cleared, {"accuracy_pass": None}
+
+    async def round_without_a_score(slot, launch, state, *, session):
+        rounds.append(slot)
+        return AccuracyRoundOutcome(slot, "eval_failed")
+
+    executor = IntegratePatchExecutor(session_dir=coordinator.session_dir)
+
+    async def integrate(ctx):
+        results.append(await executor(ctx))
+        return results[-1]
+
+    monkeypatch.setattr(IntegratePatchExecutor, "_bench_patch", bench)
+    monkeypatch.setattr(_integrate_bench, "run_candidate_accuracy_round", round_without_a_score)
+    coordinator.sub.register_executor("integrate_patch", integrate)
+
+    await coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None)
+
+    assert rounds == [slot]
+    assert results[0]["status"] == "accuracy_unavailable_reject"
+    assert (framework / "kernel.py").read_text() == "old\n"
+    assert not state.optimization_stack
+    assert state.geak_result["revalidation_status"] == "no_promote"
 
 
 @pytest.mark.asyncio
@@ -134,7 +297,7 @@ async def test_cancelled_covered_run_reuses_its_task_identity(coordinator, tmp_p
         tasks.append(task)
         if len(tasks) == 1:
             raise asyncio.CancelledError
-        return {"status": "reverted", "reason": "canonical replay did not improve"}
+        return {RESULT_BENCHED: True, "status": "reverted", "reason": "canonical replay did not improve"}
 
     async def promote(*args, **kwargs):
         pass
@@ -227,7 +390,7 @@ async def test_staging_binds_entire_overlay_without_manifest(coordinator, tmp_pa
 
     async def execute(task):
         executed.append(task)
-        return {"status": "reverted", "reason": "canonical candidate did not improve"}
+        return {RESULT_BENCHED: True, "status": "reverted", "reason": "canonical candidate did not improve"}
 
     _changed_after_staging(coordinator, monkeypatch, change_overlay)
     monkeypatch.setattr(coordinator.sub, "execute_covered", execute)
@@ -259,8 +422,6 @@ def test_recovery_retains_revalidation_identity_only_for_same_candidate(coordina
 
 
 def test_adjudicated_source_result_reopens_only_when_artifact_changes(coordinator, tmp_path):
-    from hyperloom.orchestrator.phases.geak_rebench import geak_candidate_is_adjudicated
-
     patch = _candidate(coordinator, tmp_path)
     raw = dict(coordinator.shared_state.geak_result)
     params = coordinator.writeback.geak_rebench_params(reason="unit")
