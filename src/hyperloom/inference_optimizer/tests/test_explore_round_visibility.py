@@ -15,8 +15,9 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.actions.executors._proposal_identity import controls_of
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.machine_state import PHASE_FRAMEWORK_AGENT
-from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
+from hyperloom.orchestrator.roles import Backend
 from hyperloom.orchestrator.state.task_registry import TaskSpec
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
 
 @pytest.fixture

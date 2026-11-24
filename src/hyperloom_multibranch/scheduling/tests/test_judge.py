@@ -76,7 +76,7 @@ from hyperloom_multibranch.scheduling.roster import (
     BranchStop,
     RosterCaps,
     StopCause,
-    specialist_open,
+    open_specialists,
 )
 from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
@@ -116,6 +116,9 @@ ROSTER = (
 
 
 OPENING_ROSTER = (_entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION),)
+CAPS = RosterCaps(max_branches=4, max_k_per_branch=2, max_parallel_tests=8)
+#: A session whose cards hold two tests at once, and one whose cards hold one.
+TWO_TESTS, ONE_TEST = replace(CAPS, max_parallel_tests=2), replace(CAPS, max_parallel_tests=1)
 WIDENING = WideningSignals(min_useful_seconds=1350.0, cold_start_seconds=90.0, toolbox_headroom=3)
 
 
@@ -141,12 +144,13 @@ def _view(
     building: dict[str, tuple[BuildStatus, ...]] | None = None,
     roofline_ceiling: dict[str, float] | None = None,
     focus: dict[str, str] | None = None,
+    caps: RosterCaps = CAPS,
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
         explore_remaining_seconds=3600.0,
         session_remaining_seconds=4000.0,
-        caps=RosterCaps(max_branches=4, max_k_per_branch=2, max_parallel_tests=8),
+        caps=caps,
         roster=roster,
         progress=(
             BranchProgress(
@@ -346,12 +350,6 @@ def test_a_branch_row_shows_what_is_known_of_its_specialist_and_a_gave_up_one_is
     assert "A branch whose judging failed makes no more progress" in prompt
     assert "gave up or whose judging failed" not in prompt
     assert "weigh a specialist's lost count against its progress" in prompt
-
-
-def test_the_prompt_says_unfocused_branches_spread_over_the_largest_ops_in_turn() -> None:
-    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
-
-    assert "briefed on the largest ops of the integration head's latest profile in turn" in prose
 
 
 def test_the_prompt_says_a_free_slot_may_be_opened_without_a_stop() -> None:
@@ -725,9 +723,38 @@ def test_cap_drops_unknown_stopped_and_integration_orders_and_clamps_k() -> None
 
 @pytest.mark.parametrize(("asked", "granted"), [(0, 1), (2, 2), (7, 4)])
 def test_opening_count_is_clamped_to_one_and_the_branch_cap(asked: int, granted: int) -> None:
-    view = _view(opening=True, roster=OPENING_ROSTER, free_slots=1)
+    view = _view(opening=True, roster=OPENING_ROSTER, free_slots=1, caps=ONE_TEST)
 
     assert cap_decision(JudgeDecision(open_count=asked), view).open_count == granted
+
+
+ONE_USER_ROSTER = (
+    _entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION),
+    _entry("b01", origin=BranchOrigin.USER),
+    _entry("b02", origin=BranchOrigin.AGENT),
+    _entry("b03", stopped=True),
+)
+
+
+@pytest.mark.parametrize(
+    ("roster", "caps", "asked", "granted"),
+    [
+        (OPENING_ROSTER, TWO_TESTS, 1, 2),
+        (ONE_USER_ROSTER, TWO_TESTS, 0, 1),
+    ],
+)
+def test_the_opening_batch_is_at_least_as_wide_as_the_tests_that_run_at_once_less_the_specialists_open(
+    roster: tuple[BranchEntry, ...], caps: RosterCaps, asked: int, granted: int
+) -> None:
+    """One branch opened on a session whose cards held two tests at once left a card to that branch's second test."""
+
+    view = _view(opening=True, roster=roster, free_slots=4, caps=caps)
+
+    capped = cap_decision(JudgeDecision(open_count=asked), view)
+
+    assert capped.open_count == granted
+    assert cap_decision(capped, view) == capped
+    assert cap_decision(JudgeDecision(open_count=asked), replace(view, opening=False)).open_count == asked
 
 
 @pytest.mark.parametrize(("asked", "granted"), [(0, 0), (1, 1), (7, 4)])
@@ -735,6 +762,51 @@ def test_a_later_call_opens_what_it_asks_up_to_the_branch_cap_and_never_one_by_d
     asked: int, granted: int
 ) -> None:
     assert cap_decision(JudgeDecision(open_count=asked), _view()).open_count == granted
+
+
+UNHELD = ("direction A", "direction B", "direction C", "direction D", "direction E")
+FIVE_SLOTS = replace(TWO_TESTS, max_branches=5)
+
+
+@pytest.mark.parametrize(
+    ("opening", "free_slots", "unheld", "asked", "granted", "unfocused"),
+    [
+        (True, 3, 5, 0, 3, 3),
+        (True, 5, 1, 0, 2, 1),
+        (False, 2, 5, 3, 3, 2),
+        (False, 0, 3, 0, 0, 0),
+    ],
+)
+def test_every_call_opens_a_branch_for_each_direction_no_branch_has_held_within_the_free_slots(
+    opening: bool, free_slots: int, unheld: int, asked: int, granted: int, unfocused: int
+) -> None:
+    """A judge that answered ``open: 0`` at every steering call left three of a session's five directions without a
+    branch while three slots stayed free."""
+
+    roster = OPENING_ROSTER if opening else ROSTER
+    view = _view(opening=opening, roster=roster, free_slots=free_slots, caps=FIVE_SLOTS)
+    view = replace(view, undealt=UNHELD[:unheld])
+
+    capped = cap_decision(JudgeDecision(open_count=asked), view)
+
+    assert (capped.open_count, capped.unfocused) == (granted, unfocused)
+    assert cap_decision(capped, view) == capped
+
+
+def test_no_branch_opens_for_an_unheld_direction_with_less_explore_time_left_than_a_new_branch_needs() -> None:
+    view = replace(_view(caps=FIVE_SLOTS), undealt=UNHELD)
+    short = replace(view, widening=replace(WIDENING, min_useful_seconds=view.explore_remaining_seconds + 1.0))
+
+    assert cap_decision(JudgeDecision(), short) == JudgeDecision()
+    assert cap_decision(JudgeDecision(), view) == JudgeDecision(open_count=2, unfocused=2)
+
+
+def test_the_focus_the_judge_names_is_for_the_branches_opened_after_those_of_the_unheld_directions() -> None:
+    view = replace(_view(caps=FIVE_SLOTS), undealt=UNHELD[:1])
+
+    capped = cap_decision(JudgeDecision(open_count=3, focus=("op a", "op b", "op c")), view)
+
+    assert (capped.open_count, capped.unfocused, capped.focus) == (3, 1, ("op a", "op b"))
 
 
 def test_a_full_roster_still_opens_the_branch_a_stop_in_the_same_answer_frees() -> None:
@@ -884,19 +956,21 @@ def test_a_branch_in_its_grace_takes_a_higher_k_and_the_last_order_for_it_counts
     assert hold_decision(lowered, held, USER_ROSTER).k == ()
 
 
-def test_the_opening_call_opens_none_by_default_once_user_branches_opened() -> None:
-    view = _view(opening=True, roster=USER_ROSTER, free_slots=2, held=dict.fromkeys(("b01", "b02"), HoldReason.GRACE))
+def test_the_opening_call_opens_none_by_default_once_user_branches_fill_the_tests_that_run_at_once() -> None:
+    held = dict.fromkeys(("b01", "b02"), HoldReason.GRACE)
+    view = _view(opening=True, roster=USER_ROSTER, free_slots=2, held=held, caps=TWO_TESTS)
 
     assert cap_decision(JudgeDecision(open_count=0), view).open_count == 0
     assert cap_decision(JudgeDecision(open_count=2), view).open_count == 2
+    assert cap_decision(JudgeDecision(open_count=0), replace(view, caps=CAPS)).open_count == 2
 
 
 def test_the_opening_call_opens_a_specialist_branch_when_only_an_agent_s_branch_opened() -> None:
     roster = (_entry("b01", origin=BranchOrigin.AGENT),)
-    view = _view(opening=True, roster=roster, free_slots=1, held={"b01": HoldReason.UNSTEERED})
+    view = _view(opening=True, roster=roster, free_slots=1, held={"b01": HoldReason.UNSTEERED}, caps=ONE_TEST)
 
     assert cap_decision(JudgeDecision(open_count=0), view).open_count == 1
-    assert not specialist_open(roster)
+    assert open_specialists(roster) == 0
     assert "an agent's branch does not count" in " ".join(JUDGE_SYSTEM_PROMPT.split())
 
 

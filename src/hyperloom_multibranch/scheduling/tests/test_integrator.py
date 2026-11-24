@@ -46,8 +46,9 @@ from hyperloom.contracts.recipe import (
 from hyperloom.measure.compile import LocalBlobStore, PackageBase
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.blackboard.records import JudgementWrite, LineageEvent
+from hyperloom_multibranch.contracts.blackboard.records import CommittedCommit, JudgementWrite, LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LineageKind, MergeOutcome
+from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.repo import RebasedPatch, ReplacedPatch, RepoMerge, ResolvedPatch, UnitedTable
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -55,7 +56,7 @@ from hyperloom_multibranch.blackboard.knowledge.warm_start import PreparedReplay
 from hyperloom_multibranch.blackboard.rsi.stranded import StrandedLead
 from hyperloom_multibranch.blackboard.tests.factories import FakeClock, intent, judgement, request, result
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
-from hyperloom_multibranch.scheduling.candidates import MERGE_INFRA_RETRIES, NOT_STACKABLE_ANSWERS
+from hyperloom_multibranch.scheduling.candidates import MERGE_INFRA_RETRIES, NOT_STACKABLE_ANSWERS, Candidates
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.integrator import (
@@ -78,6 +79,7 @@ from hyperloom_multibranch.scheduling.integrator import (
     LlmPatchResolver,
     MergeRecords,
     MergeReport,
+    NOT_CHECKED_AT_CANCEL,
     NOT_OFFERED_AGAIN,
     not_stackable_reason,
 )
@@ -968,23 +970,78 @@ async def test_a_commit_not_stackable_on_two_heads_is_not_offered_again_and_new_
     assert counts[apart] == NOT_STACKABLE_ANSWERS
 
 
-async def test_a_round_tests_k_candidates_at_once_and_merges_the_first_improvement(bench: Bench) -> None:
+#: ``c1`` and ``c2`` committed on branches of their own: ``c1``, whose own gain is the larger, gains 2% on the root,
+#: ``c2`` 4%, and ``c1`` another 2.9% on a head holding ``c2``.
+HEAD_GAINS: Curves = {
+    frozenset({"c1"}): {MAIN_POINT: 1020.0},
+    frozenset({"c2"}): {MAIN_POINT: 1040.0},
+    frozenset({"c1", "c2"}): {MAIN_POINT: 1070.0},
+}
+
+
+async def test_a_round_tests_k_candidates_at_once_and_merges_the_one_that_gains_most_on_the_head(
+    tmp_path: Path,
+) -> None:
+    bench = await _bench(tmp_path, HEAD_GAINS, tags=("c1",))
+    c1, c2 = bench.commits["c1"], await _committed_elsewhere(bench, _change("c2"), 2.0)
+
     first = await bench.integrator.integrate_next(2, TICK_SECONDS, ())
     merged = await bench.repo.head(INTEGRATION_BRANCH)
     second = await bench.integrator.integrate_next(2, TICK_SECONDS, ())
 
-    c1, c2 = bench.commits["c1"], bench.commits["c2"]
     assert [(r.candidate, r.onto, r.outcome, r.reason) for r in first] == [
-        (c1, bench.root, MergeOutcome.MERGED, "improved +3.00% on the integration head"),
-        (c2, bench.root, MergeOutcome.PENDING, SUPERSEDED),
+        (c2, bench.root, MergeOutcome.MERGED, "improved +4.00% on the integration head"),
+        (c1, bench.root, MergeOutcome.PENDING, SUPERSEDED),
     ]
     superseded = await bench.handle(Role.OBSERVER).record(str(first[1].request_id))
     assert superseded.conclusion is None
-    assert [(base, sources) for base, _, sources in bench.regression.calls] == [(bench.root, (c1,)), (merged, (c2,))]
-    assert [(r.candidate, r.onto, r.outcome) for r in second] == [(c2, merged, MergeOutcome.MERGED)]
+    assert [(r.candidate, r.onto, r.outcome) for r in second] == [(c1, merged, MergeOutcome.MERGED)]
     head = await bench.repo.read_recipe(await bench.repo.head(INTEGRATION_BRANCH))
     assert TAG_FLAG + "c1" in head.launch.server_args and TAG_FLAG + "c2" in head.launch.server_args
     assert await bench.integrator.integrate_next(2, TICK_SECONDS, ()) == ()
+
+
+async def test_a_superseded_commit_is_tried_on_the_new_head_before_a_commit_no_merge_attempt_took(
+    tmp_path: Path,
+) -> None:
+    """``n1``, committed after the round, has the largest own gain, yet ``c1``, which the round superseded, goes
+    first."""
+
+    bench = await _bench(tmp_path, HEAD_GAINS, tags=("c1",))
+    await _committed_elsewhere(bench, _change("c2"), 2.0)
+    first = await bench.integrator.integrate_next(2, TICK_SECONDS, ())
+    await _committed_alone(bench, "n1", tagged("n1"), 9.0)
+
+    again = await _one(bench)
+
+    c1 = bench.commits["c1"]
+    assert [(r.candidate, r.reason) for r in first][1] == (c1, SUPERSEDED)
+    assert again is not None and (again.candidate, again.outcome) == (c1, MergeOutcome.MERGED)
+
+
+async def test_a_candidate_that_may_merge_waits_for_the_round_s_other_tests_and_no_test_starts_meanwhile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``c1`` ends first and may merge, ``c2`` is still tested and gains more; the commit made meanwhile gets no slot
+    of the round, three wide as it is."""
+
+    bench = await _bench(tmp_path, HEAD_GAINS, tags=("c1",))
+    c1, c2 = bench.commits["c1"], await _committed_elsewhere(bench, _change("c2"), 2.0)
+    released = _hold(bench, monkeypatch, _carries_c2)
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(3, TICK_SECONDS, ()))
+    await _until(lambda: any(confirm in bench.toolbox.results for confirm in _confirms(bench)))
+    await asyncio.sleep(20 * POLL_SECONDS)
+
+    await _committed_alone(bench, "n1", tagged("n1"))
+    await asyncio.sleep(20 * POLL_SECONDS)
+    assert not merging.done() and await bench.repo.head(INTEGRATION_BRANCH) == bench.root
+    assert [sources for _, _, sources in bench.regression.calls] == [(c1,)]
+    released.set()
+    reports = await merging
+
+    assert [(r.candidate, r.outcome) for r in reports] == [(c2, MergeOutcome.MERGED), (c1, MergeOutcome.PENDING)]
+    assert [sources for _, _, sources in bench.regression.calls] == [(c1,), (c2,)]
+    assert len(bench.merge_tests()) == 2
 
 
 async def test_a_commit_made_during_a_round_takes_the_slot_the_round_had_nothing_to_fill(tmp_path: Path) -> None:
@@ -1483,6 +1540,20 @@ async def test_a_stranded_lead_s_head_is_adopted_first_and_lands_what_its_branch
     ]
 
 
+async def test_a_lead_adoption_that_may_merge_goes_before_a_candidate_that_gains_more_on_the_head(
+    tmp_path: Path,
+) -> None:
+    bench = await _bench(tmp_path, HEAD_GAINS, tags=("c1",))
+    c1, c2 = bench.commits["c1"], await _committed_elsewhere(bench, _change("c2"), 2.0)
+
+    reports = await bench.integrator.integrate_next(2, TICK_SECONDS, _leading("s1", c1))
+
+    assert [(r.candidate, r.adopts, r.outcome) for r in reports] == [
+        (c1, "s1", MergeOutcome.MERGED),
+        (c2, "", MergeOutcome.PENDING),
+    ]
+
+
 async def test_a_lead_is_adopted_once_per_integration_head_and_a_skipped_adoption_says_it_is_one(bench: Bench) -> None:
     bench.refuse("c2")
     c1, c2 = bench.commits["c1"], bench.commits["c2"]
@@ -1576,6 +1647,232 @@ async def test_a_merge_cancelled_while_committing_is_still_recorded_and_logged(t
     assert bench.toolbox.withdrawn == {}
     [logged] = bench.logged()
     assert (logged["detail"]["outcome"], logged["detail"]["merged_commit"]) == ("merged", record.commit_id)
+
+
+def _hold(bench: Bench, monkeypatch: pytest.MonkeyPatch, held: Callable[[TestRequest], bool]) -> asyncio.Event:
+    """The tests ``held`` picks do not end until the event returned is set; every other test runs as it does."""
+
+    run, released = bench.toolbox.executor.run, asyncio.Event()
+
+    async def gated(job: TestJob) -> TestResult:
+        if held(job.request):
+            await released.wait()
+        return await run(job)
+
+    monkeypatch.setattr(bench.toolbox.executor, "run", gated)
+    return released
+
+
+def _carries_c2(test: TestRequest) -> bool:
+    return f"{TAG_FLAG}c2" in test.delta.config.server_args
+
+
+def _carries(tag: str) -> Callable[[TestRequest], bool]:
+    return lambda test: f"{TAG_FLAG}{tag}" in test.delta.config.server_args
+
+
+async def test_a_cancelled_round_merges_what_the_regression_set_passed_on_and_logs_a_larger_gain_it_did_not_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``c1`` and ``c2`` ended and may merge while ``n1`` is still tested. The regression set ran on ``c1``, the first
+    to end; ``c2`` gained more, but nothing runs its regression set once the round is cancelled."""
+
+    bench = await _bench(tmp_path, HEAD_GAINS, tags=("c1",))
+    c1, c2 = bench.commits["c1"], await _committed_elsewhere(bench, _change("c2"), 2.0)
+    await _committed_alone(bench, "n1", tagged("n1"))
+    _hold(bench, monkeypatch, _carries("n1"))
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(3, TICK_SECONDS, ()))
+    await _until(lambda: len(_confirms(bench)) == 2 and all(done in bench.toolbox.results for done in _confirms(bench)))
+    await asyncio.sleep(20 * POLL_SECONDS)
+
+    await _cancel(merging)
+    await bench.integrator.abandon()
+
+    merged = {item.commit_id: item.merged_into for item in await bench.handle(Role.OBSERVER).committed()}
+    assert merged[c1] == await bench.repo.head(INTEGRATION_BRANCH) != bench.root and merged[c2] is None
+    assert [sources for _, _, sources in bench.regression.calls] == [(c1,)]
+    not_checked = f"{NOT_CHECKED_AT_CANCEL}; judged improved +4.00% on the integration head"
+    assert [(entry["detail"]["candidate"], entry["detail"]["outcome"]) for entry in bench.logged()] == [
+        (c2, "pending"),
+        (c1, "merged"),
+    ]
+    assert bench.logged()[0]["reason"] == not_checked
+
+
+async def test_a_round_cancelled_after_an_earlier_round_merged_still_merges_the_candidate_it_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bench = await _bench(tmp_path, HEAD_GAINS, tags=("c1",))
+    c2 = await _committed_elsewhere(bench, _change("c2"), 2.0)
+    await _committed_alone(bench, "n1", tagged("n1"))
+    earlier = await _one(bench)
+    assert earlier is not None and earlier.outcome is MergeOutcome.MERGED
+    _hold(bench, monkeypatch, _carries("n1"))
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(2, TICK_SECONDS, ()))
+    await asyncio.wait_for(_until(lambda: len(bench.regression.calls) == 2), WAIT_SECONDS)
+
+    await _cancel(merging)
+    await bench.integrator.abandon()
+
+    merged = {item.commit_id: item.merged_into for item in await bench.handle(Role.OBSERVER).committed()}
+    assert merged[c2] == await bench.repo.head(INTEGRATION_BRANCH) != earlier.merged_commit
+
+
+async def test_a_round_cancelled_while_committing_supersedes_the_candidate_it_held_and_merges_only_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression set passed on ``c1`` as its test ended; ``c2`` gained more and is being committed when the
+    round is cancelled, so ``c1`` must not be merged onto the same head as well."""
+
+    bench = await _bench(tmp_path, HEAD_GAINS, tags=("c1",), repo_type=HeldRepo)
+    repo = bench.repo
+    assert isinstance(repo, HeldRepo)
+    repo.committing, repo.released = asyncio.Event(), asyncio.Event()
+    c1, c2 = bench.commits["c1"], await _committed_elsewhere(bench, _change("c2"), 2.0)
+    tested = _hold(bench, monkeypatch, _carries_c2)
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(2, TICK_SECONDS, ()))
+    await asyncio.wait_for(_until(lambda: bool(bench.regression.calls)), WAIT_SECONDS)
+    tested.set()
+    await repo.committing.wait()
+
+    await asyncio.wait_for(_cancel(merging), WAIT_SECONDS)
+    abandoning = asyncio.ensure_future(bench.integrator.abandon())
+    repo.released.set()
+    await abandoning
+
+    merged = {item.commit_id: item.merged_into for item in await bench.handle(Role.OBSERVER).committed()}
+    assert merged == {c1: None, c2: await repo.head(INTEGRATION_BRANCH)}
+    assert [
+        (entry["detail"]["candidate"], entry["detail"]["outcome"], entry["reason"]) for entry in bench.logged()
+    ] == [
+        (c1, "pending", SUPERSEDED),
+        (c2, "merged", "improved +4.00% on the integration head"),
+    ]
+
+
+async def test_a_cancelled_round_logs_a_merge_that_may_merge_and_still_waited_for_a_test_started_before_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bench = await _bench(tmp_path, HEAD_GAINS, tags=("c1",))
+    c2 = await _committed_elsewhere(bench, _change("c2"), 2.0)
+    _hold(bench, monkeypatch, _carries("c1"))
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(2, TICK_SECONDS, ()))
+    await _until(lambda: any(confirm in bench.toolbox.results for confirm in _confirms(bench)))
+    await asyncio.sleep(20 * POLL_SECONDS)
+
+    await _cancel(merging)
+    await bench.integrator.abandon()
+
+    assert await bench.repo.head(INTEGRATION_BRANCH) == bench.root and bench.regression.calls == []
+    [logged] = bench.logged()
+    assert (logged["detail"]["candidate"], logged["detail"]["outcome"]) == (c2, "pending")
+    assert logged["reason"].startswith(NOT_CHECKED_AT_CANCEL)
+
+
+async def test_a_held_candidate_the_regression_set_fails_is_reported_as_its_test_ends_and_the_round_merges_another(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bench = await _bench(tmp_path, HEAD_GAINS, tags=("c1",))
+    c1, c2 = bench.commits["c1"], await _committed_elsewhere(bench, _change("c2"), 2.0)
+
+    async def fails_c1(
+        base_commit: str, candidate_delta: RecipeDelta, *, sources: tuple[str, ...]
+    ) -> RegressionOutcome:
+        return RegressionOutcome(sources != (c1,), "case kv-overflow reproduced" if sources == (c1,) else "")
+
+    monkeypatch.setattr(bench.regression, "check", fails_c1)
+    released = _hold(bench, monkeypatch, _carries_c2)
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(2, TICK_SECONDS, ()))
+    await asyncio.wait_for(_until(bench.decisions.exists), WAIT_SECONDS)
+
+    [failed] = bench.logged()
+    assert (failed["detail"]["candidate"], failed["reason"]) == (
+        c1,
+        "the regression set failed: case kv-overflow reproduced",
+    )
+    released.set()
+    reports = await merging
+
+    assert [(r.candidate, r.outcome) for r in reports] == [(c1, MergeOutcome.PENDING), (c2, MergeOutcome.MERGED)]
+
+
+async def test_a_merge_test_without_a_confirm_is_taken_back_when_the_rounds_end_and_no_other_starts(
+    bench: Bench, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    released = _hold(bench, monkeypatch, lambda test: test.purpose is Purpose.CONFIRM or _carries_c2(test))
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(2, TICK_SECONDS, ()))
+    await _until(lambda: len(bench.merge_tests()) == 2 and bool(_confirms(bench)))
+
+    finishing = asyncio.ensure_future(bench.integrator.finish_round())
+    await _until(lambda: bool(bench.toolbox.withdrawn))
+    [unconfirmed] = [request_id for request_id, test in bench.merge_tests().items() if _carries_c2(test)]
+    assert bench.toolbox.withdrawn.keys() == {unconfirmed} and not finishing.done()
+    released.set()
+    await asyncio.wait_for(finishing, WAIT_SECONDS)
+    reports = await merging
+
+    assert [(report.candidate, report.outcome) for report in reports] == [(bench.commits["c1"], MergeOutcome.MERGED)]
+    assert await bench.integrator.integrate_next(2, TICK_SECONDS, ()) == ()
+    assert len(bench.merge_tests()) == 2 and bench.toolbox.withdrawn.keys() == {unconfirmed}
+
+
+async def test_a_round_with_no_merge_waiting_for_its_confirm_is_over_as_soon_as_the_rounds_end(bench: Bench) -> None:
+    bench.toolbox.executor.gate.clear()
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(2, TICK_SECONDS, ()))
+    await _until(lambda: len(bench.merge_tests()) == 2)
+
+    await asyncio.wait_for(bench.integrator.finish_round(), WAIT_SECONDS)
+
+    assert await merging == ()
+    assert bench.toolbox.withdrawn.keys() == set(bench.merge_tests())
+    assert await bench.repo.head(INTEGRATION_BRANCH) == bench.root and not bench.decisions.exists()
+
+
+async def test_a_merge_confirmed_after_the_rounds_ended_waits_for_the_other_confirm_and_the_larger_gain_lands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bench = await _bench(tmp_path, HEAD_GAINS, tags=("c1",))
+    c1, c2 = bench.commits["c1"], await _committed_elsewhere(bench, _change("c2"), 2.0)
+    released = _hold(bench, monkeypatch, lambda test: test.purpose is Purpose.CONFIRM and _carries_c2(test))
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(2, TICK_SECONDS, ()))
+    await _until(lambda: len(_confirms(bench)) == 2)
+
+    finishing = asyncio.ensure_future(bench.integrator.finish_round())
+    await asyncio.wait_for(_until(lambda: bool(bench.regression.calls)), WAIT_SECONDS)
+    await asyncio.sleep(20 * POLL_SECONDS)
+    assert not finishing.done() and await bench.repo.head(INTEGRATION_BRANCH) == bench.root
+    released.set()
+    await asyncio.wait_for(finishing, WAIT_SECONDS)
+    reports = await merging
+
+    assert [(r.candidate, r.outcome) for r in reports] == [(c2, MergeOutcome.MERGED), (c1, MergeOutcome.PENDING)]
+    assert not bench.toolbox.withdrawn
+
+
+async def test_a_commit_found_while_the_rounds_end_gets_no_merge_test(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rounds end, and take the round's one test back, while the round looks for a commit to fill its free slot."""
+
+    bench = await _bench(tmp_path, tags=("c1",))
+    bench.toolbox.executor.gate.clear()
+    offered_on, finishing = Candidates.offered_on, []
+
+    async def ending_meanwhile(self: Candidates, head: str) -> tuple[CommittedCommit, ...]:
+        offered = await offered_on(self, head)
+        if any(commit.commit_id != bench.commits["c1"] for commit in offered) and not finishing:
+            finishing.append(asyncio.ensure_future(bench.integrator.finish_round()))
+            await _until(lambda: bool(bench.toolbox.withdrawn))
+        return offered
+
+    monkeypatch.setattr(Candidates, "offered_on", ending_meanwhile)
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(2, TICK_SECONDS, ()))
+    await _until(lambda: len(bench.merge_tests()) == 1)
+    await _committed_elsewhere(bench, _change("c2"), 2.0)
+
+    assert await asyncio.wait_for(merging, WAIT_SECONDS) == ()
+    await asyncio.wait_for(finishing[0], WAIT_SECONDS)
+    assert len(bench.merge_tests()) == 1
 
 
 #: ``d1`` and ``e1``, each made on a branch of its own off the root, gain 2% and 1% on it, and 4% together.
@@ -1681,7 +1978,7 @@ async def test_a_member_that_does_not_combine_is_left_out_of_the_bundle_and_take
 
     await asyncio.wait_for(skipped(), WAIT_SECONDS)
     bench.toolbox.executor.gate.set()
-    bundle, single = await merging
+    single, bundle = await merging
 
     c1 = bench.commits["c1"]
     assert (bundle.members, bundle.onto, bundle.outcome) == ((d1, e1), bench.root, MergeOutcome.MERGED)
@@ -1743,13 +2040,13 @@ async def test_the_members_of_a_bundle_that_failed_are_each_tested_alone_after_t
     later = await bench.integrator.integrate_next(2, TICK_SECONDS, ())
 
     assert [(report.members, report.outcome) for report in first] == [
-        ((), MergeOutcome.MERGED),
         ((d1, e1), MergeOutcome.NOT_STACKABLE),
+        ((), MergeOutcome.MERGED),
     ]
-    moved = first[0].merged_commit
-    assert [(report.candidate, report.members, report.onto) for report in later] == [(d1, (), moved), (e1, (), moved)]
-    assert later[0].outcome is MergeOutcome.MERGED
-    assert await _merged_into(bench, d1) == later[0].merged_commit
+    moved = first[1].merged_commit
+    assert [(report.candidate, report.members, report.onto) for report in later] == [(e1, (), moved), (d1, (), moved)]
+    assert later[1].outcome is MergeOutcome.MERGED
+    assert await _merged_into(bench, d1) == later[1].merged_commit
 
 
 async def test_a_superseded_bundle_is_offered_together_again_on_the_new_head(tmp_path: Path) -> None:

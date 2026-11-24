@@ -34,9 +34,9 @@ from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.orchestrator.bus.storage.connection import DatabaseNotPrivate, SqliteConnection
 from hyperloom.orchestrator.loop._promote_outcome import IntegrateRecoveryIncomplete
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskSpec
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
 _SECRET = "hf_live_value_123"
 _KEPT = {

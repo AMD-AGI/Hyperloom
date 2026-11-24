@@ -8,7 +8,7 @@ Three checks, so that a fact cannot go back to being a copy:
 * a fresh interpreter changes every owned string before any reader is imported, and each reader must show the changed
   value (this tells *which* module a reader takes its fact from, not only that it agrees today);
 * no non-docstring string of our layers repeats an owned value (the checklist is the owner's own ``__all__``);
-* the two copies that cannot import the owner, a standalone sandbox hook and the profile YAML files, hold its value.
+* the copies that cannot import the owner, the profile YAML files, hold its value.
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ import yaml
 import hyperloom
 import hyperloom_multibranch
 from hyperloom.common import outside_facts
-from hyperloom.measure import aiter_merge_hook
 
 #: Owned names whose value is a bare ``0`` or a shell-level phrase rather than a name: too common to scan for. So are
 #: the keys of aiperf's per-request export that are ordinary words (``error``, ``type``, ``metadata``, ``metrics``).
@@ -52,8 +51,6 @@ _NOT_SCANNED = frozenset(
         "AIPERF_PROFILING_PHASE",
     }
 )
-#: The one source file allowed to hold an owned value as a literal: it runs inside a sandbox with the standard library only.
-_STANDALONE = {"hyperloom/measure/aiter_merge_hook.py": {"AITER_MERGED_VIEW_DIR"}}
 #: The module that binds the facts to their names: the one place that holds the values.
 _OWNER = Path(outside_facts.__file__).resolve()
 _ROOTS = (
@@ -118,8 +115,6 @@ def test_no_reader_repeats_an_owned_value() -> None:
                 continue
             for line, text in _strings_outside_docstrings(path):
                 for name, value in owned.items():
-                    if name.split("[")[0] in _STANDALONE.get(relative, ()):
-                        continue
                     fragment = name.split("[")[0] in _FRAGMENTS
                     if text == value or (fragment and value in text):
                         found.append(f"{relative}:{line} repeats {name}")
@@ -327,11 +322,6 @@ def test_the_columns_that_pick_out_the_rows_judged_by_their_relative_norm_error_
 ) -> None:
     """A row is one of them by the libtype and splitK columns and the libtype the owner names, its figure is in the column it names."""
     assert probe["relnorm"] == 0.005
-
-
-def test_standalone_hook_holds_the_owners_merge_directory() -> None:
-    """The hook runs in a sandbox with the standard library only, so it cannot import the owner; it must agree."""
-    assert aiter_merge_hook._HARD_CODED == outside_facts.AITER_MERGED_VIEW_DIR
 
 
 def _entries(node: Any, key: str) -> list[Any]:

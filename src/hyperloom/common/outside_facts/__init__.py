@@ -11,8 +11,7 @@ to the name the readers import, so a reader in ``hyperloom.measure``, ``hyperloo
 the readers build module-level patterns from these values; a pack that cannot be used stops that import, naming the
 entry. The package lives in ``hyperloom.common`` because that is the one layer all of those readers may import.
 
-Two kinds of copy cannot import it and are pinned to it by a test instead: a YAML data file (``profile_*.yaml``), and a
-file that is copied into a sandbox and runs there with the standard library only (``aiter_merge_hook``).
+A YAML data file (``profile_*.yaml``) cannot import it and is pinned to it by a test instead.
 """
 
 from __future__ import annotations
@@ -37,7 +36,6 @@ __all__ = [
     "AITER_DEVELOP_MODE",
     "AITER_INSTALL_MODE_FILE",
     "AITER_LOG_TUNED_CONFIG_ENV",
-    "AITER_MERGED_VIEW_DIR",
     "AITER_META_DIR_ENV",
     "AITER_META_MARKER_DIR",
     "AITER_META_WHEEL_DIR",
@@ -131,9 +129,6 @@ def component_layouts() -> Mapping[str, ComponentLayoutSpec]:
     )
 
 
-_aiter = _PACK.names("aiter_merged_view", "dir")
-AITER_MERGED_VIEW_DIR = _aiter["dir"]
-
 _meta = _PACK.names("aiter_meta_dir", "variable", "wheel_dir", "marker_dir", "install_mode_file", "develop_mode")
 AITER_META_DIR_ENV = _meta["variable"]
 AITER_META_WHEEL_DIR = _meta["wheel_dir"]
@@ -146,7 +141,7 @@ TUNED_LIBTYPE_COLUMN = _tuned["libtype_column"]
 TUNED_SPLITK_COLUMN = _tuned["splitk_column"]
 ASM_LIBTYPE = _tuned["asm_libtype"]
 
-UPSTREAM_PR_REPOS = tuple(_PACK.names("upstream_pr_repos", "sglang", "vllm", "aiter", "pytorch").values())
+UPSTREAM_PR_REPOS = tuple(_PACK.names("upstream_pr_repos", "sglang", "vllm", "aiter", "pytorch", "llamacpp").values())
 
 FORGE_REL_NORM_ERR_COLUMN = _PACK.names("forge_rel_norm_err", "column")["column"]
 

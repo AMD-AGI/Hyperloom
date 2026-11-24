@@ -416,7 +416,7 @@ def record_gateway_request(record: LLMRequestRecord) -> None:
     """Put one ``llm_config`` HTTP request on the ledger as an ``llm.request`` under the ambient scope.
 
     The call site's attribution ``component`` wins over the ambient one when it is a known component, so a critic
-    or scorer request made inside a coordinator scope is still attributed to its caller.
+    request made inside a coordinator scope is still attributed to its caller.
     """
     if _CONTEXT.get().session_dir is None:
         return

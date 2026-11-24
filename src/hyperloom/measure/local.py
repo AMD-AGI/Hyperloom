@@ -49,6 +49,7 @@ from hyperloom.common.outside_facts import (
     ENV_TP,
     ROCR_VISIBLE_DEVICES_ENV,
 )
+from hyperloom.common.perf_metric import DATASET_PATH_ENV
 from hyperloom.contracts.long_context import LONG_CONTEXT_HELD, LONG_CONTEXT_REAL_ACCEPTANCE
 from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.measure.attachments import AttachmentError, place_attachments, substitute
@@ -477,7 +478,12 @@ def _test_environment(call: TestCall) -> Iterator[list[str]]:
     settings.pop(BOOT_BUDGET_ENV, None)
     if call.boot_budget_sec is not None:
         settings[BOOT_BUDGET_ENV] = str(call.boot_budget_sec)
-    cleared = (*AMBIENT_SHAPE_ENVS, BOOT_BUDGET_ENV)
+    # Rendering and the server's context window read the prompt dataset from the process, so it holds the point's: a
+    # runner started where another one, or none, is exported measures what the session's points name.
+    settings.pop(DATASET_PATH_ENV, None)
+    if dataset := _point(call.points[0]).envs.get(DATASET_PATH_ENV):
+        settings[DATASET_PATH_ENV] = str(dataset)
+    cleared = (*AMBIENT_SHAPE_ENVS, BOOT_BUDGET_ENV, DATASET_PATH_ENV)
     saved = {key: os.environ.get(key) for key in (*cleared, *settings)}
     for key in cleared:
         os.environ.pop(key, None)

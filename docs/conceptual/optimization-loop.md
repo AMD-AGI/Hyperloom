@@ -728,7 +728,7 @@ a resumed run.
 
 Every Orchestration turn is stateless: the Coordinator composes one
 unconditional full state projection (mission, `SharedState`, gaps,
-warm-start, scores, the tasks in flight with each explore round's grid,
+warm-start, the tasks in flight with each explore round's grid,
 and the inbox events since the last turn), so the turn never depends on
 what an earlier turn happened to remember.
 

@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ``cli_backends``: per-role backend construction (mock/agent choices, kernel selection, validation errors), advisory proposal-scorer wiring."""
+"""Coverage for ``cli_backends``: per-role backend construction (mock/agent choices, kernel selection, validation errors)."""
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import pytest
@@ -149,19 +148,6 @@ def test_build_backends_forced_protocol_without_credential_fails(monkeypatch) ->
             critic_choice="agent",
             critic_agent_root=Path("/tmp/critic"),
             critic_protocol="anthropic",
-        )
-
-
-def test_build_backends_forced_openai_protocol_rejects_a_retired_gateway_key(monkeypatch) -> None:
-    """``LLM_GATEWAY_KEY`` no longer authenticates the review client, so the host counts as uncredentialed."""
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
-    monkeypatch.setenv("LLM_GATEWAY_KEY", "ak-gateway-key")
-    with pytest.raises(ValueError, match="OpenAI-capable credential"):
-        _build(
-            critic_choice="agent",
-            critic_agent_root=Path("/tmp/critic"),
-            critic_protocol="openai",
         )
 
 
@@ -318,83 +304,6 @@ def test_build_backends_dual_config_drops_claude_when_its_sdk_is_absent(monkeypa
     monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: False)
 
     assert _build()["orchestration"][0] == "codex"
-
-
-def test_proposal_scorer_disabled_by_default(monkeypatch) -> None:
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    args = argparse.Namespace(proposal_scoring=False, proposal_scorer_models=None)
-    assert clib._build_proposal_scorer(args) is None
-
-
-def test_proposal_scorer_disabled_for_anthropic_only(monkeypatch) -> None:
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    args = argparse.Namespace(
-        proposal_scoring=True,
-        proposal_scorer_models=None,
-    )
-    assert clib._build_proposal_scorer(args) is None
-
-
-def test_proposal_scorer_empty_models_returns_none(monkeypatch) -> None:
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    args = argparse.Namespace(
-        proposal_scoring=True,
-        proposal_scorer_models="  ,  ",
-    )
-    assert clib._build_proposal_scorer(args) is None
-
-
-def test_proposal_scorer_default_models(monkeypatch) -> None:
-    from hyperloom.inference_optimizer.cli.parser import _build_parser
-    from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
-
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    monkeypatch.setattr(clib, "ProposalScorer", lambda **kw: ("scorer", kw))
-    args = _build_parser().parse_args(["optimize", "--model", "x", "--proposal-scoring"])
-    out = clib._build_proposal_scorer(args)
-    assert out[0] == "scorer"
-    assert out[1]["models"] == tuple(DEFAULT_SCORER_MODELS)
-
-
-def test_proposal_scorer_explicit_models(monkeypatch) -> None:
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    monkeypatch.setattr(clib, "ProposalScorer", lambda **kw: ("scorer", kw))
-    args = argparse.Namespace(
-        proposal_scoring=True,
-        proposal_scorer_models="m1, m2",
-    )
-    out = clib._build_proposal_scorer(args)
-    assert out[1]["models"] == ("m1", "m2")
-
-
-def test_proposal_scoring_flag_parsing() -> None:
-    from hyperloom.inference_optimizer.cli.parser import _build_parser
-
-    parser = _build_parser()
-    default = parser.parse_args(["optimize", "--model", "x"])
-    assert default.proposal_scoring is False
-    enabled = parser.parse_args(["optimize", "--model", "x", "--proposal-scoring"])
-    assert enabled.proposal_scoring is True
-    disabled = parser.parse_args(["optimize", "--model", "x", "--no-proposal-scoring"])
-    assert disabled.proposal_scoring is False
-
-
-def test_proposal_scorer_models_without_enable_stays_off(monkeypatch) -> None:
-    # Passing only --proposal-scorer-models must not turn scoring on.
-    from hyperloom.inference_optimizer.cli.parser import _build_parser
-
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    parser = _build_parser()
-    args = parser.parse_args(["optimize", "--model", "x", "--proposal-scorer-models", "m1,m2"])
-    assert args.proposal_scorer_models == "m1,m2"
-    assert args.proposal_scoring is False
-    assert clib._build_proposal_scorer(args) is None
 
 
 def test_orchestration_follows_the_openai_only_intent_after_preflight_fills_anthropic(monkeypatch):

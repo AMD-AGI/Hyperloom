@@ -102,7 +102,7 @@ def env(tmp_path, key, monkeypatch):
         IMAGE_DIGEST_VAR: SHEET_IMAGE,
         CACHE_ENV: str(stage_into(tmp_path / "runner-cache").parents[1]),
     }
-    monkeypatch.setattr(runner, "ensure_inferencex", lambda commit, cache: tmp_path / "ix")
+    monkeypatch.setattr(runner, "ensure_inferencex", lambda commit, cache, store: tmp_path / "ix")
     # this interpreter's identity of the published staging; lm-eval is not installed in CI
     monkeypatch.setattr(runner_tools, "normalised_manifest", lambda tool_cache: STAGING)
     # a machine that answers every question: the sheet's card, no errors, nothing resident

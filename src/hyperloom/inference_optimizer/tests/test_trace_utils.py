@@ -167,15 +167,6 @@ def test_recipe_read_span_defaults_method():
     assert meta["hit"] is False
 
 
-def test_mean_proposal_score_edge_cases():
-    assert lm._mean_proposal_score("not-a-list") is None
-    assert lm._mean_proposal_score([]) is None
-    # Non-dict entries and non-numeric scores are skipped -> no values -> None.
-    assert lm._mean_proposal_score([123, {"score": "abc"}]) is None
-    # A mix with one valid numeric score yields its mean.
-    assert lm._mean_proposal_score([{"score": "8"}, {"nope": 1}]) == 8.0
-
-
 # --- _row_utils: closed-schema validation ----------------------------------
 
 _FIELDS = frozenset({"session_id", "component"})

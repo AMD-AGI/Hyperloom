@@ -30,7 +30,8 @@ configured, so a host that is set up wrong refuses at start, naming every item, 
   installed version's ``+g<commit>``; when neither names a commit, the toolbox's TraceLens imports must succeed.
 
 The signing key's mode and owner are checked where it is loaded (:func:`signing_key_problem`). Access is judged from
-mode bits as user 65534 with no supplementary groups (``setpriv --clear-groups``); ACLs are not read.
+mode bits as user 65534 with no supplementary groups (``setpriv --clear-groups``), or from an access ACL entry naming
+that user, under the ACL's mask.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ import logging
 import os
 import re
 import stat
+import struct
 import subprocess
 import sys
 import sysconfig
@@ -101,6 +103,12 @@ _VERSION_COMMIT = re.compile(r"\+g([0-9a-f]{7,40})")
 _GIT_TIMEOUT_SEC = 30
 _READ, _RUN = stat.S_IROTH, stat.S_IXOTH
 _OWNER_SHIFT, _GROUP_SHIFT = 6, 3
+#: The access ACL as the kernel keeps it: a version word, then (tag, permissions, id) per entry (``acl_ea.h``).
+_ACL_XATTR = "system.posix_acl_access"
+_ACL_HEADER = 4
+_ACL_ENTRY = struct.Struct("<HHI")
+_ACL_USER, _ACL_MASK = 0x02, 0x10
+_ALL = 0o7
 #: Any access by the group or others.
 _OTHERS_ACCESS = 0o077
 #: Write access by the group or others: what lets another user change a file or a directory's entries.
@@ -197,8 +205,27 @@ def image_upstreams(image_root: Path, checkouts: Mapping[str, Path] = IMAGE_CHEC
     return found
 
 
-def _allows(found: os.stat_result, bits: int) -> bool:
-    """Whether user 65534, with no supplementary group, has ``bits`` (as the others' bits) on ``found``."""
+def _acl_bits(path: Path) -> int | None:
+    """What the access ACL of ``path`` grants user 65534 by an entry naming it, under the ACL's mask; ``None`` when no
+    entry names it (or the filesystem keeps no ACL)."""
+    try:
+        raw = os.getxattr(path, _ACL_XATTR)
+    except OSError:
+        return None
+    offsets = range(_ACL_HEADER, len(raw) - _ACL_ENTRY.size + 1, _ACL_ENTRY.size)
+    entries = [_ACL_ENTRY.unpack_from(raw, offset) for offset in offsets]
+    named = [perm for tag, perm, uid in entries if tag == _ACL_USER and uid == NOBODY]
+    if not named:
+        return None
+    return named[0] & next((perm for tag, perm, _uid in entries if tag == _ACL_MASK), _ALL)
+
+
+def _allows(path: Path, found: os.stat_result, bits: int) -> bool:
+    """Whether user 65534, with no supplementary group, has ``bits`` on ``path`` (``found``): as an ACL entry naming it
+    grants them, else as the others' bits."""
+    named = None if found.st_uid == NOBODY else _acl_bits(path)
+    if named is not None:
+        return named & bits == bits
     shift = _OWNER_SHIFT if found.st_uid == NOBODY else _GROUP_SHIFT if found.st_gid == NOBODY else 0
     return (found.st_mode >> shift) & bits == bits
 
@@ -230,7 +257,7 @@ def _blocked(path: Path, bits: int, what: str) -> str | None:
         found = stat_path(path)
     except OSError:
         return f"{path} does not exist"
-    return None if _allows(found, bits) else f"{_describe(path, found)} does not let user {NOBODY} {what}"
+    return None if _allows(path, found, bits) else f"{_describe(path, found)} does not let user {NOBODY} {what}"
 
 
 def signing_key_problem(path: Path, euid: int) -> str | None:

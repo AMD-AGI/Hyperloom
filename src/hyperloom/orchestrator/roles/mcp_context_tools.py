@@ -54,10 +54,6 @@ class ContextProvider:
         """Return the warm-start summary projection."""
         return self._safe(self.shared_state.to_warm_start_summary, "warm_start")
 
-    def proposal_scores(self) -> str:
-        """Return the proposal-scores summary projection."""
-        return self._safe(self.shared_state.to_proposal_scores_summary, "proposal_scores")
-
     def intervention_mix(self) -> str:
         """Return the intervention-mix summary projection."""
         return self._safe(self.shared_state.to_intervention_mix_summary, "intervention_mix")
@@ -192,14 +188,6 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "what worked / failed in prior runs on a similar stack).",
         _NO_ARGS_SCHEMA,
         "warm_start",
-    ),
-    (
-        "get_proposal_scores",
-        "Return the advisory multi-rater proposal scores for the most "
-        "recent specialist round (0-10 likelihood-of-gain priors). "
-        "Advisory only — never a ranking directive.",
-        _NO_ARGS_SCHEMA,
-        "proposal_scores",
     ),
     (
         "get_intervention_mix",

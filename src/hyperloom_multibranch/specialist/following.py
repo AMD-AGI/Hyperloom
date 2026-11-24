@@ -13,6 +13,10 @@ Its session moves the branch (:func:`follow`) only once no candidate test of the
 on the head it was measured against. The move is recorded in the blackboard too, so the branch's head there is the new
 one and the judge sees what waits on it. The branch's change the integration head lacks comes back as one delta on the
 new head, the patches that no longer apply there written out to port by hand; the old head stays a merge candidate.
+
+A head that leads stays where it is: FINAL validates the heads of the branches, so a head recorded above the
+integration head by more than the session's bar, with a commit of the branch the integration head has not merged, is
+the only place that value is still offered from.
 """
 
 from __future__ import annotations
@@ -97,7 +101,7 @@ async def follow(
     carrying its change the integration head lacks onto it as a delta, and record the move through ``blackboard``, the
     branch's runtime handle; the patches of that change that do not apply there are written under ``notes`` before the
     branch moves. ``None`` while the blackboard cannot record a move yet: the branch has not started there, or the
-    integration branch has no head.
+    integration branch has no head. A head that leads the integration head (:func:`_lead`) is not moved.
 
     The integration head is the blackboard's, not the repository's: the integrator lands a merge before it writes the
     judgement, and the blackboard refuses a re-root onto a commit it has not recorded. A move the blackboard refuses all the
@@ -110,6 +114,9 @@ async def follow(
     if own.stop_reason is not None:
         return Followed(f"your branch was not re-rooted: it was stopped ({own.stop_reason})")
     branch, head, onto = asked.branch, await repo.head(asked.branch), integration.head_commit
+    lead = _lead(snapshot, head, onto)
+    if lead:
+        return Followed(f"your branch was not re-rooted: {lead}")
     try:
         carried = await repo.merge(head, onto)
         ported = await _write_conflicts(repo, head, carried, notes)
@@ -131,6 +138,27 @@ async def follow(
         return Followed(f"your branch was not re-rooted: the blackboard refused the move ({error})")
     notice = f"your branch was re-rooted from {head} onto the integration head {onto}"
     return Followed(notice, _carried(snapshot, head, onto, carried, ported))
+
+
+def _lead(snapshot: BlackboardSnapshot, head: str, onto: str) -> str:
+    """How the branch head ``head`` leads the integration head ``onto``, empty when it does not: its recorded value is
+    above the integration head's by more than the session's bar on a metric the baseline sets one on, and a specialist
+    commit of it is not merged. A head whose commits are all merged holds nothing the integration head lacks."""
+
+    unmerged = set(snapshot.lineage.ancestry(head)) - set(snapshot.lineage.ancestry(onto))
+    if not _specialist_commits(snapshot, unmerged):
+        return ""
+    bars = snapshot.baseline.threshold_pct if snapshot.baseline is not None else {}
+    own, integration = snapshot.value_of(head), snapshot.value_of(onto)
+    for metric, bar in bars.items():
+        value, base = own.get(metric), integration.get(metric)
+        if value and base and (value / base - 1.0) * 100.0 > bar:
+            return (
+                f"your head {head} is recorded at {value:.4g} {metric}, {(value / base - 1.0) * 100.0:+.2f}% above the "
+                f"integration head {onto} at {base:.4g} (the bar is {bar:.2f}%), and holds a commit of yours that is "
+                "not merged"
+            )
+    return ""
 
 
 def _launch(recipe: Recipe) -> str:

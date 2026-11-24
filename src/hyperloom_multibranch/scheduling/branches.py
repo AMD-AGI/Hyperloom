@@ -18,8 +18,9 @@ and a repair branch is stopped :data:`REPAIR_BRANCH_SECONDS` after its entry int
 withdraws its specialist, its tool jobs, the processes the scheduler registered for it, its claims no test carries yet
 (a claim a test carries ends with that test), and the forks and repairs of it that are queued, or admitted but not
 started yet, as the fork desk admits nothing for a stopped branch.
-Its queued and running tests run to their end under the K it had, and their results are recorded, unless the session's
-end stopped it, which withdraws them too; the end of EXPLORE withdraws every test a stopped branch still has. Every
+Its queued and running tests run to their end under the K it had, and their results are recorded and judged, unless the
+session's end stopped it, which withdraws them too; the end of EXPLORE withdraws every test a stopped branch still has
+and ends its judging. Every
 fork and repair voided that way, stopped before it started, or whose start failed is handed to the rule gate, which
 records its candidate as only recorded unless it already landed the fork; the blackboard gets the ``STOP`` lineage of a
 branch that started, the integration branch included, which only the end of the session stops. A specialist counts
@@ -144,6 +145,7 @@ class BranchControl:
         self._desk = context.desk
         self._reserved = context.reserved
         self._specialists: set[str] = set()
+        self._finishing: set[str] = set()
         self._deadlines: dict[str, float] = {}
         self._map: SharedMap | None = None
 
@@ -340,7 +342,7 @@ class BranchControl:
             steps += await self._settle_voided((branch,), stop.reason)
         steps.append(await settled(self.push_quota()))
         if branch in self._specialists:
-            steps.append(await self._stop_specialist(branch))
+            steps.append(await self._stop_specialist(branch, finish_tests=stop.cause.lets_tests_finish))
         withdrawn = await settled(self._withdraw(branch, stop))
         steps.append(await settled(self._processes.kill_branch(branch)))
         released = await settled(self._blackboard.release_branch(branch))
@@ -365,8 +367,13 @@ class BranchControl:
 
     async def withdraw_finishing_tests(self, reason: str) -> None:
         """Withdraw every test a stopped branch was left to finish, as EXPLORE ends for ``reason``, so that none
-        competes with FINAL's measurements, and take those branches out of the quota."""
+        competes with FINAL's measurements, end the judging of those branches first, so that none asks for a retest,
+        and take them out of the quota."""
 
+        finishing = sorted(self._finishing)
+        for branch, failure in zip(finishing, await asyncio.gather(*map(self._stop_specialist, finishing))):
+            if failure is not None:
+                logger.error("the judging of %s did not end with EXPLORE", branch, exc_info=failure)
         for entry in self._roster.entries():
             if entry.finishes_tests:
                 await self._toolbox.cancel_branch(entry.branch, reason)
@@ -383,16 +390,21 @@ class BranchControl:
         return [await settled(self._reserved.settle_voided(branch, reason)) for branch in branches]
 
     async def stop_unconfirmed_specialists(self) -> tuple[str, ...]:
-        """Ask again, concurrently, for every specialist stop the runtime has not confirmed; returns the branches whose
-        specialist still did not confirm it."""
+        """Ask again, concurrently, for every specialist stop the runtime has not confirmed, and for the end of the
+        judging a stop left on a branch's tests; returns the branches the runtime still did not confirm it for."""
 
-        await asyncio.gather(*map(self._stop_specialist, sorted(self._specialists)))
-        return tuple(sorted(self._specialists))
+        await asyncio.gather(*map(self._stop_specialist, sorted(self._specialists | self._finishing)))
+        return tuple(sorted(self._specialists | self._finishing))
 
-    async def _stop_specialist(self, branch: str) -> None | BaseException:
-        stopped = await settled(self._clock.wait_for(self._lifecycle.stop(branch), SPECIALIST_CALL_SECONDS))
+    async def _stop_specialist(self, branch: str, *, finish_tests: bool = False) -> None | BaseException:
+        stopping = self._lifecycle.stop(branch, finish_tests=finish_tests)
+        stopped = await settled(self._clock.wait_for(stopping, SPECIALIST_CALL_SECONDS))
         if not isinstance(stopped, BaseException):
             self._specialists.discard(branch)
+            if finish_tests:
+                self._finishing.add(branch)
+            else:
+                self._finishing.discard(branch)
         return stopped
 
     async def _stop_admitted_forks(self, parent: str, stop: BranchStop) -> list[BaseException]:

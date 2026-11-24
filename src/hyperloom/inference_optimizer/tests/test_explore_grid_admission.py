@@ -14,7 +14,8 @@ from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload imp
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop._explore_grid import EXPLORE_GRID_MISSING, explore_grid_denial
 from hyperloom.orchestrator.state.pending_proposal import PendingProposal
-from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
+from hyperloom.orchestrator.roles import Backend
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
 # A framework the default grid has no branch for, so an explore here measures what it is sent and nothing else.
 _SEEDLESS_FRAMEWORK = "sglang"

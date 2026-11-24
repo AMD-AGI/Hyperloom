@@ -206,11 +206,17 @@ another benchmark mode is. `ISL` and `OSL` do not describe such a session's requ
 so the stores keyed on them leave it out: it publishes and reads no Experience, and
 the Recipe KB neither warm-starts it nor takes its recipe (CLOSE records
 `prompt_dataset_identity_unsupported`). A `hyperloom-multibranch run` session records
-the dataset in its session profile: its Experiences and learnings carry it as the
-`dataset` condition, an Experience measured on another dataset or on random prompts
-is recalled as one to re-verify and never as a prior, and likewise one measured on a
-dataset for a session that sends none; its Recipe KB warm start and write-back are
-skipped.
+the `DATASET_PATH` exported when it starts in its workload, beside `ISL` and `OSL`
+(`settings.workload.inferencex.dataset` of its manifest), and in its session profile.
+Every leg exports the recorded value and removes one the session did not record, so a
+`--resume` or a `final-only` sends what the first leg sent whatever its shell exports.
+A recipe whose launch sets `DATASET_PATH` is refused, a launch that unsets it leaves
+it in place, and the dataset is part of a point's `surface_sha256` when it sends one.
+A lesson of another session that sent other prompts, a dataset against random prompts
+in either direction, is recalled less alike, with `dataset` among the conditions that
+differ; a playbook trial pairs only sessions on the same prompts; the session's Recipe
+KB warm start and write-back are skipped. Tree statistics (stall odds, pace, menu
+families) pool sessions across prompt sources, as they do across `ISL` and `OSL`.
 Exported in the environment of `hyperloom optimize` or
 `hyperloom-multibranch run`, the name reaches every rendered point. The file is read
 where the round runs, first by the round before it starts its server: a file it

@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from hyperloom.inference_optimizer import cli
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -28,35 +26,11 @@ def test_the_optimisation_phase_toggle_disables_both_arms():
     assert _parse_optimize(["--no-framework-agent"]).no_framework_agent is True
 
 
-def test_no_explore_is_gone_rather_than_aliased():
-    """It named one arm, and the phase it would now disable is both."""
-    with pytest.raises(SystemExit):
-        _parse_optimize(["--no-explore"])
-
-
 def test_framework_budget_covers_the_whole_optimize_phase():
     """One phase, one budget: a separate explore share would be unread."""
     args = _parse_optimize(["--phase-budget-framework-pct", "0.6"])
     assert args.phase_budget_framework_pct == 0.6
     assert not hasattr(args, "phase_budget_explore_pct")
-
-
-@pytest.mark.parametrize(
-    "flag",
-    [
-        "--phase-budget-explore-pct",
-        "--max-minutes-explore-pct",
-        "--max-minutes-prelude-pct",
-        "--max-minutes-framework-pct",
-        "--max-minutes-kernel-pct",
-        "--max-minutes-sweep-pct",
-        "--max-minutes-close-pct",
-    ],
-)
-def test_removed_budget_spellings_are_rejected(flag):
-    with pytest.raises(SystemExit) as exc:
-        _parse_optimize([flag, "0.6"])
-    assert exc.value.code == 2
 
 
 # --------------------------------------------------------------------------- # The eval toggle, which is orthogonal
