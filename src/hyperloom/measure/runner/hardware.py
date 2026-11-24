@@ -209,21 +209,30 @@ def released_gpus(visible: Sequence[int]) -> list[int] | None:
     return busy
 
 
+#: What amd-smi prints for a card whose VBIOS carries no market name.
+_GENERIC_MODEL = "amdradeongraphics"
+
+
 def _wrong_card(gpu: GpuFacts, gpu_type: str) -> bool:
     """Whether ``gpu`` is a different card from the requested type, judged by what the silicon says before its name.
 
     The device id names the board when it belongs to one; failing that, a different architecture is a different card;
-    only when neither can say is the market name compared, as a substring.
+    only when neither can say is the market name compared, as a substring. A card that gives only the driver's generic
+    name names no board: it is the requested card when its architecture is the board's.
     """
     wanted = gpu_type.replace(" ", "").lower()
+    model = None if gpu.model is None else gpu.model.replace(" ", "").lower()
     if wanted in AMD_GPU_BOARDS:
         board = gpu_type_for_device_id(gpu.device_id)
         if board is not None:
             return board != wanted
         arch = gfx_arch_for_gpu_type(wanted)
-        if gpu.gfx_arch is not None and arch is not None and gpu.gfx_arch != arch:
-            return True
-    return gpu.model is not None and wanted not in gpu.model.replace(" ", "").lower()
+        if gpu.gfx_arch is not None and arch is not None:
+            if gpu.gfx_arch != arch:
+                return True
+            if model == _GENERIC_MODEL:
+                return False
+    return model is not None and wanted not in model
 
 
 def check_hardware(
