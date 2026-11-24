@@ -15,11 +15,13 @@ from .grid._grid_inputs import SessionDirField
 from .integrate._integrate_apply import ApplyStageMixin
 from ._integrate_attempt import IntegrateAttempt
 from .integrate._integrate_bench import BenchStageMixin
+from .integrate._integrate_build import BuildStageMixin
 from .integrate._integrate_enablement_gate import EnablementGateMixin
 from .integrate._integrate_perf_gate import PerfGateMixin
 from .integrate._integrate_resolve import ResolveStageMixin
 from .integrate._integrate_vocabulary import KEEP_STATUSES, RESULT_BENCHED, RESULT_FRAMEWORK_CHANGED
 from .patching._patch_git import restore_pending_integrate
+from .candidate_builds import CandidateBuilds
 
 
 log = logging.getLogger(__name__)
@@ -28,6 +30,7 @@ log = logging.getLogger(__name__)
 class IntegratePatchExecutor(
     ApplyStageMixin,
     BenchStageMixin,
+    BuildStageMixin,
     EnablementGateMixin,
     PerfGateMixin,
     ResolveStageMixin,
@@ -42,6 +45,7 @@ class IntegratePatchExecutor(
         session_dir: Path | str | None = None,
         default_config_path: Path | str | None = None,
         keep_threshold_pct: float = DEFAULT_KEEP_THRESHOLD_PCT,
+        native: CandidateBuilds | None = None,
     ):
         """Initialize the integrate-patch executor.
 
@@ -52,10 +56,13 @@ class IntegratePatchExecutor(
                 config path, if any.
             keep_threshold_pct (float): Minimum gain to KEEP a patch.
                 Defaults to :data:`DEFAULT_KEEP_THRESHOLD_PCT`.
+            native (CandidateBuilds | None): The session's builds of its
+                framework server, when it builds the server from source.
         """
         self.session_dir = session_dir
         self.default_config_path = Path(default_config_path) if default_config_path else None
         self.keep_threshold_pct = float(keep_threshold_pct)
+        self.native = native
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Apply a specialist's patches/config changes and benchmark them."""
@@ -84,6 +91,9 @@ class IntegratePatchExecutor(
         # when a stage cannot return because it was cancelled.
         try:
             result = await self._stage_apply(attempt, params, extra)
+            # An apply_only round builds too: it is the candidate's compile check.
+            if result is None or result.get("status") == "applied_no_bench":
+                result = await self._stage_build(attempt, params) or result
             if result is None:
                 result = {RESULT_BENCHED: True, **await self._stage_gate(attempt, params)}
         except BaseException:
@@ -97,9 +107,9 @@ class IntegratePatchExecutor(
     def _finish_attempt(self, attempt: IntegrateAttempt, result: dict[str, Any]) -> dict[str, Any]:
         """Discharge the attempt's restore obligations exactly once before returning."""
         applied_only = result.get("status") == "applied_no_bench"
-        accepted = result.get("status") in KEEP_STATUSES
+        kept = applied_only or result.get("status") in KEEP_STATUSES
         summary = (
-            restore_pending_integrate(attempt.pending, keep=accepted or applied_only)
+            restore_pending_integrate(attempt.pending, keep=kept)
             if attempt.pending
             else {"failed": [], "artifacts_reverted": []}
         )
@@ -110,6 +120,8 @@ class IntegratePatchExecutor(
                 recovery["phase"] = "applied_with_restored_stash"
         if attempt.merged_patches:
             result["patches_merged"] = attempt.merged_patches
+        if attempt.native_build is not None:
+            result["native_build"] = attempt.native_build.to_record()
         result[RESULT_FRAMEWORK_CHANGED] = attempt.changes_framework
         state = attempt.shared_state
         if state is not None:
@@ -127,7 +139,9 @@ class IntegratePatchExecutor(
                 "error_class": "integrate_restore_incomplete",
                 "recovery_errors": summary["failed"],
             }
-        if not accepted and not applied_only:
+        if kept:
+            self._accept_build(attempt)
+        else:
             result["patches_reverted"] = [str(patch) for patch in attempt.applied]
             if attempt.applied_artifacts:
                 result["artifacts_reverted"] = summary["artifacts_reverted"]

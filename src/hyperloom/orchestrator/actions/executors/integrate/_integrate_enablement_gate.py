@@ -29,6 +29,7 @@ from ..framework_change import _framework_switch_manifest as _switch_manifest
 from .._accuracy_gate import enablement_correctness
 from .._git import _git_head_sha
 from .._integrate_attempt import IntegrateAttempt
+from ._integrate_perf_gate import unrated_verdict
 from ._integrate_results import _PatchBench
 from ..patching._nogit_patch import _is_git_tree
 from ..patching._patch_git import _uncommitted_revert
@@ -254,6 +255,8 @@ class EnablementGateMixin:
 
         if bench_result.get("error_class") == FILTERED_BEFORE_BENCH_CLASS:
             verdict = _filtered_verdict(attempt, params, bench_result)
+        elif (unrated := unrated_verdict(attempt, bench_result)) is not None:
+            verdict = unrated
         elif params.get("enablement"):
             verdict = await self._gate_enablement(
                 attempt=attempt,
