@@ -58,7 +58,8 @@ knowledge base and tooling:
 ## Autonomous loop
 
 The autonomous loop wraps this cycle for overnight, unattended optimization:
-Analysis and Orchestration produce one plan, the Implementer edits the working
-tree, the driver-owned complete correctness suite validates it, and three
+Analysis profiles the current best, Orchestration plans each lane (a single-lane
+campaign skips it and the Implementer plans from the Analysis report), the
+Implementer edits the working tree, the driver-owned complete correctness suite validates it, and three
 independent benchmarks decide whether to commit or restore the candidate.
 See {doc}`Autonomous overnight loop </kernelforge/how-to/autonomous-loop>`.

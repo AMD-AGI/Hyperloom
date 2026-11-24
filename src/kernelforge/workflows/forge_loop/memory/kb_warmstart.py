@@ -20,6 +20,7 @@ from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.evaluation.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
     KEEP_MEASUREMENT_COUNT,
+    CaseAggregate,
     aggregate_regression_detail,
     keep_score,
     passes_keep_threshold,
@@ -297,11 +298,12 @@ class _CandidateTrial:
 
 @dataclass(frozen=True)
 class WarmStartHarness:
-    """How a warm-start candidate is judged on this machine: its driver, correctness threshold and bench repeats."""
+    """How a warm-start candidate is judged on this machine: its driver, threshold, bench repeats and score."""
 
     driver: str
     snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB
     bench_repeat: int = 1
+    case_aggregate: CaseAggregate = CaseAggregate.ARITHMETIC
 
 
 @dataclass(frozen=True)
@@ -342,6 +344,7 @@ def _try_apply_candidate(sol: dict, trial: _CandidateField, *, pre_untracked) ->
                 applied_bench,
                 pristine_bench.get("case_times"),
                 expected_measurements=KEEP_MEASUREMENT_COUNT,
+                aggregate=harness.case_aggregate,
             )
         except (AttributeError, CaseCoverageError):
             return _discard_and_reject(

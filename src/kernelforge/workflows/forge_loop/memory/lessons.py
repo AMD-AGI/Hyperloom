@@ -9,7 +9,7 @@ import ast
 import contextlib
 import logging
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout, tagged_iteration
@@ -218,22 +218,30 @@ def parse_held_fixed(text: str) -> tuple[tuple[str, str], ...]:
     return tuple(found.items())
 
 
-def parse_negatives_marker(text: str) -> bool | None:
-    """Whether the document says any direction it records measured worse."""
-    verdict: bool | None = None
+def _negatives_payloads(text: str) -> Iterator[str]:
+    """What follows each ``NEGATIVES:`` marker of a document, the empty ones left out."""
     for line in (text or "").splitlines():
         stripped = line.strip().lstrip("-*# ").strip()
         if not stripped.upper().startswith(NEGATIVES_PREFIX):
             continue
         payload = stripped[len(NEGATIVES_PREFIX) :].strip().strip("*.` ").strip()
-        if not payload:
-            continue
-        if payload.lower() in _NO_NEGATIVES_WORDS:
-            if verdict is None:
-                verdict = False
-            continue
-        return True
+        if payload:
+            yield payload
+
+
+def parse_negatives_marker(text: str) -> bool | None:
+    """Whether the document says any direction it records measured worse."""
+    verdict: bool | None = None
+    for payload in _negatives_payloads(text):
+        if payload.lower() not in _NO_NEGATIVES_WORDS:
+            return True
+        verdict = False
     return verdict
+
+
+def listed_negatives(text: str) -> str:
+    """The directions a document lists as having measured worse, or "" when it lists none."""
+    return "; ".join(payload for payload in _negatives_payloads(text) if payload.lower() not in _NO_NEGATIVES_WORDS)
 
 
 def parse_disproof_marker(text: str) -> str | None:
@@ -580,8 +588,12 @@ Cover all of these:
    direction in this record measured worse than where you started — including
    ones you reverted inside the session, which the outer loop never sees. Write
    exactly `{NEGATIVES_PREFIX} none` if no direction measured worse, or
-   `{NEGATIVES_PREFIX}` followed by the directions that did, for example
-   `{NEGATIVES_PREFIX} split-K=4, BLOCK_N=128`. This line is required either
+   `{NEGATIVES_PREFIX}` followed by the directions that did, each with what it
+   measured and on which cases, separated by semicolons and all on one line,
+   for example
+   `{NEGATIVES_PREFIX} split-K=4 (m64 0.105 vs 0.091 ms); BLOCK_N=128 (m4096 +7%)`.
+   This line is the one later sessions are shown for every past iteration, so
+   it has to stand on its own. It is required either
    way: without it the record cannot state what it rules out, and it is read as
    possibly carrying a negative rather than as carrying none.
 6. One line of its own beginning `{DISPROOF_PREFIX}` for anything in this
@@ -624,7 +636,15 @@ as "avoid this", "do not retry", "continue this direction", or "the next
 iteration should". The outer loop appends its measured outcome separately. If
 you nonetheless report that something could not be reached, item 6 applies to
 it: an unfalsified "cannot" is read as an open direction, not a closed one.
-"""
+{insight_request}"""
+
+
+@dataclass(frozen=True)
+class PrReferenceNote:
+    """The upstream PR references a run surfaced: their labels and the rendered context."""
+
+    labels: tuple[str, ...] = ()
+    context: str = ""
 
 
 def build_summary_prompt(
@@ -632,10 +652,14 @@ def build_summary_prompt(
     iteration: int,
     end_reason: str,
     word_budget: int = SUMMARY_WORD_BUDGET,
-    pr_references: tuple[str, ...] = (),
-    pr_reference_context: str = "",
+    references: PrReferenceNote = PrReferenceNote(),
+    insight_request: str = "",
 ) -> str:
-    """Build the factual-record prompt for the resumed Implementer."""
+    """Build the factual-record prompt for the resumed Implementer.
+
+    ``insight_request`` is what the turn is additionally asked to do with the campaign's insight list, or "" when
+    the caller keeps none.
+    """
     cutoff_note = ""
     if is_cutoff(end_reason):
         cutoff_note = (
@@ -646,9 +670,9 @@ def build_summary_prompt(
         )
 
     upstream_note = ""
-    if pr_references:
-        listed = ", ".join(pr_references)
-        reference_data = (pr_reference_context or "").strip()
+    if references.labels:
+        listed = ", ".join(references.labels)
+        reference_data = (references.context or "").strip()
         details = (
             f"\nThe exact read-only reference data available to the Implementer was:\n{reference_data}\n"
             if reference_data
@@ -672,6 +696,7 @@ def build_summary_prompt(
         NEGATIVES_PREFIX=NEGATIVES_PREFIX,
         DISPROOF_PREFIX=DISPROOF_PREFIX,
         REACH_CLASSES=REACH_CLASSES,
+        insight_request=f"\n{insight_request}" if insight_request else "",
     )
 
 
@@ -951,20 +976,13 @@ class SummaryOutcome:
         return bool(self.text)
 
 
-@dataclass(frozen=True)
-class PrReferenceNote:
-    """The upstream PR references a run surfaced: their labels and the rendered context."""
-
-    labels: tuple[str, ...] = ()
-    context: str = ""
-
-
 async def summarize_iteration(
     *,
     iteration: int,
     end_reason: str,
     summarizer,
     references: PrReferenceNote = PrReferenceNote(),
+    insight_request: str = "",
 ) -> SummaryOutcome:
     """Ask the just-finished implementer session for its lesson text. The caller writes it."""
     if summarizer is None:
@@ -972,8 +990,8 @@ async def summarize_iteration(
     prompt = build_summary_prompt(
         iteration=iteration,
         end_reason=end_reason,
-        pr_references=references.labels,
-        pr_reference_context=references.context,
+        references=references,
+        insight_request=insight_request,
     )
     text = await summarizer(prompt)
     text = (text or "").strip()

@@ -10,6 +10,10 @@ from enum import Enum
 #: The branch the integrator owns; every other branch is a specialist's.
 INTEGRATION_BRANCH = "integration"
 _NOT_STACKABLE = "not_stackable"
+#: The cause a ``STOP`` lineage event names for a branch whose specialist gave up.
+GAVE_UP_CAUSE = "gave_up"
+#: What that stop says of a specialist that gave up because its process kept crashing, before the count of crashes.
+GAVE_UP_AFTER_CRASHES = "its specialist gave up after"
 
 
 class Role(str, Enum):
@@ -237,6 +241,8 @@ class UnfinishedReason(str, Enum):
 __all__ = [
     "COMMITTING",
     "FAILED_MERGES",
+    "GAVE_UP_AFTER_CRASHES",
+    "GAVE_UP_CAUSE",
     "INTEGRATION_BRANCH",
     "INTEGRATION_CONCLUSIONS",
     "LINEAGE_STARTS",

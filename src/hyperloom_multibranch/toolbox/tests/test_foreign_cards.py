@@ -32,6 +32,7 @@ from hyperloom_multibranch.toolbox.tests.helpers import Rig as ToolboxRig
 from hyperloom_multibranch.toolbox.tests.helpers import build, req
 from hyperloom_multibranch.toolbox.tests import test_branch_leases
 from hyperloom_multibranch.toolbox.tests.test_card_placement import FOREIGN, POLICY, _PointPerBranch, _settled, _until
+from hyperloom_common.weight_prefetch import WEIGHT_PREFETCH_ENV
 
 #: The real local toolbox of ``test_branch_leases``, which the local toolbox's tests take as a fixture.
 local = test_branch_leases.local
@@ -197,6 +198,18 @@ def test_the_runners_are_given_the_guard_the_option_or_the_host_environment_name
         monkeypatch.setenv(name, value)
 
     assert _runner_envs(tmp_path, LocalOptions(card_guard=option))["HYPERLOOM_CARD_GUARD"] == expected
+
+
+@pytest.mark.parametrize("value", [None, "0", "1"])
+def test_the_runners_take_the_checkpoint_prefetch_switch_the_host_sets_and_stay_off_without_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str | None
+) -> None:
+    if value is None:
+        monkeypatch.delenv(WEIGHT_PREFETCH_ENV, raising=False)
+    else:
+        monkeypatch.setenv(WEIGHT_PREFETCH_ENV, value)
+
+    assert _runner_envs(tmp_path, LocalOptions()).get(WEIGHT_PREFETCH_ENV) == value
 
 
 def test_a_host_environment_that_names_no_guard_is_refused_when_the_toolbox_is_built(

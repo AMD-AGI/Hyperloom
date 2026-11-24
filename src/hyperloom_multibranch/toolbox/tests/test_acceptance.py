@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestRequest
+from hyperloom.measure.points import ProfileUnsupported
 from hyperloom.contracts.recipe import (
     ComponentChange,
     ComponentPatches,
@@ -52,6 +53,19 @@ async def test_a_surface_mismatch_is_refused(tmp_path: Path) -> None:
         await rig.toolbox.submit_test(req())
     assert refused.value.code == "surface_mismatch"
     assert rig.blackboard._state().requests == {}
+
+
+async def test_a_profile_of_a_framework_that_runs_no_torch_profiler_is_an_unsupported_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = build(tmp_path)
+
+    def plan(request: object, parent: object) -> object:
+        raise ProfileUnsupported("framework 'llamacpp' runs under no torch profiler, so it has no profile")
+
+    monkeypatch.setattr(rig.planner, "plan", plan)
+
+    await _rejected(rig, req(), "unsupported_kind")
 
 
 async def test_an_unknown_parent_is_refused(tmp_path: Path) -> None:

@@ -68,13 +68,16 @@ _MARKER_CONTEXT_LINES: int = 2
 
 
 #: Lines that mean the server finished startup and accepts traffic: the uvicorn frontend (vLLM, sglang), vLLM's Rust
-#: frontend and sglang's own banner.
+#: frontend, sglang's own banner and llama-server's.
 READY_MARKERS: tuple[str, ...] = (
     "Application startup complete",
     "Uvicorn running on",
     # vLLM's Rust frontend (`vllm serve` with VLLM_USE_RUST_FRONTEND=1) runs no uvicorn; this is its ready line.
     "OpenAI server is ready to accept requests",
     "The server is fired up and ready to roll",
+    # llama-server words it by release: "main: server is listening on http://..." and, from 1.0,
+    # "srv  server_on_li: listening on http://...".
+    "listening on http://",
 )
 
 # The benchmark body's own stderr, beside ``server.log`` rather than in it or the parent's pipe.

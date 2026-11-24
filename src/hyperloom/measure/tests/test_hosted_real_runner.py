@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import subprocess
 import sys
@@ -15,6 +16,8 @@ from typing import Any
 
 import pytest
 
+from hyperloom.contracts.measurement import FailureClass
+from hyperloom.measure.failures import FRAMEWORK_VERSION_MISMATCH
 from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.local_templates import image_env
 from hyperloom.measure.runner.cache_layout import CACHE_ENV
@@ -36,6 +39,8 @@ RUNNER_CLI = (
     *IDLE_CARDS_PYTHON,
 )
 MARKER = b"MARKED = True\n"
+#: The version of the package the overlay is laid over, as a compile on this interpreter records it.
+PYYAML_VERSION = importlib.metadata.version("PyYAML")
 
 
 def _git_repo(path: Path) -> str:
@@ -61,9 +66,10 @@ def _call(tmp: Path, **overrides: Any):
 
 
 class _Environment:
-    """What a compiled environment hands the sheet: one root that adds a file to the installed ``yaml`` package."""
+    """What a compiled environment hands the sheet: one root that adds a file to the installed ``yaml`` package, compiled
+    against ``version`` of it."""
 
-    def __init__(self, blob_sha: str, blob_root: Path) -> None:
+    def __init__(self, blob_sha: str, blob_root: Path, version: str = PYYAML_VERSION) -> None:
         self.attachments = ()
         self._doc = {
             "roots": [
@@ -71,7 +77,7 @@ class _Environment:
                     "id": "yaml",
                     "kind": "package",
                     "import_name": "yaml",
-                    "dist": {"name": "PyYAML", "version": "0"},
+                    "dist": {"name": "PyYAML", "version": version},
                     "entries": [
                         {"path": "_hl_marker.py", "op": "upsert", "blob": f"sha256:{blob_sha}", "mode": "0644"}
                     ],
@@ -179,6 +185,25 @@ def test_a_rebuilt_framework_is_what_the_server_would_import(real, tmp_path) -> 
     assert (call.output_dir / "import_probe.txt").read_text() == "True", "the overlay file is in the imported package"
     pythonpath = json.loads((call.output_dir / "point_seen.json").read_text())["benchmark"]["envs"]["PYTHONPATH"]
     assert pythonpath.split(":")[0].endswith("farm/site"), "the farm is first on the server's import path"
+
+
+def test_files_compiled_against_another_framework_version_are_refused_as_infra_before_anything_is_laid(
+    real, tmp_path
+) -> None:
+    r = real()
+    blob = r.config.spec.blobs.put(MARKER)
+    environment = _Environment(blob, r.config.spec.blobs.root, version="0.0.1")
+    call = _call(
+        tmp_path,
+        point=_point(tmp_path, HYPERLOOM_FRAMEWORK_PYTHON=sys.executable),
+        timeout_sec=120,
+        environment=environment,
+    )
+    outcome = r.backend.run_test(call)
+    assert outcome.returncode != 0
+    assert (outcome.failure_class, outcome.failure_reason) == (FailureClass.INFRA, FRAMEWORK_VERSION_MISMATCH)
+    assert "PyYAML 0.0.1" in outcome.stderr and f"PyYAML {PYYAML_VERSION}" in outcome.stderr, outcome.stderr
+    assert not (call.output_dir / "point_seen.json").exists(), "no server is launched over the mixed framework"
 
 
 @pytest.mark.parametrize("fixture", ["real", "real_cli"])

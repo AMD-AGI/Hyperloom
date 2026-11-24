@@ -59,6 +59,17 @@ source evidence but cannot run shell commands, profiling, or serving benchmarks.
 top-levels the host deploys onto the server, at least one. A task's `repo_root`
 must be one of them; a draft naming any other checkout is refused.
 
+A repository the host snapshot from an installed package holds that package's
+files at its root, so nothing imports it by the package's name. The optional
+`"served_trees": {"<repository>": "<installed package directory>"}` names the
+package each such repository is served from. The controller then creates its
+checkout of the repository as a directory of the package's name, links the
+package's compiled extension modules into it, links the other served trees
+installed in the same directory beside it, and runs forge-loop with
+`--import-name`, so a driver that imports the package measures the checkout
+and a package that finds files beside itself finds them. A repository with no
+served tree is checked out as it always was.
+
 ## forge-loop
 
 Runs one measurement-driven optimization campaign over a single kernel:
@@ -81,6 +92,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | Option | Default | Meaning |
 |:--|:--|:--|
 | `--workspace <dir>` | required | Git workspace the campaign runs in. |
+| `--import-name <package>` | none | The package the workspace is: it holds that package's own files at its root, as a checkout of a snapshot of an installed package does, and is the directory of that name. The directory holding it goes first on the import path of everything the loop runs, so a driver importing the package by name loads the tree being edited. Each lane copy is laid out the same way, with whatever is linked beside the workspace linked beside it too. |
 | `--resume` | off | Continue the campaign already stored in that exact workspace. |
 | `--kernel <file>` | none | The kernel file to optimize. This is the anchor the loop edits. |
 | `--driver <file>` | none | The validation/bench driver. |
@@ -102,11 +114,11 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--max-hours <h>` | `1.0` | Runtime budget in hours; the loop is time-driven. Minimum `1.0`. A round is started only when what remains can finish it, so the run ends before the budget does. Above 2 hours this also enables Analysis profiling and, for single-lane rounds, Plan Critic review. |
+| `--max-hours <h>` | `1.0` | Runtime budget in hours; the loop is time-driven. Minimum `1.0`. A round is started only when what remains can finish it, so the run ends before the budget does. Above 2 hours this also enables Analysis profiling and, in a campaign with more than one lane, Plan Critic review; a single-lane campaign has no planning stage to review. |
 | `--deadline-unix <t>` | `0` | Absolute UNIX deadline shared by task preparation and optimization. |
 | `--session-timeout-sec <s>` | from `--max-hours` | Wall-clock budget for one implementer session. The claude backend cuts the session at this deadline and the session is told about it. Under `--roofline-ceiling on` it also bounds the ceiling analyst session. |
 | `--agent-timeout-sec <s>` | provider default | Timeout for one Agent session. |
-| `--profile-timeout-sec <s>` | `7200` | Ceiling for the single complete Analysis Agent session. Phase and case artifacts are persisted for resume when the deadline is reached. |
+| `--profile-timeout-sec <s>` | `7200` | Time box for the single complete Analysis Agent session. The session is told to treat it as its budget and to write its brief as soon as the first evidence supports it. Phase and case artifacts are persisted for resume when the deadline is reached. |
 
 ### Hardware and measurement
 
@@ -116,6 +128,8 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--gpu-type <sku>` | from the arch | Hardware SKU used in knowledge-base identities. When omitted it follows the resolved GPU arch (`gfx950` → `mi355x`, `gfx942` → `mi300x`). |
 | `--nproc-per-node <n>` | `1` | Ranks the driver self-launches via torchrun, for collective tasks such as all-reduce. Above 1, EVERY rank is profiled in its own rocprofv3 session — wrapping the driver would only profile the launcher process, which runs no kernel. |
 | `--bench-repeat <n>` | `1` | How many times each bench repeats its measurement in-process, reporting the per-case median. Above 1 shrinks run-to-run spread and requires a driver that accepts `--repeat`; the flag is omitted entirely when this is 1. |
+| `--case-aggregate <arithmetic\|geometric>` | `arithmetic` | How one measurement's per-case speedups combine into the score every KEEP, in-session gate and report is judged on. Every case weighs the same under both; `arithmetic` counts a large gain on one case in full, `geometric` counts its ratio. Choose the one whoever consumes the result scores by. Immutable per campaign: it is snapshotted into `campaign_config.json`, read back on `--resume`, and named in the result as `case_aggregate`. |
+| `--case-aggregate <arithmetic\|geometric>` | `arithmetic` | How one measurement's per-case speedups combine into the score every KEEP, in-session gate and report is judged on. Every case weighs the same under both; `arithmetic` counts a large gain on one case in full, `geometric` counts its ratio. Choose the one whoever consumes the result scores by. Immutable per campaign: it is snapshotted into `campaign_config.json`, read back on `--resume`, and named in the result as `case_aggregate`. |
 | `--aiter-cache-max-gb <g>` | `4.0` | Per-attempt AITER cache soft limit in GiB. LRU pruning targets 75% of the limit; `0` disables in-run pruning. |
 | `--profiling` / `--no-profiling` | on | Allow Analysis hardware profiling and Implementer self-profiling guidance on long-horizon runs (>2 hours). Shorter runs keep Analysis static-only regardless. `--no-profiling` disables collection for every duration. |
 | `--roofline-ceiling <on\|off>` | `off` | Whether the campaign has a per-shape theoretical achievable latency to measure its attainment against. `off` skips it entirely, including any report already sitting in the workspace. `on` estimates one on a fresh campaign once the baseline has fixed the scored case set and its per-case times, which costs a profiler pass and an analyst session, typically tens of minutes; on `--resume` it reuses the ceiling this campaign already estimated, so the target stays fixed for the campaign, and estimates again only when that report can no longer be read or no longer covers every scored case. While the campaign has a ceiling, every iteration logs the incumbent's mean attainment against it; the planner, its specialists and plan critic, and the supervisor receive each case's attainment, the mean, the target and how to read them; and the implementer receives the same standing as a table. Without one, none of it is injected anywhere. Session-scoped: pass it on every `--resume` that should keep the ceiling. |
@@ -125,7 +139,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--lanes <n>` | `3` | Implementer lanes per round (1–8). Above 1 the round's analysis is partitioned into that many non-overlapping plans, each run concurrently in its own workspace copy and measured on its own. Lanes run concurrently, so a lane costs a session rather than a share of the round's wall clock, and three is what the three specialist analyses divide into. The partition returns fewer when the evidence supports fewer. Needs a provider declaring `session_env`; refused on one that does not, because lanes sharing a build cache measure each other's binaries. A provider without `stop_hooks` runs and is warned: it loses in-session denial, so a lane can waste its session or void the round, but it cannot misreport one. |
+| `--lanes <n>` | `3` | Implementer lanes per round (1–8). At 1 there is no planning stage: no dispatch, specialist, synthesis or Critic session runs, and the one Implementer session chooses its direction from the Analysis report and the lesson records. Above 1 the round's analysis is partitioned into that many non-overlapping plans, each run concurrently in its own workspace copy and measured on its own. Lanes run concurrently, so a lane costs a session rather than a share of the round's wall clock, and three is what the three specialist analyses divide into. The partition returns fewer when the evidence supports fewer. Needs a provider declaring `session_env`; refused on one that does not, because lanes sharing a build cache measure each other's binaries. A provider without `stop_hooks` runs and is warned: it loses in-session denial, so a lane can waste its session or void the round, but it cannot misreport one. |
 | `--merge-stacking` / `--no-merge-stacking` | on | Once consecutive iterations stop producing a new best, spend one iteration measuring two archived rejected gains applied together, chosen for winning on different cases. Costs a measurement but no Implementer session. Applies at every `--lanes` setting; turn it off to compare against a run that predates it. |
 | `--specialist-probe` / `--no-specialist-probe` | on | Let the read-only planning specialists measure one variant per probe in a scratch tree instead of only arguing about a dispatch constant. Each probe re-runs the workspace driver for one case with declared constants overridden, queues on the same device lock the fan-out lanes take, and never touches the canonical tree. Falls back to `FORGE_SPECIALIST_PROBE`. |
 | `--specialist-probe-max <n>` | `6` | Probes ONE analysis round may make in total, shared across every specialist it dispatches. Every call counts, including a refused one. Falls back to `FORGE_SPECIALIST_PROBE_MAX`. |

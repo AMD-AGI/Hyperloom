@@ -76,9 +76,9 @@ _KEY_BRANCHES = "branches"
 _KEY_STOP = "stop"
 _KEY_STOP_SESSION = "stop_session"
 _KEY_BRANCH = "branch"
-#: What the runtime knows of a specialist but the judge's prompt does not name: why an agent's run ended of itself is
-#: the scheduler's stop reason, since the scheduler stops that branch.
-_NOT_JUDGED = frozenset({"finished"})
+#: What the runtime knows of a specialist but the judge's prompt does not name: why an agent's run ended of itself,
+#: and whether one that gave up crashed out, are the scheduler's stop reason, since the scheduler stops that branch.
+_NOT_JUDGED = frozenset({"finished", "crashed_out"})
 _KEY_REASON = "reason"
 #: Decimals the GPU hours in the judge's view are rounded to.
 _GPU_HOURS_DIGITS = 3

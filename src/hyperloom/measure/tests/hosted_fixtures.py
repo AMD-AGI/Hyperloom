@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -114,6 +115,7 @@ def make_rig(
     templates: list[LocalTemplate] | None = None,
     gpus: int = 8,
     spec: Mapping[str, Any] | None = None,
+    clock: Callable[[], float] = time.time,
     **config: Any,
 ) -> Rig:
     provider = LocalSandboxProvider(
@@ -132,6 +134,6 @@ def make_rig(
     }
     arguments.update(config)
     hosted = HostedConfig(**arguments)
-    backend = HostedMeasurementBackend(provider, hosted)
+    backend = HostedMeasurementBackend(provider, hosted, clock=clock)
     backend.start()
     return Rig(provider, backend, hosted, archive, tmp)

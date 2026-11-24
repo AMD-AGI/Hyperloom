@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 
 from kernelforge.agent_backends import AgentHook, AgentHooks
+from kernelforge.utils.session_kill import pattern_kill_denial
+from kernelforge.workflows.forge_loop.gate.insession_scope import host_wide_kill_reason
 
 _WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 _BASH_WRITE_MARKERS = (
@@ -76,6 +78,9 @@ class AnalysisProtection:
                 "Unbounded root filesystem searches are forbidden. Use the exact "
                 "staging and knowledge paths supplied in the Analysis request."
             )
+        kill_reason = host_wide_kill_reason(command)
+        if kill_reason:
+            return self._deny(pattern_kill_denial(kill_reason))
         lowered = f" {command.lower()} "
         has_write_intent = any(marker in lowered for marker in _BASH_WRITE_MARKERS)
         names_protected = any(basename.lower() in lowered for basename in self._protected_basenames)

@@ -75,6 +75,8 @@ from hyperloom.sandbox.socket import (
     WORKSPACE_KEY,
     CommandResult,
     CreateOptions,
+    DirEntry,
+    EntryKind,
     OutputSinks,
     Role,
     RunSettings,
@@ -635,14 +637,15 @@ class _E2BSandbox:
                 total += len(chunk)
         return total
 
-    def list_dir(self, path: str) -> list[str]:
-        """List entry names of a directory, sorted.
+    def list_entries(self, path: str) -> list[DirEntry]:
+        """The entries of a directory, sorted by name; one the service reports a link target for is a link.
 
         Raises:
             FileNotFoundError: When there is no such directory.
         """
         with self._data_plane():
-            return sorted(entry.name for entry in self._handle.files.list(path))
+            listed = self._handle.files.list(path)
+        return sorted((_entry(item) for item in listed), key=lambda entry: entry.name)
 
     def run(
         self,
@@ -696,3 +699,16 @@ class _E2BSandbox:
     def kill(self) -> None:
         """End the sandbox and everything running in it; safe to call again."""
         self._control.call(lambda: e2b.Sandbox.kill(self.sandbox_id, **self._control.params))
+
+
+def _entry(item: e2b.EntryInfo) -> DirEntry:
+    """A listed entry as the socket says it: a link whatever it points at, else what the service reports it is."""
+    kind: EntryKind
+    if item.symlink_target is not None:
+        kind = "link"
+    elif item.type == e2b.FileType.DIR:
+        kind = "dir"
+    else:
+        kind = "file" if item.type == e2b.FileType.FILE else "other"
+    size = item.size if isinstance(item.size, int) and item.size >= 0 else 0
+    return DirEntry(item.name, kind, size)

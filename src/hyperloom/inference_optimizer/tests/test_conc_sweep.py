@@ -2553,3 +2553,69 @@ def test_render_conc_sweep_curve_propagates_an_unexpected_failure(tmp_path: Path
     monkeypatch.setattr(conc_sweep_plot, "_render", _fail)
     with pytest.raises(TypeError, match="malformed point"):
         render_conc_sweep_curve({}, tmp_path / "out.png", ConcCurveOptions(tp=1))
+
+
+def test_a_scriptable_workload_declines_the_sweep_before_it_starts() -> None:
+    """One forward pass of the operator's script: every rung would measure the same thing."""
+    from hyperloom.orchestrator.actions.executors.conc_sweep import _declined_as_non_serving
+
+    state = _make_state()
+    state.framework = "custom"
+    declined = _declined_as_non_serving(state)
+    assert declined is not None
+    assert declined["skip_reason"] == "non_serving_workload"
+    assert declined["was_skipped"] is True
+    assert declined["status"] == "succeeded", "a skip is not an executor failure"
+
+
+def test_a_serving_workload_still_starts_its_sweep() -> None:
+    from hyperloom.orchestrator.actions.executors.conc_sweep import _declined_as_non_serving
+
+    state = _make_state()
+    state.framework = "vllm"
+    assert _declined_as_non_serving(state) is None
+
+
+def _llamacpp_state(tmp_path: Path, *, base_args: str, optimized_args: str) -> SharedState:
+    cfg = tmp_path / "llamacpp_baseline.yaml"
+    cfg.write_text(
+        f"benchmark:\n  framework: llamacpp\n  benchmark_script: bench.sh\n  envs:\n    EXTRA_LLAMACPP_ARGS: '{base_args}'\n"
+    )
+    state = _make_state(
+        baseline_config_path=str(cfg),
+        current_best={"extra_server_args": optimized_args, "extra_envs": {}},
+    )
+    state.framework = "llamacpp"
+    state.conc = 1
+    return state
+
+
+def test_a_ladder_past_every_arm_s_request_slots_is_declined(session_dir: Path, tmp_path: Path):
+    """A server that runs one request at a time queues every other one, so a ladder above its slots measures nothing
+    the anchor did not."""
+    state = _llamacpp_state(tmp_path, base_args="-ngl 99 -np 1", optimized_args="--spec-draft-n-max 4")
+
+    with patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid") as mock_run_grid:
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[256, 64, 2], total_budget_sec=9000))
+
+    assert payload["status"] == "skipped"
+    assert payload["skip_reason"] == "concs_exceed_server_slots"
+    assert payload["server_slots"] == 1
+    mock_run_grid.assert_not_called()
+
+
+def test_the_ladder_keeps_the_concs_the_widest_arm_serves(session_dir: Path, tmp_path: Path):
+    state = _llamacpp_state(tmp_path, base_args="-ngl 99 -np 1", optimized_args="--parallel 4")
+    ran: list[int] = []
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        ran.extend(int(v.extra_envs["CONC"]) for v in grid)
+        return [_fake_variant(v.name, throughput=10.0, envs=v.extra_envs) for v in grid]
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
+    ):
+        asyncio.run(run_conc_sweep(state, session_dir, concs=[16, 8, 4, 2], total_budget_sec=9000))
+
+    assert sorted(set(ran)) == [2, 4]

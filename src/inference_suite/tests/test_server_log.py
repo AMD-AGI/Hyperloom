@@ -208,3 +208,10 @@ def test_an_excerpt_that_only_reports_the_death_names_no_cause():
     assert server_log.cause_line("(APIServer pid=1) RuntimeError: Engine core initialization failed.") is None
     assert server_log.cause_line("vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue") is None
     assert server_log.cause_line(None) is None
+
+
+def test_scan_increment_detects_llama_server_ready(tmp_path):
+    log_path = tmp_path / "server.log"
+    for line in ("main: server is listening on http://127.0.0.1:8080", "srv  server_on_li: listening on http://h:1"):
+        log_path.write_text(f"{line}\n")
+        assert server_log._scan_increment(str(log_path), 0).saw_ready is True

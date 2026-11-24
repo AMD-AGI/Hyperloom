@@ -31,7 +31,7 @@ from kernelforge.workflows.forge_loop.campaign.experiments_layout import Experim
 from kernelforge.utils.new_path_allowlist import normalize_commit_new_paths
 from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.workflows.forge_loop.search.agent_relay import AgentRelayPolicy
-from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, CaseAggregate
 
 
 _AMDGPU_ASSEMBLY_RE = re.compile(
@@ -72,6 +72,7 @@ class CampaignConfig:
     # Measurement semantics.
     nproc_per_node: int = 1
     bench_repeat: int = 1
+    case_aggregate: CaseAggregate = CaseAggregate.ARITHMETIC
     # Paths the Implementer may CREATE and still have committed with a KEEP (see
     # ``IterationConfig.commit_new_paths``).
     commit_new_paths: list[str] = field(default_factory=list)
@@ -114,6 +115,7 @@ class CampaignConfig:
             implementation_identity=dict(payload["implementation_identity"]),
             nproc_per_node=int(payload["nproc_per_node"]),
             bench_repeat=int(payload["bench_repeat"]),
+            case_aggregate=CaseAggregate(payload["case_aggregate"]),
             # Re-validated on read: this list decides which untracked files a KEEP commits and a REVERT deletes, so a
             # hand-edited pattern the loop would read differently than its author meant is refused here rather than
             # acted on later.
@@ -454,6 +456,7 @@ class CampaignInputs:
     # Measurement semantics and what a KEEP may ship beyond the tracked diff belong to the campaign, not one session.
     nproc_per_node: int = 1
     bench_repeat: int = 1
+    case_aggregate: CaseAggregate = CaseAggregate.ARITHMETIC
     commit_new_paths: tuple[str, ...] = ()
     # The Agent profiles a blockage may relay between, fixed when the campaign is created.
     agent_relay: AgentRelayPolicy | None = None
@@ -532,6 +535,14 @@ def _resolve_gpu_target(requested: str, kernel_backend: str) -> str:
     return gpu_target
 
 
+def _resolved_snr_threshold(value: float) -> float:
+    """A fresh campaign's SNR threshold, refused unless it is a positive finite number."""
+    threshold = float(value)
+    if not math.isfinite(threshold) or threshold <= 0:
+        raise ValueError("SNR threshold must be a positive finite float")
+    return threshold
+
+
 def create_campaign_config(
     workspace_dir: str,
     inputs: CampaignInputs,
@@ -573,9 +584,6 @@ def create_campaign_config(
         target_functions=resolved_targets,
     )
     program_md_sha256 = _program_md_sha256(inputs.program_md_file)
-    resolved_snr_threshold = float(inputs.snr_threshold)
-    if not math.isfinite(resolved_snr_threshold) or resolved_snr_threshold <= 0:
-        raise ValueError("SNR threshold must be a positive finite float")
     return CampaignConfig(
         kernel_path=kernel_path,
         driver_path=driver_path,
@@ -583,7 +591,7 @@ def create_campaign_config(
         source_files=normalized_sources,
         program_md_path="forge_experiments/program.md" if inputs.program_md_file else "",
         program_md_sha256=program_md_sha256,
-        snr_threshold=resolved_snr_threshold,
+        snr_threshold=_resolved_snr_threshold(inputs.snr_threshold),
         gpu_target=gpu_target,
         gpu_type=(inputs.gpu_type or canonical_gpu_type(gpu_target)).strip().lower(),
         kernel_backend=resolved_kernel_backend,
@@ -598,6 +606,7 @@ def create_campaign_config(
         implementation_identity=pristine_identity,
         nproc_per_node=max(1, int(inputs.nproc_per_node)),
         bench_repeat=max(1, int(inputs.bench_repeat)),
+        case_aggregate=inputs.case_aggregate,
         commit_new_paths=normalize_commit_new_paths(list(inputs.commit_new_paths)),
         agent_relay=inputs.agent_relay,
     )

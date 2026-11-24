@@ -44,6 +44,13 @@ its own after the measured bench): a warmup round, the measured round and the ac
 own, and the accuracy round's report holds the score of ``fake_accuracy``.
 ``fake_log_line: <text>`` writes a server log whose last line that is, so the runner's progress reports it as the last
 line of the live output.
+``fake_round_tree: true`` writes, before it runs, what a real round leaves below its own directory
+(:data:`ROUND_TREE`, below :data:`ROUND_DIR`): the server log, a client log, the phase marks, ``launch.json``, a boot
+stamp and a profiler trace, plus a link out of the sandbox root (:data:`ROUND_LINK`) whose target holds a log.
+``fake_round_ready: <seconds>`` writes, before it runs, the ready stamp of a round below :data:`ROUND_DIR` that says its
+server booted in that many seconds.
+``fake_round_ruling: <mapping>`` writes, before it runs, that mapping as the AgentX checkpoint's ruling in the measured
+round's slot (the directory above :data:`ROUND_DIR`), where a round the checkpoint ruled on leaves it.
 ``fake_jit: true`` stages a contribution to the shared compiled-code cache (one aiter module, below ``/out/jit-cache``) and
 signs it into the manifest as a test that compiled it would; ``fake_jit_swap: true`` changes the staged list after the
 signing, as something that can write ``/out`` could.
@@ -91,6 +98,27 @@ def _atomic(path: Path, data: bytes) -> None:
     scratch = path.with_name(f".{path.name}.tmp")
     scratch.write_bytes(data)
     os.replace(scratch, path)
+
+
+#: Where ``fake_round_tree`` puts a round, and what it writes there.
+ROUND_DIR = "variant_00_test/suite_run_0"
+ROUND_TREE = {
+    "server.log": b"Load weight begin\nFinished streaming dequant fp8 wo_a\n",
+    "client/aiperf.log": b"client waiting for the server\n",
+    "phase_marks.json": b'{"server_ready": null}\n',
+    "launch.json": b'{"framework": "fake"}\n',
+    "server_boot_active_at": b"1700000000.0\n",
+    "torch_trace/rank0.json": b'{"traceEvents": []}\n',
+}
+ROUND_LINK = "outside"
+
+
+def _round_tree(files: Path, root: Path) -> None:
+    for relative, data in ROUND_TREE.items():
+        _atomic(files / ROUND_DIR / relative, data)
+    outside = root.parent / f"{root.name}-outside"
+    _atomic(outside / "secret.log", b"not the sandbox's\n")
+    (files / ROUND_DIR / ROUND_LINK).symlink_to(outside, target_is_directory=True)
 
 
 def _visible_cards() -> list[int]:
@@ -410,6 +438,15 @@ def main() -> int:
         mode = str(config.get("fake_mode", "ok"))
         if "fake_log_line" in config:
             _atomic(out / "files" / "server.log", f"boot\n{config['fake_log_line']}\n".encode())
+        if config.get("fake_round_tree"):
+            _round_tree(out / "files", root)
+        if "fake_round_ready" in config:
+            _atomic(
+                out / "files" / ROUND_DIR / "server_ready_at", f"{time.time()} {config['fake_round_ready']}\n".encode()
+            )
+        if "fake_round_ruling" in config:
+            slot = out / "files" / Path(ROUND_DIR).parent
+            _atomic(slot / "agentx_checkpoint.json", json.dumps(config["fake_round_ruling"]).encode())
         if config.get("fake_ready"):
             _atomic(out / "files" / "server_ready_at", f"{time.time()} 5\n".encode())
         progress.touch()

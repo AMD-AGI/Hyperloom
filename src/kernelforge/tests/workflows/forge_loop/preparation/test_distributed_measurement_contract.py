@@ -27,6 +27,7 @@ from kernelforge.workflows.forge_loop.preparation import task_preflight
 from kernelforge.workflows.forge_loop.preparation.task_preflight import (
     PROBE_DISTRIBUTED_VIOLATION,
     PROBE_FAILED,
+    DriverContract,
     _read_graph_probe_shards,
 )
 
@@ -157,7 +158,9 @@ def test_the_probe_tells_the_driver_and_itself_the_same_rank_count(monkeypatch):
 
     monkeypatch.setattr(task_preflight.asyncio, "create_subprocess_exec", _fake_create)
 
-    task_preflight.asyncio.run(task_preflight._count_graph_replays("driver.py", 1, 1, timeout_sec=5, require_ranks=4))
+    task_preflight.asyncio.run(
+        task_preflight._count_graph_replays("driver.py", 1, 1, timeout_sec=5, contract=DriverContract(require_ranks=4))
+    )
 
     assert captured["FORGE_NPROC_PER_NODE"] == "4"
     assert captured["GRAPH_PROBE_EXPECT_RANKS"] == "4"

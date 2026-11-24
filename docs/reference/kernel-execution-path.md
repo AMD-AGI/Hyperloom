@@ -122,7 +122,13 @@ The repositories are the trees the server imports (`served_source_trees`),
 each sealed at a base commit before the controller starts
 (`seal_campaign_baseline`). A served checkout is rewritten in place; an
 installed package is rewritten in a worktree of the session's snapshot of it,
-the history its specialists branch off. Integration refuses a publication
+the history its specialists branch off. `repositories.json` names the installed
+package each such snapshot is served from (`served_trees`), and the controller
+creates its checkout of the snapshot under that package's name with the other
+served trees linked beside it, so what a campaign imports and times by the
+package's name is the checkout it edits; forge-loop's driver preflight refuses
+a driver that loaded a source file of the campaign from any other copy.
+Integration refuses a publication
 naming any other repository and deploys a validated patch onto the served tree,
 so the E2E measurement runs the patched code. Communication operators ride
 this path like any other operator; a task declares its rank count and the

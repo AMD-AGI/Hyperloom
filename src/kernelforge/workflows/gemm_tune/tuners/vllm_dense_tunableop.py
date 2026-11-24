@@ -82,12 +82,36 @@ def count_tunableop_result_lines(text: str) -> int:
 
 
 def _generate_candidate_sitecustomize() -> str:
+    """The ``sitecustomize`` that loads a TunableOp candidate into the processes of a server.
+
+    It runs in every Python process the server starts, and most of those never use the GPU. Any call into
+    ``torch.cuda.tunable`` opens the GPU device without setting ``torch.cuda.is_initialized()``, which is what a
+    framework asks before it forks: vLLM then forks its engine from a process that already holds the device, and
+    serves slower for it than with no candidate at all. So the hook checks what it can without the GPU and queues the
+    load for the moment its process initializes CUDA; a process that never does loads nothing.
+    """
     return (
         "import os\n"
         "from pathlib import Path\n\n"
         "_mode = os.environ.get('HL_TUNABLEOP_MODE', '').strip().lower()\n"
         "_file = os.environ.get('HL_TUNABLEOP_FILE', '').strip() or os.environ.get('PYTORCH_TUNABLEOP_FILENAME', '').strip()\n"
-        "_verbose = os.environ.get('HL_TUNABLEOP_VERBOSE', '').strip().lower() in {'1', 'true', 'yes', 'on'}\n"
+        "_verbose = os.environ.get('HL_TUNABLEOP_VERBOSE', '').strip().lower() in {'1', 'true', 'yes', 'on'}\n\n\n"
+        "def _fail(exc):\n"
+        "    if _verbose:\n"
+        "        print(f'HL_TUNABLEOP_READ_FAILED {type(exc).__name__}: {exc}', flush=True)\n"
+        "    raise SystemExit(f'HL_TUNABLEOP_READ_FAILED {type(exc).__name__}: {exc}') from exc\n\n\n"
+        "def _load_candidate():\n"
+        "    import torch\n"
+        "    _t = torch.cuda.tunable\n"
+        "    try:\n"
+        "        _t.enable(True)\n"
+        "        _t.tuning_enable(False)\n"
+        "        _t.record_untuned_enable(False)\n"
+        "        if hasattr(_t, 'set_filename'):\n"
+        "            _t.set_filename(_file)\n"
+        "        _t.read_file(_file)\n"
+        "    except Exception as exc:\n"
+        "        _fail(exc)\n\n\n"
         "if _mode == 'candidate':\n"
         "    try:\n"
         "        if not _file:\n"
@@ -95,19 +119,11 @@ def _generate_candidate_sitecustomize() -> str:
         "        if not Path(_file).is_file():\n"
         "            raise FileNotFoundError(f'TunableOp candidate file not found: {_file}')\n"
         "        import torch\n"
-        "        _t = torch.cuda.tunable\n"
-        "        _t.enable(True)\n"
-        "        _t.tuning_enable(False)\n"
-        "        _t.record_untuned_enable(False)\n"
-        "        if hasattr(_t, 'set_filename'):\n"
-        "            _t.set_filename(_file)\n"
-        "        if not hasattr(_t, 'read_file'):\n"
+        "        if not hasattr(torch.cuda.tunable, 'read_file'):\n"
         "            raise RuntimeError('torch.cuda.tunable.read_file unavailable; cannot load TunableOp candidate')\n"
-        "        _t.read_file(_file)\n"
+        "        torch.cuda._lazy_call(_load_candidate)\n"
         "    except Exception as exc:\n"
-        "        if _verbose:\n"
-        "            print(f'HL_TUNABLEOP_READ_FAILED {type(exc).__name__}: {exc}', flush=True)\n"
-        "        raise SystemExit(f'HL_TUNABLEOP_READ_FAILED {type(exc).__name__}: {exc}') from exc\n"
+        "        _fail(exc)\n"
     )
 
 
