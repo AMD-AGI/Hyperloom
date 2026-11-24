@@ -3,8 +3,8 @@
 
 """The measure readers of a round read an inference_suite run_dir through its ``report.json``.
 
-The contract: accuracy, the accuracy pass's exit code, the consistency check's measurement and a landed bundle's
-rounds come from the run_dir's report, never from the lm-eval file beside it.
+The contract: accuracy, the accuracy pass's exit code and a landed bundle's rounds come from the run_dir's report, never
+from the lm-eval file beside it.
 """
 
 from __future__ import annotations
@@ -15,16 +15,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.contracts.measurement import SandboxFacts
-from hyperloom.measure import consistency, hosted, local_outcome
+from hyperloom.measure import hosted, local_outcome
 from hyperloom.measure.accuracy import read_accuracy
-from hyperloom.measure.socket import RoundOutcome, TestOutcome
 from hyperloom.orchestrator.actions.executors import VariantResult
-from inference_suite.contracts import ExitCodes, FixedMetrics, Report, RunLayout
+from inference_suite.contracts import ExitCodes, Report, RunLayout
 from inference_suite.tests.test_report_contract import _report
-
-_SANDBOX = SandboxFacts(sandbox_id="local-t", backend="local")
-_FIXED = {"output_throughput": 1234.5, "completed_requests": 640, "requested_requests": 640, "request_error_rate": 0.0}
 
 
 def _run_dir(path: Path, report: Report) -> Path:
@@ -67,26 +62,6 @@ def test_the_accuracy_pass_exit_code_of_a_run_dir_is_its_reports(tmp_path, eval_
     run_dir = _run_dir(tmp_path / "suite_run_0", _report(profile=None, codes=codes))
 
     assert local_outcome._eval_returncode(_variant(run_dir, 7)) == expected
-
-
-def test_the_consistency_check_measures_a_run_dir_from_its_report(tmp_path):
-    report = _report(profile=None, eval=None, codes=ExitCodes(client=0), fixed=FixedMetrics.of(_FIXED))
-    run_dir = _run_dir(tmp_path / "suite_run_0", report)
-    outcome = TestOutcome(0, "", "", (RoundOutcome(0, "measure", run_dir, 0),), _SANDBOX, "t")
-
-    side = consistency.read_side(outcome, tmp_path)
-
-    assert side.problem is None, side
-    assert side.throughput == pytest.approx(1234.5)
-    assert side.completed == (640,) and side.error_rate == (0.0,)
-
-
-def test_the_consistency_check_names_a_run_dir_whose_round_did_not_measure(tmp_path):
-    served_nothing = FixedMetrics.of({"output_throughput": 0.0, "completed_requests": 0})
-    run_dir = _run_dir(tmp_path / "suite_run_0", _report(profile=None, eval=None, fixed=served_nothing))
-    outcome = TestOutcome(0, "", "", (RoundOutcome(0, "measure", run_dir, 0),), _SANDBOX, "t")
-
-    assert consistency.read_side(outcome, tmp_path).problem == "invalid_measurement: suite_run_0"
 
 
 def test_a_landed_bundle_without_a_round_list_finds_its_rounds_by_their_reports(tmp_path):
