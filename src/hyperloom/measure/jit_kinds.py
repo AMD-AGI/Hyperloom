@@ -21,6 +21,7 @@ __all__ = [
     "AITER_CPP",
     "AITER_JIT",
     "DISABLED",
+    "FLYDSL",
     "HIT",
     "KINDS",
     "MISS",
@@ -43,7 +44,7 @@ class CacheKind:
 
     ``env_var`` is set to ``<private root>/<name>`` for the server; ``content`` is the directory below that where the
     compiled products live, and ``allowed`` the pattern a path below ``content`` must fully match to be stored.
-    ``keyed_by`` says which key the kind is stored under (``aiter`` or ``triton``, see
+    ``keyed_by`` says which key the kind is stored under (``aiter``, ``triton`` or ``flydsl``, see
     :mod:`hyperloom.measure.jit.key`). ``located`` is the pattern of the admitted files whose content holds paths below
     the directory that wrote them (a compiler's index of the files it made); ``None`` when no file of the kind does.
     """
@@ -81,7 +82,20 @@ TRITON = CacheKind(
     located=re.compile(r"[^/]+/__grp__[^/]+"),
 )
 
-KINDS = (AITER_JIT, AITER_CPP, TRITON)
+#: FlyDSL's compiled launches: ``<function>_<manager key>/<call key>.pkl``, where the manager key is the first 32 hex digits
+#: of a hash of FlyDSL itself, the function's source and its closure values, and the call key the first 16 of a hash of
+#: the argument signatures (``JitFunction`` and ``JitCacheManager`` in ``flydsl/compiler/jit_function.py``). The lock FlyDSL
+#: keeps beside each file and its temporary files on the way to one are not products. A ``.pkl`` is a pickle, which runs
+#: code when it is loaded: only a test that runs no patched code adds to this kind (``runner.jit``).
+FLYDSL = CacheKind(
+    "flydsl",
+    "FLYDSL_RUNTIME_CACHE_DIR",
+    "",
+    re.compile(r"[A-Za-z0-9_]{1,128}_[0-9a-f]{32}/[0-9a-f]{16}\.pkl"),
+    "flydsl",
+)
+
+KINDS = (AITER_JIT, AITER_CPP, TRITON, FLYDSL)
 
 
 def kind_named(name: str) -> CacheKind:

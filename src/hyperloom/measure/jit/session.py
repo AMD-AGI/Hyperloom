@@ -33,7 +33,7 @@ from hyperloom.measure import fsafe
 from hyperloom.measure.jit.builds import BuildLog
 from hyperloom.measure.jit.locations import NotPortable, portable, read_located
 from hyperloom.measure.jit.notes import LISTED, SessionNotes
-from hyperloom.measure.jit_kinds import DISABLED, HIT, MISS, VERIFY_FAILED, CacheKind
+from hyperloom.measure.jit_kinds import DISABLED, FLYDSL, HIT, MISS, VERIFY_FAILED, CacheKind
 from hyperloom.measure.jit.store import (
     BLOBS_DIR,
     MANIFEST_NAME,
@@ -52,6 +52,7 @@ __all__ = [
     "KindPlan",
     "KindReport",
     "link_prebuilt",
+    "link_prebuilt_admitted",
 ]
 
 _TMP = ".tmp-"
@@ -216,7 +217,9 @@ class JitCacheSession:
             self._seed_kind(seeded, content)
             if seeded.plan.given is not None:
                 self._seed_given(seeded, seeded.plan.given, content)
-            if seeded.plan.prebuilt is not None:
+            if seeded.plan.prebuilt is not None and seeded.plan.kind is FLYDSL:
+                link_prebuilt_admitted(seeded.plan.prebuilt, content, FLYDSL)
+            elif seeded.plan.prebuilt is not None:
                 link_prebuilt(seeded.plan.prebuilt, content, seeded.plan.touched)
 
     def _seed_kind(self, seeded: _Seeded, content: Path) -> None:
@@ -398,6 +401,31 @@ def link_prebuilt(prebuilt: Path, content: Path, skip: frozenset[str]) -> None:
         source = Path(os.path.realpath(Path(prebuilt) / name))
         if source.is_file() and not (content / name).exists():
             os.symlink(source, content / name)
+
+
+def link_prebuilt_admitted(prebuilt: Path, content: Path, kind: CacheKind) -> None:
+    """Link each file below ``prebuilt`` that ``kind`` admits into the same place below ``content``, unless the cache
+    already gave one there. The directories on the way are made, not linked: a compiler that adds a file beside a prebuilt
+    one (FlyDSL keeps a launch's calls in one directory) adds it to the test's own directory, never to the image's."""
+    for relative in sorted(_admitted_below(Path(prebuilt), kind)):
+        target = content / relative
+        source = Path(os.path.realpath(Path(prebuilt) / relative))
+        if os.path.lexists(target) or not source.is_file():
+            continue
+        try:
+            os.makedirs(target.parent, mode=_DIR_MODE, exist_ok=True)
+            os.symlink(source, target)
+        except OSError:
+            continue
+
+
+def _admitted_below(root: Path, kind: CacheKind) -> Iterator[str]:
+    for directory, subdirs, names in os.walk(root, followlinks=False):
+        subdirs.sort()
+        for name in names:
+            relative = (Path(directory) / name).relative_to(root).as_posix()
+            if kind.admits(relative):
+                yield relative
 
 
 def _candidates(content: Path, kind: CacheKind) -> list[str]:

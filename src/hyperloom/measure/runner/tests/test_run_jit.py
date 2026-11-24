@@ -66,11 +66,14 @@ TABLE_VARIABLE = "AITER_CONFIG_GEMM_A8W8"
 HOME_READ = (
     'import os\nHOME_PATH = os.environ.get("HOME") or os.environ.get("USERPROFILE")\nROOT = f"{HOME_PATH}/.aiter"\n'
 )
-STATES = ("aiter_jit", "aiter_cpp", "triton")
+STATES = ("aiter_jit", "aiter_cpp", "triton", "flydsl")
+#: The launch the stand-in server compiles with FlyDSL, where FlyDSL puts it: ``<function>_<manager key>/<call key>.pkl``.
+FLYDSL_LAUNCH = f"launch_{'a' * 32}/{'b' * 16}.pkl"
 
 
 class _CompilingGrid(_Grid):
-    """A ``run_grid`` whose server compiles what it does not find: one aiter module, one cpp_itfs library, one Triton kernel."""
+    """A ``run_grid`` whose server compiles what it does not find: one aiter module, one cpp_itfs library, one Triton kernel
+    and one FlyDSL launch."""
 
     #: A compiler that does not trust what it was given and writes every Triton file again, to other bytes.
     recompile_triton = False
@@ -90,7 +93,11 @@ class _CompilingGrid(_Grid):
             return await super().__call__(**kwargs)
         log = self.files / "variant_0" / "server.log"
         log.parent.mkdir(parents=True, exist_ok=True)
-        compiled = {"AITER_JIT_DIR": "module_gemm.so", "AITER_ROOT_DIR": "build/pa_x/lib.so"}
+        compiled = {
+            "AITER_JIT_DIR": "module_gemm.so",
+            "AITER_ROOT_DIR": "build/pa_x/lib.so",
+            "FLYDSL_RUNTIME_CACHE_DIR": FLYDSL_LAUNCH,
+        }
         for variable, relative in compiled.items():
             target = Path(os.environ.get(variable) or self.tmp_path / "default" / variable) / relative
             if not target.exists():
@@ -273,7 +280,7 @@ def _arm(rig: Rig, **kwargs):
 
 def test_the_second_test_hits_the_cache_the_first_filled_and_builds_nothing(rig) -> None:
     first, _, first_run = rig.run("first", _arm(rig))
-    assert rig.publish(first_run, first) == 3
+    assert rig.publish(first_run, first) == 4
     second, status, _ = rig.run("second", _arm(rig))
 
     assert _states(first) == dict.fromkeys(STATES, "miss") and _states(second) == dict.fromkeys(STATES, "hit")
@@ -385,7 +392,7 @@ def test_an_aiter_patch_misses_the_aiter_caches_and_still_hits_the_one_triton_ke
     patched = _arm(rig, roots=lambda run: [rig.root(run, "aiter", "jit/optCompilerConfig.json", b'{"flags": ["-O0"]}')])
     candidate, _, _ = rig.run("patched", patched)
 
-    assert _states(candidate) == {"aiter_jit": "miss", "aiter_cpp": "miss", "triton": "hit"}
+    assert _states(candidate) == {"aiter_jit": "miss", "aiter_cpp": "miss", "triton": "hit", "flydsl": "hit"}
     assert (
         _keys(candidate)["aiter_jit"] != _keys(base)["aiter_jit"]
         and _keys(candidate)["triton"] == _keys(base)["triton"]
@@ -500,7 +507,7 @@ def test_a_test_that_sets_aiter_rebuild_does_not_use_the_aiter_caches_and_says_s
 
     manifest, status, _ = rig.run("rebuild", _arm(rig, envs={"AITER_REBUILD": "1"}))
 
-    assert _states(manifest) == {"aiter_jit": "disabled", "aiter_cpp": "disabled", "triton": "hit"}
+    assert _states(manifest) == {"aiter_jit": "disabled", "aiter_cpp": "disabled", "triton": "hit", "flydsl": "hit"}
     assert _keys(manifest)["aiter_jit"] is None
     assert "jit cache: aiter_jit is not used: AITER_REBUILD is set" in status["message"]
 
@@ -524,7 +531,7 @@ def test_a_tampered_cache_is_ignored_the_test_passes_the_result_says_so_and_the_
 
     tampered, status, tampered_run = rig.run("tampered", _arm(rig))
 
-    assert _states(tampered) == {"aiter_jit": "verify_failed", "aiter_cpp": "hit", "triton": "hit"}
+    assert _states(tampered) == {"aiter_jit": "verify_failed", "aiter_cpp": "hit", "triton": "hit", "flydsl": "hit"}
     assert tampered.outcome.returncode == 0 and tampered.jit_cache.builds_seen == 1, "it built the module itself"
     assert "the bytes are not the 36 bytes whose hash is listed; ignored" in status["message"]
     assert rig.publish(tampered_run, tampered) == 1
@@ -553,7 +560,7 @@ def test_the_contribution_is_staged_outside_the_files_the_result_lists_and_is_pu
     )
     (staged / "manifest.json").write_bytes((staged / "manifest.json").read_bytes() + b" ")  # swapped after the signing
 
-    assert rig.publish(run, first) == 2, "the swapped list is not the signed one: the other two kinds are published"
+    assert rig.publish(run, first) == 3, "the swapped list is not the signed one: the other three kinds are published"
     assert not (rig.store.root / "snapshots" / "aiter_jit").exists()
 
 
@@ -598,7 +605,7 @@ def test_an_aiter_patch_is_covered_by_the_aiter_key_so_those_caches_take_its_con
 
     manifest, _, _ = rig.run("patched", patched)
 
-    assert _contributions(manifest) == {"aiter_jit": True, "aiter_cpp": True, "triton": False}
+    assert _contributions(manifest) == {"aiter_jit": True, "aiter_cpp": True, "triton": False, "flydsl": False}
 
 
 def test_a_directory_attachment_is_code_no_key_covers_so_every_kind_is_read_only(rig) -> None:

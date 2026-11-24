@@ -21,7 +21,7 @@ import pytest
 
 from hyperloom.measure.jit import session as jit_session
 from hyperloom.measure.jit.builds import BuildLog, scan_builds
-from hyperloom.measure.jit_kinds import AITER_CPP, AITER_JIT, DISABLED, HIT, MISS, TRITON, VERIFY_FAILED
+from hyperloom.measure.jit_kinds import AITER_CPP, AITER_JIT, DISABLED, FLYDSL, HIT, MISS, TRITON, VERIFY_FAILED
 from hyperloom.measure.jit.session import GivenModules, JitCacheSession, KindPlan
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.jit.tests.triton_cache import PRODUCTS, RELEASES, find_kernel, get_group, put_kernel
@@ -576,3 +576,74 @@ def test_a_session_whose_patch_touches_nothing_has_no_stale_module_and_links_eve
 
     assert (_dirs(session)["AITER_JIT_DIR"] / "module_a.so").is_symlink()
     assert session.touched == frozenset() and session.stale_modules(NO_BUILDS) == []
+
+
+FLYDSL_KEY = "c" * 64
+PREBUILT_LAUNCH = f"gemm_a16w16_{'1' * 32}/{'2' * 16}.pkl"
+
+
+def _image_flydsl_cache(tmp_path: Path) -> Path:
+    """aiter's ``jit/flydsl_cache`` in the image: prebuilt launches, the locks FlyDSL keeps beside them, and a stray file."""
+    image = tmp_path / "image" / "aiter" / "jit" / "flydsl_cache"
+    _write(image, PREBUILT_LAUNCH, b"prebuilt pickle")
+    _write(image, PREBUILT_LAUNCH.replace(".pkl", ".lock"), b"")
+    _write(image, "README", b"not a launch")
+    return image
+
+
+def test_the_images_prebuilt_flydsl_launches_stay_visible_in_the_tests_own_directory_and_are_never_contributed(
+    store, tmp_path
+) -> None:
+    image = _image_flydsl_cache(tmp_path)
+    plans = [KindPlan(FLYDSL, FLYDSL_KEY, prebuilt=image)]
+    first = _session(store, tmp_path, "one", plans=plans)
+    first.seed()
+    own = _dirs(first)["FLYDSL_RUNTIME_CACHE_DIR"]
+
+    linked = own / PREBUILT_LAUNCH
+    assert linked.is_symlink() and linked.read_bytes() == b"prebuilt pickle", "redirecting FlyDSL hides nothing"
+    assert not linked.parent.is_symlink(), "the launch's directory is the test's own, so what FlyDSL adds stays there"
+    assert not (own / "README").exists() and not (own / PREBUILT_LAUNCH.replace(".pkl", ".lock")).exists()
+    beside = PREBUILT_LAUNCH.replace("2" * 16, "3" * 16)
+    _write(own, beside, b"a call compiled beside the prebuilt ones")
+    _write(own, f"launch_{'4' * 32}/{'5' * 16}.pkl", b"a monokernel launch")
+    first.collect()
+
+    (kind,) = first.report(NO_BUILDS).kinds
+    assert kind.contribution is not None and kind.contribution.files == 2, "the prebuilt launch is the image's"
+    assert _listed(tmp_path, "one", "flydsl") == sorted([beside, f"launch_{'4' * 32}/{'5' * 16}.pkl"])
+    assert sorted(p.relative_to(image).as_posix() for p in image.rglob("*") if p.is_file()) == sorted(
+        ["README", PREBUILT_LAUNCH, PREBUILT_LAUNCH.replace(".pkl", ".lock")]
+    ), "nothing was written into the image"
+    _publish(store, first, tmp_path, "one")
+
+    second = _session(store, tmp_path, "two", plans=plans)
+    second.seed()
+    again = _dirs(second)["FLYDSL_RUNTIME_CACHE_DIR"]
+    assert second.report(NO_BUILDS).kinds[0].state == HIT
+    assert (again / beside).read_bytes() == b"a call compiled beside the prebuilt ones" and not (
+        again / beside
+    ).is_symlink()
+    assert (again / PREBUILT_LAUNCH).is_symlink(), "the cache's launches and the image's sit side by side"
+
+
+def test_a_launch_the_cache_gave_is_not_replaced_by_the_images_copy_of_the_same_name(store, tmp_path) -> None:
+    image = _image_flydsl_cache(tmp_path)
+    first = _session(store, tmp_path, "one", plans=[KindPlan(FLYDSL, FLYDSL_KEY)])
+    first.seed()
+    _write(_dirs(first)["FLYDSL_RUNTIME_CACHE_DIR"], PREBUILT_LAUNCH, b"what the cache holds")
+    first.collect()
+    _publish(store, first, tmp_path, "one")
+
+    second = _session(store, tmp_path, "two", plans=[KindPlan(FLYDSL, FLYDSL_KEY, prebuilt=image)])
+    second.seed()
+
+    given = _dirs(second)["FLYDSL_RUNTIME_CACHE_DIR"] / PREBUILT_LAUNCH
+    assert not given.is_symlink() and given.read_bytes() == b"what the cache holds"
+
+
+def test_a_prebuilt_directory_that_is_gone_links_nothing(store, tmp_path) -> None:
+    session = _session(store, tmp_path, plans=[KindPlan(FLYDSL, FLYDSL_KEY, prebuilt=tmp_path / "nowhere")])
+    session.seed()
+
+    assert list(_dirs(session)["FLYDSL_RUNTIME_CACHE_DIR"].iterdir()) == []

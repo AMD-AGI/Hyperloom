@@ -40,13 +40,15 @@ from hyperloom.measure.jit.key import (
     Machine,
     aiter_key,
     build_surface,
+    flydsl_covers,
+    flydsl_key,
     scan_env_names,
     touches_build_surface,
     tree_identity,
     triton_key,
     without_card_arch,
 )
-from hyperloom.measure.jit_kinds import AITER_CPP, AITER_JIT, TRITON, CacheKind
+from hyperloom.measure.jit_kinds import AITER_CPP, AITER_JIT, FLYDSL, TRITON, CacheKind
 from hyperloom.measure.jit.modules import (
     CONFIG_FILE,
     SourceTree,
@@ -95,6 +97,10 @@ _PREFLIGHT_MISMATCH = "preflight_mismatch"
 _SPEC_REJECTED = "spec_rejected"
 _RUNTIME_KIND = "runtime"
 _MODULE_SUFFIX = ".so"
+#: Where below aiter's package the image keeps FlyDSL's compiled launches of aiter's own kernels: aiter points FlyDSL there
+#: when nothing else names a directory (``aiter/__init__.py``).
+_JIT = "jit"
+_FLYDSL_PREBUILT = (_JIT, "flydsl_cache")
 _NEEDS_JIT_DIR = (
     "the patch changes aiter's csrc or hsa, which is measured only by building the modules it touches in the test's own "
     "aiter JIT directory, and this runner cannot give one: {why}"
@@ -230,11 +236,13 @@ def _require_jit_dir(plans: list[KindPlan], disabled: Mapping[str, str], environ
 def _plans(inputs: _Inputs) -> tuple[list[KindPlan], dict[str, str]]:
     plans: list[KindPlan] = []
     disabled: dict[str, str] = {}
-    for kind in (TRITON, AITER_JIT, AITER_CPP):
+    for kind in (TRITON, AITER_JIT, AITER_CPP, FLYDSL):
         if kind.env_var in inputs.sheet_environment:
             disabled[kind.name] = f"the sheet sets {kind.env_var} itself"
     if TRITON.name not in disabled:
-        plans.append(KindPlan(TRITON, triton_key(inputs.machine), read_only=_triton_read_only(inputs)))
+        plans.append(KindPlan(TRITON, triton_key(inputs.machine), read_only=_patched_read_only(inputs, "Triton's")))
+    if FLYDSL.name not in disabled:
+        plans.append(_flydsl_plan(inputs))
     aiter_kinds = [kind for kind in (AITER_JIT, AITER_CPP) if kind.name not in disabled]
     if aiter_kinds:
         found = _aiter_plans(inputs, aiter_kinds)
@@ -250,13 +258,41 @@ def _directory_attachments(spec: MeasurementSpec) -> list[str]:
     return [attachment.id for attachment in spec.attachments if attachment.kind == _DIRECTORY]
 
 
-def _triton_read_only(inputs: _Inputs) -> str | None:
-    """Why this test may use the Triton cache but not add to it: Triton's key covers no patch, so any patched code (a
-    framework, aiter or Triton package, or a directory attachment) can write files that other tests would then load."""
+def _patched_read_only(inputs: _Inputs, whose: str) -> str | None:
+    """Why this test may use a cache whose key does not cover every patch (``whose`` names it) but not add to it: any
+    patched code (a framework, aiter, Triton or FlyDSL package, or a directory attachment) runs in the server and can write
+    files that other tests would then load."""
     patched = any(entry.op == "upsert" for root in inputs.spec.environment.roots for entry in root.entries)
     if patched or _directory_attachments(inputs.spec):
-        return "the test carries patched code that the key of Triton's cache does not cover"
+        return f"the test carries patched code that the key of {whose} cache does not cover"
     return None
+
+
+def _flydsl_plan(inputs: _Inputs) -> KindPlan:
+    """FlyDSL's kind: keyed by the machine, the patches to what a launch is built from and the FlyDSL and plugin variables
+    of every server, and read only for a test that runs any patched code, as for Triton: a launch is stored as a pickle,
+    which runs code when it is loaded, so only a test whose server runs the image's own code may add one. The image's
+    prebuilt launches of aiter's kernels are linked into the test's directory, which the redirected cache would hide."""
+    environment = inputs.spec.environment
+    covered = [
+        (root.import_name, e.path, e.op, e.blob or "", e.mode or "")
+        for root in environment.roots
+        for e in root.entries
+        if flydsl_covers(root.import_name, e.path)
+    ]
+    runtime = environment.runtime.manifest_sha256 if environment.runtime is not None else None
+    key = flydsl_key(inputs.machine, tree_identity(covered, runtime, ()), inputs.servers or (inputs.environment,))
+    return KindPlan(FLYDSL, key, _flydsl_prebuilt(inputs), _patched_read_only(inputs, "FlyDSL's"))
+
+
+def _flydsl_prebuilt(inputs: _Inputs) -> Path | None:
+    """The image's directory of FlyDSL launches aiter ships, ``None`` when aiter cannot be found or ships none."""
+    try:
+        base = locate_package(AITER_PACKAGE, inputs.python, inputs.around.private_root.parent)
+    except FarmError:
+        return None
+    found = base.joinpath(*_FLYDSL_PREBUILT)
+    return found if found.is_dir() else None
 
 
 def _aiter_plans(inputs: _Inputs, kinds: list[CacheKind]) -> list[KindPlan] | str:
@@ -284,7 +320,7 @@ def _aiter_plans(inputs: _Inputs, kinds: list[CacheKind]) -> list[KindPlan] | st
         return touched
     given = _given(inputs, environment, (base, effective), touched.names)
     return [
-        KindPlan(kind, key, effective / "jit", read_only, touched.names, given)
+        KindPlan(kind, key, effective / _JIT, read_only, touched.names, given)
         if kind is AITER_JIT
         else KindPlan(kind, key, None, read_only)
         for kind in kinds
@@ -379,7 +415,7 @@ def _touched(inputs: _Inputs, base: Path, effective: Path) -> Touched | str:
         return f"the module config of aiter cannot be read ({type(exc).__name__}), so which modules the patch or the tables touch is not known"
     arch = inputs.machine.gfx_arch
     variables = env_touched_entries(after, inputs.servers, inputs.around.environ, arch) | unlike_prewarmed(
-        base / "jit", inputs.servers, arch
+        base / _JIT, inputs.servers, arch
     )
     if not patched and not config_patched and not tables and not variables:
         return Touched()
