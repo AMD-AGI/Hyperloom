@@ -199,11 +199,10 @@ class _Row:
 
 @dataclass(frozen=True)
 class SweepResult:
-    """The sweep's answer: its JSON ``document``, each key's winning value, and the patch forcing them (empty when no
-    value beat the default beyond the noise)."""
+    """The sweep's answer: its JSON ``document`` and the patch forcing each key's winning value (empty when no value
+    beat the default beyond the noise)."""
 
     document: Mapping[str, Any]
-    winners: Mapping[KnobKey, str]
     patch: bytes
 
 
@@ -395,7 +394,7 @@ def run_sweep(
     chosen = {key: row.value for key, row in winners.items() if key not in refused}
     patch = knob_patch(plan.knob, source, chosen)
     document = {**_measured(plan, arms, timed, cases, rows), **_recommended(plan, chosen, refused, patch)}
-    return SweepResult(document, chosen, patch)
+    return SweepResult(document, patch)
 
 
 def _arm_document(arm: _Arm, timed: _Timed) -> dict[str, Any]:

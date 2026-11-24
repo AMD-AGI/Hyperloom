@@ -107,7 +107,7 @@ def test_a_value_faster_beyond_the_noise_wins_its_key_and_only_its_key(tmp_path:
 
     result = _sweep(tmp_path, fakes)
 
-    assert result.winners == {("Q8_0", "2"): "4"}
+    assert result.document["winners"] == {"type=Q8_0,ncols=2": "4"}
     patch = result.patch.decode()
     assert patch.startswith("diff --git a/ggml/src/ggml-cuda/mmvq.cu b/ggml/src/ggml-cuda/mmvq.cu\n")
     assert "+        if (type == GGML_TYPE_Q8_0 && ncols_dst == 2) { return 4; }\n" in patch
@@ -129,7 +129,7 @@ def test_a_winner_whose_check_against_the_cpu_fails_is_refused(tmp_path: Path) -
 
     result = _sweep(tmp_path, fakes)
 
-    assert result.winners == {}
+    assert result.document["winners"] == {}
     assert result.patch == b""
     assert "FAIL" in result.document["refused"]["type=Q8_0,ncols=2"]
     assert any(row["verdict"] == "check_failed" for row in result.document["table"])
@@ -141,7 +141,7 @@ def test_a_value_that_does_not_compile_is_reported_and_the_others_are_compared(t
 
     result = _sweep(tmp_path, fakes)
 
-    assert result.winners == {("Q8_0", "2"): "4"}
+    assert result.document["winners"] == {"type=Q8_0,ncols=2": "4"}
     arms = {arm["arm"]: arm for arm in result.document["arms"]}
     assert arms["value=2"]["status"] == "compile_error"
     assert arms["value=2"]["detail"] == "error: too many warps"
@@ -164,7 +164,7 @@ def test_a_value_whose_timing_fails_is_dropped_and_the_sweep_goes_on(tmp_path: P
     arms = {arm["arm"]: arm for arm in result.document["arms"]}
     assert arms["value=2"]["status"] == "bench_failed"
     assert "invalid configuration" in arms["value=2"]["detail"]
-    assert result.winners == {("Q8_0", "2"): "4"}
+    assert result.document["winners"] == {"type=Q8_0,ncols=2": "4"}
 
 
 def test_a_sweep_none_of_whose_values_is_timed_fails_with_each_value_s_error(tmp_path: Path) -> None:
