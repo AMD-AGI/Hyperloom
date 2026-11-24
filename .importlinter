@@ -63,7 +63,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.state.shared_state
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles.agent_role
-    hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.actions.executors.report
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.kernel.conc_sweep
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.phases.machine_state
@@ -89,7 +88,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.model_gate -> hyperloom.orchestrator.state.shared_state
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.phases.quantization_schemes
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.policy.gate
-    hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
@@ -421,7 +419,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.state.shared_state
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles.agent_role
-    hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.actions.executors.report
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.kernel.conc_sweep
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.phases.machine_state
@@ -447,7 +444,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.model_gate -> hyperloom.orchestrator.state.shared_state
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.phases.quantization_schemes
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.policy.gate
-    hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._benchmark_interpreter

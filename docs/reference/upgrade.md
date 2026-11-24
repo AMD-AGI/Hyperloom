@@ -43,6 +43,29 @@ host the CLI defaults to `session/` under the current directory instead. Prefer
 
 ---
 
+## Upgrading from 1.2.x
+
+### Required: removed flags
+
+These flags are rejected with `unrecognized arguments`:
+
+* `--proposal-scoring`, `--no-proposal-scoring` and `--proposal-scorer-models`
+  (the advisory proposal scorer is removed; while it was off they changed
+  nothing): drop them.
+
+`INFERENCE_OPTIMIZER_PROPOSAL_SCORER_TIMEOUT_SEC` is no longer read and is
+silently ignored, so drop it.
+
+### Required: `session_breakdown.json` drops `ensemble_scores`
+
+The schema stays `v6.1`, but neither a specialist round's action row nor a
+Framework run row carries `ensemble_scores` any more. Only a run launched with
+`--proposal-scoring` wrote it. The action row is closed to other properties, so
+a breakdown whose action row holds the key no longer validates against the
+packaged schema. Consumers that read it should stop.
+
+---
+
 ## Upgrading from 1.1.x
 
 ### Required: launch through `hyperloom <command>`
