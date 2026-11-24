@@ -58,8 +58,8 @@ is judged on.
 
 When EXPLORE ends, :meth:`Integrator.finish_round` ends the rounds: no merge test starts any more, and the round under
 way takes back each merge test the rule gate has not asked a confirm for. A merge waiting for its confirm goes on to
-its end, so a gain measured once already still reaches the integration head FINAL reads; the caller says how long it
-waits for that, and a round in which a merge then lands waits for no other.
+its end, so a gain measured once already still reaches the integration head FINAL reads, and of two that end the
+round merges the one it would have merged before; the caller says how long it waits for that.
 
 A caller with no time left for that cancels the round instead, and no regression set runs after that. So a round that
 holds a merge that may be merged while its other tests run puts the regression set to it as its test ends, and a
@@ -590,14 +590,14 @@ class Integrator:
 
         A test that ends waits for the tests the round started before it, and one that may be merged for every test
         of the round, which starts no more meanwhile; the regression set runs on the first of those held as its test
-        ends, and on the next where it fails. Of those that may be merged the round merges the one that
-        gained most on the head, a foundation fix before any other and the one started first of two that gained the
-        same, so which commit a round merges follows what each measured on the head rather than the gain it made on
-        its own branch or how long it took to measure.
+        ends, and on the next where it fails. Of those that may be merged the round merges a lead adoption, else a
+        foundation fix, else the one that gained most on the head, the one started first of two that gained the
+        same (:func:`_merge_order`), so which commit a round merges follows what each measured on the head rather
+        than the gain it made on its own branch or how long it took to measure.
 
-        Once :meth:`finish_round` ended the rounds no test starts, in this round or a later one, and a test that may
-        be merged no longer waits for those started after it; a test it took back leaves no report, and a round in
-        which a merge has landed is over, since the head moved under the rest.
+        Once :meth:`finish_round` ended the rounds no test starts, in this round or a later one, and a test it took
+        back leaves no report; the round waits for the tests left, those waiting for their confirm, and merges by
+        the same order.
 
         A cancelled round concludes the merges that may be merged in the same order before it takes its tests back,
         but runs no regression set: the first the set has passed on is merged and those after it are superseded,
@@ -617,14 +617,14 @@ class Integrator:
         try:
             while True:
                 free = 0 if mergeable or self._ended else width - len(running) - len(reports)
-                for start in await self._to_start(head, free, started):
+                starts = await self._to_start(head, free, started)
+                # finish_round can run during that look, and it cancels only the tests begun before it.
+                for start in () if self._ended else starts:
                     started.update(start.pending.sources)
                     running.append(self._begin(start))
                 reports += await self._settled(_ended_first(running), mergeable)
-                over = not running or self._ended
-                reports += await (self._landed(mergeable) if over else self._checked(mergeable))
-                merged = any(report.outcome is MergeOutcome.MERGED for report in reports)
-                if not running or (merged and self._ended):
+                reports += await (self._checked(mergeable) if running else self._landed(mergeable))
+                if not running:
                     return tuple(reports)
                 await self._until_one_ends([task for task in running if not task.done()], tick)
         except asyncio.CancelledError:
@@ -1051,6 +1051,11 @@ class Integrator:
             if merge.request_id not in retested:
                 merge.task.cancel()
         await self._round_over.wait()
+
+    def unfinished(self) -> tuple[str, ...]:
+        """The candidates whose merge tests the round under way has not ended."""
+
+        return tuple(candidate for candidate, merge in self._round.items() if not merge.task.done())
 
     async def abandon(self) -> None:
         """After the round was cancelled: take back every integration test still running, the gate's retests

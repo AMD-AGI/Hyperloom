@@ -46,7 +46,7 @@ from hyperloom.contracts.recipe import (
 from hyperloom.measure.compile import LocalBlobStore, PackageBase
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.blackboard.records import JudgementWrite, LineageEvent
+from hyperloom_multibranch.contracts.blackboard.records import CommittedCommit, JudgementWrite, LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LineageKind, MergeOutcome
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.repo import RebasedPatch, ReplacedPatch, RepoMerge, ResolvedPatch, UnitedTable
@@ -56,7 +56,7 @@ from hyperloom_multibranch.blackboard.knowledge.warm_start import PreparedReplay
 from hyperloom_multibranch.blackboard.rsi.stranded import StrandedLead
 from hyperloom_multibranch.blackboard.tests.factories import FakeClock, intent, judgement, request, result
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
-from hyperloom_multibranch.scheduling.candidates import MERGE_INFRA_RETRIES, NOT_STACKABLE_ANSWERS
+from hyperloom_multibranch.scheduling.candidates import MERGE_INFRA_RETRIES, NOT_STACKABLE_ANSWERS, Candidates
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.integrator import (
@@ -1828,20 +1828,51 @@ async def test_a_round_with_no_merge_waiting_for_its_confirm_is_over_as_soon_as_
     assert await bench.repo.head(INTEGRATION_BRANCH) == bench.root and not bench.decisions.exists()
 
 
-async def test_once_a_merge_lands_after_the_rounds_ended_the_round_waits_for_no_other_confirm(
-    bench: Bench, monkeypatch: pytest.MonkeyPatch
+async def test_a_merge_confirmed_after_the_rounds_ended_waits_for_the_other_confirm_and_the_larger_gain_lands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _hold(bench, monkeypatch, lambda test: test.purpose is Purpose.CONFIRM and _carries_c2(test))
+    bench = await _bench(tmp_path, HEAD_GAINS, tags=("c1",))
+    c1, c2 = bench.commits["c1"], await _committed_elsewhere(bench, _change("c2"), 2.0)
+    released = _hold(bench, monkeypatch, lambda test: test.purpose is Purpose.CONFIRM and _carries_c2(test))
     merging = asyncio.ensure_future(bench.integrator.integrate_next(2, TICK_SECONDS, ()))
     await _until(lambda: len(_confirms(bench)) == 2)
 
-    await asyncio.wait_for(bench.integrator.finish_round(), WAIT_SECONDS)
+    finishing = asyncio.ensure_future(bench.integrator.finish_round())
+    await asyncio.wait_for(_until(lambda: bool(bench.regression.calls)), WAIT_SECONDS)
+    await asyncio.sleep(20 * POLL_SECONDS)
+    assert not finishing.done() and await bench.repo.head(INTEGRATION_BRANCH) == bench.root
+    released.set()
+    await asyncio.wait_for(finishing, WAIT_SECONDS)
     reports = await merging
-    await bench.integrator.abandon()
 
-    assert [(report.candidate, report.outcome) for report in reports] == [(bench.commits["c1"], MergeOutcome.MERGED)]
-    [left] = [request_id for request_id, test in _confirms(bench).items() if _carries_c2(test)]
-    assert bench.toolbox.withdrawn.keys() == {left}
+    assert [(r.candidate, r.outcome) for r in reports] == [(c2, MergeOutcome.MERGED), (c1, MergeOutcome.PENDING)]
+    assert not bench.toolbox.withdrawn
+
+
+async def test_a_commit_found_while_the_rounds_end_gets_no_merge_test(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rounds end, and take the round's one test back, while the round looks for a commit to fill its free slot."""
+
+    bench = await _bench(tmp_path, tags=("c1",))
+    bench.toolbox.executor.gate.clear()
+    offered_on, finishing = Candidates.offered_on, []
+
+    async def ending_meanwhile(self: Candidates, head: str) -> tuple[CommittedCommit, ...]:
+        offered = await offered_on(self, head)
+        if any(commit.commit_id != bench.commits["c1"] for commit in offered) and not finishing:
+            finishing.append(asyncio.ensure_future(bench.integrator.finish_round()))
+            await _until(lambda: bool(bench.toolbox.withdrawn))
+        return offered
+
+    monkeypatch.setattr(Candidates, "offered_on", ending_meanwhile)
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(2, TICK_SECONDS, ()))
+    await _until(lambda: len(bench.merge_tests()) == 1)
+    await _committed_elsewhere(bench, _change("c2"), 2.0)
+
+    assert await asyncio.wait_for(merging, WAIT_SECONDS) == ()
+    await asyncio.wait_for(finishing[0], WAIT_SECONDS)
+    assert len(bench.merge_tests()) == 1
 
 
 #: ``d1`` and ``e1``, each made on a branch of its own off the root, gain 2% and 1% on it, and 4% together.

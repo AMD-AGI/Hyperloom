@@ -124,6 +124,7 @@ from hyperloom_multibranch.scheduling.budget import (
 )
 from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling import events
+from hyperloom_multibranch.scheduling import explore
 from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE, PROFILED
 from hyperloom_multibranch.scheduling.explore import (
     EXPLORE_TICK_SECONDS,
@@ -1624,13 +1625,14 @@ async def test_a_merge_waiting_for_its_confirm_when_explore_ends_lands_before_fi
     assert EXPLORATION_ENDED not in stage.toolbox.withdrawn.values()
 
 
-async def test_a_merge_whose_confirm_outlasts_one_test_after_explore_ended_is_withdrawn_and_final_starts(
-    tmp_path: Path,
+async def test_a_merge_whose_confirm_outlasts_one_test_after_explore_ended_is_withdrawn_named_and_final_starts(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     stage = _stage(tmp_path)
     _merge_confirm_at_the_soft_stop(stage, 2 * ONE_TEST_SECONDS)
 
-    outcome = await stage.run()
+    with caplog.at_level(logging.WARNING, logger=explore.__name__):
+        outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error) == (SessionStopReason.JUDGE_STOPPED, "")
     root = await stage.root()
@@ -1643,7 +1645,77 @@ async def test_a_merge_whose_confirm_outlasts_one_test_after_explore_ended_is_wi
         if test.branch_id == INTEGRATION_BRANCH and test.purpose is Purpose.CONFIRM
     ]
     assert stage.toolbox.withdrawn[confirm] == EXPLORATION_ENDED
+    [warned] = [record.getMessage() for record in caplog.records if record.name == explore.__name__]
+    assert await stage.repo.head("b01") in warned and f"{ONE_TEST_SECONDS:.0f} s" in warned
     assert outcome.final is not None and outcome.final.chosen is not None
+
+
+def _confirm_queued_behind_specialist_tests(stage: Stage) -> list[bool]:
+    """``b01`` commits ``c1``. ``b02``'s test holds one of the session's two cards from the start; ``b03`` submits its
+    test while ``c1``'s merge test runs on the other, takes that card as the merge test ends and holds it. The judge
+    stops the session once the merge's confirm is queued; the list returned says whether that confirm had a card by
+    then. Test doubles for specialist tests that outlast EXPLORE, not placeholders."""
+
+    reading, confirming = asyncio.Event(), asyncio.Event()
+    on_a_card: list[bool] = []
+
+    def requested(branch: str, purpose: Purpose) -> bool:
+        return any(test.branch_id == branch and test.purpose is purpose for test in stage.toolbox.requests.values())
+
+    class CrowdedToolbox(LeasingToolbox):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            measure = self.executor.run
+
+            async def run(job: TestJob) -> TestResult:
+                branch, purpose = job.request.branch_id, job.request.purpose
+                if branch in ("b02", "b03"):
+                    await asyncio.Event().wait()
+                elif branch == INTEGRATION_BRANCH and purpose is Purpose.CONFIRM:
+                    confirming.set()
+                elif branch == INTEGRATION_BRANCH and purpose is Purpose.INTEGRATION:
+                    reading.set()
+                    while not requested("b03", Purpose.EXPLORE):
+                        await stage.time.sleep(VIRTUAL_POLL_SECONDS)
+                return await measure(job)
+
+            self.executor.run = run  # type: ignore[method-assign]
+
+    class StoppingJudge(ScriptedCompletion):
+        async def __call__(self, system: str, user: str) -> CompletionReply:
+            if self.calls:
+                while not requested(INTEGRATION_BRANCH, Purpose.CONFIRM):
+                    await stage.time.sleep(VIRTUAL_POLL_SECONDS)
+                on_a_card.append(confirming.is_set())
+            return await super().__call__(system, user)
+
+    async def once_the_merge_test_runs(branch: str) -> None:
+        await reading.wait()
+
+    stage.toolbox_type = CrowdedToolbox
+    opening, stop = {"open": 3, "branches": [], "stop": []}, {"open": 0, "stop_session": {"reason": CONVERGED_REASON}}
+    stage.judge = StoppingJudge([_reply(opening), _reply(stop)])
+    stage.scripts = {"b01": SCRIPTS["b01"], "b02": (tagged("held"),), "b03": (tagged("late"),)}
+    stage.steps = {"b03": once_the_merge_test_runs}
+    return on_a_card
+
+
+async def test_a_confirm_queued_behind_specialist_tests_when_explore_ends_gets_their_cards_and_its_merge_lands(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path)
+    on_a_card = _confirm_queued_behind_specialist_tests(stage)
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.JUDGE_STOPPED, "")
+    assert on_a_card == [False]
+    root, head = await stage.root(), await stage.repo.head(INTEGRATION_BRANCH)
+    assert head != root and recipe_tags(await stage.repo.read_recipe(head)) == {"c1"}
+    waited, candidates = _from_soft_stop_to_final(stage)
+    assert head in candidates and waited < ONE_TEST_SECONDS
+    taken_back = {stage.toolbox.requests[request_id].branch_id for request_id in stage.toolbox.withdrawn}
+    assert taken_back == {"b02", "b03"}
 
 
 async def test_a_specialist_that_never_stops_at_the_end_of_explore_does_not_hold_final_up(tmp_path: Path) -> None:

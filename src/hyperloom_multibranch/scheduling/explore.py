@@ -32,13 +32,15 @@ again), which explore tests each branch has queued and which native builds its t
 what to stop. No judge round starts once less of EXPLORE is left than a branch needs to start, since nothing it
 decided could take effect; a judge call that has not answered by the EXPLORE deadline counts as failed, and a
 branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background task
-of its own, in rounds as wide as the integration branch's K. When EXPLORE ends the integrator starts no more merge
-tests and takes back those still at their first reading; a merge whose first reading the rule gate already judged a
-gain, and whose confirm is queued or running, gets the time of one test to finish (:func:`confirm_seconds`), so that
-gain is on the integration head FINAL reads. Then that task is cancelled and the
-integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and no merge
-test competes with FINAL's measurements; a profile of the integration head still running is cancelled before that,
-taking its test back. Under ``--max-gpu-hours`` EXPLORE also ends, at a tick, once the session's tests have used the GPU
+of its own, in rounds as wide as the integration branch's K. When EXPLORE ends, :meth:`Explorer.run` first ends
+exploration (:meth:`~hyperloom_multibranch.scheduling.stops.SessionStopper.end_exploration`): every specialist branch
+stops and its tests are withdrawn, so their cards are free. Then the integrator starts no more merge tests and takes
+back those still at their first reading; a merge whose first reading the rule gate already judged a gain, and whose
+confirm is queued or running, gets the time of one test to finish (:func:`confirm_seconds`), so that gain is on the
+integration head FINAL reads, and one that does not finish in it is named in a warning. Then that task is cancelled and
+the integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and no
+merge test competes with FINAL's measurements; a profile of the integration head still running is cancelled before
+that, taking its test back. Under ``--max-gpu-hours`` EXPLORE also ends, at a tick, once the session's tests have used the GPU
 hours FINAL's share leaves it, and under ``--max-llm-usd`` once the LLM spend recorded by the specialists, the judge
 and the patch resolver reaches it: FINAL runs no specialist and asks no judge, so it gets no share of that cap. EXPLORE
 ends at a tick as well once the toolbox has fewer usable cards than one test needs, and the session then skips FINAL.
@@ -106,7 +108,7 @@ from hyperloom_multibranch.scheduling.roster import (
 )
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
-from hyperloom_multibranch.scheduling.stops import SessionStopReason
+from hyperloom_multibranch.scheduling.stops import SessionStopper, SessionStopReason
 from hyperloom_multibranch.scheduling.widening import Widening, refill_focus
 
 if TYPE_CHECKING:
@@ -213,7 +215,7 @@ def spent_gpu_seconds(progress: Iterable[BranchProgress]) -> float:
 def confirm_seconds(window: ExploreWindow, ended: SessionStopReason, now: float, cap: float) -> float:
     """The clock seconds a merge waiting for its confirm gets to finish once EXPLORE ``ended`` at ``now``: one test of
     the workload, or none where that test would end past the session's deadline or past ``cap``, what the window's
-    :attr:`~ExploreWindow.final_cap` says now, or where EXPLORE ended out of GPU hours or of cards to measure on.
+    :attr:`~ExploreWindow.final_cap` last said, or where EXPLORE ended out of GPU hours or of cards to measure on.
 
     FINAL starts that much later at the most, and still before the deadline."""
 
@@ -235,7 +237,10 @@ class Explorer:
         branches: BranchControl,
         integrator: Integrator,
         steering: Steering,
+        stopper: SessionStopper,
     ) -> None:
+        self._stopper = stopper
+        self._cap = math.inf
         self._roster = context.roster
         self._branches = branches
         self._desk = context.desk
@@ -262,7 +267,9 @@ class Explorer:
         self._areas_profile: OpShares | None = None
 
     async def run(self, window: ExploreWindow) -> SessionStopReason:
-        """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns.
+        """Explore until the deadline or the judge's soft stop, then end exploration, in this order: the specialist
+        branches stop and their tests are withdrawn, a merge waiting for its confirm gets :func:`confirm_seconds` on
+        the cards that freed, and the integrator is stopped. All of it is done before this returns.
 
         The user branches open before the opening judge call; the opening batch opens nothing more when that call
         asks for the soft stop or answers only once EXPLORE is over, and opens one branch when it fails and no
@@ -272,17 +279,53 @@ class Explorer:
         the op shares of the commit they open on rather than the root's, which PRELUDE analysed from another recipe.
         """
 
+        merging: asyncio.Future[None] | None = None
         try:
             if window.start_commit != window.root_commit:
                 self._events.start_profiling(window.start_commit, window.root_commit)
-            return await self._explore(window)
+            reason = await self._opened(window)
+            if reason is None:
+                await self._dashboard.refresh()
+                merging = asyncio.ensure_future(self._merge_forever())
+                reason = await self._steer(window, merging)
+            await self._stopper.end_exploration(reason)
+            if merging is not None:
+                await self._wait_for_confirm(window, reason)
+            return reason
+        finally:
+            await self._stop_merging(merging)
+
+    async def _stop_merging(self, merging: asyncio.Future[None] | None) -> None:
+        try:
+            if merging is not None:
+                merging.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await merging
         finally:
             try:
                 await self._events.stop_profiling()
             finally:
                 await self._integrator.abandon()
 
-    async def _explore(self, window: ExploreWindow) -> SessionStopReason:
+    async def _wait_for_confirm(self, window: ExploreWindow, ended: SessionStopReason) -> None:
+        seconds = confirm_seconds(window, ended, self._clock.now(), self._cap)
+        if not seconds:
+            return
+        try:
+            await self._clock.wait_for(self._integrator.finish_round(), seconds)
+        except asyncio.TimeoutError:
+            # With none left the round is concluding its merges, which the cancelled round logs itself.
+            if left := self._integrator.unfinished():
+                logger.warning(
+                    "the merge tests of %s did not end within %.0f s of the end of EXPLORE: they are withdrawn, and "
+                    "FINAL reads an integration head without them",
+                    ", ".join(left),
+                    seconds,
+                )
+
+    async def _opened(self, window: ExploreWindow) -> SessionStopReason | None:
+        """Open the named branches and the opening batch; why EXPLORE is over already, if it is."""
+
         await self._open_named(window)
         opening = await self._ask(window, opening=True)
         first_batch = BatchStart(BranchOrigin.FIRST_BATCH, window.start_commit, window.explore_end)
@@ -290,21 +333,7 @@ class Explorer:
             await self._open_batch(0 if specialist_open(self._roster.entries()) else 1, 1, first_batch)
         elif await self._apply(opening, first_batch):
             return SessionStopReason.JUDGE_STOPPED
-        if self._clock.now() >= window.explore_end:
-            return SessionStopReason.TIME_EXHAUSTED
-        await self._dashboard.refresh()
-        merging = asyncio.ensure_future(self._merge_forever())
-        try:
-            reason = await self._steer(window, merging)
-            seconds = confirm_seconds(window, reason, self._clock.now(), await window.final_cap())
-            if seconds:
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await self._clock.wait_for(self._integrator.finish_round(), seconds)
-            return reason
-        finally:
-            merging.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await merging
+        return SessionStopReason.TIME_EXHAUSTED if self._clock.now() >= window.explore_end else None
 
     async def _open_named(self, window: ExploreWindow) -> None:
         if self._clock.now() < window.explore_end:
@@ -344,9 +373,9 @@ class Explorer:
         return SessionStopReason.TIME_EXHAUSTED
 
     async def _capped(self, window: ExploreWindow) -> ExploreWindow:
-        """``window``, ending no later than its :attr:`~ExploreWindow.final_cap` now says."""
+        """``window``, ending no later than its :attr:`~ExploreWindow.final_cap` now says, which is kept."""
 
-        cap = await window.final_cap()
+        cap = self._cap = await window.final_cap()
         if cap >= window.explore_end:
             return window
         logger.info("EXPLORE ends sooner, at %.0f: the validation FINAL would run grew", cap)

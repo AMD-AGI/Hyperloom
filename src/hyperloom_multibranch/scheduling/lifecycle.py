@@ -596,11 +596,8 @@ class Session:
         )
         reason = await self._explorer().run(window)
         if reason is SessionStopReason.NO_MEASUREMENT_CARDS:
-            await self._stopper.end_exploration(reason)
             return SessionOutcome(reason, None, None, NO_CARDS_LEFT)
-        candidates = await self._final_candidates()
-        await self._stopper.end_exploration(reason)
-        return await self._final(candidates, reason)
+        return await self._final(await self._final_candidates(), reason)
 
     async def _record_versions(self) -> None:
         """The policy versions the session runs, once PRELUDE settled its playbook: in the manifest, and with the
@@ -947,7 +944,7 @@ class Session:
             self._play,
             self._layout.manifest,
         )
-        return Explorer(self._context, self._branches, self._integrator, steering)
+        return Explorer(self._context, self._branches, self._integrator, steering, self._stopper)
 
     def _closer(self) -> Closer:
         dashboard = self._dashboard(self._scoring())
