@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from kernelforge.agent_backends import AgentRunResult
-from kernelforge.workflows.forge_loop.roles.analysis import AnalysisAgentService
+from kernelforge.workflows.forge_loop.roles.analysis import AnalysisAgentService, AnalysisScope
 from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, EvidenceContext
 
 
@@ -166,5 +166,5 @@ def _service(tmp_path, backend, *, profiling_enabled=True):
         config=SimpleNamespace(local_knowledge_dir=knowledge),
         timeout_sec=10,
         max_turns=10,
-        profiling_enabled=profiling_enabled,
+        scope=AnalysisScope(profiling_enabled=profiling_enabled),
     )

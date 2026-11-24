@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 
 DEVICE_QUEUE_SUFFIX = ".forge-device-queue"
 LANE_ROOT_PREFIX = "forge-lanes-"
+_GIT_PATH = "--git-path"
 
 
 def campaign_device_queue_path(workspace: str | Path) -> Path:
@@ -166,7 +167,7 @@ async def _isolate_lane_repository(lane_dir: Path) -> None:
     head = await _git("rev-parse", "HEAD", cwd=lane_dir)
     # A detached HEAD is a normal answer here and reported as a non-zero exit.
     branch = (await git_async("symbolic-ref", "--quiet", "HEAD", cwd=lane_dir, check=False)).stdout.strip()
-    objects = Path(await _git("rev-parse", "--git-path", "objects", cwd=lane_dir))
+    objects = Path(await _git("rev-parse", _GIT_PATH, "objects", cwd=lane_dir))
     if not objects.is_absolute():
         objects = lane_dir / objects
     if not objects.is_dir():
@@ -191,13 +192,15 @@ async def _install_device_runner(seat: LaneSeat) -> None:
     shutil.copyfile(device_queue.__file__, seat.device_runner)
     device_queue.write_runner_config(
         lane_dir / device_queue.RUNNER_CONFIG_NAME,
-        queue_root=seat.queue_root,
-        usage_log=seat.usage_log,
-        lane=seat.assignment.lane_id,
-        hold_limit_sec=MAX_COMMAND_MINUTES * 60,
-        environment=device_queue.visible_device_environment(),
+        device_queue.runner_config(
+            queue_root=seat.queue_root,
+            usage_log=seat.usage_log,
+            lane=seat.assignment.lane_id,
+            hold_limit_sec=MAX_COMMAND_MINUTES * 60,
+            environment=device_queue.visible_device_environment(),
+        ),
     )
-    exclude = Path(await _git("rev-parse", "--git-path", "info/exclude", cwd=lane_dir))
+    exclude = Path(await _git("rev-parse", _GIT_PATH, "info/exclude", cwd=lane_dir))
     if not exclude.is_absolute():
         exclude = lane_dir / exclude
     exclude.parent.mkdir(parents=True, exist_ok=True)
@@ -212,7 +215,7 @@ def lane_diff(lane_dir: Path, new_paths: Sequence[str] = ()) -> str:
     """
     if not new_paths:
         return git("diff", "HEAD", "--", ".", cwd=lane_dir).stdout
-    index = Path(git("rev-parse", "--git-path", "index", cwd=lane_dir).stdout.strip())
+    index = Path(git("rev-parse", _GIT_PATH, "index", cwd=lane_dir).stdout.strip())
     if not index.is_absolute():
         index = lane_dir / index
     with tempfile.TemporaryDirectory(prefix="forge-lane-index-") as scratch:

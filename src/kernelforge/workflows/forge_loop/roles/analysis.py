@@ -120,6 +120,15 @@ class _AnalysisSession:
     timeout_sec: float
 
 
+@dataclass(frozen=True)
+class AnalysisScope:
+    """What an Analysis session is asked to cover: whether it profiles, and how many lanes it divides the work among."""
+
+    profiling_enabled: bool = True
+    # The most lanes a round of this campaign runs. Above one, the session also divides the work among them.
+    lanes: int = 1
+
+
 class AnalysisAgentService:
     """Run one long-lived Analysis Agent and publish its validated bundle."""
 
@@ -130,8 +139,7 @@ class AnalysisAgentService:
         config: Config,
         timeout_sec: int,
         max_turns: int,
-        profiling_enabled: bool = True,
-        lanes: int = 1,
+        scope: AnalysisScope = AnalysisScope(),
     ) -> None:
         if timeout_sec <= 0:
             raise ValueError("timeout_sec must be greater than zero")
@@ -141,9 +149,8 @@ class AnalysisAgentService:
         self.config = config
         self.timeout_sec = timeout_sec
         self.max_turns = max_turns
-        self.profiling_enabled = bool(profiling_enabled)
-        # The most lanes a round of this campaign runs. Above one, the session also divides the work among them.
-        self.lanes = max(1, int(lanes))
+        self.profiling_enabled = bool(scope.profiling_enabled)
+        self.lanes = max(1, int(scope.lanes))
 
     def _stage_reference_profiling_script(self, work_root: Path) -> Path:
         profiling_source = Path(self.config.local_knowledge_dir).resolve() / "common_methodology" / "profiling"
@@ -977,6 +984,5 @@ def make_analysis_agent_service(
         config=config,
         timeout_sec=(timeout_sec if timeout_sec is not None else backend.runtime.timeout_sec),
         max_turns=config.max_turns,
-        profiling_enabled=profiling_enabled,
-        lanes=lanes,
+        scope=AnalysisScope(profiling_enabled=profiling_enabled, lanes=lanes),
     )

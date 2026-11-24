@@ -29,6 +29,7 @@ from kernelforge.utils.gpu_arch import Profiler, arch_profile
 from kernelforge.utils.session_kill import session_kill_command
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.workflows.forge_loop.gate.gate_tag import gate_outcome_tag
+from kernelforge.workflows.forge_loop.gate.gate_settings import DeviceAccess
 from kernelforge.workflows.forge_loop.gate.insession_gate import GateMeasurement, GateScope, InSessionGate
 from kernelforge.workflows.forge_loop.roles.implementer_method import (
     MAX_COMMAND_MINUTES,
@@ -331,6 +332,13 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
 ## Tool usage — token discipline
 Never `cat` a whole file — use the Read tool.
 """
+
+
+def _shared_device_section(device: DeviceAccess | None) -> str:
+    """How a session whose device is shared reaches it; nothing for a session with a device of its own."""
+    if device is None:
+        return ""
+    return _SHARED_DEVICE_SECTION.format(device_runner=device.runner, max_command_minutes=MAX_COMMAND_MINUTES)
 
 
 def _pr_kb_child_env() -> dict[str, str]:
@@ -796,11 +804,6 @@ def make_agent_fn(
     # session whose device is shared. Empty section for a session with its own device, whose prompt is unchanged.
     device = measurement.device
     driver_run = f"{device.runner} python3 {driver_base}" if device is not None else driver_base
-    shared_device_section = (
-        _SHARED_DEVICE_SECTION.format(device_runner=device.runner, max_command_minutes=MAX_COMMAND_MINUTES)
-        if device is not None
-        else ""
-    )
     profiling_dir = Path(config.local_knowledge_dir) / "common_methodology" / "profiling"
     # Suppressed when profiling is disabled so the implementer prompt carries no profiling affordance/hint at all.
     section = _SELF_PROFILING_SECTIONS[arch_profile(config.gpu_target).profiler] if task.profiling_enabled else ""
@@ -812,7 +815,7 @@ def make_agent_fn(
         "program_md": task.program_md,
         "prior_knowledge_section": prior_knowledge_section,
         "kernel_backend_section": kernel_backend_section,
-        "shared_device_section": shared_device_section,
+        "shared_device_section": _shared_device_section(device),
         "self_profiling_section": self_profiling_section,
         "workspace_hygiene_rule": _WORKSPACE_HYGIENE_RULE,
         "deliverable_hygiene_rule": _DELIVERABLE_HYGIENE_RULE,

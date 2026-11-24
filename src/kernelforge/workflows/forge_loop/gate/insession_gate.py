@@ -60,6 +60,9 @@ _EDIT_TOOL_MATCHER = "|".join(_EDIT_TOOLS)
 # A command that names a device-visibility variable, which is how a process would reach the device around the queue.
 _DEVICE_VISIBILITY_MENTION = re.compile(r"\b(?:" + "|".join(DEVICE_VISIBILITY_VARIABLES) + r")\b")
 
+# Why the gate allowed a stop on a candidate it measured and accepted.
+_END_CONVERGED = "converged"
+
 # Byte <-> str error handler for git paths and symlink targets: lossless for any bytes.
 _FS_ERRORS = "surrogateescape"
 
@@ -741,6 +744,16 @@ class InSessionGate:
             "Keep the kernel correct and try a DIFFERENT optimization to reduce wall time, then continue."
         )
 
+    def _allow_for_the_merge(self, mean_case_speedup: float) -> dict:
+        """Allow a correct candidate whose round has other lanes: its measurement is the merge's to use."""
+        self.passed = True
+        self.end_reason = _END_CONVERGED
+        self._log(
+            f"ALLOW (correct; mean case speedup {mean_case_speedup:.6f}x recorded for the round's merge) "
+            f"edit={self.edit_count}"
+        )
+        return self._allow()
+
     async def _stop_performance_verdict(self) -> dict:
         """Bench the correct candidate and allow only when it clears the KEEP bar."""
         self.last_wall_ms = None
@@ -784,13 +797,7 @@ class InSessionGate:
         self._record_insession_bench(bench, wall, mean_case_speedup, measurement_scores)
 
         if not self.gain_required:
-            self.passed = True
-            self.end_reason = "converged"
-            self._log(
-                f"ALLOW (correct; mean case speedup {mean_case_speedup:.6f}x recorded for the round's merge) "
-                f"edit={self.edit_count}"
-            )
-            return self._allow()
+            return self._allow_for_the_merge(mean_case_speedup)
 
         required = required_keep_speedup(self.best_mean_case_speedup, measurement_scores)
         if passes_keep_threshold(
@@ -798,7 +805,7 @@ class InSessionGate:
             best_mean_case_speedup=self.best_mean_case_speedup,
         ):
             self.passed = True
-            self.end_reason = "converged"
+            self.end_reason = _END_CONVERGED
             self._log(
                 f"ALLOW (correct + faster: mean case speedup mean score={mean_case_speedup:.6f}x >= {required:.6f}x "
                 f"from scores={[round(score, 6) for score in measurement_scores]}; raw mean {wall} ms) "
@@ -880,7 +887,7 @@ class InSessionGate:
         # Correctness-only phase (e.g. PORT): there is no performance requirement, so a CORRECT kernel is done.
         if self.correctness_only:
             self.passed = True
-            self.end_reason = "converged"
+            self.end_reason = _END_CONVERGED
             self._log(f"ALLOW (correct; correctness-only phase) edit={self.edit_count}")
             return self._allow()
         return await self._stop_performance_verdict()

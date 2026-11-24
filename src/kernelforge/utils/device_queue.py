@@ -141,15 +141,19 @@ def append_usage(log_path, record: dict) -> None:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
-def write_runner_config(path, *, queue_root, usage_log, lane: str, hold_limit_sec: int, environment: dict) -> None:
-    """Write the configuration a copied runner reads from beside itself."""
-    config = {
+def runner_config(*, queue_root, usage_log, lane: str, hold_limit_sec: int, environment: dict) -> dict:
+    """The configuration a copied runner reads from beside itself."""
+    return {
         "queue_root": str(queue_root),
         "usage_log": str(usage_log),
         "lane": lane,
         "hold_limit_sec": int(hold_limit_sec),
         "environment": dict(environment),
     }
+
+
+def write_runner_config(path, config: dict) -> None:
+    """Write a runner's configuration where the runner copied beside it looks for it."""
     Path(path).write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
