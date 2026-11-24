@@ -124,6 +124,14 @@ class _EnablementGrade:
     evidence: dict[str, Any]
 
 
+def _boot_advanced(params: dict[str, Any], bench_result: dict[str, Any]) -> bool:
+    """Whether the round's boot reached a deeper wall than the previous round's. The enablement gate grades that, not
+    the measurement, so it stands whatever kept the bench from measuring."""
+    before = load_boot_observation(params.get("enablement_before_observation_path"))
+    after = load_boot_observation(bench_result.get("boot_observation_path"))
+    return round_advanced(before.observation, after.observation)
+
+
 def _reverted_enablement_verdict(attempt: IntegrateAttempt, grade: _EnablementGrade) -> dict[str, Any]:
     """The verdict of a round whose boot neither runs nor reached a deeper wall."""
     return {
@@ -255,7 +263,9 @@ class EnablementGateMixin:
 
         if bench_result.get("error_class") == FILTERED_BEFORE_BENCH_CLASS:
             verdict = _filtered_verdict(attempt, params, bench_result)
-        elif (unrated := unrated_verdict(attempt, bench_result)) is not None:
+        elif (unrated := unrated_verdict(attempt, bench_result)) is not None and not (
+            params.get("enablement") and _boot_advanced(params, bench_result)
+        ):
             verdict = unrated
         elif params.get("enablement"):
             verdict = await self._gate_enablement(
@@ -287,7 +297,8 @@ class EnablementGateMixin:
         A round is accepted when the boot runs or reaches a deeper wall, and its
         writes then stay in the tree for the next round to build on; ``kept`` and
         ``advanced`` differ only in whether the lane is finished. Anything short
-        of that reverts to the state the previous round left.
+        of that reverts to the state the previous round left. A round
+        :func:`unrated_verdict` fails never gets here unless its boot advanced.
 
         The verdict depends on the trigger origin, because the two origins have
         different evidence available:

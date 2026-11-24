@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """A bench the environment or the harness kept from measuring, or the run stopped, says nothing about the patch: no
-gate grades it."""
+gate grades it, unless it is an enablement round whose boot advanced."""
 
 from __future__ import annotations
 

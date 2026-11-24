@@ -578,7 +578,8 @@ def _weigh_gate(
 
 def unrated_verdict(attempt: IntegrateAttempt, bench_result: dict[str, Any]) -> dict[str, Any] | None:
     """The failed verdict of a bench the run stopped, or the environment or the harness kept from measuring; ``None``
-    for one a gate grades. Such a bench says nothing about the candidate, so no gate grades it."""
+    for one a gate grades. Such a bench says nothing about the candidate's throughput, so the throughput gate never
+    grades it; the enablement gate still accepts one whose boot reached a deeper wall."""
     bench_class = str(bench_result.get("error_class") or "")
     stopped = stopped_by_the_run_class(bench_class)
     attribution = _not_the_candidates(bench_result, framework_changed=attempt.changes_framework)
