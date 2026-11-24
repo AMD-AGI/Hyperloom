@@ -144,6 +144,7 @@ class IterationPhasesMixin:
         rest = [lane for lane in changed if lane is not start]
         agent_error, rationale = None, ""
         if rest:
+            session_sink["session_started"] = True
             agent_error, rationale = await self._merge_session(
                 frame, start, rest, agent_fn=agents.agent_fn, digest=digest
             )
@@ -154,9 +155,7 @@ class IterationPhasesMixin:
             lead = start if start is not None else results[0]
             session_sink.update(lead.sink)
             rationale = lead.rationale
-            agent_error = lead.error or None
-            # The lane's own workspace was cleared, or the round refused above; the canonical one was never busy.
-            session_sink.pop("workspace_contention", None)
+            agent_error = lead.sink.get("agent_error") or lead.error or None
             # A measurement taken while other lanes compiled is not reused as the canonical one.
             if len(results) > 1:
                 session_sink.pop("benchmark_measurement", None)

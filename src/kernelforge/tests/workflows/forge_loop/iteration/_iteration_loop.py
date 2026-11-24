@@ -74,6 +74,8 @@ def _make_loop(
         git_branch="test-loop",
         workspace_dir=str(workspace),
         supervise_after=supervise_after,
+        # These loops turn the search when the Supervisor would be called, unless a test sets the count itself.
+        diversify_after=supervise_after,
         supervise_cooldown=0,
     )
     tracker = ExperimentTracker(tmp_path / "experiments")

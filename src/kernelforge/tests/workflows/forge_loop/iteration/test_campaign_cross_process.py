@@ -623,7 +623,8 @@ import asyncio
 import sys
 from pathlib import Path
 
-from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop, LoopAgents
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop
 from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 
 

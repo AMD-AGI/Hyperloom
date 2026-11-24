@@ -438,7 +438,7 @@ def test_new_file_whose_name_contains_a_newline_is_one_path(tmp_path, monkeypatc
 def _unlistable(loop, monkeypatch):
     """Make new-file enumeration fail the way a broken git repository does."""
 
-    def explode():
+    def explode(_workspace=None):
         raise RuntimeError("could not list new files: git ls-files exited 128")
 
     monkeypatch.setattr(loop, "_list_untracked", explode)

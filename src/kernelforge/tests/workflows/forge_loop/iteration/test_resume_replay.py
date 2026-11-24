@@ -37,7 +37,6 @@ def test_resume_replays_nonkeep_event_ahead_of_state(tmp_path, monkeypatch):
             plan="larger tile",
             wall_ms=1.1,
             best_after_ms=1.0,
-            diversification_cycle_completed=True,
         )
     )
     loop.state_store = store
@@ -53,7 +52,6 @@ def test_resume_replays_nonkeep_event_ahead_of_state(tmp_path, monkeypatch):
     assert replayed.cumulative.iterations == 2
     assert replayed.cumulative.reverted == 1
     assert replayed.stall.no_improvement_iters == 1
-    assert replayed.diversification_cycle_completed is True
 
 
 def test_resume_replay_pins_sub_threshold_gains_but_not_regressions(

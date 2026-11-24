@@ -14,6 +14,7 @@ from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json, atomic_w
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.evaluation.scoring import GateScoring, beats_current_best
 from kernelforge.utils.git import git
+from kernelforge.utils.process_reaping import processes_under
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
 from kernelforge.workflows.forge_loop.iteration.fanout import (
     LaneAssignment,
@@ -101,13 +102,16 @@ class LaneRuntimeMixin:
         scoring = GateScoring(dict(self._baseline_case_times), self.best_mean_case_speedup)
 
         async def session(seat: LaneSeat) -> tuple[str, dict]:
-            sink: dict = {}
+            sink: dict = {"session_started": True}
             self._bind_session_producer(sink, self.run_state.agent_relay.active_profile_id)
             call = agent_factory(seat, gain_required=width == 1)
             history = self._implementer_history(digest=digest, direction=self._lane_direction(seat, assignments))
-            _error, rationale = await self._run_session(
+            error, rationale = await self._run_session(
                 call, str(seat.lane_dir / kernel_relative), history, sink=sink, gate_scoring=scoring
             )
+            if error is not None:
+                # The session's error is the lane's to report, but what it had already edited is still a candidate.
+                sink["agent_error"] = error
             return rationale, sink
 
         results = await self._lane_round.run(session)
@@ -185,14 +189,28 @@ class LaneRuntimeMixin:
             log.warning("lane %s artifacts not written: %s", lane.lane_id, error)
 
     def _record_lane_contention(self, iteration: int, results: list[LaneResult]) -> None:
-        """Record a device a lane's teardown could not clear: the canonical measurement shares it."""
-        contended = [lane for lane in results if lane.contended]
-        if not contended:
+        """Record a device a lane left busy: the canonical measurement shares it.
+
+        Either the lane's teardown could not clear its workspace, or its session reported processes of its own it
+        could not stop -- which may run from a scratch directory the teardown does not see.
+        """
+        held: dict[str, str] = {}
+        pids: set[int] = set()
+        for lane in results:
+            reported = str(lane.sink.get("workspace_contention") or "")
+            if lane.contended:
+                held[lane.lane_id] = lane.reaped.describe()
+                pids.update(lane.reaped.blockers)
+            elif reported:
+                held[lane.lane_id] = reported
+                pids.update(processes_under(lane.lane_dir))
+        if not held:
             return
+        contended = list(held)
         hazard = self.device_hazard.record(
             iteration=iteration,
-            detail="; ".join(f"lane {lane.lane_id}: {lane.reaped.describe()}" for lane in contended),
-            pids={pid for lane in contended for pid in lane.reaped.blockers},
+            detail="; ".join(f"lane {lane_id}: {detail}" for lane_id, detail in held.items()),
+            pids=pids,
         )
         print(
             f"  [lanes] {len(contended)} of {len(results)} lanes left the device contended; this round measures "

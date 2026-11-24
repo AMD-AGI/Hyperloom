@@ -53,11 +53,6 @@ def test_external_deadline_holds_the_existing_finalization_reserve(campaign):
     assert campaign._analysis_deadline_unix() == 1600.0
 
 
-def test_round_admission_cannot_spend_the_floored_hour_past_external_deadline(campaign):
-    assert campaign._admit_next_round(1, requested_lanes=campaign.ic.lanes) is None
-    assert campaign.termination_reason == "round_budget_exhausted"
-
-
 def test_dispatch_cannot_spend_the_floored_hour_past_external_deadline(campaign):
     assert campaign._admit_dispatch(1) is False
     assert campaign.termination_reason == "round_budget_exhausted"

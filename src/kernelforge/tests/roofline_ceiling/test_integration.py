@@ -217,7 +217,7 @@ def test_a_ceiling_that_failed_to_estimate_injects_nothing_anywhere():
     context = _planning_context("decode-t1")
 
     assert loop._with_ceiling_standing(context) is context
-    assert "roofline" not in _supervisor_payload(loop, context)["orchestration_context"]
+    assert "roofline" not in _supervisor_payload(loop, context)["evidence_context"]
 
 
 def test_the_planner_sees_the_campaign_mean_the_target_and_how_to_read_them(tmp_path):
@@ -266,7 +266,7 @@ def test_the_supervisor_reviews_a_stall_with_the_same_standing_as_the_planner(tm
     path = _publish(_report((("a", 9.0), ("b", 4.0))), tmp_path)
     loop = _loop(str(path), target=0.86, case_times={"a": 10.0, "b": 8.0})
 
-    payload = _supervisor_payload(loop, _planning_context("a", "b"))["orchestration_context"]
+    payload = _supervisor_payload(loop, _planning_context("a", "b"))["evidence_context"]
 
     assert payload["roofline"]["mean_attainment"] == pytest.approx(0.7)
     assert {case["case_id"]: case["roofline"]["attainment"] for case in payload["cases"]} == {
@@ -276,7 +276,7 @@ def test_the_supervisor_reviews_a_stall_with_the_same_standing_as_the_planner(tm
 
 
 def test_without_a_ceiling_the_supervisor_sees_no_roofline():
-    payload = _supervisor_payload(_loop(), _planning_context("decode-t1"))["orchestration_context"]
+    payload = _supervisor_payload(_loop(), _planning_context("decode-t1"))["evidence_context"]
 
     assert "roofline" not in payload
     assert all("roofline" not in case for case in payload["cases"])

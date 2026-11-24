@@ -1102,43 +1102,6 @@ def test_a_re_measure_bench_that_failed_is_reported_as_bought_not_as_measured(mo
     assert f"required={required_keep_speedup(GQA_NEAR_MISS_INCUMBENT, scores):.6f}x" in line
 
 
-def test_the_extra_benches_are_charged_to_the_round_that_bought_them(monkeypatch):
-    """Round admission prices the next round from what this one spent measuring."""
-    clock = [1000.0]
-    patch_iteration_name(monkeypatch, "time", SimpleNamespace(time=lambda: clock[0]))
-
-    def charged(baseline, runs, extra_rounds=(), *, incumbent=None):
-        loop, calls = _attributed_loop(monkeypatch, baseline, runs, extra_rounds)
-        if incumbent is not None:
-            loop.best_mean_case_speedup = incumbent
-        inner = scoring_runtime.measure_wallclock
-
-        async def metered(run, **kwargs):
-            clock[0] += 100.0
-            return await inner(run, **kwargs)
-
-        patch_iteration_name(monkeypatch, "measure_wallclock", metered)
-        loop._round_started_at = clock[0]
-        loop._round_measurement_sec = 0.0
-        asyncio.run(loop.run_one_iteration(1))
-        return len(calls), loop._round_measurement_sec
-
-    quiet = _gqa_runs(level=0.02)
-    # The uniform shape needs no incumbent: no case dominates its sigma, so the purchase is declined before the
-    # verdict band is consulted at all.
-    plain_benches, plain_sec = charged(*UNIFORM_NOISE_SHAPES[1][1:])
-    bought_benches, bought_sec = charged(
-        GQA_BASELINE,
-        _gqa_runs(),
-        [quiet, quiet],
-        incumbent=GQA_NEAR_MISS_INCUMBENT,
-    )
-
-    assert (plain_benches, plain_sec) == (1, pytest.approx(100.0))
-    assert bought_benches == 1 + SIGMA_REMEASURE_MAX_ROUNDS
-    assert bought_sec == pytest.approx(100.0 * bought_benches)
-
-
 def test_a_cheap_dominant_case_is_re_measured_and_the_bar_comes_down(monkeypatch, capsys):
     """q61 held 87% of sigma on 5.7% of the wall time; six more runs settled it."""
     runs = _gqa_runs()

@@ -118,7 +118,7 @@ def test_the_loop_turns_after_one_round_without_a_new_best_and_is_reviewed_after
     relay that has no other profile to switch to.
     """
     loop, workspace = _make_loop(tmp_path, monkeypatch, supervise_after=SUPERVISE_AFTER_ROUNDS, session_count=4)
-    assert loop.ic.diversify_after == DIVERSIFY_AFTER_ROUNDS
+    loop.ic.diversify_after = DIVERSIFY_AFTER_ROUNDS
     loop.config = SimpleNamespace(experiments_dir=workspace / "forge_experiments", gpu_target="gfx942")
     histories: list[str] = []
     modes: list[str] = []

@@ -28,7 +28,7 @@ from kernelforge.workflows.forge_loop.search.agent_relay import (
 from kernelforge.workflows.forge_loop.campaign.run_state import RunState
 from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop
 from kernelforge.workflows.forge_loop.search.search_actors import SearchActorBundle, SearchActorPool
-from kernelforge.workflows.forge_loop.search.search_policy import PLANNED_ROUND_STALL, SELF_DIRECTED_STALL
+from kernelforge.workflows.forge_loop.search.search_policy import SUPERVISE_AFTER_ROUNDS
 
 
 def _profiles() -> tuple[AgentProfile, ...]:
@@ -100,7 +100,6 @@ def test_search_failures_advance_the_active_profile_streak(decision):
     [
         "AGENT_ERROR",
         "API_ERROR",
-        "ORCHESTRATION_ERROR",
         "REVERT_CONTENDED",
         "REVERT_INTEGRITY",
     ],
@@ -299,9 +298,7 @@ class _StateStore:
         self.saved.append(state.to_dict())
 
 
-def _loop_for_boundary(
-    tmp_path, *, streak: int, supervise_after: int = PLANNED_ROUND_STALL.supervise_after
-) -> IterationLoop:
+def _loop_for_boundary(tmp_path, *, streak: int, supervise_after: int = 3) -> IterationLoop:
     loop = object.__new__(IterationLoop)
     loop.ic = SimpleNamespace(workspace_dir=str(tmp_path), supervise_after=supervise_after)
     loop.run_state = RunState()
@@ -311,8 +308,6 @@ def _loop_for_boundary(
     )
     loop.run_state.agent_availability_snapshot = _snapshot()
     loop.state_store = _StateStore()
-    loop._lane_queue = []
-    loop._last_lane_plans = ["old plan"]
     loop._working_tree_diff = lambda: ""
     loop.monitor = SimpleNamespace(no_improve_streak=streak)
     return loop
@@ -345,8 +340,6 @@ def test_iteration_boundary_switches_before_the_next_actor_runs(tmp_path):
     assert force_supervisor is False
     assert loop.run_state.agent_relay.active_profile_id == "codex_gpt"
     assert loop.run_state.search_mode == "EXPLOIT"
-    assert loop._lane_queue == []
-    assert loop._last_lane_plans == []
     assert loop.monitor.no_improve_streak == 0
     assert loop.state_store.saved
     assert loop.state_store.events[-1]["type"] == "relay_profile_switched"
@@ -378,18 +371,16 @@ def test_iteration_boundary_uses_supervisor_when_no_alternate_is_available(tmp_p
     assert loop.run_state.agent_relay.intervention_kind == INTERVENTION_SUPERVISOR
 
 
-def test_a_blockage_is_the_stall_count_of_the_sessions_loop_shape(tmp_path):
-    """The same streak blocks a search whose sessions choose their own direction and leaves a planned one running."""
-    streak = SELF_DIRECTED_STALL.supervise_after
-    assert streak < PLANNED_ROUND_STALL.supervise_after
-    interventions = {}
-    for shape, stall in (("self-directed", SELF_DIRECTED_STALL), ("planned", PLANNED_ROUND_STALL)):
-        loop = _loop_for_boundary(tmp_path, streak=streak, supervise_after=stall.supervise_after)
+def test_a_blockage_is_the_loops_own_stall_count(tmp_path):
+    """The streak that brings the Supervisor in a loop without a relay is the one that blocks a relay's profile."""
+    selected = {}
+    for streak in (SUPERVISE_AFTER_ROUNDS - 1, SUPERVISE_AFTER_ROUNDS):
+        loop = _loop_for_boundary(tmp_path, streak=streak, supervise_after=SUPERVISE_AFTER_ROUNDS)
         pool = _search_actor_pool()
         loop._search_actors = pool
-        interventions[shape] = loop._prepare_search_actor(streak + 1, pool).profile.profile_id
+        selected[streak] = loop._prepare_search_actor(streak + 1, pool).profile.profile_id
 
-    assert interventions == {"self-directed": "codex_gpt", "planned": "claude_opus"}
+    assert selected == {SUPERVISE_AFTER_ROUNDS - 1: "claude_opus", SUPERVISE_AFTER_ROUNDS: "codex_gpt"}
 
 
 def test_keep_after_a_switch_keeps_the_intervention_in_its_provenance(tmp_path):
@@ -577,79 +568,3 @@ def test_supervisor_banner_names_the_schedule_that_governs_it(tmp_path):
     assert "stalls" not in loop._supervisor_banner()
 
 
-def test_a_blockage_waits_for_the_queued_lane_candidates_before_switching(tmp_path):
-    loop = _loop_for_boundary(tmp_path, streak=3)
-    loop._lane_queue = [object(), object()]
-    pool = _search_actor_pool()
-    loop._search_actors = pool
-
-    deferred = loop._prepare_search_actor(4, pool)
-
-    assert deferred.profile.profile_id == "claude_opus"
-    assert loop.run_state.agent_relay.active_profile_id == "claude_opus"
-    assert loop.state_store.events == []
-
-    loop._lane_queue = []
-    switched = loop._prepare_search_actor(6, pool)
-
-    assert switched.profile.profile_id == "codex_gpt"
-    assert [event["type"] for event in loop.state_store.events] == [
-        "relay_blockage_detected",
-        "relay_profile_switched",
-    ]
-
-
-def test_a_keep_among_the_queued_candidates_ends_the_blockage_without_a_switch(tmp_path):
-    loop = _loop_for_boundary(tmp_path, streak=3)
-    loop._lane_queue = [object()]
-    pool = _search_actor_pool()
-    loop._search_actors = pool
-    loop._prepare_search_actor(4, pool)
-
-    loop._apply_relay_outcome(SimpleNamespace(kept=True, agent_profile_id="claude_opus", iteration=4), "KEEP")
-    loop._lane_queue = []
-    bundle = loop._prepare_search_actor(5, pool)
-
-    assert bundle.profile.profile_id == "claude_opus"
-    assert loop.state_store.events == []
-
-
-def test_a_resumed_queue_is_measured_on_a_runnable_actor_before_the_unavailable_profile_is_replaced(tmp_path):
-    loop = _loop_for_boundary(tmp_path, streak=0)
-    loop.run_state.agent_relay.active_profile_id = "codex_gpt"
-    loop.run_state.agent_availability_snapshot = _snapshot(codex=False)
-    loop._lane_queue = [object()]
-    profiles = _profiles()
-    pool = SearchActorPool(
-        config=AgentRelayConfig(primary_profile_id="claude_opus", profiles=profiles),
-        availability=_snapshot(codex=False),
-        bundles={
-            profile.profile_id: SearchActorBundle(profile=profile, agent_fn=lambda: None)
-            for profile in profiles
-            if profile.profile_id != "codex_gpt"
-        },
-        start_profile_id="claude_opus",
-    )
-    loop._search_actors = pool
-
-    measuring = loop._prepare_search_actor(3, pool)
-
-    assert measuring.profile.profile_id == "claude_opus"
-    assert loop.run_state.agent_relay.active_profile_id == "codex_gpt"
-    assert loop.state_store.events == []
-
-    loop._lane_queue = []
-    replaced = loop._prepare_search_actor(4, pool)
-
-    assert replaced.profile.profile_id == "claude_opus"
-    assert loop.run_state.agent_relay.active_profile_id == "claude_opus"
-    assert loop.state_store.events[0]["type"] == "relay_profile_unavailable"
-
-
-def test_a_switch_with_queued_lane_candidates_is_refused(tmp_path):
-    loop = _loop_for_boundary(tmp_path, streak=3)
-    loop._lane_queue = [object()]
-    intervention = select_relay_intervention(loop.run_state.agent_relay, profiles=_profiles(), availability=_snapshot())
-
-    with pytest.raises(RuntimeError, match="queued lane candidates"):
-        loop._switch_search_actor(4, intervention)

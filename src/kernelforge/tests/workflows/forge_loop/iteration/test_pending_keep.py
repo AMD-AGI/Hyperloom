@@ -53,7 +53,6 @@ def test_pending_keep_publication_patch_is_cumulative(tmp_path, monkeypatch):
         bench_detail={"median_ms": 0.8},
     )
 
-    loop.run_state.diversification_cycle_completed = True
     pending = loop._build_pending_keep(
         result,
         plan="change kernel",
@@ -68,9 +67,6 @@ def test_pending_keep_publication_patch_is_cumulative(tmp_path, monkeypatch):
     assert "prior kept optimization" in pending["publication_patch"]
     assert "return 2" in pending["publication_patch"]
     assert pending["baseline_wall_ms"] == 1.0
-    assert pending["search_control"] == {
-        "diversification_cycle_completed": True,
-    }
 
 
 @pytest.mark.parametrize("assembly_source", ["s_endpgm\n", "s_endpgm\n\n", "s_endpgm"])

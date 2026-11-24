@@ -515,7 +515,9 @@ class OutcomeMixin:
             for session in sessions
         ]
         if not any(record for _label, record in records):
-            return SummaryOutcome(reason="; ".join(f"{label or 'session'}: {record.reason}" for label, record in records))
+            return SummaryOutcome(
+                reason="; ".join(f"{label}: {record.reason}" if label else record.reason for label, record in records)
+            )
         parts = []
         for label, record in records:
             text = record.text if record else f"(no record: {record.reason})"

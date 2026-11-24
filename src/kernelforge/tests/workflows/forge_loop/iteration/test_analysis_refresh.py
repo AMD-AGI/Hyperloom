@@ -329,7 +329,7 @@ def test_stale_published_analysis_paths_survive_resume_style_reuse(
     assert "bottleneck=memory" in rendered
     assert f"evidence={case_profile.resolve()}" in rendered
     supervisor = json.loads(loop._build_supervisor_evidence_context(2))
-    assert supervisor["orchestration_context"]["analysis_evidence"]["commit"] == evidence_commit
+    assert supervisor["evidence_context"]["analysis_evidence"]["commit"] == evidence_commit
     assert supervisor["artifact_paths"]["analysis_bundle"] == str(generation.resolve())
 
 
@@ -1059,7 +1059,7 @@ def test_loop_refreshes_stale_analysis_before_supervisor(
 
     assert len(analysis_calls) == 2
     assert len(supervisor_contexts) == 1
-    evidence = supervisor_contexts[0]["orchestration_context"]["analysis_evidence"]
+    evidence = supervisor_contexts[0]["evidence_context"]["analysis_evidence"]
     assert evidence["commit"] == loop.run_state.best.commit_hash
     assert evidence["stale"] is False
     events = LoopStateStore(str(workspace)).read_events()
