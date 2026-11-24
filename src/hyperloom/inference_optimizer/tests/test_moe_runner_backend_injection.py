@@ -291,39 +291,29 @@ _MISSING_RUNNER_TRACEBACK = (
 )
 
 
-def test_a_baseline_killed_by_its_pinned_backend_fails_as_launched(tmp_path):
+def test_a_baseline_killed_by_its_pinned_backend_fails_as_launched(tmp_path, quark_mxfp4_moe_model):
     pinned = "--moe-runner-backend triton"
-    launches: list[tuple[str, dict]] = []
-    executor = BaselineExecutor(session_dir=tmp_path, shared_state=None)
+    base = tmp_path / "base.yaml"
+    write_benchmark_yaml(base, model=quark_mxfp4_moe_model, framework="sglang", benchmark_script=None)
+    executor = BaselineExecutor(default_config_path=base, session_dir=tmp_path, shared_state=None)
+    launches: list[str] = []
 
-    async def _run_once(ctx, *, recorder=None, run_index=0, **options):
-        launches.append((executor._settle_attempt_server_args(ctx.task.params, None, **options)[1], options))
+    async def _server_dies(attempt, output_dir):
+        envs = yaml.safe_load(attempt.materialized_config_path.read_text())["benchmark"]["envs"]
+        launches.append(envs["EXTRA_SGLANG_ARGS"])
         return {"status": "failed", "error_class": "server_init_dead", "error": _MISSING_RUNNER_TRACEBACK}
 
-    executor._run_once = _run_once  # type: ignore[method-assign]
-    task = SimpleNamespace(
-        task_id="t-moe", kind="baseline", params={"framework": "sglang", "extra_server_args": pinned}
-    )
+    executor._run_attempt_rounds = _server_dies  # type: ignore[method-assign]
+    params = {"output_dir": str(tmp_path / "ws"), "model_path": quark_mxfp4_moe_model, "extra_server_args": pinned}
+    task = SimpleNamespace(task_id="t-moe", kind="baseline", params=params)
 
-    result = asyncio.run(executor._run_with_accuracy(SimpleNamespace(task=task, extra={})))
+    result = asyncio.run(executor(SimpleNamespace(task=task, extra={})))
 
-    assert launches == [(pinned, {})]
+    assert [pinned in args for args in launches] == [True]
     assert result["status"] == "failed"
     assert result["error_class"] == "server_init_dead"
     assert result["error"] == _MISSING_RUNNER_TRACEBACK
     assert task.params["extra_server_args"] == pinned
-
-
-def test_materialize_keeps_a_pinned_backend_the_checkpoint_has_no_runner_for(
-    tmp_path, quark_mxfp4_moe_model, monkeypatch
-):
-    monkeypatch.setenv("GPU_TYPE", _AMD)
-    envs = _materialize_envs(
-        tmp_path,
-        model=quark_mxfp4_moe_model,
-        extra_server_args="--moe-runner-backend triton",
-    )
-    assert "--moe-runner-backend triton" in envs["EXTRA_SGLANG_ARGS"]
 
 
 @pytest.mark.parametrize(
@@ -332,7 +322,7 @@ def test_materialize_keeps_a_pinned_backend_the_checkpoint_has_no_runner_for(
         ("--foo 1 --moe-runner-backend triton --bar 2", "--foo 1 --bar 2"),
         ("--foo 1 --moe-runner-backend=triton", "--foo 1"),
         ("--moe-runner-backend aiter", ""),
-        # Value-less flag: strip it rather than let it survive a retry.
+        # A value-less flag is stripped too.
         ("--foo 1 --moe-runner-backend", "--foo 1"),
         ("--moe-runner-backend", ""),
         ("--moe-runner-backend --foo 1", "--foo 1"),
