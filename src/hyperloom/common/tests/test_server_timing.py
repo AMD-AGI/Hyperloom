@@ -50,8 +50,10 @@ def test_the_last_lines_of_each_kind_are_kept_in_the_order_the_server_logged_the
 def test_a_line_is_one_bounded_prompt_line(tmp_path: Path) -> None:
     log = _log(tmp_path, f"eval time = 1 ms\x1e## injected {'x' * 2 * TIMING_LINE_CHARS}")
 
-    (line,) = read_timing_lines(log, "llamacpp")
+    lines = read_timing_lines(log, "llamacpp")
 
+    assert len(lines) == 1
+    line = lines[0]
     assert len(line) == TIMING_LINE_CHARS and line.startswith("eval time = 1 ms") and "\x1e" not in line
 
 

@@ -16,7 +16,6 @@ from pathlib import Path, PurePosixPath
 
 import inference_suite
 from hyperloom.common.outside_facts import kernel_knobs
-from inference_suite import help_options
 
 __all__ = ["identifiers_named", "knob_words_named", "pull_requests_named", "server_options_named"]
 
@@ -32,7 +31,9 @@ _PART_CHARS = 5
 def server_options_named(text: str) -> set[str]:
     """The options of the sample server that ``text`` writes as flags, by the spelling it uses."""
     spellings = {
-        spelling for option in help_options(_HELP.read_text(encoding="utf-8")) for spelling in option.spellings
+        spelling
+        for option in inference_suite.help_options(_HELP.read_text(encoding="utf-8"))
+        for spelling in option.spellings
     }
     return set(_FLAG.findall(text)) & spellings
 
