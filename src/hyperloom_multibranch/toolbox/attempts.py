@@ -6,8 +6,10 @@
 An :class:`Executor` runs ONE attempt in a fresh sandbox and returns a ``TestResult`` describing it. This module turns
 attempts into the request's single result:
 
-* ``infra`` failure: another sandbox, away from every node an earlier attempt failed on for a reason held against it,
-  up to ``max_infra_retries`` retries, then ``measurement_failed``; the node is reported as an infrastructure failure.
+* ``infra`` failure: another sandbox, away from the node the attempt just before it failed on when that failure is held
+  against its node (:func:`_facts_nodes`: that one node only, not every node an earlier attempt failed on; the
+  quarantine is what keeps a reported node out for the rest of the session), up to ``max_infra_retries`` retries, then
+  ``measurement_failed``; the node is reported as an infrastructure failure.
   A retry after a failure that is not the node's (:data:`WAITED_INFRA_REASONS`: cards a process outside the test held,
   a platform short of sandboxes, a failure never held against its node) waits first, longer each time
   (:class:`InfraBackoff`), so a minute in which the cards or the platform are busy does not spend every attempt; the
@@ -282,9 +284,13 @@ def _mark_same_node(result: TestResult, avoided: set[str]) -> TestResult:
 
 
 def _facts_nodes(attempts: list[Attempt]) -> list[str]:
-    """The nodes the next attempt avoids: each earlier attempt's, less the ones whose infrastructure failure was not the
-    node's (:data:`WAITED_INFRA_REASONS`); their retry waits instead and may run on the same node."""
-    return [attempt.node for attempt in attempts if attempt.node and not _waited(attempt)]
+    """The nodes the next attempt avoids: the node of the attempt just before it, when that attempt failed for a reason
+    held against its node, and none when its infrastructure failure was not the node's (:data:`WAITED_INFRA_REASONS`),
+    whose retry waits instead and may run on the same node. An earlier attempt's node is not carried on: a node a
+    reported failure held against it stays out through the quarantine (``avoid``), and one that only this test saw fail
+    is free again for any attempt after the next one."""
+    last = attempts[-1] if attempts else None
+    return [last.node] if last is not None and last.node and not _waited(last) else []
 
 
 def _waited(attempt: Attempt) -> bool:
@@ -374,7 +380,7 @@ class AttemptRunner:
     async def _back_off(self, request: TestRequest, attempts: list[Attempt]) -> None:
         """Wait before the next infrastructure retry when the last attempt failed for a reason that is not its node's
         (:data:`WAITED_INFRA_REASONS`), the ``n``-th such wait of the request for the ``n``-th such failure; after any
-        other failure the retry goes at once, to a node the avoid set has not yet seen fail."""
+        other failure the retry goes at once, away from the node that failed."""
         waited = [a for a in attempts if _waited(a)]
         if not waited or waited[-1] is not attempts[-1]:
             return
