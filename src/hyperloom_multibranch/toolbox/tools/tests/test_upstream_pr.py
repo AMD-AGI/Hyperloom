@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from hyperloom.agents.framework.models import Candidate
-from hyperloom.agents.framework.sources import SourceConfigError
 from hyperloom_multibranch.toolbox.tools import InvalidRequest, JobStatus, ToolJobs, ToolRequest, UpstreamPrSearch
 from hyperloom_multibranch.toolbox.tools.tests.sinks import RecordingSink
 from hyperloom_multibranch.toolbox.tools.upstream_pr import UpstreamSearch, build_search
@@ -19,14 +18,11 @@ def req(**params: object) -> ToolRequest:
     return ToolRequest("upstream_pr_search", "s1", {"repo_url": REPO, **params})
 
 
-def test_the_search_is_github_only_until_a_pr_monitor_is_named() -> None:
+def test_a_search_asks_github_for_the_callers_terms() -> None:
     search = build_search({"repo_url": REPO, "keywords": "moe, gemm", "limit": 3, "states": ["merged"]})
     assert search.request.search_modes == ("github",)
     assert search.request.keywords == ("moe", "gemm")
-    assert (search.request.max_search_candidates, search.states, search.request.pr_monitor) == (3, ("merged",), None)
-    monitored = build_search({"repo_url": REPO, "pr_monitor_url": "http://monitor.example/"})
-    assert monitored.request.search_modes == ("pr_monitor", "github")
-    assert monitored.request.pr_monitor is not None
+    assert (search.request.max_search_candidates, search.states) == (3, ("merged",))
 
 
 def test_only_a_search_for_open_pull_requests_is_held_to_them() -> None:
@@ -77,22 +73,13 @@ async def test_no_match_is_a_success_with_an_empty_list(tmp_path: Path) -> None:
     assert json.loads(Path(sink.pointers[0].location).read_text())["result"]["candidates"] == []
 
 
-async def test_a_misconfigured_source_fails_with_that_reason(tmp_path: Path) -> None:
-    def broken(search: UpstreamSearch) -> list[Candidate]:
-        raise SourceConfigError("no pr_monitor config")
-
-    status, sink = await run(tmp_path, broken, req())
-    assert status is JobStatus.FAILED
-    assert sink.pointers[0].summary == "failed: upstream PR search is misconfigured: no pr_monitor config"
-
-
 async def test_an_unreachable_backend_fails_instead_of_crashing(tmp_path: Path) -> None:
     def down(search: UpstreamSearch) -> list[Candidate]:
-        raise TimeoutError("pr_monitor unreachable")
+        raise TimeoutError("search backend unreachable")
 
     status, sink = await run(tmp_path, down, req())
     assert status is JobStatus.FAILED
-    assert "TimeoutError: pr_monitor unreachable" in sink.pointers[0].summary
+    assert "TimeoutError: search backend unreachable" in sink.pointers[0].summary
 
 
 async def test_a_bad_repo_is_refused_at_submit(tmp_path: Path) -> None:

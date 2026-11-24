@@ -123,7 +123,7 @@ key, export the new one and re-run `install.sh`.
 Nor does such a `.env` lend anything that would let that account run code as you
 or see your traffic. `install.sh` and the CLI preflight take from it only a few
 choices among values Hyperloom ships, each with one of its listed values:
-`FRAMEWORK` (`atom`, `custom`, `sglang`, `vllm`, `xdit`), `HF_HUB_OFFLINE` and
+`FRAMEWORK` (`atom`, `custom`, `llamacpp`, `sglang`, `vllm`, `xdit`), `HF_HUB_OFFLINE` and
 `HF_DATASETS_OFFLINE` (`0`, `1`), `HYPERLOOM_RUN_MODE` (`baremetal`, `docker`),
 `HYPERLOOM_LLM_MODE` (`anthropic`, `deepseek`, `openai`),
 `HYPERLOOM_FRAMEWORK_ENV` (`isolated`, `shared`) and `HYPERLOOM_DOTENV_CREDENTIALS`

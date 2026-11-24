@@ -37,6 +37,7 @@ from hyperloom.measure.runner import run as run_module
 from hyperloom.measure.runner.native.tests import _aiter_standin as standin
 from hyperloom.measure.runner.tests.test_run import SHEET_IMAGE
 from hyperloom.measure.runner.tests.test_run_jit import (  # noqa: F401 - fixtures
+    IMAGE_VERSION,
     Rig,
     _kind,
     _states,
@@ -86,8 +87,8 @@ class Built:
     def roots(self) -> tuple[EnvRoot, ...]:
         entry = EnvEntry(standin.KERNEL, "upsert", self.blob, "0644")
         return (
-            EnvRoot("aiter", "aiter", "amd-aiter", "0", ()),
-            EnvRoot("aiter.meta", "aiter_meta", "amd-aiter", "0", (entry,)),
+            EnvRoot("aiter", "aiter", "amd-aiter", IMAGE_VERSION, ()),
+            EnvRoot("aiter.meta", "aiter_meta", "amd-aiter", IMAGE_VERSION, (entry,)),
         )
 
     def environ(self) -> dict:

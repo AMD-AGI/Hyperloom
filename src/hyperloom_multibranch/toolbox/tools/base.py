@@ -254,9 +254,6 @@ class ToolJobs:
             job.recipients.remove(branch)
         return False if job.recipients else self.cancel(job_id)
 
-    def has_job(self, job_id: str) -> bool:
-        return job_id in self._jobs
-
     def status(self, job_id: str) -> JobStatus:
         return self._job(job_id).status
 

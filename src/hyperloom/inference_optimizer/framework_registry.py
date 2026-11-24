@@ -60,6 +60,13 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         source_root="/app/xDiT/",
         throughput_unit="img/s",
     ),
+    Framework.LLAMACPP.value: FrameworkSpec(
+        name=Framework.LLAMACPP.value,
+        extra_args_env="EXTRA_LLAMACPP_ARGS",
+        repo_url="https://github.com/ggml-org/llama.cpp.git",
+        source_root=None,
+        throughput_unit="tok/s",
+    ),
     Framework.CUSTOM.value: FrameworkSpec(
         name=Framework.CUSTOM.value,
         extra_args_env="EXTRA_CUSTOM_ARGS",
@@ -122,9 +129,48 @@ def source_root(framework: str) -> str | None:
     return _registered_spec(framework).source_root
 
 
+def loads_model_file(framework: str | None) -> bool:
+    """Return whether ``framework`` loads a model file itself (llama.cpp's GGUF) rather than a checkpoint an HF loader
+    reads."""
+    return _facts(_spec_or_default(framework)).model_file is not None
+
+
+def served_model(framework: str | None, model_path: str) -> str:
+    """Return what ``framework``'s model flag names for the model at ``model_path``: the path, or the one model file
+    in it for a framework that loads a file itself.
+
+    Raises:
+        ModelFileError: When the directory holds no such file, or more than one model.
+    """
+    return _facts(_spec_or_default(framework)).served_model(model_path)
+
+
+def native_server(framework: str | None) -> FrameworkFacts | None:
+    """Return the launch facts of ``framework`` when its server is a native program, ``None`` when it runs as a
+    module of the serving interpreter, launches no server, or is not registered."""
+    spec = FRAMEWORKS.get(str(framework or "").strip().lower())
+    facts = None if spec is None else _facts(spec)
+    command = None if facts is None else facts.server_command
+    return facts if command is not None and command.native else None
+
+
 def repo_url(framework: str) -> str:
     """Return ``framework``'s upstream repo URL, or ``""`` when it has none."""
     return _registered_spec(framework).repo_url or ""
+
+
+def torch_profiled(framework: str | None) -> bool:
+    """Return whether ``framework`` can be profiled: Hyperloom ships a profile configuration only for a framework that
+    runs under the torch profiler, which a native server does not."""
+    command = _facts(_spec_or_default(framework)).server_command
+    return command is None or not command.native
+
+
+def request_slots(framework: str | None, server_args: str) -> int | None:
+    """Return how many requests a ``framework`` server launched with ``server_args`` runs at once, or ``None`` when
+    the args or the framework set no such cap."""
+    flag = _facts(_spec_or_default(framework)).request_slots
+    return None if flag is None else flag.slots(server_args.split())
 
 
 def shipped_config_name(kind: str, framework: str) -> str:

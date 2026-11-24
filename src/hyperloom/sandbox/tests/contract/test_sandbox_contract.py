@@ -65,7 +65,7 @@ def test_sealed_runner_answers_through_in_and_out(harness) -> None:
     sb = _create(harness, harness.sealed_template, "measurement")
     sb.write_file("/in/spec.json", b'{"id": 1}')
     assert _wait_for_file(sb, "/out/status.json") == b'{"id": 1}'
-    assert "status.json" in sb.list_dir("/out")
+    assert "status.json" in [e.name for e in sb.list_entries("/out")]
 
 
 @pytest.mark.claw_policy
@@ -82,7 +82,7 @@ def test_sealed_policy_refuses_commands_and_other_paths(harness) -> None:
         with pytest.raises(SandboxDenied):
             sb.read_file(bad)
     with pytest.raises(SandboxDenied):
-        sb.list_dir("/in")
+        sb.list_entries("/in")
 
 
 def test_sealed_template_refuses_caller_environment(harness) -> None:
@@ -137,7 +137,7 @@ def test_dev_sandbox_runs_commands_and_files(harness) -> None:
     assert lines == ["hello\n"]
     sb.write_file("/work/a/b.txt", b"data")
     assert sb.read_file("/work/a/b.txt") == b"data"
-    assert sb.list_dir("/work/a") == ["b.txt"]
+    assert [e.name for e in sb.list_entries("/work/a")] == ["b.txt"]
     with pytest.raises(FileNotFoundError):
         sb.read_file("/work/missing")
 
@@ -164,7 +164,7 @@ def test_a_new_sandbox_starts_empty_and_isolated(harness) -> None:
     first.write_file("/work/leftover.txt", b"x")
     second = _create(harness, harness.dev_template, "dev")
     assert second.sandbox_id != first.sandbox_id
-    assert second.list_dir("/work") == []
+    assert [e.name for e in second.list_entries("/work")] == []
 
 
 def test_kill_ends_the_sandbox_and_is_repeatable(harness) -> None:

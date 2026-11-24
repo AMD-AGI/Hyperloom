@@ -6,22 +6,20 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.measure import consistency
 from hyperloom.measure.archive import DirResultArchive
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.socket import SessionFacts, TestCall
-from hyperloom.measure.tests.bundle_factory import STAGING, STAGING_MANIFEST, base_launch
+from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
 from hyperloom.orchestrator.state.base_launch import freeze_base
 from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate
-from inference_suite import StagingError
-from inference_suite.contracts import NormalisedManifest
 
 FAKE_RUNNER = (sys.executable, "-m", "hyperloom.measure.tests.fake_runner")
 HOSTNAME = "node-a"
@@ -77,23 +75,6 @@ def freeze_session_base(session: Path) -> None:
     freeze_base(session, base_launch())
 
 
-def staged_tool_cache(tmp: Path, monkeypatch: Any) -> NormalisedManifest:
-    """Point the application's inference_suite tool cache at one holding a staging whose normalised manifest is
-    :data:`STAGING`; returns it."""
-    tools = tmp / "inference-suite-tools"
-    tools.mkdir(parents=True, exist_ok=True)
-    (tools / "staging_manifest.json").write_bytes(STAGING_MANIFEST)
-    monkeypatch.setenv("INFERENCE_SUITE_TOOL_CACHE", str(tools))
-
-    def identify(tool_cache: Path) -> NormalisedManifest:
-        if tool_cache != tools:
-            raise StagingError(f"the AgentX client staged in {tool_cache} cannot be read")
-        return STAGING
-
-    monkeypatch.setattr(consistency, "normalised_manifest", identify)
-    return STAGING
-
-
 def spec_context(tmp: Path, **overrides: Any) -> SpecContext:
     arguments: dict[str, Any] = {
         "image_ref": "registry.invalid/fw@sha256:" + "22" * 32,
@@ -114,6 +95,7 @@ def make_rig(
     templates: list[LocalTemplate] | None = None,
     gpus: int = 8,
     spec: Mapping[str, Any] | None = None,
+    clock: Callable[[], float] = time.time,
     **config: Any,
 ) -> Rig:
     provider = LocalSandboxProvider(
@@ -132,6 +114,6 @@ def make_rig(
     }
     arguments.update(config)
     hosted = HostedConfig(**arguments)
-    backend = HostedMeasurementBackend(provider, hosted)
+    backend = HostedMeasurementBackend(provider, hosted, clock=clock)
     backend.start()
     return Rig(provider, backend, hosted, archive, tmp)

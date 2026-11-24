@@ -92,6 +92,10 @@ These flags are rejected with `unrecognized arguments`:
   `--precision` fed the removed diffusion latency roofline: drop them.
 * `python -m hyperloom.orchestrator.trace_analysis.bypass_trace_analysis` is
   removed and fails with `No module named`; use `tracelens_analysis --route non-llm`.
+* `python -m hyperloom.measure.consistency` and
+  `python -m hyperloom.measure.consistency_resume`, the local-versus-hosted
+  consistency check, are removed and fail with `No module named`; nothing in
+  Hyperloom runs them, so drop any script that does.
 
 ### Required: the `bypass` trace-analysis route is replaced by `non-llm`
 

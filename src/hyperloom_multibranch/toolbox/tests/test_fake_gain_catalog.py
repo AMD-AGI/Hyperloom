@@ -12,9 +12,11 @@ from hyperloom.measure.fake_gain import FAKE_GAINS, FakeGain
 from hyperloom.measure.tests.hosted_fixtures import make_rig
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, WorkloadKind
 from hyperloom_multibranch.toolbox.tests.test_acceptance_fake_gain import (
+    LLAMACPP_MTP,
     NGRAM,
     SIM_ENV,
     SIMULATING,
+    SYNTHETIC_LENGTH,
     _refused_with,
     _repo,
 )
@@ -23,9 +25,10 @@ from hyperloom_multibranch.toolbox.tests.test_hosted_executor_cacheless import S
 ROWS = {row.name: row for row in FAKE_GAINS}
 
 
-def test_the_catalog_has_the_three_known_rows_with_a_known_enforcement_point() -> None:
+def test_the_catalog_has_the_four_known_rows_with_a_known_enforcement_point() -> None:
     assert set(ROWS) == {
         "context_copy_draft_on_synthetic",
+        "declared_acceptance_over_verified_draft",
         "speculative_decoding_pinned",
         "agentx_baseline_prefix_cache_off",
     }
@@ -50,6 +53,12 @@ async def test_the_context_copy_row_is_refused_by_acceptance(tmp_path: Path) -> 
 async def test_the_pinned_speculative_row_is_refused_by_acceptance(tmp_path: Path) -> None:
     row = _row("speculative_decoding_pinned")
     code = await _refused_with(tmp_path, _repo(SIMULATING, SIM_ENV), WorkloadKind.AGENTX, "--speculative-num-steps 5")
+    assert code == row.refusal_code
+
+
+async def test_the_declared_acceptance_row_is_refused_by_acceptance(tmp_path: Path) -> None:
+    row = _row("declared_acceptance_over_verified_draft")
+    code = await _refused_with(tmp_path, _repo(LLAMACPP_MTP), WorkloadKind.INFERENCEX, SYNTHETIC_LENGTH)
     assert code == row.refusal_code
 
 

@@ -684,6 +684,30 @@ from these benchmark limits and retain their existing contracts.
 
 ---
 
+## Checkpoint prefetch
+
+A server that maps its safetensors files reads them by page faults, which on a
+network file system run at tens of MB/s per rank. With this switch on, the
+process that boots a measured server also reads the checkpoint into the page
+cache with 8 sequential streams from the spawn until the server is ready
+(`hyperloom_common.weight_prefetch`): only a checkpoint on a network or FUSE
+file system, only as much as the memory headroom allows
+(`memory.max - memory.current` less a tenth of the limit, at least 16 GiB),
+and again for what the loader drops from the cache, at most three times. A
+checkpoint the round's account neither owns nor may write is read once and not
+refilled: Linux does not tell such an account which of its pages are cached, so
+each file is read whole by its size within the same headroom, and what the
+loader drops from the cache afterwards is not read again. It never fails a
+round. When it is on, the run_dir of the round that boots the server holds
+`weight_prefetch.json`: the files it chose, why it skipped, the bytes it read,
+and how many file reads failed.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_WEIGHT_PREFETCH` | Unset (off) for every kind of run | `1` turns the prefetch on. It is read in the process that boots the round's server. A hosted measurement sandbox takes it from the `measurement` template's environment (see [Measurement sandbox template](../how-to/hosted-multibranch-new-cluster.md#measurement-sandbox-template)); the runner never sets it. A local sandbox runner (the local toolbox) takes it from the environment that starts the session, and a round run in the session's own process reads that environment directly. |
+
+---
+
 ## EXPLORE pre-filters
 
 Three opt-in filters can remove variants from an EXPLORE round before any of
@@ -1146,8 +1170,8 @@ Primary switch (default **off**) for live Langfuse trace push.
   recognizable prefix (for example, raw AWS `AKIA…`) can slip through. The artifact
   packager also copies `reports/trace/*.jsonl` and, with the loose mode on by
   default (`HYPERLOOM_SESSION_PACKAGE_LOOSE`), drops them under the package
-  destination `HYPERLOOM_SESSION_PACKAGE_DEST`: `/workspace` for the Claw sync when
-  it is unset. If a session might
+  destination `HYPERLOOM_SESSION_PACKAGE_DEST`: `<session dir>/archive/` when it is unset
+  (a deployment whose sync collects another directory sets the variable to it). If a session might
   contain customer code or secrets, define an explicit retention + access-control
   policy for both the Langfuse project and the package destination, and consider
   disabling live push or loose packaging for those runs.

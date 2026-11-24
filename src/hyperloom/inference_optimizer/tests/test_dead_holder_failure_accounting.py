@@ -16,12 +16,9 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
-from hyperloom.orchestrator.roles import (
-    MockBackend,
-    MockCriticBackend,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.roles import MockCriticBackend
 from hyperloom.orchestrator.state.task_registry import TaskSpec
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
 # Far above any real pid on Linux, so the liveness probe proves it dead.
 _DEAD_PID = 2_147_483_646

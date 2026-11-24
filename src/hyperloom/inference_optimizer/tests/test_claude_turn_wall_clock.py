@@ -21,9 +21,10 @@ import pytest
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.loop.reactor_turn import DEFAULT_REACTOR_TURN_TIMEOUT_SEC
-from hyperloom.orchestrator.roles import ClaudeBackend, MockBackend, ScriptedPlan
+from hyperloom.orchestrator.roles import ClaudeBackend
 from hyperloom.orchestrator.roles import claude as claude_mod
 from hyperloom.orchestrator.roles.base import LLMCallFailed, RetryPolicy
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
 
 class _Options:

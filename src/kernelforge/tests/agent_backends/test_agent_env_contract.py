@@ -13,17 +13,14 @@ from __future__ import annotations
 
 import pytest
 
-from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config, resolve_agent_model, resolve_agent_reasoning_effort
 
 _MODEL_VARS = (
     "FORGE_AGENT_MODEL",
     "FORGE_CLAUDE_MODEL",
-    "CLAUDE_CONTEXT_WINDOW",
     "FORGE_CODEX_MODEL",
     "CLAUDE_MODEL",
     "CODEX_MODEL",
-    "KERNEL_AGENTS_MODEL",
 )
 _EFFORT_VARS = ("FORGE_AGENT_REASONING_EFFORT", "HYPERLOOM_REASONING_EFFORT")
 
@@ -72,31 +69,6 @@ def test_the_forge_private_model_vars_are_not_read(clean_env) -> None:
     assert resolve_agent_model("claude") == "claude-opus-5"
     assert resolve_agent_model("codex") == "gpt-5.6"
     assert resolve_agent_model("auto") == ""
-
-
-def test_the_context_window_env_is_not_read(clean_env) -> None:
-    """``CLAUDE_CONTEXT_WINDOW`` is gone; setting it changes nothing.
-
-    It was the one rung this port added, and it turned out to name something
-    Forge does not need: the window is only ever spelled as a suffix on the
-    model id, this gateway rejects every bracketed id, and Forge has no
-    compaction or token budget that would want the number for its own sake.
-    """
-    clean_env.setenv("CLAUDE_CONTEXT_WINDOW", "1m")
-    config = Config.from_env(agent_backend="claude", workspace="/tmp")
-    assert not hasattr(config, "agent_context_window")
-    assert agent_runtime(config).model == "claude-opus-5-5"
-
-
-def test_the_removed_alias_is_no_longer_read(clean_env) -> None:
-    """``KERNEL_AGENTS_MODEL`` is gone, not merely deprecated.
-
-    Nothing in this repository or in Hyperloom ever set it -- it was only ever
-    read -- so keeping a spelling that no producer writes just gave the ladder a
-    fourth rung to explain.
-    """
-    clean_env.setenv("KERNEL_AGENTS_MODEL", "claude-opus-4-5")
-    assert resolve_agent_model("claude") == ""
 
 
 def test_model_ladder_reaches_config(clean_env) -> None:

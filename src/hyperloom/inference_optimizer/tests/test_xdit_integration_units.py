@@ -328,7 +328,13 @@ def _per_framework_tables() -> dict[str, dict]:
 
     return {
         "_ADAPTERS": adapters._ADAPTERS,
-        "parser_source": {item.value: item for item in Framework if framework_facts(item).parser_source is not None},
+        # D7 holds a Python server to its parser and a native one to its --help.
+        "flag_check": {
+            item.value: item
+            for item in Framework
+            if framework_facts(item).parser_source is not None
+            or (framework_facts(item).server_command is not None and framework_facts(item).server_command.native)
+        },
         "_DISABLE_CUDA_GRAPH_FLAGS": bringup._DISABLE_CUDA_GRAPH_FLAGS,
     }
 
@@ -339,10 +345,11 @@ class TestRegistryOwnsPerFrameworkAssets:
     @pytest.mark.parametrize("kind", ["baseline", "profile"])
     @pytest.mark.parametrize("framework", list(fr.FRAMEWORKS))
     def test_every_registered_framework_resolves_its_shipped_config(self, monkeypatch, kind, framework):
+        """A profile configuration ships for exactly the frameworks the torch profiler runs under."""
         monkeypatch.setenv("FRAMEWORK", framework)
         config = _default_config(kind)
         assert config.name == f"{kind}_{framework}.yaml"
-        assert config.is_file()
+        assert config.is_file() is (kind == "baseline" or fr.torch_profiled(framework))
 
     @pytest.mark.parametrize("kind", ["baseline", "profile"])
     def test_unset_framework_resolves_the_default_config(self, monkeypatch, kind):

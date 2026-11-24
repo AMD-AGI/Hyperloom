@@ -12,8 +12,8 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 _ISL = {"unit": "tokens", "avg": 155473.2, "p50": 108378.5, "p75": 184810.0, "p90": 371795.2, "p99": 557163.23}

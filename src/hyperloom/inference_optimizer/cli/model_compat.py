@@ -619,6 +619,8 @@ class DetectorSpec:
     args: tuple[str, ...] = ()
     skip_when_scriptable: bool = False
     amd_only: bool = False
+    # A framework that loads a model file itself reads none of the HF weights or quantization config this checks.
+    skip_when_model_file: bool = False
 
 
 def _run_compat_detector(
@@ -684,6 +686,7 @@ _COMPAT_DETECTORS: tuple[DetectorSpec, ...] = (
         "private_quant",
         _detect_private_quant,
         args=("model_path", "data"),
+        skip_when_model_file=True,
     ),
     DetectorSpec(  # 11
         "peft_adapter_only",
@@ -746,10 +749,13 @@ def _detect_incompatible_model_config(
         )
     # Steps 3-15: run the ordered registry, first non-None reason wins.
     is_amd = bool(_gpu_types._resolve_amd_gpu_type(gpu_type))
+    loads_model_file = framework_registry.loads_model_file(framework)
     for spec in _COMPAT_DETECTORS:
         if spec.amd_only and not is_amd:
             continue
         if spec.skip_when_scriptable and is_scriptable_fw:
+            continue
+        if spec.skip_when_model_file and loads_model_file:
             continue
         reason = _run_compat_detector(
             spec,

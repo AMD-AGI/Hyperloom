@@ -53,7 +53,8 @@ _SESSION_SKELETON: tuple[str, ...] = (
 #: Files whose presence means a directory holds a session that was started: a fresh session is never created there.
 SESSION_FILES: tuple[str, ...] = ("manifest.json", "state.json")
 
-#: The application-private result archive of a session, beside the skeleton above (not part of it).
+#: The application-private result archive beside the skeleton above (not part of it): the session package goes here
+#: unless ``HYPERLOOM_SESSION_PACKAGE_DEST`` names another place.
 ARCHIVE_DIRNAME = "archive"
 
 #: Top-level session subdirectories that belong to the application alone: never copied into a sandbox, packaged or
@@ -144,6 +145,11 @@ def session_dir() -> Path:
     if pinned:
         return Path(pinned)
     return workspace_root()
+
+
+def archive_root(session_dir: Path) -> Path:
+    """Where a session's results are archived: ``<session_dir>/archive``."""
+    return Path(session_dir) / ARCHIVE_DIRNAME
 
 
 def _make_dirs(path: Path, mode: int = SHARED_DIR_MODE) -> None:
@@ -380,6 +386,7 @@ __all__ = [
     "SESSION_FILES",
     "asset_prompt_references_dir",
     "asset_root",
+    "archive_root",
     "asset_system_prompts_dir",
     "db_path_for",
     "ensure_session_skeleton",

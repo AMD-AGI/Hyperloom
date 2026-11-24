@@ -437,7 +437,7 @@ class ClosePhase(CoordinatorCollaborator):
         await self._record_close_step("langfuse_flush", status="done")
 
     async def _do_artifact_package(self) -> Path | None:
-        """Bundle session artifacts into a zip under ``/workspace``.
+        """Bundle session artifacts into a zip under the package destination.
 
         Returns the package path (or None when nothing was written) so the caller
         can pass it directly to the post-sequencer close-section rebuild.
@@ -506,9 +506,8 @@ class ClosePhase(CoordinatorCollaborator):
         # to final counts and patch_breakdown_langfuse splices it back into session_breakdown.json.
         await self._run_close_step("langfuse_flush", self._do_langfuse_flush())
 
-        # Artifact package: bundle the curated result/report/analysis files into a single zip under
-        # ``HYPERLOOM_SESSION_PACKAGE_DEST`` (``/workspace`` when unset, where the Claw sandbox sync ships it to object
-        # storage even when ``$USER_DATA_PATH`` is outside ``/workspace``).
+        # Artifact package: bundle the curated result/report/analysis files into a single zip under the destination
+        # ``session_package._dest_root`` resolves.
         pkg_path: Path | None = None
         try:
             pkg_path = await self._do_artifact_package()

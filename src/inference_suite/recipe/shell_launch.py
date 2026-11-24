@@ -19,12 +19,16 @@ from pathlib import Path
 
 from hyperloom_common.credential_names import is_credential_flag
 from inference_suite.argv import is_flag
+from inference_suite.frameworks import Framework, framework_facts
 
 #: Flags the runner sets for every round, so a script's own values are taken out.
-_RUNNER_OWNED_FLAGS = frozenset({"--port", "--host", "--served-model-name", "--result-dir", "--result-filename"})
+_RUNNER_OWNED_FLAGS = frozenset(
+    {"--port", "--host", "--served-model-name", "--alias", "--result-dir", "--result-filename"}
+)
 _RUNNER_OWNED_PREFIXES = ("--result-", "--served-model")
-_MODEL_FLAGS = frozenset({"--model", "--model-path"})
-#: ``python3 -m <module>`` entrypoints, by module prefix, and the frameworks whose CLI runs ``<framework> serve``.
+_MODEL_FLAGS = frozenset({"--model", "--model-path", "-m"})
+#: ``python3 -m <module>`` entrypoints, by module prefix, and the frameworks whose CLI runs ``<framework> serve``; a
+#: native server is matched on its program name.
 _ENTRY_MODULES = {"sglang": "sglang.launch_server", "atom": "atom.entrypoints"}
 _SERVE_CLIS = frozenset({"vllm", "sglang"})
 _EXPORT = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
@@ -55,13 +59,25 @@ class ShellLaunch:
     unresolved_env: tuple[str, ...] = ()
 
 
+def _native_server(framework: str) -> str | None:
+    """The program name of ``framework``'s native server, ``None`` when it runs as a module or is unknown."""
+    try:
+        command = framework_facts(Framework(framework)).server_command
+    except ValueError:
+        return None
+    return command.entrypoint[0] if command is not None and command.native else None
+
+
 def _entrypoint_end(tokens: Sequence[str], framework: str) -> int | None:
     """The index just past ``framework``'s serving entrypoint when ``tokens`` run it, else None.
 
     Matched on words, so a comment, or an ``echo`` whose quoted text names the entrypoint, runs no server.
     """
     module = _ENTRY_MODULES.get(framework)
+    native = _native_server(framework)
     for i, token in enumerate(tokens[:-1]):
+        if native is not None and Path(token).name == native:
+            return i + 1
         following = tokens[i + 1]
         if token == "-m" and module is not None and following.startswith(module):
             return i + 2
@@ -79,8 +95,9 @@ def parse_shell_launch(text: str, *, framework: str) -> ShellLaunch:
     """
     env, unresolved_env = _exports(text)
     launch: list[str] | None = None
+    named = _native_server(framework) or framework
     for line in _logical_lines(text):
-        if framework not in line:
+        if named not in line:
             continue
         try:
             tokens = shlex.split(line, comments=True)
