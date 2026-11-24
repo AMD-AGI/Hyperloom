@@ -199,11 +199,10 @@ class _Row:
 
 @dataclass(frozen=True)
 class SweepResult:
-    """The sweep's answer: its JSON ``document``, each key's winning value, and the patch forcing them (empty when no
-    value beat the default beyond the noise)."""
+    """The sweep's answer: its JSON ``document`` and the patch forcing each key's winning value (empty when no value
+    beat the default beyond the noise)."""
 
     document: Mapping[str, Any]
-    winners: Mapping[KnobKey, str]
     patch: bytes
 
 
@@ -287,7 +286,7 @@ class _Bench:
             timed.samples.append(sample)
 
 
-def _built(plan: SweepPlan, arms: list[_Arm], build: Callable[[bytes], TreeBuild], parallel: int) -> dict[str, _Timed]:
+def _built(arms: list[_Arm], build: Callable[[bytes], TreeBuild], parallel: int) -> dict[str, _Timed]:
     with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
         builds = list(pool.map(build, [arm.patch for arm in arms]))
     if builds[0].bin is None:
@@ -376,7 +375,7 @@ def run_sweep(
         ),
         encoding="utf-8",
     )
-    timed = _built(plan, arms, hooks.build, parallel)
+    timed = _built(arms, hooks.build, parallel)
     names = [case.name for listed in cases.values() for case in listed]
     _Bench(cases_file, names, hooks.time).rounds(timed, plan.rounds, hooks.hold)
     rows = _rows(plan, arms, timed, cases)
@@ -395,7 +394,7 @@ def run_sweep(
     chosen = {key: row.value for key, row in winners.items() if key not in refused}
     patch = knob_patch(plan.knob, source, chosen)
     document = {**_measured(plan, arms, timed, cases, rows), **_recommended(plan, chosen, refused, patch)}
-    return SweepResult(document, chosen, patch)
+    return SweepResult(document, patch)
 
 
 def _arm_document(arm: _Arm, timed: _Timed) -> dict[str, Any]:
