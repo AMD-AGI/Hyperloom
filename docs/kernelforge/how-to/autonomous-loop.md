@@ -1,7 +1,7 @@
 ---
 myst:
   html_meta:
-    "description": "How to run the KernelForge autonomous overnight optimization loop with specialist plan synthesis, canonical validation, git keep/revert, and stalled-search supervision."
+    "description": "How to run the KernelForge autonomous overnight optimization loop with lanes of self-directed sessions, canonical validation, git keep/revert, and stalled-search supervision."
     "keywords": "KernelForge, autonomous loop, overnight optimization, kernelforge forge-loop, supervisor, validation pipeline, git commit revert"
 ---
 
@@ -39,129 +39,89 @@ kernel path under `aiter`, `vllm`, or `sglang` is also recognized. If no owner
 can be identified, the campaign records `unknown`. An explicit `--framework`
 value is authoritative, and resume reuses the value stored in the campaign.
 
-A campaign at `--lanes 1` runs no planning stage. Planning divides a round's
-evidence among lanes, and one lane has nothing to divide, so steps 1 to 6 below
-do not run: no dispatch, specialist, synthesis or Critic session is bought, and
-no plan file is written. The Implementer is told so at the top of its prompt,
-reads the Analysis report itself, and chooses the session's direction from it
-and from the lesson records. The search mode still reaches it there: while the
-search is exploiting it is asked for the largest expected gain, a structural
-change included, once the
-search has stalled it is asked for a mechanism materially different from the
-ones already tried, and an active Supervisor ruling names the directions to
-take. A session is a whole round here, so the stall is counted in sessions: one
-that ends without a new best turns the search to diversifying, two in a row
-are a blockage, which hands the search to another Agent profile or, when none
-is available, brings the Supervisor's review (see *Model relay* below), and the
-search stays diversifying until a session produces a new best. With a planning
-stage both counts are three iterations, and publishing a diversified plan
-returns the search to exploiting for the iterations that measure it.
+The loop has no planning stage. Every iteration is one round, and a round has
+one shape whatever its width:
 
-Each iteration of a campaign with more than one lane:
-
-1. Orchestration dispatches evidence-scoped work to read-only compute, memory,
-   and algorithm specialists.
-2. The specialists produce independent Markdown analyses. One partition call
-   then reads all of them and divides the round into at most `--lanes` lanes
-   (default 3), naming each lane's ground in the terms an edit lands in — files,
-   functions and mechanisms — and each lane synthesizes its own plan from that
-   ground and the whole round's evidence. The lanes are implemented
-   concurrently, each in its own workspace copy, and their candidates are
-   measured one per iteration. Evidence that supports only one direction, or a
-   round the budget narrowed to one lane, fuses the analyses into a single plan
-   instead: Orchestration
-   compares their expected value, evidence, feasibility, cost, dependencies and
-   risks, and synthesizes one. Concurrent lanes need an agent provider that
-   declares `session_env`; one that does not is refused by name and must be
-   given `--lanes 1`, because lanes sharing one build cache load each other's
-   JIT binaries and nothing downstream can tell that from a real result. A
-   provider that does not declare `stop_hooks` runs and is warned by name: it
-   loses in-session denial of edits to the measurement surface and of driver
-   runs that skip the shared device lock, so a lane can lose its session at the
-   boundary check or leave the round voided for device contention — costs that
-   are reported when they happen, not results that pass for real ones.
-3. For long-horizon sessions (`--max-hours > 2`), an independent read-only
-   Critic session using the same resolved backend and model reviews the draft
-   once. `ACCEPT` publishes it unchanged; `REVISE`/`REPLACE` allows
-   Orchestration one revision without rerunning specialists. The revision
-   resumes the synthesis session when the backend provides a session handle,
-   preserving the planner's context; otherwise it uses one fresh revision
-   session. Both are capped at 100 turns. The revision is given 10 minutes; the
-   Critic is given 10 minutes **per plan it has to read**, capped by the
-   Orchestration session timeout, because a round of several plans is several
-   times the reading. A turn cap, timeout, SDK truncation, or empty answer is
-   never published as a complete plan. Empty or failed Critic calls, and answers
-   not in the shape the review is held to, fail open to the draft and record the
-   verdict `NOT_REVIEWED`, which is what the artifact, the diagnostics, and the
-   next round are all given. Review diagnostics record duration.
-   Shorter sessions publish the synthesized plan directly.
-   A multi-lane round is reviewed once, with its division in view, and the one
-   verdict reaches every lane.
-4. How wide the round runs is a separate answer, given per lane. The review is
-   one structured answer -- `verdict`, the prose `review`, and `lane_narrowing`,
-   the lanes it judges not worth an Implementer session (ground the evidence does
-   not support, or another lane's change in different words), each with its
-   reason. Those lanes are not published, so the round spends fewer sessions
-   than it planned; an empty list runs every lane. The reason travels with the
-   lane into `structured_output.json`, dropping happens before the revision so
-   no revision turn is spent on a lane that will not run, and three rules bound
-   it: at least one lane always runs, a drop naming a lane the round does not
-   have keeps its lane and is reported, and a round carrying a challenger for a
-   pending `REPLACE` refuses narrowing whole because which lane is the
-   challenger was never written down. A lane the partition widened to joint
-   ground is dropped like any other — the review is shown its `joint` flag and
-   its fallback and rules with them in view — and the round records under
-   `dropped_joint` that it spent that width without measuring it. Every refusal
-   is recorded under `lane_narrowing`, where `status` says what happened to the
-   ruling.
-5. A `REPLACE` verdict is spent on the round *after* the one it judged. It says
-   the implementation route itself is dominated, which the round already
-   synthesized cannot act on, so the ruling is carried forward: the next round's
-   partition gives exactly one lane to validating the alternative the review
-   names, and divides the rest over ground that lane does not touch. A partition
-   that could not be bought carries it too. The challenger passes the unchanged
-   correctness and KEEP gates, so it is allowed to lose — one lane is what the
-   round spends to find out. The verdict and the path to its review are control
-   state in `run_state.json`, so a campaign that reaches its budget between the
-   two rounds resumes with the challenge intact.
-6. The final plan is published at
-   `<workspace>/forge_experiments/orchestration/iter_NNN/optimization_plan.md`.
-   A round of several lanes publishes lane 1's there and the rest beside it as
-   `lane_002.md`, `lane_003.md` and so on, with `lane_plans.json` written last
-   to mark the round complete.
-7. The writable Implementer reads that plan (at `--lanes 1`, the Analysis
-   report), edits the kernel sources, and exercises its in-session correctness
-   and performance gate. Each Implementer
-   session runs under a wall-clock budget sized from `--max-hours`
+1. **Analysis.** Before the first round, and again once the score has improved
+   by 5% since the evidence was collected, the Analysis Agent profiles the
+   canonical kernel and writes its brief. In a campaign of several lanes
+   (`--lanes`, default 3) it also writes `lanes.md`, dividing the work into at
+   most that many focuses: by optimization direction, by scored case, or a mix.
+   The loop reads only how many focuses there are; what a focus says is between
+   the Analysis Agent and the session that works on it. The division stays in
+   force until the next Analysis.
+2. **Lanes.** The round runs one lane per focus, and one lane with no focus when
+   the Analysis divided nothing or `--lanes` is 1. Each lane is an Implementer
+   session in its own copy of the workspace. The copy leaves out the Analysis
+   evidence, which a session reads by the absolute path its prompt names.
+3. **Direction.** A lane's session chooses its own direction from the Analysis
+   report and the lesson records, inside its focus when it has one. The focus
+   says where to start, not where to stop: a session whose own measurements
+   show the focus has no room left moves on, and it is shown the other lanes'
+   focuses so that it does not repeat them. The search mode reaches it there:
+   while the search is exploiting it is asked for the largest expected gain, a
+   structural change included; once the search has stalled it is asked for a
+   mechanism materially different from the ones already tried; and an active
+   Supervisor ruling names the directions to take. A stall is counted in
+   rounds: one that ends without a new best turns the search to diversifying,
+   two in a row are a blockage, which hands the search to another Agent profile
+   or, when none is available, brings the Supervisor's review (see *Model
+   relay* below), and the search stays diversifying until a round produces a
+   new best.
+4. **Session.** Every lane runs the same gated session. It works under a
+   wall-clock budget sized from `--max-hours`
    (`min(210, max(90, 0.15 * campaign_minutes))` minutes, overridable with
-   `--session-timeout-sec`); the session is told this deadline, and the
-   backend cuts the session at the deadline, after which the loop validates
-   whatever tracked changes the workspace holds. A high fixed turn ceiling
-   remains only as a runaway backstop -- it does not bound a session's time.
-   A session that runs the in-session gate is meant to use its budget rather
-   than hand off its first improvement. That is every session of a single-lane
-   campaign and, in a campaign with more lanes, the session of a round that
-   does not fan out; the two differ only in where the direction comes from. It
-   takes the round's plan as its direction, or without one the direction it
-   expects the most from, a restructuring included, states the score it expects
-   before editing, measures the kernel it starts from, then repeats edit,
-   correctness and benchmark, keeping a copy of the best version it has measured and
-   restoring it into the workspace after every change that does not help. It
-   reads the clock with every measurement and paces itself by four numbers:
-   it leaves a direction that measurement disproved or that 8 measured changes
-   in a row failed to improve, and takes the next one; with more than 20
-   minutes before its wrap-up minute, the time left is no reason to pass over a
-   direction; it starts to finish at the wrap-up minute (80% of the session
-   budget), after 12 measured changes in a row without a new best, or once
-   every direction worth measuring has been measured; and it keeps each
-   measurement command in the foreground and under 4 minutes. It hands off the
-   best version it measured -- or no candidate at all when nothing beat the
-   current best. Lane sessions, which run without that gate, make their change
-   and hand it off.
+   `--session-timeout-sec`); the session is told this deadline, and the backend
+   cuts the session at the deadline, after which the loop takes whatever
+   tracked changes the lane's copy holds. A high fixed turn ceiling remains only
+   as a runaway backstop -- it does not bound a session's time. The session is
+   meant to use its budget rather than hand off its first improvement: it
+   states the score it expects before editing, measures the kernel it starts
+   from, then repeats edit, correctness and benchmark, keeping a copy of the
+   best version it has measured and restoring it into the workspace after every
+   change that does not help. It reads the clock with every measurement and
+   paces itself by four numbers: it leaves a direction that measurement
+   disproved or that 8 measured changes in a row failed to improve, and takes
+   the next one; with more than 20 minutes before its wrap-up minute, the time
+   left is no reason to pass over a direction; it starts to finish at the
+   wrap-up minute (80% of the session budget), after 12 measured changes in a
+   row without a new best, or once every direction worth measuring has been
+   measured; and it keeps each measurement command in the foreground and under
+   4 minutes.
+5. **Stop check.** A session's stop is judged by its in-session gate, which
+   repeats correctness and takes three benchmark measurements. A round's only
+   lane has to beat the current best to stop, and hands off no candidate when
+   nothing did. A lane that runs beside others has to be correct: what it
+   gained on some cases is for the merge to use, whatever its overall score.
+6. **Device.** The lanes of a round share the campaign's GPU. A lane's session
+   sees no device of its own; every command that needs one -- the driver, a
+   benchmark script of the session's own, a profiler -- goes through the
+   lane's device runner, `python3 <lane>/forge_device.py <command>`, which
+   waits its turn, makes the device visible to that command and runs it
+   unchanged. Commands are served in the order they arrived, one command may
+   hold the device for at most 4 minutes, and a lane's stop check waits in the
+   same queue. Waiting counts toward the session's budget, so a round never
+   outlasts one session budget however wide it is. Every hold is recorded in
+   `forge_experiments/device_usage.jsonl` with the lane, how long it waited and
+   how long it held.
+7. **Merge.** What each lane changed is read as a patch against the round's
+   starting point; a patch that touches the driver or the harness is refused.
+   When one lane changed the kernel, its change is the round's candidate as it
+   stands. When several did, an Implementer session on the canonical tree
+   merges them. It starts from the lane whose own stop check scored highest
+   above the current best -- or from the round's starting point when none did
+   -- and is given the other lanes' patches, their workspaces and their
+   per-case times. How to merge is its own decision: apply a patch, rewrite
+   where two lanes changed the same code, dispatch per case between two lanes'
+   implementations. Its stop has to beat the score it started from. Each
+   lane's patch and stop-check result are kept under
+   `forge_experiments/rounds/iter_NNN/lane_K/`.
 8. The outer loop runs the driver-owned full correctness suite and canonical
    benchmark.
 9. A measured improvement is committed and becomes the new best; every other
    candidate is discarded back to the last validated commit.
+10. **Records.** Once the verdict is known, every session of the round -- each
+    lane, then the merge -- is asked in turn for its record (see below).
 
 Nothing a session started outlives it. On the Claude backend the session's CLI
 is started with a mark in its environment that every process it starts
@@ -196,44 +156,33 @@ system prompt in a private file rather than as an argument, so the driver and
 tool names in the prompt are not on a command line for another session's
 pattern to match.
 
-The plan file is the Implementer's planning source of truth for that iteration.
-Dispatch inputs and specialist analyses are retained beside it.
-`draft_plan.md` and `critic_review.md` are added when Critic review actually
-runs.
-The Framework owns role/case/evidence binding, so malformed paths or partial
-specialist output do not block the Implementer. If every planning Agent fails, the
-Framework writes a minimal plan that points to the current Analysis artifacts
-and asks the Implementer to plan directly. Only deterministic plan-persistence or
-workspace failures produce `ORCHESTRATION_ERROR`.
-
-Every plan leaves a short account of itself. A plan's first line, before any
-heading, is a `Summary:` line: one to three plain sentences stating the problem
-the plan addresses and what it changes to address it. The Implementer session
-does not write that takeaway. After the session ends, a separate lesson turn
-records what the session explored, including the directions it kept or dropped,
-on the lines `HELD-FIXED`, `NEGATIVES`, and `DISPROOF`. The loop then appends
+A session does not write a takeaway for the next one. After the round's verdict
+a separate lesson turn asks each of its sessions to record what it explored,
+including the directions it kept or dropped, on the lines `HELD-FIXED`,
+`NEGATIVES`, and `DISPROOF`. The turns run one after another, the lane whose
+stop check scored lowest first and the merge session last, and a round of
+several sessions sets each record under its own heading. The loop then appends
 the scope and outcome lines. That file is `lessons/iter_NNN.md`, and it is the
-only reasoning record. The same turn returns the campaign's insight list as it
+only reasoning record. Each turn also returns the campaign's insight list as it
 should stand, which is stored apart in `insights.md` and read in full by every
 later session, alongside one line of measured negatives for each past
-iteration. A lane takes that turn at the end of its round, while
-its copy of the workspace still exists, and `lane_queue.json` carries the record,
-or the reason there is none, to whichever iteration measures the lane. When the loop
+iteration; because the turns are serial, each one reads the list the one before
+it left. When the loop
 starts it hides `forge_experiments/` from git with a `forge_experiments/.gitignore`
 holding `*`, so nothing written there is committed or rejected by the workspace
 guard as a new file, whatever the workspace itself ignores.
-`kernelforge export-runs` turns the plan's `Summary:` line, the whole lesson,
-and the `report.md` of the Analysis bundle the round planned on into the
-Experiences of a run; see
+`kernelforge export-runs` turns the whole lesson into the reasoning of a run's
+Experiences; see
 {doc}`the CLI reference </kernelforge/reference/cli>`.
 
 After a KEEP, the previous Analysis bundle remains available and is marked
 stale. The loop refreshes it only after the canonical mean-case score has
 improved by the code-level 5% threshold from the evidence score, or
 immediately before a Supervisor intervention when the evidence does not match
-the current canonical. Until then, planning agents receive the previous bundle,
-current timings, and the cumulative diff between the evidence and canonical
-commits. That diff may span multiple accepted KEEP commits.
+the current canonical. Until then, the round's sessions receive the previous
+bundle, current timings, and the cumulative diff between the evidence and
+canonical commits, and the lanes keep the focuses that bundle gave them. That
+diff may span multiple accepted KEEP commits.
 
 What an Analysis session delivers is a brief. `report.md` holds, in order, where
 each scored case's time goes, the bottlenecks ranked by their effect on the
@@ -257,7 +206,7 @@ evidence and continues. A missing auxiliary diff never forces profiling or
 terminates the campaign.
 
 Analysis is limited to two session attempts per commit across resume. The loop
-does not issue the same Analysis request twice in one planning iteration, but a
+does not issue the same Analysis request twice in one iteration, but a
 failed request is eligible for the next iteration while the service still has
 an attempt available. PARTIAL evidence may use the second attempt; an exhausted
 commit continues with its published or checkpoint evidence.
@@ -269,88 +218,17 @@ self-terminating on plateau.
 
 ## Round admission
 
-A round is what the loop buys when it plans: orchestration, the lane sessions it
-fans out to, and the canonical validation and benchmark that judge the first
-candidate. Planning is the dominant part of that and the most variable — 12.5 to
-31.6 minutes across 75 measured production rounds — so the decision is taken
-twice, for two different questions. A campaign at `--lanes 1` plans nothing, so
-only the second question is asked of it: its session is priced at dispatch, and
-no round cost is recorded.
+A round is admitted against the time the campaign has left. The loop cannot
+interrupt a session once it runs, so before a round starts its lanes it
+requires what remains to cover one session and the canonical validation and
+benchmark that judge the round's candidate: the larger of 19.6 minutes and
+12.3 + 10 minutes. The lanes of a round run side by side, so its width does
+not change the price.
 
-**Before planning**, the loop refuses only a round that could not run even if
-planning were as fast as any campaign has ever seen it: the cheapest planning
-observed at that width, plus the least a session can be given and still return
-something measurable, plus the canonical measurement. This check exists so the
-campaign does not buy a plan nothing can run. A round that does not fit is
-narrowed one width at a time before it is refused, because each lane the round
-drops is one plan fewer for the Plan Critic to read.
-
-**After planning returns**, when its cost is a measurement rather than an
-estimate, the loop decides whether to dispatch. What is left to buy is one
-Implementer session and the measurement that judges it; a round that cannot pay
-for both would spend the campaign's last minutes on a candidate nobody ever
-sees. This is the decisive check: replayed over ten production campaigns, the
-two rounds killed by the external timeout came out of planning with 7.3 and 8.3
-minutes left, against a worst survivor at 24.8.
-
-The two checks price the same session differently, because they face opposite
-asymmetries. Before planning nothing is committed and being generous only
-refuses a round that would have worked, so a session is priced at the p25 of
-the 219 production sessions (8 minutes). At dispatch the loop is about to start
-something it cannot interrupt: too small a price starts a session the external
-timeout kills, too large costs one iteration — so the same session is priced at
-the median (12.3 minutes).
-
-**The dispatch requirement also has a floor of 19.6 minutes that no observation
-lowers.** A session's own wall-clock bound is sized from the campaign's total
-length, not from what is left of it, so once dispatched a round runs for however
-long the session takes. What the check is really guarding is therefore the
-external timeout — which the loop does not set, cannot measure and cannot stop,
-and which does not recede because this campaign's own validation got faster.
-The floor is derived from that kill: production allowed 15 minutes of grace past
-the loop's own deadline, and a session at the p90 (34.6 minutes) needs
-34.6 - 15 = 19.6 minutes in hand to land inside it. The estimate is still
-observation-driven above the floor, so a campaign whose measurement cycle is
-genuinely expensive requires more than 19.6 minutes.
-
-The floor sizes the session against that kill and no more — paying for the
-measurement cycle on top is the estimate's job, which is why the estimate wins
-whenever it is the larger of the two. It cannot go much higher either: it has
-to stay under the 24.8 minutes the worst surviving round had in hand. And it
-assumes the deployment leaves grace between the budget the loop counts down and
-the deadline that kills it; a campaign whose `--max-hours` *is* its external
-timeout has no grace, and no constant here can invent one.
-
-Because the two checks are priced apart, a round can pass the first and be
-refused by the second even when planning costs exactly what was estimated. The
-pre-planning check bounds whether a round could run at all; it is not a promise
-of dispatch.
-
-Neither check charges the finalize reserve. It is a bound of its own: both
-checks are handed the same unreserved remaining time the reserve is compared
-with, so a round runs when what remains clears the reserve and clears the
-round's own price, independently — the larger of the two binds, and no round has
-to cover `reserve + its own cost`. The loop already holds the reserve back
-before every iteration, and charging it a second time inside a round's price
-refused rounds that went on to produce a KEEP.
-
-Both halves are otherwise priced from what THIS campaign has observed — planning
-speed and measurement cost are properties of the kernel, the evidence, the case
-set and the device, not universals. A campaign with no round of its own falls
-back to constants derived from production measurements.
-
-An iteration that only drains a lane candidate an earlier round already paid for
-is not a round and is never refused. When a round is refused, the campaign ends
-with termination reason `round_budget_exhausted`, says so in the run summary,
-and still writes its report — which is the point. A fan-out round refused after
-planning keeps the plans it bought: they are published before dispatch and the
-iteration records no result, so the next session runs them instead of buying
-them again. The published `optimization_report.md` carries a `Round Budget`
-section with the rounds planned, the planning wall-clock, the round wall-clock,
-and planning's share of the campaign's wall-clock. All four are campaign totals,
-not this session's: a campaign that ran over several sessions reports what the
-whole campaign spent, and the share divides one campaign total by another rather
-than by the current process's elapsed time.
+When a round is refused, the campaign ends with termination reason
+`round_budget_exhausted`, says so in the run summary, and still writes its
+report. The published `optimization_report.md` then carries a `Round Budget`
+section naming the campaign's wall-clock and the refusal.
 
 ## Auto-measured baseline
 
@@ -395,12 +273,10 @@ fails the check stays unavailable for the session, and the startup log gives
 the reason. When only one profile passes, the log says model relay is off for
 the session and how to turn it on.
 
-A blockage is three consecutive non-improving search iterations produced by the
-active profile, or two at `--lanes 1`, where every iteration is a whole session.
-The count follows the session's `--lanes`, on `--resume` as well, and the
-startup log states it. Infrastructure, API, device-contention and integrity failures,
-and outcomes no profile produced (such as a stacked merge), do not count; a
-KEEP ends the blockage. Every blockage takes the first of these the session can
+A blockage is two consecutive rounds without a new best produced by the active
+profile; the startup log states the count. Infrastructure, API,
+device-contention and integrity failures do not count; a KEEP ends the
+blockage. Every blockage takes the first of these the session can
 run, checked against the startup check:
 
 1. Switch to an available profile on a different harness and model (Claude Code
@@ -409,12 +285,9 @@ run, checked against the startup check:
    different model.
 3. Otherwise, run the supervisor below on the active profile.
 
-Every intervention acts on the next plan, so the candidates a `--lanes` round
-already produced are measured first: while the lane queue holds candidates, the
-intervention waits, and a KEEP among them ends the blockage without one. A
-switch replaces the complete search actor (orchestration, specialists, Plan
-Critic and Implementer) at the next clean iteration boundary and forces the next
-round to diversify. With both `claude` and `codex` available, the search
+A switch replaces the complete search actor -- the lanes' sessions and the merge
+session -- at the next clean iteration boundary and forces the next round to
+diversify. With both `claude` and `codex` available, the search
 therefore alternates between them at every blockage until a KEEP.
 
 A session starts on the profile a resumed campaign was running, else the
@@ -452,8 +325,7 @@ kernelforge forge-loop --workspace /work/aiter-amd --resume \
 `--supervisor-backend` can override the provider of the active Agent profile
 for this review; under relay it runs on that provider's profile.
 The Supervisor inspects the stalled run and writes a free-form ruling for the
-next fresh orchestration plan, or at `--lanes 1` for the next Implementer
-session, which reads it directly. Every interaction is archived under
+sessions of the rounds that follow, which read it directly. Every interaction is archived under
 `forge_experiments/supervisor/intervention_iter_NNN.md`; the latest non-empty
 ruling is also stored verbatim at `forge_experiments/supervisor/latest.md` and
 restored on resume. It remains active only for the current stall episode: a KEEP

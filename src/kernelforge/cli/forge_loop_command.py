@@ -81,9 +81,7 @@ ANALYSIS_TIMEOUT_SEC = 7200
             default=1.0,
             type=float,
             callback=_validate_max_hours,
-            help="Max runtime hours (default: 1.0, minimum 1.0). Budgets "
-            ">2 hours enable Analysis profiling and, in a campaign with "
-            "more than one lane, Plan Critic review.",
+            help="Max runtime hours (default: 1.0, minimum 1.0). Budgets >2 hours enable Analysis profiling.",
         ),
         click.option(
             "--session-timeout-sec",

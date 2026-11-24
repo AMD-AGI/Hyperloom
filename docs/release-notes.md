@@ -20,6 +20,29 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **forge-loop runs every round as lanes and has no planning stage.** Every
+  iteration is one round: one lane per focus the Analysis Agent divides its
+  evidence into (at most `--lanes`, and one lane with no focus when it divides
+  nothing or `--lanes` is 1), each lane a self-directed Implementer session in
+  its own copy of the workspace, then one candidate measured on the canonical
+  tree. When several lanes changed the kernel, an Implementer session on the
+  canonical tree merges them, starting from the lane that scored best. The
+  lanes share the campaign's GPU through a queue: a lane's commands reach the
+  device through `forge_device.py` in its copy and wait their turn, and its
+  stop check waits in the same queue. A lane that runs beside others may stop
+  on a correct candidate that is no faster overall; a round's only lane still
+  has to beat the current best. The search turns to a different mechanism after
+  one round without a new best and is reviewed after two, at every `--lanes`.
+  **Breaking:** the dispatch, specialist, synthesis and Plan Critic sessions,
+  the per-iteration lane queue and the stacking of archived candidates are
+  removed, with `--merge-stacking`, `--specialist-probe` and
+  `--specialist-probe-{max,budget-sec,scratch-root}` and the
+  `FORGE_SPECIALIST_PROBE*` variables; passing one is an error. A campaign
+  created before this change is not resumed: its `run_state.json` carries
+  fields the loader rejects. `kernelforge export-runs` no longer emits
+  `plan_file`, `plan` from a plan file or `analysis_report`, and the decision
+  label `ORCHESTRATION_ERROR` is gone from the loop and from the
+  `kernelforge-run-v1` declaration.
 - **A hosted multi-branch run sets the AgentX window and the server boot
   budget.** The campaign spec's `multibranch` block takes
   `agentx_duration_sec` and `agentx_objective` (for `workload: agentx` only),
