@@ -12,8 +12,8 @@ a monitor service is the framework agent's own (host configuration only: a speci
 
 A diff is read a page at a time (:data:`DIFF_CHARS`): a result says how long the diff is, how long the part of each
 path is and where the next page starts, and a request names the offset to go on from, or one path to read alone.
-The pages of a diff are one download of it: a pull request may move between two requests, so the read of offset 0
-downloads the diff and the tool holds it for the later pages and paths the same branch reads.
+The pages of a diff are one download of it: a pull request may move between two requests, so a read of the whole
+diff from offset 0 downloads it and the tool holds it for the later pages and paths the same branch reads.
 
 Pull-request text is data: titles, paths and diffs are in the result, and the summary carries a ref and a title only.
 """

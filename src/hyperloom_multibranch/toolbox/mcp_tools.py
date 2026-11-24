@@ -257,12 +257,12 @@ _UPSTREAM_PR_GUIDE = (
     f"search: one page of at most {DIFF_CHARS} characters, with diff_chars (the characters of the whole diff), "
     "file_chars (those of each path's part of it) and next_offset. A next_offset that is not null is where the diff "
     "goes on: ask again with it as params.offset until next_offset is null. params.file, a path of file_chars, reads "
-    "that path's part alone, and params.offset then counts within that part. A read of offset 0 downloads the diff, "
-    "and the pages and paths you read after it come from that download, whatever the pull request became since. The "
-    "tool runs in the toolbox's host process and asks GitHub; its result arrives in poll_inbox. A GitHub that cannot "
-    "be asked fails the job and says why, which is not an empty answer: a failure that names a wait is a spent rate "
-    "limit, so ask again after it; after a token GitHub refuses or a GitHub that cannot be reached, go on without "
-    "this tool."
+    "that path's part alone, and params.offset then counts within that part. A read of the whole diff from offset 0 "
+    "downloads it, and the pages and paths you read after it come from that download, whatever the pull request "
+    "became since. The tool runs in the toolbox's host process and asks GitHub; its result arrives in poll_inbox. A "
+    "GitHub that cannot be asked fails the job and says why, which is not an empty answer: a failure that names a "
+    "wait is a spent rate limit, so ask again after it; after a token GitHub refuses or a GitHub that cannot be "
+    "reached, go on without this tool."
 )
 
 
