@@ -26,7 +26,7 @@ from hyperloom_multibranch.blackboard.tests.factories import delta, intent
 from hyperloom_multibranch.rulegate.baseline import write_inferencex_baseline
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
-from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name
 from hyperloom_multibranch.contracts.blackboard.exhausted import EXHAUSTED_PREFIX
 from hyperloom_multibranch.specialist.judging import NOTICE, Judging
 import hyperloom_multibranch.specialist.runtime as runtime_module
@@ -919,3 +919,25 @@ async def test_a_refused_retest_of_a_finishing_branch_is_noted_and_its_judge_end
     notices = await judged.notices()
     assert f"{NOTICE} the retest of {first} was refused ({stopped}); nothing was judged" in notices
     assert not any("judging this branch failed" in notice for notice in notices)
+
+
+async def test_the_undealt_directions_are_those_no_branch_has_held_that_are_open_on_the_commit(session):
+    runs = _Runs()
+    runtime = session.runtime(runs)
+    head = await session.repo.head(BRANCH)
+    _, second, third, *rest = [direction_name(direction) for direction in DIRECTIONS]
+
+    await runtime.start(BRANCH, head)
+    assert await runtime.undealt_directions(head) == (second, third, *rest)
+
+    record = {"direction": third.lower(), "head": head, "tried": ["r1"], "why": "all_tested_or_claimed"}
+    record |= {"detail": "nothing of it is left on this head", "reopen_if": "the head moves"}
+    blackboard = LocalBlackboard(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
+    entry = BranchLogEntry(BRANCH, BranchLogType.RESULT, EXHAUSTED_PREFIX + json.dumps(record))
+    await blackboard.append_branch_log(entry)
+    assert await runtime.undealt_directions(head) == (second, *rest)
+    assert await runtime.undealt_directions("a-later-head") == (second, third, *rest)
+
+    await _until(lambda: _true(len(runs.started) == 1), "the specialist to start")
+    await runtime.stop(BRANCH)
+    assert await runtime.undealt_directions(head) == (second, *rest)

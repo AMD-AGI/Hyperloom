@@ -13,11 +13,17 @@ from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe, R
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.peers import Purpose
-from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, BranchProgress, LineageEvent
-from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, LineageKind
+from hyperloom_multibranch.contracts.blackboard.records import (
+    BaselineRecord,
+    BranchProgress,
+    JudgementWrite,
+    LineageEvent,
+    MergeAttempt,
+)
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
 from hyperloom_multibranch.contracts.repo import PatchConflict
 from hyperloom_multibranch.blackboard import LocalBlackboard
-from hyperloom_multibranch.blackboard.tests.factories import intent, request, result
+from hyperloom_multibranch.blackboard.tests.factories import intent, judgement, request, result
 from hyperloom_multibranch.specialist.following import (
     SHORT,
     Followed,
@@ -136,6 +142,50 @@ async def test_following_moves_onto_the_integration_head_the_blackboard_recorded
     assert await rig.repo.head(INTEGRATION_BRANCH) == unjudged
     assert await rig.repo.head(BRANCH) == session.onto and (await _row(rig, BRANCH)).head_commit == session.onto
     assert f"onto the integration head {session.onto}" in followed.notice
+
+
+async def _bar(tmp_path: Path, rig: BranchRig, bar_pct: float) -> None:
+    baseline = BaselineRecord(rig.root, {METRIC: 1.0}, {METRIC: 0.8}, {METRIC: bar_pct}, ("b1", "b2"))
+    await _as(tmp_path, Role.GATE).write_baseline(baseline)
+
+
+async def test_a_head_recorded_over_the_bar_above_the_integration_head_with_a_commit_not_on_it_is_kept(tmp_path):
+    rig = await branch_rig(tmp_path, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH, own_value=3.5)
+    await _bar(tmp_path, rig, 1.6)
+
+    followed = await _follow(rig, tmp_path)
+
+    assert await rig.repo.head(BRANCH) == session.own and (await _row(rig, BRANCH)).head_commit == session.own
+    assert not await rig.blackboard.search("reroot") and followed.detail == ""
+    assert followed.notice.startswith("your branch was not re-rooted: ")
+    assert all(part in followed.notice for part in (session.own, session.onto, f"3.5 {METRIC}", "at 3.1", "1.60%"))
+
+
+async def test_a_head_recorded_within_the_bar_of_the_integration_head_follows_it(tmp_path):
+    rig = await branch_rig(tmp_path, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH, own_value=3.14)
+    await _bar(tmp_path, rig, 1.6)
+
+    followed = await _follow(rig, tmp_path)
+
+    assert await rig.repo.head(BRANCH) == session.onto and "was re-rooted from" in followed.notice
+
+
+async def test_a_head_recorded_above_the_integration_head_that_merged_all_its_commits_follows_it(tmp_path):
+    rig = await branch_rig(tmp_path, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH, own_value=3.5)
+    await _bar(tmp_path, rig, 1.6)
+    toolbox, integrator = _as(tmp_path, Role.TOOLBOX), _as(tmp_path, Role.INTEGRATOR)
+    both = await rig.repo.commit_integration(session.onto, OWN, (session.own,))
+    await toolbox.write_request(request("m1", intent(INTEGRATION_BRANCH, session.onto, "merge", session.own)))
+    await integrator.record_merge_attempt(MergeAttempt((session.own,), session.onto, request_id="m1"))
+    await toolbox.write_result(result("m1"))
+    await integrator.write_judgement(JudgementWrite("m1", judgement(3.2, ("m1",)), Conclusion.MERGED, both))
+
+    followed = await _follow(rig, tmp_path)
+
+    assert await rig.repo.head(BRANCH) == both and "was re-rooted from" in followed.notice
 
 
 async def test_following_a_stopped_branch_moves_nothing(tmp_path):
