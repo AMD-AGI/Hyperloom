@@ -10,7 +10,6 @@ import re
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import cast
 
 from hyperloom_kb.query_view import QueryView, RetrievalCapability
 from hyperloom_kb.retrieval import (
@@ -22,7 +21,6 @@ from hyperloom_kb.schema import (
     FieldRole,
     FieldValue,
     FileRef,
-    JsonValue,
     default_search_weight,
 )
 from hyperloom_kb.storage import ExperienceStore
@@ -43,12 +41,8 @@ class LexicalFuzzyProvider:
         self._experiences = experiences
         self._declaration = declaration
 
-    def recall(
-        self,
-        request: dict[str, JsonValue],
-        view: QueryView,
-    ) -> tuple[CandidateHit, ...]:
-        query = _normalized_text(str(request.get("text") or ""))
+    def recall(self, text: str, view: QueryView) -> tuple[CandidateHit, ...]:
+        query = _normalized_text(text)
         query_tokens = _tokens(query)
         if not query_tokens:
             return ()
@@ -68,7 +62,6 @@ class LexicalFuzzyProvider:
         hits: list[CandidateHit] = []
         max_field_weight = max((weight for _, document in documents for weight, _ in document.fields), default=1.0)
         for experience_id, document in documents:
-            matched: list[str] = []
             weighted_match = 0.0
             for token in query_tokens:
                 token_field_weight = max(
@@ -76,7 +69,6 @@ class LexicalFuzzyProvider:
                     default=0.0,
                 )
                 if token_field_weight:
-                    matched.append(token)
                     weighted_match += _idf(token, visible_count, document_frequency) * token_field_weight
             coverage = weighted_match / (query_weight * max_field_weight) if query_weight else 0.0
             summary_similarity = SequenceMatcher(None, query, document.summary).ratio()
@@ -84,17 +76,7 @@ class LexicalFuzzyProvider:
             score = (0.9 * coverage + 0.1 * summary_similarity) * identity_compatibility
             if score <= 0:
                 continue
-            hits.append(
-                CandidateHit(
-                    experience_id,
-                    RetrievalCapability.FUZZY,
-                    score,
-                    {
-                        "identity_compatibility": identity_compatibility,
-                        "matched_tokens": cast(list[JsonValue], sorted(matched)),
-                    },
-                )
-            )
+            hits.append(CandidateHit(experience_id, RetrievalCapability.FUZZY, score))
         return tuple(sorted(hits, key=lambda hit: (-(hit.score or 0.0), hit.experience_id)))
 
 

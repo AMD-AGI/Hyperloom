@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
 
@@ -38,7 +38,6 @@ class CandidateHit:
     experience_id: str
     capability: RetrievalCapability
     score: float | None = None
-    details: dict[str, JsonValue] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

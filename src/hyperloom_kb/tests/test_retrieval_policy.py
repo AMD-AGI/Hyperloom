@@ -24,6 +24,8 @@ from hyperloom_kb import (
 from hyperloom_kb.tests.view_fixtures import build_view, submit_complete
 
 NOW = datetime(2026, 9, 21, tzinfo=timezone.utc)
+# The most a record holding none of a query's words scores: its summary's likeness to the query, which weighs this.
+SUMMARY_SHARE = 0.1
 
 
 def _declaration(*, content_search: float | None = None) -> ExperienceDeclaration:
@@ -87,25 +89,23 @@ def test_fuzzy_finds_an_experience_by_its_notes() -> None:
     )
     experiences, view = _views(schema, plain, noted)
 
-    hits = LexicalFuzzyProvider(experiences, schema).recall({"text": "xgmi links saturate"}, view)
+    hits = LexicalFuzzyProvider(experiences, schema).recall("xgmi links saturate", view)
 
-    assert [(hit.experience_id, hit.details["matched_tokens"]) for hit in hits] == [
-        (noted.id, ["link", "saturate", "xgmi"]),
-        (plain.id, []),
-    ]
+    assert [hit.experience_id for hit in hits] == [noted.id, plain.id]
+    assert hits[0].score > SUMMARY_SHARE >= hits[1].score
 
 
-@pytest.mark.parametrize(("content_search", "matched"), [(None, []), (1.0, ["fragmentation"])])
-def test_fuzzy_reads_only_the_fields_the_declaration_weights(content_search, matched) -> None:
+@pytest.mark.parametrize(("content_search", "found"), [(None, False), (1.0, True)])
+def test_fuzzy_reads_only_the_fields_the_declaration_weights(content_search, found) -> None:
     schema = _declaration(content_search=content_search)
     record = _experience(
         schema, "run-content", "page_size", "The measured bottleneck suggests this knob.", content="--fix fragmentation"
     )
     experiences, view = _views(schema, record)
 
-    hits = LexicalFuzzyProvider(experiences, schema).recall({"text": "fragmentation"}, view)
+    hits = LexicalFuzzyProvider(experiences, schema).recall("fragmentation", view)
 
-    assert [hit.details["matched_tokens"] for hit in hits] == [matched]
+    assert [hit.score > SUMMARY_SHARE for hit in hits] == [found]
 
 
 def test_fuzzy_penalizes_explicit_model_size_mismatch() -> None:
@@ -126,6 +126,6 @@ def test_fuzzy_penalizes_explicit_model_size_mismatch() -> None:
     )
     experiences, view = _views(schema, qwen14, qwen8)
 
-    hits = LexicalFuzzyProvider(experiences, schema).recall({"text": "Qwen 14B scheduler batching"}, view)
+    hits = LexicalFuzzyProvider(experiences, schema).recall("Qwen 14B scheduler batching", view)
 
     assert [hit.experience_id for hit in hits[:2]] == [qwen14.id, qwen8.id]

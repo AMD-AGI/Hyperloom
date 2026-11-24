@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 
-from hyperloom_kb.query_view import RepeatAnnotations, RetrievalCapability
+from hyperloom_kb.query_view import RetrievalCapability
 from hyperloom_kb.remote import QuerySignal
 from hyperloom_kb.retrieval import (
     CandidateHit,
@@ -65,8 +65,6 @@ class MatchContribution:
 class WeightedGroupResult:
     group_key: str
     score: float
-    annotations: RepeatAnnotations
-    member_ids: tuple[str, ...]
     representative_ids: tuple[str, ...]
     contributions: tuple[MatchContribution, ...]
 
@@ -109,7 +107,7 @@ class QueryExecutor:
             if signal.field:
                 hits = self._service.exact({signal.field: signal.value})
             else:
-                hits = self._fuzzy.recall({"text": signal.text}, self._service.view)
+                hits = self._fuzzy.recall(signal.text, self._service.view)
             adjusted: list[CandidateHit] = []
             for hit in hits:
                 contribution = self._contribution(signal_id, signal, hit)
@@ -166,8 +164,6 @@ class QueryExecutor:
                 WeightedGroupResult(
                     group.group_key,
                     sum(per_signal.values()),
-                    group.annotations,
-                    group.member_ids,
                     (best.experience_id,),
                     tuple(
                         sorted(
