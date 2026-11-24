@@ -63,7 +63,21 @@ def test_the_focuses_are_the_sections_of_the_partition_in_lane_order(tmp_path):
 
     assert read_lane_focuses(tmp_path) == [
         "Fuse the two passes; cases m64 and m128.",
-        "Specialize the dispatch for m4096.\nEvidence: report.md section 2.",
+        "large shapes\nSpecialize the dispatch for m4096.\nEvidence: report.md section 2.",
+    ]
+
+
+def test_a_title_on_the_lanes_heading_line_is_part_of_its_focus(tmp_path):
+    """An Analysis names a lane, and the cases it scores, on the heading line: the session it is for has to see that."""
+    (tmp_path / LANE_PARTITION_FILE).write_text(
+        "## Lane 1: decode regime, M <= 64 (scored: m1, m16, m64)\nOne pass over the weight.\n\n"
+        "## Lane 2 \u2014 large M (scored: m4096)\n\n"
+        "## Lane 3:\n"
+    )
+
+    assert read_lane_focuses(tmp_path) == [
+        "decode regime, M <= 64 (scored: m1, m16, m64)\nOne pass over the weight.",
+        "large M (scored: m4096)",
     ]
 
 

@@ -113,25 +113,29 @@ class AnalysisBundle:
         )
 
 
-_LANE_HEADING = re.compile(r"^#{1,6}\s*lane\s+\d+\b.*$", re.IGNORECASE | re.MULTILINE)
+_LANE_HEADING = re.compile(r"^#{1,6}\s*lane\s+\d+\b(?P<title>.*)$", re.IGNORECASE | re.MULTILINE)
+# What separates a lane's number from a title written on the same heading line.
+_LANE_TITLE_SEPARATORS = " \t:-\u2013\u2014"
 
 
 def read_lane_focuses(bundle_root: Path) -> list[str]:
     """The focuses a published Analysis divided its evidence into, in lane order; empty when it divided nothing.
 
-    A focus is the text under one ``## Lane N`` heading of the bundle's partition file. The loop reads nothing else
-    of it: what a focus says is between the Analysis Agent and the session that works on it.
+    A focus is what one ``## Lane N`` section of the bundle's partition file says: the title on its heading line,
+    where the Analysis names the lane and often the cases it scores, and the text under it. The loop reads nothing
+    else of it: what a focus says is between the Analysis Agent and the session that works on it.
     """
     try:
         text = (bundle_root / LANE_PARTITION_FILE).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
     headings = list(_LANE_HEADING.finditer(text))
-    sections = [
-        text[heading.end() : following.start() if following is not None else len(text)].strip()
-        for heading, following in zip(headings, [*headings[1:], None])
-    ]
-    return [section for section in sections if section]
+    focuses = []
+    for heading, following in zip(headings, [*headings[1:], None]):
+        title = heading.group("title").lstrip(_LANE_TITLE_SEPARATORS).rstrip()
+        body = text[heading.end() : following.start() if following is not None else len(text)].strip()
+        focuses.append("\n".join(part for part in (title, body) if part))
+    return [focus for focus in focuses if focus]
 
 
 class AnalysisBundleError(RuntimeError):
