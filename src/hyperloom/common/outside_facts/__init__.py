@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from hyperloom.common.outside_facts.component_layout import ComponentLayoutSpec
+from hyperloom.common.outside_facts.kernel_knob import KernelKnobSpec
 from hyperloom.common.outside_facts.rule_pack import default_pack
 
 __all__ = [
@@ -83,6 +84,7 @@ __all__ = [
     "KFD_RENDER_MINOR_KEY",
     "KFD_ROOT",
     "KFD_VRAM_PREFIX",
+    "LLAMACPP_BACKEND_OPS",
     "PID_NAMESPACE_LINK",
     "PY_IMPORT_ERROR",
     "PY_MODULE_NOT_FOUND_ERROR",
@@ -105,6 +107,7 @@ __all__ = [
     "TUNED_SPLITK_COLUMN",
     "UPSTREAM_PR_REPOS",
     "component_layouts",
+    "kernel_knobs",
     "spaced",
 ]
 
@@ -128,6 +131,27 @@ def component_layouts() -> Mapping[str, ComponentLayoutSpec]:
         }
     )
 
+
+def kernel_knobs() -> Mapping[str, KernelKnobSpec]:
+    """Every kernel knob the pack describes, in its order, by the name a sweep is asked for it by."""
+    return MappingProxyType(_PACK.kernel_knobs())
+
+
+#: How llama.cpp's test-backend-ops is driven and read (the pack's ``llamacpp_backend_ops_bench``), by role.
+LLAMACPP_BACKEND_OPS: Mapping[str, str] = MappingProxyType(
+    _PACK.names(
+        "llamacpp_backend_ops_bench",
+        "executable",
+        "mode",
+        "backend",
+        "enum_header",
+        "op_enum",
+        "type_enum",
+        "op_prefix",
+        "type_prefix",
+        "activation_type",
+    )
+)
 
 _meta = _PACK.names("aiter_meta_dir", "variable", "wheel_dir", "marker_dir", "install_mode_file", "develop_mode")
 AITER_META_DIR_ENV = _meta["variable"]
