@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import bootstrap as cb
+from hyperloom.inference_optimizer.cli import _reset_state_file, bootstrap as cb
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -74,20 +74,16 @@ def test_a_state_written_before_the_switch_is_refused(tmp_path):
 
 
 def test_a_reset_session_still_resumes(tmp_path, monkeypatch, native_benchmark):
-    import hyperloom.inference_optimizer.cli as optimizer_cli
-
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
-    optimizer_cli._reset_state_file(tmp_path, _seed_and_reload(tmp_path))
+    _reset_state_file(tmp_path, _seed_and_reload(tmp_path))
     state = SharedState.load_or_init(tmp_path)
     assert (state.baseline_tput, state.agentx_backend) == (0.0, "inferencex")
     assert cb.measurement_state_is_stale(state) == ""
 
 
 def test_a_reset_session_keeps_the_prompt_dataset_it_recorded(tmp_path, monkeypatch):
-    import hyperloom.inference_optimizer.cli as optimizer_cli
-
     monkeypatch.setenv("DATASET_PATH", "/data/prompts.jsonl")
-    optimizer_cli._reset_state_file(tmp_path, _seed_and_reload(tmp_path))
+    _reset_state_file(tmp_path, _seed_and_reload(tmp_path))
     assert SharedState.load_or_init(tmp_path).prompt_dataset == "/data/prompts.jsonl"
 
 
