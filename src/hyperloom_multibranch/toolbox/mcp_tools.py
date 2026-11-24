@@ -6,7 +6,8 @@
 :func:`register_specialist_tools` puts the specialist-scoped tools on a :class:`~hyperloom.hosted.mcp_server.McpServer`
 and :class:`McpSpecialistTokens` issues and revokes the token each specialist gets. Every handler takes the branch from the token and never
 from the arguments, so a specialist submits, cancels, claims, logs and reads its test results for its own branch
-only; the blackboard's search and record reads are shared across branches, as the blackboard contract has them:
+only, but for the tests every branch reads (a profile, a baseline of the session: :func:`_session_wide`); the
+blackboard's search and record reads are shared across branches, as the blackboard contract has them:
 
 * ``submit_test``, ``test_result``, ``cancel_test`` and ``queue_state`` go through the toolbox interface;
 * ``wait_test`` blocks on one test of the branch until its record says it is over or the wait runs out, and then
@@ -185,7 +186,10 @@ _ANALYSIS_BLURBS = {
     UPSTREAM_PR_TOOL: "search upstream pull requests",
 }
 _TEST_RESULT_GUIDE = (
-    "The state and result of one test this branch submitted, or of any branch's profile test. An AgentX test's "
+    "The state and result of one test this branch submitted, of any branch's profile test, or of a baseline test "
+    "of the session (blackboard_search for baseline names them). timing_lines are the last lines each server log of "
+    "the test timed its requests with, each led by the log's path below output_dir; a server that logs none has "
+    "none. An AgentX test's "
     "request_classes has an entry for each measured round: how many requests the client marked failed, as "
     "failed_transport (the server did not serve it) and failed_no_content (it answered and the client found nothing in "
     "the answer; failed_empty and failed_short split these by output tokens when the export says, else null with the "
@@ -408,20 +412,24 @@ async def on_home_loop(home: asyncio.AbstractEventLoop | None, call: Awaitable[T
     return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(call, home))  # type: ignore[arg-type]
 
 
-async def _own_record(
-    blackboards: BlackboardFor, ctx: CallContext, request_id: str, *, profiles_shared: bool = False
-) -> Any:
-    """The blackboard's record of ``request_id``, when the caller's branch asked for it.
+def _session_wide(request: MeasuredRequest) -> bool:
+    """Whether every branch reads the test ``request`` asks for. A PROFILE test: ``submit_test`` refuses a second
+    profile of a commit with the id of the first (``profile_exists``), which may be another branch's, and the caller
+    waits on it. A BASELINE test, which only the session submits: it measured the root every branch starts from, so
+    its result is what a branch with no test of its own yet has of the server's timing."""
+    return request.kind is TestKind.PROFILE or request.purpose is Purpose.BASELINE
 
-    With ``profiles_shared`` a PROFILE test of any branch is also readable: ``submit_test`` refuses a second profile
-    of a commit with the id of the first (``profile_exists``), which may be another branch's, and the caller waits on
-    it. Taking a test back stays with its own branch.
-    """
+
+async def _own_record(
+    blackboards: BlackboardFor, ctx: CallContext, request_id: str, *, session_wide: bool = False
+) -> Any:
+    """The blackboard's record of ``request_id``, when the caller's branch asked for it, or, with ``session_wide``,
+    when every branch reads it (:func:`_session_wide`). Taking a test back stays with its own branch."""
     try:
         record = await blackboards(ctx.principal.branch).record(request_id)
     except BlackboardError as exc:
         raise ToolError(f"{type(exc).__name__}: {exc}") from exc
-    shared = profiles_shared and record.request.kind is TestKind.PROFILE
+    shared = session_wide and _session_wide(record.request)
     if record.request.branch != ctx.principal.branch and not shared:
         raise ToolForbidden("a specialist reads the tests of its own branch only")
     return record
@@ -529,7 +537,7 @@ def _result_document(request_id: str, record: Any) -> dict[str, Any]:
 def _test_result(blackboards: BlackboardFor) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         request_id = arguments["request_id"]
-        return _result_document(request_id, await _own_record(blackboards, ctx, request_id, profiles_shared=True))
+        return _result_document(request_id, await _own_record(blackboards, ctx, request_id, session_wide=True))
 
     return handle
 
@@ -576,10 +584,10 @@ def _wait_test(
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         request_id = arguments["request_id"]
         budget, started = wait_budget(arguments.get("wait_seconds")), time.monotonic()
-        record = await _own_record(blackboards, ctx, request_id, profiles_shared=True)
+        record = await _own_record(blackboards, ctx, request_id, session_wide=True)
         while not _is_over(record) and (left := budget - (time.monotonic() - started)) > 0:
             await asyncio.sleep(min(poll_seconds, left))
-            record = await _own_record(blackboards, ctx, request_id, profiles_shared=True)
+            record = await _own_record(blackboards, ctx, request_id, session_wide=True)
         if _is_over(record):
             return _result_document(request_id, record)
         progress = await on_home_loop(home, toolbox.progress(request_id))
@@ -837,7 +845,8 @@ def _register_test_queries(
     server.register(
         "wait_test",
         description=(
-            "How to wait for a test of this branch, or for any branch's profile test: returns as soon as its result "
+            "How to wait for a test of this branch, for any branch's profile test or for a baseline test of the "
+            "session: returns as soon as its result "
             "lands, else after wait_seconds with the test's progress; call it again to keep waiting. A test in state "
             "pending_build is waiting for the native builds its change needs (progress.builds, each with its "
             "eta_seconds), not stuck."

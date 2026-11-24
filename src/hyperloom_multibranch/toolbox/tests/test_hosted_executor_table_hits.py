@@ -10,26 +10,23 @@ output holds aiter's hit lines. What is read from the result is what the blackbo
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
-from hyperloom.contracts.measurement import TABLE_EXERCISED, TABLE_NOT_OBSERVABLE, TestResult, Validity
+from hyperloom.contracts.measurement import TABLE_EXERCISED, TABLE_NOT_OBSERVABLE, Validity
 from hyperloom.contracts.recipe import KernelKind, Recipe
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.tests.hosted_fixtures import point_yaml
-from hyperloom_multibranch.contracts.toolbox import WorkloadKind
-from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
 from hyperloom_multibranch.toolbox.mcp_tools import jsonable
-from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, build, req
+from hyperloom_multibranch.toolbox.tests.helpers import IMAGE
 from hyperloom_multibranch.toolbox.tests.kernel_rows import BETA_NEW, ENV, csv_text
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import (  # noqa: F401  (rig is a fixture)
     CANDIDATE,
     OK,
-    POLICY,
     PointPlanner,
     ScriptedBackend,
     rig,
+    stored_and_logged,
 )
 from hyperloom_multibranch.toolbox.tests.test_table_hits import ROW_1_34816, ROW_16_5120, MERGED, a8w8_hit
 
@@ -50,21 +47,7 @@ async def _run(tmp_path: Path, r, mode: str, *, with_table: bool, log: str | Non
     if log is not None:
         scripted.stamps = {SERVER_LOG: log}
     planner = PointPlanner(point, _environment(tmp_path, with_table=with_table))
-    tb = build(
-        tmp_path,
-        executor=HostedExecutor(scripted, tmp_path / "session"),  # type: ignore[arg-type]
-        planner=planner,
-        policy=POLICY,
-        workload_kind=WorkloadKind.AGENTX,
-    )
-    await tb.toolbox.start()
-    request_id = await tb.toolbox.submit_test(req())
-    await asyncio.wait_for(tb.toolbox.drain(), 60)
-    record = await tb.blackboard.record(request_id)
-    assert record.result is not None
-    entry = tb.toolbox._log.get(request_id)
-    assert entry is not None and entry.outcome is not None
-    return record.result, TestResult.from_document(entry.outcome["result"])
+    return await stored_and_logged(tmp_path, scripted, planner)
 
 
 async def test_a_test_whose_server_hit_rows_of_its_table_carries_the_count_and_the_finding(tmp_path: Path, rig) -> None:

@@ -95,6 +95,7 @@ from hyperloom_multibranch.toolbox import long_context
 from hyperloom_multibranch.toolbox.merge_smoke import MERGE_SMOKE, SMOKE_NOT_RUN, MergeSmoke, SmokeNotRun
 from hyperloom_multibranch.toolbox.short_prompts import consistency_of, rederive
 from hyperloom_multibranch.toolbox.table_hits import read_table_hits, runtime_findings
+from hyperloom_multibranch.toolbox.timing_lines import read_test_timing_lines
 from inference_suite import StagingError, normalised_manifest
 
 __all__ = [
@@ -228,6 +229,7 @@ class HostedExecutor:
             return self._timed_out(request_id, started, expired)
         result = self._result(request, accepted, call, outcome, _Span(started, self._clock()))
         result = await self._with_table_hits(result, accepted, call)
+        result = await self._with_timing_lines(result, accepted, call)
         result = await self._with_short_prompts(result, accepted, call)
         result = await self._with_long_context(result, accepted, call)
         return await self._with_request_classes(result, request, outcome, call)
@@ -422,6 +424,14 @@ class HostedExecutor:
             return result
         hits = await asyncio.to_thread(read_table_hits, accepted.environment, accepted.points, Path(call.output_dir))
         return replace(result, table_hits=hits, runtime_findings=runtime_findings(hits))
+
+    async def _with_timing_lines(self, result: TestResult, accepted: AcceptedMeasurement, call: TestCall) -> TestResult:
+        """``result`` with the last lines the test's server logs time its requests with, which its specialist cannot
+        open the logs for; a failed test has none. Read in a worker thread, as the table hits are."""
+        if result.validity is not Validity.SUCCEEDED:
+            return result
+        lines = await asyncio.to_thread(read_test_timing_lines, accepted.points, Path(call.output_dir))
+        return replace(result, timing_lines=lines)
 
     async def _with_short_prompts(
         self, result: TestResult, accepted: AcceptedMeasurement, call: TestCall
