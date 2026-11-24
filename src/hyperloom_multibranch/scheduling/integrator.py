@@ -60,6 +60,8 @@ When EXPLORE ends, :meth:`Integrator.finish_round` ends the rounds: no merge tes
 way takes back each merge test the rule gate has not asked a confirm for. A merge waiting for its confirm goes on to
 its end, so a gain measured once already still reaches the integration head FINAL reads, and of two that end the
 round merges the one it would have merged before; the caller says how long it waits for the tests and for the set.
+When the wait for the tests runs out, :meth:`Integrator.withdraw_unfinished` takes back those still running, so the
+round concludes the merges whose tests ended.
 
 A caller with no time left for that cancels the round instead, and no regression set runs after that. So a round that
 holds a merge that may be merged while its other tests run puts the regression set to it as its test ends, and a
@@ -1041,8 +1043,9 @@ class Integrator:
 
         No merge test starts from now on. The round takes back each merge test the gate has not asked a confirm for,
         as a cancelled round does, and goes on with those waiting for their confirm: their gain was measured once
-        already, and the integration head FINAL reads lacks it unless they end. The caller bounds this wait, longer with
-        no merge test left (:meth:`unfinished`), and cancels the round and awaits :meth:`abandon` after it either way.
+        already, and the integration head FINAL reads lacks it unless they end. The caller bounds this wait, longer once
+        no merge test is left (:meth:`withdraw_unfinished`), and cancels the round and awaits :meth:`abandon` after it
+        either way.
         """
 
         self._ended = True
@@ -1056,6 +1059,22 @@ class Integrator:
         """The candidates whose merge tests the round under way has not ended."""
 
         return tuple(candidate for candidate, merge in self._round.items() if not merge.task.done())
+
+    async def withdraw_unfinished(self) -> bool:
+        """Whether the round under way holds a merge that may be merged; if so its merge tests still running are
+        taken back, confirms included, and the round goes on to conclude what it holds. Otherwise nothing changes."""
+
+        tasks = [merge.task for merge in self._round.values()]
+        if not _ended_mergeable(tasks):
+            return False
+        left = {merge.request_id for merge in self._round.values() if not merge.task.done()}
+        # Cancelled first: a task that saw its confirm withdrawn would record the merge test as failed.
+        for task in tasks:
+            task.cancel()
+        for record in (await self._blackboard.snapshot()).records:
+            if record.request.retest_of in left:
+                await self._tests.withdraw(record.request_id)
+        return True
 
     async def abandon(self) -> None:
         """After the round was cancelled: take back every integration test still running, the gate's retests

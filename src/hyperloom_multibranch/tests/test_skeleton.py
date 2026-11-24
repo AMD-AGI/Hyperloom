@@ -1565,12 +1565,15 @@ async def test_a_judge_soft_stop_ends_explore_early_and_still_runs_final(tmp_pat
     assert sorted(stage.sessions.stopped) == ["b01", "b02"]
 
 
-def _merge_confirm_at_the_soft_stop(stage: Stage, seconds: float) -> None:
+def _merge_confirm_at_the_soft_stop(stage: Stage, seconds: float, hanging: str = "") -> None:
     """``b01`` commits ``c1``; the judge stops the session once the confirm of ``c1``'s merge test runs, and that
-    confirm runs ``seconds`` of virtual time more, so EXPLORE ends while the merge waits for it. Test doubles for
+    confirm runs ``seconds`` of virtual time more, so EXPLORE ends while the merge waits for it. With ``hanging``, a
+    tag, the judge also waits for the confirm of the merge carrying it, which never ends. Test doubles for
     a confirm in flight at the end of EXPLORE, not placeholders."""
 
-    running, stopping = asyncio.Event(), asyncio.Event()
+    running, stopping, hung = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    if not hanging:
+        hung.set()
 
     class ConfirmingToolbox(LeasingToolbox):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -1579,6 +1582,9 @@ def _merge_confirm_at_the_soft_stop(stage: Stage, seconds: float) -> None:
 
             async def run(job: TestJob) -> TestResult:
                 if job.request.branch_id == INTEGRATION_BRANCH and job.request.purpose is Purpose.CONFIRM:
+                    if hanging and hanging in job.request.delta.config.server_args:
+                        hung.set()
+                        await asyncio.Event().wait()
                     running.set()
                     await stopping.wait()
                     await stage.time.sleep(seconds)
@@ -1590,6 +1596,7 @@ def _merge_confirm_at_the_soft_stop(stage: Stage, seconds: float) -> None:
         async def __call__(self, system: str, user: str) -> CompletionReply:
             if self.calls:
                 await running.wait()
+                await hung.wait()
                 stopping.set()
             return await super().__call__(system, user)
 
@@ -1676,6 +1683,34 @@ async def test_a_merge_confirmed_in_the_wait_whose_regression_set_outlasts_it_st
     assert recipe_tags(await stage.repo.read_recipe(head)) == {"c1"}
     waited, candidates = _from_soft_stop_to_final(stage)
     assert head in candidates and ONE_TEST_SECONDS < waited < 2 * ONE_TEST_SECONDS
+
+
+async def test_a_merge_confirmed_in_the_wait_lands_though_another_merge_test_of_its_round_outlasts_the_wait(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    stage = _stage(tmp_path)
+    _merge_confirm_at_the_soft_stop(stage, ONE_TEST_SECONDS / 2, hanging="c2")
+    _regression_set_taking(stage, lambda: stage.time.sleep(0.75 * ONE_TEST_SECONDS))
+    stage.scripts = SCRIPTS
+    stage.measured = {**CURVES, frozenset({"c2"}): {MAIN_POINT: 1050.0, CONC: 1050.0}}
+
+    with caplog.at_level(logging.WARNING, logger=explore.__name__):
+        outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.JUDGE_STOPPED, "")
+    head = await stage.repo.head(INTEGRATION_BRANCH)
+    assert recipe_tags(await stage.repo.read_recipe(head)) == {"c1"}
+    waited, candidates = _from_soft_stop_to_final(stage)
+    assert head in candidates and ONE_TEST_SECONDS < waited < 2 * ONE_TEST_SECONDS
+    [warned] = [record.getMessage() for record in caplog.records if record.name == explore.__name__]
+    assert await stage.repo.head("b02") in warned and await stage.repo.head("b01") not in warned
+    confirms = [
+        request_id
+        for request_id, test in stage.toolbox.requests.items()
+        if test.branch_id == INTEGRATION_BRANCH and test.purpose is Purpose.CONFIRM
+    ]
+    assert len(confirms) == len(SCRIPTS) and len(set(confirms) & set(stage.toolbox.withdrawn)) == 1
+    assert EXPLORATION_ENDED not in stage.toolbox.withdrawn.values()
 
 
 async def test_a_regression_set_that_hangs_after_the_confirm_is_cancelled_at_the_deadline_and_final_runs(
