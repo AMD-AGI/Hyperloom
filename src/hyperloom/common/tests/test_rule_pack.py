@@ -170,7 +170,13 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "TUNABLEOP_TUNING_ENV": "PYTORCH_TUNABLEOP_TUNING",
     "TUNED_LIBTYPE_COLUMN": "libtype",
     "TUNED_SPLITK_COLUMN": "splitK",
-    "UPSTREAM_PR_REPOS": ["sgl-project/sglang", "vllm-project/vllm", "ROCm/aiter", "pytorch/pytorch"],
+    "UPSTREAM_PR_REPOS": [
+        "sgl-project/sglang",
+        "vllm-project/vllm",
+        "ROCm/aiter",
+        "pytorch/pytorch",
+        "ggml-org/llama.cpp",
+    ],
 }
 
 Facts = dict[str, Any]
