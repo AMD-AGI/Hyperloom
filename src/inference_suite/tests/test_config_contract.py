@@ -145,9 +145,9 @@ _SCRIPT = ScriptableWorkload(params={"XDIT_NUM_STEPS": 28, "XDIT_GUIDANCE_SCALE"
 
 
 def test_a_fixed_workload_round_trips_its_prompt_dataset_and_a_random_one_writes_none():
-    dataset = replace(_FIXED, dataset=PromptDataset("/data/prompts.jsonl", 40))
+    dataset = replace(_FIXED, dataset=PromptDataset("/data/prompts.jsonl"))
     document = json.loads(json.dumps(dataset.to_document()))
-    assert document["dataset"] == {"path": "/data/prompts.jsonl", "max_prompts": 40}
+    assert document["dataset"] == {"path": "/data/prompts.jsonl"}
     assert FixedWorkload.from_document(document) == dataset
     assert "dataset" not in _FIXED.to_document()
     assert FixedWorkload.from_document(_FIXED.to_document()) == _FIXED

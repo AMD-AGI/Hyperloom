@@ -171,8 +171,7 @@ The prompts of a fixed workload have no flag; they are read from the environment
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATASET_PATH` | Unset (InferenceX's random prompts of `ISL` tokens) | Absolute path of a JSONL file of real prompts every fixed round sends instead, each line a `prompt` string or a `turns` list whose first turn is sent. A path that is not absolute refuses the round as `config_invalid`, and so does a file the round cannot read or a kept line that holds no prompt: the round reads the file before it starts its server. A `hyperloom-multibranch run` test whose runner bubblewrap confines reads it only in a tree its sandbox shows, such as the model directory or the Hugging Face hub cache. See [InferenceSuite benchmark rounds](inference-suite.md#launch-layers). |
-| `DATASET_MAX_PROMPTS` | Unset (every line) | A positive integer: only the first that many lines of `DATASET_PATH` are sent, and a point that sets no `NUM_PROMPTS` sends at least that many requests, so each kept prompt is sent. Without `DATASET_PATH` it changes nothing. |
+| `DATASET_PATH` | Unset (InferenceX's random prompts of `ISL` tokens) | Absolute path of a JSONL file of real prompts every fixed round sends instead, each line a `prompt` string or a `turns` list whose first turn is sent. A path that is not absolute refuses the round as `config_invalid`, and so does a file the round cannot read or a line that holds no prompt: the round reads the file before it starts its server. A `hyperloom-multibranch run` test whose runner bubblewrap confines reads it only in a tree its sandbox shows, such as the model directory or the Hugging Face hub cache. See [InferenceSuite benchmark rounds](inference-suite.md#launch-layers). |
 
 ---
 

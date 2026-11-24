@@ -88,14 +88,14 @@ def server() -> Iterator[tuple[FakeServer, str]]:
 @pytest.fixture
 def dataset(tmp_path: Path) -> Path:
     path = tmp_path / "prompts.jsonl"
-    rows = [{"prompt": "alpha"}, {"turns": ["beta", "second turn"]}, {"prompt": "gamma"}, {"prompt": "unused"}]
+    rows = [{"prompt": "alpha"}, {"turns": ["beta", "second turn"]}, {"prompt": "gamma"}]
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
     return path
 
 
 def _workload(dataset: Path, **changes: object):
     return replace(_FIXED, concurrency=2, osl=64, num_prompts=6, num_warmups=2, **changes,
-                   dataset=PromptDataset(str(dataset), 3))  # fmt: skip
+                   dataset=PromptDataset(str(dataset)))  # fmt: skip
 
 
 def _run_client(base_url: str, dataset: Path, result: Path) -> int:
@@ -150,7 +150,7 @@ def test_a_line_without_a_prompt_is_refused(tmp_path: Path, line: str):
     path = tmp_path / "bad.jsonl"
     path.write_text(line + "\n", encoding="utf-8")
     with pytest.raises(dataset_client.DatasetError, match="bad.jsonl:1"):
-        dataset_client.read_prompts(path, None)
+        dataset_client.read_prompts(path)
 
 
 def test_a_prompt_holding_a_unicode_line_separator_is_one_line_of_the_file(tmp_path: Path):
@@ -158,7 +158,7 @@ def test_a_prompt_holding_a_unicode_line_separator_is_one_line_of_the_file(tmp_p
     prompts = ["one\u2028prompt", "another\x85one"]
     lines = [json.dumps({"prompt": prompt}, ensure_ascii=False) for prompt in prompts]
     path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8", newline="")
-    assert dataset_client.read_prompts(path, None) == prompts
+    assert dataset_client.read_prompts(path) == prompts
 
 
 def test_a_dataset_the_client_can_send_and_a_workload_without_one_are_not_refused(dataset: Path):

@@ -91,7 +91,7 @@ from inference_suite.contracts import (
 from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 
 from ..gpu._gpu_pin import ROCR_AUTOFILL_ENV
-from ..workload._workload_envs import DATASET_MAX_PROMPTS_ENV, DATASET_PATH_ENV, QUALITY_REF_ENVS
+from ..workload._workload_envs import DATASET_PATH_ENV, QUALITY_REF_ENVS
 from .._profile_setup import (
     _DELAY_ITERATIONS,
     _MAX_ITERATIONS,
@@ -159,7 +159,6 @@ _CONSUMED_ENV = frozenset(
         _PROFILE_ENV,
         _PROFILE_BODY_ENV,
         DATASET_PATH_ENV,
-        DATASET_MAX_PROMPTS_ENV,
     }
 )
 
@@ -376,6 +375,7 @@ def fixed_workload(document: Mapping[str, object]) -> FixedWorkload:
 
 
 def _fixed(point: _Point) -> FixedWorkload:
+    dataset = point.text(DATASET_PATH_ENV)
     return FixedWorkload(
         concurrency=point.integer(ENV_CONC),
         isl=point.integer(ENV_ISL),
@@ -387,16 +387,8 @@ def _fixed(point: _Point) -> FixedWorkload:
         warmup_seed=WARMUP_SEED,
         tokenizer_mode=point.text(_TOKENIZER_MODE_ENV) or _CLIENT_TOKENIZER_MODE,
         trust_remote_code=point.flag(_CLIENT_TRUST_ENV, default=False),
-        dataset=_dataset(point),
+        dataset=None if dataset is None else PromptDataset(dataset),
     )
-
-
-def _dataset(point: _Point) -> PromptDataset | None:
-    path = point.text(DATASET_PATH_ENV)
-    if path is None:
-        return None
-    max_prompts = None if point.text(DATASET_MAX_PROMPTS_ENV) is None else point.integer(DATASET_MAX_PROMPTS_ENV)
-    return PromptDataset(path, max_prompts)
 
 
 def _eval(point: _Point, enabled: bool) -> EvalConfig:

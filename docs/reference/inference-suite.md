@@ -173,18 +173,16 @@ file whose lines each hold a `prompt` string or a `turns` list (the first turn i
 sent), sends those prompts instead through `inference_suite.load.dataset_client`:
 one user message each to `/v1/chat/completions`, rendered by the server's chat
 template, at temperature 0 with `max_tokens` the `OSL` and EOS honoured.
-`DATASET_MAX_PROMPTS` keeps the file's first lines only. Each pass sends its prompt
-count from those lines, shuffled by its seed and cycled, so every arm sends the same
-requests. That count is `NUM_PROMPTS`; a point that sets none sends the round's
-per-concurrency default, raised to `DATASET_MAX_PROMPTS` when that is larger, so every
-kept prompt is sent. With no `DATASET_MAX_PROMPTS` the default can cover only part of
-the file: set `NUM_PROMPTS` or the cap to send all of it. A concurrency sweep sets its
-own count per rung. Token counts are the server's `usage`; a request without one fails. The
+Each pass sends its prompt count from the file's lines, shuffled by its seed and
+cycled, so every arm sends the same requests. That count is `NUM_PROMPTS`; a point
+that sets none sends the round's per-concurrency default, which can cover only part
+of the file: set `NUM_PROMPTS` to the file's line count to send all of it, and pass a
+shorter file to send fewer. A concurrency sweep sets its own count per rung. Token counts are the server's `usage`; a request without one fails. The
 client saves the keys a fixed round reads in `client/inferencex_result.json`.
 Exported in the environment of `hyperloom optimize` or
-`hyperloom-multibranch run`, both names reach every rendered point. The file is read
+`hyperloom-multibranch run`, the name reaches every rendered point. The file is read
 where the round runs, first by the round before it starts its server: a file it
-cannot read, or a kept line that holds no prompt, fails the round as
+cannot read, or a line that holds no prompt, fails the round as
 `config_invalid`. A confined runner of a `hyperloom-multibranch run` test reads it
 only in a tree its sandbox shows, such as the model directory or the Hugging Face
 hub cache.

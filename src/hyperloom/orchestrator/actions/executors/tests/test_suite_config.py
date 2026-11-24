@@ -229,11 +229,11 @@ def test_the_fixed_workload_of_a_point_is_the_one_its_round_sends() -> None:
 
 
 def test_a_point_naming_a_prompt_dataset_sends_its_prompts_and_keeps_the_names_off_the_server() -> None:
-    point = _point("vllm", DATASET_PATH="/data/prompts.jsonl", DATASET_MAX_PROMPTS="40")
+    point = _point("vllm", DATASET_PATH="/data/prompts.jsonl")
     config = suite_config(point, _base("vllm"), _settings())
 
-    assert config.fixed.dataset == PromptDataset("/data/prompts.jsonl", 40)
-    assert not {"DATASET_PATH", "DATASET_MAX_PROMPTS"} & set(config.server.user.env_set)
+    assert config.fixed.dataset == PromptDataset("/data/prompts.jsonl")
+    assert "DATASET_PATH" not in config.server.user.env_set
     assert fixed_workload(_point("vllm")).dataset is None
 
 
@@ -242,13 +242,12 @@ def test_a_prompt_dataset_the_operator_exports_reaches_the_materialized_point(tm
     base = freeze_base(session, _base("sglang"))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session))
     monkeypatch.setenv("DATASET_PATH", "/data/prompts.jsonl")
-    monkeypatch.setenv("DATASET_MAX_PROMPTS", "40")
     source = tmp_path / "recipe.yaml"
     source.write_text(yaml.safe_dump(_point("sglang")), encoding="utf-8")
     point = materialize_config_with_envs(source, tmp_path / "point", target=BenchmarkTarget(model_path=_MODEL))
 
     config = suite_config(yaml.safe_load(point.read_text(encoding="utf-8")), base, _settings())
-    assert config.fixed.dataset == PromptDataset("/data/prompts.jsonl", 40)
+    assert config.fixed.dataset == PromptDataset("/data/prompts.jsonl")
 
 
 def test_a_server_phase_point_boots_the_server_and_runs_no_load_or_eval() -> None:

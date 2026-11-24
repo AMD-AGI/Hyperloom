@@ -854,40 +854,6 @@ def test_materialize_profile_window_clamps_to_skill_floor(
     assert "--profiler-config.max_iterations 128" in extra, extra
 
 
-@pytest.mark.parametrize(
-    ("dataset_envs", "num_prompts"),
-    [
-        ({"DATASET_PATH": "/d/prompts.jsonl", "DATASET_MAX_PROMPTS": 39}, 39),
-        ({"DATASET_PATH": "/d/prompts.jsonl", "DATASET_MAX_PROMPTS": 2}, 5),
-        ({"DATASET_PATH": "/d/prompts.jsonl"}, 5),
-        ({"DATASET_PATH": "/d/prompts.jsonl", "DATASET_MAX_PROMPTS": 39, "NUM_PROMPTS": 7}, 7),
-    ],
-)
-def test_a_dataset_round_sends_every_prompt_it_keeps(tmp_path, monkeypatch, dataset_envs, num_prompts):
-    """With no NUM_PROMPTS a round sends the per-concurrency default; a dataset capped to more prompts than that sends
-    each of them, so the cap is never cut short silently. An explicit NUM_PROMPTS still wins."""
-    import yaml
-
-    _clear_workload_env(monkeypatch)
-    for name in ("DATASET_PATH", "DATASET_MAX_PROMPTS", "NUM_PROMPTS"):
-        monkeypatch.delenv(name, raising=False)
-    src = tmp_path / "point.yaml"
-    src.write_text(
-        yaml.safe_dump(
-            {
-                "benchmark": {
-                    "framework": "vllm",
-                    "model": "/m",
-                    "envs": {"CONC": 1, "ISL": 1024, "OSL": 512, **dataset_envs},
-                }
-            }
-        )
-    )
-    out = materialize_benchmark_config(src, tmp_path)
-    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
-    assert int(envs["NUM_PROMPTS"]) == num_prompts
-
-
 # NUM_PROMPTS must cover the steady-state window (profile mode force-overrides caller values).
 def test_materialize_profile_num_prompts_covers_steady_state_window(
     tmp_path,

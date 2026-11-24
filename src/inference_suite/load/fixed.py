@@ -114,7 +114,7 @@ def dataset_refusal(workload: FixedWorkload) -> Stop | None:
     if dataset is None:
         return None
     try:
-        dataset_client.read_prompts(Path(dataset.path), dataset.max_prompts)
+        dataset_client.read_prompts(Path(dataset.path))
     except (OSError, ValueError) as exc:
         return Stop(FailedStep.CONFIG_INVALID, f"{_WHAT} cannot send the prompt dataset {dataset.path}: {exc}")
     return None
@@ -152,8 +152,6 @@ def _dataset_argv(
         "--metric-percentiles",
         ",".join(str(percentile) for percentile in METRIC_PERCENTILES),
     ]
-    if dataset.max_prompts is not None:
-        argv += ["--max-prompts", str(dataset.max_prompts)]
     if client_pass.result is not None:
         argv += ["--result", str(client_pass.result)]
     return tuple(argv)

@@ -345,24 +345,21 @@ class ServerConfig:
 @dataclass(frozen=True)
 class PromptDataset:
     """A JSONL file of real prompts a fixed load sends in place of InferenceX's random tokens, one per line as its
-    ``prompt`` string or the first of its ``turns``; ``max_prompts`` keeps the first that many (``None``: all)."""
+    ``prompt`` string or the first of its ``turns``."""
 
     path: str
-    max_prompts: int | None = None
 
     def __post_init__(self) -> None:
         _FIELDS.text(self.path, "the prompt dataset path")
         if not PurePosixPath(self.path).is_absolute():
             raise ConfigError(f"the prompt dataset path must be absolute, got {self.path!r}")
-        _FIELDS.optional_integer(self.max_prompts, "the prompt dataset max_prompts", minimum=1)
 
     def to_document(self) -> dict[str, object]:
-        return {"path": self.path, "max_prompts": self.max_prompts}
+        return {"path": self.path}
 
     @classmethod
     def from_document(cls, document: object) -> PromptDataset:
-        fields = _FIELDS.known(document, ("path", "max_prompts"), "the prompt dataset")
-        return cls(fields.get("path"), fields.get("max_prompts"))
+        return cls(_FIELDS.known(document, ("path",), "the prompt dataset").get("path"))
 
 
 @dataclass(frozen=True)

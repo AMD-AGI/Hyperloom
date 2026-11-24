@@ -107,10 +107,8 @@ _SGLANG_DISABLE_CUDA_GRAPH_FLAG = "--disable-cuda-graph"
 # renamed in lockstep; drop it once those scripts have moved over.
 QUALITY_REF_ENVS = ("HYPERLOOM_QUALITY_REF", "XDIT_QUALITY_REF")
 _QUALITY_REF_WRITE_ENVS = ("HYPERLOOM_QUALITY_REF_WRITE", "XDIT_QUALITY_REF_WRITE")
-#: The JSONL file of real prompts a fixed round sends in place of InferenceX's random ones, and how many of its first
-#: lines it keeps; a point that sets no path sends random prompts.
+#: The JSONL file of real prompts a fixed round sends in place of InferenceX's random ones.
 DATASET_PATH_ENV = "DATASET_PATH"
-DATASET_MAX_PROMPTS_ENV = "DATASET_MAX_PROMPTS"
 
 
 def _first_env(names: tuple[str, ...]) -> str:
@@ -352,7 +350,7 @@ def _refuse_framework_script_mismatch(bench: dict[str, Any]) -> None:
 
 
 def _pin_workload_shape_envs(envs: dict[str, Any], *, in_session: bool) -> None:
-    for env_key in ("CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "EP", "PORT", DATASET_MAX_PROMPTS_ENV):
+    for env_key in ("CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "EP", "PORT"):
         val = os.environ.get(env_key, "").strip()
         if val:
             envs[env_key] = _coerce_workload_int_env(env_key, val)
@@ -403,15 +401,6 @@ def num_prompts_per_conc(isl: int, osl: int) -> int:
     if seq_cost <= 4096:
         return 5
     return 3 if seq_cost <= 16384 else 2
-
-
-def _default_num_prompts(envs: dict[str, Any], conc: int, isl: int, osl: int) -> int:
-    """The requests a round whose point names no ``NUM_PROMPTS`` sends: :func:`num_prompts_per_conc` per unit of
-    concurrency, raised to a prompt dataset's ``DATASET_MAX_PROMPTS`` so each prompt the cap keeps is sent."""
-    count = conc * num_prompts_per_conc(isl, osl)
-    if envs.get(DATASET_PATH_ENV) and envs.get(DATASET_MAX_PROMPTS_ENV):
-        return max(count, int(envs[DATASET_MAX_PROMPTS_ENV]))
-    return count
 
 
 def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
@@ -466,7 +455,7 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
             # window.
             envs["NUM_PROMPTS"] = profile_num_prompts
         elif "NUM_PROMPTS" not in envs:
-            envs["NUM_PROMPTS"] = _default_num_prompts(envs, conc_val, isl_val, osl_val)
+            envs["NUM_PROMPTS"] = conc_val * num_prompts_per_conc(isl_val, osl_val)
         if "NUM_WARMUPS" not in envs:
             envs["NUM_WARMUPS"] = min(conc_val, 8)
     return _RequestWindow(

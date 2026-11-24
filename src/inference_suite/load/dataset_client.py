@@ -5,8 +5,8 @@
 
 Each prompt is one user message sent to the server's ``/v1/chat/completions``, so the server renders it with the
 model's own chat template, streamed at temperature 0 with ``max_tokens`` the workload's OSL and EOS honoured: a real
-prompt's answer ends where the model ends it. A pass sends ``--num-prompts`` requests from the first
-``--max-prompts`` lines, shuffled by ``--seed`` and cycled, so two arms on one seed send identical requests.
+prompt's answer ends where the model ends it. A pass sends ``--num-prompts`` requests from the file's lines, shuffled
+by ``--seed`` and cycled, so two arms on one seed send identical requests.
 
 Token counts are the server's ``usage``: a request the server reports none for fails, as this client has no
 tokenizer. The saved result carries the keys the fixed load reads from InferenceX's result, computed as
@@ -44,13 +44,10 @@ class DatasetError(ValueError):
     """The dataset file holds no prompt this client can send."""
 
 
-def read_prompts(path: Path, max_prompts: int | None) -> list[str]:
-    """The prompts of the first ``max_prompts`` lines of the JSONL file at ``path`` (all when ``None``): each line's
-    ``prompt`` string, else the first of its ``turns``."""
+def read_prompts(path: Path) -> list[str]:
+    """The prompts of the JSONL file at ``path``: each line's ``prompt`` string, else the first of its ``turns``."""
     prompts: list[str] = []
     for number, line in enumerate(path.read_text(encoding=_ENCODING).split("\n"), start=1):
-        if max_prompts is not None and len(prompts) == max_prompts:
-            break
         if not line.strip():
             continue
         row = json.loads(line)
@@ -258,7 +255,6 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--served-model-name", required=True)
     parser.add_argument("--dataset", type=Path, required=True)
-    parser.add_argument("--max-prompts", type=int, default=None)
     parser.add_argument("--num-prompts", type=int, required=True)
     parser.add_argument("--max-concurrency", type=int, required=True)
     parser.add_argument("--max-tokens", type=int, required=True)
@@ -289,7 +285,7 @@ def _result(args: argparse.Namespace, sent: Pass, metrics: dict[str, object], ve
 def main(argv: list[str]) -> int:
     args = _parse(argv)
     target = _target(args)
-    prompts = request_order(read_prompts(args.dataset, args.max_prompts), args.num_prompts, args.seed)
+    prompts = request_order(read_prompts(args.dataset), args.num_prompts, args.seed)
     sent = run_requests(target, prompts, args.max_concurrency)
     metrics = summarize(sent.outputs, sent.duration, [float(p) for p in args.metric_percentiles.split(",")])
     verdict = outcome(args.num_prompts, int(metrics["completed"]))
