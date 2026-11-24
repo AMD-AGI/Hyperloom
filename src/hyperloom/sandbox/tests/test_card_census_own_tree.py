@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A test's own process tree may have one holder with memory on a card, and a second only in a launcher's place.
+"""A test's own process tree may have one holder with memory on a card, a second in a launcher's place, and more only
+when each pairs with a DRM file of the test's own on that card's render node.
 
 Each launcher of the test (a process of the test that holds memory and started one that holds its own) has one place,
 for a holder with no more than :data:`LAUNCHER_VRAM` on a card where the launcher holds memory on the render node.
@@ -433,3 +434,43 @@ def test_each_holder_is_paired_with_a_file_of_its_own_whichever_file_it_would_ta
     own = OwnProcesses(frozenset({1100}), procfs=tree.procfs)
 
     assert _keys(read_holders([_SPAWN_CARD], kfd=tree.kfd, procfs=tree.procfs), own) == []
+
+
+@pytest.mark.parametrize(
+    "case", ["file-shared-with-a-process-not-the-tests", "file-on-another-cards-node", "negligible-file"]
+)
+def test_a_file_pairs_only_when_all_its_processes_are_the_tests_it_is_on_this_cards_node_and_holds_memory(
+    tmp_path: Path, case: str
+) -> None:
+    """A second holder on the server's card with more than a launcher's memory pairs with none of the test's files: the
+    child's file is also held by a process of the pod outside the test's tree (one process of the test is not enough);
+    the test's other process holds its file on another card's render node only; or that file holds almost no memory
+    (:data:`NEGLIGIBLE_VRAM`), which would otherwise pair with any holder of up to the tolerance."""
+    tree = _pod(tmp_path)
+    tree.process(1100, command=("python3", "-m", "hyperloom.measure.runner"))
+    tree.process(1153, parent=1100, command=("python3", "-m", "server"))
+    tree.process(1336, parent=1100, command=("python3", "-m", "helper"))
+    tree.process(999, command=("sleep", "infinity"))
+    tree.holds(_SERVER_HOST, _SPAWN_CARD, vram=_SERVER_VRAM, queues=4)
+    tree.renders(1153, _SPAWN_CARD, kib=_SERVER_VRAM >> 10)
+    cards = [_SPAWN_CARD]
+    if case == "file-shared-with-a-process-not-the-tests":
+        tree.holds(_CHILD_HOST, _SPAWN_CARD, vram=_CHILD_VRAM, queues=2)
+        tree.renders(1336, _SPAWN_CARD, kib=_CHILD_VRAM >> 10, client="1336-3")
+        tree.renders(999, _SPAWN_CARD, kib=_CHILD_VRAM >> 10, client="1336-3")
+    elif case == "file-on-another-cards-node":
+        tree.holds(_OTHER_HOST, _SPAWN_CARD, vram=_CHILD_VRAM, queues=2)
+        tree.holds(_CHILD_HOST, 1, vram=_CHILD_VRAM, queues=2)
+        tree.renders(1336, 1, kib=_CHILD_VRAM >> 10)
+        cards = [_SPAWN_CARD, 1]
+    else:
+        tree.holds(_OTHER_HOST, _SPAWN_CARD, vram=400 << 20, queues=2)
+        tree.renders(1336, _SPAWN_CARD, kib=(4 << 20) >> 10)
+    own = OwnProcesses(frozenset({1100}), procfs=tree.procfs)
+
+    reading = read_holders(cards, kfd=tree.kfd, procfs=tree.procfs)
+
+    assert reading.method == METHOD_CENSUS_FDINFO
+    assert [i.key for i in reading.intrusions(own, before_test=False) if i.key[0] == "crowded"] == [
+        ("crowded", _SPAWN_CARD)
+    ]

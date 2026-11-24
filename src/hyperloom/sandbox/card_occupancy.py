@@ -27,8 +27,13 @@ memory on it, the test's on that card, and on the card where a launcher of the t
 and started processes that hold their own) holds memory, a second one with no more than a launcher's memory
 (:data:`LAUNCHER_VRAM`); every holder beyond that is foreign, unless every holder of the card pairs one to one, by its
 memory, with an open DRM file of the test that holds memory on that card's render node alone (a server and the processes it
-spawned, each with memory of its own on its one card). What the test's processes report on a card's render node does
-not count as holders of that card: a rank of a server with several reports its whole memory on every render node of the
+spawned, each with memory of its own on its one card). The pairing is by memory alone, and a file of the test that no
+holder pairs with does not count against it: where one of the test's files has no resident holder of its own in the
+kernel's list (a process of the test that has ended or not yet been listed), a holder that is not the test's and holds
+within :data:`UNACCOUNTED_VRAM_TOLERANCE` of that file's memory pairs with it and is read as the test's. That needs a
+file of the test without its holder and a foreign process of nearly the same memory on the same card; where every file's
+own holder is listed, a foreign holder beside them is counted at any size. What the test's processes report on a card's
+render node does not count as holders of that card: a rank of a server with several reports its whole memory on every render node of the
 server, while the kernel lists it on its own card only. A holder with almost no memory (:data:`NEGLIGIBLE_VRAM`) and no queue, such as a launcher that only initialised the
 GPU, is not counted. Memory on a card that no process the container sees
 accounts for is foreign as well (:mod:`hyperloom.sandbox.drm_fdinfo`). Processes that only opened the interface hold
@@ -315,9 +320,7 @@ class CardReading:
         child forked after its parent opened the GPU shares the parent's file and is not listed apart). A rank of a server
         with several reports its whole memory on every render node of the server, so its files are left out: on a card
         that is not its own they would stand for a holder that is someone else's. None when the descriptors were not
-        read."""
-        if self.method != METHOD_CENSUS_FDINFO:
-            return ()
+        read (the reading then has no render clients)."""
         holding = [client for client in self.render_clients if client.vram > NEGLIGIBLE_VRAM]
         files_of: dict[int, int] = {}
         for client in holding:
@@ -326,9 +329,7 @@ class CardReading:
         return tuple(
             client.vram
             for client in holding
-            if client.card == card
-            and client.processes
-            and all(files_of[pid] == 1 and own.owns(pid) for pid, _ in client.processes)
+            if client.card == card and all(files_of[pid] == 1 and own.owns(pid) for pid, _ in client.processes)
         )
 
     def _own_launchers(self, own: OwnProcesses) -> frozenset[int]:

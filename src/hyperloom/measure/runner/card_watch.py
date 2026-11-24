@@ -30,7 +30,9 @@ the result is ``unobservable`` and why: enforcing, it is refused as ``cards_unob
 :data:`REFUSE_UNOBSERVABLE` is set, and kept with a note when it is not; observing, it is kept with a note. In a pid namespace of its
 own the probe counts instead of naming (before the test nothing may hold a card; during it one process may hold memory on
 each, and beside it, on the one card where a launcher of the test's server holds memory, one with no more than a
-launcher's memory, not counting one with a few MiB and no queue; and no memory may be held that no process of this container
+launcher's memory, not counting one with a few MiB and no queue; more than that only when every holder of the card pairs
+one to one, by memory within 512 MiB, with an open DRM file of the test's own processes held on that card's render node
+alone, such as a server and the processes it spawned; and no memory may be held that no process of this container
 accounts for): the result says so in its ``method``.
 """
 
