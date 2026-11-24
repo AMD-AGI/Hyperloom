@@ -14,17 +14,14 @@ Open the Hyperloom workspace in Claude Code or Codex, then paste the following
 prompt into the agent chat, filling in your workload details:
 
 ```{note}
-The prompt includes `install.sh`. This is intentional: the agent runs in its own
-shell process, which does not inherit the environment you sourced during
-installation. The agent must re-source the env files and re-run `install.sh` in
-its own context before launching the optimizer. Because `install.sh` is
-idempotent, the second run is fast and safe.
-```
-
-```{note}
-Paths in the prompts on this page follow the recommended `pip install --target .`
-layout. In a source checkout, replace the `hyperloom/` prefix with
-`src/hyperloom/`.
+- The prompt includes `install.sh`. This is intentional: the agent runs in its own
+  shell process, which does not inherit the environment you sourced during
+  installation. The agent must re-source the env files and re-run `install.sh` in
+  its own context before launching the optimizer. Because `install.sh` is
+  idempotent, the second run is fast and safe.
+- Paths in the prompts on this page follow the recommended `pip install --target .`
+  layout. In a source checkout, replace the `hyperloom/` prefix with
+  `src/hyperloom/`.
 ```
 
 ```text

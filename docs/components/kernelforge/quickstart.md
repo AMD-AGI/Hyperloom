@@ -379,4 +379,4 @@ The loop checks for that file at the next iteration boundary, then finalizes nor
 
 - Read the shipped knowledge base under `src/kernelforge/knowledge/local_wiki/resources/` to understand what the agent knows
 - Browse the [runnable examples](https://github.com/AMD-AGI/Hyperloom/tree/main/src/kernelforge/examples) for task templates and the full driver contract
-- See {doc}`Architecture </kernelforge/conceptual/architecture>` and {doc}`Extending forge </kernelforge/how-to/extending>`
+- See {doc}`Architecture </components/kernelforge/conceptual/architecture>` and {doc}`Extending forge </components/kernelforge/how-to/extending>`

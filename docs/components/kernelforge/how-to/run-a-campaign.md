@@ -14,7 +14,7 @@ the measurement improves.
 ## Prerequisites
 
 - Hyperloom installed (`pip install -e ".[forge]"`; see
-  {doc}`Quickstart </kernelforge/install/quickstart>`).
+  {doc}`Quickstart </components/kernelforge/install/quickstart>`).
 - Agent credentials, for Claude or Codex:
   - Claude: a logged-in `claude` CLI for in-session mode, or
     `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` / a gateway's
@@ -74,7 +74,7 @@ The flags that decide what a campaign is:
 - `--max-hours` — the wall-clock budget (minimum 1.0). The campaign is
   time-driven; it does not stop at a fixed iteration count. It stops when what
   remains can no longer finish a round — measured once its planning has
-  returned, see {doc}`the autonomous loop </kernelforge/how-to/autonomous-loop>` — so the
+  returned, see {doc}`the autonomous loop </components/kernelforge/how-to/autonomous-loop>` — so the
   last hour of a budget buys a narrower round rather than one that is killed
   halfway.
 - `--git-branch` — the development branch the kept commits land on.
@@ -84,7 +84,7 @@ reads the kernel, edits it, compiles, runs the driver, and profiles. The loop
 then runs the driver-owned complete correctness suite and the canonical
 benchmark itself, commits a measured improvement as the new best, and restores
 every other candidate. See the
-{doc}`Optimization loop </kernelforge/conceptual/optimization-loop>` for the gates each
+{doc}`Optimization loop </components/kernelforge/conceptual/optimization-loop>` for the gates each
 change has to clear.
 
 For a multi-file operator or a whole repository (for example AITER), add
@@ -95,13 +95,13 @@ knowledge-base identity; `--kernel` stays the anchor.
 To optimize compiler-emitted ASM, use `--kernel-backend assembly` with the original
 Python launcher as the anchor. Automatic capture currently supports a single explicit
 FlyDSL compile call. It can follow a source-language campaign as an optional second stage. See
-{doc}`Assembly candidates </kernelforge/how-to/assembly>` for the compiler,
+{doc}`Assembly candidates </components/kernelforge/how-to/assembly>` for the compiler,
 launcher, and measurement contract.
 
 Before the first iteration, the loop checks the driver against the contract it
 enforces at run time and repairs it if needed. When that fails the run aborts
 with `task_preparation_failed`; see
-{doc}`Debug task preparation </kernelforge/how-to/debug-task-preparation>`.
+{doc}`Debug task preparation </components/kernelforge/how-to/debug-task-preparation>`.
 
 ## Watch, stop, and resume a run
 
@@ -143,4 +143,4 @@ Lessons distilled from the run accumulate under
 
 For the two ways to launch and bill a run — Claude Code in-session and the
 unattended autonomous loop — see
-{doc}`Deployment modes </kernelforge/reference/deployment-modes>`.
+{doc}`Deployment modes </components/kernelforge/reference/deployment-modes>`.

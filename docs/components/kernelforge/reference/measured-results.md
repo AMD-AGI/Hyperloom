@@ -12,7 +12,7 @@ kernels, not a promise about yours.
 
 The launch note these tables were extracted from described a repository that no
 longer exists, so its architecture and scale sections went with it -- see
-{doc}`Architecture </kernelforge/conceptual/architecture>` for the current
+{doc}`Architecture </components/kernelforge/conceptual/architecture>` for the current
 shape.
 
 ## Sparse linear attention -- CK backend

@@ -149,7 +149,7 @@ guard as a new file, whatever the workspace itself ignores.
 `kernelforge export-runs` turns the plan's `Summary:` line, the whole lesson,
 and the `report.md` of the Analysis bundle the round planned on into the
 Experiences of a run; see
-{doc}`the CLI reference </kernelforge/reference/cli>`.
+{doc}`the CLI reference </components/kernelforge/reference/cli>`.
 
 After a KEEP, the previous Analysis bundle remains available and is marked
 stale. The loop refreshes it only after the canonical mean-case score has

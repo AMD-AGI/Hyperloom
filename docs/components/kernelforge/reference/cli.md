@@ -38,7 +38,7 @@ kernelforge roofline-ceiling --workspace <W> [options]
 kernelforge export-runs <LOG_ROOT>... --output <file>
 ```
 
-See {doc}`Experience store </kernelforge/reference/experience-store>` for the exact
+See {doc}`Experience store </components/kernelforge/reference/experience-store>` for the exact
 local/remote environment contract and durable local layout.
 
 ## kernel-rewrite-controller

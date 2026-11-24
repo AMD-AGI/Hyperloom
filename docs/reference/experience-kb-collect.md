@@ -274,7 +274,7 @@ It reads:
   with, or from the plan's first three sentences when it has none;
 - `rationale.reasoning` from the whole lesson KernelForge writes for the
   iteration, `lessons/iter_NNN.md` (see the
-  [autonomous loop](../kernelforge/how-to/autonomous-loop.md)). That file is the
+  [autonomous loop](../components/kernelforge/how-to/autonomous-loop.md)). That file is the
   only reasoning record: it includes `HELD-FIXED`, `NEGATIVES`, and `DISPROOF`,
   and the loop appends the scope and outcome lines after the verdict. A single
   session that wrote no lesson gives the first three sentences of the rationale
