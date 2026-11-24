@@ -352,7 +352,8 @@ def test_patch_breakdown_conc_sweep_carries_the_report_and_keeps_the_rest(tmp_pa
 
     assert ex.patch_breakdown_conc_sweep(target, _SWEEP) is True
     after = json.loads(target.read_text())
-    assert after.pop(ex.CONC_SWEEP_SECTION) == _SWEEP
+    carried = after.pop(ex.CONC_SWEEP_SECTION)
+    assert carried == _SWEEP
     assert after == before
     assert ex.patch_breakdown_conc_sweep(target, _SWEEP) is False
 
