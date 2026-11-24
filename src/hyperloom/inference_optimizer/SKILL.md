@@ -1244,8 +1244,8 @@ a recipe for another board is used only when both share the gfx target and
 HBM size (`mi350x` / `mi355x` do; `mi300x` / `mi325x` do not), and its point
 is chosen for `--nodes` × `--gpus-per-node` (default 8) GPUs.
 
-`r9700` (Radeon AI PRO R9700, gfx1201), `r9600d` (Radeon AI PRO R9600D, gfx1201)
-and `w7900` (Radeon PRO W7900, gfx1100) run with `--framework vllm` only, and
+`r9600d` (Radeon AI PRO R9600D, gfx1201) and `w7900` (Radeon PRO W7900, gfx1100)
+run with `--framework vllm` only, and `r9700` (Radeon AI PRO R9700, gfx1201) and
 `w7900d` (Radeon PRO W7900D, gfx1100) with `vllm` or `llamacpp`. On these boards
 pass `--framework` explicitly, since another framework (including the default)
 exits with code 2 at launch.

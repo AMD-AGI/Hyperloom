@@ -27,6 +27,7 @@ class BoardPolicy:
 
 
 _VLLM_ONLY = frozenset({"vllm"})
+_VLLM_OR_LLAMACPP = frozenset({"vllm", "llamacpp"})
 
 #: Keyed by ``AMD_GPU_BOARDS``: every board has exactly one policy row.
 _BOARD_POLICIES: dict[str, BoardPolicy] = {
@@ -36,10 +37,12 @@ _BOARD_POLICIES: dict[str, BoardPolicy] = {
     # The same gfx950 die as mi355x; gfx950 alone still names mi355x.
     "mi350x": BoardPolicy(),
     "mi355x": BoardPolicy(names_its_arch=True),
-    "r9700": BoardPolicy(validated_frameworks=_VLLM_ONLY, targeted_build_validated=False, geak_identity_pinned=True),
+    "r9700": BoardPolicy(
+        validated_frameworks=_VLLM_OR_LLAMACPP, targeted_build_validated=False, geak_identity_pinned=True
+    ),
     "r9600d": BoardPolicy(validated_frameworks=_VLLM_ONLY, targeted_build_validated=False, geak_identity_pinned=True),
     "w7900": BoardPolicy(validated_frameworks=_VLLM_ONLY, targeted_build_validated=False),
-    "w7900d": BoardPolicy(validated_frameworks=frozenset({"vllm", "llamacpp"}), targeted_build_validated=False),
+    "w7900d": BoardPolicy(validated_frameworks=_VLLM_OR_LLAMACPP, targeted_build_validated=False),
     "radeon8060s": BoardPolicy(),
 }
 

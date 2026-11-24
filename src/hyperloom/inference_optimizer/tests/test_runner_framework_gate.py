@@ -68,7 +68,7 @@ def test_fresh_r9700_sglang_launch_exits_2(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         _seed(tmp_path, monkeypatch, "sglang")
     assert exc.value.code == 2
-    assert "r9700 is currently validated only for vllm" in capsys.readouterr().err
+    assert "r9700 is currently validated only for llamacpp, vllm" in capsys.readouterr().err
 
 
 def test_fresh_r9700_vllm_launch_passes_the_gate_and_exports_the_board_itself(tmp_path, monkeypatch):
