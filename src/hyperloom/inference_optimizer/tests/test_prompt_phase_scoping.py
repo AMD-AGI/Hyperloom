@@ -44,25 +44,19 @@ def _build(registry: dict, phase: str) -> str:
     )
 
 
-def test_cycle_strategy_is_rendered_in_place_of_the_default_arc(registry):
-    strategy = {
-        "focus": "moe_dispatch",
-        "score": 2.5,
-        "rationale": "not saturated in latest roofline snapshot",
-        "prior_cycles": [{"cycle": 1, "focus": "attention", "gain_delta": 1.2, "saturated_at_start": []}],
-    }
-    prompt = build_orchestration_prompt(
-        action_registry=registry,
-        enabled_actions=default_enabled_actions(no_kernel=False),
-        cycle=PromptCycle(macro_cycle=2, cycle_strategy=strategy, phase="FRAMEWORK_AGENT"),
-        assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
-    )
+def test_the_cycle_directive_replaces_the_default_arc(registry):
+    def prompt(directive: str) -> str:
+        return build_orchestration_prompt(
+            action_registry=registry,
+            enabled_actions=default_enabled_actions(no_kernel=False),
+            cycle=PromptCycle(macro_cycle=2, cycle_directive=directive, phase="FRAMEWORK_AGENT"),
+            assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
+        )
 
-    assert "focus=moe_dispatch" in prompt
-    assert "rationale: not saturated in latest roofline snapshot" in prompt
-    assert "previous cycles:" in prompt
-    assert "cycle=1 focus=attention" in prompt
-    assert "Default arc" not in prompt
+    assert "Default arc" in prompt("")
+    directed = prompt("go deep on MoE dispatch")
+    assert "go deep on MoE dispatch" in directed
+    assert "Default arc" not in directed
 
 
 # Phase-scoped modules render only where the behaviour exists
@@ -196,7 +190,6 @@ def test_phase_seam_rescopes_the_override_and_keeps_the_cycle_directive(tmp_path
     assert calls[0]["macro_cycle"] == 3
     assert calls[0]["cycle_directive"] == "keep pushing MoE dispatch"
     assert calls[0]["phase"] == "KERNEL_AGENT"
-    assert calls[0].get("cycle_strategy") is not None
 
 
 def test_phase_seam_never_clobbers_a_user_supplied_prompt(tmp_path):
@@ -232,20 +225,6 @@ async def test_the_reseeded_override_is_what_the_orchestration_turn_loads(tmp_pa
     assert handler._reseed_orch_prompt_for_phase("EXPLORE") is True
 
     assert await coord.conversation.load_system_prompt("orchestration") == "PROMPT[phase=EXPLORE]"
-
-
-def test_cycle_strategy_rows_do_not_nest_the_prior_cycles(tmp_path):
-    """The prior rows are rendered into the prompt, never stored inside the next row."""
-    handler, coord, calls = _machine_with_stub_coordinator(tmp_path)
-    state = coord.shared_state
-    for cycle in range(1, 5):
-        state.macro_cycle = cycle
-        coord.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
-        handler._reseed_orch_prompt_for_phase("EXPLORE")
-
-    assert [row["cycle"] for row in state.cycle_strategy_log] == [1, 2, 3, 4]
-    assert all("prior_cycles" not in row for row in state.cycle_strategy_log)
-    assert len(calls[-1]["cycle_strategy"]["prior_cycles"]) == 3
 
 
 @pytest.mark.parametrize(
