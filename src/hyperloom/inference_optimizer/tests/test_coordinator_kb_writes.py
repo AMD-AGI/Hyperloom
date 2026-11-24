@@ -782,6 +782,8 @@ def test_a_prompt_dataset_session_is_kept_out_of_the_recipe_kb(tmp_path: Path, m
     coord = _make_coordinator(tmp_path)
     state = coord.shared_state
     state.prompt_dataset = "/data/prompts.jsonl"
+    # The coordinator anchored when it was built, and an anchored session is not anchored again.
+    state.warm_start_ts = ""
 
     run_t0_anchor(coord.recipe_kb, state, T0AnchorRequest(workload=_MODEL, hw=_HW), session_dir=coord.session_dir)
     coord.recipe_journal.kb_amend_recipe(append_lesson={"statement": "learnt on real prompts"})

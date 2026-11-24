@@ -83,6 +83,14 @@ def test_a_reset_session_still_resumes(tmp_path, monkeypatch, native_benchmark):
     assert cb.measurement_state_is_stale(state) == ""
 
 
+def test_a_reset_session_keeps_the_prompt_dataset_it_recorded(tmp_path, monkeypatch):
+    import hyperloom.inference_optimizer.cli as optimizer_cli
+
+    monkeypatch.setenv("DATASET_PATH", "/data/prompts.jsonl")
+    optimizer_cli._reset_state_file(tmp_path, _seed_and_reload(tmp_path))
+    assert SharedState.load_or_init(tmp_path).prompt_dataset == "/data/prompts.jsonl"
+
+
 def test_a_state_written_before_valid_measurement_judged_its_evidence_is_refused(tmp_path):
     # Epoch 2 recorded benchmark_backend and benchmark_valid as constraint fields; epoch 3 records valid_measurement.
     (tmp_path / "state.json").write_text('{"benchmark_mode": "agentx", "measurement_epoch": 2}', encoding="utf-8")
