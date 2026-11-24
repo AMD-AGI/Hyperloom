@@ -167,7 +167,51 @@ async def test_in_a_mixed_run_only_the_retries_after_a_failure_that_is_not_the_n
     assert len(executor.jobs) == 4 and result.validity is Validity.MEASUREMENT_FAILED
     assert executor.clock.waits == [60.0, 120.0], "the waits count the waiting retries only"
     assert executor.started == [1000.0, 1060.0, 1060.0, 1180.0]
-    assert "n2" in reported and "n4" in reported
+    assert "n1" not in reported and "n2" in reported and "n4" in reported
+    assert [job.avoid_nodes for job in executor.jobs] == [(), (), ("n2",), ("n2",)], "only node-held failures avoid"
+
+
+async def test_cards_a_process_outside_the_test_held_neither_avoid_nor_report_their_node() -> None:
+    result, executor, reported = await _run(FOREIGN_REASON)
+    assert len(executor.jobs) == 4 and result.validity is Validity.MEASUREMENT_FAILED
+    assert result.failure_reason == f"4 attempts failed for infrastructure reasons: {FOREIGN_REASON}"
+    assert [job.avoid_nodes for job in executor.jobs] == [()] * 4, "the retry waits and may land on the same node"
+    assert reported == [], "the card guard refuses the foreign holder; its node is not quarantined"
+    assert executor.clock.waits == [60.0, 120.0, 240.0]
+
+
+class _SucceedsAfter(_ScriptedExecutor):
+    """Fails the first attempts with the scripted reasons, each on its own node, then succeeds on the next node."""
+
+    async def run(self, job: TestJob) -> TestResult:
+        if job.attempt <= len(self.reasons):
+            return await super().run(job)
+        self.jobs.append(job)
+        return TestResult(
+            request_id="r1",
+            validity=Validity.SUCCEEDED,
+            sandbox=SandboxFacts(sandbox_id=f"s{job.attempt}", node_name=f"n{job.attempt}"),
+        )
+
+
+async def test_a_retry_after_cards_a_process_outside_the_test_held_waits_and_carries_no_avoid_for_that_node() -> None:
+    executor = _SucceedsAfter((FOREIGN_REASON,))
+    reported: list[str] = []
+
+    async def on_node_failure(node: str, _reason: str, _reproduced: bool) -> None:
+        reported.append(node)
+
+    runner = AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure, backoff=_backoff(executor.clock))
+    result = await runner.run(_job())
+    assert result.validity is Validity.SUCCEEDED
+    assert [job.avoid_nodes for job in executor.jobs] == [(), ()]
+    assert reported == [] and executor.clock.waits == [60.0]
+
+
+async def test_a_waited_failure_does_not_lift_the_avoid_a_node_held_failure_put_on_its_node() -> None:
+    result, executor, reported = await _run((PORT_REASON, FOREIGN_REASON, PORT_REASON, CAPACITY_REASON))
+    assert [job.avoid_nodes for job in executor.jobs] == [(), ("n1",), ("n1",), ("n1", "n3")]
+    assert reported == ["n1", "n3", "n4"], "the busy cards of n2 do not report their node"
 
 
 async def test_an_infrastructure_retry_never_waits_past_the_latest_start_and_goes_at_once_after_it() -> None:

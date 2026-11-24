@@ -6,13 +6,16 @@
 An :class:`Executor` runs ONE attempt in a fresh sandbox and returns a ``TestResult`` describing it. This module turns
 attempts into the request's single result:
 
-* ``infra`` failure: another sandbox, away from every node tried, up to ``max_infra_retries`` retries, then
-  ``measurement_failed``; the node is reported as an infrastructure failure. A retry after a failure that is not the
-  node's (:data:`WAITED_INFRA_REASONS`: cards a process outside the test held, a platform short of sandboxes, a failure
-  never held against its node) waits first, longer each time (:class:`InfraBackoff`), so a minute in which the cards or
-  the platform are busy does not spend every attempt; the wait never runs past the time its branch can still have a
-  test measured (``latest_start``). A retry after any other infrastructure failure goes at once, since the avoid set
-  and the quarantine already move it to another node. An infrastructure
+* ``infra`` failure: another sandbox, away from every node an earlier attempt failed on for a reason held against it,
+  up to ``max_infra_retries`` retries, then ``measurement_failed``; the node is reported as an infrastructure failure.
+  A retry after a failure that is not the node's (:data:`WAITED_INFRA_REASONS`: cards a process outside the test held,
+  a platform short of sandboxes, a failure never held against its node) waits first, longer each time
+  (:class:`InfraBackoff`), so a minute in which the cards or the platform are busy does not spend every attempt; the
+  wait never runs past the time its branch can still have a test measured (``latest_start``), and the retry may land
+  on the same node again, since that failure does not put its node in the avoid set. Cards a process outside the test
+  held do not report their node either: the card guard refuses every attempt that meets such a process, so moving
+  elsewhere buys nothing a wait does not. A retry after any other infrastructure failure goes at once, since the
+  avoid set and the quarantine already move it to another node. An infrastructure
   failure every sandbox repeats (:data:`UNRETRIED_INFRA_REASONS`) ends as ``measurement_failed`` at once, and its node
   is not reported; one it likely repeats (:data:`ONCE_RETRIED_INFRA_REASONS`: an aiter build past the watchdog, a
   sandbox that failed before it ran, a merge smoke that could not run, a profile's server that died in its window) is
@@ -138,14 +141,19 @@ NODE_BLAMELESS_INFRA_REASONS: frozenset[str] = frozenset(
         HF_CACHE_PERMISSION,
     }
 )
+#: Infrastructure failures that never quarantine their node: the blameless ones, and cards a process outside the test
+#: held (:data:`FOREIGN_PROCESS_ON_CARD`), which the retry waits out, since the card guard already refuses every
+#: attempt that meets such a process.
+_UNQUARANTINED_INFRA_REASONS: frozenset[str] = NODE_BLAMELESS_INFRA_REASONS | frozenset({FOREIGN_PROCESS_ON_CARD})
 #: Infrastructure failures whose node is not reported.
-_UNREPORTED_INFRA_REASONS = ONCE_RETRIED_INFRA_REASONS | NODE_BLAMELESS_INFRA_REASONS
+_UNREPORTED_INFRA_REASONS = ONCE_RETRIED_INFRA_REASONS | _UNQUARANTINED_INFRA_REASONS
 #: Infrastructure failures a retry waits out first (:class:`InfraBackoff`): the ones that are not the node's. Cards a
 #: process outside the test held (:data:`FOREIGN_PROCESS_ON_CARD`) or a platform with no sandbox to give
 #: (:data:`RUNNER_START_TIMEOUT`, :data:`CAPACITY_UNAVAILABLE`) may be free a minute later, and a failure never held
-#: against its node (:data:`NODE_BLAMELESS_INFRA_REASONS`) is not escaped by moving elsewhere. Any other infrastructure
-#: failure is held against its node, and the avoid set and the quarantine already send the retry to another one, so it
-#: goes at once: a wait would only keep the test's dispatch slot and its branch's K idle.
+#: against its node (:data:`NODE_BLAMELESS_INFRA_REASONS`) is not escaped by moving elsewhere, so none of them puts its
+#: node in the next attempt's avoid set (:func:`_facts_nodes`). Any other infrastructure failure is held against its
+#: node, and the avoid set and the quarantine already send the retry to another one, so it goes at once: a wait would
+#: only keep the test's dispatch slot and its branch's K idle.
 WAITED_INFRA_REASONS: frozenset[str] = NODE_BLAMELESS_INFRA_REASONS | frozenset(
     {FOREIGN_PROCESS_ON_CARD, RUNNER_START_TIMEOUT, CAPACITY_UNAVAILABLE}
 )
@@ -233,9 +241,10 @@ def _reason_name(reason: str | None) -> str:
     return (reason or "").partition(":")[0].strip()
 
 
-def node_blameless(reason: str | None) -> bool:
-    """Whether a failure's ``reason`` names one never held against its node (:data:`NODE_BLAMELESS_INFRA_REASONS`)."""
-    return _reason_name(reason) in NODE_BLAMELESS_INFRA_REASONS
+def node_unquarantined(reason: str | None) -> bool:
+    """Whether a failure's ``reason`` names one that never quarantines its node (:data:`_UNQUARANTINED_INFRA_REASONS`):
+    one never held against it, or cards a process outside the test held."""
+    return _reason_name(reason) in _UNQUARANTINED_INFRA_REASONS
 
 
 def _retry_refused(reason: str | None, attempts: list[Attempt]) -> bool:
@@ -273,7 +282,13 @@ def _mark_same_node(result: TestResult, avoided: set[str]) -> TestResult:
 
 
 def _facts_nodes(attempts: list[Attempt]) -> list[str]:
-    return [attempt.node for attempt in attempts if attempt.node]
+    """The nodes the next attempt avoids: each earlier attempt's, less the ones whose infrastructure failure was not the
+    node's (:data:`WAITED_INFRA_REASONS`); their retry waits instead and may run on the same node."""
+    return [attempt.node for attempt in attempts if attempt.node and not _waited(attempt)]
+
+
+def _waited(attempt: Attempt) -> bool:
+    return attempt.failure_class is FailureClass.INFRA and _reason_name(attempt.failure_reason) in WAITED_INFRA_REASONS
 
 
 class _Ending(NamedTuple):
@@ -360,11 +375,7 @@ class AttemptRunner:
         """Wait before the next infrastructure retry when the last attempt failed for a reason that is not its node's
         (:data:`WAITED_INFRA_REASONS`), the ``n``-th such wait of the request for the ``n``-th such failure; after any
         other failure the retry goes at once, to a node the avoid set has not yet seen fail."""
-        waited = [
-            a
-            for a in attempts
-            if a.failure_class is FailureClass.INFRA and _reason_name(a.failure_reason) in WAITED_INFRA_REASONS
-        ]
+        waited = [a for a in attempts if _waited(a)]
         if not waited or waited[-1] is not attempts[-1]:
             return
         retry = len(waited)
