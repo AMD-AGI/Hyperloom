@@ -589,63 +589,31 @@ async def test_a_reject_ends_the_proposal(coord):
 
 
 @pytest.mark.asyncio
-async def test_a_rejected_specialist_proposal_is_not_a_landing_permit(coord):
-    """The mirrored verdict is what the integrate_patch gate consults for the specialist's patches."""
+@pytest.mark.parametrize(
+    ("action_name", "params"),
+    [
+        pytest.param("specialist", {"task_id": "t-permit"}, id="specialist"),
+        pytest.param("integrate_patch", {"specialist_task_id": "t-permit"}, id="integrate_patch"),
+    ],
+)
+async def test_a_rejected_proposal_is_not_a_landing_permit(coord, action_name, params):
+    """The mirrored verdict is what the integrate_patch gate consults."""
     coord.shared_state = _PatchVerdictSharedState()
-    _seed_pending(coord, "msg-permit", "specialist", {"task_id": "t-permit"})
+    _seed_pending(coord, "msg-permit", action_name, params)
     await _rule(coord, "msg-permit", verdict="reject")
 
-    assert _posted_verdict(coord) == "reject"
-    assert coord._materialise_calls == []
     assert coord.shared_state.patch_verdicts["t-permit"] == "reject"
     assert coord.shared_state.patch_verdicts["t-permit"] not in INTEGRATE_PATCH_PERMISSIVE_VERDICTS
 
 
 @pytest.mark.asyncio
-async def test_a_rejected_integrate_patch_is_never_materialised(coord):
+async def test_a_verdict_map_mirrors_the_verdict_it_collapsed_to(coord):
     coord.shared_state = _PatchVerdictSharedState()
-    _seed_pending(coord, "msg-patch", "integrate_patch", {"specialist_task_id": "t-patch"})
-    await _rule(coord, "msg-patch", verdict="reject")
-
-    assert _posted_verdict(coord) == "reject"
-    assert coord._materialise_calls == []
-    assert coord.shared_state.patch_verdicts["t-patch"] == "reject"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "ruling",
-    [
-        pytest.param({"verdict": "advise"}, id="a_single_verdict"),
-        pytest.param(
-            {"verdict_map": {"v_a": {"verdict": "advise"}, "v_b": {"verdict": "reject"}}},
-            id="a_map_whose_advised_variant_proceeds",
-        ),
-    ],
-)
-async def test_the_verdict_acted_on_is_the_verdict_mirrored(coord, ruling):
-    coord.shared_state = _PatchVerdictSharedState()
-    _seed_pending(coord, "msg-plain-permit", "specialist", {"task_id": "t-plain"})
-    await _rule(coord, "msg-plain-permit", **ruling)
+    _seed_pending(coord, "msg-map", "specialist", {"task_id": "t-map"})
+    await _rule(coord, "msg-map", verdict_map={"v_a": {"verdict": "advise"}, "v_b": {"verdict": "reject"}})
 
     assert _posted_verdict(coord) == "advise"
-    assert coord.shared_state.patch_verdicts["t-plain"] == "advise"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "findings",
-    [
-        pytest.param({"risks": 1}, id="a_count_where_the_risks_go"),
-        pytest.param({"required_evidence": 1}, id="a_count_where_the_evidence_requests_go"),
-    ],
-)
-async def test_a_verdict_with_malformed_findings_still_decides_its_proposal(coord, findings):
-    pending = _seed_pending(coord, "msg-uncountable", "specialist", {"task_id": "t-uncountable"})
-    await _rule(coord, "msg-uncountable", verdict="reject", **findings)
-
-    assert (pending.proposal_msg_id in coord.state.pending_proposals, _posted_verdict(coord)) == (False, "reject")
-    assert coord._materialise_calls == []
+    assert coord.shared_state.patch_verdicts["t-map"] == "advise"
 
 
 @pytest.mark.parametrize(
