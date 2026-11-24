@@ -9,7 +9,8 @@ prompt's answer ends where the model ends it. A pass sends ``--num-prompts`` req
 by ``--seed`` and cycled, so two arms on one seed send identical requests.
 
 Token counts are the server's ``usage``: a request the server reports none for fails, as this client has no
-tokenizer. The saved result carries the keys the fixed load reads from InferenceX's result, computed as
+tokenizer. A prompt the server answers 4xx fails the pass whatever the failed share: the metrics would describe the
+rest of the dataset. The saved result carries the keys the fixed load reads from InferenceX's result, computed as
 InferenceX's ``benchmark_serving`` computes them.
 
 It imports nothing outside the standard library: it runs under whatever interpreter runs InferenceX's client.
@@ -44,9 +45,17 @@ class DatasetError(ValueError):
     """The dataset file holds no prompt this client can send."""
 
 
-def read_prompts(path: Path) -> list[str]:
+@dataclass(frozen=True)
+class Prompt:
+    """One prompt of the dataset and the line of the file it is on."""
+
+    text: str
+    line: int
+
+
+def read_prompts(path: Path) -> list[Prompt]:
     """The prompts of the JSONL file at ``path``: each line's ``prompt`` string, else the first of its ``turns``."""
-    prompts: list[str] = []
+    prompts: list[Prompt] = []
     for number, line in enumerate(path.read_text(encoding=_ENCODING).split("\n"), start=1):
         if not line.strip():
             continue
@@ -57,16 +66,16 @@ def read_prompts(path: Path) -> list[str]:
             prompt = turns[0]
         if not isinstance(prompt, str) or not prompt.strip():
             raise DatasetError(f"{path}:{number} holds no 'prompt' string and no 'turns' list of strings")
-        prompts.append(prompt)
+        prompts.append(Prompt(prompt, number))
     if not prompts:
         raise DatasetError(f"{path} holds no prompt")
     return prompts
 
 
-def request_order(pool: list[str], num_prompts: int, seed: int) -> list[str]:
+def request_order(pool: list[Prompt], num_prompts: int, seed: int) -> list[Prompt]:
     """``num_prompts`` prompts of ``pool``: each cycle through it shuffled by one generator seeded with ``seed``."""
     rng = random.Random(seed)
-    order: list[str] = []
+    order: list[Prompt] = []
     while len(order) < num_prompts:
         cycle = list(pool)
         rng.shuffle(cycle)
@@ -76,9 +85,11 @@ def request_order(pool: list[str], num_prompts: int, seed: int) -> list[str]:
 
 @dataclass
 class RequestOutput:
-    """One request as InferenceX's ``RequestFuncOutput`` records it."""
+    """One request as InferenceX's ``RequestFuncOutput`` records it, and the HTTP ``status`` the server answered
+    (0 when it answered none)."""
 
     success: bool = False
+    status: int = 0
     latency: float = 0.0
     ttft: float = 0.0
     prompt_len: int = 0
@@ -149,6 +160,7 @@ def send(target: Target, prompt: str) -> RequestOutput:
     try:
         connection.request("POST", ENDPOINT, json.dumps(body), {"Content-Type": "application/json"})
         response = connection.getresponse()
+        output.status = response.status
         if response.status != 200:
             output.error = f"HTTP {response.status}: {response.read().decode(_ENCODING, 'replace')[:500]}"
         else:
@@ -170,7 +182,7 @@ class Pass:
     end_unix: float
 
 
-def run_requests(target: Target, prompts: list[str], concurrency: int) -> Pass:
+def run_requests(target: Target, prompts: list[Prompt], concurrency: int) -> Pass:
     """Send ``prompts`` in order, at most ``concurrency`` at once."""
     outputs = [RequestOutput() for _ in prompts]
     lock = threading.Lock()
@@ -182,7 +194,7 @@ def run_requests(target: Target, prompts: list[str], concurrency: int) -> Pass:
                 index = next(pending, None)
             if index is None:
                 return
-            outputs[index] = send(target, prompts[index])
+            outputs[index] = send(target, prompts[index].text)
             state = "ok" if outputs[index].success else f"failed: {outputs[index].error}"
             print(f"request {index + 1}/{len(prompts)} {state}", flush=True)
 
@@ -215,15 +227,23 @@ def _stats(name: str, seconds: list[float], percentiles: list[float]) -> dict[st
     return stats
 
 
-def outcome(requested: int, completed: int) -> dict[str, object]:
-    """InferenceX's request-count verdict."""
+def refusals(prompts: list[Prompt], outputs: list[RequestOutput]) -> list[str]:
+    """The prompts the server answered 4xx, each as ``line <n>: HTTP <status>``, in the file's order."""
+    refused = {prompt.line: out.status for prompt, out in zip(prompts, outputs) if 400 <= out.status < 500}
+    return [f"line {line}: HTTP {status}" for line, status in sorted(refused.items())]
+
+
+def outcome(requested: int, completed: int, refused: list[str]) -> dict[str, object]:
+    """InferenceX's request-count verdict, failed as well when the server refused a prompt (``refused``): such a
+    prompt is a defect of the dataset for this server, as a line without a prompt is."""
     failed = requested - completed
     return {
-        "status": "failed" if failed / requested > MAX_FAILURE_RATE else "passed",
+        "status": "failed" if refused or failed / requested > MAX_FAILURE_RATE else "passed",
         "requested": requested,
         "completed": completed,
         "failed": failed,
         "max_failure_rate": MAX_FAILURE_RATE,
+        "refused": refused,
     }
 
 
@@ -288,11 +308,13 @@ def main(argv: list[str]) -> int:
     prompts = request_order(read_prompts(args.dataset), args.num_prompts, args.seed)
     sent = run_requests(target, prompts, args.max_concurrency)
     metrics = summarize(sent.outputs, sent.duration, [float(p) for p in args.metric_percentiles.split(",")])
-    verdict = outcome(args.num_prompts, int(metrics["completed"]))
+    refused = refusals(prompts, sent.outputs)
+    verdict = outcome(args.num_prompts, int(metrics["completed"]), refused)
     if args.result is not None:
         args.result.write_text(json.dumps(_result(args, sent, metrics, verdict)), encoding=_ENCODING)
     if verdict["status"] == "failed":
-        print(f"FAIL: {verdict['failed']} of {verdict['requested']} requests failed", file=sys.stderr)
+        why = f"; the server refused prompts of {args.dataset}: {', '.join(refused)}" if refused else ""
+        print(f"FAIL: {verdict['failed']} of {verdict['requested']} requests failed{why}", file=sys.stderr)
         return 1
     return 0
 

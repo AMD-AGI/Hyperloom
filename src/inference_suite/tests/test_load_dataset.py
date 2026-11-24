@@ -102,9 +102,10 @@ def _workload(dataset: Path, **changes: object):
                    dataset=PromptDataset(str(dataset)))  # fmt: skip
 
 
-def _run_client(base_url: str, dataset: Path, result: Path) -> int:
+def _run_client(base_url: str, dataset: Path, result: Path, prompts: int = 6) -> int:
     target = ClientTarget(base_url, "/models/m", "m")
-    argv = client_argv(ClientTool(sys.executable, "/unused"), target, _workload(dataset), ClientPass(0, 6, result))
+    measured = ClientPass(0, prompts, result)
+    argv = client_argv(ClientTool(sys.executable, "/unused"), target, _workload(dataset), measured)
     return dataset_client.main(list(argv[2:]))
 
 
@@ -132,28 +133,35 @@ def test_the_client_streams_chat_requests_and_saves_the_result_a_fixed_round_rea
 
 
 def test_one_seed_sends_one_order_and_another_seed_another():
-    pool = [f"p{index}" for index in range(10)]
+    pool = [dataset_client.Prompt(f"p{index}", index + 1) for index in range(10)]
     order = dataset_client.request_order(pool, 25, seed=0)
     assert order == dataset_client.request_order(pool, 25, seed=0)
     assert order != dataset_client.request_order(pool, 25, seed=1)
-    assert sorted(order[:10]) == sorted(pool) and sorted(order[10:20]) == sorted(pool)
+    assert set(order[:10]) == set(pool) == set(order[10:20])
 
 
-@pytest.mark.parametrize(
-    ("fault", "failed"),
-    [({"usage": False}, 6), ({"refused": "beta"}, 2)],
-    ids=["no-usage", "a-prompt-answered-400"],
-)
-def test_a_request_answered_without_usage_or_with_an_error_fails(tmp_path, server, dataset, capsys, fault, failed):
+def test_a_request_answered_without_usage_fails(tmp_path, server, dataset, capsys):
     fake, base_url = server
-    for name, value in fault.items():
-        setattr(fake, name, value)
+    fake.usage = False
     result = tmp_path / "result.json"
 
     assert _run_client(base_url, dataset, result) == 1
-    assert f"{failed} of 6 requests failed" in capsys.readouterr().err
+    assert "6 of 6 requests failed" in capsys.readouterr().err
     saved = json.loads(result.read_text())
-    assert (saved["completed"], saved["benchmark_outcome"]["failed"]) == (6 - failed, failed)
+    assert (saved["completed"], saved["benchmark_outcome"]["failed"]) == (0, 6)
+
+
+def test_one_prompt_the_server_refuses_fails_the_pass_naming_its_line_and_the_status(tmp_path, server, capsys):
+    fake, base_url = server
+    fake.refused = "p7"
+    forty = tmp_path / "forty.jsonl"
+    forty.write_text("".join(json.dumps({"prompt": f"p{line}"}) + "\n" for line in range(1, 41)), encoding="utf-8")
+    result = tmp_path / "result.json"
+
+    assert _run_client(base_url, forty, result, prompts=40) == 1
+    assert "line 7: HTTP 400" in capsys.readouterr().err
+    verdict = json.loads(result.read_text())["benchmark_outcome"]
+    assert (verdict["status"], verdict["failed"], verdict["refused"]) == ("failed", 1, ["line 7: HTTP 400"])
 
 
 @pytest.mark.parametrize("line", ['{"prompt": ""}', '{"turns": []}', "[1]"])
@@ -169,7 +177,7 @@ def test_a_prompt_holding_a_unicode_line_separator_is_one_line_of_the_file(tmp_p
     prompts = ["one\u2028prompt", "another\x85one"]
     lines = [json.dumps({"prompt": prompt}, ensure_ascii=False) for prompt in prompts]
     path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8", newline="")
-    assert dataset_client.read_prompts(path) == prompts
+    assert [prompt.text for prompt in dataset_client.read_prompts(path)] == prompts
 
 
 def test_a_dataset_the_client_can_send_is_not_refused(dataset: Path):
