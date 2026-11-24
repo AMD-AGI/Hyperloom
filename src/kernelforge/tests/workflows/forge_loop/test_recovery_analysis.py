@@ -12,7 +12,7 @@ import pytest
 
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore, RunState, make_event
 from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
-from kernelforge.workflows.forge_loop.roles.analysis import AnalysisAgentService, AnalysisSources
+from kernelforge.workflows.forge_loop.roles.analysis import AnalysisAgentService, AnalysisScope, AnalysisSources
 from kernelforge.workflows.forge_loop.roles.analysis_bundle import (
     AnalysisBundleError,
     _case_directory,
@@ -112,7 +112,7 @@ def test_failed_analysis_attempt_does_not_advance_published_commit(tmp_path):
         config=service.config,
         timeout_sec=service.timeout_sec,
         max_turns=service.max_turns,
-        profiling_enabled=True,
+        scope=AnalysisScope(profiling_enabled=True),
     )
 
     with pytest.raises((AnalysisBundleError, OSError)):
