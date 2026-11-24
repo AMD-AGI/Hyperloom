@@ -126,6 +126,7 @@ def component_layouts() -> Mapping[str, ComponentLayoutSpec]:
             "torch": _PACK.component_layout("component_layout_torch"),
             "sgl_kernel": _PACK.component_layout("component_layout_sgl_kernel"),
             "flydsl": _PACK.component_layout("component_layout_flydsl"),
+            "llamacpp": _PACK.component_layout("component_layout_llamacpp"),
         }
     )
 

@@ -23,6 +23,7 @@ from hyperloom.common.agent_isolation import BwrapIsolation, NoIsolation
 from hyperloom.common.tests._id_map_helpers import HOST_MAP, ONE_ID_MAP, use_id_maps
 from hyperloom.measure.jit.native.config import BuildStoreConfigError
 from hyperloom.measure.runner.native import isolated
+from hyperloom.measure.runner.native.recipes import CommitSource, native_recipes
 from hyperloom_multibranch.toolbox import build_preflight as preflight
 from hyperloom_multibranch.toolbox.build_preflight import (
     ImageUpstream,
@@ -196,6 +197,12 @@ def test_without_an_installed_sglang_the_image_commit_is_its_checkout_head_or_un
         ImageUpstream("sgl_kernel", head, tmp_path / "sglang")
     ]
     assert _upstreams(tmp_path / "site", tmp_path / "none") == []
+
+
+def test_every_native_component_the_image_installs_says_where_its_upstream_commit_is_read() -> None:
+    from_image = {c for c, recipe in native_recipes().items() if recipe.commit_source is CommitSource.IMAGE_DIST}
+
+    assert set(preflight._DISTRIBUTIONS) == from_image
 
 
 # --- TraceLens ------------------------------------------------------------------------------------------------------

@@ -15,7 +15,9 @@
 #                 are configured), each a pattern of a file's name, or with a slash of its upstream path, where *
 #                 also matches a slash, and the package directories its runtime writes builds into (generated); every
 #                 examples.place line "<upstream path> -> <base>:<path in base>" must be placed so, every
-#                 examples.refuse path refused
+#                 examples.native line placed so and named native, every examples.refuse path refused. A component
+#                 no image installs lies over the pinned checkout of its upstream (base: checkout) in every section,
+#                 each section native throughout ("<prefix>/*")
 #   arg_value     reserved: no rule reads one yet, so a pack that holds one is refused
 #   kernel_table  reserved: no rule reads one yet, so a pack that holds one is refused
 # An entry may also declare image_check: checks the environment a session runs in can answer about the fact
@@ -24,7 +26,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "24"
+version: "26"
 facts:
   aiter_merged_view:
     kind: names
@@ -1323,3 +1325,56 @@ facts:
       refuse:
         - "python/flydsl/_mlir/_mlir_libs/_mlir.cpython-310-x86_64-linux-gnu.so"
         - "lib/Conversion/pass.cpp"
+
+  component_layout_llamacpp:
+    kind: component_layout
+    project: llama.cpp
+    reason: >-
+      llama.cpp installs no Python package: the server a session measures is llama-server, built with CMake from the
+      pinned checkout of its repository, so the layout lies over that checkout. A patch may change the sources
+      llama-server is compiled from: ggml (the tensor library; its HIP backend compiles ggml/src/ggml-cuda), src
+      (libllama), include (its public headers), common (argument parsing, sampling, speculative decoding) and
+      tools/server. Every file there is native: only a build of the checkout measures it, and that build refuses a change
+      to its definition (CMakeLists.txt, *.cmake, cmake/). Everything else is refused: the other tools, llama-bench among
+      them (a measuring tool, not the server), vendor (third-party copies), the top-level build definition, the
+      conversion scripts and the docs. A compiled file is refused wherever it lies.
+    import_name: llamacpp
+    sections:
+      - {prefix: ggml, base: checkout, into: ggml}
+      - {prefix: src, base: checkout, into: src}
+      - {prefix: include, base: checkout, into: include}
+      - {prefix: common, base: checkout, into: common}
+      - {prefix: tools/server, base: checkout, into: tools/server}
+    refuse:
+      - "*.so"
+      - "*.so.*"
+      - "*.a"
+      - "*.o"
+      - "*.bc"
+      - "*.co"
+      - "*.hsaco"
+      - "*.cubin"
+    native:
+      - "ggml/*"
+      - "src/*"
+      - "include/*"
+      - "common/*"
+      - "tools/server/*"
+    generated: []
+    examples:
+      place: []
+      native:
+        - "ggml/src/ggml-cuda/mmq.cuh -> checkout:ggml/src/ggml-cuda/mmq.cuh"
+        - "src/llama-graph.cpp -> checkout:src/llama-graph.cpp"
+        - "include/llama.h -> checkout:include/llama.h"
+        - "common/speculative.cpp -> checkout:common/speculative.cpp"
+        - "tools/server/server.cpp -> checkout:tools/server/server.cpp"
+      refuse:
+        - "CMakeLists.txt"
+        - "cmake/build-info.cmake"
+        - "tools/llama-bench/llama-bench.cpp"
+        - "tools/mtmd/mtmd.cpp"
+        - "vendor/cpp-httplib/httplib.h"
+        - "convert_hf_to_gguf.py"
+        - "docs/build.md"
+        - "ggml/src/libggml-hip.a"

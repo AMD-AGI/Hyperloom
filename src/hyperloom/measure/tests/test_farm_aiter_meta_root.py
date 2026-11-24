@@ -91,7 +91,7 @@ def test_the_mirror_holds_the_patched_file_and_links_what_the_patch_leaves_and_n
 
 def test_the_server_reads_the_patched_csrc_from_the_mirror_and_the_image_is_left_as_it_was(tmp_path, image):
     farm = _build(tmp_path, image, _meta_root())
-    envs = place_farm(_point(tmp_path, image), farm)
+    envs = place_farm(_point(tmp_path, image), farm, {})
 
     assert envs["AITER_META_DIR"] == str(farm.aiter_meta)
     verify_farm(farm, envs, python=image.python, cwd=tmp_path)
@@ -101,7 +101,7 @@ def test_the_server_reads_the_patched_csrc_from_the_mirror_and_the_image_is_left
 
 def test_with_a_package_root_too_the_farms_aiter_is_still_the_one_imported_and_csrc_is_the_patched_one(tmp_path, image):
     farm = _build(tmp_path, image, _aiter_root(), _meta_root())
-    envs = place_farm(_point(tmp_path, image), farm)
+    envs = place_farm(_point(tmp_path, image), farm, {})
 
     verify_farm(farm, envs, python=image.python, cwd=tmp_path)
     where = _server_reads(tmp_path, image, envs, "print(a.PATCH, p.PA, a.__file__)")
@@ -116,7 +116,7 @@ def test_a_server_that_inherits_a_meta_directory_is_refused_because_it_would_rea
 
 def test_a_yaml_that_names_another_meta_directory_fails_the_check_and_the_farms_own_passes_it(tmp_path, image):
     farm = _build(tmp_path, image, _meta_root())
-    envs = place_farm(_point(tmp_path, image, AITER_META_DIR=str(image.meta)), farm)
+    envs = place_farm(_point(tmp_path, image, AITER_META_DIR=str(image.meta)), farm, {})
 
     with pytest.raises(FarmError, match="would build the image's sources"):
         verify_farm(farm, envs, python=image.python, cwd=tmp_path)
@@ -142,7 +142,7 @@ def test_the_yaml_the_farm_writes_is_unchanged_but_for_the_variable(tmp_path, im
     farm = _build(tmp_path, image, _meta_root())
     point = _point(tmp_path, image)
 
-    place_farm(point, farm)
+    place_farm(point, farm, {})
 
     envs = yaml.safe_load(point.read_text())["benchmark"]["envs"]
     assert envs["AITER_META_DIR"] == str(farm.aiter_meta) and envs["PYTHONPATH"] == str(farm.site)

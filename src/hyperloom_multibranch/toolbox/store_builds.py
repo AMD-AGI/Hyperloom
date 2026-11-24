@@ -9,9 +9,9 @@ build from the store's own records and drives a build through
 service's key in this process. The compile is never run here: ``runner`` hands each build to the CPU build runner (a
 sandbox with no key and no view of this process) and returns what it staged.
 
-What a stack changes, ``plan``, is the runtime's to say: per component, the
-:func:`~hyperloom.measure.jit.native.key.native_digest` of the native files the stack leaves different. The rest of a
-key is the site's: the image, the builder image, the GPU architecture and the component's recipe version.
+What a stack needs, ``plan``, is the compile's to say: the inputs of each build it planned at acceptance, whose hash is
+the key the build runner builds (a pinned checkout's commit is part of its recipe version there,
+:meth:`~hyperloom.measure.runner.native.recipes.NativeRecipe.build_version`), so the driver never keys a build again.
 """
 
 from __future__ import annotations
@@ -32,18 +32,14 @@ from hyperloom.measure.runner.native.service import Build, Ensured, ensure_build
 
 logger = logging.getLogger(__name__)
 
-#: The native digest of each component an accepted request's stack changes, given what acceptance prepared.
-Plan = Callable[[TestRequest, object], Mapping[str, str]]
+#: The inputs of each build an accepted request's stack needs, as acceptance planned them.
+Plan = Callable[[TestRequest, object], tuple[BuildInputs, ...]]
 
 
 @dataclass(frozen=True)
 class BuildSite:
-    """What every key of a session shares: the image the outputs lay over, the builder image that compiles them, the
-    GPU architecture, and the recipe of each component that can be built."""
+    """The recipe of each component a session can build."""
 
-    image_digest: str
-    builder_image_digest: str
-    gfx_arch: str
     recipes: Mapping[str, NativeRecipe]
 
 
@@ -59,20 +55,9 @@ class StoreBuildDriver:
         self._store, self._signer, self._site, self._plan, self._runner = store, signer, site, plan, runner
 
     def needs(self, request: TestRequest, environment: object) -> tuple[BuildInputs, ...]:
-        """The key of each component the stack changes; a component without a recipe is a ``KeyError``."""
+        """The inputs of each build the stack needs, as planned."""
 
-        site = self._site
-        return tuple(
-            BuildInputs(
-                site.image_digest,
-                site.builder_image_digest,
-                component,
-                site.gfx_arch,
-                digest,
-                site.recipes[component].version,
-            )
-            for component, digest in self._plan(request, environment).items()
-        )
+        return self._plan(request, environment)
 
     def lookup(self, inputs: BuildInputs) -> BuildRecord | None:
         """The verified entry of ``inputs``; ``None`` also for an entry that fails a check, which ``ensure`` then

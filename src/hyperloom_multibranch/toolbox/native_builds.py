@@ -14,31 +14,33 @@ reads. So it also needs:
   must not be able to read it: as another user it cannot, and under bubblewrap the key is not there); its
   public key must be in the trust file;
 - ``HYPERLOOM_BUILD_SOURCES``: the upstream checkouts, ``<dir>/<component>/<upstream_ref>`` (``<dir>/sgl_kernel/<ref>``
-  is the SGLang repository, ``<dir>/vllm/<ref>`` vLLM's);
+  is the SGLang repository, ``<dir>/vllm/<ref>`` vLLM's, ``<dir>/llamacpp/<ref>`` a worktree of the framework checkout
+  ``FRAMEWORK_REPO_PATH`` at its ``HEAD``, for a component built from the checkout the operator pinned);
 - ``HYPERLOOM_BUILD_IMAGE_ROOT``: the image's directory of installed packages (``site-packages``);
 - ``HYPERLOOM_BUILD_GFX``: the GPU architecture the outputs are built for;
 - ``HYPERLOOM_BUILD_PYTHON`` (``python3`` when unset): the image's interpreter, which runs the compile;
 - ``HYPERLOOM_BUILDER_IMAGE`` (the active image when unset): the digest of the image the build runs in;
 - ``HYPERLOOM_BUILD_SGLANG_REF`` (unset when the image names its own): the image's sglang commit, a full commit id, for
-  an image that names none (``build_setup --sglang-ref`` records it).
+  an image that names none (``build_setup --sglang-ref`` records it);
+- ``HYPERLOOM_BUILD_CPUS`` (any when unset): the CPUs every compile is pinned to, kept apart from the ones the measured
+  servers run on (:func:`~hyperloom.measure.runner.native.isolated.build_cpus`).
 
 A store and trust given without any of the four required ones refuse the build of the toolbox, naming the variable, and
 so does a host that is not ready for them (:func:`~hyperloom_multibranch.toolbox.build_preflight.build_preflight`;
-``python -m hyperloom_multibranch.toolbox.build_setup`` sets one up). The compile runs in
-:class:`~hyperloom.measure.runner.native.isolated.IsolatedBuilds`, out of this process; a host that cannot isolate it
-fails each build as the machine's, never compiles in-process (a session that finds no isolation at its start asks
-again at each build). The signing key and the trust file are registered as the app's private paths
+``python -m hyperloom_multibranch.toolbox.build_setup`` sets one up). The builds themselves are a
+:class:`~hyperloom.measure.runner.native.session.NativeBuildSession`;
+this module reads its configuration from the environment and hands the queue its driver. The compile runs out of this
+process; a host that cannot isolate it fails each build as the machine's, never compiles in-process. The signing key
+and the trust file are registered as the app's private paths
 (:data:`~hyperloom.common.confinement.PRIVATE_PATHS`), so a compile's bubblewrap sandbox
 (:func:`~hyperloom.measure.runner.native.isolated.compile_policy`) does not show them where a bound tree holds them.
 """
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from functools import partial
 from pathlib import Path
 
 from hyperloom.common import confinement
@@ -50,23 +52,14 @@ from hyperloom.measure.jit.native.config import (
     BuildStoreConfigError,
     store_from_environment,
 )
+from hyperloom.measure.jit.native.key import BuildInputs
 from hyperloom.measure.jit.native.trust import Signer
-from hyperloom.measure.runner.native.aiter_modules import (
-    AITER_COMPONENT,
-    AITER_RECIPE_FACTORY,
-    AiterModules,
-    aiter_module_recipe,
-)
-from hyperloom.measure.runner.native.builder import BuildMachine
-from hyperloom.measure.runner.native.isolated import (
-    ISOLATION_UID_NETNS,
-    IsolatedBuilds,
-    Isolation,
-    Unisolated,
-    local_isolation,
-)
-from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
-from hyperloom.measure.runner.native.recipes import RECIPE_FACTORIES, native_recipes
+from hyperloom.measure.runner.native.aiter_modules import AITER_COMPONENT, aiter_module_recipe
+from hyperloom.measure.runner.native.builder import BUILD_PYTHON_ENV, BuildMachine
+from hyperloom.measure.runner.native.isolated import Isolation, Unisolated, build_cpus, local_isolation
+from hyperloom.measure.runner.native.planning import NativeSite
+from hyperloom.measure.runner.native.recipes import native_recipes
+from hyperloom.measure.runner.native.session import NativeBuildSession, open_session, pinned_checkouts
 from hyperloom_multibranch.toolbox.build_preflight import (
     FULL_COMMIT,
     SGL_KERNEL,
@@ -80,7 +73,6 @@ from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 __all__ = [
     "BUILD_GFX_ENV",
     "BUILD_IMAGE_ROOT_ENV",
-    "BUILD_PYTHON_ENV",
     "BUILD_SGLANG_REF_ENV",
     "BUILD_SIGNING_KEY_ENV",
     "BUILD_SOURCES_ENV",
@@ -96,29 +88,25 @@ BUILD_SIGNING_KEY_ENV = "HYPERLOOM_BUILD_SIGNING_KEY"
 BUILD_SOURCES_ENV = "HYPERLOOM_BUILD_SOURCES"
 BUILD_IMAGE_ROOT_ENV = "HYPERLOOM_BUILD_IMAGE_ROOT"
 BUILD_GFX_ENV = "HYPERLOOM_BUILD_GFX"
-BUILD_PYTHON_ENV = "HYPERLOOM_BUILD_PYTHON"
 BUILDER_IMAGE_ENV = "HYPERLOOM_BUILDER_IMAGE"
 BUILD_SGLANG_REF_ENV = "HYPERLOOM_BUILD_SGLANG_REF"
 _DEFAULT_PYTHON = "python3"
 
-logger = logging.getLogger(__name__)
-
 
 @dataclass(frozen=True)
 class NativeBuilds:
-    """A toolbox's native builds: the queue's driver, the compile's plans (of native stacks, and of aiter's touched
-    modules), and what its runners are told."""
+    """A toolbox's native builds: the queue's driver, the session it builds through (whose planner and module plan
+    acceptance compiles with), and what its runners are told."""
 
     driver: StoreBuildDriver
-    plan: NativePlanner
-    modules: AiterModules
+    session: NativeBuildSession
     runner_envs: Mapping[str, str]
 
 
-def compiled_needs(request: TestRequest, environment: object) -> Mapping[str, str]:
-    """The driver's plan: the native digest of each build acceptance compiled (``AcceptedMeasurement.environment``)."""
+def compiled_needs(request: TestRequest, environment: object) -> tuple[BuildInputs, ...]:
+    """The driver's plan: the inputs of each build acceptance compiled (``AcceptedMeasurement.environment``)."""
     compiled = getattr(environment, "environment", None)
-    return {need.inputs.component: need.inputs.native_digest for need in getattr(compiled, "builds", ())}
+    return tuple(need.inputs for need in getattr(compiled, "builds", ()))
 
 
 def _required(environ: Mapping[str, str], name: str) -> str:
@@ -129,15 +117,19 @@ def _required(environ: Mapping[str, str], name: str) -> str:
 
 
 def named_commits(environ: Mapping[str, str]) -> dict[str, str]:
-    """The upstream commit of each component ``environ`` names for an image that names none, by component.
+    """The upstream commit of each component no image names, by component: the one ``environ`` names for sgl_kernel,
+    and the ``HEAD`` of the framework checkout it names for a component built from its pinned checkout
+    (:func:`~hyperloom.measure.runner.native.session.pinned_checkouts`).
 
     Raises:
-        BuildStoreConfigError: ``HYPERLOOM_BUILD_SGLANG_REF`` is set to something other than a full commit id.
+        BuildStoreConfigError: ``HYPERLOOM_BUILD_SGLANG_REF`` is set to something other than a full commit id, or the
+            pinned checkout's ``HEAD`` cannot be read or differs from its tracked files.
     """
     ref = environ.get(BUILD_SGLANG_REF_ENV, "").strip()
     if ref and not FULL_COMMIT.fullmatch(ref):
         raise BuildStoreConfigError(f"{BUILD_SGLANG_REF_ENV} must be a full lowercase commit id")
-    return {SGL_KERNEL: ref} if ref else {}
+    pinned = {found.component: found.commit for found in pinned_checkouts(native_recipes(), environ)}
+    return {SGL_KERNEL: ref, **pinned} if ref else pinned
 
 
 def _signer(path: Path) -> Signer:
@@ -167,7 +159,8 @@ def native_builds(
 
     Raises:
         BuildStoreConfigError: The store is half configured, its trust or signing key cannot be read, a variable the
-            service needs is not set, or the sglang commit it names is not a full commit id.
+            service needs is not set, the sglang commit it names is not a full commit id, or the build CPUs it names are
+            not a CPU list.
     """
     store = store_from_environment(environ)
     if store is None:
@@ -186,47 +179,15 @@ def native_builds(
     runner_envs = {BUILD_STORE_ENV: environ[BUILD_STORE_ENV].strip(), BUILD_TRUST_ENV: environ[BUILD_TRUST_ENV].strip()}
     shared = (Path(runner_envs[BUILD_STORE_ENV]), Path(runner_envs[BUILD_TRUST_ENV]))
     confinement.PRIVATE_PATHS.add(shared[1], "the native build store's trust file")
-    build_preflight(PreflightSite(*shared, key, sources, image_root, machine.python, named_commits(environ)))
+    preflight = PreflightSite(*shared, key, sources, image_root, machine.python, named_commits(environ))
+    commits = {up.component: up.ref for up in build_preflight(preflight)}
     recipes = native_recipes()
-    site = NativeSite(machine, recipes, sources, image_root)
-    planner, isolated = NativePlanner(site, blobs), isolation()
-    modules = AiterModules(planner, history=partial(store.ready_records, AITER_COMPONENT, machine.image_digest))
-    # A session that found no isolation at its start asks again at each build: bubblewrap may answer later.
-    chosen = isolated if isinstance(isolated, Isolation) else isolation
-    runner = IsolatedBuilds(planner, blobs, chosen, {**RECIPE_FACTORIES, AITER_COMPONENT: AITER_RECIPE_FACTORY})
-    _log_isolation(isolated)
+    site = NativeSite(machine, recipes, sources, image_root, commits, build_cpus(environ))
+    session = open_session(store, signer, site, blobs, isolation)
     built = {**recipes, AITER_COMPONENT: aiter_module_recipe()}
-    build_site = BuildSite(machine.image_digest, machine.builder_image_digest, machine.gfx_arch, built)
-    driver = StoreBuildDriver(store, signer, build_site, compiled_needs, runner)
-    return NativeBuilds(driver, planner, modules, runner_envs)
-
-
-def _log_isolation(isolated: Isolation | Unisolated) -> None:
-    """Say once, at the start of the session, how this host isolates a compile (the level each build's record names)."""
-    if isinstance(isolated, Unisolated):
-        logger.warning(
-            "native builds are configured and this host cannot isolate a compile now: each build asks again, and "
-            "fails as the machine's while it cannot: %s",
-            isolated.why,
-        )
-    elif isolated.bwrap is not None:
-        logger.info(
-            "native builds compile under bubblewrap %s as this process's user, in a network namespace of their own "
-            "(%s): %s",
-            isolated.bwrap.shown,
-            isolated.level,
-            "; ".join(isolated.bwrap.notes),
-        )
-    elif isolated.level == ISOLATION_UID_NETNS:
-        logger.info(
-            "native builds compile as user %s in a network namespace of their own (%s)", isolated.uid, isolated.level
-        )
-    else:
-        logger.warning(
-            "native builds compile as user %s with this host's network: it cannot make a network namespace (%s)",
-            isolated.uid,
-            isolated.level,
-        )
+    build_site = BuildSite(built)
+    driver = StoreBuildDriver(store, signer, build_site, compiled_needs, session.runner)
+    return NativeBuilds(driver, session, runner_envs)
 
 
 def with_native_plan(acceptance: AcceptanceSetup, native: NativeBuilds | None) -> AcceptanceSetup:
@@ -235,4 +196,4 @@ def with_native_plan(acceptance: AcceptanceSetup, native: NativeBuilds | None) -
     with_native = getattr(acceptance.planner, "with_native", None)
     if native is None or with_native is None:
         return acceptance
-    return replace(acceptance, planner=with_native(native.plan, native.modules))
+    return replace(acceptance, planner=with_native(native.session.planner, native.session.modules))

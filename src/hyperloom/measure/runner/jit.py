@@ -61,6 +61,7 @@ from hyperloom.measure.jit.modules import (
 )
 from hyperloom.measure.jit.native.config import BuildStoreConfigError, store_from_environment
 from hyperloom.measure.jit.native.laying import NamedBuild, NativeLayError, SheetBuilds, sheet_builds
+from hyperloom.measure.jit.native.needs import PACKAGE_ROOT
 from hyperloom.measure.jit.native.record import COMPILE_ENV_PREFIX, BuildRecord
 from hyperloom.measure.jit.prewarmed import unlike_prewarmed
 from hyperloom.measure.jit.session import GivenModules, JitCacheSession, KindPlan
@@ -93,7 +94,6 @@ _DIRECTORY = "dir"
 _UTF8 = "utf-8"
 _PREFLIGHT_MISMATCH = "preflight_mismatch"
 _SPEC_REJECTED = "spec_rejected"
-_RUNTIME_KIND = "runtime"
 _MODULE_SUFFIX = ".so"
 _NEEDS_JIT_DIR = (
     "the patch changes aiter's csrc or hsa, which is measured only by building the modules it touches in the test's own "
@@ -186,7 +186,7 @@ def _module_build(spec: MeasurementSpec, around: Surroundings) -> _ModuleBuild |
         RunnerFailure: ``spec_rejected`` when it names one for another package, or one this runner cannot prove.
     """
     roots = {root.id: root for root in spec.environment.roots}
-    named = [ref for ref in spec.environment.builds if roots[ref.root_id].kind != _RUNTIME_KIND]
+    named = [ref for ref in spec.environment.builds if roots[ref.root_id].kind == PACKAGE_ROOT]
     if not named:
         return None
     foreign = [ref.root_id for ref in named if roots[ref.root_id].import_name != AITER_PACKAGE]

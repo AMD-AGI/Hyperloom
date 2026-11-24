@@ -36,7 +36,7 @@ from typing import Any
 
 from hyperloom.contracts.recipe import ComponentPatches
 from hyperloom.measure.compile import BlobStore, EnvRoot, PackageBase, apply_patch_stack
-from hyperloom.measure.runner.native.harvest import HarvestError, harvest
+from hyperloom.measure.runner.native.harvest import HarvestError, harvest, require_executables
 from hyperloom.measure.runner.native.process_group import run_in_group
 from hyperloom.measure.jit.native.key import BuildInputs, native_digest
 from hyperloom.measure.jit.native.record import EXECUTABLE, FAILED, READY
@@ -46,6 +46,7 @@ from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.orchestrator.enablement.runtime.build_utils import run_argv
 
 __all__ = [
+    "BUILD_PYTHON_ENV",
     "COMPILE_ERROR",
     "BuildMachine",
     "BuildRequest",
@@ -58,6 +59,8 @@ __all__ = [
 ]
 
 COMPILE_ERROR = "compile_error"
+#: The interpreter a build's child runs under (:attr:`BuildMachine.python`), when not this process's.
+BUILD_PYTHON_ENV = "HYPERLOOM_BUILD_PYTHON"
 _TREE = "tree"
 _SOURCE_MODES = {EXECUTABLE: 0o700}
 _SOURCE_MODE = 0o600
@@ -112,7 +115,7 @@ def plan(request: BuildRequest, blobs: BlobStore) -> tuple[BuildInputs, EnvRoot]
         recipe.component,
         machine.gfx_arch,
         native_digest(root.entries, base_dir),
-        recipe.version,
+        recipe.build_version(request.stack.upstream_ref),
     )
     return inputs, root
 
@@ -129,7 +132,8 @@ class LaidTree:
     ``tracked`` is the upstream build directory (a ``.hip`` it holds is a source, not hipify's output), ``laid`` the
     paths the stack wrote over it; ``environment`` holds variables the planner chose for this compile, under the recipe's
     own (which win); ``linked`` the image's directories the tree's links point into (a farm's mirrors), which the
-    compile reads through them."""
+    compile reads through them; ``upstream_ref`` the commit ``tracked`` is a checkout of (``""`` for a tree that is none),
+    which the recipe's steps may name."""
 
     recipe: NativeRecipe
     machine: BuildMachine
@@ -138,6 +142,7 @@ class LaidTree:
     laid: frozenset[str]
     environment: Mapping[str, str] = field(default_factory=dict)
     linked: tuple[Path, ...] = ()
+    upstream_ref: str = ""
 
 
 def lay_tree(request: BuildRequest, root: EnvRoot, blobs: BlobStore, scratch: Path) -> LaidTree:
@@ -147,7 +152,9 @@ def lay_tree(request: BuildRequest, root: EnvRoot, blobs: BlobStore, scratch: Pa
     shutil.copytree(tracked, tree_dir(scratch), symlinks=True)
     _lay(tree_dir(scratch), root, blobs)
     laid = frozenset(entry.path for entry in root.entries if entry.op == "upsert")
-    return LaidTree(recipe, request.machine, tracked, Path(request.image_root), laid)
+    return LaidTree(
+        recipe, request.machine, tracked, Path(request.image_root), laid, upstream_ref=request.stack.upstream_ref
+    )
 
 
 def compile_tree(
@@ -173,27 +180,50 @@ def compile_laid(laid: LaidTree, scratch: Path, *, against_image: bool = True) -
     toolchain = {**checked.toolchain, "gfx": machine.gfx_arch, "max_jobs": str(recipe.max_jobs)}
     started, cpu_before = time.monotonic(), _children_cpu_seconds()
     errors: list[str] = []
-    result = run_argv(
-        recipe.argv(machine.python),
-        cwd=tree,
-        env={**laid.environment, **recipe.environment(machine.gfx_arch, Path(scratch))},
-        timeout_sec=recipe.budget_sec,
-        run=_keeping_errors(errors, f"{tree}{os.sep}"),
-    )
+    result = _run_steps(laid, Path(scratch), started, _keeping_errors(errors, f"{tree}{os.sep}"))
     timing = (_children_cpu_seconds() - cpu_before, time.monotonic() - started)
     errors = [_named_for_the_source(error, tree, laid.tracked, set(laid.laid)) for error in errors]
-    log = "\n".join([*errors, result.stdout_tail, result.stderr_tail])
+    log = "\n".join([*errors, *result.tails])
     if result.returncode < 0:
         raise BuildInfraError(f"the compile of {recipe.component} timed out or was killed (rc={result.returncode})")
     if result.returncode != 0:
         exited = f"{COMPILE_ERROR}: the compile exited {result.returncode}"
         return _failed(f"{exited}: {errors[0]}" if errors else exited, toolchain, timing, log, scratch)
     image = laid.image_root if against_image and recipe.against_image else None
+    declared = (*recipe.outputs, *recipe.executables)
     try:
-        outputs = harvest(tree / recipe.package_dir, recipe.outputs, image, recipe.max_output_bytes, Path(scratch))
+        outputs = harvest(tree / recipe.package_dir, declared, image, recipe.max_output_bytes, Path(scratch))
+        require_executables(outputs, recipe.executables)
     except HarvestError as exc:
         return _failed(f"{COMPILE_ERROR}: {exc}", toolchain, timing, log, scratch)
     return Staged(READY, outputs, toolchain, timing[0], timing[1], log, Path(scratch))
+
+
+@dataclass(frozen=True)
+class _Steps:
+    """How the recipe's steps ended: the exit status of the last one run, and each one's output tails in order."""
+
+    returncode: int
+    tails: tuple[str, ...]
+
+
+def _run_steps(
+    laid: LaidTree, scratch: Path, started: float, run: Callable[..., subprocess.CompletedProcess[str]]
+) -> _Steps:
+    """Run the recipe's steps in the tree until one exits non-zero. They share the recipe's budget: a step with none of
+    it left is not started, and the compile ends as timed out (``-1``)."""
+    recipe, machine = laid.recipe, laid.machine
+    env = {**laid.environment, **recipe.environment(machine.gfx_arch, scratch)}
+    tails: list[str] = []
+    for argv in recipe.commands(machine.python, machine.gfx_arch, laid.upstream_ref):
+        left = int(recipe.budget_sec - (time.monotonic() - started))
+        if left <= 0:
+            return _Steps(-1, tuple(tails))
+        result = run_argv(argv, cwd=tree_dir(scratch), env=env, timeout_sec=left, run=run)
+        tails += [result.stdout_tail, result.stderr_tail]
+        if result.returncode != 0:
+            return _Steps(result.returncode, tuple(tails))
+    return _Steps(0, tuple(tails))
 
 
 def _keeping_errors(errors: list[str], tree_prefix: str) -> Callable[..., subprocess.CompletedProcess[str]]:

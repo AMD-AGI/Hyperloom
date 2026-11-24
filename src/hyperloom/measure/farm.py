@@ -19,6 +19,12 @@ the farm mirrors the image's meta directory without its ``aiter`` and sets ``AIT
 inherits a meta directory holding an ``aiter`` package is refused. A patch to ``csrc`` or ``hsa`` is a root of its own
 (``aiter_meta``): its patched files are laid over the same mirror, which aiter then builds its modules from.
 
+A build that makes executables and no package (an ``executable`` root: a server built from a pinned checkout) is laid
+as its outputs alone, each copied out of the store below ``<farm>/<root id>``, and the directories that hold them go
+first on the server's ``PATH``, ahead of the ``PATH`` it would otherwise get, which is kept whole: nothing else on it,
+ROCm's tools among them, is hidden, since those directories hold nothing but the build's executables. Whether the
+server would run the farm's copy of each is checked by resolving its name on that ``PATH``.
+
 Which copy each process of the server really imported is checked by the runner
 (:mod:`~hyperloom.measure.runner.import_outcome`), which watches the imports from the farm's ``site`` directory.
 
@@ -48,6 +54,7 @@ from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_MARKER
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.jit.key import AITER_PACKAGE
 from hyperloom.measure.jit.native.laying import NativeLayError, SheetBuilds
+from hyperloom.measure.jit.native.needs import EXECUTABLE_ROOT, RUNTIME_ROOT
 from hyperloom.measure.jit.native.record import BuildRecord
 from hyperloom.measure.spec import EnvEntry, EnvRoot
 from hyperloom.orchestrator.actions.executors import (
@@ -92,7 +99,6 @@ _PROBE_TIMEOUT_SEC = 120
 _AGENTX_DEFAULT_PYTHON = "python3"
 _UTF8 = "utf-8"
 _CONFIGS_DIR = "configs"
-_RUNTIME_KIND = "runtime"
 _DELETE = "delete"
 #: Prints the version of the distribution ``sys.argv[1]`` the interpreter has installed, or nothing when it has none.
 _DIST_VERSION = (
@@ -104,6 +110,7 @@ _DIST_VERSION = (
 )
 _IMPORT_FILE = "import importlib, sys\nprint(importlib.import_module(sys.argv[1]).__file__)\n"
 _PYTHONPATH = "PYTHONPATH"
+_PATH = "PATH"
 #: Where the render of a vLLM point names the image checkout it put on the server's path (``_apply_vllm_source_runtime``).
 _VLLM_CHECKOUT_ENV = "VLLM_REPO_PATH"
 
@@ -154,7 +161,10 @@ class Farm:
 
     When the sheet patches aiter's ``csrc`` or ``hsa`` (``meta_patched``), ``aiter_meta`` is the farm's own copy of the
     meta directory instead, and the server must read that one. ``mirrored`` are the image's directories the farm mirrors
-    (each package's, and the meta directory's where the farm lays one): its untouched files are links into them."""
+    (each package's, and the meta directory's where the farm lays one): its untouched files are links into them.
+
+    ``executables`` are the executables the farm laid from the builds of its executable roots, and ``bin`` the
+    directories that hold them, which go first on the server's ``PATH``."""
 
     site: Path
     packages: tuple[str, ...]
@@ -163,6 +173,13 @@ class Farm:
     meta_patched: bool = False
     native: tuple[NativeModule, ...] = ()
     mirrored: tuple[Path, ...] = ()
+    executables: tuple[Path, ...] = ()
+    bin: tuple[Path, ...] = ()
+
+    @property
+    def imports(self) -> bool:
+        """Whether the server imports anything from the farm's ``site``: a rebuilt package or a meta directory."""
+        return bool(self.packages) or self.aiter_meta is not None
 
 
 def locate_package(import_name: str, python: str, cwd: Path) -> Path:
@@ -214,7 +231,7 @@ def check_framework_versions(roots: Iterable[EnvRoot], *, python: str, cwd: Path
     """
     seen: dict[str, str] = {}
     for root in roots:
-        if not ((root.entries or root.kind == _RUNTIME_KIND) and root.dist_name and root.dist_version):
+        if not ((root.entries or root.kind == RUNTIME_ROOT) and root.dist_name and root.dist_version):
             continue
         if root.dist_name not in seen:
             seen[root.dist_name] = installed_version(root.dist_name, python, cwd)
@@ -320,7 +337,8 @@ def _build_root(
 
 @dataclass(frozen=True)
 class BuiltRoot:
-    """A ``runtime`` root bound to the proven record of its build and the store its outputs are copied from."""
+    """A ``runtime`` or ``executable`` root bound to the proven record of its build and the store its outputs are copied
+    from."""
 
     root: EnvRoot
     record: BuildRecord
@@ -332,22 +350,29 @@ class BuiltRoot:
 
 
 def built_roots(roots: Iterable[EnvRoot], builds: SheetBuilds | None) -> list[EnvRoot | BuiltRoot]:
-    """``roots`` with each ``runtime`` root bound to the build the sheet names for it (``builds``), proven first.
+    """``roots`` with each ``runtime`` and ``executable`` root bound to the build the sheet names for it (``builds``),
+    proven first: a runtime root's outputs must lie in its package, an executable root's must all be executables.
 
     Raises:
-        FarmError: A runtime root and no build store, or its build is missing or not the one the sheet names.
+        FarmError: A built root and no build store, or its build is missing or not the one the sheet names.
     """
     found: list[EnvRoot | BuiltRoot] = []
     for root in roots:
-        if root.kind != _RUNTIME_KIND:
+        if root.kind not in (RUNTIME_ROOT, EXECUTABLE_ROOT):
             found.append(root)
             continue
         if builds is None:
-            raise FarmError(f"{root.id}: a runtime root needs the native build store, which this runner is not given")
+            raise FarmError(
+                f"{root.id}: its {root.kind} build needs the native build store, which this runner is not given"
+            )
         try:
-            found.append(BuiltRoot(root, builds.record(root.id, root.import_name), builds))
+            if root.kind == EXECUTABLE_ROOT:
+                record = builds.executable_record(root.id)
+            else:
+                record = builds.record(root.id, root.import_name)
         except NativeLayError as exc:
             raise FarmError(str(exc)) from None
+        found.append(BuiltRoot(root, record, builds))
     return found
 
 
@@ -363,12 +388,14 @@ def build_farm(
     read_blob: Callable[[str], bytes],
     inherited: Mapping[str, str] | None = None,
 ) -> Farm | None:
-    """Build ``farm_dir/site/<import_name>`` for every root; ``None`` when the sheet changes no framework.
+    """Build ``farm_dir/site/<import_name>`` for every package root and ``farm_dir/<id>`` for every executable root;
+    ``None`` when the sheet changes no framework.
 
     ``read_blob`` returns the bytes of a ``sha256:<hex>`` address and raises when it is not there. ``inherited`` is what the
     server's process inherits (:func:`inherited_environment`), this process's environment when not given: a rebuilt aiter
     gets the farm's mirror of the image's meta directory only when it inherits none. A ``runtime`` root is laid like a
-    package root once :func:`built_roots` bound it to its proven build, whose native outputs are copied onto local disk.
+    package root once :func:`built_roots` bound it to its proven build, whose native outputs are copied onto local disk;
+    an ``executable`` root is its build's outputs alone.
 
     Raises:
         FrameworkVersionMismatch: A root that changes files was compiled against another version of its distribution
@@ -378,30 +405,57 @@ def build_farm(
     roots = list(roots)
     check_framework_versions((_plain(root) for root in roots), python=python, cwd=farm_dir.parent)
     meta_root = next((root for root in roots if root.import_name == AITER_META_WHEEL_DIR), None)
-    packages = [root for root in roots if root is not meta_root]
+    executable = [root for root in roots if _plain(root).kind == EXECUTABLE_ROOT]
+    packages = [root for root in roots if root is not meta_root and _plain(root).kind != EXECUTABLE_ROOT]
     native: list[NativeModule] = []
     mirrored: list[Path] = []
     for root in packages:
         base = locate_package(root.import_name, python, farm_dir.parent)
         mirrored.append(base)
-        if isinstance(root, BuiltRoot):
-            native += _build_runtime_root(root, base, site, read_blob)
-        elif root.kind == _RUNTIME_KIND:
-            raise FarmError(f"{root.id}: a runtime root needs its build, which this runner is not given")
-        else:
-            _build_root(root, base, site / root.import_name, read_blob)
+        native += _build_package_root(root, base, site, read_blob)
+    executables = _lay_executables(executable, farm_dir)
     meta = None
     if meta_root is not None or any(root.import_name == AITER_PACKAGE for root in packages):
         aiter = locate_package(AITER_PACKAGE, python, farm_dir.parent)
         meta = _build_meta_root(meta_root, aiter, site, os.environ if inherited is None else inherited, read_blob)
         if meta is not None:
             mirrored.append(image_aiter_meta(aiter))
-    rebuilt = tuple(_plain(root) for root in packages) + (() if meta_root is None else (_plain(meta_root),))
+    rebuilt = tuple(_plain(root) for root in (*packages, *executable, *([meta_root] if meta_root else [])))
     if not rebuilt:
         return None
     names = tuple(root.import_name for root in packages)
     patched = meta_root is not None
-    return Farm(site, names, rebuilt, meta, patched, tuple(native), tuple(dict.fromkeys(mirrored)))
+    bins = tuple(dict.fromkeys(path.parent for path in executables))
+    mirror = tuple(dict.fromkeys(mirrored))
+    return Farm(site, names, rebuilt, meta, patched, tuple(native), mirror, tuple(executables), bins)
+
+
+def _build_package_root(
+    root: EnvRoot | BuiltRoot, base: Path, site: Path, read_blob: Callable[[str], bytes]
+) -> list[NativeModule]:
+    """Lay a package root below ``site`` over the installed ``base``; the native modules of a ``runtime`` root's build."""
+    if isinstance(root, BuiltRoot):
+        return _build_runtime_root(root, base, site, read_blob)
+    if root.kind == RUNTIME_ROOT:
+        raise FarmError(f"{root.id}: a runtime root needs its build, which this runner is not given")
+    _build_root(root, base, site / root.import_name, read_blob)
+    return []
+
+
+def _lay_executables(roots: Iterable[EnvRoot | BuiltRoot], farm_dir: Path) -> list[Path]:
+    """Copy each executable root's outputs below ``farm_dir/<id>``; the executables laid, no two of one name (the first
+    on ``PATH`` would hide the other)."""
+    laid: list[Path] = []
+    for root in roots:
+        if not isinstance(root, BuiltRoot):
+            raise FarmError(f"{root.id}: an executable root needs its build, which this runner is not given")
+        target = farm_dir / root.root.id
+        try:
+            root.builds.fetch(root.record, target)
+        except NativeLayError as exc:
+            raise FarmError(str(exc)) from None
+        laid += [target / output.path for output in root.record.outputs]
+    return laid
 
 
 def _build_runtime_root(
@@ -477,6 +531,14 @@ def prepend_pythonpath(envs: MutableMapping[str, Any], site: Path) -> None:
     envs["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(part for part in parts if part))
 
 
+def _prepend_path(envs: MutableMapping[str, Any], directories: Iterable[Path], inherited: Mapping[str, str]) -> None:
+    """Put ``directories`` first on the ``PATH`` the server gets: the YAML's, else the one it inherits (``inherited``),
+    else the default search path, kept whole behind them."""
+    current = str(envs.get(_PATH) or inherited.get(_PATH) or os.defpath)
+    parts = [*(str(directory) for directory in directories), *current.split(os.pathsep)]
+    envs[_PATH] = os.pathsep.join(dict.fromkeys(part for part in parts if part))
+
+
 def _server_envs(point: BenchmarkPoint) -> Mapping[str, Any]:
     return point.agentx_launch.env if point.agentx else point.envs
 
@@ -543,8 +605,10 @@ def patched_configs(farm: Farm | None) -> dict[str, Path | None]:
     return patched
 
 
-def place_farm(config_path: Path, farm: Farm) -> Mapping[str, Any]:
-    """Put the farm first on the import path of the server ``config_path`` launches; return the variables it gets.
+def place_farm(config_path: Path, farm: Farm, inherited: Mapping[str, str]) -> Mapping[str, Any]:
+    """Put the farm first on the import path and its executables first on the ``PATH`` of the server ``config_path``
+    launches; return the variables it gets. ``inherited`` is what the server's process inherits
+    (:func:`inherited_environment`), whose ``PATH`` the farm's goes ahead of when the YAML names none.
 
     An AgentX server's variables and interpreter are the launch's, so the farm goes where the single-lineage flow puts
     an overlay: ``apply_native_runtime`` writes it into ``launch_overrides.env`` and binds the rebuilt files as source
@@ -557,20 +621,24 @@ def place_farm(config_path: Path, farm: Farm) -> Mapping[str, Any]:
     agentx = BenchmarkPoint.from_document(config, source=str(config_path)).agentx
     if agentx:
         python = named_python(config)
-        apply_native_runtime(config_path, {"runtime_python_exe": python} if python else {}, str(farm.site))
+        overlay = str(farm.site) if farm.imports else ""
+        apply_native_runtime(config_path, {"runtime_python_exe": python} if python else {}, overlay)
         config = _loaded(config_path)
     envs = launch_environment(config)
-    if not agentx:
+    if not agentx and farm.imports:
         prepend_pythonpath(envs, farm.site)
     if farm.aiter_meta is not None:
         envs.setdefault(AITER_META_DIR_ENV, str(farm.aiter_meta))
+    if farm.bin:
+        _prepend_path(envs, farm.bin, inherited)
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
     return envs
 
 
 def verify_farm(farm: Farm, envs: Mapping[str, Any], *, python: str, cwd: Path) -> None:
-    """Check that ``python``, given this YAML's variables, finds every rebuilt package in the farm first, and that a
-    rebuilt aiter is told a meta directory that holds ``csrc``."""
+    """Check that ``python``, given this YAML's variables, finds every rebuilt package in the farm first, that a
+    rebuilt aiter is told a meta directory that holds ``csrc``, and that the YAML's ``PATH`` finds each executable the
+    farm laid in the farm first."""
     environment = {**os.environ, "PYTHONPATH": str(envs.get("PYTHONPATH") or "")}
     for name in farm.packages:
         done = subprocess.run(
@@ -589,6 +657,14 @@ def verify_farm(farm: Farm, envs: Mapping[str, Any], *, python: str, cwd: Path) 
         _verify_native(module, environment, python=python, cwd=cwd)
     if AITER_PACKAGE in farm.packages or farm.meta_patched:
         _verify_aiter_meta(farm, envs)
+    for executable in farm.executables:
+        _verify_executable(executable, envs)
+
+
+def _verify_executable(executable: Path, envs: Mapping[str, Any]) -> None:
+    found = shutil.which(executable.name, path=str(envs.get(_PATH) or ""))
+    if found is None or os.path.realpath(found) != os.path.realpath(executable):
+        raise FarmError(f"{executable.name} would be run from {found or 'nowhere on PATH'}, not {executable}")
 
 
 def _verify_native(module: NativeModule, environment: Mapping[str, str], *, python: str, cwd: Path) -> None:

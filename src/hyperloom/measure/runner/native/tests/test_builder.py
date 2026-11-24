@@ -5,15 +5,20 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from hyperloom.measure.compile import PatchApplyError
-from hyperloom.measure.runner.native.builder import plan
+from hyperloom.measure.runner.native.builder import BuildRequest, compile_tree, plan, tree_dir
 from hyperloom.measure.jit.native.record import FAILED, LOG_NAME, READY, RECORD_FILES
 from hyperloom.measure.jit.native.store import BuildInfraError
-from hyperloom.measure.runner.native.tests._native import KERNEL, OUTPUT, Bench, compiled
+from hyperloom.measure.runner.native.isolated import IsolatedBuilds, Isolation
+from hyperloom.measure.runner.native.planning import Planned
+from hyperloom.measure.runner.native.recipes import CommitSource
+from hyperloom.measure.runner.native.tests import _native as native_bench
+from hyperloom.measure.runner.native.tests._native import COMPONENT, KERNEL, OUTPUT, Bench, compiled, stepped_recipe
 
 PATCHED = "int kernel(void) { return 2; }\n"
 
@@ -171,3 +176,80 @@ def test_the_compile_sees_no_variable_of_the_service(bench: Bench, monkeypatch: 
     names = (bench.store.entry_dir(record.inputs) / LOG_NAME).read_text().split()
     assert "HL_TEST_SERVICE_SECRET" not in names
     assert {"AMDGPU_TARGET", "MAX_JOBS", "PATH"} <= set(names)
+
+
+def _with_steps(request: BuildRequest, *steps: tuple[str, ...]) -> BuildRequest:
+    return replace(request, recipe=replace(request.recipe, steps=steps))
+
+
+class _Planner:
+    def __init__(self, planned: Planned) -> None:
+        self._planned = planned
+
+    def planned(self, inputs: object) -> Planned:
+        return self._planned
+
+
+def test_the_build_child_runs_the_steps_in_order_with_the_arch_the_jobs_and_the_commit_filled(
+    bench: Bench, tmp_path: Path
+) -> None:
+    request = _with_steps(bench.request(bench.patch({KERNEL: PATCHED})), *stepped_recipe().steps)
+    inputs, root = plan(request, bench.blobs)
+    runner = IsolatedBuilds(
+        _Planner(Planned(request, root)),  # type: ignore[arg-type]
+        bench.blobs,
+        Isolation((), None),
+        {COMPONENT: f"{native_bench.__name__}:{stepped_recipe.__name__}"},
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+
+    staged = runner(inputs)(scratch)
+
+    assert staged.status == READY, staged.failure
+    assert f"step -DT=gfx942 -j 1 -DC={request.stack.upstream_ref}" in staged.log
+    assert [output.path for output in staged.outputs] == [OUTPUT]
+
+
+def test_a_step_that_fails_ends_the_compile_as_the_candidates_error(bench: Bench, tmp_path: Path) -> None:
+    request = _with_steps(
+        bench.request(bench.patch({KERNEL: PATCHED})),
+        ("{python}", "-c", "import sys; sys.exit(3)"),
+        ("{python}", "build.py"),
+    )
+    inputs, root = plan(request, bench.blobs)
+
+    staged = compile_tree(request, root, bench.blobs, tmp_path / "scratch")
+
+    assert (staged.status, staged.failure) == (FAILED, "compile_error: the compile exited 3")
+    assert not (tree_dir(tmp_path / "scratch") / "python" / OUTPUT).exists(), "the later step never ran"
+
+
+@pytest.mark.parametrize(
+    ("source", "separate"), [(CommitSource.PINNED_CHECKOUT, True), (CommitSource.IMAGE_DIST, False)]
+)
+def test_a_pinned_checkouts_commit_is_part_of_the_key(bench: Bench, source: CommitSource, separate: bool) -> None:
+    request = bench.request(bench.patch({KERNEL: PATCHED}))
+    request = replace(request, recipe=replace(request.recipe, commit_source=source))
+    moved = replace(request, stack=replace(request.stack, upstream_ref="e" * 40))
+
+    first, second = plan(request, bench.blobs)[0], plan(moved, bench.blobs)[0]
+
+    assert (first.key != second.key) is separate
+    if separate:
+        assert first.recipe_version == f"fake/1+{request.stack.upstream_ref}"
+
+
+def _executable_request(bench: Bench, *steps: tuple[str, ...]) -> BuildRequest:
+    request = bench.request(bench.patch({KERNEL: PATCHED}))
+    recipe = replace(request.recipe, outputs=(), executables=(OUTPUT,), against_image=False, steps=steps)
+    return replace(request, recipe=recipe)
+
+
+def test_a_declared_executable_left_plain_is_the_candidates_compile_error(bench: Bench, tmp_path: Path) -> None:
+    request = _executable_request(bench, ("{python}", "build.py"))
+    inputs, root = plan(request, bench.blobs)
+
+    staged = compile_tree(request, root, bench.blobs, tmp_path / "scratch")
+
+    assert (staged.status, staged.failure) == (FAILED, f"compile_error: the build made no executable {OUTPUT}")

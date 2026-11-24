@@ -9,19 +9,23 @@ layout (one its ``native`` patterns name: a ``.cu`` or a header where the compon
 ``csrc``; one inside the package is an ordinary file) is planned like a build runner plans it
 (:func:`~hyperloom.measure.runner.native.builder.plan`): applied over the checkout of the component's pinned upstream
 commit, which yields the key, and its files inside the installed package, which the farm lays like a package root's. A
-stack that changes only Python is left to the package layout, as before. The planner keeps what it planned by key, so
-the build runner of a key can build it.
+stack that changes only Python is left to the package layout, as before. A recipe that makes executables (and no
+package) compiles to an executable root, which lays no file. The planner keeps what it planned by key, so
+the build runner of a key can build it. :meth:`NativePlanner.base` plans the build of a component's upstream commit as
+it is, the empty stack, at the commit the site pins for it.
 
 Refused here, at submission, naming the path: a change to the build definition (``CMakeLists.txt``, ``setup.py`` and the
 other files of :data:`~hyperloom.measure.runner.native.recipes.NATIVE_BUILD_REFUSE`, and anything below a ``cmake/``
 directory), which would run arbitrary code at build time; a change to a build product (a compiled file, which the
-layout's ``refuse`` patterns name), naming the pattern; and a stack whose upstream commit has no checkout here.
+layout's ``refuse`` patterns name), naming the pattern; a file the layout neither places nor names native, which
+no measurement takes (a checkout's layout names every file it lets in native); and a stack whose upstream commit has no
+checkout here.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 from typing import Protocol
@@ -37,7 +41,7 @@ from hyperloom.measure.compile import (
     UnsupportedComponentError,
     patch_targets,
 )
-from hyperloom.measure.jit.native.needs import NativeStack
+from hyperloom.measure.jit.native.needs import EXECUTABLE_ROOT, NativeStack
 from hyperloom.measure.jit.native.key import BuildInputs
 from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.measure.runner.native.builder import BuildMachine, BuildRequest, LaidTree, lay_tree, plan
@@ -52,13 +56,17 @@ _BUILD_DEFINITION_DIRS = frozenset({"cmake"})
 @dataclass(frozen=True)
 class NativeSite:
     """What every build of a session shares: where the outputs run (``machine``), the recipe of each component that can
-    be built, the directory of upstream checkouts (``<sources>/<component>/<upstream_ref>``) and the image's directory
-    of installed packages (``site-packages``), which outputs equal to the image's are left out against."""
+    be built, the directory of upstream checkouts (``<sources>/<component>/<upstream_ref>``), the image's directory
+    of installed packages (``site-packages``), which outputs equal to the image's are left out against, the
+    upstream commit of each component the session builds from as it is (``commits``), and the CPUs every compile is
+    pinned to (``build_cpus``, ``""`` for any: :func:`~hyperloom.measure.runner.native.isolated.build_cpus`)."""
 
     machine: BuildMachine
     recipes: Mapping[str, NativeRecipe]
     sources: Path
     image_root: Path
+    commits: Mapping[str, str] = field(default_factory=dict)
+    build_cpus: str = ""
 
 
 class PlannedBuild(Protocol):
@@ -99,15 +107,41 @@ class NativePlanner:
         layout = self._layouts.get(component.component)
         if recipe is None or layout is None or not self._changes_native(component, recipe, layout):
             return None
-        upstream = self._site.sources / component.component / component.upstream_ref
+        return self._plan(component, recipe)
+
+    def base(self, component: str) -> NativeStack:
+        """The build of ``component``'s upstream commit as the site pins it, no patch laid over it (:meth:`base_stack`).
+
+        Raises:
+            UnsupportedComponentError: As :meth:`base_stack`.
+        """
+        return self._plan(self.base_stack(component), self._site.recipes[component])
+
+    def base_stack(self, component: str) -> ComponentPatches:
+        """``component`` at the upstream commit the site pins, with no patch.
+
+        Raises:
+            UnsupportedComponentError: The commit the site pins has no checkout.
+        """
+        commit = self._site.commits.get(component)
+        return ComponentPatches(component, str(self._upstream(component, commit)), commit)
+
+    def _upstream(self, component: str, upstream_ref: str) -> Path:
+        upstream = self._site.sources / component / upstream_ref
         if not upstream.is_dir():
             raise UnsupportedComponentError(
-                f"{component.component} at {component.upstream_ref} has no upstream checkout to build from; its native "
-                "files cannot be measured until one is staged"
+                f"{component} at {upstream_ref} has no upstream checkout to build from; its native files cannot be "
+                "measured until one is staged"
             )
+        return upstream
+
+    def _plan(self, component: ComponentPatches, recipe: NativeRecipe) -> NativeStack:
+        upstream = self._upstream(component.component, component.upstream_ref)
         request = BuildRequest(recipe, component, upstream, self._site.image_root, self._site.machine)
         inputs, root = plan(request, self._blobs)
         self.remember(inputs, Planned(request, root))
+        if recipe.executables:
+            return NativeStack(inputs, (), EXECUTABLE_ROOT)
         return NativeStack(inputs, _package_entries(root, recipe))
 
     def remember(self, inputs: BuildInputs, planned: PlannedBuild) -> None:
@@ -127,8 +161,8 @@ class NativePlanner:
         return found
 
     def _changes_native(self, component: ComponentPatches, recipe: NativeRecipe, layout: ComponentLayout) -> bool:
-        """Whether the stack changes a native file of the package layout; a change to the build definition, or to a
-        build product, is refused."""
+        """Whether the stack changes a native file of the package layout; a change to the build definition, to a
+        build product, or to a file the layout neither places nor names native is refused."""
         native = False
         for ref in component.patches:
             text = self._blobs.get(ref.sha256).decode("utf-8", errors="replace")
@@ -140,7 +174,14 @@ class NativePlanner:
                         f"{ref.path}: {path!r} is a build product of {component.component} ({pattern}), never a "
                         "source a native build takes from a patch"
                     )
-                native = native or layout.spec.native_by(path) is not None
+                named = layout.spec.native_by(path) is not None
+                if not named and layout.spec.place(path) is None:
+                    prefixes = ", ".join(f"{section.prefix}/" for section in layout.spec.sections)
+                    raise PatchApplyError(
+                        f"{ref.path}: {path!r} is outside the installed package ({prefixes}) and no native source of "
+                        f"{component.component}'s build; no measurement takes a change to it"
+                    )
+                native = native or named
         return native
 
 

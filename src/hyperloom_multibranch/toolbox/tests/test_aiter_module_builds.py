@@ -68,7 +68,7 @@ class AiterRig:
         history = partial(self.store.ready_records, AITER_COMPONENT, IMAGE)
         self.modules = AiterModules(planner, history=history, environ={})
         runner = IsolatedBuilds(planner, self.blobs, isolation, {AITER_COMPONENT: standin.FACTORY})
-        site = BuildSite(IMAGE, BUILDER, "gfx942", {AITER_COMPONENT: standin.recipe()})
+        site = BuildSite({AITER_COMPONENT: standin.recipe()})
         self.driver = StoreBuildDriver(self.store, Signer(key), site, compiled_needs, runner)
         self.compiler = EnvironmentCompiler(
             self.blobs, IMAGE, lambda layout: standin.package_base(self.package), modules=self.modules

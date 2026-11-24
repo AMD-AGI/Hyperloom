@@ -43,7 +43,13 @@ from hyperloom.common.outside_facts import (
     TUNABLEOP_TABLE_ENV,
     component_layouts,
 )
-from hyperloom.common.outside_facts.component_layout import META_BASE, PACKAGE_BASE, ComponentLayoutSpec, LayoutSection
+from hyperloom.common.outside_facts.component_layout import (
+    CHECKOUT_BASE,
+    META_BASE,
+    PACKAGE_BASE,
+    ComponentLayoutSpec,
+    LayoutSection,
+)
 from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.contracts.recipe import (
     DIGEST_PREFIX,
@@ -56,6 +62,7 @@ from hyperloom.contracts.recipe import (
     apply,
 )
 from hyperloom.measure.jit.native.needs import (
+    EXECUTABLE_ROOT,
     BuildNeed,
     BuildNotReady,
     BuildRef,
@@ -82,6 +89,7 @@ from hyperloom.measure.jit.modules import (
 )
 from hyperloom.measure.framework.table_modules import named_table_modules
 from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
+from hyperloom.inference_optimizer.framework_paths import GENERIC_FRAMEWORK_ROOT_ENV
 
 
 ATTACH_PLACEHOLDER = "${HL_ATTACH:%s}"
@@ -278,6 +286,33 @@ def locate_installed_package(layout: ComponentLayout, image_roots: tuple[str, ..
             "hosted measurement cannot take it as a base"
         )
     return PackageBase(name, path, dist.metadata["Name"] if dist else None, dist.version if dist else None)
+
+
+def locate_checkout(layout: ComponentLayout, environ: Mapping[str, str] = os.environ) -> PackageBase:
+    """The pinned checkout of the component's upstream: the framework checkout the session names
+    (``FRAMEWORK_REPO_PATH``), when it holds the directory of every section of the layout."""
+
+    named = environ.get(GENERIC_FRAMEWORK_ROOT_ENV, "").strip()
+    if not named:
+        raise UnsupportedComponentError(
+            f"{layout.import_name} is built from a pinned checkout and {GENERIC_FRAMEWORK_ROOT_ENV} names none"
+        )
+    root = Path(named).resolve()
+    missing = [section.prefix for section in layout.spec.sections if not (root / section.prefix).is_dir()]
+    if missing:
+        raise UnsupportedComponentError(
+            f"{GENERIC_FRAMEWORK_ROOT_ENV} {root} is not a checkout of {layout.import_name}: it has no {missing}"
+        )
+    return PackageBase(layout.import_name, root, None, None)
+
+
+def locate_source(layout: ComponentLayout) -> PackageBase:
+    """What the component's patches are laid over, as its layout says: its installed package, or the pinned checkout of
+    its upstream (:attr:`~hyperloom.common.outside_facts.component_layout.ComponentLayoutSpec.source_base`)."""
+
+    if layout.spec.source_base == CHECKOUT_BASE:
+        return locate_checkout(layout)
+    return locate_installed_package(layout)
 
 
 # --- the compiled overlay --------------------------------------------------------------------------------------------
@@ -738,7 +773,7 @@ class EnvironmentCompiler:
 
     blobs: BlobStore
     active_image_digest: str
-    locator: PackageLocator = locate_installed_package
+    locator: PackageLocator = locate_source
     layouts: Mapping[str, ComponentLayout] = field(default_factory=lambda: COMPONENT_LAYOUTS)
     #: The native builds a stack needs; without one a stack that changes a native source is refused by its layout.
     native: NativePlan | None = None
@@ -770,7 +805,7 @@ class EnvironmentCompiler:
                 roots.extend(component_roots)
                 builds.extend(needs)
             else:
-                roots.append(self._runtime_root(component, native))
+                roots.append(self.native_root(component, native))
                 builds.append(BuildNeed(component.component, native.inputs))
         check_runtime_sources(target, tuple(builds))
         return CompiledEnvironment(
@@ -783,11 +818,16 @@ class EnvironmentCompiler:
             builds=tuple(builds),
         )
 
-    def _runtime_root(self, component: ComponentPatches, native: NativeStack) -> EnvRoot:
-        """The package root of a native stack: the stack's own package files, its native outputs to come from a build."""
+    def native_root(self, component: ComponentPatches, native: NativeStack) -> EnvRoot:
+        """The root of a native stack: a package root of the stack's own package files, its native outputs to come from a
+        build; or, for a build that makes executables, an executable root that lays no file, named by the upstream commit
+        it was built from."""
         layout = self.layouts.get(component.component)
         if layout is None:
             raise UnsupportedComponentError(f"{component.component} has no package layout; its build cannot be laid")
+        if native.kind == EXECUTABLE_ROOT:
+            name = layout.import_name
+            return EnvRoot(component.component, name, name, component.upstream_ref, (), kind=EXECUTABLE_ROOT)
         package = self.locator(layout)
         return EnvRoot(
             component.component,
@@ -826,7 +866,7 @@ def compile_environment(
     *,
     blobs: BlobStore,
     active_image_digest: str,
-    locator: PackageLocator = locate_installed_package,
+    locator: PackageLocator = locate_source,
 ) -> CompiledEnvironment:
     """The environment ``recipe`` plus ``action`` describes; raises :class:`CompileError` when it cannot be built."""
 
@@ -859,6 +899,8 @@ __all__ = [
     "kernel_attachments",
     "kernel_load_env",
     "kernel_rows_only",
+    "locate_checkout",
     "locate_installed_package",
+    "locate_source",
     "patch_targets",
 ]

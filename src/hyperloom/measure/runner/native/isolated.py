@@ -30,6 +30,10 @@ child. A host where neither works builds nothing: the build fails as the machine
 reasons (:class:`Unisolated`). A remote build pool is another
 :class:`~hyperloom.measure.runner.native.service.Build` behind the same ``runner(inputs)`` seam.
 
+A compile also must not slow a measurement running on the same host: every compile runs at the lowest CPU priority
+(``nice -n 19``), and, where the site names the CPUs compiles may use (``HYPERLOOM_BUILD_CPUS``, :func:`build_cpus`),
+only on those (``taskset``), which the record's ``build_cpus`` entry names (:class:`ChildInterpreter`).
+
 The child imports the builder from the tree this process runs from (``source``), not from whatever ``hyperloom`` the
 interpreter's environment has installed, so an environment installed from an older tree cannot compile with old code; a
 child that resolves the builder elsewhere refuses to run.
@@ -52,6 +56,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.bwrap import SYSTEM_ROOTS, BwrapPolicy, BwrapPolicyError
+from hyperloom_common.cpu_list import cpu_list, runnable_cpus
 
 import hyperloom
 from hyperloom.common.agent_isolation import BwrapIsolation, NoIsolation, bwrap_isolation
@@ -60,6 +65,7 @@ from hyperloom.common.id_map import unmapped_ids
 from hyperloom.measure import fsafe
 from hyperloom.measure.compile import BlobStore
 from hyperloom.measure.docs import DocumentError, Reader, parse_json_object, string_map
+from hyperloom.measure.jit.native.config import BuildStoreConfigError
 from hyperloom.measure.jit.native.key import BuildInputs
 from hyperloom.measure.jit.native.record import COMPILE_ENV_PREFIX, FAILED, READY, OutputFile
 from hyperloom.measure.jit.native.store import BuildInfraError
@@ -70,6 +76,8 @@ from hyperloom.measure.runner.native.process_group import run_in_group
 from hyperloom.measure.runner.native.service import Build, Staged
 
 __all__ = [
+    "BUILD_CPUS_ENV",
+    "BUILD_CPUS_KEY",
     "ChildInterpreter",
     "ISOLATION_BWRAP_NETNS",
     "ISOLATION_KEY",
@@ -82,6 +90,7 @@ __all__ = [
     "Isolation",
     "Unisolated",
     "account_problem",
+    "build_cpus",
     "compile_bwrap",
     "compile_policy",
     "job_document",
@@ -98,6 +107,11 @@ ISOLATION_KEY = "isolation"
 ISOLATION_UID_NETNS = "uid+netns"
 ISOLATION_UID = "uid"
 ISOLATION_BWRAP_NETNS = "bwrap+netns"
+#: The CPUs every compile is pinned to, as ``taskset -c`` takes them (``0-31``, ``0-15,64-79``); unset: any.
+BUILD_CPUS_ENV = "HYPERLOOM_BUILD_CPUS"
+#: The toolchain entry of a build's record that names the CPUs its compile was pinned to.
+BUILD_CPUS_KEY = "build_cpus"
+_LOWEST_PRIORITY = "19"
 #: The level of a stand-in that runs the compile as this process's own user (a test's; never a deployment's).
 _NOT_ISOLATED = "none"
 #: The directory this process imports ``hyperloom`` from: the child imports the builder from the same tree.
@@ -144,6 +158,29 @@ class Unisolated:
     """No tier can isolate a compile on this host: ``why`` names both tiers' reasons, as the choice found them."""
 
     why: str
+
+
+def build_cpus(environ: Mapping[str, str]) -> str:
+    """The CPUs ``HYPERLOOM_BUILD_CPUS`` pins every compile to; ``""`` when it names none.
+
+    Raises:
+        BuildStoreConfigError: It names something other than a CPU list ``taskset -c`` takes, or a CPU a compile
+            cannot run on here.
+    """
+    named = environ.get(BUILD_CPUS_ENV, "").strip()
+    if not named:
+        return ""
+    try:
+        cpus = cpu_list(named)
+    except ValueError as exc:
+        raise BuildStoreConfigError(f"{BUILD_CPUS_ENV}: {exc}") from None
+    absent = sorted(set(cpus) - runnable_cpus(cpus))
+    if absent:
+        raise BuildStoreConfigError(
+            f"{BUILD_CPUS_ENV}: {named!r} names {len(absent)} CPU(s) a compile cannot run on here, the lowest "
+            f"CPU {absent[0]}"
+        )
+    return named
 
 
 def private_network(unshare: str) -> bool:
@@ -239,14 +276,20 @@ def local_isolation(network_probe: Callable[[str], bool] = private_network) -> I
 @dataclass(frozen=True)
 class ChildInterpreter:
     """What runs the build child: ``python`` under ``-I``, importing the builder from ``source`` (by default this process's
-    own interpreter and the tree it runs from)."""
+    own interpreter and the tree it runs from), at the lowest CPU priority and, when ``cpus`` names any (the site's
+    build CPUs, :func:`build_cpus`), only on those."""
 
     python: str = sys.executable
     source: Path = SOURCE_ROOT
+    cpus: str = ""
 
     def command(self, work: Path) -> list[str]:
-        """The child's command line for the laid tree in ``work``."""
-        return [self.python, "-I", "-c", _CHILD_BOOTSTRAP, str(self.source), str(work)]
+        """The child's command line for the laid tree in ``work``.
+
+        Raises:
+            BuildInfraError: ``nice``, or ``taskset`` where there are CPUs to pin to, is not on ``PATH``.
+        """
+        return [*_cpu_prefix(self.cpus), self.python, "-I", "-c", _CHILD_BOOTSTRAP, str(self.source), str(work)]
 
 
 def compile_policy(work: Path, child: ChildInterpreter, laid: LaidTree, environ: Mapping[str, str]) -> BwrapPolicy:
@@ -309,6 +352,7 @@ def job_document(laid: LaidTree, factory: str) -> dict[str, Any]:
         "image_root": str(laid.image_root),
         "laid": sorted(laid.laid),
         "environment": dict(laid.environment),
+        "upstream_ref": laid.upstream_ref,
     }
 
 
@@ -354,7 +398,8 @@ class IsolatedBuilds:
             tail = done.stderr.strip()[-_STDERR_TAIL:]
             raise BuildInfraError(f"the build runner exited {done.returncode}: {tail}")
         staged = staged_record(work, timing)
-        return replace(staged, toolchain=_service_toolchain(staged.toolchain, laid, isolation.level))
+        toolchain = _service_toolchain(staged.toolchain, laid, isolation.level, self._child.cpus)
+        return replace(staged, toolchain=toolchain)
 
     def _command(self, isolation: Isolation, work: Path, laid: LaidTree) -> tuple[list[str], dict[str, str]]:
         """The child's command line under ``isolation`` and its environment; the work directory is given to the
@@ -370,12 +415,29 @@ class IsolatedBuilds:
             raise BuildInfraError(f"bubblewrap cannot sandbox this compile: {refused}; nothing was compiled") from None
 
 
-def _service_toolchain(child: Mapping[str, str], laid: LaidTree, level: str) -> dict[str, str]:
+def _cpu_prefix(cpus: str) -> list[str]:
+    """``nice`` to the lowest priority, behind ``taskset`` to ``cpus`` when there are any; the machine's failure when
+    either tool is missing, since the compile would contend with the measurement it must not slow."""
+    tools = ("taskset", "nice") if cpus else ("nice",)
+    found = {tool: shutil.which(tool) for tool in tools}
+    missing = [tool for tool, path in found.items() if path is None]
+    if missing:
+        raise BuildInfraError(f"{', '.join(missing)} is not on PATH, and a compile runs under it; nothing was compiled")
+    prefix = [str(found["nice"]), "-n", _LOWEST_PRIORITY]
+    return [str(found["taskset"]), "-c", cpus, *prefix] if cpus else prefix
+
+
+def _service_toolchain(child: Mapping[str, str], laid: LaidTree, level: str, cpus: str) -> dict[str, str]:
     """The record's toolchain: the child's facts, less any it wrote under the names this process writes (the variables of
-    the compile and its isolation), which a compile running candidate code must not be able to claim."""
+    the compile, its isolation and the CPUs it was pinned to), which a compile running candidate code must not be able
+    to claim."""
     own = {f"{COMPILE_ENV_PREFIX}{name}": value for name, value in laid.environment.items()}
-    kept = {name: value for name, value in child.items() if not name.startswith(COMPILE_ENV_PREFIX)}
-    return {**kept, **own, ISOLATION_KEY: level}
+    kept = {
+        name: value
+        for name, value in child.items()
+        if not name.startswith(COMPILE_ENV_PREFIX) and name not in (ISOLATION_KEY, BUILD_CPUS_KEY)
+    }
+    return {**kept, **own, ISOLATION_KEY: level, **({BUILD_CPUS_KEY: cpus} if cpus else {})}
 
 
 def _write_job(work: Path, job: Mapping[str, Any]) -> None:

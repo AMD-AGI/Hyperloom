@@ -23,7 +23,9 @@ configured, so a host that is set up wrong refuses at start, naming every item, 
   commit is read from the image's installed upstream (``sglang`` for ``sgl_kernel``, ``vllm`` for ``vllm``: its
   ``direct_url.json``, or the checkout it was installed from) or, for sglang, its checkout ``/sgl-workspace/sglang``;
   for an image that names none, it is the commit the host's setup was told (``HYPERLOOM_BUILD_SGLANG_REF``, which
-  ``build_setup --sglang-ref`` records);
+  ``build_setup --sglang-ref`` records); for a component built from the checkout the operator pinned, no image names
+  one: it is the ``HEAD`` of the framework checkout ``FRAMEWORK_REPO_PATH``, whose checkout is a worktree of it. Each
+  checkout's directory is its full commit id;
 - the importable TraceLens is the commit this repository pins (``TRACELENS_REF``): read from a git checkout or the
   installed version's ``+g<commit>``; when neither names a commit, the toolbox's TraceLens imports must succeed.
 
@@ -55,7 +57,6 @@ from urllib.parse import unquote, urlparse
 from hyperloom.common.agent_isolation import NoIsolation
 from hyperloom.measure.jit.native.config import BuildStoreConfigError
 from hyperloom.measure.runner.native.isolated import NOBODY, SOURCE_ROOT, account_problem, compile_bwrap, unisolated
-from hyperloom.measure.runner.native.recipes import RECIPE_FACTORIES
 from hyperloom.orchestrator.trace_analysis import TRACELENS_REF
 
 __all__ = [
@@ -131,8 +132,9 @@ class ImageUpstream:
     checkout: Path | None
 
 
-#: The installed distribution whose commit each native component
-#: (:data:`~hyperloom.measure.runner.native.recipes.RECIPE_FACTORIES`) is built from.
+#: The installed distribution whose commit each native component the image installs is built from: every recipe of
+#: :data:`~hyperloom.measure.runner.native.recipes.RECIPE_FACTORIES` whose commit source is the image's
+#: (:attr:`~hyperloom.measure.runner.native.recipes.CommitSource.IMAGE_DIST`).
 _DISTRIBUTIONS = {SGL_KERNEL: "sglang", "vllm": "vllm"}
 
 
@@ -184,8 +186,8 @@ def image_upstreams(image_root: Path, checkouts: Mapping[str, Path] = IMAGE_CHEC
     its installed upstream names, or the head of the checkout it was installed from, or else of the component's
     checkout in ``checkouts``. A component none of them names is left out."""
     found = []
-    for component in RECIPE_FACTORIES:
-        installed = _installed_upstream(image_root, component, _DISTRIBUTIONS[component])
+    for component, distribution in _DISTRIBUTIONS.items():
+        installed = _installed_upstream(image_root, component, distribution)
         own = checkouts.get(component)
         head = git_head(own) if installed is None and own is not None and own.is_dir() else None
         if head is not None:
@@ -372,8 +374,8 @@ def sources_problems(site: PreflightSite, upstreams: Sequence[ImageUpstream]) ->
         names = " or ".join(_DISTRIBUTIONS.values())
         yield (
             f"the image's upstream commits cannot be read: HYPERLOOM_BUILD_IMAGE_ROOT {site.image_root} installs no "
-            f"{names} that names one, {IMAGE_SGLANG_CHECKOUT} is not a git checkout and HYPERLOOM_BUILD_SGLANG_REF "
-            "is not set"
+            f"{names} that names one, {IMAGE_SGLANG_CHECKOUT} is not a git checkout, HYPERLOOM_BUILD_SGLANG_REF "
+            "is not set and FRAMEWORK_REPO_PATH names no checkout a native component is built from"
         )
         return
     for up in upstreams:
@@ -452,8 +454,9 @@ def _isolation_problems(account: str | None) -> list[str]:
     return [unisolated(account, bwrap)]
 
 
-def build_preflight(site: PreflightSite) -> None:
-    """Check what the host's native builds need (see the module).
+def build_preflight(site: PreflightSite) -> list[ImageUpstream]:
+    """Check what the host's native builds need (see the module); the upstream commit of each native component, which
+    the checks found checked out.
 
     Raises:
         BuildStoreConfigError: Naming every item that is not as it must be.
@@ -473,3 +476,4 @@ def build_preflight(site: PreflightSite) -> None:
             "native builds are configured (HYPERLOOM_BUILD_STORE) and this host is not ready for them: "
             + "; ".join(problems)
         )
+    return upstreams
