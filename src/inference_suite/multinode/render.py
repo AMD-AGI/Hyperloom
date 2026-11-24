@@ -18,10 +18,10 @@ from typing import Any
 
 from inference_suite.argv import canonical_flag_name, is_flag
 from inference_suite.frameworks import Framework, framework_facts
-from inference_suite.recipe.inferencex import srtctl_cli_args
 from inference_suite.recipe.model import ATOM_RUNNER_OWNED, SGLANG_RUNNER_OWNED
 
 TRANSFER_BACKEND_FLAG = "disaggregation-transfer-backend"
+TRUST_REMOTE_CODE = "--trust-remote-code"
 _FABRIC_PLACEHOLDER = "@fabric."
 _HOST_PATH_ENV = frozenset({"HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"})
 
@@ -79,8 +79,8 @@ def group_flag(group: Sequence[str]) -> str:
     return canonical_flag_name(group[0].partition("=")[0]) if is_flag(group[0]) else ""
 
 
-def _strip_args(framework: Framework, args: Sequence[str]) -> RenderedRole:
-    """``args`` with the launcher's flags taken out; no env."""
+def render_role(framework: Framework, args: Sequence[str], env: Mapping[str, Any]) -> RenderedRole:
+    """``args`` and ``env`` with the launcher's keys taken out."""
     owned = PD_RUNNER_OWNED[framework]
     kept: list[str] = []
     stripped: list[str] = []
@@ -93,13 +93,6 @@ def _strip_args(framework: Framework, args: Sequence[str]) -> RenderedRole:
         stripped.append(name)
         if group_flag(group) == TRANSFER_BACKEND_FLAG:
             backend = assigned or (group[1] if len(group) > 1 else "")
-    return RenderedRole(tuple(kept), {}, tuple(stripped), backend)
-
-
-def render_role(framework: Framework, args: Sequence[str], env: Mapping[str, Any]) -> RenderedRole:
-    """``args`` and ``env`` with the launcher's keys taken out."""
-    rendered = _strip_args(framework, args)
-    stripped = list(rendered.stripped)
     kept_env: dict[str, str] = {}
     for key, value in env.items():
         text = str(value)
@@ -107,20 +100,15 @@ def render_role(framework: Framework, args: Sequence[str], env: Mapping[str, Any
             stripped.append(f"env {key}")
         else:
             kept_env[key] = text
-    return RenderedRole(rendered.args, kept_env, tuple(stripped), rendered.transfer_backend)
-
-
-def recipe_role_args(framework: Framework, role: Mapping[str, Any]) -> list[str]:
-    """A srt-slurm recipe role's ``args`` mapping as srtctl puts it on the engine command."""
-    return list(srtctl_cli_args(framework.value, dict(role.get("args") or {})))
+    return RenderedRole(tuple(kept), kept_env, tuple(stripped), backend)
 
 
 __all__ = [
     "PD_RUNNER_OWNED",
     "TRANSFER_BACKEND_FLAG",
+    "TRUST_REMOTE_CODE",
     "RenderedRole",
     "flag_groups",
     "group_flag",
-    "recipe_role_args",
     "render_role",
 ]

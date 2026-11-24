@@ -87,16 +87,6 @@ class PdQuery:
             raise PdQueryError("a fixed workload names its isl and osl, and an AgentX one neither")
 
     @property
-    def prefill(self) -> RoleAsk:
-        """The prefill ask of a disaggregated query."""
-        return self.roles[Role.PREFILL]
-
-    @property
-    def decode(self) -> RoleAsk:
-        """The decode ask of a disaggregated query."""
-        return self.roles[Role.DECODE]
-
-    @property
     def model_name(self) -> str:
         """The model's directory name, as the PD default table keys its rows."""
         return self.model_path.rstrip("/").rsplit("/", 1)[-1]

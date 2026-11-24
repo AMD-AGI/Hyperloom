@@ -8,32 +8,36 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from inference_suite.contracts.base_launch import BaseLaunch, LaunchQuery
 
 from ..multi_node import TopologyHandoffError, topology_file_overlay
 
+_T = TypeVar("_T")
 
-def _topology_file_overlay() -> dict[str, str] | None:
-    """The TOPOLOGY_HANDOFF_FILE view of the hand-off, or exit 2 naming the file when it cannot be used."""
+
+def _or_exit(read: Callable[[], _T]) -> _T:
+    """``read()``, or exit 2 naming the hand-off problem it raises."""
     try:
-        return topology_file_overlay()
+        return read()
     except TopologyHandoffError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
+
+
+def _topology_file_overlay() -> dict[str, str] | None:
+    """The TOPOLOGY_HANDOFF_FILE view of the hand-off, or exit 2 naming the file when it cannot be used."""
+    return _or_exit(topology_file_overlay)
 
 
 def _hand_off_service_url() -> str:
     """The handed-over cluster's URL; a named but unusable topology file exits 2 before any state is built."""
     from ..multi_node._internal.external_state import external_service_url
 
-    try:
-        return external_service_url()
-    except TopologyHandoffError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        raise SystemExit(2) from exc
+    return _or_exit(external_service_url)
 
 
 def _resolve_gpus_per_node(args: argparse.Namespace) -> int:
@@ -54,25 +58,13 @@ def _hand_off_node_list() -> Any:
     """The node list handed over, or ``None``; a malformed one exits 2."""
     from ..multi_node.pd_session import handed_node_list
 
-    try:
-        return handed_node_list()
-    except TopologyHandoffError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        raise SystemExit(2) from exc
-
-
-def _default_mn_backend() -> str:
-    """The backend a node list's frontend names, else rayjob."""
-    from ..multi_node.pd_session import node_list_backend
-
-    nodes = _hand_off_node_list()
-    return node_list_backend(nodes) if nodes is not None else "rayjob"
+    return _or_exit(handed_node_list)
 
 
 def _resolve_mn_backend(args: argparse.Namespace) -> str:
     """Multi-node backend selector: --mn-backend > $TOPOLOGY_HANDOFF_FILE backend > $INFERENCE_OPTIMIZER_MN_BACKEND >
     the node list's frontend > rayjob."""
-    from ..multi_node.pd_session import SSH_BACKENDS
+    from ..multi_node.pd_session import SSH_BACKENDS, node_list_backend
 
     from_file = (_topology_file_overlay() or {}).get("INFERENCE_OPTIMIZER_MN_BACKEND", "")
     backend = (
@@ -80,7 +72,7 @@ def _resolve_mn_backend(args: argparse.Namespace) -> str:
         or from_file
         or os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "").strip()
         or os.environ.get("MN_BACKEND", "").strip()
-        or _default_mn_backend()
+        or (node_list_backend(nodes) if (nodes := _hand_off_node_list()) is not None else "rayjob")
     ).lower()
     choices = ("rayjob", *SSH_BACKENDS)
     if backend not in choices:
@@ -194,6 +186,7 @@ def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path | None
         external_has_ssh_control,
     )
     from ..multi_node.cluster_access import _save_state
+    from ..multi_node.pd_session import is_pd_state
 
     if not _hand_off_service_url():
         print(
@@ -209,7 +202,7 @@ def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path | None
     ext_state = build_external_state_from_env()
     ext_state["backend"] = _resolve_mn_backend(args)
     _reject_unusable_backend(ext_state)
-    if is_pd_session(args):
+    if is_pd_state(ext_state):
         _bind_pd_launch(ext_state, session_dir)
         _record_trace_share(ext_state)
     try:

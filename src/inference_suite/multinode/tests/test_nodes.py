@@ -15,27 +15,26 @@ from inference_suite.multinode.nodes import (
     read_node_list,
 )
 from inference_suite.multinode.record import FrontendType, PdMode, Role
+from inference_suite.multinode.tests.builders import node_document
+
+_FULL = {
+    "model": "/models/DeepSeek-R1",
+    "service_url": "http://msg1.ns.svc.cluster.local:8000",
+    "prefill_url": "http://msg1-prefill.ns.svc.cluster.local:8010",
+    "decode_url": "http://msg1-decode.ns.svc.cluster.local:8020",
+    "router": {"host": "10.0.0.1"},
+    "prefill": [{"host": "10.0.0.2"}],
+    "decode": [{"host": "10.0.0.3"}, {"host": "10.0.0.4"}],
+    "ssh": {"port": 25032, "user": "root", "key_file": "/tmp/key"},
+    "transfer_backend": "mori",
+    "topology": {"prefill": {"tp": 8, "ep": None, "dp_attention": None}, "decode": {"tp": None}},
+    "launch_mode": "in_place",
+    "config": {"prefill_args": "--a 1", "decode_args": "--b '2 3'", "router_args": ""},
+}
 
 
 def _document(**fields):
-    document = {
-        "framework": "sglang",
-        "model": "/models/DeepSeek-R1",
-        "service_url": "http://msg1.ns.svc.cluster.local:8000",
-        "prefill_url": "http://msg1-prefill.ns.svc.cluster.local:8010",
-        "decode_url": "http://msg1-decode.ns.svc.cluster.local:8020",
-        "router": {"host": "10.0.0.1"},
-        "prefill": [{"host": "10.0.0.2"}],
-        "decode": [{"host": "10.0.0.3"}, {"host": "10.0.0.4"}],
-        "gpus_per_node": 8,
-        "ssh": {"port": 25032, "user": "root", "key_file": "/tmp/key"},
-        "transfer_backend": "mori",
-        "topology": {"prefill": {"tp": 8, "ep": None, "dp_attention": None}, "decode": {"tp": None}},
-        "launch_mode": "in_place",
-        "config": {"prefill_args": "--a 1", "decode_args": "--b '2 3'", "router_args": ""},
-    }
-    document.update(fields)
-    return {key: value for key, value in document.items() if value is not None}
+    return node_document(**{**_FULL, **fields})
 
 
 def test_full_node_list_parses():
@@ -110,7 +109,8 @@ def _session(framework="sglang"):
 def test_query_combines_session_and_node_list():
     query = parse_node_list(_document()).query(_session())
     assert query.model_path == "/models/DeepSeek-R1" and query.model_id == "deepseek-ai/DeepSeek-R1-0528"
-    assert query.prefill.tp == 8 and query.decode.tp is None and query.decode.hosts == ("10.0.0.3", "10.0.0.4")
+    prefill, decode = query.roles[Role.PREFILL], query.roles[Role.DECODE]
+    assert prefill.tp == 8 and decode.tp is None and decode.hosts == ("10.0.0.3", "10.0.0.4")
     assert query.router_host == "10.0.0.1" and query.transfer_backend == "mori"
     with pytest.raises(NodeListError, match="framework|runs"):
         parse_node_list(_document()).query(_session("atom"))

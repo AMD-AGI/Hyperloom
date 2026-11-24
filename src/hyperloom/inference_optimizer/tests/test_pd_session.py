@@ -26,7 +26,10 @@ from hyperloom.inference_optimizer.multi_node import TopologyHandoffError
 from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 from hyperloom.inference_optimizer.multi_node import pd_session
 from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
+from hyperloom.orchestrator.actions.executors import profile
+from hyperloom.orchestrator.actions.executors.benchmark_run.launch import _BenchmarkLaunchMixin
 from hyperloom.orchestrator.actions.executors.serving import _multi_node_server_lifecycle as lifecycle
+from hyperloom.orchestrator.actions.executors.serving import _pd_round_server as pd_round
 from hyperloom.inference_optimizer.session.base_launch import read_base_launch
 
 _NODES = {
@@ -159,12 +162,6 @@ def test_adoption_gives_every_host_a_pod_with_the_command_it_serves(session: Pat
         assert f"--disaggregation-mode {role}" in pods[role]["launch_command"]
     assert "sglang_router.launch_router" in pods["router"]["launch_command"]
     assert "--port 8000" in pods["router"]["launch_command"]
-    assert pods["router"]["managed_by"] == "platform" and "enginePort" not in pods["router"]
-    for role in ("prefill", "decode"):
-        assert f"--port {pods[role]['enginePort']} " in pods[role]["launch_command"]
-    for role in ("router", "prefill", "decode"):
-        assert state[f"{role}_pods"] == [pods[role]]
-    assert state["worker_pods"] == []
     assert state["user_data_path"]
 
 
@@ -175,7 +172,6 @@ def test_a_round_records_the_pods_of_the_launch_as_run(session: Path, monkeypatc
     state = ext.load_multi_node_state()
     pods = {pod["role"]: pod for pod in state["pods"]}
     assert "--chunked-prefill-size 4096" in pods["decode"]["launch_command"]
-    assert state["decode_pods"] == [pods["decode"]]
 
 
 def test_resume_refuses_a_launch_that_is_not_the_one_frozen(session: Path) -> None:
@@ -189,12 +185,13 @@ def test_resume_refuses_a_launch_that_is_not_the_one_frozen(session: Path) -> No
 
 
 def test_round_overrides_share_the_round_and_keep_each_roles_own() -> None:
-    overrides = pd_session.round_overrides("--chunked-prefill-size 4096", "--chunked-prefill-size 8192", "")
+    mode = PdMode.DISAGGREGATED
+    overrides = pd_session._round_overrides("--chunked-prefill-size 4096", "--chunked-prefill-size 8192", "", mode=mode)
     assert overrides == {
         "prefill": ["--chunked-prefill-size", "8192"],
         "decode": ["--chunked-prefill-size", "4096"],
     }
-    assert pd_session.round_overrides("") == {}
+    assert pd_session._round_overrides("", "", "", mode=mode) == {}
 
 
 def _fake_restart(seen: dict):
@@ -214,8 +211,9 @@ def test_a_round_restarts_over_the_frozen_launch_and_decode_keeps_its_mem_fracti
     asyncio.run(lifecycle.restart_server_for_round(lifecycle.RoundServer("--chunked-prefill-size 4096")))
     ran = read_record(session / pd_session.RAN_RECORD_NAME)
     assert seen["overrides"]["decode"] == ["--chunked-prefill-size", "4096"]
-    assert "0.85" in ran.decode.args and "0.75" not in ran.decode.args
-    assert "4096" in ran.prefill.args and "0.7" in ran.prefill.args
+    decode, prefill = ran.role(Role.DECODE).args, ran.role(Role.PREFILL).args
+    assert "0.85" in decode and "0.75" not in decode
+    assert "4096" in prefill and "0.7" in prefill
     assert read_record(session / RECORD_NAME).digest() == ext.load_multi_node_state()[pd_session.PD_DIGEST_KEY]
 
 
@@ -260,7 +258,9 @@ def test_a_malformed_round_or_command_is_a_session_error(session: Path, monkeypa
 def test_kill_inference_stops_the_cluster(session: Path, monkeypatch) -> None:
     _adopt(session)
     stopped = []
-    monkeypatch.setattr(pd_session, "stop", lambda launch, cluster, options: stopped.append(launch.decode.hosts))
+    monkeypatch.setattr(
+        pd_session, "stop", lambda launch, cluster, options: stopped.append(launch.role(Role.DECODE).hosts)
+    )
     assert mn_cli.cmd_kill_inference(argparse.Namespace(pid_file=None)) == 0
     assert stopped == [("d0",)]
 
@@ -269,7 +269,7 @@ def test_a_gone_engine_is_named(session: Path, monkeypatch) -> None:
     _adopt(session)
     gone = [types.SimpleNamespace(role="decode", host="d0")]
     monkeypatch.setattr(pd_session, "engines_gone", lambda launch, cluster: gone)
-    assert lifecycle.pd_engines_lost_reason() == "decode engine on d0 is gone"
+    assert asyncio.run(_BenchmarkLaunchMixin._multi_node_engines_lost()) == "decode engine on d0 is gone"
 
 
 _INFERA_NODES = {
@@ -321,10 +321,10 @@ def test_the_session_mode_must_be_the_node_lists(infera_session: Path, monkeypat
 
 def test_aggregated_rounds_override_the_workers() -> None:
     mode = PdMode.AGGREGATED
-    assert pd_session.round_overrides("--chunked-prefill-size 4096", "--x", mode=mode) == {
+    assert pd_session._round_overrides("--chunked-prefill-size 4096", "--x", "", mode=mode) == {
         "worker": ["--chunked-prefill-size", "4096"]
     }
-    assert pd_session.round_overrides("", mode=mode) == {}
+    assert pd_session._round_overrides("", "", "", mode=mode) == {}
 
 
 def test_an_aggregated_round_restarts_the_workers(infera_session: Path, monkeypatch) -> None:
@@ -404,8 +404,8 @@ def test_pd_engine_profile_reaches_every_engine_of_the_frozen_launch(
     seen = _record_posts(monkeypatch)
     out = tmp_path / "round"
 
-    asyncio.run(lifecycle.trigger_pd_engine_profile("start", {"output_dir": str(out)}))
-    asyncio.run(lifecycle.trigger_pd_engine_profile("stop"))
+    asyncio.run(pd_round.trigger_pd_engine_profile("start", {"output_dir": str(out)}))
+    asyncio.run(pd_round.trigger_pd_engine_profile("stop"))
 
     assert seen == [
         ("http://p0:8010/start_profile", {"output_dir": str(out / "prefill" / "0"), "with_stack": False}),
@@ -421,7 +421,7 @@ def test_pd_engine_profile_with_stack_follows_env(session: Path, monkeypatch: py
     _adopt(session)
     monkeypatch.setenv("HYPERLOOM_MN_PROFILE_WITH_STACK", "1")
     seen = _record_posts(monkeypatch)
-    asyncio.run(lifecycle.trigger_pd_engine_profile("start"))
+    asyncio.run(pd_round.trigger_pd_engine_profile("start"))
     assert seen == [
         ("http://p0:8000/start_profile", {"with_stack": True}),
         ("http://d0:8000/start_profile", {"with_stack": True}),
@@ -429,9 +429,9 @@ def test_pd_engine_profile_with_stack_follows_env(session: Path, monkeypatch: py
 
 
 def test_pd_engine_profile_leaves_other_backends_alone(session: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(lifecycle, "_read_state", lambda: {"backend": "infera"})
+    monkeypatch.setattr(pd_round, "_read_state", lambda: {"backend": "infera"})
     seen = _record_posts(monkeypatch)
-    asyncio.run(lifecycle.trigger_pd_engine_profile("start"))
+    asyncio.run(pd_round.trigger_pd_engine_profile("start"))
     assert seen == []
 
 
@@ -440,5 +440,5 @@ def test_a_node_list_infera_session_skips_the_frontend_profile_fan_out(
 ) -> None:
     _adopt(infera_session)
     seen = _record_posts(monkeypatch)
-    asyncio.run(lifecycle.trigger_infera_engine_profile("start"))
+    asyncio.run(profile._trigger_engine_profiles("start"))
     assert seen == []

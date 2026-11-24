@@ -85,11 +85,6 @@ _ROUND_ENV_RESTARTS = pytest.mark.parametrize(
 )
 
 
-def _expected(restart, env: dict[str, str]) -> list[dict[str, str]]:
-    """The forwarded env a restart outside a PD node-list session should record."""
-    return [env]
-
-
 @pytest.fixture(autouse=True)
 def _on_a_multi_node_session(monkeypatch):
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
@@ -106,7 +101,7 @@ async def test_an_operator_pin_wins_over_the_default_tables_env_on_the_server(
     await restart(tmp_path)
 
     assert _TABLE_ROW.env["VLLM_ROCM_USE_AITER"] == "1"
-    assert forwarded == _expected(restart, {"VLLM_ROCM_USE_AITER": "0"})
+    assert forwarded == [{"VLLM_ROCM_USE_AITER": "0"}]
 
 
 @_RESTARTS
@@ -115,7 +110,7 @@ async def test_the_base_env_reaches_the_server_with_no_pin(monkeypatch, tmp_path
 
     await restart(tmp_path)
 
-    assert forwarded == _expected(restart, {"SGLANG_REF_KNOB": "1"})
+    assert forwarded == [{"SGLANG_REF_KNOB": "1"}]
 
 
 async def test_a_variant_env_wins_over_the_pin_and_the_base(monkeypatch, tmp_path, forwarded):
@@ -153,7 +148,7 @@ async def test_a_credential_pin_never_reaches_the_server(monkeypatch, tmp_path, 
 
     await restart(tmp_path)
 
-    assert forwarded == _expected(restart, {"NCCL_IB_DISABLE": "1"})
+    assert forwarded == [{"NCCL_IB_DISABLE": "1"}]
 
 
 @_ROUND_ENV_RESTARTS
@@ -165,4 +160,4 @@ async def test_a_rounds_own_env_wins_over_the_pin_and_its_unset_drops_the_base(
 
     await restart(tmp_path, {"VLLM_ROCM_USE_AITER": "candidate"}, ["SGLANG_REF_KNOB"])
 
-    assert forwarded == _expected(restart, {"VLLM_ROCM_USE_AITER": "candidate"})
+    assert forwarded == [{"VLLM_ROCM_USE_AITER": "candidate"}]

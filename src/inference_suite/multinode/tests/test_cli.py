@@ -8,7 +8,6 @@ from dataclasses import replace
 import pytest
 
 from inference_suite.contracts.base_launch import LaunchQuery, Workload
-from inference_suite.frameworks import Framework
 from inference_suite.multinode import cli
 from inference_suite.multinode.launch import LaunchError
 from inference_suite.multinode.nodes import NODE_LIST_ENV
@@ -16,33 +15,16 @@ from inference_suite.multinode.record import (
     RAN_RECORD_NAME,
     Frontend,
     FrontendType,
-    PdLaunch,
-    PdSource,
-    PdSourceKind,
     Role,
     RoleLaunch,
     read_record,
     write_record,
 )
+from inference_suite.multinode.tests.builders import SSH, node_document, pd_launch
 
-_NODES = {
-    "framework": "sglang",
-    "model": "/models/M",
-    "service_url": "http://svc:8000",
-    "router": {"host": "r0"},
-    "prefill": [{"host": "p0"}],
-    "decode": [{"host": "d0"}],
-    "gpus_per_node": 8,
-    "ssh": {"port": 22, "user": "root", "key_file": "/keys/id"},
-}
-_LAUNCH = PdLaunch(
-    source=PdSource(PdSourceKind.PD_TABLE),
-    framework=Framework.SGLANG,
-    model="/models/M",
-    served_model_name="org/M",
-    context_length=2048,
-    transfer_backend="mori",
-    roles={Role.PREFILL: RoleLaunch(("old-p",), 1, 8, args=("--a", "1")), Role.DECODE: RoleLaunch(("old-d",), 1, 8)},
+_NODES = node_document(ssh=SSH)
+_LAUNCH = pd_launch(
+    {Role.PREFILL: RoleLaunch(("old-p",), 1, 8, args=("--a", "1")), Role.DECODE: RoleLaunch(("old-d",), 1, 8)},
     frontend=Frontend(FrontendType.SGLANG_ROUTER, "old-r", ()),
 )
 
@@ -70,7 +52,7 @@ def test_resolve_replays_a_record(record, tmp_path, capsys):
     assert main(["multinode", "resolve", "--query", str(query), "--replay", str(record), "--out", str(out)]) == 0
     replayed = read_record(out)
     assert capsys.readouterr().out.strip() == replayed.digest() == _LAUNCH.digest()
-    assert replayed.prefill.hosts == ("p0",)
+    assert replayed.role(Role.PREFILL).hosts == ("p0",)
 
 
 def test_start_runs_on_the_node_list_hosts_and_records_what_ran(record, monkeypatch, capsys):
@@ -78,14 +60,14 @@ def test_start_runs_on_the_node_list_hosts_and_records_what_ran(record, monkeypa
 
     def fake_start(launch, cluster, options):
         seen.update(launch=launch, known=cluster.client.known_hosts, env=options.extra_env)
-        return launch.with_roles({Role.PREFILL: replace(launch.prefill, stripped=("unsupported --x",))})
+        return launch.with_roles({Role.PREFILL: replace(launch.role(Role.PREFILL), stripped=("unsupported --x",))})
 
     monkeypatch.setattr(cli, "start", fake_start)
     assert main(["multinode", "start", "--record", str(record), "--env", "A=b=c"]) == 0
-    assert seen["launch"].prefill.hosts == ("p0",) and seen["launch"].frontend.host == "r0"
+    assert seen["launch"].role(Role.PREFILL).hosts == ("p0",) and seen["launch"].frontend.host == "r0"
     assert seen["known"] == record.parent / "known_hosts" and seen["env"] == {"A": "b=c"}
     ran = read_record(record.with_name(RAN_RECORD_NAME))
-    assert ran.prefill.stripped == ("unsupported --x",)
+    assert ran.role(Role.PREFILL).stripped == ("unsupported --x",)
     assert capsys.readouterr().out.strip() == ran.digest()
 
 
@@ -100,12 +82,12 @@ def test_restart_keeps_the_frozen_record_and_writes_what_ran_beside_it(record, m
     frozen = record.read_bytes()
 
     def fake_restart(launch, overrides, cluster, options):
-        return launch.with_roles({Role.DECODE: replace(launch.decode, args=("--b", "2"))})
+        return launch.with_roles({Role.DECODE: replace(launch.role(Role.DECODE), args=("--b", "2"))})
 
     monkeypatch.setattr(cli, "restart", fake_restart)
     assert main(["multinode", "restart", "--record", str(record), "--decode-args", "--b 2"]) == 0
     assert record.read_bytes() == frozen
-    assert read_record(record.with_name(RAN_RECORD_NAME)).decode.args == ("--b", "2")
+    assert read_record(record.with_name(RAN_RECORD_NAME)).role(Role.DECODE).args == ("--b", "2")
 
 
 def test_a_cluster_that_does_not_come_up_exits_1(record, monkeypatch):

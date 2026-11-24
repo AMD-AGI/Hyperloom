@@ -19,15 +19,14 @@ _TOP_KERNELS = 5
 
 
 def role_analysis_payload(role: str, trace_path: str, framework: str) -> dict[str, Any]:
-    """Build the non-LLM trace_analyze request for one role's trace; the splitter runs without LLM phase hints."""
+    """Build the non-LLM trace_analyze request for one role's trace; its PD steady-state mode runs the splitter without
+    LLM phase hints and clamps same-stream overlaps."""
     return {
         "trace_input": trace_path,
         "framework": framework,
         "analysis_route": "non-llm",
-        "steady_state_mode": ROLE_STEADY_STATE_MODE.get(role, "mixed"),
-        "split_llm_inference": False,
+        "steady_state_mode": ROLE_STEADY_STATE_MODE[role],
         "roofline_output_name": f"kernel_roofline_{role}.json",
-        "clamp_stream_overlaps": True,
     }
 
 
@@ -64,7 +63,7 @@ async def analyze_role_traces(
     *,
     session_dir: Path,
     framework: str,
-    known: dict[str, dict[str, Any]] | None = None,
+    known: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     """Run TraceLens (non-LLM) on each role's trace and return ``{role: summary}``.
 
@@ -76,7 +75,7 @@ async def analyze_role_traces(
     for role, trace_path in role_traces.items():
         if not trace_path:
             continue
-        if known and role in known:
+        if role in known:
             summaries[role] = role_trace_summary(trace_path, known[role])
             continue
         payload = role_analysis_payload(role, trace_path, framework)

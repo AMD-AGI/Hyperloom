@@ -29,8 +29,10 @@ from inference_suite.recipe.inferencex import (
     MASTER,
     PROJECT,
     RUNNERS,
-    Scenario,
+    SCENARIO_OF,
+    UNSET,
     concurrencies,
+    engine_type,
     org_models_named,
     runner_board,
 )
@@ -43,9 +45,7 @@ NVIDIA_MASTER = f"{PROJECT}/configs/nvidia-master.yaml"
 CHECKOUT_DIRECTORIES = (f"{PROJECT}/configs", MULTI_NODE_RECIPES)
 #: Boards a PD session takes each other's launches for, beyond :func:`boards_interchangeable`.
 _PD_INTERCHANGEABLE_BOARDS = (frozenset({"mi300x", "mi325x"}),)
-_SCENARIO_OF = {Workload.FIXED: Scenario.FIXED, Workload.AGENTX: Scenario.AGENTIC}
 _AGENTX_SHAPE = "agentx"
-_NO_SPEC = "none"
 _ZIP_SELECTOR = re.compile(r"(zip_override_[\w-]+)\[(\d+)\]")
 _TP_KEYS = ("tp-size", "tensor-parallel-size", "tp")
 _EP_KEYS = ("ep-size", "expert-parallel-size", "ep")
@@ -225,18 +225,13 @@ def _roles_misfit(query: PdQuery, fits: Mapping[Role, RoleFit]) -> str | None:
     return None
 
 
-def _engine(recipe: Mapping[str, Any]) -> str:
-    engine = recipe.get("engine")
-    return str(engine.get("type") if isinstance(engine, Mapping) else engine)
-
-
 def _unported(recipe: Mapping[str, Any], query: PdQuery) -> str | None:
     """What of a recipe the PD launcher cannot reproduce on the query's cluster, or ``None``."""
     framework, served = query.framework, query.served_frontend.value
     roles = recipe.get("roles") or {}
     if set(roles) != {Role.PREFILL.value, Role.DECODE.value}:
         return f"it runs roles {sorted(roles)}, not prefill and decode"
-    engines = {_engine(recipe), *(str(role.get("engine")) for role in roles.values() if role.get("engine"))}
+    engines = {engine_type(recipe), *(str(role.get("engine")) for role in roles.values() if role.get("engine"))}
     if engines != {framework.value}:
         return f"it runs engine {sorted(engines)}, not {framework.value}"
     frontend = recipe.get("frontend") or {}
@@ -313,7 +308,7 @@ def _pd_boards_interchangeable(board: str, other: str) -> bool:
 def _master_rows(query: PdQuery, master: Mapping[str, Any]) -> Iterator[_MasterRow]:
     """Every row of the query's scenario in the multi-node disaggregated entries of its model and framework."""
     frameworks = {query.framework.value, f"{query.framework.value}-disagg"}
-    scenario = _SCENARIO_OF[query.workload].value
+    scenario = SCENARIO_OF[query.workload].value
     model, _ = _master_model(query.model_id, [master])
     for name, entry in master.items():
         if not (entry.get("multinode") and entry.get("disagg")):
@@ -331,7 +326,7 @@ def _row_candidate(query: PdQuery, checkout: Checkout, master_row: _MasterRow) -
     if query.workload is Workload.FIXED:
         if (block.get("isl"), block.get("osl")) != (query.isl, query.osl):
             return f"it runs {block.get('isl')}/{block.get('osl')}, not {query.isl}/{query.osl}"
-        if row.get("spec-decoding", _NO_SPEC) != _NO_SPEC:
+        if row.get("spec-decoding", UNSET) != UNSET:
             return f"it drafts with {row['spec-decoding']}, and a fixed workload runs no speculative decoding"
     fits = _row_fits(row)
     misfit = _roles_misfit(query, fits)
@@ -368,7 +363,7 @@ def master_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
     misses: list[str] = [note] if note else []
     rows = list(_master_rows(query, master))
     if not rows:
-        scenario = _SCENARIO_OF[query.workload].value
+        scenario = SCENARIO_OF[query.workload].value
         misses.append(
             f"{MASTER}: no multi-node disaggregated entry serves {query.model_id} with {query.framework.value} "
             f"in its {scenario} scenario"

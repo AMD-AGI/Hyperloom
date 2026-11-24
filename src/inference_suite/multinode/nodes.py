@@ -39,7 +39,7 @@ DEFAULT_ENGINE_PORTS = {
 }
 #: The HTTP port of an aggregated worker, every framework alike.
 WORKER_PORT = _SGLANG_ENGINE_PORT
-#: The HTTP port, multi-host rendezvous port and PD bootstrap port of an Infera engine.
+#: The HTTP port of an Infera engine.
 INFERA_ENGINE_PORT = 30000
 _SSH_PORT = "ssh_port"
 _REQUIRED = ("framework", "model", "service_url", "gpus_per_node")

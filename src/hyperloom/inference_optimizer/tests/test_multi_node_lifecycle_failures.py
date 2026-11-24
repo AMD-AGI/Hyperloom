@@ -13,6 +13,7 @@ import pytest
 
 from hyperloom.inference_optimizer import multi_node
 from hyperloom.orchestrator.actions.executors.serving import _multi_node_server_lifecycle as life
+from hyperloom.orchestrator.actions.executors.serving import _pd_round_server as pd_round
 from hyperloom.orchestrator.actions.executors.serving._multi_node_restart_settings import RestartSettings
 
 
@@ -197,13 +198,24 @@ def test_a_crashed_worker_of_any_lws_rank_fails_fast(tmp_path, monkeypatch: pyte
     assert wedge is not None and "10.0.0.3" in wedge
 
 
-def test_profiling_round_restart_enables_graph_capture_profiling(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_the_multi_node_sglang_defaults_keep_the_prefix_cache_on() -> None:
+    assert "--disable-radix-cache" not in life._merge_sglang_defaults("--chunked-prefill-size 8192")
+
+
+@pytest.mark.parametrize(
+    ("state", "graph_capture"),
+    [({"backend": "sglangrouter", "node_list": True}, True), ({"backend": "infera", "nodes": 2}, False)],
+    ids=["pd-node-list", "infera"],
+)
+def test_only_a_pd_node_list_profiling_round_enables_graph_capture_profiling(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, state: dict, graph_capture: bool
+) -> None:
     import yaml
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env, profile
 
     monkeypatch.setenv("FRAMEWORK", "sglang")
-    monkeypatch.setattr(_multi_node_env, "_read_state", lambda: {"backend": "sglangrouter", "node_list": True})
+    monkeypatch.setattr(_multi_node_env, "_read_state", lambda: dict(state))
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
     shipped = yaml.safe_load(profile._default_profile_config().read_text(encoding="utf-8"))["benchmark"]["envs"]
     calls: list[tuple[life.RoundServer, dict]] = []
@@ -213,49 +225,21 @@ def test_profiling_round_restart_enables_graph_capture_profiling(monkeypatch: py
 
     monkeypatch.setattr(life, "restart_server_for_round", _restart)
 
-    assert (
-        asyncio.run(profile._restart_round_server({"extra_server_args": "--context-length 11264"}, str(tmp_path)))
-        is None
-    )
-    assert (
-        asyncio.run(profile._restart_round_server({"extra_server_args": "--disable-cuda-graph"}, str(tmp_path))) is None
-    )
+    for args in ("--context-length 11264", "--disable-cuda-graph"):
+        assert asyncio.run(profile._restart_round_server({"extra_server_args": args}, str(tmp_path))) is None
 
     graph, eager = calls
-    assert graph[0].extra_server_args.split() == ["--context-length", "11264", "--enable-profile-cuda-graph"]
+    flag = ["--enable-profile-cuda-graph"] if graph_capture else []
+    assert graph[0].extra_server_args.split() == ["--context-length", "11264", *flag]
     assert graph[1]["torch_profiler_dir"] == str(tmp_path)
-    assert graph[1]["extra_env"] == {
-        key: str(shipped[key])
-        for key in (
-            "SGLANG_GRAPH_BATCH_CAPTURE",
-            "DEBUG_CLR_GRAPH_PACKET_CAPTURE",
-            "DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING",
-            "DEBUG_HIP_GRAPH_CLASSIC_PATH",
-        )
-    }
-    assert eager[0].extra_server_args == "--disable-cuda-graph"
-
-
-def test_infera_round_restart_keeps_graph_capture_profiling_off(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    from hyperloom.orchestrator.actions.executors import _multi_node_env, profile
-
-    monkeypatch.setenv("FRAMEWORK", "sglang")
-    monkeypatch.setattr(_multi_node_env, "_read_state", lambda: {"backend": "infera", "nodes": 2})
-    calls: list[tuple[life.RoundServer, dict]] = []
-
-    async def _restart(server, **kwargs):
-        calls.append((server, kwargs))
-
-    monkeypatch.setattr(life, "restart_server_for_round", _restart)
-
-    assert (
-        asyncio.run(profile._restart_round_server({"extra_server_args": "--context-length 11264"}, str(tmp_path)))
-        is None
+    keys = (
+        "SGLANG_GRAPH_BATCH_CAPTURE",
+        "DEBUG_CLR_GRAPH_PACKET_CAPTURE",
+        "DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING",
+        "DEBUG_HIP_GRAPH_CLASSIC_PATH",
     )
-
-    [(server, kwargs)] = calls
-    assert server.extra_server_args == "--context-length 11264"
-    assert kwargs["extra_env"] is None
+    assert graph[1]["extra_env"] == ({key: str(shipped[key]) for key in keys} if graph_capture else None)
+    assert eager[0].extra_server_args == "--disable-cuda-graph"
 
 
 @pytest.mark.parametrize(
@@ -274,7 +258,7 @@ def test_profile_is_skipped_when_the_trace_dir_is_not_shared(
 
     monkeypatch.setattr(_multi_node_env, "_read_state", lambda: dict(state))
 
-    refusal = profile._unshared_trace_dir_refusal(str(tmp_path))
+    refusal = profile._pd_profile_refusal(str(tmp_path))
 
     if skipped:
         assert refusal["status"] == "failed"
@@ -298,7 +282,7 @@ def test_the_client_profiler_is_off_only_in_a_pd_node_list_session(
 ) -> None:
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import _multi_node_env, profile
+    from hyperloom.orchestrator.actions.executors import _multi_node_env, _pd_profile_round
 
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
     monkeypatch.setattr(_multi_node_env, "_read_state", lambda: dict(state))
@@ -306,7 +290,7 @@ def test_the_client_profiler_is_off_only_in_a_pd_node_list_session(
     bench = {"profiler": {"torch_profiler": {"enabled": True}}, "envs": {"PROFILE": "1"}}
     config.write_text(yaml.safe_dump({"benchmark": bench}), encoding="utf-8")
 
-    profile._leave_capture_to_engines(config)
+    _pd_profile_round.leave_capture_to_engines(config)
 
     bench = yaml.safe_load(config.read_text(encoding="utf-8"))["benchmark"]
     assert bench["profiler"]["torch_profiler"]["enabled"] is not engines_capture
@@ -342,7 +326,7 @@ def _pd_workers(monkeypatch: pytest.MonkeyPatch, workers: dict[str, list[tuple[s
     """Make the session a PD node-list one whose frozen launch places ``workers``."""
     from hyperloom.inference_optimizer.multi_node import pd_session
 
-    monkeypatch.setattr(life, "_read_state", lambda: {"backend": "sglangrouter", "node_list": True})
+    monkeypatch.setattr(pd_round, "_read_state", lambda: {"backend": "sglangrouter", "node_list": True})
     monkeypatch.setattr(pd_session, "session_worker_hosts", lambda _state: workers)
 
 
@@ -352,13 +336,13 @@ def test_pd_role_traces_are_kept_when_the_trace_filesystem_clock_lags(
     import os
     import time
 
-    from hyperloom.orchestrator.actions.executors import profile
+    from hyperloom.orchestrator.actions.executors import _pd_profile_round, profile
 
     _pd_workers(monkeypatch, {"prefill": [("p0",)], "decode": [("d0",)]})
     root = tmp_path / "torch_trace"
     client_now = time.time() + 1260
-    round_start = profile._trace_fs_round_start(str(root), client_now)
-    for role in life.PD_PROFILE_ROLES:
+    round_start = _pd_profile_round.trace_fs_round_start(str(root), client_now)
+    for role in pd_round.PD_PROFILE_ROLES:
         (root / role / "0").mkdir(parents=True)
         (root / role / "0" / "2-TP-0.trace.json.gz").write_bytes(b"new")
     stale = root / "decode" / "0" / "1-TP-0.trace.json.gz"
@@ -393,13 +377,12 @@ def test_pd_role_traces_take_the_first_gpu_of_each_node(monkeypatch: pytest.Monk
     _pd_workers(monkeypatch, {"prefill": [("p0",)], "decode": [("d0", "d1")]})
 
     since = min(p.stat().st_mtime for p in decode.iterdir()) - 1
-    by_node = life.select_pd_node_traces(str(root), since)
+    by_node = pd_round.select_pd_node_traces(str(root), since)
 
     assert by_node == {
         "prefill": [str(prefill / "7-TP-0-EXTEND.trace.json.gz")],
         "decode": [str(decode / "5-TP-0.trace.json.gz"), str(decode / "5-TP-8.trace.json.gz")],
     }
-    assert life.select_pd_role_traces(str(root), since) == {role: paths[0] for role, paths in by_node.items()}
 
 
 def test_pd_role_traces_take_each_single_host_workers_first_gpu_in_worker_order(
@@ -412,7 +395,7 @@ def test_pd_role_traces_take_each_single_host_workers_first_gpu_in_worker_order(
             (root / "decode" / str(worker) / f"{batch}-TP-{rank}.trace.json.gz").write_bytes(b"x")
     _pd_workers(monkeypatch, {"prefill": [("p0",)], "decode": [("d0",), ("d1",)]})
 
-    by_node = life.select_pd_node_traces(str(root), 0.0)
+    by_node = pd_round.select_pd_node_traces(str(root), 0.0)
 
     assert by_node == {
         "decode": [
@@ -420,7 +403,3 @@ def test_pd_role_traces_take_each_single_host_workers_first_gpu_in_worker_order(
             str(root / "decode" / "1" / "6-TP-0.trace.json.gz"),
         ]
     }
-
-
-def test_the_multi_node_sglang_defaults_keep_the_prefix_cache_on() -> None:
-    assert "--disable-radix-cache" not in life._merge_sglang_defaults("--chunked-prefill-size 8192")

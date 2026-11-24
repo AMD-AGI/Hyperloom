@@ -27,6 +27,7 @@ from .benchmark_result import round_succeeded
 from inference_suite.contracts import RunLayout
 from inference_suite.contracts.layout import CAPTURE_TRACE_DIRS
 from .baseline import BenchmarkRunExecutor
+from ._pd_profile_round import graph_capture_round, leave_capture_to_engines, trace_fs_round_start
 
 
 log = logging.getLogger(__name__)
@@ -653,95 +654,26 @@ def _mn_round_trace_root() -> str:
     return str(scoped)
 
 
-def _trace_fs_round_start(round_trace_root: str, fallback_unix: float) -> float:
-    """Return the round start on the trace filesystem's clock, read from a marker file's mtime.
-
-    Trace mtimes are stamped by the filesystem that stores them, so this round's
-    traces are compared against a time from that same clock; ``fallback_unix``
-    is returned when the marker cannot be written.
-    """
-    marker = Path(round_trace_root) / ".round_start"
-    try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(f"{fallback_unix:.3f}\n", encoding="utf-8")
-        return marker.stat().st_mtime
-    except OSError as exc:
-        log.warning(
-            "profile_executor: cannot stamp round start under %s (%s); using the local clock", round_trace_root, exc
-        )
-        return fallback_unix
-
-
-_GRAPH_CAPTURE_PROFILE_ENV_KEYS = (
-    "SGLANG_GRAPH_BATCH_CAPTURE",
-    "DEBUG_CLR_GRAPH_PACKET_CAPTURE",
-    "DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING",
-    "DEBUG_HIP_GRAPH_CLASSIC_PATH",
-)
-_PROFILE_CUDA_GRAPH_FLAG = "--enable-profile-cuda-graph"
-
-
-def _graph_capture_profile_settings(config_path: Path) -> tuple[dict[str, str], str]:
-    """Graph-capture profiling env and server flag the profile YAML sets, as ``(env, flag)``; empty when unset."""
-    try:
-        cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        log.warning("profile_executor: cannot read %s for graph-capture profiling settings: %s", config_path, exc)
-        return {}, ""
-    bench = cfg.get("benchmark") if isinstance(cfg, dict) else None
-    envs = bench.get("envs") if isinstance(bench, dict) else None
-    if not isinstance(envs, dict):
-        return {}, ""
-    env = {key: str(envs[key]) for key in _GRAPH_CAPTURE_PROFILE_ENV_KEYS if key in envs}
-    flag = (
-        _PROFILE_CUDA_GRAPH_FLAG if _PROFILE_CUDA_GRAPH_FLAG in str(envs.get("EXTRA_SGLANG_ARGS") or "").split() else ""
-    )
-    return env, flag
-
-
-def _unshared_trace_dir_refusal(round_trace_root: str) -> dict[str, Any] | None:
-    """The skip result when the startup probe found the trace dir not shared with the engine pods, else ``None``."""
-    from ._multi_node_env import _read_state
-
-    state = _read_state() or {}
-    if state.get("profile_trace_shared") is not False:
-        return None
-    reason = str(state.get("profile_trace_share_error") or "not shared with the engine pods")
-    log.warning("profile_executor: skipping multi-node profile; trace dir %s: %s", round_trace_root, reason)
-    return {
-        "status": "failed",
-        "error_class": PROFILE_TRACE_NOT_SHARED,
-        "error": f"multi-node profile trace dir {round_trace_root} is not shared with the engine pods: {reason}",
-        "trace_dir": round_trace_root,
-    }
-
-
-def _aggregated_node_list_refusal(round_trace_root: str) -> dict[str, Any] | None:
-    """The refusal result in an aggregated node-list session, whose engines are profiled per PD role only; else
-    ``None``."""
-    from hyperloom.inference_optimizer.multi_node.pd_session import is_pd_state
+def _pd_profile_refusal(round_trace_root: str) -> dict[str, Any] | None:
+    """The refusal result of a multi-node profile whose trace dir the startup probe found not shared with the engine
+    pods, or of one in an aggregated node-list session, whose engines are profiled per PD role only; else ``None``."""
+    from hyperloom.inference_optimizer.multi_node.pd_session import TRACE_SHARE_ERROR_KEY, TRACE_SHARED_KEY, is_pd_state
     from inference_suite.multinode import PdMode
 
     from ._multi_node_env import _read_state
 
-    state = _read_state() or {}
-    if not (is_pd_state(state) and state.get("pd_mode") == PdMode.AGGREGATED.value):
+    state = _read_state()
+    if state.get(TRACE_SHARED_KEY) is False:
+        reason = str(state.get(TRACE_SHARE_ERROR_KEY) or "not shared with the engine pods")
+        log.warning("profile_executor: skipping multi-node profile; trace dir %s: %s", round_trace_root, reason)
+        error_class = PROFILE_TRACE_NOT_SHARED
+        error = f"multi-node profile trace dir {round_trace_root} is not shared with the engine pods: {reason}"
+    elif is_pd_state(state) and state.get("pd_mode") == PdMode.AGGREGATED.value:
+        error_class = PROFILE_AGGREGATED_NODE_LIST
+        error = "multi-node profile rounds are not supported in an aggregated node-list session"
+    else:
         return None
-    return {
-        "status": "failed",
-        "error_class": PROFILE_AGGREGATED_NODE_LIST,
-        "error": "multi-node profile rounds are not supported in an aggregated node-list session",
-        "trace_dir": round_trace_root,
-    }
-
-
-def _pd_node_list_session() -> bool:
-    """Whether this multi-node session serves a node-list cluster the suite launches."""
-    from hyperloom.inference_optimizer.multi_node.pd_session import is_pd_state
-
-    from ._multi_node_env import _read_state, is_multi_node
-
-    return is_multi_node() and is_pd_state(_read_state() or {})
+    return {"status": "failed", "error_class": error_class, "error": error, "trace_dir": round_trace_root}
 
 
 # Restarts the multi-node server for this profiling round, with graph-capture profiling on for a PD node-list
@@ -750,12 +682,9 @@ async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -
     from ._multi_node_env import round_server_env
     from .serving._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
-    pd = _pd_node_list_session()
-    extra_env, flag = _graph_capture_profile_settings(_default_profile_config()) if pd else ({}, "")
-    extra_server_args = str(params.get("extra_server_args") or "")
-    tokens = extra_server_args.split()
-    if flag and flag not in tokens and "--disable-cuda-graph" not in tokens:
-        extra_server_args = f"{extra_server_args} {flag}".strip()
+    extra_server_args, extra_env = graph_capture_round(
+        str(params.get("extra_server_args") or ""), _default_profile_config
+    )
     unset_envs = list(params.get("unset_envs") or ())
     try:
         await restart_server_for_round(
@@ -777,30 +706,13 @@ async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -
     return None
 
 
-def _leave_capture_to_engines(config_path: Path) -> None:
-    """Turn the client-side profiler off in a PD node-list point, whose engines the executor starts and stops
-    profiling on itself: the round loads a server it does not hold."""
-    if not _pd_node_list_session():
-        return
-    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    bench = cfg.get("benchmark") if isinstance(cfg, dict) else None
-    if not isinstance(bench, dict):
-        return
-    torch_profiler = (bench.get("profiler") or {}).get("torch_profiler")
-    if isinstance(torch_profiler, dict):
-        torch_profiler["enabled"] = False
-    envs = bench.get("envs")
-    if isinstance(envs, dict):
-        envs.pop("PROFILE", None)
-    config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
-
-
 async def _trigger_engine_profiles(action: str, body: dict[str, Any] | None = None) -> None:
-    """Start or stop torch profiling on the Infera workers and on the PD engines (each a no-op elsewhere)."""
-    from .serving._multi_node_server_lifecycle import trigger_infera_engine_profile, trigger_pd_engine_profile
+    """Start or stop torch profiling on the PD engines of a node-list session, else on the Infera workers."""
+    from ._multi_node_env import is_pd_session
+    from .serving._multi_node_server_lifecycle import trigger_infera_engine_profile
+    from .serving._pd_round_server import trigger_pd_engine_profile
 
-    await trigger_infera_engine_profile(action, body)
-    await trigger_pd_engine_profile(action, body)
+    await (trigger_pd_engine_profile if is_pd_session() else trigger_infera_engine_profile)(action, body)
 
 
 # Runs the body with a warmup-then-bounded Infera engine profiling window around it.
@@ -843,11 +755,9 @@ async def _infera_profile_window(round_trace_root: str):
             await _trigger_engine_profiles("stop")
 
 
-# Attaches this round's multi-node trace files. A PD cluster's prefill and decode traces land in per-worker subdirs of
-# each role and are recorded as ``role_traces``, decode's being the main trace; otherwise the heaviest file is the main
-# trace.
+# Attaches this round's multi-node trace files: a PD cluster's per-role traces (decode's main), else the heaviest file.
 def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_started_unix: float) -> None:
-    from .serving._multi_node_server_lifecycle import select_pd_node_traces
+    from .serving._pd_round_server import select_pd_node_traces
 
     trace_dir = Path(round_trace_root)
     if not trace_dir.is_dir():
@@ -1149,7 +1059,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
             self._host_probe_status = f"probe_injection_failed: {exc}"
         with contextlib.suppress(OSError, ValueError, yaml.YAMLError):
             self._instrumentation_preflight = _instrumentation_preflight_row(read_benchmark_point(config_path).envs)
-        _leave_capture_to_engines(config_path)
+        leave_capture_to_engines(config_path)
 
     def drain_instrumentation_report(self) -> dict[str, Any] | None:
         """Take the instrumentation report this executor produced, clearing it.
@@ -1222,10 +1132,10 @@ class ProfileExecutor(BenchmarkRunExecutor):
         round_trace_root = _mn_round_trace_root()
         log_mn_banner("profile_executor", log, trace_dir=round_trace_root)
         if round_trace_root:
-            refusal = _unshared_trace_dir_refusal(round_trace_root) or _aggregated_node_list_refusal(round_trace_root)
+            refusal = _pd_profile_refusal(round_trace_root)
             if refusal is not None:
                 return refusal
-            task_started_unix = _trace_fs_round_start(round_trace_root, task_started_unix)
+            task_started_unix = trace_fs_round_start(round_trace_root, task_started_unix)
             refusal = await _restart_round_server(params, round_trace_root)
             if refusal is not None:
                 return refusal

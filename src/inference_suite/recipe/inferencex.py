@@ -67,7 +67,7 @@ _BYTES_PER_GB = 1_000_000_000
 _RANDOM_RANGE_RATIO = "0.8"
 _THINKING_MODE = "thinking_on"
 #: InferenceX's value for a spec-decoding or KV-offloading setting the point leaves off.
-_UNSET = "none"
+UNSET = "none"
 
 #: The client environment variable naming the trace corpus an AgentX replay loads (``infx/bench/agentic/traces.py``).
 AGENTX_TRACE_ENV = "WEKA_LOADER_OVERRIDE"
@@ -97,7 +97,7 @@ class Scenario(str, Enum):
     AGENTIC = "agentic-coding"
 
 
-_SCENARIO_OF = {Workload.FIXED: Scenario.FIXED, Workload.AGENTX: Scenario.AGENTIC}
+SCENARIO_OF = {Workload.FIXED: Scenario.FIXED, Workload.AGENTX: Scenario.AGENTIC}
 
 
 @dataclass(frozen=True)
@@ -292,7 +292,7 @@ def _arm_points(arm: _Arm, runners: Mapping[str, Any]) -> Iterator[InferencexPoi
             dcp=benchmark.get("dcp-size", 1),
             pcp=benchmark.get("pcp-size", 1),
             dp_attention=bool(benchmark.get("dp-attn") or False),
-            spec_decoding=benchmark.get("spec-decoding", _UNSET),
+            spec_decoding=benchmark.get("spec-decoding", UNSET),
             isl=block["isl"] if fixed else None,
             osl=block["osl"] if fixed else None,
             kv_offloading=None if fixed else benchmark["kv-offloading"],
@@ -388,7 +388,8 @@ _ENGINES = {
 }
 
 
-def _engine_type(recipe: Mapping[str, Any]) -> str:
+def engine_type(recipe: Mapping[str, Any]) -> str:
+    """The engine a srt-slurm recipe runs: its ``engine`` block's type, or ``engine`` itself."""
     engine = recipe.get("engine")
     return str(engine.get("type") if isinstance(engine, Mapping) else engine)
 
@@ -460,7 +461,7 @@ def _atom_tensor_parallel_size(gpus: int, config: Mapping[str, Any]) -> int:
 
 
 def _no_golden_reason(point: InferencexPoint, engine: str, args: Sequence[str]) -> str:
-    if point.spec_decoding == _UNSET:
+    if point.spec_decoding == UNSET:
         return "the launch drafts no tokens"
     if engine == Framework.VLLM and (
         adaptive := adaptive_verification_reason(speculative_config(argv_flag_occurrences(args)))
@@ -530,7 +531,7 @@ def _launch(
     if selection is None:
         raise RecipeSourceError(f"the InferenceX snapshot records no selection for {point.key}")
     recipe = _with_overrides(selection.recipe, selection.golden_overrides)
-    engine = _engine_type(recipe)
+    engine = engine_type(recipe)
     unported = _unported(recipe, engine)
     if unported is not None:
         return unported
@@ -564,7 +565,7 @@ def _launch(
         },
         client_env={key: str(value) for key, value in client.items() if key not in _POINT_CLIENT_ENV},
         golden=_golden(point, selection, bundle, engine, command.args),
-        kv_offloading=point.kv_offloading or _UNSET,
+        kv_offloading=point.kv_offloading or UNSET,
         stripped=command.stripped,
         warnings=_warnings(point, query, target),
     )
@@ -572,10 +573,10 @@ def _launch(
 
 def _misfit(point: InferencexPoint, query: LaunchQuery) -> str | None:
     """Why ``point`` cannot serve ``query``, which it already matches on model, framework and board."""
-    if point.scenario is not _SCENARIO_OF[query.workload]:
-        return f"it runs {point.scenario.value}, not {_SCENARIO_OF[query.workload].value}"
+    if point.scenario is not SCENARIO_OF[query.workload]:
+        return f"it runs {point.scenario.value}, not {SCENARIO_OF[query.workload].value}"
     if query.workload is Workload.FIXED:
-        if point.spec_decoding != _UNSET:
+        if point.spec_decoding != UNSET:
             return f"it drafts with {point.spec_decoding}, and a fixed workload runs no speculative decoding"
         if (point.isl, point.osl) != (query.isl, query.osl):
             return f"it runs {point.isl}/{point.osl}, not {query.isl}/{query.osl}"
@@ -690,11 +691,14 @@ __all__ = [
     "MASTER",
     "PROJECT",
     "RUNNERS",
+    "SCENARIO_OF",
+    "UNSET",
     "InferencexPoint",
     "Scenario",
     "ServedPoints",
     "agentx_trace",
     "concurrencies",
+    "engine_type",
     "inferencex_launches",
     "inferencex_model_id",
     "model_prefixes",

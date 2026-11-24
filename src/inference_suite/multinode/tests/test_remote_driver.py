@@ -8,6 +8,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from inference_suite.multinode import remote_driver
 
 _DRIVER = Path(remote_driver.__file__)
@@ -51,3 +53,14 @@ def test_driver_spawns_then_kills_a_detached_server(tmp_path):
         time.sleep(0.1)
     assert not _alive(spawned["pid"]) and not (tmp_path / "server.pid").exists()
     assert _drive(tmp_path, "stop")["action"] == "none"
+
+
+def test_driver_without_a_needle_adopts_no_process(tmp_path, monkeypatch):
+    monkeypatch.delenv("HL_NEEDLE", raising=False)
+    monkeypatch.setenv("HL_PIDFILE", str(tmp_path / "server.pid"))
+    monkeypatch.setenv("HL_ACTION", "stop")
+    adopted = []
+    monkeypatch.setattr(remote_driver, "_stop", lambda pid, pidfile: adopted.append(pid) or "stop-kill")
+    with pytest.raises(KeyError, match="HL_NEEDLE"):
+        remote_driver.main()
+    assert adopted == []

@@ -25,8 +25,6 @@ SSH_BACKENDS = (INFERA, *PD_BACKENDS)
 NODE_LIST_KEY = "node_list"
 #: Every host of a node-list cluster's launch with the command it serves.
 PODS_KEY = "pods"
-#: The pod keys a node-list session writes from its launch, which a reload of the same hand-off keeps.
-LAUNCH_POD_KEYS = (PODS_KEY, "prefill_pods", "decode_pods", "worker_pods", "router_pods")
 
 _FRONTEND_BACKEND = {"atomesh": ATOMESH, "sglang-router": SGLANGROUTER, "infera": INFERA}
 _FRAMEWORK_BACKEND = {"atom": ATOMESH, "sglang": SGLANGROUTER}
@@ -65,19 +63,15 @@ def is_pd_state(state: dict[str, Any]) -> bool:
     return backend in PD_BACKENDS or (backend == INFERA and state.get(NODE_LIST_KEY) is True)
 
 
-def _pods(nodes: NodeList, role: str) -> list[dict[str, Any]]:
-    """SSH targets of one role's hosts."""
-    hosts = nodes.hosts(Role(role))
-    return [
-        {
-            "podIP": host,
-            "podId": f"external-{role}-{index}",
-            "role": role,
-            "lwsIndex": index,
-            "sshPort": nodes.ssh.port_of(host) if nodes.ssh else 0,
-        }
-        for index, host in enumerate(hosts)
-    ]
+def pod(nodes: NodeList, role: str, index: int, host: str) -> dict[str, Any]:
+    """The SSH target of ``host``, the ``index``-th host of ``role``."""
+    return {
+        "podIP": host,
+        "podId": f"external-{role}-{index}",
+        "role": role,
+        "lwsIndex": index,
+        "sshPort": nodes.ssh.port_of(host) if nodes.ssh else 0,
+    }
 
 
 def pd_state(nodes: NodeList, backend: str) -> dict[str, Any]:
@@ -95,7 +89,10 @@ def pd_state(nodes: NodeList, backend: str) -> dict[str, Any]:
         "ssh_port": ssh_port,
         "router_pod_ip": nodes.router,
         **{f"{role.value}_pod_ips": list(nodes.hosts(role)) for role in Role},
-        **{f"{role.value}_pods": _pods(nodes, role.value) for role in Role},
+        **{
+            f"{role.value}_pods": [pod(nodes, role.value, index, host) for index, host in enumerate(nodes.hosts(role))]
+            for role in Role
+        },
         "pd_prefill_nodes": len(prefill),
         "pd_decode_nodes": len(decode),
         "user_data_path": str(workspace_root()),
@@ -113,7 +110,6 @@ def pd_state(nodes: NodeList, backend: str) -> dict[str, Any]:
 
 __all__ = [
     "INFERA",
-    "LAUNCH_POD_KEYS",
     "NODE_LIST_KEY",
     "PODS_KEY",
     "PD_BACKENDS",
@@ -122,4 +118,5 @@ __all__ = [
     "is_pd_state",
     "node_list_backend",
     "pd_state",
+    "pod",
 ]

@@ -84,17 +84,17 @@ zip_override_1p2d:
 """
 
 
+def _write_checkout(root, files):
+    for path, text in files.items():
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text(textwrap.dedent(text))
+    return Checkout("https://example/InferenceX", "c0ffee", root)
+
+
 @pytest.fixture
 def checkout(tmp_path):
-    files = {
-        MASTER: _MASTER,
-        RUNNERS: _RUNNERS,
-        f"{MULTI_NODE_RECIPES}/m/sglang/mi355x-fp8/1k1k/disagg.yaml": _RECIPE,
-    }
-    for path, text in files.items():
-        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / path).write_text(textwrap.dedent(text))
-    return Checkout("https://example/InferenceX", "c0ffee", tmp_path)
+    recipe = f"{MULTI_NODE_RECIPES}/m/sglang/mi355x-fp8/1k1k/disagg.yaml"
+    return _write_checkout(tmp_path, {MASTER: _MASTER, RUNNERS: _RUNNERS, recipe: _RECIPE})
 
 
 def _query(prefill=1, decode=1, **fields):
@@ -146,16 +146,18 @@ def test_lookup_finds_variants_no_master_entry_names(checkout):
     assert all(c.kind is PdSourceKind.INFERENCEX_LOOKUP and c.warnings for c in found.found)
 
 
-def test_a_bare_repo_name_finds_the_master_row_inferencex_names_it_by(checkout):
-    found = master_candidates(_query(model_id="M"), checkout)
-    assert [c.entry for c in found.found] == ["m-fp8-mi355x-sglang-disagg[0]"]
-    assert "InferenceX names M org/M" in found.found[0].warnings
-
-
-def test_a_bare_repo_name_finds_the_lookup_recipes(checkout):
-    found = lookup_candidates(_query(decode=2, model_id="m"), checkout)
-    assert [c.locator for c in found.found] == ["zip_override_1p2d[0]", "zip_override_1p2d[1]"]
-    assert all("InferenceX names m org/M" in c.warnings for c in found.found)
+@pytest.mark.parametrize(
+    ("candidates", "decode", "model_id", "locators"),
+    [
+        (master_candidates, 1, "M", ["override_1p1d"]),
+        (lookup_candidates, 2, "m", ["zip_override_1p2d[0]", "zip_override_1p2d[1]"]),
+    ],
+    ids=["master", "lookup"],
+)
+def test_a_bare_repo_name_finds_what_inferencex_names_it_by(checkout, candidates, decode, model_id, locators):
+    found = candidates(_query(decode=decode, model_id=model_id), checkout).found
+    assert [c.locator for c in found] == locators
+    assert all(f"InferenceX names {model_id} org/M" in c.warnings for c in found)
 
 
 def test_a_bare_repo_name_several_orgs_name_is_not_taken():
@@ -171,9 +173,9 @@ def test_resolve_prefers_master_and_strips_runner_owned(checkout):
     launch = resolve(_query(), ResolveInputs(inferencex=lambda: checkout))
     assert launch.source.kind is PdSourceKind.INFERENCEX_MASTER
     assert launch.transfer_backend == "mori"
-    assert launch.prefill.args == ("--mem-fraction-static", "0.8")
-    assert launch.prefill.env == {"MORI_SHMEM_MODE": "ISOLATION"}
-    assert "--model-path" in launch.prefill.stripped and "env HF_HOME" in launch.prefill.stripped
+    assert launch.role(Role.PREFILL).args == ("--mem-fraction-static", "0.8")
+    assert launch.role(Role.PREFILL).env == {"MORI_SHMEM_MODE": "ISOLATION"}
+    assert "--model-path" in launch.role(Role.PREFILL).stripped and "env HF_HOME" in launch.role(Role.PREFILL).stripped
     assert launch.frontend.args == ("--policy", "round_robin")
     assert set(launch.source.files) == {MASTER, RUNNERS, launch.source.path}
 
@@ -181,15 +183,15 @@ def test_resolve_prefers_master_and_strips_runner_owned(checkout):
 def test_resolve_falls_to_lookup(checkout):
     launch = resolve(_query(decode=2), ResolveInputs(inferencex=lambda: checkout))
     assert launch.source.kind is PdSourceKind.INFERENCEX_LOOKUP
-    assert launch.decode.workers == 2
+    assert launch.role(Role.DECODE).workers == 2
     assert launch.source.alternatives == (f"{launch.source.path}:zip_override_1p2d[1]",)
 
 
 def test_operator_args_win(checkout):
-    operator = OperatorArgs(shared=("--x",), decode=("--tp-size", "8", "--y"))
+    operator = OperatorArgs(prefill=("--x",), decode=("--tp-size", "8", "--y"))
     launch = resolve(_query(), ResolveInputs(operator=operator, inferencex=lambda: checkout))
     assert launch.source.kind is PdSourceKind.OPERATOR
-    assert (launch.prefill.args, launch.decode.args) == (("--x",), ("--x", "--y"))
+    assert (launch.role(Role.PREFILL).args, launch.role(Role.DECODE).args) == (("--x",), ("--y",))
 
 
 def test_launch_names_the_model_and_its_context(checkout):
@@ -215,7 +217,7 @@ def test_unreadable_inferencex_falls_to_the_table():
     query = _query(model_id="Qwen/Qwen3.5-397B-A17B-FP8", model_path="/m/Qwen3.5-397B-A17B-FP8")
     launch = resolve(query, ResolveInputs(inferencex=_unreadable))
     assert launch.source.kind is PdSourceKind.PD_TABLE
-    assert launch.prefill.args[0] == "--trust-remote-code"
+    assert launch.role(Role.PREFILL).args[0] == "--trust-remote-code"
     assert any("offline" in warning for warning in launch.source.warnings)
 
 
@@ -258,10 +260,7 @@ def test_malformed_master_rows_miss_and_resolve_falls_to_the_table(tmp_path):
         RUNNERS: _RUNNERS,
         f"{MULTI_NODE_RECIPES}/q/sglang/mi355x-fp8/1k1k/base.yaml": "base: {engine: sglang}\n",
     }
-    for path, text in files.items():
-        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / path).write_text(textwrap.dedent(text))
-    malformed = Checkout("https://example/InferenceX", "c0ffee", tmp_path)
+    malformed = _write_checkout(tmp_path, files)
     query = _query(model_id="Qwen/Qwen3.5-397B-A17B-FP8", model_path="/m/Qwen3.5-397B-A17B-FP8")
 
     found = master_candidates(query, malformed)
@@ -283,10 +282,7 @@ def test_a_pd_session_takes_mi300x_and_mi325x_launches_for_each_other(tmp_path, 
         f"{MULTI_NODE_RECIPES}/m/sglang/{tuned}-fp8/1k1k/disagg.yaml": _RECIPE.replace("mi355x", tuned),
         f"{MULTI_NODE_RECIPES}/m/sglang/{tuned}-fp8/1k1k/extra.yaml": _RECIPE.replace("mi355x", tuned),
     }
-    for path, text in files.items():
-        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / path).write_text(textwrap.dedent(text))
-    board_checkout = Checkout("https://example/InferenceX", "c0ffee", tmp_path)
+    board_checkout = _write_checkout(tmp_path, files)
 
     master = master_candidates(_query(board=asked), board_checkout).found
     lookup = lookup_candidates(_query(board=asked), board_checkout).found
@@ -317,7 +313,7 @@ def test_table_runs_the_asked_router_without_the_other_routers_args():
     asked = resolve(replace(query, frontend=FrontendType.ATOMESH), ResolveInputs(inferencex=_unreadable))
     assert default.frontend.type is FrontendType.SGLANG_ROUTER and default.frontend.args
     assert (asked.frontend.type, asked.frontend.args) == (FrontendType.ATOMESH, ())
-    assert asked.prefill.args == default.prefill.args
+    assert asked.role(Role.PREFILL).args == default.role(Role.PREFILL).args
 
 
 def test_infera_serves_sglang_through_the_platform_frontend():

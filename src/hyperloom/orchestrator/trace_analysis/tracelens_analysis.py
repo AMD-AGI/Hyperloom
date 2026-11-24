@@ -66,7 +66,7 @@ from ._collective_candidates_inject import _inject_collective_candidates
 from ._kernel_roofline import default_roofline_fields
 from ._kernel_search import refresh_kernel_search_roots
 from ._perf_report_analysis import analyze_perf_report
-from ._stream_overlap_repair import clamp_stream_overlaps
+from ._stream_overlap_repair import clamp_chunk_stream_overlaps
 from ._trace_gates import WorkloadShares, _evaluate_idle_gate_with_graph_guard, _evaluate_low_compute_gate
 from ._trace_inputs import (
     TraceInputs,
@@ -75,13 +75,7 @@ from ._trace_inputs import (
     _trace_file_size,
     discover_trace_inputs,
 )
-from ._trace_split import (
-    STEADY_STATE_MODES,
-    UNSPLIT_MODE,
-    TraceSplitJob,
-    _run_trace_split,
-    copy_unsplit_trace,
-)
+from ._trace_split import STEADY_STATE_MODES, UNSPLIT_MODE, TraceSplitJob, _run_trace_split, use_unsplit_trace
 
 # trace_analyze heals a vanished checkout through this module's _ensure_tracelens_checkout.
 from ._tracelens_checkout import (
@@ -188,9 +182,6 @@ class _TraceLensCheckout(NamedTuple):
 
 #: The package that carries a resolved arch JSON to TraceLens' arch loader (see :func:`_tracelens_knows_arch`).
 _ARCH_EXTENSION_PACKAGE = "hyperloom_tracelens_arch"
-_SPLIT_STEP = "split_trace"
-_SPLIT_CATEGORY = "split"
-_SKIPPED = "skipped"
 
 
 @contextlib.contextmanager
@@ -707,7 +698,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--clamp-stream-overlaps",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         help="Truncate same-stream overrunning GPU events in the steady-state chunk (set for PD profiles).",
     )
     parser.add_argument(
@@ -864,8 +855,10 @@ def _preflight_trace_input(run: AnalysisRun, trace_input: Path, trace_files: lis
 
 
 def _split_steady_state(run: AnalysisRun, job: TraceSplitJob) -> Path:
-    """Split the analysed trace and return the steady-state chunk the perf report reads."""
+    """Split the analysed trace and return the steady-state chunk the perf report reads; an unsplit run reads it whole."""
     args = run.args
+    if args.steady_state_mode == UNSPLIT_MODE:
+        return use_unsplit_trace(run, job.analysis_trace_path, job.split_dir)
     cli_trace_path, split_meta = _run_trace_split(
         args,
         job,
@@ -885,8 +878,8 @@ def _split_steady_state(run: AnalysisRun, job: TraceSplitJob) -> Path:
     )
     note_step(
         run.run_meta,
-        _SPLIT_STEP,
-        category=_SPLIT_CATEGORY,
+        "split_trace",
+        category="split",
         status="ok",
         returncode=split_meta.get("returncode"),
         num_steps=split_meta.get("num_steps"),
@@ -911,45 +904,6 @@ def _split_steady_state(run: AnalysisRun, job: TraceSplitJob) -> Path:
         f"using {cli_trace_path.name} for perf report",
     )
     return cli_trace_path
-
-
-def _use_unsplit_trace(run: AnalysisRun, trace_path: Path, split_dir: Path) -> Path:
-    """Hand the whole captured trace to the perf report, as a copy under ``split_dir``."""
-    copied = copy_unsplit_trace(trace_path, split_dir)
-    run.run_meta["selection"].update(
-        {
-            "requested_mode": UNSPLIT_MODE,
-            "chunk_label": UNSPLIT_MODE,
-            "selected_chunk": str(copied),
-            "selected_chunk_count": 1,
-            "fell_back_to_full_trace": False,
-        }
-    )
-    note_step(run.run_meta, _SPLIT_STEP, category=_SPLIT_CATEGORY, status=_SKIPPED, skip_reason=UNSPLIT_MODE)
-    run.artifacts["tracelens_trace_split_dir"] = str(split_dir)
-    run.artifacts["tracelens_steady_state_trace"] = str(copied)
-    append_log(run.log_path, f"--steady-state-mode={UNSPLIT_MODE} -> using {copied.name} for perf report")
-    return copied
-
-
-def _clamp_chunk_stream_overlaps(run: AnalysisRun, chunk_path: Path) -> None:
-    """Truncate same-stream overrunning GPU events in the steady-state chunk when ``--clamp-stream-overlaps`` is set."""
-    if not run.args.clamp_stream_overlaps:
-        return
-    try:
-        summary = clamp_stream_overlaps(chunk_path)
-    except (OSError, ValueError) as exc:
-        append_log(run.log_path, f"stream overlap clamp skipped for {chunk_path.name}: {exc}")
-        note_step(
-            run.run_meta, "clamp_stream_overlaps", category=_SPLIT_CATEGORY, status=_SKIPPED, skip_reason=str(exc)
-        )
-        return
-    append_log(
-        run.log_path,
-        f"stream overlap clamp: {summary['clamped_events']} event(s), {summary['removed_ms']} ms removed "
-        f"(worst {summary['worst_event'] or '-'} {summary['worst_removed_ms']} ms) in {chunk_path.name}",
-    )
-    note_step(run.run_meta, "clamp_stream_overlaps", category=_SPLIT_CATEGORY, status="ok", **summary)
 
 
 def _discovered_capture_folder(run: AnalysisRun, trace_input: Path, analysis_trace_path: Path) -> Path | None:
@@ -991,7 +945,7 @@ def _resolve_capture_folder(run: AnalysisRun, trace_input: Path, analysis_trace_
             run.run_meta,
             "discover_capture_folder",
             category="preflight",
-            status=_SKIPPED,
+            status="skipped",
             skip_reason="no capture_traces/ beside the analysed trace",
             capture_folder="",
             exists=False,
@@ -1092,14 +1046,11 @@ def _analyse_trace(run: AnalysisRun, trace_input: Path, trace_files: list[Path])
     raw_trace_path = analysis_trace_path
     run.run_status.write(
         state="running",
-        current_step=_SPLIT_STEP,
+        current_step="split_trace",
     )
     split_dir = tracelens_dir / "trace_split"
-    if args.steady_state_mode == UNSPLIT_MODE:
-        cli_trace_path = _use_unsplit_trace(run, analysis_trace_path, split_dir)
-    else:
-        cli_trace_path = _split_steady_state(run, TraceSplitJob(analysis_trace_path, split_dir, tl_root))
-    _clamp_chunk_stream_overlaps(run, cli_trace_path)
+    cli_trace_path = _split_steady_state(run, TraceSplitJob(analysis_trace_path, split_dir, tl_root))
+    clamp_chunk_stream_overlaps(run, cli_trace_path)
 
     # Graph-capture folder for TraceLens inference graph replay analysis.
     capture_folder = _resolve_capture_folder(run, trace_input, analysis_trace_path)

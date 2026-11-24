@@ -10,7 +10,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shlex
 import subprocess
 from contextlib import contextmanager
@@ -18,7 +17,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterator, Mapping
 
-from hyperloom_common.io import safe_mtime
 from hyperloom_common.timeutil import format_exc_brief
 from hyperloom_common.env import EnvValueError, env_flag
 from hyperloom.inference_optimizer import multi_node
@@ -27,8 +25,8 @@ from hyperloom.inference_optimizer.multi_node._internal.server_args_safety impor
     ServerArgsRejected,
     validate_server_args,
 )
-from .._multi_node_env import _read_state, is_multi_node
-from ._multi_node_restart_settings import RestartSettings
+from .._multi_node_env import _read_state, is_multi_node, is_pd_session
+from ._multi_node_restart_settings import RestartSettings, ServerRestartFailed
 
 # Scoped env flag (set by the roofline compute-bound re-profile) that tells this restart to strip DP-attention /
 # dp-size from prefill+decode+shared server args, so the profiled server runs single-rank full-batch (compute-bound).
@@ -109,10 +107,6 @@ def _merge_sglang_defaults(extra_args: str) -> str:
             continue
         parts.append(default_token)
     return " ".join(p for p in parts if p)
-
-
-class ServerRestartFailed(RuntimeError):
-    """Raised when the per-round multi-node server restart did not succeed."""
 
 
 def _state_or_env(state: dict, state_key: str, env_key: str, default: str = "") -> str:
@@ -334,8 +328,13 @@ async def _apply_tracelens_patch_fanout(patch_set: str, torch_profiler_dir: str,
         )
 
 
-def _read_restart_settings() -> RestartSettings:
-    """The restart's settings; a malformed one fails the restart before it touches the cluster."""
+def _read_restart_settings(extra_server_args: str) -> RestartSettings:
+    """The restart's settings once ``extra_server_args`` pass the server-args safety check; a rejected arg or a
+    malformed setting fails the restart before it touches the cluster."""
+    try:
+        validate_server_args(extra_server_args, context="restart_server_for_round")
+    except ServerArgsRejected as exc:
+        raise ServerRestartFailed(str(exc)) from exc
     try:
         return RestartSettings.from_env()
     except EnvValueError as exc:
@@ -424,10 +423,13 @@ async def restart_server_for_round(
             "restart_server_for_round: external service URL (benchmark-only, no SSH control); skipping server restart"
         )
         return
-    from hyperloom.inference_optimizer.multi_node.pd_session import is_pd_state
+    if is_pd_session():
+        from ._pd_round_server import restart_pd_round
 
-    if is_pd_state(_read_state()):
-        await _restart_pd_round(server, extra_env=extra_env, unset_env=unset_env, torch_profiler_dir=torch_profiler_dir)
+        settings = _read_restart_settings(server.extra_server_args)
+        async with _get_restart_lock():
+            with _restart_env_scope(extra_env, unset_env, torch_profiler_dir):
+                await restart_pd_round(server.extra_server_args, torch_profiler_dir, settings.poll_timeout_s)
         return
 
     round_args = _resolve_round_args(server)
@@ -458,14 +460,14 @@ async def restart_server_for_round(
             _COMPUTE_BOUND_PROFILE_ENV,
         )
 
-    try:
-        validate_server_args(extra_server_args, context="restart_server_for_round")
-    except ServerArgsRejected as exc:
-        raise ServerRestartFailed(str(exc)) from exc
-    settings = _read_restart_settings()
+    settings = _read_restart_settings(extra_server_args)
 
     async with _get_restart_lock():
-        _ensure_profiler_dir(torch_profiler_dir)
+        if torch_profiler_dir:
+            try:
+                Path(torch_profiler_dir).mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise ServerRestartFailed(f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}") from exc
         with _restart_env_scope(extra_env, unset_env, torch_profiler_dir):
             from .._server_patcher import resolve_sglang_patch_set
 
@@ -513,50 +515,6 @@ async def restart_server_for_round(
                     raise ServerRestartFailed(f"post-launch /health wait raised: {exc!r}") from exc
 
             await _restart_with_reclaim_retry(_restart_and_wait, force_full_restart)
-
-
-def _ensure_profiler_dir(torch_profiler_dir: str) -> None:
-    """Create the round's torch profiler directory when one is named."""
-    if not torch_profiler_dir:
-        return
-    try:
-        Path(torch_profiler_dir).mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise ServerRestartFailed(f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}") from exc
-
-
-async def _restart_pd_round(
-    server: RoundServer,
-    *,
-    extra_env: dict[str, str] | None,
-    unset_env: list[str] | tuple[str, ...] | set[str] | None,
-    torch_profiler_dir: str,
-) -> None:
-    """Restart a PD session's cluster with the round's args over its frozen launch; both roles get them."""
-    from hyperloom.inference_optimizer.multi_node.cli import restart_pd_round
-    from hyperloom.inference_optimizer.multi_node.pd_session import PdSessionError
-
-    try:
-        validate_server_args(server.extra_server_args, context="restart_server_for_round")
-    except ServerArgsRejected as exc:
-        raise ServerRestartFailed(str(exc)) from exc
-    settings = _read_restart_settings()
-    log.info("restart_server_for_round: PD cluster, round args=%r", server.extra_server_args)
-    async with _get_restart_lock():
-        _ensure_profiler_dir(torch_profiler_dir)
-        with _restart_env_scope(extra_env, unset_env, torch_profiler_dir):
-            try:
-                await asyncio.to_thread(restart_pd_round, server.extra_server_args, settings.poll_timeout_s)
-            except PdSessionError as exc:
-                raise ServerRestartFailed(str(exc)) from exc
-
-
-def pd_engines_lost_reason() -> str:
-    """Why a PD session's engines no longer run (``""`` when they do, or the session is not PD)."""
-    from hyperloom.inference_optimizer.multi_node.pd_session import engines_lost, is_pd_state
-
-    state = _read_state()
-    return engines_lost(state) if is_pd_state(state) else ""
 
 
 def _log_restart_plan(round_args: tuple[str, str, int, int], pd: dict, extra_args: str, trace_dir: str) -> None:
@@ -624,195 +582,31 @@ async def _restart_with_reclaim_retry(restart_and_wait: Callable[..., Awaitable[
 # Infera frontend profiling API (infera.server --enable-profiling).
 
 
-async def trigger_infera_engine_profile(
-    action: str,
-    body: dict | None = None,
-) -> None:
-    """Drive torch profiling on every Infera worker via the frontend fan-out API; a node-list Infera session profiles
-    its engines directly instead."""
+async def trigger_infera_engine_profile(action: str, body: dict | None = None) -> None:
+    """Drive torch profiling on every Infera worker via the frontend fan-out API."""
     if not is_multi_node():
         return
-    from hyperloom.inference_optimizer.multi_node.pd_session import INFERA, is_pd_state
-
     state = _read_state() or {}
-    if str(state.get("backend") or "").strip().lower() != INFERA or is_pd_state(state):
+    if str(state.get("backend") or "").strip().lower() != "infera":
         return
     service_url = str(state.get("service_url") or "").strip().rstrip("/")
     if not service_url:
-        log.warning(
-            "trigger_infera_engine_profile(%s): no service_url in state",
-            action,
-        )
+        log.warning("trigger_infera_engine_profile(%s): no service_url in state", action)
         return
-    try:
-        import httpx as _httpx
-    except ImportError:  # pragma: no cover
-        log.warning("httpx unavailable; cannot trigger infera profiling")
-        return
+    import httpx as _httpx
+
+    from ._multi_node_restart_settings import PROFILE_START_TIMEOUT_S, profile_stop_timeout
+
     route = "start" if action == "start" else "stop"
     url = f"{service_url}/v1/admin/profile/{route}"
     payload = dict(body or {}) if action == "start" else {}
-    if action == "start":
-        client_timeout = 30.0
-    else:
-        client_timeout = float(os.environ.get("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", "600") or 600)
+    client_timeout = PROFILE_START_TIMEOUT_S if action == "start" else profile_stop_timeout()
     async with _httpx.AsyncClient(timeout=client_timeout) as client:
         try:
             resp = await client.post(url, json=payload)
-            log.info(
-                "infera profile %s -> %s HTTP %d",
-                route,
-                url,
-                resp.status_code,
-            )
+            log.info("infera profile %s -> %s HTTP %d", route, url, resp.status_code)
         except _httpx.HTTPError as exc:
             log.warning("infera profile %s -> %s failed (%s); continuing", route, url, exc)
-
-
-PD_PROFILE_ROLES = ("prefill", "decode")
-_PD_PROFILE_START_TIMEOUT_S = 30.0
-_PD_STOP_PROFILE_TIMEOUT_ENV = "HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S"
-_PD_STOP_PROFILE_TIMEOUT_DEFAULT = "600"
-
-
-def pd_worker_trace_dir(root: str, role: str, worker: int) -> str:
-    """Return the torch trace dir of one engine worker of ``role`` under a profiling round's trace root."""
-    return str(Path(root) / role / str(worker))
-
-
-_RANK_TRACE_RE = re.compile(r"\A(?P<batch>.+)-TP-(?P<rank>\d+)(?:-(?P<stage>[A-Z]+))?\.trace\.json\.gz\Z")
-_ROLE_STAGE = {"prefill": "EXTEND", "decode": "DECODE"}
-
-
-def _first_gpu_traces(paths: list[Path], role: str, nodes: int) -> list[str]:
-    """The first GPU's trace of each node from the newest batch in ``paths``; the heaviest file when none is per-rank.
-
-    SGLang numbers TP ranks across a worker's nodes, so node ``n`` starts at rank ``n * ranks_per_node``. A stage-split
-    trace prefers the role's own stage.
-    """
-    batches: dict[str, dict[int, dict[str, Path]]] = {}
-    newest: dict[str, float] = {}
-    for path in paths:
-        match = _RANK_TRACE_RE.match(path.name)
-        if match is None:
-            continue
-        batch = match["batch"]
-        batches.setdefault(batch, {}).setdefault(int(match["rank"]), {})[match["stage"] or ""] = path
-        newest[batch] = max(newest.get(batch, 0.0), safe_mtime(path))
-    if not batches:
-        return [str(max(paths, key=lambda p: (p.stat().st_size, p.name)))] if paths else []
-    ranks = batches[max(newest, key=lambda batch: newest[batch])]
-    per_node = -(-(max(ranks) + 1) // nodes)
-    picks: list[str] = []
-    for node in range(nodes):
-        stages = ranks.get(node * per_node)
-        if stages:
-            picks.append(str(stages.get(_ROLE_STAGE.get(role, "")) or stages.get("") or sorted(stages.values())[0]))
-    return picks
-
-
-def _pd_worker_hosts(state: dict[str, Any]) -> dict[str, list[tuple[str, ...]]]:
-    """The hosts of every engine worker per role of a PD session's frozen launch; empty when it cannot be placed."""
-    from hyperloom.inference_optimizer.multi_node.pd_session import PdSessionError, is_pd_state, session_worker_hosts
-
-    if not is_pd_state(state):
-        return {}
-    try:
-        return session_worker_hosts(state)
-    except PdSessionError as exc:
-        log.warning("pd profile: cannot place the engines of the frozen launch: %s", exc)
-        return {}
-
-
-def select_pd_node_traces(root: str, since_unix: float) -> dict[str, list[str]]:
-    """Return, per PD role, the first GPU's trace of each node written since ``since_unix``, worker by worker under
-    ``<root>/<role>/<worker>``; nodes are numbered across the role's workers in order."""
-    workers = _pd_worker_hosts(_read_state() or {})
-    selected: dict[str, list[str]] = {}
-    for role in PD_PROFILE_ROLES:
-        picks: list[str] = []
-        for worker, hosts in enumerate(workers.get(role, [])):
-            fresh = [
-                path
-                for path in Path(pd_worker_trace_dir(root, role, worker)).glob("*.trace.json.gz")
-                if path.is_file() and safe_mtime(path) >= since_unix
-            ]
-            picks += _first_gpu_traces(fresh, role, len(hosts))
-        if picks:
-            selected[role] = picks
-    return selected
-
-
-def select_pd_role_traces(root: str, since_unix: float) -> dict[str, str]:
-    """Return each PD role's first-node trace from :func:`select_pd_node_traces`."""
-    return {role: paths[0] for role, paths in select_pd_node_traces(root, since_unix).items()}
-
-
-def _pd_profile_targets(state: dict[str, Any]) -> list[tuple[str, int, str]]:
-    """``(role, worker, base_url)`` of every engine worker of a PD session; empty when the launch cannot be placed."""
-    from hyperloom.inference_optimizer.multi_node.pd_session import PdSessionError, session_engine_urls
-
-    try:
-        urls = session_engine_urls(state)
-    except PdSessionError as exc:
-        log.warning("pd profile: cannot place the engines of the frozen launch: %s", exc)
-        return []
-    return [(role, worker, url) for role in PD_PROFILE_ROLES for worker, url in enumerate(urls.get(role, []))]
-
-
-async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> None:
-    """POST /start_profile or /stop_profile to every prefill and decode engine of a PD session.
-
-    Each engine worker is reached at its first host on its role's engine port, as the frozen launch is placed on the
-    node list; the router writes no GPU traces. A start sends ``output_dir`` narrowed to
-    ``<output_dir>/<role>/<worker>`` and ``with_stack`` (``HYPERLOOM_MN_PROFILE_WITH_STACK``, default off); step-window
-    fields crash disaggregated SGLang.
-    """
-    if not is_multi_node():
-        return
-    from hyperloom.inference_optimizer.multi_node.pd_session import is_pd_state
-
-    state = _read_state() or {}
-    if not is_pd_state(state):
-        return
-    targets = _pd_profile_targets(state)
-    if not targets:
-        log.warning("trigger_pd_engine_profile(%s): no prefill/decode engines to profile", action)
-        return
-    try:
-        import httpx as _httpx
-    except ImportError:  # pragma: no cover
-        log.warning("httpx unavailable; cannot trigger PD engine profiling")
-        return
-    starting = action == "start"
-    route = "start_profile" if starting else "stop_profile"
-    output_dir = str((body or {}).get("output_dir") or "").strip() if starting else ""
-    with_stack = env_flag("HYPERLOOM_MN_PROFILE_WITH_STACK", default=False)
-    stop_timeout = os.environ.get(_PD_STOP_PROFILE_TIMEOUT_ENV, "") or _PD_STOP_PROFILE_TIMEOUT_DEFAULT
-    client_timeout = _PD_PROFILE_START_TIMEOUT_S if starting else float(stop_timeout)
-
-    async def _post(client: Any, role: str, worker: int, base_url: str) -> None:
-        """Send ``route`` to one engine; a transport error is logged, not raised."""
-        url = f"{base_url}/{route}"
-        payload: dict = {}
-        if output_dir:
-            worker_dir = pd_worker_trace_dir(output_dir, role, worker)
-            try:
-                Path(worker_dir).mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                log.debug("pd profile: cannot mkdir %s: %s", worker_dir, exc)
-            payload["output_dir"] = worker_dir
-        if starting:
-            payload["with_stack"] = with_stack
-        try:
-            resp = await client.post(url, json=payload)
-            log.info("pd profile %s %s -> %s HTTP %d", role, route, url, resp.status_code)
-        except _httpx.HTTPError as exc:
-            log.warning("pd profile %s -> %s failed (%s); continuing", route, url, exc)
-
-    # stop_profile returns after the trace export; engines start and stop together so each records the same window.
-    async with _httpx.AsyncClient(timeout=client_timeout) as client:
-        await asyncio.gather(*(_post(client, role, worker, base_url) for role, worker, base_url in targets))
 
 
 async def _probe_health(client: Any, health_url: str) -> tuple[bool, str]:

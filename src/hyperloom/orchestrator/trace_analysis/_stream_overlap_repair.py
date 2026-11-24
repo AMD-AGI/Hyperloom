@@ -17,17 +17,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ._analysis_run import AnalysisRun
+from ._io_utils import append_log
+from ._run_status import note_step
 from ._trace_reader import _GPU_CATS, _STREAM_OVERLAP_EPS_US
-
-
-def _text_opener(trace_path: Path) -> Callable[..., Any]:
-    """``gzip.open`` for a ``.gz`` trace, else ``open``; both take a text mode and an encoding."""
-    return gzip.open if trace_path.name.endswith(".gz") else open
 
 
 def clamp_stream_overlaps(trace_path: Path) -> dict[str, Any]:
     """Clamp each GPU event to end at the next event's start on its (pid, tid) stream; rewrite the trace if changed."""
-    opener = _text_opener(trace_path)
+    opener: Callable[..., Any] = gzip.open if trace_path.name.endswith(".gz") else open
     with opener(trace_path, "rt", encoding="utf-8") as fh:
         trace = json.load(fh)
     events = trace.get("traceEvents", []) if isinstance(trace, dict) else trace
@@ -72,3 +70,21 @@ def clamp_stream_overlaps(trace_path: Path) -> dict[str, Any]:
         "worst_event": worst_name,
         "worst_removed_ms": round(worst_us / 1000.0, 4),
     }
+
+
+def clamp_chunk_stream_overlaps(run: AnalysisRun, chunk_path: Path) -> None:
+    """Truncate same-stream overrunning GPU events in the steady-state chunk when ``--clamp-stream-overlaps`` is set."""
+    if not run.args.clamp_stream_overlaps:
+        return
+    try:
+        summary = clamp_stream_overlaps(chunk_path)
+    except (OSError, ValueError) as exc:
+        append_log(run.log_path, f"stream overlap clamp skipped for {chunk_path.name}: {exc}")
+        note_step(run.run_meta, "clamp_stream_overlaps", category="split", status="skipped", skip_reason=str(exc))
+        return
+    append_log(
+        run.log_path,
+        f"stream overlap clamp: {summary['clamped_events']} event(s), {summary['removed_ms']} ms removed "
+        f"(worst {summary['worst_event'] or '-'} {summary['worst_removed_ms']} ms) in {chunk_path.name}",
+    )
+    note_step(run.run_meta, "clamp_stream_overlaps", category="split", status="ok", **summary)

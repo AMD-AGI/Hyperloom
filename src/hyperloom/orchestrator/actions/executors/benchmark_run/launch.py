@@ -127,17 +127,6 @@ def _attach_baseline_launch_evidence(
     )
 
 
-def _pd_session() -> bool:
-    """Whether this run serves a PD-disaggregated node-list cluster."""
-    from .._multi_node_env import _read_state, is_multi_node
-
-    if not is_multi_node():
-        return False
-    from hyperloom.inference_optimizer.multi_node.pd_session import is_pd_state
-
-    return is_pd_state(_read_state())
-
-
 def _attempt_failure(error_class: str, exc: Exception, output_dir: Path) -> dict[str, Any]:
     """The failed result of an attempt refused before any round ran."""
     return {
@@ -315,7 +304,7 @@ class _BenchmarkLaunchMixin:
         server_args: str,
         resolved_model: str,
     ) -> dict[str, Any] | None:
-        from .._multi_node_env import round_server_env
+        from .._multi_node_env import is_pd_session, round_server_env
         from ..serving._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
         if round_.ctx_extra.get("mn_round_restarted"):
@@ -329,7 +318,7 @@ class _BenchmarkLaunchMixin:
             server_base = session_server_base()
             # Fold in the operator ``--server-args`` (``INFERENCE_OPTIMIZER_SERVER_ARGS``).
             # A PD session froze the operator's args in its launch; a round carries only its own.
-            operator_args = "" if _pd_session() else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
+            operator_args = "" if is_pd_session() else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
             base = server_base.args
             if operator_args:
                 base = merge_server_args(base, operator_args) if base else operator_args
@@ -416,14 +405,12 @@ class _BenchmarkLaunchMixin:
 
     @staticmethod
     async def _multi_node_engines_lost() -> str:
-        """Why a multi-node round's engines are gone (replaced or exited), or ``""`` when they run."""
-        from .._multi_node_env import is_multi_node
+        """Why a PD session's engines are gone (replaced or exited), or ``""`` when they run or the session is not PD."""
+        from hyperloom.inference_optimizer.multi_node.pd_session import engines_lost
 
-        if not is_multi_node():
-            return ""
-        from ..serving._multi_node_server_lifecycle import pd_engines_lost_reason
+        from .._multi_node_env import _read_state, is_pd_session
 
-        return await asyncio.to_thread(pd_engines_lost_reason)
+        return await asyncio.to_thread(engines_lost, _read_state()) if is_pd_session() else ""
 
     def _record_argv_refusal(self, round_: _BenchmarkRound, attempt_index: int, detail: str) -> None:
         """Record the parser's refusal at the parse rung, where enablement reads it as a terminal no patch repairs."""

@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 from inference_suite.frameworks import Framework
-from inference_suite.multinode.render import recipe_role_args, render_role
+from inference_suite.multinode.render import render_role
+from inference_suite.recipe.inferencex import srtctl_cli_args
 
 
 def test_sglang_runner_owned_flags_are_stripped():
@@ -34,12 +35,12 @@ def test_host_env_is_stripped():
 
 
 def test_recipe_role_args_follow_srtctl():
-    role = {"args": {"mem_fraction_static": 0.8, "disable-radix-cache": True, "skip": False, "cuda-graph-bs": [1, 2]}}
-    assert recipe_role_args(Framework.SGLANG, role) == [
+    args = {"mem_fraction_static": 0.8, "disable-radix-cache": True, "skip": False, "cuda-graph-bs": [1, 2]}
+    assert srtctl_cli_args(Framework.SGLANG.value, args) == (
         "--cuda-graph-bs",
         "1",
         "2",
         "--disable-radix-cache",
         "--mem-fraction-static",
         "0.8",
-    ]
+    )

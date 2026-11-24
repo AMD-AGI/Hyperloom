@@ -24,17 +24,9 @@ from inference_suite.multinode.launch import (
     with_overrides,
 )
 from inference_suite.multinode.nodes import SshAccess, parse_node_list
-from inference_suite.multinode.record import (
-    Frontend,
-    FrontendType,
-    PdLaunch,
-    PdMode,
-    PdSource,
-    PdSourceKind,
-    Role,
-    RoleLaunch,
-)
+from inference_suite.multinode.record import Frontend, FrontendType, PdSourceKind, Role, RoleLaunch
 from inference_suite.multinode.ssh import SshClient, SshError, SshResult, run_process
+from inference_suite.multinode.tests.builders import SSH, node_document, pd_launch
 
 _FLAGS = "--model-path\n--mem-fraction-static\n--cuda-graph-bs-decode\n--chunked-prefill-size\n"
 
@@ -85,35 +77,13 @@ class Clock:
 
 
 def _nodes(**fields):
-    document = {
-        "framework": "sglang",
-        "model": "/models/M",
-        "service_url": "http://svc:8000",
-        "router": {"host": "r0"},
-        "prefill": [{"host": "p0"}],
-        "decode": [{"host": "d0"}],
-        "gpus_per_node": 8,
-        "ssh": {"port": 22, "user": "root", "key_file": "/keys/id"},
-        "launch_mode": "in_place",
-    }
-    document.update(fields)
-    return parse_node_list(document)
+    return parse_node_list(node_document(ssh=SSH, launch_mode="in_place", **fields))
 
 
 def _launch(kind=PdSourceKind.INFERENCEX_MASTER):
-    return PdLaunch(
-        source=PdSource(kind),
-        framework=Framework.SGLANG,
-        model="/models/M",
-        served_model_name="org/M",
-        context_length=2048,
-        transfer_backend="mori",
-        roles={
-            Role.PREFILL: RoleLaunch(("p0",), 1, 8, args=("--mem-fraction-static", "0.8", "--cuda-graph-bs", "1", "2")),
-            Role.DECODE: RoleLaunch(("d0",), 1, 8, args=("--cuda-graph-bs", "1", "2", "--retired-flag", "x")),
-        },
-        frontend=Frontend(FrontendType.SGLANG_ROUTER, "r0", ()),
-    )
+    prefill = RoleLaunch(("p0",), 1, 8, args=("--mem-fraction-static", "0.8", "--cuda-graph-bs", "1", "2"))
+    decode = RoleLaunch(("d0",), 1, 8, args=("--cuda-graph-bs", "1", "2", "--retired-flag", "x"))
+    return pd_launch({Role.PREFILL: prefill, Role.DECODE: decode}, kind)
 
 
 def _cluster(tmp_path, hosts, healthy=lambda url: True):
@@ -122,7 +92,7 @@ def _cluster(tmp_path, hosts, healthy=lambda url: True):
     return Cluster(_nodes(), client, probe=healthy, sleep=clock.sleep, clock=clock)
 
 
-_OPTIONS = LaunchOptions(ready_timeout_s=60, poll_interval_s=10)
+_OPTIONS = LaunchOptions(ready_timeout_s=60)
 
 
 def test_start_runs_engines_before_the_router(tmp_path):
@@ -136,10 +106,10 @@ def test_start_runs_engines_before_the_router(tmp_path):
         "http://r0:8000/health",
         "http://svc:8000/health",
     ]
-    assert ran.decode.args == ("--cuda-graph-bs-decode", "1", "2")
-    assert ran.decode.stripped == ("unsupported --retired-flag",)
-    assert ran.prefill.args == ("--mem-fraction-static", "0.8")
-    assert ran.prefill.stripped == ("unsupported --cuda-graph-bs",)
+    assert ran.role(Role.DECODE).args == ("--cuda-graph-bs-decode", "1", "2")
+    assert ran.role(Role.DECODE).stripped == ("unsupported --retired-flag",)
+    assert ran.role(Role.PREFILL).args == ("--mem-fraction-static", "0.8")
+    assert ran.role(Role.PREFILL).stripped == ("unsupported --cuda-graph-bs",)
 
 
 def test_role_env_reaches_only_its_engine_role(tmp_path):
@@ -154,7 +124,7 @@ def test_role_env_reaches_only_its_engine_role(tmp_path):
 
 def test_operator_flags_are_kept_when_the_engine_does_not_list_them():
     fitted = fit_to_engine(_launch(PdSourceKind.OPERATOR), frozenset({"cuda-graph-bs-decode"}))
-    assert "--retired-flag" in fitted.decode.args
+    assert "--retired-flag" in fitted.role(Role.DECODE).args
 
 
 def test_dead_engine_fails_the_start_with_its_log(tmp_path):
@@ -234,7 +204,7 @@ def test_stop_parks_the_router_first(tmp_path):
 def test_restart_replaces_same_named_flags(tmp_path):
     hosts = FakeHosts()
     ran = restart(_launch(), {"prefill": ["--mem-fraction-static=0.7"]}, _cluster(tmp_path, hosts), _OPTIONS)
-    assert ran.prefill.args == ("--mem-fraction-static=0.7",)
+    assert ran.role(Role.PREFILL).args == ("--mem-fraction-static=0.7",)
 
 
 def test_restart_refuses_a_round_flag_the_engine_does_not_list(tmp_path):
@@ -243,8 +213,8 @@ def test_restart_refuses_a_round_flag_the_engine_does_not_list(tmp_path):
         restart(_launch(), {"decode": ["--foo", "1"]}, _cluster(tmp_path, hosts), _OPTIONS)
     assert hosts.driven("restart") == []
     ran = restart(_launch(), {"decode": ["--cuda-graph-bs", "4"]}, _cluster(tmp_path, hosts), _OPTIONS)
-    assert ran.decode.args == ("--cuda-graph-bs-decode", "4")
-    assert ran.decode.stripped == ("unsupported --retired-flag",)
+    assert ran.role(Role.DECODE).args == ("--cuda-graph-bs-decode", "4")
+    assert ran.role(Role.DECODE).stripped == ("unsupported --retired-flag",)
 
 
 def test_restart_refuses_a_prefill_override_of_a_decode_only_flag(tmp_path):
@@ -299,24 +269,15 @@ def test_atom_launch_does_not_probe_sglang(tmp_path):
     launch = replace(_launch(), framework=Framework.ATOM, frontend=Frontend(FrontendType.ATOMESH, "r0", ()))
     cluster = replace(_cluster(tmp_path, hosts), nodes=_nodes(framework="atom"))
     ran = start(launch, cluster, _OPTIONS)
-    assert ran.decode.args == launch.decode.args
+    assert ran.role(Role.DECODE).args == launch.role(Role.DECODE).args
     assert not any("launch_server --help" in stdin for _kind, _host, stdin in hosts.calls)
 
 
 def test_an_infera_launch_starts_no_router_and_waits_for_the_service(tmp_path):
     hosts = FakeHosts()
     probed = []
-    launch = PdLaunch(
-        source=PdSource(PdSourceKind.OPERATOR),
-        framework=Framework.SGLANG,
-        model="/models/M",
-        served_model_name="org/M",
-        context_length=None,
-        transfer_backend="",
-        roles={Role.WORKER: RoleLaunch(("w0", "w1"), 1, 16, args=("--mem-fraction-static", "0.8"))},
-        frontend=Frontend(FrontendType.INFERA),
-        mode=PdMode.AGGREGATED,
-    )
+    worker = RoleLaunch(("w0", "w1"), 1, 16, args=("--mem-fraction-static", "0.8"))
+    launch = pd_launch({Role.WORKER: worker}, PdSourceKind.OPERATOR, frontend=Frontend(FrontendType.INFERA))
     nodes = _nodes(mode="aggregated", prefill=None, decode=None, worker=[{"host": "w0"}, {"host": "w1"}])
     nodes = replace(nodes, frontend=FrontendType.INFERA, router="")
     cluster = replace(_cluster(tmp_path, hosts, lambda url: probed.append(url) or True), nodes=nodes)
@@ -330,17 +291,7 @@ def test_an_infera_launch_starts_no_router_and_waits_for_the_service(tmp_path):
 
 
 def test_worker_overrides_apply_to_an_aggregated_launch():
-    launch = PdLaunch(
-        source=PdSource(PdSourceKind.OPERATOR),
-        framework=Framework.SGLANG,
-        model="/models/M",
-        served_model_name="org/M",
-        context_length=None,
-        transfer_backend="",
-        roles={Role.WORKER: RoleLaunch(("w0",), 1, 8, args=("--a", "1"))},
-        frontend=Frontend(FrontendType.SGLANG_ROUTER, "r0"),
-        mode=PdMode.AGGREGATED,
-    )
+    launch = pd_launch({Role.WORKER: RoleLaunch(("w0",), 1, 8, args=("--a", "1"))}, PdSourceKind.OPERATOR)
     assert with_overrides(launch, {"worker": ["--a", "2"]}).role(Role.WORKER).args == ("--a", "2")
     with pytest.raises(LaunchError, match="no role"):
         with_overrides(launch, {"prefill": ["--a", "2"]})

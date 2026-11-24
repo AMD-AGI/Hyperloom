@@ -6,8 +6,7 @@
 The record holds the serving mode (prefill/decode disaggregated, or aggregated workers), what each role runs (hosts,
 topology, args, env, the runner-owned keys taken out of its source), the router, the KV transfer backend and where
 the launch came from. Its digest covers the mode, the roles' launch, the frontend and the transfer backend, not the
-hosts, so a resume refuses a record whose launch was changed. Documents of the previous schema, which are all
-disaggregated, still read. No credential or key path is part of it.
+hosts, so a resume refuses a record whose launch was changed. No credential or key path is part of it.
 """
 
 from __future__ import annotations
@@ -20,11 +19,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.contract_fields import ContractFields
+
 from inference_suite.frameworks import Framework
 
 SCHEMA = "inference-suite-pd-launch/2"
-#: The schema before the serving mode was recorded; its documents are disaggregated.
-SCHEMA_V1 = "inference-suite-pd-launch/1"
 RECORD_NAME = "pd_launch.json"
 #: The launch as the last start or restart ran it, beside the frozen ``pd_launch.json``.
 RAN_RECORD_NAME = "pd_launch.ran.json"
@@ -33,6 +32,9 @@ _UTF8 = "utf-8"
 
 class PdRecordError(ValueError):
     """A PD launch document breaks its contract, or its digest does not match its launch."""
+
+
+_FIELDS = ContractFields(PdRecordError)
 
 
 class PdSourceKind(str, Enum):
@@ -105,17 +107,17 @@ class PdSource:
 
     @classmethod
     def from_document(cls, document: Any) -> PdSource:
-        fields = _mapping(document, "a PD source")
+        fields = _FIELDS.mapping(document, "a PD source")
         return cls(
-            kind=_enum(PdSourceKind, fields.get("kind"), "a PD source's kind"),
+            kind=_FIELDS.enum(PdSourceKind, fields.get("kind"), "a PD source's kind"),
             repo=_text(fields.get("repo", ""), "a PD source's repo"),
             commit=_text(fields.get("commit", ""), "a PD source's commit"),
             path=_text(fields.get("path", ""), "a PD source's path"),
             entry=_text(fields.get("entry", ""), "a PD source's entry"),
             locator=_text(fields.get("locator", ""), "a PD source's locator"),
-            files=_string_map(fields.get("files", {}), "a PD source's files"),
-            alternatives=_strings(fields.get("alternatives", []), "a PD source's alternatives"),
-            warnings=_strings(fields.get("warnings", []), "a PD source's warnings"),
+            files=dict(_FIELDS.string_map(fields.get("files", {}), "a PD source's files")),
+            alternatives=_FIELDS.strings(fields.get("alternatives", []), "a PD source's alternatives"),
+            warnings=_FIELDS.strings(fields.get("warnings", []), "a PD source's warnings"),
         )
 
 
@@ -149,17 +151,17 @@ class RoleLaunch:
 
     @classmethod
     def from_document(cls, document: Any, where: str) -> RoleLaunch:
-        fields = _mapping(document, where)
-        topology = _mapping(fields.get("topology"), f"{where}'s topology")
+        fields = _FIELDS.mapping(document, where)
+        topology = _FIELDS.mapping(fields.get("topology"), f"{where}'s topology")
         return cls(
-            hosts=_strings(fields.get("hosts"), f"{where}'s hosts"),
-            workers=_integer(fields.get("workers"), f"{where}'s workers"),
-            tp=_integer(topology.get("tp"), f"{where}'s tp"),
-            ep=_integer(topology.get("ep", 1), f"{where}'s ep"),
-            dp_attention=_boolean(fields.get("dp_attention", False), f"{where}'s dp_attention"),
-            args=_strings(fields.get("args", []), f"{where}'s args"),
-            env=_string_map(fields.get("env", {}), f"{where}'s env"),
-            stripped=_strings(fields.get("stripped", []), f"{where}'s stripped"),
+            hosts=_FIELDS.strings(fields.get("hosts"), f"{where}'s hosts"),
+            workers=_FIELDS.integer(fields.get("workers"), f"{where}'s workers", minimum=1),
+            tp=_FIELDS.integer(topology.get("tp"), f"{where}'s tp", minimum=1),
+            ep=_FIELDS.integer(topology.get("ep", 1), f"{where}'s ep", minimum=1),
+            dp_attention=_FIELDS.boolean(fields.get("dp_attention", False), f"{where}'s dp_attention"),
+            args=_FIELDS.strings(fields.get("args", []), f"{where}'s args"),
+            env=dict(_FIELDS.string_map(fields.get("env", {}), f"{where}'s env")),
+            stripped=_FIELDS.strings(fields.get("stripped", []), f"{where}'s stripped"),
         )
 
 
@@ -180,11 +182,11 @@ class Frontend:
 
     @classmethod
     def from_document(cls, document: Any) -> Frontend:
-        fields = _mapping(document, "the frontend")
+        fields = _FIELDS.mapping(document, "the frontend")
         return cls(
-            type=_enum(FrontendType, fields.get("type"), "the frontend's type"),
+            type=_FIELDS.enum(FrontendType, fields.get("type"), "the frontend's type"),
             host=_text(fields.get("host", ""), "the frontend's host"),
-            args=_strings(fields.get("args", []), "the frontend's args"),
+            args=_FIELDS.strings(fields.get("args", []), "the frontend's args"),
         )
 
 
@@ -217,23 +219,15 @@ class PdLaunch:
         """The roles the launch runs, in launch order."""
         return MODE_ROLES[self.mode]
 
-    @property
-    def prefill(self) -> RoleLaunch:
-        """The prefill role of a disaggregated launch."""
-        return self.roles[Role.PREFILL]
-
-    @property
-    def decode(self) -> RoleLaunch:
-        """The decode role of a disaggregated launch."""
-        return self.roles[Role.DECODE]
-
     def role(self, role: Role) -> RoleLaunch:
         return self.roles[role]
 
-    def _launch_fields(self) -> dict[str, Any]:
-        """The digested fields every schema shares: the model, its served name and context, the transfer backend,
-        the roles but their hosts and the frontend but its host."""
-        return {
+    def digest(self) -> str:
+        """The sha256 of the launch: the framework, the mode, the model, its served name and context, the transfer
+        backend, the roles but their hosts and the frontend but its host."""
+        launch = {
+            "framework": self.framework.value,
+            "mode": self.mode.value,
             "model": self.model,
             "served_model_name": self.served_model_name,
             "context_length": self.context_length,
@@ -241,10 +235,8 @@ class PdLaunch:
             "roles": {role.value: self.role(role).launch_document() for role in self.served_roles},
             "frontend": self.frontend.launch_document(),
         }
-
-    def digest(self) -> str:
-        """The sha256 of the launch: the framework, the mode and every digested field."""
-        return _digest({**self._launch_fields(), "framework": self.framework.value, "mode": self.mode.value})
+        canonical = json.dumps(launch, sort_keys=True, separators=(",", ":"))
+        return f"sha256:{hashlib.sha256(canonical.encode(_UTF8)).hexdigest()}"
 
     def to_document(self) -> dict[str, Any]:
         return {
@@ -264,20 +256,19 @@ class PdLaunch:
     @classmethod
     def from_document(cls, document: Any) -> PdLaunch:
         """The launch ``document`` records, refused when its schema or digest does not hold."""
-        fields = _mapping(document, "a PD launch")
-        schema = fields.get("schema")
-        if schema not in (SCHEMA, SCHEMA_V1):
-            raise PdRecordError(f"a PD launch has schema {schema!r}, not {SCHEMA}")
-        mode = PdMode.DISAGGREGATED
-        if schema == SCHEMA:
-            mode = _enum(PdMode, fields.get("mode"), "a PD launch's mode")
-        roles = _mapping(fields.get("roles"), "a PD launch's roles")
+        fields = _FIELDS.mapping(document, "a PD launch")
+        if fields.get("schema") != SCHEMA:
+            raise PdRecordError(f"a PD launch has schema {fields.get('schema')!r}, not {SCHEMA}")
+        mode = _FIELDS.enum(PdMode, fields.get("mode"), "a PD launch's mode")
+        roles = _FIELDS.mapping(fields.get("roles"), "a PD launch's roles")
         launch = cls(
             source=PdSource.from_document(fields.get("source")),
-            framework=_enum(Framework, fields.get("framework"), "a PD launch's framework"),
+            framework=_FIELDS.enum(Framework, fields.get("framework"), "a PD launch's framework"),
             model=_text(fields.get("model"), "a PD launch's model"),
             served_model_name=_text(fields.get("served_model_name"), "a PD launch's served model name"),
-            context_length=_optional_integer(fields.get("context_length"), "a PD launch's context length"),
+            context_length=_FIELDS.optional_integer(
+                fields.get("context_length"), "a PD launch's context length", minimum=1
+            ),
             transfer_backend=_text(fields.get("transfer_backend", ""), "a PD launch's transfer backend"),
             roles={
                 role: RoleLaunch.from_document(roles.get(role.value), f"the {role.value} role")
@@ -286,8 +277,7 @@ class PdLaunch:
             frontend=Frontend.from_document(fields.get("frontend")),
             mode=mode,
         )
-        recorded = launch.digest() if schema == SCHEMA else _digest(launch._launch_fields())
-        if fields.get("digest") != recorded:
+        if fields.get("digest") != launch.digest():
             raise PdRecordError(f"a PD launch's digest {fields.get('digest')!r} is not that of its launch")
         return launch
 
@@ -299,12 +289,6 @@ class PdLaunch:
         """The same launch on other hosts, by role: the digest does not change."""
         roles = {role: replace(self.role(role), hosts=tuple(hosts[role])) for role in self.served_roles}
         return replace(self.with_roles(roles), frontend=replace(self.frontend, host=router))
-
-
-def _digest(launch: Mapping[str, Any]) -> str:
-    """The sha256 of ``launch`` in canonical JSON."""
-    canonical = json.dumps(launch, sort_keys=True, separators=(",", ":"))
-    return f"sha256:{hashlib.sha256(canonical.encode(_UTF8)).hexdigest()}"
 
 
 def write_record(launch: PdLaunch, path: Path) -> str:
@@ -328,52 +312,11 @@ def read_record(path: Path) -> PdLaunch:
     return PdLaunch.from_document(document)
 
 
-def _mapping(value: Any, what: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise PdRecordError(f"{what} must be a mapping, got {value!r}")
-    return value
-
-
 def _text(value: Any, what: str) -> str:
+    """A record string, which may be empty."""
     if not isinstance(value, str):
         raise PdRecordError(f"{what} must be a string, got {value!r}")
     return value
-
-
-def _integer(value: Any, what: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise PdRecordError(f"{what} must be a positive integer, got {value!r}")
-    return value
-
-
-def _optional_integer(value: Any, what: str) -> int | None:
-    return None if value is None else _integer(value, what)
-
-
-def _boolean(value: Any, what: str) -> bool:
-    if not isinstance(value, bool):
-        raise PdRecordError(f"{what} must be true or false, got {value!r}")
-    return value
-
-
-def _strings(value: Any, what: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise PdRecordError(f"{what} must be a list of strings, got {value!r}")
-    return tuple(value)
-
-
-def _string_map(value: Any, what: str) -> dict[str, str]:
-    mapping = _mapping(value, what)
-    if not all(isinstance(key, str) and isinstance(item, str) for key, item in mapping.items()):
-        raise PdRecordError(f"{what} must map strings to strings, got {value!r}")
-    return dict(mapping)
-
-
-def _enum(kind: type[Enum], value: Any, what: str) -> Any:
-    try:
-        return kind(value)
-    except ValueError as error:
-        raise PdRecordError(f"{what} must be one of {[member.value for member in kind]}, got {value!r}") from error
 
 
 __all__ = [
@@ -382,7 +325,6 @@ __all__ = [
     "RAN_RECORD_NAME",
     "RECORD_NAME",
     "SCHEMA",
-    "SCHEMA_V1",
     "Frontend",
     "FrontendType",
     "PdLaunch",

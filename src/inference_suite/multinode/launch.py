@@ -57,6 +57,8 @@ _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _HEALTH_TIMEOUT_S = 5
 _HTTP_OK = 200
 _LOG_TAIL_LINES = 40
+_SSH_TIMEOUT_S = 180
+_POLL_INTERVAL_S = 10.0
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -92,9 +94,7 @@ class LaunchOptions:
     extra_env: Mapping[str, str] = field(default_factory=dict)
     role_env: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
     log_dir: str = ""
-    ssh_timeout_s: int = 180
     ready_timeout_s: int = 1800
-    poll_interval_s: float = 10.0
 
 
 def _pidfile(role: str) -> str:
@@ -105,8 +105,10 @@ def _launch_path(role: str) -> str:
     return f"/tmp/hyperloom-mn-{role}.sh"
 
 
-def _container_env_lines() -> list[str]:
-    """Bash that exports the container's interpreter search paths."""
+def _container_env_lines(mode: LaunchMode) -> list[str]:
+    """Bash that exports the container's interpreter search paths; none on a ``direct`` host."""
+    if mode is LaunchMode.DIRECT:
+        return []
     return [
         "while IFS= read -r -d '' hl_kv; do case \"$hl_kv\" in PATH=*|PYTHONPATH=*|VIRTUAL_ENV=*|LD_LIBRARY_PATH=*)"
         f' export "$hl_kv";; esac; done < {CONTAINER_ENVIRON}'
@@ -180,14 +182,13 @@ def launch_script(command: HostCommand, env: Mapping[str, str], framework: Frame
 def _driver_payload(role: str, script: str, needle: str, action: str, mode: LaunchMode) -> str:
     """Bash that writes the launch script of ``role`` and runs the driver with ``action`` on it."""
     marker = uuid.uuid4().hex
-    environment = [] if mode is LaunchMode.DIRECT else _container_env_lines()
     return "\n".join(
         [
             f"cat > {_launch_path(role)} << 'HL_LAUNCH_{marker}'",
             script.rstrip("\n"),
             f"HL_LAUNCH_{marker}",
             f"chmod +x {_launch_path(role)}",
-            *environment,
+            *_container_env_lines(mode),
             f"export HL_LAUNCH_PATH={_launch_path(role)} HL_PIDFILE={_pidfile(role)} HL_ACTION={action}",
             f"export HL_NEEDLE={shlex.quote(needle)} HL_ENV_SOURCE={'session' if mode is LaunchMode.DIRECT else 'container'}",
             f"python3 - << 'HL_PY_{marker}'",
@@ -213,6 +214,11 @@ def _drive(cluster: Cluster, command: HostCommand, script: str, launch: PdLaunch
         raise LaunchError(f"{action} of {command.role} on {command.host} failed: {result.stderr.strip()[-1500:]}")
 
 
+def exportable_env_key(key: str) -> bool:
+    """Whether a launch can export ``key``: a shell identifier that names no driver input (``HL_*``)."""
+    return bool(_ENV_KEY.fullmatch(key)) and not key.startswith("HL_")
+
+
 def check_env(env: Mapping[str, str]) -> dict[str, str]:
     """``env`` as a launch exports it.
 
@@ -220,7 +226,7 @@ def check_env(env: Mapping[str, str]) -> dict[str, str]:
         LaunchError: a key is no shell identifier, or names a driver input (``HL_*``).
     """
     for key in env:
-        if not _ENV_KEY.fullmatch(key) or key.startswith("HL_"):
+        if not exportable_env_key(key):
             raise LaunchError(f"{key!r} cannot be exported to a PD server")
     return {key: str(value) for key, value in env.items()}
 
@@ -230,10 +236,9 @@ def probe_engine_flags(launch: PdLaunch, cluster: Cluster, timeout: int) -> froz
     the probe lists nothing."""
     if launch.framework is not Framework.SGLANG:
         return frozenset()
-    environment = [] if cluster.nodes.launch_mode is LaunchMode.DIRECT else _container_env_lines()
     script = "\n".join(
         [
-            *environment,
+            *_container_env_lines(cluster.nodes.launch_mode),
             "python3 -m sglang.launch_server --help 2>/dev/null | grep -oE -- '--[a-z][a-z0-9_-]*' | sort -u",
         ]
     )
@@ -327,10 +332,6 @@ def with_overrides(launch: PdLaunch, overrides: Mapping[str, Sequence[str]]) -> 
     return replace(launch.with_roles(roles), frontend=frontend)
 
 
-def _health_urls(launch: PdLaunch, nodes: NodeList, role: Role) -> list[str]:
-    return [f"{url}/health" for url in engine_urls(launch, nodes)[role.value]]
-
-
 def _engine_log(log_dir: str, command: HostCommand) -> str:
     return f"{log_dir}/pd_{command.role}_{command.host}.log"
 
@@ -378,11 +379,11 @@ def _await(urls: Sequence[str], launch: PdLaunch, cluster: Cluster, options: Lau
             return
         gone = engines_gone(launch, cluster)
         if gone:
-            tail = _log_tail(cluster, gone[0], options.ssh_timeout_s, options.log_dir)
+            tail = _log_tail(cluster, gone[0], _SSH_TIMEOUT_S, options.log_dir)
             raise LaunchError(f"{gone[0].role} on {gone[0].host} exited during startup:\n{tail}")
         if cluster.clock() >= deadline:
             raise LaunchError(f"not ready after {options.ready_timeout_s}s: {waiting}")
-        cluster.sleep(options.poll_interval_s)
+        cluster.sleep(_POLL_INTERVAL_S)
 
 
 def start(launch: PdLaunch, cluster: Cluster, options: LaunchOptions) -> PdLaunch:
@@ -392,7 +393,7 @@ def start(launch: PdLaunch, cluster: Cluster, options: LaunchOptions) -> PdLaunc
         LaunchError: a host refused, an engine died, or the cluster did not come up in time.
         SshError: a host key cannot be learned.
     """
-    flags = probe_engine_flags(launch, cluster, options.ssh_timeout_s)
+    flags = probe_engine_flags(launch, cluster, _SSH_TIMEOUT_S)
     return _run_fitted(fit_to_engine(launch, flags), cluster, options)
 
 
@@ -402,13 +403,13 @@ def _run_fitted(fitted: PdLaunch, cluster: Cluster, options: LaunchOptions) -> P
     for command in _engine_commands(fitted, cluster.nodes):
         role_env = {**fitted.role(Role(command.role)).env, **env, **check_env(options.role_env.get(command.role, {}))}
         script = launch_script(command, role_env, fitted.framework, options.log_dir)
-        _drive(cluster, command, script, fitted, options.ssh_timeout_s)
-    engines = [url for role in fitted.served_roles for url in _health_urls(fitted, cluster.nodes, role)]
+        _drive(cluster, command, script, fitted, _SSH_TIMEOUT_S)
+    engines = [f"{url}/health" for urls in engine_urls(fitted, cluster.nodes).values() for url in urls]
     _await(engines, fitted, cluster, options)
     service = [f"{cluster.nodes.service_url.rstrip('/')}/health"]
     if runs_router(fitted):
         router = router_command(fitted, cluster.nodes)
-        _drive(cluster, router, launch_script(router, env, fitted.framework, ""), fitted, options.ssh_timeout_s)
+        _drive(cluster, router, launch_script(router, env, fitted.framework, ""), fitted, _SSH_TIMEOUT_S)
         service.insert(0, f"http://{router.host}:{ROUTER_PORT}/health")
     _await(service, fitted, cluster, options)
     return fitted
@@ -425,7 +426,7 @@ def restart(
         SshError: a host key cannot be learned.
     """
     overridden = with_overrides(launch, overrides)
-    flags = probe_engine_flags(launch, cluster, options.ssh_timeout_s)
+    flags = probe_engine_flags(launch, cluster, _SSH_TIMEOUT_S)
     _refuse_untaken_overrides(launch, overrides, flags)
     return _run_fitted(fit_to_engine(overridden, flags), cluster, options)
 
@@ -434,7 +435,7 @@ def stop(launch: PdLaunch, cluster: Cluster, options: LaunchOptions) -> None:
     """Stop the router, then every engine; a server the container launcher waits on is parked, not killed."""
     routers = [router_command(launch, cluster.nodes)] if runs_router(launch) else []
     for command in [*routers, *_engine_commands(launch, cluster.nodes)]:
-        _drive(cluster, command, "", launch, options.ssh_timeout_s)
+        _drive(cluster, command, "", launch, _SSH_TIMEOUT_S)
 
 
 __all__ = [
@@ -445,6 +446,7 @@ __all__ = [
     "LaunchOptions",
     "check_env",
     "engines_gone",
+    "exportable_env_key",
     "fit_to_engine",
     "http_ok",
     "launch_script",

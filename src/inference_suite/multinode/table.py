@@ -1,14 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The PD default table: InferenceX ``3d55815``'s multi-node model tables, composed per role.
+"""The PD default table: InferenceX's multi-node model tables at :data:`TABLE_COMMIT`, composed per role.
 
-``pd_table/models.yaml`` and ``pd_table/models_atom.yaml`` are byte copies of
-``benchmarks/multi_node/amd_utils/models.yaml`` and ``models_atom.yaml`` at that commit. :func:`compose` turns one row
-into the prefill and decode launches ``server_sglang.sh`` / ``server_atom.sh`` at that commit build for the same
-topology, in their order: the args a script puts on the engine command after its runner-set flags, and the env it
-sets for that engine. Host and fabric env (``IBDEVICES``, library paths) and benchmark-only branches (HiCache, eval
-mode, simulated MTP acceptance) are not part of a launch.
+:func:`compose` turns one row into the prefill and decode launches ``server_sglang.sh`` / ``server_atom.sh`` build for
+the same topology, in their order: the args a script puts on the engine command after its runner-set flags, and the
+env it sets for that engine. Host and fabric env (``IBDEVICES``, library paths), MTP and benchmark-only branches
+(HiCache, eval mode) are not part of a launch.
 """
 
 from __future__ import annotations
@@ -24,9 +22,10 @@ from typing import Any
 
 import yaml
 
+from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, last_alias_value
 from inference_suite.frameworks import Framework
 
-#: The InferenceX commit the table rows are copied from.
+#: The InferenceX commit whose ``amd_utils`` tables ``pd_table`` holds byte copies of.
 TABLE_REPO = "https://github.com/SemiAnalysisAI/InferenceX"
 TABLE_COMMIT = "3d5581562f643f9bdeb8410cd924e2c70906c966"
 _UPSTREAM_DIR = "benchmarks/multi_node/amd_utils"
@@ -54,7 +53,6 @@ ATOM_TABLE = TableFile(
     f"{_UPSTREAM_DIR}/models_atom.yaml",
     "434de8485ca4e6a45e6c3b9752c4040bdb9df47adf58f2470db036f5777e71a3",
 )
-TABLES = {Framework.SGLANG: SGLANG_TABLE, Framework.ATOM: ATOM_TABLE}
 
 
 class TableError(ValueError):
@@ -72,13 +70,12 @@ class RoleShape:
 
 @dataclass(frozen=True)
 class TableQuery:
-    """What the scripts read besides the row: the model directory name, both roles' shapes, the MTP depth, the
-    largest benchmark concurrency and whether the run is agentic."""
+    """What the scripts read besides the row: the model directory name, both roles' shapes, the largest benchmark
+    concurrency and whether the run is agentic."""
 
     model_name: str
     prefill: RoleShape
     decode: RoleShape
-    mtp: int = 0
     max_concurrency: int = 512
     agentic: bool = False
 
@@ -173,7 +170,7 @@ def _select(rows: Mapping[str, Any], model_name: str, agentic: bool) -> str:
 
 # --- sglang (server_sglang.sh) -------------------------------------------------------------------------------------
 
-#: env.sh's SGLang block at 3d55815: the engine env every role runs with.
+#: env.sh's SGLang block: the engine env every role runs with.
 _SGLANG_ENV = {
     "SGLANG_USE_AITER": "1",
     "AITER_LOG_LEVEL": "ERROR",
@@ -345,8 +342,8 @@ def _decode_mode(row: Mapping[str, Any], query: TableQuery, prefill_context: str
     return flags
 
 
-def _sglang_role(row: Mapping[str, Any], shape: RoleShape, mode: list[str], query: TableQuery) -> list[str]:
-    """``build_server_config``: parallel args, base, EP, MTP and DP flags, then the role's mode flags."""
+def _sglang_role(row: Mapping[str, Any], shape: RoleShape, mode: list[str]) -> list[str]:
+    """``build_server_config``: parallel args, base, EP and DP flags, then the role's mode flags."""
     args = ["--tp-size", str(shape.tp)]
     if shape.ep:
         args += ["--ep-size", str(shape.tp)]
@@ -355,9 +352,6 @@ def _sglang_role(row: Mapping[str, Any], shape: RoleShape, mode: list[str], quer
     args += _row_words(row, "base_flags")
     if shape.ep:
         args += _row_words(row, "ep_flags")
-    if query.mtp > 0:
-        args += _row_words(row, "mtp_flags")
-        args += ["--speculative-num-steps", str(query.mtp), "--speculative-num-draft-tokens", str(query.mtp + 1)]
     if shape.dp:
         args += _row_words(row, "dp_flags")
     return args + mode
@@ -380,8 +374,6 @@ def _sglang_env(query: TableQuery, prefill_mode: Sequence[str]) -> tuple[dict[st
     if query.decode.dp and query.decode.ep:
         decode_tokens = query.max_concurrency // query.decode.tp
         switch = decode_tokens * 2
-    if query.mtp > 0:
-        decode_tokens *= query.mtp + 1
     common = {**_SGLANG_ENV, **profile.env, "SGLANG_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD": str(switch)}
     roles = []
     for index, tokens in enumerate((prefill_tokens, decode_tokens)):
@@ -411,25 +403,18 @@ def _compose_sglang(rows: Mapping[str, Any], query: TableQuery) -> TableHit:
         "DECODE_TP_SIZE": query.decode.tp,
     }
     prefill_mode = _prefill_mode(row, query, names)
-    context = _flag_value(prefill_mode, _CONTEXT_FLAG)
+    context = (
+        last_alias_value(argv_flag_occurrences(prefill_mode), frozenset({canonical_flag_name(_CONTEXT_FLAG)})) or ""
+    )
     decode_mode = _decode_mode(row, query, context)
     prefill_env, decode_env = _sglang_env(query, prefill_mode)
     return TableHit(
         table=SGLANG_TABLE,
         key=key,
-        prefill=RoleArgs(tuple(_sglang_role(row, query.prefill, prefill_mode, query)), prefill_env),
-        decode=RoleArgs(tuple(_sglang_role(row, query.decode, decode_mode, query)), decode_env),
+        prefill=RoleArgs(tuple(_sglang_role(row, query.prefill, prefill_mode)), prefill_env),
+        decode=RoleArgs(tuple(_sglang_role(row, query.decode, decode_mode)), decode_env),
         router_args=_SGLANG_AGENTIC_ROUTER if query.agentic else _SGLANG_DI_ROUTER,
     )
-
-
-def _flag_value(args: Sequence[str], flag: str) -> str:
-    """The value after the last ``flag`` in ``args``, empty without one."""
-    value = ""
-    for index, word in enumerate(args[:-1]):
-        if word == flag:
-            value = args[index + 1]
-    return value
 
 
 # --- atom (server_atom.sh) -----------------------------------------------------------------------------------------
@@ -442,7 +427,7 @@ _ATOM_CUDAGRAPH_SIZES = (
     "[1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,"
     "240,248,256]"
 )
-#: env_atom.sh at 3d55815: the engine env every role runs with (its library path is the host's).
+#: env_atom.sh: the engine env every role runs with (its library path is the host's).
 _ATOM_ENV = {
     "PYTHONUNBUFFERED": "1",
     "PYTHONDONTWRITEBYTECODE": "1",
@@ -505,12 +490,10 @@ def _compose_atom(rows: Mapping[str, Any], query: TableQuery) -> TableHit:
         raise TableError(f"the PD table has no atom row {key}")
     prefill_parallel, prefill_env = _atom_parallel(row, "prefill", query.prefill)
     decode_parallel, decode_env = _atom_parallel(row, "decode", query.decode)
-    mtp_flags = shlex.split(str(row.get("mtp_flags", "")))
-    spec = [*mtp_flags, str(query.mtp)] if query.mtp > 0 and mtp_flags else []
     quant = _atom_quant(row, query.prefill.dp)
     env = {**_ATOM_ENV, **prefill_env, **decode_env, **_pairs(row.get("env"))}
-    prefill = _atom_role(row, [*prefill_parallel, *spec], str(row.get("max_num_seqs") or 256), quant)
-    decode = _atom_role(row, [*decode_parallel, *spec], str(query.max_concurrency), quant)
+    prefill = _atom_role(row, prefill_parallel, str(row.get("max_num_seqs") or 256), quant)
+    decode = _atom_role(row, decode_parallel, str(query.max_concurrency), quant)
     decode += ["--cudagraph-capture-sizes", _ATOM_CUDAGRAPH_SIZES]
     return TableHit(
         table=ATOM_TABLE,
@@ -537,7 +520,6 @@ def compose(framework: Framework, query: TableQuery) -> TableHit:
 __all__ = [
     "ATOM_TABLE",
     "SGLANG_TABLE",
-    "TABLES",
     "TABLE_COMMIT",
     "TABLE_REPO",
     "RoleArgs",

@@ -19,18 +19,11 @@ import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from inference_suite.argv import canonical_flag_name, is_flag
+from inference_suite.argv import argv_flag_occurrences
 from inference_suite.frameworks import Framework
-from inference_suite.multinode.nodes import (
-    INFERA_ENGINE_PORT,
-    ROUTER_PORT,
-    WORKER_PORT,
-    LaunchMode,
-    NodeList,
-    engine_port,
-    role_url,
-)
+from inference_suite.multinode.nodes import ROUTER_PORT, LaunchMode, NodeList, engine_port, role_url
 from inference_suite.multinode.record import PD_ROLES, FrontendType, PdLaunch, PdMode, Role, RoleLaunch
+from inference_suite.multinode.render import TRUST_REMOTE_CODE
 
 ROUTER = "router"
 #: The multi-host rendezvous port and PD bootstrap port of an Infera engine.
@@ -53,7 +46,6 @@ _DIST_INIT_ADDR = "--dist-init-addr"
 _PORT = "--port"
 _NNODES = "--nnodes"
 _NODE_RANK = "--node-rank"
-_TRUST_REMOTE_CODE = "--trust-remote-code"
 _DP_ENABLE = frozenset({"enable-dp-attention", "enable-dp-lm-head"})
 
 
@@ -135,18 +127,13 @@ def _sglang_engine(launch: PdLaunch, nodes: NodeList, role: Role, hosts: tuple[s
     return _with_ib_device(_join([*argv, *launched.args]), role)
 
 
-def _canonical_flags(args: Sequence[str]) -> set[str]:
-    """The canonical names of the flags ``args`` sets."""
-    return {canonical_flag_name(arg.partition("=")[0]) for arg in args if is_flag(arg)}
-
-
 def _infera_engine(launch: PdLaunch, nodes: NodeList, role: Role, hosts: tuple[str, ...], rank: int) -> str:
     """``infera.engine.sglang`` for host ``rank`` of a worker on ``hosts``, advertised to the platform's frontend
     at the host's address; a PD leg skips the server warmup."""
     launched = launch.role(role)
-    given = _canonical_flags(launched.args)
+    given = {name for name, _ in argv_flag_occurrences(launched.args)}
     argv = [_PYTHON, "-m", INFERA_ENGINE, "--model-path", launch.model, "--tp-size", str(launched.tp)]
-    argv += [] if "trust-remote-code" in given else [_TRUST_REMOTE_CODE]
+    argv += [] if "trust-remote-code" in given else [TRUST_REMOTE_CODE]
     argv += [*_BIND_ALL, _PORT, str(engine_port(nodes, role)), "--discovery-backend", "kubernetes"]
     argv += ["--advertise-host", hosts[rank], "--request-transport", "nats"]
     argv += _rendezvous_args(hosts, rank, INFERA_DIST_INIT_PORT)
@@ -270,10 +257,8 @@ __all__ = [
     "INFERA_BOOTSTRAP_PORT",
     "INFERA_DIST_INIT_PORT",
     "INFERA_ENGINE",
-    "INFERA_ENGINE_PORT",
     "ROUTER",
     "ROUTER_PORT",
-    "WORKER_PORT",
     "CommandError",
     "HostCommand",
     "cluster_commands",

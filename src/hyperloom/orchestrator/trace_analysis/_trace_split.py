@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
+from ._analysis_run import AnalysisRun
 from ._io_utils import append_log
+from ._run_status import note_step
 from ._trace_gates import _check_chunk_quality
 from ._tracelens_checkout import run_command
 
@@ -31,6 +33,25 @@ def copy_unsplit_trace(trace_path: Path, split_dir: Path) -> Path:
     target = split_dir / trace_path.name
     shutil.copyfile(trace_path, target)
     return target
+
+
+def use_unsplit_trace(run: AnalysisRun, trace_path: Path, split_dir: Path) -> Path:
+    """Hand the whole captured trace to the perf report, as a copy under ``split_dir``."""
+    copied = copy_unsplit_trace(trace_path, split_dir)
+    run.run_meta["selection"].update(
+        {
+            "requested_mode": UNSPLIT_MODE,
+            "chunk_label": UNSPLIT_MODE,
+            "selected_chunk": str(copied),
+            "selected_chunk_count": 1,
+            "fell_back_to_full_trace": False,
+        }
+    )
+    note_step(run.run_meta, "split_trace", category="split", status="skipped", skip_reason=UNSPLIT_MODE)
+    run.artifacts["tracelens_trace_split_dir"] = str(split_dir)
+    run.artifacts["tracelens_steady_state_trace"] = str(copied)
+    append_log(run.log_path, f"--steady-state-mode={UNSPLIT_MODE} -> using {copied.name} for perf report")
+    return copied
 
 
 def _build_split_cmd(

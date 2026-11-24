@@ -17,45 +17,23 @@ from inference_suite.multinode.commands import (
     router_command,
 )
 from inference_suite.multinode.nodes import LaunchMode, NodeListError, parse_node_list
-from inference_suite.multinode.record import (
-    Frontend,
-    FrontendType,
-    PdLaunch,
-    PdMode,
-    PdSource,
-    PdSourceKind,
-    Role,
-    RoleLaunch,
-)
+from inference_suite.multinode.record import Frontend, FrontendType, PdSourceKind, Role, RoleLaunch
+from inference_suite.multinode.tests.builders import node_document, pd_launch
 
 
 def _nodes(**fields):
-    document = {
-        "framework": "sglang",
-        "model": "/models/M",
-        "service_url": "http://svc:8000",
-        "router": {"host": "r0"},
-        "prefill": [{"host": "p0"}],
-        "decode": [{"host": "d0"}, {"host": "d1"}],
-        "gpus_per_node": 8,
-        "launch_mode": "direct",
-    }
-    document.update(fields)
-    return parse_node_list(document)
+    return parse_node_list(
+        node_document(**{"decode": [{"host": "d0"}, {"host": "d1"}], "launch_mode": "direct", **fields})
+    )
 
 
 def _launch(framework=Framework.SGLANG, frontend=FrontendType.SGLANG_ROUTER, decode_tp=16, backend="mori"):
-    return PdLaunch(
-        source=PdSource(PdSourceKind.PD_TABLE),
+    prefill = RoleLaunch(("p0",), 1, 8, args=("--mem-fraction-static", "0.8"))
+    decode = RoleLaunch(("d0", "d1"), 1, decode_tp, args=("--a",))
+    return pd_launch(
+        {Role.PREFILL: prefill, Role.DECODE: decode},
         framework=framework,
-        model="/models/M",
-        served_model_name="org/M",
-        context_length=2048,
         transfer_backend=backend,
-        roles={
-            Role.PREFILL: RoleLaunch(("p0",), 1, 8, args=("--mem-fraction-static", "0.8")),
-            Role.DECODE: RoleLaunch(("d0", "d1"), 1, decode_tp, args=("--a",)),
-        },
         frontend=Frontend(frontend, "r0", ("--policy", "random")),
     )
 
@@ -133,7 +111,7 @@ def test_atom_tp_above_a_host_cannot_span_hosts():
 
 def test_hosts_must_split_into_workers():
     launch = _launch()
-    launch = launch.with_roles({Role.DECODE: replace(launch.decode, workers=3)})
+    launch = launch.with_roles({Role.DECODE: replace(launch.role(Role.DECODE), workers=3)})
     with pytest.raises(CommandError, match="split"):
         cluster_commands(launch, _nodes())
 
@@ -148,16 +126,12 @@ def _aggregated_nodes(**fields):
 
 
 def _aggregated(framework=Framework.SGLANG, frontend=FrontendType.SGLANG_ROUTER, tp=16, workers=1, args=("--a",)):
-    return PdLaunch(
-        source=PdSource(PdSourceKind.BASE_LAUNCH),
+    return pd_launch(
+        {Role.WORKER: RoleLaunch(("w0", "w1"), workers, tp, args=args)},
+        PdSourceKind.BASE_LAUNCH,
         framework=framework,
-        model="/models/M",
-        served_model_name="org/M",
         context_length=2048,
-        transfer_backend="",
-        roles={Role.WORKER: RoleLaunch(("w0", "w1"), workers, tp, args=args)},
         frontend=Frontend(frontend, "r0", ()),
-        mode=PdMode.AGGREGATED,
     )
 
 

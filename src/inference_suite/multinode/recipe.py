@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from inference_suite.argv import canonical_flag_name, is_flag
+from inference_suite.argv import argv_flag_occurrences
 from inference_suite.contracts.base_launch import BaseLaunch, Workload
 from inference_suite.frameworks import Framework
 from inference_suite.multinode.inferencex import (
@@ -37,7 +37,7 @@ from inference_suite.multinode.record import (
     Role,
     RoleLaunch,
 )
-from inference_suite.multinode.render import RenderedRole, recipe_role_args, render_role
+from inference_suite.multinode.render import TRUST_REMOTE_CODE, RenderedRole, flag_groups, group_flag, render_role
 from inference_suite.multinode.table import TABLE_COMMIT, TABLE_REPO, RoleShape, TableError, TableQuery, compose
 from inference_suite.recipe.inferencex import MASTER, RUNNERS, srtctl_cli_args
 from inference_suite.recipe.model import RecipeSourceError
@@ -46,7 +46,6 @@ from inference_suite.recipe.sources import Checkout, SourceFetchError
 
 #: The KV transfer backend of a launch no source names one for, by framework.
 DEFAULT_TRANSFER_BACKEND = {Framework.SGLANG: "mori", Framework.ATOM: "mooncake"}
-_TRUST_REMOTE_CODE = "--trust-remote-code"
 _DP_ATTENTION = "enable-dp-attention"
 #: The router flags the PD launcher sets, in canonical spelling.
 ROUTER_OWNED = frozenset({"host", "port", "pd-disaggregation", "prefill", "decode", "worker-urls"})
@@ -58,9 +57,8 @@ class PdResolveError(ValueError):
 
 @dataclass(frozen=True)
 class OperatorArgs:
-    """The operator's server args: for every engine role, then for each role alone, and the router's."""
+    """The operator's server args for each role, and the router's."""
 
-    shared: tuple[str, ...] = ()
     prefill: tuple[str, ...] = ()
     decode: tuple[str, ...] = ()
     router: tuple[str, ...] = ()
@@ -68,11 +66,10 @@ class OperatorArgs:
 
     @property
     def given(self) -> bool:
-        return bool(self.shared or self.prefill or self.decode or self.worker)
+        return bool(self.prefill or self.decode or self.worker)
 
     def role(self, role: Role) -> tuple[str, ...]:
-        own = {Role.PREFILL: self.prefill, Role.DECODE: self.decode, Role.WORKER: self.worker}[role]
-        return (*self.shared, *own)
+        return {Role.PREFILL: self.prefill, Role.DECODE: self.decode, Role.WORKER: self.worker}[role]
 
 
 @dataclass(frozen=True)
@@ -111,20 +108,9 @@ def _role_launch(ask: RoleAsk, fit: RoleFit, rendered: RenderedRole) -> RoleLaun
     )
 
 
-def _asks(query: PdQuery) -> dict[Role, RoleAsk]:
-    return dict(query.roles)
-
-
 def _router_args(args: Sequence[str]) -> tuple[str, ...]:
     """``args`` without the router flags the launcher sets, each with its values."""
-    kept: list[str] = []
-    dropping = False
-    for arg in args:
-        if is_flag(arg):
-            dropping = canonical_flag_name(arg.partition("=")[0]) in ROUTER_OWNED
-        if not dropping:
-            kept.append(arg)
-    return tuple(kept)
+    return tuple(token for group in flag_groups(args) if group_flag(group) not in ROUTER_OWNED for token in group)
 
 
 @dataclass(frozen=True)
@@ -142,7 +128,7 @@ class _Bound:
 def _assemble(query: PdQuery, bound: _Bound) -> PdLaunch:
     """The launch ``bound`` makes on the query's hosts; the query's transfer backend first, then the source's. An
     aggregated launch transfers no KV cache and names no backend."""
-    asks = _asks(query)
+    asks = query.roles
     named = (bound.rendered[role].transfer_backend for role in asks)
     fallback = DEFAULT_TRANSFER_BACKEND[query.framework]
     backend = query.transfer_backend or bound.transfer_backend or next((b for b in named if b), fallback)
@@ -164,7 +150,7 @@ def _assemble(query: PdQuery, bound: _Bound) -> PdLaunch:
 
 
 def _operator(query: PdQuery, operator: OperatorArgs) -> PdLaunch:
-    fits = {role: _asked_fit(ask, query.gpus_per_node) for role, ask in _asks(query).items()}
+    fits = {role: _asked_fit(ask, query.gpus_per_node) for role, ask in query.roles.items()}
     rendered = {role: render_role(query.framework, operator.role(role), {}) for role in query.roles}
     source = PdSource(PdSourceKind.OPERATOR)
     return _assemble(query, _Bound(rendered, fits, operator.router, "", source))
@@ -186,7 +172,7 @@ def _replay(query: PdQuery, launch: PdLaunch) -> PdLaunch:
         raise PdResolveError(f"the replayed launch runs {launch.framework.value}, not {query.framework.value}")
     if launch.model != query.model_path:
         raise PdResolveError(f"the replayed launch serves {launch.model}, not {query.model_path}")
-    for role, ask in _asks(query).items():
+    for role, ask in query.roles.items():
         if len(launch.role(role).hosts) != len(ask.hosts):
             raise PdResolveError(
                 f"the replayed launch runs {role.value} on {len(launch.role(role).hosts)} hosts, not {len(ask.hosts)}"
@@ -212,7 +198,9 @@ def _candidate(query: PdQuery, checkout: Checkout, found: Sequence[Candidate]) -
     roles = chosen.recipe["roles"]
     rendered = {
         role: render_role(
-            query.framework, recipe_role_args(query.framework, roles[role.value]), roles[role.value].get("env") or {}
+            query.framework,
+            srtctl_cli_args(query.framework.value, dict(roles[role.value].get("args") or {})),
+            roles[role.value].get("env") or {},
         )
         for role in PD_ROLES
     }
@@ -238,7 +226,7 @@ def _table_shape(fit: RoleFit) -> RoleShape:
 
 def _table(query: PdQuery, warnings: Sequence[str]) -> PdLaunch:
     """The PD default table's row for the model, composed for the query's topology."""
-    fits = {role: _asked_fit(ask, query.gpus_per_node) for role, ask in _asks(query).items()}
+    fits = {role: _asked_fit(ask, query.gpus_per_node) for role, ask in query.roles.items()}
     hit = compose(
         query.framework,
         TableQuery(
@@ -251,7 +239,7 @@ def _table(query: PdQuery, warnings: Sequence[str]) -> PdLaunch:
     )
     composed = {Role.PREFILL: hit.prefill, Role.DECODE: hit.decode}
     rendered = {
-        role: render_role(query.framework, (_TRUST_REMOTE_CODE, *composed[role].args), composed[role].env)
+        role: render_role(query.framework, (TRUST_REMOTE_CODE, *composed[role].args), composed[role].env)
         for role in PD_ROLES
     }
     source = PdSource(
@@ -289,11 +277,6 @@ def _inferencex(query: PdQuery, inputs: ResolveInputs, misses: list[str], warnin
     return None
 
 
-def _has_flag(args: Sequence[str], name: str) -> bool:
-    """Whether ``args`` set the flag of canonical ``name``."""
-    return any(is_flag(arg) and canonical_flag_name(arg.partition("=")[0]) == name for arg in args)
-
-
 def _base(query: PdQuery, inputs: ResolveInputs) -> PdLaunch:
     """The aggregated launch whose workers each run the single-node base launch the suite resolves, at its TP and
     EP, one worker per ``max(tp, gpus_per_node)`` GPUs of the worker hosts. Env the base holds as a sha256 is left
@@ -313,7 +296,7 @@ def _base(query: PdQuery, inputs: ResolveInputs) -> PdLaunch:
     ask = query.roles[Role.WORKER]
     tp, ep = found.topology.tp, found.topology.ep
     workers = max(1, len(ask.hosts) * query.gpus_per_node // max(tp, query.gpus_per_node))
-    fit = RoleFit(workers, tp, ep, _has_flag(found.args, _DP_ATTENTION), tp)
+    fit = RoleFit(workers, tp, ep, _DP_ATTENTION in dict(argv_flag_occurrences(found.args)), tp)
     env = {key: value for key, value in found.env.items() if isinstance(value, str)}
     rendered = render_role(query.framework, found.args, env)
     held = tuple(f"env {key}" for key in found.env if key not in env)

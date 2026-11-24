@@ -59,19 +59,12 @@ def _libc() -> ctypes.CDLL:
 
 
 def _ptrace(request: int, pid: int, addr: int = 0, data: int = 0) -> int:
-    """One ptrace request; ``OSError`` when it fails."""
+    """One ptrace request (``data`` a word, or the address of the tracee's registers); ``OSError`` when it fails."""
     rc = _libc().ptrace(ctypes.c_int(request), ctypes.c_int(pid), ctypes.c_void_p(addr), ctypes.c_ulong(data))
     if rc < 0:
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error))
     return int(rc)
-
-
-def _registers(request: int, pid: int, regs: _Regs) -> None:
-    """Read (``GETREGS``) or write (``SETREGS``) the tracee's registers."""
-    if _libc().ptrace(ctypes.c_int(request), ctypes.c_int(pid), None, ctypes.byref(regs)) < 0:
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error))
 
 
 def _align(value: int, size: int) -> int:
@@ -193,13 +186,13 @@ def descendant_pids(pid: int) -> list[int]:
 def _inject_execve(pid: int, argv: list[str], environ: list[str]) -> None:
     """Point the stopped tracee at ``execve(argv, environ)`` and let it run."""
     regs = _Regs()
-    _registers(_PTRACE_GETREGS, pid, regs)
+    _ptrace(_PTRACE_GETREGS, pid, data=ctypes.addressof(regs))
     gadget = _syscall_gadget(pid)
     slot = _stack_slot(pid, regs.rsp, 256 + sum(len(item) + 2 * _WORD for item in argv + environ))
     argv_array, cursor = _write_strings(pid, slot, argv)
     environ_array, _end = _write_strings(pid, _align(cursor, _STACK_ALIGN), environ)
     regs.rip, regs.rax, regs.rdi, regs.rsi, regs.rdx = gadget, _SYS_EXECVE, slot, argv_array, environ_array
-    _registers(_PTRACE_SETREGS, pid, regs)
+    _ptrace(_PTRACE_SETREGS, pid, data=ctypes.addressof(regs))
     _ptrace(_PTRACE_CONT, pid)
     _waited, status = os.waitpid(pid, 0)
     if os.WIFEXITED(status) or os.WIFSIGNALED(status):
@@ -353,7 +346,7 @@ def _restart(pid: int, pidfile: str, launch: str) -> tuple[str, int]:
 def main() -> None:
     """Apply ``HL_ACTION`` (``restart`` or ``stop``) to the server of the role and print what was done."""
     pidfile = os.environ["HL_PIDFILE"]
-    pid = find_server(pidfile, os.environ.get("HL_NEEDLE", ""))
+    pid = find_server(pidfile, os.environ["HL_NEEDLE"])
     if os.environ.get("HL_ACTION") == "stop":
         print(json.dumps({"status": "ok", "action": _stop(pid, pidfile), "pid": pid}))
         return
