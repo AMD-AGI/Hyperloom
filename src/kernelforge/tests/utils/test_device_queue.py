@@ -98,6 +98,18 @@ def test_a_waiter_whose_process_died_does_not_hold_the_queue(tmp_path):
     assert list(queue.root.iterdir()) == []
 
 
+def test_a_ticket_whose_owners_id_went_to_another_process_does_not_hold_the_queue(tmp_path):
+    """A process id is reused; the start time recorded beside it is not."""
+    queue = DeviceQueue(tmp_path / "queue")
+    queue.root.mkdir()
+    (queue.root / f"{1:012d}").write_text(f"{os.getpid()} 1")
+
+    with queue.held() as waited:
+        assert waited < 5.0
+
+    assert list(queue.root.iterdir()) == []
+
+
 async def test_a_cancelled_wait_gives_its_place_up(tmp_path):
     """The loop's own measurements wait as coroutines; one that is cancelled must not leave a ticket nobody releases."""
     queue = DeviceQueue(tmp_path / "queue")

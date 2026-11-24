@@ -12,7 +12,8 @@ runs every command that touches the device through the copy:
 So the file uses the standard library only and runs under whatever interpreter the workspace has.
 
 The queue is a directory of numbered tickets. A ticket is created with a number above every ticket that exists, and
-its owner holds the device while it is the lowest one. A ticket whose owner has died is removed by whoever finds it.
+its owner holds the device while it is the lowest one. A ticket names its owner by process id and start time, so one
+whose owner has died is removed by whoever finds it, even after the id has gone to another process.
 Nothing here relies on ``flock``: on a network filesystem it is a per-process lock, and several lanes' stop checks
 wait in the one loop process.
 """
@@ -53,6 +54,26 @@ def visible_device_environment(environ=None) -> dict:
     return {name: source.get(name) for name in DEVICE_VISIBILITY_VARIABLES}
 
 
+def _start_time(pid: int) -> str:
+    """When process ``pid`` started, as the kernel counts it; "" when it is gone or the kernel does not say."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+            # The command name, in parentheses, may itself hold spaces and parentheses; the fields follow its last one.
+            return handle.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return ""
+
+
+def _exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 class DeviceQueue:
     """The tickets of one device, under ``root``."""
 
@@ -62,18 +83,15 @@ class DeviceQueue:
     def _owner_alive(self, ticket: Path) -> bool:
         """Whether the process that wrote ``ticket`` still exists; a ticket not yet filled in counts as alive."""
         try:
-            pid = int(ticket.read_text().strip() or 0)
+            owner = ticket.read_text().split()
+            pid = int(owner[0]) if owner else 0
         except (OSError, ValueError):
             return True
         if pid <= 0:
             return True
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        return True
+        started = owner[1] if len(owner) > 1 else ""
+        # A recorded start time tells the owner from a later process that was given its id.
+        return _start_time(pid) == started if started else _exists(pid)
 
     def _tickets(self) -> list:
         """Every live ticket, lowest first."""
@@ -98,7 +116,7 @@ class DeviceQueue:
             except FileExistsError:
                 continue
             with os.fdopen(descriptor, "w") as handle:
-                handle.write(str(os.getpid()))
+                handle.write(f"{os.getpid()} {_start_time(os.getpid())}")
             return ticket
 
     def _is_first(self, ticket: Path) -> bool:
