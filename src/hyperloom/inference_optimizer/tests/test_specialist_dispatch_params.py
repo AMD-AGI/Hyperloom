@@ -702,7 +702,7 @@ def test_resolve_specialist_max_turns_zero_uses_default():
 # --------------------------------------------------------------------------- # Tool surface: TaskKill and
 # SlashCommand are denied. --------------------------------------------------------------------------- #
 def test_specialists_are_denied_only_the_process_cleanup_tools():
-    """specialist.md's containment model: every tool except these two, so patch authoring and KB writes stay open."""
+    """A specialist gets every tool except these two, so patch authoring and KB writes stay open."""
     from hyperloom.orchestrator.specialists.runner import SPECIALIST_TOOL_DENYLIST
 
     assert SPECIALIST_TOOL_DENYLIST == frozenset({"KillShell", "SlashCommand"})

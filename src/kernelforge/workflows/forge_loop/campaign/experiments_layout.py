@@ -78,6 +78,11 @@ class ExperimentsLayout:
         return self.root / "lessons"
 
     @property
+    def insights(self) -> Path:
+        """The campaign's cumulative insight list, replaced whole by each session's record turn."""
+        return self.root / "insights.md"
+
+    @property
     def orchestration(self) -> Path:
         return self.root / "orchestration"
 

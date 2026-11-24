@@ -25,6 +25,7 @@ from kernelforge.workflows.forge_loop.iteration.iteration_types import (
     _decision_label,
     _verdict_of,
 )
+from kernelforge.workflows.forge_loop.memory.insights import insight_request, split_insights
 from kernelforge.workflows.forge_loop.memory.lessons import (
     LessonScope,
     OutcomeMeasurement,
@@ -468,7 +469,9 @@ class OutcomeMixin:
             disproof=parse_disproof_marker(document),
         )
 
-    async def _request_lesson(self, iteration: int, end_reason: str, summarizer) -> SummaryOutcome:
+    async def _request_lesson(
+        self, iteration: int, end_reason: str, summarizer, *, insight_request: str = ""
+    ) -> SummaryOutcome:
         """Ask the session for its record while the campaign still has time for the turn."""
         if self._time_remaining() < SUMMARY_MIN_SECONDS:
             # Time to produce the summary, not the loop's session-admission reserve: a campaign that can no
@@ -480,12 +483,35 @@ class OutcomeMixin:
                 end_reason=end_reason,
                 summarizer=summarizer,
                 references=PrReferenceNote(self.ic.pr_reference_labels, self.ic.pr_reference_context),
+                insight_request=insight_request,
             )
         except Exception as error:  # isolation boundary: one iteration's lesson summarizer step
             log.warning("lessons: summarizer step failed", exc_info=True)
             return SummaryOutcome(reason=f"{type(error).__name__}: {str(error)[:200]}")
         finally:
             self._checkpoint_llm_usage()
+
+    async def _session_record_with_insights(
+        self, iteration: int, end_reason: str, session_sink: dict
+    ) -> SummaryOutcome:
+        """The session's record from its own record turn, which also returns the campaign's insight list as it now stands.
+
+        The list is taken out of the reply and stored on its own, so the record stays an account of one iteration. A
+        lane's record is taken inside its round, alongside its siblings', and leaves the list alone: several replies
+        written at once cannot each be the whole list.
+        """
+        insights = getattr(self, "insights", None)
+        request = insight_request(insights.read()) if insights is not None else ""
+        record = await self._request_lesson(
+            iteration, end_reason, session_sink.get("summarize"), insight_request=request
+        )
+        if not record or insights is None:
+            return record
+        text, entries = split_insights(record.text)
+        if insights.replace(iteration, entries):
+            print(f"  [insights] {len(entries)} entries after iter {iteration}")
+            self.state_store.append_event(make_event("insights_updated", iteration, entries=len(entries)))
+        return SummaryOutcome(text=text, reason=record.reason) if text else record
 
     async def _record_lesson(
         self,
@@ -506,7 +532,7 @@ class OutcomeMixin:
         # A lane's record was taken in its round. None means this iteration ran the session itself.
         record = lane_record
         if record is None:
-            record = await self._request_lesson(iteration, result.session_end_reason, session_sink.get("summarize"))
+            record = await self._session_record_with_insights(iteration, result.session_end_reason, session_sink)
         if record and store.write(iteration, record.text) is None:
             record = SummaryOutcome(reason="failed to persist lesson document")
         has_narrative = bool(record)

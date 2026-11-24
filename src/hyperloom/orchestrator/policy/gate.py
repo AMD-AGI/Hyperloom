@@ -546,7 +546,7 @@ class PolicyGate:
             raise PolicyDenied(
                 "integrate_patch: params must be a dict",
                 rule="integrate_patch_requires_critic_verdict",
-                hint=("pass params={specialist_task_id: <id>, ...}; see actions/integrate_patch.md"),
+                hint="pass params={specialist_task_id: <id>, ...}",
             )
         # Enablement build launch probe: an ``enablement_launch_only`` integrate
         # runs the (already artifact-verified) built runtime through the runnable

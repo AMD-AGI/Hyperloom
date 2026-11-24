@@ -30,6 +30,8 @@ KV_METRICS = "kv_metrics.json"
 AGENTX_TIMELINE = "agentx_timeline.jsonl"
 POWER = "power.json"
 GPU_METRICS = "gpu_metrics.json"
+#: What the checkpoint prefetch of a booting server did (:mod:`hyperloom_common.weight_prefetch`); only when it was on.
+WEIGHT_PREFETCH = "weight_prefetch.json"
 #: Files a host writes from the run_dir into its own round directory; never inside a run_dir.
 HOST_DERIVED = (GPU_METRICS,)
 
@@ -138,6 +140,10 @@ class RunLayout:
     @property
     def kv_metrics(self) -> Path:
         return self.root / KV_METRICS
+
+    @property
+    def weight_prefetch(self) -> Path:
+        return self.root / WEIGHT_PREFETCH
 
     @property
     def agentx_timeline(self) -> Path:
@@ -278,6 +284,7 @@ __all__ = [
     "SERVER_LOG",
     "SERVER_PID",
     "TORCH_TRACE_DIR",
+    "WEIGHT_PREFETCH",
     "ReadyStamp",
     "RunDirError",
     "RunLayout",

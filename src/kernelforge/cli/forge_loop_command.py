@@ -17,7 +17,7 @@ from kernelforge.cli.options import (
     _validate_max_hours,
     _validate_optional_agent_provider,
 )
-from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, CaseAggregate
 from kernelforge.workflows.forge_loop.api import (
     ForgeLoopError,
     ForgeLoopUsageError,
@@ -83,8 +83,8 @@ ANALYSIS_TIMEOUT_SEC = 7200
             type=float,
             callback=_validate_max_hours,
             help="Max runtime hours (default: 1.0, minimum 1.0). Budgets "
-            ">2 hours enable Analysis profiling and, for single-lane "
-            "rounds, Plan Critic review.",
+            ">2 hours enable Analysis profiling and, in a campaign with "
+            "more than one lane, Plan Critic review.",
         ),
         click.option(
             "--session-timeout-sec",
@@ -165,9 +165,10 @@ ANALYSIS_TIMEOUT_SEC = 7200
             "--profile-timeout-sec",
             default=ANALYSIS_TIMEOUT_SEC,
             type=int,
-            help="Ceiling (seconds) for the single complete Analysis Agent "
-            "session. The Agent persists phase and case artifacts for "
-            "resume when the deadline is reached. Default 7200 (2 hours).",
+            help="Time box (seconds) for the single complete Analysis Agent "
+            "session. The Agent is told to treat it as its budget and to "
+            "write its brief early, and persists phase and case artifacts "
+            "for resume when the deadline is reached. Default 7200 (2 hours).",
         ),
         click.option(
             "--supervisor-backend",
@@ -203,7 +204,9 @@ ANALYSIS_TIMEOUT_SEC = 7200
             "--lanes",
             default=3,
             type=click.IntRange(min=1, max=8),
-            help="Implementer lanes per round. Above 1 the round's analysis is "
+            help="Implementer lanes per round. At 1 there is no planning stage: "
+            "the one Implementer session chooses its direction from the "
+            "Analysis report. Above 1 the round's analysis is "
             "partitioned into that many non-overlapping plans, each run "
             "concurrently in its own workspace copy, and each candidate is "
             "measured on its own. Default 3: the lanes of a round run "
@@ -233,6 +236,18 @@ ANALYSIS_TIMEOUT_SEC = 7200
             "reporting the per-case median. Default 1 (single shot). >1 "
             "shrinks run-to-run spread. Requires a driver that accepts "
             "--repeat; the flag is omitted entirely when this is 1.",
+        ),
+        click.option(
+            "--case-aggregate",
+            default=CaseAggregate.ARITHMETIC.value,
+            type=click.Choice([aggregate.value for aggregate in CaseAggregate]),
+            help="How one measurement's per-case speedups combine into the score "
+            "every KEEP, in-session gate and report is judged on. Every case "
+            "weighs the same under both; 'arithmetic' (default) counts a large "
+            "gain on one case in full, 'geometric' counts its ratio. Choose the "
+            "one whoever consumes the result scores by. Immutable per campaign: "
+            "it is snapshotted into campaign_config.json and read back on "
+            "--resume.",
         ),
         click.option(
             "--commit-new-path",

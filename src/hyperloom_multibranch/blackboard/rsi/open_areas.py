@@ -39,13 +39,11 @@ from hyperloom_multibranch.contracts.blackboard.records import (
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus
 from hyperloom_multibranch.blackboard.families import direction_names_op, family_of, op_family
 from hyperloom_multibranch.blackboard.rsi.menu import profiled_commit, record_family
-from hyperloom_multibranch.blackboard.rsi.playbook import H0, Playbook
+from hyperloom_multibranch.blackboard.rsi.playbook import CRASHED_OUT_FACTOR, H0, Playbook
 
 #: How many ops the open areas list at most.
 OPEN_OPS = 5
 _MINUTE = 60.0
-#: How many times the playbook's ``failed_op_limit`` of crashed-out branches spends an op.
-_CRASHED_OUT_FACTOR = 2
 #: The reasons of an EXHAUSTED record that, quoted by a focused branch's give-up, say its op is done on the record's head.
 _DONE = frozenset({ExhaustedWhy.NO_CEILING_ABOVE_BAR, ExhaustedWhy.ALL_TESTED_OR_CLAIMED})
 
@@ -298,7 +296,7 @@ def _spent(
     crashed = _crashed_out(snapshot, ended)
     bare = [node for node in ended if node not in crashed]
     here = [sum(1 for node in nodes if lineage.same_recipe(node.start_commit, head)) for nodes in (bare, crashed)]
-    if record is None and here[0] < limit and here[1] < _CRASHED_OUT_FACTOR * limit:
+    if record is None and here[0] < limit and here[1] < CRASHED_OUT_FACTOR * limit:
         return None
     branches = {node.branch for node in focused}
     gains = [commit.gain_pct for commit in snapshot.committed if commit.branch in branches]

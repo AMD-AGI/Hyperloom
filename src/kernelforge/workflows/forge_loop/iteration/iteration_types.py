@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, CaseAggregate
 from kernelforge.workflows.forge_loop.campaign.decision_labels import DecisionLabel
 from kernelforge.workflows.forge_loop.memory.lessons import SummaryOutcome
 from kernelforge.utils.new_path_allowlist import normalize_commit_new_paths
@@ -90,6 +90,9 @@ class IterationConfig:
     # loop stopping at the first plateau.
     supervise_after: int = 3  # consecutive no-improvement iters that trigger
     supervise_cooldown: int = 3  # min iterations between interventions
+    # Consecutive iterations without a new best before the search leaves its current line for a different mechanism;
+    # None waits for the same count that brings the Supervisor.
+    diversify_after: int | None = None
     max_consecutive_orchestration_errors: int = 3
     # Task context handed to the Analysis Agent and planning chain.
     program_md: str = ""
@@ -112,9 +115,12 @@ class IterationConfig:
     # How many times each bench repeats its measurement in-process, reporting the per-case median. 1 selects
     # single-shot behavior (and omits the --repeat flag entirely, so drivers that don't accept it are unaffected).
     bench_repeat: int = 1
+    # How one measurement's per-case speedups combine into the score every KEEP, gate and report is judged on.
+    case_aggregate: CaseAggregate = CaseAggregate.ARITHMETIC
     # Implementer lanes run concurrently from one round's analysis, each in its own workspace copy, and each candidate
-    # is measured on its own. 1 keeps the single fused plan and single session this loop has always run; fan-out also
-    # needs an ``agent_factory``, because a session is bound to its workspace.
+    # is measured on its own. 1 runs one session a round with no plan: the campaign builds no planning service and the
+    # session chooses its direction. Fan-out also needs an ``agent_factory``, because a session is bound to its
+    # workspace.
     lanes: int = 1
     # Whether a stalled search may spend an iteration measuring two archived rejected gains applied together.
     merge_stacking: bool = True
@@ -174,10 +180,15 @@ def _with_search_actor(agents: LoopAgents, bundle) -> LoopAgents:
 
 @dataclass(frozen=True)
 class _RoundPlan:
-    """The plan an orchestrated round synthesized, and whether it is executable."""
+    """The plan file an orchestrated round synthesized, if any, and whether the round has a direction to execute."""
 
     path: str = ""
     executable: bool = False
+
+    @property
+    def published(self) -> bool:
+        """Whether a plan document exists for the round to execute, as opposed to a session choosing for itself."""
+        return self.executable and bool(self.path)
 
 
 @dataclass(frozen=True)

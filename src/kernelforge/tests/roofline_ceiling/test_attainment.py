@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import pytest
 
+from kernelforge.evaluation.scoring import CaseAggregate
 from kernelforge.roofline_ceiling.attainment import measure_attainment
 from kernelforge.roofline_ceiling.contract import load_report
 
@@ -108,3 +109,11 @@ def test_no_cases_means_no_figure_and_no_crash():
 
     assert standing.mean is None
     assert standing.cases == ()
+
+
+def test_a_geometric_campaign_combines_attainment_geometrically():
+    """One case at its ceiling and one at a quarter of it: 62.5% by the arithmetic mean, 50% by the geometric."""
+    report, measured = _report([("at-ceiling", 5.0), ("far", 5.0)]), {"at-ceiling": 5.0, "far": 20.0}
+
+    assert measure_attainment(report, measured).mean == pytest.approx(0.625)
+    assert measure_attainment(report, measured, aggregate=CaseAggregate.GEOMETRIC).mean == pytest.approx(0.5)

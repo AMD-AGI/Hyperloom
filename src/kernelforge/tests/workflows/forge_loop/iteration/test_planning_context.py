@@ -110,7 +110,7 @@ def test_orchestration_context_uses_current_scored_cases(tmp_path, monkeypatch):
     assert context.analysis_commit == head
     assert [case.case_id for case in context.cases] == ["case-a", "case-b"]
     assert [case.latency_ms for case in context.cases] == [0.8, 1.5]
-    assert "maximizing equal-weight mean incumbent-to-candidate" in context.objective
+    assert "maximizing the equal-weight arithmetic mean of incumbent-to-candidate case speedups" in context.objective
     assert context.source_map_path == str((workspace / "kernel.py").resolve())
 
 

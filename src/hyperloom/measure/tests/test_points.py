@@ -32,6 +32,7 @@ from hyperloom.measure.points import (
     CANONICAL_FILE,
     MEASUREMENT_SEED,
     PointError,
+    ProfileUnsupported,
     accept_measurement,
     default_canonical,
     generate_points,
@@ -317,6 +318,16 @@ def test_every_shipped_profile_configuration_replays_graphs_node_by_node_and_no_
     assert "DEBUG_CLR_GRAPH_PACKET_CAPTURE" not in baseline
 
 
+def test_a_framework_that_runs_no_torch_profiler_has_no_profile_point(tmp_path, model, blobs):
+    config = asset_root() / "assets" / "configs" / "baseline_llamacpp.yaml"
+    canonical = default_canonical(
+        tmp_path / "canonical", primary_concurrency=8, config_path=config, model_path=str(model)
+    )
+
+    with pytest.raises(ProfileUnsupported, match="llamacpp"):
+        generate_profile_point(environment(blobs, tmp_path), canonical, tmp_path / "profile")
+
+
 def test_a_normal_point_does_not_turn_the_profiler_on(canonical, blobs, tmp_path):
     (point,) = generate_points(environment(blobs, tmp_path), canonical, tmp_path / "points")
 
@@ -401,6 +412,24 @@ def test_an_agentx_point_is_what_the_main_flow_hands_the_round_for_the_recipe_an
     launch = rendered["benchmark"]["agentx"]["launch_overrides"]
     assert launch["append_args"] == SERVER_ARGS.split()
     assert launch["env"] == {"HSA_FORCE_FINE_GRAIN_PCIE": "1", AITER_LOG_TUNED_CONFIG_ENV: "1"}
+
+
+def test_an_inferencex_point_is_seeded_with_the_server_base_it_is_rendered_with(tmp_path, model, blobs):
+    base = replace(_agentx_base(), args=("--tp", "2", "--mem-fraction-static", "0.71"))
+    canonical = default_canonical(
+        tmp_path / "canonical",
+        primary_concurrency=32,
+        config_path=default_baseline_config(),
+        model_path=str(model),
+        server_base=server_base(base),
+    )
+    delta = RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS))
+
+    (point,) = generate_points(environment(blobs, tmp_path, delta=delta), canonical, tmp_path / "points")
+
+    args = load(point)["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"].split()
+    assert args[:4] == ["--tp", "2", "--mem-fraction-static", "0.71"]
+    assert "--max-running-requests" in args
 
 
 def test_an_agentx_point_runs_on_the_sessions_frozen_base_as_the_main_flow_composes_it(

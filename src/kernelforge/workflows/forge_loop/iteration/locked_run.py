@@ -151,7 +151,7 @@ class LockedRunMixin:
             actors = _with_search_actor(actors, self._iteration_bundle(iteration))
             agent_fn, agent_factory, supervisor_fn = actors.agent_fn, actors.agent_factory, actors.supervisor_fn
             orchestration_service = actors.orchestration_service
-            round_lanes = self._price_round(iteration)
+            round_lanes = self._price_round(iteration, orchestration_service)
             if round_lanes is None:
                 break
             await self._open_iteration(
@@ -216,7 +216,7 @@ class LockedRunMixin:
             _attempt_source,
             _attempt_diff,
             reusable_benchmark,
-            _optimization_plan_path,
+            optimization_plan_path,
             optimization_plan_executable,
             _lane_record,
         ) = attempt
@@ -257,8 +257,9 @@ class LockedRunMixin:
         # run's end-reason distribution (edit cap / turn cap / converged / …) is analyzable.
         result.session_end_reason = frame.session_sink.get("end_reason", "")
         result.turns = frame.session_sink.get("turns")
+        # A session that chose its own direction published no plan, so it completes no diversification cycle.
         self._apply_iteration_planning_state(
-            optimization_plan_created=optimization_plan_executable,
+            optimization_plan_created=optimization_plan_executable and bool(optimization_plan_path),
         )
         ruling = self._rule_on_attempt(result, attempt, frame, on_best_committed=callbacks.on_best_committed)
         await self._close_iteration(result, attempt, frame, ruling=ruling, callbacks=callbacks)

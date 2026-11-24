@@ -56,7 +56,7 @@ class SearchActorBuildContext:
     relay: AgentRelayConfig | None = None
 
     def build(self, profile: AgentProfile) -> SearchActorBundle:
-        """Build and probe all profile-bound planning and implementation services."""
+        """Build and probe the profile-bound implementation services, and the planning service a multi-lane round needs."""
         from kernelforge.workflows.forge_loop.bootstrap.lanes import (
             _make_lane_agent_factory,
             _require_lane_provider_capabilities,
@@ -77,11 +77,17 @@ class SearchActorBuildContext:
             setup=setup,
             usage=self.usage,
         )
-        orchestration = make_orchestration_service(
-            config=actor_config,
-            usage=self.usage,
-            definitions=self.specialist_definitions,
-            enable_plan_critic=self.critic_enabled,
+        # Planning divides a round's evidence among lanes. One lane has nothing to divide: its session reads the
+        # Analysis evidence and chooses its own direction.
+        orchestration = (
+            make_orchestration_service(
+                config=actor_config,
+                usage=self.usage,
+                definitions=self.specialist_definitions,
+                enable_plan_critic=self.critic_enabled,
+            )
+            if self.lanes > 1
+            else None
         )
         supervisor_provider = self.supervisor_backend or profile.provider
         supervisor = make_supervisor_fn(
@@ -117,11 +123,7 @@ class SearchActorBuildContext:
         return AgentProfile(profile.profile_id, effective[0], effective[1], profile.reasoning_effort)
 
 
-def resolve_relay_policy(
-    config: Config,
-    *,
-    blockage_threshold: int = 3,
-) -> AgentRelayPolicy:
+def resolve_relay_policy(config: Config) -> AgentRelayPolicy:
     """One relay member per auto-selectable provider, the provider this campaign starts on first as primary.
 
     A provider only an explicit name reaches joins the relay only as the primary that name chose.
@@ -134,7 +136,6 @@ def resolve_relay_policy(
     return AgentRelayPolicy(
         primary_profile_id=primary,
         profiles=tuple(AgentProfileSpec(provider, provider) for provider in providers),
-        blockage_threshold=blockage_threshold,
     )
 
 
@@ -160,11 +161,7 @@ def resolve_session_relay(policy: AgentRelayPolicy | None, config: Config) -> Ag
         model = config.agent_model if member.profile_id == primary.profile_id else ""
         runtime = agent_runtime_for(strict_config, member.provider, model or resolve_agent_model(member.provider))
         profiles.append(AgentProfile(member.profile_id, member.provider, runtime.model, runtime.reasoning_effort))
-    return AgentRelayConfig(
-        primary_profile_id=primary.profile_id,
-        profiles=tuple(profiles),
-        blockage_threshold=policy.blockage_threshold,
-    )
+    return AgentRelayConfig(primary_profile_id=primary.profile_id, profiles=tuple(profiles))
 
 
 def config_for_profile(

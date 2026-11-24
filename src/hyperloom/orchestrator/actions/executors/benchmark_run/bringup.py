@@ -246,6 +246,7 @@ _DISABLE_CUDA_GRAPH_FLAGS = {
     "sglang": "--disable-cuda-graph",
     "vllm": "--compilation-config.cudagraph_mode NONE",
     "atom": "--enforce-eager",
+    "llamacpp": "",  # llama-server takes no option for it
 }
 
 
@@ -259,4 +260,5 @@ def _disable_cuda_graph_flag(framework: str) -> str:
 
 def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
     """Apply the framework-correct disable-cuda-graph flag once (idempotent)."""
-    return with_capture_disabled(extra_server_args or "", _disable_cuda_graph_flag(framework))
+    flag = _disable_cuda_graph_flag(framework)
+    return with_capture_disabled(extra_server_args or "", flag) if flag else extra_server_args or ""
