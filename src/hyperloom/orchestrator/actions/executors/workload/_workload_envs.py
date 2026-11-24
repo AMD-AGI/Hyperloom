@@ -612,7 +612,7 @@ def _pin_model_launch_workarounds(bench: dict[str, Any], model_path: str | None)
         # kernel aborts during CUDA-graph capture. Disabling the fused decode
         # pipeline keeps tp8 + the clean aiter MLA path.
         envs.setdefault("SGLANG_ROCM_FUSED_DECODE_MLA", "0")
-    if "mimo-v2" in _model_basename:
+    if "mimo-v2" in _model_basename and not framework_registry.loads_model_file(bench.get("framework")):
         # MiMo-V2.x's DEFAULT aiter attention backend SIGABRTs during CUDA-graph
         # capture on gfx942. Pin the triton attention backend. sglang accepts
         # lowercase `triton`; vLLM only knows TRITON_ATTN.
@@ -682,7 +682,8 @@ def _pin_client_model_access(bench: dict[str, Any], model_path: str | None, mode
     # Qwen3.6 MoE declares an arch the SERVER must also load remote code for, or it
     # refuses the arch at boot.
     _custom_code = "qwen3.6-35b-a3b" in model_basename or "qwen3-6-35b-a3b" in model_basename
-    if _custom_code or _model_requires_remote_code(_model):
+    _hf_loader = not framework_registry.loads_model_file(bench.get("framework"))
+    if _hf_loader and (_custom_code or _model_requires_remote_code(_model)):
         add_server_arg_unless_pinned(
             envs,
             bench.get("framework"),

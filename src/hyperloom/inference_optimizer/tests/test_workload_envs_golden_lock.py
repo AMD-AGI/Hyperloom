@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
@@ -266,3 +267,18 @@ def test_a_re_materialized_config_carries_the_session_base_once(monkeypatch, tmp
     )
     envs = yaml.safe_load(rendered.read_text())["benchmark"]["envs"]
     assert envs["EXTRA_VLLM_ARGS"] == f"{base} --enable-prefix-caching"
+
+
+@pytest.mark.parametrize("model", ["/models/Qwen3.6-35B-A3B-GGUF", "/models/MiMo-V2-Flash-GGUF"])
+def test_a_llamacpp_config_gets_no_flag_of_an_hf_loader(monkeypatch, tmp_path, model):
+    """llama-server lists neither ``--trust-remote-code`` nor ``--attention-backend`` in its ``--help``, so a launch
+    carrying one is refused as ``flag_unknown``."""
+    _isolate(monkeypatch)
+    src = _write(tmp_path / "cfg.yaml", {"framework": "llamacpp", "model": model, "envs": {}})
+    rendered = we.materialize_config_with_envs(
+        src,
+        tmp_path,
+        target=we.BenchmarkTarget(model_path=model),
+        options=we.MaterializeOptions(server_base=ServerBase(args=_LLAMACPP_BASE)),
+    )
+    assert yaml.safe_load(rendered.read_text())["benchmark"]["envs"]["EXTRA_LLAMACPP_ARGS"] == _LLAMACPP_BASE
