@@ -99,6 +99,10 @@ class GpuCard:
             return None
         return round(self.compute_units * self.engine_clock_mhz * rate / 1e6, 1)
 
+    def label(self) -> str:
+        """The name the card files results under by itself: its model designation, else its arch."""
+        return board_label(self.name) or self.gfx
+
     def describe(self) -> str:
         """The card's name and kind, for a message."""
         facts = ((self.compute_units, "CUs"), (self.memory_mib, "MiB"), (self.engine_clock_mhz, "MHz"))

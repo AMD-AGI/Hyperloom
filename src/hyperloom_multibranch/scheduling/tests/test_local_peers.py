@@ -1370,8 +1370,8 @@ async def test_a_gpu_type_other_than_the_cards_own_label_stays_the_sessions_and_
         async with _peers(tmp_path, monkeypatch, workload):
             assert os.environ["GPU_TYPE"] == "mi350x" and session_card() == MI355X_CARD
 
-    said = "the GPU type is given as 'mi350x', but the cards call themselves 'mi355x' (AMD Instinct MI355X (gfx950"
-    assert said in caplog.text and "results are filed under 'mi350x'" in caplog.text
+    said = "the GPU type is given as 'mi350x', but the cards are 'mi355x' (AMD Instinct MI355X (gfx950"
+    assert said in caplog.text and "looked up under 'mi350x'" in caplog.text
 
 
 @pytest.mark.parametrize(

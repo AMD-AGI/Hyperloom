@@ -143,15 +143,16 @@ def _visible_cards(cards: list[GpuCard]) -> list[GpuCard]:
 
 
 def _session_label(given: str, card: GpuCard | None) -> str:
-    """The name the session files its results under: the one given, else the card's model designation, else its arch."""
-    named = gpu_card.board_label(card.name) if card else ""
-    if given and named and given != named:
+    """The name the session files its results under: the one given, else the card's own; a given name that is not the
+    card's own is taken with a WARN."""
+    own = card.label() if card else ""
+    if card and given and given != own:
         print(
-            f"WARN: the GPU type is given as {given!r}, but the card calls itself {named!r} ({card.name}); "
-            f"this session's results are filed under {given!r}",
+            f"WARN: the GPU type is given as {given!r}, but the card is {own!r} ({card.describe()}); recipes, KB rows "
+            f"and TraceLens specs are looked up under {given!r}",
             file=sys.stderr,
         )
-    return given or named or (card.gfx if card else "")
+    return given or own
 
 
 def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> None:

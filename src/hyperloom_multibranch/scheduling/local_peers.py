@@ -532,13 +532,12 @@ def _publish_session_card(backend: ToolboxBackend, workload: Workload) -> GpuCar
 
     card = backend.card()
     gpu_card.publish_session_card(card)
-    own = gpu_card.board_label(card.name)
-    if own and own != workload.gpu_type:
+    if card.label() != workload.gpu_type:
         logger.warning(
-            "the GPU type is given as %r, but the cards call themselves %r (%s); this session's results are filed "
-            "under %r",
+            "the GPU type is given as %r, but the cards are %r (%s); recipes, KB rows and TraceLens specs are looked "
+            "up under %r",
             workload.gpu_type,
-            own,
+            card.label(),
             card.describe(),
             workload.gpu_type,
         )

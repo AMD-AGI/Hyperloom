@@ -399,15 +399,24 @@ def test_catalog_probe_keeps_anthropic_side_when_it_has_its_own_key(clean_creds_
         pytest.param("", MI355X_CARD, "mi355x", id="card-only"),
         pytest.param("mi300x", None, "mi300x", id="given-only"),
         pytest.param("", replace(MI355X_CARD, name="AMD Radeon Graphics"), "gfx950", id="no-designation-so-its-arch"),
-        pytest.param(
-            "r9700", replace(MI355X_CARD, name="AMD Radeon Graphics"), "r9700", id="given-for-an-unnamed-card"
-        ),
+        pytest.param("mi355x", MI355X_CARD, "mi355x", id="given-the-cards-own"),
     ],
 )
 def test_session_label_without_a_disagreement_is_silent(given, card, label, capsys):
     """A given name is the label; without one the card's own name is."""
     assert session_setup._session_label(given, card) == label
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize(
+    ("card", "own"),
+    [(MI355X_CARD, "mi355x"), (replace(MI355X_CARD, name="AMD Radeon Graphics", gfx="gfx1201"), "gfx1201")],
+    ids=["named", "unnamed"],
+)
+def test_a_given_name_that_is_not_the_cards_own_is_kept_with_a_warn_naming_both(card, own, capsys):
+    assert session_setup._session_label("mi300x", card) == "mi300x"
+    warning = capsys.readouterr().err
+    assert warning.startswith("WARN:") and "'mi300x'" in warning and repr(own) in warning
 
 
 # _emit_launch_info
