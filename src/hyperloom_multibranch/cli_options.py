@@ -48,7 +48,7 @@ DEFAULT_JUDGE_INTERVAL_SECONDS = 600.0
 ENCODING = "utf-8"
 FILE_METAVAR = "FILE"
 #: The GPU types a session runs on; the toolbox's environment exports the board itself as ``GPU_TYPE``.
-SESSION_GPU_TYPES = ("mi300x", "mi325x", "mi350x", "mi355x")
+SESSION_GPU_TYPES = ("mi300x", "mi325x", "mi350x", "mi355x", "r9700", "w7900d")
 #: The options ``run`` requires unless it is given ``--resume``, by their argparse names.
 RUN_REQUIRED = ("model", "framework", "gpu_type", "workload", "tp", "conc", "precision")
 #: The options an inferencex workload requires and an agentx one refuses.

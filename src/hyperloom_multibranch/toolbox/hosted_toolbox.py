@@ -584,7 +584,7 @@ def build_hosted_toolbox(
 
     directory = Path(inputs.session_dir)
     acceptance = _acceptance_with_prompts(acceptance, options, os.environ, spec.model_dir)
-    native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest)
+    native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest, spec.gpu_type)
     acceptance = with_native_plan(acceptance, native)
     grant = inputs.grant()
     parallel_tests_for(grant, inputs.tp)  # a grant that cannot run one test is refused before the templates are read

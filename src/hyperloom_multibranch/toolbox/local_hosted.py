@@ -799,7 +799,7 @@ def build_local_toolbox(
     parallel = max_parallel_tests(len(cards), tp)
     jit_root = private_jit_store(jit_store_root(options))
     acceptance = _acceptance_with_prompts(acceptance, options, os.environ, spec.model_dir)
-    native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest)
+    native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest, spec.gpu_type)
     acceptance = with_native_plan(acceptance, native)
     config = HostedConfig(
         session_dir=directory,
