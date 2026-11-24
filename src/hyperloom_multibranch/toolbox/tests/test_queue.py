@@ -56,6 +56,100 @@ def test_the_queue_hands_out_the_highest_priority_first_then_arrival_order() -> 
     assert order == ["d", "b", "e", "a", "c"]
 
 
+def _starts(queue: WorkQueue, count: int) -> list[str]:
+    """The branches of the next ``count`` tests the queue starts; when none may start, the test running longest ends."""
+    running = [item.request_id for item in queue.items() if item.state is State.RUNNING]
+    branches: list[str] = []
+    while len(branches) < count:
+        item = queue.take()
+        if item is None:
+            queue.remove(running.pop(0))
+            continue
+        branches.append(item.branch)
+        running.append(item.request_id)
+    return branches
+
+
+def _backlog(queue: WorkQueue, branch: str, tests: range) -> None:
+    for index in tests:
+        queue.push(_item(f"{branch}-{index}", branch))
+
+
+def test_branches_that_each_hold_a_backlog_start_their_tests_in_rotation() -> None:
+    queue = _queue(per_branch_k=1, global_concurrency=2)
+    branches = ["b1", "b2", "b3", "b4", "b5"]
+    for branch in branches:
+        _backlog(queue, branch, range(4))
+    assert _starts(queue, 20) == branches * 4
+
+
+def test_a_branch_of_twice_the_k_takes_twice_the_starts_and_no_more() -> None:
+    queue = _queue(per_branch_k=1, branch_k={"wide": 2}, global_concurrency=2)
+    _backlog(queue, "wide", range(8))
+    for branch in ("n1", "n2", "n3", "n4"):
+        _backlog(queue, branch, range(4))
+    assert _starts(queue, 18) == ["wide", "n1", "n2", "n3", "n4", "wide"] * 3
+
+
+def test_a_branch_that_queues_late_takes_its_turn_and_none_of_the_turns_it_missed() -> None:
+    queue = _queue(per_branch_k=1, global_concurrency=1)
+    _backlog(queue, "b1", range(8))
+    _backlog(queue, "b2", range(8))
+    assert _starts(queue, 6) == ["b1", "b2"] * 3
+    _backlog(queue, "late", range(4))
+    assert _starts(queue, 6) == ["late", "b1", "b2"] * 2
+
+
+def test_a_branch_that_had_nothing_to_start_is_owed_no_turn_when_it_queues_again() -> None:
+    queue = _queue(per_branch_k=1, global_concurrency=1)
+    _backlog(queue, "b1", range(2))
+    _backlog(queue, "b2", range(8))
+    assert _starts(queue, 7) == ["b1", "b2", "b1", "b2", "b2", "b2", "b2"]
+    _backlog(queue, "b1", range(2, 6))
+    assert _starts(queue, 4) == ["b1", "b2", "b1", "b2"]
+
+
+def test_a_changed_k_weighs_only_the_tests_started_under_it() -> None:
+    queue = _queue(per_branch_k=1, global_concurrency=1)
+    _backlog(queue, "b1", range(8))
+    _backlog(queue, "b2", range(8))
+    assert _starts(queue, 4) == ["b1", "b2"] * 2
+    queue.set_policy(QueuePolicy(per_branch_k=1, branch_k={"b2": 2}, global_concurrency=1))
+    assert _starts(queue, 6) == ["b1", "b2", "b2"] * 2
+
+
+def test_a_test_of_a_higher_priority_starts_first_and_costs_its_branch_no_turn_in_the_lower_one() -> None:
+    queue = _queue(per_branch_k=1, global_concurrency=1)
+    _backlog(queue, "b1", range(3))
+    _backlog(queue, "b2", range(3))
+    assert _starts(queue, 2) == ["b1", "b2"]
+    queue.push(_item("urgent", "b1", priority=2))
+    assert _starts(queue, 5) == ["b1", "b1", "b2", "b1", "b2"]
+
+
+def test_an_exempt_test_takes_no_turn_and_keeps_its_arrival_order() -> None:
+    queue = _queue(per_branch_k=1, global_concurrency=1)
+    _backlog(queue, "b1", range(2))
+    queue.push(_item("health", "b2", purpose=Purpose.HEALTH))
+    _backlog(queue, "b2", range(2))
+    order = [queue.take().request_id]  # type: ignore[union-attr]
+    while len(order) < 5:
+        queue.remove(order[-1])
+        order.append(queue.take().request_id)  # type: ignore[union-attr]
+    assert order == ["b1-0", "health", "b2-0", "b1-1", "b2-1"]
+
+
+def test_queued_ahead_counts_the_tests_that_take_their_turn_first_and_takes_none() -> None:
+    queue = _queue(per_branch_k=1, global_concurrency=1)
+    _backlog(queue, "b1", range(4))
+    _backlog(queue, "b2", range(1))
+    assert queue.take().request_id == "b1-0"  # type: ignore[union-attr]
+    assert queue.queued_ahead("b2-0") == 0, "b1 took its turn, so the three tests it still holds come after"
+    assert [queue.queued_ahead(f"b1-{index}") for index in (1, 2, 3)] == [1, 2, 3]
+    queue.remove("b1-0")
+    assert queue.take().request_id == "b2-0"  # type: ignore[union-attr]
+
+
 def test_the_cards_of_the_toolbox_lower_the_global_concurrency_but_never_raise_it() -> None:
     queue = _queue(per_branch_k=9, global_concurrency=3)
     for name in "abcd":

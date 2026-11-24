@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
+from unittest.mock import ANY
 
 from hyperloom.contracts.measurement import TestKind, TestRequest, TestResult, Validity
 from hyperloom.contracts.recipe import Recipe
@@ -110,9 +111,9 @@ class _Repo:
 
     With a ``repo`` the recipe is the one that repository holds for the commit, read as the real toolbox reads it, so a
     parent that pins a component takes a delta of patches only; a commit the repository does not know is an unknown
-    parent; the root is that repository's. Without one every parent exists and its recipe is the empty one on the
-    fake's image, which pins no component, and so is the root's. ``parent_exists`` narrows the parents either way: a
-    commit it refuses is unknown.
+    parent; the root is that repository's. Without one every parent exists and is its branch's head, and its recipe
+    is the empty one on the fake's image, which pins no component, and so is the root's. ``parent_exists`` narrows
+    the parents either way: a commit it refuses is unknown.
     """
 
     def __init__(
@@ -122,6 +123,9 @@ class _Repo:
 
     async def root(self) -> str:
         return await self._repo.root() if self._repo is not None else _ROOT
+
+    async def head(self, branch: str) -> str:
+        return await self._repo.head(branch) if self._repo is not None else ANY
 
     async def read_recipe(self, commit: str) -> Recipe:
         if commit != _ROOT and self._exists is not None and not self._exists(commit):
