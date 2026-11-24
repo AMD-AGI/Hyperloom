@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.common.failure_signature import classify_failure
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridVariant, _build_variant_yaml, GridRecipe
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
@@ -24,17 +23,10 @@ from hyperloom.orchestrator.enablement.runtime.stack_actions import (
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.enablement.lane import EnablementLane
 
-_ARCH_LOG = "ValueError: Model architectures ['DeepseekV4ForCausalLM'] are not supported for now."
-_OOM_LOG = "torch.OutOfMemoryError: HIP out of memory. Tried to allocate 2.00 GiB"
 
-
-def _params(log: str = _ARCH_LOG, **extra) -> dict:
-    """Params for an enablement round dispatched on the verdict ``log`` classifies to."""
-    return {
-        "enablement": True,
-        "enablement_failure_signature": classify_failure(log).to_dict(),
-        **extra,
-    }
+def _params(**extra) -> dict:
+    """Params for an enablement round."""
+    return {"enablement": True, **extra}
 
 
 _REQUEST = {"packages": ["transformers==4.57.1"], "capability": "deepseek_v4"}
@@ -162,15 +154,8 @@ async def test_without_a_kept_runtime_a_round_that_requests_none_acquires_nothin
     assert attempt.provision_result is None
 
 
-@pytest.mark.parametrize(
-    "log",
-    [
-        pytest.param(_ARCH_LOG, id="code_gap"),
-        pytest.param(_OOM_LOG, id="resource_constraint"),
-    ],
-)
-async def test_the_requested_runtime_is_what_the_adapter_builds_whatever_the_gap(_executor, monkeypatch, log):
-    """The specialist read the failure; no failure kind vetoes the runtime it asked for."""
+async def test_the_requested_runtime_is_what_the_adapter_builds(_executor, monkeypatch):
+    """The specialist's request alone selects the runtime."""
     seen: dict = {}
 
     class _Recorder(_FakeAdapter):
@@ -181,22 +166,13 @@ async def test_the_requested_runtime_is_what_the_adapter_builds_whatever_the_gap
     adapter = _Recorder(_ok_result(str(_executor.session_dir / "v")))
     monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
     attempt = _attempt(request=_REQUEST)
-    assert await _executor._stage_provision_attempt_runtime(attempt, _params(log), "t-1") is None
+    assert await _executor._stage_provision_attempt_runtime(attempt, _params(), "t-1") is None
     assert seen["request"].packages == ("transformers==4.57.1",)
     assert seen["request"].capability == "deepseek_v4"
     assert attempt.stack_action is not None
 
 
-@pytest.mark.parametrize(
-    "log",
-    [
-        pytest.param(_ARCH_LOG, id="code_gap"),
-        # The kept runtime is what got the boot this far; an OOM past it is
-        # still to be fixed on top of it, not on the base install.
-        pytest.param(_OOM_LOG, id="resource_constraint"),
-    ],
-)
-async def test_kept_action_is_reprovisioned_instead_of_a_fresh_candidate(_executor, monkeypatch, log):
+async def test_kept_action_is_reprovisioned_instead_of_a_fresh_candidate(_executor, monkeypatch):
     """Serial stacking reuses the runtime the last KEEP promoted; a new request does not replace it."""
 
     class _NoBuild(_FakeAdapter):
@@ -207,7 +183,7 @@ async def test_kept_action_is_reprovisioned_instead_of_a_fresh_candidate(_execut
     monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
     kept = _candidate()
     attempt = _attempt(kept=kept, request=_REQUEST)
-    assert await _executor._stage_provision_attempt_runtime(attempt, _params(log), "t-1") is None
+    assert await _executor._stage_provision_attempt_runtime(attempt, _params(), "t-1") is None
     assert adapter.provision_calls == 1
     assert attempt.provision_result is not None
     assert attempt.stack_action is not None
@@ -342,10 +318,10 @@ async def test_the_kept_runtime_alone_is_still_no_patches(_executor, monkeypatch
     adapter = _FakeAdapter(_ok_result(venv))
     monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
     attempt = _apply_ready(_executor, kept=_candidate())
-    assert await _executor._stage_provision_attempt_runtime(attempt, _params(_OOM_LOG), "t-1") is None
+    assert await _executor._stage_provision_attempt_runtime(attempt, _params(), "t-1") is None
     assert attempt.attempt_venv_root == venv
 
-    out = await _executor._stage_apply(attempt, _params(_OOM_LOG), {})
+    out = await _executor._stage_apply(attempt, _params(), {})
     assert out is not None
     assert out["status"] == "no_patches"
 

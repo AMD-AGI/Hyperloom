@@ -24,7 +24,6 @@ from hyperloom.orchestrator.enablement.mandate import (
 )
 
 
-_SGLANG = "https://github.com/sgl-project/sglang.git"
 _ARCH_LOG = "ValueError: Model architecture 'Glm5ForCausalLM' is not supported"
 
 
