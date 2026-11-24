@@ -47,9 +47,7 @@ from hyperloom_multibranch.contracts.toolbox import (
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.tests.factories import TTL, FakeClock, delta, intent, request, result
 from hyperloom_multibranch.blackboard.tests.sessions import Writers, scripted_session
-from hyperloom.common.tests.handed_names import knob_words_named, pull_requests_named, server_options_named
 from hyperloom_multibranch.toolbox import mcp_tools
-from hyperloom_multibranch.toolbox.analysis import ANALYSIS_TOOLS
 from hyperloom_multibranch.toolbox.mcp_tools import (
     REPLY_INBOX_HEADER,
     REPLY_INBOX_LINES,
@@ -1070,12 +1068,3 @@ async def test_the_old_cursor_with_no_returned_item_was_one_the_feed_refuses() -
     with pytest.raises(InvalidParamsError, match="not an inbox cursor"):
         await _unread(inbox, _bad_cursor(feed, 0))
     assert feed.after(0) == "at-1" and await _unread(inbox, feed.after(0)) == tuple(inbox.items[1:])
-
-
-# --- what start_analysis tells a specialist about each tool ---------------------------------------------------------
-
-
-def test_the_analysis_guides_name_no_knob_no_kernel_constant_and_no_pull_request() -> None:
-    described = mcp_tools._start_analysis_description(ANALYSIS_TOOLS)
-    assert not knob_words_named(described) and not pull_requests_named(described)
-    assert not server_options_named(described) and "test-backend-ops" not in described

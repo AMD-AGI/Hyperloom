@@ -86,7 +86,6 @@ from hyperloom_multibranch.toolbox.option_reviews import (
     ReviewRefused,
 )
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL
-from hyperloom_multibranch.toolbox.tools.knob_tune import KNOB_TUNE_TOOL
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
 from hyperloom_multibranch.toolbox.tools.upstream_pr import DEFAULT_LIMIT, MAX_LIMIT, UPSTREAM_PR_TOOL
 
@@ -194,7 +193,6 @@ _ANALYSIS_BLURBS = {
     TRACELENS_TOOL: "analyse a trace",
     ROOFLINE_TOOL: "the kernel roofline of a trace",
     KERNEL_TUNE_TOOL: "tune GEMM shapes on one card",
-    KNOB_TUNE_TOOL: "sweep a compile-time kernel knob on one card",
     UPSTREAM_PR_TOOL: "search upstream pull requests",
 }
 _TEST_RESULT_GUIDE = (
@@ -256,24 +254,6 @@ _KERNEL_TUNE_GUIDE = (
     "choice, and only an end-to-end accuracy check (GSM8K, and the long-context check for attention or KV paths) "
     "decides whether they stand. Its microseconds are advice only; a test of the rows says whether they help."
 )
-_KNOB_TUNE_GUIDE = (
-    " knob_tune: sweeps a compile-time launch parameter of a native kernel of a component the toolbox builds from its "
-    "pinned checkout. params.knob names a knob the rule pack declares for such a component: a request that names none, "
-    "or one the pack does not declare, is refused with the knobs it takes, each with its axes, their values and the "
-    "values it may be given. A key is one value of each axis. params.axes maps an axis of the knob to the values of it "
-    "to sweep (an axis left out takes all its values), params.values the values to force (all of the knob's when "
-    "omitted), params.shapes the "
-    "weight shapes [m, k] of your model each key is timed at (required), params.copies the weights of each shape "
-    "multiplied in one launch so they exceed the GPU's cache as a model's do (default 4), params.rounds the timed "
-    "rounds (default 5). A case must be larger than the GPU's cache (copies times the weight's bytes): otherwise its "
-    "repeats read a cached matrix and overstate the gain. "
-    "It builds the pinned commit once per value, no card held, then times every key with the component's own operator "
-    "benchmark on a card "
-    "leased per round, the default build twice per round for the noise (refused with lease_leaves_no_measurement when "
-    "no card can be spared). Its result arrives in poll_inbox: the ranked table, the noise, each key's winning value "
-    "where it beat the default beyond the noise and matched the CPU backend, and the patch forcing the winners (a git "
-    "patch over the pinned commit). Commit it on your branch and submit a test: the microbenchmark is advice only."
-)
 
 
 _UPSTREAM_PR_GUIDE = (
@@ -334,7 +314,6 @@ def _start_analysis_description(served: Sequence[str]) -> str:
         "analysed is this branch's head, set by the server; with a profile_request_id of any branch's profile test of "
         "its recipe the pointer carries its op shares."
         + (_KERNEL_TUNE_GUIDE if KERNEL_TUNE_TOOL in served else "")
-        + (_KNOB_TUNE_GUIDE if KNOB_TUNE_TOOL in served else "")
         + (_UPSTREAM_PR_GUIDE if UPSTREAM_PR_TOOL in served else "")
     )
 

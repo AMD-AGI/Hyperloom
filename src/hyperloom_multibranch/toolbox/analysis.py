@@ -2,9 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 """What a specialist may start from the MCP service: ``tracelens`` and ``roofline`` on its own branch's commit,
-``kernel_tune`` on the landed output of a test, ``knob_tune`` on the pinned commit of a component the toolbox builds,
-and ``upstream_pr_search`` on an upstream repository, those of them the toolbox's tool registry serves
-(:attr:`AnalysisStarter.analysis_tools`).
+``kernel_tune`` on the landed output of a test, and ``upstream_pr_search`` on an upstream repository, those of them the
+toolbox's tool registry serves (:attr:`AnalysisStarter.analysis_tools`).
 
 The caller names the tool and its own parameters. The commit the analysis is about is never the caller's: it is the
 head of the caller's branch in the experiment repository, read here. ``profile_request_id`` is kept only when the
@@ -15,8 +14,6 @@ prompt and output length (an AgentX replay) has its phase windows weighted by th
 measured (:mod:`~.tools.baseline_lengths`), which the caller names no more than the hints. A ``kernel_tune`` request
 names a test (``test_request_id``) and gets the directory its output landed in, resolved inside the session, from the
 blackboard's record of it, never from the caller.
-A ``knob_tune`` request is about the pinned commit its builds start from, not the branch's: it names the knob, the
-keys, the values and the shapes, checked when it is asked for.
 An ``upstream_pr_search`` request is about no commit and no test: it names a repository (one the rule pack lists) and what to
 look for.
 """
@@ -35,8 +32,6 @@ from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolRequest
 from hyperloom_multibranch.toolbox.tools.baseline_lengths import baseline_lengths, prefix_cache_reading
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL, LANDED_PARAM, TEST_PARAM, check_params
-from hyperloom_multibranch.toolbox.tools.knob_tune import KNOB_TUNE_TOOL
-from hyperloom_multibranch.toolbox.tools.knob_tune import check_params as check_knob_params
 from hyperloom_multibranch.toolbox.tools.op_shares import COMMIT_PARAM, PROFILE_REQUEST_PARAM
 from hyperloom_multibranch.toolbox.tools.phase_mix import ISL_KEY, MEASURED_LENGTH_KEYS, OSL_KEY
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
@@ -45,7 +40,7 @@ from hyperloom_multibranch.toolbox.tools.tune_inputs import POINT_CONFIG_GLOB, r
 from hyperloom_multibranch.toolbox.tools.upstream_pr import UPSTREAM_PR_TOOL, build_search
 
 #: The ceiling of what a specialist may start; the toolbox serves those of them its registry holds, never more.
-ANALYSIS_TOOLS = (TRACELENS_TOOL, ROOFLINE_TOOL, KERNEL_TUNE_TOOL, KNOB_TUNE_TOOL, UPSTREAM_PR_TOOL)
+ANALYSIS_TOOLS = (TRACELENS_TOOL, ROOFLINE_TOOL, KERNEL_TUNE_TOOL, UPSTREAM_PR_TOOL)
 CODE_TOOL_NOT_ALLOWED = "tool_not_allowed"
 CODE_SERVER_OWNED_PARAM = "server_owned_param"
 CODE_COMMIT_UNKNOWN = "commit_unknown"
@@ -236,8 +231,6 @@ async def analysis_request(
         return await _tune_request(records, ask, trace_root)
     if ask.tool == UPSTREAM_PR_TOOL:
         return _pr_search_request(ask)
-    if ask.tool == KNOB_TUNE_TOOL:
-        return _knob_request(ask)
     if not ask.profile_request_id:
         raise RequestRejected(
             f"{ask.tool} reads the trace of a profile test: name the profile test with profile_request_id",
@@ -251,17 +244,6 @@ async def analysis_request(
         if ask.tool == TRACELENS_TOOL:
             params.update(await _workload_hints(records, record, trace_root))
     return ToolRequest(ask.tool, ask.branch, params)
-
-
-def _knob_request(ask: AnalysisAsk) -> ToolRequest:
-    """The ``knob_tune`` request: the caller's sweep, checked now so a sweep that can never run is refused."""
-    if ask.profile_request_id:
-        raise RequestRejected(f"{KNOB_TUNE_TOOL} reads no profile test: leave profile_request_id out")
-    try:
-        check_knob_params(ask.params)
-    except InvalidRequest as exc:
-        raise RequestRejected(str(exc)) from None
-    return ToolRequest(ask.tool, ask.branch, dict(ask.params))
 
 
 def _pr_search_request(ask: AnalysisAsk) -> ToolRequest:

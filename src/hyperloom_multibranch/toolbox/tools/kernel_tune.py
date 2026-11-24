@@ -86,7 +86,6 @@ __all__ = [
     "TEST_PARAM",
     "TIMEOUT_PARAM",
     "KernelTuneTool",
-    "card_env",
     "check_params",
     "kernel_tune_tool",
     "serving_aiter_root",
@@ -255,23 +254,18 @@ def serving_aiter_root(configs: Path) -> Path:
     )
 
 
-def card_env(cards: Sequence[int], extra: Mapping[str, str] | None = None) -> dict[str, str]:
-    """The environment of a tool job's process on its leased ``cards``: this process's without credentials, hooks or a
-    mask of the visible cards, masked to ``cards``, with ``extra`` set."""
+def _tuner_env(cards: Sequence[int], plan: _Plan) -> dict[str, str]:
+    """This process's environment without credentials, hooks or a mask of the visible cards, masked to ``cards``, with
+    the tuner's aiter pinned to the plan's ``aiter_root`` and the job's own JIT and temporary directories."""
     env = {
         name: value
         for name, value in os.environ.items()
         if name not in GPU_MASK_ENV_NAMES and not is_secret_shaped_env_name(name)
     }
     env[ROCR_VISIBLE_DEVICES_ENV] = ",".join(map(str, cards))
-    env.update(extra or {})
+    env[_AITER_ROOT_ENV] = str(plan.aiter_root)
+    env.update(plan.job_env)
     return scrub_benchmark_process_env(env)
-
-
-def _tuner_env(cards: Sequence[int], plan: _Plan) -> dict[str, str]:
-    """:func:`card_env` with the tuner's aiter pinned to the plan's ``aiter_root`` and the job's own JIT and temporary
-    directories."""
-    return card_env(cards, {_AITER_ROOT_ENV: str(plan.aiter_root), **plan.job_env})
 
 
 async def _reaped(worker: asyncio.Future[Any]) -> None:
