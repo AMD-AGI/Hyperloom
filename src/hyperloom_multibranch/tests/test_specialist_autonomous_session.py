@@ -415,7 +415,7 @@ async def test_an_agent_whose_source_changes_cannot_land_has_the_reason_in_its_s
         return await make_ready(source, spec, *args)
 
     monkeypatch.setattr(autonomous_session, "make_ready", recorded)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: WHEEL)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: WHEEL)
     monkeypatch.setattr(worktree_module, "installed_upstream", lambda package: upstream if package == WHEEL else None)
     rig = await _rig(tmp_path, start=start)
 
@@ -440,9 +440,9 @@ WITHOUT_VLLM = Recipe(ROOT.base_image_digest, ROOT.launch)
 
 def _from_a_wheel(monkeypatch: pytest.MonkeyPatch) -> None:
     """vLLM installed from a wheel whose upstream commit nothing resolves."""
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: WHEEL)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: WHEEL)
     monkeypatch.setattr(worktree_module, "installed_upstream", lambda _package: None)
-    monkeypatch.setattr(autonomous_session, "installed_component_upstream", lambda _component: None)
+    monkeypatch.setattr(autonomous_session, "component_upstream", lambda _component: None)
 
 
 def _told(monkeypatch: pytest.MonkeyPatch) -> None:

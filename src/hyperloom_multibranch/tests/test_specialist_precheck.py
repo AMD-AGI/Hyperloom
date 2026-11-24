@@ -23,7 +23,7 @@ def rig(tmp_path, monkeypatch):
     (package / "__init__.py").write_bytes(b"from .config import VALUE\n")
     (package / "config.py").write_bytes(b"VALUE = 1\n")
     installed = PackageBase("demo_pkg", package, None, None)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     monkeypatch.setattr(worktree_module, "COMPONENT_LAYOUTS", LAYOUTS)
     base = SourceBase(tmp_path / "source")
     base.build(["demo"])
@@ -104,7 +104,7 @@ def test_a_patched_aiter_imports_its_csrc_from_the_image(tmp_path, monkeypatch, 
     (meta / "csrc" / "pa.py").write_bytes(b"KERNEL = 'pa'\n")
     layouts = {"aiter": ComponentLayout("aiter", "aiter")}
     installed = PackageBase("aiter", package, None, None)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     monkeypatch.setattr(worktree_module, "COMPONENT_LAYOUTS", layouts)
     base = SourceBase(tmp_path / "source")
     base.build(["aiter"])
@@ -134,7 +134,7 @@ def test_a_change_to_the_source_beside_the_package_does_not_stop_the_check(tmp_p
     installed = PackageBase("demo_pkg", package, "demo-pkg", version)
     sections = (LayoutSection("src/demo_pkg"), LayoutSection("src/csrc", META_BASE, "csrc"))
     layouts = {"demo": ComponentLayout("demo_pkg", "src/demo_pkg", sections)}
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     monkeypatch.setattr(worktree_module, "COMPONENT_LAYOUTS", layouts)
     base = SourceBase(tmp_path / "source")
     base.build(["demo"])

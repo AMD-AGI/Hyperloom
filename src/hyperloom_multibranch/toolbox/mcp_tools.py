@@ -17,6 +17,8 @@ blackboard's search and record reads are shared across branches, as the blackboa
   branch's head commit, or on the landed output of the test ``kernel_tune`` names (an
   :class:`~.analysis.AnalysisStarter`, the real toolbox);
 * ``poll_inbox`` reads the branch's inbox, one page at a time (:data:`POLL_INBOX_MAX_ITEMS` items at most);
+* ``option_review``, served where the session laid an option inventory, records the branch's verdicts on the options
+  the launch leaves unset (:class:`~.option_reviews.OptionReviews`) and answers what its review still leaves out;
 * the ``blackboard_*`` tools are the blackboard's own specialist tools (lookup, claim, release, search, record, branch log,
   brief), bound per call to the blackboard handle of the caller's branch.
 
@@ -61,6 +63,7 @@ from hyperloom.hosted.mcp_server import (
     ToolError,
     ToolForbidden,
 )
+from hyperloom.inference_optimizer.native_builds import OptionVerdict
 from hyperloom.measure.compile import LOADABLE_KERNEL_KINDS
 from hyperloom_multibranch.contracts.blackboard.interfaces import Blackboard, BlackboardError, StartupBriefProvider
 from hyperloom_multibranch.contracts.blackboard.records import InboxItem
@@ -75,6 +78,13 @@ from hyperloom_multibranch.contracts.toolbox import (
 )
 from hyperloom_multibranch.blackboard.tools import ERROR, blackboard_tools
 from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, AnalysisStarter
+from hyperloom_multibranch.toolbox.option_reviews import (
+    NOTE_CHARS,
+    OPTIONS_UNREVIEWED_CODE,
+    OptionReviews,
+    ReviewEntry,
+    ReviewRefused,
+)
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
 from hyperloom_multibranch.toolbox.tools.upstream_pr import DEFAULT_LIMIT, MAX_LIMIT, UPSTREAM_PR_TOOL
@@ -436,8 +446,11 @@ async def _own_record(
 
 
 def _submit_test(
-    toolbox: Toolbox, home: asyncio.AbstractEventLoop | None
+    toolbox: Toolbox, home: asyncio.AbstractEventLoop | None, reviews: OptionReviews | None
 ) -> Callable[[dict[str, Any], CallContext], Any]:
+    """The handler of ``submit_test``; with ``reviews``, a test is first held to its branch's option review
+    (:meth:`~.option_reviews.OptionReviews.check`)."""
+
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, str]:
         kind, purpose = arguments["kind"], arguments["purpose"]
         if (kind, purpose) not in _SPECIALIST_PAIR_VALUES:
@@ -449,6 +462,8 @@ def _submit_test(
         except ValueError as exc:  # MeasurementError and RecipeError both are
             raise InvalidParamsError(str(exc)) from exc
         try:
+            if reviews is not None:
+                reviews.check(request)
             return {"request_id": await on_home_loop(home, toolbox.submit_test(request))}
         except RequestRejected as exc:
             raise ToolError(f"rejected ({exc.code}): {exc.reason}") from exc
@@ -782,6 +797,8 @@ class SpecialistToolOptions:
     with the caller's branch from the token at every ``blackboard_brief``; without it the blackboard's own brief is returned.
     ``analysis`` starts ``start_analysis`` jobs (the real toolbox is one); without it that tool refuses by name.
     ``wait_poll_seconds`` is how often ``wait_test`` reads the record of the test it waits for.
+    ``option_reviews`` keeps each branch's review of the options the session's server takes and its launch leaves
+    unset; with it ``option_review`` is served, and without it (a session that laid no option inventory) it is not.
     """
 
     claim_ttl_seconds: float = 600.0
@@ -790,6 +807,7 @@ class SpecialistToolOptions:
     briefing_for: BriefingFor | None = None
     analysis: AnalysisStarter | None = None
     wait_poll_seconds: float = WAIT_POLL_SECONDS
+    option_reviews: OptionReviews | None = None
 
 
 def register_specialist_tools(
@@ -805,24 +823,34 @@ def register_specialist_tools(
         with contextlib.suppress(RuntimeError):
             toolbox_loop = asyncio.get_running_loop()
     server.attach_reply_annotator(reply_inbox(blackboards))
-    _register_submit_test(server, toolbox, toolbox_loop)
+    _register_submit_test(server, toolbox, toolbox_loop, options.option_reviews)
     _register_put_kernel_artifact(server, toolbox, toolbox_loop)
     _register_test_queries(server, toolbox, blackboards, toolbox_loop, options)
     _register_start_analysis(server, options.analysis, toolbox_loop)
     _register_poll_inbox(server, blackboards)
+    if options.option_reviews is not None:
+        _register_option_review(server, options.option_reviews)
     _register_blackboard_tools(server, blackboards, options)
 
 
-def _register_submit_test(server: McpServer, toolbox: Toolbox, home: asyncio.AbstractEventLoop | None) -> None:
+def _register_submit_test(
+    server: McpServer, toolbox: Toolbox, home: asyncio.AbstractEventLoop | None, reviews: OptionReviews | None
+) -> None:
+    description = (
+        "Submit a test of a recipe change for this branch; returns the request id once accepted. A profile of a "
+        "commit that already has one queued, running or measured is refused as profile_exists and names that "
+        "request: wait_test on it, or read the commit's op shares from the blackboard."
+    )
+    if reviews is not None:
+        description += (
+            f" A test that changes server arguments is refused as {OPTIONS_UNREVIEWED_CODE} while your branch's "
+            f"review ({_OPTION_REVIEW_TOOL}) leaves an option the launch does not set without a verdict."
+        )
     server.register(
         "submit_test",
-        description=(
-            "Submit a test of a recipe change for this branch; returns the request id once accepted. A profile of a "
-            "commit that already has one queued, running or measured is refused as profile_exists and names that "
-            "request: wait_test on it, or read the commit's op shares from the blackboard."
-        ),
+        description=description,
         schema=_SUBMIT_TEST,
-        handler=_submit_test(toolbox, home),
+        handler=_submit_test(toolbox, home, reviews),
         scopes=_SPECIALIST_SCOPES,
     )
 
@@ -894,6 +922,75 @@ def _register_poll_inbox(server: McpServer, blackboards: BlackboardFor) -> None:
         ),
         schema=_POLL_INBOX,
         handler=_poll_inbox(blackboards),
+        scopes=_SPECIALIST_SCOPES,
+    )
+
+
+_OPTION_REVIEW_TOOL = "option_review"
+#: How many of the options still without a verdict one reply names; the count says how many there are.
+_OPTION_REVIEW_REMAINING_NAMED = 30
+_OPTION_REVIEW: dict[str, Any] = {
+    "type": _OBJECT,
+    "properties": {
+        "entries": {
+            "type": _ARRAY,
+            "items": {
+                "type": _OBJECT,
+                "properties": {
+                    "option": {"type": _STRING, "minLength": 1, "description": "Any spelling the server lists."},
+                    "verdict": {"enum": [verdict.value for verdict in OptionVerdict]},
+                    "note": {"type": _STRING, "description": f"One line, {NOTE_CHARS} characters at most."},
+                },
+                "required": ["option", "verdict", "note"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["entries"],
+    "additionalProperties": False,
+}
+
+
+def _option_review(reviews: OptionReviews) -> Callable[[dict[str, Any], CallContext], Any]:
+    def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, object]:
+        entries = [
+            ReviewEntry(entry["option"], OptionVerdict(entry["verdict"]), entry["note"])
+            for entry in arguments["entries"]
+        ]
+        try:
+            standing = reviews.record(ctx.principal.branch, entries)
+        except ReviewRefused as exc:
+            raise ToolError(f"nothing recorded: {exc}") from exc
+        return {
+            "total": standing.total_unset,
+            "covered": standing.covered,
+            "remaining": len(standing.remaining),
+            "first_remaining": list(standing.remaining[:_OPTION_REVIEW_REMAINING_NAMED]),
+            "complete": standing.complete,
+            "candidates": list(standing.candidates),
+        }
+
+    return handle
+
+
+def _register_option_review(server: McpServer, reviews: OptionReviews) -> None:
+    server.register(
+        _OPTION_REVIEW_TOOL,
+        description=(
+            "Record your verdict on options the session's server takes and the launch leaves unset (the inventory "
+            "file your role names). Each entry names an option by any of its spellings, a verdict (candidate: you "
+            "will test it; no_effect_on_step: it cannot change the time of a decode step of this workload; "
+            "default_already: the launch already gets this behaviour by default, name the default you read in the "
+            "source; changes_workload_or_weights: it would change what is served or measured; not_usable_here: this "
+            "build, card or launch cannot run it) and a note of one line with the evidence, which is that option's "
+            "own: a review in which two options share a note fails the call. Entries accumulate over "
+            "calls, a later verdict on an option replacing your earlier one; the reply lists what is still without "
+            "a verdict, and a call with no entry only reads that. A test that changes server arguments is refused "
+            "until none is. An entry that cannot be taken fails the call, naming it, and nothing of that call is "
+            "recorded."
+        ),
+        schema=_OPTION_REVIEW,
+        handler=_option_review(reviews),
         scopes=_SPECIALIST_SCOPES,
     )
 

@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.measure.runner.native.server_options import inventory_path, read_inventory
 from hyperloom.measure.versions import socket_versions
 from hyperloom_multibranch.contracts.fork import ShareRequest
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
@@ -328,7 +329,8 @@ class Session:
 
     def _build_integrator(self, repo: ExperimentRepo, checks: SessionChecks, services: SessionServices) -> Integrator:
         """The integrator, writing as itself to the blackboard and the merge log, with the LLM patch resolver whose
-        spend the scheduler records."""
+        spend the scheduler records and the option inventory the peers laid in the toolbox directory, when they
+        laid one."""
 
         merger = LocalBlackboard(
             self._layout.blackboard, Writer(Role.INTEGRATOR, INTEGRATOR_WRITER), clock=self._clock.now
@@ -340,7 +342,11 @@ class Session:
         )
         records = MergeRecords(merger, DecisionLog(self._layout.merges, self._clock))
         integrator = BundlingIntegrator if self._settings.workload.bundles_merges else Integrator
-        return integrator(records, repo, checks, resolver, self._clock)
+        built = integrator(records, repo, checks, resolver, self._clock)
+        laid = inventory_path(self._layout.toolbox)
+        if laid is not None:
+            built.options = read_inventory(laid)
+        return built
 
     def _open_llm_roles(self, services: SessionServices) -> None:
         """The judge, and the playbook author and the curator CLOSE asks, each recording its spend on the blackboard."""

@@ -18,15 +18,12 @@ from typing import Any, TypeVar
 
 from hyperloom.contracts.recipe import ComponentChange, RecipeDelta
 from hyperloom.hosted.mcp_server import CallContext, InvalidParamsError, McpServer, ToolError
-from hyperloom.measure.compile import (
-    COMPONENT_LAYOUTS,
-    UnsupportedComponentError,
-    locate_installed_package,
-)
+from hyperloom.common.outside_facts.component_layout import CHECKOUT_BASE
+from hyperloom.measure.compile import COMPONENT_LAYOUTS, UnsupportedComponentError, locate_source
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST
 from hyperloom_multibranch.specialist.precheck import CheckFailed, check_change
-from hyperloom_multibranch.specialist.worktree import BranchWorktree, installed_upstream
+from hyperloom_multibranch.specialist.worktree import BranchWorktree, component_upstream
 
 _T = TypeVar("_T")
 
@@ -105,7 +102,7 @@ def register_worktree_tools(
         "worktree_patch",
         description=(
             "Store your worktree's change to one component, committed or not, as a patch; returns the delta and parent "
-            "to test. A component new on your head gets the upstream commit its installed package was built from."
+            "to test. A component new on your head gets the upstream commit its source came from."
         ),
         schema=_PATCH,
         handler=_patch(repo, worktrees),
@@ -130,8 +127,13 @@ def _check(worktrees: WorktreeFor) -> Callable[[dict[str, Any], CallContext], An
         layout = COMPONENT_LAYOUTS.get(component)
         if layout is None or not worktree.holds(component):
             raise InvalidParamsError(f"your worktree holds no source of {component}")
+        if layout.spec.source_base == CHECKOUT_BASE:
+            raise ToolError(
+                f"{component} is compiled from its checkout, not imported: submit_test builds your change before the "
+                "test, and a change that does not compile ends the test as compile_error with the compiler's lines"
+            )
         try:
-            package = locate_installed_package(layout)
+            package = locate_source(layout)
             compiled = await asyncio.to_thread(
                 _holding, worktree, lambda: check_change(worktree, component, layout, package)
             )
@@ -160,12 +162,10 @@ def _patch(repo: ExperimentRepo, worktrees: WorktreeFor) -> Callable[[dict[str, 
         change = ComponentChange(component, add_patches=(ref,))
         taken: dict[str, Any] = {"parent_commit": head, "patch": ref.to_document()}
         if all(present.component != component for present in (await repo.read_recipe(head)).components):
-            upstream = worktree.native_upstream(component) or await asyncio.to_thread(
-                installed_upstream, locate_installed_package(COMPONENT_LAYOUTS[component])
-            )
+            upstream = worktree.native_upstream(component) or await asyncio.to_thread(component_upstream, component)
             if upstream is None:
                 taken["note"] = (
-                    f"{component} is new on your head and its installed package names no commit it was built from: "
+                    f"{component} is new on your head and its source names no upstream commit it came from: "
                     "set upstream_repo and upstream_ref in the delta to the repository and full commit it came from"
                 )
             else:
