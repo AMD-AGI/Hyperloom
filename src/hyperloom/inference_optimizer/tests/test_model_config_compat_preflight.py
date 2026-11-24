@@ -728,7 +728,6 @@ def test_unsupported_model_fail_fast_emits_to_langfuse(tmp_path, monkeypatch):
         model,
         model_type="llava",
         architectures=["LlavaForConditionalGeneration"],
-        vision_config={"hidden_size": 1024},
         max_position_embeddings=4096,
     )
     sd = tmp_path / "session_vlm_lf"
