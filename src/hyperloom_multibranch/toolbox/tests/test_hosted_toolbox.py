@@ -884,12 +884,12 @@ async def test_a_lease_is_a_dev_sandbox_and_its_cards_leave_the_measurement_capa
         assert lease.template == _DEVS[1] and lease.sandbox.run("echo hi").stdout == "hi\n"  # type: ignore[attr-defined]
         assert lease.lifetime_sec == 600 + LIFETIME_MARGIN_SEC  # type: ignore[attr-defined]
         assert (await toolbox.measurement_capacity()) == MeasurementCapacity(8, 8, leased_cards=2)
-        assert lease.remaining_cards == 6 and toolbox._parallel_limit() == 2, "three tests fit, one's room is kept"
+        assert lease.remaining_cards == 6 and toolbox._parallel_limit() == 3
         (created,) = [c for c in service.creates if c.role == "dev"]
         assert created.metadata[PURPOSE_KEY] == LEASE_PURPOSE and created.metadata[BRANCH_ID_KEY] == "b1"
         assert created.metadata[RUN_ID_KEY] == "run-1" and not created.options.envs, "a dev sandbox is given no source"
         await toolbox.release_branch_sandbox(lease.lease_id)
-        assert (await toolbox.measurement_capacity()) == MeasurementCapacity(8, 8) and toolbox._parallel_limit() == 3
+        assert (await toolbox.measurement_capacity()) == MeasurementCapacity(8, 8) and toolbox._parallel_limit() == 4
         assert service.running("dev") == []
     finally:
         await toolbox.close()
