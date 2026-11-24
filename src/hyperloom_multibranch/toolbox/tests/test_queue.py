@@ -14,7 +14,6 @@ from hyperloom_multibranch.toolbox.queue import (
     State,
     WorkQueue,
     exempt_from_k,
-    sandbox_priority,
 )
 from hyperloom_multibranch.toolbox.tests.helpers import req
 
@@ -159,10 +158,6 @@ def test_a_new_policy_reprioritises_only_queued_tests_without_an_explicit_priori
     assert (queue.get("default").priority, queue.get("explicit").priority) == (0, 4)  # type: ignore[union-attr]
 
 
-def test_sandbox_priority_has_three_tiers() -> None:
-    assert [sandbox_priority(p) for p in range(5)] == [0, 0, 1, 1, 2]
-
-
 def test_a_policy_outside_the_contract_is_refused() -> None:
     with pytest.raises(ValueError, match="at least 1"):
         QueuePolicy(per_branch_k=0)
@@ -173,9 +168,6 @@ def test_a_policy_outside_the_contract_is_refused() -> None:
 def test_k_is_a_default_with_per_branch_overrides() -> None:
     policy = QueuePolicy(per_branch_k=2, branch_k={"slow": 1, "wide": 5})
     assert [policy.k_for(b) for b in ("other", "slow", "wide")] == [2, 1, 5]
-    draft = QueuePolicy(per_branch_k={"*": 3, "slow": 1})
-    assert (draft.per_branch_k, draft.k_for("slow"), draft.k_for("x")) == (3, 1, 3)
-    assert QueuePolicy(per_branch_k={"a": 4}).k_for("b") == 2, "a mapping without a default keeps the default of 2"
     with pytest.raises(ValueError, match="at least 1"):
         QueuePolicy(branch_k={"a": 0})
 

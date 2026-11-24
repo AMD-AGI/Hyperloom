@@ -14,13 +14,34 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common import confinement
+from hyperloom.measure.tests.bundle_factory import STAGING, STAGING_MANIFEST
 from hyperloom.measure.tests.gpu_free_host import (  # noqa: F401
     USES_REAL_GPUS_FLAG,
     idle_card_list,
     machine_without_readable_gpus,
 )
-from hyperloom.measure.tests.hosted_fixtures import freeze_session_base, staged_tool_cache
+from hyperloom.measure.tests.hosted_fixtures import freeze_session_base
+from hyperloom_multibranch.toolbox import hosted_executor
 from hyperloom_multibranch.toolbox.local_hosted import JIT_STORE_ENV
+from inference_suite import StagingError
+from inference_suite.contracts import NormalisedManifest
+
+
+def staged_tool_cache(tmp: Path, monkeypatch: pytest.MonkeyPatch) -> NormalisedManifest:
+    """Point the application's inference_suite tool cache at one holding a staging whose normalised manifest is
+    :data:`STAGING`; returns it."""
+    tools = tmp / "inference-suite-tools"
+    tools.mkdir(parents=True, exist_ok=True)
+    (tools / "staging_manifest.json").write_bytes(STAGING_MANIFEST)
+    monkeypatch.setenv("INFERENCE_SUITE_TOOL_CACHE", str(tools))
+
+    def identify(tool_cache: Path) -> NormalisedManifest:
+        if tool_cache != tools:
+            raise StagingError(f"the AgentX client staged in {tool_cache} cannot be read")
+        return STAGING
+
+    monkeypatch.setattr(hosted_executor, "normalised_manifest", identify)
+    return STAGING
 
 
 @pytest.fixture(autouse=True)

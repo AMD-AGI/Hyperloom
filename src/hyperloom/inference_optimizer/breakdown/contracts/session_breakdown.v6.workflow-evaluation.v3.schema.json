@@ -946,9 +946,6 @@
             "number",
             "null"
           ]
-        },
-        "ensemble_scores": {
-          "type": "object"
         }
       },
       "additionalProperties": false

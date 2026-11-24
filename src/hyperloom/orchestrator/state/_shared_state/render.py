@@ -16,7 +16,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK
 from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_FAILED_STATUSES
 from ...mcp_tool_names import qualified_context_tool_name
-from . import gap_rows, proposal_scores, variant_line, warm_start
+from . import gap_rows, variant_line, warm_start
 from .attempt_audit import _AUDIT_ACTIONS
 from .phase_state import GAP_SEVERITY_RANK
 
@@ -27,7 +27,6 @@ _FAILURE_EXCERPT_CHARS = 600
 _WARM_START_MAX_LINES = 12
 _GAPS_MAX_ENTRIES = 10
 _UNTESTED_PROPOSALS_MAX_ENTRIES = 12
-_PROPOSAL_SCORE_ROUNDS = 2
 
 # Ordered (key, label) projection for advisory ``model_arch``; empty/None keys dropped.
 _MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
@@ -486,29 +485,6 @@ class _RenderMixin:
                 )
             )
         return "\n".join(out)
-
-    def to_proposal_scores_summary(self) -> str:
-        """Render advisory multi-model proposal scores for Orchestration; no mean/sorting, rater identities anonymized. Empty when no recent round carries scores."""
-        rounds = [
-            r
-            for r in (self.specialist_rounds or [])
-            if isinstance(r, dict)
-            and isinstance(r.get("ensemble_scores"), dict)
-            and (r["ensemble_scores"].get("models") or {})
-        ]
-        if not rounds:
-            return ""
-        shown = rounds[-_PROPOSAL_SCORE_ROUNDS:]
-        labels = proposal_scores.rater_labels(shown)
-        rows: list[str] = [
-            "(Advisory only — one reference among many, NOT a ranking "
-            "directive. Scores are 0-10 likelihood-of-throughput-gain "
-            "priors from independent anonymized raters; weigh on merit "
-            "alongside gaps / KB / analysis.md.)",
-        ]
-        for round_row in shown:
-            rows.extend(proposal_scores.round_rows(round_row, labels))
-        return "\n".join(rows)
 
     def to_prompt_summary(self) -> str:
         """Compact, human-readable snapshot for prompt injection."""

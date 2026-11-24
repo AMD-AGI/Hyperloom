@@ -12,8 +12,9 @@ import pytest
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+from hyperloom.orchestrator.roles import MockCriticBackend
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
 SPECIALIST_ID = "spec-patch-1"
 _FREEFORM_PATCH = {"scope": "freeform", "mode": "patch", "task_description": "fix the scheduler crash"}

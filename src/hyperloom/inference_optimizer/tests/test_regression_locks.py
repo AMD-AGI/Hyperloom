@@ -13,12 +13,8 @@ import pytest
 from hyperloom.orchestrator.actions.executors.report import (
     ReportExecutor,
 )
-from hyperloom.orchestrator.roles import (
-    MockBackend,
-    MockTurn,
-    ScriptedPlan,
-)
 from hyperloom.orchestrator.roles.base import BackendError
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType, NoIntentEmitted
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.orchestrator.loop import conversation
