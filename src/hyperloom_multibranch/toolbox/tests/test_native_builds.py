@@ -19,6 +19,7 @@ import pytest
 
 from hyperloom.contracts.measurement import BuildPayment, FailureClass, Purpose, TestKind, TestRequest, Validity
 from hyperloom.contracts.recipe import ComponentPatches, Recipe, RecipeDelta
+from hyperloom.measure import farm as farm_module
 from hyperloom.measure import signing
 from hyperloom.measure.compile import EnvironmentCompiler, LocalBlobStore, PatchApplyError, UnsupportedComponentError
 from hyperloom.measure.jit.native.needs import BuildNotReady, BuildRef, RuntimeSourcesConflict
@@ -157,15 +158,18 @@ def rig(tmp_path: Path) -> Rig:
 
 
 def farm_of(rig: Rig, accepted: AcceptedMeasurement):
-    """The sheet's environment as a runner reads it, and the farm it lays."""
+    """The sheet's environment as a runner reads it, and the farm it lays over the image (whose interpreter has the
+    version its package records)."""
     environment = Environment.parse(accepted.environment.to_document(), "environment")
     named = {b.root_id: NamedBuild(b.root_id, b.key, b.manifest_sha256) for b in environment.builds}
-    farm = build_farm(
-        built_roots(environment.roots, SheetBuilds(rig.store, named, IMAGE)),
-        rig.tmp / "farm",
-        python=rig.image.python,
-        read_blob=lambda address: rig.blobs.get(address.removeprefix("sha256:")),
-    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(farm_module, "installed_version", fake.installed_version)
+        farm = build_farm(
+            built_roots(environment.roots, SheetBuilds(rig.store, named, IMAGE)),
+            rig.tmp / "farm",
+            python=rig.image.python,
+            read_blob=lambda address: rig.blobs.get(address.removeprefix("sha256:")),
+        )
     return environment, farm
 
 
