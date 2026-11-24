@@ -1204,7 +1204,6 @@ def test_chat_completion_does_not_request_a_stream():
 _MIGRATED_CALL_SITES = (
     "orchestrator/roles/codex.py",
     "orchestrator/roles/critic_agent.py",
-    "orchestrator/scoring/proposal_scorer.py",
 )
 
 # ``a.b.create`` attribute chains that only llm_config may call directly.

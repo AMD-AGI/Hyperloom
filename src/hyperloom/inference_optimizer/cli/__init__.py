@@ -29,7 +29,6 @@ from .backends import (
     CriticSetup,
     ModelRouting,
     _build_backends,
-    _build_proposal_scorer,
     _orchestration_banner,
     _resolve_orchestration_backend,
 )
@@ -207,7 +206,6 @@ def _build_orchestration_prompt(
     *,
     macro_cycle: int = 0,
     cycle_directive: str = "",
-    cycle_strategy: Mapping[str, Any] | None = None,
     phase: str = "",
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
@@ -231,9 +229,7 @@ def _build_orchestration_prompt(
             agentx_grading=context.agentx_grading,
             agentx_backend=context.agentx_backend,
         ),
-        cycle=PromptCycle(
-            macro_cycle=int(macro_cycle), cycle_directive=cycle_directive, cycle_strategy=cycle_strategy, phase=phase
-        ),
+        cycle=PromptCycle(macro_cycle=int(macro_cycle), cycle_directive=cycle_directive, phase=phase),
         assets=PromptAssets(rules_fragment_path=_orchestration_rules_fragment_path()),
     )
 
@@ -981,8 +977,6 @@ def _build_coordinator(
         advisory=AdvisoryServices(
             # KnowledgePlane facade (None when --degraded-pr).
             knowledge_plane=knowledge_plane,
-            # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
-            proposal_scorer=_build_proposal_scorer(args, session_dir),
         ),
     )
 

@@ -50,8 +50,10 @@ class _Reserved:
 
 
 def _recorded_as(judgement: Judgement) -> Conclusion:
-    """An inconclusive retest is not an accuracy failure, even when one of its measurements failed the gate."""
-    if judgement.accuracy is AccuracyVerdict.FAILED and judgement.verdict is not Verdict.INCONCLUSIVE:
+    """Neither an inconclusive retest nor a gain left without its retest is an accuracy failure, even when one of its
+    measurements failed the gate."""
+    unsettled = judgement.verdict in (Verdict.INCONCLUSIVE, Verdict.NEEDS_CONFIRM)
+    if judgement.accuracy is AccuracyVerdict.FAILED and not unsettled:
         return Conclusion.ACCURACY_FAILED
     return Conclusion.RECORDED_ONLY
 
@@ -93,8 +95,9 @@ class RuleGate:
         """The judgement is written against ``request``, the first measurement of the candidate.
 
         A commit whose branch has moved past ``request.parent_commit`` is recorded only, and ``RECORD_ONLY`` returned:
-        a gain measured against one parent must not land on another. A commit carrying ``fix`` registers its case as a
-        regression case of the new commit; a correctness fix cannot commit without one (``ValueError``).
+        a gain measured against one parent must not land on another. So is a provisional gain whose branch is not at
+        that parent, as no retest could land it. A commit carrying ``fix`` registers its case as a regression case of
+        the new commit; a correctness fix cannot commit without one (``ValueError``).
         """
         action = decide(judgement)
         if action is Action.COMMIT:
@@ -103,6 +106,10 @@ class RuleGate:
             # The scheduler may stop a specialist at any moment; a stop must not split a commit from its judgement.
             message = f"{request.request_id}: {judgement.verdict.value} {judgement.gain_pct:+.2f}%"
             if not await asyncio.shield(self._commit(request, judgement, fix, message)):
+                return Action.RECORD_ONLY
+        elif action is Action.RETEST:
+            if await self._repo.head(request.branch) != request.parent_commit:
+                await self._record(request, judgement)
                 return Action.RECORD_ONLY
         elif action is Action.RECORD_ONLY:
             await self._record(request, judgement)

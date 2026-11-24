@@ -925,7 +925,6 @@ class LangfuseEmitter:
             "phase": phase,
             "tick": drow.get("tick"),
             "metrics": dec.get("metrics"),
-            "proposal_scores": dec.get("proposal_scores"),
             "cost_tokens_total": cost_total,
             "cost_calls": (tokens.get("calls") or None),
         }

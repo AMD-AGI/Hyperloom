@@ -43,6 +43,29 @@ host the CLI defaults to `session/` under the current directory instead. Prefer
 
 ---
 
+## Upgrading from 1.2.x
+
+### Required: removed flags
+
+These flags are rejected with `unrecognized arguments`:
+
+* `--proposal-scoring`, `--no-proposal-scoring` and `--proposal-scorer-models`
+  (the advisory proposal scorer is removed; while it was off they changed
+  nothing): drop them.
+
+`INFERENCE_OPTIMIZER_PROPOSAL_SCORER_TIMEOUT_SEC` is no longer read and is
+silently ignored, so drop it.
+
+### Required: `session_breakdown.json` drops `ensemble_scores`
+
+The schema stays `v6.1`, but neither a specialist round's action row nor a
+Framework run row carries `ensemble_scores` any more. Only a run launched with
+`--proposal-scoring` wrote it. The action row is closed to other properties, so
+a breakdown whose action row holds the key no longer validates against the
+packaged schema. Consumers that read it should stop.
+
+---
+
 ## Upgrading from 1.1.x
 
 ### Required: launch through `hyperloom <command>`
@@ -193,6 +216,25 @@ without `context` now lists `model` and `framework` in `required_context`.
 Pass `context` explicitly.
 
 `hyperloom optimize` no longer sets `WORKSPACE_PATH`, which nothing read.
+
+### Required: the multi-branch image check is removed
+
+A multi-branch session no longer checks the rule pack's facts against its
+environment before PRELUDE.
+
+`HYPERLOOM_IMAGE_CHECK` is no longer read and is silently ignored, so drop it:
+`strict` no longer stops a session before PRELUDE, and a value that is no mode
+is no longer refused as a usage error.
+
+`python -m hyperloom.common.outside_facts.image_check` is removed. A session no
+longer writes the `image_check` field of `MB-manifest.json` or
+`MB-reports/image_check.json`; consumers that read them should stop. A manifest
+an earlier session wrote with the field still reads.
+
+A rule pack named by `HYPERLOOM_RULE_PACK` must drop the `image_check` block of
+every entry: a pack that keeps one fails every import of
+`hyperloom.common.outside_facts` with `RulePackError`. The shipped pack is
+version 25 and no longer holds `aiter_merged_view`.
 
 ### Required: quantization failure exits 4
 

@@ -138,11 +138,9 @@ class AdvisoryServices:
 
     Attributes:
         knowledge_plane: KnowledgePlane facade; pre-warms PR feed + advisory context.
-        proposal_scorer: Advisory multi-model specialist-proposal scorer.
     """
 
     knowledge_plane: Any = None
-    proposal_scorer: Any = None
 
 
 @dataclass(frozen=True)
@@ -186,8 +184,6 @@ class Coordinator:
         self.orch_prompt = OrchestrationPrompt(overrides={})
         # KnowledgePlane facade; pre-warms PR feed + advisory context.
         self.knowledge_plane: Any = advisory.knowledge_plane
-        # Advisory multi-model specialist-proposal scorer.
-        self.proposal_scorer: Any = advisory.proposal_scorer
         self._model_class_override: str = (settings.model_class or "").strip()
 
         # Validate every reactor has a backend wired.

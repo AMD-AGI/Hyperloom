@@ -51,6 +51,7 @@ provider-side combinations and what each one enables.
 | `LANGFUSE_HOST`        | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Base URL of your Langfuse deployment (for example, `https://langfuse.<your-domain>`). Used by both the live trace push and the offline `backfill_langfuse` CLI. |
 | `LANGFUSE`<br>`_PUBLIC_KEY`  | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Langfuse project public key (`pk-...`).                                                                                                                  |
 | `LANGFUSE`<br>`_SECRET_KEY`  | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Langfuse project secret key (`sk-...`).                                                                                                                  |
+| `GITHUB_TOKEN`         | No       | —    | GitHub token a multi-branch session's own process asks GitHub with for the specialists' upstream pull-request search (`upstream_pr_search`). Use a token that reads public repositories and nothing else: a fine-grained token with repository access "Public repositories" and no permission, or a classic token with no scope. `GH_TOKEN` is read when it is unset. `hyperloom-multibranch` reads it from its process environment, not from `.env`. It is not in the environment of a specialist's CLI or of a measurement; a dev or agent sandbox that runs without bubblewrap inherits it. Without it the search asks GitHub anonymously and the session logs one WARNING. See [Upstream pull-request search](../how-to/run-multibranch.md#upstream-pull-request-search). |
 
 ---
 
@@ -78,7 +79,6 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `ROCPC_VENV`                               | No                   | `/opt/rocprof-compute-venv` | Private venv that rocprof-compute's analyze mode runs in, created by `install.sh` from the tool's own `requirements.txt` so its exact pins cannot displace the serving image's numpy and pandas. `rocpc_profile.py` derives the same path. Without the venv, analyze degrades and profiling still collects. |
 | `INFERENCE_SUITE_TOOL_CACHE`               | No                   | `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}`<br>`/inference-suite-tools`                                               | Tool cache `install.sh` stages the pinned InferenceX client, GSM8K task and AgentX harness into; every benchmark round reads it and fetches nothing. See [Staging and pins](inference-suite.md#staging-and-pins). |
 | `HYPERLOOM_`<br>`RULE_PACK` | No | Unset (the pack shipped with the package) | Path to the rule pack, the YAML file that states the facts about projects outside this repository (aiter, SGLang, vLLM, PyTorch, the HIP runtime, argparse, Transformers, InferenceX log markers and variable names) that `hyperloom.common.outside_facts` binds for its readers. Read once, at the first import of `hyperloom.common.outside_facts` in each process. An empty or blank value raises `RulePackError`; unset it to read the shipped pack. A path that cannot be read, or a pack that fails validation, fails the import of every reader (`visible_devices`, `failure_signature`, ...) with the file and the entry named; nothing falls back to the shipped pack. A relative path resolves against each process's own working directory. Child processes inherit the variable, so a value that is valid on the host but names a file that is missing in a sandbox or container makes every process there fail at import. |
-| `HYPERLOOM_`<br>`IMAGE_CHECK` | No | `warn` | What `run_image_check` (in `hyperloom.common.outside_facts.image_check`), which checks the rule pack's facts against the environment once before a session measures anything, does with a fact that does not hold there: `warn` logs one warning naming each failing fact, its project and why, and goes on; `strict` also raises `ImageCheckFailed`, so the session stops before it spends anything; `off` checks nothing and asks the environment for nothing. Surrounding space and case are ignored; any other value raises `ValueError` naming the accepted ones. `python -m hyperloom.common.outside_facts.image_check` does not read it: the command line always checks, records `strict` in its report and exits 1 when a fact fails. |
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_SES`<br>`SION_DIR` | No (multi-node) | Unset | Last-resort session root for multi-node crash-log collection. Point it at one session dir, never at `$USER_DATA_PATH`. |
 
 ---
@@ -710,17 +710,16 @@ and how many file reads failed.
 
 ## EXPLORE pre-filters
 
-Three opt-in filters can remove variants from an EXPLORE round before any of
-them is benchmarked. All three are off by default; with every switch below
+Two opt-in filters can remove variants from an EXPLORE round before any of
+them is benchmarked. Both are off by default; with every switch below
 unset, a round runs exactly as it did before. They run once, before the first
-variant, in this order: measurement store, screen, projection.
+variant, in this order: measurement store, projection.
 
 A filter only removes variants. It never adds or reorders one, and none of its
 numbers reaches KEEP/REVERT, `current_best`, the journal or the knowledge base:
 every KEEP comes from a measured decision round. A removed variant is recorded
 in the round's `skipped_dup` with a reason (`measured_revert_before`,
-`screen_decisively_slower`, `projection_decisively_slower` or
-`projection_outranked`). It is not journaled or written to the tested ledger,
+`projection_decisively_slower` or `projection_outranked`). It is not journaled or written to the tested ledger,
 so a later round may propose it again.
 
 No filter ever drops a variant in a stack-revalidation round or a config replay
@@ -736,27 +735,6 @@ its default.
 |---|---|---|
 | `HYPERLOOM_MEASUREMENT_STORE` | unset (off) | Directory that records every decision round that REVERTed on performance, across sessions. A later variant whose exact launch REVERTed before is dropped (`measured_revert_before`) instead of measured again. A KEEP, an accuracy REVERT (`accuracy_drop` / `accuracy_unavailable`) and a failed round are never recorded, so they are always measured. The key covers the model, engine, GPU, workload signature, benchmark block, inherited args, warm or cold decision protocol, grading axis, KEEP threshold, image digest, engine / ROCm / aiter versions, the stack, the variant, the launch envs, and the content of every kernel overlay on `PYTHONPATH`. A launch is never keyed, and so always measured, when the image digest or engine version is unknown, a runtime override is in effect, or an overlay cannot be hashed. Safe to share between sessions; writes are atomic. |
 | `HYPERLOOM_MEASUREMENT_MAX_AGE_DAYS` | `14` | Records older than this many days are ignored. Negative values are treated as `0`, which ignores every record. |
-
-### Screen (reduced-GPU probe)
-
-A real engine probe on fewer GPUs, using Infera's vLLM benchmark script. The
-baseline probe is the round's stack, and each variant is probed on that stack,
-with the server args and envs the round would launch it with. It drops a variant only when the probe resolved the same kernels as the deployment
-did, read from both sides' logs; otherwise it returns the round untouched. A
-variant whose probe fails is kept. It needs at least three variants and
-`HYPERLOOM_INFERASIM_ROOT`. On the one grid it was measured against, the order
-did not transfer to fewer GPUs, so validate it on your deployment before relying
-on it.
-
-| Variable | Default | Description |
-|---|---|---|
-| `HYPERLOOM_EXPLORE_SCREEN` | off | Turns the screen on. |
-| `HYPERLOOM_EXPLORE_SCREEN_MARGIN_PCT` | `10` | Drop a variant that probes more than this many percent behind the probed stack (`screen_decisively_slower`). Measured on eight replicas, a gap this wide is one every replica reproduces. A non-positive value falls back to the default. |
-| `HYPERLOOM_EXPLORE_SCREEN_GPUS` | `1` | GPUs the probe runs on, capped at the deployment's TP. |
-| `HYPERLOOM_EXPLORE_SCREEN_MODEL` | the config's model | Model the probe loads, for example a smaller checkpoint of the same architecture. |
-| `HYPERLOOM_EXPLORE_SCREEN_LAYERS` | all | Truncate the probed model to this many hidden layers. |
-| `HYPERLOOM_EXPLORE_SCREEN_ATTENTION_BACKEND` | the deployment's | Attention backend pinned onto the probe. By default it is read from the deployment's `--attention-backend`, else from the kernels the session's own benchmark logged. A variant that sets the backend itself still wins. |
-| `HYPERLOOM_EXPLORE_SCREEN_TIMEOUT_SEC` | `1800` | Wall-clock limit for one probe. A probe that times out is kept. |
 
 ### Projection (InferaSim)
 
@@ -785,7 +763,7 @@ Without it every projection fails, and the round is benchmarked untouched.
 | `HYPERLOOM_EXPLORE_PROJECTION_MARGIN_PCT` | `15` | Simulate mode: drop a variant projected more than this many percent behind the stack (`projection_decisively_slower`). The default sits above the 9.7% median output-throughput error simulate mode scored on held-out AgentX configurations. A non-positive value falls back to the default. |
 | `HYPERLOOM_EXPLORE_PROJECTION_CALIBRATED_MARGIN_PCT` | `5` | The margin when both the stack and the variant are calibrated against an in-regime anchor (regime distance 0); otherwise the simulate margin applies. The default is a placeholder until the gap error between two calibrated configurations has been measured. |
 | `HYPERLOOM_EXPLORE_PROJECTION_TOP_K` | `5` | Of the variants that are not decisively behind, benchmark only the top K by projected gain; the rest are dropped (`projection_outranked`). `0` turns the cap off. On held-out AgentX stack ladders, the DES top 5 contained the best configuration 94% of the time, against 47% for the single top pick. |
-| `HYPERLOOM_INFERASIM_ROOT` | unset | Path to the Infera checkout; it is put first on `sys.path`. Required by the screen and by harvesting, and by the projection unless Infera is installed. |
+| `HYPERLOOM_INFERASIM_ROOT` | unset | Path to the Infera checkout; it is put first on `sys.path`. Required by harvesting, and by the projection unless Infera is installed. |
 | `HYPERLOOM_INFERASIM_MODE` | `auto` | `auto` projects the round in benchmark (calibrated) mode when the anchor store already holds an in-regime anchor for the stack, and in simulate mode otherwise. It is resolved once, on the stack, and never boots a server. `simulate` never reads an anchor. `benchmark` requires an anchor, harvests one on a miss, and fails closed (the variant is benchmarked) when none can be had. Any other value is an error, and the round is benchmarked untouched. |
 | `HYPERLOOM_INFERASIM_ESTIMATOR` | `des` | `des` replays a closed-loop client at the round's concurrency (10 requests per client, between 64 and 4,000). `analytical` selects the closed form, which ranked held-out configurations far worse. Any other value is an error. |
 | `HYPERLOOM_INFERASIM_MODEL` | inferred | InferaSim model preset to project, for example `gpt_oss_120B`. By default it is inferred from the model path: the most specific match wins, and a distilled checkpoint uses its student. With no match and neither this nor `HYPERLOOM_INFERASIM_WORKLOAD` set, the round is benchmarked. |
@@ -1500,6 +1478,7 @@ The image is not required. `scripts/hosted_app_image/build_layer.sh --out <dir> 
 |----------|----------|-------------|
 | `HYPERLOOM_SOURCE_REPO` | Yes | `OWNER/NAME` on GitHub, or a git URL or path, of the Hyperloom source to run. A path or `file://` URL may name a mirror another account owns (in a container that maps one id, the host root's mirror shows as 65534): the fetch from it, and only that fetch, runs with a global git config in `${TMPDIR:-/tmp}` whose `safe.directory` names the mirror's resolved path and its `.git`, nothing else, so no system-wide `safe.directory` is needed. |
 | `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built in a new mode-0700 directory below the container's temporary directory, never on the shared storage, where another account of the group could put a wheel of its own in its place, and only that wheel is installed (`--no-deps --force-reinstall`, so a new commit replaces an old one) into the image's framework Python environment (`/opt/venv` when it exists, else `$PYTHON`, else `python3`, the order `install.sh` uses) when this account can write it, else into `${TMPDIR:-/tmp}/hyperloom-venv` beside it (see above); the Python of that environment runs the entry. The runtime dependencies are resolved there by the `install.sh` the entry runs before it hands the run over. That environment records the installed commit in `.hyperloom-install`; a container that already holds it installs nothing, and a new container builds the wheel again (a depth-1 fetch of the commit and a `pip wheel` of it). |
+| `HYPERLOOM_USER_DATA_PATH` | No | A data root the deployment names in place of the `USER_DATA_PATH` the host sets: a host may reserve `USER_DATA_PATH` to itself and point it at the submitting user's directory, while the deployment keeps hosted sessions under one shared root. When it is set and not empty, `app_bootstrap.sh` exports `USER_DATA_PATH` with its value before any check, logging one line on stderr that names both values, so the absolute-path and writability checks, the entry and the multi-branch command all see the new root alone; empty or unset, `USER_DATA_PATH` is used as the host set it. Only the bootstrap reads it: a run started without the bootstrap ignores it. A restarted multi-branch run finds its session through `session.json` in `HYPERLOOM_STATE_DIR` (the session directory an earlier start recorded), not through `USER_DATA_PATH`, so changing this value moves only sessions started afterwards. The root must be writable by every account of the run (the bootstrap and the entry refuse one that is not, naming `USER_DATA_PATH` and the path) and should be a directory of the deployment's group with the setgid bit (`chmod 2775`), so what each leg makes below it takes that group. |
 | `HYPERLOOM_CODE_REVISION` | Set by the script | The commit id, exported before the entry starts: a wheel has no `.git` to read it from. |
 | `HYPERLOOM_HOST_LAYER` | Set by `start.sh` | The layer's own directory. The entry launches agents under bubblewrap only with its `bin/bwrap`, never one on `PATH`; whitespace around the value is ignored, and unset, blank or relative, no launch of the run uses bubblewrap (see [Agent isolation](#agent-isolation)). |
 

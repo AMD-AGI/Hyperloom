@@ -212,7 +212,7 @@ class RecordingLifecycle:
         self.repairs[branch] = task.repair
         self.k[branch] = 1
 
-    async def stop(self, branch: str) -> None:
+    async def stop(self, branch: str, *, finish_tests: bool = False) -> None:
         del self.running[branch]
         del self.briefs[branch]
         del self.repairs[branch]

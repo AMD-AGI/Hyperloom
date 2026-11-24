@@ -43,8 +43,11 @@ async def _measure(root: Path, branch: str, request_id: str, parent: str, change
     await toolbox.write_result(result(request_id))
 
 
-async def diverged(repo: GitExperimentRepo, blackboard_root: Path, root: str, base: Recipe, branch: str) -> Diverged:
-    """``s0`` commits chunked prefill, which the integrator merges; ``branch`` commits an aiter env on the root."""
+async def diverged(
+    repo: GitExperimentRepo, blackboard_root: Path, root: str, base: Recipe, branch: str, own_value: float = 2.0
+) -> Diverged:
+    """``s0`` commits chunked prefill, which the integrator merges at a recorded 3.1; ``branch`` commits an aiter env on
+    the root, recorded at ``own_value``."""
 
     gate, integrator = _as(blackboard_root, Role.GATE), _as(blackboard_root, Role.INTEGRATOR)
     await repo.create_branch("s0", root)
@@ -53,7 +56,7 @@ async def diverged(repo: GitExperimentRepo, blackboard_root: Path, root: str, ba
     await gate.write_judgement(JudgementWrite("r0", judgement(3.0, ("r0",)), Conclusion.COMMITTED, merged))
     own = await repo.commit(branch, root, apply(base, OWN), "aiter")
     await _measure(blackboard_root, branch, "r1", root, OWN, "attention")
-    await gate.write_judgement(JudgementWrite("r1", judgement(2.0, ("r1",)), Conclusion.COMMITTED, own))
+    await gate.write_judgement(JudgementWrite("r1", judgement(own_value, ("r1",)), Conclusion.COMMITTED, own))
     onto = await repo.commit_integration(root, CHUNKING, (merged,))
     await _as(blackboard_root, Role.TOOLBOX).write_request(request("m0", intent("integration", root, "merge", merged)))
     await integrator.record_merge_attempt(MergeAttempt((merged,), root, request_id="m0"))

@@ -35,7 +35,8 @@ from hyperloom_multibranch.scheduling.budget import (
     explore_gpu_seconds,
 )
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.explore import spent_gpu_seconds
+from hyperloom_multibranch.scheduling.explore import ExploreWindow, confirm_seconds, spent_gpu_seconds
+from hyperloom_multibranch.scheduling.stops import SessionStopReason
 
 _HOUR = 3600.0
 #: A 12-hour session's PRELUDE left about 710 minutes, and one test of its workload took about 11.
@@ -128,6 +129,36 @@ def test_a_review_s_pause_moves_the_hard_stop_unless_it_was_brought_forward() ->
     assert hard_stop.extend(900.0) == budget.hard_stop_at + 900.0
     brought = hard_stop.bring_forward()
     assert hard_stop.extend(900.0) == brought
+
+
+def _window(deadline: float) -> ExploreWindow:
+    """An EXPLORE of a session ending at ``deadline``, one test of whose workload takes :data:`_ROOT_TEST_SECONDS`."""
+
+    return ExploreWindow("root", "root", 0.0, deadline, _ROOT_TEST_SECONDS, math.inf, math.inf, (), ())
+
+
+def test_a_merge_waiting_for_its_confirm_gets_one_test_where_explore_ends_on_its_reserve() -> None:
+    budget = SessionBudget.from_hours(12, 0.0)
+    explore_end, ended = budget.explore_end(_HOUR, _ROOT_TEST_SECONDS), SessionStopReason.TIME_EXHAUSTED
+
+    assert confirm_seconds(_window(budget.deadline), ended, explore_end, math.inf) == _ROOT_TEST_SECONDS
+
+
+def test_a_merge_gets_no_time_for_a_confirm_that_would_end_past_the_deadline_or_the_caller_s_cap() -> None:
+    budget = SessionBudget.from_hours(12, 0.0)
+    window, ended = _window(budget.deadline), SessionStopReason.JUDGE_STOPPED
+    too_late = budget.deadline - _ROOT_TEST_SECONDS + 1.0
+
+    assert confirm_seconds(window, ended, too_late, math.inf) == 0.0
+    assert confirm_seconds(window, ended, _HOUR, _HOUR + _ROOT_TEST_SECONDS - 1.0) == 0.0
+    assert confirm_seconds(window, ended, _HOUR, _HOUR + _ROOT_TEST_SECONDS) == _ROOT_TEST_SECONDS
+
+
+@pytest.mark.parametrize("ended", [SessionStopReason.GPU_HOURS_EXHAUSTED, SessionStopReason.NO_MEASUREMENT_CARDS])
+def test_a_merge_gets_no_time_for_its_confirm_once_explore_ended_out_of_gpu_hours_or_cards(
+    ended: SessionStopReason,
+) -> None:
+    assert confirm_seconds(_window(12 * _HOUR), ended, _HOUR, math.inf) == 0.0
 
 
 def test_a_gpu_hour_budget_ends_explore_where_only_finals_share_is_left() -> None:

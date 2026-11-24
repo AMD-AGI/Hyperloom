@@ -65,6 +65,7 @@ _ERR_METHOD = -32601
 _ERR_PARAMS = -32602
 _ERR_INTERNAL = -32603
 _ERR_FORBIDDEN = -32001
+_CLIENT_GONE = (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)
 
 
 class ToolForbidden(PermissionError):
@@ -246,13 +247,14 @@ def _nothing_to_keep() -> None:
 @dataclass(frozen=True)
 class PostReply:
     """The answer to one POST; call ``keep`` just before ``body`` is written to the client, and ``drop`` if the
-    write fails."""
+    write fails. ``tools`` names the registered tools the POST called, for the log."""
 
     status: HTTPStatus
     body: Any
     initialized: bool = False
     keep: Callable[[], None] = _nothing_to_keep
     drop: Callable[[], None] = _nothing_to_keep
+    tools: str = ""
 
 
 class McpServer:
@@ -479,6 +481,13 @@ class McpServer:
             done.set()
             thread.join()
 
+    def _tools_called(self, payload: Any) -> str:
+        """Registered names only: a name the client made up may be a token, which is never logged."""
+        items = payload if isinstance(payload, list) else [payload]
+        params = [item.get("params") for item in items if isinstance(item, dict) and item.get("method") == "tools/call"]
+        names = [str(each.get("name")) for each in params if isinstance(each, dict)]
+        return ", ".join(name for name in names if name in self._tools)
+
     def handle_post(self, principal: McpPrincipal, presented: str, body: bytes) -> PostReply:
         """Run one POST body: what to send (status, the JSON reply, ``None`` for no content, whether it initialized)."""
         try:
@@ -493,7 +502,7 @@ class McpServer:
         keep, drop = (notes.keep, notes.drop) if notes is not None else (_nothing_to_keep, _nothing_to_keep)
         if reply is None:
             return PostReply(HTTPStatus.ACCEPTED, None, keep=keep, drop=drop)
-        return PostReply(HTTPStatus.OK, reply, _mentions_initialize(payload), keep, drop)
+        return PostReply(HTTPStatus.OK, reply, _mentions_initialize(payload), keep, drop, self._tools_called(payload))
 
     # -- lifecycle ---------------------------------------------------------------------------------------------
 
@@ -554,15 +563,28 @@ def _make_handler(server: McpServer) -> type[BaseHTTPRequestHandler]:
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - signature of the base class
             logger.debug("MCP request handled")
 
-        def _send(self, status: HTTPStatus, body: Any = None, headers: Mapping[str, str] | None = None) -> None:
+        def _send(
+            self, status: HTTPStatus, body: Any = None, headers: Mapping[str, str] | None = None, tools: str = ""
+        ) -> bool:
+            """Write one reply; ``False``, with one log line, when the client has closed the connection."""
             raw = b"" if body is None else json.dumps(body).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(raw)))
             for key, value in (headers or {}).items():
                 self.send_header(key, value)
-            self.end_headers()
-            self.wfile.write(raw)
+            try:
+                self.end_headers()
+                self.wfile.write(raw)
+            except _CLIENT_GONE:
+                logger.info(
+                    "client %s:%s closed the connection before its %d reply was written; tool calls: %s",
+                    *self.client_address[:2],
+                    status,
+                    tools or "none",
+                )
+                return False
+            return True
 
         def _on_path(self) -> bool:
             if self.path.split("?", 1)[0] == MCP_PATH:
@@ -592,11 +614,12 @@ def _make_handler(server: McpServer) -> type[BaseHTTPRequestHandler]:
             reply = server.handle_post(principal, presented, self.rfile.read(length))
             headers = {SESSION_HEADER: uuid.uuid4().hex} if reply.initialized else None
             reply.keep()
+            delivered = False
             try:
-                self._send(reply.status, reply.body, headers)
-            except BaseException:
-                reply.drop()
-                raise
+                delivered = self._send(reply.status, reply.body, headers, reply.tools)
+            finally:
+                if not delivered:
+                    reply.drop()
 
     return Handler
 
