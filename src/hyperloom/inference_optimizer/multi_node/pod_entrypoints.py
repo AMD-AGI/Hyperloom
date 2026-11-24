@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+import inference_suite.multinode
 from hyperloom_common import aiter_jit_cache
 
 from ._internal.server_args_safety import ServerArgsRejected, prepare_shell_safe_extra_args
@@ -31,7 +32,13 @@ def read_pod_script(name: str) -> str:
 
 KERNEL_NODE_OPS_DEPS = (Path(aiter_jit_cache.__file__).resolve(), _SCRIPTS_DIR / "patch_path_safety.py")
 SHAPE_GATE_DEPS = (_SCRIPTS_DIR / "sglang_shape_gate.py",)
-LAUNCHER_DEPS = (Path(__file__).parent / "_internal" / "server_args_safety.py", *SHAPE_GATE_DEPS)
+#: The Infera engine command the launcher and the PD launch both build; stdlib only, shipped beside the launcher.
+INFERA_ENGINE_DEPS = (Path(inference_suite.multinode.__file__).with_name("infera_engine.py"),)
+LAUNCHER_DEPS = (
+    Path(__file__).parent / "_internal" / "server_args_safety.py",
+    *SHAPE_GATE_DEPS,
+    *INFERA_ENGINE_DEPS,
+)
 
 
 def read_bundled_pod_python_script(main: str, deps: tuple[Path, ...]) -> str:

@@ -422,6 +422,9 @@ omit = [
     # tests do run (``scripts/tests`` is in ``testpaths``); it is the measured
     # denominator they stay out of, not the suite.
     "scripts/*",
+    # The host-side PD driver: sent over SSH and run by ``python3 -`` on each host, and it ptraces the server it
+    # replaces, so its tests run it in a subprocess the coverage run does not follow.
+    "src/inference_suite/multinode/remote_driver.py",
     # CLI drivers.
     "src/hyperloom/inference_optimizer/cli/__init__.py",
     "src/hyperloom/inference_optimizer/cli/session_resume.py",
