@@ -135,10 +135,6 @@ class GitHubUnavailable(RuntimeError):
         self.status = status
 
 
-class DiffRefused(GitHubUnavailable):
-    """GitHub knows the pull request and serves no diff of it."""
-
-
 @dataclass(frozen=True)
 class PullRequest:
     """A pull request as GitHub serves it."""
@@ -157,7 +153,7 @@ def _token_hint() -> str:
     """What to do about a refusal of a request that was made without a token."""
     if token_configured():
         return ""
-    return "; the host has no GITHUB_TOKEN or GH_TOKEN, and an anonymous search is allowed very few requests"
+    return "; the host has no GITHUB_TOKEN or GH_TOKEN, and an anonymous host is allowed very few requests"
 
 
 def _wait_sec(refused: urllib.error.HTTPError) -> int | None:
@@ -282,15 +278,14 @@ def pr_diff(repo_url: str, number: int, *, timeout_sec: float = _PR_TIMEOUT_SEC)
 
     Raises:
         ValueError: ``repo_url`` is not a GitHub repository URL.
-        DiffRefused: GitHub serves no diff of this pull request.
-        GitHubUnavailable: GitHub could not be asked, or refused for another reason.
+        GitHubUnavailable: GitHub could not be asked, refused, or serves no diff of this pull request.
     """
     path = f"{_repo_path(repo_url)}/pulls/{number}"
     try:
         body = _get(path, accept=_DIFF, asked=f"the diff of pull request {number}", timeout_sec=timeout_sec)
     except GitHubUnavailable as exc:
         if exc.status in _HTTP_DIFF_REFUSED:
-            raise DiffRefused(
+            raise GitHubUnavailable(
                 f"GitHub serves no diff of pull request {number} (HTTP {exc.status}): it is too large", exc.status
             ) from None
         raise
@@ -303,7 +298,6 @@ build_query = _build_query
 __all__ = [
     "MAX_OR_TERMS",
     "PERF_TERMS",
-    "DiffRefused",
     "GitHubUnavailable",
     "PullRequest",
     "SearchAnswer",

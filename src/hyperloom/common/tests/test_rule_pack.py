@@ -177,13 +177,6 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
         "pytorch/pytorch",
         "ggml-org/llama.cpp",
     ],
-    "UPSTREAM_PR_REPO_OF": {
-        "sglang": "sgl-project/sglang",
-        "vllm": "vllm-project/vllm",
-        "aiter": "ROCm/aiter",
-        "pytorch": "pytorch/pytorch",
-        "llamacpp": "ggml-org/llama.cpp",
-    },
 }
 
 Facts = dict[str, Any]

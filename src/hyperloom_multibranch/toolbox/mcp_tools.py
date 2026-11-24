@@ -40,6 +40,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
+from hyperloom.agents.framework.sources.github import MAX_OR_TERMS
 from hyperloom.common.outside_facts import (
     TUNABLEOP_ENABLED_ENV,
     TUNABLEOP_TABLE_ENV,
@@ -75,13 +76,7 @@ from hyperloom_multibranch.blackboard.tools import ERROR, blackboard_tools
 from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, AnalysisStarter
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
-from hyperloom_multibranch.toolbox.tools.upstream_pr import (
-    DEFAULT_LIMIT,
-    DIFF_CHARS,
-    MAX_KEYWORDS,
-    MAX_LIMIT,
-    UPSTREAM_PR_TOOL,
-)
+from hyperloom_multibranch.toolbox.tools.upstream_pr import DEFAULT_LIMIT, DIFF_CHARS, MAX_LIMIT, UPSTREAM_PR_TOOL
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.blackboard.learning_search import LearningFinder
@@ -252,7 +247,7 @@ _UPSTREAM_PR_GUIDE = (
     f"required, the GitHub URL of one of {', '.join(UPSTREAM_PR_REPOS)}. A search takes params.keywords, the words or "
     "phrases to look for in a pull request's title, body and comments, and any one of them matches: a string is split "
     "at spaces and commas into words, a list keeps each entry whole, so a phrase is an entry of a list. Only the "
-    f"first {MAX_KEYWORDS} are searched for. The search matches words, not parts of one, and not the paths a pull "
+    f"first {MAX_OR_TERMS} are searched for. The search matches words, not parts of one, and not the paths a pull "
     "request changes. "
     f"params.limit (default {DEFAULT_LIMIT}, at most {MAX_LIMIT}) and params.states (open by default; merged, closed "
     "or all search pull requests of every state) are optional. Each candidate has its ref, title and url. The result "
@@ -262,10 +257,12 @@ _UPSTREAM_PR_GUIDE = (
     f"search: one page of at most {DIFF_CHARS} characters, with diff_chars (the characters of the whole diff), "
     "file_chars (those of each path's part of it) and next_offset. A next_offset that is not null is where the diff "
     "goes on: ask again with it as params.offset until next_offset is null. params.file, a path of file_chars, reads "
-    "that path's part alone, and params.offset then counts within that part. The tool runs in the toolbox's host "
-    "process and asks GitHub; its result arrives in poll_inbox. A GitHub that cannot be asked fails the job and says "
-    "why, which is not an empty answer: a failure that names a wait is a spent rate limit, so ask again after it; "
-    "after any other, go on without this tool."
+    "that path's part alone, and params.offset then counts within that part. A read of offset 0 downloads the diff, "
+    "and the pages and paths you read after it come from that download, whatever the pull request became since. The "
+    "tool runs in the toolbox's host process and asks GitHub; its result arrives in poll_inbox. A GitHub that cannot "
+    "be asked fails the job and says why, which is not an empty answer: a failure that names a wait is a spent rate "
+    "limit, so ask again after it; after a token GitHub refuses or a GitHub that cannot be reached, go on without "
+    "this tool."
 )
 
 

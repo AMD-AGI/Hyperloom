@@ -12,6 +12,8 @@ a monitor service is the framework agent's own (host configuration only: a speci
 
 A diff is read a page at a time (:data:`DIFF_CHARS`): a result says how long the diff is, how long the part of each
 path is and where the next page starts, and a request names the offset to go on from, or one path to read alone.
+The pages of a diff are one download of it: a pull request may move between two requests, so the read of offset 0
+downloads the diff and the tool holds it for the later pages and paths the same branch reads.
 
 Pull-request text is data: titles, paths and diffs are in the result, and the summary carries a ref and a title only.
 """
@@ -29,7 +31,6 @@ from hyperloom_common.unified_diff import touched_paths
 from hyperloom.agents.framework.models import Candidate, CandidateSearchRequest, PRMonitorConfig
 from hyperloom.agents.framework.sources import SourceConfigError, enumerate_candidates
 from hyperloom.agents.framework.sources.github import (
-    MAX_OR_TERMS,
     PERF_TERMS,
     GitHubUnavailable,
     build_query,
@@ -44,8 +45,6 @@ from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolFailure
 UPSTREAM_PR_TOOL = "upstream_pr_search"
 MAX_LIMIT = 20
 DEFAULT_LIMIT = 10
-#: The keywords of a search that GitHub is asked for: its first ones.
-MAX_KEYWORDS = MAX_OR_TERMS
 #: The characters of a diff one result carries: a page of it.
 DIFF_CHARS = 60_000
 _FILE_SECTION = re.compile(r"(?m)^(?=diff --git )")
@@ -105,16 +104,20 @@ class PullRequestDiff:
 _BREAKS_A_PHRASE = str.maketrans({'"': " ", "\\": " "})
 
 
+def _words(keyword: str) -> str:
+    """What GitHub is asked to find for ``keyword``: its words, in lower case, one space apart."""
+    return " ".join(keyword.lower().translate(_BREAKS_A_PHRASE).split())
+
+
 def _phrases(keywords: tuple[str, ...]) -> tuple[str, ...]:
     """Each of ``keywords`` as a quoted phrase of a GitHub search. Unquoted, GitHub requires the leading words of a
     keyword of several words of every result, whatever the other keywords are, and reads a qualifier in a keyword."""
-    words = (" ".join(keyword.lower().translate(_BREAKS_A_PHRASE).split()) for keyword in keywords)
-    return tuple(f'"{word}"' for word in words if word)
+    return tuple(f'"{_words(keyword)}"' for keyword in keywords)
 
 
 def search_github(search: UpstreamSearch) -> Found:
     """The pull requests GitHub's search finds for ``search``: those that hold any one of its first
-    :data:`MAX_KEYWORDS` keywords, held to the caller's states.
+    :data:`~hyperloom.agents.framework.sources.github.MAX_OR_TERMS` keywords, held to the caller's states.
 
     Raises:
         GitHubUnavailable: GitHub could not be asked or refused (never an empty list for that).
@@ -202,12 +205,16 @@ def build_search(params: Mapping[str, Any]) -> UpstreamSearch:
     states = _strings(params.get("states")) or _OPEN_ONLY
     if not set(states) <= _STATES:
         raise InvalidRequest(f"states must come from {sorted(_STATES)}")
+    keywords = _strings(params.get("keywords"))
+    wordless = [keyword for keyword in keywords if not _words(keyword)]
+    if wordless:
+        raise InvalidRequest(f"keyword {wordless[0]!r} holds no word to search for")
     monitor_url = str(params.get("pr_monitor_url") or "").strip()
     request = CandidateSearchRequest(
         repo_url=repo_url,
         max_search_candidates=limit,
         pr_monitor=PRMonitorConfig(monitor_url) if monitor_url else None,
-        keywords=_strings(params.get("keywords")),
+        keywords=keywords,
         search_modes=(_MONITOR, _GITHUB) if monitor_url else (_GITHUB,),
     )
     number, offset, file = _number(params), _offset(params), str(params.get("file") or "").strip()
@@ -255,9 +262,8 @@ def _page_end(text: str, offset: int) -> int:
     return text.rfind("\n", offset, end) + 1 or end
 
 
-def _page(search: UpstreamSearch) -> ToolOutput:
-    """One page of the diff of the pull request ``search`` names, with what is left to read of it."""
-    pr = _read(search)
+def _page(pr: PullRequestDiff, search: UpstreamSearch) -> ToolOutput:
+    """The page ``search`` reads of the diff of ``pr``, with what is left to read of it."""
     parts = _file_parts(pr.diff)
     text = _paged_text(pr, parts, search)
     end = _page_end(text, search.offset)
@@ -286,11 +292,8 @@ def _page(search: UpstreamSearch) -> ToolOutput:
     )
 
 
-def _answer(enumerate_fn: Enumerate, search: UpstreamSearch) -> ToolOutput:
-    """A page of the diff of the pull request ``search`` names, or the candidates ``enumerate_fn`` finds for it."""
-    if search.number is not None:
-        return _page(search)
-    found = enumerate_fn(search)
+def _candidates(found: Found, search: UpstreamSearch) -> ToolOutput:
+    """What ``search`` ``found``, with how many pull requests the limit left out."""
     prs = [{"ref": c.ref, "title": c.title, "url": c.html_url} for c in found.candidates]
     not_shown = None if found.matched is None else found.matched - len(prs)
     shown = f"{len(prs)} of {found.matched}" if not_shown else str(len(prs))
@@ -317,19 +320,41 @@ class UpstreamPrSearch:
 
     def __init__(self, enumerate_fn: Enumerate = search_github) -> None:
         self._enumerate = enumerate_fn
+        #: The diff each branch last downloaded of a pull request, by branch, repository and number.
+        self._held: dict[tuple[str, str, int | None], PullRequestDiff] = {}
 
     def validate(self, request: ToolRequest) -> None:
         build_search(request.params)
 
+    def _diff(self, branch: str, search: UpstreamSearch) -> PullRequestDiff:
+        """The diff ``search`` reads a page of: downloaded by a read of offset 0 (of one path only when ``branch``
+        holds no diff of the pull request), else the one that download left.
+
+        Raises:
+            GitHubUnavailable: GitHub could not be asked or refused.
+            ToolFailure: The offset goes on from a diff the tool does not hold.
+        """
+        key = (branch, repo_slug(search.request.repo_url).lower(), search.number)
+        if not search.offset and (not search.file or key not in self._held):
+            self._held[key] = _read(search)
+        elif key not in self._held:
+            raise ToolFailure(
+                f"offset {search.offset} goes on from a diff of PR:{search.number} this toolbox does not hold: read "
+                "it again from offset 0"
+            )
+        return self._held[key]
+
+    def _answer(self, branch: str, search: UpstreamSearch) -> ToolOutput:
+        """A page of the diff of the pull request ``search`` names, or the candidates its search finds."""
+        if search.number is not None:
+            return _page(self._diff(branch, search), search)
+        return _candidates(self._enumerate(search), search)
+
     async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
         search = build_search(request.params)
         try:
-            return await asyncio.to_thread(_answer, self._enumerate, search)
-        except ToolFailure:
-            raise
+            return await asyncio.to_thread(self._answer, request.branch, search)
         except SourceConfigError as exc:
             raise ToolFailure(f"upstream PR search is misconfigured: {exc}") from exc
         except GitHubUnavailable as exc:
             raise ToolFailure(f"upstream PR search cannot use GitHub: {exc}") from exc
-        except Exception as exc:
-            raise ToolFailure(f"upstream PR search failed: {type(exc).__name__}: {exc}") from exc

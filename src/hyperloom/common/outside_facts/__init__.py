@@ -106,7 +106,6 @@ __all__ = [
     "TUNED_LIBTYPE_COLUMN",
     "TUNED_SPLITK_COLUMN",
     "UPSTREAM_PR_REPOS",
-    "UPSTREAM_PR_REPO_OF",
     "component_layouts",
     "spaced",
 ]
@@ -146,12 +145,7 @@ TUNED_LIBTYPE_COLUMN = _tuned["libtype_column"]
 TUNED_SPLITK_COLUMN = _tuned["splitk_column"]
 ASM_LIBTYPE = _tuned["asm_libtype"]
 
-#: The GitHub repository (``owner/name``) whose pull requests upstream_pr_search may search, by the project's key in the
-#: pack, which is the component's name for a component built from its checkout.
-UPSTREAM_PR_REPO_OF: Mapping[str, str] = MappingProxyType(
-    _PACK.names("upstream_pr_repos", "sglang", "vllm", "aiter", "pytorch", "llamacpp")
-)
-UPSTREAM_PR_REPOS = tuple(UPSTREAM_PR_REPO_OF.values())
+UPSTREAM_PR_REPOS = tuple(_PACK.names("upstream_pr_repos", "sglang", "vllm", "aiter", "pytorch", "llamacpp").values())
 
 FORGE_REL_NORM_ERR_COLUMN = _PACK.names("forge_rel_norm_err", "column")["column"]
 

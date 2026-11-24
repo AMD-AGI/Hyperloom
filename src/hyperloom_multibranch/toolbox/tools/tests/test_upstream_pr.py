@@ -23,8 +23,8 @@ from hyperloom_multibranch.toolbox.tools.upstream_pr import (
 REPO = "https://github.com/sgl-project/sglang"
 
 
-def req(**params: object) -> ToolRequest:
-    return ToolRequest("upstream_pr_search", "s1", {"repo_url": REPO, **params})
+def req(branch: str = "s1", **params: object) -> ToolRequest:
+    return ToolRequest("upstream_pr_search", branch, {"repo_url": REPO, **params})
 
 
 def test_the_search_is_github_only_until_a_pr_monitor_is_named() -> None:
@@ -51,6 +51,7 @@ def test_only_a_search_for_open_pull_requests_is_held_to_them() -> None:
         ({"repo_url": REPO, "limit": 99}, "between 1 and 20"),
         ({"repo_url": REPO, "limit": "many"}, "must be an integer"),
         ({"repo_url": REPO, "states": ["draft"]}, "states must come from"),
+        ({"repo_url": REPO, "keywords": ["mmq", '"']}, "holds no word to search for"),
     ],
 )
 def test_a_bad_search_is_refused_with_its_reason(params: dict, match: str) -> None:
@@ -70,7 +71,7 @@ def test_a_bad_search_is_refused_with_its_reason(params: dict, match: str) -> No
             ['mmq") repo:someone/private-repo ("x', "is:closed"],
             '("mmq ) repo:someone/private-repo ( x" OR "is:closed")',
         ),
-        (["rdna3\\", "\\", " author:someone \\", "ggml-cuda\\mmq"], '("rdna3" OR "author:someone" OR "ggml-cuda mmq")'),
+        (["rdna3\\", " author:someone \\", "ggml-cuda\\mmq"], '("rdna3" OR "author:someone" OR "ggml-cuda mmq")'),
     ],
     ids=["a-phrase-among-words", "a-string-of-words", "a-qualifier-in-a-keyword", "a-backslash-in-a-keyword"],
 )
@@ -196,9 +197,11 @@ class _Response:
         return self._body
 
 
-def _github(monkeypatch: pytest.MonkeyPatch, diff: str) -> list[str]:
-    """A GitHub that serves pull request 42 of sglang and ``diff`` as its diff; returns the URLs asked."""
+def _github(monkeypatch: pytest.MonkeyPatch, *diffs: str) -> list[str]:
+    """A GitHub that serves pull request 42 of sglang and each of ``diffs`` as its diff to one download, the last to
+    every later one; returns the URLs asked."""
     asked: list[str] = []
+    left = list(diffs)
 
     def urlopen(request: urllib.request.Request, timeout: float | None = None) -> _Response:
         asked.append(request.full_url)
@@ -206,30 +209,39 @@ def _github(monkeypatch: pytest.MonkeyPatch, diff: str) -> list[str]:
         if request.get_header("Accept") != "application/vnd.github.diff":
             listed = {"number": 42, "title": "Faster MoE decode", "html_url": f"{REPO}/pull/42"}
             return _Response(json.dumps(listed).encode())
-        return _Response(diff.encode())
+        return _Response((left.pop(0) if len(left) > 1 else left[0]).encode())
 
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
     return asked
 
 
-async def read_pages(tmp_path: Path, offset: int | None = 0, **params: object) -> list[tuple[JobStatus, dict]]:
-    """The status and the result record of each page of pull request 42 read with ``params``, from ``offset`` to its
-    last page or to the one that fails."""
-    sink = RecordingSink()
-    runner = ToolJobs([UpstreamPrSearch()], sink, tmp_path, push_delay_seconds=0)
-    pages: list[tuple[JobStatus, dict]] = []
-    while offset is not None:
-        status = await runner.wait(runner.submit(req(number=42, offset=offset, **params)))
-        pages.append((status, json.loads(Path(sink.pointers[-1].location).read_text())))
-        offset = pages[-1][1]["result"]["next_offset"] if status is JobStatus.SUCCEEDED else None
-    return pages
+class Reads:
+    """The reads of pull request 42 one toolbox serves."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self._sink = RecordingSink()
+        self._runner = ToolJobs([UpstreamPrSearch()], self._sink, tmp_path, push_delay_seconds=0)
+
+    async def page(self, **params: object) -> tuple[JobStatus, dict]:
+        """The status and the result record of one read with ``params``."""
+        status = await self._runner.wait(self._runner.submit(req(number=42, **params)))
+        return status, json.loads(Path(self._sink.pointers[-1].location).read_text())
+
+    async def pages(self, offset: int | None = 0, **params: object) -> list[tuple[JobStatus, dict]]:
+        """Each page read with ``params``, from ``offset`` to the last one or to the one that fails."""
+        pages: list[tuple[JobStatus, dict]] = []
+        while offset is not None:
+            pages.append(await self.page(offset=offset, **params))
+            status, record = pages[-1]
+            offset = record["result"]["next_offset"] if status is JobStatus.SUCCEEDED else None
+        return pages
 
 
 async def test_a_number_returns_that_pull_requests_diff_and_changed_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     asked = _github(monkeypatch, diff_of("python/sglang/moe.py", "README.md"))
-    ((status, record),) = await read_pages(tmp_path)
+    ((status, record),) = await Reads(tmp_path).pages()
     assert status is JobStatus.SUCCEEDED
     assert record["result"] == {
         "repo_url": REPO,
@@ -256,7 +268,7 @@ async def test_a_diff_longer_than_a_page_is_read_whole_over_its_pages(
 ) -> None:
     assert len(LONG_DIFF) > 2 * DIFF_CHARS
     _github(monkeypatch, LONG_DIFF)
-    records = [record for _, record in await read_pages(tmp_path)]
+    records = [record for _, record in await Reads(tmp_path).pages()]
     pages = [record["result"] for record in records]
     assert len(pages) == 3 and "".join(page["diff"] for page in pages) == LONG_DIFF
     assert all(len(page["diff"]) <= DIFF_CHARS and page["diff"].endswith("\n") for page in pages)
@@ -275,7 +287,7 @@ async def test_a_line_longer_than_a_page_is_cut_inside_and_still_read_whole(
 ) -> None:
     diff = diff_of("a.cpp") + "+" + "x" * (2 * DIFF_CHARS) + "\n"
     _github(monkeypatch, diff)
-    pages = [record["result"]["diff"] for _, record in await read_pages(tmp_path)]
+    pages = [record["result"]["diff"] for _, record in await Reads(tmp_path).pages()]
     assert "".join(pages) == diff
     assert all(len(page) <= DIFF_CHARS for page in pages)
 
@@ -284,7 +296,7 @@ async def test_a_file_returns_only_the_part_of_the_diff_that_changes_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _github(monkeypatch, LONG_DIFF)
-    ((_, record),) = await read_pages(tmp_path, file="src/beta.cpp")
+    ((_, record),) = await Reads(tmp_path).pages(file="src/beta.cpp")
     result = record["result"]
     assert result["diff"] == LONG_PARTS["src/beta.cpp"] and result["file"] == "src/beta.cpp"
     assert (result["offset"], result["next_offset"], result["diff_chars"]) == (0, None, len(LONG_DIFF))
@@ -292,24 +304,52 @@ async def test_a_file_returns_only_the_part_of_the_diff_that_changes_it(
     assert record["summary"] == f"PR:42 Faster MoE decode: characters 0-{size} of the {size} of one file of its diff"
 
 
+async def test_the_pages_and_files_of_a_read_come_from_its_one_download_of_a_pull_request_that_moves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    moved = LONG_DIFF.replace("line", "LINE")
+    asked = _github(monkeypatch, LONG_DIFF, moved)
+    reads = Reads(tmp_path)
+    _, first = await reads.page()
+    _, other = await reads.page(branch="s2")
+    rest = await reads.pages(offset=first["result"]["next_offset"])
+    assert "".join(record["result"]["diff"] for record in (first, *(record for _, record in rest))) == LONG_DIFF
+    assert moved.startswith(other["result"]["diff"])
+    _, part = await reads.page(file="src/beta.cpp")
+    assert part["result"]["diff"] == LONG_PARTS["src/beta.cpp"]
+    assert len(asked) == 4
+    _, again = await reads.page()
+    assert moved.startswith(again["result"]["diff"]) and len(asked) == 6
+
+
 @pytest.mark.parametrize(
-    ("params", "error"),
+    ("held", "params", "error"),
     [
         (
+            True,
             {"offset": len(LONG_DIFF)},
             f"offset {len(LONG_DIFF)} is past the end of the {len(LONG_DIFF)} characters of the diff of PR:42",
         ),
         (
+            False,
+            {"offset": 60000},
+            "offset 60000 goes on from a diff of PR:42 this toolbox does not hold: read it again from offset 0",
+        ),
+        (
+            False,
             {"file": "src/delta.cpp"},
             "the diff of PR:42 has no part that changes 'src/delta.cpp': file_chars of a read without file has the "
             "paths it holds",
         ),
     ],
-    ids=["past-the-diff", "no-such-path"],
+    ids=["past-the-diff", "diff-not-held", "no-such-path"],
 )
 async def test_a_page_the_diff_does_not_hold_fails_saying_what_it_holds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, params: dict, error: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, held: bool, params: dict, error: str
 ) -> None:
     _github(monkeypatch, LONG_DIFF)
-    ((status, record),) = await read_pages(tmp_path, **params)
+    reads = Reads(tmp_path)
+    if held:
+        await reads.page()
+    status, record = await reads.page(**params)
     assert status is JobStatus.FAILED and record["error"] == error

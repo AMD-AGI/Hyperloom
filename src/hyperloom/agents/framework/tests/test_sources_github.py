@@ -222,23 +222,16 @@ SPENT = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(NOW + 1500)}
     ("code", "headers", "body", "said"),
     [
         (403, SPENT, b"", "GitHub's rate limit for this host is spent (HTTP 403): ask again in 25 min"),
-        (429, {"Retry-After": "40"}, b"", "GitHub's rate limit for this host is spent (HTTP 429): ask again in 40 s"),
         (
             403,
             {"x-ratelimit-remaining": "4990"},
             b'{"message": "You have exceeded a secondary rate limit."}',
             "GitHub's rate limit for this host is spent (HTTP 403): ask again in 60 s",
         ),
-        (
-            403,
-            {"x-ratelimit-remaining": "4990"},
-            b'{"message": "Resource not accessible by personal access token"}',
-            "GitHub does not allow this host's token the search (HTTP 403); asking again will not change that",
-        ),
     ],
-    ids=["quota-spent", "told-to-wait", "no-wait-named", "token-not-allowed"],
+    ids=["quota-spent", "no-wait-named"],
 )
-def test_a_refusal_says_how_long_to_wait_or_that_waiting_changes_nothing(
+def test_a_rate_limit_that_names_no_retry_after_still_says_how_long_to_wait(
     monkeypatch, code: int, headers: dict[str, str], body: bytes, said: str
 ) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", "a-token")
@@ -269,5 +262,5 @@ def test_a_token_no_header_can_carry_is_named_without_its_value(monkeypatch, tok
 @pytest.mark.parametrize("code", [406, 422])
 def test_pr_diff_says_when_github_serves_no_diff_of_a_pull_request(monkeypatch, code: int) -> None:
     _install_urlopen(monkeypatch, _refusing(code))
-    with pytest.raises(gh.DiffRefused, match=f"serves no diff of pull request 31 .HTTP {code}."):
+    with pytest.raises(gh.GitHubUnavailable, match=f"serves no diff of pull request 31 .HTTP {code}."):
         gh.pr_diff(REPO_URL, 31)

@@ -127,9 +127,10 @@ To give the session a token:
    The session's log then says `upstream PR search asks GitHub with this host's token` when its toolbox is built.
 
 With a token GitHub allows 5,000 requests an hour and 30 searches a minute, for all the tokens of one account
-together; a search is one request and each page of a diff is two. A search looks for the agent's keywords, words or
-phrases, of which only the first six are used, and finds the pull requests whose title, body or comments hold any
-one of them, open ones unless the agent names other states; it does not look at the paths a pull request changes.
+together; a search is one request and a diff is two, whatever its pages. A search looks for the agent's keywords,
+words or phrases, of which only the first six are used, and finds the pull requests whose title, body or comments
+hold any one of them, open ones unless the agent names other states; it does not look at the paths a pull request
+changes.
 The agent gets up to `limit` candidates (10 by default, 20 at most), each with its number, title and URL, with how
 many pull requests matched in all (`matched_prs`) and how many of them the limit left out (`not_shown`). A diff is
 returned whole, in pages of at most 60,000 characters. A GitHub that cannot be reached, a rejected token, a request
