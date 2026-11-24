@@ -42,6 +42,7 @@ from hyperloom_multibranch.blackboard.tests.sessions import scripted_session
 from hyperloom_multibranch.blackboard.tools import (
     CEILING_OPS,
     ERROR,
+    LINE_CHARS,
     MAX_LINES,
     MAX_REPLY_CHARS,
     PATCH_PAGE_CHARS,
@@ -551,6 +552,31 @@ def test_the_brief_lists_every_op_of_at_least_one_percent_with_its_ceiling_befor
         "- norm: 1.0% of GPU time, at most +1.0%",
     ]
     assert "Ceilings" not in render_brief(StartupBrief("c1", ()))
+
+
+def test_a_long_brief_line_is_cut_before_the_id_it_ends_with_and_keeps_the_id() -> None:
+    """The id is what the specialist revises or retires a lesson by and cites an Experience by."""
+    learning = "[MB-20261123T054105Z-2d1719e0, same conditions, unmeasured] Why profiles fail " + "in this image " * 9
+    prior = (
+        "prior: HL_SELF_PROFILE_START=8000 HL_SELF_PROFILE_STEPS=30 patch/sglang/" + "3face767" * 8 + ": revert -0.3%"
+    )
+    ids = ("[exp-0a1b2c3d4e5f60718293a4b5c6d7e8f9]", "[lsn-0a1b2c3d4e5f]")
+
+    shown = render_brief(
+        StartupBrief("c1", (), lessons=(f"learnt before: {learning} {ids[1]}", f"{prior} {ids[0]}"))
+    ).splitlines()
+
+    assert [line[-len(found) :] for line, found in zip(shown[2:4], ids[::-1])] == list(ids[::-1])
+    assert all(len(line) == LINE_CHARS and f"... {found}" in line for line, found in zip(shown[2:4], ids[::-1]))
+    assert shown[2].startswith("- learnt before: [MB-20261123T054105Z-2d1719e0, same conditions, unmeasured] Why")
+
+
+def test_a_long_brief_line_without_an_id_at_its_end_is_cut_at_the_end() -> None:
+    tagged = "tried [moe gemm, tuned kernel] " + "x" * 200 + " [kind, purpose]"
+
+    [shown] = render_brief(StartupBrief("c1", (), leads=(tagged,))).splitlines()[2:]
+
+    assert shown == f"- {tagged}"[: LINE_CHARS - 3] + "..."
 
 
 async def test_bad_arguments_come_back_as_marked_errors(tools_of: Tools) -> None:

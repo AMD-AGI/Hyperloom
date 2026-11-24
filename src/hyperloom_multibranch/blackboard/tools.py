@@ -23,6 +23,7 @@ the tool computes. Output stays small: a line is at most 160 characters, a list 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -80,6 +81,8 @@ MAX_LINES = 20
 MAX_REPLY_CHARS = 4000
 #: How much of a left-out patch one reply shows, leaving room in it for the lines around the text.
 PATCH_PAGE_CHARS = MAX_REPLY_CHARS - 300
+#: The id a line ends with, such as ``[exp-...]`` or ``[lsn-...]``: one bracketed word, which a cut must keep.
+_TRAILING_ID = re.compile(r" \[[^\s\[\]]+\]$")
 #: The brief's ceilings name every op of at least :data:`CEILING_MIN_SHARE_PCT` of GPU time, the largest first, up to
 #: this many, so that a direction on small ops can name its targets and claim several together.
 CEILING_OPS = 12
@@ -131,7 +134,14 @@ class BlackboardTool:
 
 
 def clip(text: str, limit: int = LINE_CHARS) -> str:
-    return text if len(text) <= limit else text[: limit - 3] + "..."
+    """``text`` cut to ``limit`` with an ellipsis; a line ending in an id keeps it, cut before it instead, since the
+    id is what a specialist revises, retires or cites the line by."""
+
+    if len(text) <= limit:
+        return text
+    found = _TRAILING_ID.search(text)
+    kept = found.group() if found and len(found.group()) <= limit // 2 else ""
+    return text[: limit - 3 - len(kept)] + "..." + kept
 
 
 def lines(items: Sequence[str]) -> list[str]:
