@@ -62,6 +62,7 @@ from hyperloom.measure.hosted_log import (
     where,
 )
 from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
+from hyperloom.measure.jit.prune import note_used
 from hyperloom.measure.jit.publish import publish_contributions
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.manifest import ResultManifest
@@ -770,6 +771,8 @@ class HostedMeasurementBackend:
             publish_contributions(store, _handle(attempt.runner), facts, scratch)
         except OSError as exc:
             log.warning("jit cache: nothing was published (%s)", type(exc).__name__)
+        for kind in facts.kinds:  # the keys this test read or filled are in use: pruning keeps them
+            note_used(store, kind.kind, kind.key)
 
     def _staging_dir(self, attempt: _Attempt) -> Path:
         root = self._config.staging_root or Path(tempfile.gettempdir()) / "hyperloom-staging"

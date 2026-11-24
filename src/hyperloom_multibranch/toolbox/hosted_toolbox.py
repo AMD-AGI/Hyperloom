@@ -28,6 +28,7 @@ from hyperloom.measure.archive import ResultArchive
 from hyperloom.measure.framework.base import SESSION_SNAPSHOT_DIR, framework_envs
 from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_spec import SpecContext
+from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.runner.cache_layout import MANIFEST_PIN_ENV
 from hyperloom.measure.sandboxes import (
     DEFAULT_HANDOVER_TIMEOUT_SEC,
@@ -44,6 +45,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, INFRA_BACKOFF_SECONDS
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
+from hyperloom_multibranch.toolbox.jit_store import named_jit_store, session_jit_store
 from hyperloom_multibranch.toolbox.merge_smoke import merge_smoke_from
 from hyperloom_multibranch.toolbox.hosted_leases import (
     HANDOVER_MIN_TESTS,
@@ -251,6 +253,13 @@ class HostedOptions:
     session that lends none builds no branch leases (``HostedToolbox.leases`` is ``None``) and reads no ``dev`` template,
     whatever ``dev`` key the host gave. A hosted session sets it from its ``dev_leases`` and ``agents``
     (:class:`~hyperloom_multibranch.scheduling.hosted_peers.HostedSandboxes`).
+    ``jit_store`` is this host's path of the shared compiled-code cache, else ``HYPERLOOM_JIT_STORE`` of the host
+    environment names it; with neither, nothing is published and the tests read whatever cache their template mounts.
+    Named, this host publishes what each accepted test compiled into it, as the local toolbox does, and prunes it as the
+    session starts (:func:`~.jit_store.session_jit_store`). The runners read it where the ``measurement`` template mounts
+    the same directory, read-only, and names it ``HYPERLOOM_JIT_CACHE``: this host cannot see that mount, so the template
+    and this option must name one directory. The directory must be this account's own, which only it can write (made
+    0700 when missing), as the runners load what it holds as compiled code; a runner reads it as this account or root.
     """
 
     policy: QueuePolicy | None = None
@@ -267,6 +276,7 @@ class HostedOptions:
     framework_configs: str | None = None
     make_before_break: bool = True
     dev_leases: bool = True
+    jit_store: Path | None = None
 
 
 class HostedToolbox(LeasedToolbox):
@@ -534,6 +544,13 @@ def _acceptance_with_prompts(
     return named
 
 
+def _session_jit_store(options: HostedOptions) -> DirJitStore | None:
+    """The compiled-code cache this host publishes to (:attr:`HostedOptions.jit_store`), checked and pruned; ``None``
+    when neither the options nor ``HYPERLOOM_JIT_STORE`` name one."""
+    root = named_jit_store(options.jit_store, os.environ)
+    return session_jit_store(root) if root is not None else None
+
+
 def build_hosted_toolbox(
     inputs: HostedToolboxInputs,
     blackboard: LocalBlackboard,
@@ -569,6 +586,8 @@ def build_hosted_toolbox(
         options: Everything else, see :class:`HostedOptions`.
 
     Raises:
+        JitStoreNotPrivate: The compiled-code cache the options or ``HYPERLOOM_JIT_STORE`` name is not this account's own
+            directory that only it can write; nothing has been started.
         ShortPromptsNotStaged: ``HYPERLOOM_SHORT_PROMPTS`` names a set that is not staged in this host's runner cache; nothing
             has been started.
         ValueError: When the templates have no runner template for ``tp`` (or no ``dev`` one, when the session lends
@@ -577,6 +596,7 @@ def build_hosted_toolbox(
     """
 
     directory = Path(inputs.session_dir)
+    jit_store = _session_jit_store(options)
     acceptance = _acceptance_with_prompts(acceptance, options, os.environ, spec.model_dir)
     native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest)
     acceptance = with_native_plan(acceptance, native)
@@ -601,6 +621,7 @@ def build_hosted_toolbox(
         archive=session_archive(options.archive, directory),
         max_parallel_tests=parallel,
         poll_interval_sec=options.poll_interval_sec,
+        jit_store=jit_store,
         handover=handover,
     )
     backend = started_backend(provider, config)

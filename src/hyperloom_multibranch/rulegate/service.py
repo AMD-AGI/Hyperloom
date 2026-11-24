@@ -9,20 +9,26 @@ it asked for before instead of paying for another.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Protocol
 
-from hyperloom.contracts.measurement import Validity
+from hyperloom.contracts.measurement import TestResult, Validity
 from hyperloom_multibranch.contracts.gate import NotMeasured, ResultVerifier
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, GateRecords, RecordSearch, SnapshotQuery
-from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, TestRecord
+from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, RecordedValue, TestRecord
 from hyperloom_multibranch.contracts.toolbox import Toolbox
 from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
+from hyperloom_multibranch.rulegate.cache_states import cache_states_differ
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
 from hyperloom_multibranch.rulegate.regression import ended
 from hyperloom_multibranch.rulegate.rules import Rule, repeats, retest_request
+
+logger = logging.getLogger(__name__)
 
 
 class GateBlackboard(RecordSearch, SnapshotQuery, CommitQuery, GateRecords, Protocol):
@@ -58,14 +64,42 @@ class GateService:
 
     async def compare(self, request_id: str) -> Judgement:
         first = await self._measured(request_id)
-        parent = (await self._blackboard.recorded_value(first.request.parent_commit)).values
+        recorded = await self._blackboard.recorded_value(first.request.parent_commit)
+        parent = recorded.values
         with _judgeable():
             judgement = await self._rule.first(first, parent)
-        if judgement.verdict is not Verdict.NEEDS_CONFIRM:
+        if judgement.verdict is Verdict.NEEDS_CONFIRM:
+            retest = await self._measured(await self._retest_of(first))
+            with _judgeable():
+                judgement = await self._rule.retest(judgement, retest, parent)
+        return await self._flagged(judgement, recorded)
+
+    async def _flagged(self, judgement: Judgement, recorded: RecordedValue) -> Judgement:
+        """``judgement`` with the kinds of compiled-code cache its tests met in another state than the tests behind the
+        parent's value (:func:`~.cache_states.cache_states_differ`); a test that cannot be read back is left out."""
+        candidates = await self._results(judgement.request_ids)
+        parents = await self._results(recorded.request_ids)
+        differ = cache_states_differ(candidates, parents)
+        if not differ:
             return judgement
-        retest = await self._measured(await self._retest_of(first))
-        with _judgeable():
-            return await self._rule.retest(judgement, retest, parent)
+        logger.warning(
+            "%s met the compiled-code cache otherwise than its parent's tests (%s): its boot, and any kernel first built "
+            "after warm-up, differ",
+            judgement.request_ids[0] if judgement.request_ids else "the candidate",
+            "; ".join(differ),
+        )
+        return replace(judgement, cache_states_differ=differ)
+
+    async def _results(self, request_ids: Sequence[str]) -> list[TestResult]:
+        found = []
+        for request_id in request_ids:
+            try:
+                record = await self._blackboard.record(request_id)
+            except (LookupError, BlackboardError):
+                continue
+            if record.result is not None:
+                found.append(record.result)
+        return found
 
     async def request_confirm(self, request_id: str) -> str:
         if not self._rule.confirms_ahead:

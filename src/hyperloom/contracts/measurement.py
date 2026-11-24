@@ -826,6 +826,29 @@ class BuildPayment(str, Enum):
 
 
 @dataclass(frozen=True)
+class JitCacheState:
+    """How the shared compiled-code cache of one ``kind`` stood when the test began: ``hit``, ``miss``,
+    ``verify_failed`` or ``disabled``, as its signed result states it. A warm cache moves the compile out of the server's
+    boot, and a kernel first built after warm-up out of the measured window, so two tests whose states differ are
+    compared with that difference flagged."""
+
+    kind: str
+    state: str
+
+    def __post_init__(self) -> None:
+        _text(self.kind, "a compiled-code cache's kind")
+        _text(self.state, "a compiled-code cache's state")
+
+    def to_document(self) -> dict[str, object]:
+        return {"kind": self.kind, "state": self.state}
+
+    @classmethod
+    def from_document(cls, document: object) -> JitCacheState:
+        f = _mapping(document, "a compiled-code cache state")
+        return cls(kind=f.get("kind"), state=f.get("state"))
+
+
+@dataclass(frozen=True)
 class BuildCharge:
     """One native build a test needed, as the blackboard sums build time: by its ``key`` and ``component``.
 
@@ -909,6 +932,8 @@ class TestResult:
     ``agentx_checkpoint`` is the ruling the AgentX checkpoint made on the test's measured round (``None`` for a test it
     did not judge, or whose window never closed); a test it stopped (``stopped``) is the candidate's failure, and its
     ``gain_pct`` covers the first ``at_sec`` of the round only.
+    ``jit_cache`` is the state of each kind of the shared compiled-code cache the test's signed result states (none for a
+    test that used none, a result without a verified bundle, or a document written before it existed).
     A document written while the greedy decode pass existed may carry ``decode_outputs`` and ``decode_identity``; they
     mean nothing now and ``from_document`` leaves them out, so such a document still loads.
     """
@@ -945,6 +970,7 @@ class TestResult:
     long_context: LongContextResult | None = None
     builds: tuple[BuildCharge, ...] = ()
     agentx_checkpoint: AgentxCheckpointRuling | None = None
+    jit_cache: tuple[JitCacheState, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.request_id, "request_id")
@@ -979,6 +1005,8 @@ class TestResult:
         self._check_findings()
         if not isinstance(self.builds, tuple) or not all(isinstance(b, BuildCharge) for b in self.builds):
             raise MeasurementError(f"builds must be a tuple of BuildCharge, got {self.builds!r}")
+        if not isinstance(self.jit_cache, tuple) or not all(isinstance(j, JitCacheState) for j in self.jit_cache):
+            raise MeasurementError(f"jit_cache must be a tuple of JitCacheState, got {self.jit_cache!r}")
 
     def _check_findings(self) -> None:
         """The checks the test ran beside its rounds, and the checkpoint's ruling on them."""
@@ -1052,6 +1080,8 @@ class TestResult:
             document["builds"] = [value.to_document() for value in self.builds]
         if self.agentx_checkpoint is not None:
             document["agentx_checkpoint"] = self.agentx_checkpoint.to_document()
+        if self.jit_cache:
+            document["jit_cache"] = [value.to_document() for value in self.jit_cache]
         return document
 
     @classmethod
@@ -1092,6 +1122,7 @@ class TestResult:
             long_context=None if long_context is None else LongContextResult.from_document(long_context),
             builds=tuple(map(BuildCharge.from_document, _items(f.get("builds", ()), "builds"))),
             agentx_checkpoint=None if checkpoint is None else AgentxCheckpointRuling.from_document(checkpoint),
+            jit_cache=tuple(map(JitCacheState.from_document, _items(f.get("jit_cache", ()), "jit_cache"))),
         )
 
 
@@ -1126,8 +1157,10 @@ __all__ = [
     "AttachmentRef",
     "Attempt",
     "BuildCharge",
+    "JitCacheState",
     "BuildPayment",
     "FailureClass",
+    "JitCacheState",
     "LongContextPrompt",
     "LongContextResult",
     "LongContextTask",

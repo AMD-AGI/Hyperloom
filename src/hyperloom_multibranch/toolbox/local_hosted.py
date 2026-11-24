@@ -59,7 +59,6 @@ from hyperloom.measure.hosted import FILES_ROOT, HostedConfig, HostedMeasurement
 from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.jit.key import build_surface
-from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.live_log import last_output_below
 from hyperloom.measure.local import SUPPORTED_KINDS
 from hyperloom.measure.framework.base import (
@@ -90,13 +89,18 @@ from hyperloom.sandbox.local import CARD_RELEASE_WAIT_SEC, LocalSandboxProvider,
 from hyperloom.sandbox.rooted import open_rooted
 from hyperloom.sandbox.socket import SandboxDenied
 from hyperloom.sandbox.templates import LocalTemplate
-from hyperloom_common.fs_utils import is_private_dir
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, INFRA_BACKOFF_SECONDS
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases, CardDrain
-from hyperloom_multibranch.toolbox.build_preflight import changeable_by_others
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
+from hyperloom_multibranch.toolbox.jit_store import (
+    JIT_STORE_ENV,
+    JitStoreNotPrivate,
+    named_jit_store,
+    private_jit_store,
+    session_jit_store,
+)
 from hyperloom_multibranch.toolbox.merge_smoke import merge_smoke_from
 from hyperloom_multibranch.toolbox.leased_toolbox import (
     LeasedToolbox,
@@ -140,8 +144,6 @@ __all__ = [
 
 #: One node serves at most eight cards, so at most ``8 / TP`` tests run at once.
 MAX_CARDS_PER_NODE = 8
-#: The host environment variable that names the shared compiled-code cache when ``LocalOptions.jit_store`` is not given.
-JIT_STORE_ENV = "HYPERLOOM_JIT_STORE"
 #: The shared compiled-code cache below this host's temporary directory when neither the options nor the environment
 #: name one, followed by ``-<uid>``: each account on the host keeps its own.
 DEFAULT_JIT_STORE = "hyperloom-jit-store"
@@ -421,11 +423,6 @@ def card_guard_of(options: LocalOptions, environ: Mapping[str, str] | None = Non
     return options.card_guard or card_guard(os.environ if environ is None else environ)
 
 
-class JitStoreNotPrivate(ValueError):
-    """The compiled-code cache is not a directory of this account's that only it can write, or another account could
-    change a directory above it."""
-
-
 def jit_store_root(options: LocalOptions, environ: Mapping[str, str] | None = None) -> Path:
     """The absolute directory of the shared compiled-code cache: the one ``options`` (or ``HYPERLOOM_JIT_STORE``) names,
     else :data:`DEFAULT_JIT_STORE` and this account's uid below this host's temporary directory.
@@ -433,37 +430,8 @@ def jit_store_root(options: LocalOptions, environ: Mapping[str, str] | None = No
     The runner starts in a directory of its own, so a relative path is made absolute here, once. A link is not resolved:
     :func:`private_jit_store` judges what stands under the name, and a link there is refused, never followed.
     """
-    source = os.environ if environ is None else environ
-    default = Path(tempfile.gettempdir(), f"{DEFAULT_JIT_STORE}-{os.getuid()}")
-    named = options.jit_store or source.get(JIT_STORE_ENV, "").strip() or default
-    return Path(named).expanduser().absolute()
-
-
-def private_jit_store(root: Path) -> Path:
-    """``root``, made (mode 0700) when nothing stands under its name.
-
-    Raises:
-        JitStoreNotPrivate: ``root`` is not a directory of this account's (a link to one is refused too), or its group or
-            others can write it: the runners load what it holds as compiled code, and the snapshots prove only their own
-            content. Another account can plant the default name, which stops the build here but feeds it nothing. Nor
-            may a directory above it be another account's or writable by its group or others unless it is sticky (as a
-            host's temporary directory is): whoever can change one could move the store aside and put one of their own
-            in its place (:func:`~.build_preflight.changeable_by_others`, the build store's check).
-    """
-    with contextlib.suppress(FileExistsError):  # what already stands there, a link included, is judged below
-        root.mkdir(mode=0o700, parents=True)
-    if not is_private_dir(root):
-        raise JitStoreNotPrivate(
-            f"the compiled-code cache {root} is not a directory of this account's that only it can write (nor may it "
-            f"be a link to one); name one that is with {JIT_STORE_ENV}"
-        )
-    problem = changeable_by_others(root, os.getuid())
-    if problem is not None:
-        raise JitStoreNotPrivate(
-            f"users other than this account could change the compiled-code cache {root}: {problem}; name one below "
-            f"directories only this account or root can change with {JIT_STORE_ENV}"
-        )
-    return root
+    named = named_jit_store(options.jit_store, os.environ if environ is None else environ)
+    return named or Path(tempfile.gettempdir(), f"{DEFAULT_JIT_STORE}-{os.getuid()}").absolute()
 
 
 def aiter_builds_missing(runner_envs: Mapping[str, str]) -> str | None:
@@ -775,7 +743,8 @@ def build_local_toolbox(
 
     directory, cards, tp = Path(session.session_dir), tuple(session.cards), session.tp
     parallel = max_parallel_tests(len(cards), tp)
-    jit_root = private_jit_store(jit_store_root(options))
+    jit_store = session_jit_store(jit_store_root(options))
+    jit_root = jit_store.root
     acceptance = _acceptance_with_prompts(acceptance, options, os.environ, spec.model_dir)
     native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest)
     acceptance = with_native_plan(acceptance, native)
@@ -788,7 +757,7 @@ def build_local_toolbox(
         archive=session_archive(options.archive, directory),
         max_parallel_tests=parallel,
         poll_interval_sec=options.poll_interval_sec,
-        jit_store=DirJitStore(jit_root),
+        jit_store=jit_store,
     )
     template = _runner_template(session, options)
     shared_dirs = {**_shared_dirs(jit_root, os.environ), **(native.runner_envs if native else {})}

@@ -39,6 +39,7 @@ from hyperloom.contracts.measurement import (
     CARD_UNOBSERVABLE,
     AccuracyValue,
     FailureClass,
+    JitCacheState,
     PhaseTiming,
     RoundValue,
     SandboxFacts,
@@ -272,6 +273,7 @@ class HostedExecutor:
                 or _unlike_consistency(result, landed)
                 or _unlike_long_context(result, landed)
                 or _unlike_checkpoint(result, landed)
+                or _unlike_jit_cache(result, derived)
             )
 
     async def reverify(self, result: TestResult) -> None:
@@ -492,6 +494,7 @@ class HostedExecutor:
         manifest = _archived_manifest(str(extra.get("archive") or ""), manifest_sha)
         if manifest is not None:
             fields.update(spec_fingerprint=manifest.spec_fingerprint, surface_sha256=manifest.surface_sha256)
+            fields["jit_cache"] = _jit_cache_states(manifest)
         return fields
 
 
@@ -547,6 +550,21 @@ def _unlike_checkpoint(result: TestResult, landed: Path) -> str | None:
         return None
     held = read_ruling(landed)
     return None if held == recorded else f"agentx_checkpoint: recorded {recorded}, the bundle holds {held}"
+
+
+def _unlike_jit_cache(result: TestResult, derived: Reverified) -> str | None:
+    """Why the compiled-code cache states ``result`` records are not the ones the verified bundle signs; a record that
+    holds none is not checked: it makes no claim."""
+    if not result.jit_cache:
+        return None
+    held = _jit_cache_states(derived.manifest)
+    return None if held == result.jit_cache else f"jit_cache: recorded {result.jit_cache}, the bundle signs {held}"
+
+
+def _jit_cache_states(manifest: ResultManifest) -> tuple[JitCacheState, ...]:
+    """The state of each kind of compiled-code cache the signed ``manifest`` states; none when it used none."""
+    signed = manifest.jit_cache
+    return tuple(JitCacheState(kind.kind, kind.state) for kind in signed.kinds) if signed is not None else ()
 
 
 def _with_checkpoint(result: TestResult, call: TestCall) -> TestResult:

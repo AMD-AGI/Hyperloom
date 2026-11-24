@@ -13,7 +13,9 @@ snapshot, a name becomes visible in one rename, and two publishers of the same n
 its hash). A stored blob is never rewritten, except that bytes which verify against the hash of a stored blob that does
 not are put in its place: a damaged blob would otherwise stay damaged for every later test, and the name of the blob is
 the hash of what it must hold, so the replacement can only repair. The one removal is of a blob a reader found damaged:
-its bytes can never be read, and a rebuild seldom makes the same bytes again to repair it (:func:`_drop_damaged`). Publishers that extend the same snapshot concurrently
+its bytes can never be read, and a rebuild seldom makes the same bytes again to repair it (:func:`_drop_damaged`). The
+publishing host alone also retires keys unused for long and later removes them and the blobs nothing lists any more
+(:mod:`hyperloom.measure.jit.prune`), never one a test may still be reading. Publishers that extend the same snapshot concurrently
 make two snapshots, both valid; a reader takes the one with the most files.
 
 Reading proves every byte: the snapshot's own name is the hash of its bytes, it names the kind and key that were asked
@@ -45,8 +47,10 @@ from hyperloom.measure.jit_kinds import KINDS, CacheKind, kind_named
 
 __all__ = [
     "BLOBS_DIR",
+    "INCOMING_PREFIX",
     "MANIFEST_NAME",
     "MAX_SNAPSHOT_BYTES",
+    "SNAPSHOTS_DIR",
     "DirJitStore",
     "Fetched",
     "JitStoreError",
@@ -70,6 +74,8 @@ SNAPSHOTS_DIR = "snapshots"
 _MAX_MANIFEST_BYTES = 32 * 1024**2
 _GENERATIONS_TRIED = 3
 _INCOMING = ".incoming-"
+#: The prefix of what a publication writes before it renames it into place; a leftover is a publisher that died.
+INCOMING_PREFIX = _INCOMING
 _DAMAGED = ".damaged-"
 _FILE_MODE = 0o600
 #: A stored blob or snapshot is readable by its owner only and writable by none: the store is content-addressed and never
@@ -249,13 +255,18 @@ class DirJitStore:
         found, problems = [], []
         for name in names:
             try:
-                found.append(self._read_snapshot(directory / name, kind, key))
+                found.append(self.read_snapshot(directory / name, kind, key))
             except SnapshotInvalid as exc:
                 problems.append(f"{kind.name} snapshot {name[:12]}: {exc}")
         return sorted(found, key=lambda s: (-len(s.files), s.sha256())), problems
 
     @staticmethod
-    def _read_snapshot(path: Path, kind: CacheKind, key: str) -> Snapshot:
+    def read_snapshot(path: Path, kind: CacheKind, key: str) -> Snapshot:
+        """The snapshot list at ``path``, which must be of ``kind`` under ``key``, read and proved as a reader proves it.
+
+        Raises:
+            SnapshotInvalid: The list does not hash to its name, is not canonical, or is of another kind or key.
+        """
         stem = path.name.removesuffix(".json")
         if path.name == stem or not SHA256_RE.fullmatch(stem):
             raise SnapshotInvalid("the name is not a snapshot hash")
@@ -307,7 +318,7 @@ class DirJitStore:
         if kind not in KINDS or not SHA256_RE.fullmatch(key) or not SHA256_RE.fullmatch(sha256):
             return None
         try:
-            return self._read_snapshot(self._root / SNAPSHOTS_DIR / kind.name / key / f"{sha256}.json", kind, key).files
+            return self.read_snapshot(self._root / SNAPSHOTS_DIR / kind.name / key / f"{sha256}.json", kind, key).files
         except SnapshotInvalid:
             return None
 
