@@ -53,14 +53,6 @@ class SpecialistProfile:
         """True iff this dispatch should contend for the ``benchmark_lane``."""
         return self.mode == MODE_PATCH and self.bench
 
-    @property
-    def low_tier(self) -> bool:
-        """Whether this dispatch runs on the launch's ``--low-model``.
-
-        Research mode only proposes, and nothing it proposes is kept before a benchmark has measured it.
-        """
-        return self.mode == MODE_RESEARCH
-
 
 def _infer_scope(p: dict[str, Any]) -> str:
     """Infer the dispatch scope when none is explicitly given."""

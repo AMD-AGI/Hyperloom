@@ -468,7 +468,7 @@ def _probe_low_model(args: argparse.Namespace, *, codex_follows_claude: bool, cl
         return
     print(
         f"ERROR: low model {model!r} did not answer over the {protocol} protocol: {last_error!r}\n"
-        f"  Orchestration and research-mode specialists run on it; there is no fallback model.\n"
+        f"  Orchestration runs on it; there is no fallback model.\n"
         f"  Fix that model or its credential, or drop --low-model. Refusing to start.",
         file=sys.stderr,
     )

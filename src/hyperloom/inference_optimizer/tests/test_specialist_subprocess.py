@@ -181,34 +181,6 @@ async def test_the_runner_hands_the_dispatcher_the_tasks_model_to_read(tmp_path,
     assert all(not path.is_absolute() for path in spawn.readable) is not local
 
 
-@pytest.mark.parametrize(
-    ("mode", "low_model", "expected"),
-    [
-        ("research", "claude-haiku-5-5", "claude-haiku-5-5"),
-        ("patch", "claude-haiku-5-5", "claude-opus-5-5"),
-        ("research", "", "claude-opus-5-5"),
-    ],
-)
-async def test_only_a_research_dispatch_runs_on_the_low_model(tmp_path, mode, low_model, expected):
-    config = SpecialistSubprocessConfig(model="claude-opus-5-5", low_model=low_model)
-    runner = SpecialistRunner(subprocess_config=config, session_dir=tmp_path / "session")
-    spawns: list[SpecialistSpawn] = []
-
-    async def run(spawn: SpecialistSpawn) -> SpecialistSubprocessResult:
-        spawns.append(spawn)
-        return SpecialistSubprocessResult(exit_code=0)
-
-    runner.subprocess_dispatcher.run = run
-    ctx = _make_runner_ctx(f"t-{mode}")
-    ctx.task.params["mode"] = mode
-
-    await runner.run(ctx)
-
-    [spawn] = spawns
-    cmd = runner.subprocess_dispatcher._build_claude_cmd(spawn)
-    assert cmd[cmd.index("--model") + 1] == expected
-
-
 async def test_the_runner_hands_the_dispatcher_the_admin_dir_the_repository_records_for_the_worktree(tmp_path):
     framework = tmp_path / "framework"
     init_git_repo(framework, seed_file="mod.py", seed_text="old = 1\n")
@@ -1114,15 +1086,11 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
         framework_source_roots=(str(framework), str(framework)),
     )
     cmd = SpecialistSubprocessDispatcher(cfg)._build_claude_cmd(
-        SpecialistSpawn(
-            task_id="t",
-            workspace=workspace,
-            worktree=worktree,
-            worktree_base=None,
-            system_prompt="SYSTEM",
-            user_prompt="",
-            disallowed_tools=frozenset({"KillShell", "SlashCommand"}),
-        )
+        system_prompt_file=system_prompt_file,
+        system_prompt="SYSTEM",
+        workspace=workspace,
+        worktree=worktree,
+        disallowed_tools=frozenset({"KillShell", "SlashCommand"}),
     )
 
     assert cmd[cmd.index("--model") + 1] == "claude-test"

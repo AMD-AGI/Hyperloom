@@ -37,7 +37,7 @@ async def test_pre_cancelled_specialist_never_starts(monkeypatch, tmp_path):
     scope.cancel(reason="session_stopped")
     local_spawn = Mock(side_effect=AssertionError("cancelled specialist must not spawn"))
     dispatcher = ss.SpecialistSubprocessDispatcher(ss.SpecialistSubprocessConfig(agent_backend="claude"))
-    monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda _request: ["unused"])
+    monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
     monkeypatch.setattr(ss.subprocess, "Popen", local_spawn)
     with use_cancel_scope(scope), pytest.raises(CancelledError, match="session_stopped"):
         await dispatcher.run(
@@ -68,7 +68,7 @@ async def test_specialist_scope_cancel_stops_before_harvest(monkeypatch, tmp_pat
     kill = Mock()
     harvest = Mock(side_effect=AssertionError("cancelled specialist must not harvest results"))
     monkeypatch.setattr(ss, "collect_patches", harvest)
-    monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda _request: ["unused"])
+    monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
     child = subprocess.Popen(
         [sys.executable, "-c", "import sys; sys.stdin.readline()"],
         stdin=subprocess.PIPE,
@@ -205,7 +205,7 @@ async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path, dem
     dispatcher = SpecialistSubprocessDispatcher(
         ss.SpecialistSubprocessConfig(agent_backend="claude", poll_interval_seconds=0.05)
     )
-    monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda _request: ["unused"])
+    monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
     monkeypatch.setattr(ss, "collect_patches", lambda *args, **kwargs: ([], {}))
     bystander = real_popen(
         [sys.executable, "-c", "import time; time.sleep(300)"],
@@ -259,7 +259,7 @@ async def test_a_sweep_that_never_returns_does_not_hold_back_the_done_file(monke
     dispatcher = SpecialistSubprocessDispatcher(
         ss.SpecialistSubprocessConfig(agent_backend="claude", poll_interval_seconds=0.05)
     )
-    monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda _request: ["unused"])
+    monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
     monkeypatch.setattr(ss, "collect_patches", lambda *args, **kwargs: ([], {}))
     try:
         with caplog.at_level("WARNING", logger=launch_env.log.name):

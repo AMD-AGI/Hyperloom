@@ -444,10 +444,10 @@ def _add_model_context_arguments(opt: argparse.ArgumentParser) -> None:
         dest="low_model",
         type=str,
         default="",
-        help="Model id for the roles that decide or propose rather than write code: the orchestration role and "
-        "research-mode specialists. Patch-mode specialists, the critic and kernel work keep their models. It must "
-        "be served on the side orchestration runs on, and one real request checks it at startup. Empty (default): "
-        "every role runs on its usual model.",
+        help="Model id for the orchestration role, which decides what to try next rather than writing code. "
+        "Specialists, the critic and kernel work keep their models. It must be served on the side orchestration "
+        "runs on, and one real request checks it at startup. Empty (default): orchestration runs on its usual "
+        "model.",
     )
 
 

@@ -269,14 +269,6 @@ def _build_cmd(tmp_path: Path, **cfg_overrides: object) -> list[str]:
     cfg_overrides.setdefault("framework_source_roots", (str(framework),))
     cfg = SpecialistSubprocessConfig(**cfg_overrides)
     dispatcher = SpecialistSubprocessDispatcher(cfg)
-    spawn = SpecialistSpawn(
-        task_id="t",
-        workspace=workspace,
-        worktree=worktree,
-        worktree_base=None,
-        system_prompt="SYSTEM_INSTRUCTION_SENTINEL",
-        user_prompt="USER_PROMPT_SENTINEL",
-    )
     backend = dispatcher._agent_backend()
     if backend == AGENT_BACKEND_CODEX:
         import os as _os
@@ -287,9 +279,20 @@ def _build_cmd(tmp_path: Path, **cfg_overrides: object) -> list[str]:
             if k in agent_cli_config._SPECIALIST_ENV_ALLOWLIST | agent_cli_config._SPECIALIST_SECRET_ENV_ALLOWLIST
         }
         with mock.patch.object(sp, "probe_codex_sandbox_capability", return_value=True):
-            cmd, _ = dispatcher._build_codex_launch(spawn, base_env=base_env)
+            cmd, _ = dispatcher._build_codex_launch(
+                workspace=workspace,
+                worktree=worktree,
+                system_prompt="SYSTEM_INSTRUCTION_SENTINEL",
+                base_env=base_env,
+            )
         return cmd
-    return dispatcher._build_claude_cmd(spawn)
+    return dispatcher._build_claude_cmd(
+        system_prompt_file=workspace / "system_prompt.md",
+        system_prompt="SYSTEM_INSTRUCTION_SENTINEL",
+        workspace=workspace,
+        worktree=worktree,
+        disallowed_tools=frozenset(),
+    )
 
 
 def test_openai_only_deployment_builds_a_codex_exec_argv(

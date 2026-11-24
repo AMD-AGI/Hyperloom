@@ -20,7 +20,6 @@ from hyperloom_common.git_safety import recorded_admin_dir
 from hyperloom.orchestrator.specialists import patch_safety as ps
 from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSubprocessConfig, SpecialistSubprocessDispatcher
-from hyperloom.orchestrator.specialists.subprocess_types import SpecialistSpawn
 from hyperloom.orchestrator.specialists.worktrees import PinnedGit, _setup_worktree
 from hyperloom.inference_optimizer.tree_snapshot import snapshot_tree
 from hyperloom.orchestrator.specialists import subprocess_harvest
@@ -62,18 +61,6 @@ def _dispatcher(**cfg_over: Any) -> SpecialistSubprocessDispatcher:
     return SpecialistSubprocessDispatcher(cfg)
 
 
-def _spawn(workspace: Path, worktree: Path | None = None, **fields: Any) -> SpecialistSpawn:
-    return SpecialistSpawn(
-        task_id="t",
-        workspace=workspace,
-        worktree=worktree,
-        worktree_base=None,
-        system_prompt="SYS",
-        user_prompt="",
-        **fields,
-    )
-
-
 def test_build_claude_cmd_full(tmp_path: Path) -> None:
     fw = tmp_path / "fw"
     fw.mkdir()
@@ -87,7 +74,13 @@ def test_build_claude_cmd_full(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     ws.mkdir()
     sys_file = ws / "system_prompt.md"
-    cmd = d._build_claude_cmd(_spawn(ws, wt, disallowed_tools=frozenset({"KillShell", "SlashCommand"})))
+    cmd = d._build_claude_cmd(
+        system_prompt_file=sys_file,
+        system_prompt="SYS",
+        workspace=ws,
+        worktree=wt,
+        disallowed_tools=frozenset({"KillShell", "SlashCommand"}),
+    )
     assert "--model" in cmd and "claude-opus-4-7" in cmd
     assert cmd[cmd.index("--system-prompt-file") + 1] == str(sys_file)
     assert "--mcp-config" in cmd and "/cfg/mcp.json" in cmd
@@ -105,7 +98,13 @@ def test_build_claude_cmd_minimal_no_model_no_mcp(tmp_path: Path) -> None:
     d = _dispatcher()
     ws = tmp_path / "ws"
     ws.mkdir()
-    cmd = d._build_claude_cmd(_spawn(ws))
+    sys_file = ws / "system_prompt.md"
+    cmd = d._build_claude_cmd(
+        system_prompt_file=sys_file,
+        system_prompt="SYS",
+        workspace=ws,
+        worktree=None,
+    )
     assert "--model" not in cmd
     assert "--mcp-config" not in cmd
     assert "--allowedTools" not in cmd
@@ -120,7 +119,13 @@ def test_build_claude_cmd_injects_leaf_agents_when_task_allowed(tmp_path: Path) 
     d = _dispatcher()
     ws = tmp_path / "ws"
     ws.mkdir()
-    cmd = d._build_claude_cmd(_spawn(ws))
+    sys_file = ws / "system_prompt.md"
+    cmd = d._build_claude_cmd(
+        system_prompt_file=sys_file,
+        system_prompt="SYS",
+        workspace=ws,
+        worktree=None,
+    )
     agents_idx = cmd.index("--agents") + 1
     agents = json.loads(cmd[agents_idx])
     assert LEAF_AGENT_NAME in agents
@@ -437,5 +442,11 @@ def test_read_done_unwraps_intent_envelope(tmp_path: Path) -> None:
 
 
 def test_a_claude_specialist_loads_none_of_the_operators_settings(tmp_path: Path) -> None:
-    cmd = _dispatcher()._build_claude_cmd(_spawn(tmp_path))
+    cmd = _dispatcher()._build_claude_cmd(
+        system_prompt_file=tmp_path / "system_prompt.md",
+        system_prompt="SYS",
+        workspace=tmp_path,
+        worktree=None,
+        disallowed_tools=frozenset(),
+    )
     assert "--setting-sources=" in cmd

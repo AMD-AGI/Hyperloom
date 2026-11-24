@@ -816,8 +816,6 @@ def _print_backend_banner(args: argparse.Namespace, backends: dict[str, Any], li
             f"critic-agent(protocol={_review_protocol}, model={_review_model}, root={lineup.critic_agent_root})"
         )
     print(f"Backends        : orchestration={orchestration_str}, kernel={kernel_str}, critic={critic_str}")
-    if args.low_model:
-        print(f"Low model       : {args.low_model} (orchestration and research-mode specialists)")
     print(f"Max ticks       : {args.max_ticks or 'unlimited'} (budget = {args.max_hours}h)")
     print(f"Tick interval   : {args.tick_interval_sec}s")
     print()

@@ -101,7 +101,6 @@ def _specialist_agent_cli_config(args: argparse.Namespace) -> dict[str, Any]:
             "$GEAK_CLAUDE_BIN or on PATH. src/hyperloom/inference_optimizer/assets/install.sh puts it on PATH.",
         )
     config["model"] = str(getattr(args, "specialist_model", None) or "").strip() or default_model
-    config["low_model"] = getattr(args, "low_model", "")
     return config
 
 

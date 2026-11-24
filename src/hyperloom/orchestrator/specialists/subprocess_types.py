@@ -107,8 +107,6 @@ class SpecialistSpawn:
         worktree_admin: The admin directory of ``worktree`` as its repository
             records it (:mod:`.worktrees`): the app's git over the worktree goes
             through it alone (``None``: no git, only ``patches/`` is scanned).
-        low_tier: Runs on the dispatcher config's ``low_model`` rather than its
-            ``model`` when one is set (:attr:`.profile.SpecialistProfile.low_tier`).
     """
 
     task_id: str
@@ -123,4 +121,3 @@ class SpecialistSpawn:
     progress_cb: Any = None
     readable: tuple[Path, ...] = ()
     worktree_admin: Path | None = None
-    low_tier: bool = False
