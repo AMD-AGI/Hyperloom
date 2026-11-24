@@ -260,14 +260,18 @@ def test_a_base_with_no_speculative_decoding_may_enable_it_with_a_simulated_acce
 LLAMACPP_MTP = "-md /models/mtp-head.gguf --spec-type draft-mtp --spec-draft-n-max 5"
 
 
+_LLAMACPP_SYNTHETIC = LLAMACPP_MTP + " --spec-synth-len 4"
+
+
 @pytest.mark.parametrize(
-    ("candidate_args", "candidate_envs"),
+    ("base_args", "candidate_args", "candidate_envs"),
     [
-        pytest.param(LLAMACPP_MTP + " --spec-synth-len 4", {}, id="a-synthetic-length"),
-        pytest.param(LLAMACPP_MTP, {"LLAMA_ARG_SPEC_SYNTH_LEN": "4"}, id="a-synthetic-length-by-its-env"),
+        pytest.param(LLAMACPP_MTP, _LLAMACPP_SYNTHETIC, {}, id="a-draft-head"),
+        pytest.param("--spec-type draft-mtp", _LLAMACPP_SYNTHETIC, {}, id="a-draft-type"),
+        pytest.param("--spec-draft-model /models/d.gguf", _LLAMACPP_SYNTHETIC, {}, id="a-draft-model"),
+        pytest.param(LLAMACPP_MTP, LLAMACPP_MTP, {"LLAMA_ARG_SPEC_SYNTH_LEN": "4"}, id="declared-by-its-env"),
     ],
 )
-@pytest.mark.parametrize("base_args", [LLAMACPP_MTP, "--spec-type draft-mtp", "--spec-draft-model /models/d.gguf"])
 def test_a_llama_server_candidate_may_not_declare_the_acceptance_of_a_draft_its_base_verifies(
     base_args, candidate_args, candidate_envs
 ):

@@ -126,6 +126,13 @@ def test_a_speculative_env_change_on_a_copying_base_is_a_change():
     assert not context_copy_refusal(argv, base_envs, argv, {**base_envs, "SGLANG_USE_AITER": "1"})
 
 
+def test_a_copying_draft_switched_through_llama_server_s_environment_is_a_change():
+    argv = "-ngl 99"
+    assert context_copy_refusal(
+        argv, {"LLAMA_ARG_SPEC_TYPE": "ngram-simple"}, argv, {"LLAMA_ARG_SPEC_TYPE": "ngram-mod"}
+    )
+
+
 # --------------------------------------------------------------------------
 # explore
 # --------------------------------------------------------------------------
