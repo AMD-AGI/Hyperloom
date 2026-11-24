@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_multibranch.scheduling import budget, lifecycle
+from hyperloom_multibranch.scheduling import budget
 from hyperloom_multibranch.scheduling.budget import ExploreCap, FinalWork, SessionBudget
 from hyperloom_multibranch.scheduling.resumption import deadline_after_downtime, resumable_run
 from hyperloom_multibranch.scheduling.session_types import SessionOutcome
@@ -25,8 +25,7 @@ from hyperloom_multibranch.tests.test_skeleton import SETTINGS, START, Stage, _d
 async def _run(stage: Stage, cap: ExploreCap | None) -> SessionOutcome:
     """:meth:`Stage.run` with ``cap`` given to the session."""
 
-    with stage._polls_on_virtual_time() as patch:
-        patch.setattr(lifecycle, "run_image_check", stage.image_check)
+    with stage._polls_on_virtual_time():
         return await stage._session().run(cap)
 
 
@@ -131,8 +130,7 @@ async def test_a_resumed_session_ends_explore_at_the_cap_it_is_given_and_final_s
         asked.append(work)
         return START
 
-    with resumed._polls_on_virtual_time() as patch:
-        patch.setattr(lifecycle, "run_image_check", resumed.image_check)
+    with resumed._polls_on_virtual_time():
         deadline = deadline_after_downtime(resumed.layout, resumed.time.now())
         outcome = await resumed._session().resume(persisted.ended, deadline, cap)
 

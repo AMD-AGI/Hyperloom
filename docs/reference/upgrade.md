@@ -217,6 +217,25 @@ Pass `context` explicitly.
 
 `hyperloom optimize` no longer sets `WORKSPACE_PATH`, which nothing read.
 
+### Required: the multi-branch image check is removed
+
+A multi-branch session no longer checks the rule pack's facts against its
+environment before PRELUDE.
+
+`HYPERLOOM_IMAGE_CHECK` is no longer read and is silently ignored, so drop it:
+`strict` no longer stops a session before PRELUDE, and a value that is no mode
+is no longer refused as a usage error.
+
+`python -m hyperloom.common.outside_facts.image_check` is removed. A session no
+longer writes the `image_check` field of `MB-manifest.json` or
+`MB-reports/image_check.json`; consumers that read them should stop. A manifest
+an earlier session wrote with the field still reads.
+
+A rule pack named by `HYPERLOOM_RULE_PACK` must drop the `image_check` block of
+every entry: a pack that keeps one fails every import of
+`hyperloom.common.outside_facts` with `RulePackError`. The shipped pack is
+version 25 and no longer holds `aiter_merged_view`.
+
 ### Required: quantization failure exits 4
 
 A failed `--quantize` prelude now exits 4 instead of 3; exit 3 means only
