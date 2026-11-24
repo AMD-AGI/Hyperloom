@@ -41,6 +41,7 @@ from hyperloom.common.agentx_workload import (
 )
 from hyperloom.common.benchmark_config import AgentxLaunch, BenchmarkPoint, is_agentx
 from hyperloom.common.gain_math import AGENTX_ERROR_RATE_THRESHOLD_PCT
+from hyperloom.common.perf_metric import DATASET_PATH_ENV
 from hyperloom.common.outside_facts import (
     ENV_CONC,
     ENV_EP,
@@ -91,7 +92,7 @@ from inference_suite.contracts import (
 from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 
 from ..gpu._gpu_pin import ROCR_AUTOFILL_ENV
-from ..workload._workload_envs import DATASET_PATH_ENV, QUALITY_REF_ENVS
+from ..workload._workload_envs import QUALITY_REF_ENVS
 from .._profile_setup import (
     _DELAY_ITERATIONS,
     _MAX_ITERATIONS,

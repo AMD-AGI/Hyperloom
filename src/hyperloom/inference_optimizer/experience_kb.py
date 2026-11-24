@@ -207,7 +207,10 @@ def _reads_off_reason(state: Any) -> str:
     # so an AgentX run must not read the synthetic ones either.
     if agentx_active(benchmark_mode=getattr(state, "benchmark_mode", "")):
         return "its schema cannot represent an AgentX workload"
-    objective = str(grading_block(state).get("objective") or "")
+    grading = grading_block(state)
+    if grading.get("prompt_dataset"):
+        return "its schema cannot represent a prompt dataset"
+    objective = str(grading.get("objective") or "")
     if objective != GRADED_OUTPUT:
         return f"it is graded on {objective or 'no recorded objective'}, and Experiences record throughput only"
     return ""

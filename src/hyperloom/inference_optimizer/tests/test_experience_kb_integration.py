@@ -509,6 +509,14 @@ def test_only_a_run_graded_on_throughput_reads_throughput_experiences(tmp_path, 
     assert integration_for(state("e2e_norm_intvty_p90")) is None
 
 
+def test_a_run_sending_a_prompt_dataset_reads_no_random_prompt_experience(monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_KB_URL", "https://kb.example")
+    monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "service-token")
+    grading = {"objective": "output_throughput", "prompt_dataset": True}
+
+    assert integration_for(SharedState(phase="FRAMEWORK_AGENT", grading=grading)) is None
+
+
 def test_proposal_exposure_only_uses_current_orchestration_tick() -> None:
     evidence = ExperienceKBEvidence(
         tick=7,

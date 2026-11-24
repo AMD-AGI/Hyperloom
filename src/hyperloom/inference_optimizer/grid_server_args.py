@@ -501,10 +501,10 @@ def inject_sglang_context_length(
         return args
     # AgentX replays a fixed trace corpus, so ISL/OSL are placeholders here and the ISL+OSL+headroom ceiling (8192 at
     # the 1024/1024 defaults) would pin sglang's window two orders of magnitude below what the corpus needs -- every
-    # oversized trace then 4xxs.
-    from hyperloom.common.perf_metric import agentx_enabled
+    # oversized trace then 4xxs. A prompt dataset is the same case.
+    from hyperloom.common.perf_metric import request_lengths_from_data
 
-    if agentx_enabled():
+    if request_lengths_from_data():
         context_length = int(max_pos)
     else:
         context_length = min(int(max_pos), resolve_sglang_context_cap(window.isl, window.osl))

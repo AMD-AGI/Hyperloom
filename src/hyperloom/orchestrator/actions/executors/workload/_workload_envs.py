@@ -37,7 +37,7 @@ from hyperloom_common.coerce import to_str_list
 from hyperloom_common.io import atomic_write_text
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
-from hyperloom.common.perf_metric import agentx_enabled
+from hyperloom.common.perf_metric import DATASET_PATH_ENV, agentx_enabled
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
@@ -107,8 +107,6 @@ _SGLANG_DISABLE_CUDA_GRAPH_FLAG = "--disable-cuda-graph"
 # renamed in lockstep; drop it once those scripts have moved over.
 QUALITY_REF_ENVS = ("HYPERLOOM_QUALITY_REF", "XDIT_QUALITY_REF")
 _QUALITY_REF_WRITE_ENVS = ("HYPERLOOM_QUALITY_REF_WRITE", "XDIT_QUALITY_REF_WRITE")
-#: The JSONL file of real prompts a fixed round sends in place of InferenceX's random ones.
-DATASET_PATH_ENV = "DATASET_PATH"
 
 
 def _first_env(names: tuple[str, ...]) -> str:

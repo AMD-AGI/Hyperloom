@@ -8,6 +8,7 @@ from __future__ import annotations
 from hyperloom.common.benchmark_config import configured_benchmark, is_agentx
 from hyperloom_common.coerce import optional_positive_float
 
+import os
 from dataclasses import dataclass
 from math import isfinite
 from typing import Any, Mapping
@@ -17,6 +18,8 @@ from hyperloom_common.env import env_bool, env_float, env_str
 INTVTY_V1 = "intvty_v1"
 
 _AGENTX_ENV = "HYPERLOOM_AGENTX"
+#: The JSONL file of real prompts a fixed round sends in place of InferenceX's random ones.
+DATASET_PATH_ENV = "DATASET_PATH"
 
 # The value ``SharedState.benchmark_mode`` carries for an AgentX session, stamped at seed so it outlives the shell
 # that started the run.
@@ -111,6 +114,19 @@ VERDICT_REVERT = "REVERT"
 def agentx_enabled(env: Mapping[str, str] | None = None) -> bool:
     """Return whether CLI workload translation or a bound YAML selects AgentX."""
     return is_agentx(configured_benchmark(env)) or env_bool(_AGENTX_ENV, env=env)
+
+
+def prompt_dataset_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Whether the fixed rounds send a prompt dataset: ``DATASET_PATH`` is exported or set in the bound YAML's envs."""
+    envs = configured_benchmark(env).get("envs")
+    bound = envs.get(DATASET_PATH_ENV) if isinstance(envs, Mapping) else None
+    return bool(str((os.environ if env is None else env).get(DATASET_PATH_ENV) or bound or "").strip())
+
+
+def request_lengths_from_data(env: Mapping[str, str] | None = None) -> bool:
+    """Whether a round's requests take their lengths from a corpus (AgentX traces, a prompt dataset), so that ISL and
+    OSL do not bound them."""
+    return agentx_enabled(env) or prompt_dataset_enabled(env)
 
 
 def is_agentx_mode(benchmark_mode: Any) -> bool:
@@ -567,6 +583,7 @@ __all__ = [
     "AGENTX_CHECKPOINT_MAX_DROP_PCT",
     "AGENTX_CHECKPOINT_SEC",
     "CONSTRAINT_FIELDS",
+    "DATASET_PATH_ENV",
     "DURATION_DRIFT_PCT",
     "ERROR_RATE_SLACK_PCT",
     "GradedComparison",
@@ -601,6 +618,8 @@ __all__ = [
     "constraint_veto_reason",
     "latency_veto_reason",
     "power_veto_reason",
+    "prompt_dataset_enabled",
+    "request_lengths_from_data",
     "output_tput_of",
     "parse_intvty_noise_pct",
     "perf_snapshot_from_mapping",

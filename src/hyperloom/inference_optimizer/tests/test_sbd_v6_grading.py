@@ -170,6 +170,17 @@ def test_metadata_grading_reports_no_guard_on_a_synthetic_session():
     assert block["tput_guard"]["enabled"] is False
 
 
+def test_metadata_grading_says_a_session_sent_a_prompt_dataset_from_what_its_seed_recorded(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
+    monkeypatch.setenv("DATASET_PATH", "/data/prompts.jsonl")
+    dataset = _state(benchmark_mode="synthetic", grading=seed_grading("sglang", "synthetic"))
+    monkeypatch.delenv("DATASET_PATH")
+    random = _state(benchmark_mode="synthetic", grading=seed_grading("sglang", "synthetic"))
+
+    assert grading_block(dataset)["prompt_dataset"] is True
+    assert "prompt_dataset" not in grading_block(random)
+
+
 def test_metadata_grading_names_the_mode_a_session_with_no_recorded_axis_ran():
     # ``benchmark_mode`` reaches ``reports/final.json`` but nothing else in the breakdown, so an AgentX
     # session would otherwise be unidentifiable in this document.

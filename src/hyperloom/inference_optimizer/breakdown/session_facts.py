@@ -108,11 +108,14 @@ def grading_block(state: Any) -> dict[str, Any]:
     if grading is None:
         return {}
     on_intvty, noise = grading
-    return {
+    block = {
         "benchmark_mode": str(_field(state, "benchmark_mode", "") or "").strip() or "synthetic",
         "objective": GRADED_INTVTY if on_intvty else GRADED_OUTPUT,
         "tput_guard": {"enabled": on_intvty, "noise_pct": noise},
     }
+    if (_field(state, "grading", None) or {}).get("prompt_dataset"):
+        block["prompt_dataset"] = True
+    return block
 
 
 def workload_signature(config: Mapping[str, Any]) -> str:

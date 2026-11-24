@@ -212,6 +212,7 @@ def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
         GRADED_OUTPUT,
         intvty_serving_grading_enabled,
         parse_intvty_noise_pct,
+        prompt_dataset_enabled,
     )
 
     from .. import framework_registry
@@ -223,6 +224,7 @@ def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
     return {
         "objective": GRADED_INTVTY if on_intvty else GRADED_OUTPUT,
         "noise_pct": parse_intvty_noise_pct(),
+        "prompt_dataset": prompt_dataset_enabled(),
     }
 
 
