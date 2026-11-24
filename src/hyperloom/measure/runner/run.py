@@ -67,6 +67,7 @@ from hyperloom.measure.farm import (
     inherited_environment,
     lay_profile_patch,
     patched_configs,
+    prepend_base_bins,
     record_unpatched,
     server_environment,
     server_python,
@@ -353,6 +354,13 @@ def _prepare(ctx: _Context, spec: MeasurementSpec) -> tuple[list[Path], Path, Fa
     except (AttachmentError, FarmError, NativeLayError, ValueError) as exc:
         raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
     return points, inferencex, farm
+
+
+def _prepend_base_bins(environ: MutableMapping[str, str]) -> None:
+    try:
+        prepend_base_bins(environ)
+    except FarmError as exc:
+        raise RunnerFailure(_START_FAILED, str(exc)) from exc
 
 
 def _sheet_builds(spec: MeasurementSpec, environ: Mapping[str, str]) -> SheetBuilds | None:
@@ -733,6 +741,7 @@ def run(
         try:
             key = _load_key(environ)
             take_topology(environ)
+            _prepend_base_bins(environ)
             _check_cards_free(ctx, _visible(environ))
             progress.phase("waiting_spec")
             if not wait_for_file(in_dir / "READY", spec_wait_sec):
