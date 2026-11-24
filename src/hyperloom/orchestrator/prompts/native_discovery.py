@@ -10,21 +10,16 @@ yet (an option of the server, an auxiliary model file, a source change in the GP
 backend), each bounded by the share of the step it touches and stated with what would prove it wrong. The text names no
 server: where a server's options are defined, the flag that names its auxiliary model, the words of its timing lines
 and the host side of its decode loop are the rule pack's, by component, and so are the files of its GPU kernels.
-
-A session that wrote the list of its server's options from the server's own help hands the specialist that list
-(:class:`OptionList`) in place of asking it to read the option table: asked to read the table, a specialist takes the
-options from memory.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
 from hyperloom.common.outside_facts import NATIVE_AUX_MODEL_FLAGS, NATIVE_SERVING, kernel_knobs
 from hyperloom.common.server_timing import TIMING_LINES_KEPT
 
-__all__ = ["DISCOVERY_TEXTS", "OptionList", "gpu_kernel_dirs", "native_discovery"]
+__all__ = ["gpu_kernel_dirs", "native_discovery"]
 
 _EVIDENCE = """\
 Finding gains in {component}: time evidence first, then the levers this launch does not use yet, in the order of the \
@@ -45,7 +40,7 @@ _LEVERS = """\
 Three kinds of lever a launch can lack:
 (a) An option of the server that the launch does not set. Take the options from the checkout, never from memory: each \
 is one {option_entry} entry of {option_table}, with its spellings, its help text and the field it sets ({help_command} \
-prints those the server takes). {whole_list} For each option \
+prints those the server takes). Read the whole table once. For each option \
 that moves work off the part of the step your budget shows largest, or removes it, read the path it switches on \
 ({host_loop}) and make it a candidate: it is a code path this session has not measured, not a value in the settings \
 sweep, and it costs no build. No option is ruled out by a label in its help text: each is judged by the measurement \
@@ -64,24 +59,6 @@ change goes before a build. With each one state the budget line it acts on, the 
 and the observation that would prove it wrong (the timing line that must move, the acceptance that must hold), so a \
 flat result names the assumption that failed."""
 _KERNEL_DIRS = " ({dirs})"
-_WHOLE_TABLE = "Read the whole table once."
-_OPTION_LIST = """\
-The session ran {help_command} on the server it built and wrote every option it takes, with its spellings, its help \
-text and whether the launch sets it, to {file}: {total} options, {unset} of them not set by the launch. Go through all \
-of the unset ones, not the ones you remember."""
-
-#: The texts the section is rendered from, for the version of a prompt that carries it.
-DISCOVERY_TEXTS = (_EVIDENCE, _HANDED, _LEVERS, _KERNEL_DIRS, _WHOLE_TABLE, _OPTION_LIST)
-
-
-@dataclass(frozen=True)
-class OptionList:
-    """The list a session wrote of the options its server takes, from the server's own help: the file, how many
-    options it holds, and how many of them the launch leaves unset."""
-
-    file: Path
-    total: int
-    unset: int
 
 
 def gpu_kernel_dirs(component: str) -> tuple[str, ...]:
@@ -90,11 +67,10 @@ def gpu_kernel_dirs(component: str) -> tuple[str, ...]:
     return tuple(sorted({f"{PurePosixPath(file).parent}/" for file in files}))
 
 
-def native_discovery(component: str, *, carried: str, logs: str, options: OptionList | None = None) -> str:
+def native_discovery(component: str, *, carried: str, logs: str) -> str:
     """The section for a specialist of ``component``'s server; ``carried`` is the sentence that says what carries the
-    timing lines it is handed, ``logs`` where the logs they were read from are, and ``options`` the option list the
-    session wrote (none: the specialist is asked to read the option table). Empty for a component the rule pack states
-    no serving facts of."""
+    timing lines it is handed, and ``logs`` where the logs they were read from are. Empty for a component the rule pack
+    states no serving facts of."""
     facts = NATIVE_SERVING.get(component)
     if facts is None:
         return ""
@@ -102,15 +78,9 @@ def native_discovery(component: str, *, carried: str, logs: str, options: Option
     handed = _HANDED.format(kept=TIMING_LINES_KEPT, carried=carried, logs=logs)
     evidence = _EVIDENCE.format(component=component, handed=handed, **facts)
     flag, *aliases = NATIVE_AUX_MODEL_FLAGS[component]
-    whole_list = _WHOLE_TABLE
-    if options is not None:
-        whole_list = _OPTION_LIST.format(
-            help_command=facts["help_command"], file=options.file, total=options.total, unset=options.unset
-        )
     levers = _LEVERS.format(
         kernel_dirs=_KERNEL_DIRS.format(dirs=", ".join(dirs)) if dirs else "",
         aux_model_flag=f"{flag} ({', '.join(aliases)})" if aliases else flag,
-        whole_list=whole_list,
         **facts,
     )
     return f"{evidence}\n{levers}"
