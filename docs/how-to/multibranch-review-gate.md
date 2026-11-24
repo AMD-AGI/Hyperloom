@@ -4,7 +4,7 @@ myst:
         "description": "Review the agent map before a multi-branch session opens its agent branches: when MB waits, what it shows, the clock, what you may edit, how to approve or reject, and how to skip the review for unattended runs."
         "keywords": "Hyperloom, multi-branch, MB, review gate, agent map, dossier, approve, reject, no-review-gate"
 ---
-# Reviewing the agent map before the agent branches open
+# Reviewing the Hyperloom agent map before branches open
 
 A multi-branch session (MB) with component agents makes a map of directions before their branches open: the dossier
 pass's map, a map generated from the root's profile, or one you gave with `--agent-directions`. A component agent is

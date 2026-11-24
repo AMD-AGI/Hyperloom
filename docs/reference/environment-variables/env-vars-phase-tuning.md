@@ -4,7 +4,7 @@ myst:
         "description": "Phase tuning variables for Hyperloom: macro-cycle duration, backend error streak threshold, minimum remaining time for a new cycle, kernel idle ticks and seconds, and SWEEP variant timeout."
         "keywords": "Hyperloom, environment variables, phase tuning, INFERENCE_OPTIMIZER_CYCLE_HOURS, INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS, SWEEP_VARIANT_TIMEOUT_SEC, macro-cycle"
 ---
-# Phase tuning
+# Hyperloom Phase tuning
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|

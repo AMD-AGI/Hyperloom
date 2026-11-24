@@ -5,7 +5,7 @@ myst:
         "keywords": "Hyperloom, Experience KB, collect, mapping, schema, declaration, session breakdown, hyperloom-kb-collect, KernelForge, kernelforge-v1"
 ---
 
-# Experience collection
+# Hyperloom experience collection
 
 `collect` turns one producer log document into complete Experiences through a
 **mapping**: a YAML file that says which parts of the document are units, how
@@ -27,7 +27,7 @@ report = collect(
 
 ```bash
 hyperloom-kb-collect --mapping hyperloom-sbd-v6 --document session_breakdown.json --dry-run
-# from a pip --target workspace: python -m hyperloom_kb.collect.cli ...
+# Hyperloom experience collection
 ```
 
 Without `kb=`, the target is the Experience service named by `HYPERLOOM_KB_URL`

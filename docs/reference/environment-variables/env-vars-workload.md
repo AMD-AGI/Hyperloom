@@ -4,7 +4,7 @@ myst:
         "description": "Workload parameter environment variables for Hyperloom: model shape, budget goals, GPU power settings, cluster topology, PD disaggregation, and phase toggles."
         "keywords": "Hyperloom, environment variables, workload, ISL, OSL, CONC, TP, EP, GPU power, phase toggles, quantization"
 ---
-# Workload configuration
+# Hyperloom Workload configuration
 
 Set with CLI flags. `ISL` / `OSL` / `CONC` / `TP` / `EP` resolve on a ladder,
 and the ladder differs by branch. A fresh launch takes an explicit flag, then

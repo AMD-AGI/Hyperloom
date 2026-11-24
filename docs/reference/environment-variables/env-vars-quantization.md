@@ -4,7 +4,7 @@ myst:
         "description": "Quantization prelude variables for Hyperloom: primary switch for the AMD Quark PTQ quantization prelude and the Quark checkout path used by the quantization agent."
         "keywords": "Hyperloom, environment variables, quantization, HYPERLOOM_QUANTIZE_ENABLED, QUARK_ROOT, AMD Quark, PTQ, --quantize, --quantize-scheme"
 ---
-# Quantization prelude
+# Hyperloom Quantization prelude
 
 | Variable | Default | Description |
 |----------|---------|-------------|

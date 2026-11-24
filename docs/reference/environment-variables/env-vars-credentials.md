@@ -4,7 +4,7 @@ myst:
         "description": "LLM gateway credential variables for Hyperloom: Anthropic, OpenAI, DeepSeek and GEAK endpoint and API key pairs, model ids, and reasoning effort settings."
         "keywords": "Hyperloom, environment variables, credentials, ANTHROPIC_API_KEY, OPENAI_API_KEY, CLAUDE_MODEL, LANGFUSE, authentication"
 ---
-# Credentials
+# Hyperloom Credentials
 
 These variables configure LLM gateway access and optional backend credentials.
 See [Authentication and credentials](authentication.md) for the accepted

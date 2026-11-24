@@ -15,8 +15,7 @@ the measurement improves.
 
 Before running a campaign, ensure you have the following.
 
-- Hyperloom installed (`pip install -e ".[forge]"`; see
-  {doc}`Quickstart </components/kernelforge/install/quickstart>`).
+- Hyperloom installed (`pip install -e ".[forge]"`; see {doc}`Quickstart </components/kernelforge/quickstart>`).
 - Agent credentials, for Claude or Codex:
   - Claude: a logged-in `claude` CLI for in-session mode, or
     `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` / a gateway's

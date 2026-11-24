@@ -4,7 +4,7 @@ myst:
         "description": "Kernel source resolution reference for Hyperloom: resolution ladder (curated dictionary, trace-derived launcher frame, name grep) and the kernel_source_resolution.json output schema."
         "keywords": "Hyperloom, kernel source resolution, kernel_source_resolution.json, TraceLens, kernel candidates, source file, resolution tier"
 ---
-# Kernel source resolution
+# Hyperloom Kernel source resolution
 
 A kernel candidate must resolve to a real source file before any backend can
 rewrite it. Resolution runs as a ladder: curated dictionary, then the

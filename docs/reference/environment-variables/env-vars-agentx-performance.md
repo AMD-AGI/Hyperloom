@@ -4,7 +4,7 @@ myst:
         "description": "AgentX performance metric variables for Hyperloom: 2-D interactivity grading, noise band, early-stop mode, and the MLPerf agentic backend for MLCommons inference-endpoint replays."
         "keywords": "Hyperloom, environment variables, AgentX, HYPERLOOM_PERF_METRIC, HYPERLOOM_AGENTX_EARLY_STOP, HYPERLOOM_AGENTIC_BACKEND, mlperf, interactivity, intvty_v1"
 ---
-# AgentX performance metric
+# Hyperloom AgentX performance metric
 
 Grading defaults to output throughput alone. On an agentic replay that is the
 wrong objective: the canonical corpus averages ~114k prompt tokens against ~810

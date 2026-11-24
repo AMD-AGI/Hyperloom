@@ -4,7 +4,7 @@ myst:
         "description": "Targeted build (Rung 5) variables for Hyperloom: auto-escalation disable switch, aiter JIT directory, GPU target architecture, compile parallelism cap, and framework Python interpreter."
         "keywords": "Hyperloom, environment variables, targeted builds, Rung 5, HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD, PYTORCH_ROCM_ARCH, MAX_JOBS, HYPERLOOM_FRAMEWORK_PYTHON, aiter"
 ---
-# Targeted builds (Rung 5)
+# Hyperloom Targeted builds (Rung 5)
 
 These variables control the Rung-5 off-loop compiled-component acquisition
 step (AITER FP4/MLA/NSA kernels, sgl-kernel, and vLLM from source).  All are

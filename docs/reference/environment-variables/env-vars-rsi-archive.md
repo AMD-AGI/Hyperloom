@@ -4,7 +4,7 @@ myst:
         "description": "Multi-branch RSI archive variables for Hyperloom: archive directory path, as-of timestamp for replay experiments, and write-only mode for runs beside the archive."
         "keywords": "Hyperloom, environment variables, RSI archive, HYPERLOOM_RSI_ARCHIVE, HYPERLOOM_RSI_AS_OF, HYPERLOOM_RSI_WRITE_ONLY, multi-branch"
 ---
-# Multi-branch RSI archive
+# Hyperloom Multi-branch RSI archive
 
 A multi-branch session reads its predecessors' search trees, lessons, scheduling playbooks and outcomes from this
 archive, and writes its own into it at CLOSE. `python -m hyperloom_multibranch.blackboard.rsi.lessons` (`list`, `show`,

@@ -4,7 +4,7 @@ myst:
         "description": "Framework and source-tree discovery variables for Hyperloom: source search roots, rescue paths, aiter JIT directory, sglang patch version pins, and framework preflight gate bypass."
         "keywords": "Hyperloom, environment variables, framework discovery, INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS, HYPERLOOM_ENABLE_PATCH, HYPERLOOM_SKIP_FRAMEWORK_CHECK, AITER_REF, ATOM_REF"
 ---
-# Framework / source-tree discovery
+# Hyperloom framework discovery
 
 The following variables configure framework source discovery and path overrides.
 

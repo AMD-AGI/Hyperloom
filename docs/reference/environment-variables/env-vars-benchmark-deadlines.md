@@ -4,7 +4,7 @@ myst:
         "description": "Benchmark deadline and lifecycle variables for Hyperloom: hard wall-clock timeout per benchmark spawn, output-silence timeout after server readiness, and session lifecycle notes."
         "keywords": "Hyperloom, environment variables, benchmark deadlines, INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC, INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC, session lifecycle"
 ---
-# Benchmark deadlines and lifecycle
+# Hyperloom benchmark deadlines
 
 Each actual benchmark subprocess spawn uses the same finite, positive limits,
 including baseline, explore, sweep, and rebench measurements:

@@ -5,7 +5,7 @@ myst:
         "keywords": "Hyperloom, Experience KB, experience, knowledge base, schema, HTTP API, configuration"
 ---
 
-# Experience KB service
+# Hyperloom experience KB service
 
 The Experience KB stores one immutable Experience per measured Framework
 attempt and serves them back to later decisions. It ships inside Hyperloom as

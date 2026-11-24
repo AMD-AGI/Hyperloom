@@ -4,7 +4,7 @@ myst:
         "description": "Reactor budget variables for Hyperloom: total wall-clock limit per reactor stage, Claude Agent SDK turn timeout for orchestration, and DeepSeek Harness turn timeout."
         "keywords": "Hyperloom, environment variables, reactor budgets, INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC, INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC, INFERENCE_OPTIMIZER_DEEPSEEK_CALL_TIMEOUT_SEC"
 ---
-# Reactor budgets
+# Hyperloom Reactor budgets
 
 | Variable | Default | Description |
 |---|---|---|

@@ -4,7 +4,7 @@ myst:
         "description": "Plug selection variables for Hyperloom: manifest path and overrides path for choosing plug socket implementations such as the events (progress reporting) socket."
         "keywords": "Hyperloom, environment variables, plug selection, HYPERLOOM_MANIFEST, HYPERLOOM_MANIFEST_OVERRIDES, plug profile, events socket, --plug"
 ---
-# Plug selection
+# Hyperloom Plug selection
 
 Which implementation serves each plug socket (today only `events`, progress reporting) is chosen by layering, lowest
 first: the built-in `local` profile, the `plugs.resolved.json` of the session being resumed, `--plug-profile`,

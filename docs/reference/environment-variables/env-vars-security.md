@@ -4,7 +4,7 @@ myst:
         "description": "Security compatibility variables and agent isolation reference for Hyperloom: credential inheritance switch, specialist user account, bubblewrap sandbox details, and isolation chooser."
         "keywords": "Hyperloom, environment variables, security, HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV, HYPERLOOM_SPECIALIST_USER, bubblewrap, agent isolation, bwrap, sandbox"
 ---
-# Security compatibility switches
+# Hyperloom Security compatibility switches
 
 These switches keep production-compatible behavior by default while still
 allowing operators to turn off credential/env persistence in hardened

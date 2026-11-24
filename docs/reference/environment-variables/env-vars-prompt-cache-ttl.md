@@ -4,7 +4,7 @@ myst:
         "description": "Multi-branch prompt-cache TTL variables for Hyperloom: Claude CLI and subagent cache TTLs, defaulting to 1h on InferenceX and the CLI default on AgentX workloads."
         "keywords": "Hyperloom, environment variables, prompt cache, CLAUDE_CODE_PROMPT_CACHE_TTL, CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL, multi-branch, TTL"
 ---
-# Multi-branch prompt-cache TTL
+# Hyperloom Multi-branch prompt-cache TTL
 
 A multi-branch session sets the prompt-cache TTL of every branch's Claude CLI. On an InferenceX workload a branch
 waits for its test in the same conversation for longer than the CLI's default 5-minute TTL, so the session

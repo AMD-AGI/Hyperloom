@@ -4,7 +4,7 @@ myst:
         "description": "Run a multi-branch Hyperloom session with hyperloom-multibranch run: the environment it needs, its options grouped by what they control, and its exit codes."
         "keywords": "Hyperloom, multi-branch, MB, hyperloom-multibranch, run, RSI archive, runner cache, image check, Recipe KB"
 ---
-# Running a multi-branch session
+# Running a Hyperloom multi-branch session
 
 `hyperloom-multibranch` (also `python -m hyperloom_multibranch`) is installed with Hyperloom. `run` starts one
 session: PRELUDE, EXPLORE, FINAL and CLOSE; `run --resume SESSION_DIR` continues one that stopped before FINAL (see

@@ -4,7 +4,7 @@ myst:
         "description": "Enablement admission reference for Hyperloom: the --enablement CLI flag (off/launch/eval/all) for self-heal lanes and the fixed accuracy floor constant for enablement KEEP decisions."
         "keywords": "Hyperloom, enablement, --enablement, self-heal, baseline_failed, accuracy floor, DEFAULT_ENABLEMENT_ACCURACY_FLOOR, launch lane, eval lane"
 ---
-# Enablement admission
+# Hyperloom Enablement admission
 
 Enablement is not configured through the environment. Both self-heal lanes
 are admitted by the `--enablement {off,launch,eval,all}` CLI flag, which defaults

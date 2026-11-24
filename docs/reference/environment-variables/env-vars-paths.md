@@ -4,7 +4,7 @@ myst:
         "description": "Filesystem path variables for Hyperloom: checkout root, session and runtime directories, credential env-file location, and open-source dependency caches."
         "keywords": "Hyperloom, environment variables, paths, USER_DATA_PATH, REPO_ROOT, TRACELENS_ROOT, KERNEL_AGENT_ENV, HYPERLOOM_CACHE_DIR"
 ---
-# Path environment
+# Hyperloom path variables
 
 The following variables configure filesystem paths for Hyperloom's runtime dependencies and session data.
 

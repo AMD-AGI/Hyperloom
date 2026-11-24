@@ -4,7 +4,7 @@ myst:
         "description": "Multi-node and prefill-decode cluster hand-off variables for Hyperloom: topology hand-off file, service URL, SSH keys, pod IPs, and Ray Dashboard connection details."
         "keywords": "Hyperloom, environment variables, multi-node, prefill-decode, TOPOLOGY_HANDOFF_FILE, HYPERLOOM_MN_EXT_SERVICE_URL, HYPERLOOM_MN_EXT_SSH_KEY, infera, rayjob"
 ---
-# Multi-node / prefill-decode (PD)
+# Hyperloom multi-node prefill-decode
 
 Use CLI flags for multi-node topology and prefill-decode configuration:
 

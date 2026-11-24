@@ -4,7 +4,7 @@ myst:
         "description": "Critic and knowledge base variables for Hyperloom: Recipe backend mode, local and framework KB roots, KB Store endpoint and token, draft and warm-start handoffs, and critic token cap."
         "keywords": "Hyperloom, environment variables, critic, knowledge base, KB_STORE_URL, KB_STORE_TOKEN, KNOWLEDGE_STORE_MODE, CRITIC_AGENT_MAX_COMPLETION_TOKENS, recipe KB"
 ---
-# Critic / knowledge base (KB)
+# Hyperloom critic and knowledge base
 
 The following variables configure the Critic and knowledge base components.
 

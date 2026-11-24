@@ -4,7 +4,7 @@ myst:
         "description": "TraceLens analysis route variable for Hyperloom: selects agent (LLM-driven) or non-llm (TraceLens-only) analysis route for trace_analyze requests."
         "keywords": "Hyperloom, environment variables, TraceLens, HYPERLOOM_TRACE_ANALYSIS_ROUTE, trace_analyze, non-llm, agent, analysis route"
 ---
-# TraceLens analysis route
+# Hyperloom TraceLens analysis route
 
 | Variable | Default | Description |
 |---|---|---|

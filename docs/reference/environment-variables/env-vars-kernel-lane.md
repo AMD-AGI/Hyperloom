@@ -4,7 +4,7 @@ myst:
         "description": "KERNEL lane behaviour reference for Hyperloom: forge-only behaviors including fusion recipe cap, GEMM per-tuner candidates, fp8 to bf16 retry, tuner cap, and subprocess output recording."
         "keywords": "Hyperloom, kernel lane, forge, KERNEL_OPT_BACKEND_ORDER, fusion lane, GEMM tuning, kernel rewrite controller, subprocess"
 ---
-# KERNEL lane behaviour
+# Hyperloom KERNEL lane behaviour
 
 No variable toggles the behaviours below; `KERNEL_OPT_BACKEND_ORDER` only decides
 which of them apply.

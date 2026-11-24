@@ -4,7 +4,7 @@ myst:
         "description": "Fusion lane variables for Hyperloom: skip switch, wrapper timeout, agent turn cap, and minimum throughput gain required for a queued fusion patch to be KEPT on integration."
         "keywords": "Hyperloom, environment variables, fusion lane, HYPERLOOM_SKIP_FUSION, FORGE_FUSION_TIMEOUT, FORGE_FUSION_MAX_TURNS, HYPERLOOM_FUSION_KEEP_PCT"
 ---
-# Fusion lane
+# Hyperloom Fusion lane
 
 The fusion lane is Coordinator-owned and forge-only: it runs at KERNEL entry on
 the forge branch, never as an agent request, and the default `geak` backend

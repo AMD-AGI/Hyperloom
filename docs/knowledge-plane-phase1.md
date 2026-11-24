@@ -7,7 +7,7 @@ myst:
 orphan: true
 ---
 
-# KnowledgePlane phase 1
+# Hyperloom KnowledgePlane phase 1
 
 Phase 1 puts Recipe KB and the KernelForge knowledge control-plane behind one
 Hyperloom `KnowledgePlane`. PR Monitor is co-hosted by KB Store: one

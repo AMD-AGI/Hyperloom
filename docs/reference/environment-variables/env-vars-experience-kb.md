@@ -4,7 +4,7 @@ myst:
         "description": "Experience KB environment variables for Hyperloom: local service URL and token, global KB URL for sharing, auto-push switch, and planner model and timeout settings."
         "keywords": "Hyperloom, environment variables, Experience KB, HYPERLOOM_KB_URL, HYPERLOOM_GLOBAL_KB_URL, LOCAL_KB_PLANNER_MODEL, knowledge base"
 ---
-# Experience KB
+# Hyperloom experience KB variables
 
 Every workspace runs a local Experience KB service. The global KB settings are
 optional: unset, the workspace uses only its local KB. See

@@ -4,7 +4,7 @@ myst:
         "description": "Codex agent sandbox variable for Hyperloom: HYPERLOOM_CODEX_SANDBOX_MODE selects workspace-write, read-only, or bypass isolation for Codex agent sessions and TraceLens analysis."
         "keywords": "Hyperloom, environment variables, Codex sandbox, HYPERLOOM_CODEX_SANDBOX_MODE, bubblewrap, agent isolation, workspace-write, bypass"
 ---
-# Codex (OpenAI) agent sandbox
+# Hyperloom Codex agent sandbox
 
 Selects how a Codex agent session (TraceLens analysis and every future
 Codex-based agent) is contained. The secure default is `workspace-write`.

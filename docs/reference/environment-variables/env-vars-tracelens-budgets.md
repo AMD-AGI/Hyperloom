@@ -4,7 +4,7 @@ myst:
         "description": "TraceLens analysis budget variables for Hyperloom: stream idle timeout and tool-call idle timeout that bound inactivity in the Claude-backed TraceLens analysis session."
         "keywords": "Hyperloom, environment variables, TraceLens budgets, HYPERLOOM_TRACELENS_STREAM_IDLE_TIMEOUT_SEC, HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC, idle timeout"
 ---
-# TraceLens analysis budgets
+# Hyperloom TraceLens analysis budgets
 
 On the Claude backend, the TraceLens analysis session bounds each wait for the
 next SDK message: the in-process SDK has no read timeout, so a stalled gateway

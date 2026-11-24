@@ -4,7 +4,7 @@ myst:
         "description": "Measurement card guard variable for Hyperloom: controls what happens when a process outside a test holds one of the test's GPU cards during measurement."
         "keywords": "Hyperloom, environment variables, measurement card guard, HYPERLOOM_CARD_GUARD, GPU cards, foreign process, enforce, observe"
 ---
-# Measurement card guard
+# Hyperloom Measurement card guard
 
 What is done about a process outside a test that holds one of the test's GPU cards. The local toolbox reads it once, when
 it is built (the `card_guard` option wins over it), applies it to the cards it hands out to tests and leases, and passes

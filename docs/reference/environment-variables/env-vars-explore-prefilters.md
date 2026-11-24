@@ -4,7 +4,7 @@ myst:
         "description": "EXPLORE pre-filter variables for Hyperloom: measurement store, reduced-GPU screen, and InferaSim projection filters that remove variants before benchmarking."
         "keywords": "Hyperloom, environment variables, EXPLORE pre-filters, HYPERLOOM_MEASUREMENT_STORE, HYPERLOOM_EXPLORE_SCREEN, HYPERLOOM_EXPLORE_PROJECTION, HYPERLOOM_INFERASIM_ROOT"
 ---
-# EXPLORE pre-filters
+# Hyperloom EXPLORE pre-filters
 
 Three opt-in filters can remove variants from an EXPLORE round before any of
 them is benchmarked. All three are off by default; with every switch below

@@ -4,7 +4,7 @@ myst:
         "description": "Collective candidate extraction variable for Hyperloom: opt-in switch to allow a source-resolved collective to borrow shapes from the trace's sole all-reduce workload family."
         "keywords": "Hyperloom, environment variables, collective extraction, HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES, NCCL, RCCL, TraceLens, kernel candidates"
 ---
-# Collective candidate extraction
+# Hyperloom Collective candidate extraction
 
 Communication operators are optimized by the rewrite controller like any other
 operator. TraceLens still resolves them deterministically: it maps a mangled

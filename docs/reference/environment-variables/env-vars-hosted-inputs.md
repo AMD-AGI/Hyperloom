@@ -4,7 +4,7 @@ myst:
         "description": "Hosted run input variables for Hyperloom: campaign request file, run ID and timestamps, state and events directories, MCP server port and token, sandbox templates, and S3 archive settings."
         "keywords": "Hyperloom, environment variables, hosted run, HYPERLOOM_INPUT_FILE, HYPERLOOM_RUN_ID, HYPERLOOM_STATE_DIR, HYPERLOOM_SANDBOX_KEY_MEASUREMENT, E2B_API_URL, AWS_ACCESS_KEY_ID"
 ---
-# Hosted run inputs
+# Hyperloom Hosted run inputs
 
 A hosted run is configured by the host that launches it. `src/hyperloom/hosted/host_info.py` is the only reader of these variables:
 it checks them once at start-up and names every missing or malformed variable in one error (variable names and reasons, never

@@ -4,7 +4,7 @@ myst:
         "description": "Single-node Ray GPU scheduling variables for Hyperloom: in-flight GPU specialist limit, per-round wall-clock ceiling, and serving-priority flag to prevent research work from starving serving."
         "keywords": "Hyperloom, environment variables, Ray GPU scheduling, INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT, INFERENCE_OPTIMIZER_RAY_ROUND_WAIT_SEC, INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY"
 ---
-# Single-node Ray GPU scheduling
+# Hyperloom Single-node Ray GPU scheduling
 
 These variables tune the single-node Ray execution path (active when
 `INFERENCE_OPTIMIZER_RAY_EXEC=1` and `--nodes=1`). They have no effect on

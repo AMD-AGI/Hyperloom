@@ -34,9 +34,6 @@ subtrees:
         entries:
         - file: components/kernelforge/quickstart.md
           title: Quickstart
-          entries:
-          - file: components/kernelforge/install/quickstart.md
-            title: Install
         - file: components/kernelforge/conceptual/architecture.md
           title: Architecture
           entries:

@@ -4,7 +4,7 @@ myst:
         "description": "Compute partitioning variables for Hyperloom on AMD MI300-series: partition mode assertion, runtime hand-off variables, and the partition_mode_sweep.py script for choosing the mode."
         "keywords": "Hyperloom, environment variables, compute partitioning, HYPERLOOM_PARTITION_GPU, HYPERLOOM_PARTITION_MODE, SPX, DPX, QPX, CPX, MI300, partition_mode_sweep"
 ---
-# Compute partitioning (AMD)
+# Hyperloom compute partitioning
 
 An MI300-series card can be split into independent partitions (`SPX`, `DPX`,
 `QPX`, `CPX`). Splitting it trades per-request latency for aggregate throughput,

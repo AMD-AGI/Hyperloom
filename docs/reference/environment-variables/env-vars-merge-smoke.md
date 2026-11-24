@@ -4,7 +4,7 @@ myst:
         "description": "Merge smoke variable for Hyperloom: controls whether Python import smoke-testing runs on patched files before a test is given a sandbox or GPU cards."
         "keywords": "Hyperloom, environment variables, merge smoke, HYPERLOOM_MERGE_SMOKE, byte-compile, import check, patched module, multi-branch"
 ---
-# Merge smoke
+# Hyperloom Merge smoke
 
 Before a test that carries patches is given a sandbox or cards, the multi-branch toolbox (hosted and local) byte-compiles
 every Python file the test's patch stack changes and imports each patched component on CPU, with every GPU hidden and the

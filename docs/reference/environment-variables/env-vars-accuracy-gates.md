@@ -4,7 +4,7 @@ myst:
         "description": "Accuracy gate variables for Hyperloom: eval generation bounds, per-generation token ceiling, truncation probe settings, and the fixed 5-point tolerance for candidate KEEP decisions."
         "keywords": "Hyperloom, environment variables, accuracy gates, eval, HYPERLOOM_EVAL_LIMIT, HYPERLOOM_EVAL_MAX_TOKENS, HYPERLOOM_EVAL_PROBE, lm-eval"
 ---
-# Accuracy gates
+# Hyperloom Accuracy gates
 
 A candidate that clears the throughput bar must also hold accuracy before it is
 kept. Grading runs only *after* the throughput bar is cleared, and reads the

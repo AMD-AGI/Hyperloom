@@ -4,7 +4,7 @@ myst:
         "description": "Single-node Ray execution variables for Hyperloom: Ray backend toggle, head readiness timeout, and driver connect probe timeout for the single-node Ray serving path."
         "keywords": "Hyperloom, environment variables, Ray execution, INFERENCE_OPTIMIZER_RAY_EXEC, HYPERLOOM_RAY_READY_TIMEOUT_SEC, HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC, single-node"
 ---
-# Single-node Ray execution
+# Hyperloom Single-node Ray execution
 
 | Variable | Default | Description |
 |----------|---------|-------------|

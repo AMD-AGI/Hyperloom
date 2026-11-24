@@ -5,7 +5,7 @@ myst:
         "keywords": "Hyperloom, Framework Experience, Knowledge Base, session breakdown, SBD V6, experience publication"
 ---
 
-# Framework Experience publication
+# Hyperloom framework experience publication
 
 Framework Experience publication is a side effect of SBD V6 export.
 It is separate from Recipe KB reads and writes.

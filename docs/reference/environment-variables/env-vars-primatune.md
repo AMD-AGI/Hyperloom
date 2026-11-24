@@ -4,7 +4,7 @@ myst:
         "description": "PrimaTune predictor variables for Hyperloom: service endpoint URL, operating mode (off/shadow/active), and per-request timeout. Set by --primatune-endpoint and --primatune-mode."
         "keywords": "Hyperloom, environment variables, PrimaTune, HYPERLOOM_PREDICTOR_ENDPOINT, HYPERLOOM_PREDICTOR_MODE, HYPERLOOM_PREDICTOR_TIMEOUT_SEC, predictor"
 ---
-# PrimaTune predictor
+# Hyperloom PrimaTune variables
 
 Set by `--primatune-endpoint` and `--primatune-mode`, or directly in the shell. See
 [PrimaTune predictor](primatune-predictor.md).

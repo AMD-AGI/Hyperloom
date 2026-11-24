@@ -46,7 +46,7 @@ Key properties:
 
 The following resources cover installation, conceptual background, and practical use.
 
-- Install and run your first task: {doc}`Quickstart </components/kernelforge/install/quickstart>`.
+- Install and run your first task: {doc}`Quickstart </components/kernelforge/quickstart>`.
 - Understand the system: {doc}`Architecture </components/kernelforge/conceptual/architecture>` and the
   {doc}`Optimization loop </components/kernelforge/conceptual/optimization-loop>`.
 - Drive a run: {doc}`Run a campaign </components/kernelforge/how-to/run-a-campaign>`.

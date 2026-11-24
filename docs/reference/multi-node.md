@@ -5,7 +5,7 @@ myst:
         "keywords": "Hyperloom, multi-node, cluster, infera, rayjob, AMD GPU, ROCm, MI300X, MI325X, SGLang, PD disaggregation, NFS, Primus-Claw, inference optimization"
 ---
 
-# Multi-node inference optimization
+# Hyperloom multi-node inference optimization
 
 This page is the reference for running Hyperloom across a multi-node GPU cluster
 (`--nodes >= 2`). It covers both supported backends, the cluster hand-off
@@ -327,10 +327,10 @@ failed before writing `manifest.json`.
 **Fix**:
 
 ```bash
-# Locate the session directory
+# Hyperloom multi-node inference optimization
 find "$USER_DATA_PATH" -name manifest.json
 
-# Resume with the exact session directory
+# Hyperloom multi-node inference optimization
 python3 -m hyperloom optimize \
   --resume-from /path/to/session
 ```

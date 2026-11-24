@@ -5,7 +5,7 @@ myst:
         "keywords": "Hyperloom, kernel optimization, GEAK, Forge, request dispatch, kernel execution, AMD GPU, ROCm, KERNEL phase, TraceLens, rewrite controller, multi-node"
 ---
 
-# Kernel optimization execution path
+# Hyperloom kernel optimization execution path
 
 Kernel work in Hyperloom is not handled by an LLM agent. Every kernel
 `REQUEST` emitted by orchestration is intercepted inline by the Coordinator
@@ -76,14 +76,14 @@ fusion, the rewrite controller, GEAK and its revalidation) is covered by those
 lanes. Which calls it makes depends on the backend:
 
 ```python
-# 1. GEAK branch — the SGLang/vLLM default. One whole-pipeline e2e run, then
-#    the phase winds down to SWEEP. Nothing below this line executes.
+# Hyperloom kernel optimization execution path
+# Hyperloom kernel optimization execution path
 if geak_enabled:                      # KernelPhase.geak_enabled(): kernel_optimizer == "geak"
     await self._run_geak_kernel_phase(from_phase=from_phase)
     return
 
-# 2. Forge branch — only with KERNEL_OPT_BACKEND_ORDER=forge. Two routes into
-#    one shared tail, chosen by whether GEMM tuning is due.
+# Hyperloom kernel optimization execution path
+# Hyperloom kernel optimization execution path
 if not self._gemm_tuning_required_before_kernel_opt():
     await self._finish_kernel_entry()
     return
@@ -213,8 +213,8 @@ started with `python -m <module>`. Install everything using:
 
 ```bash
 export REPO_ROOT="$(pwd -P)"    # workspace holding the hyperloom package
-# Pin the artifact root so the env file below has a known path. Left unset, the
-# CLI picks /workspace/hyperloom when writable and session/ under $PWD otherwise.
+# Hyperloom kernel optimization execution path
+# Hyperloom kernel optimization execution path
 export USER_DATA_PATH="${USER_DATA_PATH:-$REPO_ROOT/session}"
 bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
 ```

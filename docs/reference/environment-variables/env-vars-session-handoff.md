@@ -4,7 +4,7 @@ myst:
         "description": "Session and observability hand-off variables for Hyperloom: Claw session and user IDs, Langfuse live trace push settings, and gateway attribution for per-call spend reconciliation."
         "keywords": "Hyperloom, environment variables, session, Langfuse, HYPERLOOM_LANGFUSE_ENABLE, HYPERLOOM_LLM_ATTRIBUTION, CLAW_SESSION_ID, observability, LiteLLM"
 ---
-# Session / observability hand-off
+# Hyperloom session and observability
 
 These are read by `src/hyperloom/inference_optimizer/session/manifest.py` and the `src/hyperloom/inference_optimizer/breakdown/collectors/`
 package to populate `session_breakdown.json` for downstream consumers.

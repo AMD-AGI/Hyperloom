@@ -4,7 +4,7 @@ myst:
         "description": "Variables intentionally not exposed in Hyperloom: internal-only environment variables such as host-stall probe handoffs and test suite toggles that should not be set by hand."
         "keywords": "Hyperloom, environment variables, internal variables, HYPERLOOM_HOST_PROBE, INFERENCE_OPTIMIZER_INTERNAL, not exposed, diagnostic"
 ---
-# Variables intentionally not exposed
+# Hyperloom Variables intentionally not exposed
 
 These are read by `os.environ` somewhere in the codebase but are
 internal-only — do not set them by hand:

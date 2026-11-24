@@ -4,7 +4,7 @@ myst:
         "description": "Kernel optimization backend variables for Hyperloom: backend selection ladder, GEMM shape capture, GPU-time share gate, aiter hit logging, and GEAK end-to-end budget settings."
         "keywords": "Hyperloom, environment variables, kernel backend, KERNEL_OPT_BACKEND_ORDER, HYPERLOOM_GEMM_SHAPE_CAPTURE, GEAK_E2E_TIMEOUT_S, forge, geak"
 ---
-# Kernel-opt backend selection
+# Hyperloom kernel backend selection
 
 The following variables control the kernel optimization backend ladder.
 
