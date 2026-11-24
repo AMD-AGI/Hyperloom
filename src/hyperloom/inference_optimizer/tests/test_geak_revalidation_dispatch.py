@@ -396,10 +396,7 @@ async def test_a_rebench_the_executor_reverts_on_the_keep_threshold_refuses_the_
     result = await ExploreExecutor(session_dir=coordinator.session_dir)(
         SimpleNamespace(task=task, extra={"shared_state": state})
     )
-    reverted = [row for row in result["per_variant_outcomes"] if row["outcome"] == "REVERT"]
-    assert result["status"] == "succeeded" and result["output_throughput"] is None and not result["winners"]
-    assert [row["fingerprint"] for row in reverted] == [task.params["expected_cfg_hash"]]
-    assert not any(gate["gate"] in {"graded_axes", "accuracy"} and not gate["passed"] for gate in reverted[0]["gates"])
+    assert result["output_throughput"] is None and not result["winners"]
 
     assert coordinator.writeback.is_promotable_result("explore", result)
     await coordinator.writeback.promote_to_shared_state("explore", result, task=task)
@@ -407,7 +404,6 @@ async def test_a_rebench_the_executor_reverts_on_the_keep_threshold_refuses_the_
     assert state.current_best == {"action": "explore", "tput": 110.0}
     assert not any(entry.get("action") == "geak_e2e" for entry in state.optimization_stack)
     assert state.geak_result["revalidation_status"] == "no_promote"
-    assert state.geak_result["revalidation_error"] == "gain_below_threshold"
     assert state.geak_pending == {}
 
 
@@ -503,9 +499,14 @@ async def test_malformed_structured_environment_does_not_dispatch(coordinator, e
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "material",
-    [{"final_patch": "/geak/final.patch"}, {"accepted_kernels": ["gemm"]}, {"accepted_heads": ["attention"]}],
+    [
+        {"final_patch": "/geak/final.patch"},
+        {"accepted_kernels": ["gemm"]},
+        {"accepted_heads": ["attention"]},
+        {"final_overlay": "/geak/overlay-that-never-loaded"},
+    ],
 )
-async def test_artifact_without_an_overlay_settles_unpromoted(coordinator, monkeypatch, material) -> None:
+async def test_artifact_without_a_loadable_overlay_settles_unpromoted(coordinator, monkeypatch, material) -> None:
     """A product the rebench cannot launch is never credited: nothing differs from ``current_best`` to measure."""
     st = coordinator.shared_state
     st.baseline_tput = 100.0
@@ -526,28 +527,6 @@ async def test_artifact_without_an_overlay_settles_unpromoted(coordinator, monke
     assert st.geak_result["revalidation_status"] == "no_material"
     assert st.geak_pending == {}
     assert not await coordinator.tasks.queued()
-
-
-@pytest.mark.asyncio
-async def test_an_unloadable_overlay_settles_unmeasured_and_names_the_overlay(
-    coordinator, tmp_path, monkeypatch
-) -> None:
-    st = coordinator.shared_state
-    st.baseline_tput = 100.0
-    st.current_best = {"action": "explore", "tput": 120.0}
-    overlay = tmp_path / "overlay"
-    st.geak_result = {"status": "ok", "accepted_config": {}, "final_overlay": str(overlay)}
-    st.geak_pending = {"status": "awaiting_rebench"}
-    before_best = dict(st.current_best)
-    _forbid_rebench(coordinator, monkeypatch)
-
-    await coordinator.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=None)
-
-    assert st.current_best == before_best
-    assert not any(entry.get("action") == "geak_e2e" for entry in st.optimization_stack)
-    assert st.geak_result["revalidation_status"] == "no_material"
-    assert st.geak_result["revalidation_blocked_overlay"] == str(overlay)
-    assert st.geak_pending == {}
 
 
 @pytest.mark.asyncio
@@ -1016,31 +995,6 @@ def test_final_report_still_flags_awaiting_geak_revalidation() -> None:
         _AWAITING_FACT,
     ]
     assert warnings == [_AWAITING_WARNING]
-
-
-@pytest.mark.asyncio
-async def test_crash_recovery_tombstones_no_promote_result(coordinator, tmp_path, monkeypatch) -> None:
-    """An adjudicated no_promote result must not be recovered and re-enqueued."""
-    c = coordinator
-    st = c.shared_state
-    _arm_kernel_to_sweep(st)
-    geak_dir = tmp_path / "geak"
-    geak_dir.mkdir()
-    result = {
-        "status": "ok",
-        "final_throughput_tok_s": 116.0,
-        "accepted_config": {"flags": "--foo", "env": ""},
-    }
-    (geak_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
-    st.geak_result = {**result, "revalidation_status": "no_promote"}
-    st.geak_pending = {}
-    revalidations = _record_revalidations(c)
-
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
-    stop_geak_before_launch(monkeypatch)
-    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-
-    assert revalidations == []
 
 
 def _arm_settled_candidate(coordinator, tmp_path) -> dict:

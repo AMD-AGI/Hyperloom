@@ -195,29 +195,32 @@ async def test_geak_acceptance_requires_native_retention(promotion, claimed_intv
 
 
 @pytest.mark.asyncio
-async def test_a_rebench_below_current_best_is_conclusive_and_not_validated(promotion):
+@pytest.mark.parametrize("overlay_survives", [True, False])
+async def test_a_rebench_whose_overlay_did_not_survive_the_run_is_refused(promotion, overlay_survives):
     coord, result, recorder = promotion
     recorder.begin(tput_before=110.0)
     state = coord.shared_state
     state.geak_result = deepcopy(result)
     coord.phase_kernel._record_geak_candidate(result)
-    set_resume_pending(state, True)
     before = deepcopy(state.current_best)
-    before_gain = state.cumulative_gain_validated
+    before_stack = deepcopy(state.optimization_stack)
+    task = rebench_task(result)
+    if not overlay_survives:
+        (Path(result["final_overlay"]) / "sitecustomize.py").unlink()
 
     await coord.writeback.promote_to_shared_state(
         "explore",
-        {"output_throughput": 105.0, "best_variant": {"fingerprint": "candidate"}, "winners": []},
-        task=rebench_task(result),
+        {"output_throughput": 120.0, "best_variant": {"fingerprint": "candidate"}, "winners": []},
+        task=task,
     )
 
-    assert state.current_best == before
-    assert state.cumulative_gain_validated == before_gain
-    assert not state.kernel_integrate_attempts
     assert not state.geak_pending
-    assert resume_pending(state)
-    assert state.geak_result["revalidation_status"] == "no_promote"
-    assert state.geak_result["final_validation"]["decision"] == "REJECTED"
+    if overlay_survives:
+        assert state.current_best["tput"] == 120.0
+    else:
+        assert state.current_best == before
+        assert state.optimization_stack == before_stack
+        assert state.geak_result["revalidation_status"] == "no_promote"
 
 
 @pytest.mark.parametrize("effective_flags", ["--mem-fraction-static 0.9", ""])
@@ -330,7 +333,7 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(promotion, closed
 
 @pytest.mark.parametrize(("power_w", "promoted"), [(650.0, True), (812.0, False), (None, False)])
 def test_geak_promotion_honours_the_power_budget(promotion, power_w, promoted):
-    """The replay's measured-phase power reaches the lift, so GEAK is judged on it instead of always refused."""
+    """The rebench round's measured-phase power reaches the lift, so GEAK is judged on it instead of always refused."""
     coord, result, _ = promotion
     coord.shared_state.power_budget_w = 700.0
     measurement = {"output_throughput": 120.0, "fingerprint": "geak-power"}

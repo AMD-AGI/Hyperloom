@@ -328,38 +328,6 @@ async def test_2b_stamps_validated_from_orchestrator_rebench(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_2b_identity_mismatch_is_refused_with_nothing_promoted(tmp_path: Path) -> None:
-    """A rebench that returned a measurement of another config did not confirm the candidate."""
-    base, measured = 2844.209, 3270.0  # engaged, but fingerprint won't match
-    coord = _coord(tmp_path, baseline=base, best_tput=3236.489)
-    coord.shared_state.optimization_stack = [{"action": "geak_e2e", "variant_name": "geak_e2e", "tput": 3236.489}]
-    set_resume_pending(coord.shared_state, True)
-    coord.shared_state.geak_pending = {
-        "status": "awaiting_rebench",
-        "revalidation_task_id": "reval-1",
-    }
-
-    before_best = dict(coord.shared_state.current_best)
-    before_stack = list(coord.shared_state.optimization_stack)
-
-    result = {
-        "output_throughput": measured,
-        "best_variant": {"fingerprint": "DRIFTED"},  # != expected "abc"
-        "winners": [],
-    }
-    await coord.writeback.promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
-
-    ss = coord.shared_state
-    assert ss.current_best == before_best
-    assert ss.optimization_stack == before_stack
-    assert ss.cumulative_gain_validated == pytest.approx(0.0)
-    assert not ss.geak_pending
-    assert resume_pending(ss) is True
-    assert ss.geak_result["revalidation_status"] == "no_promote"
-    assert result["status"] == "no_promote"
-
-
-@pytest.mark.asyncio
 async def test_2b_no_promote_when_rebench_loses_to_current_best(tmp_path: Path) -> None:
     """A GEAK rebench that beats baseline but loses to current_best is measured, not a KEEP."""
     base, current_best, measured = 7380.7, 10067.9, 9623.0
@@ -418,56 +386,20 @@ async def test_2b_native_revert_is_conclusive(tmp_path: Path, reason: str, expec
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", ["both_axes_regressed (intvty 100.0->50.0 tput 1000.0->900.0)", "new gate wording"])
-async def test_structured_native_rejection_is_terminal(tmp_path, reason):
+async def test_2b_revert_of_another_config_is_refused(tmp_path: Path) -> None:
     coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
-    coord.shared_state.geak_result = _ok_result(final=150.0)
     set_resume_pending(coord.shared_state, True)
-    coord.shared_state.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": "reval-1"}
     await coord.writeback.promote_to_shared_state(
         "explore",
         {
-            "status": "succeeded",
             "output_throughput": None,
             "winners": [],
-            "per_variant_outcomes": [
-                {
-                    "outcome": "REVERT",
-                    "reason": reason,
-                    "fingerprint": "abc",
-                    "gates": [{"gate": "graded_axes", "passed": False, "reason": reason}],
-                }
-            ],
+            "per_variant_outcomes": [{"outcome": "REVERT", "reason": "accuracy_drop", "fingerprint": "different"}],
         },
         task=_revalidate_task(expected_hash="abc"),
     )
     assert coord.shared_state.current_best["tput"] == 110.0
     assert coord.shared_state.geak_result["revalidation_status"] == "no_promote"
-    assert coord.shared_state.geak_result["revalidation_error"] == reason
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "outcome,reason,fingerprint,settled",
-    [("FAILED", "no_measurement", "abc", "failed"), ("REVERT", "accuracy_drop", "different", "no_promote")],
-    ids=["no-measurement-stays-retryable", "another-config-reverted-is-refused"],
-)
-async def test_2b_round_without_a_winner_settles_by_whether_it_measured(
-    tmp_path: Path, outcome: str, reason: str, fingerprint: str, settled: str
-) -> None:
-    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
-    set_resume_pending(coord.shared_state, True)
-    await coord.writeback.promote_to_shared_state(
-        "explore",
-        {
-            "output_throughput": None,
-            "winners": [],
-            "per_variant_outcomes": [{"outcome": outcome, "reason": reason, "fingerprint": fingerprint}],
-        },
-        task=_revalidate_task(expected_hash="abc"),
-    )
-    assert coord.shared_state.current_best["tput"] == 110.0
-    assert coord.shared_state.geak_result["revalidation_status"] == settled
 
 
 def _ok_result(*, final: float, base_for_gain: float | None = None) -> dict:

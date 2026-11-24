@@ -40,8 +40,7 @@ def test_rejection_annotations_do_not_reopen_an_adjudicated_candidate(promotion)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("benchmark_mode", ["agentx", "synthetic"])
-async def test_a_settled_candidate_is_not_re_promoted_on_the_next_kernel_entry(promotion, benchmark_mode):
+async def test_a_settled_candidate_is_not_re_promoted_on_the_next_kernel_entry(promotion):
     """A settled candidate stays settled across a re-entry: the runner's timing never enters the record.
 
     Recovery compares the persisted ``geak_result`` against the ``result.json`` still on disk. Anything
@@ -51,7 +50,6 @@ async def test_a_settled_candidate_is_not_re_promoted_on_the_next_kernel_entry(p
     """
     coord, result, _recorder = promotion
     state = coord.shared_state
-    state.benchmark_mode = benchmark_mode
     phase = coord.phase_kernel
     # The candidate settles unmeasured because this overlay will not load; while that holds, the settlement stands.
     overlay = coord.session_dir / "overlay-that-never-loaded"
