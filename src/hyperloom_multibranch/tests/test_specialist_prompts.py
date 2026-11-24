@@ -100,6 +100,16 @@ def test_the_role_names_the_workload_every_step_s_tool_and_the_rules():
         role_prompt(RoleWorkload(" \n"))
 
 
+def test_the_role_tests_independent_candidates_as_a_batch_and_never_to_fill_a_slot():
+    prompt = " ".join(role_prompt(WORKLOAD).split())
+
+    assert "submit every independent candidate you have for your head as soon as it is ready" in prompt
+    assert "do not wait for its result before you submit another independent candidate" in prompt
+    assert "Up to K of your tests run at once and the rest wait in the queue" in prompt
+    assert "never a test just to fill a slot" in prompt
+    assert "you submit that one again on the new head" in prompt
+
+
 def test_the_role_reads_the_briefs_two_direction_lists_before_claiming_and_chooses_as_before_without_them():
     prompt = " ".join(role_prompt(WORKLOAD).split())
     settings, code = (title.split(" (")[0] for title in (SETTINGS_TITLE, CODE_TITLE))

@@ -207,8 +207,11 @@ that measured better than its parent. This conversation lasts as long as your br
 arrives for your branch (results, judgements, briefs, the runtime's notices) wakes you with a new message. Keep your \
 branch log current all the same: a new conversation starts from it if this one is lost.
 
-Up to K of your tests may be running at once. K is a ceiling, not a target: submit only candidates that the profile \
-and your analysis say can clear the session's bar, never a test just to fill a slot.
+Test your candidates as a batch, not one after another: submit every independent candidate you have for your head \
+as soon as it is ready, without waiting for the result of one that runs. Candidates are independent when none needs \
+another's result to be written or judged; each is measured against your head as its parent. Up to K of your tests \
+run at once and the rest wait in the queue, which starts them as cards come free. Submit only candidates that the \
+profile and your analysis say can clear the session's bar, never a test just to fill a slot.
 1. Read where your branch stands: your branch log (blackboard_branch_log), the startup brief, and what was tried and \
 learnt (blackboard_search, blackboard_learnings, blackboard_brief).
 2. Choose a direction from your branch head's own state, starting from where its GPU time goes: blackboard_brief lists \
@@ -276,11 +279,14 @@ or table in a commit your branch log or the brief names): one already on your he
 fingerprint your claim returned. The delta must carry the change you claimed: a server argument or environment \
 variable in its config, a patch in its components, a kernel in add_kernels; an empty delta tests nothing. Never submit purpose "confirm": the runtime retests a measured gain on another node \
 itself.
-5. After submit_test, keep working; do not end your turn because a test runs. While fewer than K of your tests run, \
-prepare and submit the next candidate the evidence supports. With all K running, read the analysis and the server \
-logs of finished tests, read the code on the top operator's path or profile it, and prepare the candidate for the \
-next free slot. End your turn only when nothing is left to read or prepare and every candidate the evidence \
-supports is running, K or fewer: every result wakes you. For a short wait, wait_test returns the result as soon as it lands (test_result reads \
+5. After submit_test, keep working; do not end your turn because a test runs, and do not wait for its result before \
+you submit another independent candidate: prepare and submit the next one the evidence supports, however many of \
+your tests run or wait. Only a candidate that builds on the result of a test still running waits for that result. \
+A candidate that beats its parent lands only while your head is still that parent: once one of a batch has moved \
+your head, a notice names each other one that improved on the old head, and you submit that one again on the new \
+head. With nothing left to submit, read the analysis and the server logs of finished tests, and read the code on the \
+top operator's path or profile it. End your turn only when nothing is left to read or prepare and every candidate \
+the evidence supports is submitted: every result wakes you. For a short wait, wait_test returns the result as soon as it lands (test_result reads \
 it again later), else within a minute with the test's progress. Never wait with sleep, a background shell or by \
 reading the test's files: such a wait sees no result and leaves your session hanging. poll_inbox lists what else \
 arrived, judgements and briefs. A test in state pending_build waits for a native build its change needs \
