@@ -553,7 +553,8 @@ _SPECIALIST_WORK_ARTIFACT_ROOTS = (
     "heartbeat.json",
     "specialist_done.json",
     "specialist_done.partial.json",
-    "scratch/rebench",
+    # The specialist's own work area: the rebench output, and the probe scripts, servers and logs agents keep beside it.
+    "scratch",
 )
 SPECIALIST_WORK_ARTIFACT_PATHSPECS = tuple(f":(top,exclude){root}" for root in _SPECIALIST_WORK_ARTIFACT_ROOTS) + (
     ":(top,glob,exclude)**/__pycache__/**",

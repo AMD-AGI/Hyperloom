@@ -168,7 +168,8 @@ def _make_harvest_worktree(tmp_path: Path, *, with_source: bool = True) -> tuple
 
 
 def _write_harvest_work_artifacts(wt: Path) -> dict[str, bytes]:
-    # The dispatcher consumes done files here; the rebench prompt names scratch/rebench.
+    # The dispatcher consumes done files here; the rebench prompt names scratch/rebench, and an enablement specialist
+    # checking a launch fix keeps its own server, its log and its eval script beside it.
     artifacts = {
         "specialist_done.json": b'{"empty": true, "summary": "probe complete"}\n',
         "specialist_done.partial.json": b'{"summary": "probe in progress"}\n',
@@ -176,6 +177,10 @@ def _write_harvest_work_artifacts(wt: Path) -> dict[str, bytes]:
         "scratch/rebench/probe.py": b"print('one-off probe')\n",
         "scratch/rebench/specialist_rebench.with_envs.yaml": b"server_port: 31000\n",
         "scratch/rebench/process.log": b"probe completed\n",
+        "scratch/env.sh": b"export ROCM_PATH=/opt/rocm\n",
+        "scratch/gsm.py": b"print('strict_acc', 0.91)\n",
+        "scratch/server.log": b"INFO Application startup complete.\n",
+        "scratch/server.pid": b"10725\n",
         "artifacts/runtime.yaml": b"block_size: 128\n",
         ".hyperloom/state.json": b'{"status": "probing"}\n',
         "__pycache__/runtime.cpython-312.pyc": b"\x00\x00cached bytecode\n",
@@ -194,7 +199,7 @@ def test_collect_patches_excludes_work_artifacts_from_mixed_source_harvest(tmp_p
         "runtime.py": "# Runtime selection.\nBLOCK_SIZE = 128\n",
         "kernels/new_kernel.py": "def block_size():\n    return 128\n",
         "configs/runtime.json": '{"block_size": 128}\n',
-        "scratch/runtime.json": '{"block_size": 128}\n',
+        "configs/scratch/runtime.json": '{"block_size": 128}\n',
         "docs/runtime.md": "# Runtime configuration\nThe tuned block size is 128.\n",
     }
     for rel, content in installable.items():
@@ -253,12 +258,13 @@ def test_collect_patches_annotation_only_produces_no_delivery(tmp_path: Path) ->
     assert not (wt / "patches" / "_worktree_diff.patch").exists()
 
 
-def test_collect_patches_fallback_cannot_deliver_work_artifact_patch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("rel", ["scratch/rebench/newprobe.py", "scratch/gsm.py"])
+def test_collect_patches_fallback_cannot_deliver_work_artifact_patch(tmp_path: Path, rel: str) -> None:
     base, wt = _make_harvest_worktree(tmp_path)
-    probe = wt / "scratch" / "rebench" / "newprobe.py"
+    probe = wt / rel
     probe.parent.mkdir(parents=True)
     probe.write_text("print('one-off probe')\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(wt), "add", "-N", "scratch/rebench/newprobe.py"], check=True)
+    subprocess.run(["git", "-C", str(wt), "add", "-N", rel], check=True)
     diff = subprocess.run(["git", "-C", str(wt), "diff", "HEAD"], check=True, capture_output=True, text=True).stdout
     manual = wt / "patches" / "probe.patch"
     manual.parent.mkdir()
@@ -367,7 +373,7 @@ def test_collect_patches_does_not_rediscover_an_obsolete_harvest(tmp_path: Path)
         ("kernels/new_kernel.py", "def block_size():\n    return 128\n"),
         ("configs/runtime.json", '{"block_size": 128}\n'),
         ("configs/runtime.yaml", "block_size: 128\n"),
-        ("scratch/runtime.json", '{"block_size": 128}\n'),
+        ("configs/scratch/runtime.json", '{"block_size": 128}\n'),
         ("configs/specialist_done.json", '{"block_size": 128}\n'),
     ],
 )
