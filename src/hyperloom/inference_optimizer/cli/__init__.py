@@ -1035,27 +1035,31 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     coordinator = _build_coordinator(args, state, backends, session_dir=session_dir, knowledge_plane=knowledge_plane)
     _initial_macro_cycle = int(getattr(coordinator.shared_state, "macro_cycle", 0) or 0)
     prompts = _install_system_prompts(coordinator, args, objective, lineup, macro_cycle=_initial_macro_cycle)
-    _install_executors(coordinator, args, session_dir=session_dir, knowledge_plane=knowledge_plane)
-    # Persist effective system prompts for resume / drift inspection.
-    _snapshot_system_prompts(
-        session_dir,
-        prompts=prompts,
-        orchestration_phase=coordinator.shared_state.phase,
-        macro_cycle=_initial_macro_cycle,
-    )
-    _print_backend_banner(args, backends, lineup)
-
-    warn_without_target_gpu(args)
 
     stop_reason: str | None = None
+    installed = False
     try:
         with running_plug_host(plug_host):
+            # The session's native builds come from the started host.
+            _install_executors(coordinator, args, session_dir=session_dir, knowledge_plane=knowledge_plane)
+            # Persist effective system prompts for resume / drift inspection.
+            _snapshot_system_prompts(
+                session_dir,
+                prompts=prompts,
+                orchestration_phase=coordinator.shared_state.phase,
+                macro_cycle=_initial_macro_cycle,
+            )
+            _print_backend_banner(args, backends, lineup)
+            warn_without_target_gpu(args)
+            installed = True
             stop_reason = await coordinator.run(
                 objective=objective,
                 options=_run_options(args),
             )
     finally:
-        await _close_optimize_run(coordinator, session_lock, session_dir, stop_reason)
+        # A run refused while its executors are installed never ran: nothing of it is stopped or written.
+        if installed:
+            await _close_optimize_run(coordinator, session_lock, session_dir, stop_reason)
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.

@@ -75,10 +75,11 @@ def test_a_run_that_selects_nothing_writes_and_prints_nothing(tmp_path: Path, ca
     assert list(tmp_path.iterdir()) == []
     captured = capsys.readouterr()
     assert (captured.out, captured.err) == ("", "")
-    assert {k: v["impl"] for k, v in host.describe()["sockets"].items()} == {"events": "local"}
+    selected = {k: v["impl"] for k, v in host.describe()["sockets"].items()}
+    assert selected == {"events": "local", "native_builds": "session"}
 
 
-def test_a_run_that_selects_nothing_starts_only_the_local_events_plug(tmp_path: Path) -> None:
+def test_a_run_that_selects_nothing_starts_the_local_profile_plugs_and_closes_them(tmp_path: Path) -> None:
     host = prepare_plug_host(_args(), tmp_path)
     with running_plug_host(host):
         assert active() is host
@@ -170,7 +171,7 @@ def test_a_resumed_file_naming_a_missing_implementation_stops_the_resume(tmp_pat
     assert "socket 'events' has no implementation 'ghost'" in capsys.readouterr().err
 
 
-def test_optimize_resolves_the_plugs_before_any_session_is_opened_and_runs_the_coordinator_inside_the_host() -> None:
+def test_optimize_resolves_the_plugs_before_any_session_is_opened_and_installs_and_runs_inside_the_host() -> None:
     tree = ast.parse(inspect.getsource(ocli._run_optimize))
     first_line = {}
     for node in ast.walk(tree):
@@ -181,7 +182,8 @@ def test_optimize_resolves_the_plugs_before_any_session_is_opened_and_runs_the_c
     assert first_line["open_plug_host"] < first_line["_bootstrap_recipe_kb"]
     withs = [n for n in ast.walk(tree) if isinstance(n, ast.With) and "running_plug_host" in ast.unparse(n.items[0])]
     assert len(withs) == 1
-    assert any("coordinator.run" in ast.unparse(c) for c in ast.walk(withs[0]) if isinstance(c, ast.Call))
+    inside = {ast.unparse(c.func) for c in ast.walk(withs[0]) if isinstance(c, ast.Call)}
+    assert {"_install_executors", "coordinator.run"} <= inside
 
 
 @pytest.mark.parametrize(

@@ -53,8 +53,10 @@ from .base_launch import resolve_base_launch
 from .executors import _build_specialist_executor, _register_executors
 from .model_gate import _load_model_arch, _load_model_config_tags
 from ..model_config_utils import summarize_model_config
+from ..native_builds import NativeBuildsRefused, start_candidate_builds
 
 if TYPE_CHECKING:
+    from hyperloom.orchestrator.actions.executors.candidate_builds import CandidateBuilds
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from inference_suite.contracts import BaseLaunch
 
@@ -728,7 +730,18 @@ def _install_executors(
         compare_against_gpu=getattr(args, "compare_against_gpu", None),
         session_dir=session_dir,
         specialist_executor=specialist_executor,
+        native=_start_native_builds(coordinator, session_dir),
     )
+
+
+def _start_native_builds(coordinator: Coordinator, session_dir: Path) -> CandidateBuilds | None:
+    """The session's builds of its framework's server, its accepted build first on ``PATH`` before any round runs;
+    exits naming the reason when the server is built from source and that cannot be done here."""
+    try:
+        return start_candidate_builds(session_dir, coordinator.shared_state.framework)
+    except NativeBuildsRefused as refused:
+        print(f"ERROR: {refused}", file=sys.stderr)
+        raise SystemExit(2) from None
 
 
 @dataclass(frozen=True)
