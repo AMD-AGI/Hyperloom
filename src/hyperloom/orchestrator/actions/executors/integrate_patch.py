@@ -93,7 +93,7 @@ class IntegratePatchExecutor(
             result = await self._stage_apply(attempt, params, extra)
             # An apply_only round builds too: it is the candidate's compile check.
             if result is None or result.get("status") == "applied_no_bench":
-                result = await self._stage_build(attempt, params) or result
+                result = await self._stage_build(attempt) or result
             if result is None:
                 result = {RESULT_BENCHED: True, **await self._stage_gate(attempt, params)}
         except BaseException:
