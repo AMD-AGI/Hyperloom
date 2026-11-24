@@ -22,7 +22,7 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
-#: How long a round may spend reading source context before the tick stops waiting.
+#: How long a round may spend building its specialist params before the tick stops waiting.
 ENABLEMENT_PARAMS_BUDGET_SEC: float = 45.0
 
 
