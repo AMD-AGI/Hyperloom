@@ -193,7 +193,7 @@ def _register_executors(
     compare_against_gpu: str | None = None,
     session_dir: Path | None = None,
     specialist_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
-    native: "CandidateBuilds | None" = None,
+    native: CandidateBuilds | None = None,
 ) -> None:
     """Wire all available action executors onto ``coordinator``: the
     _REAL_EXECUTORS_FULL set, the always-wired Coordinator-internal executors,
