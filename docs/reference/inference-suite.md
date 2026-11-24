@@ -177,12 +177,13 @@ Each pass sends its prompt count from the file's lines, shuffled by its seed and
 cycled, so every arm sends the same requests. That count is `NUM_PROMPTS`; a point
 that sets none sends the round's per-concurrency default, which can cover only part
 of the file: set `NUM_PROMPTS` to the file's line count to send all of it, and pass a
-shorter file to send fewer. A concurrency sweep sets its own count per rung. A session with a dataset serves the
-model's own context window, as an AgentX session does, in place of `ISL` + `OSL` plus
-headroom, since the prompts carry their own lengths; `MAX_MODEL_LEN` still overrides
-it. A prompt longer than the window fails its request, and the pass fails above a 5 %
-failed share. Token counts are the server's `usage`; a request without one fails. The
-client saves the keys a fixed round reads in `client/inferencex_result.json`.
+shorter file to send fewer. A concurrency sweep sets its own count per rung. A session
+with a dataset serves the model's own context window, as an AgentX session does, in
+place of `ISL` + `OSL` plus headroom, since the prompts carry their own lengths;
+`MAX_MODEL_LEN` still overrides it. A prompt longer than the window fails its request,
+and the pass fails above a 5 % failed share. Token counts are the server's `usage`; a
+request without one fails. The client saves the keys a fixed round reads in
+`client/inferencex_result.json`.
 Exported in the environment of `hyperloom optimize` or
 `hyperloom-multibranch run`, the name reaches every rendered point. The file is read
 where the round runs, first by the round before it starts its server: a file it

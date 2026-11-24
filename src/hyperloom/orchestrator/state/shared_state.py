@@ -316,6 +316,7 @@ class SharedState(
     # HYPERLOOM_PERF_NOISE_PCT, and a resume is a new process: a shell that lost the variable would flip the axis
     # mid-run, and a lost noise band would silently widen a 3.5% guard back to the 5% default. The KEEP/REVERT rule
     # has to be the one the session started with. Empty on sessions predating the field, which fall back to deriving.
+    # "prompt_dataset" (bool) is recorded beside them: whether the session's fixed rounds send a DATASET_PATH file.
     grading: dict[str, Any] = field(default_factory=dict)
     # Stamped once when the run objective is first met.
     target_reached_at: str = ""

@@ -205,7 +205,8 @@ def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
     The resolution reads ``HYPERLOOM_PERF_METRIC`` and ``HYPERLOOM_PERF_NOISE_PCT``. Deriving it again later -- in a
     resumed process, a re-baseline subprocess, or the breakdown export CLOSE drives from a subprocess that often did
     not inherit them -- can name an axis the session never graded on. This is the same reasoning that put
-    ``benchmark_mode`` in the state rather than leaving it to the ambient var.
+    ``benchmark_mode`` in the state rather than leaving it to the ambient var. ``prompt_dataset`` (whether the fixed
+    rounds send a ``DATASET_PATH`` file) is recorded with them for the same reason.
     """
     from hyperloom.common.perf_metric import (
         GRADED_INTVTY,
