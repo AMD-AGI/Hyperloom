@@ -291,10 +291,10 @@ def _llamacpp_variables(environ: Mapping[str, str] | None = None) -> dict[str, s
 
 
 def _llamacpp_preflight(scratch: Path, gfx_arch: str) -> Preflight:
-    """No torch: disk, the GPU architecture, and the versions of CMake, Ninja and the ROCm root's clang."""
+    """No torch: disk and the versions of CMake, Ninja and the ROCm root's clang."""
     programs = {"cmake": _CMAKE, "ninja": "ninja", "hip_clang": _llamacpp_variables()["HIPCXX"]}
     tools = {name: (program, "--version") for name, program in programs.items()}
-    return native_preflight(tools, _LLAMACPP_DISK_GB, scratch, gfx_arch)
+    return native_preflight(tools, _LLAMACPP_DISK_GB, scratch)
 
 
 def _vllm_preflight(scratch: Path, gfx_arch: str) -> Preflight:
