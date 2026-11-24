@@ -146,3 +146,22 @@ def test_a_checkout_with_changed_tracked_files_is_refused(tmp_path: Path, checko
 
     with pytest.raises(NativeBuildsRefused, match="changes to tracked files"):
         open_native_builds(tmp_path, "llamacpp", _environ(checkout))
+
+
+def test_a_sweep_builds_patches_over_the_recorded_base_into_a_store_of_its_own(tmp_path: Path, checkout: Path) -> None:
+    native = start_native_builds(tmp_path / "session", "llamacpp", _environ(checkout))
+    base_source = git(checkout, "show", f"HEAD:{SOURCE}") + "\n"
+    (checkout / SOURCE).write_text("int a = 9;\n")
+
+    tunes = session_builds.tune_native_builds(tmp_path / "session")
+    patch = native.build_tree([SOURCE])
+    changed = tunes.build_patch(
+        f"diff --git a/{SOURCE} b/{SOURCE}\n--- a/{SOURCE}\n+++ b/{SOURCE}\n@@ -1 +1 @@\n-{base_source}+int a = 7;\n".encode()
+    )
+    base = tunes.build_patch(b"")
+
+    assert tunes.read_upstream(SOURCE) == base_source
+    assert tunes.root == tmp_path / "session" / "native" / "tunes"
+    assert base.status is changed.status is TreeBuildStatus.BUILT
+    assert _server(base.bin) == _server(native.current)
+    assert _server(changed.bin) not in (_server(base.bin), _server(patch.bin))

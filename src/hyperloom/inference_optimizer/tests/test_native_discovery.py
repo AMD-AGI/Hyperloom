@@ -107,3 +107,30 @@ def test_a_specialist_told_its_timing_lines_are_handed_to_it_has_them_in_its_tas
     assert "Those lines are handed to you" not in image_system
     if domain == "custom_specialist":
         assert "## 4c. RUNTIME FINDINGS" not in image_user, "told of no lines, an operator's specialist is handed none"
+
+
+_KNOB_TUNE = "python -m hyperloom.measure.runner.native.knob_tune"
+
+
+def _prompts(monkeypatch, **dispatch) -> str:
+    monkeypatch.setenv(ENV_CURRENT_SESSION_DIR, "/session")
+    for name in ("HYPERLOOM_GFX_ARCH", "GFX_ARCH"):
+        monkeypatch.delenv(name, raising=False)
+    given = {"framework": "llamacpp", "gpu_type": "w7900d", **_PATCH_WITH_CARDS, **dispatch}
+    inputs = SpecialistPromptInputs(domain=get_domain("serving_specialist"), max_turns=4, **given)
+    return " ".join(build_specialist_prompts(inputs))
+
+
+def test_a_patch_specialist_with_cards_is_offered_the_knob_sweep_of_its_session_on_those_cards(monkeypatch):
+    prompts = _prompts(monkeypatch)
+
+    assert f"ROCR_VISIBLE_DEVICES=3 {_KNOB_TUNE}" in prompts and "--session /session --knob" in prompts
+
+
+@pytest.mark.parametrize(
+    "dispatch", [{"mode": "research"}, {"allocated_gpu_ids": []}, {"framework": "sglang"}, {"gpu_type": "r9700"}]
+)
+def test_the_knob_sweep_is_not_offered_where_it_cannot_be_timed_or_applied_or_the_board_has_no_knob(
+    monkeypatch, dispatch
+):
+    assert _KNOB_TUNE not in _prompts(monkeypatch, **dispatch)
