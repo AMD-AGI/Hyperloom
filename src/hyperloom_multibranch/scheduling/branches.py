@@ -74,8 +74,8 @@ logger = logging.getLogger(__name__)
 SPECIALIST_CALL_SECONDS = 60.0
 #: Clock seconds a branch gets to open, its specialist's start included, before the branch counts as not started.
 SPECIALIST_START_SECONDS = 300.0
-#: The K the lifecycle contract gives a specialist that has just started.
-STARTED_K = 1
+#: The K of an agent's branch: its agent tests one keep at a time.
+AGENT_K = 1
 #: Clock seconds a repair branch may hold its slot, from its entry into the roster, before it is stopped: two hours.
 #: A repair that waited in the fork desk's queue counts from leaving it.
 REPAIR_BRANCH_SECONDS = 2 * 3600.0
@@ -160,9 +160,9 @@ class BranchControl:
         return await self._repo.head(INTEGRATION_BRANCH)
 
     async def open_branches(
-        self, count: int, k: int, start: BatchStart, focus: tuple[BranchFocus, ...] = ()
+        self, count: int, start: BatchStart, focus: tuple[BranchFocus, ...] = ()
     ) -> tuple[BranchEntry, ...]:
-        """Open up to ``count`` specialist branches at K ``k`` as ``start`` says, record ``OPEN``, start them; the
+        """Open up to ``count`` specialist branches as ``start`` says, record ``OPEN``, start them; the
         branches opened before the roster first refuses one. The n-th branch is briefed on ``focus[n]``, on none past
         its end or where its text is ``""``.
 
@@ -171,7 +171,7 @@ class BranchControl:
 
         opened = []
         for index in range(count):
-            entry = self._issue(start, k)
+            entry = self._issue(start)
             if entry is None:
                 break
             aim = focus[index] if index < len(focus) else UNFOCUSED
@@ -182,7 +182,7 @@ class BranchControl:
         self, directions: tuple[str, ...], start_commit: str, deadline: float
     ) -> tuple[BranchEntry, ...]:
         """Open one :attr:`BranchOrigin.USER` branch at ``start_commit`` for each of the user's ``directions`` as
-        :meth:`open_branches` opens a batch, unfocused at K :data:`STARTED_K`; the roster entries issued before the
+        :meth:`open_branches` opens a batch, unfocused; the roster entries issued before the
         roster first refuses one, a branch whose specialist did not start among them, already stopped."""
 
         launches = tuple(Launch(focus=UNFOCUSED, direction=direction) for direction in directions)
@@ -192,7 +192,7 @@ class BranchControl:
         self, agents: tuple[str, ...], start_commit: str, deadline: float, plans: tuple[str, ...] = ()
     ) -> tuple[BranchEntry, ...]:
         """Open one :attr:`BranchOrigin.AGENT` branch at ``start_commit`` for each agent source the user named, as
-        :meth:`open_user_branches` opens the user's directions; no judge changes its K of :data:`STARTED_K`. ``plans``
+        :meth:`open_user_branches` opens the user's directions; no judge changes its K of :data:`AGENT_K`. ``plans``
         gives each agent, in order, its share of the session's directions (``""``, or none given, for no share)."""
 
         shares = plans + ("",) * (len(agents) - len(plans))
@@ -219,19 +219,21 @@ class BranchControl:
         start = BatchStart(origin, start_commit, deadline)
         opened = []
         for launch in launches:
-            entry = self._issue(start, STARTED_K)
+            entry = self._issue(start)
             if entry is None:
                 break
             opened.append(await self._open(entry, start_commit, deadline, launch))
         return tuple(opened)
 
-    def _issue(self, start: BatchStart, k: int) -> BranchEntry | None:
+    def _issue(self, start: BatchStart) -> BranchEntry | None:
         """A new branch on the roster as ``start`` says, or ``None`` when the roster refuses one; a refused branch
-        takes no id."""
+        takes no id. A specialist's branch opens at the highest K the caps allow, which the judge lowers from there;
+        an agent's at :data:`AGENT_K`."""
 
         if self._roster.open_refusal():
             return None
         branch = self._roster.next_branch_id()
+        k = self._roster.caps.max_k_per_branch if start.origin.steered_by_judge else AGENT_K
         return self._roster.open(branch, origin=start.origin, start_commit=start.start_commit, k=k)
 
     async def start_admitted(self, admitted: AdmittedBranch, deadline: float) -> None:
@@ -459,13 +461,12 @@ class BranchControl:
             focus=launch.focus.text if launch.focus is not None else "",
             plan=launch.plan,
             map_for=launch.map_for,
+            k=entry.k,
         )
         started = await settled(self._lifecycle.start(entry.branch, start_commit, task))
         if isinstance(started, BaseException):
             self._specialists.discard(entry.branch)
             raise started
-        if entry.k != STARTED_K:
-            await self._lifecycle.set_k(entry.branch, entry.k)
 
     async def _send_k(self, entry: BranchEntry) -> str:
         """Hand the specialist its K; the failure's text, or ``""``."""

@@ -200,7 +200,7 @@ def test_run_defaults() -> None:
         max_hours=MB_DEFAULT_MAX_HOURS,
         max_gpu_hours=0.0,
         max_llm_usd=0.0,
-        caps=RosterCaps(max_branches=4, max_k_per_branch=2, max_parallel_tests=4),
+        caps=RosterCaps(max_branches=4, max_k_per_branch=4, max_parallel_tests=4),
         judge_interval_seconds=600.0,
         conc_sweep=True,
     )

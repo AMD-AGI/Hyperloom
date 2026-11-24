@@ -338,7 +338,7 @@ class Explorer:
         opening = await self._ask(window, opening=True)
         first_batch = BatchStart(BranchOrigin.FIRST_BATCH, window.start_commit, window.explore_end)
         if opening is None:
-            await self._open_batch(0 if specialist_open(self._roster.entries()) else 1, 1, first_batch)
+            await self._open_batch(0 if specialist_open(self._roster.entries()) else 1, first_batch)
         elif await self._apply(opening, first_batch):
             return SessionStopReason.JUDGE_STOPPED
         return SessionStopReason.TIME_EXHAUSTED if self._clock.now() >= window.explore_end else None
@@ -591,7 +591,6 @@ class Explorer:
                 decision.session_stop or "applied",
                 detail={
                     "open": decision.open_count,
-                    "open_k": decision.open_k,
                     "unfocused": decision.unfocused,
                     "k": {order.branch: order.k for order in decision.k},
                     "stop": {order.branch: order.reason for order in decision.stop},
@@ -607,7 +606,7 @@ class Explorer:
             return True
         self._desk.fill_free_slots()
         focus = await self._focus(decision, start) if start.origin is BranchOrigin.REFILL else ()
-        await self._open_batch(self._playbook_room(decision.open_count, start, focus), decision.open_k, start, focus)
+        await self._open_batch(self._playbook_room(decision.open_count, start, focus), start, focus)
         return False
 
     def _playbook_room(self, count: int, start: BatchStart, focus: tuple[BranchFocus, ...]) -> int:
@@ -674,16 +673,16 @@ class Explorer:
         return (UNFOCUSED,) * decision.unfocused + focus
 
     async def _open_batch(
-        self, count: int, k: int, start: BatchStart, focus: tuple[BranchFocus, ...] = ()
+        self, count: int, start: BatchStart, focus: tuple[BranchFocus, ...] = ()
     ) -> tuple[BranchEntry, ...]:
-        """Open up to ``count`` branches at K ``k`` as ``start`` says, briefed on ``focus``; none once its deadline has
+        """Open up to ``count`` branches as ``start`` says, briefed on ``focus``; none once its deadline has
         passed. The only place a batch is cut to the free slots: a fork or repair admitted while the batch starts can
         take the last ones, and the branches that found no slot are recorded as ``open_cut``. A start commit a large
         merge moved the head to is profiled once branches opened on it, unless its merge had it profiled."""
 
         if self._clock.now() >= start.deadline:
             return ()
-        opened = await self._branches.open_branches(count, k, start, focus)
+        opened = await self._branches.open_branches(count, start, focus)
         if opened:
             self._events.branches_opened_on(start.start_commit)
         if len(opened) < count:

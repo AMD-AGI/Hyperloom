@@ -181,7 +181,7 @@ class Stage:
         self.root = await self.repo.init_root(baseline)
         await self.blackboard.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=self.root))
         self.roster.add_integration(self.root, k=1)
-        await self.branches.open_branches(2, 1, BatchStart(BranchOrigin.FIRST_BATCH, self.root, HARD_STOP))
+        await self.branches.open_branches(2, BatchStart(BranchOrigin.FIRST_BATCH, self.root, HARD_STOP))
         await asyncio.sleep(SPECIALIST_POLL_SECONDS)
         await self.branches.stop_branch("b02", JUDGE_STOP)
         fork = self.roster.next_branch_id()
