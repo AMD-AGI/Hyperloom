@@ -76,7 +76,7 @@ from hyperloom_multibranch.blackboard.tools import ERROR, blackboard_tools
 from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, AnalysisStarter
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
-from hyperloom_multibranch.toolbox.tools.upstream_pr import DEFAULT_LIMIT, DIFF_CHARS, MAX_LIMIT, UPSTREAM_PR_TOOL
+from hyperloom_multibranch.toolbox.tools.upstream_pr import DEFAULT_LIMIT, MAX_LIMIT, UPSTREAM_PR_TOOL
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.blackboard.learning_search import LearningFinder
@@ -250,19 +250,13 @@ _UPSTREAM_PR_GUIDE = (
     f"first {MAX_OR_TERMS} are searched for. The search matches words, not parts of one, and not the paths a pull "
     "request changes. "
     f"params.limit (default {DEFAULT_LIMIT}, at most {MAX_LIMIT}) and params.states (open by default; merged, closed "
-    "or all search pull requests of every state) are optional. Each candidate has its ref, title and url. The result "
-    "also has matched_prs, the pull requests GitHub matched, and not_shown, those the limit left out: when not_shown "
-    "is not 0 the list is cut, so raise params.limit or search again with fewer, more specific words. "
-    "params.number, in place of keywords, returns that pull request's diff and the paths it changes instead of a "
-    f"search: one page of at most {DIFF_CHARS} characters, with diff_chars (the characters of the whole diff), "
-    "file_chars (those of each path's part of it) and next_offset. A next_offset that is not null is where the diff "
-    "goes on: ask again with it as params.offset until next_offset is null. params.file, a path of file_chars, reads "
-    "that path's part alone, and params.offset then counts within that part. A read of the whole diff from offset 0 "
-    "downloads it, and the pages and paths you read after it come from that download, whatever the pull request "
-    "became since. The tool runs in the toolbox's host process and asks GitHub; its result arrives in poll_inbox. A "
-    "GitHub that cannot be asked fails the job and says why, which is not an empty answer: a failure that names a "
-    "wait is a spent rate limit, so ask again after it; after a token GitHub refuses or a GitHub that cannot be "
-    "reached, go on without this tool."
+    "or all search pull requests of every state) are optional. The tool runs in the toolbox's host process and asks "
+    "GitHub. poll_inbox shows you the job's summary: how many candidates the search kept, of how many pull requests "
+    'matched when the limit left some out ("10 of 266"), and the ref and title of the first candidate, the best '
+    "match. The other candidates are in the job's result record, which you are not shown: to see another pull "
+    "request, search again with fewer, more specific words. A GitHub that cannot be asked fails the job and says "
+    "why, which is not an empty answer: a failure that names a wait is a spent rate limit, so ask again after it; "
+    "after a token GitHub refuses or a GitHub that cannot be reached, go on without this tool."
 )
 
 

@@ -37,7 +37,7 @@ session directory left behind when that directory cannot be written.
 | `INFERENCE_SUITE_TOOL_CACHE` | no | The tool cache `install.sh` staged the pinned InferenceX client in, which every test runs. Default `inference-suite-tools` under the dependency cache. Without a staging there that verifies, the command fails, naming `python -m inference_suite stage --tool-cache <dir>`. |
 | `KB_STORE_URL`, `KB_STORE_TOKEN` | no | Both set: PRELUDE reads warm-start leads from the Recipe KB and CLOSE writes the final recipe back. Neither set: no Recipe KB. Only one set is refused. |
 | `HYPERLOOM_AGENTX_EARLY_STOP` | no | AgentX checkpoint mode: `shadow` (default here), `enforce` or `off`. Read once when the session starts and kept in `MB-manifest.json`, so a resumed session keeps it. Any other value is a usage error. |
-| `GITHUB_TOKEN` | no | Not checked when the session starts. The GitHub token this process asks GitHub with when a specialist searches an upstream repository's pull requests or reads one's diff. `GH_TOKEN` is read when it is unset. Without either the session runs, logs one WARNING when its toolbox is built and asks GitHub anonymously, which GitHub refuses once the address's small quota is spent. See [Upstream pull-request search](#upstream-pull-request-search). |
+| `GITHUB_TOKEN` | no | Not checked when the session starts. The GitHub token this process asks GitHub with when a specialist searches an upstream repository's pull requests. `GH_TOKEN` is read when it is unset. Without either the session runs, logs one WARNING when its toolbox is built and asks GitHub anonymously, which GitHub refuses once the address's small quota is spent. See [Upstream pull-request search](#upstream-pull-request-search). |
 
 The short-prompt and long-context consistency checks are on by default and, when a test runs them, run on its own
 server, reading a prompt set staged in this host's runner cache (`HYPERLOOM_RUNNER_CACHE`). `HYPERLOOM_SHORT_PROMPTS`
@@ -77,8 +77,8 @@ value but `on`, `off` or empty is refused when the toolbox is built.
 ## Upstream pull-request search
 
 A specialist of a session measured on this machine's cards (`--measurement local`) can search the pull requests of
-its component's upstream repository (`upstream_pr_search`) and read the diff of one, to port a change upstream
-already has instead of writing it again. The repositories are the ones the rule pack names: sgl-project/sglang,
+its component's upstream repository (`upstream_pr_search`), to learn of a change upstream already has before it
+writes one. The repositories are the ones the rule pack names: sgl-project/sglang,
 vllm-project/vllm, ROCm/aiter, pytorch/pytorch and ggml-org/llama.cpp. The session's own process asks GitHub, with
 the token in its environment.
 
@@ -126,19 +126,20 @@ To give the session a token:
 
    The session's log then says `upstream PR search asks GitHub with this host's token` when its toolbox is built.
 
-With a token GitHub allows 5,000 requests an hour and 30 searches a minute, for all the tokens of one account
-together; a search is one request and a diff is two, whatever its pages. A search looks for the agent's keywords,
-words or phrases, of which only the first six are used, and finds the pull requests whose title, body or comments
-hold any one of them, open ones unless the agent names other states; it does not look at the paths a pull request
-changes.
-The agent gets up to `limit` candidates (10 by default, 20 at most), each with its number, title and URL, with how
-many pull requests matched in all (`matched_prs`) and how many of them the limit left out (`not_shown`). A diff is
-returned whole, in pages of at most 60,000 characters. A GitHub that cannot be reached, a rejected token, a request
-the token is not allowed and a spent rate limit each fail the request with that reason, never with an empty list; a
-spent rate limit says how long to wait, and a request the token is not allowed says that asking again will not help.
+With a token GitHub allows 30 searches a minute, for all the tokens of one account together; a search is one
+request. A search looks for the agent's keywords, words or phrases, of which only the first six are used, and finds
+the pull requests whose title, body or comments hold any one of them, open ones unless the agent names other states;
+it does not look at the paths a pull request changes.
+The search keeps up to `limit` candidates (10 by default, 20 at most), each with its number, title and URL, in the
+job's result record, with how many pull requests matched in all (`matched_prs`) and how many of them the limit left
+out (`not_shown`). The specialist is shown the job's summary: how many candidates were kept, of how many that matched
+when the limit left some out ("10 of 266"), and the number and title of the first. A GitHub that cannot be reached,
+a rejected token, a request the token is not allowed and a spent rate limit each fail the request with that reason,
+never with an empty list; a spent rate limit says how long to wait, and a request the token is not allowed says that
+asking again will not help.
 
-Without a token the requests are anonymous: GitHub allows an address 10 searches a minute and 60 other requests an
-hour, which a shared address has usually spent. A refused request then fails saying how long to wait and that the
+Without a token the requests are anonymous: GitHub allows an address 10 searches a minute, which a shared
+address has usually spent. A refused request then fails saying how long to wait and that the
 host has no token. The session logs one WARNING when its toolbox is built. Everything else runs as before.
 
 ## Options of `run`

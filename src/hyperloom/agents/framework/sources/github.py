@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""GitHub Search backend for perf PR candidate discovery, and the strict reads of a repository's pull requests.
+"""GitHub Search backend for perf PR candidate discovery, and the strict search of GitHub's pull requests.
 
 ``search_perf_prs`` and ``pr_patches`` are best-effort: a GitHub that cannot be asked reads as "nothing found". The
-strict reads (``search_issues``, ``pull_request``, ``pr_diff``) are for a caller that must tell the two apart: they
-raise :class:`GitHubUnavailable`, which says why, and an empty answer means GitHub answered with none.
+strict search (``search_issues``) is for a caller that must tell the two apart: it raises :class:`GitHubUnavailable`,
+which says why, and an empty answer means GitHub answered with none.
 """
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ from hyperloom.common.github_urls import repo_slug as parse_repo_slug
 from ._shared import GitHubPr
 
 _ENCODING = "utf-8"
-_PR_TIMEOUT_SEC = 30.0
 
 
 def _auth_headers(accept: str) -> dict[str, str]:
@@ -93,7 +92,7 @@ def search_perf_prs(
     return out[:limit]
 
 
-def pr_patches(repo_slug: str, number: int, *, timeout_sec: float = _PR_TIMEOUT_SEC) -> str:
+def pr_patches(repo_slug: str, number: int, *, timeout_sec: float = 30.0) -> str:
     """Return a merged PR's unified diff (``git apply``-ready), or ``\"\"``."""
     slug = str(repo_slug or "").strip().strip("/")
     if not slug or number <= 0:
@@ -116,32 +115,15 @@ def pr_patches(repo_slug: str, number: int, *, timeout_sec: float = _PR_TIMEOUT_
 
 _API = "https://api.github.com"
 _JSON = "application/vnd.github+json"
-_DIFF = "application/vnd.github.diff"
 _HTTP_UNAUTHORIZED = 401
 _HTTP_FORBIDDEN, _HTTP_TOO_MANY = 403, 429
 #: How long GitHub's documentation says to wait after a rate limit whose answer names no wait.
 _UNNAMED_WAIT_SEC = 60
 _MINUTE = 60
-#: What GitHub answers the diff of a pull request too large for it to render with.
-_HTTP_DIFF_REFUSED = (406, 422)
 
 
 class GitHubUnavailable(RuntimeError):
-    """GitHub cannot be used from this host; the message says why. ``status`` is the HTTP status GitHub refused with,
-    ``None`` when it was not reached or answered something other than what was asked."""
-
-    def __init__(self, message: str, status: int | None = None) -> None:
-        super().__init__(message)
-        self.status = status
-
-
-@dataclass(frozen=True)
-class PullRequest:
-    """A pull request as GitHub serves it."""
-
-    number: int
-    title: str
-    html_url: str
+    """GitHub's search cannot be used from this host; the message says why."""
 
 
 def token_configured() -> bool:
@@ -175,18 +157,18 @@ def _wait_sec(refused: urllib.error.HTTPError) -> int | None:
     return None
 
 
-def _refusal(refused: urllib.error.HTTPError, asked: str) -> str:
-    """Why GitHub refused, and whether asking again later can help."""
+def _refusal(refused: urllib.error.HTTPError) -> str:
+    """Why GitHub refused the search, and whether asking again later can help."""
     code = refused.code
     if code == _HTTP_UNAUTHORIZED:
         return "GitHub rejected the token of this host (GITHUB_TOKEN or GH_TOKEN)"
     if code not in (_HTTP_FORBIDDEN, _HTTP_TOO_MANY):
-        return f"GitHub answered {asked} with HTTP {code}"
+        return f"GitHub answered the search with HTTP {code}"
     hint = _token_hint()
     wait = _wait_sec(refused)
     if wait is None:
         who = "this host" if hint else "this host's token"
-        return f"GitHub does not allow {who} {asked} (HTTP {code}); asking again will not change that{hint}"
+        return f"GitHub does not allow {who} the search (HTTP {code}); asking again will not change that{hint}"
     after = f"{wait} s" if wait < 2 * _MINUTE else f"{-(-wait // _MINUTE)} min"
     return f"GitHub's rate limit for this host is spent (HTTP {code}): ask again in {after}{hint}"
 
@@ -197,19 +179,19 @@ def _unreachable(exc: Exception) -> GitHubUnavailable:
     )
 
 
-def _get(path: str, *, accept: str, asked: str, timeout_sec: float) -> bytes:
-    """What GitHub's API answers ``path`` with; ``asked`` names the request in a refusal.
+def _get(path: str, timeout_sec: float) -> bytes:
+    """What GitHub's API answers the search at ``path`` with.
 
     Raises:
         GitHubUnavailable: GitHub could not be reached, or refused, or the token of this host cannot be sent.
     """
-    request = urllib.request.Request(f"{_API}{path}", headers=_auth_headers(accept))
+    request = urllib.request.Request(f"{_API}{path}", headers=_auth_headers(_JSON))
     try:
         try:
             with urllib.request.urlopen(request, timeout=timeout_sec) as response:  # nosec B310 - fixed GitHub HTTPS API host.
                 return response.read()
         except urllib.error.HTTPError as exc:
-            raise GitHubUnavailable(_refusal(exc, asked), exc.code) from None
+            raise GitHubUnavailable(_refusal(exc)) from None
     except ValueError:  # http.client's, for a header it cannot send, whose value its text quotes; only the token varies
         raise GitHubUnavailable(
             "the GitHub token of this host (GITHUB_TOKEN or GH_TOKEN) holds a line break or another character no "
@@ -217,19 +199,6 @@ def _get(path: str, *, accept: str, asked: str, timeout_sec: float) -> bytes:
         ) from None
     except (OSError, http.client.HTTPException) as exc:
         raise _unreachable(exc) from None
-
-
-def _get_json(path: str, *, asked: str, timeout_sec: float) -> Any:
-    body = _get(path, accept=_JSON, asked=asked, timeout_sec=timeout_sec)
-    try:
-        return json.loads(body.decode(_ENCODING))
-    except ValueError as exc:  # a proxy or a captive portal answered in GitHub's place
-        raise _unreachable(exc) from None
-
-
-def _repo_path(repo_url: str) -> str:
-    """``/repos/<owner>/<name>`` of the GitHub repository at ``repo_url``; raises ``ValueError`` for any other URL."""
-    return f"/repos/{urllib.parse.quote(parse_repo_slug(repo_url))}"
 
 
 @dataclass(frozen=True)
@@ -247,7 +216,11 @@ def search_issues(query: str, *, per_page: int, timeout_sec: float = 10.0) -> Se
         GitHubUnavailable: GitHub could not be asked, refused, or did not answer with a search result.
     """
     path = "/search/issues?" + urllib.parse.urlencode({"q": query, "per_page": str(per_page)})
-    answer = _get_json(path, asked="the search", timeout_sec=timeout_sec)
+    body = _get(path, timeout_sec)
+    try:
+        answer = json.loads(body.decode(_ENCODING))
+    except ValueError as exc:  # a proxy or a captive portal answered in GitHub's place
+        raise _unreachable(exc) from None
     if (
         not isinstance(answer, dict)
         or not isinstance(answer.get("items"), list)
@@ -257,41 +230,6 @@ def search_issues(query: str, *, per_page: int, timeout_sec: float = 10.0) -> Se
     return SearchAnswer(answer["items"], answer["total_count"])
 
 
-def pull_request(repo_url: str, number: int, *, timeout_sec: float = _PR_TIMEOUT_SEC) -> PullRequest:
-    """The pull request ``number`` of the repository at ``repo_url``.
-
-    Raises:
-        ValueError: ``repo_url`` is not a GitHub repository URL.
-        GitHubUnavailable: GitHub could not be asked, refused, or did not answer with a pull request.
-    """
-    asked = f"pull request {number}"
-    item = _get_json(f"{_repo_path(repo_url)}/pulls/{number}", asked=asked, timeout_sec=timeout_sec)
-    if not isinstance(item, dict) or not isinstance(item.get("number"), int):
-        raise GitHubUnavailable(f"GitHub answered {asked} with something that is not a pull request")
-    return PullRequest(
-        number=item["number"], title=str(item.get("title") or ""), html_url=str(item.get("html_url") or "")
-    )
-
-
-def pr_diff(repo_url: str, number: int, *, timeout_sec: float = _PR_TIMEOUT_SEC) -> str:
-    """The unified diff of the pull request ``number`` of the repository at ``repo_url``.
-
-    Raises:
-        ValueError: ``repo_url`` is not a GitHub repository URL.
-        GitHubUnavailable: GitHub could not be asked, refused, or serves no diff of this pull request.
-    """
-    path = f"{_repo_path(repo_url)}/pulls/{number}"
-    try:
-        body = _get(path, accept=_DIFF, asked=f"the diff of pull request {number}", timeout_sec=timeout_sec)
-    except GitHubUnavailable as exc:
-        if exc.status in _HTTP_DIFF_REFUSED:
-            raise GitHubUnavailable(
-                f"GitHub serves no diff of pull request {number} (HTTP {exc.status}): it is too large", exc.status
-            ) from None
-        raise
-    return body.decode(_ENCODING, "replace")
-
-
 #: The public name of ``_build_query``, the search query of a repository, for a caller of :func:`search_issues`.
 build_query = _build_query
 
@@ -299,12 +237,9 @@ __all__ = [
     "MAX_OR_TERMS",
     "PERF_TERMS",
     "GitHubUnavailable",
-    "PullRequest",
     "SearchAnswer",
     "build_query",
-    "pr_diff",
     "pr_patches",
-    "pull_request",
     "search_issues",
     "search_perf_prs",
     "token_configured",

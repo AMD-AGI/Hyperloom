@@ -197,10 +197,9 @@ def test_source_patch_exports():
     assert "pr_patches" in gh.__all__
 
 
-# pr_diff, search_issues: a failure is raised, never an empty answer -------------------------------------------------
+# search_issues: a failure is raised, never an empty answer -------------------------------------------------
 
 
-REPO_URL = "https://github.com/ggml-org/llama.cpp"
 QUERY = "repo:ggml-org/llama.cpp is:pr (decode)"
 
 
@@ -257,10 +256,3 @@ def test_a_token_no_header_can_carry_is_named_without_its_value(monkeypatch, tok
     with pytest.raises(gh.GitHubUnavailable, match="GITHUB_TOKEN or GH_TOKEN. holds a line break") as refused:
         gh.search_issues(QUERY, per_page=5)
     assert not any(part in str(refused.value) for part in ("ghp_", "second_line", "✓"))
-
-
-@pytest.mark.parametrize("code", [406, 422])
-def test_pr_diff_says_when_github_serves_no_diff_of_a_pull_request(monkeypatch, code: int) -> None:
-    _install_urlopen(monkeypatch, _refusing(code))
-    with pytest.raises(gh.GitHubUnavailable, match=f"serves no diff of pull request 31 .HTTP {code}."):
-        gh.pr_diff(REPO_URL, 31)
