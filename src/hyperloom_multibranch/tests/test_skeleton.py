@@ -1650,6 +1650,49 @@ async def test_a_merge_whose_confirm_outlasts_one_test_after_explore_ended_is_wi
     assert outcome.final is not None and outcome.final.chosen is not None
 
 
+def _regression_set_taking(stage: Stage, wait: Callable[[], Awaitable[object]]) -> None:
+    """The session's regression set finishes ``wait`` before it answers for a merge. A test double for a merge with a
+    regression case left to run, not a placeholder."""
+
+    class SlowRegressionSet(FakeRegressionCheck):
+        async def check(
+            self, base_commit: str, candidate_delta: RecipeDelta, *, sources: tuple[str, ...]
+        ) -> RegressionOutcome:
+            await wait()
+            return await super().check(base_commit, candidate_delta, sources=sources)
+
+    stage.regression = SlowRegressionSet()
+
+
+async def test_a_merge_confirmed_in_the_wait_whose_regression_set_outlasts_it_still_lands(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    _merge_confirm_at_the_soft_stop(stage, ONE_TEST_SECONDS / 2)
+    _regression_set_taking(stage, lambda: stage.time.sleep(ONE_TEST_SECONDS))
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.JUDGE_STOPPED, "")
+    head = await stage.repo.head(INTEGRATION_BRANCH)
+    assert recipe_tags(await stage.repo.read_recipe(head)) == {"c1"}
+    waited, candidates = _from_soft_stop_to_final(stage)
+    assert head in candidates and ONE_TEST_SECONDS < waited < 2 * ONE_TEST_SECONDS
+
+
+async def test_a_regression_set_that_hangs_after_the_confirm_is_cancelled_at_the_deadline_and_final_runs(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path)
+    _merge_confirm_at_the_soft_stop(stage, ONE_TEST_SECONDS / 2)
+    _regression_set_taking(stage, asyncio.Event().wait)
+
+    outcome = await stage.run()
+
+    assert outcome.final is not None and outcome.final.chosen is not None
+    assert await stage.repo.head(INTEGRATION_BRANCH) == await stage.root()
+    waited, _ = _from_soft_stop_to_final(stage)
+    assert waited > ONE_TEST_SECONDS
+
+
 def _confirm_queued_behind_specialist_tests(stage: Stage) -> list[bool]:
     """``b01`` commits ``c1``. ``b02``'s test holds one of the session's two cards from the start; ``b03`` submits its
     test while ``c1``'s merge test runs on the other, takes that card as the merge test ends and holds it. The judge
