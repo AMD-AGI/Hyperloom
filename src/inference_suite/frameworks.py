@@ -142,7 +142,8 @@ class FrameworkFacts:
     and one with no ``data_parallel`` option runs one replica.
     ``parser_source`` is Python source defining ``_build_parser()``, run in the serving interpreter so an argv is
     judged by the parser that would refuse it; ``None`` when no server parser can be reached. ``metrics_flag`` is the
-    switch without which the server serves no ``/metrics``; ``None`` when it serves them by default.
+    switch without which the server serves no ``/metrics``; ``None`` when it serves them by default, or serves none
+    the KV poller reads.
     ``ready_timeout_env`` is the variable, in seconds, after which the server gives up on its own start and exits;
     ``None`` when it waits for its start without a limit of its own. ``model_file`` is the suffix of the one file of a
     model directory the server loads, ``None`` when it loads the directory. ``request_slots`` is the option capping
@@ -304,7 +305,6 @@ _FACTS: dict[Framework, FrameworkFacts] = {
             _MODEL_FLAG, _HOST_FLAG, _PORT_FLAG, "--alias", ContextLengthFlag(("--ctx-size", "-c"))
         ),
         server_command=ServerCommand(("llama-server",), None),
-        metrics_flag="--metrics",
         model_file=".gguf",
         request_slots=RequestSlotsFlag(("-np", "--parallel")),
     ),

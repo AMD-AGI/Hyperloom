@@ -129,15 +129,6 @@ def _run_native(executable: str, option: str, env: Mapping[str, str], *, cwd: Pa
         raise FrameworkProbeError(f"{executable} could not run: {error}") from error
 
 
-def native_executable(program: str, env: Mapping[str, str]) -> str:
-    """The real path of the file that runs as the native server ``program`` where ``env``'s ``PATH`` resolves it.
-
-    Raises:
-        FrameworkProbeError: When ``program`` is not on the launch ``PATH``.
-    """
-    return os.path.realpath(_native_executable(program, env))
-
-
 #: ``--help`` text by the binary's real path and mtime, so a rebuilt server is read again.
 _NATIVE_HELP: dict[tuple[str, int], str] = {}
 
@@ -148,7 +139,7 @@ def native_help(program: str, env: Mapping[str, str], *, cwd: Path) -> str:
     Raises:
         FrameworkProbeError: When ``program`` is not on the launch ``PATH``, or its ``--help`` fails or prints nothing.
     """
-    executable = native_executable(program, env)
+    executable = os.path.realpath(_native_executable(program, env))
     key = (executable, os.stat(executable).st_mtime_ns)
     if key not in _NATIVE_HELP:
         completed = _run_native(executable, "--help", env, cwd=cwd)
@@ -208,7 +199,6 @@ __all__ = [
     "PROBE_TIMEOUT_S",
     "FrameworkInstall",
     "FrameworkProbeError",
-    "native_executable",
     "native_help",
     "probe_install",
     "run_probe",

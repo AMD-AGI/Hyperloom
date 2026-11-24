@@ -499,7 +499,6 @@ def test_a_native_server_runs_as_its_entrypoint_on_the_one_model_file_of_its_dir
     assert launch.argv[0] == "llama-server"
     assert ("--model", (str(tmp_path / "Qwen-Q8_0.gguf"),), "guard", ()) in _sources(launch)
     assert ("--alias", ("glm",), "guard", ()) in _sources(launch)
-    assert "--metrics" in launch.argv
 
 
 @pytest.mark.parametrize("files", [(), ("a.gguf", "b.gguf")])

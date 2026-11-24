@@ -159,10 +159,10 @@ def repo_url(framework: str) -> str:
     return _registered_spec(framework).repo_url or ""
 
 
-def torch_profiled(framework: str) -> bool:
+def torch_profiled(framework: str | None) -> bool:
     """Return whether ``framework`` can be profiled: Hyperloom ships a profile configuration only for a framework that
     runs under the torch profiler, which a native server does not."""
-    command = _facts(_registered_spec(framework)).server_command
+    command = _facts(_spec_or_default(framework)).server_command
     return command is None or not command.native
 
 

@@ -122,7 +122,7 @@ def _fusion_findings_rows(findings: Any) -> list[str]:
 def _no_snapshot(framework: str) -> str:
     """What the section says while it has no evidence: that a snapshot is on its way, or that none will come for a
     framework that runs under no torch profiler, of which no roofline is enqueued."""
-    if framework_registry.is_supported(framework) and not framework_registry.torch_profiled(framework):
+    if not framework_registry.torch_profiled(framework):
         return (
             f"(none — {framework} runs under no torch profiler, so this session records no roofline snapshot of it "
             "and none is in flight: do not wait for one.)"

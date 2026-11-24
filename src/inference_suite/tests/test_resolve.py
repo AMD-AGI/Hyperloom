@@ -795,4 +795,3 @@ def test_a_llama_server_script_is_a_llamacpp_base_on_one_replica():
     assert base.args == ("-ngl", "99", "-fa", "on", "-c", "16384", "-np", "4", "--jinja")
     assert base.topology == Topology(1)
     assert {"--host", "--port", "--alias"} <= set(base.stripped)
-    assert "--metrics" in base.runner_owned.args

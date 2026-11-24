@@ -185,7 +185,7 @@ class NativeFlags:
 
 
 @dataclass(frozen=True)
-class HelpOption:
+class _HelpOption:
     """One entry of a native server's ``--help``: every spelling it lists for the option, and what it says about it
     on one line (the value placeholder first, when the option takes one). ``removed`` entries are listed only to say
     the option is gone."""
@@ -195,7 +195,7 @@ class HelpOption:
     removed: bool
 
 
-def help_options(text: str) -> tuple[HelpOption, ...]:
+def _help_options(text: str) -> tuple[_HelpOption, ...]:
     """The entries of the ``--help`` ``text`` of a native server, in the order it prints them."""
     entries: list[tuple[list[str], list[str]]] = []
     for line in text.splitlines():
@@ -211,18 +211,18 @@ def help_options(text: str) -> tuple[HelpOption, ...]:
                 break
         if spellings:
             entries.append((spellings, [rest]))
-    options: list[HelpOption] = []
+    options: list[_HelpOption] = []
     for spellings, lines in entries:
         described = " ".join(" ".join(lines).split())
-        options.append(HelpOption(tuple(spellings), described, removed=_REMOVED in described))
+        options.append(_HelpOption(tuple(spellings), described, removed=_REMOVED in described))
     return tuple(options)
 
 
-def read_native_help(text: str) -> NativeFlags:
+def _read_native_help(text: str) -> NativeFlags:
     """The flags the ``--help`` ``text`` of a native server lists."""
     accepted: set[str] = set()
     removed: dict[str, str] = {}
-    for option in help_options(text):
+    for option in _help_options(text):
         if option.removed:
             note = option.help[option.help.index(_REMOVED) :]
             removed.update((spelling, note) for spelling in option.spellings)
@@ -232,7 +232,7 @@ def read_native_help(text: str) -> NativeFlags:
 
 
 def _check_native(launch: Launch, program: str, env: Mapping[str, str], *, cwd: Path) -> FlagRefusal | None:
-    flags = read_native_help(native_help(program, env, cwd=cwd))
+    flags = _read_native_help(native_help(program, env, cwd=cwd))
     refused = [arg for arg in launch.args if arg.flag not in flags.accepted]
     if not refused:
         return None
@@ -269,7 +269,6 @@ def check(launch: Launch, python: str, env: Mapping[str, str], *, cwd: Path) -> 
 
 __all__ = [
     "FlagRefusal",
-    "HelpOption",
     "NativeFlags",
     "ParseStatus",
     "ParserAnswer",
@@ -277,8 +276,6 @@ __all__ = [
     "ParserProbe",
     "RefusedFlag",
     "check",
-    "help_options",
     "parser_probe",
     "read_answer",
-    "read_native_help",
 ]

@@ -133,7 +133,7 @@ def no_gpu_trace_reason(state: Any) -> str:
     from hyperloom.inference_optimizer import framework_registry
 
     fw = str(state.framework or "")
-    if framework_registry.is_supported(fw) and not framework_registry.torch_profiled(fw):
+    if not framework_registry.torch_profiled(fw):
         return f"framework {fw!r} runs under no torch profiler, so it ships no profile configuration"
     return ""
 
