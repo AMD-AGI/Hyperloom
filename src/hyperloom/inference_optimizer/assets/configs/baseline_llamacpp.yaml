@@ -15,7 +15,7 @@ benchmark:
     ISL: 1024
     OSL: 1024
     RANDOM_RANGE_RATIO: 1
-    MAX_MODEL_LEN: 8192
+    # No MAX_MODEL_LEN: llama-server takes its context from -c / --ctx-size of the base launch.
 
   timeout_seconds: 3600
 

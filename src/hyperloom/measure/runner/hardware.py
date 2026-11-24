@@ -10,6 +10,7 @@ be read is never filled in, and a check that needs it is not made (the runner re
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -27,6 +28,8 @@ from hyperloom_common.gpu_identity import (
 )
 from hyperloom.common.gpu_power_settings import reading_matches, socket_power_cap_w
 from hyperloom.common.rocm_smi import GpuVram, gpu_vram_usage, vram_busy
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "CARD_RELEASE_WAIT_SEC",
@@ -218,7 +221,8 @@ def _wrong_card(gpu: GpuFacts, gpu_type: str) -> bool:
 
     The device id names the board when it belongs to one; failing that, a different architecture is a different card;
     only when neither can say is the market name compared, as a substring. A card that gives only the driver's generic
-    name names no board: it is the requested card when its architecture is the board's.
+    name names no board, so nothing read from it contradicts the operator's ``--gpu-type``: it is taken as that type,
+    with a warning.
     """
     wanted = gpu_type.replace(" ", "").lower()
     model = None if gpu.model is None else gpu.model.replace(" ", "").lower()
@@ -227,11 +231,11 @@ def _wrong_card(gpu: GpuFacts, gpu_type: str) -> bool:
         if board is not None:
             return board != wanted
         arch = gfx_arch_for_gpu_type(wanted)
-        if gpu.gfx_arch is not None and arch is not None:
-            if gpu.gfx_arch != arch:
-                return True
-            if model == _GENERIC_MODEL:
-                return False
+        if gpu.gfx_arch is not None and arch is not None and gpu.gfx_arch != arch:
+            return True
+    if model == _GENERIC_MODEL:
+        log.warning("GPU %s names no board (%s): taken as %s, the --gpu-type given", gpu.index, gpu.model, gpu_type)
+        return False
     return model is not None and wanted not in model
 
 
