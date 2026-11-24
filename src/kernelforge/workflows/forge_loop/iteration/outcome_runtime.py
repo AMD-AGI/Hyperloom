@@ -366,7 +366,6 @@ class OutcomeMixin:
                 search_mode=self.run_state.search_mode,
                 search_reason_codes=tuple(self.run_state.search_reason_codes),
                 search_objective=self.run_state.search_objective,
-                search_mode_residence_remaining=(self.run_state.search_mode_residence_remaining),
                 supervisor_ruling_path=supervisor_ruling_path,
                 plan=handoff_plan,
                 lesson_path=lesson_path,

@@ -10,14 +10,13 @@ from typing import Any
 import pytest
 
 from kernelforge.knowledge.pr_knowledge import mcp_server as pr_server
-from kernelforge.workflows.forge_loop.roles import specialist_probe_server
 
 
 @pytest.mark.parametrize(
     "schema",
     [
         pytest.param(tool["inputSchema"], id=tool["name"])
-        for server in (pr_server, specialist_probe_server)
+        for server in (pr_server,)
         for tool in server.TOOL_DEFINITIONS
     ],
 )

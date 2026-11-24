@@ -19,9 +19,9 @@ from kernelforge.tests.conftest import patch_iteration_name, silence_jit_rebuild
 
 
 # The stand-in for "budget is not what this test is about". It has to clear the
-# round admission guard, which prices a whole round -- planning, a session worth
-# starting, the canonical measurement and the finalize reserve -- so a value near
-# the reserve itself would silently turn these tests into admission tests.
+# round admission guard, which prices a whole round -- a session worth starting,
+# the canonical measurement and the finalize reserve -- so a value near the
+# reserve itself would silently turn these tests into admission tests.
 _AMPLE_BUDGET_SEC = 12 * 3600.0
 
 
@@ -119,38 +119,6 @@ def _reduction_loop(tmp_path, monkeypatch, workspace_state=None):
     return loop, workspace
 
 
-def _lane_agent_factory(edits):
-    """An agent that writes the edit its lane was assigned, in that lane's copy."""
-
-    def factory(lane_dir, _serialized_driver):
-        async def agent(_kernel_file, prompt, session_sink=None):
-            path = Path(lane_dir) / "kernel.py"
-            for plan, (old, new) in edits.items():
-                if plan in prompt:
-                    path.write_text(path.read_text().replace(old, new))
-                    return
-
-        return agent
-
-    return factory
-
-
-def _counting_plan(loop, workspace, rounds, *, plans=("a", "b"), unavailable=False):
-    """Stand in for planning, recording every round an iteration is charged for."""
-
-    async def _plan(*, iteration, lanes=1, **_kwargs):
-        rounds.append(lanes)
-        if unavailable:
-            return None, "OrchestrationInfrastructureError: backend unreachable"
-        loop._last_lane_plans = list(plans)
-        plan_path = workspace / "forge_experiments" / "orchestration" / f"iter_{iteration:03d}" / "optimization_plan.md"
-        plan_path.parent.mkdir(parents=True, exist_ok=True)
-        plan_path.write_text(f"# Optimization plan\n{plans[0]}\n")
-        return plan_path, ""
-
-    return _plan
-
-
 def _diff_of(workspace: Path, edit) -> str:
     """A patch for one edit, taken back off the tree once it is captured."""
     restore = {path: path.read_text() for path in workspace.rglob("*.py") if ".git" not in path.parts}
@@ -223,10 +191,6 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     loop._best_case_times = {"small": 1.0, "large": 1.0}
     loop._case_times = {}
     loop.config = SimpleNamespace(gpu_target="gfx942")
-    # No round is open around these iterations, so the measurement they run is
-    # charged to nothing -- which is also what a drain iteration does.
-    loop._round_started_at = None
-    loop._round_measurement_sec = 0.0
     return loop, benchmark_calls
 
 

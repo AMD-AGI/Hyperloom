@@ -27,7 +27,6 @@ _NON_SEARCH_DECISIONS = frozenset(
     {
         "AGENT_ERROR",
         "API_ERROR",
-        "ORCHESTRATION_ERROR",
         "REVERT_CONTENDED",
         "REVERT_INTEGRITY",
     }
