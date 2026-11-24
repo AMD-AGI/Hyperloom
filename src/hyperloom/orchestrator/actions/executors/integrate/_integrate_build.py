@@ -33,7 +33,7 @@ class BuildStageMixin:
 
     native: CandidateBuilds | None
 
-    async def _stage_build(self, attempt: IntegrateAttempt, params: dict[str, Any]) -> dict[str, Any] | None:
+    async def _stage_build(self, attempt: IntegrateAttempt) -> dict[str, Any] | None:
         """Build the candidate the apply stage left in the tree; the verdict of one that does not build, or ``None`` to
         go on (the bench then runs the build, :meth:`IntegrateAttempt.benchmark_params`)."""
         native = self.native
