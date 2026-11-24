@@ -9,14 +9,22 @@ it asked for before instead of paying for another.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Protocol
 
 from hyperloom.contracts.measurement import Validity
+from hyperloom.measure.jit_kinds import HIT
 from hyperloom_multibranch.contracts.gate import NotMeasured, ResultVerifier
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
-from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, GateRecords, RecordSearch, SnapshotQuery
+from hyperloom_multibranch.contracts.blackboard.interfaces import (
+    CommitQuery,
+    GateRecords,
+    NotRecorded,
+    RecordSearch,
+    SnapshotQuery,
+)
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, TestRecord
 from hyperloom_multibranch.contracts.toolbox import Toolbox
 from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
@@ -58,14 +66,17 @@ class GateService:
 
     async def compare(self, request_id: str) -> Judgement:
         first = await self._measured(request_id)
-        parent = (await self._blackboard.recorded_value(first.request.parent_commit)).values
+        parent = await self._blackboard.recorded_value(first.request.parent_commit)
         with _judgeable():
-            judgement = await self._rule.first(first, parent)
-        if judgement.verdict is not Verdict.NEEDS_CONFIRM:
-            return judgement
-        retest = await self._measured(await self._retest_of(first))
-        with _judgeable():
-            return await self._rule.retest(judgement, retest, parent)
+            judgement = await self._rule.first(first, parent.values)
+        if judgement.verdict is Verdict.NEEDS_CONFIRM:
+            retest = await self._measured(await self._retest_of(first))
+            with _judgeable():
+                judgement = await self._rule.retest(judgement, retest, parent.values)
+        differing = cache_mismatch(
+            await self._recorded(judgement.request_ids), await self._recorded(parent.request_ids)
+        )
+        return replace(judgement, cache_mismatch=differing) if differing else judgement
 
     async def request_confirm(self, request_id: str) -> str:
         if not self._rule.confirms_ahead:
@@ -80,6 +91,16 @@ class GateService:
 
     async def speed_gates(self) -> frozenset[str]:
         return self._rule.speed_gates
+
+    async def _recorded(self, request_ids: Sequence[str]) -> list[TestRecord]:
+        """The records of ``request_ids`` this blackboard holds; a parent's tests run in another session are not here."""
+        records = []
+        for request_id in request_ids:
+            try:
+                records.append(await self._blackboard.record(request_id))
+            except NotRecorded:
+                continue
+        return records
 
     async def _retest_of(self, first: TestRecord) -> str:
         snapshot = await self._blackboard.snapshot()
@@ -113,8 +134,26 @@ def _judgeable() -> Iterator[None]:
         raise NotMeasured(str(error)) from error
 
 
+def cache_mismatch(candidate: Sequence[TestRecord], parent: Sequence[TestRecord]) -> tuple[str, ...]:
+    """The kinds of shared cache that were warm in some test on one side and not alike on the other; none when a side has
+    no test to say. A test whose result states no cache counts as cold for every kind."""
+    if not candidate or not parent:
+        return ()
+    kinds = {kind for record in (*candidate, *parent) for kind in _states(record)}
+    return tuple(sorted(kind for kind in kinds if _warmth(candidate, kind) != _warmth(parent, kind)))
+
+
+def _states(record: TestRecord) -> Mapping[str, str]:
+    return record.result.cache_states if record.result is not None else {}
+
+
+def _warmth(records: Sequence[TestRecord], kind: str) -> frozenset[bool]:
+    """Whether each of ``records`` found the cache of ``kind`` warm."""
+    return frozenset(_states(record).get(kind) == HIT for record in records)
+
+
 def _succeeded(record: TestRecord) -> bool:
     return record.result is not None and record.result.validity is Validity.SUCCEEDED
 
 
-__all__ = ["GateBlackboard", "GateService"]
+__all__ = ["GateBlackboard", "GateService", "cache_mismatch"]

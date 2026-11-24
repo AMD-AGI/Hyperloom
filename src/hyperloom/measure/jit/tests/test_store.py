@@ -15,10 +15,12 @@ import json
 import os
 import stat
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from hyperloom.measure import jit_kinds
 from hyperloom.measure.jit import store as jit_store
 from hyperloom.measure.jit_kinds import AITER_JIT, TRITON
 from hyperloom.measure.jit.store import DirJitStore, JitStoreError, Snapshot, SnapshotInvalid, StoredFile
@@ -442,7 +444,7 @@ def test_a_symlinked_staged_list_is_refused(store, tmp_path) -> None:
 
 
 def test_a_snapshot_over_the_size_a_snapshot_may_have_is_refused(store, tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(jit_store, "MAX_SNAPSHOT_BYTES", 5)
+    monkeypatch.setattr(jit_kinds, "KINDS", (replace(AITER_JIT, max_bytes=5), *jit_kinds.KINDS[1:]))
     staged, snapshot = _stage(tmp_path / "s", {"module_a.so": MODULE})
 
     with pytest.raises(SnapshotInvalid, match="more bytes than a snapshot may hold"):

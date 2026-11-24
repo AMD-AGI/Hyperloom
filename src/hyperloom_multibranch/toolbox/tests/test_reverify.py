@@ -117,6 +117,17 @@ async def test_an_edited_spec_fingerprint_is_named(tmp_path: Path, rig) -> None:
     assert executor.difference(replace(result, spec_fingerprint=other)).startswith("spec_fingerprint: recorded")
 
 
+async def test_cache_states_the_bundle_does_not_sign_are_named_and_a_record_without_any_claims_none(
+    tmp_path: Path, rig
+) -> None:
+    executor, result = await _accepted(tmp_path, rig)
+    assert result.cache_states == {}, "the fake runner signs no cache"
+
+    claimed = replace(result, cache_states={"aiperf_dataset": "hit"})
+    assert executor.difference(claimed) == "cache_states: recorded {'aiperf_dataset': 'hit'}, the bundle has {}"
+    assert executor.difference(replace(result, cache_states={})) is None
+
+
 async def test_a_record_without_a_bundle_hash_names_no_bundle(tmp_path: Path, rig) -> None:
     executor, result = await _accepted(tmp_path, rig)
     assert executor.difference(replace(result, manifest_sha256=None)) == "manifest_sha256: the record names no bundle"

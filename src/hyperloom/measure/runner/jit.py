@@ -9,6 +9,7 @@ each kind and hands the backend a :class:`~hyperloom.measure.jit.session.JitCach
 for a test to fail: a fact that cannot be read switches the kind that needs it off, with a note, and the test builds cold.
 
 ``HYPERLOOM_JIT_CACHE`` names the cache's directory; the template mounts it read-only, and without it there is no cache.
+The same store holds the AgentX client's tokenized dataset (:mod:`hyperloom.measure.runner.dataset_cache`).
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ from hyperloom.measure.jit.key import (
     triton_key,
     without_card_arch,
 )
-from hyperloom.measure.jit_kinds import AITER_CPP, AITER_JIT, TRITON, CacheKind
+from hyperloom.measure.jit_kinds import AIPERF_DATASET, AITER_CPP, AITER_JIT, TRITON, CacheKind
 from hyperloom.measure.jit.modules import (
     CONFIG_FILE,
     SourceTree,
@@ -67,6 +68,7 @@ from hyperloom.measure.jit.session import GivenModules, JitCacheSession, KindPla
 from hyperloom.measure.framework.table_modules import file_identity, stale_table_modules
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.round_marks import boot_parts
+from hyperloom.measure.runner.dataset_cache import dataset_plan
 from hyperloom.measure.runner.hardware import GpuFacts
 from hyperloom.measure.runner.service import RunnerFailure
 from hyperloom.measure.spec import EnvRoot, MeasurementSpec
@@ -104,13 +106,15 @@ _NEEDS_JIT_DIR = (
 @dataclass(frozen=True)
 class Surroundings:
     """What the runner has besides the sheet: its environment, where a test's own cache directories and its staged
-    contribution go, how to read a blob of the sheet, and where to leave notes."""
+    contribution go, how to read a blob of the sheet, where to leave notes, and the hash of the inference_suite staging
+    the AgentX client runs from (``None`` when the sheet names none)."""
 
     environ: Mapping[str, str]
     private_root: Path
     staging: Path
     read_blob: Callable[[str], bytes]
     notes: list[str]
+    client: str | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +174,11 @@ def build_session(
     python = server_python(config, default="python3")
     inputs = _Inputs(spec, machine, environment, sheet, farm, python, around, servers, _module_build(spec, around))
     plans, disabled = _plans(inputs)
+    dataset = dataset_plan(spec, [config, *(_point(path) for path in points[1:])], around.client)
+    if isinstance(dataset, KindPlan):
+        plans.append(dataset)
+    elif dataset is not None:
+        disabled[AIPERF_DATASET.name] = dataset
     if needs_jit_dir:
         _require_jit_dir(plans, disabled, environment)
     if not plans and not disabled:

@@ -15,11 +15,11 @@ import json
 import os
 import shutil
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from hyperloom.measure.jit import session as jit_session
 from hyperloom.measure.jit.builds import BuildLog, scan_builds
 from hyperloom.measure.jit_kinds import AITER_CPP, AITER_JIT, DISABLED, HIT, MISS, TRITON, VERIFY_FAILED
 from hyperloom.measure.jit.session import GivenModules, JitCacheSession, KindPlan
@@ -272,9 +272,8 @@ def test_a_kind_that_is_switched_off_is_reported_with_its_reason_and_gets_no_dir
     assert "jit cache: triton is not used: the sheet sets TRITON_CACHE_DIR itself" in report.notes
 
 
-def test_a_snapshot_over_the_size_a_snapshot_may_have_is_not_contributed(store, tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(jit_session, "MAX_SNAPSHOT_BYTES", 3)
-    session = _session(store, tmp_path, plans=[KindPlan(AITER_JIT, KEY)])
+def test_a_snapshot_over_the_size_a_snapshot_may_have_is_not_contributed(store, tmp_path) -> None:
+    session = _session(store, tmp_path, plans=[KindPlan(replace(AITER_JIT, max_bytes=3), KEY)])
     session.seed()
     _write(_dirs(session)["AITER_JIT_DIR"], "module_a.so", b"four")
 

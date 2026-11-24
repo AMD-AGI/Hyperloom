@@ -491,7 +491,11 @@ class HostedExecutor:
         }
         manifest = _archived_manifest(str(extra.get("archive") or ""), manifest_sha)
         if manifest is not None:
-            fields.update(spec_fingerprint=manifest.spec_fingerprint, surface_sha256=manifest.surface_sha256)
+            fields.update(
+                spec_fingerprint=manifest.spec_fingerprint,
+                surface_sha256=manifest.surface_sha256,
+                cache_states=manifest.cache_states(),
+            )
         return fields
 
 

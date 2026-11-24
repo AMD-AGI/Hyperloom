@@ -28,6 +28,8 @@ from hyperloom.measure.archive import ResultArchive
 from hyperloom.measure.framework.base import SESSION_SNAPSHOT_DIR, framework_envs
 from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_spec import SpecContext
+from hyperloom.measure.jit.store import DirJitStore
+from hyperloom.measure.jit_kinds import AIPERF_DATASET
 from hyperloom.measure.runner.cache_layout import MANIFEST_PIN_ENV
 from hyperloom.measure.sandboxes import (
     DEFAULT_HANDOVER_TIMEOUT_SEC,
@@ -52,6 +54,7 @@ from hyperloom_multibranch.toolbox.hosted_leases import (
     HostedBranchLeases,
     LeaseTuning,
 )
+from hyperloom_multibranch.toolbox.local_hosted import JIT_STORE_ENV, private_jit_store
 from hyperloom_multibranch.toolbox.leased_toolbox import (
     LeasedToolbox,
     capped_policy,
@@ -81,6 +84,7 @@ __all__ = [
     "build_hosted_toolbox",
     "dev_templates",
     "handover_for",
+    "hosted_jit_store",
     "parallel_tests_for",
 ]
 
@@ -95,6 +99,9 @@ _COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _MANIFEST_DIGEST = re.compile(r"[0-9a-f]{64}")
 _GRANT_KEYS = ("max_sandboxes", "max_gpus", "gpu_hours", "max_runtime_sec")
 _REQUIRED_TEXT = ("run_id", "api_url", "sandbox_url", "measurement_key")
+#: What a hosted session publishes to the shared cache ``HYPERLOOM_JIT_STORE`` names: the AgentX client's dataset only.
+#: The compiled kinds stay unpublished from hosted tests until their store is laid out for the sandboxes.
+HOSTED_PUBLISHED_KINDS = frozenset({AIPERF_DATASET.name})
 
 log = logging.getLogger(__name__)
 
@@ -534,6 +541,16 @@ def _acceptance_with_prompts(
     return named
 
 
+def hosted_jit_store(environ: Mapping[str, str]) -> DirJitStore | None:
+    """The shared cache the host publishes verified contributions to, the directory ``HYPERLOOM_JIT_STORE`` names, or
+    ``None`` when it names none. The measurement template mounts the same directory read only at the path its
+    ``HYPERLOOM_JIT_CACHE`` names: the tests read it, only this host writes it."""
+    named = environ.get(JIT_STORE_ENV, "").strip()
+    if not named:
+        return None
+    return DirJitStore(private_jit_store(Path(named).expanduser().absolute()))
+
+
 def build_hosted_toolbox(
     inputs: HostedToolboxInputs,
     blackboard: LocalBlackboard,
@@ -574,6 +591,8 @@ def build_hosted_toolbox(
         ValueError: When the templates have no runner template for ``tp`` (or no ``dev`` one, when the session lends
             ``dev`` sandboxes and the host gave a ``dev`` key and grant limits),
             the grant cannot run one test, or the options and the acceptance setup name different short-prompt sets.
+        JitStoreNotPrivate: ``HYPERLOOM_JIT_STORE`` names a directory that another account could change; the tests
+            read what it holds.
     """
 
     directory = Path(inputs.session_dir)
@@ -601,6 +620,8 @@ def build_hosted_toolbox(
         archive=session_archive(options.archive, directory),
         max_parallel_tests=parallel,
         poll_interval_sec=options.poll_interval_sec,
+        jit_store=hosted_jit_store(os.environ),
+        jit_published_kinds=HOSTED_PUBLISHED_KINDS,
         handover=handover,
     )
     backend = started_backend(provider, config)

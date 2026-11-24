@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 
+from dataclasses import replace
+
 import pytest
 
 from hyperloom.common.gain_math import ACCURACY_METRICS
@@ -23,7 +25,7 @@ from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
 from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.tests.fakes import RecordingVerifier, quick_polls  # noqa: F401
-from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox
+from hyperloom_multibranch.toolbox.tests.fake import FakeExecutor, FakeToolbox
 from hyperloom_multibranch.toolbox.tests.fake_model import Fate, FakeToolboxConfig, NoiseModel
 
 ROOT, CONC = "c0", 64
@@ -235,6 +237,39 @@ async def test_a_merge_whose_retest_does_not_re_verify_cannot_be_judged(session)
 
     with pytest.raises(NotMeasured, match=f"{retest.request_id} did not re-verify"):
         await session.new_gate().compare(merge)
+
+
+def _cache_states(monkeypatch, states_of) -> None:
+    """Every result the fake toolbox makes states the shared caches ``states_of(request)`` says its test found."""
+    made = FakeExecutor._result
+
+    def result(self, request, *args):
+        return replace(made(self, request, *args), cache_states=states_of(request))
+
+    monkeypatch.setattr(FakeExecutor, "_result", result)
+
+
+async def test_a_comparison_whose_sides_started_from_different_cache_states_names_the_kinds(tmp_path, monkeypatch):
+    warm, cold = {"aiperf_dataset": "hit", "triton": "miss"}, {"aiperf_dataset": "miss", "triton": "miss"}
+    _cache_states(monkeypatch, lambda request: warm if request.purpose is Purpose.BASELINE else cold)
+    session = _Session(tmp_path / "blackboard")
+    await session.gate.establish_baseline(ROOT, await session.root_tests())
+    merge = await session.toolbox.submit_test(_request(Purpose.INTEGRATION, FLAT))
+
+    judgement = await session.gate.compare(merge)
+
+    assert judgement.verdict is Verdict.FLAT and judgement.cache_mismatch == ("aiperf_dataset",)
+    await session.toolbox.close()
+
+
+async def test_a_comparison_whose_sides_found_the_caches_alike_names_none(tmp_path, monkeypatch):
+    _cache_states(monkeypatch, lambda request: {"aiperf_dataset": "hit", "triton": "miss"})
+    session = _Session(tmp_path / "blackboard")
+    await session.gate.establish_baseline(ROOT, await session.root_tests())
+    merge = await session.toolbox.submit_test(_request(Purpose.INTEGRATION, FLAT))
+
+    assert (await session.gate.compare(merge)).cache_mismatch == ()
+    await session.toolbox.close()
 
 
 async def test_a_flat_merge_is_judged_without_a_retest(session):

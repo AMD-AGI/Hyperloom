@@ -379,6 +379,10 @@ class ResultManifest:
     def from_bytes(cls, raw: bytes) -> "ResultManifest":
         return cls.from_document(parse_json_object(raw, what="manifest"))
 
+    def cache_states(self) -> dict[str, str]:
+        """The state the shared cache of each kind was in for the test, by the kind's name; empty without a cache."""
+        return {} if self.jit_cache is None else {kind.kind: kind.state for kind in self.jit_cache.kinds}
+
     def total_size(self) -> int:
         return sum(entry.size for entry in self.files)
 

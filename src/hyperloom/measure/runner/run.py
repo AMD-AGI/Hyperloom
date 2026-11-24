@@ -566,7 +566,8 @@ def _jit_session(
     """The test's use of the shared compiled-code cache, or ``None`` when none is configured (``measure.runner.jit``);
     its private directories lie in the test's compile directory, its staged contribution in the output."""
     private = _compile_dir(ctx, spec.request_id) / "jit"
-    around = Surroundings(ctx.environ, private, ctx.out_dir / STAGING_DIR, ctx.read_blob, ctx.notes)
+    client = None if ctx.staging is None else ctx.staging.sha256()
+    around = Surroundings(ctx.environ, private, ctx.out_dir / STAGING_DIR, ctx.read_blob, ctx.notes, client)
     return build_session(spec, points, farm, facts[0] if facts else None, around)
 
 

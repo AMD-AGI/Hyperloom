@@ -344,6 +344,15 @@ def test_a_cold_start_round_trips_and_a_document_written_before_it_loads_with_no
     assert TestResult.from_document(document).cold_start_seconds is None
 
 
+def test_cache_states_round_trip_and_a_document_written_before_them_loads_with_none() -> None:
+    states = {"triton": "miss", "aiperf_dataset": "hit"}
+    assert _roundtrip(_result(cache_states=states)).cache_states == states
+    assert "cache_states" not in _result().to_document(), "a test without a cache writes the document it always did"
+    assert TestResult.from_document(_result().to_document()).cache_states == {}
+    with pytest.raises(MeasurementError, match="cache_states.triton must be a non-empty string"):
+        _result(cache_states={"triton": ""})
+
+
 def test_a_cold_start_is_a_finite_number_that_is_not_negative() -> None:
     with pytest.raises(MeasurementError, match="cold_start_seconds cannot be negative"):
         _result(cold_start_seconds=-0.5)

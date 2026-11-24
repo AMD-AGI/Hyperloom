@@ -34,10 +34,14 @@ _CONSISTENCY_NOT_IN_BUNDLE = frozenset({"trigger", "pooled"})
 
 
 def first_hash_difference(recorded: TestResult, manifest: ResultManifest) -> str | None:
-    """The first of the manifest's own fields that the record names differently."""
+    """The first of the manifest's own fields that the record names differently. The cache states are compared when the
+    record holds some: one written before they were recorded claims none."""
     for name in _HASH_FIELDS:
         if getattr(recorded, name) != getattr(manifest, name):
             return f"{name}: recorded {getattr(recorded, name)!r}, the bundle has {getattr(manifest, name)!r}"
+    signed = manifest.cache_states()
+    if recorded.cache_states and dict(recorded.cache_states) != signed:
+        return f"cache_states: recorded {dict(recorded.cache_states)!r}, the bundle has {signed!r}"
     return None
 
 

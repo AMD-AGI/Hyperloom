@@ -77,8 +77,10 @@ from hyperloom_multibranch.toolbox.hosted_toolbox import (
     HostedToolboxInputs,
     build_hosted_toolbox,
     handover_for,
+    hosted_jit_store,
     parallel_tests_for,
 )
+from hyperloom_multibranch.toolbox.local_hosted import JIT_STORE_ENV, JitStoreNotPrivate
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.resume_guard import MeasuredOn
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req, lineage_blackboard
@@ -487,6 +489,31 @@ def test_the_runner_cache_manifest_digest_is_a_create_environment_of_every_runne
     assert toolbox.backend._config.create_envs == {SOURCE_SHA_ENV: _SOURCE_SHA, MANIFEST_PIN_ENV: _MANIFEST}
     assert MANIFEST_PIN_ENV == "HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256", "the name the runner's bootstrap reads"
     assert toolbox.backend.pool._create_envs == toolbox.backend._config.create_envs, "the pool creates with them"
+
+
+def test_the_shared_cache_the_host_names_is_where_the_session_publishes_the_clients_dataset_and_nothing_else(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = tmp_path / "store"
+    monkeypatch.setenv(JIT_STORE_ENV, str(store))
+
+    config = _toolbox(None, tmp_path).backend._config
+
+    assert config.jit_store is not None and config.jit_store.root == store and store.is_dir()
+    assert config.jit_published_kinds == frozenset({"aiperf_dataset"}), "the compiled kinds are not published"
+
+
+def test_no_shared_cache_named_publishes_nothing_and_one_another_account_could_change_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.delenv(JIT_STORE_ENV, raising=False)
+    assert _toolbox(None, tmp_path).backend._config.jit_store is None
+
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o775)
+    shared.chmod(0o775)
+    with pytest.raises(JitStoreNotPrivate, match="not a directory of this account's that only it can write"):
+        hosted_jit_store({JIT_STORE_ENV: str(shared)})
 
 
 def test_the_grants_sandboxes_and_gpus_bound_the_tests_at_once(tmp_path: Path) -> None:

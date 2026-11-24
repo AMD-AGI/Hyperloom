@@ -41,7 +41,7 @@ from hyperloom.measure import fsafe
 from hyperloom.measure.archive import fsync_dir
 from hyperloom.measure.docs import SHA256_RE, DocumentError, Reader, canonical_json, parse_json_object, relative_path
 from hyperloom.measure.jit.locations import MAX_LOCATED_BYTES, NotPortable, localised
-from hyperloom.measure.jit_kinds import KINDS, CacheKind, kind_named
+from hyperloom.measure.jit_kinds import KINDS, MAX_SNAPSHOT_BYTES, CacheKind, kind_named
 
 __all__ = [
     "BLOBS_DIR",
@@ -62,8 +62,6 @@ __all__ = [
 ]
 
 SNAPSHOT_SCHEMA = "hyperloom.jit-cache-snapshot/v1"
-#: A kind's snapshot (everything it holds, not only what a test added) over this size is not stored.
-MAX_SNAPSHOT_BYTES = 4 * 1024**3
 MANIFEST_NAME = "manifest.json"
 BLOBS_DIR = "blobs"
 SNAPSHOTS_DIR = "snapshots"
@@ -140,7 +138,7 @@ class Snapshot:
         files = _parse_files(r.raw("files"), kind)
         r.done()
         snapshot = cls(kind.name, key, parent, files)
-        if snapshot.total_bytes > MAX_SNAPSHOT_BYTES:
+        if snapshot.total_bytes > kind.max_bytes:
             raise DocumentError("snapshot.files: more bytes than a snapshot may hold")
         return snapshot
 

@@ -76,6 +76,7 @@ _MAX_UNIX_TIME = 1.0e11
 
 _ACCURACY = "accuracy"
 _FAILURE_CLASS = "failure_class"
+_CACHE_STATES = "cache_states"
 #: The verdicts of a ``repro`` test: the case's failure is still there, or the case ran clean.
 REPRODUCED = "reproduced"
 NOT_REPRODUCED = "not_reproduced"
@@ -909,6 +910,9 @@ class TestResult:
     ``agentx_checkpoint`` is the ruling the AgentX checkpoint made on the test's measured round (``None`` for a test it
     did not judge, or whose window never closed); a test it stopped (``stopped``) is the candidate's failure, and its
     ``gain_pct`` covers the first ``at_sec`` of the round only.
+    ``cache_states`` is the state the shared cache of each kind was in for the test (``hit``, ``miss``, ``verify_failed``
+    or ``disabled``, by the kind's name), as its signed result states it; empty when the test used no shared cache, and in
+    a document written before it existed.
     A document written while the greedy decode pass existed may carry ``decode_outputs`` and ``decode_identity``; they
     mean nothing now and ``from_document`` leaves them out, so such a document still loads.
     """
@@ -945,6 +949,7 @@ class TestResult:
     long_context: LongContextResult | None = None
     builds: tuple[BuildCharge, ...] = ()
     agentx_checkpoint: AgentxCheckpointRuling | None = None
+    cache_states: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _text(self.request_id, "request_id")
@@ -979,6 +984,9 @@ class TestResult:
         self._check_findings()
         if not isinstance(self.builds, tuple) or not all(isinstance(b, BuildCharge) for b in self.builds):
             raise MeasurementError(f"builds must be a tuple of BuildCharge, got {self.builds!r}")
+        for kind, state in _mapping(self.cache_states, _CACHE_STATES).items():
+            _text(kind, _CACHE_STATES)
+            _text(state, f"{_CACHE_STATES}.{kind}")
 
     def _check_findings(self) -> None:
         """The checks the test ran beside its rounds, and the checkpoint's ruling on them."""
@@ -1052,6 +1060,8 @@ class TestResult:
             document["builds"] = [value.to_document() for value in self.builds]
         if self.agentx_checkpoint is not None:
             document["agentx_checkpoint"] = self.agentx_checkpoint.to_document()
+        if self.cache_states:
+            document[_CACHE_STATES] = dict(sorted(self.cache_states.items()))
         return document
 
     @classmethod
@@ -1092,6 +1102,7 @@ class TestResult:
             long_context=None if long_context is None else LongContextResult.from_document(long_context),
             builds=tuple(map(BuildCharge.from_document, _items(f.get("builds", ()), "builds"))),
             agentx_checkpoint=None if checkpoint is None else AgentxCheckpointRuling.from_document(checkpoint),
+            cache_states=dict(_mapping(f.get(_CACHE_STATES, {}), _CACHE_STATES)),
         )
 
 

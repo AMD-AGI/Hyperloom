@@ -10,6 +10,10 @@ the list fails toward "not cached", never toward leaking into another test.
 
 A kind may also say which of its files name the directory they were written in: those are stored without it and given the
 reading test's own directory again (:mod:`hyperloom.measure.jit.locations`).
+
+The cache holds one kind that is not compiled code: the AgentX client's tokenized dataset (:data:`AIPERF_DATASET`). It is
+stored, verified, seeded and published the way the compiled kinds are; only the process that reads it is the client, not
+the server.
 """
 
 from __future__ import annotations
@@ -18,11 +22,13 @@ import re
 from dataclasses import dataclass
 
 __all__ = [
+    "AIPERF_DATASET",
     "AITER_CPP",
     "AITER_JIT",
     "DISABLED",
     "HIT",
     "KINDS",
+    "MAX_SNAPSHOT_BYTES",
     "MISS",
     "STATES",
     "TRITON",
@@ -35,6 +41,9 @@ _NAME = r"[A-Za-z0-9_][A-Za-z0-9_.-]*"
 #: What a test found in the cache of a kind: a verified snapshot, none, one that failed verification, or no use of it.
 HIT, MISS, VERIFY_FAILED, DISABLED = "hit", "miss", "verify_failed", "disabled"
 STATES = (HIT, MISS, VERIFY_FAILED, DISABLED)
+#: A kind's snapshot (everything it holds, not only what a test added) over this size is not stored, unless the kind says
+#: otherwise (``CacheKind.max_bytes``).
+MAX_SNAPSHOT_BYTES = 4 * 1024**3
 
 
 @dataclass(frozen=True)
@@ -46,6 +55,7 @@ class CacheKind:
     ``keyed_by`` says which key the kind is stored under (``aiter`` or ``triton``, see
     :mod:`hyperloom.measure.jit.key`). ``located`` is the pattern of the admitted files whose content holds paths below
     the directory that wrote them (a compiler's index of the files it made); ``None`` when no file of the kind does.
+    ``max_bytes`` is the most a snapshot of the kind may hold.
     """
 
     name: str
@@ -54,6 +64,7 @@ class CacheKind:
     allowed: re.Pattern[str]
     keyed_by: str
     located: re.Pattern[str] | None = None
+    max_bytes: int = MAX_SNAPSHOT_BYTES
 
     def admits(self, relative: str) -> bool:
         return self.allowed.fullmatch(relative) is not None
@@ -81,7 +92,20 @@ TRITON = CacheKind(
     located=re.compile(r"[^/]+/__grp__[^/]+"),
 )
 
-KINDS = (AITER_JIT, AITER_CPP, TRITON)
+#: aiperf's content-addressed dataset cache (``aiperf/dataset/mmap_cache.py`` of the AgentX client):
+#: ``<cache key>/dataset.dat``, ``index.dat`` (``.dat.zst`` when compressed) and the ``manifest.json`` that makes an entry
+#: complete, one directory per 32-hex key. Its lock files and half-written ``.<key>.tmp.<pid>`` directories are not
+#: stored. One entry of a corpus is about 6.5 GB.
+AIPERF_DATASET = CacheKind(
+    "aiperf_dataset",
+    "AIPERF_DATASET_MMAP_CACHE_DIR",
+    "",
+    re.compile(r"[0-9a-f]{32}/(?:(?:dataset|index)\.dat(?:\.zst)?|manifest\.json)"),
+    "client",
+    max_bytes=32 * 1024**3,
+)
+
+KINDS = (AITER_JIT, AITER_CPP, TRITON, AIPERF_DATASET)
 
 
 def kind_named(name: str) -> CacheKind:

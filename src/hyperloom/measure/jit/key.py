@@ -10,6 +10,10 @@ request share one cache:
 * **Triton** names a kernel's directory by the hash of its source, signature, options, target and its own compiler, so
   an entry is content-addressed already; the key is the image (which fixes Triton and the toolchain) and the GPU
   architecture.
+* **aiperf's dataset** (the AgentX client's tokenized corpus) is addressed by aiperf itself by the corpus, the tokenizer's
+  name, the seeds and every setting that shapes the bytes, but not by aiperf's own code nor by the tokenizer's files; the
+  key is the client's staging (which fixes aiperf and every library it runs) and the content of the model directory's
+  files other than its weights, the tokenizer among them (:func:`dataset_key`).
 * **aiter** names a module only by ``md_name`` and builds nothing when ``<md_name>.so`` exists, whatever changed under
   it. The name does encode what a call asks for (``gen_func`` puts dtype, bias, mask and the like into ``md_name`` and
   the code generator command; a cpp_itfs library's directory is ``md_name`` plus the hash of every template argument),
@@ -63,6 +67,7 @@ __all__ = [
     "Machine",
     "aiter_key",
     "build_surface",
+    "dataset_key",
     "entry_env_names",
     "env_names_in",
     "plain_build_names",
@@ -172,6 +177,20 @@ def _hash(document: dict[str, object]) -> str:
 def triton_key(machine: Machine) -> str:
     """Triton's own hashing makes an entry content-addressed; the key only fixes the compiler and the target."""
     return _hash({"schema": SCHEMA, "kind": "triton", "image": machine.image_digest, "gfx": machine.gfx_arch})
+
+
+def dataset_key(client: str, model: str, model_files: Mapping[str, str]) -> str:
+    """The key of aiperf's dataset cache: the client's staging, the model path the tokenizer is read from (aiperf names
+    the tokenizer by it) and the sha256 of each file of that directory a tokenizer can read (``model_files``)."""
+    return _hash(
+        {
+            "schema": SCHEMA,
+            "kind": "aiperf_dataset",
+            "client": client,
+            "model": model,
+            "files": dict(sorted(model_files.items())),
+        }
+    )
 
 
 def aiter_key(machine: Machine, tree: str, surface: BuildSurface) -> str:

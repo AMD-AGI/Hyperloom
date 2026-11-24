@@ -55,7 +55,10 @@ class Judgement:
     committed. On InferenceX it holds the eval score under ``ACCURACY_SCORE`` too when the eval ran, on AgentX the request
     error rate. ``accuracy`` is ``FAILED`` when a measurement behind the judgement failed the accuracy gate, ``PASSED``
     when every one that ran its eval passed it, and ``NOT_MEASURED`` when none ran it; ``refused_by`` names the
-    performance gates that kept it from ``IMPROVED``.
+    performance gates that kept it from ``IMPROVED``. ``cache_mismatch`` names the kinds of shared cache that were warm
+    (a hit) in the candidate's tests and not alike in the tests its parent's value comes from, or the other way round:
+    the two sides started from different cache states. That moves their start-up, and their measured window only where a
+    compiler builds something first asked for after warmup.
     """
 
     verdict: Verdict
@@ -67,6 +70,7 @@ class Judgement:
     refused_by: tuple[str, ...] = ()
     fixes_correctness: bool = False
     foundation_fix: bool = False
+    cache_mismatch: tuple[str, ...] = ()
 
 
 __all__ = ["ACCURACY_SCORE", "AccuracyVerdict", "Judgement", "Verdict"]

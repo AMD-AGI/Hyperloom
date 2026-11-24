@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+from collections.abc import Collection
 from pathlib import Path
 
 from hyperloom.measure.jit_kinds import kind_named
@@ -35,11 +36,14 @@ log = logging.getLogger(__name__)
 STAGING_PATH = "/out/jit-cache"
 
 
-def publish_contributions(store: DirJitStore, handle: Sandbox, facts: JitCacheFacts, scratch: Path) -> int:
-    """Add the contribution of each kind the signed result lists; the number of kinds that were added to the store."""
+def publish_contributions(
+    store: DirJitStore, handle: Sandbox, facts: JitCacheFacts, scratch: Path, kinds: Collection[str] | None = None
+) -> int:
+    """Add the contribution of each kind the signed result lists, of the ``kinds`` named when they are; the number of
+    kinds that were added to the store."""
     added = 0
     for kind in facts.kinds:
-        if kind.contribution is None:
+        if kind.contribution is None or (kinds is not None and kind.kind not in kinds):
             continue
         try:
             kind_named(kind.kind)

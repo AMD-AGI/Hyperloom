@@ -37,7 +37,6 @@ from hyperloom.measure.jit_kinds import DISABLED, HIT, MISS, VERIFY_FAILED, Cach
 from hyperloom.measure.jit.store import (
     BLOBS_DIR,
     MANIFEST_NAME,
-    MAX_SNAPSHOT_BYTES,
     DirJitStore,
     JitStoreError,
     Snapshot,
@@ -281,7 +280,7 @@ class JitCacheSession:
             return None
         parent = None if seeded.snapshot is None else seeded.snapshot.sha256()
         snapshot = Snapshot(kind.name, seeded.plan.key, parent, {**seeded.files, **new})
-        if snapshot.total_bytes > MAX_SNAPSHOT_BYTES:
+        if snapshot.total_bytes > kind.max_bytes:
             shutil.rmtree(directory, ignore_errors=True)
             self._notes.fact(f"jit cache: {kind.name} is over the size a snapshot may have; not contributed")
             return None

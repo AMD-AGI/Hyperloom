@@ -174,7 +174,8 @@ class HostedConfig:
     (``rule_pack_mismatch``); ``None`` accepts any pack. ``create_envs`` is the environment every authoritative sandbox is
     created with; the service's sealed runner template must accept those names (``accepted_envs``). ``jit_store`` is the
     shared compiled-code cache: the compiled files a signed result says its test added are published to it
-    after the result is accepted; ``None`` publishes nothing. ``handover`` keeps the sandbox of a test whose result
+    after the result is accepted; ``None`` publishes nothing. ``jit_published_kinds`` names the kinds that are
+    published there, ``None`` all of them. ``handover`` keeps the sandbox of a test whose result
     landed until the next test's sandbox runs (:class:`~.sandboxes.Handover`), so that the cluster's queue does not
     give its node to another job between two tests; ``None`` closes every sandbox when its test ends.
     """
@@ -196,6 +197,7 @@ class HostedConfig:
     create_envs: Mapping[str, str] = field(default_factory=dict)
     staging_root: Path | None = None
     jit_store: DirJitStore | None = None
+    jit_published_kinds: frozenset[str] | None = None
     handover: Handover | None = None
     should_stop: Callable[[], bool] = field(default=lambda: False, compare=False)
 
@@ -767,7 +769,7 @@ class HostedMeasurementBackend:
         try:
             scratch = staging / "jit"
             scratch.mkdir()
-            publish_contributions(store, _handle(attempt.runner), facts, scratch)
+            publish_contributions(store, _handle(attempt.runner), facts, scratch, self._config.jit_published_kinds)
         except OSError as exc:
             log.warning("jit cache: nothing was published (%s)", type(exc).__name__)
 
