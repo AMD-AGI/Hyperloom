@@ -1073,3 +1073,19 @@ async def test_a_cancelled_initial_analysis_is_asked_for_again_until_its_keys_ru
         assert phase_transitions.compute_next_phase(state) is not None
     finally:
         await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_framework_with_no_profiler_enqueues_no_analysis(coord: Coordinator, caplog):
+    """A framework that runs under no torch profiler ships no profile configuration, so a roofline or profile of it
+    can only fail; none is enqueued, and the log says why."""
+    coord.shared_state.framework = "llamacpp"
+
+    with caplog.at_level("ERROR"):
+        assert await coord.phase_prelude.enqueue_internal_analysis_task(reason="prelude_initial") is None
+
+    assert coord.tasks._tasks == {}
+    assert "llamacpp" in caplog.text and "no torch profiler" in caplog.text
+    coord.shared_state.cumulative_gain_validated = 50.0
+    coord.shared_state.roofline_failure_streak = 1
+    assert coord.phase_kernel._needs_roofline_for_watermark() is False

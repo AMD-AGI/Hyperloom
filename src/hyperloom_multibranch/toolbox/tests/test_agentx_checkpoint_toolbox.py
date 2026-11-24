@@ -28,6 +28,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.measure.checkpoint import CheckpointPlan
 from hyperloom.measure.failures import classify_test_failure
+from hyperloom.measure.hosted_log import STATE_FINISHED, Record
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.socket import TestCall, TestOutcome
 from hyperloom.measure.tests.hosted_fixtures import make_rig, point_yaml
@@ -114,24 +115,32 @@ async def test_an_explore_whose_parent_recorded_no_median_runs_unjudged_and_says
 
 
 class _Journal:
-    def latest(self, request_id: str) -> object:
-        return None
+    """Records the verified bundle each call landed, as the hosted backend's journal does."""
+
+    def __init__(self) -> None:
+        self.landed: Record | None = None
+
+    def latest(self, request_id: str) -> Record | None:
+        return self.landed
 
     def next_attempt(self, request_id: str) -> int:
         return 1
 
 
 class _Stopping:
-    """A backend whose sandbox stopped the test at the checkpoint and left its ruling in the measured round's slot."""
+    """A backend whose sandbox stopped the test at the checkpoint, left its ruling in the measured round's slot and landed
+    its verified bundle, as a runner writes one after a stopped round."""
 
     name = "hosted"
-    journal = _Journal()
 
     def __init__(self) -> None:
         self.calls: list[TestCall] = []
+        self.journal = _Journal()
 
     def run_test(self, call: TestCall) -> TestOutcome:
         self.calls.append(call)
+        extra = {"verified": True, "manifest_sha256": "d" * 64}
+        self.journal.landed = Record("r1", 1, STATE_FINISHED, "sbx-1", str(call.output_dir), call.task_id, extra)
         slot = Path(call.output_dir) / "variant_00_test"
         slot.mkdir(parents=True)
         (slot / "agentx_checkpoint.json").write_text(json.dumps(RULING.to_document()), encoding="utf-8")

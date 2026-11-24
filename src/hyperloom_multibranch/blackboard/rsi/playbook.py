@@ -86,6 +86,11 @@ class PlaybookRule:
     text: str
 
 
+#: How many times the playbook's ``failed_op_limit`` of branches that crashed out (their specialist gave up after
+#: crashes before any test of them was judged) spends their focus op: they explored nothing of it.
+CRASHED_OUT_FACTOR = 2
+
+
 @dataclass(frozen=True)
 class PlaybookNumbers:
     """The playbook's numbers, each applied by code.
@@ -95,9 +100,11 @@ class PlaybookNumbers:
     ``grace_tests`` of its explore tests succeeded and were judged. ``max_open`` caps the branches running at once,
     ``None`` for the run's cap; no branch the judge refills opens in the last ``last_open_minutes`` of EXPLORE,
     ``None`` for the median time a new branch took to its first commit; an op that ``failed_op_limit`` branches opened
-    on the integration head as it stands were focused on and stopped without a commit, or that one branch focused on it
-    gave up on at that head quoting an EXHAUSTED record that finds no ceiling above the bar or every idea tested or
-    claimed, leaves the open areas until the head moves.
+    on the integration head as it stands were focused on and stopped without a commit, not counting those that crashed
+    out, or that :data:`CRASHED_OUT_FACTOR` times ``failed_op_limit`` such branches crashed out, or that one branch
+    focused on it gave up on at that head quoting an EXHAUSTED record that finds no ceiling above the bar or every idea
+    tested or claimed, leaves the open areas until the head moves. A branch crashed out when its specialist gave up
+    after crashes before any test of it was judged.
     """
 
     stall_tests: int | None = None
@@ -171,8 +178,11 @@ class Playbook:
             f"- open: at most {opened} at once; after the opening batch, none once less of EXPLORE is left than {late}. "
             "The scheduler cuts an open past either.",
             f"- spent: an op {n.failed_op_limit} branches opened on the integration head were focused on and ended "
-            "without a commit, or that a branch focused on it gave up on at that head quoting an exhausted record of "
-            "no ceiling above the bar or every idea tested or claimed, leaves the open areas until the head moves.",
+            f"without a commit, not counting those that crashed out, or {CRASHED_OUT_FACTOR * n.failed_op_limit} such "
+            "branches crashed out (their specialist gave up after crashes before any test of them was judged), or that "
+            "a branch focused on it gave up on at that head quoting an exhausted record of no ceiling above the bar or "
+            "every idea tested or claimed, leaves the open areas until the head moves; an op offered after fewer "
+            "crash-outs than that is still open.",
             *(f"- rule ({rule.governs.value}): {rule.text}" for rule in self.rules),
             "Safety envelope, whatever the playbook says:",
             *(f"- {line}" for line in SAFETY_ENVELOPE),
@@ -447,6 +457,7 @@ __all__ = [
     "BOUNDS",
     "CHALLENGER_SHARE",
     "CHAMPION_KEY",
+    "CRASHED_OUT_FACTOR",
     "CROWNED_FORMAT",
     "FALLBACK_KEY",
     "H0",

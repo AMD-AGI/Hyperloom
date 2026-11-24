@@ -27,6 +27,8 @@ __all__ = [
     "SIGNING_PUBLIC_KEY",
     "WORKSPACE_KEY",
     "CommandResult",
+    "DirEntry",
+    "EntryKind",
     "Role",
     "Sandbox",
     "SandboxCreateFailed",
@@ -147,6 +149,25 @@ class CreateOptions:
     wait_sec: float = 60
 
 
+#: What a directory entry is, read without following it: a link is a link, whatever it points at.
+EntryKind = Literal["file", "dir", "link", "other"]
+
+
+@dataclass(frozen=True)
+class DirEntry:
+    """One entry of a directory as :meth:`Sandbox.list_entries` reads it: never through a link.
+
+    Attributes:
+        name: The entry's name in its directory.
+        kind: ``file`` (a regular file), ``dir``, ``link`` (a symbolic link, never followed) or ``other``.
+        size: The size in bytes the listing reports; 0 where it reports none.
+    """
+
+    name: str
+    kind: EntryKind
+    size: int = 0
+
+
 class Sandbox(Protocol):
     """One isolated execution environment, bound to the role that created it."""
 
@@ -164,8 +185,8 @@ class Sandbox(Protocol):
     def copy_out(self, path: str, dest: Path) -> int:
         """Stream a (possibly large) file to ``dest``; return the byte count."""
 
-    def list_dir(self, path: str) -> list[str]:
-        """Return the entry names of the directory ``path``, sorted."""
+    def list_entries(self, path: str) -> list[DirEntry]:
+        """The entries of the directory ``path``, sorted by name, each read without following a link."""
 
     def run(
         self,

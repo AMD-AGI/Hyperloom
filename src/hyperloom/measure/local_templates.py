@@ -18,6 +18,7 @@ from typing import Final
 from hyperloom.common.env_safety import is_secret_shaped_env_name
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.sandbox.local import LocalTemplate
+from hyperloom_common.weight_prefetch import WEIGHT_PREFETCH_ENV
 
 __all__ = [
     "HOST_HF_ENV_NAMES",
@@ -25,6 +26,7 @@ __all__ = [
     "IMAGE_ENV_PREFIXES",
     "RUNNER_SCRIPT",
     "host_hf_env",
+    "host_prefetch_env",
     "image_env",
     "local_runner_command",
     "local_runner_template",
@@ -89,6 +91,15 @@ def host_hf_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def host_prefetch_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The checkpoint prefetch switch (:data:`~hyperloom_common.weight_prefetch.WEIGHT_PREFETCH_ENV`) as ``environ``
+    (this process's by default) sets it, so an operator who sets it on the host reaches the runner in a local sandbox,
+    which starts from an emptied environment. Nothing when it is not set: the prefetch is then off."""
+    source = os.environ if environ is None else environ
+    value = source.get(WEIGHT_PREFETCH_ENV, "").strip()
+    return {WEIGHT_PREFETCH_ENV: value} if value else {}
+
+
 def _default_hf_home(environ: Mapping[str, str]) -> str | None:
     cache, home = environ.get("XDG_CACHE_HOME", ""), environ.get("HOME", "")
     if os.path.isabs(cache):
@@ -120,8 +131,8 @@ def local_runner_template(
     """A sealed, signing ``measurement`` template for ``gpus`` cards whose startup command is the runner.
 
     ``envs`` are the template's fixed variables; when omitted they are the image's variables of this process
-    (:func:`image_env`) and its Hugging Face settings (:func:`host_hf_env`), the local stand-in for what a hosted image
-    and template set.
+    (:func:`image_env`), its Hugging Face settings (:func:`host_hf_env`) and its checkpoint prefetch switch
+    (:func:`host_prefetch_env`), the local stand-in for what a hosted image and template set.
     """
     return LocalTemplate(
         name,
@@ -130,5 +141,5 @@ def local_runner_template(
         gpus=gpus,
         sealed=True,
         signing=True,
-        envs={**image_env(), **host_hf_env()} if envs is None else dict(envs),
+        envs={**image_env(), **host_hf_env(), **host_prefetch_env()} if envs is None else dict(envs),
     )

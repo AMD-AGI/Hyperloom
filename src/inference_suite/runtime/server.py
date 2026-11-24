@@ -12,6 +12,8 @@ it owns that server. ``external`` runs against a server something else starts an
 copies the bytes the server logged during the round into its run_dir's ``server.log`` and records their range.
 
 Ready means three things at once: ``/health`` answers 200, the process is alive, and the log shows a ready marker.
+Until then, when ``HYPERLOOM_WEIGHT_PREFETCH`` says so, the model's checkpoint is read into the page cache alongside the
+boot (:mod:`hyperloom_common.weight_prefetch`), and what that did is written to the run_dir's ``weight_prefetch.json``.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from pathlib import Path
 
 from hyperloom_common.cpu_list import runnable_cpus
 from hyperloom_common.proctree import proc_identity, tree_cpu_sec, tree_io_bytes, tree_rss_bytes
+from hyperloom_common.weight_prefetch import start_weight_prefetch
 
 from inference_suite.contracts.config import LifecycleMode, ServerConfig, SuiteConfig
 from inference_suite.contracts.layout import SERVER_LOG, SERVER_PID, ReadyStamp, RunLayout
@@ -233,6 +236,8 @@ class ServerLifecycle:
         self._clock.mark(Phase.SPAWN, started)
         place = ChildPlace(self._layout.framework_cwd, cpus)
         spawned = self._spawned = spawn(self._launch.argv, self._server_env(), self._log, place=place)
+        # Alongside the boot, not before it: the boot's own steps overlap the reads (hyperloom_common.weight_prefetch).
+        prefetch = start_weight_prefetch(self._config.server.model_path, os.environ)
         self._record(spawned)
         pid = spawned.proc.pid
         watch = ServerWatch(
@@ -242,7 +247,12 @@ class ServerLifecycle:
             started,
             BootReaders(cpu=lambda: tree_cpu_sec(pid), rss=lambda: tree_rss_bytes(pid), io=lambda: tree_io_bytes(pid)),
         )
-        stop = self._await_ready(spawned, watch)
+        try:
+            stop = self._await_ready(spawned, watch)
+        finally:
+            if prefetch is not None:
+                prefetch.stop()
+                prefetch.write_outcome(self._layout.weight_prefetch)
         if stop is not None:
             self._teardown_stop = self._teardown()
             return stop

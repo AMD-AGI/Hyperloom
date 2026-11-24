@@ -289,9 +289,9 @@ def _user_args(point: _Point) -> tuple[str, ...]:
     extra = tuple((point.text(extra_args_env(point.framework.value)) or "").split())
     flags = {name for name, _ in argv_flag_occurrences(extra)}
     added: tuple[str, ...] = ()
-    context_flag = framework_facts(point.framework).server_flags.context_length
-    if point.framework in _LAUNCHER_CONTEXT_LENGTH and canonical_flag_name(context_flag) not in flags:
-        added = (context_flag, str(point.integer(ENV_MAX_MODEL_LEN, _LAUNCHER_MAX_MODEL_LEN)))
+    context = framework_facts(point.framework).server_flags.context_length
+    if point.framework in _LAUNCHER_CONTEXT_LENGTH and context.value(extra) is None:
+        added = (context.aliases[0], str(point.integer(ENV_MAX_MODEL_LEN, _LAUNCHER_MAX_MODEL_LEN)))
     conflicts = _LAUNCHER_CONFLICTS.get(point.framework, ())
     dropped = [drop for need, drop in conflicts if canonical_flag_name(need) in flags]
     if dropped:

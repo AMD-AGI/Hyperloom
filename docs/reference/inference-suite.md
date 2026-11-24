@@ -123,6 +123,18 @@ spelled. A base whose entrypoint is not its framework's is refused
 (`config_invalid`); name another install with the server's `framework_python`
 instead.
 
+llama.cpp (`llamacpp`) is a native server: the round runs `llama-server` as the
+launch environment's `PATH` resolves it, records the version its `--version`
+prints, and holds its flags to the ones its `--help` lists, read once per binary:
+a flag it does not list, or lists as removed, is refused (`flag_unknown`) before
+the server starts. A `llama-server` missing from `PATH` or whose `--help` fails
+stops the round (`framework_version_unknown`). Its model directory holds the one `.gguf` the server loads,
+which the guard passes as `--model`, beside the
+Hugging Face tokenizer files the load client reads. No recipe source knows it, so
+its base is the operator's launch script. An eval reads the context the server
+serves from the launch's `-c` / `--ctx-size`, else from the model directory's
+`config.json`; a round with neither stops as `eval_context_too_short`.
+
 ## Launch layers
 
 A round's launch is composed in a fixed order, and `launch.json` records the layer
@@ -293,6 +305,7 @@ One round writes one run directory and leaves it unchanged once the round ends.
 | `phase_marks.json` | The instants the round passed from one phase to the next. |
 | `kv_metrics.json`, `agentx_timeline.jsonl` | KV-cache samples and the AgentX request timeline. |
 | `power.json` | Every power reading the node gave over the whole round; see [Power](#power). |
+| `weight_prefetch.json` | What the checkpoint prefetch did while the server booted, only when `HYPERLOOM_WEIGHT_PREFETCH=1` turned it on: the chosen files, the skip reason, the totals, the bytes read and the unreadable file count. See [Checkpoint prefetch](environment-variables.md#checkpoint-prefetch). |
 | `client/` | `stdout.log`, `stderr.log`, `agentx_client.log`, `inferencex_result.json`, `aiperf_artifacts/` (`profile_export.jsonl`, `profile_export_aiperf.json`, `logs/aiperf.log`) and, on an MLPerf round, `mlperf_artifacts/` (the harness's `result_summary.json` and `scores.json`). |
 | `eval/` | `stdout.log`, `stderr.log`, lm-eval's `results_<time>.json`, `hyperloom_eval_probe.json` and `definition.json`. |
 | `profile/` | `torch_trace/`, `capture_traces/`, `graph_capture_profile/` and `capture.json`. |

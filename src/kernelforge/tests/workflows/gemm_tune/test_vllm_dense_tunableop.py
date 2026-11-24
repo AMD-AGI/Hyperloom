@@ -13,43 +13,47 @@ from kernelforge.workflows.gemm_tune.tuners.vllm_dense_tunableop import (
 )
 
 
+#: What a serving process does once it uses the GPU, and what one that never uses it does.
+_USES_GPU = "import torch; torch.cuda.init(); print('candidate ran')"
+_NEVER_USES_GPU = "print('candidate ran')"
+
+
 def _write_fake_torch(tmp_path, *, with_read_file: bool, read_file_raises: bool = False):
+    """A ``torch`` whose ``cuda.tunable`` logs each call to ``TUNABLE_LOG`` and whose ``cuda.init()`` runs what
+    ``cuda._lazy_call`` queued, as PyTorch runs it when a process first initializes CUDA."""
     torch_root = tmp_path / "fake_torch"
     cuda_dir = torch_root / "torch" / "cuda"
     cuda_dir.mkdir(parents=True)
     (torch_root / "torch" / "__init__.py").write_text("from . import cuda\n", encoding="utf-8")
+    read_file = ""
     if with_read_file:
-        read_body = (
-            "        raise ValueError('corrupt tunableop csv')\n"
-            if read_file_raises
-            else "        open(os.environ['READ_MARKER'], 'w', encoding='utf-8').write(value)\n"
-        )
-        cuda_init = (
-            "import os\n"
-            "class _Tunable:\n"
-            "    def enable(self, value): pass\n"
-            "    def tuning_enable(self, value): pass\n"
-            "    def record_untuned_enable(self, value): pass\n"
-            "    def set_filename(self, value): self.filename = value\n"
-            f"    def read_file(self, value):\n{read_body}"
-            "tunable = _Tunable()\n"
-        )
-    else:
-        cuda_init = (
-            "class _Tunable:\n"
-            "    def enable(self, value): pass\n"
-            "    def tuning_enable(self, value): pass\n"
-            "    def record_untuned_enable(self, value): pass\n"
-            "    def set_filename(self, value): pass\n"
-            "tunable = _Tunable()\n"
-        )
+        read_body = "        raise ValueError('corrupt tunableop csv')\n" if read_file_raises else "        pass\n"
+        read_file = f"    def read_file(self, value):\n        _note(f'read_file {{value}}')\n{read_body}"
+    cuda_init = (
+        "import os\n"
+        "_queued = []\n"
+        "def _lazy_call(call): _queued.append(call)\n"
+        "def init():\n"
+        "    for call in _queued: call()\n"
+        "def _note(what):\n"
+        "    log = os.environ.get('TUNABLE_LOG')\n"
+        "    if log:\n"
+        "        with open(log, 'a', encoding='utf-8') as handle: handle.write(what + '\\n')\n"
+        "class _Tunable:\n"
+        "    def enable(self, value): _note('enable')\n"
+        "    def tuning_enable(self, value): _note('tuning_enable')\n"
+        "    def record_untuned_enable(self, value): _note('record_untuned_enable')\n"
+        "    def set_filename(self, value): _note('set_filename')\n"
+        f"{read_file}"
+        "tunable = _Tunable()\n"
+    )
     (cuda_dir / "__init__.py").write_text(cuda_init, encoding="utf-8")
     return torch_root
 
 
-def _run_with_sitecustomize(tmp_path, *, torch_root, extra_env=None):
+def _run_with_sitecustomize(tmp_path, *, torch_root, extra_env=None, program=_USES_GPU):
     site_dir = tmp_path / "site"
-    site_dir.mkdir()
+    site_dir.mkdir(exist_ok=True)
     (site_dir / "sitecustomize.py").write_text(_generate_candidate_sitecustomize(), encoding="utf-8")
 
     candidate_file = tmp_path / "tunableop_results.csv"
@@ -68,7 +72,7 @@ def _run_with_sitecustomize(tmp_path, *, torch_root, extra_env=None):
         env.update(extra_env)
 
     return subprocess.run(
-        [sys.executable, "-c", "print('candidate ran')"],
+        [sys.executable, "-c", program],
         env=env,
         text=True,
         stdout=subprocess.PIPE,
@@ -135,7 +139,7 @@ def test_candidate_sitecustomize_fails_closed_when_candidate_file_missing(tmp_pa
 
 def test_candidate_sitecustomize_fails_closed_without_read_file(tmp_path):
     torch_root = _write_fake_torch(tmp_path, with_read_file=False)
-    result = _run_with_sitecustomize(tmp_path, torch_root=torch_root)
+    result = _run_with_sitecustomize(tmp_path, torch_root=torch_root, program=_NEVER_USES_GPU)
 
     assert result.returncode != 0
     combined = result.stdout + result.stderr
@@ -155,18 +159,35 @@ def test_candidate_sitecustomize_fails_closed_when_read_file_raises(tmp_path):
     assert "candidate ran" not in result.stdout
 
 
-def test_candidate_sitecustomize_loads_file_when_read_file_works(tmp_path):
+def test_candidate_sitecustomize_loads_the_file_when_its_process_initializes_cuda(tmp_path):
     torch_root = _write_fake_torch(tmp_path, with_read_file=True)
-    marker = tmp_path / "read_marker"
+    log = tmp_path / "tunable.log"
+    result = _run_with_sitecustomize(tmp_path, torch_root=torch_root, extra_env={"TUNABLE_LOG": str(log)})
+
+    assert result.returncode == 0, result.stderr
+    assert "candidate ran" in result.stdout
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "enable",
+        "tuning_enable",
+        "record_untuned_enable",
+        "set_filename",
+        f"read_file {tmp_path / 'tunableop_results.csv'}",
+    ]
+
+
+def test_candidate_sitecustomize_leaves_tunableop_alone_in_a_process_that_never_uses_the_gpu(tmp_path):
+    """Every ``torch.cuda.tunable`` call opens the GPU device, and the hook runs in every process a server starts: a
+    process that only parses requests must not come to hold the device, least of all the one the engine is forked
+    from."""
+    torch_root = _write_fake_torch(tmp_path, with_read_file=True)
+    log = tmp_path / "tunable.log"
     result = _run_with_sitecustomize(
-        tmp_path,
-        torch_root=torch_root,
-        extra_env={"READ_MARKER": str(marker)},
+        tmp_path, torch_root=torch_root, extra_env={"TUNABLE_LOG": str(log)}, program=_NEVER_USES_GPU
     )
 
     assert result.returncode == 0, result.stderr
     assert "candidate ran" in result.stdout
-    assert marker.read_text(encoding="utf-8") == str(tmp_path / "tunableop_results.csv")
+    assert not log.exists()
 
 
 def test_tunableop_script_failure_reports_status_and_traceback(tmp_path):
