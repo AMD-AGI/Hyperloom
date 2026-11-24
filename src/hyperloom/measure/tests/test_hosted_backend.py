@@ -18,7 +18,7 @@ import pytest
 from hyperloom.contracts.measurement import AccuracyValue
 from hyperloom.measure import signing
 from hyperloom.measure.bundle import RejectReason, ResultRejected
-from hyperloom.measure.failures import SANDBOX_ACQUIRE_TIMEOUT
+from hyperloom.measure.failures import RESULT_DOWNLOAD_INCOMPLETE, SANDBOX_ACQUIRE_TIMEOUT
 from hyperloom.measure.hosted import STOPPED_RETURNCODE, HostedMeasurementBackend, HostedStartError
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED
 from hyperloom.measure.hosted_logs import INDEX_FILE, PREFIX
@@ -363,7 +363,7 @@ def _report_copies(copied: list[tuple[str, int]]) -> list[int]:
 def test_a_file_whose_copy_comes_back_short_is_copied_again_and_the_result_lands(rig, tmp_path, caplog) -> None:
     r = rig()
     copied = _copying(r, short_copies=1)
-    with caplog.at_level(logging.WARNING, logger="hyperloom.measure.hosted"):
+    with caplog.at_level(logging.WARNING, logger="hyperloom.measure.hosted_copy"):
         call, outcome = _run(r, tmp_path, fake_throughput=4321.5)
     assert outcome.returncode == 0, outcome.stderr
     short, whole = _report_copies(copied)
@@ -374,27 +374,59 @@ def test_a_file_whose_copy_comes_back_short_is_copied_again_and_the_result_lands
     assert r.backend.journal.latest("req-1").extra["verified"] is True
 
 
-def test_a_file_whose_every_copy_comes_back_short_is_refused_with_both_sizes_and_its_logs_kept(rig, tmp_path) -> None:
+def test_a_file_whose_every_copy_comes_back_short_is_an_incomplete_download_with_its_logs_kept(rig, tmp_path) -> None:
     r = rig()
     copied = _copying(r, short_copies=3)
     call, outcome = _run(r, tmp_path)
-    assert outcome.returncode == HOSTED_RESULT_REJECTED_RC
+    assert outcome.returncode == HOSTED_INFRA_FAILURE_RC, outcome.stderr
+    assert (outcome.failure_class.value, outcome.failure_reason) == ("infra", RESULT_DOWNLOAD_INCOMPLETE)
     received = _report_copies(copied)
-    assert len(received) == 3 and len(set(received)) == 1, "the first copy and two more, then verification decides"
-    listed = received[0] + 3
-    detail = f"{REPORT_PATH}: {received[0]} bytes read, the manifest lists {listed}"
-    assert f"(file_size_mismatch): {detail}" in outcome.stderr, outcome.stderr
+    assert len(received) == 3 and len(set(received)) == 1, "the first copy and two more, then the download gives up"
+    detail = f"{REPORT_PATH}: {received[0]} bytes received, the manifest lists {received[0] + 3}"
+    assert outcome.stderr == f"{RESULT_DOWNLOAD_INCOMPLETE}: {detail}"
+    assert outcome.sandbox.node_name is None, "no node is named, so none is held to blame"
     record = r.backend.journal.latest("req-1")
-    assert record.extra["reject"] == "file_size_mismatch" and record.extra["detail"] == detail
-    assert _landed(call.output_dir) == [], "nothing of the refused result lands"
+    assert record.extra["verdict"] == RESULT_DOWNLOAD_INCOMPLETE and record.extra["detail"] == detail
+    assert "verified" not in record.extra, "verification never ran on an incomplete download"
+    assert _landed(call.output_dir) == [], "nothing of the result lands"
+    assert not (tmp_path / "archive").exists() or not any((tmp_path / "archive").iterdir()), "nothing was archived"
     assert (call.output_dir / "hosted-server.log").read_bytes() == b"server up\nserver down\n", "the logs are kept"
     assert (call.output_dir / INDEX_FILE).is_file()
     assert r.provider.find({}, role="measurement") == []
 
 
+def test_a_whole_copy_that_does_not_hash_to_the_manifest_stays_a_final_refusal(rig, tmp_path) -> None:
+    r = rig()
+    copied: list[str] = []
+    real_create = r.provider.create
+
+    def create(*args, **kwargs):
+        sandbox = real_create(*args, **kwargs)
+        original = sandbox.copy_out
+
+        def copy_out(path: str, dest: Path) -> int:
+            received = original(path, dest)
+            if path.endswith(REPORT_PATH) and not _saved_log(dest):
+                copied.append(path)
+                data = dest.read_bytes()
+                dest.write_bytes(bytes([data[0] ^ 1]) + data[1:])  # the listed size, other bytes
+            return received
+
+        sandbox.copy_out = copy_out
+        return sandbox
+
+    r.provider.create = create
+    call, outcome = _run(r, tmp_path)
+    assert outcome.returncode == HOSTED_RESULT_REJECTED_RC
+    assert outcome.failure_class is None and outcome.failure_reason == "result_rejected"
+    assert "(file_hash_mismatch)" in outcome.stderr, outcome.stderr
+    assert len(copied) == 1, "a copy of the listed size is not copied again"
+    assert r.backend.journal.latest("req-1").extra["reject"] == "file_hash_mismatch"
+    assert _landed(call.output_dir) == []
+
+
 def test_a_refusal_stays_a_refusal_when_the_logs_cannot_be_saved(rig, tmp_path) -> None:
     r = rig()
-    _copying(r, short_copies=3)
     real_create = r.provider.create
 
     def create(*args, **kwargs):
@@ -407,10 +439,10 @@ def test_a_refusal_stays_a_refusal_when_the_logs_cannot_be_saved(rig, tmp_path) 
         return sandbox
 
     r.provider.create = create
-    _, outcome = _run(r, tmp_path)
+    _, outcome = _run(r, tmp_path, fake_mode="tamper")
     assert outcome.returncode == HOSTED_RESULT_REJECTED_RC
-    assert "(file_size_mismatch)" in outcome.stderr, outcome.stderr
-    assert r.backend.journal.latest("req-1").extra["reject"] == "file_size_mismatch"
+    assert "(file_hash_mismatch)" in outcome.stderr, outcome.stderr
+    assert r.backend.journal.latest("req-1").extra["reject"] == "file_hash_mismatch"
 
 
 def test_a_file_whose_copy_comes_back_whole_is_copied_once(rig, tmp_path) -> None:

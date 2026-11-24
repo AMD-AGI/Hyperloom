@@ -40,6 +40,7 @@ from hyperloom.measure.bundle import (
     VerifiedBundle,
 )
 from hyperloom.measure.failures import (
+    RESULT_DOWNLOAD_INCOMPLETE,
     RUNNER_EXITED,
     RUNNER_START_TIMEOUT,
     SANDBOX_ACQUIRE_TIMEOUT,
@@ -48,6 +49,7 @@ from hyperloom.measure.failures import (
     FailureEvidence,
     classify_test_failure,
 )
+from hyperloom.measure.hosted_copy import DownloadIncomplete, copy_listed
 from hyperloom.measure.hosted_live import LiveOutputs, finite_number
 from hyperloom.measure.hosted_logs import SeenProgress, save_runner_files, write_progress
 from hyperloom.measure.hosted_log import (
@@ -65,7 +67,7 @@ from hyperloom.measure.hosted_log import (
 from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
 from hyperloom.measure.jit.publish import publish_contributions
 from hyperloom.measure.jit.store import DirJitStore
-from hyperloom.measure.manifest import ManifestFile, ResultManifest
+from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.phases import ACQUIRED, LANDED, RUNNER_DONE, HostTimeline
 from hyperloom.measure.boot_watch import HUNG_BEFORE_READY, PRE_READY_SILENCE_SEC, PreReadySilence
 from hyperloom.measure.runner.rounds import ROUNDS_FILE, WARMUP_DIR
@@ -126,8 +128,6 @@ READY_PATH, SPEC_PATH = "/in/READY", "/in/spec.json"
 STATUS_PATH, PROGRESS_PATH = "/out/status.json", "/out/progress.json"
 MANIFEST_PATH, SIGNATURE_PATH, FILES_ROOT = "/out/manifest.json", "/out/manifest.sig", "/out/files"
 _LOSS_POLLS = 3
-#: How many more times a result file is copied when the bytes received do not add up to its listed size.
-_RECOPIES = 2
 #: The steps of a landing, marked on the attempt's timeline when each ends. The journal line of the attempt's end says how
 #: long each took (``landing_sec``): all of them are file system work below the session directory, and a slow landing
 #: is told apart only by its steps. What ``result_landing`` holds beyond them is that journal line and its event.
@@ -759,6 +759,12 @@ class HostedMeasurementBackend:
             self._finish_record(attempt, outcome, extra)
             self._emit("hyperloom.measurement_finished", attempt, {"accepted": False})
             return outcome
+        except DownloadIncomplete as exc:
+            # The platform's file API, not the result: a new attempt downloads it again (logs kept, nothing landed).
+            self._save_logs(_handle(attempt.runner), call)
+            outcome = _infra(call, HOSTED_INFRA_FAILURE_RC, RESULT_DOWNLOAD_INCOMPLETE, str(exc))
+            self._finish_record(attempt, outcome, {"verdict": RESULT_DOWNLOAD_INCOMPLETE, "detail": str(exc)})
+            return outcome
         except (ArchiveError, MaterializeError, SandboxError, OSError, ValueError) as exc:
             error_class = "archive_failed" if isinstance(exc, ArchiveError) else "result_read_failed"
             outcome = _infra(call, HOSTED_INFRA_FAILURE_RC, error_class, f"{type(exc).__name__}: {exc}")
@@ -796,7 +802,7 @@ class HostedMeasurementBackend:
         for entry in listed.files:
             target = staging / entry.path
             target.parent.mkdir(parents=True, exist_ok=True)
-            _copy_listed(handle, entry, target)
+            copy_listed(handle, FILES_ROOT, entry, target)
         return bundle_mod.verify_bundle(
             staging,
             bundle_mod.BundleExpectation(
@@ -1042,24 +1048,6 @@ def _blob_refs(spec: MeasurementSpec) -> set[str]:
     refs = [attachment.blob for attachment in spec.attachments]
     refs.extend(entry.blob for root in spec.environment.roots for entry in root.entries if entry.blob)
     return set(refs)
-
-
-def _copy_listed(handle: Sandbox, entry: ManifestFile, target: Path) -> None:
-    """Copy one listed file to ``target``; a copy whose byte count is not the listed size is made again.
-
-    A transfer can come back short or long without an error from the file service; it is copied again, at most
-    :data:`_RECOPIES` more times. A count that still differs is left as it is: verification refuses it as before. Every
-    kept byte is still checked against the signed size and hash, so another copy can never let a changed file through.
-    """
-    source = f"{FILES_ROOT}/{entry.path}"
-    for copy in range(1, _RECOPIES + 2):
-        received = handle.copy_out(source, target)
-        if received == entry.size:
-            return
-        then = "copying it again" if copy <= _RECOPIES else "verification decides"
-        log.warning(
-            "%s: copy %d received %s bytes, the manifest lists %d; %s", entry.path, copy, received, entry.size, then
-        )
 
 
 def _handle(runner: RunnerSandbox) -> Sandbox:
