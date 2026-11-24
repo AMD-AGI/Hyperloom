@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, last_alias_value
 
@@ -17,6 +18,7 @@ class Framework(str, Enum):
     VLLM = "vllm"
     ATOM = "atom"
     XDIT = "xdit"
+    LLAMACPP = "llamacpp"
     #: An operator's own workload.
     CUSTOM = "custom"
 
@@ -61,17 +63,44 @@ class DataParallelFlag:
 
 
 @dataclass(frozen=True)
-class ServerFlags:
-    """The flags that carry a round's runtime facts to the server; ``None`` when the server takes no such flag.
+class RequestSlotsFlag:
+    """The server option that sets how many requests it runs at once, every argparse spelling of it; a request past
+    that many waits for a slot to free."""
 
-    ``context_length`` sets the context the server serves; without it the server serves the model's native one.
-    """
+    aliases: tuple[str, ...]
+
+    def slots(self, args: Sequence[str]) -> int | None:
+        """The slots ``args`` set; ``None`` when they set none or a non-positive count, which leaves it to the
+        server."""
+        value = last_alias_value(argv_flag_occurrences(args), frozenset(map(canonical_flag_name, self.aliases)))
+        try:
+            count = int(value or 0)
+        except ValueError:
+            return None
+        return count if count > 0 else None
+
+
+@dataclass(frozen=True)
+class ContextLengthFlag:
+    """The server option that sets the context the server serves, every spelling of it, the one the runner writes
+    first; without it the server serves the model's native context."""
+
+    aliases: tuple[str, ...]
+
+    def value(self, args: Sequence[str]) -> str | None:
+        """The context ``args`` set last, as they spell it; ``None`` when they set none."""
+        return last_alias_value(argv_flag_occurrences(args), frozenset(map(canonical_flag_name, self.aliases)))
+
+
+@dataclass(frozen=True)
+class ServerFlags:
+    """The flags that carry a round's runtime facts to the server; ``None`` when the server takes no such flag."""
 
     model: str
     host: str
     port: str
     served_model_name: str | None
-    context_length: str
+    context_length: ContextLengthFlag
 
     def guarded(self) -> tuple[str, ...]:
         """The flags the runner's guard sets on every round: the model, the address and the served name."""
@@ -84,15 +113,24 @@ class ServerCommand:
 
     ``entrypoint`` is the command the recipes spell, resolved through ``PATH``, which a base records as provenance.
     ``module`` runs that same server under a named interpreter, so the server runs in the install the version probe
-    and the parser check read.
+    and the parser check read; ``None`` for a native server, which runs as its entrypoint and is probed as one.
     """
 
     entrypoint: tuple[str, ...]
-    module: tuple[str, ...]
+    module: tuple[str, ...] | None
+
+    @property
+    def native(self) -> bool:
+        """Whether the server is a native program rather than a module of the serving interpreter."""
+        return self.module is None
 
     def argv(self, python: str) -> tuple[str, ...]:
-        """The server command under ``python``."""
-        return (python, *self.module)
+        """The server command under ``python``; a native server runs as its entrypoint whatever ``python`` is."""
+        return self.entrypoint if self.module is None else (python, *self.module)
+
+
+class ModelFileError(ValueError):
+    """A model directory does not hold exactly one model file the server loads."""
 
 
 @dataclass(frozen=True)
@@ -104,9 +142,12 @@ class FrameworkFacts:
     and one with no ``data_parallel`` option runs one replica.
     ``parser_source`` is Python source defining ``_build_parser()``, run in the serving interpreter so an argv is
     judged by the parser that would refuse it; ``None`` when no server parser can be reached. ``metrics_flag`` is the
-    switch without which the server serves no ``/metrics``; ``None`` when it serves them by default.
+    switch without which the server serves no ``/metrics``; ``None`` when it serves them by default, or serves none
+    the KV poller reads.
     ``ready_timeout_env`` is the variable, in seconds, after which the server gives up on its own start and exits;
-    ``None`` when it waits for its start without a limit of its own.
+    ``None`` when it waits for its start without a limit of its own. ``model_file`` is the suffix of the one file of a
+    model directory the server loads, ``None`` when it loads the directory. ``request_slots`` is the option capping
+    the requests the server runs at once, ``None`` when it has none that a load past it only queues behind.
     """
 
     kind: FrameworkKind
@@ -118,6 +159,24 @@ class FrameworkFacts:
     parser_source: str | None = None
     metrics_flag: str | None = None
     ready_timeout_env: str | None = None
+    model_file: str | None = None
+    request_slots: RequestSlotsFlag | None = None
+
+    def served_model(self, model_path: str) -> str:
+        """What the server's model flag names for the model at ``model_path``: the path itself, or the one
+        ``model_file`` in it when ``model_path`` is a directory.
+
+        Raises:
+            ModelFileError: When the directory holds no such file, or more than one model.
+        """
+        directory = Path(model_path)
+        if self.model_file is None or not directory.is_dir():
+            return model_path
+        files = sorted(path.name for path in directory.iterdir() if path.name.endswith(self.model_file))
+        if len(files) != 1:
+            found = ", ".join(files) or "none"
+            raise ModelFileError(f"{model_path} must hold one *{self.model_file} model to serve, found {found}")
+        return str(directory / files[0])
 
     def cards(self, tp: int, args: Sequence[str]) -> int:
         """The GPUs a launch at ``tp`` running ``args`` occupies: ``tp`` for each data-parallel replica that holds
@@ -191,8 +250,12 @@ _ATOM_PARSER_SOURCE = (
 )
 
 
+_MODEL_FLAG = "--model"
 _HOST_FLAG = "--host"
+_PORT_FLAG = "--port"
 _SERVED_MODEL_NAME_FLAG = "--served-model-name"
+#: The context option vLLM and ATOM share.
+_MAX_MODEL_LEN = ContextLengthFlag(("--max-model-len",))
 #: The expert-parallel switch vLLM and ATOM share.
 _VLLM_STYLE_EP_SWITCH = "--enable-expert-parallel"
 
@@ -200,7 +263,9 @@ _FACTS: dict[Framework, FrameworkFacts] = {
     Framework.SGLANG: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package=Framework.SGLANG.value,
-        server_flags=ServerFlags("--model-path", _HOST_FLAG, "--port", _SERVED_MODEL_NAME_FLAG, "--context-length"),
+        server_flags=ServerFlags(
+            "--model-path", _HOST_FLAG, _PORT_FLAG, _SERVED_MODEL_NAME_FLAG, ContextLengthFlag(("--context-length",))
+        ),
         server_command=ServerCommand(("python3", "-m", "sglang.launch_server"), ("-m", "sglang.launch_server")),
         expert_parallel=ExpertParallelFlag("--ep-size", ("--ep-size", "--expert-parallel-size", "--ep"), True),
         data_parallel=DataParallelFlag(("--data-parallel-size", "--dp-size"), shares_tp=("--enable-dp-attention",)),
@@ -213,7 +278,7 @@ _FACTS: dict[Framework, FrameworkFacts] = {
     Framework.VLLM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package=Framework.VLLM.value,
-        server_flags=ServerFlags("--model", _HOST_FLAG, "--port", _SERVED_MODEL_NAME_FLAG, "--max-model-len"),
+        server_flags=ServerFlags(_MODEL_FLAG, _HOST_FLAG, _PORT_FLAG, _SERVED_MODEL_NAME_FLAG, _MAX_MODEL_LEN),
         # The ``vllm`` console script is ``vllm.entrypoints.cli.main:main``.
         server_command=ServerCommand(("vllm", "serve"), ("-m", "vllm.entrypoints.cli.main", "serve")),
         expert_parallel=ExpertParallelFlag(_VLLM_STYLE_EP_SWITCH, (_VLLM_STYLE_EP_SWITCH, "-ep"), False),
@@ -226,12 +291,22 @@ _FACTS: dict[Framework, FrameworkFacts] = {
     Framework.ATOM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package=Framework.ATOM.value,
-        server_flags=ServerFlags("--model", _HOST_FLAG, "--server-port", _SERVED_MODEL_NAME_FLAG, "--max-model-len"),
+        server_flags=ServerFlags(_MODEL_FLAG, _HOST_FLAG, "--server-port", _SERVED_MODEL_NAME_FLAG, _MAX_MODEL_LEN),
         server_command=ServerCommand(
             ("python3", "-m", "atom.entrypoints.openai_server"), ("-m", "atom.entrypoints.openai_server")
         ),
         expert_parallel=ExpertParallelFlag(_VLLM_STYLE_EP_SWITCH, (_VLLM_STYLE_EP_SWITCH,), False),
         parser_source=_ATOM_PARSER_SOURCE,
+    ),
+    Framework.LLAMACPP: FrameworkFacts(
+        kind=FrameworkKind.SERVING,
+        python_package=None,
+        server_flags=ServerFlags(
+            _MODEL_FLAG, _HOST_FLAG, _PORT_FLAG, "--alias", ContextLengthFlag(("--ctx-size", "-c"))
+        ),
+        server_command=ServerCommand(("llama-server",), None),
+        model_file=".gguf",
+        request_slots=RequestSlotsFlag(("-np", "--parallel")),
     ),
     Framework.XDIT: FrameworkFacts(kind=FrameworkKind.SCRIPTABLE, python_package="xfuser"),
     Framework.CUSTOM: FrameworkFacts(kind=FrameworkKind.SCRIPTABLE, python_package=None),
@@ -244,11 +319,14 @@ def framework_facts(framework: Framework) -> FrameworkFacts:
 
 
 __all__ = [
+    "ContextLengthFlag",
     "DataParallelFlag",
     "ExpertParallelFlag",
     "Framework",
     "FrameworkFacts",
     "FrameworkKind",
+    "ModelFileError",
+    "RequestSlotsFlag",
     "ServerCommand",
     "ServerFlags",
     "framework_facts",

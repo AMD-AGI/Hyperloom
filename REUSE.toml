@@ -67,3 +67,10 @@ path = "src/inference_suite/tests/fixtures/atom/**"
 precedence = "override"
 SPDX-FileCopyrightText = "Advanced Micro Devices, Inc."
 SPDX-License-Identifier = "MIT"
+
+# The --help text of llama-server 1.0.0-dev (build 12439), which the native server flag check is tested against.
+[[annotations]]
+path = "src/inference_suite/tests/fixtures/llamacpp/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2023-2026 The ggml authors"
+SPDX-License-Identifier = "MIT"

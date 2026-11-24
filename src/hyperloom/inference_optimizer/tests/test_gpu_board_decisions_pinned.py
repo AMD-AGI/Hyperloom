@@ -42,11 +42,19 @@ def test_instinct_boards_leave_the_framework_unconstrained(product, framework):
 
 
 @pytest.mark.parametrize("framework", ["sglang", "atom", "xdit"])
-def test_r9700_is_validated_for_vllm_only(framework):
+def test_r9700_is_validated_for_vllm_and_llamacpp_only(framework):
     assert gpu_types._board_framework_error("R9700", "vllm") is None
     assert gpu_types._board_framework_error("r9700", framework) == (
-        f"r9700 is currently validated only for vllm; framework {framework!r} has not been validated on it"
+        f"r9700 is currently validated only for llamacpp, vllm; framework {framework!r} has not been validated on it"
     )
+
+
+def test_llamacpp_is_validated_on_r9700_and_w7900d_only():
+    radeon = ("r9700", "r9600d", "w7900", "w7900d")
+    assert [board for board in radeon if gpu_types._board_framework_error(board, "llamacpp") is None] == [
+        "r9700",
+        "w7900d",
+    ]
 
 
 def test_only_the_gfx1201_radeon_boards_pin_their_geak_identity():

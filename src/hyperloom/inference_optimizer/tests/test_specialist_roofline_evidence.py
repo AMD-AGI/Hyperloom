@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -231,6 +232,16 @@ def test_section_renders_none_when_evidence_empty():
     text = "\n".join(section)
     assert "## 4a. ROOFLINE EVIDENCE" in text
     assert "(none" in text
+
+
+def test_section_promises_no_snapshot_of_a_framework_that_runs_under_no_torch_profiler():
+    """No roofline is ever enqueued for such a framework, so the section must not say one is in flight."""
+    text = " ".join(roofline_evidence_section(replace(_make_inp({}), framework="llamacpp")))
+    assert "no torch profiler" in text and "auto-enqueues" not in text
+
+    for profiled in ("sglang", ""):
+        text = " ".join(roofline_evidence_section(replace(_make_inp({}), framework=profiled)))
+        assert "auto-enqueues" in text and "no torch profiler" not in text
 
 
 @pytest.mark.parametrize(

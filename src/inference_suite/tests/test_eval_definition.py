@@ -15,7 +15,7 @@ import pytest
 
 from inference_suite.compose import RoundFacts, compose
 from inference_suite.contracts import EvalDefinition, EvalProbe, FailedStep, LaunchDelta, RunLayout, SuiteConfig
-from inference_suite.contracts.launch import Launch, VersionCheck
+from inference_suite.contracts.launch import Launch, LaunchArg, LayerSource, VersionCheck
 from inference_suite.eval.definition import (
     PROMPT_ROOM_TOKENS,
     EvalPlan,
@@ -23,11 +23,13 @@ from inference_suite.eval.definition import (
     StagedEval,
     definition_digest,
     plan_eval,
+    served_context,
 )
 from inference_suite.eval import run as eval_run
 from inference_suite.eval.run import EvalRequest
 from inference_suite.frameworks import Framework, framework_facts
 from inference_suite.tests.test_base_launch_contract import _base
+from inference_suite.tests.test_compose import _llamacpp_compose
 from inference_suite.tests.test_config_contract import _accuracy_round, _config, _eval
 
 _FACTS = RoundFacts(config_sha256="d" * 64, installed_version="0.5.23", version_check=VersionCheck.PASSED)
@@ -169,12 +171,21 @@ def test_the_plan_writes_its_definition_and_request_and_names_its_process(staged
     assert (plan.request.output_dir, plan.request.probe_file) == (str(layout.eval_dir), str(layout.eval_probe))
 
 
+@pytest.mark.parametrize("flag", ["-c", "--ctx-size"])
+def test_a_llamacpp_launch_serves_the_context_either_spelling_of_its_flag_sets(tmp_path, flag):
+    (tmp_path / "m.gguf").write_text("")
+    launch = _llamacpp_compose(tmp_path)
+    launch = replace(launch, args=(*launch.args, LaunchArg(flag, ("32768",), LayerSource.BASE)))
+
+    assert served_context(launch, tmp_path) == 32768
+
+
 @pytest.mark.parametrize(
     "framework, flag",
     [(Framework.SGLANG, "--context-length"), (Framework.VLLM, "--max-model-len"), (Framework.ATOM, "--max-model-len")],
 )
 def test_each_serving_framework_names_its_context_flag(framework, flag):
-    assert framework_facts(framework).server_flags.context_length == flag
+    assert framework_facts(framework).server_flags.context_length.aliases == (flag,)
 
 
 def test_the_eval_process_runs_the_tree_the_definition_was_read_from(staged, tmp_path):

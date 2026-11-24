@@ -123,6 +123,18 @@ spelled. A base whose entrypoint is not its framework's is refused
 (`config_invalid`); name another install with the server's `framework_python`
 instead.
 
+llama.cpp (`llamacpp`) is a native server: the round runs `llama-server` as the
+launch environment's `PATH` resolves it, records the version its `--version`
+prints, and holds its flags to the ones its `--help` lists, read once per binary:
+a flag it does not list, or lists as removed, is refused (`flag_unknown`) before
+the server starts. A `llama-server` missing from `PATH` or whose `--help` fails
+stops the round (`framework_version_unknown`). Its model directory holds the one `.gguf` the server loads,
+which the guard passes as `--model`, beside the
+Hugging Face tokenizer files the load client reads. No recipe source knows it, so
+its base is the operator's launch script. An eval reads the context the server
+serves from the launch's `-c` / `--ctx-size`, else from the model directory's
+`config.json`; a round with neither stops as `eval_context_too_short`.
+
 ## Launch layers
 
 A round's launch is composed in a fixed order, and `launch.json` records the layer
