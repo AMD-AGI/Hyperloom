@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from hyperloom.orchestrator.actions.executors.benchmark_run.launch import _attach_baseline_launch_evidence
 from hyperloom.orchestrator.measurement.runtime_findings import (
+    RUNTIME_FINDINGS_FILE,
     correctness_fix_refusal,
+    load_runtime_findings,
     persist_runtime_findings,
     render_runtime_findings,
     scan_server_log,
@@ -384,3 +387,49 @@ def test_persist_writes_slot_file(tmp_path):
     persist_runtime_findings(report, slot=tmp_path / "variant_00_x")
 
     assert (tmp_path / "variant_00_x" / "runtime_findings.json").read_text(encoding="utf-8").startswith("{")
+
+
+_SLOT = "9.01.100.000 I slot print_timing: id  0 | task 12 |"
+LLAMA_SERVER_LOG = (
+    f"{_SLOT} prompt eval time =     562.90 ms /   220 tokens (    2.56 ms per token,   390.83 tokens per second)\n"
+    f"{_SLOT}        eval time =   12621.18 ms /   512 tokens (   24.70 ms per token,    40.49 tokens per second)\n"
+    f"{_SLOT}       total time =   13184.08 ms /   732 tokens\n"
+    f"{_SLOT} draft acceptance = 0.47872 (  360 accepted /   752 generated), mean len =  3.38\n"
+)
+_TIMING_LINES = [
+    "9.01.100.000 I slot print_timing: id 0 | task 12 | eval time = 12621.18 ms / 512 tokens ( 24.70 ms per token, "
+    "40.49 tokens per second)",
+    "9.01.100.000 I slot print_timing: id 0 | task 12 | draft acceptance = 0.47872 ( 360 accepted / 752 generated), "
+    "mean len = 3.38",
+]
+
+
+def test_the_report_of_a_checkout_built_server_keeps_the_last_timing_lines_of_its_log(tmp_path):
+    log = _write(tmp_path, LLAMA_SERVER_LOG)
+
+    report = scan_server_log(log, "llamacpp")
+
+    assert (report["schema_version"], report["timing_lines"]) == (2, _TIMING_LINES)
+    assert scan_server_log(log, "sglang")["timing_lines"] == []
+    assert scan_server_log(None, "llamacpp")["timing_lines"] == []
+    assert scan_server_log(str(tmp_path / "absent.log"), "llamacpp")["timing_lines"] == []
+
+
+def test_render_ends_with_the_timing_lines_of_the_log(tmp_path):
+    log = _write(tmp_path, LLAMA_SERVER_LOG)
+    persist_runtime_findings(scan_server_log(log, "llamacpp"), slot=tmp_path / "slot")
+
+    out = render_runtime_findings({"launch_evidence_path": str(tmp_path / "slot" / "launch_evidence.json")})
+
+    assert [line.strip() for line in out.splitlines()[-2:]] == _TIMING_LINES
+
+
+def test_a_report_written_before_timing_lines_existed_loads_as_one_that_holds_none(tmp_path):
+    before = {key: value for key, value in scan_server_log(None, "custom").items() if key != "timing_lines"}
+    (tmp_path / RUNTIME_FINDINGS_FILE).write_text(json.dumps({**before, "schema_version": 1}), encoding="utf-8")
+    measurement = {"launch_evidence_path": str(tmp_path / "launch_evidence.json")}
+
+    loaded = load_runtime_findings(measurement)
+
+    assert loaded == scan_server_log(None, "custom")
+    assert render_runtime_findings(measurement).splitlines()[0] == "runtime findings for (no server log) [custom]"

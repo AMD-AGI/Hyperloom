@@ -23,6 +23,7 @@ from typing import Any
 from hyperloom_common.coerce import first_text
 from hyperloom.common.prompt_safety import defang_prompt_structure
 from hyperloom.inference_optimizer.framework_registry import python_package
+from .native_server_blocks import carries_timing_lines, native_server_blocks
 from .roofline_evidence_section import roofline_evidence_section
 from .proposal_schemas import (
     EXPLORE_VARIANT_CONTRACT,
@@ -40,6 +41,7 @@ from .specialist_prompt_text import (
 from ..measurement.runtime_findings import CORRECTNESS_FIX_MAX_DROP_PCT, CORRECTNESS_FIX_RULES
 
 from ..specialists.domains import domain_for_tag
+from ..specialists.option_reviews import review_request
 from ..specialists.profile import MODE_PATCH
 from ..specialists.prompt_inputs import SpecialistPromptInputs
 from .specialist_context_sections import (
@@ -218,6 +220,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
     if inp.allocated_gpu_ids:
         body.extend(_gpu_autonomy_block(inp))
     body.extend(_cpu_selfcheck_block(inp))
+    body.extend(native_server_blocks(inp))
     if inp.auto_retry_reason.strip():
         body.extend(_auto_retry_note_block(inp))
     return body
@@ -701,6 +704,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "  emit source-backed ``{what, source, expected_impact, accuracy_risk,",
         "  domain_tags[]}`` records.",
         "- ``residual_questions`` carries to the next specialist round.",
+        *review_request(inp),
         "",
         (f"Hard cap: at most **{inp.max_turns}** LLM turns. Emit specialist_done before the cap."),
     ]
@@ -921,9 +925,9 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             _section_execution_budget(inp),
             _section_gap(inp),
             _section_experience_kb(inp),
+            _section_runtime_findings(inp) if carries_timing_lines(inp) else [],
+            _section_source_hint(inp) if _authors_patches(inp) else [],
         ]
-        if _authors_patches(inp):
-            user_sections.append(_section_source_hint(inp))
     else:
         user_sections = [
             _section_mandate(inp),
