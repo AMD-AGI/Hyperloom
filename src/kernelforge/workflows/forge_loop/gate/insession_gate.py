@@ -19,7 +19,7 @@ from typing import Any
 
 from kernelforge.agent_backends.workspace_guard import remove_filesystem_path
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS, PROTECTED_GLOBS
-from kernelforge.utils.device_queue import DEVICE_VISIBILITY_VARIABLES, DeviceQueue, append_usage
+from kernelforge.utils.device_queue import DEVICE_VISIBILITY_VARIABLES, DeviceQueue, append_usage, usage_record
 from kernelforge.utils.git import GitError, git, git_bytes
 from kernelforge.utils.session_kill import pattern_kill_denial
 from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement, GateScope
@@ -830,13 +830,12 @@ class InSessionGate:
             finally:
                 append_usage(
                     self.device.usage_log,
-                    {
-                        "time": time.time(),
-                        "lane": self.device.lane,
-                        "wait_sec": round(waited, 3),
-                        "hold_sec": round(time.monotonic() - started, 3),
-                        "command": "stop check",
-                    },
+                    usage_record(
+                        lane=self.device.lane,
+                        command="stop check",
+                        wait_sec=waited,
+                        hold_sec=time.monotonic() - started,
+                    ),
                 )
 
     async def _measure_candidate(self) -> dict:

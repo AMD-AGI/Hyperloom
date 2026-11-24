@@ -128,6 +128,9 @@ def test_a_lanes_stop_check_holds_the_shared_device_and_measures_in_the_lanes_en
     assert list((tmp_path / "queue").iterdir()) == []
     [record] = [json.loads(line) for line in (tmp_path / "usage.jsonl").read_text().splitlines()]
     assert (record["lane"], record["command"]) == ("2", "stop check")
+    # The same fields as a runner's command, so one reader serves the whole log; a check has no exit status.
+    assert (record["status"], record["hold_limit_reached"]) == (None, False)
+    assert record["wait_sec"] >= 0 and record["hold_sec"] >= 0
 
 
 def test_a_session_with_its_own_device_measures_without_queueing(tmp_path, monkeypatch):

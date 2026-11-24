@@ -11,10 +11,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
 from kernelforge.config import Config
+from kernelforge.evaluation.scoring import GateScoring
 from kernelforge.utils.device_queue import RUNNER_CONFIG_NAME, hidden_device_environment
 from kernelforge.utils.import_root import import_name_of, import_path_first
 from kernelforge.workflows.forge_loop.bootstrap.errors import ForgeLoopError
 from kernelforge.workflows.forge_loop.gate.gate_settings import DeviceAccess
+from kernelforge.workflows.forge_loop.roles.agent_extras import declared_extras
 
 if TYPE_CHECKING:
     from kernelforge.workflows.forge_loop.iteration.fanout import LaneSeat
@@ -191,12 +193,23 @@ def _make_lane_agent_factory(
         # The session itself sees no device: every command that needs one goes through the lane's runner.
         session_env = {**measurement_env, **hidden_device_environment()}
 
-        async def session(kernel_path: str, history: str, **extras) -> str:
+        async def session(
+            kernel_path: str,
+            history: str,
+            session_sink: dict | None = None,
+            gate_scoring: GateScoring = GateScoring(),
+        ) -> str:
+            """Run the lane's Implementer session under the Implementer callback's own contract.
+
+            The loop hands a session only the optional arguments it names, so both are named here: the scoring state
+            the lane's stop check measures against, and the sink the round reads the lane's result from.
+            """
             _assert_lane_session_cwd(
                 kernel_path=kernel_path,
                 workspace=lane_config.workspace,
                 lane_dir=lane_dir,
             )
+            extras = declared_extras(lane_agent, {"session_sink": session_sink, "gate_scoring": gate_scoring})
             try:
                 with session_environment(session_env):
                     return await lane_agent(kernel_path, history, **extras)

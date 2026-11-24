@@ -159,6 +159,22 @@ def append_usage(log_path, record: dict) -> None:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
+def usage_record(*, lane: str, command: str, wait_sec: float, hold_sec: float) -> dict:
+    """One hold of the device as the usage log records it.
+
+    Every hold carries the same fields. One that is not a runner's command has no exit status and no hold limit.
+    """
+    return {
+        "time": time.time(),
+        "lane": lane,
+        "command": command[:300],
+        "wait_sec": round(wait_sec, 3),
+        "hold_sec": round(hold_sec, 3),
+        "status": None,
+        "hold_limit_reached": False,
+    }
+
+
 def runner_config(*, queue_root, usage_log, lane: str, hold_limit_sec: int, environment: dict) -> dict:
     """The configuration a copied runner reads from beside itself."""
     return {
@@ -232,18 +248,9 @@ def main(argv: list) -> int:
             f"[device] stopped after {config['hold_limit_sec']}s: one command may hold the device no longer. "
             "Split the work into shorter commands.\n"
         )
-    append_usage(
-        config["usage_log"],
-        {
-            "time": time.time(),
-            "lane": config["lane"],
-            "wait_sec": round(waited, 3),
-            "hold_sec": round(held, 3),
-            "command": " ".join(argv)[:300],
-            "status": status,
-            "hold_limit_reached": limited,
-        },
-    )
+    record = usage_record(lane=config["lane"], command=" ".join(argv), wait_sec=waited, hold_sec=held)
+    record.update(status=status, hold_limit_reached=limited)
+    append_usage(config["usage_log"], record)
     return status
 
 

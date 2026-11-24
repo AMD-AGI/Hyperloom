@@ -42,6 +42,7 @@ from kernelforge.config import Config
 from kernelforge.utils.device_queue import RUNNER_CONFIG_NAME, RUNNER_NAME
 from kernelforge.workflows.forge_loop.iteration.fanout import LaneAssignment, LaneSeat
 from kernelforge.evaluation.scoring import GateScoring
+from kernelforge.workflows.forge_loop.roles.agent_extras import declared_extras
 
 
 @pytest.fixture(autouse=True)
@@ -211,6 +212,29 @@ def test_a_lane_session_sink_reaches_an_agent_that_declares_it(tmp_path, monkeyp
     assert sink["session_started"] is True
     assert sink["end_reason"]
     assert "progress_log" in sink
+
+
+def test_a_lane_session_names_what_the_loop_hands_a_session(tmp_path, monkeypatch):
+    """The loop hands a session only the optional arguments it names.
+
+    A lane session that names neither runs without the campaign's scoring state, so its stop check has nothing to
+    score against and blocks every stop, and without the sink, so the round reads no result from it.
+    """
+    specs = _record_backend_specs(monkeypatch)
+    lane_dir = _tree(tmp_path / "lanes" / "1")
+    session = _lane_factory(tmp_path)(_seat(tmp_path, lane_dir), gain_required=True)
+    sink: dict = {}
+    scoring = GateScoring({"case": 2.0}, 1.5)
+
+    handed = declared_extras(session, {"gate_scoring": scoring, "session_sink": sink})
+    asyncio.run(session(str(lane_dir / "src" / "kernel.py"), "plan 3", **handed))
+
+    assert handed == {"gate_scoring": scoring, "session_sink": sink}
+    gate = specs[0].hooks.stop[0].callback.__self__
+    assert gate.baseline_case_times == {"case": 2.0}
+    assert gate.best_mean_case_speedup == 1.5
+    assert "Fixed pristine per-case ms: {'case': 2.0}" in specs[0].system_prompt
+    assert sink["end_reason"]
 
 
 def test_a_hookless_provider_is_given_no_hooks_to_drop(tmp_path, monkeypatch):

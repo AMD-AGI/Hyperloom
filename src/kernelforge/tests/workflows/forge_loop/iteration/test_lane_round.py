@@ -13,7 +13,10 @@ from pathlib import Path
 
 import pytest
 
+from kernelforge.config import Config
+from kernelforge.evaluation.scoring import GateScoring
 from kernelforge.utils.device_queue import RUNNER_CONFIG_NAME, RUNNER_NAME
+from kernelforge.workflows.forge_loop.bootstrap.lanes import LaneBinding, _make_lane_agent_factory
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore
 from kernelforge.workflows.forge_loop.iteration.fanout import (
@@ -24,9 +27,11 @@ from kernelforge.workflows.forge_loop.iteration.fanout import (
     campaign_device_queue_path,
     lane_diff,
 )
+from kernelforge.workflows.forge_loop.roles.agent import ImplementerSetup, ImplementerTask
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
     _initialize_workspace,
     _make_loop,
+    _no_change_agent,
     _stub_measurement,
     _unused_supervisor,
     lane_agents,
@@ -150,6 +155,49 @@ def test_a_round_of_one_lane_works_in_a_copy_and_its_change_is_measured_on_the_c
     lane = ExperimentsLayout.of(workspace).round(1) / "lane_1"
     assert "return 2" in (lane / "change.diff").read_text()
     assert json.loads((lane / "lane.json").read_text())["plan"] == "return the faster constant"
+
+
+def test_the_campaigns_lane_factory_carries_the_scoring_state_in_and_the_lanes_result_out(tmp_path, monkeypatch):
+    """The factory a campaign is started with stands between the loop and the session it builds.
+
+    What the loop hands a session has to cross it in both directions: the scoring state the lane's stop check
+    measures against, and the sink the round reads the lane's verdict and score from.
+    """
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"case": 4.0})
+    _stub_measurement(monkeypatch, walls=[0.5])
+    handed: list[GateScoring] = []
+
+    class LaneAgent:
+        """Stand in for the Implementer session the factory builds for one lane."""
+
+        async def __call__(self, kernel_path, history, session_sink, gate_scoring):
+            handed.append(gate_scoring)
+            Path(kernel_path).write_text("def kernel():\n    return 2\n")
+            _verified(session_sink, score=2.0, case_ms=2.0)
+            return "changed the constant"
+
+        def close(self):
+            """Nothing is held between sessions."""
+
+    factory = _make_lane_agent_factory(
+        make_agent=lambda _config, _setup, usage=None: LaneAgent(),
+        config=Config(workspace=str(workspace), agent_backend="claude"),
+        binding=LaneBinding(
+            workspace_dir=str(workspace), driver=loop.ic.driver_script, source_files=[loop.ic.kernel_file]
+        ),
+        setup=ImplementerSetup(ImplementerTask(program_md="Optimize the kernel.")),
+    )
+
+    asyncio.run(
+        loop.run(replace(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor), agent_factory=factory))
+    )
+
+    [scoring] = handed
+    assert scoring.baseline_case_times == {"case": 4.0}
+    assert scoring.best_mean_case_speedup == 1.0
+    lane = json.loads((ExperimentsLayout.of(workspace).round(1) / "lane_1" / "lane.json").read_text())
+    assert (lane["verified"], lane["mean_case_speedup"], lane["case_times"]) == (True, 2.0, {"case": 2.0})
+    assert _decisions(workspace) == ["KEEP"]
 
 
 @pytest.mark.parametrize(
