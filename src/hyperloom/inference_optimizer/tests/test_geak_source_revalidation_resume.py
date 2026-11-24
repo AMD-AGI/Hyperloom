@@ -252,9 +252,12 @@ async def test_source_measurement_killed_mid_bench_is_rolled_back_on_resume_and_
 
 
 @pytest.mark.asyncio
-async def test_source_measurement_whose_restore_failed_is_restored_on_resume(coordinator, bench, resume, monkeypatch):
+@pytest.mark.parametrize("ending", ["budget_stopped", "reverted"])
+async def test_source_measurement_whose_restore_failed_is_restored_on_resume(
+    coordinator, bench, resume, monkeypatch, ending
+):
     session = coordinator.session_dir
-    bench.ending = "budget_stopped"
+    bench.ending = ending
     with monkeypatch.context() as live:
         live.setattr(
             integrate_patch_module,
@@ -263,6 +266,7 @@ async def test_source_measurement_whose_restore_failed_is_restored_on_resume(coo
         )
         await _measure(coordinator)
     assert _source(session) == _PATCHED
+    assert coordinator.shared_state.geak_result["revalidation_status"] == "failed"
     assert coordinator.shared_state.pending_integrate["recovery"]["phase"] == "ready"
     coordinator.db.raw.close()
 

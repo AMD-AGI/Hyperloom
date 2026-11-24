@@ -23,6 +23,7 @@ from ..framework_change._enablement_config import _parse_framework_switches
 from ..grid._grid_inputs import session_grid_bounds
 from .._integrate_attempt import IntegrateAttempt
 from ._integrate_refusals import _FIX_ACCURACY_UNAVAILABLE, _derive_lane, _preflight_missing_targets
+from ._integrate_vocabulary import RESULT_GRADED
 from ..patching._patch_artifacts import _ArtifactSpec, _resolve_artifact_specs, _validate_aiter_gemm_artifacts
 from ..patching._patch_sources import _read_patch_texts, _resolve_patch_paths, resolved_explicit_root
 from ..workload._launch_restatement import handed_server_args
@@ -80,6 +81,8 @@ class _PatchMeasurement:
     keep_threshold_pct: float
     accuracy_pass: bool | None
     measured_against: dict[str, Any]
+    #: What the result states as ``RESULT_GRADED``.
+    graded: bool
     #: The graded verdict as the gate row an attempt records; empty when the bench produced no measurement.
     gates: tuple[dict[str, Any], ...] = ()
 
@@ -93,6 +96,7 @@ class _PatchMeasurement:
             "measured_against": self.measured_against,
             "keep_threshold_pct": self.keep_threshold_pct,
             "gates": list(self.gates),
+            RESULT_GRADED: self.graded,
             "bench_result": self.bench_result,
         }
 

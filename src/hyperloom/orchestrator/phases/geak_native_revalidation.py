@@ -22,7 +22,7 @@ from hyperloom_common.io import atomic_write_json
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.common.overlay import overlay_is_loadable
 from hyperloom.common.perf_metric import agentx_replay_session
-from hyperloom.orchestrator.actions.executors.integrate._integrate_vocabulary import RESULT_BENCHED
+from hyperloom.orchestrator.actions.executors.integrate._integrate_vocabulary import RESULT_GRADED
 from hyperloom.orchestrator.kernel.geak_config import geak_spec_is_env
 from hyperloom.orchestrator.state.task_registry import Task
 from .geak_rebench import source_digest, overlay_source_files, verify_source_artifacts
@@ -188,21 +188,16 @@ def _record_canonical_adoption(coord: Any, params: dict[str, Any], measurement: 
 
 
 def _unkept_status(result: dict[str, Any]) -> str:
-    """The status of a product the integration did not keep: a verdict only when its bench was graded.
-
-    The executor marks every result that reached the bench, and reports a bench the run stopped or the environment
-    kept from measuring as ``failed``; neither that nor a result from before the bench judged the product.
-    """
-    graded = bool(result.get(RESULT_BENCHED)) and result.get("status") != "failed"
-    return REBENCH_NO_PROMOTE if graded else REBENCH_FAILED
+    """The status of a product the integration did not keep: a verdict only where the executor says it graded one."""
+    return REBENCH_NO_PROMOTE if result.get(RESULT_GRADED) else REBENCH_FAILED
 
 
 async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
     """Measure a staged source product through the transactional integration and promotion paths.
 
-    The measurement is the gate: a product whose bench was graded settles as validated or not promoted. One the
-    integration did not measure settles as failed, which is no verdict: the next KERNEL entry measures it again
-    if GEAK reported it as a win, and runs GEAK afresh otherwise.
+    The measurement is the gate: a product the executor graded settles as validated or not promoted. One it did not
+    grade settles as failed, which is no verdict: the next KERNEL entry measures it again if GEAK reported it as a
+    win, and runs GEAK afresh otherwise.
     """
     try:
         verify_source_artifacts(params)

@@ -22,6 +22,11 @@ KEEP_STATUSES: frozenset[str] = frozenset({"kept", "advanced", "kept_inert"})
 #: False on a variant a pre-bench filter dropped, which reached the bench and was never launched.
 RESULT_BENCHED = "benched"
 
+#: True on a result whose verdict the performance gate reached on a round the session could grade against its base:
+#: the candidate was judged, on that comparison or on the accuracy it then owed. Absent or false on every other
+#: result, which is no verdict on the candidate.
+RESULT_GRADED = "graded"
+
 #: Set on every result of an attempt that reached the apply stage: whether it put changed framework code where its
 #: server imports from (:attr:`IntegrateAttempt.changes_framework`), so a reader of the result can attribute a
 #: framework the server could not import.

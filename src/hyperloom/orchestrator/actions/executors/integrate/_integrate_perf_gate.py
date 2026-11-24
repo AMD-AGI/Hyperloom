@@ -549,6 +549,7 @@ def _weigh_gate(
         ) + _fix_accuracy_refusals(accuracy_pass)
         if not fix_refusals:
             gate_pass = correctness_fix = True
+    round_measured = bench_result.get("status") == "succeeded"
     measured = _PatchMeasurement(
         bench_result=bench_result,
         new_tput=bench_result.get("output_throughput"),
@@ -557,9 +558,10 @@ def _weigh_gate(
         keep_threshold_pct=keep_threshold_pct,
         accuracy_pass=accuracy_pass,
         measured_against=_measured_against(params, base_tput=base_tput),
+        graded=round_measured and graded.comparable,
         gates=(
             (graded_gate_row(graded, keep_threshold_pct, graded.veto_reason or graded.refused_by),)
-            if bench_result.get("status") == "succeeded"
+            if round_measured
             else ()
         ),
     )

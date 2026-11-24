@@ -18,7 +18,7 @@ from .integrate._integrate_bench import BenchStageMixin
 from .integrate._integrate_enablement_gate import EnablementGateMixin
 from .integrate._integrate_perf_gate import PerfGateMixin
 from .integrate._integrate_resolve import ResolveStageMixin
-from .integrate._integrate_vocabulary import KEEP_STATUSES, RESULT_BENCHED, RESULT_FRAMEWORK_CHANGED
+from .integrate._integrate_vocabulary import KEEP_STATUSES, RESULT_BENCHED, RESULT_FRAMEWORK_CHANGED, RESULT_GRADED
 from .patching._patch_git import restore_pending_integrate
 
 
@@ -130,6 +130,7 @@ class IntegratePatchExecutor(
                 "status": "failed",
                 "error_class": "integrate_restore_incomplete",
                 "recovery_errors": summary["failed"],
+                RESULT_GRADED: False,
             }
         if not accepted and not applied_only:
             result["patches_reverted"] = [str(patch) for patch in attempt.applied]
