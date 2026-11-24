@@ -112,7 +112,8 @@ class DeviceQueue:
             number = int(tickets[-1].name) + 1 if tickets else 1
             ticket = self.root / f"{number:0{_TICKET_DIGITS}d}"
             try:
-                descriptor = os.open(ticket, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                # Read only by the lanes of the same campaign, which run as the same user.
+                descriptor = os.open(ticket, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             except FileExistsError:
                 continue
             with os.fdopen(descriptor, "w") as handle:

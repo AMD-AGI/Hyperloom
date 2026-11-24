@@ -11,9 +11,11 @@ EXTRAS = {"session_sink": {}, "gate_scoring": object()}
 
 
 def test_a_callback_is_handed_the_extras_it_names():
-    async def names_one(kernel_path, history, session_sink): ...
+    async def names_one(kernel_path, history, session_sink):
+        return ""
 
-    async def names_none(kernel_path, history): ...
+    async def names_none(kernel_path, history):
+        return ""
 
     assert declared_extras(names_one, EXTRAS) == {"session_sink": EXTRAS["session_sink"]}
     assert declared_extras(names_none, EXTRAS) == {}
@@ -22,7 +24,8 @@ def test_a_callback_is_handed_the_extras_it_names():
 def test_a_callback_that_accepts_any_keyword_is_handed_every_extra():
     """A wrapper that forwards its keywords would otherwise lose every extra on the way to what it wraps."""
 
-    async def forwards(kernel_path, history, **extras): ...
+    async def forwards(kernel_path, history, **extras):
+        return ""
 
     assert declared_extras(forwards, EXTRAS) == EXTRAS
 
