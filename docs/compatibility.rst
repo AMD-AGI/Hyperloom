@@ -18,10 +18,6 @@ Hyperloom compatibility matrix
 
    <a href="https://github.com/AMD-AGI/GEAK"><i class="fab fa-github"></i></a>
 
-.. |agent-kernel-arena-github| raw:: html
-
-   <a href="https://github.com/AMD-AGI/AgentKernelArena"><i class="fab fa-github"></i></a>
-
 This topic lists the hardware, inference frameworks, and container images that
 Hyperloom is validated against.
 
@@ -73,13 +69,10 @@ The following table lists the validated Hyperloom version and component combinat
 | 1.2.0             | `TraceLens 1.0.0`_        | Hardware-agnostic      | No dependency                      | OS-independent| >= 3.6      | |tracelens-github|          |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 |                   | `GEAK 4.0.0`_             | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x, 10.0.0 | 22.04, 24.04  | 3.8, 3.12   | |geak-github|               |
-+                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
-|                   | `AgentKernelArena 0.2.0`_ | MI300X, MI325X, MI355X | 7.2.x, 10.0.0                      | 22.04, 24.04  | >= 3.10     | |agent-kernel-arena-github| |
 +-------------------+---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 
 .. _TraceLens 1.0.0: https://rocm.docs.amd.com/projects/tracelens/en/docs-1.0.0/
 .. _GEAK 4.0.0: https://rocm.docs.amd.com/projects/geak/en/docs-4.0.0/
-.. _AgentKernelArena 0.2.0: https://rocm.docs.amd.com/projects/agent-kernel-arena/en/docs-0.2.0/
 
 .. note::
 

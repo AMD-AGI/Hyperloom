@@ -1,8 +1,8 @@
 ---
 myst:
     html_meta:
-        "description": "Explore Hyperloom's specialized components: TraceLens, GEAK, AgentKernelArena, and KernelForge for GPU kernel development and optimization."
-        "keywords": "Hyperloom, components, TraceLens, GEAK, AgentKernelArena, KernelForge, GPU profiling, benchmarking, kernel optimization, AMD GPU, ROCm, evaluation"
+        "description": "Explore Hyperloom's specialized components: TraceLens, GEAK, and KernelForge for GPU kernel development and optimization."
+        "keywords": "Hyperloom, components, TraceLens, GEAK, KernelForge, GPU profiling, benchmarking, kernel optimization, AMD GPU, ROCm"
 ---
 # Hyperloom components
 
@@ -18,5 +18,4 @@ The following table lists each component with its role, source repository, and d
 |-----------|------|--------|--------------|
 | [TraceLens](tracelens.md) | Agentic trace analysis and roofline targets | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) | [TraceLens Docs](https://rocm.docs.amd.com/projects/tracelens/en/latest/) |
 | [GEAK](geak.md) | GPU kernel generation and optimization (Triton, HIP, or FlyDSL) | [AMD-AGI/GEAK](https://github.com/AMD-AGI/GEAK) | [GEAK Docs](https://rocm.docs.amd.com/projects/geak/en/latest/) |
-| [AgentKernelArena](agentkernelarena.md) | Optional standardized evaluation arena for agent benchmarking | [AMD-AGI/AgentKernelArena](https://github.com/AMD-AGI/AgentKernelArena) | [AgentKernelArena Docs](https://rocm.docs.amd.com/projects/agent-kernel-arena/en/latest/) |
 | [KernelForge](kernelforge/what-is-kernelforge.md) | Autonomous GPU kernel development and optimization; ships inside Hyperloom as the built-in kernel-optimization agent | [AMD-AGI/Hyperloom](https://github.com/AMD-AGI/Hyperloom) (`src/kernelforge`) | [KernelForge docs](kernelforge/what-is-kernelforge.md) |

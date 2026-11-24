@@ -29,8 +29,6 @@ subtrees:
         title: TraceLens
       - url: https://rocm.docs.amd.com/projects/geak/en/latest/
         title: GEAK
-      - url: https://rocm.docs.amd.com/projects/agent-kernel-arena/en/latest/
-        title: AgentKernelArena
       - file: components/kernelforge/what-is-kernelforge.md
         title: KernelForge
         entries:
