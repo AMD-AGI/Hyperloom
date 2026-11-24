@@ -140,6 +140,28 @@ def test_an_inferencex_arm_is_one_sweep_test_and_both_arms_run_at_once(tmp_path:
     assert payload["estimated_sec"] == 600 * 3
 
 
+def test_the_session_breakdown_beside_the_report_carries_the_sweep(tmp_path: Path, inferencex_base: None):
+    layout = _layout(tmp_path)
+    breakdown = layout.reports / "session_breakdown.json"
+    breakdown.write_text(json.dumps({"schema_version": "multibranch-2", "tests": []}))
+
+    asyncio.run(_sweep(layout, _settings(), _Tests()).run(_never()))
+
+    document = json.loads(breakdown.read_text())
+    assert document["conc_sweep_summary"] == _summary(layout)
+    assert (document["schema_version"], document["tests"]) == ("multibranch-2", [])
+
+
+def test_a_skipped_sweep_is_carried_in_the_session_breakdown(tmp_path: Path):
+    layout = _layout(tmp_path)
+    breakdown = layout.reports / "session_breakdown.json"
+    breakdown.write_text(json.dumps({"schema_version": "multibranch-2"}))
+
+    final.write_skipped(layout, WORKLOAD, final.NO_OPTIMIZATION)
+
+    assert json.loads(breakdown.read_text())["conc_sweep_summary"]["skip_reason"] == final.NO_OPTIMIZATION
+
+
 def test_an_agentx_point_is_a_test_of_its_own(tmp_path: Path, inferencex_base: None):
     tests = _Tests()
 

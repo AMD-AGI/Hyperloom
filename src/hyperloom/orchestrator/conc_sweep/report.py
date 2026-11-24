@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom_common import io as _common_io
+from hyperloom.inference_optimizer.breakdown.exporter import patch_breakdown_conc_sweep
 from hyperloom.inference_optimizer.roofline_ceiling import (
     ComputeTarget,
     DecodeShape,
@@ -21,7 +22,7 @@ from hyperloom.inference_optimizer.roofline_ceiling import (
     select_peak_and_bound,
 )
 from hyperloom.inference_optimizer.roofline_model_meta import load_model_meta
-from hyperloom.inference_optimizer.session.session_paths import reports_dir
+from hyperloom.inference_optimizer.session.session_paths import CONC_SWEEP_SUMMARY_FILENAME, reports_dir
 
 from .plot import ConcCurveOptions, render_conc_sweep_curve
 
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-SUMMARY_FILE = "conc_sweep_summary.json"
+SUMMARY_FILE = CONC_SWEEP_SUMMARY_FILENAME
 RAW_FILE = "conc_sweep_raw.csv"
 CURVE_FILE = "conc_sweep_curve.png"
 FINAL_FILE = "final.json"
@@ -209,11 +210,16 @@ def read_summary(reports: Path) -> dict[str, Any] | None:
     return json.loads(path.read_text(encoding=_ENCODING)) if path.is_file() else None
 
 
-def write_report(payload: dict[str, Any], reports: Path) -> None:
-    """Atomically write the summary JSON and the raw CSV into ``reports``."""
+def write_report(payload: dict[str, Any], reports: Path, *, breakdown: Path) -> None:
+    """Atomically write the summary JSON and the raw CSV into ``reports``, and carry the summary in ``breakdown``.
+
+    ``breakdown`` is the session's ``session_breakdown.json``: CLOSE wrote it before the sweep began, and it is the
+    document a session's results are ingested from.
+    """
     reports.mkdir(parents=True, exist_ok=True)
     _common_io.atomic_write_text(reports / SUMMARY_FILE, json.dumps(payload, indent=2, ensure_ascii=False, default=str))
     _write_csv(reports / RAW_FILE, [*payload["baseline"]["points"], *payload["optimized"]["points"]])
+    patch_breakdown_conc_sweep(breakdown, payload)
 
 
 def write_curve(payload: dict[str, Any], reports: Path, options: ConcCurveOptions) -> Path | None:

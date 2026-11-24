@@ -30,6 +30,8 @@ export has its own schema version and its own sections:
   did (``knowledge``: the Experiences, the learnings and the archived search tree) and how the session's merges went
   (``merges``: the integrator's conflict statistics); given the session's metric, each branch whose lead over
   integration was stranded, for how many minutes and at what peak (``stranded``).
+* ``conc_sweep_summary``: the concurrency sweep's ``MB-reports/conc_sweep_summary.json``, verbatim. Not built here:
+  the sweep runs after CLOSE and adds it each time it rewrites its report, and a later CLOSE carries it over.
 """
 
 from __future__ import annotations

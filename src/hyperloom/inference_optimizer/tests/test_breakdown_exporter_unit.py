@@ -303,6 +303,69 @@ def test_write_minimal_final_json_fields(tmp_path):
     assert data["current_best"] == {"action": "baseline", "tput": 35.83}
 
 
+# ---- the concurrency sweep's report ----
+
+_SWEEP = {
+    "status": "in_progress",
+    "concs": [4, 16],
+    "baseline": {"points": [{"conc": 16}]},
+    "optimized": {"points": []},
+}
+
+
+def _write_sweep_report(session_dir: Path) -> None:
+    reports = session_dir / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "conc_sweep_summary.json").write_text(json.dumps(_SWEEP), encoding="utf-8")
+
+
+def test_a_breakdown_of_a_session_no_sweep_ran_for_has_no_sweep_section(tmp_path):
+    assert ex.CONC_SWEEP_SECTION not in ex.build(tmp_path)
+
+
+def test_a_rebuilt_breakdown_keeps_the_sweep_report_on_disk(tmp_path):
+    _write_sweep_report(tmp_path)
+
+    assert ex.build(tmp_path)[ex.CONC_SWEEP_SECTION] == _SWEEP
+
+
+def test_an_unreadable_sweep_report_is_a_warning_not_a_section(tmp_path):
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "conc_sweep_summary.json").write_text("{bad", encoding="utf-8")
+
+    out = ex.build(tmp_path)
+
+    assert ex.CONC_SWEEP_SECTION not in out
+    assert any("conc_sweep_summary.json" in w for w in out["metadata"]["warnings"])
+
+
+def test_patch_breakdown_conc_sweep_needs_a_breakdown(tmp_path):
+    target = tmp_path / ex.BREAKDOWN_FILENAME
+
+    assert ex.patch_breakdown_conc_sweep(target, _SWEEP) is False
+    assert not target.exists()
+
+
+def test_patch_breakdown_conc_sweep_carries_the_report_and_keeps_the_rest(tmp_path):
+    target = ex.write_breakdown_json(tmp_path)
+    before = json.loads(target.read_text())
+
+    assert ex.patch_breakdown_conc_sweep(target, _SWEEP) is True
+    after = json.loads(target.read_text())
+    assert after.pop(ex.CONC_SWEEP_SECTION) == _SWEEP
+    assert after == before
+    assert ex.patch_breakdown_conc_sweep(target, _SWEEP) is False
+
+
+def test_patch_breakdown_conc_sweep_writes_a_breakdown_kept_elsewhere(tmp_path):
+    target = tmp_path / "MB-reports" / ex.BREAKDOWN_FILENAME
+    target.parent.mkdir()
+    target.write_text(json.dumps({"schema_version": "multibranch-2"}), encoding="utf-8")
+
+    assert ex.patch_breakdown_conc_sweep(target, {**_SWEEP, "concs": (4, 16)}) is True
+    assert json.loads(target.read_text())[ex.CONC_SWEEP_SECTION]["concs"] == [4, 16]
+
+
 def test_patch_breakdown_langfuse_success(tmp_path):
     from hyperloom.inference_optimizer.trace.langfuse_emitter import _receipt_path
 

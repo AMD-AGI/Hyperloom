@@ -209,7 +209,8 @@ of its own; a fixed-length workload keeps one server per arm.
 
 The sweep logs its estimated length before it starts, rewrites
 `reports/conc_sweep_summary.json` and `reports/conc_sweep_raw.csv` after every
-point, and draws `reports/conc_sweep_curve.png` (interactivity against
+point, carrying the summary each time as `conc_sweep_summary` in the session's
+`session_breakdown.json`, and draws `reports/conc_sweep_curve.png` (interactivity against
 throughput per GPU) at the end. Its `status` is `succeeded`, `partial`,
 `failed`, `skipped` (with `skip_reason`) or `cancelled` (SIGINT or SIGTERM;
 the measured points stay). A later run measures only the points not yet

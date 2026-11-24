@@ -752,6 +752,9 @@ class SessionBreakdown(TypedDict, total=False):
     timeline: list[V6TimelineEvent]
     close: V6Close
     critic: V6Critic
+    # The concurrency sweep's ``reports/conc_sweep_summary.json``, verbatim. Absent until a sweep runs, which is after
+    # CLOSE (``--enable-conc-sweep`` or ``hyperloom conc-sweep``); the sweep adds it each time it rewrites its report.
+    conc_sweep_summary: dict[str, Any]
 
 
 __all__ = [

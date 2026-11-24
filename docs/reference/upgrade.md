@@ -368,6 +368,11 @@ the package carries them. The `conc_sweep` timeline event of
 session recorded in `SWEEP` does not resume: finish it under the build that
 started it.
 
+The sweep that runs after CLOSE writes the report files again and adds its
+summary to `session_breakdown.json` as the top-level `conc_sweep_summary`, the
+key breakdowns carried it under before #1455. A consumer that read the sweep
+from the `conc_sweep` timeline event reads it there instead.
+
 ### Recommended: commands that stay outside `hyperloom.cli`
 
 `hyperloom <command>` covers setup, check, optimize, recover, quantize,

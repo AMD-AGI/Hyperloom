@@ -29,9 +29,11 @@ from typing import Any
 
 from hyperloom_common.jsonio import read_jsonl
 from hyperloom.contracts.recipe import RecipeError
+from hyperloom.inference_optimizer.breakdown.exporter import CONC_SWEEP_SECTION
 from hyperloom.measure.compile import BlobError, BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
+from hyperloom.orchestrator.conc_sweep.report import read_summary
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteRecipeValidationError, RemoteWriteResult
 from hyperloom_multibranch.contracts.blackboard.interfaces import Blackboard
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
@@ -272,6 +274,11 @@ class SessionExports:
                 claw_session_id=manifest.claw_session_id,
             ),
         )
+        # A later CLOSE (a resume, a ``final-only``) rebuilds the breakdown after a sweep may already have run, and a
+        # sweep that has settled never writes its report again, so the rebuild carries it.
+        sweep = read_summary(self._layout.reports)
+        if sweep is not None:
+            document = {**document, CONC_SWEEP_SECTION: sweep}
         breakdown = write_breakdown(self._layout.reports, document)
         dashboard = await self._dashboard.write(queue)
         checkpoint = None if self._checkpoint is None else checkpoint_tally(snapshot, self._checkpoint)

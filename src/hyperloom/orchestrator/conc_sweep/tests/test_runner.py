@@ -244,6 +244,52 @@ def test_a_cancel_keeps_the_points_measured_before_it(
     assert [point["conc"] for point in _summary(session_dir)["baseline"]["points"]] == [16]
 
 
+def _breakdown(session_dir: Path) -> dict[str, Any]:
+    return json.loads((session_dir / "session_breakdown.json").read_text())
+
+
+def test_the_session_breakdown_carries_the_sweep_as_each_point_lands(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    _state(session_dir)
+    (session_dir / "session_breakdown.json").write_text(json.dumps({"schema_version": "v6.1", "outcome": {}}))
+    carried: list[int] = []
+    measured = runner._Sweep.record
+
+    def record_then_read(self: Any, arm: Any, result: VariantResult) -> None:
+        measured(self, arm, result)
+        carried.append(len(_breakdown(session_dir)["conc_sweep_summary"][arm.name]["points"]))
+
+    monkeypatch.setattr(runner._Sweep, "record", record_then_read)
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    breakdown = _breakdown(session_dir)
+    assert carried == [1, 2, 3, 4, 1, 2, 3, 4]
+    assert breakdown["conc_sweep_summary"] == _summary(session_dir)
+    assert breakdown["conc_sweep_summary"]["status"] == "succeeded"
+    assert (breakdown["schema_version"], breakdown["outcome"]) == ("v6.1", {})
+
+
+def test_a_skipped_sweep_is_carried_in_the_breakdown_too(session_dir: Path, grid: SimpleNamespace):
+    _state(session_dir, cumulative_gain_validated=0.0)
+    (session_dir / "session_breakdown.json").write_text(json.dumps({"schema_version": "v6.1"}))
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    carried = _breakdown(session_dir)["conc_sweep_summary"]
+    assert (carried["status"], carried["skip_reason"]) == ("skipped", "no_optimization")
+
+
+def test_a_session_without_a_breakdown_still_gets_its_report(session_dir: Path, grid: SimpleNamespace):
+    _state(session_dir)
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert _summary(session_dir)["status"] == "succeeded"
+    assert not (session_dir / "session_breakdown.json").exists()
+
+
 def test_the_session_report_points_at_the_sweep(session_dir: Path, grid: SimpleNamespace):
     _state(session_dir)
     final = session_dir / "reports" / "final.json"

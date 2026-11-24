@@ -145,6 +145,13 @@ inputs are `cycle_end_result` (`settled`, `reloop`) rather than
 session that reached the phase reports `outcome.stage_reached` `cycle_end`
 where it reported `conc_sweep`.
 
+The concurrency sweep that runs after CLOSE (`--enable-conc-sweep` or
+`hyperloom conc-sweep`) adds its report to the breakdown as the top-level
+`conc_sweep_summary`: the `reports/conc_sweep_summary.json` it writes,
+verbatim, rewritten after every point. A breakdown of a session that ran no
+sweep has no such key. A multi-branch breakdown carries it the same way, from
+`MB-reports/conc_sweep_summary.json`.
+
 V6 was the preceding cutover, for the timeline: each action records its own event
 while it runs, so an event's `start_time` is when the work began rather than
 when its artefacts were written, and the KERNEL and BASELINE projections are no

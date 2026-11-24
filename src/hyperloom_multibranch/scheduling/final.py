@@ -32,8 +32,9 @@ with the workload's CONC among them. It runs only when that commit is not the ro
 the baseline. Both arms are submitted at once, so they run side by side where the session runs two tests at once. An
 AgentX point is a test of its own, booted cold as every AgentX level is; an InferenceX arm is one sweep test over all
 its points on one server, whose attempt timeout scales with them (:meth:`SweepPlan.test_points`). The report
-(``MB-reports/conc_sweep_summary.json``) is rewritten after every test; a later run measures only the points not yet
-measured. These tests are session measurements with no accuracy and no checks.
+(``MB-reports/conc_sweep_summary.json``) is rewritten after every test, and carried each time as ``conc_sweep_summary``
+in ``MB-reports/session_breakdown.json``; a later run measures only the points not yet measured. These tests are
+session measurements with no accuracy and no checks.
 """
 
 from __future__ import annotations
@@ -61,6 +62,7 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, TestWithdrawn
 from hyperloom_multibranch.blackboard.changes import same_recipe
 from hyperloom_multibranch.blackboard.codec import decode
+from hyperloom_multibranch.blackboard.knowledge.breakdown import FILENAME as BREAKDOWN_FILENAME
 from hyperloom_multibranch.scheduling.budget import FinalWork
 from hyperloom_multibranch.scheduling.explore import integration_row
 from hyperloom_multibranch.scheduling.integrator import defects_beyond_gain
@@ -513,6 +515,11 @@ def _header(layout: SessionLayout, workload: Workload) -> dict[str, Any]:
     }
 
 
+def _write(layout: SessionLayout, payload: dict[str, Any]) -> None:
+    """Write the report into ``MB-reports/`` and carry it in the session breakdown beside it."""
+    write_report(payload, layout.reports, breakdown=layout.reports / BREAKDOWN_FILENAME)
+
+
 def write_skipped(layout: SessionLayout, workload: Workload, reason: str) -> dict[str, Any]:
     """The report of a sweep that measured nothing, written where a sweep's report goes."""
     payload = {
@@ -523,7 +530,7 @@ def write_skipped(layout: SessionLayout, workload: Workload, reason: str) -> dic
         "optimized": {"points": []},
         "summary": {},
     }
-    write_report(payload, layout.reports)
+    _write(layout, payload)
     logger.info("conc_sweep: skipped (%s)", reason)
     return payload
 
@@ -583,7 +590,7 @@ class ConcSweep:
         else:
             stopped.cancel()
         payload = self.payload(final=True)
-        write_report(payload, self.layout.reports)
+        _write(self.layout, payload)
         shape = self.workload.inferencex
         options = ConcCurveOptions(
             self.workload.model_basename,
@@ -615,7 +622,7 @@ class ConcSweep:
     def _record(self, rows: list[dict[str, Any]]) -> None:
         for row in rows:
             self.measured[row["arm"]][row["conc"]] = row
-        write_report(self.payload(), self.layout.reports)
+        _write(self.layout, self.payload())
 
     def _resume(self) -> None:
         """Keep the points an earlier run of the same sweep measured on the same commit of each arm, so only the rest

@@ -20,11 +20,20 @@ from . import collectors
 from .recorder.event_finalize import finalize_events
 from .recorder.recorder_warnings import RECORDING_ERRORS
 from ..session.sbd_v6 import SCHEMA_VERSION_V6
-from ..session.session_paths import BREAKDOWN_FILENAME, manifest_path, state_path
+from ..session.session_paths import (
+    BREAKDOWN_FILENAME,
+    CONC_SWEEP_SUMMARY_FILENAME,
+    manifest_path,
+    reports_dir,
+    state_path,
+)
 
 log = logging.getLogger(__name__)
 
 EXPORTER_VERSION = "session-breakdown-1.0.0"
+#: The top-level key the concurrency sweep's report is carried under, verbatim. The sweep runs after the session has
+#: closed, so the breakdown CLOSE wrote has no such key until the sweep adds it.
+CONC_SWEEP_SECTION = "conc_sweep_summary"
 
 
 def _recorded_session_value(value: Any) -> bool:
@@ -208,10 +217,11 @@ def build(session_dir: Path | str) -> dict[str, Any]:
     v6_critic = collectors.collect_v6_critic(assembled.get("critic"))
     # Snapshot last: every collector above feeds this one list, and this is the
     # single place a collection failure surfaces.
+    conc_sweep = _conc_sweep_report(sd, warnings)
     if isinstance(metadata, dict):
         metadata["warnings"] = list(warnings)
 
-    return {
+    breakdown = {
         "schema_version": schema_version,
         "exported_at_utc": exported_at,
         "exporter_version": EXPORTER_VERSION,
@@ -221,6 +231,18 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         "close": sections.close,
         "critic": v6_critic,
     }
+    if conc_sweep is not None:
+        breakdown[CONC_SWEEP_SECTION] = conc_sweep
+    return breakdown
+
+
+def _conc_sweep_report(session_dir: Path, warnings: list[str]) -> dict[str, Any] | None:
+    """The report a concurrency sweep of this session left, so a rebuilt breakdown keeps it; ``None`` when none ran."""
+    path = reports_dir(session_dir) / CONC_SWEEP_SUMMARY_FILENAME
+    if not path.is_file():
+        return None
+    report = _load_session_json(path, CONC_SWEEP_SUMMARY_FILENAME, warnings)
+    return report or None
 
 
 def _load_assembled(
@@ -327,17 +349,49 @@ def _patch_breakdown(
 ) -> bool:
     """Rewrite one section of an already-written breakdown, atomically."""
     sd = Path(session_dir).resolve()
-    target = sd / BREAKDOWN_FILENAME
+    return _patch_breakdown_file(sd / BREAKDOWN_FILENAME, section, lambda breakdown: revise(sd, breakdown))
+
+
+def _patch_breakdown_file(target: Path, section: str, revise: Callable[[dict[str, Any]], bool]) -> bool:
+    """Rewrite one section of the breakdown at ``target``, atomically; ``False`` when there is none or nothing changed."""
     if not target.exists():
         return False
     breakdown = json.loads(target.read_text(encoding="utf-8"))
     if not isinstance(breakdown, dict):
         return False
-    if not revise(sd, breakdown):
+    if not revise(breakdown):
         return False
     atomic_write_text(target, json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default))
     log.info("session_breakdown: refreshed %s section in %s", section, target)
     return True
+
+
+def patch_breakdown_conc_sweep(breakdown_path: Path | str, report: dict[str, Any]) -> bool:
+    """Carry the concurrency sweep's ``report`` in the already-written breakdown at ``breakdown_path``.
+
+    The sweep runs after the session has closed, so CLOSE's breakdown cannot hold it. The sweep calls this each time it
+    rewrites its report, so a consumer that reads only the breakdown sees each point as it lands. The path is the
+    caller's because a multi-branch session keeps its breakdown in ``MB-reports/`` rather than the session root.
+
+    Self-skipping, like :func:`patch_breakdown_langfuse`: returns False on a missing breakdown or an unchanged report.
+
+    Args:
+        breakdown_path: The ``session_breakdown.json`` to update.
+        report: The sweep's report, as written to ``conc_sweep_summary.json``.
+
+    Returns:
+        ``True`` when the breakdown was rewritten, ``False`` otherwise.
+    """
+    # Round-tripped so the comparison and the file see the values JSON keeps, not a tuple or a Path the report holds.
+    carried = json.loads(json.dumps(report, default=_json_default))
+
+    def _revise(breakdown: dict[str, Any]) -> bool:
+        if breakdown.get(CONC_SWEEP_SECTION) == carried:
+            return False
+        breakdown[CONC_SWEEP_SECTION] = carried
+        return True
+
+    return _patch_breakdown_file(Path(breakdown_path), CONC_SWEEP_SECTION, _revise)
 
 
 def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
@@ -594,9 +648,11 @@ def write_minimal_final_json(session_dir: Path | str) -> Path:
 
 
 __all__ = [
+    "CONC_SWEEP_SECTION",
     "EXPORTER_VERSION",
     "FINAL_PRODUCER_COORDINATOR",
     "build",
+    "patch_breakdown_conc_sweep",
     "write_breakdown_json",
     "write_minimal_final_json",
     "write_minimal_final_report",

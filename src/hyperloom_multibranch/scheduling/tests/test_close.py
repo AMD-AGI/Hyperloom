@@ -375,6 +375,37 @@ async def test_the_breakdown_spend_includes_the_close_llm_calls(
     assert spend["llm_usd"] == pytest.approx(before + 0.11)
 
 
+async def test_a_later_close_keeps_the_sweep_an_earlier_close_was_followed_by(
+    layout: SessionLayout,
+    blackboard: LocalBlackboard,
+    final: FinalRecipe,
+) -> None:
+    """A resumed or ``final-only`` CLOSE rebuilds the breakdown after the sweep ran; the sweep's report survives it."""
+
+    sweep = {"status": "succeeded", "concs": [4, 16], "baseline": {"points": []}, "optimized": {"points": []}}
+    (layout.reports / "conc_sweep_summary.json").write_text(json.dumps(sweep))
+
+    report = await _closer(layout, blackboard, _clean(), final, None).close(
+        SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP
+    )
+
+    assert report.exports is not None
+    assert json.loads(report.exports.breakdown.read_text())["conc_sweep_summary"] == sweep
+
+
+async def test_a_close_with_no_sweep_writes_no_sweep_section(
+    layout: SessionLayout,
+    blackboard: LocalBlackboard,
+    final: FinalRecipe,
+) -> None:
+    report = await _closer(layout, blackboard, _clean(), final, None).close(
+        SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP
+    )
+
+    assert report.exports is not None
+    assert "conc_sweep_summary" not in json.loads(report.exports.breakdown.read_text())
+
+
 async def test_a_session_stopped_before_its_baseline_asks_no_llm_and_leaves_the_archive_empty(
     layout: SessionLayout,
     blackboard: LocalBlackboard,
