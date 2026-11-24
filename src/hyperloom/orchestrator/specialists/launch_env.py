@@ -21,9 +21,7 @@ already confines it and codex's own, a nested bubblewrap, could not map a user n
 bubblewrap ends its sandbox at once on a SIGTERM of its own, without passing it on, and exits before the agent ran
 when it cannot set the sandbox up. So the process a sandboxed launch gives (:class:`SandboxedProcess`) asks the agent
 to stop by TERMing the sandbox's marked processes, and tells a setup failure from the agent's exit by what bubblewrap
-wrote on ``--json-status-fd``. A Ray GPU actor's launch is built from this host's probe and paths, so under bubblewrap
-it is for a single-node Ray cluster only; its status goes to a file the actor's shell opens, and its sandbox ends
-when the actor does (``--die-with-parent``).
+wrote on ``--json-status-fd``.
 """
 
 from __future__ import annotations
@@ -32,10 +30,8 @@ import asyncio
 import functools
 import logging
 import os
-import shutil
 import signal
 import subprocess
-import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field, replace
@@ -144,9 +140,6 @@ CODEX_SANDBOX_OFF = (
 _CODEX_SANDBOX_FLAGS = ("--sandbox", "-s")
 _CODEX_SANDBOX_SWITCHES = ("--full-auto",)
 CODEX_BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox"
-#: The descriptor a Ray actor's shell opens the status file on, and how: bubblewrap's own exit codes start at 1.
-_ACTOR_STATUS_FD = 3
-_OPEN_STATUS = 'exec 3>>"$0" && exec "$@"'
 _BWRAP_LINE = "bwrap:"
 _POLL_SEC = 0.05
 #: Bounds the scan for an account's marked processes; walking a few thousand /proc entries takes well under a second.
@@ -204,26 +197,15 @@ def compose_launch_env(task_id: str) -> tuple[dict[str, str], str]:
     return env, reap_mark
 
 
-def apply_gpu_env(env: dict[str, str], workspace: Path, gpu_ids: Sequence[int], gpu_lease: object | None) -> None:
+def apply_gpu_env(env: dict[str, str], workspace: Path, gpu_ids: Sequence[int]) -> None:
     """Set the GPU and compiler-cache environment of a specialist, in place.
 
     Args:
         env: The child environment.
         workspace: The task workspace, home of the private compiler caches of a CPU specialist.
-        gpu_ids: Cards pinned for the task (the logical view under Ray's mask when ``gpu_lease`` is set).
-        gpu_lease: The Ray GPU lease when the specialist runs in a Ray actor, else ``None``.
+        gpu_ids: Cards pinned for the task.
     """
-    if gpu_lease is not None:
-        # Ray-managed GPU execution: Ray sets *_VISIBLE_DEVICES in
-        # the actor's worker; never let the caller env pin them (that would
-        # override Ray's card assignment). ``gpu_ids`` here is the logical
-        # 0..N-1 view the specialist sees under Ray's mask — kept only as the
-        # informational count env for specialist tooling.
-        for var in GPU_MASK_ENV_NAMES:
-            env.pop(var, None)
-        if gpu_ids:
-            env[_GPU_IDS_ENV] = ",".join(str(g) for g in gpu_ids)
-    elif gpu_ids:
+    if gpu_ids:
         visible = ",".join(str(g) for g in gpu_ids)
         env["HIP_VISIBLE_DEVICES"] = visible
         env["CUDA_VISIBLE_DEVICES"] = visible
@@ -241,15 +223,15 @@ def apply_gpu_env(env: dict[str, str], workspace: Path, gpu_ids: Sequence[int], 
         env[_AITER_JIT_ENV] = aiter_jit
 
 
-def resolve_launch_isolation(gpu_lease: object | None) -> AgentIsolation:
-    """How to isolate a specialist launched now (the module doc); one in a Ray GPU actor (``gpu_lease`` set) is never
-    started as another account. Reads the environment, the capability set and bubblewrap's probe; changes nothing.
+def resolve_launch_isolation() -> AgentIsolation:
+    """How to isolate a specialist launched now (the module doc). Reads the environment, the capability set and
+    bubblewrap's probe; changes nothing.
 
     Raises:
         IsolationRefused: The specialist must be isolated (a hosted run, or ``HYPERLOOM_SPECIALIST_USER`` set) and no
             tier works here; a :class:`~hyperloom.common.env_safety.RunAsError`.
     """
-    return choose_agent_isolation(allow_account=gpu_lease is None)
+    return choose_agent_isolation()
 
 
 @dataclass(frozen=True)
@@ -294,13 +276,11 @@ class Spawn:
 
 @dataclass
 class LaunchStatus:
-    """Where bubblewrap writes its status (``--json-status-fd``): a local launch's pipe (``read_fd``, and
-    ``write_fd`` until the launch has its own copy), or, for a Ray actor's, ``path`` in a directory only the app
-    writes."""
+    """Where bubblewrap writes its status (``--json-status-fd``): the launch's pipe (``read_fd``, and ``write_fd``
+    until the launch has its own copy)."""
 
     read_fd: int = -1
     write_fd: int = -1
-    path: Path | None = None
     data: bytes = b""
 
     @classmethod
@@ -310,11 +290,6 @@ class LaunchStatus:
         os.set_blocking(read_fd, False)
         return cls(read_fd, write_fd)
 
-    @classmethod
-    def file(cls) -> LaunchStatus:
-        """A file name in a fresh directory of mode 0700."""
-        return cls(path=Path(tempfile.mkdtemp(prefix="hl-agent-status-")) / "status.json")
-
     def started(self) -> None:
         """Close this process's copy of the write end, once the launch holds its own."""
         if self.write_fd >= 0:
@@ -323,13 +298,7 @@ class LaunchStatus:
 
     def read(self) -> BwrapStatus:
         """What bubblewrap has written so far."""
-        if self.path is not None:
-            try:
-                self.data = read_bytes_nofollow(self.path)
-            except OSError:
-                # Not written yet (the actor's shell opens it), or already removed: what was read before stands.
-                pass
-        elif self.read_fd >= 0:
+        if self.read_fd >= 0:
             self.data += _drained(self.read_fd)
         try:
             return BwrapStatus.parse(self.data)
@@ -337,15 +306,12 @@ class LaunchStatus:
             return BwrapStatus(None, None)
 
     def close(self) -> None:
-        """Close the pipe, or remove the file and its directory; what was read stays readable."""
+        """Close the pipe; what was read stays readable."""
         self.read()
         self.started()
         if self.read_fd >= 0:
             os.close(self.read_fd)
             self.read_fd = -1
-        if self.path is not None:
-            shutil.rmtree(self.path.parent, ignore_errors=True)
-            self.path = None
 
 
 def _drained(fd: int) -> bytes:
@@ -373,8 +339,8 @@ def _bwrap_line(process_log: Path) -> str:
 
 
 class SandboxedProcess:
-    """A launch's bubblewrap process (``process``: a ``Popen``, or a Ray actor's stand-in) as the reap loop supervises
-    it; every other attribute is the process's own.
+    """A launch's bubblewrap process (``process``: a ``Popen``) as the reap loop supervises it; every other attribute
+    is the process's own.
 
     bubblewrap ends the sandbox when the agent ends, exiting with the agent's code (``128 + n`` for a death by signal
     ``n``), and on a SIGTERM of its own at once, without passing it on: :meth:`stop_agent` TERMs the sandbox's
@@ -468,7 +434,7 @@ class PreparedLaunch:
     with ``scratch`` (its ``/tmp`` and ``/dev/shm``) bound in it, and ``network`` what the sandbox reaches from its own
     network.
 
-    :meth:`local` or :meth:`actor` gives the spawn's arguments and :meth:`started` the process to supervise;
+    :meth:`local` gives the spawn's arguments and :meth:`started` the process to supervise;
     :meth:`marked_pids` finds what carries the launch's reap mark; :meth:`release` removes what the launch left here
     once it has ended.
     """
@@ -496,23 +462,6 @@ class PreparedLaunch:
         self.status = LaunchStatus.pipe()
         argv, child_env = self._sandboxed(self.isolation, cmd, env, policy, self.status.write_fd)
         return Spawn(argv, child_env, {"pass_fds": (self.status.write_fd,)})
-
-    def actor(self, cmd: Sequence[str], env: Mapping[str, str]) -> Spawn:
-        """The arguments that start ``cmd`` with ``env`` in a Ray GPU actor on this host: built from this host's
-        probe and paths, so under bubblewrap for a single-node cluster only. There a shell opens the status file on
-        descriptor 3 and execs bubblewrap with ``--die-with-parent``, so the sandbox ends when the actor does: the
-        actor's process manager starts it from the thread it runs on, as it arms its own ``PR_SET_PDEATHSIG``.
-
-        Raises:
-            IsolationRefused: This bubblewrap must not launch the sandbox's policy, or there is none.
-        """
-        if not isinstance(self.isolation, BwrapIsolation):
-            return self.local(cmd, env)
-        policy = replace(self._policy(), die_with_parent=True)
-        self.status = LaunchStatus.file()
-        isolation = replace(self.isolation, started_elsewhere=True)
-        argv, child_env = self._sandboxed(isolation, cmd, env, policy, _ACTOR_STATUS_FD)
-        return Spawn(["/bin/sh", "-c", _OPEN_STATUS, str(self.status.path), *argv], child_env, {})
 
     def _policy(self) -> BwrapPolicy:
         """The sandbox's policy, which :func:`prepare_launch` made; a sandbox without one is never started unconfined.
@@ -545,7 +494,7 @@ class PreparedLaunch:
         return isolation.launch(inside, policy, env, marks=(REAP_MARK_ENV,), status_fd=status_fd)
 
     def started(self, process: Any) -> Any:
-        """The process to supervise for ``process``, just started with :meth:`local` or :meth:`actor`."""
+        """The process to supervise for ``process``, just started with :meth:`local`."""
         if self.status is None:
             return process
         self.status.started()

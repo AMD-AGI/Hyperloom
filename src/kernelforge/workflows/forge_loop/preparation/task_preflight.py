@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic driver-contract preflight: correctness, benchmark, graph-replay and profile probes."""
+"""Deterministic driver-contract preflight: correctness, benchmark and graph-replay probes."""
 
 from __future__ import annotations
 
@@ -18,12 +18,12 @@ import sys
 import tempfile
 import time
 import traceback
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock
 from kernelforge.evaluation.correctness.driver import test_correctness
-from kernelforge.evaluation.profiling.contracts import PROFILE_RUN_FLAG
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.utils.aiter_cache import cleanup_current_owned_aiter_locks
 
@@ -40,7 +40,6 @@ class PreflightResult:
     correctness_ok: bool
     bench_ok: bool
     graph_ok: bool = True
-    profile_ok: bool = True
     ranks_ok: bool = True
     reasons: list[str] = field(default_factory=list)
     details: dict = field(default_factory=dict)
@@ -172,6 +171,20 @@ def _harness_measured():
         return False
 
 
+def _misloaded():
+    """The campaign's source modules this process loaded from a file that is not the campaign's."""
+    try:
+        expected = json.loads(os.environ.get("GRAPH_PROBE_SOURCES") or "{}")
+    except ValueError:
+        return {}
+    found = {}
+    for name, path in expected.items():
+        loaded = getattr(sys.modules.get(name), "__file__", None)
+        if loaded and os.path.realpath(loaded) != path:
+            found[name] = os.path.realpath(loaded)
+    return found
+
+
 def _dump():
     out = os.environ.get("GRAPH_PROBE_OUT")
     if not out:
@@ -179,6 +192,7 @@ def _dump():
     try:
         payload = {
             "replays": _n[0],
+            "misloaded": _misloaded(),
             "rank": os.environ.get("RANK"),
             "local_rank": os.environ.get("LOCAL_RANK"),
             "world_size": os.environ.get("WORLD_SIZE"),
@@ -210,10 +224,9 @@ atexit.register(_dump)
 # just needs to compile once.
 PREFLIGHT_CORRECTNESS_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_CORRECTNESS_TIMEOUT", "1800") or "1800")
 PREFLIGHT_BENCH_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_BENCH_TIMEOUT", "1800") or "1800")
-# graph-replay and profiling preflight run *after* bench, so the JIT cache is usually warm by then, but on a cold
-# first run a fresh module can still compile here.
+# The graph-replay preflight runs *after* bench, so the JIT cache is usually warm by then, but on a cold first run a
+# fresh module can still compile here.
 PREFLIGHT_GRAPH_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_GRAPH_TIMEOUT", "900") or "900")
-PREFLIGHT_PROFILE_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_PROFILE_TIMEOUT", "900") or "900")
 
 
 # How much of a failed stage's stdout+stderr to carry into the audit record and the repair agent's next prompt.
@@ -248,6 +261,7 @@ def _cleanup_probe(out_path: str, probe_dir: str) -> None:
 # a violated distributed contract is a verdict on it.
 PROBE_FAILED = -1
 PROBE_DISTRIBUTED_VIOLATION = -2
+PROBE_SOURCE_VIOLATION = -3
 
 
 @dataclass(frozen=True)
@@ -488,20 +502,44 @@ async def _abandon_probe(proc: asyncio.subprocess.Process, out_path: str, probe_
     _cleanup_probe(out_path, probe_dir)
 
 
+def _source_violation(out_path: str) -> str:
+    """Why the driver did not run the campaign's sources, from what each of its processes reported; empty if it did."""
+    misloaded: dict[str, str] = {}
+    for shard in glob.glob(f"{out_path}.*"):
+        try:
+            payload = json.loads(Path(shard).read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("misloaded"), dict):
+            misloaded.update(payload["misloaded"])
+    if not misloaded:
+        return ""
+    loaded = "; ".join(f"{name} from {where}" for name, where in sorted(misloaded.items()))
+    return (
+        f"the driver loaded {loaded}, which is not the campaign workspace: it times code the campaign does not edit. "
+        "Load the kernel from the workspace the driver is in"
+    )
+
+
 async def _count_graph_replays(
     driver: str,
     warmup: int,
     iters: int,
     *,
     timeout_sec: float = 300,
-    require_ranks: int = 1,
+    contract: DriverContract | None = None,
 ) -> tuple[int, str]:
-    """Run the driver and return its effective CUDA graph replay count."""
+    """Run the driver and return its effective CUDA graph replay count.
+
+    ``contract`` names the ranks the driver must launch and the modules it must load from the campaign workspace.
+    """
+    require_ranks = contract.require_ranks if contract is not None else 1
     fd, out_path = tempfile.mkstemp(prefix="forge_graph_probe_")
     os.close(fd)
     probe_dir = tempfile.mkdtemp(prefix="forge_graph_probe_site_")
     pathlib.Path(probe_dir, "sitecustomize.py").write_text(_GRAPH_PROBE_SITECUSTOMIZE)
     env = _graph_probe_env(out_path, probe_dir, require_ranks)
+    env["GRAPH_PROBE_SOURCES"] = json.dumps(dict(contract.sources) if contract is not None else {})
     cmd = [
         sys.executable,
         driver,
@@ -540,11 +578,14 @@ async def _count_graph_replays(
             detail += f": {tail}"
         return PROBE_FAILED, detail
 
+    violation = _source_violation(out_path)
     replays, shard_error = _read_graph_probe_shards(
         out_path,
         expected_world_size=require_ranks if require_ranks > 1 else None,
     )
     _cleanup_probe(out_path, probe_dir)
+    if violation:
+        return PROBE_SOURCE_VIOLATION, violation
     if shard_error:
         detail = shard_error
         if tail:
@@ -556,50 +597,17 @@ async def _count_graph_replays(
     return replays, tail
 
 
-async def _check_profile_contract(
-    driver: str,
-    *,
-    timeout_sec: float,
-) -> tuple[bool, str]:
-    """Verify the prepared driver owns a kernel-only profiling path."""
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        driver,
-        PROFILE_RUN_FLAG,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
-    )
-    try:
-        out, err = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=timeout_sec,
-        )
-    except asyncio.TimeoutError:
-        _kill_process_group(proc)
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(proc.wait(), timeout=10)
-        return False, "profile-run timed out"
-    except asyncio.CancelledError:
-        _kill_process_group(proc)
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(proc.wait(), timeout=10)
-        raise
-    output = (out.decode(errors="replace") if out else "") + (err.decode(errors="replace") if err else "")
-    if proc.returncode != 0:
-        return False, f"profile-run exited {proc.returncode}: {output[-200:]}"
-    return True, "verified"
-
-
 @dataclass(frozen=True)
 class DriverContract:
-    """What a driver must satisfy: the correctness threshold, graph timing, a profile run, its ranks and cases."""
+    """What a driver must satisfy: the correctness threshold, graph timing, its ranks and cases."""
 
     snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB
     require_graph: bool = False
-    require_profile: bool = False
     require_ranks: int = 1
     expected_case_ids: list[str] | None = None
+    #: The campaign's source modules and the workspace file each has to be loaded from
+    #: (:func:`~.loaded_sources.declared_source_modules`). A driver that loads one from elsewhere is refused.
+    sources: Mapping[str, str] = field(default_factory=dict)
 
 
 def _stage_seconds(since: float) -> float:
@@ -709,7 +717,7 @@ class _PreflightWork:
             warmup,
             iters,
             timeout_sec=_deadline_timeout(deadline_unix, PREFLIGHT_GRAPH_TIMEOUT_S),
-            require_ranks=contract.require_ranks,
+            contract=contract,
         )
         self.details["graph"] = {
             "replays": replays,
@@ -719,7 +727,10 @@ class _PreflightWork:
         if replays >= iters:
             return _GraphVerdict(graph_ok=True, ranks_ok=True)
         self.diagnostics["graph"] = tail
-        if replays == PROBE_DISTRIBUTED_VIOLATION:
+        if replays == PROBE_SOURCE_VIOLATION:
+            # A verdict on the driver as well: what it times is not the campaign's.
+            self.reasons.append(tail)
+        elif replays == PROBE_DISTRIBUTED_VIOLATION:
             # A verdict on the driver, not a failure of the probe, so it is
             # reported against the rank contract rather than graph timing.
             self.reasons.append(f"distributed measurement contract violated: {tail}")
@@ -731,25 +742,6 @@ class _PreflightWork:
                 f"graph replays over {iters} timed iterations): {tail[-160:]}"
             )
         return failed
-
-    async def check_profile(self, driver: str, deadline_unix: float) -> bool:
-        if not self.bench_ok:
-            self.reasons.append("cannot verify profiling contract because bench produced no timing")
-            return False
-        stage_started = time.monotonic()
-        profile_ok, profile_detail = await _check_profile_contract(
-            driver,
-            timeout_sec=_deadline_timeout(deadline_unix, PREFLIGHT_PROFILE_TIMEOUT_S),
-        )
-        self.details["profile"] = {
-            "ok": profile_ok,
-            "contract": profile_detail if profile_ok else "",
-            "seconds": _stage_seconds(stage_started),
-        }
-        if not profile_ok:
-            self.diagnostics["profile"] = profile_detail
-            self.reasons.append(f"profiling contract failed ({profile_detail})")
-        return profile_ok
 
 
 async def _preflight_async(
@@ -767,7 +759,6 @@ async def _preflight_async(
             correctness_ok=False,
             bench_ok=False,
             graph_ok=not contract.require_graph,
-            profile_ok=not contract.require_profile,
             ranks_ok=contract.require_ranks <= 1,
             reasons=[f"driver file not found: {driver}"],
         )
@@ -791,16 +782,12 @@ async def _preflight_async(
         )
     if contract.require_ranks > 1:
         work.details["distributed"] = {"ok": graph.ranks_ok, "required_ranks": contract.require_ranks}
-    profile_ok = True
-    if contract.require_profile:
-        profile_ok = await work.check_profile(driver, deadline_unix)
-    ok = correctness_ok and work.bench_ok and graph.graph_ok and profile_ok and graph.ranks_ok
+    ok = correctness_ok and work.bench_ok and graph.graph_ok and graph.ranks_ok
     return PreflightResult(
         ok=ok,
         correctness_ok=correctness_ok,
         bench_ok=work.bench_ok,
         graph_ok=graph.graph_ok,
-        profile_ok=profile_ok,
         ranks_ok=graph.ranks_ok,
         reasons=work.reasons,
         details=work.details,

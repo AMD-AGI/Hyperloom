@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as life
+from hyperloom.orchestrator.actions.executors.serving import _multi_node_server_lifecycle as life
 from hyperloom.orchestrator.actions.executors import profile
 
 _PD_WORKERS = {

@@ -34,6 +34,10 @@ SHARE_MINUTES = 63.0
 AGENT_PORT = 31100
 #: The axis an AgentX session is graded on unless the run names another.
 DEFAULT_AGENTX_OBJECTIVE = AgentXObjective.P50_INTERACTIVITY
+#: The longest boot budget a run may give its tests' servers: six hours, past any checkpoint load a test would wait for.
+#: The round raises the serving framework's own ready timeout above the budget (``inference_suite.compose``), so the
+#: whole range buys the boot time it promises.
+MAX_BOOT_BUDGET_SEC = 6 * 3600
 
 
 def sweep_concs(conc: int) -> tuple[int, ...]:
@@ -75,6 +79,9 @@ class Workload:
     expert-parallel size either is served at.
     ``agentx_duration_sec`` is an AgentX workload's trace window, ``None`` for the measuring harness's default.
     ``agentx_objective`` is the axis an AgentX workload is graded on; an InferenceX one is graded on output throughput.
+    ``boot_budget_sec`` is at least how long the server of a test may take to be ready, which may also lengthen how
+    long an attempt of the test may run (:func:`~hyperloom_multibranch.scheduling.local_peers.attempt_timeout_sec`); it
+    never shortens either; ``None`` for the defaults of both.
 
     ``gpu_type`` is named, not detected: the toolbox writes it into every measurement spec, built before PRELUDE runs.
     """
@@ -90,6 +97,7 @@ class Workload:
     ep: int = DEFAULT_EP
     agentx_duration_sec: int | None = None
     agentx_objective: AgentXObjective = DEFAULT_AGENTX_OBJECTIVE
+    boot_budget_sec: int | None = None
 
     @property
     def model_basename(self) -> str:
@@ -211,6 +219,7 @@ __all__ = [
     "AGENT_PORT",
     "DEFAULT_AGENTX_OBJECTIVE",
     "DOSSIER_MINUTES",
+    "MAX_BOOT_BUDGET_SEC",
     "SHARE_MINUTES",
     "SWEEP_FACTORS",
     "InferenceXShape",

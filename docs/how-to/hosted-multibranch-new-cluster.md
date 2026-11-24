@@ -37,7 +37,7 @@ These are set in the app container's environment.
 | `HYPERLOOM_SOURCE_SHA` | yes | The full 40-hex commit the run executes. |
 | `HYPERLOOM_RSI_ARCHIVE` | yes, for the hosted multi-branch entry | Writable directory where sessions archive their search trees for later sessions to learn from. Point every session of a deployment at the same directory to share what they learn; a private directory keeps a session's tree out of the shared archive. There is no default. When the sessions may be different host accounts of one group, make it a directory of that group with the setgid bit (`chmod 2775`). |
 | `INFERENCE_SUITE_TOOL_CACHE` | no | The tool cache `install.sh` staged the pinned InferenceX client in. Default `inference-suite-tools` under the dependency cache. Without a staging there that verifies, the session refuses to start, naming `python -m inference_suite stage --tool-cache <dir>`. |
-| `HYPERLOOM_HOST_LAYER` | yes, unless `HYPERLOOM_SPECIALIST_USER` names an account the app can run agents as | The hosting layer's directory. A hosted run launches an agent under bubblewrap only with the layer's `bin/bwrap`, never one on `PATH` (the framework image may carry its own). |
+| `HYPERLOOM_HOST_LAYER` | yes, unless `HYPERLOOM_SPECIALIST_USER` names an account the app can run agents as | The hosting layer's directory. A hosted run launches an agent under bubblewrap only with the layer's `bin/bwrap`, never one on `PATH` (the framework image may carry its own). Where the container's root mount is unbindable (apptainer), bubblewrap runs only under the layer's `bin/unshare`, never one on `PATH`; the layer image does not build it, so a deployment there adds a static util-linux `unshare` whose `--help` lists `--user`, `--map-current-user`, `--mount` and `--propagation` (2.37.2 does) to the layer directory. |
 
 The model is named by the campaign spec (`model.path`), not by a variable. The app host reads the model's tokenizer
 files at that path.
@@ -45,7 +45,11 @@ files at that path.
 A hosted run starts nothing unconfined in the app container, beside its credentials: its specialists run as the account
 `HYPERLOOM_SPECIALIST_USER` names where it can be used, else under the layer's bubblewrap (`HYPERLOOM_HOST_LAYER`).
 Where neither can isolate them, the run ends before anything starts, naming both reasons (exit code 1); a bubblewrap
-that gives no answer within 10 s leaves the host to start the run again.
+that gives no answer within 10 s leaves the host to start the run again. Where the root mount is unbindable, a root app
+runs every launch under `unshare --mount`, and an app that is not root under `unshare --user --map-current-user --mount
+--propagation private` (the layer's `bin/unshare`, above). Under that user-namespace tier no launch can join another
+sandbox's namespaces: the specialists are confined, but a run measured on this container's cards is refused (see
+below), and a run measured in the grant's sandboxes starts.
 
 Each leg of a run may be another host account of one group. The entry checks `HYPERLOOM_STATE_DIR` and
 `USER_DATA_PATH` before it hands over (see the table above); before a session starts,
@@ -82,6 +86,32 @@ sandbox and runs every test it fits. A dev sandbox a branch is promised takes th
 `multibranch.make_before_break: false` in the campaign spec (`--no-make-before-break` on `run --measurement hosted`) to
 run every test the grant fits and close each sandbox when its test ends.
 
+### AgentX window and boot budget
+
+The `multibranch` block of the campaign spec carries the options of `run` that set how long a test runs:
+
+```json
+"workload": {"conc": 16, "precision": "fp8"},
+"multibranch": {
+  "workload": "agentx",
+  "agentx_duration_sec": 3600,
+  "agentx_objective": "p50_interactivity",
+  "boot_budget_sec": 5400
+}
+```
+
+- `agentx_duration_sec` (`--agentx-duration-sec`), a positive whole number of seconds: the trace window each test
+  replays; the harness's default (3600 s) when not given.
+- `agentx_objective` (`--agentx-objective`), `p50_interactivity` (the default) or `total_token_throughput`: the axis
+  the session is graded on.
+- `boot_budget_sec` (`--boot-budget-sec`), a positive whole number of seconds, at most 21600: how long, at least, the
+  server of a test may take to be ready; see [Boot budget](run-multibranch.md#options-of-run).
+
+The two AgentX fields are taken with `multibranch.workload: agentx` only; with another workload, or a value of the
+wrong type, the run ends for good (exit code 2), naming the field. A `boot_budget_sec` only raises the limits the
+session sets, and the server's own start timeout follows it: a round sets that timeout to the budget plus 3600 s when
+that is above its usual 10800 s.
+
 ### Starting the runner from the cache
 
 Start the runner with the step that `hyperloom.measure.runner.bootstrap.runner_template_step(...)` returns. It needs
@@ -89,6 +119,16 @@ Start the runner with the step that `hyperloom.measure.runner.bootstrap.runner_t
 `bootstrap.sh` against that manifest, runs the checked copy, and returns at once so the sandbox turns ready. A plain
 `sh <cache>/<HYPERLOOM_SOURCE_SHA>/bootstrap.sh` step is safe only when no account but the builder can write the cache:
 the script is what checks the manifest, so it cannot check itself.
+
+The step makes `/in`, `/out` and `/scratch` (or the directories the template names); the runner only reads the in
+directory, but it must be able to write the out and scratch directories. On an image whose root is read-only the
+platform must bind those writable into the sandbox. A scratch or in directory the step cannot make, or a scratch
+directory it cannot write, ends the start with a `runner_start_failed` status that names it; when the out directory
+itself cannot be made or written, no status can be left there, so the step prints the reason on stderr and exits 1. The
+runner's boot log goes to `/runner-boot.log` (or the template's `boot_log`) when the step can write it, else to
+`runner-boot.log` in the out directory; when neither can be written the start ends with that reason. A template embeds
+the step when it is built, so an existing template keeps the old step, and its boot log at `/runner-boot.log`, until it
+is rebuilt.
 
 The script reads the entry's `source.tar` once and unpacks it into the sandbox's scratch directory only when those bytes
 are the archive the manifest records. It copies the wheels there, checking each against the manifest as it copies,
@@ -133,9 +173,12 @@ script that cannot serve as the base ends the run the same way, naming why.
 ## Dev sandbox template
 
 Only a session that lends dev sandboxes (`multibranch.dev_leases`, `--dev-leases`) or runs autonomous agents
-(`multibranch.autonomous_agents`, `--autonomous-agent`) uses the `dev` template; it then also needs the grant's `dev` key
-(`HYPERLOOM_SANDBOX_KEY_DEV`) and its limits (`HYPERLOOM_GRANT_LIMITS`), and refuses to start without them, and a `dev`
-template of the session's TP in `HYPERLOOM_SANDBOX_TEMPLATES`. The session runs only processes in a `dev` sandbox: their
+(`multibranch.autonomous_agents`, `--autonomous-agent`) uses the `dev` template; a session with neither reads no `dev`
+template and starts whether or not the host gives it a `dev` key. A session that lends needs the grant's `dev` key
+(`HYPERLOOM_SANDBOX_KEY_DEV`), its limits (`HYPERLOOM_GRANT_LIMITS`), a `dev` template of the session's TP in
+`HYPERLOOM_SANDBOX_TEMPLATES`, and a grant that fits one dev sandbox beside one test (`max_gpus` at least twice the TP,
+`max_sandboxes` at least 2); without any of them the run ends before it starts (exit code 2), naming what is missing,
+instead of being restarted. The session runs only processes in a `dev` sandbox: their
 files stay in the session directory, so the template must mount the storage `USER_DATA_PATH` is on at the same path, read
 and write, and the model at the path the campaign spec names. The sandbox's commands run as root and are given the app
 host's LLM gateway variables (`ANTHROPIC_*`, `OPENAI_*`) and its CA bundle variables (`SSL_CERT_FILE` and the like), whose
@@ -163,7 +206,10 @@ run in the app container, so the run needs no measurement or `dev` template, no 
   every test runs there.
 - The agent and dev sandboxes and the tests run in this container, beside the run's credentials, so the run starts only
   where they run isolated, as the specialists must: under the layer's bubblewrap (`HYPERLOOM_HOST_LAYER`). Where it
-  cannot sandbox them, the run ends before anything starts, naming them and why (exit code 1).
+  cannot sandbox them, the run ends before anything starts, naming them and why (exit code 1). Their commands join a
+  holder's namespaces, which bubblewrap cannot do under the `unshare --user` tier (an app that is not root on a node
+  whose root mount is unbindable): there the run is refused at start even though the specialists are confined
+  (`a launch cannot join another sandbox's namespaces here: ...`); measure such a deployment in the grant's sandboxes.
 - Without a visible-device mask, the cards are as many as `rocm-smi` shows, and a container that holds fewer render
   nodes (`/dev/dri/renderD*`) than that is refused, naming both counts: set `ROCR_VISIBLE_DEVICES` to the cards it was
   given.

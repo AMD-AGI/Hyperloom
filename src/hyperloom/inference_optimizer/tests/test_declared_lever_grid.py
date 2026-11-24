@@ -24,7 +24,7 @@ from hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers 
     declared_lever_payload,
     load_declared_levers,
 )
-from hyperloom.orchestrator.actions.executors.explore import _lever_seeded_payload
+from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import _lever_seeded_payload
 
 _LEVERS = [
     {"name": "workers_1", "extra_envs": {"GPU_CHAIN_WORKERS": "1"}},
@@ -181,11 +181,11 @@ def test_resolve_grid_skips_names_the_real_ledger_has_benched(scripts_dir):
 )
 def test_launch_rejects_extra_envs_that_normalize_away(scripts_dir, bad_envs, capsys):
     """These pass a raw truthiness check but carry no envs once normalized."""
-    from hyperloom.inference_optimizer import cli
+    from hyperloom.inference_optimizer.cli import session_setup
 
     _declare(scripts_dir, [{"name": "threads_4", "extra_envs": bad_envs}])
     with pytest.raises(SystemExit) as excinfo:
-        cli._require_custom_entrypoint("custom", gpu_type="mi355x")
+        session_setup._require_custom_entrypoint("custom", gpu_type="mi355x")
     assert excinfo.value.code == 2
     # _require_custom_entrypoint also exits 2 when it cannot resolve the entrypoint,
     # so the code alone does not prove this came from the lever check.
@@ -193,11 +193,11 @@ def test_launch_rejects_extra_envs_that_normalize_away(scripts_dir, bad_envs, ca
 
 
 def test_launch_exits_2_on_a_malformed_declaration(scripts_dir, capsys):
-    from hyperloom.inference_optimizer import cli
+    from hyperloom.inference_optimizer.cli import session_setup
 
     (scripts_dir / DECLARED_LEVERS_FILENAME).write_text("{not json", encoding="utf-8")
     with pytest.raises(SystemExit) as excinfo:
-        cli._require_custom_entrypoint("custom", gpu_type="mi355x")
+        session_setup._require_custom_entrypoint("custom", gpu_type="mi355x")
     assert excinfo.value.code == 2
     assert "is not valid JSON" in capsys.readouterr().err
 

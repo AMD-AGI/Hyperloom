@@ -283,7 +283,8 @@ The loop:
   doesn't supply one (so iteration 1 isn't kept unconditionally)
 
 When the search stalls, `--supervisor-backend codex|claude` escalates to a
-supervisor after three consecutive iterations without a new best. Interventions
+supervisor after three consecutive iterations without a new best, or after two
+at `--lanes 1`, where every iteration is a whole session. Interventions
 remain available for the full time budget. The supervisor adds API
 calls only while stuck; bench remains the final gate on every accepted edit.
 
@@ -297,7 +298,7 @@ written to.
 
 | Task | Backend | What it shows |
 |------|---------|---------------|
-| `examples/triton-softmax-forge-loop/` | Triton | Tutorial task — the complete driver contract: correctness, CUDA-graph benchmark, per-case timing, kernel-only profiling |
+| `examples/triton-softmax-forge-loop/` | Triton | Tutorial task — the complete driver contract: correctness, CUDA-graph benchmark, per-case timing |
 | `examples/flydsl-softmax-forge-loop/` | FlyDSL | The same contract plus the stream-routing guard a self-managed-stream DSL needs to be benchmarked honestly |
 | `examples/triton_mixtral_dynamic_quant/` | Triton | Production hot kernel — dynamic per-tensor FP8 quant, `(64, 4096)` BF16 → FP8 E4M3FN |
 | `examples/flydsl_gemma_rmsnorm/` | FlyDSL | Production hot kernel — Gemma RMSNorm, `(64, 2816)` BF16 |

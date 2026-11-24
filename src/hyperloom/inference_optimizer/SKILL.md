@@ -322,7 +322,7 @@ in [Step 1](#step-1--install-one-time-per-pod--venv-rebuild). CLI preflight read
 the regenerated `kernel-agent.env.sh` in-process, from the place `install.sh`
 selected (`assets/runtime_env.sh` decides it for both); the launch shell must not
 source it. Skipping install can leave
-TraceLens/GEAK unavailable or Ray unprepared. A missing runtime env fails
+TraceLens/GEAK unavailable. A missing runtime env fails
 preflight before optimization. `install.sh --check-only` is a *diagnostic*,
 never a substitute.
 
@@ -465,7 +465,7 @@ still waiting then is left unbenched.
 ### IR-8 — `--framework atom` is single-node only
 
 `--framework atom` (`atom.entrypoints.openai_server`) reaches full parity with sglang/vllm
-EXCEPT multi-node: `_apply_atom_auto_tighten` in `cli.py` rejects
+EXCEPT multi-node: `_apply_atom_auto_tighten` in `cli/session_setup.py` rejects
 `--nodes >= 2` with `SystemExit(2)` (atom upstream has no multi-node TP
 wiring). No other flag is auto-flipped — kernel-agent, framework-agent,
 profile / roofline / TraceLens all run on atom. The atom-specific
@@ -561,7 +561,6 @@ of `src/hyperloom/inference_optimizer/assets/install.sh`):
 
 | Component | Provided by |
 |---|---|
-| `ray==2.44.1`, or the lowest published version above it that has a wheel for this interpreter; `RAY_VERSION` is honoured verbatim. The install is certified by Ray's own parser accepting the `ray start` argv Hyperloom passes (`RAY_START_ARGV`). `click` changes in one case only: when Ray 2.44.1's CLI fails to import under `click` 8.3+ (`is not a valid Sentinel`), the installer and preflight hold `click<8.3` once and certify again; nothing else changes `click` | pip |
 | TraceLens public (editable install) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_ROOT`; skills, patches, CLI, analysis orchestrator) |
 | TraceLens-internal (editable install, **optional**) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_INTERNAL_ROOT` only when set; mirrors read-only checkout to `${HYPERLOOM_ROOT}/TraceLens-internal`; rehydration module). Unset => open-source-only. |
 | GEAKv4 Claude Code workflow checkout + SDK deps | `ensure_geak` |
@@ -835,10 +834,17 @@ python3 -m hyperloom optimize \
   benchmark configs, display names, and the optimization report carry the stale
   operator-supplied precision label (e.g. `fp8`/`bf16`) and **mislabel** an
   actually-quantized model. Never leave a conflicting precision when quantizing.
+- Master switch: quantization runs only when `$HYPERLOOM_QUANTIZE_ENABLED` is
+  truthy (`1`/`true`/`yes`/`on`). Without it `--quantize` and
+  `--quantize-scheme` are **skipped**: the run prints a `QUANTIZATION_SKIPPED:`
+  line, sets `$HYPERLOOM_QUANTIZATION_SKIPPED`, and continues on the
+  un-quantized model. The frontend or operator sets the switch on the sandbox;
+  do not export it yourself. When a run is skipped for it, report the line and
+  that setting `HYPERLOOM_QUANTIZE_ENABLED=1` enables quantization.
 - Behavior: one-shot, **never runs on a resume**. On a failed/unusable
   quantization the run **hard-stops (`SystemExit(4)`)** — it never silently
   optimizes the un-quantized source after an explicit `--quantize`.
-  The one exception is a **pre-flight scheme/GPU mismatch** via
+  With the switch on, the one exception is a **pre-flight scheme/GPU mismatch** via
   `--quantize-scheme` (e.g. `mxfp4` on a non-MI355X target): this is **skipped**
   (not a hard stop) and continues on the un-quantized model, emitting a
   `QUANTIZATION_SKIPPED:` line on stdout and setting
@@ -857,7 +863,6 @@ node; do not stop for an extra confirmation. After IR-2, smoke-test the
 CLI:
 
 ```bash
-export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 # TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens
 # to ${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha> and pin it
 # to a fixed SHA. Only export it as an operator override to point at a
@@ -875,14 +880,12 @@ bash "$INSTALL_SH"
 ```
 
 Quirks: with `set -u`, assign dependent vars on separate lines (chained
-`export A=... B=$A` can fail with `unbound variable`). The installer
-leaves a live Ray head; `ray status` must succeed because `trace_analyze`
-submits tasks with `num_gpus>=1` — never restart Ray with `--num-gpus=0`.
+`export A=... B=$A` can fail with `unbound variable`).
 
 `_preflight()` runs every launch as the in-loop counterpart of IR-2 and
 **owns** the things the launcher must NOT do by hand: re-export auth
 aliases (LLM) from `OPENAI_API_KEY`,
-auto-`pip install` the SDKs / `ray`, ROCm hygiene, `--gpu-type` auto-detect, and it emits the
+auto-`pip install` the SDKs, ROCm hygiene, `--gpu-type` auto-detect, and it emits the
 canonical `Preflight diagnostics:` block (paste verbatim into status
 reports). Two checks **abort** the run on failure: the model gate
 (probed against `<OPENAI_BASE_URL>/models`; the allowlist
@@ -893,7 +896,7 @@ the catalog probe is the sole gate; see
 `## Failure Handling`) and, when `--critic-agent` is active, the
 critic-agent runtime probe (`## Critic Backend Selection`).
 
-Don't manually pip-install SDKs, start Ray,
+Don't manually pip-install SDKs
 or `curl /v1/models` — `_preflight()` owns these. See `docs/reference/kernel-execution-path.md`
 for the kernel dispatch and artifact layout.
 
@@ -1045,6 +1048,11 @@ wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is accepted for compatibility; baseline uses the first value.
 Use `--conc-sweep-concs` to override the synthetic ladder SWEEP measures (`256,128,64,32,16,8,4,2`). Native AgentX uses `HYPERLOOM_AGENTX=1` with the ordinary workload flags, or `--benchmark-config` for an AgentX workload YAML. Hyperloom archives the resolved workload as `benchmark.yaml`; CONC is fixed per session, so start a separate session to measure another concurrency.
 
+Concurrency sweeps apply only to serving workloads. For server-less PyTorch
+workloads (`custom` and `xdit`), SWEEP records `non_serving_workload` and proceeds
+to CLOSE. Optimize the declared forward-pass workload; do not propose request
+concurrency as an optimization for these models.
+
 Native AgentX supports one node and SGLang, vLLM or ATOM; an ATOM session takes its base from InferenceX's ATOM agentic entries. It rejects `--enable-conc-sweep`,
 `--isl`, `--osl`, `--profile-osl`, `--max-model-len`, `--quantize` and
 `--quantize-scheme`. `--reference-script` is its base launch, ahead of the
@@ -1086,7 +1094,7 @@ flag needed).
 
 | Flag | Backend class | Behaviour |
 |---|---|---|
-| (none) / `--critic-agent` | `CriticAgentBackend` | Drives the `hyperloom.agents.critic` skill runtime via `python -m hyperloom.agents.critic.runtime.cli prepare-review` → Codex chat completion → `python -m hyperloom.agents.critic.runtime.cli commit-review`. Adds KB priors lookup (with circuit-breaker for unreachable services), per-session memory + idempotent `reviewed_msg_ids` (no double-verdict), `judge_bundle.review_constraints` injected into the LLM prompt, and `needs_review` / `critic_unavailable` source when context is missing. |
+| (none) / `--critic-agent` | `CriticAgentBackend` | Drives the `hyperloom.agents.critic` skill runtime via `python -m hyperloom.agents.critic.runtime.cli prepare-review` → Codex chat completion → `python -m hyperloom.agents.critic.runtime.cli commit-review`. Adds per-session memory + idempotent `reviewed_msg_ids` (no double-verdict), `judge_bundle.review_constraints` injected into the LLM prompt, and `needs_review` / `critic_unavailable` source when context is missing. |
 | `--critic-mock` | `MockCriticBackend` | Always-approve adapter. Use for offline / smoke tests when Codex creds aren't available. |
 
 Default is overridable per pod via
@@ -1113,11 +1121,7 @@ so it is kept in one place.
 | Var | Purpose | Default |
 |---|---|---|
 | `CRITIC_AGENT_ROOT` | Path to the directory containing `runtime/cli.py`. | in-tree `$REPO_ROOT/src/hyperloom/agents/critic/` |
-| `CRITIC_KB_CLIENT_MODE` | `inmemory` keeps KB writes / reads off the wire. `live` requires `KB_BASE_URL`. | `inmemory` |
-| `KB_BASE_URL` | KB service URL when `CRITIC_KB_CLIENT_MODE=live`. | unset (live mode aborts at start if absent) |
-| `KB_TIMEOUT_MS` / `KB_RETRY_MAX` / `KB_DEAD_LETTER_DIR` | Forwarded to the runtime; see `src/hyperloom/agents/critic/README.md`. | runtime defaults |
-| `CRITIC_SESSION_MEMORY_DIR` | Where the runtime persists per-session decisions / reviewed_msg_ids. | `$SESSION_DIR/critic-session-memory` (auto-set by the optimizer; co-located with the Coordinator session and cleaned up alongside it). |
-| `WORKSPACE_PATH` | Skill root the critic-agent runtime resolves prompt assets against. | `$REPO_ROOT` (auto-set). |
+| `CRITIC_SESSION_MEMORY_DIR` | Where the runtime persists per-session reviewed_msg_ids. | `$SESSION_DIR/critic-session-memory` (auto-set by the optimizer; co-located with the Coordinator session and cleaned up alongside it). |
 
 CLI startup checks that `CRITIC_AGENT_ROOT` resolves to a real directory
 with `runtime/cli.py`, then runs `python -m hyperloom.agents.critic.runtime.cli --help`
@@ -1160,7 +1164,7 @@ What this controls:
   back to when no `params.grid` is supplied. atom and xdit are the
   frameworks with programmatic seeds today
   (`_default_grid_for_framework` in
-  `src/hyperloom/orchestrator/actions/executors/_grid_base.py` dispatches to
+  `src/hyperloom/orchestrator/actions/executors/grid/_grid_base.py` dispatches to
   `_atom_default_grid()` / `_xdit_default_grid()`); sglang and vllm continue to rely on
   the orchestration LLM emitting `provenance='default_grid'`
   variants. On those two an `explore` that carries no usable
@@ -1266,8 +1270,7 @@ where a draft/MTP path exists, benchmarked with chat-formatted prompts.
 To override shipped configs without editing them, materialize a per-run asset
 root and `export INFERENCE_OPTIMIZER_ASSET_ROOT="$ASSET_ROOT"` (env var, not a
 CLI flag; `asset_root()` raises `AssetRootNotFound` if the dir is missing).
-`mkdir -p "$ASSET_ROOT/assets/configs"`, `ln -sfn` `actions/` from
-`$REPO_ROOT/src/hyperloom/inference_optimizer/` and `orchestrator/` from
+`mkdir -p "$ASSET_ROOT/assets/configs"`, `ln -sfn` `orchestrator/` from
 `$REPO_ROOT/src/hyperloom/`, then
 copy + edit the relevant `baseline_*.yaml` / `profile_*.yaml`. Reach for this
 only when `_workload_envs.materialize_config_with_envs` defaults don't fit
@@ -1655,9 +1658,11 @@ Benchmark subprocesses use two finite, positive limits:
 
 Session `--max-hours` and cancellation remain effective independently of those
 limits. Session exhaustion is cooperative: it cannot guarantee termination of a
-frozen Coordinator. Busy logs are not proof of useful progress. Setting
-`PYTHONUNBUFFERED=1` only affects Python output; it does not force shell or native
-programs, or upstream subprocess capture, to stream output.
+frozen Coordinator. Busy logs are not proof of useful progress, and quiet logs
+are not proof of a hang: inspect the server and compiler logs and the cache
+artifacts before deciding a cold start was interrupted. Setting
+`PYTHONUNBUFFERED=1` only affects Python output; it does not force shell or
+native programs, or upstream subprocess capture, to stream output.
 
 Cold-start detection is diagnostic, not a separate benchmark timeout policy.
 Profile, KernelForge, GEAK, LLM-call, and framework-owned watchdog budgets retain
@@ -1730,8 +1735,8 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 |---|---|
 | `--critic-agent selected but critic-agent runtime not found` | `export CRITIC_AGENT_ROOT=/path/to/src/hyperloom/agents/critic`, or check the `src/hyperloom/agents/critic/` install. |
 | `hyperloom.agents.critic.runtime.cli prepare-review/commit-review exited rc=2` | Schema/validation bug (per `src/hyperloom/agents/critic/README.md` §Exit codes). Inspect workdir payload; retry with `--critic-mock` while fixing. |
-| `hyperloom.agents.critic.runtime.cli ... timed out after 30s` | KB stuck. If `CRITIC_KB_CLIENT_MODE=live`, drop to `inmemory`. Reproducing in `inmemory` is a bug — that path must not block on I/O. |
-| All verdicts `('needs_review','critic_unavailable')` + `kb_skipped=missing_critical_context` | Static context load failed. Check `manifest.json` has non-empty `model_name`/`framework`; grep `logs/cli.log` for `critic_agent_backend static_context`. |
+| `hyperloom.agents.critic.runtime.cli ... timed out after 30s` | Critic runtime is stuck. It does no remote I/O, so this is a bug: inspect the workdir payload; retry with `--critic-mock` while fixing. |
+| All verdicts `('needs_review','critic_unavailable')` + non-empty `required_context=[...]` | Static context load failed. Check `manifest.json` has non-empty `model_name`/`framework`; grep `logs/cli.log` for `critic_agent_backend static_context`. |
 
 ### Run-time signals
 

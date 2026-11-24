@@ -52,11 +52,8 @@ class CriticRequest:
     """Normalised Critic input: one Coordinator inbox prompt to review."""
 
     session_id: str
-    decision_id: str | None = None
     raw_prompt: str | None = None
     context: dict[str, Any] = field(default_factory=dict)
-    proposals: list[Proposal] = field(default_factory=list)
-    options: dict[str, Any] = field(default_factory=dict)
 
 
 # Parsing
@@ -94,16 +91,6 @@ def _optional_dict(d: dict[str, Any], key: str, *, where: str) -> dict[str, Any]
     return dict(value)
 
 
-def _optional_list(d: dict[str, Any], key: str, *, where: str) -> list[Any]:
-    """Extract an optional list field."""
-    if key not in d or d[key] is None:
-        return []
-    value = d[key]
-    if not isinstance(value, list):
-        raise RequestValidationError(f"{where}: field {key!r} must be a list when present, got {type(value).__name__}")
-    return list(value)
-
-
 def parse_request(raw: dict[str, Any]) -> CriticRequest:
     """Validate the input dict and return a :class:`CriticRequest`."""
     if not isinstance(raw, dict):
@@ -111,35 +98,16 @@ def parse_request(raw: dict[str, Any]) -> CriticRequest:
 
     session_id = _require_str(raw, "session_id", where="request")
 
-    decision_id = _optional_str(raw, "decision_id", where="request")
-
     raw_prompt = _optional_str(raw, "raw_prompt", where="request")
     if not (raw_prompt and raw_prompt.strip()):
         raise RequestValidationError("request: raw_prompt must be a non-empty string")
 
     context = _optional_dict(raw, "context", where="request")
-    options = _optional_dict(raw, "options", where="request")
-
-    proposals_raw = _optional_list(raw, "proposals", where="request")
-    proposals: list[Proposal] = []
-    for i, prop in enumerate(proposals_raw):
-        if not isinstance(prop, dict):
-            raise RequestValidationError(f"request.proposals[{i}] must be an object, got {type(prop).__name__}")
-        msg_id = _require_str(prop, "msg_id", where=f"request.proposals[{i}]")
-        from_agent = _require_str(prop, "from_agent", where=f"request.proposals[{i}]")
-        payload = _optional_dict(prop, "payload", where=f"request.proposals[{i}]")
-        seq = prop.get("seq")
-        if seq is not None and not isinstance(seq, int):
-            raise RequestValidationError(f"request.proposals[{i}].seq must be int when present")
-        proposals.append(Proposal.from_payload(msg_id=msg_id, from_agent=from_agent, payload=payload, seq=seq))
 
     return CriticRequest(
         session_id=session_id,
-        decision_id=decision_id,
         raw_prompt=raw_prompt,
         context=context,
-        proposals=proposals,
-        options=options,
     )
 
 

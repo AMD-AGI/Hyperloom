@@ -52,17 +52,18 @@ in-phase kernel patch would.
 
 * `judge_bundle.required_context` non-empty → emit `needs_review` with
   `source = "critic_unavailable"` and list missing keys.
-* `judge_bundle.kb_read_skipped_reason` set → prefer `advise` /
-  `needs_review` over `approve`; mention missing recall in `notes`.
-* Honor `judge_bundle.review_constraints.approve_requires`.
+* Honor `judge_bundle.review_constraints.approve_requires_by_class` for
+  each proposal's class in `proposal_action_classes`, not the bundle-level
+  `approve_requires`.
 
 ### Hard rules (terse mirror of SKILL.md)
 
-* No `approve` without comparable before/after benchmark + accuracy gate,
-  EXCEPT for archival actions (`report`, `session_breakdown`,
-  `target_analysis`) — these transcribe existing state to disk and
-  introduce no new measurements, so the before/after gate does not
-  apply. Always `approve` archival actions: they are the LLM's only
+* No `approve` of a `patch_landing` proposal (per
+  `review_constraints.proposal_action_classes`) without comparable
+  before/after benchmark + accuracy gate; the other classes are not held
+  to that gate. Always `approve` archival actions (`report`,
+  `session_breakdown`, `target_analysis`): they transcribe existing state
+  to disk and introduce no new measurements, and they are the LLM's only
   honest way to signal "I'm done; write the final summary." Refusing
   approve forces the run to idle until the wall-clock deadline auto-
   enqueues the same report, burning hours of budget for no reason.

@@ -43,8 +43,8 @@ from hyperloom_multibranch.specialist.runtime import (
     SpecialistRuntime,
     restart_notice,
 )
-from hyperloom_multibranch.specialist.scripted import ScriptedSession, ScriptedSetup
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, RecordingVerifier
+from hyperloom_multibranch.tests.scripted import ScriptedSession, ScriptedSetup
 from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.tests.fake_model import FakeToolboxConfig, NoiseModel
 
@@ -326,7 +326,7 @@ async def test_past_the_restarts_a_window_allows_the_specialist_stays_down(sessi
     await _until(lambda: _any_notice(session, "not restarted"), "the runtime to give up")
 
     assert len(runs.started) == 1 + MAX_RESTARTS
-    assert await runtime.status(BRANCH) == SpecialistStatus(False, 1 + MAX_RESTARTS, 0, True, False)
+    assert await runtime.status(BRANCH) == SpecialistStatus(False, 1 + MAX_RESTARTS, 0, True, False, crashed_out=True)
     await runtime.set_k(BRANCH, 2)
     await runtime.stop(BRANCH)
 
@@ -346,7 +346,7 @@ async def test_losses_in_a_row_stop_the_restarts_however_far_apart_they_are(sess
 
     assert len(runs.started) == losses == 3
     assert any(f"lost {losses} sessions in a row" in notice for notice in await session.notices())
-    assert await runtime.status(BRANCH) == SpecialistStatus(False, losses, losses, True, False)
+    assert await runtime.status(BRANCH) == SpecialistStatus(False, losses, losses, True, False, crashed_out=True)
     await runtime.stop(BRANCH)
 
 
@@ -516,6 +516,18 @@ async def test_two_idle_sessions_in_a_row_end_the_specialist_after_one_fresh_ses
     assert any("starts a fresh session" in notice for notice in notices)
     assert any("found nothing to test" in notice and "not restarted" in notice for notice in notices)
     assert await runtime.status(BRANCH) == SpecialistStatus(False, 0, 0, True, False)
+    await runtime.stop(BRANCH)
+
+
+async def test_idle_sessions_after_a_crash_give_up_as_idle_not_as_crashed_out(session):
+    runs = _Runs(errors=(RuntimeError("the agent CLI exited 1"), _idle(), _idle()))
+    runtime = session.runtime(runs)
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH))
+    await _until(lambda: _any_notice(session, "not restarted"), "the runtime to give up")
+
+    assert len(runs.started) == 3
+    assert await runtime.status(BRANCH) == SpecialistStatus(False, 1, 0, True, False)
     await runtime.stop(BRANCH)
 
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, CaseAggregate
 
 # Max times the Stop hook will BLOCK a stop for an unrestored protected-harness change before it gives up, allows the
 # stop, and hands off to the outer loop's force-REVERT.
@@ -25,6 +25,7 @@ class GateMeasurement:
     stage_timeout_sec: int = 1800
     bench_timeout_sec: int = 300
     bench_repeat: int = 1
+    case_aggregate: CaseAggregate = CaseAggregate.ARITHMETIC
     correctness_only: bool = False
     interposed_driver_path: str | None = None
     max_stop_blocks: int = MAX_STOP_BLOCKS

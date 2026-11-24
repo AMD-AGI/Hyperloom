@@ -257,7 +257,7 @@ def test_resume_honours_this_turns_policy_not_the_original():
     kwargs = captured["options"].kwargs
     assert kwargs["allowed_tools"] == ["Read", "Grep", "Glob"]
     assert kwargs["max_turns"] == 4
-    assert kwargs["system_prompt"] == "summarizer role"
+    assert captured["system_prompt"] == "summarizer role"
 
 
 def test_provider_omits_max_turns_for_time_limited_session():
@@ -356,7 +356,7 @@ def test_a_read_only_resume_describes_the_session_tools_but_permits_only_reading
 
     kwargs = captured["options"].kwargs
     assert kwargs["resume"] == "sess-1"
-    assert kwargs["system_prompt"] == "implementer system prompt"
+    assert captured["system_prompt"] == "implementer system prompt"
     assert kwargs["tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]
     assert kwargs["allowed_tools"] == ["Read", "Grep", "Glob"]
     assert _denied_tools(kwargs) == {"Edit", "Write", "Bash"}

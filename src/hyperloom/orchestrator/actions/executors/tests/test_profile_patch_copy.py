@@ -20,8 +20,9 @@ import pytest
 import yaml
 
 from hyperloom.inference_optimizer.session.paths import asset_root
-from hyperloom.orchestrator.actions.executors import _patch_laying, _server_patcher
-from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
+from hyperloom.orchestrator.actions.executors.patching import _patch_laying
+from hyperloom.orchestrator.actions.executors import _server_patcher
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import materialize_config_with_envs
 
 _PATCH_TREE = ("examples", "custom_workflows", "inference_analysis")
 

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.multi_node.cli import _multinode_server_log_dir
+from hyperloom.inference_optimizer.multi_node.cluster_access import _multinode_server_log_dir
 
 
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:

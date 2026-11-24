@@ -21,7 +21,7 @@ from typing import Any
 from hyperloom_common.io import SHARED, atomic_write_json
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.blackboard.vocab import BranchDriver
+from hyperloom_multibranch.contracts.blackboard.vocab import GAVE_UP_CAUSE, BranchDriver
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
@@ -92,7 +92,7 @@ class StopCause(str, Enum):
     JUDGE = "judge"
     SESSION_END = "session_end"
     START_FAILED = "start_failed"
-    GAVE_UP = "gave_up"
+    GAVE_UP = GAVE_UP_CAUSE
     REPAIR_TIME_LIMIT = "repair_time_limit"
 
     @property

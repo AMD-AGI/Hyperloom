@@ -463,11 +463,9 @@ driver.py must cover all known shapes for the six-tuple operator and implement
 the forge-loop contract: `python3 driver.py` prints a correctness line such as
 `SNR: <db> dB` or `allclose: True/False`; `python3 driver.py --warmup 3
 --iters 20 --bench-mode` measures CUDA/HIP graph replays and prints
-`case_ms: <case> <ms>` for every case plus one `mean_ms: <ms>`;
-`python3 driver.py --profile-run` selects one representative case, runs only
-   the target kernel for 1-3 synchronized iterations without reference work or
-   timing output, and exits zero. Do not search other Hyperloom or KernelForge
-   trees for task or driver examples; this prompt is the authoritative contract.
+`case_ms: <case> <ms>` for every case plus one `mean_ms: <ms>`. Do not search
+other Hyperloom or KernelForge trees for task or driver examples; this prompt
+is the authoritative contract.
 
 The host copies driver.py into the repository under optimization before running
 it, one directory below the repository root. Resolve anything you need from the
@@ -475,6 +473,11 @@ tree — a source file to hash, a config to read — as
 `Path(__file__).resolve().parents[1] / "<repo-relative path>"`. Do not derive
 that root from the current working directory, which is not the repository, nor
 from an environment variable, which the loop repoints at its build cache.
+
+The driver has to run the copy under optimization. Importing the operator by
+its package's name does so: the host runs the driver with that copy ahead of
+any installed one. It refuses a driver that loaded one of the task's source
+files from anywhere else, so do not point the driver at an installed path.
 
 Publish the strongest plausible task before investigating secondary candidates.
 The host and forge-loop own validation, so do not spend the analysis budget

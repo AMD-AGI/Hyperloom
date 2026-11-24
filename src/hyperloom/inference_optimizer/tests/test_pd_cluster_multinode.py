@@ -653,15 +653,13 @@ def test_tracelens_patch_failure_reports_the_pod_error(monkeypatch: pytest.Monke
     stdout = json.dumps({"status": "failed", "per_pod": [{"status": "failed", "error": pod_error}]})
     fake = SimpleNamespace(
         EXIT_CONFIG_ERROR=real_cli.EXIT_CONFIG_ERROR,
-        _SHAPE_GATE_DEPS=(),
-        _read_bundled_pod_python_script=lambda *_args: "print()",
         _poll_timeout_from_args=lambda _args: 30,
-        _extract_pod_json=real_cli._extract_pod_json,
         _infera_ssh_bash_with_env=lambda *_args, **_kwargs: subprocess.CompletedProcess(
             ["ssh"], 1, stdout=stdout, stderr="bash: warning: setlocale: LC_ALL: cannot change locale\n"
         ),
     )
     monkeypatch.setattr(pd_cmds, "_cli", lambda: fake)
+    monkeypatch.setattr(pd_cmds, "read_bundled_pod_python_script", lambda *_args: "print()")
     monkeypatch.setattr(pd_cmds, "_require_state", lambda: dict(_PD_STATE))
 
     ns = argparse.Namespace(tracelens_root="/tl", sglang_version_pin=None, patch_set="roofline")
@@ -740,10 +738,7 @@ def test_tracelens_patch_runs_under_the_container_environment(monkeypatch: pytes
     scripts: list[str] = []
     fake = _FakeCli({})
     fake.EXIT_CONFIG_ERROR = real_cli.EXIT_CONFIG_ERROR
-    fake._SHAPE_GATE_DEPS = ()
-    fake._read_bundled_pod_python_script = lambda *_args: "print('patched')"
     fake._poll_timeout_from_args = lambda _args: 30
-    fake._extract_pod_json = real_cli._extract_pod_json
 
     def _bash_with_env(state, ip, script, *, timeout, port=None):
         scripts.append(script)
@@ -753,6 +748,7 @@ def test_tracelens_patch_runs_under_the_container_environment(monkeypatch: pytes
     monkeypatch.setattr(pd_cmds, "_cli", lambda: fake)
     monkeypatch.setattr(pd_cmds, "_require_state", lambda: dict(_PD_STATE))
     monkeypatch.setattr(pd_cmds, "CONTAINER_ENVIRON_PATH", str(environ))
+    monkeypatch.setattr(pd_cmds, "read_bundled_pod_python_script", lambda *_args: "print('patched')")
 
     ns = argparse.Namespace(tracelens_root="/tl", sglang_version_pin=None, patch_set="roofline")
     assert pd_cmds.apply_tracelens_patch(ns) == 0
@@ -766,8 +762,8 @@ def test_tracelens_patch_runs_under_the_container_environment(monkeypatch: pytes
 
 def test_engine_restart_gives_each_pod_its_own_profiler_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeCli({})
-    fake._extract_pod_json = lambda _stdout: {}
     monkeypatch.setattr(pd_cmds, "_cli", lambda: fake)
+    monkeypatch.setattr(pd_cmds, "extract_pod_json", lambda _stdout: {})
     env = {"SGLANG_TORCH_PROFILER_DIR": "/shared/torch_trace"}
     router = {"role": "router", "podIP": "10.0.0.3", "sshPort": 29000}
     second_decode = {"role": "decode", "podIP": "10.0.0.4", "sshPort": 29000}
@@ -791,8 +787,8 @@ def test_infera_frontend_listens_on_the_router_pod_port(
     from hyperloom.inference_optimizer.multi_node.commands import infera
 
     fake = _FakeCli({})
-    fake._extract_pod_json = lambda _stdout: {}
     monkeypatch.setattr(infera, "_mn_cli", fake)
+    monkeypatch.setattr(infera, "extract_pod_json", lambda _stdout: {})
     state = {
         "service_url": service_url,
         "ssh_port": 29000,

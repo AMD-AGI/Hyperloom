@@ -27,6 +27,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     recipe_canonical_id,
 )
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
+from hyperloom.orchestrator.knowledge.recipe_amend import kb_best_config_overrides_for_keep
 from hyperloom.orchestrator.knowledge.recipe_journal import (
     recipe_attrs_from_state,
 )
@@ -581,7 +582,7 @@ def test_what_worked_follows_a_best_config_the_keep_amend_stamped(tmp_path: Path
     journal = coord.recipe_journal
     _stack_one_keep(coord.shared_state)
     coord.shared_state.cumulative_gain_validated_stack_len = 1
-    overrides = journal.kb_best_config_overrides_for_keep(
+    overrides = kb_best_config_overrides_for_keep(
         live=journal.read_local_recipe_row(),
         best_config_candidate={"name": "page32", "extra_server_args": "--page-size 32", "tput": 2200.0},
         throughput_after=2200.0,

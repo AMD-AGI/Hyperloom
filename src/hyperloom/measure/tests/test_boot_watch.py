@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import time
+from dataclasses import replace
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,7 @@ from typing import Any
 import pytest
 import yaml
 
-from hyperloom.measure import boot_watch, local
+from hyperloom.measure import boot_watch, local, local_outcome
 from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.measure.boot_watch import BOOT_SHARE, boot_limit_sec, boot_seconds
 from hyperloom.measure.local import LocalMeasurementBackend
@@ -169,7 +170,7 @@ def test_only_a_round_that_boots_a_server_is_watched(monkeypatch, tmp_path) -> N
     monkeypatch.setattr(local, "run_grid", _ServerGrid(READY_SERVER))
     watched = _record_watches(monkeypatch)
 
-    async def boot_then_reuse(run: local._Run) -> None:
+    async def boot_then_reuse(run: local_outcome.Run) -> None:
         run.add(0, await local._grid(run, 0, "boot"))
         run.add(0, await local._grid(run, 0, "reuse", server_already_ready=True))
 
@@ -189,6 +190,38 @@ def test_the_limit_is_a_share_of_what_the_point_allows_and_never_of_more_than_th
     assert boot_limit_sec(_benchmark("vllm", 2700), 3600) == BOOT_SHARE * 2700
     assert boot_limit_sec(_benchmark("vllm", 7200), 3600) == 1800
     assert boot_limit_sec(_benchmark("vllm", 0), 3600) == 1800
+
+
+def test_a_boot_budget_the_call_gives_is_the_limit_when_longer_than_the_share_and_never_more_than_the_round() -> None:
+    assert boot_limit_sec(_benchmark("sglang"), 7200, boot_budget_sec=5400) == 5400
+    assert boot_limit_sec(_benchmark("vllm", 900), 7200, boot_budget_sec=5400) == 5400
+    assert boot_limit_sec(_benchmark("vllm", 900), 3600, boot_budget_sec=5400) == 3600
+    assert boot_limit_sec(_benchmark("custom"), 7200, boot_budget_sec=5400) is None
+
+
+@pytest.mark.parametrize(("timeout", "budget"), [(3600, 60), (3600, 1800), (7200, 1800), (7200, 3600)])
+def test_a_boot_budget_no_longer_than_the_share_keeps_the_share(timeout: int, budget: int) -> None:
+    assert boot_limit_sec(_benchmark("sglang", timeout), timeout, boot_budget_sec=budget) == BOOT_SHARE * timeout
+
+
+def test_the_backend_watches_a_boot_for_the_budget_its_call_gives(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(local, "run_grid", _ServerGrid(READY_SERVER))
+    watched = _record_watches(monkeypatch)
+    call = replace(_call(tmp_path, _point(tmp_path)), boot_budget_sec=3)
+
+    LocalMeasurementBackend().run_test(call)
+
+    assert watched and set(watched) == {3.0}, "not the 2 s half of the 4 s timeout"
+
+
+def test_the_backend_keeps_the_share_of_a_boot_when_the_budget_its_call_gives_is_shorter(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(local, "run_grid", _ServerGrid(READY_SERVER))
+    watched = _record_watches(monkeypatch)
+    call = replace(_call(tmp_path, _point(tmp_path)), boot_budget_sec=1)
+
+    LocalMeasurementBackend().run_test(call)
+
+    assert watched and set(watched) == {2.0}, "the 2 s half of the 4 s timeout, not the 1 s budget"
 
 
 @pytest.mark.parametrize("framework", ["custom", "xdit", ""])

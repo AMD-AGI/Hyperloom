@@ -22,6 +22,7 @@ from hyperloom.inference_optimizer.breakdown.workflow_contract import workflow_c
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 
 from . import machine_state as _phase_state
+from . import phase_predicates, phase_transitions
 from .machine import Transition
 from ..bus.message_bus import Message
 from ..state.task_registry import TERMINAL_STATES, IllegalTransition, Task, TaskNotFound, TaskSpec
@@ -849,9 +850,9 @@ class ClosePhase(CoordinatorCollaborator):
         )
         kernel_facts = await self._coord.phase_kernel.exit_facts()
         now = time.time()
-        decision = _phase_state.compute_next_phase(
+        decision = phase_transitions.compute_next_phase(
             state,
-            in_flight=_phase_state.WorkInFlight(
+            in_flight=phase_predicates.WorkInFlight(
                 enablement=enablement_in_flight,
                 kernel=kernel_facts.agent_in_flight,
             ),

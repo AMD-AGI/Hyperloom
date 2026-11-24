@@ -150,8 +150,6 @@ def _make_fake_runtime(
             envelope = _build_envelope_from_review(review, request["session_id"])
             emit = {
                 "session_id": request["session_id"],
-                "decision_id": None,
-                "kb_writes": [],
                 "notes": [],
                 "intent_envelope": envelope,
             }
@@ -204,7 +202,6 @@ def _make_backend(
     judge_bundle: dict[str, Any],
     fail_phase: str | None = None,
     runtime_calls: list[RuntimeCall] | None = None,
-    known_actions: tuple[str, ...] = (),
 ) -> tuple[CriticAgentBackend, FakeOpenAIClient]:
     fake_client = FakeOpenAIClient(codex_replies)
     fake_caller = _make_fake_runtime(
@@ -406,8 +403,7 @@ async def test_single_proposal_yields_matching_verdict(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "merged_context": {"model": "Llama-3.1-8B", "framework": "sglang"},
-        "missing_context": [],
+        "context": {"model": "Llama-3.1-8B", "framework": "sglang"},
         "required_context": [],
         "proposals": [
             {
@@ -418,8 +414,6 @@ async def test_single_proposal_yields_matching_verdict(
                 "payload": {"action_name": "baseline"},
             }
         ],
-        "kb_priors_by_proposal": {"abc1": []},
-        "kb_read_skipped_reason": None,
         "review_constraints": {
             "allowed_verdicts": ["approve", "reject", "redirect", "advise", "needs_review"],
             "approve_requires": [
@@ -428,9 +422,7 @@ async def test_single_proposal_yields_matching_verdict(
                 "active_path_proof_when_relevant",
                 "rollback_plan",
             ],
-            "ceiling_importance": 0.84,
         },
-        "notes": [],
     }
     reply = """```json
 {"review_verdicts": [
@@ -490,7 +482,7 @@ async def test_multiple_proposals_yield_one_verdict_each(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
                 "msg_id": "p1",
@@ -507,11 +499,7 @@ async def test_multiple_proposals_yield_one_verdict_each(
                 "predicted_gain_pct": 1.0,
             },
         ],
-        "kb_priors_by_proposal": {"p1": [], "p2": []},
-        "kb_read_skipped_reason": None,
         "review_constraints": {},
-        "notes": [],
-        "missing_context": [],
         "required_context": [],
     }
     reply = """```json
@@ -540,13 +528,9 @@ async def test_empty_proposals_yields_heartbeat_no_llm(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [],
-        "kb_priors_by_proposal": {},
-        "kb_read_skipped_reason": None,
         "review_constraints": {},
-        "notes": [],
-        "missing_context": [],
         "required_context": [],
     }
     backend, client = _make_backend(
@@ -572,7 +556,7 @@ async def test_unparseable_llm_reply_fails_the_turn(
 ):
     """Proposals were reviewed and no verdict came back — that is a failure."""
     judge_bundle = {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
                 "msg_id": "px",
@@ -582,11 +566,7 @@ async def test_unparseable_llm_reply_fails_the_turn(
                 "predicted_gain_pct": 0.0,
             }
         ],
-        "kb_priors_by_proposal": {"px": []},
-        "kb_read_skipped_reason": None,
         "review_constraints": {},
-        "notes": [],
-        "missing_context": [],
         "required_context": [],
     }
     backend, _ = _make_backend(
@@ -601,7 +581,7 @@ async def test_unparseable_llm_reply_fails_the_turn(
 
 def _single_proposal_judge_bundle() -> dict[str, Any]:
     return {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
                 "msg_id": "px",
@@ -611,11 +591,7 @@ def _single_proposal_judge_bundle() -> dict[str, Any]:
                 "predicted_gain_pct": 0.0,
             }
         ],
-        "kb_priors_by_proposal": {"px": []},
-        "kb_read_skipped_reason": None,
         "review_constraints": {},
-        "notes": [],
-        "missing_context": [],
         "required_context": [],
     }
 
@@ -675,10 +651,9 @@ async def test_openai_review_truncated_twice_fails_the_turn(
 async def test_missing_critical_context_yields_needs_review(
     fake_critic_root: Path,
     fake_session_dir: Path,
-    recorded_iterations: list[Any],
 ):
     judge_bundle = {
-        "merged_context": {},
+        "context": {},
         "proposals": [
             {
                 "msg_id": "p1",
@@ -688,11 +663,7 @@ async def test_missing_critical_context_yields_needs_review(
                 "predicted_gain_pct": 0.0,
             }
         ],
-        "kb_priors_by_proposal": {},
-        "kb_read_skipped_reason": "missing_critical_context",
         "review_constraints": {},
-        "notes": ["model and/or framework unknown — KB priors not fetched"],
-        "missing_context": ["model", "framework"],
         "required_context": ["model", "framework"],
     }
     reply = """```json
@@ -714,7 +685,6 @@ async def test_missing_critical_context_yields_needs_review(
     p = res.intents[0].payload
     assert p["verdict"] == "needs_review"
     assert p["source"] == "critic_unavailable"
-    assert recorded_iterations[0].judge_bundle["kb_read_skipped_reason"] == "missing_critical_context"
 
 
 # Case 6: subprocess exit code 2 -> BackendError
@@ -741,7 +711,7 @@ async def test_commit_review_subprocess_failure_raises(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
                 "msg_id": "z",
@@ -751,11 +721,7 @@ async def test_commit_review_subprocess_failure_raises(
                 "predicted_gain_pct": 0.0,
             }
         ],
-        "kb_priors_by_proposal": {"z": []},
-        "kb_read_skipped_reason": None,
         "review_constraints": {},
-        "notes": [],
-        "missing_context": [],
         "required_context": [],
     }
     reply = '{"review_verdicts": [{"target_proposal_msg_id": "z", "verdict": "approve"}]}'
@@ -768,65 +734,6 @@ async def test_commit_review_subprocess_failure_raises(
     )
     with pytest.raises(BackendError, match=r"commit-review.*rc=2"):
         await backend.run("prompt")
-
-
-# Case 7: CRITIC_KB_CLIENT_MODE=live + kb_unreachable -> still emits, surfaces reason
-@pytest.mark.asyncio
-async def test_kb_unreachable_still_emits_verdict(
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-    recorded_iterations: list[Any],
-    monkeypatch: pytest.MonkeyPatch,
-):
-    judge_bundle = {
-        "merged_context": {"model": "m", "framework": "sglang"},
-        "proposals": [
-            {
-                "msg_id": "p1",
-                "from_agent": "orchestration",
-                "action_name": "baseline",
-                "payload": {},
-                "predicted_gain_pct": 0.0,
-            }
-        ],
-        "kb_priors_by_proposal": {"p1": []},
-        "kb_read_skipped_reason": "kb_unreachable",
-        "review_constraints": {
-            "kb_breaker": {"open": True, "until": 1234567890},
-        },
-        "notes": [
-            "KB service unreachable (circuit breaker open); proceeding without priors",
-        ],
-        "missing_context": [],
-        "required_context": [],
-    }
-    reply = """```json
-{"review_verdicts": [
-  {"target_proposal_msg_id": "p1", "verdict": "advise",
-   "source": "critic",
-   "reasoning": "approving without KB priors is risky; advise instead",
-   "notes": ["KB unreachable"]}
-]}
-```"""
-    monkeypatch.setenv("CRITIC_KB_CLIENT_MODE", "live")
-    monkeypatch.setenv("KB_BASE_URL", "http://127.0.0.1:1")
-    runtime_calls: list[RuntimeCall] = []
-    backend, _ = _make_backend(
-        fake_critic_root,
-        fake_session_dir,
-        codex_replies=[reply],
-        judge_bundle=judge_bundle,
-        runtime_calls=runtime_calls,
-    )
-    res = await backend.run("prompt")
-
-    assert len(res.intents) == 1
-    assert res.intents[0].payload["verdict"] == "advise"
-    assert recorded_iterations[0].judge_bundle["kb_read_skipped_reason"] == "kb_unreachable"
-    # KB env passed through to the subprocess
-    env = runtime_calls[0].env
-    assert env["CRITIC_KB_CLIENT_MODE"] == "live"
-    assert env["KB_BASE_URL"] == "http://127.0.0.1:1"
 
 
 # Default runtime caller: real subprocess command shape and the operator-matched failure texts
@@ -913,7 +820,7 @@ async def test_per_turn_workdirs_are_isolated(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
                 "msg_id": "px",
@@ -923,11 +830,7 @@ async def test_per_turn_workdirs_are_isolated(
                 "predicted_gain_pct": 0.0,
             }
         ],
-        "kb_priors_by_proposal": {"px": []},
-        "kb_read_skipped_reason": None,
         "review_constraints": {},
-        "notes": [],
-        "missing_context": [],
         "required_context": [],
     }
     reply = '{"review_verdicts": [{"target_proposal_msg_id": "px", "verdict": "approve"}]}'
@@ -950,7 +853,7 @@ async def test_user_prompt_includes_judge_bundle_and_instructions(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
                 "msg_id": "abc",
@@ -960,11 +863,7 @@ async def test_user_prompt_includes_judge_bundle_and_instructions(
                 "predicted_gain_pct": 0.0,
             }
         ],
-        "kb_priors_by_proposal": {"abc": []},
-        "kb_read_skipped_reason": None,
         "review_constraints": {},
-        "notes": [],
-        "missing_context": [],
         "required_context": [],
     }
     reply = '{"review_verdicts": [{"target_proposal_msg_id": "abc", "verdict": "approve"}]}'
@@ -995,7 +894,7 @@ def test_the_output_schema_asks_for_the_rule_the_verdict_rests_on():
 def _bundle_reviewing(action_name: str) -> dict[str, Any]:
     """A judge bundle whose single proposal proposes ``action_name``."""
     return {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
                 "msg_id": "abc",
@@ -1005,11 +904,7 @@ def _bundle_reviewing(action_name: str) -> dict[str, Any]:
                 "predicted_gain_pct": 0.0,
             }
         ],
-        "kb_priors_by_proposal": {"abc": []},
-        "kb_read_skipped_reason": None,
         "review_constraints": {},
-        "notes": [],
-        "missing_context": [],
         "required_context": [],
     }
 
@@ -1094,7 +989,7 @@ async def test_run_populates_request_context_from_manifest(
         },
     )
     judge_bundle = {
-        "merged_context": {"model": "Llama-3.1-8B-Instruct", "framework": "sglang"},
+        "context": {"model": "Llama-3.1-8B-Instruct", "framework": "sglang"},
         "proposals": [
             {
                 "msg_id": "p1",
@@ -1104,11 +999,7 @@ async def test_run_populates_request_context_from_manifest(
                 "predicted_gain_pct": 0.0,
             }
         ],
-        "kb_priors_by_proposal": {"p1": []},
-        "kb_read_skipped_reason": None,
         "review_constraints": {},
-        "notes": [],
-        "missing_context": [],
         "required_context": [],
     }
     reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve"}]}'
@@ -1172,13 +1063,9 @@ async def test_missing_manifest_falls_back_to_empty_context(
 ):
     # No manifest written: backend must not raise; request.context = {} + a WARNING is logged.
     judge_bundle = {
-        "merged_context": {},
+        "context": {},
         "proposals": [],
-        "kb_priors_by_proposal": {},
-        "kb_read_skipped_reason": None,
         "review_constraints": {},
-        "notes": [],
-        "missing_context": [],
         "required_context": [],
     }
     fake_caller = _make_fake_runtime(judge_bundle=judge_bundle)
@@ -1255,7 +1142,7 @@ async def test_required_context_reaches_recorded_judge_bundle(
     recorded_iterations: list[Any],
 ):
     judge_bundle = {
-        "merged_context": {},
+        "context": {},
         "proposals": [
             {
                 "msg_id": "p1",
@@ -1265,11 +1152,7 @@ async def test_required_context_reaches_recorded_judge_bundle(
                 "predicted_gain_pct": 0.0,
             }
         ],
-        "kb_priors_by_proposal": {},
-        "kb_read_skipped_reason": "missing_critical_context",
         "review_constraints": {},
-        "notes": [],
-        "missing_context": ["model", "framework"],
         "required_context": ["model", "framework"],
     }
     reply = """```json
@@ -1477,10 +1360,7 @@ async def test_critic_agent_real_runtime_clears_proposal(
     session_memories = list(memory_root.iterdir())
     assert session_memories, f"session memory dir is empty under {memory_root}"
     sm_dir = session_memories[0]
-    # The runtime stamps decisions.jsonl + reviewed_msg_ids.json once a verdict commits.
-    assert (sm_dir / "decisions.jsonl").is_file(), (
-        f"decisions.jsonl missing under {sm_dir} (entries: {list(sm_dir.iterdir())})"
-    )
+    # The runtime stamps reviewed_msg_ids.json once a verdict commits.
     assert (sm_dir / "reviewed_msg_ids.json").is_file(), f"reviewed_msg_ids.json missing under {sm_dir}"
 
     # The Coordinator generates the msg_id, so just check the file is non-trivial.
@@ -1523,155 +1403,6 @@ async def test_critic_agent_heartbeat_when_no_proposal(
         )
     finally:
         await c.stop()
-
-
-# KB trace + dry-run injection gate
-def test_build_kb_priors_trace_counts_and_reference():
-    judge_bundle = {
-        "kb_priors_trace": {
-            "configured": True,
-            "mode": "per_proposal",
-            "client_mode": "live",
-            "scope_filter": {"model": "m"},
-            "limit": 5,
-            "requests": [{"msg_id": "p1", "count": 2}],
-        },
-        "kb_priors_by_proposal": {"p1": [{"slug": "a"}, {"slug": "b"}]},
-        "kb_read_skipped_reason": None,
-    }
-    review = {"review_verdicts": [{"verdict": "approve", "kb_evidence": ["k"]}]}
-    trace = CriticAgentBackend._build_kb_priors_trace(judge_bundle, review)
-    assert trace["configured"] is True
-    assert trace["mode"] == "per_proposal"
-    assert trace["prior_count"] == 2
-    assert trace["referenced_in_verdict"] is True
-
-
-def test_build_kb_priors_trace_carries_skip_reason():
-    judge_bundle = {
-        "kb_priors_trace": {},
-        "kb_priors_by_proposal": {},
-        "kb_read_skipped_reason": "kb_unreachable",
-    }
-    trace = CriticAgentBackend._build_kb_priors_trace(judge_bundle, None)
-    assert trace["skipped_reason"] == "kb_unreachable"
-    assert trace["prior_count"] == 0
-
-
-def _kb_trace_judge_bundle() -> dict[str, Any]:
-    return {
-        "merged_context": {"model": "m", "framework": "sglang"},
-        "proposals": [
-            {
-                "msg_id": "p1",
-                "from_agent": "orchestration",
-                "action_name": "sweep",
-                "payload": {},
-                "predicted_gain_pct": 1.0,
-            },
-        ],
-        "kb_priors_by_proposal": {"p1": []},
-        "kb_priors_trace": {
-            "configured": True,
-            "mode": "per_proposal",
-            "client_mode": "",
-            "scope_filter": {"model": "m"},
-            "limit": 5,
-            "requests": [{"msg_id": "p1", "cache": "miss", "count": 0}],
-        },
-        "kb_read_skipped_reason": None,
-        "review_constraints": {},
-        "notes": [],
-        "missing_context": [],
-        "required_context": [],
-    }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("kb_evidence", "referenced"),
-    [
-        pytest.param(["kb_x"], True, id="cites-kb"),
-        pytest.param([], False, id="cites-nothing"),
-    ],
-)
-async def test_the_recorded_kb_trace_says_whether_a_verdict_cited_the_kb(
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-    recorded_iterations: list[Any],
-    kb_evidence: list[str],
-    referenced: bool,
-):
-    verdict = {"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic", "kb_evidence": kb_evidence}
-    backend, _ = _make_backend(
-        fake_critic_root,
-        fake_session_dir,
-        codex_replies=[json.dumps({"review_verdicts": [verdict]})],
-        judge_bundle=_kb_trace_judge_bundle(),
-    )
-    await backend.run("prompt")
-    assert recorded_iterations[0].kb_priors["referenced_in_verdict"] is referenced
-
-
-class _FakeKbEmitter:
-    def __init__(self):
-        self.enabled = True
-        self.spans: list[dict[str, Any]] = []
-
-    def record_kb_span(self, **kwargs):
-        self.spans.append(kwargs)
-
-    def record_llm_call(self, row):
-        pass
-
-    def record_conversation(self, row):
-        pass
-
-
-@pytest.mark.asyncio
-async def test_run_mirrors_kb_trace_to_langfuse(
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-    monkeypatch,
-):
-    fake_em = _FakeKbEmitter()
-    from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
-
-    monkeypatch.setattr(lfe, "get_emitter", lambda sd: fake_em)
-    reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic"}]}'
-    backend, _ = _make_backend(
-        fake_critic_root,
-        fake_session_dir,
-        codex_replies=[reply],
-        judge_bundle=_kb_trace_judge_bundle(),
-    )
-    await backend.run("prompt")
-    names = sorted(s["name"] for s in fake_em.spans)
-    assert names == ["kb_priors:iter_0"]
-    agents = {s["agent"] for s in fake_em.spans}
-    assert agents == {"critic"}
-
-
-@pytest.mark.asyncio
-async def test_run_skips_langfuse_mirror_when_disabled(
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-    monkeypatch,
-):
-    fake_em = _FakeKbEmitter()
-    fake_em.enabled = False
-    from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
-
-    monkeypatch.setattr(lfe, "get_emitter", lambda sd: fake_em)
-    reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic"}]}'
-    backend, _ = _make_backend(
-        fake_critic_root,
-        fake_session_dir,
-        codex_replies=[reply],
-        judge_bundle=_kb_trace_judge_bundle(),
-    )
-    await backend.run("prompt")
-    assert fake_em.spans == []
 
 
 # Claude CLI review path (protocol="anthropic")
@@ -1738,8 +1469,7 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
     monkeypatch: pytest.MonkeyPatch,
 ):
     judge_bundle = {
-        "merged_context": {"model": "Llama-3.1-8B", "framework": "sglang"},
-        "missing_context": [],
+        "context": {"model": "Llama-3.1-8B", "framework": "sglang"},
         "required_context": [],
         "proposals": [
             {
@@ -1750,10 +1480,7 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
                 "payload": {"action_name": "baseline"},
             }
         ],
-        "kb_priors_by_proposal": {"abc1": []},
-        "kb_read_skipped_reason": None,
         "review_constraints": {"allowed_verdicts": ["approve", "reject"]},
-        "notes": [],
     }
     review_json = (
         '{"review_verdicts": [{"target_proposal_msg_id": "abc1", '
@@ -1769,7 +1496,7 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
 
     res = await backend.run("prompt-with-proposal-abc1", system_prompt="critic system")
 
-    # Full KB+tools critic-agent produced the verdict via the Anthropic path.
+    # The critic-agent produced the verdict via the Anthropic path.
     assert len(res.intents) == 1
     assert res.intents[0].type == IntentType.REVIEW_VERDICT
     assert res.intents[0].payload["target_proposal_msg_id"] == "abc1"
@@ -1809,7 +1536,7 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
 
 def _minimal_judge_bundle() -> dict[str, Any]:
     return {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [{"msg_id": "p1", "from_agent": "orchestration", "action_name": "baseline", "payload": {}}],
         "review_constraints": {},
     }
@@ -1835,7 +1562,7 @@ async def test_critic_cache_blocks_preserve_transport_prompt(
     from hyperloom_common.llm import claude_oneshot, llm_config
 
     bundle = _minimal_judge_bundle()
-    bundle["notes"] = ["Unicode \u03bb ==== JUDGE BUNDLE ==== inside data"]
+    bundle["required_context"] = ["Unicode \u03bb ==== JUDGE BUNDLE ==== inside data"]
     reply = '{"review_verdicts":[{"target_proposal_msg_id":"p1","verdict":"approve"}]}'
     backend, _ = _make_anthropic_backend(
         fake_critic_root, fake_session_dir, monkeypatch, results=[], judge_bundle=bundle
@@ -1883,16 +1610,11 @@ async def test_critic_cache_blocks_preserve_transport_prompt(
         key: bundle.get(key)
         for key in (
             "session_id",
-            "decision_id",
             "phase",
-            "merged_context",
-            "missing_context",
+            "context",
             "required_context",
             "proposals",
-            "kb_priors_by_proposal",
-            "kb_read_skipped_reason",
             "review_constraints",
-            "notes",
         )
     }
     dynamic = (

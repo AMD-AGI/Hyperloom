@@ -406,6 +406,7 @@ def test_wal_ownership_is_seen_without_changing_database_or_history(tmp_path):
 @pytest.mark.parametrize("residual", ["foreign", "cancelled", "matching", "older_schema"])
 def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkeypatch, capsys, residual):
     import hyperloom.inference_optimizer.cli as cli
+    from hyperloom.inference_optimizer.cli import session_resume
     from hyperloom.orchestrator.bus import resource_lock
 
     monkeypatch.setattr(os, "environ", os.environ.copy())
@@ -437,18 +438,18 @@ def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkey
     monkeypatch.setattr(cli, "_check_codex_sandbox", Mock())
     monkeypatch.setattr(resource_lock, "local_owner_scope", lambda: "local")
     lock = Mock()
-    monkeypatch.setattr(cli, "_acquire_session_lock_or_exit", Mock(return_value=lock))
+    monkeypatch.setattr(session_resume, "_acquire_session_lock_or_exit", Mock(return_value=lock))
     install = Mock()
-    monkeypatch.setattr(cli, "_persist_install_event", install)
+    monkeypatch.setattr(session_resume, "_persist_install_event", install)
     coordinator = Mock(side_effect=AssertionError("execution must not start"))
     monkeypatch.setattr(cli, "Coordinator", coordinator)
     resume_leg = Mock(side_effect=AssertionError("resume history must not change"))
-    monkeypatch.setattr(cli, "_begin_resume_leg", resume_leg)
+    monkeypatch.setattr(session_resume, "_begin_resume_leg", resume_leg)
 
     class AdmissionPassed(Exception):
         pass
 
-    monkeypatch.setattr(cli, "load_manifest", Mock(side_effect=AdmissionPassed))
+    monkeypatch.setattr(session_resume, "load_manifest", Mock(side_effect=AdmissionPassed))
     args = cli._build_parser().parse_args(["optimize", "--resume-from", str(session_dir)])
     if residual == "matching":
         with pytest.raises(AdmissionPassed):
@@ -489,7 +490,7 @@ def _recover_args(tmp_path, **changes):
         session_dir=tmp_path,
         force=False,
         confirm_stopped="task-1",
-        confirmation_reason="Verified process tree and Ray actors stopped; secret-ticket",
+        confirmation_reason="Verified process tree and remote workers stopped; secret-ticket",
     )
     values.update(changes)
     return argparse.Namespace(**values)
@@ -565,7 +566,7 @@ def test_confirmation_parser_accepts_only_explicit_task_arguments(tmp_path):
 
 
 _CONFIRMED_AT = "2026-09-18T12:00:00+00:00"
-_CONFIRMATION_REASON = "Verified the entire process tree and every Ray actor stopped"
+_CONFIRMATION_REASON = "Verified the entire process tree and every remote worker stopped"
 
 
 def _confirm_in_sqlite(path, *, task_id="task-1", reason=_CONFIRMATION_REASON):

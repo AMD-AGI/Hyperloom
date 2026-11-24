@@ -91,6 +91,7 @@ SKIP_RECIPE_READ_FAILED = "recipe_read_failed"
 SKIP_CONFIDENCE_BELOW_THRESHOLD = "confidence_below_threshold"
 SKIP_BEST_CONFIG_EMPTY = "best_config_empty"
 SKIP_RESTATES_BASELINE = "restates_baseline"
+SKIP_CONTEXT_COPY_DRAFT = "speculative_context_copy_on_synthetic"
 SKIP_WORKLOAD_CONFIG_INCOMPATIBLE = "workload_config_incompatible"
 SKIP_FRAMEWORK_ROOT_MISSING = "framework_root_missing"
 SKIP_KERNEL_ROOT_MISSING = "kernel_root_missing"
@@ -138,6 +139,7 @@ __all__ = [
     "SECTION_GATE",
     "SKIP_BEST_CONFIG_EMPTY",
     "SKIP_CONFIDENCE_BELOW_THRESHOLD",
+    "SKIP_CONTEXT_COPY_DRAFT",
     "SKIP_DISABLED_BY_FLAG",
     "SKIP_ENQUEUE_FAILED",
     "SKIP_FRAMEWORK_ROOT_MISSING",

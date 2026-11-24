@@ -37,7 +37,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
 from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.actions.executors._grid_runner import GridStop, GridVariant, VariantResult
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridStop, GridVariant, VariantResult
 from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 from hyperloom.orchestrator.kernel.conc_sweep import run_conc_sweep
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -283,7 +283,7 @@ def test_the_arm_says_which_execution_strategy_ran_the_ladder(session_dir: Path,
     with (
         session_scope(session_dir),
         patch(
-            "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+            "hyperloom.orchestrator.actions.executors.serving._server_lifecycle.resolve_lifecycle_params",
             return_value=refused,
         ),
     ):
@@ -303,7 +303,7 @@ def test_a_lifecycle_capable_arm_boots_once_and_reuses(session_dir: Path, baseli
     with (
         session_scope(session_dir),
         patch(
-            "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+            "hyperloom.orchestrator.actions.executors.serving._server_lifecycle.resolve_lifecycle_params",
             return_value={"eligible": True, "reason": "supported", "port": 8888, "framework": "sglang"},
         ),
     ):
@@ -339,7 +339,7 @@ def test_the_concurrency_the_server_would_not_boot_at_is_recorded(session_dir: P
     with (
         session_scope(session_dir),
         patch(
-            "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+            "hyperloom.orchestrator.actions.executors.serving._server_lifecycle.resolve_lifecycle_params",
             return_value={"eligible": True, "reason": "supported", "port": 8888, "framework": "sglang"},
         ),
     ):
@@ -396,7 +396,7 @@ def test_a_rung_the_budget_refused_mid_ladder_is_recorded_as_such(session_dir: P
     with (
         session_scope(session_dir),
         patch(
-            "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+            "hyperloom.orchestrator.actions.executors.serving._server_lifecycle.resolve_lifecycle_params",
             return_value={"eligible": True, "reason": "supported", "port": 8888, "framework": "sglang"},
         ),
         patch("hyperloom.orchestrator.kernel.conc_sweep.time.monotonic", side_effect=lambda: clock["now"]),
@@ -582,7 +582,7 @@ def test_a_sweep_that_could_not_write_its_report_records_the_step_that_broke(
 
     with (
         session_scope(session_dir),
-        patch("hyperloom.orchestrator.kernel.conc_sweep._write_csv", side_effect=_no_csv),
+        patch("hyperloom.orchestrator.kernel.conc_sweep_report._write_csv", side_effect=_no_csv),
     ):
         payload = _run(state, session_dir, recorder=_recorder(), run_grid=_all_succeed)
         event = _sweep_event(session_dir)
@@ -604,7 +604,7 @@ def test_a_lifecycle_that_would_not_resolve_fails_the_sweep_rather_than_reading_
     with (
         session_scope(session_dir),
         patch(
-            "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+            "hyperloom.orchestrator.actions.executors.serving._server_lifecycle.resolve_lifecycle_params",
             side_effect=RuntimeError("lifecycle probe exploded"),
         ),
         pytest.raises(RuntimeError, match="^lifecycle probe exploded$"),
@@ -648,7 +648,7 @@ def _cancelled_arm(session_dir: Path, baseline_yaml: Path, *, rungs: int, lifecy
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_cancelled_after(rungs)),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_materialize),
         patch(
-            "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+            "hyperloom.orchestrator.actions.executors.serving._server_lifecycle.resolve_lifecycle_params",
             return_value=lifecycle_params,
         ),
         pytest.raises(asyncio.CancelledError),

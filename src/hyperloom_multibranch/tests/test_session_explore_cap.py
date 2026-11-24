@@ -17,11 +17,12 @@ import pytest
 from hyperloom_multibranch.scheduling import budget, lifecycle
 from hyperloom_multibranch.scheduling.budget import ExploreCap, FinalWork, SessionBudget
 from hyperloom_multibranch.scheduling.resumption import deadline_after_downtime, resumable_run
+from hyperloom_multibranch.scheduling.session_types import SessionOutcome
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.tests.test_skeleton import SETTINGS, START, Stage, _decisions, _resumed, _signalling, _stage
 
 
-async def _run(stage: Stage, cap: ExploreCap | None) -> lifecycle.SessionOutcome:
+async def _run(stage: Stage, cap: ExploreCap | None) -> SessionOutcome:
     """:meth:`Stage.run` with ``cap`` given to the session."""
 
     with stage._polls_on_virtual_time() as patch:

@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The asynchronous tool contract and the runner that guarantees every tool result reaches the inbox.
+"""The asynchronous tool contract and the runner that pushes every tool result to the inbox.
 
 A tool is one coroutine: a request in, a JSON-serialisable result out. :class:`ToolJobs` accepts a request and returns
 a job id at once; when the tool ends, whatever way it ends (success, failure, cancellation), the runner writes the
 result file and pushes a :class:`~hyperloom_multibranch.contracts.blackboard.records.ToolResultPointer` to the branch
-that asked. A push the sink refuses is retried and, when it still fails, kept for :meth:`ToolJobs.redeliver`, so a
-finished job is never silent.
+that asked. A push the sink refuses is retried; one that still fails is logged as an error.
 
 Work whose answer is the same whoever asks is started once (:meth:`ToolJobs.share`, keyed by the caller): a branch that
 asks while the job runs joins it, and the job's pointer then goes to every branch that joined; one that asks after it
@@ -119,7 +118,7 @@ class _Job:
     pointer: ToolResultPointer | None = None
     result: Mapping[str, Any] = field(default_factory=dict)
     #: The branches the result goes to, in the order they asked, those whose push the sink accepted, and those whose push
-    #: is under way (a join or a redelivery meanwhile does not push to them again).
+    #: is under way (a join meanwhile does not push to them again).
     recipients: list[str] = field(default_factory=list)
     delivered: set[str] = field(default_factory=set)
     pushing: set[str] = field(default_factory=set)
@@ -300,17 +299,6 @@ class ToolJobs:
             await asyncio.shield(job.task)
         return job.status
 
-    def undelivered(self) -> tuple[str, ...]:
-        """Jobs that ended but whose pointer the sink never accepted for some branch it goes to."""
-        return tuple(job.job_id for job in self._jobs.values() if _owed(job))
-
-    async def redeliver(self) -> tuple[str, ...]:
-        """Push every undelivered pointer again; returns the job ids still undelivered."""
-        for job in list(self._jobs.values()):
-            if _owed(job):
-                await self._push(job)
-        return self.undelivered()
-
     def _job(self, job_id: str) -> _Job:
         try:
             return self._jobs[job_id]
@@ -389,12 +377,12 @@ class ToolJobs:
 
     async def _push(self, job: _Job) -> None:
         """Push the job's pointer to every branch it goes to that has not accepted it and is not being pushed to, each with
-        its own branch. A branch is claimed before the push is awaited, so a join or a redelivery that runs meanwhile
-        does not push to it a second time."""
+        its own branch. A branch is claimed before the push is awaited, so a join that runs meanwhile does not push to it
+        a second time."""
         assert job.pointer is not None
         for branch in list(job.recipients):
             if branch not in job.recipients or branch in job.delivered or branch in job.pushing:
-                continue  # it left, or a join or a redelivery that ran during an earlier await pushed to it
+                continue  # it left, or a join that ran during an earlier await pushed to it
             job.pushing.add(branch)
             try:
                 accepted = await self._pushed(replace(job.pointer, branch=branch))
@@ -403,7 +391,7 @@ class ToolJobs:
             if accepted:
                 job.delivered.add(branch)
             else:
-                log.error("job %s ended but its result could not be pushed; redeliver() will retry", job.job_id)
+                log.error("job %s ended but its result could not be pushed", job.job_id)
 
     async def _pushed(self, pointer: ToolResultPointer) -> bool:
         for attempt in range(1, self._attempts + 1):
@@ -416,8 +404,3 @@ class ToolJobs:
                 continue
             return True
         return False
-
-
-def _owed(job: _Job) -> bool:
-    """Whether the job ended and some branch it goes to has not accepted its pointer."""
-    return job.pointer is not None and any(branch not in job.delivered for branch in job.recipients)

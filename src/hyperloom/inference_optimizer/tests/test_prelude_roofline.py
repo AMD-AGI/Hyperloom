@@ -18,6 +18,7 @@ import hyperloom.orchestrator.kernel.campaign_baseline as campaign_baseline
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.phases import phase_transitions
 
 
 # Minimal SharedState + TaskRegistry doubles.
@@ -1062,13 +1063,13 @@ async def test_a_cancelled_initial_analysis_is_asked_for_again_until_its_keys_ru
                 break
             assert state.auto_roofline_pending_task_id not in requested
             assert (await c.tasks.get(state.auto_roofline_pending_task_id)).state == "queued"
-            assert ps.compute_next_phase(state) is None
+            assert phase_transitions.compute_next_phase(state) is None
             requested.append(state.auto_roofline_pending_task_id)
             assert len(requested) <= task_registry.RETRY_KEY_ATTEMPTS
 
         assert len(requested) > 1, "the cancelled initial analysis was not asked for again"
         assert len(requested) == task_registry.RETRY_KEY_ATTEMPTS
         assert [t for t in await c.tasks.queued() if t.kind == kind] == []
-        assert ps.compute_next_phase(state) is not None
+        assert phase_transitions.compute_next_phase(state) is not None
     finally:
         await c.stop()

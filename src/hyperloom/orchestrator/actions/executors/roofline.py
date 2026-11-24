@@ -7,21 +7,15 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import json
 import logging
 import os
-import shutil
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Sequence
+from typing import Any, Awaitable, Callable
 
 from hyperloom.common.provenance import detect_kineto_backend
 from hyperloom_common.timeutil import now_iso
-from hyperloom_common.jsonio import read_json_strict
-from inference_suite.contracts import FailedStep, Report
-from inference_suite.contracts.layout import REPORT_FILE
 from ...phases.machine_state import LifecycleMark, record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
 from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
@@ -29,6 +23,15 @@ from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
 from ._pd_role_trace import ROLE_STEADY_STATE_MODE, node_trace_summaries
 from .profile import profile_trace_path
+from .serving._profile_evidence import (
+    drain_instrumentation,
+    marker_hit_context,
+    preflight_probe,
+    reap_session_orphans,
+    server_liveness_probe,
+    trace_dir_inventory,
+    write_capture_failure_diagnosis,
+)
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
@@ -65,11 +68,6 @@ _CAPTURE_DIAGNOSIS_WORKLOAD_KEYS = (
 #: Per-source cap on the raw text kept in a capture-failure diagnosis. Generous on purpose: this file is the only
 #: record of the failure, since nothing downstream re-runs the arm to reproduce it.
 _CAPTURE_DIAGNOSIS_SOURCE_BYTES = 32768
-#: Suffixes trace discovery will consider. One of these already present in a task's own run directory is
-#: a leftover discovery can lead with instead of what this run produces.
-_TRACE_SUFFIXES = (".pt.trace.json.gz", ".pt.trace.json", ".trace.json.gz", ".trace.json")
-#: Enough leftovers to establish the pattern; the preflight record is context, not an inventory.
-_PREFLIGHT_STALE_TRACE_LIMIT = 20
 _TERMINAL_PROFILE_ERRORS = frozenset(
     {
         ORCHESTRATOR_CANCELLED_CLASS,
@@ -87,13 +85,6 @@ _TERMINAL_CAPTURE_REASONS = frozenset(
 
 # Env switch for the multi-node compute-bound auto re-profile (default on; set to "0" to disable).
 _AUTO_COMPUTE_BOUND_ENV = "HYPERLOOM_PROFILE_AUTO_COMPUTE_BOUND"
-
-
-async def _reap_session_orphans(session_dir: Path | str) -> list[int]:
-    """Reap this session's own orphaned serving processes."""
-    from ._server_lifecycle import reap_orphaned_servers
-
-    return await asyncio.to_thread(reap_orphaned_servers, Path(session_dir))
 
 
 def _gpu_trace_unsupported_reason(profile_result: dict[str, Any]) -> str:
@@ -246,160 +237,6 @@ def _profile_server_log_tail(profile_result: Any, max_bytes: int = 16384) -> str
         return logs[0].read_bytes()[-max_bytes:].decode("utf-8", "replace")
     except OSError:
         return ""
-
-
-def _marker_hit_context(sources: dict[str, str], marker: str, radius: int = 6) -> list[dict[str, Any]]:
-    """Return the lines around each source's first hit on ``marker``.
-
-    The classifier matches lowercased substrings, so it can be fooled; the excerpt is the original text, because
-    that is what a reader needs to overrule a classification they think is wrong.
-    """
-    needle = marker.split(" + ")[0].lower()
-    hits: list[dict[str, Any]] = []
-    for name, text in sources.items():
-        if not text:
-            continue
-        lines = text.splitlines()
-        for idx, line in enumerate(lines):
-            if needle in line.lower():
-                hits.append(
-                    {
-                        "source": name,
-                        "line_no": idx + 1,
-                        "excerpt": lines[max(0, idx - radius) : idx + radius + 1],
-                    }
-                )
-                break
-    return hits
-
-
-def _trace_dir_inventory(profile_result: Any, limit: int = 200) -> dict[str, Any]:
-    """List what a failed profile left on disk, so a truncated export reads differently from no export at all."""
-    if not isinstance(profile_result, dict):
-        return {}
-    base = profile_result.get("trace_dir") or profile_result.get("workspace")
-    if not base:
-        return {}
-    root = Path(str(base))
-    try:
-        entries = sorted(p for p in root.rglob("*") if p.is_file())
-    except OSError as exc:
-        # The inventory is evidence about a failure, so it reports its own trouble rather than raising over it.
-        return {"root": str(root), "error": repr(exc)}
-    files: list[dict[str, Any]] = []
-    for p in entries[:limit]:
-        try:
-            files.append({"path": str(p.relative_to(root)), "size_bytes": p.stat().st_size})
-        except OSError:
-            continue
-    out: dict[str, Any] = {"root": str(root), "file_count": len(entries), "files": files}
-    if len(entries) > limit:
-        out["truncated"] = True
-    return out
-
-
-def _iso_from_epoch(ts: float) -> str:
-    """Render a filesystem timestamp in the same UTC ISO form the rest of the event uses."""
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
-
-
-def _preflight_probe(session_dir: Path, task_id: str, *, reaped: Sequence[int]) -> dict[str, Any]:
-    """Describe the conditions the action is about to profile under. Never raises.
-
-    Reported, not acted on: a leftover server, a nearly-full disk or a trace file already sitting in this task's
-    own output directory all change how the result should be read, but deciding what to do about them is not a
-    measurement stage's call.
-    """
-    out: dict[str, Any] = {
-        "orphans_reaped": list(reaped),
-        "orphans_reaped_count": len(reaped),
-    }
-    try:
-        usage = shutil.disk_usage(session_dir)
-        out["disk"] = {
-            "path": str(session_dir),
-            "free_bytes": usage.free,
-            "total_bytes": usage.total,
-            "free_pct": round(100.0 * usage.free / usage.total, 2) if usage.total else None,
-        }
-    except OSError as exc:
-        out["disk"] = {"path": str(session_dir), "error": repr(exc)}
-
-    # A trace already under this task's own run directory can lead trace discovery instead of what this run
-    # produces, and by then there is no way to tell which run the numbers came from.
-    stale: list[dict[str, Any]] = []
-    try:
-        for run_dir in sorted(session_dir.glob(f"runs/*/{task_id}")) if task_id else []:
-            for p in sorted(run_dir.rglob("*")):
-                if len(stale) >= _PREFLIGHT_STALE_TRACE_LIMIT:
-                    break
-                if p.is_file() and str(p).endswith(_TRACE_SUFFIXES):
-                    info = p.stat()
-                    stale.append(
-                        {
-                            "path": str(p.relative_to(session_dir)),
-                            "size_bytes": info.st_size,
-                            "mtime_iso": _iso_from_epoch(info.st_mtime),
-                        }
-                    )
-    except OSError as exc:
-        out["stale_traces_error"] = repr(exc)
-    out["stale_traces"] = stale
-    out["stale_trace_count"] = len(stale)
-    return out
-
-
-def _drain_instrumentation(executor: Any) -> dict[str, Any] | None:
-    """Take the profile executor's per-attempt instrumentation report, if it keeps one."""
-    drain = getattr(executor, "drain_instrumentation_report", None)
-    if not callable(drain):
-        return None
-    report = drain()
-    return report if isinstance(report, dict) else None
-
-
-_SERVER_DIED_STEPS = frozenset({FailedStep.SERVER_DIED, FailedStep.SERVER_EXITED_BEFORE_READY})
-
-
-def _server_liveness_probe(session_dir: Path, task_id: str) -> dict[str, Any]:
-    """Report, from this task's run_dir ``report.json`` files, whose server died and whose outlived its teardown.
-
-    A run whose engine died can still have exported a complete trace, which is exactly why the result dict alone
-    cannot show it.
-    """
-    runs_dir = session_dir / "runs"
-    if not runs_dir.is_dir():
-        return {}
-    reports = [path for path in sorted(runs_dir.rglob(REPORT_FILE)) if task_id in str(path)]
-    steps = {path.parent: Report.from_document(read_json_strict(path)).failed_step for path in reports}
-    entries = [
-        {"run_dir": str(run_dir.relative_to(session_dir)), "failed_step": step.value}
-        for run_dir, step in steps.items()
-        if step in _SERVER_DIED_STEPS or step is FailedStep.TEARDOWN_INCOMPLETE
-    ]
-    if not entries:
-        return {"reports": len(reports)}
-    return {
-        "reports": len(reports),
-        "server_died": sum(1 for step in steps.values() if step in _SERVER_DIED_STEPS),
-        "server_outlived_teardown": sum(1 for step in steps.values() if step is FailedStep.TEARDOWN_INCOMPLETE),
-        "entries": entries,
-    }
-
-
-def _write_capture_failure_diagnosis(path: Path, payload: dict[str, Any]) -> str:
-    """Write the capture-failure evidence file; return its path, or ``""`` when it could not be written.
-
-    A failure to write the evidence must not displace the capture failure it describes, so this degrades to an
-    empty path and lets the caller's message stand on its own.
-    """
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
-    except (OSError, TypeError, ValueError) as exc:
-        log.warning("roofline: could not write capture-failure diagnosis to %s: %r", path, exc)
-        return ""
-    return str(path)
 
 
 async def _reported(label: str, start: Callable[[], Awaitable[Any]], **fields: Any) -> Any:
@@ -585,10 +422,10 @@ async def _end_profile_run(
             failure=end.failure,
             # Probed on every attempt, not only the failed ones: the run this is meant to catch is the one that reports
             # success.
-            server_liveness=await asyncio.to_thread(_server_liveness_probe, session_dir, recorder.task_id),
+            server_liveness=await asyncio.to_thread(server_liveness_probe, session_dir, recorder.task_id),
             # Drained per attempt, so every attempt carries which patchers ran and what they returned -- including the
             # attempts that raised, where no result dict exists to carry it.
-            instrumentation=_drain_instrumentation(profile_executor),
+            instrumentation=drain_instrumentation(profile_executor),
         ),
     )
 
@@ -642,7 +479,7 @@ async def _fail_on_capture(
         return None
     task_id = str(getattr(task, "task_id", "") or "") or "unknown"
     params = dict(task.params or {})
-    diagnosis = _write_capture_failure_diagnosis(
+    diagnosis = write_capture_failure_diagnosis(
         session_dir / "diagnostics" / f"roofline_cuda_graph_capture_{task_id}.json",
         {
             "category": category,
@@ -656,9 +493,9 @@ async def _fail_on_capture(
                 "extra_server_args": params.get("extra_server_args"),
                 "workload": {k: params.get(k) for k in _CAPTURE_DIAGNOSIS_WORKLOAD_KEYS if k in params},
             },
-            "marker_hits": _marker_hit_context(sources, marker),
+            "marker_hits": marker_hit_context(sources, marker),
             "sources": {k: v[-_CAPTURE_DIAGNOSIS_SOURCE_BYTES:] for k, v in sources.items() if v},
-            "trace_dir": await asyncio.to_thread(_trace_dir_inventory, unusable.result),
+            "trace_dir": await asyncio.to_thread(trace_dir_inventory, unusable.result),
         },
     )
     message = (
@@ -749,12 +586,12 @@ async def _preflight(recorder: Any, session_dir: Path) -> None:
     An explore variant boots its server with ``cleanup=false`` to keep it hot and tears it down in a ``finally`` --
     which never runs if the driver process dies.
     """
-    reaped = await _reap_session_orphans(session_dir)
+    reaped = await reap_session_orphans(session_dir)
     if reaped:
         log.warning("roofline: preflight reaped %d orphaned server pid(s) before profiling: %s", len(reaped), reaped)
     if recorder is not None:
         recorder.record_preflight(
-            await asyncio.to_thread(_preflight_probe, session_dir, recorder.task_id, reaped=reaped)
+            await asyncio.to_thread(preflight_probe, session_dir, recorder.task_id, reaped=reaped)
         )
 
 
@@ -1003,7 +840,7 @@ class RooflineExecutor:
 
     def _record_profile_findings(self, profiled: _ProfileOutcome) -> None:
         """Record what the profile shows regardless of its analysis: Kineto backend, stack verdict, rewrite evidence."""
-        from ._framework_rewrite_evidence import promote_evidence_path
+        from .framework_change._framework_rewrite_evidence import promote_evidence_path
 
         state = self.shared_state
         backend = detect_kineto_backend(profiled.trace_path)
@@ -1143,7 +980,7 @@ class RooflineExecutor:
         A re-profile or re-analysis that returns a failure leaves the original analysis standing; one that raises does
         not, and the action crashes with its attempt rows already written.
         """
-        from ._multi_node_server_lifecycle import _COMPUTE_BOUND_PROFILE_ENV, _scoped_env
+        from .serving._multi_node_server_lifecycle import _COMPUTE_BOUND_PROFILE_ENV, _scoped_env
 
         log.info(
             "roofline: host-bound trace (0 hot kernels + high GPU idle); "

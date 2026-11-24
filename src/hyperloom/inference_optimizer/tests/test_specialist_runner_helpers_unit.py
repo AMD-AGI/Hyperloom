@@ -15,6 +15,7 @@ import pytest
 
 from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.specialists import patch_claims, workspace_files
 from hyperloom.orchestrator.specialists import runner as sr
 from hyperloom.orchestrator.specialists import worktrees
 from hyperloom.orchestrator.specialists.failure_class import SpecialistFailureType, classify_specialist_failure
@@ -22,6 +23,7 @@ from hyperloom.orchestrator.specialists.runner import (
     SpecialistRunner,
     build_empty_specialist_done,
 )
+from hyperloom.orchestrator.specialists.subprocess_types import SpecialistSubprocessResult
 from hyperloom.orchestrator.state.task_registry import Task
 
 from .conftest import init_git_repo, make_fake_claude
@@ -51,18 +53,18 @@ def _checkout(path, *files):
 
 def test_safe_redact():
     line = "export ANTHROPIC_API_KEY=redact_me and GITHUB_TOKEN=redact_me_too"
-    out = sr._safe_redact(line)
+    out = workspace_files._safe_redact(line)
     assert "ANTHROPIC_API_KEY=[REDACTED]" in out
     assert "GITHUB_TOKEN=[REDACTED]" in out
     assert "redact_me" not in out
     assert "redact_me_too" not in out
     assert "[REDACTED]]" not in out
-    assert sr._safe_redact("plain line") == "plain line"
+    assert workspace_files._safe_redact("plain line") == "plain line"
 
 
 def test_safe_redact_headers():
     line = "Authorization: Bearer redactable-header-value"
-    out = sr._safe_redact(line)
+    out = workspace_files._safe_redact(line)
     assert "Authorization: Bearer [REDACTED]" in out
     assert "redactable-header-value" not in out
 
@@ -70,7 +72,7 @@ def test_safe_redact_headers():
 def test_safe_redact_bare_gateway_token_shapes():
     """ak-/pk- shaped tokens are masked even without their env-var name."""
     line = "curl --header x ak-abc123def456 and pk-lf-98765 and sk-zyx987"
-    out = sr._safe_redact(line)
+    out = workspace_files._safe_redact(line)
     assert "ak-abc123def456" not in out
     assert "pk-lf-98765" not in out
     assert "sk-zyx987" not in out
@@ -83,7 +85,7 @@ def test_safe_redact_aws_and_custom_headers():
         "AWS_SESSION_TOKEN=FwoGZXIvYXdzEHsaDNEXAMPLETOKEN "
         "ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: deadbeefsecret"
     )
-    out = sr._safe_redact(line)
+    out = workspace_files._safe_redact(line)
     assert "wJalrXUtnFEMI" not in out
     assert "FwoGZXIvYXdzEHsaDNEXAMPLETOKEN" not in out
     assert "deadbeefsecret" not in out
@@ -136,10 +138,9 @@ def test_build_empty_specialist_done():
 
 
 def test_path_helpers_with_workspace(tmp_path):
-    r = _runner()
-    assert r._transcript_path(tmp_path).name == "transcript.jsonl"
-    assert r._heartbeat_path(tmp_path).name == "heartbeat.json"
-    assert r._done_path(tmp_path).name == "specialist_done.json"
+    assert workspace_files.transcript_path(tmp_path).name == "transcript.jsonl"
+    assert workspace_files.heartbeat_path(tmp_path).name == "heartbeat.json"
+    assert workspace_files.done_path(tmp_path).name == "specialist_done.json"
 
 
 def test_resolve_workspace_from_extra(tmp_path):
@@ -165,24 +166,21 @@ def test_resolve_workspace_session_dir(tmp_path):
 
 
 def test_write_helpers_noop_none_workspace():
-    r = _runner()
-    r._append_transcript(None, 0, {"k": "v"})
-    r._write_heartbeat(None, turn=0, max_turns=1, status="x")
-    r._write_specialist_done(None, {"a": 1})
+    workspace_files.append_transcript(None, 0, {"k": "v"})
+    workspace_files.write_heartbeat(None, turn=0, max_turns=1, status="x")
+    workspace_files.write_specialist_done(None, {"a": 1})
 
 
 def test_append_transcript(tmp_path):
-    r = _runner()
-    r._append_transcript(tmp_path, 1, {"event": "turn"})
-    r._append_transcript(tmp_path, 2, {"event": "turn2"})
+    workspace_files.append_transcript(tmp_path, 1, {"event": "turn"})
+    workspace_files.append_transcript(tmp_path, 2, {"event": "turn2"})
     lines = (tmp_path / "transcript.jsonl").read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 2
     assert json.loads(lines[0])["turn"] == 1
 
 
 def test_append_transcript_redacts_nested_metadata(tmp_path):
-    r = _runner()
-    r._append_transcript(
+    workspace_files.append_transcript(
         tmp_path,
         1,
         {
@@ -200,23 +198,20 @@ def test_append_transcript_redacts_nested_metadata(tmp_path):
 
 
 def test_write_heartbeat(tmp_path):
-    r = _runner()
-    r._write_heartbeat(tmp_path, turn=3, max_turns=10, status="working")
+    workspace_files.write_heartbeat(tmp_path, turn=3, max_turns=10, status="working")
     payload = json.loads((tmp_path / "heartbeat.json").read_text(encoding="utf-8"))
     assert payload["turn"] == 3 and payload["status"] == "working"
 
 
 def test_write_specialist_done(tmp_path):
-    r = _runner()
-    r._write_specialist_done(tmp_path, {"proposal_set": []})
+    workspace_files.write_specialist_done(tmp_path, {"proposal_set": []})
     payload = json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
     assert payload["proposal_set"] == [] and "ts" in payload
 
 
 def test_write_specialist_done_scrubs_credentials(tmp_path):
-    r = _runner()
     reason = "clone failed: Authorization: Bearer abcdefgh12345678 ghp_abcdef123456"
-    r._write_specialist_done(tmp_path, {"reason": reason, "n": 2})
+    workspace_files.write_specialist_done(tmp_path, {"reason": reason, "n": 2})
     text = (tmp_path / "specialist_done.json").read_text(encoding="utf-8")
     assert "abcdefgh12345678" not in text and "ghp_abcdef123456" not in text
     assert json.loads(text)["n"] == 2
@@ -224,8 +219,7 @@ def test_write_specialist_done_scrubs_credentials(tmp_path):
 
 def test_write_specialist_done_atomic_leaves_no_tmp(tmp_path):
     # Final write goes through temp + os.replace; no .tmp residue, valid JSON.
-    r = _runner()
-    r._write_specialist_done(tmp_path, {"proposal_set": []})
+    workspace_files.write_specialist_done(tmp_path, {"proposal_set": []})
     assert not list(tmp_path.glob("*.tmp"))
     assert json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))["proposal_set"] == []
 
@@ -238,7 +232,7 @@ def _finalize(r, tmp_path, payload, params=None):
         workspace=tmp_path,
     )
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params=dict(params or {})), extra={})
-    result = r._finalize(ctx=ctx, prep=prep, sub_result=sr.SpecialistSubprocessResult(done_payload=payload))
+    result = r._finalize(ctx=ctx, prep=prep, sub_result=SpecialistSubprocessResult(done_payload=payload))
     return result, json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
 
 
@@ -269,7 +263,7 @@ def test_a_harvested_diff_is_the_whole_round_and_the_specialists_copy_of_it_is_n
     vetted = _vetted_by_finalize(
         tmp_path,
         monkeypatch,
-        sr.SpecialistSubprocessResult(
+        SpecialistSubprocessResult(
             done_payload={"proposal_set": [], "summary": "s", "patches_written": [str(copy)]},
             patches=[str(harvested)],
             patch_roots={str(harvested): str(tmp_path)},
@@ -291,7 +285,7 @@ def test_a_refused_worktree_leaves_no_patch_the_specialist_claims(tmp_path, monk
     vetted = _vetted_by_finalize(
         tmp_path,
         monkeypatch,
-        sr.SpecialistSubprocessResult(done_payload=payload, worktree_refused=refused, error=refused),
+        SpecialistSubprocessResult(done_payload=payload, worktree_refused=refused, error=refused),
         worktree=tmp_path / "worktree",
     )
 
@@ -494,8 +488,8 @@ def test_patch_path_within_bases_accepts_sandbox_paths(tmp_path):
     inside = worktree / "patches" / "x.patch"
     inside.parent.mkdir(parents=True)
     inside.write_text("diff", encoding="utf-8")
-    assert sr._patch_path_within_bases(inside, bases) is True
-    assert sr._patch_path_within_bases(workspace / "y.patch", bases) is True
+    assert patch_claims.patch_path_within_bases(inside, bases) is True
+    assert patch_claims.patch_path_within_bases(workspace / "y.patch", bases) is True
 
 
 def test_patch_path_within_bases_rejects_outside_paths(tmp_path):
@@ -508,9 +502,9 @@ def test_patch_path_within_bases_rejects_outside_paths(tmp_path):
     workspace.mkdir()
     bases = [worktree, workspace]
 
-    assert sr._patch_path_within_bases(Path("/etc/passwd"), bases) is False
-    assert sr._patch_path_within_bases(worktree / ".." / "escape.patch", bases) is False
-    assert sr._patch_path_within_bases(tmp_path / "sibling.patch", bases) is False
+    assert patch_claims.patch_path_within_bases(Path("/etc/passwd"), bases) is False
+    assert patch_claims.patch_path_within_bases(worktree / ".." / "escape.patch", bases) is False
+    assert patch_claims.patch_path_within_bases(tmp_path / "sibling.patch", bases) is False
 
 
 @pytest.mark.parametrize(
@@ -527,7 +521,7 @@ def test_a_reaped_subprocess_is_classified_by_why_it_was_reaped(tmp_path, reaped
     """The classifier keys off the error's leading token, not the reaper's own text kept after it."""
     prep = sr._PreparedRun(domain=SimpleNamespace(key="serving_specialist"), gap="gap-1", workspace=tmp_path)
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
-    result = _runner()._finalize(ctx=ctx, prep=prep, sub_result=sr.SpecialistSubprocessResult(**reaped))
+    result = _runner()._finalize(ctx=ctx, prep=prep, sub_result=SpecialistSubprocessResult(**reaped))
     assert result.status == "stale"
     assert result.error.endswith(reaped.get("error", ""))
     assert classify_specialist_failure(result.status, result.error) == (expected, True)
@@ -553,7 +547,7 @@ def test_finalize_skips_non_dict_proposals_and_drops_scanned_patches_outside(tmp
     result = _runner()._finalize(
         ctx=ctx,
         prep=prep,
-        sub_result=sr.SpecialistSubprocessResult(
+        sub_result=SpecialistSubprocessResult(
             done_payload={"proposal_set": ["skip-me", {"name": "keep"}], "summary": "s"},
             patches=[str(outside)],
         ),
@@ -582,7 +576,7 @@ def test_record_subprocess_run_emits_one_ledger_row_per_turn(tmp_path):
     r._record_subprocess_run(
         ctx,
         prep,
-        sr.SpecialistSubprocessResult(
+        SpecialistSubprocessResult(
             trace=AgentTrace(
                 turn_usages=[{"input_tokens": 1}, {"input_tokens": 2}],
                 usage={"model": "m", "input_tokens": 3},

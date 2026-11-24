@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from types import SimpleNamespace
 
 import pytest
@@ -56,21 +56,20 @@ def test_policy_records_one_member_per_provider_without_models(tmp_path):
     assert policy == AgentRelayPolicy(
         primary_profile_id="codex",
         profiles=(AgentProfileSpec("codex", "codex"), AgentProfileSpec("claude", "claude")),
-        blockage_threshold=3,
     )
-    assert (
+    assert AgentRelayPolicy.from_dict(asdict(policy)) == policy
+
+
+def test_a_relay_policy_stored_with_a_blockage_threshold_is_refused():
+    """A campaign is resumed by the version that created it: a policy holding a field this one does not write is not read."""
+    with pytest.raises(ValueError, match="unknown fields: blockage_threshold"):
         AgentRelayPolicy.from_dict(
             {
                 "primary_profile_id": "codex",
-                "profiles": [
-                    {"profile_id": "codex", "provider": "codex"},
-                    {"profile_id": "claude", "provider": "claude"},
-                ],
+                "profiles": [{"profile_id": "codex", "provider": "codex"}],
                 "blockage_threshold": 3,
             }
         )
-        == policy
-    )
 
 
 def test_a_persisted_profile_model_is_refused():
@@ -79,7 +78,6 @@ def test_a_persisted_profile_model_is_refused():
             {
                 "primary_profile_id": "claude",
                 "profiles": [{"profile_id": "claude", "provider": "claude", "model": "claude-opus-5"}],
-                "blockage_threshold": 3,
             }
         )
 

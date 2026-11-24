@@ -726,7 +726,7 @@ def _pd_cluster_session() -> bool:
 # the refusal result when it failed.
 async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -> dict[str, Any] | None:
     from ._multi_node_env import round_server_env
-    from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
+    from .serving._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
     extra_env, flag = _graph_capture_profile_settings(_default_profile_config()) if _pd_cluster_session() else ({}, "")
     extra_server_args = str(params.get("extra_server_args") or "")
@@ -765,7 +765,7 @@ async def _await_pd_role_traces(root: str, roles: list[str], since_unix: float) 
     import asyncio as _asyncio
     import time as _time
 
-    from ._multi_node_server_lifecycle import select_pd_node_traces
+    from .serving._multi_node_server_lifecycle import select_pd_node_traces
 
     timeout_s = float(os.environ.get("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", "600") or 600)
     deadline = _time.monotonic() + timeout_s
@@ -792,7 +792,7 @@ async def _await_pd_role_traces(root: str, roles: list[str], since_unix: float) 
 async def _infera_profile_window(round_trace_root: str, since_unix: float = 0.0):
     import asyncio as _asyncio
 
-    from ._multi_node_server_lifecycle import (
+    from .serving._multi_node_server_lifecycle import (
         PD_PROFILE_MODE_STEPS,
         pd_profile_mode,
         trigger_infera_engine_profile,
@@ -854,7 +854,7 @@ async def _infera_profile_window(round_trace_root: str, since_unix: float = 0.0)
 # Attaches this round's multi-node trace files. A PD cluster's prefill and decode traces land in per-engine subdirs and
 # are recorded as ``role_traces``, decode's being the main trace; otherwise the heaviest file is the main trace.
 def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_started_unix: float) -> None:
-    from ._multi_node_server_lifecycle import select_pd_node_traces
+    from .serving._multi_node_server_lifecycle import select_pd_node_traces
 
     trace_dir = Path(round_trace_root)
     if not trace_dir.is_dir():
@@ -1087,7 +1087,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         probe's environment only when the probe is enabled. Returns the probe's report directory,
         or ``""`` when the probe is not armed.
         """
-        from . import _framework_rewrite_evidence as _evidence
+        from .framework_change import _framework_rewrite_evidence as _evidence
         from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 
         asset_dir = _evidence.probe_asset_dir()
@@ -1130,7 +1130,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
 
     def _host_probe_env(self, output_dir: Path) -> dict[str, str]:
         """Return the environment that arms the host probe, or ``{}`` when its report directory cannot be made."""
-        from . import _framework_rewrite_evidence as _evidence
+        from .framework_change import _framework_rewrite_evidence as _evidence
 
         probe_dir = output_dir / _evidence.PROBE_SUBDIR
         try:
@@ -1181,7 +1181,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         if not probe_dir:
             result["framework_rewrite_evidence_status"] = self._host_probe_status or "probe_not_armed"
             return
-        from . import _framework_rewrite_evidence as _evidence
+        from .framework_change import _framework_rewrite_evidence as _evidence
 
         try:
             out_path = Path(probe_dir).parent / _evidence.EVIDENCE_FILENAME

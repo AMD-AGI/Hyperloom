@@ -64,7 +64,7 @@ Cursor and Claw.
 ```
 src/hyperloom/inference_optimizer/
 ├── SKILL.md                    # Agent instructions (Cursor / Claw entry point)
-├── references/                 # SKILL reference chapters (benchmark/cache/critic/…)
+├── references/                 # SKILL reference chapters (critic, troubleshooting, rewrite patterns)
 ├── cli/                        # `python -m hyperloom optimize` entry point
 │   ├── __init__.py             # main()/_run_optimize()
 │   ├── parser.py               # _build_parser()
@@ -81,7 +81,6 @@ src/hyperloom/inference_optimizer/
 │   └── lock.py                 # Single-optimizer session lock
 ├── baseline_comparison/        # InferenceX reference fetching & target analysis
 ├── breakdown/                  # session_breakdown.json producer (downstream contract)
-├── actions/                    # Per-action markdown specs
 ├── tools/                      # Operator CLIs (dump_session_breakdown/event_counts/…)
 ├── assets/                     # install.sh + bare-metal/profile configs
 └── tests/                      # Unit + regression tests

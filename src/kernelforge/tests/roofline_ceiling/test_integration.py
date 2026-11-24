@@ -16,6 +16,7 @@ from click.testing import CliRunner
 
 from kernelforge import cli as cli_module
 from kernelforge.agent_backends.base import AgentProviderUnavailableError
+from kernelforge.evaluation.scoring import CaseAggregate
 from kernelforge.workflows.forge_loop.bootstrap.errors import InvalidOptionValue
 from kernelforge.workflows.forge_loop.bootstrap.request import validate_roofline_target
 from kernelforge.workflows.forge_loop.bootstrap.run import _make_ceiling_estimator
@@ -407,6 +408,21 @@ def test_the_mean_is_equal_weight_across_cases_like_the_keep_objective(tmp_path)
 
     assert loop._roofline_attainment().mean == pytest.approx(0.85)
     assert not loop._is_roofline_target_met()
+
+
+def test_a_geometric_campaign_is_stopped_by_the_mean_it_is_scored_under(tmp_path):
+    """100% and 25%: the arithmetic mean is past a 60% target and the geometric one is not."""
+    path = _publish(_report((("a", 5.0), ("b", 5.0))), tmp_path)
+    case_times = {"a": 5.0, "b": 20.0}
+    arithmetic = _loop(str(path), target=0.6, case_times=case_times)
+    geometric = _loop(str(path), target=0.6, case_times=case_times)
+    geometric.ic.case_aggregate = CaseAggregate.GEOMETRIC
+
+    assert arithmetic._is_roofline_target_met()
+    assert geometric._roofline_attainment().mean == pytest.approx(0.5)
+    assert not geometric._is_roofline_target_met()
+    assert "(equal-weight geometric mean across scored cases)" in geometric._render_ceiling_advisory()
+    assert "(equal-weight arithmetic mean across scored cases)" in arithmetic._render_ceiling_advisory()
 
 
 def test_a_ceiling_below_the_measured_latency_cannot_end_the_campaign(tmp_path):

@@ -14,6 +14,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.policy import gate as gate_module
 from hyperloom.orchestrator.policy import projection as projection_module
+from hyperloom.orchestrator.policy import validators as validators_module
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.policy.projection import (
@@ -258,7 +259,7 @@ def _reachable_code(*entries: object) -> list:
         list: Code objects of the entries, their nested comprehensions and
         closures, and of every policy-layer function they call by name.
     """
-    modules = (gate_module, projection_module)
+    modules = (gate_module, projection_module, validators_module)
     seen: dict[int, object] = {}
     queue = [e.__code__ for e in entries if isinstance(e, FunctionType)]
     while queue:
@@ -305,7 +306,7 @@ def test_no_validator_on_the_intent_path_reaches_a_database_call():
         assert not (loaded & banned), f"{code.co_name} reaches {sorted(loaded & banned)}"
 
     # And the gate cannot name a connection even to pass one on.
-    assert not {"sqlite3", "SqliteConnection", "RoundStore"} & set(vars(gate_module))
+    assert not {"sqlite3", "SqliteConnection", "RoundStore"} & (set(vars(gate_module)) | set(vars(validators_module)))
 
 
 def test_the_resource_rules_refuse_nothing_until_the_facts_are_read():

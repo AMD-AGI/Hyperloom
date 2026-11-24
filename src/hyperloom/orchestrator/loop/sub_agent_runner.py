@@ -117,8 +117,7 @@ class ExecutionCleanupUnconfirmed(RuntimeError):
         result: The executor's own outcome, for the terminal row.
         tree_pgid: Process group whose teardown went unconfirmed, or None when
             the raise site has no local group to name -- a cleanup that failed
-            before any process existed, or a Ray actor whose ids belong to
-            another node.
+            before any process existed.
     """
 
     def __init__(
@@ -323,7 +322,7 @@ class SubAgentRunner:
         evidence: dict[str, Any],
         *,
         lease: Lease | None,
-        release_resources: Callable[[], Awaitable[bool]] | None,
+        release_resources: Callable[[], Awaitable[None]] | None,
     ) -> None:
         """Record the execution's terminal row and release what it held.
 
@@ -341,7 +340,9 @@ class SubAgentRunner:
         try:
             if cleanup_error is None:
                 try:
-                    released = release_resources is None or await release_resources() is True
+                    if release_resources is not None:
+                        await release_resources()
+                    released = True
                 except BaseException as exc:
                     cleanup_error = exc
                     raise
@@ -387,7 +388,7 @@ class SubAgentRunner:
         *,
         prebound_lease: Lease | None = None,
         extra_context: dict | None = None,
-        release_resources: Callable[[], Awaitable[bool]] | None = None,
+        release_resources: Callable[[], Awaitable[None]] | None = None,
     ) -> SubAgentResult:
         """Claim the row, execute it, record the outcome.
 
@@ -402,9 +403,9 @@ class SubAgentRunner:
                 released here. ``None`` only for a task that needs no lanes.
             extra_context: Optional extra values merged into the
                 :class:`RunnerContext`.
-            release_resources: Return the execution's other capacity and report
-                whether worker cleanup confirmed; its answer is evidence on the
-                terminal row, not a condition for releasing the lanes.
+            release_resources: Return the execution's other capacity; a raise
+                leaves cleanup unconfirmed, which is evidence on the terminal
+                row, not a condition for releasing the lanes.
 
         Returns:
             The :class:`SubAgentResult` capturing terminal state and payload.

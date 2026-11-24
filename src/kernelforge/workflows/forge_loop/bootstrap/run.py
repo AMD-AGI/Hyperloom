@@ -34,9 +34,11 @@ from kernelforge.workflows.forge_loop.bootstrap.session_budget import _forge_ses
 from kernelforge.workflows.forge_loop.bootstrap.warm_start import _read_kb_warm_start, _WarmStart
 from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config, KnowledgeConfig, agent_runtime_overrides
+from kernelforge.evaluation.scoring import CaseAggregate
 from kernelforge.workflows.forge_loop.memory.knowledge_integration import kb_reference_program_md
 from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 from kernelforge.utils.git import git_head
+from kernelforge.utils.import_root import import_path_first
 from kernelforge.utils.gpu_arch import Profiler, arch_profile
 from kernelforge.workflows.forge_loop.campaign.schema import ExperimentSubject
 
@@ -270,6 +272,7 @@ def _resolve_campaign(request: ForgeLoopRequest, workspace: Path, agent_relay) -
                 framework=request.identity.framework,
                 nproc_per_node=request.loop_shape.nproc_per_node,
                 bench_repeat=request.loop_shape.bench_repeat,
+                case_aggregate=CaseAggregate(request.loop_shape.case_aggregate),
                 commit_new_paths=tuple(request.loop_shape.commit_new_paths),
                 agent_relay=agent_relay,
             ),
@@ -455,6 +458,22 @@ class _SearchPlan:
     assembly: _AssemblyPreparation
 
 
+def _put_workspace_first_on_import_path(import_name: str | None, workspace: Path) -> None:
+    """Make ``workspace`` the package ``import_name`` for everything this process starts.
+
+    The directory holding the workspace goes first on this process's ``PYTHONPATH``, which the driver runs, the agent
+    sessions and the lanes all start from.
+    """
+    if not import_name:
+        return
+    if workspace.name != import_name:
+        raise ForgeLoopError(
+            f"--import-name {import_name} names a package the workspace cannot be imported as: the workspace has to "
+            f"be a directory of that name, and is {workspace}"
+        )
+    os.environ["PYTHONPATH"] = import_path_first(workspace.parent, os.environ.get("PYTHONPATH", ""))
+
+
 def run_forge_loop(request: ForgeLoopRequest, *, publish_result: Callable[[dict], None]) -> dict:
     """Run one forge-loop campaign and return its result.
 
@@ -477,6 +496,7 @@ def run_forge_loop(request: ForgeLoopRequest, *, publish_result: Callable[[dict]
         raise ForgeLoopError("--profile-timeout-sec must be positive")
 
     workspace = Path(request.campaign.workspace_dir).resolve()
+    _put_workspace_first_on_import_path(request.campaign.import_name, workspace)
     workspace_lock = WorkspaceLock(workspace / "forge_experiments" / "workspace.lock")
     try:
         workspace_lock.acquire()
@@ -529,8 +549,8 @@ def _run_campaign(inputs: _RunInputs) -> dict:
     # Resolved before the loop is built: the ceiling estimator captures it, and the raw option is ``None`` by default.
     session_timeout_sec = _forge_session_timeout_sec(request.budget.max_hours, request.budget.session_timeout_sec)
 
-    # Construct the loop only after task preparation has resolved the profiling contract; IterationLoop snapshots that
-    # readiness in its runtime state.
+    # Construct the loop only after task preparation, which settles the driver, the persisted campaign and the source
+    # files the loop is built from.
     loop_runner = _build_loop_runner(run, assembly.source_files, session_timeout_sec)
 
     warm_start = _read_kb_warm_start(run, assembly.program_md, assembly.kb_warmstart_enabled)
@@ -609,8 +629,10 @@ def _agent_session(inputs: _RunInputs, opened: _OpenedCampaign) -> _AgentSession
 def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig) -> IterationConfig:
     """The loop's configuration: the campaign's task and measurement semantics, and this invocation's budget."""
     from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationConfig
+    from kernelforge.workflows.forge_loop.search.search_policy import stall_thresholds
 
     request, workspace, deadline = inputs.request, inputs.workspace, inputs.deadline
+    stall = stall_thresholds(planned_rounds=request.loop_shape.lanes > 1)
     # Measurement semantics come from the campaign, never from this invocation's defaults.
     iter_config = IterationConfig(
         kernel_file=str((workspace / campaign.kernel_path).resolve()),
@@ -636,8 +658,11 @@ def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig) -> Iteration
         nproc_per_node=campaign.nproc_per_node,
         # Measurement fidelity: in-process repeats within each independent bench.
         bench_repeat=campaign.bench_repeat,
+        case_aggregate=campaign.case_aggregate,
         lanes=request.loop_shape.lanes,
         merge_stacking=request.loop_shape.merge_stacking,
+        supervise_after=stall.supervise_after,
+        diversify_after=stall.diversify_after,
         # New files a KEEP may carry; a REVERT removes exactly the same set. From the campaign, so a resumed session
         # can still ship or remove the new file an earlier session was configured to.
         commit_new_paths=list(campaign.commit_new_paths),
@@ -750,6 +775,7 @@ def _implementer_setup(
             stage_timeout_sec=iter_config.validate_stage_timeout_sec,
             bench_timeout_sec=iter_config.bench_timeout_sec,
             bench_repeat=iter_config.bench_repeat,
+            case_aggregate=iter_config.case_aggregate,
         ),
         SessionOptions(
             session_timeout_sec=session_timeout_sec,
@@ -791,6 +817,19 @@ def _start_actors(
         raise ForgeLoopError(f"Agent startup availability check failed: {error}") from error
 
 
+def _announce_planning(plan: _SearchPlan) -> None:
+    """Print the planning roles a multi-lane campaign runs."""
+    print(f"  Orchestration: enabled with parallel specialists ({', '.join(sorted(plan.specialist_definitions))})")
+    print(
+        "  Plan Critic: "
+        + (
+            "enabled (long-horizon, same backend/model; skips rounds that continue a kept route)"
+            if plan.critic_enabled
+            else "disabled (requires --max-hours > 2)"
+        )
+    )
+
+
 def _search(
     run: _ForgeRun, loop_runner: IterationLoop, session: _AgentSession, actors: SearchActorStartup, plan: _SearchPlan
 ) -> _RunReporter:
@@ -806,15 +845,10 @@ def _search(
         profiling_enabled=plan.profiling_enabled,
     )
     print("  Analysis Agent: " + ("profiled" if plan.profiling_enabled else "static-only"))
-    print(f"  Orchestration: enabled with parallel specialists ({', '.join(sorted(plan.specialist_definitions))})")
-    print(
-        "  Plan Critic: "
-        + (
-            "enabled (long-horizon, same backend/model; skips rounds that continue a kept route)"
-            if plan.critic_enabled
-            else "disabled (requires --max-hours > 2)"
-        )
-    )
+    if start_bundle.orchestration_service is None:
+        print("  Orchestration: off (one lane; the Implementer chooses its direction from the Analysis evidence)")
+    else:
+        _announce_planning(plan)
 
     reporter = _RunReporter(
         run=run,

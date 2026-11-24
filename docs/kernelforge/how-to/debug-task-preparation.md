@@ -79,7 +79,6 @@ The first attempt always runs, however little time is left.
 | `FORGE_PREFLIGHT_CORRECTNESS_TIMEOUT` | `1800` | Correctness stage timeout; raise for cold-JIT backends |
 | `FORGE_PREFLIGHT_BENCH_TIMEOUT` | `1800` | Benchmark stage timeout |
 | `FORGE_PREFLIGHT_GRAPH_TIMEOUT` | `900` | Graph-replay probe timeout |
-| `FORGE_PREFLIGHT_PROFILE_TIMEOUT` | `900` | Profiling-contract probe timeout |
 | `FORGE_PREFLIGHT_DIAG_CHARS` | `1500` | How much of a failed stage's output is kept per stage |
 | `FORGE_EXTERNAL_IGNORE_DIRS` | — | Extra directory names to exclude when the driver lives outside the workspace |
 

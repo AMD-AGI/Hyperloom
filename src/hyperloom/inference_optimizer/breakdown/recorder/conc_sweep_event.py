@@ -317,7 +317,6 @@ class ArmStrategy:
     lifecycle_reason: Any = None
     port: Any = None
     framework: Any = None
-    serving_lease_held: Any = None
 
     def fields(self) -> dict[str, Any]:
         """The arm row fields this record persists as."""
@@ -330,7 +329,6 @@ class ArmStrategy:
                 "port": _int_or_none(self.port),
                 "framework": _text(self.framework),
             },
-            "serving_lease_held": None if self.serving_lease_held is None else bool(self.serving_lease_held),
         }
 
 
@@ -891,7 +889,6 @@ def _assemble_arm(
         "strategy": _text(row.get("strategy")),
         "strategy_reason": row.get("strategy_reason"),
         "lifecycle": _as_dict(row.get("lifecycle")),
-        "serving_lease_held": row.get("serving_lease_held"),
         "refused": _as_dict(row.get("refused")) or None,
         "failure": _as_dict(row.get("failure")) or None,
         "grid": _as_list(row.get("grid")),

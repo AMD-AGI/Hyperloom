@@ -12,8 +12,6 @@ import subprocess
 import sys
 import time
 from concurrent.futures import CancelledError
-from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 from hyperloom.common.deadline import Deadline
@@ -29,19 +27,15 @@ from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.launch_env import PreparedLaunch
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessDispatcher,
-    SpecialistSpawn,
 )
+from hyperloom.orchestrator.specialists.subprocess_types import SpecialistSpawn
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["local", "pending"])
-async def test_pre_cancelled_specialist_never_starts(monkeypatch, tmp_path, backend):
+async def test_pre_cancelled_specialist_never_starts(monkeypatch, tmp_path):
     scope = CancelScope()
     scope.cancel(reason="session_stopped")
     local_spawn = Mock(side_effect=AssertionError("cancelled specialist must not spawn"))
-    lease = Mock() if backend == "pending" else None
-    if lease is not None:
-        lease.start_async.side_effect = AssertionError("cancelled specialist must not start actor")
     dispatcher = ss.SpecialistSubprocessDispatcher(ss.SpecialistSubprocessConfig(agent_backend="claude"))
     monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
     monkeypatch.setattr(ss.subprocess, "Popen", local_spawn)
@@ -54,17 +48,14 @@ async def test_pre_cancelled_specialist_never_starts(monkeypatch, tmp_path, back
                 worktree_base=None,
                 system_prompt="system",
                 user_prompt="user",
-                gpu_lease=lease,
             )
         )
     local_spawn.assert_not_called()
-    if lease is not None:
-        lease.start_async.assert_not_called()
     assert not scope.has_listeners
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["running", "done_grace", "pending"])
+@pytest.mark.parametrize("phase", ["running", "done_grace"])
 @pytest.mark.parametrize("confirmed_dead", [True, False])
 @pytest.mark.parametrize("cancel_kind", ["scope", "direct"])
 async def test_specialist_scope_cancel_stops_before_harvest(monkeypatch, tmp_path, phase, confirmed_dead, cancel_kind):
@@ -72,46 +63,34 @@ async def test_specialist_scope_cancel_stops_before_harvest(monkeypatch, tmp_pat
     dispatcher = ss.SpecialistSubprocessDispatcher(
         ss.SpecialistSubprocessConfig(agent_backend="claude", poll_interval_seconds=0.01)
     )
-    child = None
     run = None
     entered = asyncio.Event()
-    lease = Mock() if phase == "pending" else None
     kill = Mock()
     harvest = Mock(side_effect=AssertionError("cancelled specialist must not harvest results"))
-    monkeypatch.setattr(dispatcher, "_collect_patches", harvest)
+    monkeypatch.setattr(ss, "collect_patches", harvest)
     monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
-    if lease is not None:
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.readline()"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
-        def poll_started():
-            entered.set()
-            return
+    def spawn(*args, **kwargs):
+        entered.set()
+        return child
 
-        lease.poll_started.side_effect = poll_started
-        lease.close.return_value = confirmed_dead
-        monkeypatch.setattr(ss, "_RAY_PENDING_POLL_INTERVAL_SEC", 0.01)
-    else:
-        child = subprocess.Popen(
-            [sys.executable, "-c", "import sys; sys.stdin.readline()"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+    def kill_child(proc):
+        kill(proc)
+        if confirmed_dead:
+            proc.terminate()
+            proc.wait(timeout=3)
+        return confirmed_dead
 
-        def spawn(*args, **kwargs):
-            entered.set()
-            return child
-
-        def kill_child(proc):
-            kill(proc)
-            if confirmed_dead:
-                proc.terminate()
-                proc.wait(timeout=3)
-            return confirmed_dead
-
-        monkeypatch.setattr(ss.subprocess, "Popen", spawn)
-        monkeypatch.setattr(dispatcher, "_kill", kill_child)
-        if phase == "done_grace":
-            (tmp_path / "specialist_done.json").write_text('{"summary": "not accepted"}', encoding="utf-8")
+    monkeypatch.setattr(ss.subprocess, "Popen", spawn)
+    monkeypatch.setattr(dispatcher, "_kill", kill_child)
+    if phase == "done_grace":
+        (tmp_path / "specialist_done.json").write_text('{"summary": "not accepted"}', encoding="utf-8")
     try:
         with use_cancel_scope(scope):
             run = asyncio.create_task(
@@ -123,7 +102,6 @@ async def test_specialist_scope_cancel_stops_before_harvest(monkeypatch, tmp_pat
                         worktree_base=None,
                         system_prompt="system",
                         user_prompt="user",
-                        gpu_lease=lease,
                     )
                 )
             )
@@ -138,19 +116,15 @@ async def test_specialist_scope_cancel_stops_before_harvest(monkeypatch, tmp_pat
         expected = cancelled_error if confirmed_dead else ExecutionCleanupUnconfirmed
         with pytest.raises(expected):
             await asyncio.wait_for(asyncio.shield(run), 3)
-        if lease is not None:
-            assert lease.close.call_count == (1 if confirmed_dead else 2)
-        else:
-            kill.assert_called_once_with(child)
-            assert (child.poll() is not None) is confirmed_dead
+        kill.assert_called_once_with(child)
+        assert (child.poll() is not None) is confirmed_dead
         harvest.assert_not_called()
         assert not scope.has_listeners
     finally:
-        if child is not None:
-            if child.poll() is None:
-                child.terminate()
-            child.wait(timeout=3)
-            child.stdin.close()
+        if child.poll() is None:
+            child.terminate()
+        child.wait(timeout=3)
+        child.stdin.close()
         if run is not None:
             run.cancel()
             await asyncio.gather(run, return_exceptions=True)
@@ -224,7 +198,7 @@ async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path, dem
 
     monkeypatch.setattr(ss.subprocess, "Popen", spawn)
     if demoted:
-        monkeypatch.setattr(ss, "resolve_launch_isolation", lambda lease: AccountIsolation(_SameUidRunAs()))
+        monkeypatch.setattr(ss, "resolve_launch_isolation", lambda: AccountIsolation(_SameUidRunAs()))
         monkeypatch.setattr(launch_env, "_demote", lambda *args: {})
         # The app's uid cannot read a demoted child's environ.
         monkeypatch.setattr(launch_env, "marked_pids", lambda key, value: [])
@@ -232,7 +206,7 @@ async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path, dem
         ss.SpecialistSubprocessConfig(agent_backend="claude", poll_interval_seconds=0.05)
     )
     monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
-    monkeypatch.setattr(dispatcher, "_collect_patches", lambda *args, **kwargs: ([], {}))
+    monkeypatch.setattr(ss, "collect_patches", lambda *args, **kwargs: ([], {}))
     bystander = real_popen(
         [sys.executable, "-c", "import time; time.sleep(300)"],
         env={**os.environ, "HYPERLOOM_REAP_MARK": "another-run"},
@@ -286,7 +260,7 @@ async def test_a_sweep_that_never_returns_does_not_hold_back_the_done_file(monke
         ss.SpecialistSubprocessConfig(agent_backend="claude", poll_interval_seconds=0.05)
     )
     monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
-    monkeypatch.setattr(dispatcher, "_collect_patches", lambda *args, **kwargs: ([], {}))
+    monkeypatch.setattr(ss, "collect_patches", lambda *args, **kwargs: ([], {}))
     try:
         with caplog.at_level("WARNING", logger=launch_env.log.name):
             result = await asyncio.wait_for(
@@ -397,113 +371,36 @@ async def test_reap_loop_kill_left_unconfirmed_raises_the_kills_error_carrying_t
     assert ("at its deadline" if ending == "deadline" else "heartbeat stale") in outcome["error"]
 
 
-@pytest.mark.parametrize("confirmed_dead", [True, False])
-def test_kill_ray_process_requires_cleanup_ack(confirmed_dead):
-    lease = Mock()
-    lease.stop.return_value = confirmed_dead
-    lease.close.return_value = confirmed_dead
-    lease.exit_code.return_value = None
-    proc = ss._RayLeaseProcess(lease, 4242)
-    if confirmed_dead:
-        confirmed = SpecialistSubprocessDispatcher._kill(proc)
-        assert confirmed is True
-    else:
-        with pytest.raises(ExecutionCleanupUnconfirmed, match="actor cleanup unconfirmed"):
-            SpecialistSubprocessDispatcher._kill(proc)
-    lease.stop.assert_called_once()
-    assert lease.close.call_count == int(not confirmed_dead)
+class _NeverExits:
+    pid = -1
+    returncode = None
+
+    def poll(self):
+        return None
 
 
-@pytest.mark.parametrize("exit_code", [None, 0, 7, -15])
-def test_ray_reap_followup_ack_preserves_observed_exit_code(exit_code):
-    actor = SimpleNamespace(closed=False)
-    lease = Mock()
-    lease.stop.return_value = False
-    lease.exit_code.side_effect = lambda: None if actor.closed else exit_code
+@pytest.mark.parametrize("done_file", [False, True])
+async def test_a_cancel_is_noticed_within_the_stop_gate_poll_not_the_reap_poll(tmp_path, done_file):
+    # The dispatcher's cancel grace budgets one STOP_GATE_POLL_SECONDS for noticing, so neither the reap poll nor the
+    # done-file grace may hold a cancelled specialist longer than that before its teardown starts.
+    from hyperloom_common.proctree import STOP_GATE_POLL_SECONDS
+    from hyperloom.orchestrator.specialists.reap_watch import ReapWatch
 
-    def close():
-        actor.closed = True
-        return True
-
-    lease.close.side_effect = close
-    proc = ss._RayLeaseProcess(lease, 4242)
-    confirmed = SpecialistSubprocessDispatcher._kill(proc)
-    assert confirmed is True
-    assert proc.returncode == exit_code
-    lease.stop.assert_called_once()
-    lease.close.assert_called_once()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["timeout", "stale", "done", "natural"])
-@pytest.mark.parametrize("exit_code", [None, 0, 7])
-async def test_ray_followup_ack_preserves_reap_outcome(monkeypatch, tmp_path, phase, exit_code):
-    dispatcher = ss.SpecialistSubprocessDispatcher(
-        ss.SpecialistSubprocessConfig(
-            agent_backend="claude", poll_interval_seconds=0.01, heartbeat_stale_seconds=1 if phase == "stale" else 300
+    done = tmp_path / "done.json"
+    if done_file:
+        done.write_text("{}", encoding="utf-8")
+    # Without a done-file the loop sits in its reap poll; with one it sits in the done-file grace.
+    poll = 0.01 if done_file else 30.0
+    dispatcher = SpecialistSubprocessDispatcher(ss.SpecialistSubprocessConfig(poll_interval_seconds=poll))
+    scope = CancelScope()
+    watch = ReapWatch(workspace=tmp_path, done_files=(done,), task_id="t")
+    with use_cancel_scope(scope):
+        reaping = asyncio.create_task(
+            dispatcher._reap_loop(_NeverExits(), watch, deadline=None, started=time.monotonic())
         )
-    )
-    monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
-    monkeypatch.setattr(dispatcher, "_collect_patches", Mock(return_value=([], {})))
-    clock = SimpleNamespace(now=100.0)
-    monkeypatch.setattr(ss, "time", SimpleNamespace(monotonic=lambda: clock.now, time=lambda: 100.0))
-
-    async def advance(_delay):
-        clock.now += 31.0
-
-    monkeypatch.setattr(ss.asyncio, "sleep", advance)
-    real_create = ss.create_nofollow
-
-    def created_long_ago(base, rel):
-        """The launch's log, made fresh as the dispatcher makes it; this test's wall clock never moves, so it is dated
-        before it, as the empty log of a CLI that never wrote is once its heartbeat window has passed."""
-        handle = real_create(base, rel)
-        os.utime(Path(base, *rel), (0.0, 0.0))
-        return handle
-
-    monkeypatch.setattr(ss, "create_nofollow", created_long_ago)
-    lease = Mock()
-    lease.poll_started.return_value = 4242
-    actor = SimpleNamespace(closed=False, alive=phase != "natural")
-    lease.is_alive.side_effect = lambda: actor.alive and not actor.closed
-    lease.exit_code.side_effect = lambda: None if actor.closed else exit_code
-    lease.stop.return_value = False
-
-    def close():
-        actor.closed = True
-        return True
-
-    lease.close.side_effect = close
-    payload = {"summary": "preserved", "proposal_set": []}
-    filename = "specialist_done.json" if phase in {"done", "natural"} else "specialist_done.partial.json"
-    (tmp_path / filename).write_text(json.dumps(payload), encoding="utf-8")
-    result = await dispatcher.run(
-        SpecialistSpawn(
-            task_id="ray-reap-outcome",
-            workspace=tmp_path,
-            worktree=None,
-            worktree_base=None,
-            system_prompt="system",
-            user_prompt="user",
-            gpu_lease=lease,
-            deadline=Deadline.after(0 if phase == "timeout" else 600, now=100),
-        )
-    )
-    assert result.timed_out is (phase == "timeout")
-    assert result.stale_heartbeat is (phase == "stale")
-    if phase == "timeout":
-        assert "deadline" in result.error
-    elif phase == "stale":
-        assert "heartbeat stale" in result.error
-    else:
-        assert result.error == ""
-    assert result.done_payload["summary"] == "preserved"
-    assert result.done_payload.get("_recovered_from_partial", False) is (phase in {"timeout", "stale"})
-    if phase == "natural" and exit_code is None:
-        from hyperloom.orchestrator.actions.executors._ray_serving import _RAY_ACTOR_DIED_RC
-
-        assert result.exit_code == _RAY_ACTOR_DIED_RC
-    else:
-        assert result.exit_code == exit_code
-    assert lease.stop.call_count == int(phase != "natural")
-    assert lease.close.call_count == int(phase != "natural")
+        await asyncio.sleep(0.2)
+        cancelled_at = time.monotonic()
+        scope.cancel(reason="coordinator_stop")
+        with pytest.raises(CancelledError):
+            await asyncio.wait_for(reaping, timeout=5.0)
+    assert time.monotonic() - cancelled_at <= STOP_GATE_POLL_SECONDS + 0.25

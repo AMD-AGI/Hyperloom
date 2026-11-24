@@ -184,18 +184,6 @@ def pd_topology_from_state() -> dict[str, Any]:
     }
 
 
-def ray_gcs_address_from_state() -> str:
-    """Ray GCS address for ``ray.init`` (head pod IP + default GCS port)."""
-    state = _read_state()
-    addr = str(state.get("ray_address") or "").strip()
-    if addr:
-        return addr
-    head = str(state.get("head_pod_ip") or "").strip()
-    if head:
-        return f"{head}:6379"
-    return ""
-
-
 def infera_ssh_env_from_state() -> dict[str, str]:
     """Env that routes kernel-agent GEAK GPU work to a Infera pod over SSH."""
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
@@ -214,15 +202,6 @@ def infera_ssh_env_from_state() -> dict[str, str]:
         "MN_SSH_PORT": str(first.get("sshPort") or state.get("ssh_port") or 2233),
         "MN_SSH_KEY": key,
     }
-
-
-def export_ray_address_to_os() -> None:
-    """Set ``RAY_ADDRESS`` from multi_node state when running multi-node optimize."""
-    if not is_multi_node():
-        return
-    addr = ray_gcs_address_from_state()
-    if addr:
-        os.environ["RAY_ADDRESS"] = addr
 
 
 def _multi_node_service_url() -> str:
@@ -288,9 +267,7 @@ def log_mn_banner(
 
 __all__ = [
     "client_only_server_url",
-    "export_ray_address_to_os",
     "is_multi_node",
     "log_mn_banner",
-    "ray_gcs_address_from_state",
     "resolve_kb_topology",
 ]

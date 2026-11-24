@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._framework_switch_manifest import KNOWN_CATEGORIES
+from hyperloom.orchestrator.actions.executors.framework_change._framework_switch_manifest import KNOWN_CATEGORIES
 from hyperloom.orchestrator.prompts.specialist_focus import _focus_framework_rewrite_specialist
 from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
@@ -153,7 +153,7 @@ def test_serving_frameworks_keep_the_serving_domain(framework):
 
 def test_evidence_block_renders_from_the_recorded_path(tmp_path):
     """The arm hands the specialist the measured evidence, not just a gap phrase."""
-    from hyperloom.orchestrator.actions.executors import _framework_rewrite_evidence as ev
+    from hyperloom.orchestrator.actions.executors.framework_change import _framework_rewrite_evidence as ev
 
     document = ev.build_evidence(
         [
@@ -322,7 +322,7 @@ def test_serving_dispatch_is_unchanged(tmp_path):
 
 def test_scriptable_dispatch_inlines_the_measured_evidence(tmp_path):
     """When evidence exists it travels with the dispatch."""
-    from hyperloom.orchestrator.actions.executors import _framework_rewrite_evidence as ev
+    from hyperloom.orchestrator.actions.executors.framework_change import _framework_rewrite_evidence as ev
 
     document = ev.build_evidence(
         [
@@ -365,7 +365,7 @@ def test_scriptable_dispatch_without_evidence_says_how_to_look(tmp_path):
 
 def test_publishing_never_overrides_an_operator_value(monkeypatch, tmp_path):
     """An explicitly exported checkout wins; Hyperloom only fills a gap."""
-    from hyperloom.orchestrator.actions.executors._workload_envs import (
+    from hyperloom.orchestrator.actions.executors.workload._framework_runtime import (
         _publish_scriptable_repo_root,
     )
 
@@ -382,7 +382,7 @@ def test_publishing_never_overrides_an_operator_value(monkeypatch, tmp_path):
 
 def test_publishing_ignores_blank_input(monkeypatch):
     """A blank path would make the allowlist claim a root that does not exist."""
-    from hyperloom.orchestrator.actions.executors._workload_envs import (
+    from hyperloom.orchestrator.actions.executors.workload._framework_runtime import (
         _publish_scriptable_repo_root,
     )
 

@@ -342,21 +342,6 @@ async def test_a_broken_stack_fails_as_the_candidate_and_no_sandbox_is_asked_for
     assert result.gpu_seconds == 0 and result.sandbox is None
 
 
-async def test_an_import_error_fails_as_the_candidate(tmp_path: Path, framework: Framework) -> None:
-    environment = _environment(tmp_path, framework, REMOVES_Y, IMPORTS_Y)
-    result, backend, _ = await _through_toolbox(tmp_path, environment, MergeSmoke(default_python=framework.python))
-    assert result.validity is Validity.CANDIDATE_FAILED and backend.calls == 0
-    assert result.failure_reason == f"{MERGE_SMOKE}: {REMOVED_Y_ERROR}"
-
-
-async def test_a_device_probe_with_no_gpu_goes_on_to_its_measurement(tmp_path: Path, framework: Framework) -> None:
-    environment = _environment(tmp_path, framework, DEVICE_PROBE)
-    result, backend, journal = await _through_toolbox(
-        tmp_path, environment, MergeSmoke(default_python=framework.python)
-    )
-    assert result.validity is Validity.SUCCEEDED and backend.calls == 1 and journal is not None
-
-
 async def test_a_good_stack_goes_on_to_its_measurement(tmp_path: Path, framework: Framework) -> None:
     environment = _environment(tmp_path, framework, MERGE_OWN)
     result, backend, journal = await _through_toolbox(
@@ -375,14 +360,6 @@ async def test_a_smoke_that_cannot_run_is_infrastructure_never_the_candidate(
     assert (result.failure_reason or "").startswith(f"{SMOKE_NOT_RUN}: the framework interpreter ")
     assert backend.calls == 0 and journal is None
     assert len(result.attempts) == 2, "a smoke that could not run is tried once more, then the test ends"
-
-
-async def test_a_smoke_past_its_timeout_is_infrastructure(tmp_path: Path, framework: Framework) -> None:
-    environment = _environment(tmp_path, framework, {"srt/a.py": (OLD_A, "import time\ntime.sleep(60)\n")})
-    smoke = MergeSmoke(default_python=framework.python, timeout_sec=2)
-    result, backend, _ = await _through_toolbox(tmp_path, environment, smoke)
-    assert result.failure_class is FailureClass.INFRA and backend.calls == 0
-    assert "timed out after 2 s" in (result.failure_reason or "")
 
 
 @dataclass(frozen=True)

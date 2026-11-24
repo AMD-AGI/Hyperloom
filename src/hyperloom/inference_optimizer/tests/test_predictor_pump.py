@@ -551,7 +551,7 @@ async def test_entry_asks_at_its_own_decision_point_after_filing_an_earlier_answ
 
 
 async def test_a_filed_answer_is_the_phases_work_and_a_run_on_its_event(service, monkeypatch):
-    from hyperloom.orchestrator.phases.machine_state import _framework_predicate_inputs
+    from hyperloom.orchestrator.phases.phase_predicates import _framework_predicate_inputs
     from hyperloom.orchestrator.phases.exit_predicates import framework_exit
     from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_KERNEL
 

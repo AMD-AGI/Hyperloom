@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_common.llm import llm_config
-from hyperloom.common.ports import DEV_SANDBOX_PORTS, RAY_WORKER_PORTS
+from hyperloom.common.ports import DEV_SANDBOX_PORTS
 from hyperloom.common.codex_session import (
     CODEX_SANDBOX_MODE_ENV,
     DEFAULT_CODEX_SANDBOX_MODE,
@@ -43,7 +43,7 @@ from hyperloom.orchestrator.kernel import _forge_shapes as forge_shapes
 from hyperloom.orchestrator.kernel import serving_log_evidence as serving_log_evidence
 from hyperloom.orchestrator.kernel import _shape_capture as shape_capture
 from hyperloom.orchestrator.kernel import _untuned_gemm_csv as untuned_gemm_csv
-from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import LaunchLayer
 
 
 _FUSION_PROVIDER_ENV_KEYS = (
@@ -2158,7 +2158,6 @@ class TestRunGemmTuningHandler:
         capture_port = int(task.params["extra_envs"]["PORT"])
         ephemeral_start = int(Path("/proc/sys/net/ipv4/ip_local_port_range").read_text(encoding="utf-8").split()[0])
         assert capture_port < ephemeral_start and capture_port not in DEV_SANDBOX_PORTS
-        assert capture_port not in RAY_WORKER_PORTS
         assert task.params["extra_envs"]["TP"] == "1"
         assert task.params["extra_envs"]["CONC"] == "128"
         assert task.params["extra_envs"]["ISL"] == "1024"
@@ -2173,7 +2172,7 @@ class TestRunGemmTuningHandler:
 
         import yaml
 
-        from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
+        from hyperloom.orchestrator.actions.executors.workload._workload_envs import materialize_config_with_envs
 
         monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
         base = tmp_path / "base.yaml"

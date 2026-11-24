@@ -14,6 +14,7 @@ from ..bus.gpu_pool import gpus_by_task_sync
 from ..mcp_tool_names import qualified_context_tool_name
 from ..phases import dispatch_order
 from ..phases import machine_state as _phase_state
+from ..phases import phase_transitions
 from ..phases.proposal_bench import carried_fingerprints, explore_grid_fingerprints, waiting_proposal_rows
 from ..policy.custom_specialist import custom_only_framework
 from ..policy.projection import resource_pools_summary
@@ -651,7 +652,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         context: list[str] = [f"SESSION_DIR={self.session_dir}"]
         turn: list[str] = []
 
-        phase_block = _phase_state.phase_status_summary(self.shared_state)
+        phase_block = phase_transitions.phase_status_summary(self.shared_state)
         if phase_block:
             turn.append("=== Phase ===")
             turn.append(phase_block)

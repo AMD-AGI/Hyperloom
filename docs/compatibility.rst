@@ -74,7 +74,7 @@ The following table lists the validated Hyperloom version and component combinat
 +-------------------+---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 | Hyperloom version | Component                 | GPU                    | ROCm version                       | Ubuntu        | Python      | GitHub                      |
 +===================+===========================+========================+====================================+===============+=============+=============================+
-| 1.1.5             | `TraceLens 1.0.0`_        | Hardware-agnostic      | No dependency                      | OS-independent| >= 3.6      | |tracelens-github|          |
+| 1.2.0             | `TraceLens 1.0.0`_        | Hardware-agnostic      | No dependency                      | OS-independent| >= 3.6      | |tracelens-github|          |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 |                   | `GEAK 4.0.0`_             | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x, 10.0.0 | 22.04, 24.04  | 3.8, 3.12   | |geak-github|               |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
@@ -148,9 +148,9 @@ mirror, set the registry prefix accordingly.
 
    * - Image
      - GPU
-   * - ``lmsysorg/sglang-rocm:v0.5.23-rocm10-mi30x-20261118``
+   * - ``lmsysorg/sglang-rocm:v0.5.23-rocm10-mi30x-20261111``
      - MI300X / MI325X
-   * - ``lmsysorg/sglang-rocm:v0.5.23-rocm10-mi35x-20261118``
+   * - ``lmsysorg/sglang-rocm:v0.5.23-rocm10-mi35x-20261111``
      - MI355X
    * - ``vllm/vllm-openai-rocm:v0.34.0-rocm100``
      - MI300X / MI325X / MI355X

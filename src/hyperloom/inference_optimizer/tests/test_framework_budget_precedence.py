@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state
+from hyperloom.orchestrator.phases import phase_transitions
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_KERNEL, ESCALATE_HINT_SKIP_TO_SWEEP
 from hyperloom.orchestrator.state.task_registry import TaskSpec
 
@@ -88,7 +89,7 @@ async def test_expired_allocation_outranks_advisory_operator_hold(coord, hint, p
     assert coord.shared_state.stop_reason == ""
     assert (await coord.tasks.get(task.task_id)).state == "cancelled"
     inputs = coord.shared_state.phase_history[-1]["evidence"]["predicate_inputs"]
-    assert machine_state.replay_next_phase(inputs)[0] == coord.shared_state.phase
+    assert phase_transitions.replay_next_phase(inputs)[0] == coord.shared_state.phase
 
 
 @pytest.mark.parametrize("hint", HINTS)

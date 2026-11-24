@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import subprocess
 import threading
 from pathlib import Path
@@ -25,6 +24,7 @@ from hyperloom.measure import local
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.points import AMBIENT_SHAPE_ENVS
 from hyperloom.measure.repro import read_verdict
+from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC
 from hyperloom.measure.runner.rounds import rounds_document
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
 from hyperloom.measure.tests import eval_refusal_logs, test_hf_cache_permission, test_log_causes
@@ -36,7 +36,7 @@ from hyperloom.orchestrator.actions.executors import (
     PatchedServer,
     VariantResult,
 )
-from hyperloom.orchestrator.actions.executors._server_lifecycle import REUSE_PORT_DEFAULT
+from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_boot_budget_sec
 from inference_suite.contracts import Deadlines, FailedStep, RunLayout
 from inference_suite.tests import test_config_contract
 
@@ -144,33 +144,21 @@ def _run(call: TestCall):
     return LocalMeasurementBackend().run_test(call)
 
 
-def _own_port(config: dict[str, Any]) -> int:
-    """The port a round's point carries, taken out of it: what is left is the point the test was asked to run."""
-    port = int(config["benchmark"]["envs"].pop("PORT"))
-    assert port != REUSE_PORT_DEFAULT, "the default is the port every round without one shares"
-    return port
-
-
 # --- single-point test --------------------------------------------------------------------------------------------
 
 
 def test_a_single_point_test_is_one_run_grid_call_with_one_variant(grid, unheld, tmp_path):
-    call = _call(tmp_path, result_dir="/res", session_deadline_sec=123.0, serving_lease="lease")
+    call = _call(tmp_path, result_dir="/res", session_deadline_sec=123.0)
 
     outcome = _run(call)
 
     (kwargs,) = grid.calls
     assert [v.name for v in kwargs["grid"]] == ["test"]
     assert kwargs["output_root"] == tmp_path / "out"
-    assert (kwargs["launch"].result_dir, kwargs["stop"].session_deadline_sec, kwargs["launch"].serving_lease) == (
-        "/res",
-        123.0,
-        "lease",
-    )
+    assert (kwargs["launch"].result_dir, kwargs["stop"].session_deadline_sec) == ("/res", 123.0)
     assert kwargs["launch"].server_lifecycle is None
     (config,) = grid.configs
-    _own_port(config)
-    assert config == yaml.safe_load(call.points[0].read_text()), "the point is run as it is, with a port of its own"
+    assert config == yaml.safe_load(call.points[0].read_text()), "the point is run as it is"
     assert [(r.point, r.phase, r.returncode) for r in outcome.rounds] == [(0, "measure", 0)]
     assert (outcome.returncode, outcome.failure_class, outcome.request_id) == (0, None, "t-1")
     assert outcome.sandbox.backend == "local"
@@ -944,6 +932,66 @@ def test_the_per_round_cap_and_the_leak_scope_come_from_the_call(grid, tmp_path,
     }
 
 
+@pytest.mark.parametrize(("budget", "named"), [(None, None), (14400.0, "14400.0")])
+def test_the_boot_budget_of_the_call_is_named_to_its_rounds(grid, tmp_path, monkeypatch, budget, named):
+    """A round reads the test's boot budget from the environment and holds the framework's ready timeout past it."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC", raising=False)
+    captured: list[str | None] = []
+
+    async def look(**kwargs):
+        captured.append(os.environ.get("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC"))
+        return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
+
+    monkeypatch.setattr(local, "run_grid", look)
+
+    _run(_call(tmp_path, timeout_sec=20000, boot_budget_sec=budget))
+
+    assert captured == [named]
+    assert "INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC" not in os.environ, "the test puts the environment back"
+
+
+@pytest.mark.parametrize("budget", [None, 14400.0])
+def test_the_round_reads_the_boot_budget_the_backend_names(grid, tmp_path, monkeypatch, budget):
+    """The backend's side and the round's side agree on where the budget travels: a rename on one side alone fails."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC", raising=False)
+    read: list[float | None] = []
+
+    async def look(**kwargs):
+        read.append(resolve_boot_budget_sec())
+        return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
+
+    monkeypatch.setattr(local, "run_grid", look)
+
+    _run(_call(tmp_path, timeout_sec=20000, boot_budget_sec=budget))
+
+    assert read == [budget]
+
+
+@pytest.mark.parametrize("source", ["operator", "sheet"])
+def test_an_exported_boot_budget_does_not_reach_a_test_without_one(grid, tmp_path, monkeypatch, source):
+    """The budget is the backend's own: a value the operator or the sheet exported is removed from a test with none,
+    and the call's own budget wins over it, and the operator's value is back once the test ends."""
+    overrides: dict[str, str] = {}
+    if source == "operator":
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC", "9000")
+    else:
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC", raising=False)
+        overrides["INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC"] = "9000"
+    captured: list[str | None] = []
+
+    async def look(**kwargs):
+        captured.append(os.environ.get("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC"))
+        return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
+
+    monkeypatch.setattr(local, "run_grid", look)
+
+    _run(_call(tmp_path, timeout_sec=20000, env_overrides=overrides))
+    _run(_call(tmp_path, timeout_sec=20000, boot_budget_sec=14400.0, env_overrides=overrides))
+
+    assert captured == [None, "14400.0"]
+    assert os.environ.get("INFERENCE_OPTIMIZER_BOOT_BUDGET_SEC") == ("9000" if source == "operator" else None)
+
+
 def test_two_tests_in_one_process_do_not_overlap(monkeypatch, tmp_path):
     active, peak = [0], [0]
     gate = threading.Lock()
@@ -987,7 +1035,7 @@ BOOT_ENVS = {"RUN_EVAL": "false", "NUM_PROMPTS": "1"}
 def _envs_handed_to_the_round(grid: _Grid, tmp_path: Path, call: dict[str, Any]) -> dict[str, Any]:
     """The ``benchmark.envs`` ``run_grid`` makes of one recorded call: its own layering of the point and the recipe's
     base variables over the round's shape the process environment held while the call ran."""
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import _build_variant_yaml
 
     shape = grid.shapes[next(index for index, recorded in enumerate(grid.calls) if recorded is call)]
     with mock.patch.dict(os.environ):
@@ -1235,14 +1283,14 @@ def test_a_round_the_lifecycle_holds_runs_from_the_point_itself_on_the_lifecycle
     assert {_lifecycle(c)["port"] for c in grid.calls} == {8123}
 
 
-def test_a_sweep_that_restarts_per_level_gives_every_level_a_port_of_its_own(monkeypatch, grid, tmp_path):
+def test_a_sweep_that_restarts_per_level_runs_every_level_from_its_own_point(monkeypatch, grid, tmp_path):
+    # Each level's server gets a free port of its own where its round reads the point (_suite.rounds._round_point).
     _Server(monkeypatch, eligible=False)
     call = _sweep_call(tmp_path, 8, 4)
 
     _run(call)
 
-    ports = [_own_port(config) for config in grid.configs]
-    assert len(ports) == 2 and all(0 < port < 65536 for port in ports)
+    assert len(grid.configs) == 2
     assert all(config == yaml.safe_load(point.read_text()) for config, point in zip(grid.configs, call.points[:2]))
 
 
@@ -1388,7 +1436,7 @@ def test_a_patched_test_tells_the_rounds_verdict_that_it_changed_the_framework(
 ):
     python, _ = installed_framework
     seen: list[bool] = []
-    ended = local._ended
+    ended = local.ended
 
     def record(run):
         seen.append(run.call.framework_changed)
@@ -1398,7 +1446,7 @@ def test_a_patched_test_tells_the_rounds_verdict_that_it_changed_the_framework(
         return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
 
     monkeypatch.setattr(local, "run_grid", look)
-    monkeypatch.setattr(local, "_ended", record)
+    monkeypatch.setattr(local, "ended", record)
     point = _point_with_python(tmp_path, python)
 
     _run(_call(tmp_path, point, environment=_compile(tmp_path, installed_framework)))
@@ -1426,7 +1474,7 @@ def _agentx_launch(monkeypatch, tmp_path, python) -> dict[str, Any]:
     """What ``run_grid`` hands the round for the point, and what the server it launches then imports from ``a.f()``."""
     import subprocess
 
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import _build_variant_yaml
 
     launched: dict[str, Any] = {}
 
@@ -1518,7 +1566,6 @@ def test_a_test_on_the_image_as_it_is_runs_the_point_unchanged(grid, unheld, tmp
 
     _run(call)
 
-    _own_port(grid.configs[0])
     assert compiled.is_base and grid.configs[0] == yaml.safe_load(call.points[0].read_text())
 
 
@@ -1744,7 +1791,6 @@ def test_an_agentx_profile_test_is_one_profiled_round_that_turns_the_profiler_on
     outcome = _run(_call(tmp_path, point, kind="profile", rounds=RoundPlan(warmup_rounds=1)))
 
     (kwargs,) = grid.calls
-    _own_port(grid.configs[0])
     assert kwargs["launch"].warmup_before_measure is False and grid.configs[0] == yaml.safe_load(point.read_text())
     assert outcome.returncode == 0
     assert (tmp_path / "out" / "profile" / "torch_trace" / capture / "rank0.pt.trace.json.gz").is_file()
@@ -1764,86 +1810,6 @@ def test_a_plain_test_does_not_gather_traces(grid, tmp_path):
     _run(_call(tmp_path))
 
     assert not (tmp_path / "out" / "profile").exists()
-
-
-class _Machine:
-    """One machine's ports: ``run_grid`` as it is for a round whose server is up, listening on the port the round's own
-    config names in ``benchmark.envs.PORT`` (the default when it names none).
-
-    The InferenceX script reads it from the environment it is run with; an AgentX recipe reads it into the ``--port``
-    of the server's argv and ``PORT`` is not one of ``launch_overrides.env``, so the AgentX server's port can come from
-    nowhere else.
-
-    The listeners stay open to the end of the test, as the servers of tests running at the same time do; a round whose
-    port is taken fails the way the real one did: its server dies.
-    """
-
-    def __init__(self, tmp_path: Path) -> None:
-        self.tmp_path = tmp_path
-        self.ports: list[int] = []
-        self.launches: list[dict[str, Any]] = []
-        self.listeners: list[socket.socket] = []
-
-    async def __call__(self, **kwargs: Any) -> list[VariantResult]:
-        from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
-
-        variant = kwargs["grid"][0]
-        slot = self.tmp_path / "slots" / str(len(self.ports))
-        launched = _build_variant_yaml(kwargs["recipe"], variant, output_subdir=slot)
-        self.launches.append(benchmark := yaml.safe_load(launched.read_text())["benchmark"])
-        self.ports.append(port := int((benchmark.get("envs") or {}).get("PORT", REUSE_PORT_DEFAULT)))
-        workspace = slot / "suite_run_0"
-        RunLayout(workspace).profile_torch_trace.mkdir(parents=True)
-        (RunLayout(workspace).profile_torch_trace / "rank0.pt.trace.json.gz").write_bytes(b"trace")
-        listener = socket.socket()
-        try:
-            listener.bind(("127.0.0.1", port))
-            listener.listen()
-        except OSError as exc:
-            listener.close()
-            error = f"Server process died during benchmark: {exc}"
-            return [
-                VariantResult(
-                    variant.name, "", {}, status="failed", returncode=1, workspace=str(workspace), error=error
-                )
-            ]
-        self.listeners.append(listener)
-        return [VariantResult(variant.name, "", {}, status="succeeded", returncode=0, workspace=str(workspace))]
-
-
-@pytest.fixture
-def machine(monkeypatch, tmp_path):
-    fake = _Machine(tmp_path)
-    monkeypatch.setattr(local, "run_grid", fake)
-    yield fake
-    for listener in fake.listeners:
-        listener.close()
-
-
-def _profile_agentx_point(tmp_path: Path, monkeypatch) -> Path:
-    from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile
-
-    point = _agentx_point(tmp_path, monkeypatch)
-    enable_profile(point)
-    return point
-
-
-@pytest.mark.parametrize("make_point", [_profile_point, _profile_agentx_point], ids=["inferencex", "agentx"])
-def test_two_profile_tests_on_one_machine_launch_their_servers_on_ports_of_their_own(
-    machine, tmp_path, monkeypatch, make_point
-):
-    """A profile round is not held by the server lifecycle, so no port was assigned to it: both listened on 8888."""
-    point = make_point(tmp_path) if make_point is _profile_point else make_point(tmp_path, monkeypatch)
-    shared = point.read_text()
-
-    first = _run(_call(tmp_path, point, kind="profile", output_dir=tmp_path / "first"))
-    second = _run(_call(tmp_path, point, kind="profile", output_dir=tmp_path / "second"))
-
-    assert [first.returncode, second.returncode] == [0, 0], "the second server found its port taken"
-    assert len(set(machine.ports)) == 2 and REUSE_PORT_DEFAULT not in machine.ports
-    server_envs = [((b.get("agentx") or {}).get("launch_overrides") or {}).get("env") or {} for b in machine.launches]
-    assert all("PORT" not in env for env in server_envs), "PORT is never among an AgentX server's variables"
-    assert point.read_text() == shared, "the point is shared by every test that runs it: it is not written to"
 
 
 # --- repro test ---------------------------------------------------------------------------------------------------
@@ -1929,7 +1895,7 @@ def test_a_case_that_cannot_run_to_a_verdict_is_a_failure_of_the_measurement_not
 
     outcome = _run(_repro_call(tmp_path, timeout_sec=1))
 
-    assert outcome.failure_class == "infra" and outcome.returncode == local.HOSTED_INFRA_FAILURE_RC
+    assert outcome.failure_class == "infra" and outcome.returncode == HOSTED_INFRA_FAILURE_RC
     assert reason in outcome.stderr and "repro_case_error" in outcome.stderr
     assert not (tmp_path / "out" / "repro" / "verdict.json").exists()
     assert len(case.events) == 1, "the server is reclaimed whatever became of the case"

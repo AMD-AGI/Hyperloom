@@ -9,17 +9,18 @@ import json
 import sys
 import textwrap
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from hyperloom_common.proctree import running
-from inference_suite.contracts import Deadlines, FailedStep, RunLayout
+from inference_suite.contracts import PRE_READY_BUSY_SILENCE_SEC, Deadlines, FailedStep, RunLayout
 from inference_suite.frameworks import Framework
 from inference_suite.runtime import watch
 from inference_suite.runtime.phases import Phase, PhaseClock
 from inference_suite.runtime.process import PidfileError, ServerPidfile, spawn
-from inference_suite.runtime.watch import Exited, RoundGate, ServerWatch, Stop, wait_child
+from inference_suite.runtime.watch import BootReaders, Exited, RoundGate, ServerWatch, Stop, wait_child
 
 _DEADLINES = Deadlines(boot_sec=100, round_sec=1000, eval_sec=60, silence_sec=50, pre_ready_silence_sec=30)
 _BUILD_LINE = "[aiter] [pid=7 pname=x] start build [module_cktile_gemm] under /tmp/jit\n"
@@ -64,6 +65,170 @@ def test_pre_ready_silence_and_exit_end_the_boot(tmp_path):
     server_watch.advance(0.0)
     assert server_watch.before_ready(31.0, None).step is FailedStep.SERVER_SILENT_BEFORE_READY
     assert server_watch.before_ready(1.0, 1).step is FailedStep.SERVER_EXITED_BEFORE_READY
+
+
+class _Cpu:
+    """A CPU reader that answers the given totals in turn, the last one ever after."""
+
+    def __init__(self, *totals: float | None) -> None:
+        self._totals = list(totals)
+        self.reads = 0
+
+    def __call__(self) -> float | None:
+        self.reads += 1
+        return self._totals.pop(0) if len(self._totals) > 1 else self._totals[0]
+
+
+class _Tree:
+    """A per-process reader whose ``n``-th read answers ``reading(n)``."""
+
+    def __init__(self, reading: Callable[[int], dict[int, int] | None]) -> None:
+        self._reading = reading
+        self.reads = 0
+
+    def __call__(self) -> dict[int, int] | None:
+        self.reads += 1
+        return self._reading(self.reads - 1)
+
+
+def _growing(per_sample: int) -> _Tree:
+    """Two processes; the server's rank grows by ``per_sample`` bytes each read, its helper stays flat."""
+    return _Tree(lambda n: {1: 150 << 30 if per_sample == 0 else (100 << 30) + per_sample * n, 2: 1 << 30})
+
+
+def _flat() -> _Tree:
+    return _growing(0)
+
+
+def _boot(
+    tmp_path: Path,
+    cpu: _Cpu | None,
+    until: float,
+    deadlines: Deadlines = _DEADLINES,
+    step: float = 1.0,
+    rss: _Tree | None = None,
+    io: _Tree | None = None,
+) -> Stop | None:
+    """Watch a boot whose log is silent from 0 to ``until``, advancing every ``step`` as a poll would, and the first
+    stop."""
+    log = tmp_path / "server.log"
+    log.write_text("Finished streaming dequant\n", encoding="utf-8")
+    server_watch = ServerWatch(log, 0, deadlines, now=0.0, readers=BootReaders(cpu, rss, io))
+    now = 0.0
+    server_watch.advance(now)
+    while now < until:
+        now += step
+        server_watch.advance(now)
+        stop = server_watch.before_ready(now, None)
+        if stop is not None:
+            return Stop(stop.step, f"{now:.0f} {stop.detail}")
+    return None
+
+
+def _per_sample(share: float) -> list[float]:
+    """CPU totals growing by ``share`` of a CPU between reads, one read at spawn and one each sample."""
+    return [share * watch.CPU_SAMPLE_SEC * index for index in range(20)]
+
+
+def test_a_silent_boot_whose_processes_use_cpu_is_working(tmp_path):
+    # 90 s of a silent log: three pre-ready silence limits, still inside the 100 s boot budget.
+    assert _boot(tmp_path, _Cpu(*_per_sample(2.0)), until=90.0) is None
+    assert _boot(tmp_path, _Cpu(*_per_sample(watch.CPU_ACTIVE_SHARE)), until=90.0) is None
+
+
+def test_a_silent_boot_whose_processes_idle_is_stopped_at_the_limit(tmp_path):
+    stop = _boot(tmp_path, _Cpu(*_per_sample(watch.CPU_ACTIVE_SHARE * 0.8)), until=90.0)
+    assert stop == Stop(
+        FailedStep.SERVER_SILENT_BEFORE_READY,
+        "30 the server log was silent for 30.0s and its processes used under 0.25 of a CPU for 30.0s",
+    )
+
+
+def test_a_boot_whose_cpu_time_cannot_be_read_is_stopped_at_the_limit(tmp_path):
+    stop = _boot(tmp_path, _Cpu(None), until=90.0)
+    assert (
+        stop is not None and stop.detail == "30 the server log was silent for 30.0s and its CPU time could not be read"
+    )
+    # Readable at spawn, then gone: the failed reads are no activity either.
+    stop = _boot(tmp_path, _Cpu(0.0, None), until=90.0)
+    assert stop is not None and stop.detail.startswith("30 ") and stop.detail.endswith("could not be read")
+
+
+def test_cpu_time_that_falls_is_no_activity(tmp_path):
+    # A busy process exits before its time is counted: the total drops, then stays flat.
+    stop = _boot(tmp_path, _Cpu(100.0, 40.0, 40.0), until=90.0)
+    assert stop is not None and stop.step is FailedStep.SERVER_SILENT_BEFORE_READY and stop.detail.startswith("30 ")
+
+
+def test_silence_counts_from_the_last_stretch_that_used_cpu(tmp_path):
+    # Busy until the read at 40 s, flat after it: silent from 40 s, stopped 30 s later.
+    stop = _boot(tmp_path, _Cpu(0.0, 10.0, 20.0, 30.0, 40.0, 40.0), until=90.0)
+    assert stop is not None and stop.detail.startswith("70 the server log was silent for 70.0s")
+    assert stop.detail.endswith("for 30.0s")
+
+
+#: The release config's budgets: a boot budget well past the busy-silence bound, the default pre-ready silence limit.
+_LONG_BOOT = Deadlines(boot_sec=7200, round_sec=10000, eval_sec=60, silence_sec=50, pre_ready_silence_sec=1800)
+
+
+def _busy(share: float, reads: int = 400) -> list[float]:
+    return [share * watch.CPU_SAMPLE_SEC * index for index in range(reads)]
+
+
+def test_a_busy_silent_boot_is_working_below_the_busy_silence_bound(tmp_path):
+    bound = PRE_READY_BUSY_SILENCE_SEC
+    assert (
+        _boot(tmp_path, _Cpu(*_busy(2.0)), until=bound - watch.CPU_SAMPLE_SEC, deadlines=_LONG_BOOT, step=10.0) is None
+    )
+
+
+def test_a_busy_silent_boot_is_stopped_at_the_busy_silence_bound_as_a_possible_spin(tmp_path):
+    stop = _boot(tmp_path, _Cpu(*_busy(2.0)), until=5000.0, deadlines=_LONG_BOOT, step=10.0)
+    assert stop == Stop(
+        FailedStep.SERVER_SILENT_BEFORE_READY,
+        "3600 the server log was silent for 3600.0s while its processes stayed busy, which may be a spin",
+    )
+
+
+def test_a_flat_cpu_silent_boot_is_still_stopped_at_the_pre_ready_limit(tmp_path):
+    stop = _boot(tmp_path, _Cpu(*_busy(0.0)), until=5000.0, deadlines=_LONG_BOOT, step=10.0)
+    assert stop is not None and stop.step is FailedStep.SERVER_SILENT_BEFORE_READY
+    assert stop.detail.startswith("1800 the server log was silent for 1800.0s and its processes used under")
+
+
+def test_the_busy_silence_bound_never_cuts_below_the_pre_ready_limit(tmp_path):
+    above = Deadlines(boot_sec=20000, round_sec=30000, eval_sec=60, silence_sec=50, pre_ready_silence_sec=5000)
+    stop = _boot(tmp_path, _Cpu(*_busy(2.0, reads=700)), until=6000.0, deadlines=above, step=10.0)
+    assert stop is not None and stop.detail.startswith("5000 the server log was silent for 5000.0s while its processes")
+
+
+def test_a_boot_without_a_cpu_reader_says_so(tmp_path):
+    stop = _boot(tmp_path, None, until=90.0)
+    assert stop is not None and stop.detail == "30 the server log was silent for 30.0s and its CPU time was not watched"
+
+
+def test_log_growth_alone_restarts_the_silence_bound(tmp_path):
+    server_watch, log = _watch(tmp_path, "loading\n")
+    server_watch.advance(0.0)
+    with log.open("a") as fh:
+        fh.write("still loading\n")
+    server_watch.advance(20.0)
+    assert server_watch.before_ready(49.0, None) is None
+    assert server_watch.before_ready(50.0, None).step is FailedStep.SERVER_SILENT_BEFORE_READY
+
+
+def test_a_live_servers_cpu_is_not_activity(tmp_path):
+    log = tmp_path / "server.log"
+    log.write_text("Application startup complete\n", encoding="utf-8")
+    cpu = _Cpu(*_per_sample(4.0))
+    server_watch = ServerWatch(log, 0, _DEADLINES, now=0.0, readers=BootReaders(cpu))
+    server_watch.advance(0.0)
+    server_watch.mark_ready(1.0)
+    for now in range(2, 60):
+        server_watch.advance(float(now))
+    assert cpu.reads == 1, "only the read at spawn: a live server's CPU is not read"
+    assert server_watch.cpu_active_at is None
+    assert server_watch.stalled(51.0).step is FailedStep.SERVER_STALLED
 
 
 def test_live_server_gates(tmp_path):
@@ -169,3 +334,71 @@ def test_pidfile_round_trips_and_refuses_what_it_did_not_write(tmp_path):
     path.write_text("1234 1234\n")
     with pytest.raises(PidfileError, match="not JSON"):
         ServerPidfile.read(path)
+
+
+def test_a_silent_boot_whose_memory_grows_is_working_past_both_silence_bounds(tmp_path):
+    # CPU flat, the rank pre-faulting a mapped checkpoint: only the boot budget ends it.
+    rss = _growing(watch.RSS_GROWTH_BYTES)
+    assert _boot(tmp_path, _Cpu(0.0), until=7000.0, deadlines=_LONG_BOOT, step=10.0, rss=rss, io=_flat()) is None
+    stop = _boot(tmp_path, _Cpu(0.0), until=8000.0, deadlines=_LONG_BOOT, step=10.0, rss=_growing(80 << 20), io=_flat())
+    assert stop is not None and stop.step is FailedStep.SERVER_BOOT_TIMEOUT and stop.detail.startswith("7200 ")
+
+
+def test_a_silent_boot_whose_reads_grow_is_working(tmp_path):
+    io = _growing(watch.IO_GROWTH_BYTES)
+    assert _boot(tmp_path, _Cpu(0.0), until=7000.0, deadlines=_LONG_BOOT, step=10.0, rss=_flat(), io=io) is None
+
+
+def test_growth_under_the_threshold_is_no_progress(tmp_path):
+    under = watch.RSS_GROWTH_BYTES - (1 << 20)
+    stop = _boot(tmp_path, _Cpu(0.0), until=5000.0, deadlines=_LONG_BOOT, step=10.0, rss=_growing(under), io=_flat())
+    assert stop is not None and stop.detail.startswith("1800 the server log was silent for 1800.0s, its resident")
+
+
+def test_a_process_seen_in_one_read_only_is_no_progress(tmp_path):
+    # A helper that starts (or a pid read once) brings its whole resident memory with it: not growth of the server.
+    rss = _Tree(lambda n: {1: 100 << 30, 1000 + n: 1 << 30})
+    stop = _boot(tmp_path, _Cpu(0.0), until=5000.0, deadlines=_LONG_BOOT, step=10.0, rss=rss, io=_flat())
+    assert stop is not None and stop.detail.startswith("1800 ")
+
+
+def test_a_boot_whose_memory_and_reads_are_flat_is_stopped_at_the_limit_naming_each(tmp_path):
+    stop = _boot(tmp_path, _Cpu(0.0), until=5000.0, deadlines=_LONG_BOOT, step=10.0, rss=_flat(), io=_flat())
+    assert stop == Stop(
+        FailedStep.SERVER_SILENT_BEFORE_READY,
+        "1800 the server log was silent for 1800.0s, its resident memory grew under 64 MiB per 10s for 1800.0s,"
+        " its IO grew under 64 MiB per 10s for 1800.0s and its processes used under 0.25 of a CPU for 1800.0s",
+    )
+
+
+def test_cpu_alone_still_stops_at_the_busy_silence_bound(tmp_path):
+    stop = _boot(tmp_path, _Cpu(*_busy(2.0)), until=5000.0, deadlines=_LONG_BOOT, step=10.0, rss=_flat(), io=_flat())
+    assert stop == Stop(
+        FailedStep.SERVER_SILENT_BEFORE_READY,
+        "3600 the server log was silent for 3600.0s and its resident memory grew under 64 MiB per 10s for 3600.0s"
+        " and its IO grew under 64 MiB per 10s for 3600.0s while its processes stayed busy, which may be a spin",
+    )
+
+
+def test_unreadable_memory_and_io_never_count(tmp_path):
+    unread = _Tree(lambda n: None)
+    stop = _boot(
+        tmp_path, _Cpu(0.0), until=5000.0, deadlines=_LONG_BOOT, step=10.0, rss=unread, io=_Tree(lambda n: None)
+    )
+    assert stop == Stop(
+        FailedStep.SERVER_SILENT_BEFORE_READY,
+        "1800 the server log was silent for 1800.0s, its resident memory could not be read, its IO could not be read"
+        " and its processes used under 0.25 of a CPU for 1800.0s",
+    )
+    # Readable only every other read: no two readings one sample apart, so even a huge jump is no progress.
+    flicker = _Tree(lambda n: None if n % 2 else {1: n << 30})
+    stop = _boot(tmp_path, _Cpu(0.0), until=5000.0, deadlines=_LONG_BOOT, step=10.0, rss=flicker, io=unread)
+    assert stop is not None and stop.detail.startswith("1800 ")
+
+
+def test_silence_counts_from_the_last_growth(tmp_path):
+    # Memory grows until the read at 2000 s (read 200), flat after it: stopped 1800 s later.
+    rss = _Tree(lambda n: {1: min(n, 200) * watch.RSS_GROWTH_BYTES})
+    stop = _boot(tmp_path, _Cpu(0.0), until=6000.0, deadlines=_LONG_BOOT, step=10.0, rss=rss, io=_flat())
+    assert stop is not None and stop.detail.startswith("3800 the server log was silent for 3800.0s, its resident")
+    assert "grew under 64 MiB per 10s for 1800.0s" in stop.detail

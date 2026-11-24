@@ -138,7 +138,7 @@ write_env_file
         self.assertNotIn(_ROTATED_KEY, stderr)
 
     def test_env_file_still_supplies_credentials_when_unset(self) -> None:
-        """Slurm/Ray paths source only this file, so the snapshot must remain."""
+        """The slurm path sources only this file, so the snapshot must remain."""
         with tempfile.TemporaryDirectory() as td:
             work = Path(td)
             repo_root = work / "repo"

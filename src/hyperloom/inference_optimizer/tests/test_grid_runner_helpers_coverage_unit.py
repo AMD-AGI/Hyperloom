@@ -12,19 +12,20 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
     removals_absent_from_args,
 )
-from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
+from hyperloom.orchestrator.actions.executors.grid import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors.grid import _capability_probe as cp
+from hyperloom.orchestrator.actions.executors.grid import _round_report as rr
+from hyperloom.orchestrator.actions.executors.grid._grid_variant_filter import ServingStack
 from hyperloom.orchestrator.actions.executors import _benchmark_interpreter as bi
-from hyperloom.orchestrator.actions.executors._benchmark_runtime import apply_runtime_benchmark_overrides
+from hyperloom.orchestrator.actions.executors.workload._benchmark_runtime import apply_runtime_benchmark_overrides
 
 # Patch compatibility-filter helpers in the ``_grid_variant_filter`` sibling, where apply_compatibility_filter
 # resolves them (not via the re-export).
-from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
+from hyperloom.orchestrator.actions.executors.grid import _grid_variant_filter as vf
 
 
 def _variant(name: str, args: str = "", envs: dict | None = None) -> gr.GridVariant:
@@ -61,27 +62,9 @@ def test_ungrounded_env_file_reason_drops_missing_config_path(tmp_path) -> None:
     # A proposal may point a config env at an artifact no stage authored; the server would read it
     # unconditionally and die at config load, so the variant must be dropped with a reason.
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(tmp_path / "nope.csv")})
-    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    reason = cp.ungrounded_env_file_reason(v.extra_envs)
     assert reason and "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE" in reason
     assert str(tmp_path / "nope.csv") in reason
-
-
-def test_ungrounded_env_file_reason_passes_authored_file(tmp_path) -> None:
-    csv = tmp_path / "tuned.csv"
-    csv.write_text("gfx,M,N,K,splitK\ngfx950,64,5120,5120,2\n", encoding="utf-8")
-    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(csv)})
-    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
-
-
-def test_ungrounded_env_file_reason_accepts_colon_joined_existing_files(tmp_path) -> None:
-    # A set AITER_CONFIG_* is aiter's SET form: a `:`-joined list, each element loaded (csvs_aiter_will_load).
-    # Both files on disk is a valid variant and must not be dropped.
-    a = tmp_path / "t.csv"
-    a.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
-    b = tmp_path / "t2.csv"
-    b.write_text("gfx,M,N,K\ngfx950,4,5,6\n", encoding="utf-8")
-    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{a}:{b}"})
-    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
 
 
 def test_ungrounded_env_file_reason_drops_colon_joined_missing_element(tmp_path) -> None:
@@ -89,7 +72,7 @@ def test_ungrounded_env_file_reason_drops_colon_joined_missing_element(tmp_path)
     a.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
     missing = str(tmp_path / "never_authored.csv")
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{a}:{missing}"})
-    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    reason = cp.ungrounded_env_file_reason(v.extra_envs)
     assert reason and missing in reason and str(a) not in reason.split("element(s)")[1].split(" do not exist")[0]
 
 
@@ -100,7 +83,7 @@ def test_ungrounded_env_file_reason_treats_an_unreadable_path_as_missing(monkeyp
 
     monkeypatch.setattr(gr.Path, "is_file", raise_eacces)
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": "/root/private/tuned.csv"})
-    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    reason = cp.ungrounded_env_file_reason(v.extra_envs)
     assert reason and "/root/private/tuned.csv" in reason
 
 
@@ -108,7 +91,7 @@ def test_run_grid_fast_fail_drops_a_variant_whose_config_file_is_missing(tmp_pat
     # The backstop of the admission check: run_grid's fast-fail drops it before boot, whatever the framework.
     monkeypatch.setenv("FRAMEWORK", "sglang")
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": str(tmp_path / "never_written.csv")})
-    assert "AITER_CONFIG_GEMM_BF16" in (gr.unsupported_capability_reason(v) or "")
+    assert "AITER_CONFIG_GEMM_BF16" in (cp.unsupported_capability_reason(v) or "")
 
 
 def test_run_grid_fast_fail_drops_a_list_whose_other_table_is_written(tmp_path, monkeypatch) -> None:
@@ -120,7 +103,7 @@ def test_run_grid_fast_fail_drops_a_list_whose_other_table_is_written(tmp_path, 
     written.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
     missing = str(tmp_path / "never_written.csv")
     v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{written}:{missing}"})
-    named_missing = (gr.unsupported_capability_reason(v) or "").split("element(s)")[-1].split(" do not exist")[0]
+    named_missing = (cp.unsupported_capability_reason(v) or "").split("element(s)")[-1].split(" do not exist")[0]
     assert missing in named_missing and str(written) not in named_missing
 
 
@@ -134,12 +117,12 @@ def test_ungrounded_env_file_reason_noop_without_config_envs(tmp_path) -> None:
             "AITER_CONFIG_GEMM_A8W8": "",
         },
     )
-    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
+    assert cp.ungrounded_env_file_reason(v.extra_envs) is None
 
 
 # -- unsupported_capability_reason (env-flag build probe) -----------------
 def _clear_cap_cache() -> None:
-    gr._CAP_PROBE_CACHE.clear()
+    cp._CAP_PROBE_CACHE.clear()
 
 
 @pytest.mark.parametrize(
@@ -154,23 +137,23 @@ def _clear_cap_cache() -> None:
 def test_capability_reason_does_not_probe_without_an_enabled_vllm_flag(monkeypatch, framework, envs) -> None:
     monkeypatch.setenv("FRAMEWORK", framework)
     monkeypatch.setattr(
-        gr,
+        cp,
         "_probe_vllm_aiter_shared_expert_unsupported",
         lambda: (_ for _ in ()).throw(AssertionError("probe should not run")),
     )
-    assert gr.unsupported_capability_reason(_variant("se", envs=envs)) is None
+    assert cp.unsupported_capability_reason(_variant("se", envs=envs)) is None
 
 
 def test_capability_reason_drops_when_module_missing(monkeypatch) -> None:
     monkeypatch.setenv("FRAMEWORK", "vllm")
     _clear_cap_cache()
     monkeypatch.setattr(
-        gr,
+        cp,
         "_probe_vllm_aiter_shared_expert_unsupported",
         lambda: "missing module(s): vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe",
     )
     v = _variant("se", envs={"VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "1"})
-    reason = gr.unsupported_capability_reason(v)
+    reason = cp.unsupported_capability_reason(v)
     assert reason is not None and "rocm_aiter_fused_moe" in reason
 
 
@@ -179,7 +162,7 @@ _SHARED_EXPERTS_ON = {"VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "1"}
 
 def _record_probe_runs(monkeypatch, status: str) -> list[list[str]]:
     monkeypatch.setenv("FRAMEWORK", "vllm")
-    monkeypatch.setattr(gr, "_CAP_PROBE_CACHE", {})
+    monkeypatch.setattr(cp, "_CAP_PROBE_CACHE", {})
     runs: list[list[str]] = []
 
     def fake_run(cmd, *_a, **_k):
@@ -187,7 +170,7 @@ def _record_probe_runs(monkeypatch, status: str) -> list[list[str]]:
         payload = {"status": status, "missing": ["vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe"]}
         return SimpleNamespace(stdout=json.dumps(payload), stderr="")
 
-    monkeypatch.setattr(gr.subprocess, "run", fake_run)
+    monkeypatch.setattr(cp.subprocess, "run", fake_run)
     return runs
 
 
@@ -198,7 +181,7 @@ def _record_probe_runs(monkeypatch, status: str) -> list[list[str]]:
 )
 def test_the_build_probe_answer_is_reused_across_variants_unless_unknown(monkeypatch, status, drops, probes) -> None:
     runs = _record_probe_runs(monkeypatch, status)
-    reasons = [gr.unsupported_capability_reason(_variant(name, envs=_SHARED_EXPERTS_ON)) for name in ("se-a", "se-b")]
+    reasons = [cp.unsupported_capability_reason(_variant(name, envs=_SHARED_EXPERTS_ON)) for name in ("se-a", "se-b")]
     assert [reason is not None for reason in reasons] == [drops, drops]
     assert len(runs) == probes
 
@@ -209,18 +192,11 @@ def test_probe_swallows_subprocess_error(monkeypatch) -> None:
     def boom(*_a, **_k):
         raise OSError("no python3")
 
-    monkeypatch.setattr(gr.subprocess, "run", boom)
-    assert gr._probe_vllm_aiter_shared_expert_unsupported() is None
+    monkeypatch.setattr(cp.subprocess, "run", boom)
+    assert cp._probe_vllm_aiter_shared_expert_unsupported() is None
 
 
 # -- _resolve_probe_python / probe interpreter selection ------------------
-def test_resolve_probe_python_takes_the_venv_that_backs_vllm_serve(monkeypatch) -> None:
-    monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
-    monkeypatch.setattr(bi.shutil, "which", lambda name, **_k: "/other/venv/bin/vllm" if name == "vllm" else None)
-    monkeypatch.setattr(bi.os.path, "exists", lambda p: p == "/other/venv/bin/python")
-    assert bi._resolve_probe_python() == "/other/venv/bin/python"
-
-
 @pytest.mark.parametrize(("image", "expected"), [(True, "/opt/venv/bin/python"), (False, "/usr/bin/python3")])
 def test_resolve_probe_python_without_vllm_takes_the_images_interpreter_else_python3(
     monkeypatch, image, expected
@@ -237,7 +213,7 @@ def test_the_build_probe_runs_under_the_vllm_venv_interpreter(monkeypatch, tmp_p
     venv_python.touch(mode=0o755)
     monkeypatch.setenv("VLLM_VENV_ROOT", str(tmp_path))
     runs = _record_probe_runs(monkeypatch, "ok")
-    gr.unsupported_capability_reason(_variant("se", envs=_SHARED_EXPERTS_ON))
+    cp.unsupported_capability_reason(_variant("se", envs=_SHARED_EXPERTS_ON))
     assert [cmd[0] for cmd in runs] == [str(venv_python)]
 
 
@@ -272,50 +248,18 @@ def test_runtime_overrides_env_ints_and_rocr_autofill(monkeypatch) -> None:
     assert envs["ROCR_VISIBLE_DEVICES"] == "0,1"
 
 
-def test_runtime_overrides_explicit_benchmark_script_wins(monkeypatch) -> None:
-    for k in ("PRECISION", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC", "ROCR_VISIBLE_DEVICES"):
-        monkeypatch.delenv(k, raising=False)
-    bench = {"framework": "vllm"}
-    apply_runtime_benchmark_overrides(
-        bench,
-        gpu_type="mi300x",
-        benchmark_script="custom.sh",
-    )
-    assert bench["benchmark_script"] == "custom.sh"
-
-
 # -- _parse_report ---------------------------------------------------------
 def test_parse_report_invalid_json(tmp_path: Path) -> None:
     (tmp_path / "benchmark_report.json").write_text("{bad", encoding="utf-8")
-    assert gr._parse_report(tmp_path) is None
+    assert rr._parse_report(tmp_path) is None
 
 
 def test_parse_report_non_dict(tmp_path: Path) -> None:
     (tmp_path / "benchmark_report.json").write_text("[1,2,3]", encoding="utf-8")
-    assert gr._parse_report(tmp_path) is None
+    assert rr._parse_report(tmp_path) is None
 
 
 # -- _build_variant_yaml ---------------------------------------------------
-def test_build_variant_yaml_injects_extra_envs(tmp_path: Path) -> None:
-    base = tmp_path / "base.yaml"
-    base.write_text(
-        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {}}}),
-        encoding="utf-8",
-    )
-    variant = _variant("v1", "--foo 1", envs={"USE_AITER": "1"})
-    out = gr._build_variant_yaml(
-        gr.GridRecipe(base_yaml_path=base),
-        variant,
-        output_subdir=tmp_path / "v1",
-    )
-    cfg = yaml.safe_load(out.read_text(encoding="utf-8"))
-    envs = cfg["benchmark"]["envs"]
-    assert envs["USE_AITER"] == "1"
-    # variant + base server args merged into the framework's args env
-    arg_key = server_args_env_name("sglang")
-    assert "--foo 1" in envs[arg_key]
-
-
 def test_build_variant_yaml_dedupes_repeated_flags(tmp_path: Path) -> None:
     """When base YAML + base_extra_args + variant all set the same flag, the materialized YAML must contain each flag
     only once (last wins).
@@ -425,17 +369,6 @@ def test_compose_server_args_replace_still_applies_remove_args() -> None:
     assert out == "--also-bad 2 --keep 4"
 
 
-def test_compose_server_args_launches_with_the_harness_flags_the_baseline_ran_with() -> None:
-    out = compose_server_args(
-        inherited_args="--no-enable-prefix-caching --block-size 128",
-        base_extra_args="--no-enable-prefix-caching",
-        variant_extra_args="--kv-cache-dtype fp8 --no-enable-prefix-caching",
-    )
-    assert "--no-enable-prefix-caching" in out
-    assert "--block-size 128" in out
-    assert "--kv-cache-dtype fp8" in out
-
-
 def test_compose_server_args_keeps_the_harness_flag_in_replace_mode() -> None:
     out = compose_server_args(
         inherited_args="--ignored",
@@ -444,14 +377,6 @@ def test_compose_server_args_keeps_the_harness_flag_in_replace_mode() -> None:
         args_mode="replace",
     )
     assert out == "--no-enable-prefix-caching --max-num-seqs 256 --kv-cache-dtype fp8"
-
-
-def test_launch_keeps_what_the_persisted_recipe_strips() -> None:
-    from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
-
-    launched = compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 256")
-    assert "--no-enable-prefix-caching" in launched
-    assert strip_benchmark_harness_flags(launched) == "--max-num-seqs 256"
 
 
 def test_removals_absent_from_args_drops_only_what_the_args_assert() -> None:

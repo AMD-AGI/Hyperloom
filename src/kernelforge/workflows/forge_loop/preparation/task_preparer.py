@@ -26,6 +26,7 @@ from kernelforge.workflows.forge_loop.preparation.external_artifacts import (
     ExternalArtifactTransaction,
 )
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.workflows.forge_loop.preparation.loaded_sources import declared_source_modules
 from kernelforge.workflows.forge_loop.preparation.task_preflight import (
     DriverContract,
     PreflightResult,
@@ -470,9 +471,9 @@ async def prepare_task(
         snr_threshold=task.snr_threshold,
         # A produced driver must actually time under a CUDA/HIP graph, not eagerly (nor silently fall back to eager).
         require_graph=True,
-        require_profile=True,
         require_ranks=task.nproc_per_node,
         expected_case_ids=list(task.expected_case_ids),
+        sources=declared_source_modules(task.workspace_dir, [task.kernel, *task.source_files]),
     )
     start = time.monotonic()
     run = _AttemptRun(config, usage, audit, contract, _preflight_deadline(deadline_sec, deadline_unix))

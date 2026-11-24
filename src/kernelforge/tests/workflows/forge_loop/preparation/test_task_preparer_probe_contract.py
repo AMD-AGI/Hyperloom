@@ -1,4 +1,4 @@
-"""Tests for the graph-replay probe and profile-contract subprocess helpers."""
+"""Tests for the graph-replay probe subprocess helper."""
 
 from __future__ import annotations
 
@@ -233,48 +233,3 @@ def test_count_graph_replays_spawn_error_returns_minus_one(monkeypatch):
     replays, tail = _run(task_preflight._count_graph_replays("driver.py", 1, 1, timeout_sec=1))
     assert replays == -1
     assert "OSError" in tail
-
-
-# _check_profile_contract
-
-
-def test_profile_contract_success(monkeypatch):
-    proc = _FakeProc(out=b"ok", err=b"", returncode=0)
-    _patch_spawn(monkeypatch, proc)
-
-    ok, detail = _run(task_preflight._check_profile_contract("driver.py", timeout_sec=5))
-    assert ok is True
-    assert detail == "verified"
-
-
-def test_profile_contract_nonzero_exit(monkeypatch):
-    proc = _FakeProc(out=b"", err=b"boom", returncode=3)
-    _patch_spawn(monkeypatch, proc)
-
-    ok, msg = _run(task_preflight._check_profile_contract("driver.py", timeout_sec=5))
-    assert ok is False
-    assert "exited 3" in msg
-
-
-def test_profile_contract_timeout_reaps_group(monkeypatch):
-    proc = _FakeProc()
-    _patch_spawn(monkeypatch, proc)
-
-    killed = {"called": False}
-    monkeypatch.setattr(
-        task_preflight,
-        "_kill_process_group",
-        lambda p: killed.__setitem__("called", True),
-    )
-
-    async def _fake_wait_for(awaitable, timeout):
-        if asyncio.iscoroutine(awaitable):
-            awaitable.close()
-        raise asyncio.TimeoutError
-
-    monkeypatch.setattr(task_preflight.asyncio, "wait_for", _fake_wait_for)
-
-    ok, msg = _run(task_preflight._check_profile_contract("driver.py", timeout_sec=1))
-    assert ok is False
-    assert "timed out" in msg
-    assert killed["called"] is True

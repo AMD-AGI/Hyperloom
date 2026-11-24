@@ -88,6 +88,19 @@ def _profiler_env() -> dict:
     return env
 
 
+def _interpreter_env(python: str) -> dict:
+    """Environment rocprof-compute runs in under ``python``.
+
+    The private analyze venv exists to hold exactly the packages the tool pins. A module path inherited from the
+    caller puts the caller's packages ahead of them, and the tool then refuses to analyze over the first pin that
+    differs, so that interpreter is started without one.
+    """
+    env = _profiler_env()
+    if python == _rocpc_venv_python():
+        env.pop("PYTHONPATH", None)
+    return env
+
+
 def _rocpc_venv_python() -> str:
     """Interpreter of the private venv install.sh builds for analyze mode."""
     return os.path.join(os.environ.get("ROCPC_VENV", "").strip() or "/opt/rocprof-compute-venv", "bin", "python")
@@ -218,7 +231,7 @@ def _run(rocpc_python: str, libexec: str, native: list[str], cwd=None, timeout=1
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
-        env=_profiler_env(),
+        env=_interpreter_env(rocpc_python),
     )
     _CURRENT_PROC = proc
     try:
@@ -236,20 +249,32 @@ def _run(rocpc_python: str, libexec: str, native: list[str], cwd=None, timeout=1
     return proc.returncode, (out + err)
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Self-contained rocprof-compute profiling.")
-    ap.add_argument("--driver", required=True, help="driver/harness that runs the kernel")
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    ap = argparse.ArgumentParser(
+        description="Self-contained rocprof-compute profiling of one command.",
+        usage="%(prog)s [--roofline] [--kernel INDEX] [--out DIR] -- <command ...>",
+    )
     ap.add_argument("--roofline", action="store_true", help="also build the empirical roofline (AI)")
     ap.add_argument("--kernel", default="", help="isolate one kernel by its Top-Stats index")
     ap.add_argument("--out", default="", help="dir to keep the raw workload (default ./forge_profile)")
-    a = ap.parse_args()
+    ap.add_argument(
+        "command",
+        nargs="+",
+        help="the command to profile, given after `--`. The profiler replays it once per counter group, so it "
+        "should launch the kernel under test a few times and little else. It runs with the --out directory as "
+        "its working directory, so name its files by absolute path",
+    )
+    return ap.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    a = _parse_args(argv)
 
     # Reap the rocprof-compute subtree if we're killed externally (the agent runs this under a Bash `timeout`), so a
     # stuck rocprofv3 never orphans + poisons GPU.
     signal.signal(signal.SIGTERM, _on_terminate)
     signal.signal(signal.SIGINT, _on_terminate)
 
-    driver_python = sys.executable  # the profiled command runs under THIS python (has torch/etc.)
     libexec = _resolve_libexec()
     if not libexec:
         print("rocprof-compute not found under $ROCM_PATH or /opt/rocm — skipping profiling.")
@@ -265,7 +290,7 @@ def main() -> int:
             f"rocprof-compute's requirements.txt ({libexec}/requirements.txt) — into one of them."
         )
         return 3
-    ok, msg = _torch_import_under_rocprofv3(driver_python)
+    ok, msg = _torch_import_under_rocprofv3(sys.executable)
     if not ok:
         print("rocprofv3 cannot profile this image's torch runtime — skipping profiling.")
         print(msg)
@@ -274,17 +299,17 @@ def main() -> int:
     out = a.out or os.path.join(os.getcwd(), "forge_profile")
     os.makedirs(out, exist_ok=True)
 
-    # 1) profile: replay the driver to collect counters (+ roofline microbench if asked).
+    # 1) profile: replay the command to collect counters (+ roofline microbench if asked).
     prof = ["profile", "-n", "run"]
     if not a.roofline:
         prof += ["--no-roof", "-b", "2"]
-    prof += ["--", driver_python, a.driver, "--profile-run"]
+    prof += ["--", *a.command]
     rc, log = _run(rocpc_python, libexec, prof, cwd=out, timeout=1800)
     if rc != 0:
-        # Deps were already verified by _detect_rocpc_python, so a failure here is almost always the driver: it
-        # crashed or launched no GPU kernel.
+        # Deps were already verified by _detect_rocpc_python, so a failure here is almost always the profiled
+        # command: it crashed or launched no GPU kernel.
         print(
-            "PROFILE FAILED (rocprof-compute exited non-zero). The driver most likely crashed or "
+            "PROFILE FAILED (rocprof-compute exited non-zero). The profiled command most likely crashed or "
             "launched no GPU kernel — see its traceback in the tail below."
         )
         print("--- rocprof-compute output tail ---")

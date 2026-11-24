@@ -8,10 +8,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import math
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, AbstractSet, Any, Awaitable, Callable
 
@@ -56,6 +55,14 @@ from ..state.shared_state import SharedState, effective_closing_grace_sec
 from ..state.state_file import database_target
 from .signals import SignalDrain
 from .intent_router import IntentRouter
+from .coordinator_state import CoordinatorState, close_undecided_proposals
+from .reactor_turn import (
+    close_backends,
+    resolve_reactor_turn_timeout_sec,
+    stamp_trace_context,
+    trace_mcp_setup,
+    trace_reactor_llm_call,
+)
 from hyperloom.inference_optimizer.model_config_utils import infer_model_class
 from .sub_agent_runner import SubAgentRunner
 from .turn_pump import PumpBesideTurn
@@ -71,47 +78,19 @@ from hyperloom.inference_optimizer.trace.llm_trace import (
 from hyperloom.inference_optimizer.trace.context_events import PromptSnapshotTracker, record_prompt_snapshot
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_LLM_CALL,
-    EVENT_PROPOSAL,
     EVENT_SESSION,
-    STATUS_CANCELLED,
-    TERMINAL_STATUSES,
-    EventSpan,
     llm_call_summary,
-    load_events,
-    record_event,
     trajectory_scope,
     trajectory_span,
 )
 from hyperloom.common.deadline import Deadline, seconds_until
-from hyperloom.inference_optimizer.trace.orchestration_trace import (
-    write_mcp_setup_once,
-)
 from hyperloom_common.timeutil import format_exc_brief
 
 
 log = logging.getLogger(__name__)
 
-REACTOR_TURN_TIMEOUT_ENV = "INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC"
-DEFAULT_REACTOR_TURN_TIMEOUT_SEC = 1800.0
-
-
-def resolve_reactor_turn_timeout_sec() -> float:
-    """Resolve the reactor turn's total wall-clock timeout."""
-    value = env_float(REACTOR_TURN_TIMEOUT_ENV, default=DEFAULT_REACTOR_TURN_TIMEOUT_SEC)
-    if value > 0.0 and math.isfinite(value):
-        return value
-    log.warning(
-        "%s=%.1f is not a positive finite number; using default %.1fs",
-        REACTOR_TURN_TIMEOUT_ENV,
-        value,
-        DEFAULT_REACTOR_TURN_TIMEOUT_SEC,
-    )
-    return DEFAULT_REACTOR_TURN_TIMEOUT_SEC
-
-
 if TYPE_CHECKING:
     from hyperloom.inference_optimizer.experience_kb import ExperienceKBIntegration
-    from ..state.pending_proposal import PendingProposal
 
 
 def reap_orphaned_servers_best_effort(session_dir: Path, *, phase: str) -> None:
@@ -127,7 +106,7 @@ def reap_orphaned_servers_best_effort(session_dir: Path, *, phase: str) -> None:
 
         if is_multi_node():
             return
-        from ..actions.executors._server_lifecycle import reap_orphaned_servers
+        from ..actions.executors.serving._server_lifecycle import reap_orphaned_servers
 
         reaped = reap_orphaned_servers(session_dir)
         if reaped:
@@ -139,13 +118,6 @@ def reap_orphaned_servers_best_effort(session_dir: Path, *, phase: str) -> None:
             )
     except (OSError, RuntimeError, ValueError):
         log.exception("coordinator: orphan server reaper failed at %s (ignored)", phase)
-
-
-@dataclass
-class CoordinatorState:
-    """In-memory ephemeral state for the reactor + dispatcher."""
-
-    pending_proposals: dict[str, PendingProposal] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -246,8 +218,8 @@ class Coordinator:
         self.conversation.attach_orchestration_context_tools()
         # Resume detection must run before any boot-time state.json write.
         self.writeback.detect_resume_state()
-        # Reap serving processes orphaned by a prior monitor-process crash (e.g. a raylet death that took the
-        # optimizer down mid-benchmark), scoped strictly to this session's own pidfiles.
+        # Reap serving processes orphaned by a prior monitor-process crash, scoped strictly to this session's own
+        # pidfiles.
         reap_orphaned_servers_best_effort(self.session_dir, phase="boot")
         # Before any bring-up can dispatch: an attempt classified against a
         # different pin is not comparable with its neighbours.
@@ -850,48 +822,11 @@ class Coordinator:
             try:
                 stop_reason = await self._run_ticks(objective=objective, options=options)
             except BaseException:
-                self._close_undecided_proposals(self.shared_state.stop_reason)
+                close_undecided_proposals(self.session_dir, self.state.pending_proposals, self.shared_state.stop_reason)
                 raise
-            self._close_undecided_proposals(stop_reason)
+            close_undecided_proposals(self.session_dir, self.state.pending_proposals, stop_reason)
             span.finish(stop_reason=stop_reason)
             return stop_reason
-
-    def _close_undecided_proposals(self, stop_reason: str) -> None:
-        """Close the trajectory span of every proposal the session ends without a verdict on.
-
-        A supervisor restart ends a leg, not the session: the next leg's replay restores these proposals. A resumed
-        session may end again over proposals an earlier leg already closed, so those are skipped.
-        """
-        from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
-
-        if stop_reason == SUPERVISOR_RESTART_REASON:
-            return
-        # A decided proposal is popped from the registry, so everything still pending is undecided.
-        undecided = list(self.state.pending_proposals.values())
-        if not undecided:
-            return
-        try:
-            closed = {
-                row.get("span_id")
-                for row in load_events(self.session_dir)
-                if row.get("event_type") == EVENT_PROPOSAL and row.get("status") in TERMINAL_STATUSES
-            }
-            for pending in undecided:
-                if pending.proposal_msg_id in closed:
-                    continue
-                record_event(
-                    EVENT_PROPOSAL,
-                    span=EventSpan(span_id=pending.proposal_msg_id, status=STATUS_CANCELLED),
-                    attributes={
-                        "name": pending.action_name,
-                        "action_name": pending.action_name,
-                        "from_agent": pending.from_agent,
-                        "reason": "session_ended_undecided",
-                        "stop_reason": stop_reason,
-                    },
-                )
-        except (OSError, ValueError):  # the trace must never mask the stop reason the session is closing on
-            log.warning("trajectory: closing undecided proposals failed", exc_info=True)
 
     def _trajectory_phase_tick(self) -> tuple[str | None, int | None]:
         """Live ``(phase, tick)`` for trajectory events recorded inside :meth:`run`."""
@@ -953,7 +888,7 @@ class Coordinator:
             self.shared_state.cumulative_gain_validated,
             max_minutes,
         )
-        await self._close_backends()
+        await close_backends(self.backends)
         # A server outliving the run holds every GPU it was given, so the
         # session's last act is to reap its own pidfiles.
         await asyncio.to_thread(reap_orphaned_servers_best_effort, self.session_dir, phase="shutdown")
@@ -1030,17 +965,6 @@ class Coordinator:
             )
         return stop_reason or self.shared_state.stop_reason
 
-    async def _close_backends(self) -> None:
-        """Release every backend holding a live agent session."""
-        for name, backend in list(self.backends.items()):
-            closer = getattr(backend, "aclose", None)
-            if not callable(closer):
-                continue
-            try:
-                await closer()
-            except (OSError, RuntimeError):
-                log.exception("Coordinator: closing the %s backend failed", name)
-
     # Reactor
     async def reactor_pass(self, agent_name: str, *, request: str = "") -> BackendTurnResult | None:
         """Run one reactor turn for ``agent_name``, route its intents, and return the turn's result.
@@ -1059,7 +983,7 @@ class Coordinator:
         prompt = f"{turn.prompt}\n\n{request}" if request else turn.prompt
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
-        backend_self_traces = self._stamp_trace_context(backend)
+        backend_self_traces = stamp_trace_context(backend, self.shared_state)
         # max_turns=0 → backend default.
         _t0 = time.perf_counter()
         call_id = new_call_id()
@@ -1104,11 +1028,11 @@ class Coordinator:
             await self._record_reactor_exception(agent_name, exc)
             return None
         finally:
-            self._trace_mcp_setup(agent_name=agent_name, backend=backend)
+            trace_mcp_setup(self.session_dir, agent_name=agent_name, backend=backend)
         self._reset_backend_error_streak(agent_name)
         # Record this reactor turn's token spend on the unified ledger.
         latency_ms = int((time.perf_counter() - _t0) * 1000)
-        self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
+        trace_reactor_llm_call(self.session_dir, self.shared_state, agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
         self.conversation.record_reactor_conversation(agent_name, result, context=turn.context)
         with trajectory_scope(call_id=call_id, parent_span_id=call_span.span_id):
@@ -1116,18 +1040,6 @@ class Coordinator:
                 await self.router.handle_intent(agent_name, intent)
         await self._settle_routed_turn(agent_name, result, request=request)
         return result
-
-    def _stamp_trace_context(self, backend: Backend) -> bool:
-        """Set the tick, phase and macro cycle on a backend that accepts them; return whether it does."""
-        _set_trace_ctx = getattr(backend, "set_trace_context", None)
-        backend_self_traces = callable(_set_trace_ctx)
-        if backend_self_traces:
-            _set_trace_ctx(
-                tick=int(self.shared_state.tick or 0),
-                phase=(self.shared_state.phase or "") or None,
-                macro_cycle=int(self.shared_state.macro_cycle or 0),
-            )
-        return backend_self_traces
 
     async def _record_reactor_exception(self, agent_name: str, exc: Exception) -> None:
         """Record an unexpected reactor-turn failure as an observation and a session exception."""
@@ -1163,53 +1075,6 @@ class Coordinator:
             state.last_discarded_escalate_hint = ""
             state.last_discarded_escalate_hint_ts = ""
         self.shared_state.agent_last_active[agent_name] = time.time()
-
-    def _trace_mcp_setup(self, *, agent_name: str, backend: Backend) -> None:
-        """Persist orchestration MCP setup once per session."""
-        if agent_name != "orchestration":
-            return
-        setup_getter = getattr(backend, "get_mcp_setup_diagnostic", None)
-        if callable(setup_getter):
-            setup = setup_getter()
-            if isinstance(setup, dict):
-                write_mcp_setup_once(session_dir=self.session_dir, setup=setup)
-
-    def _trace_reactor_llm_call(
-        self,
-        agent_name: str,
-        result: BackendTurnResult,
-        *,
-        latency_ms: int | None = None,
-    ) -> None:
-        """Append one ``llm_calls.jsonl`` row for a reactor turn."""
-        try:
-            metadata = result.metadata or {}
-            has_tokens = any(
-                metadata.get(k) is not None
-                for k in (
-                    "input_tokens",
-                    "output_tokens",
-                    "cache_creation_input_tokens",
-                    "cache_read_input_tokens",
-                )
-            )
-            if not has_tokens:
-                return
-            site = LLMCallSite(
-                session_id=self.session_dir.name,
-                component=agent_name,
-                role=agent_name,
-                tick=int(self.shared_state.tick or 0),
-                phase=(self.shared_state.phase or "") or None,
-            )
-            record = LLMCallRecord.from_metadata(site, metadata, latency_ms=latency_ms)
-            append_llm_call(session_dir=self.session_dir, record=record)
-        except LLMTraceRowError:
-            log.debug(
-                "full-trace: reactor llm_call append failed for %s",
-                agent_name,
-                exc_info=True,
-            )
 
     def _trace_reactor_llm_failure(
         self,
@@ -1317,7 +1182,4 @@ class Coordinator:
             self.shared_state.set_stop_reason(BACKEND_UNHEALTHY_STOP_REASON)
 
 
-__all__ = [
-    "Coordinator",
-    "CoordinatorState",
-]
+__all__ = ["Coordinator"]

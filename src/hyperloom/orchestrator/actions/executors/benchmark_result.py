@@ -20,7 +20,7 @@ from hyperloom_common.coerce import first_float, first_int, to_float, to_int
 from hyperloom_common.jsonio import read_json
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT
 
-from ._gpu_metrics import gpu_metrics_from_report, write_gpu_metrics
+from .gpu._gpu_metrics import gpu_metrics_from_report, write_gpu_metrics
 from ._round_folder import RoundFolder, is_round_folder
 
 log = logging.getLogger(__name__)
@@ -640,7 +640,7 @@ def _round_gpu_power(
     node -- is the fallback for the mean on rounds no recorder ran on; it reads one card, so such a round has no
     per-card figure and any per-card or total budget treats it as unmeasured.
     """
-    from ._gpu_power import round_power_fields, round_power_summary
+    from .gpu._gpu_power import round_power_fields, round_power_summary
 
     summary = round_power_summary(report, workspace, subprocess_started_unix=subprocess_started_unix)
     if summary is not None:
@@ -726,7 +726,7 @@ def _add_agentx_timeline_fields(measurement: dict[str, Any], workspace: Path | N
     """The checkpoint median and the replayed corpus shape, both read from the aiperf exports under ``workspace``."""
     from hyperloom.inference_optimizer.agentx.report import measured_corpus_shape
 
-    from ._agentx_checkpoint import workspace_checkpoint_p50
+    from .workload._agentx_checkpoint import workspace_checkpoint_p50
 
     measurement[GRADED_INTVTY_P50_CHECKPOINT] = workspace_checkpoint_p50(workspace)
     if corpus_shape := measured_corpus_shape(workspace):

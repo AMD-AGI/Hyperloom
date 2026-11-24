@@ -11,12 +11,14 @@ from kernelforge.workflows.forge_loop.iteration.handoffs import HandoffStore
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
 from kernelforge.workflows.forge_loop.campaign.loop_log import LOOP_BANNER, experiment_line
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationResult
+from kernelforge.workflows.forge_loop.memory.measured_negatives import render_measured_negatives
 from kernelforge.workflows.forge_loop.roles.prompt_view import (
     MAX_RECENT_ATTEMPT_LINES,
     OptionalRecords,
     render_long_horizon_header,
 )
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore, MAX_PINNED_ITERATIONS, RunState
+from kernelforge.workflows.forge_loop.search.search_policy import SEARCH_MODE_DIVERSIFY
 
 
 # How many recent iteration outcomes the long-horizon prompt header is built from.
@@ -216,6 +218,7 @@ class CampaignReportMixin:
         )
         history = self._evidence_history(lh_header=lh_header, digest=digest)
         for render, label in (
+            (self._render_insights, "campaign insights"),
             (self._render_analysis_evidence_for_implementer, "Analysis evidence"),
             (self._render_case_config_coverage, "per-case configuration coverage"),
             (self._render_ceiling_advisory, "roofline attainment standing"),
@@ -253,6 +256,15 @@ class CampaignReportMixin:
         # prepends, as the compact memory frame the implementer reads first.
         if lh_header:
             history = f"{lh_header}\n\n{history}"
+        return f"{self._session_direction(optimization_plan_path)}\n\n{history}"
+
+    def _render_insights(self) -> str:
+        """The campaign's insight list, or "" when this loop keeps none or it is still empty."""
+        insights = getattr(self, "insights", None)
+        return insights.render_for_prompt() if insights is not None else ""
+
+    def _session_direction(self, optimization_plan_path: str) -> str:
+        """What the session is to work on: the round's synthesized plan, or how to choose a direction without one."""
         if optimization_plan_path:
             ruling_instruction = (
                 "The plan was synthesized from current evidence and the "
@@ -261,26 +273,55 @@ class CampaignReportMixin:
                 if self._supervisor_ruling
                 else "The plan was synthesized from current evidence. "
             )
-            history = (
+            return (
                 "## Required optimization plan\n"
                 f"Read {optimization_plan_path} and execute the integrated "
                 "plan it contains. "
                 f"{ruling_instruction}"
-                "Historical lesson records are evidence, not instructions.\n\n"
-                f"{history}"
+                "Historical lesson records are evidence, not instructions."
             )
-        return history
+        policy = self._search_policy_decision
+        if self._supervisor_ruling:
+            mode_guidance = (
+                "The latest Supervisor Ruling below is the planning authority while the search is stalled: take one "
+                "of its directions that no session since the ruling has measured, and once each of them has been "
+                "measured, a mechanism materially different from every one already tried."
+            )
+        elif policy is not None and policy.mode == SEARCH_MODE_DIVERSIFY:
+            stalled = self.run_state.stall.unresolved_stall_iters
+            opening = (
+                f"The search has gone {stalled} session(s) without a new best"
+                if stalled
+                else "Recent sessions have stopped paying"
+            )
+            mode_guidance = (
+                f"{opening}, so choose a mechanism materially different from the ones already tried rather than a "
+                "refinement of the current best."
+            )
+        else:
+            mode_guidance = (
+                "Choose the direction with the largest expected gain on the score, a structural change included."
+            )
+        return (
+            "## Direction (yours to choose)\n"
+            "No plan was synthesized for this session. Read the Analysis report named `analysis_summary` under "
+            "Analysis Evidence below, when there is one, before you choose: it says where each scored case spends "
+            "its time and ranks what it expects to pay. The lesson records and the attempt history say what was "
+            "already tried and what it measured; do not repeat a direction they disproved. The list of measured "
+            "negatives below covers every past iteration, not only the ones whose records are shown: check your "
+            "direction against it before you choose. "
+            f"{mode_guidance}"
+        )
 
     def _evidence_history(self, *, lh_header: str, digest) -> str:
         """Join the digest, lessons and ledger into the history body, falling back to recent results."""
         # Lesson documents from the most recent iterations, verbatim, plus the absolute path of the directory
         # holding every past one.
-        lessons_txt = ""
+        lessons_txt = negatives_txt = ""
         if getattr(self, "lessons", None) is not None:
-            lessons_txt = self.lessons.render_for_prompt(
-                current_cases=self._scored_case_ids(),
-                kernel_source=self._kernel_source_for_scope(),
-            )
+            scope = {"current_cases": self._scored_case_ids(), "kernel_source": self._kernel_source_for_scope()}
+            lessons_txt = self.lessons.render_for_prompt(**scope)
+            negatives_txt = render_measured_negatives(self.lessons, **scope)
 
         ledger_txt = ""
         if self.ledger:
@@ -289,7 +330,7 @@ class CampaignReportMixin:
             ledger_txt = self.ledger.render_for_prompt(
                 include_recent=(not lessons_txt and (bool(lh_header) or not bool(digest)))
             )
-        sources = [lessons_txt, ledger_txt]
+        sources = [negatives_txt, lessons_txt, ledger_txt]
         if lh_header:
             print(f"  [agent] injected long-horizon header: {len(lh_header)} chars (digest reserved for supervisor)")
         else:
@@ -300,6 +341,8 @@ class CampaignReportMixin:
         history = "\n\n".join(p for p in sources if p)
         if lessons_txt:
             print(f"  [agent] injected lesson documents: {len(lessons_txt)} chars")
+        if negatives_txt:
+            print(f"  [agent] injected measured negatives: {len(negatives_txt)} chars")
         if not history:
             history = "\n".join(_compact_history_entry(r) for r in self.results[-5:])
         return history

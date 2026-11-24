@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._grid_runner import (
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import (
     GridVariant,
     VariantResult,
     GridRecipe,
@@ -28,19 +28,18 @@ from hyperloom.orchestrator.kernel import conc_sweep as conc_sweep_module, kerne
 from hyperloom.orchestrator.kernel.conc_sweep import (
     _Arm,
     _build_arm_grid,
-    _flush_conc_sweep_report,
     _grading_of,
     _optimized_arm,
     _workload_ladder,
-    _point_from_variant,
     conc_sweep_declined_to_run,
     run_conc_sweep,
 )
+from hyperloom.orchestrator.kernel.conc_sweep_report import flush_conc_sweep_report, point_from_variant
 from hyperloom.common.gain_math import conc_pair_comparison as _build_comparison
 from hyperloom.common.perf_metric import graded_metric_key
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.phases.kernel_stack import KernelStackPhase
-from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
+from hyperloom.orchestrator.actions.executors.workload._workload_envs import BenchmarkTarget
 
 
 # Fixtures
@@ -165,8 +164,8 @@ def test_conc_sweep_preserves_retained_launch_controls(
 ):
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import _build_variant_yaml
 
     baseline_args = (
         current_best.get("extra_server_args") if current_best.get("args_mode") == "replace" else ""
@@ -242,8 +241,8 @@ def test_conc_sweep_loads_retained_overlay_only_in_optimized_arm(
 
     import yaml
 
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle
 
     overlay = session_dir / "retained_overlay"
     overlay.mkdir()
@@ -609,7 +608,7 @@ def test_run_conc_sweep_targets_the_session_board(
 def test_conc_sweep_preserves_baseline_script_through_variant_materialization(session_dir, baseline_yaml, monkeypatch):
     import yaml
 
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import _build_variant_yaml
 
     baseline_yaml.write_text(
         "benchmark:\n  framework: sglang\n  model: /models/test\n  run_mode: local\n"
@@ -619,9 +618,6 @@ def test_conc_sweep_preserves_baseline_script_through_variant_materialization(se
     state.gpu_type = "MI355X"
     state.baseline_benchmark_script = "sglang_custom.sh"
     monkeypatch.setenv("GPU_TYPE", "mi355x")
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
-    )
     calls = []
 
     async def capture_grid(**kwargs):
@@ -1119,7 +1115,8 @@ def test_record_conc_sweep_writes_last_conc_sweep():
 
 def test_sweep_exits_based_on_ladder_status():
     """The concurrency ladder is the only sweep, so its status is the phase's."""
-    from hyperloom.orchestrator.phases.machine_state import PhaseFlags, compute_next_phase
+    from hyperloom.orchestrator.phases.phase_predicates import PhaseFlags
+    from hyperloom.orchestrator.phases.phase_transitions import compute_next_phase
 
     def _State(last_conc_sweep=None):
         return SharedState(
@@ -1156,7 +1153,7 @@ def test_sweep_exits_based_on_ladder_status():
 
 def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
     """``was_skipped`` covers both outcomes, so the row must carry what tells them apart."""
-    from hyperloom.orchestrator.phases.machine_state import compute_next_phase
+    from hyperloom.orchestrator.phases.phase_transitions import compute_next_phase
 
     state = SharedState(
         phase="SWEEP",
@@ -1337,7 +1334,7 @@ def test_each_arm_runs_the_anchor_first_then_cheapest_first(
     assert call_log == [f"{arm}_conc{conc}" for arm in ("baseline", "optimized") for conc in (4, 1, 16)]
 
 
-# ───────────────────────────────────────────────────────────────────────────── Change 5: _flush_conc_sweep_report
+# ───────────────────────────────────────────────────────────────────────────── Change 5: flush_conc_sweep_report
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1354,7 +1351,7 @@ def test_flush_conc_sweep_report_writes_json_and_csv(session_dir: Path):
         "baseline": {"points": [{"arm": "baseline", "conc": 4, "status": "succeeded", "output_throughput": 100.0}]},
         "optimized": {"points": []},
     }
-    _flush_conc_sweep_report(payload, session_dir)
+    flush_conc_sweep_report(payload, session_dir)
     assert json_path.exists()
     assert csv_path.exists()
     loaded = json.loads(json_path.read_text())
@@ -1532,21 +1529,21 @@ class TestAnUnreportedTotalComesFromItsHalves:
         )
 
     def test_the_halves_sum_when_the_parser_named_no_total(self):
-        point = _point_from_variant(
+        point = point_from_variant(
             self._variant(input_throughput=24000.0, output_throughput=180.0),
             arm="baseline",
         )
         assert point["total_token_throughput"] == pytest.approx(24180.0)
 
     def test_a_reported_total_is_not_recomputed(self):
-        point = _point_from_variant(
+        point = point_from_variant(
             self._variant(input_throughput=1.0, output_throughput=1.0, total_token_throughput=25984.8),
             arm="baseline",
         )
         assert point["total_token_throughput"] == pytest.approx(25984.8)
 
     def test_a_missing_half_leaves_the_total_unmeasured(self):
-        point = _point_from_variant(self._variant(output_throughput=180.0), arm="baseline")
+        point = point_from_variant(self._variant(output_throughput=180.0), arm="baseline")
         assert point["total_token_throughput"] is None
 
 
@@ -1567,7 +1564,7 @@ class TestTheCurveCarriesBothAxisPairs:
         return VariantResult(**base)
 
     def test_the_agentic_pair_reaches_the_point(self):
-        point = _point_from_variant(
+        point = point_from_variant(
             self._variant(
                 output_throughput=183.44,
                 total_token_throughput=25984.8,
@@ -1578,13 +1575,13 @@ class TestTheCurveCarriesBothAxisPairs:
             arm="optimized",
         )
         assert point["total_token_throughput"] == pytest.approx(25984.8)
-        # _point_from_variant maps VariantResult.intvty_p90 -> e2e_norm_intvty_p90 dict key
+        # point_from_variant maps VariantResult.intvty_p90 -> e2e_norm_intvty_p90 dict key
         assert point["e2e_norm_intvty_p90"] == pytest.approx(447.2)
         assert point["input_throughput"] == pytest.approx(25801.36)
         assert point["tpot_p90_ms"] == pytest.approx(2.4)
 
     def test_the_synthetic_pair_is_unaffected(self):
-        point = _point_from_variant(
+        point = point_from_variant(
             self._variant(output_throughput=1200.0, e2el_mean_ms=850.0),
             arm="baseline",
         )
@@ -1598,11 +1595,11 @@ class TestTheCurveCarriesBothAxisPairs:
         rdir.mkdir(parents=True, exist_ok=True)
         json_path = rdir / "conc_sweep_summary.json"
         csv_path = rdir / "conc_sweep_raw.csv"
-        point = _point_from_variant(
+        point = point_from_variant(
             self._variant(total_token_throughput=25984.8, intvty_p90=447.2),
             arm="optimized",
         )
-        _flush_conc_sweep_report(
+        flush_conc_sweep_report(
             {
                 "schema_version": "1.0",
                 "status": "succeeded",
@@ -1619,7 +1616,7 @@ class TestTheCurveCarriesBothAxisPairs:
 
 
 def test_flush_conc_sweep_report_is_atomic(session_dir: Path, monkeypatch: pytest.MonkeyPatch):
-    """_flush_conc_sweep_report silently catches IO errors."""
+    """flush_conc_sweep_report silently catches IO errors."""
     rdir = session_dir / "reports"
     rdir.mkdir(parents=True, exist_ok=True)
     json_path = rdir / "conc_sweep_summary.json"
@@ -1635,20 +1632,20 @@ def test_flush_conc_sweep_report_is_atomic(session_dir: Path, monkeypatch: pytes
     from hyperloom_common import io as _common_io
 
     monkeypatch.setattr(_common_io, "atomic_write_text", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
-    _flush_conc_sweep_report(payload, session_dir)  # must not raise
+    flush_conc_sweep_report(payload, session_dir)  # must not raise
 
 
 def _record_summary_writes(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Capture ``conc_sweep_summary.json`` as it stands on disk after every write."""
     writes: list[dict[str, Any]] = []
-    real_flush = conc_sweep_module._flush_conc_sweep_report
+    real_flush = conc_sweep_module.flush_conc_sweep_report
 
     def _flush(payload: dict[str, Any], session_dir: Path) -> Exception | None:
         error = real_flush(payload, session_dir)
         writes.append(json.loads(Path(payload["report_json_path"]).read_text()))
         return error
 
-    monkeypatch.setattr(conc_sweep_module, "_flush_conc_sweep_report", _flush)
+    monkeypatch.setattr(conc_sweep_module, "flush_conc_sweep_report", _flush)
     return writes
 
 
@@ -2107,7 +2104,7 @@ def test_format_conc_sweep_curve_section_with_png():
 
 def _patch_lifecycle_eligible(monkeypatch: pytest.MonkeyPatch, teardown_log: list[tuple]):
     """Patch resolve_lifecycle_params → eligible and track teardown calls."""
-    import hyperloom.orchestrator.actions.executors._server_lifecycle as _sl
+    import hyperloom.orchestrator.actions.executors.serving._server_lifecycle as _sl
 
     def _fake_resolve(_cfg_path):
         return {"eligible": True, "framework": "vllm", "port": 8888, "reason": ""}
@@ -2177,9 +2174,6 @@ def test_single_server_boot_round_measures_its_rung_and_the_next_rung_reuses_it(
     """The round that boots an arm's server measures its own rung on it; no round of the sweep asks to boot only."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     _patch_lifecycle_eligible(monkeypatch, [])
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
-    )
     calls: list[dict[str, Any]] = []
 
     async def _fake_run_grid(*, grid: list[GridVariant], **kw):
@@ -2211,9 +2205,6 @@ def test_a_session_closing_during_a_boot_round_starts_no_round_after_it(
     """A closing session does not start the round after the one that booted the server."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     _patch_lifecycle_eligible(monkeypatch, [])
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
-    )
     calls: list[str] = []
 
     async def _fake_run_grid(*, grid: list[GridVariant], **kw):
@@ -2273,7 +2264,7 @@ def test_single_server_not_eligible_restarts_the_server_per_rung(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """A non-lifecycle-eligible framework routes straight to Option B."""
-    import hyperloom.orchestrator.actions.executors._server_lifecycle as _sl
+    import hyperloom.orchestrator.actions.executors.serving._server_lifecycle as _sl
 
     monkeypatch.setattr(
         _sl,
@@ -2436,13 +2427,11 @@ def test_a_cancelled_sweep_stops_the_ladder_and_is_not_failed(
     """
     from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
     from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
-    from hyperloom.orchestrator.phases.machine_state import PhaseFlags, compute_next_phase
+    from hyperloom.orchestrator.phases.phase_predicates import PhaseFlags
+    from hyperloom.orchestrator.phases.phase_transitions import compute_next_phase
 
     teardown_log: list[tuple] = []
     _patch_lifecycle_eligible(monkeypatch, teardown_log)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
-    )
     state = _make_state(baseline_config_path=str(baseline_yaml))
     scope = CancelScope()
     transition = "phase_transition:SWEEP->CLOSE"
@@ -2506,7 +2495,8 @@ def test_the_sweep_phase_budget_waits_for_the_sweep_it_granted():
     enqueued on entry was granted the rest of the session clock. With no result yet, the phase waits for the grant;
     once the grant has run out, or the sweep has landed, the ordinary exits apply again.
     """
-    from hyperloom.orchestrator.phases.machine_state import PhaseFlags, compute_next_phase
+    from hyperloom.orchestrator.phases.phase_predicates import PhaseFlags
+    from hyperloom.orchestrator.phases.phase_transitions import compute_next_phase
 
     now = 1_800_000_000.0
 
@@ -2563,3 +2553,24 @@ def test_render_conc_sweep_curve_propagates_an_unexpected_failure(tmp_path: Path
     monkeypatch.setattr(conc_sweep_plot, "_render", _fail)
     with pytest.raises(TypeError, match="malformed point"):
         render_conc_sweep_curve({}, tmp_path / "out.png", ConcCurveOptions(tp=1))
+
+
+def test_a_scriptable_workload_declines_the_sweep_before_it_starts() -> None:
+    """One forward pass of the operator's script: every rung would measure the same thing."""
+    from hyperloom.orchestrator.actions.executors.conc_sweep import _declined_as_non_serving
+
+    state = _make_state()
+    state.framework = "custom"
+    declined = _declined_as_non_serving(state)
+    assert declined is not None
+    assert declined["skip_reason"] == "non_serving_workload"
+    assert declined["was_skipped"] is True
+    assert declined["status"] == "succeeded", "a skip is not an executor failure"
+
+
+def test_a_serving_workload_still_starts_its_sweep() -> None:
+    from hyperloom.orchestrator.actions.executors.conc_sweep import _declined_as_non_serving
+
+    state = _make_state()
+    state.framework = "vllm"
+    assert _declined_as_non_serving(state) is None

@@ -59,10 +59,6 @@ class SearchActorPool:
     def profiles(self) -> tuple[AgentProfile, ...]:
         return self.config.profiles
 
-    @property
-    def blockage_threshold(self) -> int:
-        return self.config.blockage_threshold
-
     def bundle(self, profile_id: str) -> SearchActorBundle:
         """Return one available bundle without probing or falling back."""
         try:

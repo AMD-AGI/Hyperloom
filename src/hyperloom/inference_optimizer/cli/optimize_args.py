@@ -131,7 +131,7 @@ def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
         "1 (default) keeps the legacy single-pod path. "
         ">=2: `optimize` adopts the cluster the platform provisioned and handed "
         "over via HYPERLOOM_MN_EXT_* (see multi_node/SKILL.md), runs bootstrap "
-        "once, and exports RAY_ADDRESS for kernel-agent. It never creates or "
+        "once. It never creates or "
         "releases the cluster; without a hand-off it exits 2. "
         "Default: 1.",
     )

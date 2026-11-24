@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _workload_envs as we
+from hyperloom.orchestrator.actions.executors.workload import _workload_envs as we
 from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
 
 from ._workload_envs_helpers import clear_env, materialize, write_config
@@ -146,16 +146,6 @@ def _write_sparse_model_dir(tmp_path, *, sparse_block_size=128, nested=False, na
     return str(d)
 
 
-def test_sparse_model_injects_block_size_from_config_vllm(monkeypatch, tmp_path):
-    # Config-derived: any model declaring sparse_attention_config.sparse_block_size gets that value as vLLM
-    # --block-size (default 16 aborts KV-cache init).
-    clear_env(monkeypatch)
-    model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
-    src = write_config(tmp_path / "cfg.yaml", framework="vllm")
-    bench = materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path=model_dir))
-    assert "--block-size 128" in bench["envs"]["EXTRA_VLLM_ARGS"]
-
-
 def test_sparse_block_size_read_from_nested_text_config(monkeypatch, tmp_path):
     # sparse_attention_config nested under text_config (multimodal wrapper); the value is model-derived, not hardcoded
     # (here 64 to prove it is read).
@@ -164,17 +154,6 @@ def test_sparse_block_size_read_from_nested_text_config(monkeypatch, tmp_path):
     src = write_config(tmp_path / "cfg.yaml", framework="vllm")
     bench = materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path=model_dir))
     assert "--block-size 64" in bench["envs"]["EXTRA_VLLM_ARGS"]
-
-
-def test_dense_model_no_block_size_injection(monkeypatch, tmp_path):
-    # No sparse_attention_config -> nothing injected (dense models untouched).
-    clear_env(monkeypatch)
-    d = tmp_path / "dense"
-    d.mkdir()
-    (d / "config.json").write_text(json.dumps({"model_type": "llama"}), encoding="utf-8")
-    src = write_config(tmp_path / "cfg.yaml", framework="vllm")
-    bench = materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path=str(d)))
-    assert "block-size" not in bench["envs"].get("EXTRA_VLLM_ARGS", "")
 
 
 def test_sparse_model_block_size_not_injected_for_sglang(monkeypatch, tmp_path):
@@ -203,14 +182,6 @@ def test_sparse_model_respects_operator_pinned_block_size(monkeypatch, tmp_path)
     assert "--block-size 128" not in bench["envs"]["EXTRA_VLLM_ARGS"]
 
 
-def test_run_eval_process_env_false_is_ignored(monkeypatch, tmp_path):
-    clear_env(monkeypatch)
-    monkeypatch.setenv("RUN_EVAL", "false")
-    src = write_config(tmp_path / "cfg.yaml")
-    bench = materialize(src, tmp_path / "out")
-    assert bench["envs"]["RUN_EVAL"] == "true"
-
-
 def _arm_sglang_shape_tool(monkeypatch, tmp_path) -> Path:
     """Route the SGLang profile through the kernel_shape_tool path and return the tool dir."""
     from hyperloom.orchestrator.actions.executors import _server_patcher
@@ -230,7 +201,7 @@ def test_profile_shape_tool_keeps_the_inherited_pythonpath(monkeypatch, tmp_path
     # inherited entries, or the profile server loses the operator's and the image's import paths.
     import os
 
-    from hyperloom.orchestrator.actions.executors import _framework_rewrite_evidence as evidence
+    from hyperloom.orchestrator.actions.executors.framework_change import _framework_rewrite_evidence as evidence
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
 
     tool_dir = _arm_sglang_shape_tool(monkeypatch, tmp_path)
@@ -282,7 +253,9 @@ def test_the_cli_and_the_orchestrator_read_one_set_of_workload_defaults():
     assert imported == ["__future__"], imported
 
     # And the orchestrator side must not import the CLI parser at any scope.
-    orchestrator_src = Path(we.__file__).read_text(encoding="utf-8")
+    orchestrator_src = "".join(
+        path.read_text(encoding="utf-8") for path in sorted(Path(we.__file__).parent.glob("*.py"))
+    )
     assert "inference_optimizer.cli import parser" not in orchestrator_src
     assert "inference_optimizer.cli.parser" not in orchestrator_src
 

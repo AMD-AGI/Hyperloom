@@ -45,6 +45,7 @@ from hyperloom_common import bwrap as bwrap_module
 from hyperloom_common.bwrap import BwrapProbe
 from hyperloom_common.shared_storage import current_umask
 from hyperloom.common import agent_isolation, visible_devices
+from hyperloom.common.env_safety import RunAs
 from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
@@ -71,6 +72,7 @@ from hyperloom.measure.runner.cache_build import CacheBuildError
 from hyperloom.orchestrator.state.base_launch import frozen_base
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom_multibranch import cli
+from hyperloom_multibranch import cli_options
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord
@@ -98,8 +100,8 @@ from hyperloom_multibranch.scheduling.prelude import BASELINE_ESTABLISHED
 from hyperloom_multibranch.scheduling import review
 from hyperloom_multibranch.scheduling.layout import REVIEW_DIR, SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
-from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, SessionOutcome, persisted_run
-from hyperloom_multibranch.scheduling.resumption import ResumeRefused, resumable_run
+from hyperloom_multibranch.scheduling.resumption import PersistedRun, ResumeRefused, persisted_run
+from hyperloom_multibranch.scheduling.session_types import COMPLETED_REASONS, SessionOutcome
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version, read_manifest
 from hyperloom_multibranch.scheduling import local_peers
@@ -124,6 +126,8 @@ from hyperloom_multibranch.scheduling.settings import (
 from hyperloom_multibranch.scheduling.session_base import freeze_session_base
 from hyperloom_multibranch.scheduling.session_environment import hosted_runner_cache, require_writable_storage
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
+from hyperloom_multibranch.scheduling import specialist_reach
+from hyperloom_multibranch.scheduling.specialist_reach import ProbeResult
 from hyperloom_multibranch.tests.agent_rig import install_stand_in
 from hyperloom_multibranch.tests.base_records import write_record
 from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
@@ -165,7 +169,7 @@ IMPORT_PROBE = (
 
 
 def _settings(*extra: str, workload: list[str] = WORKLOAD_ARGS) -> RunSettings:
-    return cli.settings_from(cli.build_parser().parse_args(["run", *workload, *extra]))
+    return cli_options.settings_from(cli_options.build_parser().parse_args(["run", *workload, *extra]))
 
 
 def _without(args: list[str], option: str) -> list[str]:
@@ -177,7 +181,7 @@ def test_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         cli.main(["--help"])
     assert exc.value.code == 0
-    assert cli.PROG in capsys.readouterr().out
+    assert cli_options.PROG in capsys.readouterr().out
 
 
 def test_reference_help_says_which_name_briefs_inferencex_reference_launches(
@@ -253,6 +257,21 @@ def test_an_agentx_run_has_no_sequence_lengths_and_is_graded_on_p50_interactivit
 def test_a_run_is_served_at_the_ep_it_names_and_at_ep_1_by_default(workload: list[str]) -> None:
     assert _settings(workload=workload).workload.ep == 1
     assert _settings("--ep", "8", workload=workload).workload.ep == 8
+
+
+@pytest.mark.parametrize("workload", [WORKLOAD_ARGS, AGENTX_ARGS], ids=["inferencex", "agentx"])
+def test_a_run_gives_its_tests_servers_the_boot_budget_it_names_up_to_six_hours_and_none_by_default(
+    workload: list[str],
+) -> None:
+    assert _settings(workload=workload).workload.boot_budget_sec is None
+    assert _settings("--boot-budget-sec", "5400", workload=workload).workload.boot_budget_sec == 5400
+    assert _settings("--boot-budget-sec", "21600", workload=workload).workload.boot_budget_sec == 21600
+
+
+@pytest.mark.parametrize("budget", ["0", "21601"])
+def test_a_boot_budget_out_of_range_is_refused_with_its_range(budget: str) -> None:
+    with pytest.raises(ValueError, match=r"--boot-budget-sec must be a positive number of seconds, at most 21600"):
+        _settings("--boot-budget-sec", budget)
 
 
 def test_an_agentx_run_replays_the_trace_window_it_names_and_the_harness_default_otherwise() -> None:
@@ -331,7 +350,9 @@ def test_kernel_optimizer_can_be_geak() -> None:
 
 
 def test_parallel_tests_default_fills_the_machine() -> None:
-    settings = cli.settings_from(cli.build_parser().parse_args(["run", *WORKLOAD_ARGS[:5], "8", *WORKLOAD_ARGS[6:]]))
+    settings = cli_options.settings_from(
+        cli_options.build_parser().parse_args(["run", *WORKLOAD_ARGS[:5], "8", *WORKLOAD_ARGS[6:]])
+    )
     assert settings.caps.max_parallel_tests == 1
 
 
@@ -379,6 +400,10 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *WORKLOAD_ARGS, "--agentx-duration-sec", "600"],
         ["run", *WORKLOAD_ARGS, "--agentx-objective", "total_token_throughput"],
         ["run", *AGENTX_ARGS, "--agentx-objective", "output_throughput"],
+        ["run", *WORKLOAD_ARGS, "--boot-budget-sec", "0"],
+        ["run", *AGENTX_ARGS, "--boot-budget-sec", "-60"],
+        ["run", *WORKLOAD_ARGS, "--boot-budget-sec", "21601"],
+        ["run", *WORKLOAD_ARGS, "--boot-budget-sec", "1.5"],
     ],
 )
 def test_usage_errors_exit_two(argv: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1036,7 +1061,10 @@ def test_a_canonical_measurement_that_cannot_be_taken_fails_like_the_other_start
     assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
 
     captured = capsys.readouterr()
-    assert captured.err == f"{cli.PROG}: cannot run a session, the canonical measurement cannot be taken: {refusal}\n"
+    assert (
+        captured.err
+        == f"{cli_options.PROG}: cannot run a session, the canonical measurement cannot be taken: {refusal}\n"
+    )
     session_dir = Path(captured.out.strip())
     assert session_dir.is_dir() and tmp_path in session_dir.parents
 
@@ -1057,7 +1085,7 @@ def test_a_strict_image_check_that_fails_is_refused_like_the_other_start_up_refu
     assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
 
     expected = f"image check failed under {MODE_ENV}=strict: sglang.renamed-flag"
-    assert capsys.readouterr().err == f"{cli.PROG}: cannot run a session, {expected}\n"
+    assert capsys.readouterr().err == f"{cli_options.PROG}: cannot run a session, {expected}\n"
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
@@ -1551,15 +1579,29 @@ def test_a_resume_continues_the_session_on_the_settings_its_manifest_holds(
     assert 3600.0 + before <= deadline <= 3600.0 + time.time(), "the first deadline, moved by the time it was down"
 
 
-def _hosted_ended_before_final(root: Path, **manifest: object) -> PersistedRun:
+@pytest.mark.usefixtures("ready_environment")
+def test_a_resume_whose_specialists_account_cannot_reach_the_session_is_refused_before_it_runs(
+    agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    layout = _ended_before_final(tmp_path / "session")
+    _killed(layout, ANOTHER_POD)
+    layout.branches.mkdir()  # as every session makes it
+    account = RunAs("hl-specialist", os.getuid(), os.getgid(), (), "/")
+    monkeypatch.setattr(specialist_reach, "resolve_launch_isolation", lambda: agent_isolation.AccountIsolation(account))
+    monkeypatch.setattr(specialist_reach, "run_as_account", lambda *_: ProbeResult(3, f"search\t{tmp_path}\n"))
+
+    assert cli.main(["run", "--resume", str(layout.root)]) == cli.EXIT_FAILED
+
+    assert agent_cli == [] and RESUMED_TO == [], "not resumed"
+    assert f"cannot search {tmp_path}" in capsys.readouterr().err
+
+
+def _hosted_ended_before_final(root: Path) -> PersistedRun:
     """A session measured in a grant's sandboxes, killed with the container it ran in, as a restart of the run in
-    another container reads it back: its last decision at 0, its deadline at 3600 and ``manifest`` written over its
-    manifest."""
+    another container reads it back: its last decision at 0 and its deadline at 3600."""
 
     layout = _ended_before_final(root)
     layout.runner_source.mkdir()
-    if manifest:
-        _manifest(layout, **manifest)
     _killed(layout, ANOTHER_POD)
     state_dir = root.parent / "state"
     state_dir.mkdir()
@@ -1569,30 +1611,18 @@ def _hosted_ended_before_final(root: Path, **manifest: object) -> PersistedRun:
     return persisted
 
 
-def test_a_hosted_restart_resumes_up_to_the_first_starts_deadline_giving_no_downtime_back(tmp_path: Path) -> None:
-    persisted = _hosted_ended_before_final(tmp_path / "session")
-    before = _tree(persisted.layout.root)
-
-    assert hosted_resume_deadline(persisted, 1800.0) == 3600.0
-    assert _tree(persisted.layout.root) == before
-    with pytest.raises(ResumeRefused, match="a grant's sandboxes"):
-        resumable_run(persisted.layout.root)
-
-
 @pytest.mark.parametrize(
-    ("stop_after_map", "baseline_decision", "now", "error"),
+    ("baseline_decision", "now", "error"),
     [
-        (False, False, 0.0, "recorded no baseline to resume from"),
-        (True, True, 0.0, "its map"),
-        (False, True, 3600.0, "used its budget, which ended 0 s ago"),
+        (False, 0.0, "recorded no baseline to resume from"),
+        (True, 3600.0, "used its budget, which ended 0 s ago"),
     ],
-    ids=["no baseline decision", "stop after map", "budget used"],
+    ids=["no baseline decision", "budget used"],
 )
 def test_a_hosted_restart_refuses_a_resume_it_should_finish_instead(
-    stop_after_map: bool, baseline_decision: bool, now: float, error: str, tmp_path: Path
+    baseline_decision: bool, now: float, error: str, tmp_path: Path
 ) -> None:
-    settings = encode(replace(_settings(), stop_after_map=stop_after_map))
-    persisted = _hosted_ended_before_final(tmp_path / "session", settings=settings)
+    persisted = _hosted_ended_before_final(tmp_path / "session")
     if not baseline_decision:
         persisted.layout.decisions.write_text("", encoding="utf-8")
     before = _tree(persisted.layout.root)
@@ -1605,6 +1635,8 @@ def test_a_hosted_restart_refuses_a_resume_it_should_finish_instead(
 
 #: A grant of four GPUs that has a day left.
 GRANT = {"max_sandboxes": 4, "max_gpus": 4, "gpu_hours": 100, "max_runtime_sec": 86400}
+#: A template list with a ``dev`` template of :data:`WORKLOAD_ARGS`' TP, which a session that lends dev sandboxes needs.
+TEMPLATES_WITH_DEV = {"measurement": {"2": "ar-01ja-measurement"}, "dev": {"2": "ar-01ja-dev"}}
 #: The campaign spec of :data:`WORKLOAD_ARGS` as a multibranch run, as a host injects it.
 SPEC: dict[str, object] = {
     "schema": "hyperloom.campaign-spec/v1",
@@ -1813,6 +1845,7 @@ def test_a_hosted_spec_lends_dev_sandboxes_and_runs_agents_with_the_grants_dev_k
 ) -> None:
     host.spec(multibranch={**SPEC["multibranch"], "dev_leases": 2, "autonomous_agents": ["/agents/a", "/agents/b"]})
     monkeypatch.setenv("HYPERLOOM_SANDBOX_KEY_DEV", "dev-key-0123456789")
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_TEMPLATES", json.dumps(TEMPLATES_WITH_DEV))
     agents = ("--autonomous-agent", "/agents/a", "--autonomous-agent", "/agents/b")
     on_the_command_line = _settings(*SPEC_RUN_ARGS, "--dev-leases", "2", *agents)
     monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
@@ -1820,6 +1853,59 @@ def test_a_hosted_spec_lends_dev_sandboxes_and_runs_agents_with_the_grants_dev_k
     assert cli.main(["hosted", "run"]) == 0
 
     assert agent_cli == [on_the_command_line]
+
+
+@pytest.mark.parametrize(
+    ("changed", "named"),
+    [
+        (
+            {"HYPERLOOM_SANDBOX_TEMPLATES": json.dumps({"measurement": {"2": "ar-01ja-measurement"}})},
+            "need a dev template of the session's 2 cards in HYPERLOOM_SANDBOX_TEMPLATES; its dev templates serve []",
+        ),
+        (
+            {"HYPERLOOM_GRANT_LIMITS": json.dumps({**GRANT, "max_gpus": 3})},
+            "the grant's 3 GPUs leave no 2-card dev sandbox beside one 2-card test (max_gpus must be at least 4)",
+        ),
+        (
+            {"HYPERLOOM_GRANT_LIMITS": json.dumps({**GRANT, "max_sandboxes": 1})},
+            "the grant's 1 sandbox leaves none for a dev sandbox beside one test (max_sandboxes must be at least 2)",
+        ),
+    ],
+    ids=["no-dev-template", "too-few-gpus", "too-few-sandboxes"],
+)
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_that_lends_dev_sandboxes_the_grant_cannot_make_ends_for_good_naming_why(
+    changed: dict[str, str], named: str, host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.spec(multibranch={**SPEC["multibranch"], "dev_leases": 1})
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_KEY_DEV", "dev-key-0123456789")
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_TEMPLATES", json.dumps(TEMPLATES_WITH_DEV))
+    for name, value in changed.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_USAGE
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_USAGE)
+    assert named in str(document["error"]) and "dev-key" not in str(document["error"])
+    assert agent_cli == [] and not any(host.workspace.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_that_lends_nothing_starts_with_a_dev_key_and_no_dev_template(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dev key the host gives a session that lends no dev sandbox and runs no agent is never used, so a template list
+    without a ``dev`` template, or a grant too small for one, does not keep the session from starting."""
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_KEY_DEV", "dev-key-0123456789")
+    monkeypatch.setenv("HYPERLOOM_GRANT_LIMITS", json.dumps({**GRANT, "max_gpus": 3, "max_sandboxes": 1}))
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    [settings] = agent_cli
+    assert (settings.dev_leases, settings.agents) == (0, ())
 
 
 @pytest.mark.usefixtures("ready_environment")
@@ -2032,6 +2118,20 @@ def test_a_hosted_session_ends_explore_a_final_reserve_before_the_grant_s_stop(
 
 
 @pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_gives_its_tests_the_boot_budget_it_names_as_run_would(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.spec(multibranch={**SPEC["multibranch"], "boot_budget_sec": 5400})
+    on_the_command_line = _settings(*SPEC_RUN_ARGS, "--boot-budget-sec", "5400")
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert agent_cli == [on_the_command_line]
+    assert on_the_command_line.workload.boot_budget_sec == 5400
+
+
+@pytest.mark.usefixtures("ready_environment")
 def test_a_session_run_with_no_grant_has_no_explore_cap(
     agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2052,6 +2152,9 @@ def test_a_session_run_with_no_grant_has_no_explore_cap(
         ({"multibranch": {"workload": "agentx"}}, "--isl is not taken by an agentx workload"),
         ({"multibranch": {"workload": "inferencex", "inferencex_commit": "main"}}, "'main' is not a commit"),
         ({"multibranch": {"workload": "inferencex", "inferencex_commit": 1234567}}, "must be a string"),
+        ({"multibranch": {"workload": "inferencex", "agentx_duration_sec": 600}}, "multibranch.agentx_duration_sec"),
+        ({"multibranch": {"workload": "inferencex", "boot_budget_sec": "5400"}}, "multibranch.boot_budget_sec"),
+        ({"multibranch": {"workload": "inferencex", "boot_budget_sec": 21601}}, "--boot-budget-sec must be"),
     ],
 )
 @pytest.mark.usefixtures("ready_environment")
@@ -2110,6 +2213,33 @@ def test_a_leg_that_cannot_open_a_file_of_the_run_ends_it_for_good_naming_the_fi
     document = host.exit_document()
     assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
     assert document["error"] == f"[Errno 13] Permission denied: '{roster}'"
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_binaries", "isolated_launches")
+def test_a_hosted_session_whose_specialists_account_cannot_reach_it_ends_the_run_before_it_runs(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    account = RunAs("hl-specialist", os.getuid(), os.getgid(), (), "/")
+    monkeypatch.setattr(specialist_reach, "resolve_launch_isolation", lambda: agent_isolation.AccountIsolation(account))
+    monkeypatch.setattr(specialist_reach, "run_as_account", lambda *_: ProbeResult(3, f"search\t{host.workspace}\n"))
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+    monkeypatch.setattr(cli, "Session", _never_built)
+    handlers = list(logging.getLogger().handlers)
+
+    try:
+        assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+    finally:  # the session's own log, which the session adds as it is created
+        for handler in set(logging.getLogger().handlers) - set(handlers):
+            logging.getLogger().removeHandler(handler)
+            handler.close()
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
+    assert f"cannot search {host.workspace}" in str(document["error"])
+
+
+def _never_built(*_: object) -> NoReturn:
+    raise AssertionError("the session was built")
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
@@ -2243,7 +2373,7 @@ def test_a_restart_that_finishes_a_preempted_session_ends_the_run_as_its_final_w
         finishes.append((persisted.ended, restart))
         ended = SessionStopReason.FINISHED_AFTER_RESTART if restart and chose else persisted.ended
         _report(persisted.layout, stop_reason=ended.value, final={"chosen": {"commit": "c9"}} if chose else None)
-        return 0 if ended in lifecycle.COMPLETED_REASONS else 1
+        return 0 if ended in COMPLETED_REASONS else 1
 
     monkeypatch.setattr(cli, "final_only", finish)
 
@@ -2859,7 +2989,7 @@ def handed(agent_binaries: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 
 def test_run_measures_on_local_cards_unless_told_hosted() -> None:
-    parser = cli.build_parser()
+    parser = cli_options.build_parser()
 
     assert parser.parse_args(["run", *WORKLOAD_ARGS]).measurement == "local"
     assert parser.parse_args(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]).measurement == "hosted"
@@ -2883,7 +3013,9 @@ def test_a_hosted_run_measures_in_the_sandboxes_of_the_grant_handed_to_it(handed
     )
     assert host.sandbox_keys.measurement.reveal() == HANDED["HYPERLOOM_SANDBOX_KEY_MEASUREMENT"]
     assert settings.caps.max_parallel_tests == 2, "TP=2 on 8 GPUs and 3 sandboxes, one test's room kept for a handover"
-    on_two_tests = cli.settings_from(cli.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 2)
+    on_two_tests = cli_options.settings_from(
+        cli_options.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 2
+    )
     assert settings == replace(on_two_tests, max_hours=settings.max_hours), "the flags give the workload"
     assert "HYPERLOOM_SANDBOX_KEY_MEASUREMENT" not in os.environ, "no child process inherits a grant key"
 
@@ -3005,6 +3137,7 @@ def test_a_hosted_run_lends_dev_sandboxes_and_runs_agents_in_the_grants_dev_sand
     extra: list[str], handed: Started, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HYPERLOOM_SANDBOX_KEY_DEV", "dev-key")
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_TEMPLATES", json.dumps(TEMPLATES_WITH_DEV))
 
     assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted", *extra]) == 0
 
@@ -3040,6 +3173,53 @@ def test_a_hosted_run_without_what_a_dev_sandbox_needs_is_a_usage_error_naming_i
     err = capsys.readouterr().err
     assert f"need {missing}" in err and "dev-key" not in err
     assert handed.sessions == []
+
+
+@pytest.mark.parametrize("extra", BRANCHES_IN_DEV_SANDBOXES, ids=["dev-leases", "agent"])
+@pytest.mark.parametrize(
+    ("changed", "named"),
+    [
+        ({"HYPERLOOM_SANDBOX_TEMPLATES": json.dumps({**TEMPLATES_WITH_DEV, "dev": {"1": "d1"}})}, "serve [1]"),
+        ({"HYPERLOOM_SANDBOX_TEMPLATES": json.dumps({**TEMPLATES_WITH_DEV, "dev": "d"})}, "'dev' templates must map"),
+        ({"HYPERLOOM_GRANT_LIMITS": json.dumps({**GRANT, "max_gpus": 3})}, "max_gpus must be at least 4"),
+        ({"HYPERLOOM_GRANT_LIMITS": json.dumps({**GRANT, "max_sandboxes": 1})}, "max_sandboxes must be at least 2"),
+    ],
+    ids=["no-dev-template-of-tp", "malformed-dev-templates", "too-few-gpus", "too-few-sandboxes"],
+)
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_that_lends_dev_sandboxes_the_grant_cannot_make_is_a_usage_error_naming_why(
+    extra: list[str],
+    changed: dict[str, str],
+    named: str,
+    handed: Started,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_KEY_DEV", "dev-key")
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_TEMPLATES", json.dumps(TEMPLATES_WITH_DEV))
+    for name, value in changed.items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted", *extra])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert named in err and "dev-key" not in err
+    assert handed.sessions == []
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_that_lends_nothing_starts_with_a_dev_key_and_no_dev_template(
+    handed: Started, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_KEY_DEV", "dev-key")
+    monkeypatch.setenv("HYPERLOOM_GRANT_LIMITS", json.dumps({**GRANT, "max_gpus": 3, "max_sandboxes": 1}))
+
+    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == 0
+
+    [(settings, _)] = handed.sessions
+    assert (settings.dev_leases, settings.agents) == (0, ())
 
 
 @pytest.mark.usefixtures("ready_environment")

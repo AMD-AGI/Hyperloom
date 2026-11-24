@@ -104,7 +104,7 @@ def test_a_resume_without_a_ledger_is_one_line_and_exit_code_2_from_the_resume_s
     it: the start of the resume ends the run with the guard's one line and exit code 2, before anything is started."""
     import argparse
 
-    from hyperloom.inference_optimizer.cli import _open_resumed_session
+    from hyperloom.inference_optimizer.cli.session_resume import _open_resumed_session
 
     session = _in_a_new_container(tmp_path, monkeypatch, tmp_path / "workspace")
     with pytest.raises(SystemExit) as ended:

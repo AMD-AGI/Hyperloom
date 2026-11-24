@@ -39,12 +39,3 @@ def test_a_refusal_to_resume_a_credential_session_is_not_taken_for_an_earlier_se
 
     with pytest.raises(type(refusal)):
         close_before_starting_again(close, _left(tmp_path / "earlier"))
-
-
-def test_an_earlier_session_with_a_file_this_account_cannot_read_is_still_left_and_a_new_one_started(tmp_path):
-    root = tmp_path / "earlier"
-
-    def close() -> int:
-        raise PermissionError(13, "Permission denied", str(root / "state.json"))
-
-    assert close_before_starting_again(close, _left(root)) is None

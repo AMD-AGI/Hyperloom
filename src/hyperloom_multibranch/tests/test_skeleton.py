@@ -140,22 +140,22 @@ from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.hosted_run import prelude_landed
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
-from hyperloom_multibranch.scheduling.lifecycle import (
-    COMPLETED_REASONS,
-    CUT_SHORT,
-    LESSONS_KEY,
-    NO_BASELINE,
-    NO_CARDS_LEFT,
+from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, LESSONS_KEY, NO_BASELINE, NO_CARDS_LEFT, Session
+from hyperloom_multibranch.scheduling.local_peers import workload_rule
+from hyperloom_multibranch.scheduling.manifest import read_manifest
+from hyperloom_multibranch.scheduling.resumption import (
     PersistedRun,
-    Session,
+    ResumeRefused,
+    deadline_after_downtime,
+    persisted_run,
+    resumable_run,
+)
+from hyperloom_multibranch.scheduling.session_types import (
+    COMPLETED_REASONS,
     SessionHost,
     SessionOutcome,
     SessionServices,
-    persisted_run,
 )
-from hyperloom_multibranch.scheduling.local_peers import workload_rule
-from hyperloom_multibranch.scheduling.manifest import read_manifest
-from hyperloom_multibranch.scheduling.resumption import ResumeRefused, deadline_after_downtime, resumable_run
 from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.prelude import roofline_ceiling
@@ -1049,41 +1049,24 @@ async def test_a_run_given_the_inferencex_checkout_briefs_its_launches_for_the_s
     assert briefed["without"] == ()
 
 
-async def test_the_dev_leases_of_the_run_reach_the_peers(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("dev_leases", 2),
+        ("make_before_break", True),
+        ("make_before_break", False),
+        ("agent_port", 32100),
+        ("inferencex_commit", "8a76a78e41"),
+    ],
+    ids=["dev-leases", "make-before-break-on", "make-before-break-off", "agent-port", "inferencex-commit"],
+)
+async def test_a_setting_of_the_run_reaches_the_peers(tmp_path: Path, name: str, value: object) -> None:
     stage = _stage(tmp_path)
-    stage.settings = replace(stage.settings, dev_leases=2)
+    stage.settings = replace(stage.settings, **{name: value})
 
     stage._session()
 
-    assert stage.setup.dev_leases == 2
-
-
-@pytest.mark.parametrize("keep", [True, False])
-async def test_the_make_before_break_of_the_run_reaches_the_peers(tmp_path: Path, keep: bool) -> None:
-    stage = _stage(tmp_path)
-    stage.settings = replace(stage.settings, make_before_break=keep)
-
-    stage._session()
-
-    assert stage.setup.make_before_break is keep
-
-
-async def test_the_agent_port_of_the_run_reaches_the_peers(tmp_path: Path) -> None:
-    stage = _stage(tmp_path)
-    stage.settings = replace(stage.settings, agent_port=32100)
-
-    stage._session()
-
-    assert stage.setup.agent_port == 32100
-
-
-async def test_the_inferencex_commit_of_the_run_reaches_the_peers(tmp_path: Path) -> None:
-    stage = _stage(tmp_path)
-    stage.settings = replace(stage.settings, inferencex_commit="8a76a78e41")
-
-    stage._session()
-
-    assert stage.setup.inferencex_commit == "8a76a78e41"
+    assert getattr(stage.setup, name) == value
 
 
 @pytest.mark.parametrize(("review_gate", "handed"), [(True, "host"), (False, "off")])

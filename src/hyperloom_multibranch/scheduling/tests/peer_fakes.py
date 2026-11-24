@@ -72,7 +72,7 @@ from hyperloom_multibranch.contracts.llm import CompletionReply
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.specialist.judging import Judging
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SessionFactory, SessionStart, SpecialistRuntime
-from hyperloom_multibranch.specialist.scripted import BranchHeads, ScriptedSession, ScriptedSetup
+from hyperloom_multibranch.tests.scripted import BranchHeads, ScriptedSession, ScriptedSetup
 from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
 from hyperloom_multibranch.toolbox.tests.fake_model import DEFAULT_BASELINE, FakeToolboxConfig, NoiseModel
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
@@ -347,7 +347,7 @@ class RecordedSession:
 
 class RecordedSessions:
     """The specialist runtime's session factory in the tests: every run is a
-    :class:`~hyperloom_multibranch.specialist.scripted.ScriptedSession` of its branch's script, after the branch's
+    :class:`~hyperloom_multibranch.tests.scripted.ScriptedSession` of its branch's script, after the branch's
     ``step`` when one is given; a branch without a script idles until it is stopped.
 
     ``started`` keeps the start commit of every branch a run started on, ``briefs`` the brief its first run started
@@ -358,7 +358,7 @@ class RecordedSessions:
     asked for. A run of a branch in ``hanging`` never returns from its stop, a failure double. Every scripted session
     waits ``poll_seconds`` with ``sleep`` between two reads. A mapping branch runs the specialist side's own
     :class:`~hyperloom_multibranch.specialist.map_session.MapSession` on ``maps`` with ``run_pass`` as its pass, and is
-    kept in ``mapping``. Not a placeholder: the scripted session is the specialist runtime's own.
+    kept in ``mapping``. A test double, not a placeholder.
     """
 
     def __init__(

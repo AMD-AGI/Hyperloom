@@ -650,7 +650,7 @@ def _place_host_copy(config: dict[str, Any]) -> bool:
     """Name this host's patched copy of the framework on the server's ``PYTHONPATH`` in the profile ``config``: where its
     render named its own copy, which is behind a farm and ahead of the installed framework, or last when it named none;
     whether ``config`` changed. A point that needs no patch is left as it is. The copy of a vLLM whose render put the
-    image's checkout on the path (``_workload_envs._apply_vllm_source_runtime``) mirrors that checkout, which it goes
+    image's checkout on the path (``_framework_runtime._apply_vllm_source_runtime``) mirrors that checkout, which it goes
     ahead of."""
     package = _profiled_package(config)
     if package is None:

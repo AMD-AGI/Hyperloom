@@ -37,7 +37,7 @@ real peaks into `roofline.csv`, then emits one PDF per dtype. Overlay dtypes wit
 kernels with `--kernel-names`.
 
 > **In the forge loop, do not run this by hand.** Use
-> `python3 rocpc_profile.py --driver <driver> --roofline` — it handles the dependency gate, isolates
+> `python3 rocpc_profile.py --roofline -- <command ...>` — it handles the dependency gate, isolates
 > your kernel, and prints AI plus distance-to-roof directly (`measure_rocpc_workflow.md`).
 
 ## gfx950 anchors (context only — compare against the empirical roof)

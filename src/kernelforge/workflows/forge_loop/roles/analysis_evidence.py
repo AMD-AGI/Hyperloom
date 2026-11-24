@@ -156,7 +156,8 @@ class AnalysisEvidenceMixin:
                 gpu_target=self.config.gpu_target,
                 objective=(
                     "Preserve correctness and complete benchmark case coverage while "
-                    "maximizing equal-weight mean incumbent-to-candidate case speedup."
+                    f"maximizing the equal-weight {self.ic.case_aggregate.value} mean of incumbent-to-candidate "
+                    "case speedups."
                 ),
                 program_context=(self.ic.program_md or f"Optimize the kernel at {self.ic.kernel_file}."),
                 source_map_path=str(source_map_path),

@@ -33,29 +33,36 @@ from hyperloom.measure.runner.tests.bootstrap_rig import PROBE_FILE, Rig, read_p
 
 #: The sh a template's step runs (a key copy as the template's own preparation); the step carries it base64-encoded.
 _PINNED_PAYLOAD = (
-    'hl_start_failed() { o=${HYPERLOOM_OUT_DIR:-/app/out}; if [ ! -e "$o/status.json" ]; then t=$(tail -c'
-    " 600 /app/work/runner-boot.log 2>/dev/null | LC_ALL=C tr '\\n\\t' '  ' | LC_ALL=C tr -cd ' -~' | tr -d"
-    ' \'"\\\\\'); mkdir -p "$o"; printf \'{"error_class": "runner_start_failed", "message": "runner start, exi'
-    't %s before status.json was written: %s", "state": "failed"}\\n\' "$1" "$t" >"$o/.status.json.tmp" && '
-    'mv "$o/.status.json.tmp" "$o/status.json"; fi; return "$1"; }; { mkdir -p /app/in /app/out /app/work'
-    '/scratch && (umask 077 && cp "$HYPERLOOM_SIGNING_KEY_FILE" /app/work/hl-sign.pem) && ( (HYPERLOOM_SI'
-    "GNING_KEY_FILE=/app/work/hl-sign.pem nohup sh -c 'e=\"${HYPERLOOM_RUNNER_CACHE:-/runner-cache}/${HYPE"
-    'RLOOM_SOURCE_SHA:-}" d="${TMPDIR:-/tmp}/hl-start.$$" o="${HYPERLOOM_OUT_DIR:-/out}"; if [ -n "${HYPE'
-    'RLOOM_SOURCE_SHA:-}" ] && [ -n "${HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256:-}" ] && mkdir -m 700 "$d" '
-    '&& cp "$e/manifest" "$e/bootstrap.sh" "$d/" && printf \'"\'"\'%s  %s\\n\'"\'"\' "$HYPERLOOM_RUNNER_CACHE_MA'
-    'NIFEST_SHA256" "$d/manifest" | sha256sum -c - >&2 && h=$(sed -n \'"\'"\'s/^  "bootstrap_sha256": "\\([0-'
-    '9a-f]\\{64\\}\\)",*$/\\1/p\'"\'"\' "$d/manifest") && [ -n "$h" ] && printf \'"\'"\'%s  %s\\n\'"\'"\' "$h" "$d/boot'
-    'strap.sh" | sha256sum -c - >&2; then exec sh "$d/bootstrap.sh" --spec-wait-sec 1800; fi; echo "hyper'
-    "loom-runner-bootstrap: bootstrap.sh or manifest of $e is missing or not the one HYPERLOOM_RUNNER_CAC"
-    'HE_MANIFEST_SHA256 pins" >&2; mkdir -p "$o" && printf \'"\'"\'%s\\n\'"\'"\' \'"\'"\'{"error_class": "runner_st'
-    'art_failed", "message": "runner bootstrap, step verify, exit 1: bootstrap.sh or manifest of the cach'
-    "e entry is missing or not the one HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256 pins, or that or HYPERLOOM_"
-    'SOURCE_SHA is not set", "state": "failed"}\'"\'"\' >"$o/.status.json.tmp" && mv "$o/.status.json.tmp" "'
-    '$o/status.json"; exit 2\' >/app/work/runner-boot.log 2>&1 || hl_start_failed "$?") </dev/null >/dev/null'
-    ' 2>&1 &); } || hl_start_failed "$?"'
+    'hl_start_failed() { o=${HYPERLOOM_OUT_DIR:-/app/out}; if [ ! -e "$o/status.json" ]; then t=$({ if [ '
+    '-n "${hl_why:-}" ]; then printf %s "$hl_why"; else tail -c 600 "${hl_boot:-}" 2>/dev/null; fi; } | L'
+    "C_ALL=C tr '\\n\\t' '  ' | LC_ALL=C tr -cd ' -~' | tr -d '\"\\\\'); mkdir -p \"$o\"; printf '{\"error_class\""
+    ': "runner_start_failed", "message": "runner start, exit %s before status.json was written: %s", "sta'
+    'te": "failed"}\\n\' "$1" "$t" >"$o/.status.json.tmp" && mv "$o/.status.json.tmp" "$o/status.json"; fi;'
+    ' return "$1"; }; hl_dirs() { hl_w=; for hl_d in "$@"; do if ! mkdir -p "$hl_d" 2>/dev/null || { [ -n'
+    ' "$hl_w" ] && [ ! -w "$hl_d" ]; }; then hl_why="hyperloom-runner-bootstrap: cannot make or write the'
+    " directory $hl_d (the image root is read-only or not writable by this account): the platform must bi"
+    'nd $hl_d writable into the sandbox"; echo "$hl_why" >&2; return 1; fi; hl_w=1; done; }; hl_log() { o'
+    '=${HYPERLOOM_OUT_DIR:-/app/out}; hl_t=/app/work/runner-boot.log; for hl_boot in "$hl_t" "$o/runner-b'
+    'oot.log"; do { true >>"$hl_boot"; } 2>/dev/null && return 0; done; hl_why="hyperloom-runner-bootstra'
+    'p: cannot write the boot log $hl_t or runner-boot.log in the out directory $o"; echo "$hl_why" >&2; '
+    'return 1; }; { hl_dirs /app/in /app/out /app/work/scratch && hl_log && (umask 077 && cp "$HYPERLOOM_'
+    'SIGNING_KEY_FILE" /app/work/hl-sign.pem) && ( (HYPERLOOM_SIGNING_KEY_FILE=/app/work/hl-sign.pem nohu'
+    'p sh -c \'e="${HYPERLOOM_RUNNER_CACHE:-/runner-cache}/${HYPERLOOM_SOURCE_SHA:-}" d="${TMPDIR:-/tmp}/h'
+    'l-start.$$" o="${HYPERLOOM_OUT_DIR:-/out}"; if [ -n "${HYPERLOOM_SOURCE_SHA:-}" ] && [ -n "${HYPERLO'
+    'OM_RUNNER_CACHE_MANIFEST_SHA256:-}" ] && mkdir -m 700 "$d" && cp "$e/manifest" "$e/bootstrap.sh" "$d'
+    '/" && printf \'"\'"\'%s  %s\\n\'"\'"\' "$HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256" "$d/manifest" | sha256sum '
+    '-c - >&2 && h=$(sed -n \'"\'"\'s/^  "bootstrap_sha256": "\\([0-9a-f]\\{64\\}\\)",*$/\\1/p\'"\'"\' "$d/manifest"'
+    ') && [ -n "$h" ] && printf \'"\'"\'%s  %s\\n\'"\'"\' "$h" "$d/bootstrap.sh" | sha256sum -c - >&2; then exec'
+    ' sh "$d/bootstrap.sh" --spec-wait-sec 1800; fi; echo "hyperloom-runner-bootstrap: bootstrap.sh or ma'
+    'nifest of $e is missing or not the one HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256 pins" >&2; mkdir -p "$'
+    'o" && printf \'"\'"\'%s\\n\'"\'"\' \'"\'"\'{"error_class": "runner_start_failed", "message": "runner bootstrap'
+    ", step verify, exit 1: bootstrap.sh or manifest of the cache entry is missing or not the one HYPERLO"
+    'OM_RUNNER_CACHE_MANIFEST_SHA256 pins, or that or HYPERLOOM_SOURCE_SHA is not set", "state": "failed"'
+    '}\'"\'"\' >"$o/.status.json.tmp" && mv "$o/.status.json.tmp" "$o/status.json"; exit 2\' >"$hl_boot" 2>&1'
+    ' || hl_start_failed "$?") </dev/null >/dev/null 2>&1 &); } || hl_start_failed "$?"'
 )
 #: The SHA-256 of that payload, with a final newline.
-_PINNED_SHA256 = "07a9eab8d44e4311edaf817688d6d32288ec89a56413465d03caebf38aad608f"
+_PINNED_SHA256 = "a9ecb9c8f1d63149c4dabcfece47b48da7d66baf791cca698ceb784bcda4f28f"
 _KEY_COPY = '(umask 077 && cp "$HYPERLOOM_SIGNING_KEY_FILE" /app/work/hl-sign.pem)'
 _APP_PATHS = {"dirs": ("/app/in", "/app/out", "/app/work/scratch"), "boot_log": "/app/work/runner-boot.log"}
 #: How long the step may take to return: it makes three directories and forks; the runner's start is not waited for.
@@ -90,9 +97,12 @@ def test_the_runner_waits_the_template_default_for_its_spec_unless_the_arguments
 
 def test_the_step_without_preparation_or_environment_starts_the_runner_straight_after_the_directories() -> None:
     payload = runner_template_payload()
-    assert "; { mkdir -p /in /out /scratch && ( (nohup sh -c " in payload
+    assert "; { hl_dirs /in /out /scratch && hl_log && ( (nohup sh -c " in payload
+    assert (
+        'o=${HYPERLOOM_OUT_DIR:-/out}; hl_t=/runner-boot.log; for hl_boot in "$hl_t" "$o/runner-boot.log"; ' in payload
+    )
     assert payload.endswith(
-        ' >/runner-boot.log 2>&1 || hl_start_failed "$?") </dev/null >/dev/null 2>&1 &); } || hl_start_failed "$?"'
+        ' >"$hl_boot" 2>&1 || hl_start_failed "$?") </dev/null >/dev/null 2>&1 &); } || hl_start_failed "$?"'
     )
 
 

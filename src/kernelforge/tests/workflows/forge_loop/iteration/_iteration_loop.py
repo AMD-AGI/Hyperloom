@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+from kernelforge.evaluation.scoring import CaseAggregate
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore, RunState
 from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop, IterationResult
 from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
@@ -195,6 +196,7 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
         validate_stage_timeout_sec=300,
         bench_timeout_sec=300,
         bench_repeat=1,
+        case_aggregate=CaseAggregate.ARITHMETIC,
         nproc_per_node=1,
         build_dir=None,
         baseline_wall_ms=5.0,

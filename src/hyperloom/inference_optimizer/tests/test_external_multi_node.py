@@ -601,7 +601,7 @@ def test_kill_entrypoints_quote_state_derived_paths(builder: str, build: object)
 
 def test_launch_entrypoint_quotes_state_derived_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     """Same for the launch entrypoint's pid/log directories."""
-    from hyperloom.inference_optimizer.multi_node import cli as mncli
+    from hyperloom.inference_optimizer.multi_node import pod_entrypoints
 
     monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", "")
     args = argparse.Namespace(
@@ -614,7 +614,7 @@ def test_launch_entrypoint_quotes_state_derived_paths(monkeypatch: pytest.Monkey
         no_wait_health=False,
     )
 
-    entrypoint = mncli._build_multinode_launch_entrypoint(args, 2, "/tmp/my pids", "/tmp/my logs")
+    entrypoint = pod_entrypoints._build_multinode_launch_entrypoint(args, 2, "/tmp/my pids", "/tmp/my logs")
 
     assert "--pid-dir '/tmp/my pids'" in entrypoint
     assert "--log-dir '/tmp/my logs'" in entrypoint
@@ -1173,6 +1173,7 @@ def test_missing_handoff_exits_config_error_not_transient(
 ) -> None:
     """An unset hand-off is not something a retry can fix."""
     from hyperloom.inference_optimizer.multi_node import cli as mncli
+    from hyperloom.inference_optimizer.multi_node import cluster_access
 
     session = tmp_path / "session"
     session.mkdir()
@@ -1180,9 +1181,9 @@ def test_missing_handoff_exits_config_error_not_transient(
     monkeypatch.delenv("HYPERLOOM_MN_EXT_SERVICE_URL", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
 
-    with pytest.raises(mncli.ConfigurationError, match="HYPERLOOM_MN_EXT_SERVICE_URL is unset"):
-        mncli._load_state()
-    assert mncli.main(["verify"]) == mncli.EXIT_CONFIG_ERROR
+    with pytest.raises(cluster_access.ConfigurationError, match="HYPERLOOM_MN_EXT_SERVICE_URL is unset"):
+        cluster_access._load_state()
+    assert mncli.main(["verify"]) == cluster_access.EXIT_CONFIG_ERROR
     assert "HYPERLOOM_MN_EXT_SERVICE_URL is unset" in capsys.readouterr().err
 
 

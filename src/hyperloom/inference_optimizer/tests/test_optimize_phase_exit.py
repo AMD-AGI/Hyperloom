@@ -12,6 +12,7 @@ import pytest
 from hyperloom.orchestrator.phases.exit_predicates import framework_plateau
 
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.phases import phase_predicates, phase_transitions
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_KERNEL, ESCALATE_HINT_SKIP_TO_SWEEP
 
 from ._optimize_fixtures import optimize_state
@@ -33,7 +34,7 @@ _DRY_CONFIG = {"config_keep_gain_pct": 0.0, "config_empty_rounds": 9}
 )
 def test_the_phase_leaves_only_when_both_arms_are_dry(source_dry, config_dry, leaves):
     state = optimize_state(**({**_DRY_SOURCE} if source_dry else {}), **({**_DRY_CONFIG} if config_dry else {}))
-    verdict = ps.compute_next_phase(state)
+    verdict = phase_transitions.compute_next_phase(state)
     assert (verdict is not None) is leaves
     if leaves:
         assert verdict[1] == "optimize_no_more_leverage"
@@ -43,7 +44,7 @@ def test_the_phase_leaves_only_when_both_arms_are_dry(source_dry, config_dry, le
 def test_candidate_exhaustion_dries_the_source_arm_without_a_no_keep_streak():
     """Discovery reporting itself done is the other way the source arm ends."""
     state = optimize_state(source_exhausted=True, **_DRY_CONFIG)
-    verdict = ps.compute_next_phase(state)
+    verdict = phase_transitions.compute_next_phase(state)
     assert verdict is not None
     assert verdict[2]["source_candidates_exhausted"] is True
 
@@ -55,7 +56,7 @@ def test_one_dry_arm_still_flags_a_bottleneck_switch(arm):
     state = optimize_state(**arm)
     assert ps.per_lever_dryness(state)[1]["switch_bottleneck"] is True
     # No exit, but the signal is available to whatever does exit later.
-    assert ps.compute_next_phase(state) is None
+    assert phase_transitions.compute_next_phase(state) is None
 
 
 def test_switch_bottleneck_rides_every_exit_path():
@@ -65,7 +66,7 @@ def test_switch_bottleneck_rides_every_exit_path():
         "skip_to_sweep hint": optimize_state(pending_escalate_hint=ESCALATE_HINT_SKIP_TO_SWEEP),
     }
     for label, state in paths.items():
-        verdict = ps.compute_next_phase(state)
+        verdict = phase_transitions.compute_next_phase(state)
         assert verdict is not None, label
         assert "switch_bottleneck" in verdict[2], label
 
@@ -75,7 +76,7 @@ def test_switch_bottleneck_rides_every_exit_path():
 def test_a_skip_to_sweep_hint_leaves_with_an_arm_still_paying():
     """An explicit hint outranks the two-arm rule; that is the point of it."""
     state = optimize_state(pending_escalate_hint=ESCALATE_HINT_SKIP_TO_SWEEP)
-    verdict = ps.compute_next_phase(state)
+    verdict = phase_transitions.compute_next_phase(state)
     assert verdict is not None
     assert verdict[1] == "optimize_no_more_leverage"
     assert verdict[2]["evidence"] == "skip_to_sweep"
@@ -85,14 +86,18 @@ def test_a_skip_to_sweep_hint_leaves_with_an_arm_still_paying():
 # --------------------------------------------------------------------------- #
 def test_exhausted_leverage_switches_lever_rather_than_ending_the_run():
     state = optimize_state(**_DRY_SOURCE, **_DRY_CONFIG)
-    target, reason, _ = ps.compute_next_phase(state, flags=ps.PhaseFlags(kernel_enabled=True))
+    target, reason, _ = phase_transitions.compute_next_phase(
+        state, flags=phase_predicates.PhaseFlags(kernel_enabled=True)
+    )
     assert target == ps.PHASE_KERNEL_AGENT
     assert reason == "optimize_no_more_leverage"
 
 
 def test_with_kernel_disabled_it_winds_down_to_sweep_carrying_its_reason():
     state = optimize_state(**_DRY_SOURCE, **_DRY_CONFIG)
-    target, reason, evidence = ps.compute_next_phase(state, flags=ps.PhaseFlags(kernel_enabled=False))
+    target, reason, evidence = phase_transitions.compute_next_phase(
+        state, flags=phase_predicates.PhaseFlags(kernel_enabled=False)
+    )
     assert target == ps.PHASE_SWEEP
     assert reason == "optimize_no_more_leverage"
     assert evidence["kernel_skipped"] is True
@@ -118,7 +123,7 @@ def test_skip_to_kernel_leaves_on_an_optimize_reason():
     state.pending_escalate_hint = ESCALATE_HINT_SKIP_TO_KERNEL
     state.explore_search = {"tested": {"fp0": {"cycle": 0}}, "winners_history": []}
 
-    out = ps.compute_next_phase(state)
+    out = phase_transitions.compute_next_phase(state)
 
     assert out is not None
     assert out[1] == "optimize_no_more_leverage"
@@ -135,4 +140,4 @@ def test_skip_to_kernel_is_refused_before_either_arm_has_run():
     # Clear attempts so the phase has recorded no work this cycle.
     state.attempts = []
 
-    assert ps.compute_next_phase(state) is None
+    assert phase_transitions.compute_next_phase(state) is None

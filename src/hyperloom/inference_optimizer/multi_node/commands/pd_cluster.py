@@ -39,6 +39,7 @@ from .._internal.pd_cluster import (
 from .._internal.baseline_args import SOURCE_INFERENCEX
 from .._internal.pd_remote import bash_payload, launch_path, pidfile_path
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
+from ..pod_entrypoints import SHAPE_GATE_DEPS, extract_pod_json, read_bundled_pod_python_script
 
 
 def _cli():
@@ -135,7 +136,7 @@ def _ssh_pod(
         "role": role,
         "rc": completed.returncode,
     }
-    parsed = _cli()._extract_pod_json(completed.stdout or "")
+    parsed = extract_pod_json(completed.stdout or "")
     if parsed:
         record["summary"] = parsed
     if completed.returncode != 0:
@@ -330,7 +331,7 @@ def apply_tracelens_patch(args: argparse.Namespace) -> int:
         err("apply-tracelens-patch requires --tracelens-root or $TRACELENS_ROOT")
         return cli.EXIT_CONFIG_ERROR
     targets = list(state.get("prefill_pods") or []) + list(state.get("decode_pods") or [])
-    script = cli._read_bundled_pod_python_script("apply_tracelens_patch_multinode.py", cli._SHAPE_GATE_DEPS)
+    script = read_bundled_pod_python_script("apply_tracelens_patch_multinode.py", SHAPE_GATE_DEPS)
     op_args = f"--local --tracelens-root {shlex.quote(str(tracelens_root))}"
     if getattr(args, "sglang_version_pin", None):
         op_args += f" --sglang-version-pin {shlex.quote(str(args.sglang_version_pin))}"
@@ -352,7 +353,7 @@ def apply_tracelens_patch(args: argparse.Namespace) -> int:
         except subprocess.TimeoutExpired:
             failures.append({"host": ip, "sshPort": port, "error": f"timeout after {timeout}s"})
             continue
-        parsed = cli._extract_pod_json(completed.stdout) or {}
+        parsed = extract_pod_json(completed.stdout) or {}
         rows = parsed.get("per_pod")
         if str(parsed.get("status")) in ("applied", "skipped") and rows:
             for row in rows:
