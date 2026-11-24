@@ -477,8 +477,9 @@ def _merge_caller_overrides(
             envs[framework_env] = server_args
         else:
             if framework_env == "EXTRA_SGLANG_ARGS" and "--moe-runner-backend" in str(server_args):
-                # The caller's backend replaces an inherited one rather than
-                # relying on duplicate last-wins flags.
+                # For MoE backend exploration/tuning, the candidate value must
+                # replace the baseline's injected default (usually triton) rather
+                # than relying on duplicate last-wins flags.
                 existing = remove_moe_runner_backend_arg(existing)
             envs[framework_env] = merge_server_args(existing, server_args)
     # Only ``benchmark.envs`` reaches the round, so ``--extra-env`` lands there for

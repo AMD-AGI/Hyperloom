@@ -579,8 +579,7 @@ SGLANG_MOE_RUNNER_BACKEND_RE = re.compile(r"--moe-runner-backend(?:[=\s]|$)")
 
 # Same flag with the value that follows it, so a removal takes the pair and not just the name.
 # The value is optional so a bare, value-less flag (an operator typo, or a flag left dangling at
-# end-of-string) is stripped too rather than surviving into a retry that is supposed to launch
-# without it.
+# end-of-string) is stripped too.
 _SGLANG_MOE_RUNNER_BACKEND_PAIR_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:(?:[=\s]+)(?!--)\S+)?")
 
 
