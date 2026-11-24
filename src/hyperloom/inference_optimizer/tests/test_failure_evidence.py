@@ -48,9 +48,7 @@ _FREE_DEVICE_MEMORY_LINE = (
 )
 
 
-@pytest.mark.parametrize(
-    "text", [_MAMBA_CAPACITY_LINE, _KV_MEMORY_LINE, _KV_EMPTY_LINE, _KV_TOKENS_LINE, _FREE_DEVICE_MEMORY_LINE]
-)
+@pytest.mark.parametrize("text", [_MAMBA_CAPACITY_LINE, _KV_MEMORY_LINE, _KV_EMPTY_LINE, _KV_TOKENS_LINE])
 def test_an_engine_capacity_error_is_recognised(text):
     assert is_engine_capacity_error(text)
 
@@ -63,6 +61,7 @@ def test_an_engine_capacity_error_is_recognised(text):
         "hipErrorNoBinaryForGpu: no kernel image is available for execution on the device",
         "Transformers does not recognize this architecture",
         "INFO max_num_seqs=256 gpu_memory_utilization=0.9",
+        _FREE_DEVICE_MEMORY_LINE,
     ],
 )
 def test_engine_capacity_error_ignores_other_failures(text):

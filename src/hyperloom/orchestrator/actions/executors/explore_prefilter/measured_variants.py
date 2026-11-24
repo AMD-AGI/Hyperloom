@@ -38,7 +38,7 @@ __all__ = [
 GAIN_BELOW_THRESHOLD = "gain_below_threshold"
 
 # Outcomes that carry a measured verdict. A FAILED or overtime-killed row says nothing about the launch's merit, so it
-# may run again.
+# may run again, unless it carries a change the framework refused at start (``dead_changes``).
 _MEASURED_OUTCOMES = frozenset({"KEEP", "REVERT"})
 
 
@@ -158,26 +158,32 @@ def explore_grid_already_covered(params: Mapping[str, Any], active: Iterable[Any
     }
     grid = list(params.get("grid") or ())
     dead = _session_dead_changes(params, ledger, now.workload_signature)
+    covered: list[str] = []
     carrying_dead: list[str] = []
     for key, raw in zip(keys, grid):
+        name = str(raw.get("name") or "")
         if key in pending or measured_verdict(ledger, key[0], variant=raw, now=now):
-            continue
-        if not carried_dead_change(_change_of(raw), dead, stack=now.stack):
+            covered.append(name)
+        elif carried_dead_change(_change_of(raw), dead, stack=now.stack):
+            carrying_dead.append(name)
+        else:
             return None
-        carrying_dead.append(str(raw.get("name") or ""))
-    names = [str(v.get("name") or "") for v in grid]
-    reason = (
-        f"delegate{{action_name='explore'}} adds nothing new: {', '.join(names)} already measured, queued or running "
-        "on the current stack"
-    )
-    if carrying_dead:
-        reason += f", or carrying a change the framework refused at start ({', '.join(carrying_dead)})"
     return PolicyDenied(
-        reason,
+        _covered_reason(covered, carrying_dead),
         rule="explore_grid_already_covered",
         hint="Read the measured verdicts and the start failures in explore_search, or propose a variant that changes "
         "the launch.",
     )
+
+
+def _covered_reason(covered: list[str], carrying_dead: list[str]) -> str:
+    """Each variant of a denied grid once, under what already answers it."""
+    parts = []
+    if covered:
+        parts.append(f"{', '.join(covered)} already measured, queued or running on the current stack")
+    if carrying_dead:
+        parts.append(f"{', '.join(carrying_dead)} carrying a change the framework refused at start")
+    return "delegate{action_name='explore'} adds nothing new: " + "; ".join(parts)
 
 
 def _session_dead_changes(params: Mapping[str, Any], ledger: Any, workload: str) -> list[DeadChange]:

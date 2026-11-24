@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from inference_suite.server_log import cause_line
+from hyperloom.common.failure_signature import DEVICE_MEMORY_SHORTFALL_LINE
 from hyperloom.inference_optimizer.canonical_fingerprint import change_items
 
 from ....state.failure_evidence import (
@@ -29,11 +30,12 @@ __all__ = ["KNOWN_DEAD_CHANGE", "DeadChange", "carried_dead_change", "dead_chang
 # ``skipped_dup`` reason for a variant that carries a change this session saw kill a server before it was ready.
 KNOWN_DEAD_CHANGE: str = "known_dead_change"
 
-# The root cause a server that exited before it was ready reads as when nothing names memory, capacity or the host.
+# The root cause of a server that exited before it was ready whose log names no out-of-memory or capacity limit.
 _ENGINE_INIT = "engine_core_init"
 
-# Exceptions a framework raises when it rejects the configuration it was given. A host fault (OSError, MemoryError, a
-# RuntimeError with no device, a hub HTTP error) is not one, so it never retires a change.
+# Exceptions a framework raises when it rejects the configuration it was given. A host fault raised as another type
+# (OSError, MemoryError, a RuntimeError with no device, a hub HTTP error) never retires a change; one raised under these
+# names does, unless its log names the host or a card short of free memory.
 _CONFIG_REFUSALS: frozenset[str] = frozenset(
     {"ValueError", "NotImplementedError", "AssertionError", "TypeError", "ValidationError"}
 )
@@ -81,6 +83,7 @@ def _start_death_cause(row: Mapping[str, Any]) -> str | None:
         _exception_name(cause) not in _CONFIG_REFUSALS
         or error_class != SERVER_INIT_DEAD
         or row.get("framework_changed")
+        or DEVICE_MEMORY_SHORTFALL_LINE.search(excerpt)
     ):
         return None
     if classify_root_cause_type(error_class, excerpt) != _ENGINE_INIT:

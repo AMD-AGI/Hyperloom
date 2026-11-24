@@ -136,10 +136,19 @@ def test_only_a_start_failure_of_the_variants_own_change_counts(row):
     assert dead_changes([_failed("v00", _AITER_ON, **row)], workload_signature=_WS) == []
 
 
-def test_a_configuration_the_framework_rejects_by_validation_counts():
-    row = _failed("v00", _AITER_ON, error_excerpt="pydantic_core._pydantic_core.ValidationError: 1 validation error")
-    (dead,) = dead_changes([row], workload_signature=_WS)
-    assert dead.cause.startswith("pydantic_core._pydantic_core.ValidationError")
+@pytest.mark.parametrize(
+    "cause",
+    [
+        "ValueError: max_model_len exceeds the model's limit",
+        "NotImplementedError: FP8 MoE is not supported on this backend",
+        "AssertionError: num_heads must be divisible by tensor_parallel_size",
+        "TypeError: __init__() got an unexpected keyword argument 'use_aiter'",
+        "pydantic_core._pydantic_core.ValidationError: 1 validation error for ModelConfig",
+    ],
+)
+def test_each_configuration_refusal_retires_the_change(cause):
+    (dead,) = dead_changes([_failed("v00", _AITER_ON, error_excerpt=cause)], workload_signature=_WS)
+    assert dead.cause == cause
 
 
 def test_a_decision_round_failure_carries_its_log_text_as_the_reason():

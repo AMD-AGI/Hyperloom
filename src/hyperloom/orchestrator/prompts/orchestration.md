@@ -401,11 +401,12 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
 * **`explore` does not relaunch a change the framework refused at start.**
   Once a variant's server exits before ready on its own change and its log
   names a configuration error (a `ValueError`, `NotImplementedError`,
-  `AssertionError`, `TypeError` or `ValidationError` that is not a capacity
-  or host fault), any later variant this session carrying that change whole
-  is skipped as `known_dead_change`, on any stack, unless the stack already
-  runs it; the delegated result's `skipped:` line names the dead variant and
-  its cause. A grid made only of such variants is denied as
+  `AssertionError`, `TypeError` or `ValidationError`; a KV-cache capacity
+  or free-device-memory shortfall does not count, a host fault raised under
+  one of these names does), any later variant this session carrying that
+  change whole is skipped as `known_dead_change`, on any stack, unless the
+  stack already runs it; the delegated result's `skipped:` line names the
+  dead variant and its cause. A grid made only of such variants is denied as
   `explore_grid_already_covered`. Adding a fix on top does not lift it:
   change or drop the dead setting itself.
 * **`explore` validates its own KEEPs.**

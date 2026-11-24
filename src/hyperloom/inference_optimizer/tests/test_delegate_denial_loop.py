@@ -532,6 +532,8 @@ def test_explore_grid_coverage_tells_a_variant_removal_from_the_base_one():
 
 def test_explore_grid_coverage_refuses_a_grid_made_only_of_known_dead_changes():
     """A grid whose every variant carries a change the framework refused at start launches nothing; it is refused."""
+    from types import SimpleNamespace
+
     from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
     from hyperloom.orchestrator.actions.executors.explore_prefilter.measured_variants import (
         explore_grid_already_covered,
@@ -554,6 +556,14 @@ def test_explore_grid_coverage_refuses_a_grid_made_only_of_known_dead_changes():
 
     denied = explore_grid_already_covered({**base, "grid": [sibling]}, [], ledger)
     assert denied is not None and denied.rule == "explore_grid_already_covered"
-    assert str(denied).endswith("carrying a change the framework refused at start (v02)")
+    assert str(denied) == (
+        "delegate{action_name='explore'} adds nothing new: v02 carrying a change the framework refused at start"
+    )
+    queued = [SimpleNamespace(kind="explore", params={**base, "grid": [new]})]
+    mixed = explore_grid_already_covered({**base, "grid": [new, sibling]}, queued, ledger)
+    assert str(mixed) == (
+        "delegate{action_name='explore'} adds nothing new: v01 already measured, queued or running on the current "
+        "stack; v02 carrying a change the framework refused at start"
+    )
     assert explore_grid_already_covered({**base, "grid": [sibling, new]}, [], ledger) is None
     assert explore_grid_already_covered({**base, "source": "stack_revalidate", "grid": [sibling]}, [], ledger) is None
