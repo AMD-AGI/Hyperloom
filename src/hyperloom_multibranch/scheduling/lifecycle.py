@@ -7,8 +7,8 @@ PRELUDE roots the session and measures its baseline (:mod:`.prelude`); EXPLORE t
 test and one CLOSE grace are left before the deadline. EXPLORE and CLOSE score the branches with the frontier's
 defaults for the session's budget. Once the baseline is established, a session with an RSI archive plays the
 scheduling playbook ``--playbook`` asks for, the champion of the pool beside it or a playbook on trial, as the session's id draws under
-``auto``, recorded under ``playbook`` in ``policy_versions``. The FINAL candidates are fixed while every branch still stands,
-then exploration ends and FINAL validates them. With the review on, a session whose component agents are given a map pauses before their branches open until a person approves it (:mod:`.review`); the pause moves the
+``auto``, recorded under ``playbook`` in ``policy_versions``. EXPLORE ends exploration itself, the specialist branches first
+(:meth:`Explorer.run <hyperloom_multibranch.scheduling.explore.Explorer.run>`); the FINAL candidates are read after that and FINAL validates them. With the review on, a session whose component agents are given a map pauses before their branches open until a person approves it (:mod:`.review`); the pause moves the
 deadline, and EXPLORE's end, by its length. A map a mapping branch makes is reviewed in EXPLORE, while the clock runs,
 and its shares open only with ``--agent-share-minutes`` left before their cutoff. A failed PRELUDE, a run asked to stop once its component agents' directions are mapped,
 a map a person rejected, an EXPLORE that ran out of cards to measure on, a stop signal, the session deadline
