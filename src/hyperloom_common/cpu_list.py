@@ -10,11 +10,8 @@ import re
 import threading
 from collections.abc import Iterable
 
-__all__ = ["SERVER_CPUS_ENV", "cpu_list", "runnable_cpus"]
+__all__ = ["cpu_list", "runnable_cpus"]
 
-#: The CPUs every measured server is pinned to, apart from the ones builds compile on: a host's deployment fact, read
-#: where a round starts its server.
-SERVER_CPUS_ENV = "HYPERLOOM_SERVER_CPUS"
 _LIST = re.compile(r"\d+(-\d+)?(,\d+(-\d+)?)*")
 
 

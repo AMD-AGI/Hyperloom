@@ -11,9 +11,6 @@ same directory never meets the run_dir before it.
 
 :func:`run_accuracy_suite_round` serves the launch an AgentX point ran for the D9 accuracy round: on a server of its
 own, without the base's golden layer, eval only, into ``<slot>/accuracy``.
-
-``HYPERLOOM_SERVER_CPUS`` names the CPUs every server a round starts is pinned to (a list such as ``32-63``), apart
-from the ones other work on the host runs on; unset, a server runs on the CPUs of the round.
 """
 
 from __future__ import annotations
@@ -28,7 +25,7 @@ from pathlib import Path
 
 import yaml
 
-from hyperloom_common.cpu_list import SERVER_CPUS_ENV, cpu_list, runnable_cpus
+from hyperloom_common.cpu_list import cpu_list
 from hyperloom_common.env import env_flag
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.common.ports import pick_server_port
@@ -83,6 +80,9 @@ _KV_METRICS_ENV = "INFERENCE_OPTIMIZER_KV_METRICS"
 TOOL_CACHE_DIR = "inference-suite-tools"
 TOOL_CACHE_ENV = "INFERENCE_SUITE_TOOL_CACHE"
 RUN_DIR_PREFIX = "suite_run_"
+#: The CPUs every server a round starts is pinned to, a list such as ``32-63``; unset, a server runs on the round's
+#: own. Only the server is pinned: other work on the host stays off them only when it is confined to the others.
+SERVER_CPUS_ENV = "HYPERLOOM_SERVER_CPUS"
 
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # The round masks the server's GPUs itself; a host mask inherited beneath it would renumber them.
@@ -282,17 +282,9 @@ def _server_cpus() -> tuple[int, ...]:
     if not named:
         return ()
     try:
-        cpus = cpu_list(named)
+        return cpu_list(named)
     except ValueError as exc:
         raise _refused_at(FailedStep.CONFIG_INVALID, f"{SERVER_CPUS_ENV}: {exc}") from None
-    absent = sorted(set(cpus) - runnable_cpus(cpus))
-    if absent:
-        raise _refused_at(
-            FailedStep.CONFIG_INVALID,
-            f"{SERVER_CPUS_ENV}: {named!r} names {len(absent)} CPU(s) a server cannot run on here, the lowest "
-            f"CPU {absent[0]}",
-        )
-    return cpus
 
 
 def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable[[], None]) -> RoundResult:

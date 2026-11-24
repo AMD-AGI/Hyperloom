@@ -291,18 +291,6 @@ def test_server_cpus_that_name_no_cpu_list_refuse_the_round_as_an_invalid_config
     assert not calls
 
 
-@pytest.mark.parametrize("named", ["100000-100001", "{own},100000"], ids=["none-of-the-host", "one-not-of-the-host"])
-def test_server_cpus_the_host_cannot_run_a_server_on_refuse_the_round_as_an_invalid_config(monkeypatch, suite, named):
-    monkeypatch.setenv("HYPERLOOM_SERVER_CPUS", named.format(own=min(os.sched_getaffinity(0))))
-    row, calls, _ = _play(
-        monkeypatch, suite, LaunchAttempt(outcome=READY), launch=GridLaunch(warmup_before_measure=False)
-    )
-
-    assert row.status == "failed" and row.error_class == failed_step_error_class(FailedStep.CONFIG_INVALID), row
-    assert "HYPERLOOM_SERVER_CPUS" in row.error and "100000" in row.error
-    assert not calls
-
-
 def test_a_point_without_a_frozen_base_is_refused_as_an_invalid_config_and_runs_nothing(monkeypatch, suite, tmp_path):
     monkeypatch.setattr(_grid_runner, "_resolve_session_dir", lambda: tmp_path / "no_base")
     row, calls, _ = _play(

@@ -137,11 +137,8 @@ def test_round_trip_through_json(config):
     assert SuiteConfig.from_document(document).to_document() == document
 
 
-def test_a_config_written_before_the_server_could_be_pinned_reads_as_unpinned():
-    document = json.loads(json.dumps(_config().to_document()))
-    del document["server"]["cpus"]
-
-    assert SuiteConfig.from_document(document).server.cpus == ()
+def test_an_unpinned_server_writes_no_cpus_key_so_a_build_without_it_reads_the_config():
+    assert "cpus" not in _config().to_document()["server"]
 
 
 _SCRIPT = ScriptableWorkload(params={"XDIT_NUM_STEPS": 28, "XDIT_GUIDANCE_SCALE": 4.0})

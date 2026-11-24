@@ -248,8 +248,8 @@ class ServerConfig:
     candidate's failure, a user's or base's stops the line. ``source_files`` are re-hashed before launch;
     ``env_inherit`` names the host environment the server may see. ``framework_python`` is the one interpreter the
     server runs in and the version probe and parser check read. ``import_packages`` are packages beside the
-    framework's own whose import roots the probe records. ``cpus`` are the CPUs the server is pinned to, apart from
-    those other work on the host (a native build) runs on; empty, it runs on the round's own.
+    framework's own whose import roots the probe records. ``cpus`` are the CPUs the server is pinned to; empty, it runs
+    on the round's own. Nothing else is kept off them.
     """
 
     base: BaseRef
@@ -296,7 +296,8 @@ class ServerConfig:
         _FIELDS.unique(self.cpus, "server cpus")
 
     def to_document(self) -> dict[str, object]:
-        return {
+        """The server's document; an unpinned server's has no ``cpus`` key, as configs written before it had."""
+        document = {
             "base": self.base.to_document(),
             "user": self.user.to_document(),
             "candidate": self.candidate.to_document(),
@@ -312,8 +313,10 @@ class ServerConfig:
             "absent_source_files": list(self.absent_source_files),
             "import_packages": list(self.import_packages),
             "env": {"inherit": list(self.env_inherit)},
-            "cpus": list(self.cpus),
         }
+        if self.cpus:
+            document["cpus"] = list(self.cpus)
+        return document
 
     @classmethod
     def from_document(cls, document: object) -> ServerConfig:
