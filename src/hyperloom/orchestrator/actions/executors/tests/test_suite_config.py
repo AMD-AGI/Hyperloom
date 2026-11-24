@@ -50,6 +50,7 @@ _EXTRA = {
     "sglang": ("EXTRA_SGLANG_ARGS", "--context-length 8192 --cuda-graph-max-bs 64"),
     "vllm": ("EXTRA_VLLM_ARGS", "--max-num-seqs 64 --gpu-memory-utilization 0.9"),
     "atom": ("EXTRA_ATOM_ARGS", "--trust-remote-code"),
+    "llamacpp": ("EXTRA_LLAMACPP_ARGS", "-np 4"),
 }
 _PYTHON = "/opt/venv/bin/python"
 _SGLANG_ENTRY = (_PYTHON, "-m", "sglang.launch_server")

@@ -192,6 +192,17 @@ def test_an_unlisted_device_id_is_judged_by_architecture_and_then_by_name():
     assert _wrong_card(_card("AMD Instinct MI308X", "74a2", "gfx942"), "MI300X")
 
 
+def test_a_card_that_gives_only_the_driver_s_generic_name_is_taken_as_the_type_the_operator_gave(caplog):
+    with caplog.at_level("WARNING", logger="hyperloom.measure.runner.hardware"):
+        assert _wrong_card(_card("AMD Radeon Graphics", "ffff", "gfx1201"), "r9700") == []
+        assert _wrong_card(_card("AMD Radeon Graphics", "ffff", None), "r9700") == []
+    assert [record.getMessage() for record in caplog.records] == [
+        "GPU 0 names no board (AMD Radeon Graphics): taken as r9700, the --gpu-type given"
+    ] * 2
+    assert _wrong_card(_card("AMD Radeon Graphics", "ffff", "gfx1100"), "r9700")
+    assert _wrong_card(_card("AMD Radeon AI PRO R9600D", "ffff", "gfx1201"), "r9700")
+
+
 def test_a_type_without_a_device_id_table_is_compared_by_name_as_before():
     assert _wrong_card(_card("AMD Instinct MI400X", "75a3", "gfx950"), "mi400x") == []
     assert _wrong_card(_card("AMD Instinct MI355X", "75a3", "gfx950"), "mi400x")

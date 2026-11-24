@@ -490,12 +490,19 @@ class XditAdapter(BaseAdapter):
     framework = "xdit"
 
 
+class LlamacppAdapter(BaseAdapter):
+    """llama.cpp adapter: a native server, built rather than pip-installed, with no Python package to localize into."""
+
+    framework = "llamacpp"
+
+
 # Registry: one adapter class per framework. Extend here (single source).
 _ADAPTERS: dict[str, type[BaseAdapter]] = {
     "vllm": VllmRocmAdapter,
     "sglang": SglangAdapter,
     "atom": AtomAdapter,
     "xdit": XditAdapter,
+    "llamacpp": LlamacppAdapter,
 }
 
 
@@ -511,6 +518,7 @@ def get_adapter(framework: str | None, *, run: RunFn = _default_run) -> BaseAdap
 __all__ = [
     "AtomAdapter",
     "BaseAdapter",
+    "LlamacppAdapter",
     "NullAdapter",
     "SglangAdapter",
     "VllmRocmAdapter",
