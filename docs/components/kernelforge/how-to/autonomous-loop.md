@@ -24,7 +24,7 @@ kernelforge forge-loop \
     --max-hours 8
 ```
 
-`forge-loop` runs ONE campaign as a standalone, hard-killable subprocess (the
+`forge-loop` runs one campaign as a standalone, hard-killable subprocess (the
 entry the Hyperloom forge backend shells out to). The campaign's immutable
 inputs are snapshotted into `<workspace>/forge_experiments/campaign_config.json`,
 so `--resume` continues an interrupted run from the same workspace.
@@ -70,7 +70,7 @@ Each iteration:
    resumes the synthesis session when the backend provides a session handle,
    preserving the planner's context; otherwise it uses one fresh revision
    session. Both are capped at 100 turns. The revision is given 10 minutes; the
-   Critic is given 10 minutes **per plan it has to read**, capped by the
+   Critic is given 10 minutes per plan it has to read, capped by the
    Orchestration session timeout, because a round of several plans is several
    times the reading. A turn cap, timeout, SDK truncation, or empty answer is
    never published as a complete plan. Empty or failed Critic calls, and answers
@@ -188,7 +188,7 @@ candidate. Planning is the dominant part of that and the most variable — 12.5 
 31.6 minutes across 75 measured production rounds — so the decision is taken
 twice, for two different questions.
 
-**Before planning**, the loop refuses only a round that could not run even if
+Before planning, the loop refuses only a round that could not run even if
 planning were as fast as any campaign has ever seen it: the cheapest planning
 observed at that width, plus the least a session can be given and still return
 something measurable, plus the canonical measurement. This check exists so the
@@ -196,7 +196,7 @@ campaign does not buy a plan nothing can run. A round that does not fit is
 narrowed one width at a time before it is refused, because each lane the round
 drops is one plan fewer for the Plan Critic to read.
 
-**After planning returns**, when its cost is a measurement rather than an
+After planning returns, when its cost is a measurement rather than an
 estimate, the loop decides whether to dispatch. What is left to buy is one
 Implementer session and the measurement that judges it; a round that cannot pay
 for both would spend the campaign's last minutes on a candidate nobody ever
@@ -212,8 +212,8 @@ something it cannot interrupt: too small a price starts a session the external
 timeout kills, too large costs one iteration — so the same session is priced at
 the median (12.3 minutes).
 
-**The dispatch requirement also has a floor of 19.6 minutes that no observation
-lowers.** A session's own wall-clock bound is sized from the campaign's total
+The dispatch requirement also has a floor of 19.6 minutes that no observation
+lowers. A session's own wall-clock bound is sized from the campaign's total
 length, not from what is left of it, so once dispatched a round runs for however
 long the session takes. What the check is really guarding is therefore the
 external timeout — which the loop does not set, cannot measure and cannot stop,

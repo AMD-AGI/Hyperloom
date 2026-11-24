@@ -17,7 +17,7 @@ move it. No micro-benchmark figure is reported here as an end-to-end gain.
 ## What enters this list
 
 Every PR in `vllm-project/vllm` or `sgl-project/sglang` whose body credits Hyperloom (`Found by
-Hyperloom`, `Powered by Hyperloom`, or the older `Found and validated with ROCm Hyperloom`) **and**
+Hyperloom`, `Powered by Hyperloom`, or the older `Found and validated with ROCm Hyperloom`) and
 is merged. Attributed PRs that are still open, or that were closed without merging, are not listed:
 a change nobody upstream accepted is not evidence.
 

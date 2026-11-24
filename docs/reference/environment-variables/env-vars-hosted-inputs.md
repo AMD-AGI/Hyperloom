@@ -7,7 +7,7 @@ myst:
 # Hosted run inputs
 
 A hosted run is configured by the host that launches it. `src/hyperloom/hosted/host_info.py` is the only reader of these variables:
-it checks them once at start-up and names **every** missing or malformed variable in one error (variable names and reasons, never
+it checks them once at start-up and names every missing or malformed variable in one error (variable names and reasons, never
 values), so a bad input stops the run before it starts. Which variables are required depends on what the run hosts; the run, state
 and input variables are always required except for a session started by hand on a grant handed to it
 (`hyperloom-multibranch run --measurement hosted`), which needs the sandbox URLs and templates, `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`,

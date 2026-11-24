@@ -10,7 +10,7 @@ An MI300-series card can be split into independent partitions (`SPX`, `DPX`,
 `QPX`, `CPX`). Splitting it trades per-request latency for aggregate throughput,
 so a partitioned measurement is not comparable with a whole-card one.
 
-**The optimizer does not set the mode.** Changing it is privileged, disruptive to
+The optimizer does not set the mode. Changing it is privileged, disruptive to
 every process holding a GPU context, and not something an optimization loop
 should be doing between benchmark rounds. The card is put in its mode before
 launch — by the operator or the provisioning platform — and `optimize` only
@@ -19,7 +19,7 @@ hands the shape to the benchmark entrypoint that places work across partitions.
 
 Two CLI flags configure this, both optional:
 
-- `--compute-partition-mode {SPX,DPX,QPX,CPX}` **asserts** the mode the card is
+- `--compute-partition-mode {SPX,DPX,QPX,CPX}` asserts the mode the card is
   already in. It is a check, not a request: if the card is in a different mode
   the session is refused rather than silently measuring the wrong topology. If
   the card cannot be read at all, a declared mode is also a refusal — the flag

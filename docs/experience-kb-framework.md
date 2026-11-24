@@ -1,3 +1,10 @@
+---
+myst:
+    html_meta:
+        "description": "Learn how Hyperloom records and publishes Framework Experience data, including attempt facts, session breakdowns, and Knowledge Base integration."
+        "keywords": "Hyperloom, Framework Experience, Knowledge Base, session breakdown, SBD V6, experience publication"
+---
+
 # Framework Experience publication
 
 Framework Experience publication is a side effect of SBD V6 export.

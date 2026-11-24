@@ -34,14 +34,14 @@ Every prep writes one directory per attempt under
 
 Three questions answer most failures:
 
-1. **Did the agent write anything?** `agent_event.json` → `driver_edited`. An
+- **Did the agent write anything?** `agent_event.json` → `driver_edited`. An
    attempt that ends `false` produced nothing salvageable; the preflight
    reasons in that case describe the *original* driver, not a failed repair.
    The failure message says so explicitly.
-2. **Why did the driver fail?** `preflight.json` → `diagnostics`, which carries
+- **Why did the driver fail?** `preflight.json` → `diagnostics`, which carries
    the driver's own stdout/stderr tail. A bare `DRIVER CRASHED (exit 1)` with
    no traceback means the driver died before printing anything.
-3. **Where did the time go?** `preflight.json` → `duration_sec` and the
+- **Where did the time go?** `preflight.json` → `duration_sec` and the
    per-stage `seconds`, against `agent_event.json` → `elapsed_s` / `budget_s`.
 
 File timestamps in this directory are capture times, so they can be read as a

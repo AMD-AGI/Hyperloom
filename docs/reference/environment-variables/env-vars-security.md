@@ -67,7 +67,7 @@ is handed to `hyperloom-multibranch` before the entry's isolation check (below);
 makes the same check at its start, with the same layer bubblewrap, and also ends the run, naming which and why, when
 the agent runner would start its specialists unconfined or refuse them.
 
-**Specialists in a bubblewrap sandbox** (`orchestrator/specialists/launch_env.py`; the dispatcher, its Ray GPU actor
+Specialists in a bubblewrap sandbox (`orchestrator/specialists/launch_env.py`; the dispatcher, its Ray GPU actor
 path and the agent runner) write their workspace and worktree, and a private `/tmp` and `/dev/shm` (directories of
 mode 0700 on the host's `/tmp` and `/dev/shm`; with a bubblewrap older than 0.12, a fresh tmpfs where the workspace
 lies below `/tmp`). `HOME`, and `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CACHE_HOME` and the compiler caches

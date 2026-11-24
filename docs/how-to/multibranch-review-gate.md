@@ -9,7 +9,7 @@ myst:
 A multi-branch session (MB) with component agents makes a map of directions before their branches open: the dossier
 pass's map, a map generated from the root's profile, or one you gave with `--agent-directions`. A component agent is
 an `--autonomous-agent` whose checkout an installed adapter recognises. With the review on, the default, MB then
-**waits** until a person approves or rejects that map and its dossier, holding no GPU lease for it.
+waits until a person approves or rejects that map and its dossier, holding no GPU lease for it.
 
 ## When MB waits
 
@@ -19,7 +19,7 @@ an `--autonomous-agent` whose checkout an installed adapter recognises. With the
 - **What waits:**
   - **A map the session makes** (the dossier pass's, or one generated from the root's profile) is made by a mapping
     branch in EXPLORE. Only that branch waits: the other branches go on, and the deadline stays.
-  - **A map you gave** with `--agent-directions` is reviewed before EXPLORE. The session pauses, and its deadline
+  - A map you gave with `--agent-directions` is reviewed before EXPLORE. The session pauses, and its deadline
     moves by the pause.
 - **Never:** with `--no-review-gate`, or with `--stop-after-map`. The latter's stop is the review point: it keeps
   the map and ends, for a review offline. A second run then takes the reviewed map and dossier with

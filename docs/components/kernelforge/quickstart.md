@@ -7,7 +7,7 @@ myst:
 
 # KernelForge quickstart
 
-This guide walks through a complete kernel development workflow — from installation to a fully optimized kernel with experiment history and extracted lessons.
+This guide walks through a complete kernel development workflow: from installation to a fully optimized kernel with experiment history and extracted lessons.
 
 ## Prerequisites
 
@@ -19,13 +19,12 @@ Before installing KernelForge, verify the following requirements are met.
 | ROCm | ≥ 6.0 | `rocminfo \| head -5` |
 | rocprofv3 | (included with ROCm) | `rocprofv3 --version` |
 | GPU | AMD Instinct™ MI300X or MI355X | `rocm-smi --showproductname` |
-| Claude auth | API key, subscription token, **or** Claude Code Max | `echo $ANTHROPIC_API_KEY` / `echo $CLAUDE_CODE_OAUTH_TOKEN` **or** `claude --version` |
+| Claude auth | API key, subscription token, or Claude Code Max | `echo $ANTHROPIC_API_KEY` / `echo $CLAUDE_CODE_OAUTH_TOKEN` or `claude --version` |
 | Codex auth (instead of Claude) | OpenAI-side key and endpoint | `echo $OPENAI_API_KEY` / `echo $OPENAI_BASE_URL` |
 
-**Billing choice.** `kernelforge forge-loop` drives its agent sessions through `claude-agent-sdk.query()`, which spawns the `claude` CLI as a subprocess, so whatever that CLI authenticates with is what gets billed. A `claude` logged in with Claude Code Max bills against your Max subscription and needs **no `ANTHROPIC_API_KEY`**. Where a login cannot persist — a container, CI — `CLAUDE_CODE_OAUTH_TOKEN` reaches the same subscription. Set `ANTHROPIC_API_KEY` only if you want API-credit billing instead; the CLI reads it ahead of the subscription token, so setting both bills the key. To run on Codex instead, pass `--agent-backend codex` or configure only the OpenAI side (`OPENAI_BASE_URL` + `OPENAI_API_KEY`); sessions then run through the Codex SDK, billed to that key, with `CODEX_MODEL` as the model.
+**Billing choice:** `kernelforge forge-loop` drives its agent sessions through `claude-agent-sdk.query()`, which spawns the `claude` CLI as a subprocess, so whatever that CLI authenticates with is what gets billed. A `claude` logged in with Claude Code Max bills against your Max subscription and needs **no `ANTHROPIC_API_KEY`**. Where a login cannot persist — a container, CI — `CLAUDE_CODE_OAUTH_TOKEN` reaches the same subscription. Set `ANTHROPIC_API_KEY` only if you want API-credit billing instead; the CLI reads it ahead of the subscription token, so setting both bills the key. To run on Codex instead, pass `--agent-backend codex` or configure only the OpenAI side (`OPENAI_BASE_URL` + `OPENAI_API_KEY`); sessions then run through the Codex SDK, billed to that key, with `CODEX_MODEL` as the model.
 
-Optional but recommended:
-- AITER repo cloned at `/work/aiter-amd` (or wherever your kernel workspace is)
+Optional but recommended: AITER repo cloned at `/work/aiter-amd` (or wherever your kernel workspace is).
 
 ## Step 1: Install
 
@@ -58,11 +57,10 @@ export KERNEL_WORKSPACE=/work/aiter-amd
 export GPU_TARGET=gfx950
 ```
 
-**Claude Code Max, at a terminal.** Nothing to configure — as above, a `claude`
+- **Claude Code Max, at a terminal:** Nothing to configure — as above, a `claude`
 CLI already logged in supplies its own endpoint and billing. `claude login` puts
 those credentials in `~/.claude/.credentials.json`, on the machine you ran it on.
-
-**Claude Code Max, headless.** That file is what a container does not have: its
+- **Claude Code Max, headless:** That file is what a container does not have: its
 `claude` is a fresh `npm install` and your host's home is not mounted in. Mint a
 long-lived token instead and pass it in the environment, which is the only route
 to subscription billing in a container or CI job:
@@ -76,14 +74,14 @@ The CLI defaults the endpoint here too, so this one variable is the whole
 configuration. Leave `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` unset — the
 CLI resolves either of them first, and the run would bill to the key instead.
 
-**API-credit billing.** Only the key is required; the CLI defaults to `api.anthropic.com`, so
+**API-credit billing:** Only the key is required; the CLI defaults to `api.anthropic.com`, so
 `ANTHROPIC_BASE_URL` is optional:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-**Anthropic-compatible gateway.** Here both halves are required — the endpoint has
+**Anthropic-compatible gateway:** Here both halves are required — the endpoint has
 no sensible default — and you authenticate with the gateway's bearer token rather
 than a console key:
 
@@ -123,14 +121,14 @@ Or create a `.env` file (see `.env.example`).
 
 ## Step 3: Run your first campaign
 
-`kernelforge forge-loop` runs one campaign: it proposes ONE change per iteration, validates it with your driver, benchmarks it, and keeps only measured improvements. The tasks ship inside the package, under `src/kernelforge/examples/` in a checkout — the Triton softmax one is the smallest task that exercises the whole loop:
+`kernelforge forge-loop` runs one campaign: it proposes one change per iteration, validates it with your driver, benchmarks it, and keeps only measured improvements. The tasks ship inside the package, under `src/kernelforge/examples/` in a checkout — the Triton softmax one is the smallest task that exercises the whole loop:
 
 ```bash
 cd src/kernelforge/examples/triton-softmax-forge-loop
 MAX_HOURS=1 ./run_example.sh /tmp/forge_softmax
 ```
 
-`run_example.sh` copies the task into a scratch git workspace, commits it, and launches the loop — the isolate-then-run pattern every caller should follow, because forge-loop git-inits its workspace and edits the kernel **in place**. Underneath it is a plain CLI call:
+`run_example.sh` copies the task into a scratch git workspace, commits it, and launches the loop (the isolate-then-run pattern every caller should follow, because forge-loop git-inits its workspace and edits the kernel in place). Underneath it is a plain CLI call:
 
 ```bash
 kernelforge forge-loop \
@@ -148,7 +146,7 @@ kernelforge forge-loop \
 
 `--kernel-backend` picks which kernel backend's domain knowledge is injected into the agent's prompt: `ck`, `flydsl`, `triton`, `gluon`, `aiter`, `hip`, or `hipblaslt`. Omit it and the backend is inferred from the kernel sources.
 
-**In a container.** On a GPU host, a ROCm image with torch and your backend already installed needs nothing else from the environment except the credential line and a `claude` CLI on PATH:
+**In a container:** On a GPU host, a ROCm image with torch and your backend already installed needs nothing else from the environment except the credential line and a `claude` CLI on PATH:
 
 ```bash
 docker run --rm \
@@ -166,13 +164,14 @@ docker run --rm \
 
 Each iteration:
 
-1. Profiling and analysis of the current best produce the measured evidence for ONE executable plan
-2. The implementer agent applies that plan to the kernel sources — one change per iteration
-3. The driver's complete correctness suite runs; a candidate that fails is reverted and never benchmarked
-4. The benchmark scores the candidate against the pristine baseline over three independent measurements
-5. A measured improvement is git-committed and becomes the new best; every other candidate is reverted
+1. Profiling and analysis of the current best produce the measured evidence for ONE executable plan.
+2. The implementer agent applies that plan to the kernel sources — one change per iteration.
+3. The driver's complete correctness suite runs; a candidate that fails is reverted and never benchmarked.
+4. The benchmark scores the candidate against the pristine baseline over three independent measurements.
+5. A measured improvement is git-committed and becomes the new best; every other candidate is reverted.
 
 The injected backend prompt enforces the following development loop, where SNR (signal-to-noise ratio) is the correctness gate and PMC (performance monitoring counter) is the hardware-counter analysis step:
+
 ```
 READ → PREDICT → BUILD → TEST (SNR gate) → BENCH → PMC → ANALYZE → DECIDE → LOG
 ```
@@ -281,7 +280,8 @@ kernelforge forge-loop \
 ```
 
 The loop:
-- Makes ONE change per iteration
+
+- Makes one change per iteration
 - Git commits each change
 - Runs the driver's complete correctness suite
 - Benchmarks only if validation passes
@@ -299,10 +299,8 @@ calls only while stuck; bench remains the final gate on every accepted edit.
 ## Example tasks
 
 Paths below are relative to `src/kernelforge/examples/` in a checkout. From
-an installed wheel, `python -c "from kernelforge.config.resources import resource_path;
-print(resource_path('examples'))"` prints the same tree — copy a task out of it
-rather than running in place, because the package directory is not meant to be
-written to.
+an installed wheel, `python -c "from kernelforge.config.resources import resource_path;print(resource_path('examples'))"` prints the same tree — copy a task out of it
+rather than running in place, because the package directory is not meant to be written to.
 
 | Task | Backend | What it shows |
 |------|---------|---------------|
@@ -324,11 +322,11 @@ A task is a directory of files plus a launch script:
 
 | File | Required | Role | forge edits it? |
 |------|----------|------|-----------------|
-| kernel source | yes | What forge optimizes — the `--kernel` anchor (one file, or the entry file of a multi-file operator / repo) | **YES** — the edited target(s) |
-| `driver.py` | yes | Measurement driver: correctness oracle + perf measurer | never (protected) |
-| `graph_harness.py` | recommended | Operator-agnostic CUDA/HIP graph timing harness — the default way to bench | never (protected) |
-| `program.md` | recommended | Free-form guidance for the agent, passed with `--program-md-file` | never |
-| `run_example.sh` | yes | Prepares a scratch git workspace and launches the loop for this task | never |
+| kernel source | yes | What forge optimizes — the `--kernel` anchor (one file, or the entry file of a multi-file operator / repo) | Yes — the edited target(s) |
+| `driver.py` | yes | Measurement driver: correctness oracle + perf measurer | Never (protected) |
+| `graph_harness.py` | recommended | Operator-agnostic CUDA/HIP graph timing harness — the default way to bench | Never (protected) |
+| `program.md` | recommended | Free-form guidance for the agent, passed with `--program-md-file` | Never |
+| `run_example.sh` | yes | Prepares a scratch git workspace and launches the loop for this task | Never |
 
 The kernel source must expose a stable public entry point the driver calls, and it must pass the driver's correctness gate as shipped — the loop measures the pristine kernel first, so that measurement is the baseline every candidate is scored against.
 
@@ -358,6 +356,7 @@ kernelforge forge-loop --workspace /work/aiter-amd \
 ### Build fails with "stale .cuda.o"
 
 This is a known Composable Kernel (CK) pitfall (header dependencies not tracked). The build tool automatically cleans stale objects, but if you're building manually:
+
 ```bash
 rm -f aiter/jit/build/module_*/build/*.cuda.o
 ```
@@ -365,6 +364,7 @@ rm -f aiter/jit/build/module_*/build/*.cuda.o
 ### SNR is low (< 30 dB) but output looks "close"
 
 Common causes:
+
 - FlyDSL: LSE domain mismatch (scaled-log2 vs raw-qk)
 - CK: AGPR asm bug (`"+a"` constraint drops reg_idx=0)
 - Tensor layout: `.clone()` preserving non-contiguous strides
@@ -390,6 +390,6 @@ The loop checks for that file at the next iteration boundary, then finalizes nor
 
 These resources cover additional KernelForge features and task templates.
 
-- Read the shipped knowledge base under `src/kernelforge/knowledge/local_wiki/resources/` to understand what the agent knows
-- Browse the [runnable examples](https://github.com/AMD-AGI/Hyperloom/tree/main/src/kernelforge/examples) for task templates and the full driver contract
-- See {doc}`Architecture </components/kernelforge/conceptual/architecture>` and {doc}`Extending forge </components/kernelforge/how-to/extending>`
+- Read the shipped knowledge base under `src/kernelforge/knowledge/local_wiki/resources/` to understand what the agent knows.
+- Browse the [runnable examples](https://github.com/AMD-AGI/Hyperloom/tree/main/src/kernelforge/examples) for task templates and the full driver contract.
+- See {doc}`Architecture </components/kernelforge/conceptual/architecture>` and {doc}`Extending forge </components/kernelforge/how-to/extending>`.

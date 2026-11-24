@@ -15,17 +15,17 @@ latency with no visible cost.
 `HYPERLOOM_AGENTX=1` (workload YAML generated from Hyperloom flags), or an explicit
 AgentX YAML passed with `--benchmark-config`, adopts the 2-D grading shape InferenceX uses. Upstream
 sweeps a concurrency ladder, keeps TTFT / ITL / TPOT percentiles separately, and
-publishes a **Pareto frontier** with E2E normalised interactivity as the x-axis
+publishes a Pareto frontier with E2E normalised interactivity as the x-axis
 and token throughput per chip as the y-axis. It never collapses the axes into one
-weighted number, and it has **no fixed interactivity target** — interactivity is
+weighted number, and it has no fixed interactivity target — interactivity is
 a frontier coordinate, not a constraint, so a point that trades interactivity for
 throughput moves along the frontier rather than violating a rule.
 
 Hyperloom's local KEEP rule (fixed concurrency, no ladder) approximates the
 per-concurrency arm selection maintainers apply before submitting:
 
-- **KEEP** — E2E normalised interactivity P50 (median) gain ≥ 2%, **and** the P90
-  slow tail and total token throughput each no worse than the noise band, **and** the
+- **KEEP** — E2E normalised interactivity P50 (median) gain ≥ 2%, and the P90
+  slow tail and total token throughput each no worse than the noise band, and the
   pair is comparable: benchmark windows within 5% of each other and no more failed
   requests than the anchor.
 - **REVERT** — anything short of all of that.
@@ -39,7 +39,7 @@ but guards nothing: it follows the replayed window's output-length mix, not the
 server.
 
 Hyperloom reads `e2e_norm_intvty_p90` from the accepted `current_best` for both
-grading and advisory comparison. This is aiperf's summary **P10** of the
+grading and advisory comparison. This is aiperf's summary P10 of the
 per-request rate `OSL / E2EL_s`, representing the slow tail for a
 `LARGER_IS_BETTER` metric. Comparison does not recompute request-level metrics.
 The external reference uses `1 / P90(E2EL_s / OSL)`; finite-sample linear
@@ -76,7 +76,7 @@ at preflight. The backend is recorded at seed; resuming a session under the
 other backend is refused.
 
 The harness publishes no per-request OSL/E2EL series, so MLPerf sessions grade
-on **output throughput** (`HYPERLOOM_PERF_METRIC` is not honoured here) and gate
+on output throughput (`HYPERLOOM_PERF_METRIC` is not honoured here) and gate
 every KEEP on the harness's inline accuracy (`scores.json` `score`) against the
 baseline's smoke score, within the usual accuracy tolerance. A round with
 unscored turns, or over the 10% error-rate ceiling, fails that gate. A baseline

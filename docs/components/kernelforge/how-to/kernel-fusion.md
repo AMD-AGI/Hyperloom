@@ -14,9 +14,9 @@ operations -- residual adds, RMSNorm, RoPE, activations, cache writes -- each
 paying a full launch on every decode step. Collapsing a chain of them into one
 Triton kernel buys back the launches.
 
-## When it is worth running
+## Assess whether fusion will pay off
 
-Capture a kineto trace **with CUDA graphs disabled**. With graphs on, replay has
+Capture a kineto trace with CUDA graphs disabled. With graphs on, replay has
 already amortized the launches you are trying to count and the tail vanishes
 from the trace.
 
@@ -29,7 +29,7 @@ campaign is not worth its time.
 Both numbers rank candidates rather than veto them. A modest share with one
 clearly fusible chain beats a large share with nothing fusible in it.
 
-## Running it
+## Run forge-fuse
 
 Use the following command to run forge-fuse on a captured trace:
 
@@ -50,7 +50,7 @@ kernelforge forge-fuse ... --dry-run
 That writes the manifest with the localized recipe skeleton so you can see which
 chain would be attempted and where in the framework source it lives.
 
-## Naming the kernel yourself
+## Target a specific kernel
 
 Ranking picks the chain by default, which is the wrong answer when you already
 know which kernel is interesting. `--fuse-kernel` takes the full GPU kernel name,
@@ -73,7 +73,7 @@ gemm -> cast -> attention   (1456/1488 = 97.8%)
        ...
 ```
 
-Neighbours are aggregated **by category**, not by name. Kernels that differ only
+Neighbours are aggregated by category, not by name. Kernels that differ only
 in template parameters -- `SPK2`/`SPK4`/`SPK7` above -- are one pattern, and
 counting them separately would report a stable GEMM epilogue as three unrelated
 coincidences. The concrete names are listed underneath so nothing is hidden.
@@ -90,7 +90,7 @@ model file only delegates to -- the agent is asked to say so and propose the
 largest fusion that is reachable and still contains the anchor, rather than
 returning nothing.
 
-## Giving it the whole repository
+## Expand discovery across the full repository
 
 Everything above assumes one implementation file: the run resolves the model's
 source, embeds it in the discovery prompt, and the author can edit that file
@@ -116,24 +116,24 @@ It costs discovery turns, since the agent is searching instead of reading, and
 it only applies to `--discover llm` and `--discover anchored`; pattern
 discovery has no agent to give a repository to.
 
-## What happens
+## The forge-fuse pipeline
 
 The following steps describe the forge-fuse pipeline from diagnosis to export.
 
-1. **Diagnose** the trace into a launch-bound share and a predicted gain.
-2. **Discover** which chain to fuse: by matching the pattern library
+1. Diagnose the trace into a launch-bound share and a predicted gain.
+2. Discover which chain to fuse: by matching the pattern library
    (`--discover patterns`, the default), by letting an agent read the trace and
    the real source (`--discover llm`), or around a kernel you named yourself
    (`--fuse-kernel`).
-3. **Claim an existing pass.** If a vLLM compile pass already covers the chain,
+3. Claim an existing pass. If a vLLM compile pass already covers the chain,
    flipping its default on and running a serving A/B is cheaper than authoring
    anything, so that shortcut runs before the loop.
-4. **Author and validate** each ranked recipe as one `forge-loop` campaign, using
+4. Author and validate each ranked recipe as one `forge-loop` campaign, using
    the fusion kernel_backend. The loop iterates, gates correctness at SNR >= 30 dB,
    benchmarks three times, and commits or reverts.
-5. **Serving smoke** on whatever the loop kept: boot the real framework with
-   CUDA graphs **on** and run decode.
-6. **Export** a patch and write `fusion_manifest.json`.
+5. Serving smoke on whatever the loop kept: boot the real framework with
+   CUDA graphs on and run decode.
+6. Export a patch and write `fusion_manifest.json`.
 
 The serving smoke exists because the kernel-level gates cannot see the failure
 that matters most. Parity and the microbench run on small shapes with no graph
@@ -141,7 +141,7 @@ capture, so a kernel that allocates or host-syncs per call passes both and then
 takes down the scheduler decode loop. Set `FORGE_FUSION_SERVING_CHECK=0` to skip
 it when you only want the kernel-level verdict.
 
-## How the framework tree is handled
+## How forge-fuse manages the framework tree
 
 The loop keeps and reverts candidates with git, only sees tracked files, and
 treats its commits as the deliverable — it expects the caller to hand it a
@@ -171,7 +171,7 @@ it into the baseline, and names it in the task document as the file to write the
 kernel into. A kernel written to a path created mid-campaign would be scored and
 then lost. Repo scope changes which *other* files may be edited, not this.
 
-## What the agent is told
+## What the authoring agent receives
 
 The durable discipline -- CUDA-graph safety, fp32 accumulation inside the
 kernel, one launch replacing the chain, importing the real eager op as the
@@ -186,7 +186,7 @@ warm-up leaves the chip below its steady clock and whichever arm is timed second
 comes out about 3% slower from heat alone -- the same size as the keep bar, and
 against the fused arm whenever eager is timed first.
 
-## Output
+## Output artifacts
 
 The following table describes the artifacts that forge-fuse writes to the output directory.
 

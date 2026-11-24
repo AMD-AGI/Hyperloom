@@ -7,7 +7,7 @@ myst:
 # `session_breakdown.json` integration in Hyperloom
 
 ```{note}
-This page is for **integrators and downstream consumers** — teams building
+This page is for integrators and downstream consumers — teams building
 dashboards, reporting pipelines, or services
 that read Hyperloom session output programmatically. If you just ran an
 optimization and want to check your results, read the three headline fields
@@ -303,7 +303,7 @@ local trace jsonl is always written regardless.
 The starting point Hyperloom measured before any modifications.
 Includes throughput, accuracy, optional time to first token (TTFT) and end-to-end latency (E2EL), the materialised
 benchmark config path, attempt history (in case the baseline required
-retries), and the `BenchmarkInvocation` record needed to **replay**
+retries), and the `BenchmarkInvocation` record needed to replay
 the exact baseline benchmark.
 
 Disposition: `baseline.throughput_tok_s_per_gpu` (6.0) → `baseline.output_throughput` (6.1).
@@ -373,7 +373,7 @@ downstream consumers:
 | `invocation`                       | Same shape as `baseline.invocation`; lets a consumer replay the final benchmark.          |
 | `closing_phase_entered`            | True iff Coordinator entered the closing phase cleanly (vs SIGTERM exit).                  |
 
-> **Scope of `output_throughput`: whole-server total in `throughput_unit`, not per-GPU.**
+> Scope of `output_throughput`: whole-server total in `throughput_unit`, not per-GPU.
 > Do not divide it by a GPU count.
 > `cumulative_gain_pct_validated` is a ratio of two such numbers and is unaffected.
 > Disposition: `throughput_tok_s_per_gpu` (6.0) → `output_throughput` (6.1).

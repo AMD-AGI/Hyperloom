@@ -11,9 +11,9 @@ Runtime parameters such as framework, tensor parallelism, prompt lengths, and
 phase toggles are configured with CLI flags; internal subprocess handoff envs
 are intentionally not listed as user configuration.
 
-Variables marked **Required** must be set (using shell or `$REPO_ROOT/.env`)
-or the CLI will exit fast at startup. Variables marked **Optional** have
-sensible defaults; the default is shown in the **Default** column.
+Variables marked Required must be set (using shell or `$REPO_ROOT/.env`)
+or the CLI will exit fast at startup. Variables marked Optional have
+sensible defaults; the default is shown in the Default column.
 
 Precedence rule (applies everywhere): shell-exported env wins over `.env`.
 See [Hyperloom authentication and credentials](authentication.md).

@@ -34,10 +34,10 @@ repository with an initial commit. A workspace holds:
 
 | File | Role | Needed |
 |-------|-------|---------|
-| kernel source | What the loop optimizes — the `--kernel` anchor | required |
-| `driver.py` | Correctness oracle and benchmark; protected, never edited | required |
-| `graph_harness.py` | CUDA/HIP graph timing harness the driver benches through | recommended |
-| `program.md` | Free-form guidance handed to the agent | recommended |
+| kernel source | What the loop optimizes — the `--kernel` anchor | Required |
+| `driver.py` | Correctness oracle and benchmark; protected, never edited | Required |
+| `graph_harness.py` | CUDA/HIP graph timing harness the driver benches through | Recommended |
+| `program.md` | Free-form guidance handed to the agent | Recommended |
 
 Keep build artifacts and `forge_experiments/` untracked so a revert never fails
 on a dirtied tree. Every `src/kernelforge/examples/<task>/run_example.sh` sets
@@ -46,7 +46,7 @@ way to start a new task.
 
 ## Run the loop
 
-Use the following command to launch a forge-loop campaign.
+Use the following command to launch a forge-loop campaign:
 
 ```bash
 W=/tmp/forge_run

@@ -2,6 +2,8 @@
 myst:
     html_meta:
         "robots": "noindex"
+        "description": "Details about KnowledgePlane phase 1, integrating Recipe KB and KernelForge knowledge control-plane under a single Hyperloom KnowledgePlane."
+        "keywords": "Hyperloom, KnowledgePlane, Recipe KB, KernelForge, KB Store, knowledge control-plane"
 orphan: true
 ---
 

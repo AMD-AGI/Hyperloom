@@ -25,7 +25,7 @@ throughput-only measurement.
 | `INFERENCE_OPTIMIZER`<br>`_REQUIRE_KERNEL`<br>`_ACCURACY` | On | Gates the `KEEP` for a kernel patch integrated by the kernel lane. Set to `0` / `false` / `no` / `off` to fall back to a throughput-only `KEEP`. Disable only when the eval lane is known-broken: this gate is what stops a faster-but-wrong kernel from being kept. |
 | `HYPERLOOM_EVAL_LIMIT` | Unset (full task set) | Caps the number of eval problems (`lm_eval --limit`). Useful for smoke runs; see the noise caveat below before using it on a run whose `KEEP` decisions matter. |
 
-The tolerance is deliberately **not** an env knob: `ACCURACY_THRESHOLD` in
+The tolerance is deliberately not an env knob: `ACCURACY_THRESHOLD` in
 `src/hyperloom/common/gain_math.py` is a fixed
 `0.05`, that is, a candidate must stay within 5 percentage points of the recorded
 baseline accuracy.
@@ -61,7 +61,7 @@ saw and the share cut; check it before concluding a score is low for any other
 reason.
 
 All of these are part of the eval's definition, which keeps them equal across the
-baseline and candidate arms. **That symmetry is the whole point**: the gate
+baseline and candidate arms. That symmetry is the whole point: the gate
 compares a *difference* of two scores, so a bound that reaches only one arm biases
 the verdict instead of merely limiting it. Prefer leaving these alone; if you do
 change one, change it for the whole session rather than a single round. They are

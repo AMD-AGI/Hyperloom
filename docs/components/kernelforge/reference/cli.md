@@ -395,7 +395,7 @@ and `plan` then consume as their highest-priority shape source.
 
 ## roofline-ceiling
 
-Estimates the **theoretical achievable latency** of one kernel, for each scored
+Estimates the theoretical achievable latency of one kernel, for each scored
 test shape, on the accelerator it runs on. The answer is an optimistic lower
 bound under hardware limits and legal algorithm constraints; it does not claim
 an implementation reaching it exists.

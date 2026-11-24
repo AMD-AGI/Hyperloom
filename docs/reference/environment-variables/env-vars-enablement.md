@@ -6,7 +6,7 @@ myst:
 ---
 # Enablement admission
 
-Enablement is **not** configured through the environment. Both self-heal lanes
+Enablement is not configured through the environment. Both self-heal lanes
 are admitted by the `--enablement {off,launch,eval,all}` CLI flag, which defaults
 to `all`:
 

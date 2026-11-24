@@ -190,7 +190,7 @@ Each schema on a service has one current state: the stored Experiences in it,
 minus the ones excluded. Reads see exactly that state.
 Writing an Experience adds it to the state; nothing is ever deleted.
 
-- **Exclude** an Experience, with a reason, to hide it from reads; **include**
+- **Exclude** an Experience, with a reason, to hide it from reads; include
   lets reads see it again: it lifts the exclusion and, when a restore set the
   Experience outside the state, puts it back, so deleting the only label that
   holds an Experience never loses it. Every exclude and include of an

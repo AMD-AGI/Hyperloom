@@ -19,7 +19,7 @@ current directory is both the install target and the agent workspace. Prepare a
 dedicated clean directory first, then open that directory in Claude Code or
 Codex before running the install command.
 
-> **Recommended run mode: Docker** Running the demos inside the provided
+> Recommended run mode: Docker. Running the demos inside the provided
 > [ROCm container](https://rocm.docs.amd.com/projects/hyperloom/en/latest/compatibility.html#container-images)
 > ships a validated ROCm + framework stack, gives reproducible results,
 > and keeps your host untouched. Bare-metal mode is for advanced users: it

@@ -209,7 +209,7 @@ HYPERLOOM_AGENTX=1 hyperloom optimize \
   --max-hours 12
 ```
 
-This path is **single-node** SGLang or vLLM: run Hyperloom inside your serving
+This path is single-node SGLang or vLLM: run Hyperloom inside your serving
 image. `--docker-image IMAGE` records that runtime image; it does not launch a
 container. Custom models require an explicit `--docker-image`.
 

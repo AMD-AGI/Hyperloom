@@ -21,11 +21,11 @@ These labels are used throughout this page to indicate urgency:
 
 * **Required**: Your run will fail or behave incorrectly until you do
   this.
-* **Recommended**: Your run will still work, but you'll get a
-  deprecation warning or sub-optimal behavior.
+* **Recommended**: Your run will still work, but you will get a
+  deprecation warning or suboptimal behavior.
 * **Optional**: Strictly improves UX or unlocks new features.
 
-Hyperloom doesn't mutate your `.env` on upgrade; all migrations
+Hyperloom does not mutate your `.env` on upgrade; all migrations
 below are explicit.
 
 ```{note}
@@ -72,7 +72,7 @@ are strict, so a command that still carries one exits with
 | TraceLens kernel tool `--num-denoise-steps`, `--model-path`, `--precision` | Delete them; they fed the diffusion latency roofline, which is removed. |
 | `python -m hyperloom.orchestrator.trace_analysis.bypass_trace_analysis` | Use `tracelens_analysis --route non-llm`. |
 | `python -m hyperloom.inference_optimizer.framework_deps` | Nothing replaces it; its installer assets were already gone, so it did nothing. |
-| A `--benchmark-config` YAML whose `profiler.torch_profiler.num_profiles` is not `1` | **Refused** at launch: a profile round captures one window. Drop the key. |
+| A `--benchmark-config` YAML whose `profiler.torch_profiler.num_profiles` is not `1` | Refused at launch: a profile round captures one window. Drop the key. |
 | Imports of `hyperloom.common.{aiter_jit_cache, checkpoint_quant, coerce, env, fs_utils, git_safety, gpu_identity, io, jsonio, pr_monitor_urls, proctree, timeutil, unified_diff}` and of `hyperloom.common.{llm_config, llm_headers, llm_attribution, llm_request_hooks, llm_stability_env, token_usage, reasoning_effort, claude_oneshot}` | Import them from `hyperloom_common` and `hyperloom_common.llm`; no aliases are kept. `kernelforge.tools.durable_io` is removed: use `hyperloom_common.io`. |
 | KernelForge modules under `kernelforge.loop`, `kernelforge.gemm_tune`, `kernelforge.fusion`, `kernelforge.orchestrator`, `kernelforge.assembly`, `kernelforge.llm`, `kernelforge.tracker`, `kernelforge.tools`, `kernelforge.kernel_rewrite_controller` and `kernelforge.rewrite_by_flydsl` | They move under `kernelforge.workflows`, `kernelforge.kernel_backends`, `kernelforge.agent_backends`, `kernelforge.utils` and `kernelforge.config`, with no compatibility modules. A hand-written MCP configuration that runs `python -m kernelforge.orchestrator.specialist_probe_server`, the path 1.1.5 named, needs `kernelforge.workflows.forge_loop.roles.specialist_probe_server`; `kernelforge.evaluation.benchmark.runner` and `kernelforge.knowledge.pr_knowledge.mcp_server` keep their paths. No `kernelforge` subcommand is removed. |
 
@@ -90,15 +90,15 @@ settings that do stop the run are marked below.
 | `HYPERLOOM_BENCHMARK_BACKEND` | Delete it; every round runs through InferenceSuite. `--framework custom` no longer needs `HYPERLOOM_BENCHMARK_BACKEND=bypass`; `--benchmark-scripts-dir` (`HYPERLOOM_BYPASS_SCRIPTS_DIR`) still names the script directory. |
 | `INFERENCEX_REF`, `INFERENCEX_DEFAULT_DIR` | Delete them; no InferenceX checkout is configured any more. The client is staged at the commit `inference_suite.pins` pins, and the base launch is read from InferenceX `main` unless `--inferencex-commit` names one. `INFERENCEX_PATH` is optional and no longer set by `install.sh`; the research scout reads reference launch scripts under it. |
 | `HYPERLOOM_EVAL_DERIVE_STOP`, `HYPERLOOM_EVAL_STOP_STRINGS` | Delete them; nothing reads them. `HYPERLOOM_EVAL_MAX_TOKENS` is still read. |
-| `HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass`, or `analysis_route: bypass` in a `trace_analyze` request | **Fails** the request with `invalid_analysis_route`. Set `non-llm`, which needs a TraceLens checkout and writes `analysis.json` instead of `analysis.md`. `HYPERLOOM_BYPASS_STEADY_STATE`, `HYPERLOOM_BYPASS_CORR_WARN_PCT`, `HYPERLOOM_BYPASS_OTHERS_WARN_PCT`, `HYPERLOOM_TRACE_SHAPE_MANIFEST`, `HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES`, `HYPERLOOM_NUM_DENOISE_STEPS` and `KERNEL_AGENT_USE_LLM_ORCHESTRATOR` are ignored. |
+| `HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass`, or `analysis_route: bypass` in a `trace_analyze` request | Fails the request with `invalid_analysis_route`. Set `non-llm`, which needs a TraceLens checkout and writes `analysis.json` instead of `analysis.md`. `HYPERLOOM_BYPASS_STEADY_STATE`, `HYPERLOOM_BYPASS_CORR_WARN_PCT`, `HYPERLOOM_BYPASS_OTHERS_WARN_PCT`, `HYPERLOOM_TRACE_SHAPE_MANIFEST`, `HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES`, `HYPERLOOM_NUM_DENOISE_STEPS` and `KERNEL_AGENT_USE_LLM_ORCHESTRATOR` are ignored. |
 | `HYPERLOOM_SPECIALIST_PERMISSION_MODE` | Delete it; a Claude specialist always runs with `--permission-mode bypassPermissions`. |
 | `INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`, `HYPERLOOM_ROCPROF_ROOFLINE_ENRICH`, `HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC` | Delete them; nothing reads them. |
 | `GEAK_TERM_GRACE_S` | Delete it; the KERNEL phase stops every process its GEAK run started, and `GEAK_FLUSH_GRACE_S` is the window GEAK gets to flush its result. |
 | `RAY_CLI_CLICK_MAX_VERSION` | Delete it; the Ray CLI is certified by its own `ray start` parser. `RAY_VERSION` is still honored. |
 | `HYPERLOOM_GPU_POWER_INTERVAL_S` | The default drops from 2 s to 1 s. A value above 1.5 s is refused: the round samples nothing, so a power budget refuses it as unmeasured. |
 | `KERNEL_AGENT_ENV` naming `$USER_DATA_PATH/runtime/kernel-agent.env.sh` (a 1.1.5 `.env` or shell) | Ignored and derived again; the file now lives at `${TMPDIR:-/tmp}/hyperloom-<uid>-<key>/kernel-agent.env.sh` on the container's own disk, and install removes the old copy. A value in a directory that the group or others can write **is refused** by `install.sh` and by preflight. |
-| `TRACELENS_ROOT` naming an earlier install's `TraceLens@<sha>` | **Exits 2** at preflight (`is an earlier install's checkout`). Delete the line and rerun `install.sh`. |
-| A malformed numeric `HYPERLOOM_MN_*` setting (for example `HYPERLOOM_MN_HEALTH_POLL_S=10s`) | **Fails** the first multi-node restart (`invalid multi-node restart setting`) and makes a `hyperloom multi-node` subcommand exit 3, where 1.1.5 fell back to a default on some paths. |
+| `TRACELENS_ROOT` naming an earlier install's `TraceLens@<sha>` | Exits 2 at preflight (`is an earlier install's checkout`). Delete the line and rerun `install.sh`. |
+| A malformed numeric `HYPERLOOM_MN_*` setting (for example `HYPERLOOM_MN_HEALTH_POLL_S=10s`) | Fails the first multi-node restart (`invalid multi-node restart setting`) and makes a `hyperloom multi-node` subcommand exit 3, where 1.1.5 fell back to a default on some paths. |
 
 ### Changed defaults and gates
 
@@ -371,7 +371,7 @@ exit code should treat 4 as a non-retryable failure. See also
 
 `hyperloom <command>` covers setup, check, optimize, recover, quantize,
 multi-node, and `session {breakdown,report,backfill,events,state}`. These
-entry points are **intentionally separate** (same as before the unification,
+entry points are intentionally separate (same as before the unification,
 only the optimizer-family commands moved under `hyperloom`):
 
 | Entry | Typical use |
@@ -437,7 +437,7 @@ tolerated; see [Inference Optimizer Skill](https://github.com/AMD-AGI/Hyperloom/
 `dense`, `moe_mla`, `moe_swa`, `moe_mla_nsa`.
 
 If `--model-class` is omitted and inference cannot determine the family, the
-Coordinator falls back to a generic dense prior — likely sub-optimal for mixture of experts (MoE) /
+Coordinator falls back to a generic dense prior, likely suboptimal for mixture of experts (MoE) /
 multi-head latent attention (MLA) / native sparse attention (NSA) models.
 
 ### Required: pass `--compare-against-gpu` to opt into InferenceX reference fetching
@@ -455,7 +455,7 @@ the "vs B200" comparison number).
 ### Required: setup is no longer an in-loop action
 
 Earlier launchers might have waited for the Coordinator to emit a
-`setup` action. Move all setup work to **before** the
+`setup` action. Move all setup work to before the
 `python -m hyperloom optimize` call:
 
 ```diff
@@ -497,7 +497,7 @@ The `--compat-report-path` argument was removed.
 
 There is no `HYPERLOOM_ENABLE_PMC_ROOFLINE` environment variable. Roofline
 analysis (the composite `profile` + `trace_analyze` + `analysis.md` path) is
-controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
+controlled by the CLI flag `--enable-roofline`, which defaults on. Pass
 `--no-enable-roofline` for a profile-only run. See
 [Environment variables](environment-variables.md).
 
@@ -540,7 +540,7 @@ need a downstream migration, as described in
 
 ## Upgrading from pre-0.5 (training and MLPerf-training)
 
-Hyperloom is **inference-only** since v0.4. If you are still on a
+Hyperloom is inference-only since v0.4. If you are still on a
 training-mode build:
 
 * The training-mode TraceLens CLI

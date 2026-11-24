@@ -31,10 +31,10 @@ published Triton autotuned baseline. `B=1 H=24 S=65536 D=128`, sparsity 0.90.
 |---|---|---|---|---|
 | B (`BLKQ=64`) | forward | 13.29 ms | 11.06 ms | 1.20x |
 | B (`BLKQ=64`) | backward | 47.56 ms | 33.79 ms | 1.41x |
-| B (`BLKQ=64`) | **total** | 60.85 ms | 44.97 ms | **1.35x** |
+| B (`BLKQ=64`) | total | 60.85 ms | 44.97 ms | 1.35x |
 | C (`BLKQ=128`) | forward | 11.41 ms | 8.94 ms | 1.28x |
 | C (`BLKQ=128`) | backward | 46.71 ms | 33.84 ms | 1.38x |
-| C (`BLKQ=128`) | **total** | 58.12 ms | 42.68 ms | **1.33x** |
+| C (`BLKQ=128`) | total | 58.12 ms | 42.68 ms | 1.33x |
 
 The backward kernel took six optimization phases — split pipeline, constexpr
 masks, bf16 delta preprocessing, and occupancy-2 for both the dkdv and dq
@@ -52,7 +52,7 @@ prefill shape. `TP=4 E=384 topk=8 hidden=7168`.
 | 256 | | | 1.06x |
 | 512 | | | 1.07x |
 | 1024 | | | 1.18x |
-| 2048 | 823 us | 620 us | **1.33x** (peak) |
+| 2048 | 823 us | 620 us | 1.33x (peak) |
 | 4096 | | | 1.22x |
 | 8192 | 2159 us | 1745 us | 1.24x |
 
@@ -65,7 +65,7 @@ above 4096 tokens is ~1.22x; the remaining gap is the Matrix Fused Multiply-Add 
 A fully autonomous campaign -- agents ran overnight on a SLURM cluster with no
 human in the loop.
 
-- The Triton campaign reached **1.15x** (1169 → 1363 TFLOPS).
+- The Triton campaign reached 1.15x (1169 → 1363 TFLOPS).
 - Hardware-counter evidence put the ceiling at High Bandwidth Memory (HBM) bandwidth and named CK int8
   as the path past it.
 - The follow-on CK campaign started from a complete int8 integration package

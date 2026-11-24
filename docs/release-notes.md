@@ -83,7 +83,7 @@ gone.
   that needs more GPUs than the session has; `--host`, `--port`,
   `--served-model-name` and `--result-*` are recorded as stripped. A JSON
   `base_launch.json` from an earlier session is accepted as the launch file.
-  **Upgrade note:** a session whose state predates `base_launch.json`
+  Upgrade note: a session whose state predates `base_launch.json`
   cannot be resumed; start a new one. A `current_setting.sh` that records
   launch controls no longer re-feeds as `--reference-script`. See
   [Choose the base launch](how-to/optimize.md#choose-the-base-launch).
@@ -172,7 +172,7 @@ gone.
   unless `--allow-shared-npm-node` is passed on every launch and resume, which
   records the cards left out as `shared_npm_node`. Each round's `power.json`
   says how much of the measured phase the node was held at its NPM limit, and
-  logs it. **Upgrade note:** a session on part of an NPM-enabled node,
+  logs it. Upgrade note: a session on part of an NPM-enabled node,
   including one launched under 1.1.5, now refuses on launch and resume until it
   is given every card or passes `--allow-shared-npm-node`.
 
@@ -354,7 +354,7 @@ not 1.1.5.
   against its server, on the session's frozen base, trace corpus, seed,
   concurrency and trace window, writing `report.json` per run. A session whose
   base or staged tools cannot run that round now refuses to start, naming why.
-  **Upgrade note:** an `--agent-launch` file no longer takes a `client` key,
+  Upgrade note: an `--agent-launch` file no longer takes a `client` key,
   which the gate's client always overrode; a file that names one is refused
   (`keys a launch does not: client`), so remove it.
 
@@ -410,7 +410,7 @@ not 1.1.5.
   `INFERENCE_SUITE_TOOL_CACHE`, and base-launch resolution reads InferenceX
   itself. `MAGPIE_*`, `HYPERLOOM_BENCHMARK_BACKEND` and
   `INFERENCEX_REF` are no longer read; `MAGPIE_EVAL_LIMIT` is now
-  `HYPERLOOM_EVAL_LIMIT`. **Upgrade note:** hosted measurement sheets and
+  `HYPERLOOM_EVAL_LIMIT`. Upgrade note: hosted measurement sheets and
   result manifests are v2 and nothing reads v1 ones any more: a session
   started before this change cannot be resumed, nor its accepted results
   verified again. Build the runner cache (`cache_build`) for the new commit
@@ -476,7 +476,7 @@ not 1.1.5.
   version probe and flag parser had validated. `launch.json` records the command
   as `entrypoint` and in `argv`, so launch digests of new rounds differ from
   earlier ones; base digests and earlier `launch.json` files read as before.
-  **Upgrade note:** a frozen base whose entrypoint is not its framework's
+  Upgrade note: a frozen base whose entrypoint is not its framework's
   default (for example a hand-edited interpreter path) is refused as
   `config_invalid`; set `framework_python` to that interpreter instead.
 
@@ -508,7 +508,7 @@ not 1.1.5.
   release commit), and clears the image entrypoint in the Slurm `docker run` branch.
   The TraceLens patch check now looks for `capture_traces` in `vllm/profiler/wrapper.py`
   from vLLM 0.32, where the patch writes it, so a correctly patched tree is no longer
-  rolled back. **Upgrade note:** move from
+  rolled back. Upgrade note: move from
   `rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0` to
   `vllm/vllm-openai-rocm:v0.33.0-rocm100` (or match `VLLM_VERSION` and `VLLM_SOURCE_REF` on bare metal).
 
@@ -518,7 +518,7 @@ not 1.1.5.
   the quick-start `Dockerfile` and the hosted app image `Dockerfile`. These
   builds ship `fastokens`, which the DeepSeek-V4.1-Flash InferenceX recipes
   pass as their tokenizer backend, and answer `/start_profile` without an
-  admin API key, so the roofline profile captures a trace. **Upgrade note:**
+  admin API key, so the roofline profile captures a trace. Upgrade note:
   move from `v0.5.21-rocm10-mi30x|mi35x-20261008` to
   `v0.5.23-rocm10-mi30x|mi35x-20261111` (or match `SGLANG_REF` on bare metal).
 
@@ -546,11 +546,11 @@ not 1.1.5.
   `radeon8060s`; gfx1201 records stay under the ISA name, which more than one
   board shares.
 
-- **Specialists run in a bubblewrap sandbox where the host allows it.** On such a host a specialist can no longer read the app's home, credentials or state, nor reach anything but the LLM endpoints and MCP servers its launch names; in a multi-branch session agent and dev sandboxes are confined too. A native build that cannot run as user 65534 compiles under bubblewrap (`bwrap+netns`). The start-up log says once how agents are isolated and the session report carries an `agent isolation:` line. Where neither the specialist account nor bubblewrap works, a run logs one WARNING and agents run unconfined, unless isolation is required (a hosted run, or `HYPERLOOM_SPECIALIST_USER` set), which refuses; a hosted container that maps only its root now starts, with its specialists under the layer's bubblewrap. A specialist that swaps its worktree for a link gets no patch collected (`worktree_refused`), and a host whose user namespace does not map the specialist account refuses the switch (`RunAsError`) instead of running it as root. `python -I -m hyperloom_common.bwrap probe` says whether a host can sandbox agents and why not. **Upgrade note:** a sandboxed `claude` CLI cannot read a login kept only in the app's home: such a launch runs unconfined with a WARNING, or is refused where isolation is required, until its environment carries `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` or Bedrock credentials.
+- **Specialists run in a bubblewrap sandbox where the host allows it.** On such a host a specialist can no longer read the app's home, credentials or state, nor reach anything but the LLM endpoints and MCP servers its launch names; in a multi-branch session agent and dev sandboxes are confined too. A native build that cannot run as user 65534 compiles under bubblewrap (`bwrap+netns`). The start-up log says once how agents are isolated and the session report carries an `agent isolation:` line. Where neither the specialist account nor bubblewrap works, a run logs one WARNING and agents run unconfined, unless isolation is required (a hosted run, or `HYPERLOOM_SPECIALIST_USER` set), which refuses; a hosted container that maps only its root now starts, with its specialists under the layer's bubblewrap. A specialist that swaps its worktree for a link gets no patch collected (`worktree_refused`), and a host whose user namespace does not map the specialist account refuses the switch (`RunAsError`) instead of running it as root. `python -I -m hyperloom_common.bwrap probe` says whether a host can sandbox agents and why not. Upgrade note: a sandboxed `claude` CLI cannot read a login kept only in the app's home: such a launch runs unconfined with a WARNING, or is refused where isolation is required, until its environment carries `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` or Bedrock credentials.
 
-- **The kernel-agent env file and a shared `.env` no longer hand out credentials.** `install.sh` writes `kernel-agent.env.sh` to `${TMPDIR:-/tmp}/hyperloom-<uid>-<key>/` instead of `$USER_DATA_PATH/runtime/`, removes a copy left there, and stops when `KERNEL_AGENT_ENV` points into a directory other accounts can write; preflight, the documented source line and the slurm job refuse such a file too. A `.env` that is not private to the account, or that sets `HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env`, lends no credential; one that another account can write also exports only listed non-credential settings with listed values. Before, every pod of the user could read the credentials in that file and replace what the next launch sourced. **Upgrade note:** run `install.sh` in every new container before `optimize`; one that did not now fails preflight with exit 2 instead of sourcing a file another container wrote.
+- **The kernel-agent env file and a shared `.env` no longer hand out credentials.** `install.sh` writes `kernel-agent.env.sh` to `${TMPDIR:-/tmp}/hyperloom-<uid>-<key>/` instead of `$USER_DATA_PATH/runtime/`, removes a copy left there, and stops when `KERNEL_AGENT_ENV` points into a directory other accounts can write; preflight, the documented source line and the slurm job refuse such a file too. A `.env` that is not private to the account, or that sets `HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env`, lends no credential; one that another account can write also exports only listed non-credential settings with listed values. Before, every pod of the user could read the credentials in that file and replace what the next launch sourced. Upgrade note: run `install.sh` in every new container before `optimize`; one that did not now fails preflight with exit 2 instead of sourcing a file another container wrote.
 
-- **A session on shared storage can be continued by another account of its group.** Below a setgid, group-writable directory closed to others (`2775`), the session's state, database, lock, logs, blackboard, git objects and refs, runner cache and archive are written group-writable, so `--resume-from` or a hosted restart as another account of the group reads and continues what an earlier leg left; git's own config, `HEAD` and hooks stay the creating account's. A session whose `--extra-env` or `--server-args` hold a credential keeps `state.json`, `manifest.json` and its journal owner-only, and a resume by another account is refused naming the file. A directory a leg cannot write is named up front with its owner and mode. Elsewhere modes are unchanged. **Upgrade note:** create the shared directories group-owned with mode `2775` once.
+- **A session on shared storage can be continued by another account of its group.** Below a setgid, group-writable directory closed to others (`2775`), the session's state, database, lock, logs, blackboard, git objects and refs, runner cache and archive are written group-writable, so `--resume-from` or a hosted restart as another account of the group reads and continues what an earlier leg left; git's own config, `HEAD` and hooks stay the creating account's. A session whose `--extra-env` or `--server-args` hold a credential keeps `state.json`, `manifest.json` and its journal owner-only, and a resume by another account is refused naming the file. A directory a leg cannot write is named up front with its owner and mode. Elsewhere modes are unchanged. Upgrade note: create the shared directories group-owned with mode `2775` once.
 
 - **The orchestration role no longer stalls inside its own turn.** On the Claude backend an orchestration call can run 32 Claude Code turns instead of 12, so a model that talks between tool calls reaches its intent. On Codex the orchestration session runs without Codex's shell, so it cannot `sleep` in its turn while nothing is dispatched, and a timed-out turn is not retried. On DeepSeek every round opens a fresh conversation, and every DeepSeek Harness runtime compacts at a quarter of the model's window instead of 80%; a 12-hour run had spent about 403M input tokens against 167M on Claude. Codex runs no longer offer the hosted `web_search` tool, whose result a gateway fronting Claude rejected with a 400.
 
@@ -558,7 +558,7 @@ not 1.1.5.
 
 - **TraceLens is pinned at `bda57c6` (1.1.5 pinned `614c597`).** Analyses gain the speculative-decoding graph merge and perf models for GLM-5.x, DeepSeek-V4-Pro and DeepSeek-V4.1-Flash kernels, and a report whose compute findings lack their Data tables is sent back for repair instead of reaching Hyperloom with no hot kernels. TraceLens's SGLang graph-capture patch now applies to SGLang 0.5.18 through 0.5.21 only: on 0.5.22 and later a profile keeps detailed annotations (before, the patch was reported `unavailable` and annotations were turned off), and the analysis reads SGLang's own `graph_capture_profile/` when `capture_traces/` holds no capture trace.
 
-- **forge-fuse and forge-rewrite name the host's GPU.** On a host other than MI355X, the rewrite controller's operator id and task directory, forge-loop's `--gpu-type` and `--gpu-target`, and the KB identities forge-loop and forge-rewrite file under carry that host's SKU and arch (for example `mi300x`, gfx942) instead of `mi355x`, gfx950, and forge-fuse counts Gemma-style norm kernels toward `launch_bound_share`. **Upgrade note:** KB records such hosts filed under `mi355x` are no longer read back, and `forge-rewrite-by-flydsl` without `--gpu-target` refuses to start where neither `GPU_TARGET` nor rocminfo names exactly one GPU (it assumed gfx942).
+- **forge-fuse and forge-rewrite name the host's GPU.** On a host other than MI355X, the rewrite controller's operator id and task directory, forge-loop's `--gpu-type` and `--gpu-target`, and the KB identities forge-loop and forge-rewrite file under carry that host's SKU and arch (for example `mi300x`, gfx942) instead of `mi355x`, gfx950, and forge-fuse counts Gemma-style norm kernels toward `launch_bound_share`. Upgrade note: KB records such hosts filed under `mi355x` are no longer read back, and `forge-rewrite-by-flydsl` without `--gpu-target` refuses to start where neither `GPU_TARGET` nor rocminfo names exactly one GPU (it assumed gfx942).
 
 - **A degraded trace analysis says so.** A fallback or poor-quality analysis, one with no located kernel source, a phase split the splitter could not confirm, and a roofline computed on vendor peaks after the arch microbenchmark failed (`gpu_arch_json_vendor_peak`) now appear in `trace_health_warnings`, and the roofline result reads `degraded: true`. Vendor peaks go to the session's own `gpu_arch/` directory instead of the TraceLens checkout, where one failed microbenchmark used to leave them for every later session. The trace certificate now certifies the file the analysis reads: `<trace_dir>.selfcert.json` loses its `production_*` keys, and `session_breakdown.json` v6.1 drops `trace_quality.production_selected_role` and `production_would_analyze_split_chunk`.
 
@@ -574,7 +574,7 @@ not 1.1.5.
   as `e2e.self_reported_e2e_gain_pct`. In `kernel_optimization_summary.json`,
   `totals` counts `claimed`, `adopted`, `rejected`, `failed`, `needs_review`
   and `not_dispatched`, `rejection_breakdown` is gone and `by_kernel` has one
-  row per candidate. **Upgrade note:** readers must accept both throughput
+  row per candidate. Upgrade note: readers must accept both throughput
   keys, since 6.0 documents and those exported by 1.1.x keep the old one.
 
 - **A candidate whose patches the tree already holds ends as `already_present`, unmeasured.**
@@ -672,7 +672,7 @@ not 1.1.5.
   fails with `invalid_analysis_route`. `tracelens_analysis --route {agent,non-llm}`
   replaces `--use-llm-orchestrator` or `--no-llm-orchestrator`, which now exit
   with `unrecognized arguments`. The `non-llm` route needs a TraceLens
-  checkout. **Upgrade note:** the `bypass_trace_analysis` module is gone, and
+  checkout. Upgrade note: the `bypass_trace_analysis` module is gone, and
   `KERNEL_AGENT_USE_LLM_ORCHESTRATOR`, `HYPERLOOM_BYPASS_STEADY_STATE`,
   `HYPERLOOM_BYPASS_CORR_WARN_PCT`, `HYPERLOOM_BYPASS_OTHERS_WARN_PCT`,
   `HYPERLOOM_TRACE_SHAPE_MANIFEST` and
@@ -696,7 +696,7 @@ not 1.1.5.
   is not installed.
 
 - **forge-loop skips the plan critic on rounds that continue a kept route.**
-  **Upgrade note:** `forge-loop --resume` of a campaign whose `run_state.json`
+  Upgrade note: `forge-loop --resume` of a campaign whose `run_state.json`
   predates this release fails on the missing
   `round_costs.recent[].review_sec`; finish it under the build that started it.
 
@@ -750,7 +750,7 @@ not 1.1.5.
   `request.json`, `judge_bundle.json` and `emit.json` lose `kind`
   (`judge_bundle.json` also `messages`, `decision` and
   `kb_priors_for_decision`), and the critic dead-letter queue no longer writes
-  `batch_insert.jsonl`. **Upgrade note:** a leftover `batch_insert.jsonl` stays
+  `batch_insert.jsonl`. Upgrade note: a leftover `batch_insert.jsonl` stays
   queued as an unknown endpoint, so clear it before upgrading a live
   critic-KB deployment.
 

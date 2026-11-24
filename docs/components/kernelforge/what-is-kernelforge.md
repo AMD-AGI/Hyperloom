@@ -25,7 +25,7 @@ of domain experts, creating a critical bottleneck.
 ## The approach
 
 KernelForge optimizes one kernel at a time with an autonomous iteration loop.
-The loop drives an agent carrying one **kernel backend's** expertise —
+The loop drives an agent carrying one kernel backend's expertise —
 Composable Kernel, Triton, HIP, hipBLASLt, FlyDSL, AITER, or hand-written gfx950
 assembly — through an enforced development cycle: build, a signal-to-noise
 ratio (SNR) correctness gate, benchmark, performance monitoring counter (PMC)
@@ -34,12 +34,12 @@ measured evidence.
 
 Key properties:
 
-- **Measurement-driven.** Every decision is grounded in hardware counters
+- **Measurement-driven:** Every decision is grounded in hardware counters
   (for example, the wait-to-MFMA (matrix fused multiply-add) ratio classifies
   a kernel as compute-, memory-, or latency-bound) rather than guesswork.
-- **Enforced discipline.** Correctness and performance gates are hard
+- **Enforced discipline:** Correctness and performance gates are hard
   constraints; a change that regresses or fails validation is reverted.
-- **Self-improving.** Each campaign distills lessons and pitfalls into a
+- **Self-improving:** Each campaign distills lessons and pitfalls into a
   knowledge base that makes the next campaign smarter.
 
 ## Where to go next

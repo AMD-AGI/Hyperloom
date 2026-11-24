@@ -42,7 +42,7 @@ wait/MFMA ratio is a primary signal:
 | 5–10 | Balanced | Profile deeper — check for local data share (LDS) or vector memory (VMEM) stalls |
 | > 10 | Memory-bound | Reduce HBM (high-bandwidth memory) traffic (occupancy, prefetch) |
 
-The `registers` tool predicts vector and scalar general-purpose register (VGPR/SGPR) usage and occupancy **before** building,
+The `registers` tool predicts vector and scalar general-purpose register (VGPR/SGPR) usage and occupancy before building,
 so an occupancy cliff (for example VGPR crossing 256) is caught before it costs
 a build-bench cycle.
 
