@@ -285,8 +285,8 @@ def _flydsl_plan(inputs: _Inputs) -> KindPlan | str:
     shipped = files_below(prebuilt) if prebuilt is not None else []
     if shipped and not any(FLYDSL.admits(relative) for relative in shipped):
         return (
-            f"none of the {len(shipped)} files of the image's prebuilt FlyDSL launches ({prebuilt}) is in a layout this "
-            f"runner knows (FlyDSL 0.4.x or 0.5.x), so {FLYDSL.env_var} is left to aiter's default"
+            f"none of the {len(shipped)} files of aiter's prebuilt FlyDSL launches (jit/flydsl_cache) is in a layout "
+            f"this runner knows (FlyDSL 0.4.x or 0.5.x), so {FLYDSL.env_var} is left to aiter's default"
         )
     environment = inputs.spec.environment
     covered = [

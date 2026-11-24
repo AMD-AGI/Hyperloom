@@ -173,10 +173,10 @@ def test_an_image_whose_prebuilt_launches_are_in_no_known_layout_keeps_aiters_di
         "aiter points FlyDSL at its own directory, so the server sees the image's"
     )
     assert (
-        "jit cache: flydsl is not used: none of the 1 files of the image's prebuilt FlyDSL launches"
+        "jit cache: flydsl is not used: none of the 1 files of aiter's prebuilt FlyDSL launches (jit/flydsl_cache) is in "
+        "a layout this runner knows (FlyDSL 0.4.x or 0.5.x), so FLYDSL_RUNTIME_CACHE_DIR is left to aiter's default"
         in status["message"]
     )
-    assert "FLYDSL_RUNTIME_CACHE_DIR is left to aiter's default" in status["message"]
 
 
 def test_an_empty_prebuilt_directory_hides_nothing_and_the_kind_is_used(rig) -> None:
