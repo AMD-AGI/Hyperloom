@@ -10,6 +10,7 @@ import json
 import stat
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -141,6 +142,12 @@ def _patch_rows(text: str) -> dict[str, dict[str, Any]]:
     return rows
 
 
+def _gateway_model(patch: str) -> dict[str, Any]:
+    """The single model entry the patch declares on the gateway route."""
+    (model,) = _patch_rows(patch)["llm-pi-ai"]["config"]["providers"]["gateway"]["models"]
+    return model
+
+
 def _pin_provider_env(monkeypatch: pytest.MonkeyPatch, shape: dict[str, str]) -> None:
     for key in _PROVIDER_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
@@ -265,7 +272,7 @@ async def test_a_deepseek_selection_runs_the_specialist_on_the_dsh_cli(
         "DEEPSEEK_API_KEY": _OPENAI_ENV["OPENAI_API_KEY"],
     }
     rows = _patch_rows(record["patch"])
-    assert rows["agent-default-model"]["config"] == {"provider": "deepseek-official", "model": "deepseek-v4-flash"}
+    assert rows["agent-default-model"]["config"] == {"provider": "gateway", "model": "deepseek-v4-flash"}
     assert rows["session-title-llm"]["disabled"] is True
     assert rows["session-persistence-jsonl"]["config"]["compression"] == "none"
     assert rows["compaction-basic"]["config"] == {"thresholdRatio": 0.25}
@@ -459,7 +466,7 @@ def test_the_output_token_cap_reaches_the_dsh_specialist_patch(tmp_path: Path, m
     launch = dsh_launch.build_dsh_launch(_dsh_request(tmp_path), dict(_OPENAI_ENV))
 
     patch = Path(launch.cmd[launch.cmd.index("--patch") + 1]).read_text(encoding="utf-8")
-    assert _patch_rows(patch)["llm-deepseek"]["config"] == {"maxTokens": 64000}
+    assert _gateway_model(patch)["maxTokens"] == 64000
 
 
 def test_the_dsh_specialist_patch_keeps_the_harness_default_cap_when_none_is_set(
@@ -471,7 +478,29 @@ def test_the_dsh_specialist_patch_keeps_the_harness_default_cap_when_none_is_set
     launch = dsh_launch.build_dsh_launch(_dsh_request(tmp_path), dict(_OPENAI_ENV))
 
     patch = Path(launch.cmd[launch.cmd.index("--patch") + 1]).read_text(encoding="utf-8")
-    assert "llm-deepseek" not in _patch_rows(patch)
+    assert "maxTokens" not in _gateway_model(patch)
+
+
+def test_the_dsh_specialist_reaches_the_gateway_over_the_anthropic_messages_protocol(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gateway answers with ``redacted_thinking`` blocks; only the pi-ai adapter replays them."""
+    _pin_provider_env(monkeypatch, _OPENAI_ENV)
+
+    launch = dsh_launch.build_dsh_launch(_dsh_request(tmp_path), dict(_OPENAI_ENV))
+
+    patch = Path(launch.cmd[launch.cmd.index("--patch") + 1]).read_text(encoding="utf-8")
+    rows = _patch_rows(patch)
+    assert rows["agent-default-model"]["config"] == {"provider": "gateway", "model": "claude-opus-5.5"}
+    route = rows["llm-pi-ai"]["config"]["providers"]["gateway"]
+    assert route["api"] == "anthropic-messages"
+    # The Messages client appends /v1/messages itself, so the OpenAI-style /v1 suffix is dropped.
+    assert route["baseURL"] == "https://gateway.invalid/Unified"
+    assert route["apiKeyEnv"] == "DEEPSEEK_API_KEY"
+    assert "openai-side-key" not in patch
+    model = _gateway_model(patch)
+    assert model["id"] == "claude-opus-5.5"
+    assert {"low", "high", "max"} <= set(model["reasoningEfforts"])
 
 
 @pytest.mark.parametrize("raw", ["0", "-5", "many"])
@@ -483,6 +512,59 @@ def test_an_invalid_output_token_cap_fails_the_dsh_task(
 
     with pytest.raises(SpecialistAgentUnavailableError, match="HYPERLOOM_DSH_MAX_TOKENS"):
         dsh_launch.build_dsh_launch(_dsh_request(tmp_path), dict(_OPENAI_ENV))
+
+
+def test_the_harness_runtime_is_routed_to_the_gateway_over_the_anthropic_messages_protocol(tmp_path: Path) -> None:
+    from hyperloom_common.llm import deepseek_session
+
+    seen: dict[str, Any] = {}
+
+    class _Harness:
+        def __init__(self, **kwargs: Any) -> None:
+            seen.update(kwargs)
+
+        def start(self) -> None:
+            return None
+
+    class _Sdk:
+        DeepSeekHarness = _Harness
+
+    deepseek_session.start_harness(
+        _Sdk(),
+        deepseek_session.HarnessLaunch(
+            dsh_home=tmp_path / "home",
+            cwd=tmp_path,
+            model="claude-opus-5.5",
+            reasoning_effort="high",
+            env={"DEEPSEEK_BASE_URL": "https://gateway.invalid/Unified/v1", "DEEPSEEK_API_KEY": "gateway-key"},
+            request_timeout_sec=30.0,
+        ),
+    )
+
+    assert seen["provider"] == "gateway"
+    route_patch = next(Path(p) for p in seen["patches"] if Path(p).name == "hyperloom-gateway-route.yml")
+    text = route_patch.read_text(encoding="utf-8")
+    route = _patch_rows(text)["llm-pi-ai"]["config"]["providers"]["gateway"]
+    assert route["api"] == "anthropic-messages"
+    assert route["baseURL"] == "https://gateway.invalid/Unified"
+    assert "gateway-key" not in text
+
+
+def test_a_harness_runtime_without_a_gateway_url_is_unavailable(tmp_path: Path) -> None:
+    from hyperloom_common.llm import deepseek_session
+
+    with pytest.raises(deepseek_session.DeepSeekSessionUnavailableError, match="DEEPSEEK_BASE_URL"):
+        deepseek_session.start_harness(
+            SimpleNamespace(DeepSeekHarness=lambda **kwargs: None),
+            deepseek_session.HarnessLaunch(
+                dsh_home=tmp_path / "home",
+                cwd=tmp_path,
+                model="claude-opus-5.5",
+                reasoning_effort="high",
+                env={},
+                request_timeout_sec=30.0,
+            ),
+        )
 
 
 def test_the_output_token_cap_is_passed_to_the_harness_runtime(tmp_path: Path) -> None:
@@ -507,12 +589,14 @@ def test_the_output_token_cap_is_passed_to_the_harness_runtime(tmp_path: Path) -
             cwd=tmp_path,
             model="claude-opus-5.5",
             reasoning_effort="high",
-            env={"HYPERLOOM_DSH_MAX_TOKENS": "64000"},
+            env={"HYPERLOOM_DSH_MAX_TOKENS": "64000", "DEEPSEEK_BASE_URL": "https://gateway.invalid/v1"},
             request_timeout_sec=30.0,
         ),
     )
 
     assert seen["max_tokens"] == 64000
+    route_patch = next(Path(p) for p in seen["patches"] if Path(p).name == "hyperloom-gateway-route.yml")
+    assert _gateway_model(route_patch.read_text(encoding="utf-8"))["maxTokens"] == 64000
 
 
 def test_a_cut_off_dsh_session_log_still_yields_its_complete_records(tmp_path: Path) -> None:
