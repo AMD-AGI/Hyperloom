@@ -25,13 +25,13 @@ attempts into the request's single result:
   retried once, and its node is not reported either. One that says nothing about
   the node (:data:`NODE_BLAMELESS_INFRA_REASONS`: a runner that could not start, a runner lost, a Hub download refused
   for its rate limit, a result file whose download came back short) is retried like any other, and its node is not
-  reported. A profile retries every infrastructure failure once only, but the ones it did not start for
-  (:data:`UNSTARTED_INFRA_REASONS`), which it waits out as before.
+  reported. A profile whose server was ready before it failed (:func:`_served`) retries every infrastructure failure
+  once only.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
 * ``unclear`` failure: one rerun away from the first node. A second failure is ``candidate_failed``; a success is the
   result, and the first attempt is re-labelled an infrastructure failure of its node and reported as a failure that
-  did not reproduce. A profile, and a sweep that ran out of its time (:data:`TEST_TIMEOUT_REASON`), is not rerun:
-  ``measurement_failed`` at once (:func:`_rerun_refused`).
+  did not reproduce. A profile whose server was ready before it failed, and a sweep that ran out of its time
+  (:data:`TEST_TIMEOUT_REASON`), is not rerun: ``measurement_failed`` at once (:func:`_rerun_refused`).
 * an executor that raises :class:`MeasurementRefused` (a rejected spec, a result that fails verification): no retry,
   ``measurement_failed``.
 
@@ -63,6 +63,7 @@ from hyperloom.measure.failures import (
     SANDBOX_ACQUIRE_TIMEOUT,
     TEST_TIMEOUT_REASON,
 )
+from hyperloom.measure.round_marks import SERVED_PHASES
 from hyperloom.measure.runner.import_outcome import INERT_PATCH
 from hyperloom.contracts.measurement import (
     Attempt,
@@ -157,19 +158,15 @@ NODE_BLAMELESS_INFRA_REASONS: frozenset[str] = frozenset(
 _UNQUARANTINED_INFRA_REASONS: frozenset[str] = NODE_BLAMELESS_INFRA_REASONS | frozenset({FOREIGN_PROCESS_ON_CARD})
 #: Infrastructure failures whose node is not reported.
 _UNREPORTED_INFRA_REASONS = ONCE_RETRIED_INFRA_REASONS | _UNQUARANTINED_INFRA_REASONS
-#: Infrastructure failures that came before the test started its server: cards a process outside the test held
-#: (:data:`FOREIGN_PROCESS_ON_CARD`), a platform with no sandbox to give (:data:`RUNNER_START_TIMEOUT`,
-#: :data:`CAPACITY_UNAVAILABLE`). They spent no card time and say nothing of the test, so a profile retries them like
-#: any other test rather than once only: one that ended on them would switch profiling off for the session.
-UNSTARTED_INFRA_REASONS: frozenset[str] = frozenset(
-    {FOREIGN_PROCESS_ON_CARD, RUNNER_START_TIMEOUT, CAPACITY_UNAVAILABLE}
-)
-#: Infrastructure failures a retry waits out first (:class:`InfraBackoff`): the ones that are not the node's. The
-#: unstarted ones (:data:`UNSTARTED_INFRA_REASONS`) may be free a minute later, and a failure never held against its
-#: node (:data:`NODE_BLAMELESS_INFRA_REASONS`) is not escaped by moving elsewhere. Any other infrastructure
+#: Infrastructure failures a retry waits out first (:class:`InfraBackoff`): the ones that are not the node's. Cards a
+#: process outside the test held (:data:`FOREIGN_PROCESS_ON_CARD`) or a platform with no sandbox to give
+#: (:data:`RUNNER_START_TIMEOUT`, :data:`CAPACITY_UNAVAILABLE`) may be free a minute later, and a failure never held
+#: against its node (:data:`NODE_BLAMELESS_INFRA_REASONS`) is not escaped by moving elsewhere. Any other infrastructure
 #: failure is held against its node, and the avoid set and the quarantine already send the retry to another one, so it
 #: goes at once: a wait would only keep the test's dispatch slot and its branch's K idle.
-WAITED_INFRA_REASONS: frozenset[str] = NODE_BLAMELESS_INFRA_REASONS | UNSTARTED_INFRA_REASONS
+WAITED_INFRA_REASONS: frozenset[str] = NODE_BLAMELESS_INFRA_REASONS | frozenset(
+    {FOREIGN_PROCESS_ON_CARD, RUNNER_START_TIMEOUT, CAPACITY_UNAVAILABLE}
+)
 #: Infrastructure failures that do not put their node in the next attempt's avoid set (:func:`_facts_nodes`), since
 #: they clearly say nothing about the node: cards a process outside the test held (:data:`FOREIGN_PROCESS_ON_CARD`),
 #: whose retry waits and may run on the same node unless two attempts in a row were refused that way on it
@@ -271,33 +268,40 @@ def node_unquarantined(reason: str | None) -> bool:
     return _reason_name(reason) in _UNQUARANTINED_INFRA_REASONS
 
 
-def _retry_refused(request: TestRequest, reason: str | None, attempts: list[Attempt]) -> bool:
-    """Whether an infrastructure failure's ``reason`` names one that a retry in a fresh sandbox repeats, or one retried
-    once only that ``attempts`` (this one included) already met before. A profile retries every reason once only but
-    the unstarted ones (:data:`UNSTARTED_INFRA_REASONS`): its failures mostly come from the profiler on the image, and
-    a retry that met one again met it on a second node, where it would only hold the cards for a third."""
-    name = _reason_name(reason)
+def _retry_refused(request: TestRequest, result: TestResult, attempts: list[Attempt]) -> bool:
+    """Whether an infrastructure failure ``result`` names one that a retry in a fresh sandbox repeats, or one retried
+    once only that ``attempts`` (this one included) already met before. A profile whose server was ready before it
+    failed (:func:`_served`) retries every reason once only: its failures then mostly come from the profiler on the
+    image, and a retry that met one again met it on a second node, where it would only hold the cards for a third."""
+    name = _reason_name(result.failure_reason)
     if name in UNRETRIED_INFRA_REASONS:
         return True
-    once = name in ONCE_RETRIED_INFRA_REASONS or (
-        request.kind is TestKind.PROFILE and name not in UNSTARTED_INFRA_REASONS
-    )
+    once = name in ONCE_RETRIED_INFRA_REASONS or (request.kind is TestKind.PROFILE and _served(result))
     return once and sum(_reason_name(a.failure_reason) == name for a in attempts) > 1
 
 
-def _rerun_refused(request: TestRequest, reason: str | None) -> bool:
-    """Whether an unclear failure ends ``measurement_failed`` without its rerun, nothing held against the candidate or
-    the node.
+def _rerun_refused(request: TestRequest, result: TestResult) -> bool:
+    """Whether an unclear failure ``result`` ends ``measurement_failed`` without its rerun, nothing held against the
+    candidate or the node.
 
-    A profile's rerun nearly always fails again for the same cause (a server that dies or stalls under the tracer, a
-    client that times out), holding its cards for another boot and window; a profile is evidence for the session, not
-    a verdict on its candidate. A sweep that ran out of its time gets the same time for the same concs on its
+    A profile whose server was ready before it failed (:func:`_served`) nearly always fails its rerun for the same cause
+    (a server that dies or stalls under the tracer, a client that times out), after another boot and window on its
+    cards; a profile is evidence for the session, not a verdict on its candidate. One that failed while its server
+    booted keeps its rerun: a boot also fails for a passing fault of its node, and a profile that ended on one would
+    switch profiling off for the session. A sweep that ran out of its time gets the same time for the same concs on its
     rerun, which a sweep at a low conc outruns again; FINAL, the sweep's one requester, ranks a candidate whose sweep
     gave nothing on its reproduction (``hyperloom_multibranch.scheduling.final``), so a rerun only holds FINAL for one
     more timeout."""
     if request.kind is TestKind.PROFILE:
-        return True
-    return request.kind is TestKind.SWEEP and _reason_name(reason) == TEST_TIMEOUT_REASON
+        return _served(result)
+    return request.kind is TestKind.SWEEP and _reason_name(result.failure_reason) == TEST_TIMEOUT_REASON
+
+
+def _served(result: TestResult) -> bool:
+    """Whether an attempt's server was ready before the attempt failed: its phases hold one a round begins only at its
+    server's ready stamp (:data:`~hyperloom.measure.round_marks.SERVED_PHASES`). An attempt that stamped no phases (no
+    result landed, or a backend that stamps none) counts as not ready."""
+    return any(phase.name in SERVED_PHASES for phase in result.phases)
 
 
 def _attempt_of(result: TestResult) -> Attempt:
@@ -413,12 +417,12 @@ class AttemptRunner:
                     job, result, attempts, _Ending(Validity.CANDIDATE_FAILED, failure, result.failure_reason)
                 )
             if failure is FailureClass.UNCLEAR:
-                if reran or _rerun_refused(job.request, result.failure_reason):
+                if reran or _rerun_refused(job.request, result):
                     validity = Validity.CANDIDATE_FAILED if reran else Validity.MEASUREMENT_FAILED
                     return self._final(job, result, attempts, _Ending(validity, failure, result.failure_reason))
                 reran = True
                 continue
-            if _retry_refused(job.request, result.failure_reason, attempts):
+            if _retry_refused(job.request, result, attempts):
                 return self._final(
                     job,
                     result,
