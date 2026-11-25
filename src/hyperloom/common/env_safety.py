@@ -186,6 +186,7 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
+        "DATASET_PATH",
         # Retired provider variables, still readable so a pre-migration .env can be normalized by
         # hyperloom_common.llm.llm_config.deepseek_compat_env.
         "DEEPSEEK_API_KEY",
@@ -209,6 +210,7 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "HYPERLOOM_WHEEL_TAG",
         "INFERENCE_OPTIMIZER_FORCE_PYTHON",
         "KERNEL_OPT_BACKEND_ORDER",
+        ENV_NUM_PROMPTS,
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "OPENAI_CUSTOM_HEADERS",

@@ -167,12 +167,14 @@ when `--gpu-type` is omitted.
 Run `hyperloom optimize --help` for the exhaustive flag list.
 
 The prompts of a fixed workload have no flag; they are read from the environment of `hyperloom optimize` or
-`hyperloom-multibranch run` into every rendered point:
+`hyperloom-multibranch run` into every rendered point. `hyperloom optimize` also takes one its shell
+does not set from the checkout's `.env`, unless another account can write that file; `hyperloom-multibranch run` reads
+its shell alone:
 
 | Variable | Default | Description |
 |---|---|---|
 | `DATASET_PATH` | Unset (InferenceX's random prompts of `ISL` tokens) | Absolute path of a JSONL file of real prompts every fixed round sends instead, each line a `prompt` string or a `turns` list whose first turn is sent. A path that is not absolute refuses the round as `config_invalid`, and so does a file the round cannot read or a line that holds no prompt: the round reads the file before it starts its server. A prompt the server answers with a 4xx status fails the round, naming the prompt's line. A session records the path: a `hyperloom optimize --resume-from` with another value, or none, is refused, and a session with a dataset is kept out of the Recipe KB and the Experience KB's random-prompt identity. A `hyperloom-multibranch run` session records the value exported when it starts, and every leg, a `--resume` too, sends that file or none. A `hyperloom-multibranch run` test whose runner bubblewrap confines reads it only in a tree its sandbox shows, such as the model directory or the Hugging Face hub cache. See [InferenceSuite benchmark rounds](inference-suite.md#launch-layers). |
-| `NUM_PROMPTS` | Unset (the round's concurrency times a per-concurrency count: 10, 5, 3 or 2, fewer the longer `ISL` + `OSL`) | Requests every measured fixed round sends, at every concurrency level of the session, with or without a dataset. It must be a positive integer: any other value stops the render of a point with an error. A boot round, a profile round and each rung of a concurrency sweep keep their own count, and an `--extra-env NUM_PROMPTS=` of `hyperloom optimize` takes precedence. Neither command records it with the session: a resumed leg needs the same value exported again, and without it sends the default count. |
+| `NUM_PROMPTS` | Unset (the round's concurrency times a per-concurrency count: 10, 5, 3 or 2, fewer the longer `ISL` + `OSL`) | Requests every measured fixed round sends, at every concurrency level of the session, with or without a dataset. It must be a positive integer: any other value stops the render of a point with an error. A boot round, a profile round and each rung of a concurrency sweep keep their own count, and an `--extra-env NUM_PROMPTS=` of `hyperloom optimize` takes precedence. Neither command records it with the session: a resumed leg needs the same value set again, and without it sends the default count. |
 
 ---
 
