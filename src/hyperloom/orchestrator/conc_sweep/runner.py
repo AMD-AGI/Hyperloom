@@ -428,12 +428,39 @@ async def _run_rung(sweep: _Sweep, arm: Arm, conc: int, launch: GridLaunch) -> V
     return result
 
 
-async def _run_arm(sweep: _Sweep, arm: Arm) -> None:
-    """Run ``arm``'s pending points, a run of points that launch alike on one held server unless each point needs a
-    cold one."""
-    concs = sweep.pending(arm)
+async def _run_points(sweep: _Sweep) -> None:
+    """Run both arms' pending points: arm by arm on held servers, else each point on its own server, a concurrency's
+    two arms one after the other, so a deadline leaves pairs measured rather than an arm."""
     lifecycle = resolve_lifecycle_params(sweep.setup.base_yaml_path)
-    held = bool(lifecycle.get("eligible")) and not agentx_replay_session(sweep.state)
+    if not lifecycle.get("eligible") or agentx_replay_session(sweep.state):
+        await _run_cold(sweep)
+        return
+    for arm in sweep.arms:
+        if sweep.observe_cancel():
+            return
+        await _run_held_arm(sweep, arm, lifecycle)
+
+
+async def _run_cold(sweep: _Sweep) -> None:
+    order = ladder(sweep.points.concs, sweep.state.conc)
+    queue = [(conc, arm) for conc in order for arm in sweep.arms if conc in sweep.pending(arm)]
+    for idx, (conc, arm) in enumerate(queue):
+        if sweep.observe_cancel():
+            return
+        if sweep.out_of_time():
+            for each in sweep.arms:
+                if left := [c for c, a in queue[idx:] if a is each]:
+                    sweep.skip_for_budget(each, left)
+            return
+        result = await _run_rung(sweep, arm, conc, GridLaunch())
+        sweep.record(arm, result)
+        if sweep.observe_cancel(result):
+            return
+
+
+async def _run_held_arm(sweep: _Sweep, arm: Arm, lifecycle: Mapping[str, Any]) -> None:
+    """Run ``arm``'s pending points, a run of points that launch alike on one held server."""
+    concs = sweep.pending(arm)
     pid_dir = sweep.setup.workspace / f"server_{arm.name}"
     pid_dir.mkdir(parents=True, exist_ok=True)
     port = int(lifecycle.get("port") or 8888)
@@ -446,19 +473,16 @@ async def _run_arm(sweep: _Sweep, arm: Arm) -> None:
             if sweep.out_of_time():
                 sweep.skip_for_budget(arm, concs[idx:])
                 return
-            if held and booted and layers[idx] != layers[idx - 1]:
+            if booted and layers[idx] != layers[idx - 1]:
                 teardown_variant_server(pid_dir)
                 booted = False
-            if not held:
-                launch = GridLaunch()
-            else:
-                last = idx == len(concs) - 1 or layers[idx + 1] != layers[idx]
-                lifecycle_settings = {"cleanup": booted and last, "pid_dir": str(pid_dir), "port": port}
-                launch = GridLaunch(
-                    server_lifecycle=lifecycle_settings, server_already_ready=booted, warmup_before_measure=False
-                )
+            last = idx == len(concs) - 1 or layers[idx + 1] != layers[idx]
+            lifecycle_settings = {"cleanup": booted and last, "pid_dir": str(pid_dir), "port": port}
+            launch = GridLaunch(
+                server_lifecycle=lifecycle_settings, server_already_ready=booted, warmup_before_measure=False
+            )
             result = await _run_rung(sweep, arm, conc, launch)
-            if held and not booted:
+            if not booted:
                 booted = result.status == _SUCCEEDED
                 if not booted:
                     teardown_variant_server(pid_dir)
@@ -466,7 +490,7 @@ async def _run_arm(sweep: _Sweep, arm: Arm) -> None:
             if sweep.observe_cancel(result):
                 return
     finally:
-        if held and (survivors := teardown_variant_server(pid_dir)):
+        if survivors := teardown_variant_server(pid_dir):
             log.error("conc_sweep: arm=%s pids %s outlived SIGKILL; %s keeps them", arm.name, survivors, pid_dir)
 
 
@@ -496,10 +520,7 @@ async def run_conc_sweep(
     _resume(sweep)
     sweep.estimated_sec = sweep.per_point_sec * sum(len(sweep.pending(arm)) for arm in sweep.arms)
     _log_plan(sweep)
-    for arm in sweep.arms:
-        if sweep.observe_cancel():
-            break
-        await _run_arm(sweep, arm)
+    await _run_points(sweep)
     payload = sweep.payload(final=True)
     ceiling = build_roofline_ceiling(
         state,

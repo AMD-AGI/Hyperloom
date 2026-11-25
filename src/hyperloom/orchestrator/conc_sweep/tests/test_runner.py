@@ -418,3 +418,33 @@ def test_a_later_run_measures_again_a_report_an_earlier_schema_wrote(session_dir
     asyncio.run(runner.run_conc_sweep(session_dir))
 
     assert len(grid.calls) == 8
+
+
+def test_cold_points_run_in_pairs_so_a_deadline_leaves_pairs_measured(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    """Each point is priced at 600 s and boots its own server; a deadline 1300 s out fits one concurrency's pair."""
+    _state(session_dir, benchmark_mode="agentx")
+    clock = [1000.0]
+    monkeypatch.setattr(runner.time, "time", lambda: clock[0])
+    measure = runner.run_grid
+
+    async def run_grid(**kwargs: Any) -> list[VariantResult]:
+        clock[0] += 600.0
+        return await measure(**kwargs)
+
+    monkeypatch.setattr(runner, "run_grid", run_grid)
+
+    payload = asyncio.run(runner.run_conc_sweep(session_dir, deadline_unix=2300.0))
+
+    assert [call["name"] for call in grid.calls] == ["baseline_conc16", "optimized_conc16"]
+    measured = {
+        arm: [p["conc"] for p in payload[arm]["points"] if p["status"] == "succeeded"]
+        for arm in ("baseline", "optimized")
+    }
+    assert measured == {"baseline": [16], "optimized": [16]}
+    skipped = {
+        arm: sorted(p["conc"] for p in payload[arm]["points"] if p["status"] == "skipped_budget")
+        for arm in ("baseline", "optimized")
+    }
+    assert skipped == {"baseline": [4, 8, 32], "optimized": [4, 8, 32]}
