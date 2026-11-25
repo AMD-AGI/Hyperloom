@@ -337,9 +337,10 @@ def _per_conc_base(monkeypatch: pytest.MonkeyPatch, by_conc: dict[int, str]) -> 
     monkeypatch.setattr(base_launch, "frozen_base", lambda _toolbox: SimpleNamespace(launch=launch))
 
 
-def test_an_inferencex_sweep_tests_each_launch_apart_and_drops_points_past_its_slots(
+def test_an_inferencex_sweep_runs_one_test_per_launch_its_recipe_caps_requests_with_included(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    """The recipe caps requests below the concurrency at 32 (as InferenceX's AgentX recipes do); the point still runs."""
     by_conc = {4: "--max-running-requests 8", 16: "--max-running-requests 32", 32: "--max-running-requests 16"}
     _per_conc_base(monkeypatch, by_conc)
     layout, tests = _layout(tmp_path), _Tests()
@@ -347,17 +348,8 @@ def test_an_inferencex_sweep_tests_each_launch_apart_and_drops_points_past_its_s
     plan = final.sweep_plan(layout, _settings())
     payload = asyncio.run(_sweep(layout, _settings(), tests).run(_never()))
 
-    assert plan == final.SweepPlan("c0ffee", SweepPoints((4, 16), "inferencex"), ((4,), (16,)))
-    assert sorted((r.parent_commit, r.concurrency) for r in tests.requests) == [
-        ("c0ffee", (4,)),
-        ("c0ffee", (16,)),
-        ("root", (4,)),
-        ("root", (16,)),
-    ]
+    assert plan == final.SweepPlan("c0ffee", SweepPoints((4, 16, 32), "inferencex"), ((4,), (16,), (32,)))
+    assert sorted((r.parent_commit, r.concurrency) for r in tests.requests) == sorted(
+        (commit, (conc,)) for commit in ("root", "c0ffee") for conc in (4, 16, 32)
+    )
     assert payload["status"] == "succeeded"
-
-
-def test_a_sweep_whose_every_point_is_past_its_slots_is_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    _per_conc_base(monkeypatch, {4: "--max-running-requests 2", 16: "--max-running-requests 8"})
-
-    assert final.sweep_plan(_layout(tmp_path), _settings()) == final.CONCS_EXCEED_SERVER_SLOTS

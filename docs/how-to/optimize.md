@@ -214,11 +214,10 @@ args and environment in place of the session's own, with the optimization
 stacked on top (what it sets wins; what it removes stays removed). A concurrency
 the recipe does not publish runs the launch of the nearest higher one, else its
 highest. An AgentX point boots a server of its own; a fixed-length workload
-keeps one server across consecutive points that launch alike. A point whose
-launch caps the requests the server runs at once below its concurrency
-(vLLM's `--max-num-seqs`, SGLang's `--max-running-requests`) on both arms is
-dropped, since the server only queues
-the rest; with none left the sweep is skipped (`concs_exceed_server_slots`).
+keeps one server across consecutive points that launch alike. A point runs the
+request cap the recipe sets at its concurrency (`--max-num-seqs`,
+`--max-running-requests`) even below that concurrency, as InferenceX measures it:
+an AgentX concurrency counts agent sessions, not requests in flight.
 
 A multi-branch session runs a concurrency's baseline and optimized point side by
 side, within `--max-parallel-tests`; `--conc-sweep-parallel N` runs up to N of

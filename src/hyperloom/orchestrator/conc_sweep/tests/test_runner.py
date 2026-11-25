@@ -367,17 +367,6 @@ def test_what_the_optimization_removes_stays_removed_at_every_concurrency(
     assert "--max-running-requests" in optimized["optimized_conc32"]["remove"]
 
 
-def test_a_point_past_both_arms_request_slots_there_is_dropped(
-    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
-):
-    _state(session_dir)
-    _per_conc_base(monkeypatch, _SLOTS[16], {**_SLOTS, 32: "--max-running-requests 16"})
-
-    payload = asyncio.run(runner.run_conc_sweep(session_dir))
-
-    assert payload["concs"] == [4, 16]
-
-
 def test_a_held_server_is_booted_again_where_the_next_point_launches_otherwise(
     session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ):

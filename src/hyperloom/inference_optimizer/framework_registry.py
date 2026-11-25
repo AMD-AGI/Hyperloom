@@ -176,13 +176,6 @@ def torch_profiled(framework: str | None) -> bool:
     return command is None or not command.native
 
 
-def request_slots(framework: str | None, server_args: str) -> int | None:
-    """Return how many requests a ``framework`` server launched with ``server_args`` runs at once, or ``None`` when
-    the args or the framework set no such cap."""
-    flag = _facts(_spec_or_default(framework)).request_slots
-    return None if flag is None else flag.slots(server_args.split())
-
-
 def shipped_config_name(kind: str, framework: str) -> str:
     """Return the shipped ``<kind>_<framework>.yaml`` asset name."""
     return f"{kind}_{_registered_spec(framework).name}.yaml"

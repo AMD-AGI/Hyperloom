@@ -274,7 +274,6 @@ _FACTS: dict[Framework, FrameworkFacts] = {
         # The warmup request it sends once its HTTP server is up; past it the server kills itself before it reports
         # ready. Unset (-1) means 600 s.
         ready_timeout_env="SGLANG_WARMUP_TIMEOUT",
-        request_slots=RequestSlotsFlag(("--max-running-requests",)),
     ),
     Framework.VLLM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
@@ -288,7 +287,6 @@ _FACTS: dict[Framework, FrameworkFacts] = {
         # How long the frontend waits for the engine cores to report ready (600 s unset), the Rust frontend's
         # ``engine_ready_timeout_secs`` included.
         ready_timeout_env="VLLM_ENGINE_READY_TIMEOUT_S",
-        request_slots=RequestSlotsFlag(("--max-num-seqs",)),
     ),
     Framework.ATOM: FrameworkFacts(
         kind=FrameworkKind.SERVING,

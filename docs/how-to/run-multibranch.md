@@ -252,9 +252,8 @@ session's own. It runs only when FINAL chose a commit other than the root whose 
 The points are `--conc-sweep-concs C1,C2,...` when given (hosted: `multibranch.conc_sweep_concs`), else every
 concurrency the InferenceX recipe of the frozen base publishes for the workload, with `--conc` among them; a
 `--reference-script` base needs them given. Each point is seeded with the recipe's own launch at its concurrency
-(the nearest higher one the recipe publishes, else its highest), under the commit's own changes; a point whose launch
-caps the requests the server runs at once (`--max-num-seqs`, `--max-running-requests`, `-np`) below its concurrency
-is dropped. The tests run a concurrency's baseline and commit point together, `--conc-sweep-parallel N` of them at
+(the nearest higher one the recipe publishes, else its highest), under the commit's own changes, its request cap
+included even below its concurrency, as InferenceX measures it. The tests run a concurrency's baseline and commit point together, `--conc-sweep-parallel N` of them at
 once (hosted: `multibranch.conc_sweep_parallel`; 2 by default, 1 for one at a time), within `--max-parallel-tests`.
 An AgentX point is a test of its own; an InferenceX arm is one sweep test over the points that launch alike, whose
 timeout scales with them. The tests are session measurements of the commits as they are: no accuracy and no checks.

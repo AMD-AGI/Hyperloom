@@ -15,17 +15,16 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.overlay import is_safe_path_entry, overlay_is_loadable
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, agentx_replay_session, is_agentx_mode
-from hyperloom.inference_optimizer.framework_registry import is_scriptable, native_component, request_slots
+from hyperloom.inference_optimizer.framework_registry import is_scriptable, native_component
 from hyperloom.inference_optimizer.grid_server_args import (
-    compose_server_args,
     merge_server_args,
     server_args_delta,
 )
@@ -156,16 +155,6 @@ def _stacked(lower: _Layer, upper: _Layer) -> _Layer:
     )
 
 
-def _servable(points: SweepPoints, slots_at: Callable[[int], int | None]) -> SweepPoints:
-    """``points`` less those past the request slots both arms' servers run there: a server queues the requests past its
-    slots, so such a point measures the same batch behind a longer queue."""
-    dropped = [conc for conc in points.concs if (slots := slots_at(conc)) is not None and conc > slots]
-    if not dropped:
-        return points
-    log.info("conc_sweep: dropping concs %s, past the request slots both arms' servers run there", dropped)
-    return replace(points, concs=tuple(conc for conc in points.concs if conc not in dropped))
-
-
 @dataclass(frozen=True)
 class _Setup:
     """Where the sweep runs and the materialized base config both arms launch from."""
@@ -254,17 +243,6 @@ class _Sweep:
     def layer(self, arm: Arm, conc: int) -> _Layer:
         """What ``arm``'s point at ``conc`` runs over the baseline: the source's launch there, then ``arm``'s change."""
         return _stacked(_conc_layer(self.frozen, conc), _arm_layer(arm, self.base_args))
-
-    def slots_at(self, conc: int) -> int | None:
-        """The most requests either arm's server runs at once at ``conc``, ``None`` when either sets no cap."""
-        slots = []
-        for arm in self.arms:
-            layer = self.layer(arm, conc)
-            args = compose_server_args(
-                inherited_args=self.base_args, variant_extra_args=layer.args, remove_args=list(layer.remove_args)
-            )
-            slots.append(request_slots(self.state.framework, args))
-        return None if None in slots else max(slot for slot in slots if slot is not None)
 
     def variant(self, arm: Arm, conc: int) -> GridVariant:
         state = self.state
@@ -499,9 +477,6 @@ async def run_conc_sweep(
     sweep = _Sweep(
         state, session_dir, setup, points, optimized, state.baseline_runtime_sec, deadline_unix, launch, base_args
     )
-    sweep.points = _servable(points, sweep.slots_at)
-    if not sweep.points.concs:
-        return _skipped(state, session_dir, "concs_exceed_server_slots", server_slots=sweep.slots_at(state.conc))
     _resume(sweep)
     sweep.estimated_sec = sweep.per_point_sec * sum(len(sweep.pending(arm)) for arm in sweep.arms)
     _log_plan(sweep)

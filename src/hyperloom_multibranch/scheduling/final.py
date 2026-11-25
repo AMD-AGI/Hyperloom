@@ -454,7 +454,6 @@ class FinalSelector:
 BASELINE, OPTIMIZED = "baseline", "optimized"
 NO_OPTIMIZATION = "no_optimization"
 NO_SWEEP_POINTS = "no_sweep_points"
-CONCS_EXCEED_SERVER_SLOTS = "concs_exceed_server_slots"
 SKIPPED_BUDGET = "skipped_budget"
 _SUCCEEDED = "succeeded"
 
@@ -496,26 +495,19 @@ def sweep_plan(layout: SessionLayout, settings: RunSettings) -> SweepPlan | str:
         return NO_SWEEP_POINTS
     if frozen is None:
         return SweepPlan(chosen.commit, points)
-    return _seeded_plan(chosen.commit, points, frozen.launch, workload.framework)
+    return _seeded_plan(chosen.commit, points, frozen.launch)
 
 
-def _seeded_plan(chosen: str, points: SweepPoints, base: BaseLaunch, framework: str) -> SweepPlan | str:
-    """``points`` less those past the request slots the source's launch there runs, grouped by that launch."""
-    from hyperloom.inference_optimizer.framework_registry import request_slots
+def _seeded_plan(chosen: str, points: SweepPoints, base: BaseLaunch) -> SweepPlan:
+    """``points`` grouped by the source launch each is seeded with."""
     from hyperloom.orchestrator.state.base_launch import server_base_at
 
-    seeds = {conc: server_base_at(base, conc) for conc in points.concs}
-    dropped = [conc for conc, seed in seeds.items() if (slots := request_slots(framework, seed.args)) and conc > slots]
-    if dropped:
-        logger.info("conc_sweep: dropping concs %s, past the request slots the recipe's launch there runs", dropped)
-    kept = tuple(conc for conc in points.concs if conc not in dropped)
-    if not kept:
-        return CONCS_EXCEED_SERVER_SLOTS
     by_launch: dict[tuple[str, tuple[tuple[str, str], ...]], list[int]] = {}
-    for conc in kept:
-        by_launch.setdefault((seeds[conc].args, tuple(sorted(seeds[conc].env.items()))), []).append(conc)
+    for conc in points.concs:
+        seed = server_base_at(base, conc)
+        by_launch.setdefault((seed.args, tuple(sorted(seed.env.items()))), []).append(conc)
     groups = tuple(tuple(group) for group in by_launch.values()) if len(by_launch) > 1 else ()
-    return SweepPlan(chosen, replace(points, concs=kept), groups)
+    return SweepPlan(chosen, points, groups)
 
 
 def sweep_unfinished(layout: SessionLayout, settings: RunSettings) -> bool:
@@ -752,7 +744,6 @@ __all__ = [
     "SKIPPED_BUDGET",
     "PRIMARY_POINT_ONLY",
     "REPRODUCTION_POINT_ONLY",
-    "CONCS_EXCEED_SERVER_SLOTS",
     "CandidateCheck",
     "ConcSweep",
     "FinalCandidate",
