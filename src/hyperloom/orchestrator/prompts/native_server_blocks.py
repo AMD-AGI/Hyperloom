@@ -54,6 +54,8 @@ def _knob_tune_block(inp: SpecialistPromptInputs) -> list[str]:
     server the session builds from source, when the rule pack states a kernel knob of that framework in a branch
     compiled for the architecture the session builds for."""
     component = native_component(inp.framework)
+    if component is None:
+        return []
     gfx = detect_gfx_arch(os.environ, gpu_type=inp.gpu_type or None, probe=False)
     declared = any(knob.component == component and gfx in knob.archs for knob in kernel_knobs().values())
     if not declared or not inp.allocated_gpu_ids or inp.mode != MODE_PATCH or not inp.worktree_base:

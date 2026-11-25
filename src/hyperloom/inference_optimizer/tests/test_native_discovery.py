@@ -18,6 +18,7 @@ from hyperloom.common.tests.handed_names import (
 )
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.inference_optimizer.session.session_paths import runs_root
+from hyperloom.orchestrator.prompts import native_server_blocks
 from hyperloom.orchestrator.prompts.native_discovery import OptionList, gpu_kernel_dirs, native_discovery
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 from hyperloom.orchestrator.specialists.domains import SPECIALIST_DOMAINS, get_domain
@@ -134,3 +135,13 @@ def test_the_knob_sweep_is_not_offered_where_it_cannot_be_timed_or_applied_or_th
     monkeypatch, dispatch
 ):
     assert _KNOB_TUNE not in _prompts(monkeypatch, **dispatch)
+
+
+def test_a_framework_the_session_does_not_build_reads_neither_the_board_nor_the_knobs_for_its_prompt(monkeypatch):
+    def read(*args, **kwargs):
+        raise AssertionError("read for a framework with no native component")
+
+    monkeypatch.setattr(native_server_blocks, "detect_gfx_arch", read)
+    monkeypatch.setattr(native_server_blocks, "kernel_knobs", read)
+
+    assert _KNOB_TUNE not in _prompts(monkeypatch, framework="sglang")
