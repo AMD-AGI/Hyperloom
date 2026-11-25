@@ -100,6 +100,16 @@ def test_the_role_names_the_workload_every_step_s_tool_and_the_rules():
         role_prompt(RoleWorkload(" \n"))
 
 
+def test_the_role_keeps_k_tests_running_on_evidence_and_does_not_poll_wait_test():
+    prompt = " ".join(role_prompt(WORKLOAD).split())
+
+    assert "K is a ceiling, not a target" not in prompt
+    assert "your branch should keep that many running" in prompt
+    assert "never a candidate without evidence just to fill a slot" in prompt
+    assert "With all K running you may queue one more candidate that is ready" in prompt
+    assert "do not call wait_test over and over" in prompt and "branch_free_slots" in prompt
+
+
 def test_the_role_reads_the_briefs_two_direction_lists_before_claiming_and_chooses_as_before_without_them():
     prompt = " ".join(role_prompt(WORKLOAD).split())
     settings, code = (title.split(" (")[0] for title in (SETTINGS_TITLE, CODE_TITLE))

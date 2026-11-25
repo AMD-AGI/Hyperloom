@@ -312,15 +312,21 @@ class WorkQueue:
     def state(self) -> QueueState:
         by_priority = dict.fromkeys(range(PRIORITY_HIGHEST, PRIORITY_LOWEST + 1), 0)
         counts: dict[State, dict[str, int]] = {state: {} for state in State}
+        counted: dict[str, int] = {}
         for item in self._items.values():
             if item.state is State.QUEUED:
                 by_priority[item.priority] += 1
             per_branch = counts[item.state]
             per_branch[item.branch] = per_branch.get(item.branch, 0) + 1
+            if not exempt_from_k(item.request):
+                counted[item.branch] = counted.get(item.branch, 0) + 1
+        branches = {*self.policy.branch_k, *(self.policy.open_branches or ()), *(item.branch for item in self.items())}
         return QueueState(
             by_priority,
             counts[State.RUNNING],
             counts[State.QUEUED],
             self.cold_start_seconds,
             pending_build_by_branch=counts[State.PENDING_BUILD],
+            k_by_branch={branch: self.policy.k_for(branch) for branch in sorted(branches)},
+            counted_by_branch=counted,
         )
