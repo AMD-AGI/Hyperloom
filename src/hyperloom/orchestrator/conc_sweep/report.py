@@ -209,16 +209,6 @@ def read_summary(reports: Path) -> dict[str, Any] | None:
     return json.loads(path.read_text(encoding=_ENCODING)) if path.is_file() else None
 
 
-def sweep_unfinished(session_dir: Path) -> bool:
-    """Whether the optimize session in ``session_dir`` closed, asked for a conc sweep, and that sweep has not run its
-    course; read off ``state.json`` and the summary alone."""
-    state = json.loads((session_dir / "state.json").read_text(encoding=_ENCODING))
-    if not (state.get("conc_sweep_enabled") and state.get("close_sequence_done")):
-        return False
-    summary = read_summary(reports_dir(session_dir))
-    return summary is None or summary["status"] not in SETTLED
-
-
 def write_report(payload: dict[str, Any], reports: Path) -> None:
     """Atomically write the summary JSON and the raw CSV into ``reports``."""
     reports.mkdir(parents=True, exist_ok=True)

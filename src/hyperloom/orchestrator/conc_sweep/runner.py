@@ -282,7 +282,7 @@ def _resume(sweep: _Sweep) -> None:
                 sweep.measured[arm.name][point["conc"]] = point
 
 
-def _log_plan(sweep: _Sweep, per_point_sec: float, grant_end_unix: float | None) -> None:
+def _log_plan(sweep: _Sweep, per_point_sec: float) -> None:
     rungs = sum(len(sweep.pending(arm)) for arm in sweep.arms)
     log.info(
         "conc_sweep: plan source=%s concs=%s arms=baseline,optimized serial pending_points=%d "
@@ -293,12 +293,6 @@ def _log_plan(sweep: _Sweep, per_point_sec: float, grant_end_unix: float | None)
         sweep.estimated_sec / 3600.0,
         per_point_sec,
     )
-    if grant_end_unix is None:
-        return
-    left = grant_end_unix - time.time()
-    log.info("conc_sweep: the run's grant has %.1fh left", left / 3600.0)
-    if sweep.estimated_sec > left:
-        log.warning("conc_sweep: the estimate outlasts the run's grant; the platform may end the sweep early")
 
 
 async def _run_rung(sweep: _Sweep, arm: Arm, conc: int, launch: GridLaunch) -> VariantResult:
@@ -357,7 +351,7 @@ async def _run_arm(sweep: _Sweep, arm: Arm) -> None:
             log.error("conc_sweep: arm=%s pids %s outlived SIGKILL; %s keeps them", arm.name, survivors, pid_dir)
 
 
-async def run_conc_sweep(session_dir: Path, *, grant_end_unix: float | None = None) -> dict[str, Any]:
+async def run_conc_sweep(session_dir: Path) -> dict[str, Any]:
     """Sweep the finished session in ``session_dir`` and return the report it wrote to ``reports/``."""
     state = SharedState.load_or_init(session_dir)
     reason = decline_reason(state)
@@ -379,7 +373,7 @@ async def run_conc_sweep(session_dir: Path, *, grant_end_unix: float | None = No
     sweep = _Sweep(state, session_dir, setup, points, optimized, estimated_sec=0.0)
     _resume(sweep)
     sweep.estimated_sec = per_point_sec * sum(len(sweep.pending(arm)) for arm in sweep.arms)
-    _log_plan(sweep, per_point_sec, grant_end_unix)
+    _log_plan(sweep, per_point_sec)
     for arm in sweep.arms:
         if sweep.observe_cancel():
             break

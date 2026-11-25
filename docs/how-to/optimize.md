@@ -109,7 +109,7 @@ session and prints nothing about plugs. To choose other implementations of a plu
 
 | Flag | Effect |
 |------|--------|
-| `--plug-profile NAME` | Load a built-in profile (`local`, `hosted-gpu`, `hosted-cpu`). Not `--profile`, which stays the abbreviation of `--profile-osl`. |
+| `--plug-profile NAME` | Load a built-in profile (`local`). Not `--profile`, which stays the abbreviation of `--profile-osl`. |
 | `--manifest PATH` | Lay a JSON manifest over the profile. `$HYPERLOOM_MANIFEST` is the same, from the environment. |
 | `--plug SOCKET=IMPL` | Pick one implementation for one socket (repeatable). |
 | `--plug-config SOCKET.KEY=VALUE` | Set one configuration key (repeatable; a JSON value is read as JSON). |

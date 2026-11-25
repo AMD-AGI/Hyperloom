@@ -77,6 +77,46 @@ A launch that pins `--moe-runner-backend` on a checkpoint that has no runner
 for that backend now fails its round with the server's error, where the round
 was relaunched without the flag. Fix the pin where it was set.
 
+### Required: the hosted single-session flow is retired
+
+`hyperloom hosted run` now only runs the multi-branch flow, handing every run
+to `hyperloom-multibranch hosted run`. In 1.2.0 a campaign spec with no `flow`
+ran the single-session flow; that default is gone.
+
+* A spec must now set `"flow": "multibranch"` or carry a `multibranch`
+  section, and a multi-branch run needs `multibranch.workload`,
+  `workload.conc` and `workload.precision`. An unchanged 1.2.0 single spec
+  (neither `flow` nor `multibranch`) ends the run with a final `exit.json`
+  (`"final": true`, return code 2) and the error
+  `campaign spec refused: a spec with neither flow nor multibranch ran the single flow, which is retired; set flow to 'multibranch' and add a multibranch section with workload, and give workload.conc and workload.precision`.
+* A spec that still says `"flow": "single"` ends the same way with
+  `campaign spec refused: flow 'single' is retired; leave flow out or set it to 'multibranch'`.
+* `placement.measurement` now defaults to `hosted` for every spec; the single
+  flow defaulted it to `local`. Set `"measurement": "local"` (with
+  `placement.profile` `hosted-gpu`) to measure on the application container's
+  own cards.
+* A single-flow run in flight does not resume on this release: restarted, its
+  spec is judged as a multi-branch one and refused as above, and the single
+  flow's session files are ignored. Let such runs finish on 1.2.0 before
+  upgrading the host.
+* The `hosted-gpu` and `hosted-cpu` plug profiles are removed:
+  `hyperloom optimize --plug-profile hosted-gpu` (or `hosted-cpu`) exits 2
+  with `ERROR: plug configuration refused: unknown profile 'hosted-gpu'; available: local`.
+  Drop the flag.
+* `HYPERLOOM_EVENTS_DIR`, `HYPERLOOM_MCP_HOST`, `HYPERLOOM_MCP_PORT` and
+  `HYPERLOOM_MCP_TOKEN` are no longer read or checked; a host may stop
+  setting them (any value is accepted and removed from the environment of
+  every child). The single flow's MCP host tools and progress events are gone,
+  and the Coordinator no longer reads `hosted/control/stop.json`; stop a run
+  with a signal.
+* `options.conc_sweep` is no longer part of the spec: it switched the single
+  flow's sweep, and like any unknown field it is now accepted and ignored.
+  Turn a multi-branch run's sweep off with `"multibranch": {"conc_sweep": false}`.
+  The single flow's two other sweep behaviours go with it: restarted, the
+  hosted entry no longer runs the unfinished sweep of a closed single-flow
+  session, and that sweep no longer warns when its estimate outlasts the
+  hosted grant.
+
 ### Required: `session_breakdown.json` drops the held Critic verdict
 
 The schema stays `v6.1`, but a Critic ruling no longer carries `held_to_rule`,
