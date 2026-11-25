@@ -183,6 +183,9 @@ class HarnessLaunch:
     env: Mapping[str, str]
     request_timeout_sec: float
     initialize_timeout_sec: float = _INITIALIZE_TIMEOUT_SEC
+    #: The profile the runtime boots, and the patch files laid over it after the compaction patch, in order.
+    profile: str = "sdk"
+    patches: tuple[Path, ...] = ()
 
 
 def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
@@ -211,7 +214,8 @@ def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
         env=dict(launch.env),
         initialize_timeout_seconds=launch.initialize_timeout_sec,
         request_timeout_seconds=launch.request_timeout_sec,
-        patches=(str(compaction_patch),),
+        profile=launch.profile,
+        patches=(str(compaction_patch), *map(str, launch.patches)),
     )
     try:
         harness.start()

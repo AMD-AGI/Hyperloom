@@ -16,6 +16,7 @@ from pathlib import Path
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
 from hyperloom_common.env import EnvValueError
+from hyperloom_common.llm.llm_config import resolve_agent_backend
 from hyperloom_common.shared_storage import setgid_warnings, writable_problems
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
@@ -105,9 +106,12 @@ def require_writable_storage(env: Mapping[str, str], dirs: Mapping[str, Path]) -
 
 
 def require_session_environment(settings: RunSettings, env: Mapping[str, str]) -> None:
-    """Raise ValueError when ``env`` contradicts the workload of ``settings`` or cannot price its dollar cap."""
+    """Raise ValueError when ``env`` contradicts the workload of ``settings``, names in
+    ``INFERENCE_OPTIMIZER_AGENT_BACKEND`` an agent backend the specialists cannot run (none there is, or the DeepSeek
+    Harness without its SDK installed), or cannot price its dollar cap."""
 
     require_workload_switch(settings.workload, env)
+    resolve_agent_backend(env)
     require_priced_models(settings.max_llm_usd, env)
 
 

@@ -515,6 +515,79 @@ def test_the_output_token_cap_is_passed_to_the_harness_runtime(tmp_path: Path) -
     assert seen["max_tokens"] == 64000
 
 
+def test_a_runtime_boots_the_profile_and_the_patches_its_launch_names_over_the_compaction_patch(
+    tmp_path: Path,
+) -> None:
+    from hyperloom_common.llm import deepseek_session
+
+    seen: dict[str, Any] = {}
+
+    class _Harness:
+        def __init__(self, **kwargs: Any) -> None:
+            seen.update(kwargs)
+
+        def start(self) -> None:
+            return None
+
+    class _Sdk:
+        DeepSeekHarness = _Harness
+
+    fields = {
+        "dsh_home": tmp_path / "home",
+        "cwd": tmp_path,
+        "model": "deepseek-v4-flash",
+        "reasoning_effort": "high",
+        "env": {},
+        "request_timeout_sec": 30.0,
+    }
+    deepseek_session.start_harness(_Sdk(), deepseek_session.HarnessLaunch(**fields))
+    assert seen["profile"] == "sdk" and [Path(patch).name for patch in seen["patches"]] == ["hyperloom-compaction.yml"]
+
+    extra = tmp_path / "extra.yml"
+    deepseek_session.start_harness(
+        _Sdk(), deepseek_session.HarnessLaunch(**fields, profile="sdk-minimal", patches=(extra,))
+    )
+    assert seen["profile"] == "sdk-minimal"
+    assert seen["patches"] == (str(tmp_path / "home" / "hyperloom-compaction.yml"), str(extra))
+
+
+def test_a_conversation_s_home_keeps_the_sessions_a_later_process_resumes(tmp_path: Path) -> None:
+    home = tmp_path / "workspace" / ".dsh"
+    kept = home / "sessions" / "ws" / "session-0" / "session.v4.jsonl"
+    kept.parent.mkdir(parents=True)
+    kept.write_text('{"type": "session"}\n', encoding="utf-8")
+    request = dsh_launch.DshSessionHome(home, "deepseek-v4-flash", "be careful", disabled=("tool-ask-user",))
+
+    boot = dsh_launch.prepare_session_home(request, {})
+
+    assert kept.read_text(encoding="utf-8") == '{"type": "session"}\n' and boot.env_additions == {}
+    assert (home / "AGENTS.md").read_text(encoding="utf-8") == "be careful"
+    assert oct(home.stat().st_mode & 0o777) == "0o700" and oct(boot.patch.stat().st_mode & 0o777) == "0o600"
+    rows = _patch_rows(boot.patch.read_text(encoding="utf-8"))
+    assert rows["session-persistence-jsonl"]["config"]["compression"] == "none"
+    assert rows["agent-default-model"]["config"]["model"] == "deepseek-v4-flash"
+    assert rows["agent-instructions"]["config"]["maxBytes"] > len("be careful")
+    assert rows["tool-ask-user"]["disabled"] is True and "llm-deepseek" not in rows
+
+
+def test_a_conversation_s_mcp_servers_read_their_headers_from_variables_only_the_runtime_sees(
+    tmp_path: Path,
+) -> None:
+    server = {"type": "http", "url": "http://127.0.0.1:9/mcp", "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}}
+    config = tmp_path / "mcp.json"
+    config.write_text(json.dumps({"mcpServers": {"hyperloom": server}}), encoding="utf-8")
+    request = dsh_launch.DshSessionHome(tmp_path / ".dsh", "deepseek-v4-flash", mcp_config_path=str(config))
+
+    boot = dsh_launch.prepare_session_home(request, {"MCP_TOKEN": "s3cret"})
+
+    text = boot.patch.read_text(encoding="utf-8")
+    assert boot.env_additions == {"HYPERLOOM_DSH_MCP_ENV_0": "Bearer s3cret"} and "s3cret" not in text
+    row = _patch_rows(text)["mcp-hyperloom"]
+    assert (row["config"]["serverName"], row["config"]["url"]) == ("hyperloom", "http://127.0.0.1:9/mcp")
+    with pytest.raises(SpecialistAgentUnavailableError, match="unset environment variable 'MCP_TOKEN'"):
+        dsh_launch.prepare_session_home(request, {})
+
+
 def test_a_cut_off_dsh_session_log_still_yields_its_complete_records(tmp_path: Path) -> None:
     """A reaped run leaves a half-written final line; the records before it are still the run's."""
     home = tmp_path / ".dsh"

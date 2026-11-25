@@ -44,6 +44,7 @@ import os
 import secrets
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from functools import cache, partial
@@ -51,10 +52,12 @@ from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from inference_suite.contracts import AGENTX_DEFAULT_DURATION_SEC
+from hyperloom_common.llm.deepseek_session import MAX_TOKENS_ENV
 from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CLAUDE,
-    preferred_agent_backend,
+    AGENT_BACKEND_DEEPSEEK,
     provider_model_defaults,
+    resolve_agent_backend,
     resolve_forge_llm_model,
 )
 from hyperloom.common.model_paths import resolve_serving_model_path
@@ -687,10 +690,10 @@ def machine_parallel_tests(tp: int) -> int:
 
 
 def specialist_model(env: Mapping[str, str]) -> str:
-    """The model every specialist of a session runs on: the one ``env`` names for the backend it is credentialed
-    for."""
+    """The model every specialist of a session runs on: the one ``env`` names for the backend its specialists run
+    (:func:`specialist_command`); raises ValueError as that does."""
 
-    return resolve_forge_llm_model(preferred_agent_backend(env), env={**env, **provider_model_defaults(env)})
+    return resolve_forge_llm_model(resolve_agent_backend(env), env={**env, **provider_model_defaults(env)})
 
 
 #: Where install.sh installs the Claude CLI, below the home (``ensure_claude_cli``). Only a shell that sourced the
@@ -708,22 +711,42 @@ def _installed_cli_dir(backend: str, env: Mapping[str, str]) -> str | None:
     return os.path.join(home, INSTALLED_CLI_DIR)
 
 
+def _harness_python(env: Mapping[str, str]) -> str:
+    """The Python the specialists run the DeepSeek Harness's bridge on
+    (:mod:`~hyperloom_multibranch.specialist.dsh_cli`): this one, whose harness SDK ships the runtime. Raises
+    :class:`PeersUnavailable` when ``env`` configures no gateway the harness can call."""
+
+    from hyperloom_common.llm.deepseek_session import DeepSeekSessionUnavailableError, gateway_env
+
+    try:
+        gateway_env(env)
+    except DeepSeekSessionUnavailableError as exc:
+        raise PeersUnavailable(f"the DeepSeek Harness the specialists run cannot reach a model: {exc}") from exc
+    return sys.executable
+
+
 def specialist_command(env: Mapping[str, str]) -> AgentCommand:
-    """The agent CLI every specialist of a session runs: the backend ``env`` is credentialed for, found on its
-    ``PATH``, else where install.sh installs it (:func:`_installed_cli_dir`), on :func:`specialist_model`; raises
-    :class:`PeersUnavailable` when that CLI is not installed. A model the price sheet does not list records its tokens
-    only, which the command line accepts only without a dollar cap, and says so here."""
+    """The agent CLI every specialist of a session runs, on :func:`specialist_model`: that of the backend
+    ``INFERENCE_OPTIMIZER_AGENT_BACKEND`` names in ``env``, as it names the main flow's, else of the one ``env`` is
+    credentialed for, found on ``env``'s ``PATH``, else where install.sh installs it (:func:`_installed_cli_dir`). The
+    DeepSeek Harness runs only when named, as its bridge on this Python (:func:`_harness_python`). Raises
+    :class:`PeersUnavailable` when that CLI is not installed, or the harness has no gateway, and ValueError when the
+    variable names no backend, or the harness without its SDK installed. A model the price sheet does not list records
+    its tokens only, which the command line accepts only without a dollar cap, and says so here."""
 
     from hyperloom_multibranch.specialist.agent_session import AgentCommand
 
-    backend = preferred_agent_backend(env)
-    installed = _installed_cli_dir(backend, env)
-    executable = shutil.which(backend, path=env.get("PATH"))
-    if executable is None and installed is not None:
-        executable = shutil.which(backend, path=installed)
-    if executable is None:
-        where = f" nor in {installed}" if installed else ""
-        raise PeersUnavailable(f"the {backend} CLI the specialists run is not on PATH{where}")
+    backend = resolve_agent_backend(env)
+    if backend == AGENT_BACKEND_DEEPSEEK:
+        executable: str | None = _harness_python(env)
+    else:
+        installed = _installed_cli_dir(backend, env)
+        executable = shutil.which(backend, path=env.get("PATH"))
+        if executable is None and installed is not None:
+            executable = shutil.which(backend, path=installed)
+        if executable is None:
+            where = f" nor in {installed}" if installed else ""
+            raise PeersUnavailable(f"the {backend} CLI the specialists run is not on PATH{where}")
     model = specialist_model(env)
     if price_of(model) is None:
         logger.warning("the specialists run on %s, which the price sheet does not list: they record tokens only", model)
@@ -783,11 +806,15 @@ INFERENCEX_PROMPT_CACHE_TTL = "1h"
 def specialist_env(workload: Workload) -> dict[str, str]:
     """The environment a branch's specialist runs with: the main flow's allowlisted one, which carries the prompt-cache
     TTL an operator sets, with :data:`INFERENCEX_PROMPT_CACHE_TTL` for each TTL it lacks on an InferenceX workload; on
-    an AgentX one, whose test outlasts even an hour's cache, the CLI keeps its own default."""
+    an AgentX one, whose test outlasts even an hour's cache, the CLI keeps its own default. The cap an operator sets on
+    the output tokens of the DeepSeek Harness's model calls goes with it, as the harness's runtime starts below the
+    specialist's CLI."""
 
     from hyperloom.orchestrator.specialists.agent_runner import build_specialist_env
 
     env = dict(build_specialist_env())
+    if os.environ.get(MAX_TOKENS_ENV, "").strip():
+        env[MAX_TOKENS_ENV] = os.environ[MAX_TOKENS_ENV]
     if workload.inferencex is not None:
         for name in PROMPT_CACHE_TTL_ENV:
             env.setdefault(name, INFERENCEX_PROMPT_CACHE_TTL)
