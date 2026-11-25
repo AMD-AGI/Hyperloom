@@ -5,23 +5,27 @@
 
 A server that maps its safetensors files and reads them by page faults reads a network file system one fault at a time,
 tens of MB/s per rank, where a few sequential streams read the same files at gigabytes per second. :class:`WeightPrefetch`
-reads the files the loader reads, in the loader's order, with a few streams in background threads, from the moment the
-server is spawned until it is ready, so that its faults find the pages cached.
+reads the files the loader reads with a few streams in background threads, from the moment the server is spawned until it
+is ready, so that its faults find the pages cached. It reads the largest files first (:func:`prefetch_order`): a loader
+reads its small shards quickly with its own threads but faults a very large file in one stream per rank, and those are
+the files a cached page saves the most time on.
 
 It runs alongside the server rather than before it. The server's own start (process start, distributed and device set-up,
 shard loading) overlaps the reads instead of waiting for them, and a loader that drops the checkpoint's page cache while it
-starts (SGLang's engram host table does, before it pre-faults its shard) would discard what a read before the start had
-cached. So after the first pass, every ``_REFILL_INTERVAL_SEC`` until the server is ready, it asks the kernel which
-pages of the files it chose are no longer cached (``mincore``) and reads those again, at most ``_MAX_REFILLS`` times.
+starts (SGLang's engram host table does, before it pre-faults its shard) discards what was read before. So until the
+server is ready it samples, every ``_POLL_INTERVAL_SEC``, how much of each file it chose is still cached (``mincore`` on
+a few pages spread over the file), and as soon as files it had cached lost most of their pages it reads what is missing
+again, largest first, ending a pass in progress to do so; at most ``_MAX_REFILLS`` times.
 
 ``mincore`` tells the truth only about a file this process owns or may open for writing; for any other file Linux reports
 every page cached. Such a file is read whole, by its size, within the same budget, and is not read again by a refill.
 
 What it reads is bounded by memory. File pages count toward the cgroup's ``memory.current``, so it reads at most
-``memory.max - memory.current`` less a margin: the files in the loader's order while they fit. Before each file it looks at
-the headroom again and stops when the file no longer fits, rather than evict the pages it cached or crowd the server.
-Without a cgroup limit, the host's ``MemTotal`` and ``MemAvailable`` stand in. A checkpoint on a local file system is left
-alone (a local disk is not the bottleneck), as is one whose headroom is too small to matter.
+``memory.max - memory.current`` less a margin. At the start it chooses, largest first, the files that fit that headroom;
+then before each piece (``_PIECE``) it reads, it looks at the live headroom again, less what its other streams are reading,
+and ends the pass when the piece no longer fits, rather than evict the pages it cached or crowd the server (whose memory
+grows as it starts). Without a cgroup limit, the host's ``MemTotal`` and ``MemAvailable`` stand in. A checkpoint on a local
+file system is left alone (a local disk is not the bottleneck), as is one whose headroom is too small to matter.
 
 It is off unless ``HYPERLOOM_WEIGHT_PREFETCH`` is ``1`` in the environment of the process that boots the server, for
 every kind of run: a hosted deployment sets it in its ``measurement`` template's environment, and a local sandbox takes it
@@ -60,6 +64,7 @@ __all__ = [
     "PrefetchOutcome",
     "WeightPrefetch",
     "checkpoint_files",
+    "prefetch_order",
     "start_weight_prefetch",
 ]
 
@@ -72,10 +77,22 @@ _GIB = 1 << 30
 #: with four, still close to linear, so four had not reached what the storage serves; eight keeps going up that line at
 #: a cost of eight 16 MiB buffers. Not an operator setting: a hosted round that shows otherwise changes it here.
 _STREAMS = 8
-#: After the first pass, how often the cache is looked at again while the server starts, and how many refills there are
-#: at most.
-_REFILL_INTERVAL_SEC = 30.0
-_MAX_REFILLS = 3
+#: How often the cache of the chosen files is sampled while the server starts, during a pass and after it, and how many
+#: refill passes there are at most. Short, because a pass that has not yet seen a drop keeps reading files further down
+#: the order into the headroom the files at its top need again: a second at a few GB/s is a few GB. A loader that drops the checkpoint's page cache does it once or twice in a start
+#: (SGLang's engram host table: before it pre-faults its shard, and again when the shard lacks huge pages); the bound
+#: only keeps a cache that is reclaimed over and over from being read over and over.
+_POLL_INTERVAL_SEC = 1.0
+_MAX_REFILLS = 8
+#: A file that lost at least this share of itself from the cache since its highest share has been dropped.
+_DROPPED_SHARE = 0.5
+#: Bytes one stream reads of a file before it takes the next piece, so several streams share one large file.
+_PIECE = _GIB
+#: How many places of a file a sample looks at, and how many pages at each: a drop (``POSIX_FADV_DONTNEED``) or a reclaim
+#: takes whole files or large runs of them, which a sample of a few hundred pages per file sees at a cost of about a
+#: hundred syscalls per file per look, instead of a page vector of every page of a checkpoint of hundreds of GiB.
+_SAMPLES = 32
+_SAMPLE_PAGES = 16
 #: Bytes one ``preadv`` asks for; a stop is seen between two of them.
 _CHUNK = 16 << 20
 #: Headroom kept free for the server: a tenth of the limit, and never less than this.
@@ -133,6 +150,9 @@ class Host(Protocol):
         """The byte ranges of the file that are not in the page cache, as ``(start, end)``; ``None`` when the kernel
         does not say which pages of this file are cached."""
 
+    def cached_share(self, path: Path, size: int) -> float | None:
+        """The share of the file's pages in the page cache, sampled; ``None`` when the kernel does not tell."""
+
     def read(self, path: Path, span: Span, stop: threading.Event) -> int:
         """Read ``span`` of the file into the page cache, until it is read or ``stop`` is set; the bytes read."""
 
@@ -185,8 +205,27 @@ def checkpoint_files(model_dir: Path) -> list[Path]:
     return sorted(files, key=_natural)
 
 
+def prefetch_order(sized: Sequence[tuple[Path, int]]) -> list[tuple[Path, int]]:
+    """The order the prefetch reads ``sized`` (files in the loader's order with their sizes) in: largest first, files of
+    one size in the loader's order.
+
+    A loader reads its many small shards with a few threads, from the network as fast as a prefetch would, but faults a
+    very large file in through a mapping, one stream per rank; and it reads the largest files last in a checkpoint whose
+    biggest tensors sit in its last files (DeepSeek V4's engram embedding tables, two files of 101.5 GB at the end of 48).
+    Those are the reads a cached page saves the most time on, and the ones a prefix of the loader's order leaves out when
+    the memory does not hold the whole checkpoint. A checkpoint of shards of one size is read in the loader's order."""
+    return sorted(sized, key=lambda pair: -pair[1])
+
+
 def _span_total(spans: Iterable[Span]) -> int:
     return sum(end - start for start, end in spans)
+
+
+def _pieces(spans: Iterable[Span]) -> Iterable[Span]:
+    """``spans`` cut into pieces of at most ``_PIECE`` bytes, so that several streams share one large file."""
+    for start, end in spans:
+        for offset in range(start, end, _PIECE):
+            yield offset, min(offset + _PIECE, end)
 
 
 def _is_network(fs_type: str | None) -> bool:
@@ -195,13 +234,56 @@ def _is_network(fs_type: str | None) -> bool:
 
 @dataclass
 class _PassTally:
-    """What one pass read, under the lock its streams share."""
+    """What one pass read, under the lock its streams share; ``pending`` is the bytes the streams are reading now, which
+    the memory in use does not count yet."""
 
-    files: int = 0
+    files: set[Path] = field(default_factory=set)
     read: int = 0
     unreadable: int = 0
     out_of_room: bool = False
+    pending: int = 0
+    running: int = 0
+    #: Files a read of failed; their other pieces are not read in this pass.
+    failed: set[Path] = field(default_factory=set)
+    #: How many pieces of each file were read whole.
+    whole: dict[Path, int] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    done: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
+
+
+class _Watch:
+    """The sampled share of each watched file in the page cache, against the highest share seen since the last refill:
+    a file that lost at least ``_DROPPED_SHARE`` of itself has been dropped (by a loader, or reclaimed)."""
+
+    def __init__(self, host: Host, watched: Sequence[_Chosen]) -> None:
+        self._host = host
+        self._watched = watched
+        self._highest = {item.path: 0.0 for item in watched}
+
+    def filled(self, paths: Iterable[Path]) -> None:
+        """A pass read every page of ``paths`` that was missing: they were whole in the cache, even if a drop comes
+        before the next sample."""
+        for path in paths:
+            if path in self._highest:
+                self._highest[path] = 1.0
+
+    def dropped(self) -> int:
+        """Sample every watched file; the bytes of the files that dropped, ``0`` when less than ``_MIN_REFILL``. A drop
+        found starts the highest shares again from what is cached now, so the same drop is not found twice."""
+        shares = {item.path: self._host.cached_share(item.path, item.size) for item in self._watched}
+        lost = 0
+        for item in self._watched:
+            share = shares[item.path]
+            if share is None:
+                continue
+            highest = self._highest[item.path] = max(self._highest[item.path], share)
+            if highest - share >= _DROPPED_SHARE:
+                lost += int((highest - share) * item.size)
+        if lost < _MIN_REFILL:
+            return 0
+        for path, share in shares.items():
+            self._highest[path] = share or 0.0
+        return lost
 
 
 class WeightPrefetch:
@@ -211,6 +293,8 @@ class WeightPrefetch:
         self._model_dir = model_dir
         self._host: Host = LinuxHost()
         self._stop = threading.Event()
+        #: Ends the reads of the pass in progress: set by :meth:`stop`, and by a drop seen while the pass reads.
+        self._interrupt = threading.Event()
         self._thread: threading.Thread | None = None
         self.outcome = PrefetchOutcome(str(model_dir), streams=_STREAMS)
 
@@ -221,6 +305,7 @@ class WeightPrefetch:
     def stop(self) -> None:
         """Ask the reads to stop and wait a few seconds for them; a read still blocked is left to finish alone."""
         self._stop.set()
+        self._interrupt.set()
         self.join(_STOP_WAIT_SEC)
 
     def join(self, timeout_sec: float) -> bool:
@@ -257,25 +342,32 @@ class WeightPrefetch:
             )
 
     def _prefetch(self) -> None:
+        """The first pass over the chosen files, then, until :meth:`stop`, a look at the cache every
+        ``_POLL_INTERVAL_SEC`` and a refill pass as soon as a drop is seen, at most ``_MAX_REFILLS`` of them. A drop seen
+        while a pass reads ends that pass and starts the refill at once, from the top of the order again."""
         chosen = self._choose()
         if not chosen:
             return
-        if not self._read_pass(chosen):
-            return
-        refillable = [item for item in chosen if item.residency_known]
-        if not refillable:
+        watched = [item for item in chosen if item.residency_known]
+        watch = _Watch(self._host, watched)
+        lost = self._read_pass(chosen, watch)
+        if not watched:
             return
         refills = 0
-        while refills < _MAX_REFILLS and not self._stop.wait(_REFILL_INTERVAL_SEC):
-            uncached = sum(_span_total(self._host.uncached(item.path, item.size) or ()) for item in refillable)
-            if uncached < _MIN_REFILL:
+        while not self._stop.is_set():
+            if not lost:
+                if self._stop.wait(_POLL_INTERVAL_SEC):
+                    return
+                lost = watch.dropped()
                 continue
+            if refills >= _MAX_REFILLS:
+                log.info("weight prefetch: %.1f GiB left the page cache again; no refill is left", lost / _GIB)
+                return
             refills += 1
             log.info(
-                "weight prefetch: %.1f GiB of the chosen files left the page cache; reading them again", uncached / _GIB
+                "weight prefetch: %.1f GiB of the chosen files left the page cache; reading them again", lost / _GIB
             )
-            if not self._read_pass(refillable):
-                return
+            lost = self._read_pass(watched, watch)
 
     def _skip(self, reason: str) -> list[_Chosen]:
         self.outcome.skipped = reason
@@ -283,7 +375,8 @@ class WeightPrefetch:
         return []
 
     def _choose(self) -> list[_Chosen]:
-        """The files to read with their sizes: a prefix of the loader's order whose uncached bytes fit the headroom."""
+        """The files to read with their sizes, in :func:`prefetch_order`: each whose uncached bytes still fit the
+        headroom once the files before it are counted, a file that does not fit left out."""
         if not self._model_dir.is_dir():
             return self._skip("the model is not a local directory")
         files = checkpoint_files(self._model_dir)
@@ -302,11 +395,11 @@ class WeightPrefetch:
         total = sum(size for _, size in sized)
         chosen: list[_Chosen] = []
         wanted = 0
-        for path, size in sized:
+        for path, size in prefetch_order(sized):
             spans = self._host.uncached(path, size)
             need = size if spans is None else _span_total(spans)
             if wanted + need > budget:
-                break
+                continue
             wanted += need
             chosen.append(_Chosen(path, size, spans is not None))
         self.outcome.files, self.outcome.total_bytes = len(files), total
@@ -314,7 +407,7 @@ class WeightPrefetch:
             {"name": item.path.name, "size": item.size, "residency_known": item.residency_known} for item in chosen
         ]
         log.info(
-            "weight prefetch: %s on %s, %d files of %.1f GiB; reading %.1f GiB of the first %d (headroom %.1f GiB) "
+            "weight prefetch: %s on %s, %d files of %.1f GiB; reading %.1f GiB of %d, largest first (headroom %.1f GiB) "
             "with %d streams",
             self._model_dir,
             fs_type,
@@ -327,71 +420,102 @@ class WeightPrefetch:
         )
         return chosen
 
-    def _read_pass(self, chosen: Sequence[_Chosen]) -> bool:
-        """Read what of ``chosen`` is not cached, ``streams`` files at a time; whether the memory still had room."""
+    def _read_pass(self, chosen: Sequence[_Chosen], watch: _Watch) -> int:
+        """Read what of ``chosen`` is not cached, in pieces in that order, ``streams`` pieces at a time, looking at the
+        cache every ``_POLL_INTERVAL_SEC`` meanwhile; the bytes a drop seen meanwhile took (the pass then ends early),
+        else ``0``."""
         self.outcome.passes += 1
-        work: queue.SimpleQueue[_Chosen] = queue.SimpleQueue()
+        self._interrupt.clear()
+        if self._stop.is_set():
+            self._interrupt.set()
+        work: queue.SimpleQueue[tuple[_Chosen, Span]] = queue.SimpleQueue()
+        queued: dict[Path, int] = {}
         for item in chosen:
-            work.put(item)
-        tally = _PassTally()
+            spans = self._host.uncached(item.path, item.size)
+            queued[item.path] = 0
+            for piece in _pieces([(0, item.size)] if spans is None else spans):
+                work.put((item, piece))
+                queued[item.path] += 1
+        pieces = sum(queued.values())
+        tally = _PassTally(running=min(_STREAMS, pieces))
         started = time.monotonic()
-        streams = [
-            threading.Thread(target=self._stream, args=(work, tally), name=f"weight-prefetch-{n}", daemon=True)
-            for n in range(min(_STREAMS, len(chosen)))
-        ]
-        for stream in streams:
-            stream.start()
-        for stream in streams:
-            stream.join()
+        if not pieces:
+            tally.done.set()
+        for n in range(tally.running):
+            threading.Thread(target=self._stream, args=(work, tally), name=f"weight-prefetch-{n}", daemon=True).start()
+        lost = 0
+        try:
+            while not tally.done.wait(_POLL_INTERVAL_SEC):
+                lost = lost or watch.dropped()
+                if lost:
+                    self._interrupt.set()
+        except BaseException:
+            self._interrupt.set()  # a look at the cache that fails ends the reads with it
+            raise
         elapsed = max(time.monotonic() - started, 1e-9)
+        if not lost:  # after a drop, what was read before it is no longer whole
+            watch.filled(path for path, count in queued.items() if tally.whole.get(path, 0) == count)
         self.outcome.read_bytes += tally.read
         self.outcome.unreadable += tally.unreadable
-        self.outcome.out_of_room = tally.out_of_room
+        self.outcome.out_of_room = self.outcome.out_of_room or tally.out_of_room
         log.info(
-            "weight prefetch pass %d: read %.1f GiB from %d of %d files in %.1f s, %.0f MB/s, %d unreadable%s",
+            "weight prefetch pass %d: read %.1f GiB from %d of %d files in %.1f s, %.0f MB/s, %d unreadable%s%s",
             self.outcome.passes,
             tally.read / _GIB,
-            tally.files,
+            len(tally.files),
             len(chosen),
             elapsed,
             tally.read / elapsed / 1e6,
             tally.unreadable,
             "; stopped: the memory headroom ran out" if tally.out_of_room else "",
+            "; ended early: the page cache dropped what was read" if lost else "",
         )
-        return not tally.out_of_room
+        return lost
 
-    def _stream(self, work: queue.SimpleQueue[_Chosen], tally: _PassTally) -> None:
-        while not self._stop.is_set() and not tally.out_of_room:
-            try:
-                item = work.get_nowait()
-            except queue.Empty:
-                return
-            try:
-                self._read_file(item, tally)
-            except Exception:  # isolation boundary: one unreadable file ends no other read
-                with tally.lock:
-                    tally.unreadable += 1
-                log.warning("weight prefetch: %s not read", item.path.name, exc_info=True)
+    def _stream(self, work: queue.SimpleQueue[tuple[_Chosen, Span]], tally: _PassTally) -> None:
+        try:
+            while not self._interrupt.is_set() and not tally.out_of_room:
+                try:
+                    item, piece = work.get_nowait()
+                except queue.Empty:
+                    return
+                try:
+                    self._read_piece(item, piece, tally)
+                except Exception:  # isolation boundary: one unreadable file ends no other read
+                    with tally.lock:
+                        first = item.path not in tally.failed
+                        tally.failed.add(item.path)
+                        tally.unreadable += first
+                    if first:
+                        log.warning("weight prefetch: %s not read", item.path.name, exc_info=True)
+        finally:
+            with tally.lock:
+                tally.running -= 1
+                if tally.running <= 0:
+                    tally.done.set()
 
-    def _read_file(self, item: _Chosen, tally: _PassTally) -> None:
-        spans = self._host.uncached(item.path, item.size)
-        if spans is None:
-            spans = [(0, item.size)] if item.size > 0 else []
-        need = _span_total(spans)
-        if not need:
-            return
+    def _read_piece(self, item: _Chosen, piece: Span, tally: _PassTally) -> None:
+        """Read one piece if the live headroom, less what the other streams are reading now, still holds it."""
+        need = piece[1] - piece[0]
         memory = self._host.memory()
-        if memory is None or need > memory.headroom():
-            tally.out_of_room = True
-            return
-        read = 0
-        for span in spans:
-            if self._stop.is_set():
-                break
-            read += self._host.read(item.path, span, self._stop)
         with tally.lock:
-            tally.files += 1
-            tally.read += read
+            if item.path in tally.failed:
+                return
+            if memory is None or need > memory.headroom() - tally.pending:
+                tally.out_of_room = True
+                return
+            tally.pending += need
+        read = 0
+        try:
+            read = self._host.read(item.path, piece, self._interrupt)
+        finally:
+            with tally.lock:
+                tally.pending -= need
+                tally.read += read
+                if read:
+                    tally.files.add(item.path)
+                if read == need:
+                    tally.whole[item.path] = tally.whole.get(item.path, 0) + 1
 
 
 def start_weight_prefetch(model_path: str, environ: Mapping[str, str]) -> WeightPrefetch | None:
@@ -572,6 +696,27 @@ class LinuxHost:
                 length = min(_RESIDENCY_WINDOW, size - offset)
                 spans.extend(_uncached_runs(self._libc.residency(fd, offset, length), offset, offset + length))
             return _merge(spans)
+        finally:
+            os.close(fd)
+
+    def cached_share(self, path: Path, size: int) -> float | None:
+        pages = -(-size // mmap.PAGESIZE)
+        if pages <= 0:
+            return 1.0
+        if self._libc is None:
+            self._libc = _Libc()
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            if not _residency_visible(path, os.fstat(fd).st_uid):
+                return None
+            seen = resident = 0
+            for first in sorted({n * pages // _SAMPLES for n in range(min(_SAMPLES, pages))}):
+                count = min(_SAMPLE_PAGES, pages - first)
+                length = min(count * mmap.PAGESIZE, size - first * mmap.PAGESIZE)
+                flags = self._libc.residency(fd, first * mmap.PAGESIZE, length)
+                seen += len(flags)
+                resident += sum(flags.translate(_RESIDENT_BIT))
+            return resident / seen
         finally:
             os.close(fd)
 
