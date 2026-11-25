@@ -36,7 +36,9 @@ from hyperloom.orchestrator.actions.executors.candidate_builds import TreeBuild,
 
 _MMVQ = "int f() {\n    if (table_id == MMVQ_PARAMETERS_RDNA3_0) {\n        return 1;\n    }\n}\n"
 _HEADER = (
-    "enum ggml_type { GGML_TYPE_F32 = 0, GGML_TYPE_Q8_0 = 8, };\nenum ggml_op { GGML_OP_NONE, GGML_OP_MUL_MAT, };\n"
+    "enum ggml_type { GGML_TYPE_F32 = 0, GGML_TYPE_Q8_0 = 8, GGML_TYPE_Q4_K = 12, GGML_TYPE_Q5_K = 13, "
+    "GGML_TYPE_Q6_K = 14, GGML_TYPE_IQ4_NL = 20, GGML_TYPE_IQ4_XS = 22, };\n"
+    "enum ggml_op { GGML_OP_NONE, GGML_OP_MUL_MAT, };\n"
 )
 _PARAMS = {
     "knob": "mmvq_nwarps_rdna3",
@@ -248,6 +250,33 @@ async def test_a_specialist_reads_the_sweep_s_document_from_the_toolbox_and_anot
     assert "+        if (type == GGML_TYPE_Q8_0 && ncols_dst == 1) { return 2; }" in document["result"]["patch"]
     assert len(document["result"]["table"]) == 4 and document["result"]["noise"]
     assert other["error"]["message"] == "a specialist reads the jobs of its own branch only"
+
+
+async def test_the_largest_sweep_a_toolbox_takes_is_read_whole_and_a_larger_one_is_refused_when_asked(
+    tmp_path: Path, envs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    types = ["Q4_K", "Q5_K", "Q6_K", "IQ4_NL", "IQ4_XS"]
+    largest = {"knob": _PARAMS["knob"], "axes": {"type": types}, "shapes": [[5120, 17408]] * 16}
+    monkeypatch.setattr(
+        knob_tune,
+        "time_cases",
+        lambda exe, cases, names, env, timeout: dict.fromkeys(
+            names, 54321.67 if exe.parent.name == "bin-2" else 98765.43
+        ),
+    )
+    tool = knob_tune.KnobTuneTool(_Leases(), {"llamacpp": _Builds(tmp_path / "builds")})
+
+    with pytest.raises(
+        InvalidRequest, match=r"384 table rows, over the 160 .* fewer of axes.type, axes.ncols or values"
+    ):
+        knob_tune.check_params({"knob": _PARAMS["knob"], "shapes": [[64, 128]]})
+    async with contextlib.asynccontextmanager(_stack)(tmp_path, analyses={tool.name: tool}) as stack:
+        job = json.loads(_text(await stack.start(tool=tool.name, params=largest)))["job_id"]
+        await stack.jobs.wait(job)
+        document = json.loads(_text(await asyncio.to_thread(stack.call, "b1", "analysis_result", job_id=job)))
+
+    assert len(document["result"]["table"]) == knob_tune.MAX_ROWS == 5 * 8 * 4
+    assert len(document["result"]["winners"]) == 5 * 8
 
 
 @pytest.mark.parametrize(
