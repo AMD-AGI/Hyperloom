@@ -58,8 +58,8 @@ class NativeSite:
     """What every build of a session shares: where the outputs run (``machine``), the recipe of each component that can
     be built, the directory of upstream checkouts (``<sources>/<component>/<upstream_ref>``), the image's directory
     of installed packages (``site-packages``), which outputs equal to the image's are left out against, the
-    upstream commit of each component the session builds from as it is (``commits``), and the CPUs every compile is
-    pinned to (``build_cpus``, ``""`` for any: :func:`~hyperloom.measure.runner.native.isolated.build_cpus`)."""
+    upstream commit of each component the session builds from as it is (``commits``), and the CPUs a pinned checkout's
+    compile is pinned to (``build_cpus``, ``""`` for any: :func:`~hyperloom.measure.runner.native.isolated.build_cpus`)."""
 
     machine: BuildMachine
     recipes: Mapping[str, NativeRecipe]
