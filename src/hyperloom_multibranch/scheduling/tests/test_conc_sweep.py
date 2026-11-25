@@ -208,6 +208,7 @@ def test_a_stop_signal_takes_the_tests_back_and_keeps_what_landed(tmp_path: Path
 
     assert (payload["status"], payload["cancel_reason"]) == ("cancelled", "signal 15")
     assert tests.withdrawn == ["signal 15"]
+    assert len(tests.requests) == 2, "a test still queued for a slot is not submitted once the stop came"
     measured = [p["conc"] for arm in ("baseline", "optimized") for p in _summary(layout)[arm]["points"]]
     assert measured == [WORKLOAD.conc]
 

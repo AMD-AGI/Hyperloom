@@ -618,6 +618,8 @@ class ConcSweep:
 
     async def _test(self, arm: str, commit: str, concs: tuple[int, ...], slots: asyncio.Semaphore) -> None:
         async with slots:
+            if self.cancel_reason:
+                return
             if self.deadline_unix is not None and time.time() + self.per_point_sec * len(concs) > self.deadline_unix:
                 self._record([{"arm": arm, "conc": conc, "status": SKIPPED_BUDGET} for conc in concs])
                 logger.warning("conc_sweep: arm=%s concs %s skipped: they would end past the deadline", arm, concs)
