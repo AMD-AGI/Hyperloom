@@ -91,9 +91,15 @@ def _summary(session_dir: Path) -> dict[str, Any]:
 
 
 def test_an_inferencex_base_sweeps_its_arm_with_the_session_conc():
-    swept = points.sweep_points(_base(SourceKind.INFERENCEX, (4, 8, 32)), 16, [2, 4])
+    swept = points.sweep_points(_base(SourceKind.INFERENCEX, (4, 8, 32)), 16, [])
 
     assert swept == points.SweepPoints((4, 8, 16, 32), points.SOURCE_INFERENCEX)
+
+
+def test_the_operators_points_replace_the_recipes():
+    swept = points.sweep_points(_base(SourceKind.INFERENCEX, (4, 8, 32)), 16, [2, 64])
+
+    assert swept == points.SweepPoints((2, 16, 64), points.SOURCE_OPERATOR)
 
 
 def test_a_base_no_inferencex_arm_gave_sweeps_the_operators_points_or_none():
@@ -283,3 +289,35 @@ def test_the_sweep_keeps_the_points_the_widest_arm_serves(session_dir: Path, gri
 
     assert payload["concs"] == [2, 4]
     assert sorted({int(call["name"].rsplit("conc", 1)[1]) for call in grid.calls}) == [2, 4]
+
+
+def test_a_point_that_would_end_past_the_deadline_is_skipped_and_not_started(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    """Each point is priced at the session's baseline round (600 s); a deadline 1500 s out fits two points."""
+    _state(session_dir)
+    clock = [1000.0]
+    monkeypatch.setattr(runner.time, "time", lambda: clock[0])
+    measure = runner.run_grid
+
+    async def run_grid(**kwargs: Any) -> list[VariantResult]:
+        clock[0] += 600.0
+        return await measure(**kwargs)
+
+    monkeypatch.setattr(runner, "run_grid", run_grid)
+
+    payload = asyncio.run(runner.run_conc_sweep(session_dir, deadline_unix=2500.0))
+
+    assert [call["name"] for call in grid.calls] == ["baseline_conc16", "baseline_conc4"]
+    statuses = {arm: {p["conc"]: p["status"] for p in payload[arm]["points"]} for arm in ("baseline", "optimized")}
+    assert statuses["baseline"] == {4: "succeeded", 8: "skipped_budget", 16: "succeeded", 32: "skipped_budget"}
+    assert set(statuses["optimized"].values()) == {"skipped_budget"}
+
+
+def test_the_operators_points_are_swept_in_place_of_the_recipes(session_dir: Path, grid: SimpleNamespace):
+    _state(session_dir)
+
+    payload = asyncio.run(runner.run_conc_sweep(session_dir, concs=(2,)))
+
+    assert (payload["concs"], payload["concs_source"]) == ([2, 16], points.SOURCE_OPERATOR)
+    assert [call["name"] for call in grid.calls][:2] == ["baseline_conc16", "baseline_conc2"]

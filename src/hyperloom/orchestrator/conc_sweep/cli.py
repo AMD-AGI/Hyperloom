@@ -17,13 +17,13 @@ import logging
 import os
 import signal
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.breakdown import package_session_artifacts
-from hyperloom.inference_optimizer.cli.bootstrap import hosted_grant_end_unix
+from hyperloom.common.concurrencies import parse_concurrencies
 from hyperloom.inference_optimizer.session.lock import SessionAlreadyRunning, SessionLock
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
@@ -50,16 +50,30 @@ def _cancelled_by_signals(scope: CancelScope) -> Iterator[None]:
             signal.signal(signum, handler if handler is not None else signal.SIG_DFL)
 
 
-async def sweep_session(session_dir: Path) -> dict[str, Any]:
-    """Run the sweep of the session in ``session_dir`` under its lock, warned at a hosted run's grant end, then package
-    the session so the package carries the report; raises ``SessionAlreadyRunning``."""
+async def sweep_session(
+    session_dir: Path, *, concs: Sequence[int] = (), deadline_unix: float | None = None
+) -> dict[str, Any]:
+    """Run the sweep of the session in ``session_dir`` under its lock, over ``concs`` when given, starting no point that
+    would end past ``deadline_unix``, then package the session so the package carries the report; raises
+    ``SessionAlreadyRunning``."""
     session_dir = session_dir.resolve()
     os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
     scope = CancelScope()
     with SessionLock(session_dir), use_cancel_scope(scope), _cancelled_by_signals(scope):
-        payload = await run_conc_sweep(session_dir, grant_end_unix=hosted_grant_end_unix())
+        payload = await run_conc_sweep(session_dir, concs=concs, deadline_unix=deadline_unix)
     _package(session_dir)
     return payload
+
+
+def sweep_and_report(session_dir: Path, *, concs: Sequence[int] = (), deadline_unix: float | None = None) -> int:
+    """:func:`sweep_session` as a command: print how it ended and return the exit code, 0 once the sweep settled."""
+    try:
+        payload = asyncio.run(sweep_session(session_dir, concs=concs, deadline_unix=deadline_unix))
+    except SessionAlreadyRunning as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print(f"conc-sweep: {payload['status']} {payload.get('skip_reason', '')}".rstrip())
+    return 0 if payload["status"] in SETTLED else 1
 
 
 def _package(session_dir: Path) -> None:
@@ -79,15 +93,16 @@ def main(argv: list[str] | None = None) -> int:
         description="Sweep a finished session's baseline and optimized launch over its recipe's concurrencies.",
     )
     parser.add_argument("session_dir", type=Path, help="The session directory of a finished optimize run.")
+    parser.add_argument(
+        "--conc-sweep-concs",
+        dest="concs",
+        type=parse_concurrencies,
+        default=(),
+        help="Comma-separated concurrencies to sweep, in place of the recipe's; the session's CONC is always among them.",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    try:
-        payload = asyncio.run(sweep_session(args.session_dir))
-    except SessionAlreadyRunning as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
-    print(f"conc-sweep: {payload['status']} {payload.get('skip_reason', '')}".rstrip())
-    return 0 if payload["status"] in SETTLED else 1
+    return sweep_and_report(args.session_dir, concs=args.concs)
 
 
-__all__ = ["main", "sweep_session"]
+__all__ = ["main", "sweep_and_report", "sweep_session"]

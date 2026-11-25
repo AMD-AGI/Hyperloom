@@ -3,11 +3,12 @@
 
 """The concurrency sweep of a finished session: its baseline and its optimized launch over the recipe's concurrencies.
 
-The points are the concurrencies the InferenceX arm of the session's base publishes, or the operator's
-``--conc-sweep-concs`` for a base no InferenceX arm gave, with the session's own CONC among them. Each arm runs its
+The points are the operator's ``--conc-sweep-concs``, else the concurrencies the InferenceX arm of the session's base
+publishes, with the session's own CONC among them. Each arm runs its
 points serially, the session's CONC first and then low to high; an arm keeps one server across its points unless the
 workload is an AgentX replay, whose points each boot their own (``BenchmarkPoint.sweeps_on_cold_servers``). The report
-is rewritten after every point, and a later run measures only the points not yet measured.
+is rewritten after every point, and a later run measures only the points not yet measured. Given a deadline, a point
+that would end past it is not started and reads ``skipped_budget``.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import logging
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.model_paths import resolve_session_model_path
@@ -58,6 +59,7 @@ from .report import ArmCurves, build_roofline_ceiling, point_from_variant, publi
 log = logging.getLogger(__name__)
 
 _SUCCEEDED = "succeeded"
+SKIPPED_BUDGET = "skipped_budget"
 
 
 @dataclass(frozen=True)
@@ -169,7 +171,9 @@ class _Sweep:
     setup: _Setup
     points: SweepPoints
     optimized: Arm
-    estimated_sec: float
+    per_point_sec: float
+    deadline_unix: float | None
+    estimated_sec: float = 0.0
     started_at: float = field(default_factory=time.time)
     measured: dict[str, dict[int, dict[str, Any]]] = field(default_factory=lambda: {"baseline": {}, "optimized": {}})
     cancel_reason: str = ""
@@ -182,6 +186,16 @@ class _Sweep:
         done = self.measured[arm.name]
         order = ladder(self.points.concs, self.state.conc)
         return [conc for conc in order if done.get(conc, {}).get("status") != _SUCCEEDED]
+
+    def out_of_time(self) -> bool:
+        """Whether a point started now would end past the deadline."""
+        return self.deadline_unix is not None and time.time() + self.per_point_sec > self.deadline_unix
+
+    def skip_for_budget(self, arm: Arm, concs: Sequence[int]) -> None:
+        for conc in concs:
+            self.measured[arm.name][conc] = {"arm": arm.name, "conc": conc, "status": SKIPPED_BUDGET}
+        write_report(self.payload(), reports_dir(self.session_dir))
+        log.warning("conc_sweep: arm=%s concs %s skipped: they would end past the deadline", arm.name, list(concs))
 
     def observe_cancel(self, result: VariantResult | None = None) -> bool:
         """Latch a cancel of the sweep's scope, or of a round it reaped; return whether the sweep is cancelled."""
@@ -307,7 +321,7 @@ def _resume(sweep: _Sweep) -> None:
                 sweep.measured[arm.name][point["conc"]] = point
 
 
-def _log_plan(sweep: _Sweep, per_point_sec: float, grant_end_unix: float | None) -> None:
+def _log_plan(sweep: _Sweep) -> None:
     rungs = sum(len(sweep.pending(arm)) for arm in sweep.arms)
     log.info(
         "conc_sweep: plan source=%s concs=%s arms=baseline,optimized serial pending_points=%d "
@@ -316,14 +330,14 @@ def _log_plan(sweep: _Sweep, per_point_sec: float, grant_end_unix: float | None)
         list(sweep.points.concs),
         rungs,
         sweep.estimated_sec / 3600.0,
-        per_point_sec,
+        sweep.per_point_sec,
     )
-    if grant_end_unix is None:
+    if sweep.deadline_unix is None:
         return
-    left = grant_end_unix - time.time()
-    log.info("conc_sweep: the run's grant has %.1fh left", left / 3600.0)
+    left = sweep.deadline_unix - time.time()
+    log.info("conc_sweep: the sweep must end within %.1fh", left / 3600.0)
     if sweep.estimated_sec > left:
-        log.warning("conc_sweep: the estimate outlasts the run's grant; the platform may end the sweep early")
+        log.warning("conc_sweep: the estimate outlasts the deadline; the points that would end past it are skipped")
 
 
 async def _run_rung(sweep: _Sweep, arm: Arm, conc: int, launch: GridLaunch) -> VariantResult:
@@ -361,6 +375,9 @@ async def _run_arm(sweep: _Sweep, arm: Arm) -> None:
         for idx, conc in enumerate(concs):
             if sweep.observe_cancel():
                 return
+            if sweep.out_of_time():
+                sweep.skip_for_budget(arm, concs[idx:])
+                return
             if not held:
                 launch = GridLaunch()
             else:
@@ -382,8 +399,11 @@ async def _run_arm(sweep: _Sweep, arm: Arm) -> None:
             log.error("conc_sweep: arm=%s pids %s outlived SIGKILL; %s keeps them", arm.name, survivors, pid_dir)
 
 
-async def run_conc_sweep(session_dir: Path, *, grant_end_unix: float | None = None) -> dict[str, Any]:
-    """Sweep the finished session in ``session_dir`` and return the report it wrote to ``reports/``."""
+async def run_conc_sweep(
+    session_dir: Path, *, concs: Sequence[int] = (), deadline_unix: float | None = None
+) -> dict[str, Any]:
+    """Sweep the finished session in ``session_dir`` over ``concs`` when given, starting no point that would end past
+    ``deadline_unix``, and return the report it wrote to ``reports/``."""
     state = SharedState.load_or_init(session_dir)
     reason = decline_reason(state)
     if reason is not None:
@@ -394,7 +414,7 @@ async def run_conc_sweep(session_dir: Path, *, grant_end_unix: float | None = No
     if optimized.overlay and not (is_safe_path_entry(optimized.overlay) and overlay_is_loadable(optimized.overlay)):
         return _skipped(state, session_dir, "optimized_overlay_unavailable")
     frozen = frozen_base(session_dir)
-    points = sweep_points(None if frozen is None else frozen.launch, state.conc, state.conc_sweep_concs)
+    points = sweep_points(None if frozen is None else frozen.launch, state.conc, concs or state.conc_sweep_concs)
     if points is None:
         return _skipped(state, session_dir, "no_sweep_points")
     slots = _server_slots(state, optimized)
@@ -404,11 +424,10 @@ async def run_conc_sweep(session_dir: Path, *, grant_end_unix: float | None = No
     setup = _prepare(state, session_dir)
     if isinstance(setup, str):
         return _skipped(state, session_dir, setup)
-    per_point_sec = state.baseline_runtime_sec
-    sweep = _Sweep(state, session_dir, setup, points, optimized, estimated_sec=0.0)
+    sweep = _Sweep(state, session_dir, setup, points, optimized, state.baseline_runtime_sec, deadline_unix)
     _resume(sweep)
-    sweep.estimated_sec = per_point_sec * sum(len(sweep.pending(arm)) for arm in sweep.arms)
-    _log_plan(sweep, per_point_sec, grant_end_unix)
+    sweep.estimated_sec = sweep.per_point_sec * sum(len(sweep.pending(arm)) for arm in sweep.arms)
+    _log_plan(sweep)
     for arm in sweep.arms:
         if sweep.observe_cancel():
             break
@@ -435,4 +454,4 @@ async def run_conc_sweep(session_dir: Path, *, grant_end_unix: float | None = No
     return payload
 
 
-__all__ = ["BASELINE", "Arm", "decline_reason", "optimized_arm", "run_conc_sweep"]
+__all__ = ["BASELINE", "SKIPPED_BUDGET", "Arm", "decline_reason", "optimized_arm", "run_conc_sweep"]

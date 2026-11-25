@@ -294,6 +294,13 @@ async def _run_session(
     return outcome.exit_code
 
 
+def _with_sweep_options(settings: RunSettings, args: argparse.Namespace) -> RunSettings:
+    """The closed session's settings with the conc-sweep options ``conc-sweep`` was given in place of its own."""
+
+    given = {"conc_sweep_concs": args.conc_sweep_concs, "conc_sweep_parallel": args.conc_sweep_parallel}
+    return replace(settings, **{name: value for name, value in given.items() if value is not None})
+
+
 def _sweeps_after(settings: RunSettings, outcome: SessionOutcome) -> bool:
     """Whether the session's conc sweep runs once it closed: asked for, and the session was not stopped by a signal."""
 
@@ -305,7 +312,7 @@ async def sweep_closed(
     settings: RunSettings,
     peer_factory: PeerFactory,
     services: SessionServices,
-    grant_end_unix: float | None = None,
+    deadline_unix: float | None = None,
 ) -> dict[str, Any]:
     """The concurrency sweep of the closed session in ``layout``, on a session built over it whose tests may run as
     long as its plan's points need; returns the report it wrote."""
@@ -316,7 +323,7 @@ async def sweep_closed(
     clock = Clock()
     host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
     session = Session(settings, peer_factory, host, services, test_points=plan.test_points(settings.workload))
-    return await session.conc_sweep(plan, grant_end_unix)
+    return await session.conc_sweep(plan, deadline_unix)
 
 
 def conc_sweep(
@@ -324,7 +331,7 @@ def conc_sweep(
     settings: RunSettings,
     peer_factory: PeerFactory,
     services: SessionServices,
-    grant_end_unix: float | None = None,
+    deadline_unix: float | None = None,
 ) -> int:
     """``conc-sweep SESSION_DIR``: :func:`sweep_closed` under the session's lock file; 0 once the sweep settled."""
 
@@ -332,7 +339,7 @@ def conc_sweep(
         if not held:
             return EXIT_USAGE
         with adopting_orphans():
-            payload = asyncio.run(sweep_closed(layout, settings, peer_factory, services, grant_end_unix))
+            payload = asyncio.run(sweep_closed(layout, settings, peer_factory, services, deadline_unix))
     print(f"{PROG}: conc sweep {payload['status']} {payload.get('skip_reason', '')}".rstrip(), flush=True)
     return 0 if payload["status"] in SETTLED else EXIT_FAILED
 
@@ -374,7 +381,7 @@ def _over_session(
     peer_factory: PeerFactory,
     services: SessionServices,
     leg: SessionLeg,
-    grant_end_unix: float | None = None,
+    deadline_unix: float | None = None,
 ) -> int:
     """Run ``leg`` over the session directory ``persisted`` was read from, holding the session's lock file while it
     works; a second run over the same directory is refused rather than left to write over the first one's report."""
@@ -383,7 +390,7 @@ def _over_session(
         if not held:
             return EXIT_USAGE
         with adopting_orphans():
-            return asyncio.run(_run_leg(persisted, peer_factory, services, leg, grant_end_unix))
+            return asyncio.run(_run_leg(persisted, peer_factory, services, leg, deadline_unix))
 
 
 @contextlib.contextmanager
@@ -410,7 +417,7 @@ async def _run_leg(
     peer_factory: PeerFactory,
     services: SessionServices,
     leg: SessionLeg,
-    grant_end_unix: float | None = None,
+    deadline_unix: float | None = None,
 ) -> int:
     clock = Clock()
     layout = persisted.layout
@@ -422,7 +429,7 @@ async def _run_leg(
         session = Session(persisted.settings, peer_factory, host, services)
         outcome = await leg(session, persisted.ended)
         if _sweeps_after(persisted.settings, outcome):
-            await sweep_closed(layout, persisted.settings, peer_factory, services, grant_end_unix)
+            await sweep_closed(layout, persisted.settings, peer_factory, services, deadline_unix)
         return outcome.exit_code
     finally:
         logging.getLogger().removeHandler(handler)
@@ -515,7 +522,7 @@ def _hosted_start(host: HostInfo) -> HostedStart:
         settings = read_manifest(earlier.sweep.manifest).settings
         ready = hosted_ready_session(host, settings.workload, local=spec.measurement == MEASUREMENT_LOCAL)
         sweep = partial(conc_sweep, earlier.sweep, settings, ready.peer_factory, ready.services)
-        return HostedStart(partial(sweep, grant_end_unix=grant_tests_end_by(host)))
+        return HostedStart(partial(sweep, deadline_unix=grant_tests_end_by(host)))
     persisted = earlier.finish
     if (taken := persisted or earlier.left) is not None:
         share_with_the_group(taken.layout.root)
@@ -619,7 +626,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == CONC_SWEEP_COMMAND:
             swept = SessionLayout(args.session_dir)
-            settings = read_manifest(swept.manifest).settings
+            settings = _with_sweep_options(read_manifest(swept.manifest).settings, args)
         elif args.command == FINAL_ONLY_COMMAND:
             persisted = persisted_run(args.session_dir)
             settings = persisted.settings

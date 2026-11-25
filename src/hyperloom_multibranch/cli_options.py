@@ -15,6 +15,7 @@ from pathlib import Path
 from hyperloom.common.perf_metric import DATASET_PATH_ENV
 from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.workload_defaults import DEFAULT_EP
+from hyperloom.common.concurrencies import parse_concurrencies
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
@@ -26,6 +27,7 @@ from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import (
     AGENT_PORT,
     DEFAULT_AGENTX_OBJECTIVE,
+    DEFAULT_CONC_SWEEP_PARALLEL,
     DOSSIER_MINUTES,
     MAX_BOOT_BUDGET_SEC,
     SHARE_MINUTES,
@@ -91,6 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     conc_sweep.add_argument("session_dir", type=Path, help="The session directory of a closed run.")
+    _add_conc_sweep_options(conc_sweep, concs=None, parallel=None)
     _add_verbose_option(conc_sweep)
     hosted = commands.add_parser(HOSTED_COMMAND, help="Run under a host that injects the campaign spec and its inputs.")
     hosted_commands = hosted.add_subparsers(dest="hosted_command", required=True)
@@ -259,13 +262,7 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         default=True,
         help="After CLOSE, sweep the root and the commit FINAL chose over the base's InferenceX recipe concurrencies.",
     )
-    run.add_argument(
-        "--conc-sweep-concs",
-        type=_concurrencies,
-        default=(),
-        metavar="C1,C2,...",
-        help="The conc sweep's concurrencies for a base no InferenceX recipe gave; ignored for one that did.",
-    )
+    _add_conc_sweep_options(run, concs=(), parallel=DEFAULT_CONC_SWEEP_PARALLEL)
     run.add_argument(
         "--measurement",
         choices=(LOCAL_MEASUREMENT, HOSTED_MEASUREMENT),
@@ -704,15 +701,38 @@ def settings_from(
         agentx_early_stop=session_early_stop(os.environ),
         conc_sweep=args.enable_conc_sweep,
         conc_sweep_concs=args.conc_sweep_concs,
+        conc_sweep_parallel=args.conc_sweep_parallel,
     )
 
 
-def _concurrencies(value: str) -> tuple[int, ...]:
-    """``C1,C2,...`` as the distinct concurrencies it names, ascending; each must be positive."""
-    concs = tuple(sorted({int(item) for item in value.split(",")}))
-    if concs[0] < 1:
-        raise argparse.ArgumentTypeError(f"concurrencies must be positive, got {value}")
-    return concs
+def _add_conc_sweep_options(
+    parser: argparse.ArgumentParser, *, concs: tuple[int, ...] | None, parallel: int | None
+) -> None:
+    """The sweep's points and how many of its tests run at once, defaulting to ``concs`` and ``parallel``; ``None``
+    keeps what the session ran with."""
+    parser.add_argument(
+        "--conc-sweep-concs",
+        type=parse_concurrencies,
+        default=concs,
+        metavar="C1,C2,...",
+        help="The conc sweep's concurrencies, in place of those the base's InferenceX recipe publishes; needed for a"
+        " base no recipe gave. The session's CONC is always among them.",
+    )
+    parser.add_argument(
+        "--conc-sweep-parallel",
+        type=_positive_int,
+        default=parallel,
+        metavar="N",
+        help=f"The conc sweep's tests running at once, within --max-parallel-tests; {DEFAULT_CONC_SWEEP_PARALLEL} runs"
+        " the baseline and the optimized point of a concurrency side by side, 1 runs one test at a time.",
+    )
+
+
+def _positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value}")
+    return number
 
 
 def _limit_errors(args: argparse.Namespace) -> list[str]:

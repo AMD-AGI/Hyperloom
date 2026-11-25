@@ -451,6 +451,7 @@ class FinalSelector:
 BASELINE, OPTIMIZED = "baseline", "optimized"
 NO_OPTIMIZATION = "no_optimization"
 NO_SWEEP_POINTS = "no_sweep_points"
+SKIPPED_BUDGET = "skipped_budget"
 _SUCCEEDED = "succeeded"
 
 
@@ -551,6 +552,7 @@ class ConcSweep:
     tests: SessionTests
     parallel: int
     per_point_sec: float
+    deadline_unix: float | None = None
     estimated_sec: float = 0.0
     started_at: float = field(default_factory=time.time)
     measured: dict[str, dict[int, dict[str, Any]]] = field(default_factory=lambda: {BASELINE: {}, OPTIMIZED: {}})
@@ -561,13 +563,16 @@ class ConcSweep:
         order = ladder(self.plan.points.concs, self.workload.conc)
         return [conc for conc in order if done.get(conc, {}).get("status") != _SUCCEEDED]
 
-    async def run(self, stop: Awaitable[int], grant_end_unix: float | None = None) -> dict[str, Any]:
-        """Run both arms until they end or ``stop`` returns a signal, which takes their tests back."""
+    async def run(self, stop: Awaitable[int]) -> dict[str, Any]:
+        """Run both arms' tests, ``parallel`` at a time, until they end or ``stop`` returns a signal, which takes their
+        tests back."""
         self._resume()
-        per_arm = [self.per_point_sec * len(self.pending(arm)) for arm in (BASELINE, OPTIMIZED)]
-        self.estimated_sec = max(per_arm) if self.parallel > 1 else sum(per_arm)
-        self._log_plan(grant_end_unix)
-        arms = asyncio.gather(self._arm(BASELINE, self.root), self._arm(OPTIMIZED, self.plan.chosen))
+        tests = self._tests()
+        points = sum(len(concs) for _, _, concs in tests)
+        self.estimated_sec = self.per_point_sec * points / max(1, min(self.parallel, len(tests)))
+        self._log_plan()
+        slots = asyncio.Semaphore(self.parallel)
+        arms = asyncio.gather(*(self._test(arm, commit, concs, slots) for arm, commit, concs in tests))
         stopped = asyncio.ensure_future(stop)
         await asyncio.wait({arms, stopped}, return_when=asyncio.FIRST_COMPLETED)
         if stopped.done():
@@ -592,10 +597,22 @@ class ConcSweep:
         )
         return payload
 
-    async def _arm(self, arm: str, commit: str) -> None:
-        pending = self.pending(arm)
-        groups = [(conc,) for conc in pending] if self.workload.inferencex is None else [tuple(sorted(pending))]
-        for concs in (group for group in groups if group):
+    def _tests(self) -> list[tuple[str, str, tuple[int, ...]]]:
+        """The tests left to run as ``(arm, commit, concs)``: one per AgentX point, the two arms' interleaved in ladder
+        order so a concurrency's pair runs together; one per arm for an InferenceX workload, which sweeps every point
+        on one server."""
+        arms = ((BASELINE, self.root), (OPTIMIZED, self.plan.chosen))
+        if self.workload.inferencex is not None:
+            return [(arm, commit, tuple(sorted(self.pending(arm)))) for arm, commit in arms if self.pending(arm)]
+        order = ladder(self.plan.points.concs, self.workload.conc)
+        return [(arm, commit, (conc,)) for conc in order for arm, commit in arms if conc in self.pending(arm)]
+
+    async def _test(self, arm: str, commit: str, concs: tuple[int, ...], slots: asyncio.Semaphore) -> None:
+        async with slots:
+            if self.deadline_unix is not None and time.time() + self.per_point_sec * len(concs) > self.deadline_unix:
+                self._record([{"arm": arm, "conc": conc, "status": SKIPPED_BUDGET} for conc in concs])
+                logger.warning("conc_sweep: arm=%s concs %s skipped: they would end past the deadline", arm, concs)
+                return
             request = integration_test_request(TestKind.SWEEP, Purpose.HEALTH, commit, concurrency=concs)
             try:
                 result = await self.tests.result(request)
@@ -624,23 +641,25 @@ class ConcSweep:
                 if point["status"] == _SUCCEEDED:
                     self.measured[arm][point["conc"]] = point
 
-    def _log_plan(self, grant_end_unix: float | None) -> None:
+    def _log_plan(self) -> None:
         logger.info(
-            "conc_sweep: plan source=%s concs=%s arms=baseline,optimized %s pending_points=%d estimated=%.1fh "
-            "(each point priced as the session's longest root test of %.0fs)",
+            "conc_sweep: plan source=%s concs=%s arms=baseline,optimized tests_at_once=%d pending_points=%d "
+            "estimated=%.1fh (each point priced as the session's longest root test of %.0fs)",
             self.plan.points.source,
             list(self.plan.points.concs),
-            "side by side" if self.parallel > 1 else "one after the other",
+            self.parallel,
             len(self.pending(BASELINE)) + len(self.pending(OPTIMIZED)),
             self.estimated_sec / 3600.0,
             self.per_point_sec,
         )
-        if grant_end_unix is None:
+        if self.deadline_unix is None:
             return
-        left = grant_end_unix - time.time()
-        logger.info("conc_sweep: the run's grant has %.1fh left", left / 3600.0)
+        left = self.deadline_unix - time.time()
+        logger.info("conc_sweep: the sweep must end within %.1fh", left / 3600.0)
         if self.estimated_sec > left:
-            logger.warning("conc_sweep: the estimate outlasts the run's grant; the platform may end the sweep early")
+            logger.warning(
+                "conc_sweep: the estimate outlasts the deadline; the points that would end past it are skipped"
+            )
 
     def payload(self, *, final: bool = False) -> dict[str, Any]:
         sections = {
@@ -681,6 +700,7 @@ __all__ = [
     "NO_OPTIMIZATION",
     "NO_SWEEP_POINTS",
     "OPTIMIZED",
+    "SKIPPED_BUDGET",
     "PRIMARY_POINT_ONLY",
     "REPRODUCTION_POINT_ONLY",
     "CandidateCheck",

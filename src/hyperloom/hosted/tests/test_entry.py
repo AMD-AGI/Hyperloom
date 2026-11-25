@@ -215,13 +215,15 @@ def test_a_restart_over_a_closed_session_whose_sweep_did_not_finish_sweeps_it_an
     entry.main(["run"])
     session = Path(_session_json(run))
     (session / "state.json").write_text(json.dumps(closed))
-    swept: list[list[str]] = []
-    monkeypatch.setattr(sweep_cli, "main", lambda argv: swept.append(argv) or 0)
+    swept: list[tuple[Path, float | None]] = []
+    monkeypatch.setattr(sweep_cli, "sweep_and_report", lambda path, **kw: swept.append((path, kw["deadline_unix"])) or 0)
     run.restart()
+    monkeypatch.setenv(Var.GRANT_LIMITS, json.dumps({"max_gpus": 8, "max_runtime_sec": 7200}))
 
     assert entry.main(["run"]) == 0
 
-    assert swept == [[str(session)]] and len(fake.calls) == 1
+    grant_end = datetime(2026, 10, 23, 8, 30, 5, tzinfo=timezone.utc).timestamp() + 7200
+    assert swept == [(session, grant_end)] and len(fake.calls) == 1
     assert _exit(run) == {"final": True, "returncode": 0, "stop_reason": "cycle_end_done"}
 
 

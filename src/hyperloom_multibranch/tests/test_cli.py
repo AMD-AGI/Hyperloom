@@ -1455,7 +1455,7 @@ def test_a_final_only_holds_the_session_against_a_second_one_and_releases_it(
     persisted = persisted_run(layout.root)
 
     async def while_it_runs(
-        run: PersistedRun, peer_factory: object, services: object, leg: object, grant_end_unix: float | None
+        run: PersistedRun, peer_factory: object, services: object, leg: object, deadline_unix: float | None
     ) -> int:
         assert layout.final_only_lock.read_text(encoding="utf-8") == f"{os.getpid()}\n"
         assert cli.final_only(run, peer_factory, services) == cli.EXIT_USAGE
@@ -1608,9 +1608,9 @@ def test_a_restart_leg_warns_its_conc_sweep_at_the_grants_tests_end(
     ends: list[float | None] = []
 
     async def run_leg(
-        run: PersistedRun, peer_factory: object, services: object, leg: object, grant_end_unix: float | None
+        run: PersistedRun, peer_factory: object, services: object, leg: object, deadline_unix: float | None
     ) -> int:
-        ends.append(grant_end_unix)
+        ends.append(deadline_unix)
         return 0
 
     monkeypatch.setattr(cli, "_run_leg", run_leg)
@@ -2611,7 +2611,7 @@ def test_a_restart_that_cannot_read_the_session_before_its_baseline_leaves_it_an
     left = {path: path.read_bytes() for path in layout.root.rglob("*") if path.is_file() and path != state}
 
     async def closing(
-        persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object, grant_end_unix: float | None
+        persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object, deadline_unix: float | None
     ) -> int:
         frozen_base(persisted.layout.toolbox)  # what building the close's peers reads first
         raise AssertionError("the session could be read")
@@ -2653,7 +2653,7 @@ def test_a_restart_refused_a_file_outside_the_session_it_closes_ends_the_run(
     outside = tmp_path / "workspace-cache" / "index.json"
 
     async def closing(
-        persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object, grant_end_unix: float | None
+        persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object, deadline_unix: float | None
     ) -> int:
         raise PermissionError(errno.EACCES, "Permission denied", str(outside))
 

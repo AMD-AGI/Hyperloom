@@ -38,9 +38,20 @@ AGENTX = replace(WORKLOAD, inferencex=None)
 CHOSEN = FinalCandidate("integration", "integration", "c0ffee", 130.0)
 
 
-def _settings(workload: Workload = WORKLOAD, *, parallel: int = 2, concs: tuple[int, ...] = ()) -> RunSettings:
+def _settings(
+    workload: Workload = WORKLOAD, *, parallel: int = 2, concs: tuple[int, ...] = (), sweep_parallel: int = 2
+) -> RunSettings:
+    caps = RosterCaps(4, 2, parallel)
     return RunSettings(
-        workload, 3.0, 0.0, 0.0, RosterCaps(4, 2, parallel), 60.0, conc_sweep=True, conc_sweep_concs=concs
+        workload,
+        3.0,
+        0.0,
+        0.0,
+        caps,
+        60.0,
+        conc_sweep=True,
+        conc_sweep_concs=concs,
+        conc_sweep_parallel=sweep_parallel,
     )
 
 
@@ -90,11 +101,13 @@ class _Tests:
         return ()
 
 
-def _sweep(layout: SessionLayout, settings: RunSettings, tests: _Tests) -> final.ConcSweep:
+def _sweep(
+    layout: SessionLayout, settings: RunSettings, tests: _Tests, deadline_unix: float | None = None
+) -> final.ConcSweep:
     plan = final.sweep_plan(layout, settings)
     assert isinstance(plan, final.SweepPlan)
-    caps = settings.caps
-    return final.ConcSweep(plan, "root", layout, settings.workload, tests, caps.max_parallel_tests, 600.0)
+    parallel = min(settings.conc_sweep_parallel, settings.caps.max_parallel_tests)
+    return final.ConcSweep(plan, "root", layout, settings.workload, tests, parallel, 600.0, deadline_unix)
 
 
 async def _never() -> int:
@@ -119,10 +132,16 @@ def test_a_final_that_chose_no_gaining_commit_beside_the_root_gets_no_sweep(
 def test_the_plan_sweeps_the_chosen_commit_over_the_recipes_points_with_the_workloads_conc(
     tmp_path: Path, inferencex_base: None
 ):
-    plan = final.sweep_plan(_layout(tmp_path), _settings(concs=(2,)))
+    plan = final.sweep_plan(_layout(tmp_path), _settings())
 
     assert plan == final.SweepPlan("c0ffee", SweepPoints((4, 16, 32), "inferencex"))
     assert (plan.test_points(WORKLOAD), plan.test_points(AGENTX)) == (3, 1)
+
+
+def test_the_operators_points_replace_the_recipes(tmp_path: Path, inferencex_base: None):
+    plan = final.sweep_plan(_layout(tmp_path), _settings(concs=(2,)))
+
+    assert plan == final.SweepPlan("c0ffee", SweepPoints((2, 16), "operator"))
 
 
 def test_an_inferencex_arm_is_one_sweep_test_and_both_arms_run_at_once(tmp_path: Path, inferencex_base: None):
@@ -244,3 +263,60 @@ def test_a_new_session_sweeps_once_closed_unless_a_signal_stopped_it_or_another_
 
     assert sweeps == (roots if swept else [])
     assert SessionLayout(roots[0]).final_only_lock.is_file() is held
+
+
+class _Counting(_Tests):
+    """Records how many tests run at once, each taking one 600 s step of ``clock``."""
+
+    def __init__(self, clock: list[float] | None = None) -> None:
+        super().__init__()
+        self.running = self.peak = 0
+        self.clock = clock
+
+    async def result(self, request: TestRequest) -> TestResult:
+        self.running += 1
+        self.peak = max(self.peak, self.running)
+        await asyncio.sleep(0)
+        if self.clock is not None:
+            self.clock[0] += 600.0
+        try:
+            return await super().result(request)
+        finally:
+            self.running -= 1
+
+
+@pytest.mark.parametrize(("sweep_parallel", "peak"), [(1, 1), (2, 2), (4, 4)])
+def test_the_sweep_runs_as_many_tests_at_once_as_asked_pairing_each_concurrency(
+    tmp_path: Path, inferencex_base: None, sweep_parallel: int, peak: int
+):
+    tests = _Counting()
+    settings = _settings(AGENTX, parallel=8, sweep_parallel=sweep_parallel)
+
+    asyncio.run(_sweep(_layout(tmp_path), settings, tests).run(_never()))
+
+    assert tests.peak == peak
+    assert [(r.parent_commit, r.concurrency) for r in tests.requests][:2] == [("root", (16,)), ("c0ffee", (16,))]
+
+
+def test_a_point_that_would_end_past_the_deadline_is_skipped_and_not_started(
+    tmp_path: Path, inferencex_base: None, monkeypatch: pytest.MonkeyPatch
+):
+    """Each point is priced at 600 s; one test at a time, a deadline 1900 s out fits three."""
+    clock = [1000.0]
+    monkeypatch.setattr(final.time, "time", lambda: clock[0])
+    tests = _Counting(clock)
+    sweep = _sweep(_layout(tmp_path), _settings(AGENTX, sweep_parallel=1), tests, deadline_unix=2900.0)
+
+    payload = asyncio.run(sweep.run(_never()))
+
+    assert [(r.parent_commit, r.concurrency) for r in tests.requests] == [
+        ("root", (16,)),
+        ("c0ffee", (16,)),
+        ("root", (4,)),
+    ]
+    statuses = {(p["arm"], p["conc"]): p["status"] for arm in ("baseline", "optimized") for p in payload[arm]["points"]}
+    assert [key for key, status in statuses.items() if status == final.SKIPPED_BUDGET] == [
+        ("baseline", 32),
+        ("optimized", 4),
+        ("optimized", 32),
+    ]

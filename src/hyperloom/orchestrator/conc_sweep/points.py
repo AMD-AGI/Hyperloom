@@ -6,13 +6,10 @@ sweeps alike; imports nothing of either flow's runtime."""
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from inference_suite.contracts.base_launch import BaseLaunch, SourceKind
-
-log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "2.0"
 SOURCE_INFERENCEX = "inferencex"
@@ -28,14 +25,12 @@ class SweepPoints:
 
 
 def sweep_points(base: BaseLaunch | None, conc: int, operator: Sequence[int]) -> SweepPoints | None:
-    """The points of the InferenceX arm ``base`` was taken from, else the ``operator``'s, each with the session's
+    """The ``operator``'s points, else those of the InferenceX arm ``base`` was taken from, each with the session's
     ``conc``; ``None`` when neither names any."""
-    if base is not None and base.source.kind is SourceKind.INFERENCEX and base.point.source_concs:
-        if operator:
-            log.warning("conc_sweep: --conc-sweep-concs %s ignored; the InferenceX recipe names the points", operator)
-        return SweepPoints(tuple(sorted({*base.point.source_concs, conc})), SOURCE_INFERENCEX)
     if operator:
         return SweepPoints(tuple(sorted({*operator, conc})), SOURCE_OPERATOR)
+    if base is not None and base.source.kind is SourceKind.INFERENCEX and base.point.source_concs:
+        return SweepPoints(tuple(sorted({*base.point.source_concs, conc})), SOURCE_INFERENCEX)
     return None
 
 

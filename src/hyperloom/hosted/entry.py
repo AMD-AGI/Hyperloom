@@ -192,7 +192,7 @@ def _run() -> int:
     _require_resume_safe(session_dir)
     with _plug_inputs(lock, info), _mcp_service(info, session_dir):
         if is_resumable(session_dir) and sweep_unfinished(session_dir):
-            return _sweep(info.state_dir, session_dir)
+            return _sweep(info.state_dir, session_dir, _grant_end_unix(info))
         return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
 
 
@@ -401,14 +401,18 @@ def _plug_inputs(lock: Mapping[str, Mapping[str, str]], info: HostInfo) -> Itera
     """
     from hyperloom.inference_optimizer.cli.bootstrap import HostedPlugInputs, set_hosted_plug_inputs
 
-    limits = info.grant_limits
-    runtime = None if limits is None else limits.max_runtime_sec
-    end = None if runtime is None else info.run_created_at.timestamp() + runtime
-    set_hosted_plug_inputs(HostedPlugInputs(lock=lock, host_info=info, grant_end_unix=end))
+    set_hosted_plug_inputs(HostedPlugInputs(lock=lock, host_info=info, grant_end_unix=_grant_end_unix(info)))
     try:
         yield
     finally:
         set_hosted_plug_inputs(None)
+
+
+def _grant_end_unix(info: HostInfo) -> float | None:
+    """When the run's grant ends, Unix seconds: its runtime from when the run was created; ``None`` without one."""
+    limits = info.grant_limits
+    runtime = None if limits is None else limits.max_runtime_sec
+    return None if runtime is None else info.run_created_at.timestamp() + runtime
 
 
 def _state_dir_from_environment() -> Path | None:
@@ -527,13 +531,13 @@ def _optimize(argv: list[str], state_dir: Path, session_dir: Path) -> int:
     return returncode
 
 
-def _sweep(state_dir: Path, session_dir: Path) -> int:
+def _sweep(state_dir: Path, session_dir: Path, deadline_unix: float | None) -> int:
     """Run the conc sweep of a session that closed and was stopped before its sweep ran its course, and end the run:
     resuming a closed session would open another macro-cycle instead. The return code is the sweep's."""
-    from hyperloom.orchestrator.conc_sweep.cli import main as sweep_main
+    from hyperloom.orchestrator.conc_sweep.cli import sweep_and_report
 
     print(f"[hosted] sweeping session {session_dir}, which closed before its conc sweep finished", flush=True)
-    returncode = sweep_main([str(session_dir)])
+    returncode = sweep_and_report(session_dir, deadline_unix=deadline_unix)
     write_exit(state_dir, final=True, returncode=returncode, stop_reason=_stop_reason(session_dir))
     return returncode
 

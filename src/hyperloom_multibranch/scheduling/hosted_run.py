@@ -11,7 +11,8 @@ the legacy entry validated, a multi-branch session needs ``multibranch.workload`
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
 ``--autonomous-agent``, ``multibranch.make_before_break`` (``true`` by default) ``--make-before-break`` or
 ``--no-make-before-break``, ``multibranch.conc_sweep`` (``true`` by default) ``--no-enable-conc-sweep`` when ``false``,
-``multibranch.conc_sweep_concs`` ``--conc-sweep-concs``, ``multibranch.agentx_duration_sec`` ``--agentx-duration-sec`` and
+``multibranch.conc_sweep_concs`` ``--conc-sweep-concs``, ``multibranch.conc_sweep_parallel``
+``--conc-sweep-parallel``, ``multibranch.agentx_duration_sec`` ``--agentx-duration-sec`` and
 ``multibranch.agentx_objective`` ``--agentx-objective`` (an ``agentx`` workload only), ``multibranch.boot_budget_sec``
 ``--boot-budget-sec``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what runs at once
 where the session measures. The fields ``run`` has no option for --
@@ -205,6 +206,7 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         **_agentx_values(section),
         "boot-budget-sec": _whole_seconds(section, "boot_budget_sec"),
         "conc-sweep-concs": _conc_sweep_concs(section.get("conc_sweep_concs")),
+        "conc-sweep-parallel": section.get("conc_sweep_parallel"),
     }
     agents = [f"--autonomous-agent={source}" for source in _agent_sources(section.get("autonomous_agents"))]
     switches = _switches(section)

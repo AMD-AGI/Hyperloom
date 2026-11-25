@@ -418,7 +418,7 @@ class Session:
         work = self._no_final(ended) if candidates is None else self._final_phases(candidates, ended, restart)
         return await self._run_and_close(work, ending, budget, hard_stop)
 
-    async def conc_sweep(self, plan: SweepPlan, grant_end_unix: float | None = None) -> dict[str, Any]:
+    async def conc_sweep(self, plan: SweepPlan, deadline_unix: float | None = None) -> dict[str, Any]:
         """Sweep the closed session's root and the commit FINAL chose over ``plan``'s points on this session's toolbox,
         which takes up and withdraws what an earlier run left in its log first; a stop signal ends the sweep, and the
         toolbox is released however it ends."""
@@ -431,15 +431,16 @@ class Session:
             self._layout,
             self._settings.workload,
             self._tests,
-            self._settings.caps.max_parallel_tests,
+            min(self._settings.conc_sweep_parallel, self._settings.caps.max_parallel_tests),
             longest,
+            deadline_unix,
         )
         self._signals.install()
         try:
             await self._toolbox.start()
             await self._toolbox.withdraw_all(CONC_SWEEP)
             await self._toolbox.set_policy(final_quota(self._settings.caps))
-            return await sweep.run(self._signals.wait(), grant_end_unix)
+            return await sweep.run(self._signals.wait())
         finally:
             self._signals.uninstall()
             await self._stopper.release(TOOLBOX_CLOSE_SECONDS)
