@@ -104,7 +104,7 @@ from hyperloom_multibranch.specialist.following import (
     reroot_requested,
 )
 from hyperloom_multibranch.specialist.judging import NOTICE, left_unjudged
-from hyperloom_multibranch.specialist.llm_usage import launch_cost, launch_usage
+from hyperloom_multibranch.specialist.llm_usage import launch_cost, launch_usage, tokens_beyond
 from hyperloom_multibranch.specialist.prompts import (
     IntegrationHeads,
     Resume,
@@ -330,6 +330,7 @@ class AgentSession:
         self._handle: AgentHandle | None = None
         self._beat: Beat | None = None
         self._recorded: Mapping[str, TokenCounts] = {}
+        self._launch_resumed = False
         self._requested: frozenset[str] = frozenset()
 
     async def preflight(self) -> None:
@@ -470,7 +471,7 @@ class AgentSession:
             await asyncio.to_thread(self._write_cli, launch.cli)
         spec = await asyncio.to_thread(self._spec, grant, launch)
         clock, started = self._setup.clock, self._setup.clock()
-        self._recorded = {}
+        self._recorded, self._launch_resumed = {}, launch.resumed
         if self._setup.command.interactive:
             launch.turns = TurnLog(self._place.workspace / PROCESS_LOG_NAME)
         handle = self._handle = await self._setup.runner.launch(spec)
@@ -861,11 +862,9 @@ class AgentSession:
 
     async def _record_cost(self) -> None:
         """Record what the launch used since its last record."""
-        used = await asyncio.to_thread(launch_usage, self._place.workspace / PROCESS_LOG_NAME)
-        added = {
-            model: _less(counts, self._recorded.get(model, TokenCounts())) for model, counts in used.tokens.items()
-        }
-        added = {model: counts for model, counts in added.items() if counts != TokenCounts()}
+        log = self._place.workspace / PROCESS_LOG_NAME
+        used = await asyncio.to_thread(launch_usage, log, resumed=self._launch_resumed)
+        added = tokens_beyond(used.tokens, self._recorded)
         if not added:
             return
         self._recorded = used.tokens
@@ -1016,10 +1015,6 @@ class TurnLog:
             row.get("stop_reason", "")
         )
         self.context_exceeded = self.context_exceeded or (erred and too_long)
-
-
-def _less(counts: TokenCounts, earlier: TokenCounts) -> TokenCounts:
-    return TokenCounts(*(max(0, getattr(counts, item.name) - getattr(earlier, item.name)) for item in fields(counts)))
 
 
 def _describe(status: AgentStatus, seconds: float) -> str:

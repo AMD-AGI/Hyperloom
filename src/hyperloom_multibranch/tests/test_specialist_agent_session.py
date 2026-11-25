@@ -793,6 +793,13 @@ def _call(context: int) -> dict:
     return {"type": "assistant", "message": {"id": f"m{context}", "model": "claude-sonnet-5-5", "usage": usage}}
 
 
+def _totals_row(own: TokenCounts, totals: TokenCounts) -> dict:
+    """The ``result`` row of a query that used ``own``, in a conversation that has used ``totals`` in all."""
+    usage = {"input_tokens": own.input, "output_tokens": own.output, "cache_read_input_tokens": own.cache_read}
+    running = {"inputTokens": totals.input, "outputTokens": totals.output, "cacheReadInputTokens": totals.cache_read}
+    return {"type": "result", "subtype": "success", "usage": usage, "modelUsage": {"claude-sonnet-5-5": running}}
+
+
 def _flag(argv, flag: str) -> str | None:
     return argv[argv.index(flag) + 1] if flag in argv else None
 
@@ -861,6 +868,15 @@ async def test_a_crashed_cli_is_resumed_by_the_next_run_with_what_arrived_while_
     assert "Startup brief" not in message and "result r1" in message
     assert ("exited 1" if status is CRASHED else "lost") in message and "as you left it" in message
     assert (rig.worktree.path / "half-done.txt").exists()
+
+
+async def test_a_resumed_conversation_records_what_its_own_launch_used_not_what_it_carried_in(rig):
+    first, second = TokenCounts(10, 5, 49_990), TokenCounts(10, 5, 59_990)
+    await _crash_after_a_turn(rig, rig.session(), 1, CRASHED, _call(50_000), _totals_row(first, first))
+    await _crash_after_a_turn(rig, rig.session(), 2, CRASHED, _call(60_000), _totals_row(second, first + second))
+
+    assert "--resume" in rig.runner.specs[1].argv
+    assert [record.usage.tokens for record in (await rig.blackboard.snapshot()).llm_usage] == [first, second]
 
 
 async def test_a_resume_after_the_branch_head_moved_resets_the_worktree_and_says_so(rig, monkeypatch):
