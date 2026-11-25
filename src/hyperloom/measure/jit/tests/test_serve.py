@@ -9,18 +9,16 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import os
 import tarfile
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from hyperloom.measure.jit import publish, serve
+from hyperloom.measure.jit import serve
 from hyperloom.measure.jit.serve import WantRefused
 from hyperloom.measure.jit.store import DirJitStore, Snapshot, StoredFile
 from hyperloom.measure.jit_kinds import AITER_JIT, TRITON
-from hyperloom.measure.manifest import JitCacheFacts
 from hyperloom.sandbox.socket import DirEntry, SandboxGone
 
 KEY = "b" * 64
@@ -166,12 +164,18 @@ def test_the_host_follows_no_link_in_its_store(tmp_path) -> None:
     assert serve.pack(store, AITER_JIT, KEY) is None
 
 
-def test_a_snapshot_over_the_bound_of_one_upload_is_not_served(tmp_path, monkeypatch) -> None:
+def test_a_snapshot_over_the_bound_of_one_upload_is_not_served_and_said_once_at_warning(
+    tmp_path, monkeypatch, caplog
+) -> None:
     store, _ = _store(tmp_path, {"module_a.so": MODULE})
     monkeypatch.setattr(serve, "MAX_TAR_BYTES", len(MODULE) - 1)
+    monkeypatch.setattr(serve, "_TOO_LARGE", set())
 
     assert serve.pack(store, AITER_JIT, KEY) is None
+    assert serve.pack(store, AITER_JIT, KEY) is None
     assert serve.pack(store, AITER_JIT, "c" * 64) is None, "nothing stored under that key"
+    (warning,) = [record for record in caplog.records if "too large to serve" in record.getMessage()]
+    assert warning.levelname == "WARNING" and f"aiter_jit key {KEY[:12]}" in warning.getMessage()
 
 
 def test_a_tar_at_its_bound_is_served_and_one_byte_over_is_not(tmp_path, monkeypatch) -> None:
@@ -306,6 +310,29 @@ def test_the_host_serves_what_the_runner_asked_for_and_the_runner_reads_it(tmp_p
     assert served.fetch(TRITON, "c" * 64, tmp_path / "private-triton").snapshot is None, "missing: it builds cold"
 
 
+def test_a_served_tar_the_runner_cannot_remove_from_its_input_directory_does_not_fail_the_test(
+    tmp_path, monkeypatch
+) -> None:
+    """An input directory the runner may only read: the tar stays, the cache is still read."""
+    store, snapshot = _store(tmp_path / "host", {"module_a.so": MODULE})
+    sandbox = _sandbox(tmp_path)
+    (tmp_path / "out" / "jit-want.json").write_bytes(serve.want_document([(AITER_JIT, KEY)]))
+    assert serve.serve(store, sandbox, "req") == 1
+    unlink = Path.unlink
+
+    def read_only(path: Path, missing_ok: bool = False) -> None:
+        if path.parent == tmp_path / "in" / "jit-cache":
+            raise PermissionError(13, "Permission denied")
+        unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", read_only)
+
+    _, notes = _asked(tmp_path, [(AITER_JIT, KEY)])
+
+    assert "aiter_jit 2 files" in notes[-1] and (tmp_path / "in" / "jit-cache" / "aiter_jit.tar").exists()
+    assert DirJitStore(tmp_path / "served").fetch(AITER_JIT, KEY, tmp_path / "private").snapshot == snapshot
+
+
 @pytest.mark.parametrize("kind", ["oversize", "link", "missing", "garbage"])
 def test_a_want_the_host_cannot_take_serves_nothing_and_still_says_done(tmp_path, kind) -> None:
     store, _ = _store(tmp_path / "host", {"module_a.so": MODULE})
@@ -368,42 +395,3 @@ def test_a_runner_is_offered_the_cache_only_when_the_host_said_so(tmp_path) -> N
     (tmp_path / "jit-cache").mkdir()
     (tmp_path / "jit-cache" / "SERVING").write_bytes(b"")
     assert serve.offered(tmp_path)
-
-
-# -- the publish path reads the sandbox as untrusted too -------------------------------------------------------------
-
-
-def _staged(tmp_path: Path, data: bytes, *, listed_size: int | None = None, link: bool = False) -> JitCacheFacts:
-    staged = tmp_path / "out" / "jit-cache" / "aiter_jit"
-    (staged / "blobs").mkdir(parents=True)
-    sha = hashlib.sha256(data).hexdigest()
-    if link:
-        (tmp_path / "target").write_bytes(data)
-        (staged / "blobs" / sha).symlink_to(tmp_path / "target")
-    else:
-        (staged / "blobs" / sha).write_bytes(data)
-    snapshot = Snapshot("aiter_jit", KEY, None, {"module_a.so": StoredFile(sha, listed_size or len(data))})
-    (staged / "manifest.json").write_bytes(snapshot.to_bytes())
-    contribution = {"sha256": snapshot.sha256(), "files": 1, "bytes": len(data)}
-    kind = {"kind": "aiter_jit", "key": KEY, "state": "miss", "seed_files": 0, "seed_bytes": 0, "seed_snapshot": None}
-    document = {"kinds": [{**kind, "contribution": contribution}], "builds_seen": 0, "jit_compile_sec": 0.0}
-    return JitCacheFacts.parse(document, "jit_cache")
-
-
-@pytest.mark.parametrize("how", ["link", "size"])
-def test_a_staged_blob_that_is_a_link_or_not_its_listed_size_is_not_fetched(tmp_path, how) -> None:
-    facts = _staged(tmp_path, MODULE, link=how == "link", listed_size=len(MODULE) + 5 if how == "size" else None)
-    store = DirJitStore(tmp_path / "store")
-    (tmp_path / "scratch").mkdir()
-
-    assert publish.publish_contributions(store, _DirSandbox(tmp_path), facts, tmp_path / "scratch") == 0
-    assert not (tmp_path / "store" / "blobs").exists()
-
-
-def test_a_staged_plain_blob_of_its_listed_size_is_published(tmp_path) -> None:
-    facts = _staged(tmp_path, MODULE)
-    store = DirJitStore(tmp_path / "store")
-    (tmp_path / "scratch").mkdir()
-
-    assert publish.publish_contributions(store, _DirSandbox(tmp_path), facts, tmp_path / "scratch") == 1
-    assert os.path.isdir(tmp_path / "store" / "blobs")

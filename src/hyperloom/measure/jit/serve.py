@@ -145,14 +145,23 @@ def ask(
             continue
         try:
             files = unpack(tar, dest, kind, key)
-        except (WantRefused, tarfile.TarError, OSError, fsafe.UnsafeEntry, fsafe.MissingEntry) as exc:
+        except (WantRefused, tarfile.TarError, ValueError, OSError, fsafe.UnsafeEntry, fsafe.MissingEntry) as exc:
             notes.append(f"jit cache: {kind.name}: what the host served was not used ({exc}); it builds cold")
-            continue
-        finally:
-            tar.unlink(missing_ok=True)  # the copy below the test's directory is what is read from here on
-        given.append(f"{kind.name} {files} files")
+            files = None
+        _remove(tar)
+        if files is not None:
+            given.append(f"{kind.name} {files} files")
     notes.append(f"jit cache: served by the host in {time.monotonic() - started:.1f}s: {', '.join(given) or 'nothing'}")
     return notes
+
+
+def _remove(tar: Path) -> None:
+    """Remove a served tar, which is read from its unpacked copy from here on; an input directory this runner cannot
+    write keeps it, which costs only its space."""
+    try:
+        tar.unlink(missing_ok=True)
+    except OSError as exc:
+        log.info("jit cache: the served %s was not removed (%s)", tar.name, type(exc).__name__)
 
 
 def unpack(tar: Path, dest: Path, kind: CacheKind, key: str) -> int:
@@ -280,12 +289,25 @@ def parse_want(raw: bytes) -> list[tuple[CacheKind, str]]:
     return list(wanted.values())
 
 
+#: The keys whose snapshot was found too large to serve, said once each.
+_TOO_LARGE: set[tuple[str, str]] = set()
+
+
 def pack(store: DirJitStore, kind: CacheKind, key: str) -> Packed | None:
     """The tar of the snapshot of ``kind`` under ``key`` a reader would take, every blob proved as it is packed; the next
     generation when one does not prove; ``None`` when none does or the store has none within the bounds."""
     for snapshot in store.generations(kind, key):
         if len(snapshot.files) >= MAX_TAR_FILES or snapshot.total_bytes > MAX_TAR_BYTES:
-            log.info("jit cache: %s snapshot %s is too large to serve", kind.name, snapshot.sha256()[:12])
+            if (kind.name, key) not in _TOO_LARGE:  # once per key: every test of it builds cold
+                _TOO_LARGE.add((kind.name, key))
+                log.warning(
+                    "jit cache: %s key %s: snapshot %s (%d files, %d bytes) is too large to serve; its tests build cold",
+                    kind.name,
+                    key[:12],
+                    snapshot.sha256()[:12],
+                    len(snapshot.files),
+                    snapshot.total_bytes,
+                )
             continue
         try:
             return _pack_snapshot(store, snapshot)

@@ -124,8 +124,9 @@ Start the runner with the step that `hyperloom.measure.runner.bootstrap.runner_t
 `sh <cache>/<HYPERLOOM_SOURCE_SHA>/bootstrap.sh` step is safe only when no account but the builder can write the cache:
 the script is what checks the manifest, so it cannot check itself.
 
-The step makes `/in`, `/out` and `/scratch` (or the directories the template names); the runner only reads the in
-directory, but it must be able to write the out and scratch directories. On an image whose root is read-only the
+The step makes `/in`, `/out` and `/scratch` (or the directories the template names); the runner reads the in
+directory and removes the compiled-code cache tars served there once unpacked (an in directory it cannot write keeps
+them), and it must be able to write the out and scratch directories. On an image whose root is read-only the
 platform must bind those writable into the sandbox. A scratch or in directory the step cannot make, or a scratch
 directory it cannot write, ends the start with a `runner_start_failed` status that names it; when the out directory
 itself cannot be made or written, no status can be left there, so the step prints the reason on stderr and exits 1. The
