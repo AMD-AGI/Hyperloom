@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import json
 import subprocess
@@ -15,7 +17,6 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.workflows.forge_loop.roles import analysis_evidence
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.policy.analysis_refresh_policy import AnalysisRefreshDecision
 from kernelforge.workflows.forge_loop.campaign.run_state import BestRecord, LoopStateStore, RunState
 from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
@@ -328,7 +329,7 @@ def test_stale_published_analysis_paths_survive_resume_style_reuse(
     assert "bottleneck=memory" in rendered
     assert f"evidence={case_profile.resolve()}" in rendered
     supervisor = json.loads(loop._build_supervisor_evidence_context(2))
-    assert supervisor["orchestration_context"]["analysis_evidence"]["commit"] == evidence_commit
+    assert supervisor["evidence_context"]["analysis_evidence"]["commit"] == evidence_commit
     assert supervisor["artifact_paths"]["analysis_bundle"] == str(generation.resolve())
 
 
@@ -343,10 +344,10 @@ def test_analysis_service_rechecks_same_commit_for_partial_upgrade(
         experiments_dir=workspace / "forge_experiments",
         gpu_target="gfx942",
     )
-    baseline = loop._build_orchestration_context()
+    baseline = loop._build_evidence_context()
     monkeypatch.setattr(
         loop,
-        "_build_orchestration_context",
+        "_build_evidence_context",
         lambda: baseline,
     )
 
@@ -482,9 +483,7 @@ def test_keep_defers_incremental_analysis_until_next_request(
 
     async def exercise():
         service = AnalysisService()
-        await loop.run(
-            runner_module.LoopAgents(agent_fn=editing_agent, analysis_service=service, supervisor_fn=_unused_supervisor)
-        )
+        await loop.run(lane_agents(editing_agent, analysis_service=service, supervisor_fn=_unused_supervisor))
         assert len(analysis_calls) == 1
         assert loop._analysis_bundle is None
         await loop._resolve_analysis_context(service)
@@ -523,7 +522,7 @@ def test_small_keeps_reuse_analysis_until_cumulative_gain_reaches_threshold(
     initial_generation.mkdir(parents=True)
     (initial_root / "published.json").write_text(json.dumps({"generation_root": initial_generation.name}))
     loop._active_analysis_context = replace(
-        loop._build_orchestration_context(),
+        loop._build_evidence_context(),
         evidence_commit=initial_commit,
         evidence_status="profiled",
         evidence_mean_case_speedup=1.0,
@@ -670,7 +669,7 @@ def test_missing_cumulative_diff_degrades_without_forcing_refresh(
     loop.run_state.analysis.evidence_mean_case_speedup = 1.0
     loop.run_state.analysis.evidence_status = "profiled"
     loop._active_analysis_context = replace(
-        loop._build_orchestration_context(),
+        loop._build_evidence_context(),
         evidence_commit=evidence_commit,
         evidence_status="profiled",
         evidence_mean_case_speedup=1.0,
@@ -766,7 +765,7 @@ def test_analysis_refresh_event_failure_propagates(
     loop.state_store = SimpleNamespace(
         append_event=lambda _event: (_ for _ in ()).throw(OSError("event log unavailable"))
     )
-    context = loop._build_orchestration_context()
+    context = loop._build_evidence_context()
 
     with pytest.raises(OSError, match="^event log unavailable$"):
         loop._record_analysis_refresh_decision(
@@ -830,7 +829,7 @@ def test_partial_bundle_does_not_inherit_prior_commit_evidence_refs(
     loop.run_state.analysis.evidence_mean_case_speedup = 1.0
     loop.run_state.analysis.evidence_status = "profiled"
     loop._active_analysis_context = replace(
-        loop._build_orchestration_context(),
+        loop._build_evidence_context(),
         evidence_commit=evidence_commit,
         evidence_status="profiled",
         evidence_mean_case_speedup=1.0,
@@ -1056,17 +1055,11 @@ def test_loop_refreshes_stale_analysis_before_supervisor(
 
     monkeypatch.setattr(loop, "run_one_iteration", canonical_result)
 
-    asyncio.run(
-        loop.run(
-            runner_module.LoopAgents(
-                agent_fn=editing_agent, analysis_service=AnalysisService(), supervisor_fn=supervisor
-            )
-        )
-    )
+    asyncio.run(loop.run(lane_agents(editing_agent, analysis_service=AnalysisService(), supervisor_fn=supervisor)))
 
     assert len(analysis_calls) == 2
     assert len(supervisor_contexts) == 1
-    evidence = supervisor_contexts[0]["orchestration_context"]["analysis_evidence"]
+    evidence = supervisor_contexts[0]["evidence_context"]["analysis_evidence"]
     assert evidence["commit"] == loop.run_state.best.commit_hash
     assert evidence["stale"] is False
     events = LoopStateStore(str(workspace)).read_events()

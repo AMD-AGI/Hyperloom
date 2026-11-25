@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import json
 import math
@@ -11,7 +13,6 @@ import random
 import statistics
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -58,7 +59,6 @@ from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
     _unused_supervisor,
 )
 from kernelforge.workflows.forge_loop.iteration import iteration_types
-from kernelforge.workflows.forge_loop.iteration import scoring_runtime
 from kernelforge.tests.conftest import patch_iteration_name
 
 # A modest speedup, well inside anything the loop has ever argued about.
@@ -389,7 +389,7 @@ def test_a_high_scoring_measurement_reaches_the_event_stream_as_a_keep(
 
     monkeypatch.setattr(loop, "run_one_iteration", fast_iteration)
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=fast_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(fast_agent, supervisor_fn=_unused_supervisor)))
 
     events = [
         event for event in LoopStateStore(str(workspace)).read_events() if event.get("type") == "iteration_result"
@@ -827,14 +827,14 @@ def test_loop_startup_rejects_a_drifted_pristine_baseline(tmp_path, monkeypatch)
     _write_reference(workspace, {"case": 0.25})
 
     with pytest.raises(BaselineReferenceError):
-        asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+        asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
 
 def test_loop_startup_accepts_a_matching_pristine_baseline(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     _write_reference(workspace, {"case": 1.02})
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert [
         event.get("decision")
@@ -851,7 +851,7 @@ def test_loop_startup_says_when_the_anchor_is_unverified(
     """A run against an unverified anchor must not look like a checked one."""
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert "the pristine anchor every speedup divides by is unverified" in (capsys.readouterr().out)
 
@@ -866,7 +866,7 @@ def test_loop_startup_reports_how_many_of_its_cases_the_reference_backed(
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=measured)
     _write_reference(workspace, {"k001": 1.0})
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert "agrees with the task reference on 1 of 12 measured case(s)" in (capsys.readouterr().out)
 
@@ -880,7 +880,7 @@ def test_loop_startup_names_the_reference_entries_it_could_not_read(
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     _write_partly_readable_reference(workspace, {"case": 1.0}, ["ghost"])
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert "could not read 1 of the 2 entries" in capsys.readouterr().out
 
@@ -895,7 +895,7 @@ def test_loop_startup_announces_a_widened_drift_tolerance(
     _write_reference(workspace, {"case": 1.4})
     monkeypatch.setenv(DRIFT_TOLERANCE_ENV, "0.5")
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     output = capsys.readouterr().out
     assert "drift tolerance widened to 50%" in output
@@ -1098,43 +1098,6 @@ def test_a_re_measure_bench_that_failed_is_reported_as_bought_not_as_measured(mo
     assert "stopped early: re-measure bench failed" in line
     assert f"sigma={measurement_sigma(scores):.6f}" in line
     assert f"required={required_keep_speedup(GQA_NEAR_MISS_INCUMBENT, scores):.6f}x" in line
-
-
-def test_the_extra_benches_are_charged_to_the_round_that_bought_them(monkeypatch):
-    """Round admission prices the next round from what this one spent measuring."""
-    clock = [1000.0]
-    patch_iteration_name(monkeypatch, "time", SimpleNamespace(time=lambda: clock[0]))
-
-    def charged(baseline, runs, extra_rounds=(), *, incumbent=None):
-        loop, calls = _attributed_loop(monkeypatch, baseline, runs, extra_rounds)
-        if incumbent is not None:
-            loop.best_mean_case_speedup = incumbent
-        inner = scoring_runtime.measure_wallclock
-
-        async def metered(run, **kwargs):
-            clock[0] += 100.0
-            return await inner(run, **kwargs)
-
-        patch_iteration_name(monkeypatch, "measure_wallclock", metered)
-        loop._round_started_at = clock[0]
-        loop._round_measurement_sec = 0.0
-        asyncio.run(loop.run_one_iteration(1))
-        return len(calls), loop._round_measurement_sec
-
-    quiet = _gqa_runs(level=0.02)
-    # The uniform shape needs no incumbent: no case dominates its sigma, so the purchase is declined before the
-    # verdict band is consulted at all.
-    plain_benches, plain_sec = charged(*UNIFORM_NOISE_SHAPES[1][1:])
-    bought_benches, bought_sec = charged(
-        GQA_BASELINE,
-        _gqa_runs(),
-        [quiet, quiet],
-        incumbent=GQA_NEAR_MISS_INCUMBENT,
-    )
-
-    assert (plain_benches, plain_sec) == (1, pytest.approx(100.0))
-    assert bought_benches == 1 + SIGMA_REMEASURE_MAX_ROUNDS
-    assert bought_sec == pytest.approx(100.0 * bought_benches)
 
 
 def test_a_cheap_dominant_case_is_re_measured_and_the_bar_comes_down(monkeypatch, capsys):

@@ -1,10 +1,10 @@
 format: hyperloom-kb.collect.v2
 description: >-
-  KernelForge forge-loop runs, one Experience per candidate kernel a run archived, so each lane of a fan-out round
-  gets its own, each holding the time it was measured against, the agent's reasoning and plan, the Analysis report
-  the plan was built on, the kernel it measured, and what KernelForge measured and decided; from the document
-  kernelforge export-runs writes from a run's forge_experiments directory and its forge-loop.log. Each Experience
-  links one empty raw log, raw-logs-not-collected.log, which export-runs writes beside the document.
+  KernelForge forge-loop runs, one Experience per candidate kernel a run archived, which is one per round whatever
+  the round's width, each holding the time it was measured against, the reasoning its sessions recorded, the kernel
+  it measured, and what KernelForge measured and decided; from the document kernelforge export-runs writes from a
+  run's forge_experiments directory and its forge-loop.log. Each Experience links one empty raw log,
+  raw-logs-not-collected.log, which export-runs writes beside the document.
 declaration: kernelforge-run-v1
 producer:
   name: kernelforge
@@ -32,8 +32,7 @@ require:
     check: {absent: $run.read_error}
   - reason: >-
       No reasoning, which every Experience requires: the logs hold no lesson for this candidate and no rationale in
-      its meta.json. A merge never has one, since no agent made it, and neither does a lane whose iteration recorded
-      no lesson. For any other candidate, provide the lesson the iteration wrote.
+      its meta.json. Provide the lesson the iteration wrote.
     check: {present: $run.reasoning}
 
 experience:
@@ -48,16 +47,12 @@ experience:
     source_ms: {number: $run.source_ms}
   rationale:
     reasoning: {text: $run.reasoning}
-    plan: {text: $run.plan}
-    plan_file: $run.plan_file
   change:
     source_code: $run.source_code
     change_diff_file: $run.change_diff_file
   outcome:
     decision: {text: $run.decision}
     candidate_wall_ms: {number: $run.candidate_wall_ms}
-  reflection:
-    analysis_report: {text: $run.analysis_report}
   raw_logs: $doc.raw_logs
   provenance:
     source_ref: {text: $run.unit_id}
@@ -66,8 +61,6 @@ experience:
         object:
           candidate_origin: $run.provenance.candidate_origin
           kb_record: $run.provenance.kb_record
-          analysis_generation: $run.provenance.analysis_generation
-          analysis_report_omitted: $run.provenance.analysis_report_omitted
           meta:
             compact:
               object:

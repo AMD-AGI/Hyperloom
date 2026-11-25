@@ -19,7 +19,7 @@ blocked by the system, so no change is ever accepted without measured evidence.
 3. **Benchmark** — measure wall-clock and kernel time (median over iterations).
 4. **Register check** — read the candidate's VGPR usage from the build and record
    it with the measurements. Hardware counters are not read per candidate: the
-   Analysis Agent profiles the current best, and planning reads that evidence.
+   Analysis Agent profiles the current best, and the round's sessions read that evidence.
 5. **Accept** (assembly only) — run the task's own `compile_command`, then its
    `correctness_command`, stopping at the first failure, and judge the
    `numerical_validation` evidence the assembly backend's contract requires.
@@ -58,8 +58,10 @@ knowledge base and tooling:
 ## Autonomous loop
 
 The autonomous loop wraps this cycle for overnight, unattended optimization:
-Analysis profiles the current best, Orchestration plans each lane (a single-lane
-campaign skips it and the Implementer plans from the Analysis report), the
-Implementer edits the working tree, the driver-owned complete correctness suite validates it, and three
-independent benchmarks decide whether to commit or restore the candidate.
+Analysis profiles the current best and divides the work among the round's
+lanes, each lane's Implementer session edits the kernel (in its own copy of
+the workspace when lanes run side by side), a merge session combines what
+several lanes left, the driver-owned complete
+correctness suite validates the result, and three independent benchmarks decide
+whether to commit or restore the candidate.
 See {doc}`Autonomous overnight loop </kernelforge/how-to/autonomous-loop>`.

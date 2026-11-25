@@ -105,6 +105,8 @@ REJECTION_CODES = (
     "lease_leaves_no_measurement",  # ``lease_branch_sandbox``, ``start_analysis kernel_tune``: leasing would leave fewer cards than one test needs
     "lease_exists",  # ``lease_branch_sandbox``: the branch already holds a lease
     "build_after_deadline",  # the native builds the stack still needs and one test of its kind would end past the branch's deadline
+    "options_unreviewed",  # a specialist's explore changes server arguments while its branch's option review leaves an unset option without a verdict
+    "option_set_by_env",  # a specialist's explore sets the environment variable the server reads an option from
 )
 
 

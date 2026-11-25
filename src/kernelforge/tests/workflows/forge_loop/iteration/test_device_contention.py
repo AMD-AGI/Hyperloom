@@ -5,10 +5,11 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 from kernelforge.utils import process_reaping
 from kernelforge.utils.process_reaping import ReapReport
@@ -16,13 +17,9 @@ from kernelforge.workflows.forge_loop.iteration import fanout
 from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.iteration.device_hazard import MAX_BLOCKED_ITERATIONS
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore
-from kernelforge.workflows.forge_loop.roles.contracts import OrchestrationRunResult
 from kernelforge.workflows.forge_loop.iteration import iteration_phases
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
-    _counting_plan,
-    _lane_agent_factory,
     _make_loop,
-    _no_change_agent,
     _unused_supervisor,
 )
 
@@ -56,7 +53,7 @@ def test_a_contended_workspace_skips_the_canonical_measurement(
 
     monkeypatch.setattr(loop, "run_one_iteration", unexpected_validation)
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=contended_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(contended_agent, supervisor_fn=_unused_supervisor)))
 
     assert validation_calls == []
     # Unmeasured means unkept: HEAD stays at the last state a benchmark ever
@@ -110,20 +107,14 @@ def test_one_contended_lane_costs_the_whole_round_its_measurement(
     half of the response: what the lane left running is on the same GPU the
     canonical benchmark is about to use, so the number the round would take is
     the sibling's plus whatever is still benching. The round takes no
-    measurement, and the sibling's candidate -- already paid for -- stays queued
-    for an iteration that can measure it.
+    measurement.
     """
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, lanes=2)
-    rounds: list[int] = []
-    monkeypatch.setattr(
-        loop,
-        "_run_orchestration",
-        _counting_plan(loop, workspace, rounds, plans=("tune prefill", "tune decode")),
-    )
+    monkeypatch.setattr(loop, "_lane_focuses", lambda: ["tune prefill", "tune decode"])
 
-    async def one_lane_left_something_running(lane_dir: Path) -> ReapReport:
-        if lane_dir.name == "2":
+    async def one_lane_left_something_running(lane_dir: Path, **_kwargs) -> ReapReport:
+        if lane_dir.parent.name == "2" or lane_dir.name == "2":
             return ReapReport(
                 directory=str(lane_dir),
                 unkillable=(4321,),
@@ -131,23 +122,19 @@ def test_one_contended_lane_costs_the_whole_round_its_measurement(
             )
         return ReapReport(directory=str(lane_dir))
 
-    monkeypatch.setattr(fanout, "_reap_lane_processes", one_lane_left_something_running)
+    monkeypatch.setattr(fanout, "reap_processes_under", one_lane_left_something_running)
 
     async def unexpected_validation(*_args, **_kwargs):
         raise AssertionError("a contended round must measure nothing")
 
     monkeypatch.setattr(loop, "run_one_iteration", unexpected_validation)
 
-    asyncio.run(
-        loop.run(
-            runner_module.LoopAgents(
-                agent_fn=_no_change_agent,
-                agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
-                orchestration_service=object(),
-                supervisor_fn=_unused_supervisor,
-            )
-        )
-    )
+    async def editing_lane(kernel_path, _history, session_sink):
+        session_sink["plan"] = "tune"
+        Path(kernel_path).write_text("def kernel():\n    return 2\n")
+        return "tuned"
+
+    asyncio.run(loop.run(lane_agents(editing_lane, supervisor_fn=_unused_supervisor)))
 
     decisions = [
         event.get("decision")
@@ -159,75 +146,8 @@ def test_one_contended_lane_costs_the_whole_round_its_measurement(
     assert loop.results[0].kept is False
     assert loop.results[0].validation_passed is False
     assert "4321" in loop.results[0].workspace_contention
-    # Refused, not discarded: the healthy lane's session was the expensive part
-    # and its candidate is still worth measuring once the device is free.
-    assert [item.plan for item in loop._lane_queue] == ["tune prefill"]
-
-
-def test_a_leaked_probe_costs_the_round_its_measurement(tmp_path, monkeypatch):
-    """A probe is a benchmark, and the device it holds is not the round's alone.
-
-    A specialist killed by its session timeout mid-probe leaves a process on the
-    same GPU the canonical measurement is about to use. The lanes queue behind
-    it on the campaign sentinel; the canonical measurement takes no lock and
-    would have run straight into it. So the analysis phase's teardown finding
-    becomes a hazard exactly as a contended lane's does, and the round it
-    belongs to measures nothing.
-    """
-    loop, workspace = _make_loop(tmp_path, monkeypatch)
-    loop.ic = replace(loop.ic, lanes=2)
-    loop.config = SimpleNamespace(
-        experiments_dir=workspace / "forge_experiments",
-        gpu_target="gfx942",
-    )
-
-    class _ProbeLeakingService:
-        """Planning that succeeded and left a probe running behind it."""
-
-        has_plan_critic = False
-
-        async def run(self, _context, *, usage=None, lanes=1):
-            return OrchestrationRunResult(
-                dispatch_plan=None,
-                optimization_plans=("tune prefill", "tune decode"),
-                structured_output_diagnostics={
-                    "probe_device_hazard": {
-                        "describe": ("pid(s) [4321] survived SIGKILL; pid(s) [4321] hold a device node"),
-                        "pids": [4321],
-                    }
-                },
-            )
-
-    async def unexpected_validation(*_args, **_kwargs):
-        raise AssertionError("a round with a leaked probe must measure nothing")
-
-    monkeypatch.setattr(loop, "run_one_iteration", unexpected_validation)
-
-    asyncio.run(
-        loop.run(
-            runner_module.LoopAgents(
-                agent_fn=_no_change_agent,
-                agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
-                orchestration_service=_ProbeLeakingService(),
-                supervisor_fn=_unused_supervisor,
-            )
-        )
-    )
-
-    decisions = [
-        event.get("decision")
-        for event in LoopStateStore(str(workspace)).read_events()
-        if event.get("type") == "iteration_result"
-    ]
-
-    assert decisions == ["REVERT_CONTENDED"]
-    assert loop.results[0].kept is False
-    assert loop.results[0].validation_passed is False
-    assert "4321" in loop.results[0].workspace_contention
-    assert "probe round" in loop.results[0].workspace_contention
-    # Bought and kept: the lane sessions were the expensive part, and their
-    # candidates are still worth measuring once the device is free.
-    assert [item.plan for item in loop._lane_queue] == ["tune prefill"]
+    # Neither lane's change reached the canonical tree.
+    assert (workspace / "kernel.py").read_text() == "def kernel():\n    return 1\n"
 
 
 def test_a_hazard_outlives_the_iteration_that_found_it(tmp_path, monkeypatch):
@@ -257,7 +177,7 @@ def test_a_hazard_outlives_the_iteration_that_found_it(tmp_path, monkeypatch):
 
     asyncio.run(
         loop.run(
-            runner_module.LoopAgents(agent_fn=agent, supervisor_fn=_unused_supervisor),
+            lane_agents(agent, supervisor_fn=_unused_supervisor),
             callbacks=runner_module.LoopCallbacks(on_iteration=free_the_device_after_the_second_refusal),
         )
     )
@@ -290,7 +210,7 @@ def test_a_hazard_nothing_clears_stops_the_run_rather_than_spinning(
     _fake_device(monkeypatch, {4321: 99})
     monkeypatch.setattr(iteration_phases, "processes_under", lambda _dir: {4321})
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_contended_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_contended_agent, supervisor_fn=_unused_supervisor)))
 
     decisions = [
         event.get("decision")

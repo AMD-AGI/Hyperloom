@@ -144,10 +144,13 @@ treats its commits as the deliverable — it expects the caller to hand it a
 workspace it may write history into. Fusion cannot hand it a copy, because the
 benchmark and the serving smoke both have to import the framework from its real
 install path, so it edits the live tree and isolates the git side instead. For
-the same reason a fusion campaign always runs `--lanes 1`: a lane is a workspace
-copy measured on its own, and a lane's edit would never reach the tree the
-benchmark imports. A single-lane campaign has no planning stage, so the
-Implementer chooses each session's direction from the Analysis report.
+the same reason a fusion campaign always runs `--lanes 1`: a round's only lane
+works in the workspace itself, where lanes that run side by side each work in a
+copy, and a copy's edit would never reach the tree the benchmark imports. The
+loop refuses `--lanes` above 1 on a tree whose repository is selected through
+`GIT_DIR` or `GIT_WORK_TREE`, which is how fusion isolates the git side of a
+framework that is itself a checkout. The Implementer chooses each session's
+direction from the Analysis report.
 
 Every git call the campaign makes is pointed at a repository under the run's
 output directory (`shadow.git`) with the framework tree as its work tree. No

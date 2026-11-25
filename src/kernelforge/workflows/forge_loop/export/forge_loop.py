@@ -15,7 +15,7 @@ measured that iteration, and a kept candidate takes the record that session prin
 experiment no exported run recorded, and two logs that disagree on one session's record, leave ``kb_record`` unset.
 Nothing about a log stops the export, and no path is compared, so two runs on one kernel file each keep their own
 record, as does a run whose ``forge_experiments`` was moved out of the workspace it was made in. A unit does not
-name the log: the only files a unit names are its plan, its kernel, and the diff of every file the commit touched.
+name the log: the only files a unit names are its kernel and the diff of every file the commit touched.
 
 Kernel Forge writes naive local times, and the units carry them as it wrote them; collection reads a naive time as
 UTC. That is right for a run made in a container, which normally runs in UTC, and shifts the times of a run made on a
@@ -38,25 +38,23 @@ from kernelforge.workflows.forge_loop.campaign.experiments_layout import (
     ExperimentsLayout,
     tagged_iteration,
 )
-from kernelforge.workflows.forge_loop.iteration.fanout import LANE_ROOT_PREFIX, is_lane_rationale
+from kernelforge.workflows.forge_loop.iteration.fanout import LANE_ROOT_PREFIX
 from kernelforge.workflows.forge_loop.campaign.loop_log import (
     EXPERIMENT_LINE,
     ITERATION_HEADER,
     KB_WRITTEN,
     LOOP_BANNER,
 )
-from kernelforge.workflows.forge_loop.iteration.merge_candidates import MERGE_PLAN_PREFIX
 from kernelforge.workflows.forge_loop.campaign.run_state import ITERATION_RESULT, ITERATION_STARTED
 from kernelforge.workflows.forge_loop.gate.gate_tag import strip_gate_outcome_tag
 from kernelforge.workflows.forge_loop.export.archive import (
     IterationArchive,
-    analysis_report,
     campaign_identity,
     first_sentences,
     lesson_reasoning,
 )
 from kernelforge.workflows.forge_loop.export.files import FileRecord, inventory, read_json, read_text
-from kernelforge.workflows.forge_loop.export.units import CandidateOrigin, Run, read_error
+from kernelforge.workflows.forge_loop.export.units import CANDIDATE_ORIGIN, Run, read_error
 from kernelforge.config.edit_policy import FORGE_LOOP_OUTPUT_DIRNAME
 
 
@@ -158,28 +156,6 @@ def _run_events(path: Path) -> _RunEvents:
     return _RunEvents(times, experiments)
 
 
-def _origin(meta: dict[str, Any]) -> CandidateOrigin:
-    if str(meta.get("plan") or "").startswith(MERGE_PLAN_PREFIX):
-        return CandidateOrigin.MERGE
-    if is_lane_rationale(str(meta.get("rationale") or "")):
-        return CandidateOrigin.LANE
-    return CandidateOrigin.SESSION
-
-
-def _origin_fields(origin: CandidateOrigin, meta: dict[str, Any], plan: str) -> dict[str, Any]:
-    """What ``meta.json`` says of the candidate that depends on where it came from.
-
-    A merge's plan is Kernel Forge's line naming the two stacked candidates, and no agent reasoned about it. A single
-    session's ``rationale`` is the agent's own text. A lane's records neither, only which lane it was.
-    """
-
-    if origin is CandidateOrigin.MERGE:
-        return {"plan": first_sentences(plan)}
-    if origin is CandidateOrigin.SESSION:
-        return {"reasoning": first_sentences(strip_gate_outcome_tag(str(meta.get("rationale") or "")))}
-    return {}
-
-
 @dataclass(frozen=True)
 class _PlainRun:
     """One plain run: the layout of its ``forge_experiments`` directory, its event times, and the KB records its logs
@@ -198,19 +174,14 @@ class _PlainRun:
         if meta is None:
             message = f"{archive.candidate / CANDIDATE_META} is not a readable JSON object"
             return read_error(f"{self.run.label}/iteration-{seq}", message)
-        origin = _origin(meta)
-        plan = str(meta.get("plan") or "").strip()
-        plan_file = archive.plan_file(origin, plan)
-        report = analysis_report(self.layout, plan_file)
         stamp = _iso(meta.get("timestamp"))
         kb_record = self.kb_records.get(seq) if meta.get("kept") else None
         unit = self.run.unit(
             f"iteration-{seq}",
             seq,
             kb_record=kb_record,
-            candidate_origin=origin.value,
+            candidate_origin=CANDIDATE_ORIGIN,
             meta=meta,
-            **(report.provenance() if report is not None else {}),
         )
         unit.update(
             started_at=self.times.get((ITERATION_STARTED, seq), stamp),
@@ -219,12 +190,10 @@ class _PlainRun:
             decision=meta.get("decision"),
             candidate_wall_ms=meta.get("wall_ms"),
         )
-        unit.update(archive.fields(meta, plan_file))
-        unit.update(_origin_fields(origin, meta, plan))
-        # The lesson is the reasoning. A session that wrote none keeps the rationale excerpt _origin_fields set.
+        unit.update(archive.fields(meta))
+        # The lesson is the reasoning. A round whose sessions wrote none keeps an excerpt of the rationale.
+        unit["reasoning"] = first_sentences(strip_gate_outcome_tag(str(meta.get("rationale") or "")))
         unit.update(lesson_reasoning(archive.lesson))
-        if report is not None and report.fits:
-            unit["analysis_report"] = report.text
         return unit
 
 

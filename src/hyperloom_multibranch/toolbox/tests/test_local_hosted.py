@@ -682,6 +682,24 @@ async def test_final_s_retries_on_the_integration_branch_wait_no_later_than_the_
     assert toolbox._latest_retry_start(req(INTEGRATION_BRANCH, purpose=Purpose.FINAL)) == tests_end_by
 
 
+@pytest.mark.parametrize(
+    "base_bins", [{BASE_BINS_ENV: "/session/base-builds/k/llamacpp/bin"}, {}], ids=["base", "none"]
+)
+async def test_a_toolbox_names_what_this_machine_runs_its_base_server_build_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, base_bins: dict[str, str]
+) -> None:
+    """The base build's executables and the first of the session's cards, so a process of this machine that runs the
+    build reaches no card of another session; nothing where no base build is laid."""
+    commit = "0" * 40
+    pin_inferencex_at(commit, monkeypatch)
+    monkeypatch.setattr(local_hosted, "base_bins_env", lambda native, farms: base_bins)
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _toolbox_of(blackboard, tmp_path, tmp_path / "session", commit)
+    await toolbox.close()
+
+    assert toolbox.base_probe_env == ({**base_bins, "ROCR_VISIBLE_DEVICES": "0"} if base_bins else {})
+
+
 @pytest.mark.agent_isolation
 async def test_the_toolbox_s_test_sandboxes_run_in_bubblewrap_where_it_can_sandbox_them(tmp_path: Path) -> None:
     usable_bwrap()

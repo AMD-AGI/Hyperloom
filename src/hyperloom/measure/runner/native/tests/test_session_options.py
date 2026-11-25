@@ -24,20 +24,22 @@ _HELP = """\
 
 
 def _server(root: Path, text: str = _HELP, *, code: int = 0) -> dict[str, str]:
-    """A stand-in ``llama-server`` on a ``PATH`` of its own that prints ``text`` for any argument."""
+    """A stand-in ``llama-server`` on a ``PATH`` of its own that prints ``text`` for any argument and names the
+    ``SERVER_LIBS`` it ran with."""
     bin_dir = root / "bin"
     bin_dir.mkdir(exist_ok=True)
     (root / "help.txt").write_text(text, encoding="utf-8")
     program = bin_dir / "llama-server"
-    program.write_text(f'#!/bin/sh\n/bin/cat "{root / "help.txt"}"\nexit {code}\n', encoding="utf-8")
+    ran = f'echo "$SERVER_LIBS" > "{root / "ran"}"'
+    program.write_text(f'#!/bin/sh\n/bin/cat "{root / "help.txt"}"\n{ran}\nexit {code}\n', encoding="utf-8")
     program.chmod(0o755)
     return {"PATH": str(bin_dir)}
 
 
-def _session(root: Path, args: tuple[str, ...]) -> Path:
+def _session(root: Path, args: tuple[str, ...], env: dict[str, str] | None = None) -> Path:
     session = root / "session"
     session.mkdir()
-    freeze_base(session, replace(base_launch(), framework="llamacpp", args=args, golden_al=None))
+    freeze_base(session, replace(base_launch(), framework="llamacpp", args=args, env=env or {}, golden_al=None))
     return session
 
 
@@ -50,6 +52,14 @@ def test_an_option_the_runner_sets_on_every_launch_is_not_left_unset(tmp_path: P
     inventory = session_options(session).inventory
     assert inventory.option("--model").set_by_base and inventory.option("--port").set_by_base
     assert [option.name for option in inventory.unset] == ["--ctx-size", "--no-jinja", "--keep"]
+
+
+def test_the_server_is_asked_under_the_environment_its_launch_sets(tmp_path: Path) -> None:
+    session = _session(tmp_path, (), {"SERVER_LIBS": "/opt/libs"})
+
+    record_session_options(session, "llamacpp", {**_server(tmp_path), "SERVER_LIBS": "/usr/lib"})
+
+    assert (tmp_path / "ran").read_text().strip() == "/opt/libs"
 
 
 def test_a_later_leg_keeps_the_list_the_session_started_with(tmp_path: Path) -> None:

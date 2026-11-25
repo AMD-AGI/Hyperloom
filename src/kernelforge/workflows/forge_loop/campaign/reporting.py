@@ -68,27 +68,14 @@ def is_best_manifest(payload: object) -> bool:
 
 
 def _round_budget_lines(summary: object) -> list[str]:
-    """Render what the campaign's rounds cost, for the report's reader."""
-    if not isinstance(summary, dict) or not summary:
+    """Say that the campaign stopped because no round fit the time left, for the report's reader."""
+    if not isinstance(summary, dict) or not summary.get("refused"):
         return []
     lines = ["", "## Round Budget", ""]
-    rounds = int(summary.get("rounds", 0) or 0)
-    planning_sec = float(summary.get("planning_total_sec", 0.0) or 0.0)
-    total_sec = float(summary.get("total_sec", 0.0) or 0.0)
     campaign_sec = float(summary.get("campaign_sec", 0.0) or 0.0)
-    lines.append(f"- Rounds planned (campaign total): {rounds}")
-    lines.append(f"- Planning wall-clock (campaign total): {planning_sec / 60:.1f} min")
-    lines.append(f"- Round wall-clock (campaign total): {total_sec / 60:.1f} min")
     if campaign_sec > 0:
-        # Printed beside the share so a reader can check the division that produced it against the two numbers it was
-        # made from.
         lines.append(f"- Campaign wall-clock: {campaign_sec / 60:.1f} min")
-    share = summary.get("planning_share_pct")
-    if isinstance(share, (int, float)) and not isinstance(share, bool):
-        lines.append(f"- Planning share of campaign wall-clock: {float(share):.0f}%")
-    refusal = summary.get("refused")
-    if refusal:
-        lines.append(f"- Stopped: no round fit the remaining budget ({refusal})")
+    lines.append(f"- Stopped: no round fit the remaining budget ({summary['refused']})")
     return lines
 
 
