@@ -47,11 +47,6 @@ NVIDIA_MASTER = f"{PROJECT}/configs/nvidia-master.yaml"
 CHECKOUT_DIRECTORIES = (f"{PROJECT}/configs", MULTI_NODE_RECIPES)
 _AGENTX_SHAPE = "agentx"
 _ZIP_SELECTOR = re.compile(r"(zip_override_[\w-]+)\[(\d+)\]")
-#: The topology spellings of the frameworks a PD session runs.
-_TOPOLOGY_SPELLING: dict[Framework, TopologySpelling] = {
-    Framework.SGLANG: SGLANG_TOPOLOGY,
-    Framework.ATOM: ATOM_TOPOLOGY,
-}
 
 
 @dataclass(frozen=True)
@@ -68,7 +63,7 @@ class RoleFit:
 @dataclass(frozen=True)
 class Candidate:
     """One InferenceX recipe variant that serves a query: where it is, the merged recipe, both roles' topology, the
-    entry's KV transfer backend and benchmarked concurrency (none for a lookup) and the warnings it carries."""
+    entry's KV transfer backend and benchmarked concurrency and the warnings it carries."""
 
     kind: PdSourceKind
     entry: str

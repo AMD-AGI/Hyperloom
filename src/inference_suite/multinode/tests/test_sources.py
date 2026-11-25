@@ -172,13 +172,6 @@ def test_resolve_prefers_master_and_strips_runner_owned(checkout):
     assert set(launch.source.files) == {MASTER, RUNNERS, launch.source.path}
 
 
-def test_resolve_falls_to_lookup(checkout):
-    launch = resolve(_query(decode=2), ResolveInputs(inferencex=lambda: checkout))
-    assert launch.source.kind is PdSourceKind.INFERENCEX_LOOKUP
-    assert launch.role(Role.DECODE).workers == 2
-    assert launch.source.alternatives == (f"{launch.source.path}:zip_override_1p2d[1]",)
-
-
 def test_operator_args_win(checkout):
     operator = OperatorArgs(prefill=("--x",), decode=("--tp-size", "8", "--y"))
     launch = resolve(_query(), ResolveInputs(operator=operator, inferencex=lambda: checkout))
@@ -219,7 +212,6 @@ def test_the_table_launch_names_why_each_inferencex_source_passed(checkout):
     assert launch.source.kind is PdSourceKind.PD_TABLE
     warnings = "\n".join(launch.source.warnings)
     assert "no multi-node disaggregated entry serves Qwen/Qwen3.5-397B-A17B-FP8 with sglang" in warnings
-    assert "no recipe directory of Qwen/Qwen3.5-397B-A17B-FP8 for sglang on mi300x" in warnings
 
 
 _MALFORMED_MASTER = """
@@ -261,25 +253,18 @@ def test_malformed_master_rows_miss_and_resolve_falls_to_the_table(tmp_path):
     assert resolve(query, ResolveInputs(inferencex=lambda: malformed)).source.kind is PdSourceKind.PD_TABLE
 
 
-def test_a_lookup_without_the_board_directory_names_the_directory_it_looked_for(checkout):
-    misses = lookup_candidates(_query(board="mi300x"), checkout).misses
-    assert f"no recipe directory of org/M for sglang on mi300x: {MULTI_NODE_RECIPES}/m/sglang/mi300x-fp8" in misses
-
-
 @pytest.mark.parametrize(("tuned", "asked"), [("mi325x", "mi300x"), ("mi300x", "mi325x")])
 def test_a_pd_session_refuses_a_launch_tuned_on_the_other_gfx942_board(tmp_path, tuned, asked):
     files = {
         MASTER: _MASTER.replace("mi355x", tuned),
         RUNNERS: _RUNNERS.replace("mi355x", tuned),
         f"{MULTI_NODE_RECIPES}/m/sglang/{tuned}-fp8/1k1k/disagg.yaml": _RECIPE.replace("mi355x", tuned),
-        f"{MULTI_NODE_RECIPES}/m/sglang/{tuned}-fp8/1k1k/extra.yaml": _RECIPE.replace("mi355x", tuned),
     }
     board_checkout = _write_checkout(tmp_path, files)
 
     master = master_candidates(_query(board=asked), board_checkout)
-    lookup = lookup_candidates(_query(board=asked), board_checkout)
 
-    assert master.found == () and lookup.found == ()
+    assert master.found == ()
     assert any(f"it runs on {tuned}, not {asked}" in miss for miss in master.misses)
 
 

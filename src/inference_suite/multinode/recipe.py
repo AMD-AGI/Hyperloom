@@ -25,7 +25,6 @@ from inference_suite.multinode.inferencex import (
     Candidate,
     Candidates,
     RoleFit,
-    lookup_candidates,
     master_candidates,
 )
 from inference_suite.multinode.query import DEFAULT_FRONTEND, PdQuery, RoleAsk
@@ -308,17 +307,16 @@ def _table(query: PdQuery, warnings: Sequence[str]) -> PdLaunch:
 
 
 def _inferencex(query: PdQuery, inputs: ResolveInputs, misses: list[str], warnings: list[str]) -> PdLaunch | None:
-    """The launch InferenceX main serves the query, its master entries before its lookup, else ``None`` with every
-    candidate passed over appended to ``misses`` and an unreadable InferenceX to ``warnings``."""
+    """The launch InferenceX main serves the query from its master entries, else ``None`` with every candidate
+    passed over appended to ``misses`` and an unreadable InferenceX to ``warnings``."""
     if inputs.inferencex is None:
         return None
     try:
         checkout = inputs.inferencex()
-        for source in (master_candidates, lookup_candidates):
-            candidates: Candidates = source(query, checkout)
-            misses.extend(candidates.misses)
-            if candidates.found:
-                return _candidate(query, checkout, candidates.found)
+        candidates: Candidates = master_candidates(query, checkout)
+        misses.extend(candidates.misses)
+        if candidates.found:
+            return _candidate(query, checkout, candidates.found)
     except (SourceFetchError, RecipeSourceError, OSError) as error:
         if inputs.pinned:
             raise PdResolveError(f"the pinned InferenceX commit cannot be read: {error}") from error
