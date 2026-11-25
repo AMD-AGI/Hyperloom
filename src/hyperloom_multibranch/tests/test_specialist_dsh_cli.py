@@ -175,21 +175,44 @@ def test_a_turn_stopped_by_a_limit_names_it_as_a_claude_cli_does(tmp_path: Path,
 def test_a_model_call_is_in_flight_from_its_step_s_start_to_its_reply_by_session() -> None:
     clock = SimpleNamespace(now=100.0)
     turn = Turn(Rows(io.StringIO()), SID, lambda: clock.now)
-    assert turn.waiting() is None
+    assert turn.in_flight() == {}
 
     turn.note(_event("step/start", {"turn": 1, "step": 1}))
     clock.now = 130.0
     turn.note(_event("step/start", {"turn": 1, "step": 1}, CHILD))
     clock.now = 190.0
-    assert turn.waiting() == 90.0
+    assert turn.in_flight() == {"model_request": 90.0}
     turn.note(_call([_tool_call()]))
-    assert turn.waiting() == 60.0
+    assert turn.in_flight() == {"model_request": 60.0}
     turn.note(_event("assistant/attempt", session=CHILD))
-    assert turn.waiting() is None
+    assert turn.in_flight() == {}
     turn.note(_event("llm/retry-started", {"retry": 1}, CHILD))
-    assert turn.waiting() == 0.0
+    assert turn.in_flight() == {"model_request": 0.0}
     turn.ended()
-    assert turn.waiting() is None
+    assert turn.in_flight() == {}
+
+
+def test_a_tool_call_is_in_flight_from_its_call_to_its_result_or_the_end_of_its_session_s_turn() -> None:
+    clock = SimpleNamespace(now=100.0)
+    turn = Turn(Rows(io.StringIO()), SID, lambda: clock.now)
+
+    # The runtime's own tool that waits for input blocks for as long as the model asks, an hour at most.
+    turn.note(_event("tool/call", {"callId": "t1", "name": "wait_agent", "arguments": '{"timeout_ms": 900000}'}))
+    clock.now = 160.0
+    turn.note(_event("tool/call", {"callId": "t2", "name": "bash", "arguments": "{}"}, CHILD))
+    clock.now = 200.0
+    assert turn.in_flight() == {"tool_call": 100.0}
+    turn.note(_event("tool/result", {"message": {"role": "tool", "toolCallId": "t1", "content": []}}))
+    assert turn.in_flight() == {"tool_call": 40.0}
+    # A sub-agent whose turn ended runs no tool any more, whatever became of the call.
+    turn.note(_event("turn/end", {"turn": 1, "reason": {"kind": "aborted"}}, CHILD))
+    assert turn.in_flight() == {}
+    turn.note(_event("tool/call", {"callId": "t3", "name": "bash", "arguments": "{}"}))
+    turn.note(_event("step/start", {"turn": 1, "step": 2}, CHILD))
+    clock.now = 230.0
+    assert turn.in_flight() == {"model_request": 30.0, "tool_call": 30.0}
+    turn.ended()
+    assert turn.in_flight() == {}
 
 
 def test_a_stream_json_user_message_is_its_text_and_any_other_line_is_the_prompt_itself() -> None:
@@ -217,7 +240,7 @@ class _Session:
         if harness.fails_at == number:
             raise _HarnessError("DeepSeek Harness runtime stdout closed")
         if harness.stalls is not None:
-            on_notification(_event("step/start", {"turn": number, "step": 1}, self.id))
+            on_notification(_event(harness.stalls_in, {"turn": number, "step": 1, "callId": "t1"}, self.id))
             harness.stalls.wait(5)
         events = [
             _call([{"type": "text", "text": f"reply {number}"}], ident=f"m{number}", session=self.id,
@@ -242,6 +265,7 @@ class _Harness:
     fails_at = 0
     reason: dict = {"kind": "completed"}
     stalls: threading.Event | None = None
+    stalls_in = "step/start"
 
     def __init__(self, **kwargs: object) -> None:
         self.kwargs, self.prompts, self.opened, self.closed = kwargs, [], [], False
@@ -467,18 +491,20 @@ def test_a_one_shot_run_whose_turn_failed_exits_non_zero_after_its_error_result(
     assert (rows[-1]["is_error"], rows[-1]["result"]) == (True, "TRANSPORT: DeepSeek Messages transport failed")
 
 
-def test_a_model_call_in_flight_is_said_in_the_log_while_it_waits(
-    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+@pytest.mark.parametrize(("stalls_in", "subtype"), [("step/start", "model_request"), ("tool/call", "tool_call")])
+def test_a_model_call_or_a_tool_call_in_flight_is_said_in_the_log_while_it_waits(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, stalls_in: str, subtype: str
 ) -> None:
     stalls = threading.Event()
     monkeypatch.setattr(_Harness, "stalls", stalls)
-    monkeypatch.setattr(dsh_cli, "MODEL_REQUEST_ROW_S", 0.05)
+    monkeypatch.setattr(_Harness, "stalls_in", stalls_in)
+    monkeypatch.setattr(dsh_cli, "IN_FLIGHT_ROW_S", 0.05)
     said = threading.Event()
     write = Rows.write
 
     def watched(self: Rows, row) -> None:
         write(self, row)
-        if row.get("subtype") == "model_request":
+        if row.get("subtype") == subtype:
             said.set()
             stalls.set()
 
@@ -487,10 +513,10 @@ def test_a_model_call_in_flight_is_said_in_the_log_while_it_waits(
     _, rows, _ = _run(monkeypatch, capsys, ["--model", MODEL, "--session-id", SID], _message("a"))
 
     assert said.is_set()
-    waiting = [row for row in rows if row.get("subtype") == "model_request"]
+    waiting = [row for row in rows if row.get("subtype") == subtype]
     assert waiting and waiting[0]["session_id"] == SID
     # A row of a call in flight ends no turn and counts no model call.
-    assert [row["type"] for row in rows if row.get("subtype") != "model_request"] == ["system", "assistant", "result"]
+    assert [row["type"] for row in rows if row.get("subtype") != subtype] == ["system", "assistant", "result"]
 
 
 @pytest.mark.parametrize("unset", ["DSH_HOME", "OPENAI_API_KEY"])

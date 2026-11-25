@@ -7,6 +7,7 @@ the measurement is the fake toolbox's. Where the DeepSeek Harness SDK is install
 behind its bridge, on a scripted model that follows the role prompt one tool call at a time."""
 
 import asyncio
+import io
 import json
 import os
 import re
@@ -45,6 +46,7 @@ from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.specialist.agent_onboard import cli_onboard
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSetup
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist import dsh_cli
 from hyperloom_multibranch.specialist.dsh_cli import MODULE as DSH_CLI
 from hyperloom_multibranch.specialist.judging import NOTICE, Judging
 from hyperloom_multibranch.specialist.model_sessions import SESSION_DIR, model_sessions
@@ -491,6 +493,36 @@ def test_the_commands_the_deepseek_harness_s_tools_run_are_not_pointed_at_the_ap
     result = json.loads(next(line for line in ran.stdout.splitlines() if '"result"' in line))["result"]
     imports = re.search(r"imports=\[(.*?)\]", result).group(1).split(os.pathsep)
     assert imports == (env["PYTHONPATH"].split(os.pathsep)[1:] or [""])
+
+
+@needs_harness
+def test_the_deepseek_harness_is_not_silent_while_its_own_waiting_tool_blocks(tmp_path, monkeypatch, capsys):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    def step(body: dict) -> tuple[str, dict] | str:
+        results = [block for message in body["messages"] for block in _blocks(message) if "tool_use_id" in block]
+        # The shortest wait the tool takes; a model asks for up to an hour of it.
+        return f"waited: {_result_text(results[-1])}" if results else ("wait_agent", {"timeout_ms": 10000})
+
+    model = _ScriptedModel(step)
+    for name, value in {**model.env(tmp_path / "home"), "DSH_HOME": str(tmp_path / "session" / ".dsh")}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.chdir(worktree)
+    monkeypatch.setattr(dsh_cli, "IN_FLIGHT_ROW_S", 1.0)
+    monkeypatch.setattr("sys.stdin", io.StringIO("Wait for what arrives."))
+    try:
+        code = dsh_cli.main(["--model", HARNESS.model, "--print"])
+    finally:
+        model.stop()
+
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert code == 0 and rows[-1]["result"].startswith("waited: ")
+    kinds = [row.get("subtype") or row["type"] for row in rows]
+    # Between the call and its result the log grows, which is all a session reads its CLI's life from.
+    blocked = kinds[kinds.index("assistant") + 1 : kinds.index("user")]
+    assert len(blocked) >= 3 and set(blocked) == {"tool_call"}
+    assert "tool_call" not in kinds[kinds.index("user") :]
 
 
 class _Spend:

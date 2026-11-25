@@ -30,9 +30,12 @@ sees (:func:`~hyperloom.orchestrator.specialists.dsh_launch.prepare_session_home
 tools of its profile that wait for a person or change the runtime itself are off (:data:`UNATTENDED_OFF`).
 
 The runtime reports a model call when it ends, not while it streams, so a long reply would show as silence. While a
-model call is in flight the bridge writes a ``system``/``model_request`` row every :data:`MODEL_REQUEST_ROW_S`: the
+model call is in flight the bridge writes a ``system``/``model_request`` row every :data:`IN_FLIGHT_ROW_S`: the
 model adapter of a specialist's profile fails a call whose stream stays idle for five minutes, so a call still in
-flight is one that receives. Past :data:`MODEL_REQUEST_MAX_S` a call is vouched for no longer.
+flight is one that receives. A tool call says nothing until its result either, and the runtime's own tools block
+longer than a session takes silence for a hung CLI (``wait_agent`` for up to an hour, at the model's word), so a tool
+call in flight is a ``system``/``tool_call`` row the same way. Past :data:`IN_FLIGHT_MAX_S` a call is vouched for no
+longer.
 
 ``--print`` runs one turn on the prompt stdin holds as plain text and exits, non-zero when the turn failed.
 ``--read-only`` boots a composition whose only tools read: ``read``, ``glob`` and ``grep``, with no shell, no MCP
@@ -115,10 +118,12 @@ SYSTEM_PROMPT_ENV = "DSH_SYSTEM_PROMPT"
 FULL_ACCESS, READ_ONLY = "danger-full-access", "read-only"
 #: How long one protocol request may wait for its answer; a turn's own length is not one request's.
 REQUEST_TIMEOUT_S = 300.0
-#: How often a model call in flight is said in the log, well inside the silence a session takes its CLI for lost
-#: after, and how long one call is vouched for.
-MODEL_REQUEST_ROW_S = 60.0
-MODEL_REQUEST_MAX_S = 3600.0
+#: How often a model call or a tool call in flight is said in the log, well inside the silence a session takes its
+#: CLI for lost after, and how long one call is vouched for: the longest the runtime's own waiting tool blocks.
+IN_FLIGHT_ROW_S = 60.0
+IN_FLIGHT_MAX_S = 3600.0
+#: The rows that say them.
+MODEL_REQUEST, TOOL_CALL = "model_request", "tool_call"
 #: The runtime's failure code for a conversation past its model's window, and how a Claude CLI words that stop.
 CONTEXT_EXCEEDED_CODE = "CONTEXT_WINDOW_EXCEEDED"
 CONTEXT_EXCEEDED_STOP = "model_context_window_exceeded"
@@ -127,6 +132,8 @@ _ASSISTANT_MESSAGE, _ASSISTANT_ATTEMPT = "assistant/message", "assistant/attempt
 #: The events of a session that open and close the wait for a model call's reply.
 _CALL_OPENS = frozenset({"step/start", "llm/retry-started"})
 _CALL_CLOSES = frozenset({_ASSISTANT_MESSAGE, _ASSISTANT_ATTEMPT, "step/end", "turn/end"})
+#: The events a tool call runs between, and the one that ends every tool call of its session.
+_TOOL_STARTS, _TOOL_RESULT, _TURN_END = "tool/call", "tool/result", "turn/end"
 #: The type of the rows that are no message of the conversation, and of a content block that is text.
 _SYSTEM, _TEXT = "system", "text"
 _ENCODING = "utf-8"
@@ -166,8 +173,8 @@ class Rows:
 
 @dataclass
 class Turn:
-    """What one turn's notifications add up to: its rows, the model calls it made, their token counts, and the model
-    calls still in flight by session."""
+    """What one turn's notifications add up to: its rows, the model calls it made, their token counts, and what is
+    still in flight: the model calls by session, and the tool calls by session and call."""
 
     rows: Rows
     session_id: str
@@ -176,6 +183,7 @@ class Turn:
     usage: dict[str, int] = field(default_factory=dict)
     failure: Mapping[str, object] = field(default_factory=dict)
     _in_flight: dict[str, float] = field(default_factory=dict)
+    _tools: dict[tuple[str, str], float] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def note(self, notification: Any) -> None:
@@ -188,6 +196,7 @@ class Turn:
         data = data if isinstance(data, dict) else {}
         session = str(payload.get("sessionId") or self.session_id)
         self._flight(kind, session)
+        self._tool_flight(kind, session, data)
         row: dict[str, object] | None = None
         if kind == _ASSISTANT_MESSAGE:
             self.calls += 1
@@ -198,7 +207,7 @@ class Turn:
             row = _tool_result(data)
         elif kind == "llm/retry":
             row = _retry(data)
-        elif kind == "turn/end" and session == self.session_id:
+        elif kind == _TURN_END and session == self.session_id:
             reason = data.get("reason")
             error = reason.get("error") if isinstance(reason, dict) else None
             self.failure = error if isinstance(error, dict) else {}
@@ -207,14 +216,18 @@ class Turn:
                 row["parent_tool_use_id"] = session
             self.rows.write({**row, "session_id": self.session_id})
 
-    def waiting(self) -> float | None:
-        """How long the oldest model call still in flight has waited for its reply; ``None`` when none is."""
+    def in_flight(self) -> dict[str, float]:
+        """How long the oldest model call still in flight has waited for its reply (:data:`MODEL_REQUEST`), and the
+        oldest tool call for its result (:data:`TOOL_CALL`); neither when none is."""
         with self._lock:
-            return self.clock() - min(self._in_flight.values()) if self._in_flight else None
+            now = self.clock()
+            started = {MODEL_REQUEST: self._in_flight.values(), TOOL_CALL: self._tools.values()}
+            return {what: now - min(since) for what, since in started.items() if since}
 
     def ended(self) -> None:
         with self._lock:
             self._in_flight.clear()
+            self._tools.clear()
 
     def _flight(self, kind: str, session: str) -> None:
         with self._lock:
@@ -222,6 +235,17 @@ class Turn:
                 self._in_flight[session] = self.clock()
             elif kind in _CALL_CLOSES:
                 self._in_flight.pop(session, None)
+
+    def _tool_flight(self, kind: str, session: str, data: Mapping[str, object]) -> None:
+        message = data.get("message")
+        with self._lock:
+            if kind == _TOOL_STARTS:
+                self._tools[session, str(data.get("callId") or "")] = self.clock()
+            elif kind == _TOOL_RESULT and isinstance(message, dict):
+                self._tools.pop((session, str(message.get("toolCallId") or "")), None)
+            elif kind == _TURN_END:
+                for call in [call for call in self._tools if call[0] == session]:
+                    del self._tools[call]
 
     def _assistant(self, event: Mapping[str, object], data: Mapping[str, object]) -> dict[str, object]:
         message = data.get("message")
@@ -444,7 +468,7 @@ class Bridge:
             self.close()
             what = f"cannot resume conversation {self._session_id}" if options.resume else "the runtime did not start"
             raise Refused(f"{what}: {error}") from error
-        threading.Thread(target=self._say_calls_in_flight, name="dsh-model-requests", daemon=True).start()
+        threading.Thread(target=self._say_calls_in_flight, name="dsh-calls-in-flight", daemon=True).start()
         self._rows.write(
             {
                 "type": _SYSTEM,
@@ -484,21 +508,17 @@ class Bridge:
                 harness.close()
 
     def _say_calls_in_flight(self) -> None:
-        """Write a row for a model call that has been in flight since the log's last row, every
-        :data:`MODEL_REQUEST_ROW_S`, for as long as it is vouched for."""
-        while not self._closed.wait(MODEL_REQUEST_ROW_S / 4):
+        """Write a row for a model call or a tool call that has been in flight since the log's last row, every
+        :data:`IN_FLIGHT_ROW_S`, for as long as it is vouched for."""
+        while not self._closed.wait(IN_FLIGHT_ROW_S / 4):
             turn = self._turn
-            waited = turn.waiting() if turn is not None else None
-            silent = self._clock() - self._rows.written_at
-            if waited is not None and waited <= MODEL_REQUEST_MAX_S and silent >= MODEL_REQUEST_ROW_S:
-                self._rows.write(
-                    {
-                        "type": _SYSTEM,
-                        "subtype": "model_request",
-                        "session_id": self._session_id,
-                        "waited_s": int(waited),
-                    }
-                )
+            if turn is None or self._clock() - self._rows.written_at < IN_FLIGHT_ROW_S:
+                continue
+            vouched = [(what, waited) for what, waited in turn.in_flight().items() if waited <= IN_FLIGHT_MAX_S]
+            if vouched:
+                what, waited = vouched[0]
+                row = {"type": _SYSTEM, "subtype": what, "session_id": self._session_id, "waited_s": int(waited)}
+                self._rows.write(row)
 
 
 def _whole(stream: TextIO) -> Iterator[str]:
@@ -579,8 +599,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 __all__ = [
     "HOME_ENV",
     "IMPORT_PATH_ENV",
-    "MODEL_REQUEST_MAX_S",
-    "MODEL_REQUEST_ROW_S",
+    "IN_FLIGHT_MAX_S",
+    "IN_FLIGHT_ROW_S",
     "MODULE",
     "PACKAGES",
     "READING_PATCH",
