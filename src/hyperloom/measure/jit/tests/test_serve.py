@@ -11,6 +11,7 @@ import io
 import json
 import os
 import tarfile
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -171,6 +172,47 @@ def test_a_snapshot_over_the_bound_of_one_upload_is_not_served(tmp_path, monkeyp
 
     assert serve.pack(store, AITER_JIT, KEY) is None
     assert serve.pack(store, AITER_JIT, "c" * 64) is None, "nothing stored under that key"
+
+
+def test_a_tar_at_its_bound_is_served_and_one_byte_over_is_not(tmp_path, monkeypatch) -> None:
+    store, _ = _store(tmp_path, {"module_a.so": MODULE})
+    packed = serve.pack(store, AITER_JIT, KEY)
+    assert packed is not None and serve.MAX_TAR_BYTES == 1024**3
+    monkeypatch.setattr(serve, "MAX_TAR_BYTES", len(packed.data))
+    assert serve.pack(store, AITER_JIT, KEY) == packed
+    (tmp_path / "a.tar").write_bytes(packed.data)
+    assert serve.unpack(tmp_path / "a.tar", tmp_path / "served", AITER_JIT, KEY) == 2
+
+    monkeypatch.setattr(serve, "MAX_TAR_BYTES", len(packed.data) - 1)
+    assert serve.pack(store, AITER_JIT, KEY) is None
+    with pytest.raises(WantRefused, match="larger"):
+        serve.unpack(tmp_path / "a.tar", tmp_path / "served", AITER_JIT, KEY)
+
+
+def test_the_tar_is_built_in_a_temp_file_that_is_gone_on_every_path(tmp_path, monkeypatch) -> None:
+    store, snapshot = _store(tmp_path, {"module_a.so": MODULE})
+    spools, temp_dir, made = [], tmp_path / "tmp", tempfile.TemporaryFile
+
+    def tracked(*args, **kwargs):
+        spools.append(made(*args, **kwargs))
+        return spools[-1]
+
+    temp_dir.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp_dir))
+    monkeypatch.setattr(tempfile, "TemporaryFile", tracked)
+    bound = serve.MAX_TAR_BYTES
+
+    assert serve.pack(store, AITER_JIT, KEY) is not None
+    monkeypatch.setattr(serve, "MAX_TAR_BYTES", len(MODULE))
+    assert serve.pack(store, AITER_JIT, KEY) is None, "over the bound once built"
+    monkeypatch.setattr(serve, "MAX_TAR_BYTES", bound)
+    blob = store.root / "blobs" / snapshot.files["module_a.so"].sha256[:2] / snapshot.files["module_a.so"].sha256
+    blob.chmod(0o600)
+    blob.write_bytes(b"\x7fELF a modulE")
+    assert serve.pack(store, AITER_JIT, KEY) is None, "a blob that does not prove"
+
+    assert len(spools) == 3 and all(spool.closed for spool in spools)
+    assert not any(temp_dir.iterdir())
 
 
 @pytest.mark.parametrize(
