@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 
+from hyperloom.common.agent_isolation import NONE, agent_isolation_report
 from hyperloom.common.outside_facts import kernel_knobs
 from hyperloom.common.provenance import detect_gfx_arch
 from hyperloom.inference_optimizer.framework_registry import native_component
@@ -52,9 +53,12 @@ def _discovery_block(inp: SpecialistPromptInputs) -> list[str]:
 def _knob_tune_block(inp: SpecialistPromptInputs) -> list[str]:
     """Optional ``knob_tune`` helper for a patch specialist with cards of its own and a worktree of a framework whose
     server the session builds from source, when the rule pack states a kernel knob of that framework in a branch
-    compiled for the architecture the session builds for."""
+    compiled for the architecture the session builds for. Only for a specialist launched unconfined: in a sandbox or
+    as another account it is not shown the session's recorded base and cannot write the session's sweeps."""
     component = native_component(inp.framework)
     if component is None:
+        return []
+    if agent_isolation_report().specialists != NONE:
         return []
     gfx = detect_gfx_arch(os.environ, gpu_type=inp.gpu_type or None, probe=False)
     declared = any(knob.component == component and gfx in knob.archs for knob in kernel_knobs().values())

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.agent_isolation import ACCOUNT, BWRAP, NONE, REFUSED, IsolationReport
 from hyperloom.common.outside_facts import NATIVE_AUX_MODEL_FLAGS, NATIVE_SERVING
 from hyperloom.common.tests.handed_names import (
     identifiers_named,
@@ -113,8 +114,10 @@ def test_a_specialist_told_its_timing_lines_are_handed_to_it_has_them_in_its_tas
 _KNOB_TUNE = "python -m hyperloom.measure.runner.native.knob_tune"
 
 
-def _prompts(monkeypatch, **dispatch) -> str:
+def _prompts(monkeypatch, isolation: str = NONE, **dispatch) -> str:
     monkeypatch.setenv(ENV_CURRENT_SESSION_DIR, "/session")
+    report = IsolationReport(specialists=isolation, sandboxes=NONE, required=False, bwrap=None, reasons=())
+    monkeypatch.setattr(native_server_blocks, "agent_isolation_report", lambda: report)
     for name in ("HYPERLOOM_GFX_ARCH", "GFX_ARCH"):
         monkeypatch.delenv(name, raising=False)
     given = {"framework": "llamacpp", "gpu_type": "w7900d", **_PATCH_WITH_CARDS, **dispatch}
@@ -135,6 +138,13 @@ def test_the_knob_sweep_is_not_offered_where_it_cannot_be_timed_or_applied_or_th
     monkeypatch, dispatch
 ):
     assert _KNOB_TUNE not in _prompts(monkeypatch, **dispatch)
+
+
+@pytest.mark.parametrize("isolation", [BWRAP, ACCOUNT, REFUSED])
+def test_the_knob_sweep_is_not_offered_to_a_confined_specialist_which_is_not_shown_the_session_s_base(
+    monkeypatch, isolation
+):
+    assert _KNOB_TUNE not in _prompts(monkeypatch, isolation=isolation)
 
 
 def test_a_framework_the_session_does_not_build_reads_neither_the_board_nor_the_knobs_for_its_prompt(monkeypatch):
