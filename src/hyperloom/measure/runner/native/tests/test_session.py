@@ -8,6 +8,7 @@ failure, and the environment a test of a built stack runs in."""
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from hyperloom.measure.compile import (
 from hyperloom.measure.jit.native.config import BuildStoreConfigError
 from hyperloom.measure.jit.native.needs import BuildNotReady
 from hyperloom.measure.jit.native.record import FAILED, LOG_NAME
+from hyperloom.measure.runner.native import isolated as isolated_module
 from hyperloom.measure.runner.native import recipes as recipes_module
 from hyperloom.measure.runner.native.builder import BuildMachine
 from hyperloom.measure.runner.native.isolated import (
@@ -35,6 +37,7 @@ from hyperloom.measure.runner.native.isolated import (
 from hyperloom.measure.runner.native.planning import NativeSite
 from hyperloom.measure.runner.native.recipes import NativeRecipe, llamacpp_recipe, native_recipes
 from hyperloom.measure.runner.native.session import (
+    BuildOutcome,
     BuildStatus,
     NativeBuildSession,
     PinnedCheckout,
@@ -51,6 +54,7 @@ from hyperloom.measure.runner.native.tests._native import (
     affinity_recipe,
     executable_recipe,
     image_root,
+    pinned_affinity_recipe,
     stepped_recipe,
     upstream_tree,
 )
@@ -182,20 +186,48 @@ def test_the_pinned_commit_as_it_is_runs_in_its_build_when_the_build_makes_execu
     assert (built.reused, again.status, again.reused) == (False, BuildStatus.BUILT, True)
 
 
-def test_every_compile_runs_at_the_lowest_priority_on_the_build_cpus_the_record_names(
+def _affinity(bench: Bench, monkeypatch: pytest.MonkeyPatch, recipe: Callable[[], NativeRecipe]) -> BuildOutcome:
+    """The build of the pinned commit by ``recipe``, which prints its CPUs and priority, on a site whose build CPUs are
+    CPU 0."""
+    monkeypatch.setitem(recipes_module.RECIPE_FACTORIES, COMPONENT, f"{native_bench.__name__}:{recipe.__name__}")
+    return _session(bench, recipe=recipe(), cpus="0").base(COMPONENT)
+
+
+def _log(bench: Bench, built: BuildOutcome) -> str:
+    return (bench.store.entry_dir_of(COMPONENT, built.inputs.key) / LOG_NAME).read_text()
+
+
+def test_a_pinned_checkouts_compile_runs_at_the_lowest_priority_on_the_build_cpus_the_record_names(
     bench: Bench, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setitem(
-        recipes_module.RECIPE_FACTORIES, COMPONENT, f"{native_bench.__name__}:{affinity_recipe.__name__}"
-    )
-    session = _session(bench, recipe=affinity_recipe(), cpus="0")
-
-    built = session.base(COMPONENT)
+    built = _affinity(bench, monkeypatch, pinned_affinity_recipe)
 
     assert built.status is BuildStatus.BUILT
     assert built.record.toolchain[BUILD_CPUS_KEY] == "0"
-    log = (bench.store.entry_dir_of(COMPONENT, built.inputs.key) / LOG_NAME).read_text()
-    assert "cpus [0] nice 19" in log
+    assert "cpus [0] nice 19" in _log(bench, built)
+
+
+def test_any_other_compile_keeps_this_process_cpus_and_priority_and_its_record_names_no_build_cpus(
+    bench: Bench, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(isolated_module.shutil, "which", lambda tool, *args, **kwargs: None)
+
+    built = _affinity(bench, monkeypatch, affinity_recipe)
+
+    assert built.status is BuildStatus.BUILT, "it needs neither nice nor taskset"
+    assert BUILD_CPUS_KEY not in built.record.toolchain
+    assert f"cpus {sorted(os.sched_getaffinity(0))} nice {os.nice(0)}" in _log(bench, built)
+
+
+def test_a_host_without_nice_fails_a_pinned_checkouts_compile_as_the_machines(
+    bench: Bench, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(isolated_module.shutil, "which", lambda tool, *args, **kwargs: None)
+
+    built = _affinity(bench, monkeypatch, pinned_affinity_recipe)
+
+    assert (built.status, built.record) == (BuildStatus.INFRA, None)
+    assert "taskset, nice is not on PATH" in built.detail
 
 
 def test_the_build_cpus_are_a_cpu_list_of_this_host_and_anything_else_is_refused() -> None:

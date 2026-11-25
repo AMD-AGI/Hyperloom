@@ -30,9 +30,11 @@ child. A host where neither works builds nothing: the build fails as the machine
 reasons (:class:`Unisolated`). A remote build pool is another
 :class:`~hyperloom.measure.runner.native.service.Build` behind the same ``runner(inputs)`` seam.
 
-A compile also must not slow a measurement running on the same host: every compile runs at the lowest CPU priority
-(``nice -n 19``), and, where the site names the CPUs compiles may use (``HYPERLOOM_BUILD_CPUS``, :func:`build_cpus`),
-only on those (``taskset``), which the record's ``build_cpus`` entry names (:class:`ChildInterpreter`).
+The compile of a recipe built from a pinned checkout (:attr:`~hyperloom.measure.runner.native.recipes.CommitSource.
+PINNED_CHECKOUT`) also must not slow a measurement running on the same host: it runs at the lowest CPU priority
+(``nice -n 19``), and, where the site names the CPUs such compiles may use (``HYPERLOOM_BUILD_CPUS``,
+:func:`build_cpus`), only on those (``taskset``), which the record's ``build_cpus`` entry names. Any other recipe's
+compile runs as the child's command line is, and its record has no such entry of this process's.
 
 The child imports the builder from the tree this process runs from (``source``), not from whatever ``hyperloom`` the
 interpreter's environment has installed, so an environment installed from an older tree cannot compile with old code; a
@@ -73,6 +75,7 @@ from hyperloom.measure.jit.store import SnapshotInvalid, read_bounded
 from hyperloom.measure.runner.native.builder import LaidTree
 from hyperloom.measure.runner.native.planning import NativePlanner, PlannedBuild
 from hyperloom.measure.runner.native.process_group import run_in_group
+from hyperloom.measure.runner.native.recipes import CommitSource
 from hyperloom.measure.runner.native.service import Build, Staged
 
 __all__ = [
@@ -107,7 +110,7 @@ ISOLATION_KEY = "isolation"
 ISOLATION_UID_NETNS = "uid+netns"
 ISOLATION_UID = "uid"
 ISOLATION_BWRAP_NETNS = "bwrap+netns"
-#: The CPUs every compile is pinned to, as ``taskset -c`` takes them (``0-31``, ``0-15,64-79``); unset: any.
+#: The CPUs a pinned checkout's compile is pinned to, as ``taskset -c`` takes them (``0-31``, ``0-15,64-79``); unset: any.
 BUILD_CPUS_ENV = "HYPERLOOM_BUILD_CPUS"
 #: The toolchain entry of a build's record that names the CPUs its compile was pinned to.
 BUILD_CPUS_KEY = "build_cpus"
@@ -161,7 +164,7 @@ class Unisolated:
 
 
 def build_cpus(environ: Mapping[str, str]) -> str:
-    """The CPUs ``HYPERLOOM_BUILD_CPUS`` pins every compile to; ``""`` when it names none.
+    """The CPUs ``HYPERLOOM_BUILD_CPUS`` pins a pinned checkout's compile to; ``""`` when it names none.
 
     Raises:
         BuildStoreConfigError: It names something other than a CPU list ``taskset -c`` takes, or a CPU a compile
@@ -276,20 +279,16 @@ def local_isolation(network_probe: Callable[[str], bool] = private_network) -> I
 @dataclass(frozen=True)
 class ChildInterpreter:
     """What runs the build child: ``python`` under ``-I``, importing the builder from ``source`` (by default this process's
-    own interpreter and the tree it runs from), at the lowest CPU priority and, when ``cpus`` names any (the site's
-    build CPUs, :func:`build_cpus`), only on those."""
+    own interpreter and the tree it runs from). ``cpus`` are the site's build CPUs (:func:`build_cpus`), which the
+    compile of a recipe built from a pinned checkout is pinned to."""
 
     python: str = sys.executable
     source: Path = SOURCE_ROOT
     cpus: str = ""
 
     def command(self, work: Path) -> list[str]:
-        """The child's command line for the laid tree in ``work``.
-
-        Raises:
-            BuildInfraError: ``nice``, or ``taskset`` where there are CPUs to pin to, is not on ``PATH``.
-        """
-        return [*_cpu_prefix(self.cpus), self.python, "-I", "-c", _CHILD_BOOTSTRAP, str(self.source), str(work)]
+        """The child's command line for the laid tree in ``work``."""
+        return [self.python, "-I", "-c", _CHILD_BOOTSTRAP, str(self.source), str(work)]
 
 
 def compile_policy(work: Path, child: ChildInterpreter, laid: LaidTree, environ: Mapping[str, str]) -> BwrapPolicy:
@@ -398,13 +397,22 @@ class IsolatedBuilds:
             tail = done.stderr.strip()[-_STDERR_TAIL:]
             raise BuildInfraError(f"the build runner exited {done.returncode}: {tail}")
         staged = staged_record(work, timing)
-        toolchain = _service_toolchain(staged.toolchain, laid, isolation.level, self._child.cpus)
+        toolchain = _service_toolchain(staged.toolchain, laid, isolation.level, self._cpus(laid))
         return replace(staged, toolchain=toolchain)
+
+    def _cpus(self, laid: LaidTree) -> str | None:
+        """The CPUs the compile of ``laid`` is pinned to (``""``: any), at the lowest priority; ``None`` for a recipe
+        not built from a pinned checkout, whose compile is neither pinned nor given a priority."""
+        return self._child.cpus if laid.recipe.commit_source is CommitSource.PINNED_CHECKOUT else None
 
     def _command(self, isolation: Isolation, work: Path, laid: LaidTree) -> tuple[list[str], dict[str, str]]:
         """The child's command line under ``isolation`` and its environment; the work directory is given to the
-        compile's user first, when it has one of its own."""
-        env, command = _child_environment(work), self._child.command(work)
+        compile's user first, when it has one of its own.
+
+        Raises:
+            BuildInfraError: The compile runs under ``nice`` or ``taskset`` (:meth:`_cpus`) and it is not on ``PATH``.
+        """
+        env, command = _child_environment(work), [*_cpu_prefix(self._cpus(laid)), *self._child.command(work)]
         if isolation.bwrap is None:
             if isolation.uid is not None:
                 _give(work, isolation.uid)
@@ -415,9 +423,12 @@ class IsolatedBuilds:
             raise BuildInfraError(f"bubblewrap cannot sandbox this compile: {refused}; nothing was compiled") from None
 
 
-def _cpu_prefix(cpus: str) -> list[str]:
-    """``nice`` to the lowest priority, behind ``taskset`` to ``cpus`` when there are any; the machine's failure when
-    either tool is missing, since the compile would contend with the measurement it must not slow."""
+def _cpu_prefix(cpus: str | None) -> list[str]:
+    """``nice`` to the lowest priority, behind ``taskset`` to ``cpus`` when there are any, and nothing for ``None``; the
+    machine's failure when either tool is missing, since the compile would contend with the measurement it must not
+    slow."""
+    if cpus is None:
+        return []
     tools = ("taskset", "nice") if cpus else ("nice",)
     found = {tool: shutil.which(tool) for tool in tools}
     missing = [tool for tool, path in found.items() if path is None]
@@ -427,17 +438,17 @@ def _cpu_prefix(cpus: str) -> list[str]:
     return [str(found["taskset"]), "-c", cpus, *prefix] if cpus else prefix
 
 
-def _service_toolchain(child: Mapping[str, str], laid: LaidTree, level: str, cpus: str) -> dict[str, str]:
+def _service_toolchain(child: Mapping[str, str], laid: LaidTree, level: str, cpus: str | None) -> dict[str, str]:
     """The record's toolchain: the child's facts, less any it wrote under the names this process writes (the variables of
-    the compile, its isolation and the CPUs it was pinned to), which a compile running candidate code must not be able
-    to claim."""
+    the compile, its isolation and, unless ``cpus`` is ``None``, the CPUs it was pinned to), which a compile running
+    candidate code must not be able to claim."""
     own = {f"{COMPILE_ENV_PREFIX}{name}": value for name, value in laid.environment.items()}
-    kept = {
-        name: value
-        for name, value in child.items()
-        if not name.startswith(COMPILE_ENV_PREFIX) and name not in (ISOLATION_KEY, BUILD_CPUS_KEY)
-    }
-    return {**kept, **own, ISOLATION_KEY: level, **({BUILD_CPUS_KEY: cpus} if cpus else {})}
+    kept = {name: value for name, value in child.items() if not name.startswith(COMPILE_ENV_PREFIX)}
+    toolchain = {**kept, **own, ISOLATION_KEY: level}
+    if cpus is None:
+        return toolchain
+    toolchain.pop(BUILD_CPUS_KEY, None)
+    return {**toolchain, BUILD_CPUS_KEY: cpus} if cpus else toolchain
 
 
 def _write_job(work: Path, job: Mapping[str, Any]) -> None:
