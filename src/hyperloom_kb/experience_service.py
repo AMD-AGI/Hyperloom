@@ -64,11 +64,11 @@ from hyperloom_kb.schema import (
     FileRef,
     JsonValue,
 )
-from hyperloom_kb.service import CompleteExperienceRequired
 from hyperloom_kb.storage import (
     ImmutableExperienceConflict,
     InMemoryExperienceStore,
     InsertStatus,
+    StorageContractError,
     canonical_experience_bytes,
 )
 from hyperloom_kb.sync import GlobalSync, SyncLedger
@@ -443,7 +443,7 @@ class ExperienceHTTPService:
             self.register(declaration)
         schema = self.declaration_for(experience.schema_ref)
         if experience.status is not ExperienceStatus.COMPLETE:
-            raise CompleteExperienceRequired("a write requires a complete Experience")
+            raise StorageContractError("a write requires a complete Experience")
         schema.validate(experience)
         data = canonical_experience_bytes(experience)
         content_hash = hashlib.sha256(data).hexdigest()

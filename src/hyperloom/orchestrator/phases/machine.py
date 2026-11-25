@@ -300,11 +300,10 @@ class MachinePhase(CoordinatorCollaborator):
             state.no_gain_cycle_streak = int(move.evidence.get("no_gain_cycle_streak_effective", 0) or 0)
 
     def _open_next_macro_cycle(self, no_gain_cycle_streak: int, *, trigger: str) -> None:
-        """Open the next macro-cycle and record the strategy it starts on."""
+        """Open the next macro-cycle."""
         state = self.shared_state
         prior_cycle = state.macro_cycle
         state.open_macro_cycle(no_gain_cycle_streak=no_gain_cycle_streak)
-        self._coord.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
         log.info(
             "Coordinator: macro-cycle %s %d -> %d (no_gain_streak=%d, gain_anchor=%.4f)",
             trigger,
@@ -585,15 +584,9 @@ class MachinePhase(CoordinatorCollaborator):
         if rebuild is None:
             return False
         state = self.shared_state
-        cycle = int(state.macro_cycle or 0)
-        log_rows = list(state.cycle_strategy_log or [])
-        prior_cycles = [r for r in log_rows if isinstance(r, dict) and int(r.get("cycle", -1) or -1) != cycle]
-        focus_plan = self._coord.phase_macro_cycle.plan_cycle_focus()
-        focus_plan["prior_cycles"] = prior_cycles[-5:]
         scoped = rebuild(
             macro_cycle=state.macro_cycle,
             cycle_directive=self._cycle_directive(),
-            cycle_strategy=focus_plan,
             phase=phase,
         )
         orch_prompt.set("orchestration", scoped)
