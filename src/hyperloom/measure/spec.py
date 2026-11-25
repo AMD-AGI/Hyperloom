@@ -28,6 +28,7 @@ from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointErro
 from hyperloom.common.launch_credentials import credentials_in_the_clear
 from hyperloom.contracts.measurement import Purpose
 from hyperloom.measure.checkpoint import CheckpointPlan
+from hyperloom.measure.jit.native.needs import BUILT_ROOT_KINDS, EXECUTABLE_ROOT, PACKAGE_ROOT, RUNTIME_ROOT
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS
@@ -325,7 +326,7 @@ class EnvRoot:
         dist.done()
         root = cls(
             id=r.text("id", pattern=_ID_RE) or "",
-            kind=r.choice(_KIND, ("package", _RUNTIME)) or "",
+            kind=r.choice(_KIND, (PACKAGE_ROOT, RUNTIME_ROOT, EXECUTABLE_ROOT)) or "",
             import_name=r.text("import_name") or "",
             dist_name=dist_name,
             dist_version=dist_version,
@@ -335,6 +336,8 @@ class EnvRoot:
         paths = [entry.path for entry in root.entries]
         if len(set(paths)) != len(paths):
             raise DocumentError(f"{path}.entries: a path appears twice")
+        if root.kind == EXECUTABLE_ROOT and root.entries:
+            raise DocumentError(f"{path}.entries: an executable root lays no file over a package")
         return root
 
     def to_document(self) -> dict[str, Any]:
@@ -391,9 +394,9 @@ class BuildRef:
 
 @dataclass(frozen=True)
 class Environment:
-    """The overlay a runner rebuilds. ``builds`` name the ready native build of each ``runtime`` root, one each, and of
-    a package root whose JIT modules a CPU build made (aiter's); a sheet with none leaves the key out, so a
-    runner that does not know it reads every other sheet as before and refuses one that has builds."""
+    """The overlay a runner rebuilds. ``builds`` name the ready native build of each ``runtime`` and ``executable`` root,
+    one each, and of a package root whose JIT modules a CPU build made (aiter's); a sheet with none leaves the key out,
+    so a runner that does not know it reads every other sheet as before and refuses one that has builds."""
 
     roots: tuple[EnvRoot, ...] = ()
     runtime: RuntimeSnapshot | None = None
@@ -418,12 +421,12 @@ class Environment:
         if len(set(ids)) != len(ids):
             raise DocumentError(f"{path}.roots: an id appears twice")
         kinds = {root.id: root.kind for root in environment.roots}
-        runtime_ids = sorted(root_id for root_id, kind in kinds.items() if kind == _RUNTIME)
+        built_ids = sorted(root_id for root_id, kind in kinds.items() if kind in BUILT_ROOT_KINDS)
         built = [ref.root_id for ref in environment.builds]
-        if len(set(built)) != len(built) or not set(runtime_ids) <= set(built) <= set(kinds):
+        if len(set(built)) != len(built) or not set(built_ids) <= set(built) <= set(kinds):
             raise DocumentError(
-                f"{path}.builds: each runtime root needs exactly one build, a package root may have one (of the "
-                f"modules its JIT builds), and each build names a root (runtime roots {runtime_ids}, builds {built})"
+                f"{path}.builds: each runtime or executable root needs exactly one build, a package root may have one "
+                f"(of the modules its JIT builds), and each build names a root (built roots {built_ids}, builds {built})"
             )
         return environment
 

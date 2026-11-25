@@ -108,6 +108,7 @@ def test_a_base_no_inferencex_arm_gave_sweeps_the_operators_points_or_none():
     [
         ({"nodes": 2}, "multi_node"),
         ({"framework": "xdit"}, "non_serving_workload"),
+        ({"framework": "llamacpp"}, "checkout_built_server"),
         ({"benchmark_mode": "agentx", "agentx_backend": "mlperf"}, "mlperf_backend"),
     ],
 )
@@ -252,34 +253,3 @@ def test_the_session_report_points_at_the_sweep(session_dir: Path, grid: SimpleN
 
     pointer = json.loads(final.read_text())["conc_sweep_summary"]
     assert pointer["report_path"] == "reports/conc_sweep_summary.json" and pointer["status"] == "succeeded"
-
-
-def _llamacpp_state(session_dir: Path, *, base_args: str, optimized_args: str) -> SharedState:
-    state = _state(session_dir, framework="llamacpp", conc=2)
-    state.current_best = {"extra_server_args": optimized_args, "extra_envs": {}}
-    Path(state.baseline_config_path).write_text(
-        "benchmark:\n  framework: llamacpp\n  benchmark_script: bench.sh\n"
-        f"  envs:\n    EXTRA_LLAMACPP_ARGS: '{base_args}'\n"
-    )
-    state.save(session_dir)
-    return state
-
-
-def test_points_past_every_arm_s_request_slots_skip_the_sweep(session_dir: Path, grid: SimpleNamespace):
-    """A server that runs one request at a time queues every other one, so points above its slots measure nothing
-    the session's own point did not."""
-    _llamacpp_state(session_dir, base_args="-ngl 99 -np 1", optimized_args="--spec-draft-n-max 4")
-
-    payload = asyncio.run(runner.run_conc_sweep(session_dir))
-
-    assert (payload["status"], payload["skip_reason"]) == ("skipped", "concs_exceed_server_slots")
-    assert payload["server_slots"] == 1 and grid.calls == []
-
-
-def test_the_sweep_keeps_the_points_the_widest_arm_serves(session_dir: Path, grid: SimpleNamespace):
-    _llamacpp_state(session_dir, base_args="-ngl 99 -np 1", optimized_args="--parallel 4")
-
-    payload = asyncio.run(runner.run_conc_sweep(session_dir))
-
-    assert payload["concs"] == [2, 4]
-    assert sorted({int(call["name"].rsplit("conc", 1)[1]) for call in grid.calls}) == [2, 4]

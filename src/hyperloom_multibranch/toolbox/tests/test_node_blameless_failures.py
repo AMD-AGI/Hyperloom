@@ -3,7 +3,7 @@
 
 """A runner that could not start or was lost leaves its node out of the quarantine the blackboard keeps; a node fault
 still quarantines it, and that quarantine is read back when the toolbox starts again, while one a blameless failure
-recorded before is not."""
+or cards a process outside the test held recorded before is not."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from hyperloom_multibranch.toolbox.tests.test_attempts import (
     CREATE_FAILED_REASON,
     HUB_REFUSED_REASON,
     KEY_READ_ONLY_REASON,
+    FOREIGN_REASON,
     LOST_REASON,
 )
 
@@ -60,8 +61,8 @@ async def _restarted_quarantine(tmp_path: Path) -> frozenset[str]:
 
 @pytest.mark.parametrize(
     "reason",
-    [KEY_READ_ONLY_REASON, CACHE_REASON, LOST_REASON, CREATE_FAILED_REASON, HUB_REFUSED_REASON],
-    ids=["signing_key", "runner_cache", "runner_lost", "sandbox_create_failed", "hub_rate_limited"],
+    [KEY_READ_ONLY_REASON, CACHE_REASON, LOST_REASON, CREATE_FAILED_REASON, HUB_REFUSED_REASON, FOREIGN_REASON],
+    ids=["signing_key", "runner_cache", "runner_lost", "sandbox_create_failed", "hub_rate_limited", "foreign_process"],
 )
 async def test_a_runner_that_could_not_start_or_was_lost_does_not_quarantine_its_node(
     tmp_path: Path, reason: str
@@ -93,6 +94,7 @@ async def test_a_node_quarantine_recorded_for_a_blameless_failure_is_not_read_ba
         "node-b": CACHE_REASON,
         "node-c": LOST_REASON,
         "node-d": NODE_FAULT_REASON,
+        "node-e": FOREIGN_REASON,
     }
     for node, reason in recorded.items():
         event = QuarantineEvent(node=node, action=QuarantineAction.QUARANTINE, reason=reason, request_ids=("r1",))
