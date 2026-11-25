@@ -28,7 +28,7 @@ reads. So it also needs:
 A store and trust given without any of the four required ones refuse the build of the toolbox, naming the variable, and
 so does a host that is not ready for them (:func:`~hyperloom_multibranch.toolbox.build_preflight.build_preflight`;
 ``python -m hyperloom_multibranch.toolbox.build_setup`` sets one up). The builds themselves are a
-:class:`~hyperloom.measure.runner.native.session.NativeBuildSession`;
+:class:`~hyperloom.measure.runner.native.session.NativeBuildSession`, the one the single-branch flow builds through too;
 this module reads its configuration from the environment and hands the queue its driver. The compile runs out of this
 process; a host that cannot isolate it fails each build as the machine's, never compiles in-process. The signing key
 and the trust file are registered as the app's private paths
@@ -52,14 +52,17 @@ from hyperloom.measure.jit.native.config import (
     BuildStoreConfigError,
     store_from_environment,
 )
+from hyperloom.measure.farm import BASE_BINS_ENV, FarmError
 from hyperloom.measure.jit.native.key import BuildInputs
+from hyperloom.measure.jit.native.laying import NativeLayError
 from hyperloom.measure.jit.native.trust import Signer
 from hyperloom.measure.runner.native.aiter_modules import AITER_COMPONENT, aiter_module_recipe
 from hyperloom.measure.runner.native.builder import BUILD_PYTHON_ENV, BuildMachine
 from hyperloom.measure.runner.native.isolated import Isolation, Unisolated, build_cpus, local_isolation
 from hyperloom.measure.runner.native.planning import NativeSite
-from hyperloom.measure.runner.native.recipes import native_recipes
-from hyperloom.measure.runner.native.session import NativeBuildSession, open_session, pinned_checkouts
+from hyperloom.measure.runner.native.recipes import CommitSource, native_recipes
+from hyperloom.measure.runner.native.session import BuildStatus, NativeBuildSession, open_session, pinned_checkouts
+from hyperloom.measure.runner.native.session_builds import lay_executables
 from hyperloom_multibranch.toolbox.build_preflight import (
     FULL_COMMIT,
     SGL_KERNEL,
@@ -78,6 +81,8 @@ __all__ = [
     "BUILD_SOURCES_ENV",
     "BUILDER_IMAGE_ENV",
     "NativeBuilds",
+    "base_bins_env",
+    "base_executables",
     "compiled_needs",
     "named_commits",
     "native_builds",
@@ -187,6 +192,45 @@ def native_builds(
     built = {**recipes, AITER_COMPONENT: aiter_module_recipe()}
     driver = StoreBuildDriver(store, signer, built, compiled_needs, session.runner)
     return NativeBuilds(driver, session, runner_envs)
+
+
+def base_executables(session: NativeBuildSession, farms: Path) -> tuple[Path, ...]:
+    """The directory of the executables of each component the site builds from its pinned checkout as it is, built
+    when the store has no such build and laid once below ``farms``: a test whose recipe does not change the component
+    runs these, as a candidate runs its own build, never whatever ``PATH`` finds.
+
+    Raises:
+        BuildStoreConfigError: A base did not build, or its executables cannot be laid.
+    """
+    site = session.planner.site
+    laid = []
+    for component in sorted(site.commits):
+        recipe = site.recipes.get(component)
+        if recipe is None or recipe.commit_source is not CommitSource.PINNED_CHECKOUT or not recipe.executables:
+            continue
+        outcome = session.base(component)
+        if outcome.status is not BuildStatus.BUILT:
+            raise BuildStoreConfigError(
+                f"the {component} base at {site.commits[component]} did not build ({outcome.status.value}): "
+                f"{outcome.detail}"
+            )
+        environment = session.base_environment(component)
+        try:
+            laid.append(lay_executables(session, component, outcome.inputs.key, environment, farms))
+        except (FarmError, NativeLayError, OSError) as unlaid:
+            raise BuildStoreConfigError(f"the {component} base build cannot be laid: {unlaid}") from None
+    return tuple(laid)
+
+
+def base_bins_env(native: NativeBuilds | None, farms: Path) -> dict[str, str]:
+    """The runner variable naming the directories of the base builds' executables (:func:`base_executables`, laid
+    below ``farms``), which a runner puts ahead of its own ``PATH``; none without native builds or such a component.
+
+    Raises:
+        BuildStoreConfigError: As :func:`base_executables`.
+    """
+    bins = base_executables(native.session, farms) if native is not None else ()
+    return {BASE_BINS_ENV: os.pathsep.join(map(str, bins))} if bins else {}
 
 
 def with_native_plan(acceptance: AcceptanceSetup, native: NativeBuilds | None) -> AcceptanceSetup:

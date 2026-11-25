@@ -23,7 +23,10 @@ A build that makes executables and no package (an ``executable`` root: a server 
 as its outputs alone, each copied out of the store below ``<farm>/<root id>``, and the directories that hold them go
 first on the server's ``PATH``, ahead of the ``PATH`` it would otherwise get, which is kept whole: nothing else on it,
 ROCm's tools among them, is hidden, since those directories hold nothing but the build's executables. Whether the
-server would run the farm's copy of each is checked by resolving its name on that ``PATH``.
+server would run the farm's copy of each is checked by resolving its name on that ``PATH``. A test that does not rebuild
+such a component runs its base build, which the toolbox laid where the runner reads it and names in
+``HYPERLOOM_BASE_BINS``: the runner puts those directories ahead of its own ``PATH`` (:func:`prepend_base_bins`), the
+one its image keeps.
 
 Which copy each process of the server really imported is checked by the runner
 (:mod:`~hyperloom.measure.runner.import_outcome`), which watches the imports from the farm's ``site`` directory.
@@ -67,6 +70,7 @@ from hyperloom.orchestrator.actions.executors import (
 from hyperloom.orchestrator.actions.executors.agentx_point import apply_native_runtime
 
 __all__ = [
+    "BASE_BINS_ENV",
     "BuiltRoot",
     "Farm",
     "FarmError",
@@ -82,6 +86,7 @@ __all__ = [
     "patched_configs",
     "patches_aiter_sources",
     "place_farm",
+    "prepend_base_bins",
     "place_host_copies",
     "prepend_pythonpath",
     "record_unpatched",
@@ -111,6 +116,8 @@ _DIST_VERSION = (
 _IMPORT_FILE = "import importlib, sys\nprint(importlib.import_module(sys.argv[1]).__file__)\n"
 _PYTHONPATH = "PYTHONPATH"
 _PATH = "PATH"
+#: The directories of the base builds' executables, joined by ``os.pathsep``, that the runner puts ahead of its ``PATH``.
+BASE_BINS_ENV = "HYPERLOOM_BASE_BINS"
 #: Where the render of a vLLM point names the image checkout it put on the server's path (``_apply_vllm_source_runtime``).
 _VLLM_CHECKOUT_ENV = "VLLM_REPO_PATH"
 
@@ -535,6 +542,20 @@ def _prepend_path(envs: MutableMapping[str, Any], directories: Iterable[Path], i
     current = str(envs.get(_PATH) or inherited.get(_PATH) or os.defpath)
     parts = [*(str(directory) for directory in directories), *current.split(os.pathsep)]
     envs[_PATH] = os.pathsep.join(dict.fromkeys(part for part in parts if part))
+
+
+def prepend_base_bins(environ: MutableMapping[str, str]) -> None:
+    """Put the directories ``environ`` names in :data:`BASE_BINS_ENV` first on its ``PATH``.
+
+    Raises:
+        FarmError: A named directory is not here: its test would run whatever the rest of ``PATH`` finds.
+    """
+    bins = tuple(Path(part) for part in environ.get(BASE_BINS_ENV, "").split(os.pathsep) if part)
+    missing = [str(directory) for directory in bins if not directory.is_dir()]
+    if missing:
+        raise FarmError(f"{BASE_BINS_ENV} names base builds that are not here: {', '.join(missing)}")
+    if bins:
+        _prepend_path(environ, bins, {})
 
 
 def _server_envs(point: BenchmarkPoint) -> Mapping[str, Any]:
