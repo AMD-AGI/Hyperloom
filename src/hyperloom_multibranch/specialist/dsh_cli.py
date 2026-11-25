@@ -9,7 +9,8 @@ every later message are written to the CLI's stdin as stream-json user messages,
 session reads turn ends, tool calls and token counts from. ``dsh`` holds a conversation across turns only behind
 JSON-RPC (``dsh --profile sdk``), which refuses a prompt until its ``initialize`` request was answered, so nothing
 written ahead into a pipe can drive it. This module is the process in between, started as
-``python -m hyperloom_multibranch.specialist.dsh_cli``: it holds one runtime through the harness SDK, runs each
+``python -m hyperloom_multibranch.specialist.dsh_cli`` on :func:`bridge_env`, which names the packages its launcher
+runs: it holds one runtime through the harness SDK, runs each
 message it reads as one turn of one conversation, and writes what the runtime reports as the rows a Claude CLI
 writes:
 
@@ -75,6 +76,9 @@ from hyperloom_common.llm.reasoning_effort import DEFAULT_REASONING_EFFORT, harn
 MODULE = "hyperloom_multibranch.specialist.dsh_cli"
 #: The variable that names the runtime's home, which the launcher sets: the conversation's log is kept there.
 HOME_ENV = "DSH_HOME"
+#: The directory this app's packages are imported from, and the variable that names such directories to a Python.
+PACKAGES = Path(__file__).resolve().parents[2]
+IMPORT_PATH_ENV = "PYTHONPATH"
 #: The profile a specialist's conversation boots, and the one a reading run boots.
 SESSION_PROFILE, READING_PROFILE = "sdk", "sdk-minimal"
 #: The rows of :data:`SESSION_PROFILE` an unattended conversation runs without: the tool that asks a person, the one
@@ -348,6 +352,25 @@ def prompt_of(line: str) -> str:
     return _text(content) if isinstance(content, list) else line.strip()
 
 
+def _other_imports(env: Mapping[str, str]) -> list[str]:
+    """The directories ``env`` names for imports besides this app's packages."""
+    return [entry for entry in env.get(IMPORT_PATH_ENV, "").split(os.pathsep) if entry and Path(entry) != PACKAGES]
+
+
+def bridge_env(env: Mapping[str, str]) -> dict[str, str]:
+    """``env`` as the bridge is launched with it: this app's packages first among what its Python imports. A session's
+    allowlisted environment does not say where they are, so a Python given ``env`` alone would run the copy it has
+    installed, or none, where the app itself runs from a source tree."""
+    return {**env, IMPORT_PATH_ENV: os.pathsep.join([str(PACKAGES), *_other_imports(env)])}
+
+
+def _runtime_env(env: Mapping[str, str]) -> dict[str, str]:
+    """``env`` for the runtime and the commands its tools run, which import as they did before :func:`bridge_env`."""
+    others = _other_imports(env)
+    kept = {name: value for name, value in env.items() if name != IMPORT_PATH_ENV}
+    return {**kept, IMPORT_PATH_ENV: os.pathsep.join(others)} if others else kept
+
+
 def _home() -> Path:
     value = os.environ.get(HOME_ENV, "").strip()
     if not os.path.isabs(value):
@@ -383,7 +406,7 @@ def _launch(options: Options, home: Path, cwd: Path) -> HarnessLaunch:
             patch, profile = boot.patch, SESSION_PROFILE
     except (DeepSeekSessionError, SpecialistAgentUnavailableError, OSError) as error:
         raise Refused(str(error)) from error
-    env["DSH_TELEMETRY_MODE"] = "DISABLED"
+    env = _runtime_env({**env, "DSH_TELEMETRY_MODE": "DISABLED"})
     return HarnessLaunch(home, cwd, options.model, effort, env, REQUEST_TIMEOUT_S, profile=profile, patches=(patch,))
 
 
@@ -555,9 +578,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 __all__ = [
     "HOME_ENV",
+    "IMPORT_PATH_ENV",
     "MODEL_REQUEST_MAX_S",
     "MODEL_REQUEST_ROW_S",
     "MODULE",
+    "PACKAGES",
     "READING_PATCH",
     "UNATTENDED_OFF",
     "Bridge",
@@ -566,6 +591,7 @@ __all__ = [
     "Refused",
     "Rows",
     "Turn",
+    "bridge_env",
     "main",
     "parse",
     "prompt_of",

@@ -124,7 +124,8 @@ def cli_onboard(
         log = _next_log(checkout.parent)
         try:
             with _harness_home(command, log) as home:
-                returncode = await asyncio.wait_for(_run(argv, checkout, {**env, **home}, prompt, log), seconds)
+                launched = {**command.env(env), **home}
+                returncode = await asyncio.wait_for(_run(argv, checkout, launched, prompt, log), seconds)
         except asyncio.TimeoutError as error:
             raise _failed(log, f"the onboarding CLI did not answer within {seconds:.0f} s") from error
         finally:

@@ -3,6 +3,7 @@
 
 import io
 import json
+import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +15,8 @@ from hyperloom_common.llm import deepseek_session
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.specialist import dsh_cli
 from hyperloom_multibranch.specialist.agent_session import TurnLog
-from hyperloom_multibranch.specialist.dsh_cli import READING_PATCH, UNATTENDED_OFF, Rows, Turn, prompt_of, result_row
+from hyperloom_multibranch.specialist.dsh_cli import PACKAGES, READING_PATCH, UNATTENDED_OFF
+from hyperloom_multibranch.specialist.dsh_cli import Rows, Turn, prompt_of, result_row
 from hyperloom_multibranch.specialist.llm_usage import launch_usage
 
 SID, CHILD, MODEL = "0b9c3f6e-conversation", "session-of-a-sub-agent", "deepseek-v4-flash"
@@ -325,6 +327,17 @@ def test_a_fresh_conversation_runs_each_message_as_a_turn_until_its_stdin_ends(
     assert patch["session-persistence-jsonl"]["config"]["compression"] == "none"
     assert patch["agent-default-model"]["config"]["model"] == MODEL
     assert [patch[row]["disabled"] for row in UNATTENDED_OFF] == [True] * len(UNATTENDED_OFF)
+
+
+@pytest.mark.parametrize(("others", "kept"), [(["/opt/tools"], "/opt/tools"), ([], None)])
+def test_the_runtime_and_its_tools_do_not_import_from_where_the_bridge_was_pointed_at_the_app(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, others: list[str], kept: str | None
+) -> None:
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(PACKAGES), *others]))
+
+    _run(monkeypatch, capsys, ["--model", MODEL, "--session-id", SID], _message("a"))
+
+    assert _Harness.made[0].kwargs["env"].get("PYTHONPATH") == kept
 
 
 def test_the_rows_of_a_launch_read_as_a_claude_cli_s_turns_and_spend(

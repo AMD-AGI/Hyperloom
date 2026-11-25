@@ -41,6 +41,7 @@ from hyperloom_multibranch.specialist.agent_session import (
 )
 from hyperloom_multibranch.specialist.dev_sandbox import DevLeases, DevLimits, LeaseTerm
 from hyperloom_multibranch.specialist.dsh_cli import MODULE as DSH_CLI
+from hyperloom_multibranch.specialist.dsh_cli import PACKAGES as APP_PACKAGES
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart, restart_notice
 from hyperloom_multibranch.tests.branch_rig import branch_rig
@@ -781,6 +782,18 @@ def test_the_deepseek_harness_is_run_as_a_cli_that_takes_message_after_message(t
     assert _text(harness.stdin("ROLE", "PROMPT")) == "PROMPT" == _text(harness.message("PROMPT"))
 
 
+def test_the_deepseek_harness_s_bridge_is_told_where_the_app_it_is_a_module_of_is_imported_from():
+    harness = AgentCommand("deepseek", sys.executable)
+    elsewhere = os.pathsep.join(["/opt/other", str(APP_PACKAGES)])
+
+    # An allowlisted environment names no import path, and one that does keeps its own entries after the app's.
+    assert harness.env({"HOME": "/h"}) == {"HOME": "/h", "PYTHONPATH": str(APP_PACKAGES)}
+    assert harness.env({"PYTHONPATH": elsewhere})["PYTHONPATH"] == os.pathsep.join([str(APP_PACKAGES), "/opt/other"])
+    assert (APP_PACKAGES / DSH_CLI.replace(".", os.sep)).with_suffix(".py").is_file()
+    # A CLI that is a program of its own imports nothing of the app.
+    assert AgentCommand("claude", "claude").env({"HOME": "/h"}) == {"HOME": "/h"}
+
+
 _STAND_IN = """#!/usr/bin/env python3
 import json, os, pathlib, sys
 role = pathlib.Path(sys.argv[sys.argv.index("--system-prompt-file") + 1])
@@ -790,6 +803,7 @@ seen = {
     "mcp_config": "--mcp-config" in sys.argv,
     "token": os.environ.get("HYPERLOOM_SPECIALIST_MCP_TOKEN"),
     "harness_home": os.environ.get("DSH_HOME"),
+    "imports": os.environ.get("PYTHONPATH"),
 }
 (role.parent / "seen.json").write_text(json.dumps(seen))
 sys.stdin.read()
@@ -817,6 +831,8 @@ async def test_a_real_session_feeds_its_cli_the_prompt_and_the_mcp_service(tmp_p
     assert (seen["mcp_config"], seen["token"]) == (True, "token-of-s1")
     # The harness keeps its conversation in a home of the branch's workspace, where a later launch resumes it.
     assert seen["harness_home"] == (str(rig.workspace / ".dsh") if backend == "deepseek" else None)
+    # Its bridge is a module of this app, which the session's own environment does not say where to import from.
+    assert seen["imports"] == (str(APP_PACKAGES) if backend == "deepseek" else None)
 
 
 _INIT = {"type": "system", "subtype": "init", "session_id": "from-the-cli"}

@@ -298,13 +298,15 @@ class _ScriptedModel:
         self._server.server_close()
 
     def env(self, home) -> dict[str, str]:
-        """The environment of a harness that calls this model, with ``home`` as its home: the bridge runs on this
-        interpreter, importing what this test imports however it was put on the path."""
+        """The environment of a harness that calls this model, with ``home`` as its home. As a session's allowlisted
+        environment, it does not say where this app's packages are, which a test may import from a source tree; what
+        else this interpreter was pointed at, the harness SDK among it, it keeps."""
         home.mkdir()
+        others = [entry for entry in sys.path if entry and Path(entry).resolve() != APP_PACKAGES]
         return {
             "PATH": os.environ.get("PATH", ""),
             "HOME": str(home),
-            "PYTHONPATH": os.pathsep.join(entry for entry in sys.path if entry),
+            "PYTHONPATH": os.pathsep.join(others),
             "OPENAI_BASE_URL": self.url,
             "OPENAI_API_KEY": "scripted",
         }
@@ -336,6 +338,8 @@ needs_harness = pytest.mark.skipif(
     not deepseek_harness_sdk_installed(), reason="the DeepSeek Harness SDK and its runtime are an optional extra"
 )
 HARNESS = AgentCommand("deepseek", sys.executable, model="deepseek-v4-flash")
+#: The directory this test imports the app's packages from.
+APP_PACKAGES = Path(__file__).resolve().parents[2]
 
 
 @needs_harness
@@ -418,7 +422,7 @@ def test_the_deepseek_harness_goes_on_with_the_conversation_of_a_process_that_wa
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     model = _ScriptedModel(lambda body: f"heard {len(body['messages'])} messages")
-    env = {**model.env(tmp_path / "home"), "DSH_HOME": str(tmp_path / "session" / ".dsh")}
+    env = {**HARNESS.env(model.env(tmp_path / "home")), "DSH_HOME": str(tmp_path / "session" / ".dsh")}
 
     def command(*conversation: str) -> list[str]:
         return [sys.executable, "-m", DSH_CLI, "--model", HARNESS.model, *conversation]

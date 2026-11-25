@@ -15,6 +15,7 @@ from hyperloom_multibranch.specialist.agent_onboard import ALLOWED_TOOLS, TOOLS,
 from hyperloom_multibranch.specialist.agent_onboarding import AttemptFailed, GatewayDown, ModelRefused
 from hyperloom_multibranch.specialist.agent_session import AgentCommand
 from hyperloom_multibranch.specialist.dsh_cli import MODULE as DSH_CLI
+from hyperloom_multibranch.specialist.dsh_cli import PACKAGES as APP_PACKAGES
 
 MODEL = "claude-sonnet-5-5"
 SUB_MODEL = "claude-haiku-5-5"
@@ -166,6 +167,7 @@ import json, os, pathlib, sys
 home = pathlib.Path(os.environ["DSH_HOME"])
 (home / "sessions").mkdir(parents=True)
 record = {{"argv": sys.argv[1:], "cwd": os.getcwd(), "stdin": sys.stdin.read(), "home": str(home)}}
+record["imports"] = os.environ.get("PYTHONPATH")
 with open(os.environ["FAKE_RECORD"], "w") as handle:
     json.dump(record, handle)
 mode = os.environ.get("FAKE_MODE", "ok")
@@ -206,6 +208,8 @@ async def test_a_deepseek_harness_answers_from_a_home_of_the_run_s_own_that_goes
     assert ran["argv"] == ["-m", DSH_CLI, "--print", "--read-only", "--model", HARNESS_MODEL]
     # The home is beside the log, never in the checkout, and nothing of the conversation is left once the run ended.
     assert ran["home"] == str(tmp_path / "agent" / "onboard-1.dsh") and not Path(ran["home"]).exists()
+    # The bridge is a module of this app, which the environment the run was given does not say where to import from.
+    assert ran["imports"] == str(APP_PACKAGES)
     [recorded] = usage.recorded
     assert (recorded.branch, recorded.tokens, recorded.launch) == ("b07", TokenCounts(10, 40, 30), "s-1")
     assert recorded.cost_usd == pytest.approx(price_of(HARNESS_MODEL).cost_usd(TokenCounts(10, 40, 30)))

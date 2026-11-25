@@ -101,6 +101,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import InboxKind, UsageSou
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
 from hyperloom_multibranch.specialist.dsh_cli import MODULE as DSH_CLI
+from hyperloom_multibranch.specialist.dsh_cli import bridge_env
 from hyperloom_multibranch.specialist.following import (
     REROOT,
     Followed,
@@ -219,6 +220,11 @@ class AgentCommand:
     def interactive(self) -> bool:
         """Whether one CLI takes message after message on its stdin; codex exec reads one prompt and ends."""
         return self.backend != AGENT_BACKEND_CODEX
+
+    def env(self, env: Mapping[str, str]) -> dict[str, str]:
+        """``env`` as the CLI is launched with it: the DeepSeek Harness's bridge is a module of this app, so its
+        Python is told where this app's packages are (:func:`~hyperloom_multibranch.specialist.dsh_cli.bridge_env`)."""
+        return bridge_env(env) if self.backend == AGENT_BACKEND_DEEPSEEK else dict(env)
 
     def argv(self, role_file: Path, worktree: Path, *, session_id: str = "", resume_id: str = "") -> tuple[str, ...]:
         """The command line; the socket adds the MCP configuration. A Claude CLI and the DeepSeek Harness start the
@@ -821,7 +827,7 @@ class AgentSession:
             task_id=self._start.branch,
             workspace=workspace,
             argv=setup.command.argv(role_file, worktree, **conversation),
-            env={**setup.env, grant.token_env: grant.token},
+            env={**setup.command.env(setup.env), grant.token_env: grant.token},
             cwd=worktree,
             gpus=0,
             deadline_unix=setup.clock() + setup.session_seconds,
