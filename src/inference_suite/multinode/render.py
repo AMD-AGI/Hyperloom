@@ -30,6 +30,8 @@ TRANSFER_BACKEND_FLAG = "disaggregation-transfer-backend"
 TRUST_REMOTE_CODE = "--trust-remote-code"
 _FABRIC_PLACEHOLDER = "@fabric."
 _HOST_PATH_ENV = frozenset({"HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"})
+#: How each framework a PD session runs spells its topology.
+TOPOLOGY_SPELLING = {Framework.SGLANG: SGLANG_TOPOLOGY, Framework.ATOM: ATOM_TOPOLOGY}
 
 
 def _tp_flags(topology: TopologySpelling) -> frozenset[str]:
@@ -122,6 +124,7 @@ def render_role(framework: Framework, args: Sequence[str], env: Mapping[str, Any
 
 __all__ = [
     "PD_RUNNER_OWNED",
+    "TOPOLOGY_SPELLING",
     "TRANSFER_BACKEND_FLAG",
     "TRUST_REMOTE_CODE",
     "RenderedRole",

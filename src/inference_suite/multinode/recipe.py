@@ -14,8 +14,10 @@ launch the suite resolves for the GPUs of every worker host, whose args every wo
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
-from inference_suite.argv import argv_flag_occurrences
+from dataclasses import dataclass, field, replace
+from typing import Any
+
+from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, last_alias_value
 from inference_suite.contracts.base_launch import BaseLaunch, Workload
 from inference_suite.frameworks import Framework
 from inference_suite.multinode.inferencex import (
@@ -37,7 +39,14 @@ from inference_suite.multinode.record import (
     Role,
     RoleLaunch,
 )
-from inference_suite.multinode.render import TRUST_REMOTE_CODE, RenderedRole, flag_groups, group_flag, render_role
+from inference_suite.multinode.render import (
+    TOPOLOGY_SPELLING,
+    TRUST_REMOTE_CODE,
+    RenderedRole,
+    flag_groups,
+    group_flag,
+    render_role,
+)
 from inference_suite.multinode.table import TABLE_COMMIT, TABLE_REPO, RoleShape, TableError, TableQuery, compose
 from inference_suite.recipe.inferencex import MASTER, RUNNERS, srtctl_cli_args
 from inference_suite.recipe.model import RecipeSourceError
@@ -149,8 +158,48 @@ def _assemble(query: PdQuery, bound: _Bound) -> PdLaunch:
 # --- sources ------------------------------------------------------------------------------------------------------
 
 
+def _named(args: Sequence[str], flags: Sequence[str]) -> str | None:
+    """The value the args give the last of ``flags``' spellings, ``None`` when they give none."""
+    return last_alias_value(argv_flag_occurrences(args), frozenset(canonical_flag_name(flag) for flag in flags))
+
+
+def _named_size(args: Sequence[str], flags: Sequence[str], role: Role, name: str) -> int | None:
+    """The size the args give through ``flags``, ``None`` when they give none."""
+    value = _named(args, flags)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError as error:
+        raise PdResolveError(f"the operator args set {role.value} {name} {value!r}, which is not a size") from error
+
+
+def _agree(role: Role, name: str, asked: Any, named: Any) -> Any:
+    """The value the node list fixes where it does, else the operator args' (``None`` when neither sets it); both
+    must agree when both set it."""
+    if asked is not None and named is not None and asked != named:
+        raise PdResolveError(f"the node list fixes {role.value} {name} {asked}, but the operator args set {named}")
+    return asked if asked is not None else named
+
+
+def _operator_fit(role: Role, ask: RoleAsk, args: Sequence[str], query: PdQuery) -> RoleFit:
+    """The role's topology from the node list and the operator's own args; one worker of the node's GPUs per node
+    where neither names a TP."""
+    spelling = TOPOLOGY_SPELLING[query.framework]
+    tp = _agree(role, "tp", ask.tp, _named_size(args, spelling.tp, role, "tp")) or query.gpus_per_node
+    if spelling.ep:
+        named_ep = _named_size(args, spelling.ep, role, "ep")
+    else:
+        named_ep = tp if _named(args, spelling.ep_switch) is not None else None
+    ep = _agree(role, "ep", ask.ep, named_ep) or 1
+    named_dp = True if _named(args, ("enable-dp-attention",)) is not None else None
+    dp = bool(_agree(role, "dp_attention", ask.dp_attention, named_dp))
+    workers = max(1, len(ask.hosts) * query.gpus_per_node // max(tp, query.gpus_per_node))
+    return RoleFit(workers, tp, ep, dp, tp)
+
+
 def _operator(query: PdQuery, operator: OperatorArgs) -> PdLaunch:
-    fits = {role: _asked_fit(ask, query.gpus_per_node) for role, ask in query.roles.items()}
+    fits = {role: _operator_fit(role, ask, operator.role(role), query) for role, ask in query.roles.items()}
     rendered = {role: render_role(query.framework, operator.role(role), {}) for role in query.roles}
     source = PdSource(PdSourceKind.OPERATOR)
     return _assemble(query, _Bound(rendered, fits, operator.router, "", source))
@@ -316,16 +365,29 @@ def _base(query: PdQuery, inputs: ResolveInputs) -> PdLaunch:
 
 
 def resolve(query: PdQuery, inputs: ResolveInputs) -> PdLaunch:
-    """The launch of the first source that serves ``query``.
+    """The launch of the first source that serves ``query``. Operator router args alone replace the router the
+    source gives, and the engines still come from that source.
 
     Raises:
-        PdResolveError: no source serves the query, a replayed launch does not fit it, or the pinned InferenceX
-            commit cannot be read.
+        PdResolveError: no source serves the query, a replayed launch does not fit it, the pinned InferenceX commit
+            cannot be read, or the operator args' topology conflicts with the node list's.
     """
     if inputs.replay is not None:
         return _replay(query, inputs.replay)
     if inputs.operator.given:
         return _operator(query, inputs.operator)
+    launch = _from_sources(query, inputs)
+    if not inputs.operator.router:
+        return launch
+    return replace(launch, frontend=replace(launch.frontend, args=_router_args(inputs.operator.router)))
+
+
+def _from_sources(query: PdQuery, inputs: ResolveInputs) -> PdLaunch:
+    """The launch of the first source that serves ``query``, when neither a replay nor operator role args decide it.
+
+    Raises:
+        PdResolveError: no source serves the query, or the pinned InferenceX commit cannot be read.
+    """
     if query.mode is PdMode.AGGREGATED:
         return _base(query, inputs)
     misses: list[str] = []

@@ -25,6 +25,7 @@ from inference_suite.contracts.base_launch import Workload
 from inference_suite.argv import canonical_flag_name
 from inference_suite.frameworks import Framework
 from inference_suite.multinode.query import PdQuery, RoleAsk
+from inference_suite.multinode.render import TOPOLOGY_SPELLING
 from inference_suite.multinode.record import PD_ROLES, PdSourceKind, Role
 from inference_suite.recipe.inferencex import (
     MASTER,
@@ -37,13 +38,7 @@ from inference_suite.recipe.inferencex import (
     org_models_named,
     runner_board,
 )
-from inference_suite.recipe.model import (
-    ATOM_TOPOLOGY,
-    SGLANG_TOPOLOGY,
-    RecipeSourceError,
-    TopologySpelling,
-    boards_interchangeable,
-)
+from inference_suite.recipe.model import RecipeSourceError, boards_interchangeable
 from inference_suite.recipe.sources import Checkout
 
 MULTI_NODE_RECIPES = f"{PROJECT}/benchmarks/multi_node/srt-slurm-recipes"
@@ -265,7 +260,7 @@ def recipe_fit(role: Mapping[str, Any], framework: Framework) -> RoleFit:
     """The topology a recipe role states: its workers and GPUs, and TP, EP and DP attention from its args."""
     args = role.get("args") or {}
     gpus = int(role.get("gpus") or 0)
-    spelling = _TOPOLOGY_SPELLING[framework]
+    spelling = TOPOLOGY_SPELLING[framework]
     tp = int(_arg(args, _spellings(spelling.tp)) or gpus)
     if spelling.ep_switch:
         ep = tp if _arg(args, _spellings(spelling.ep_switch)) else 1

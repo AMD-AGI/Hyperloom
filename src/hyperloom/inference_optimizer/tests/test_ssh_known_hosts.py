@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from hyperloom.inference_optimizer.multi_node._internal import ssh_known_hosts
+from inference_suite.multinode import ssh as suite_ssh
 
 
 def test_is_host_key_error_detects_verification_failure():
@@ -24,7 +25,7 @@ def test_refresh_known_hosts_appends_scanned_keys(tmp_path, monkeypatch):
 
         return _Proc()
 
-    monkeypatch.setattr(ssh_known_hosts.subprocess, "run", _fake_scan)
+    monkeypatch.setattr(suite_ssh.subprocess, "run", _fake_scan)
     out = ssh_known_hosts.refresh_known_hosts([("10.0.0.1", 2222)], dest)
     assert out == dest
     assert "ssh-ed25519" in dest.read_text(encoding="utf-8")

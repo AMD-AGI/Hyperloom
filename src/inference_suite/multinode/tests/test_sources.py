@@ -17,7 +17,7 @@ from inference_suite.multinode.inferencex import (
     master_candidates,
     recipe_fit,
 )
-from inference_suite.multinode.query import PdQuery, PdQueryError, RoleAsk
+from inference_suite.multinode.query import PdQuery, RoleAsk
 from inference_suite.multinode.record import FrontendType, PdMode, PdSourceKind, Role
 from inference_suite.multinode.recipe import OperatorArgs, PdResolveError, ResolveInputs, resolve
 from inference_suite.recipe.inferencex import MASTER, RUNNERS
@@ -316,13 +316,6 @@ def test_table_runs_the_asked_router_without_the_other_routers_args():
 
 def test_infera_serves_sglang_through_the_platform_frontend():
     assert _query(frontend=FrontendType.INFERA).served_frontend is FrontendType.INFERA
-    with pytest.raises(PdQueryError, match="atom session serves through"):
-        _query(framework=Framework.ATOM, frontend=FrontendType.INFERA)
-
-
-def test_a_query_asks_for_the_roles_of_its_mode():
-    with pytest.raises(PdQueryError, match="aggregated session asks for"):
-        _query(mode=PdMode.AGGREGATED)
 
 
 def _aggregated(workers=2, **fields):
@@ -375,3 +368,22 @@ def test_replay_keeps_the_mode():
     assert resolve(_aggregated(router_host="r9"), ResolveInputs(replay=first)).digest() == first.digest()
     with pytest.raises(PdResolveError, match="aggregated, not disaggregated"):
         resolve(_query(), ResolveInputs(replay=first))
+
+
+def test_operator_topology_is_the_launch_topology():
+    operator = OperatorArgs(decode=("--tp-size", "16", "--ep-size", "16", "--enable-dp-attention", "--dp-size", "16"))
+    decode = resolve(_query(decode=2), ResolveInputs(operator=operator)).role(Role.DECODE)
+    assert (decode.tp, decode.ep, decode.dp_attention, decode.workers) == (16, 16, True, 1)
+
+
+def test_operator_topology_conflicting_with_the_node_list_is_refused():
+    query = replace(_query(), roles={Role.PREFILL: RoleAsk(("p0",), tp=8), Role.DECODE: RoleAsk(("d0",))})
+    with pytest.raises(PdResolveError, match="prefill tp"):
+        resolve(query, ResolveInputs(operator=OperatorArgs(prefill=("--tp-size", "4"), decode=("--x",))))
+
+
+def test_router_args_alone_replace_the_source_router(checkout):
+    operator = OperatorArgs(router=("--policy", "cache_aware"))
+    launch = resolve(_query(), ResolveInputs(operator=operator, inferencex=lambda: checkout))
+    assert launch.source.kind is PdSourceKind.INFERENCEX_MASTER
+    assert launch.frontend.args == ("--policy", "cache_aware")

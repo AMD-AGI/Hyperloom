@@ -72,6 +72,9 @@ def test_minimal_node_list_takes_defaults():
         ({"topology": {"router": {}}}, "unknown keys"),
         ({"topology": {"decode": {"dp_attention": "yes"}}}, "dp_attention"),
         ({"config": {"prefill_args": "--a '1"}}, "tokenizable"),
+        ({"framework": "atom", "frontend": "infera"}, "does not serve through the infera frontend"),
+        ({"mode": "aggregated"}, "lacks"),
+        ({"model": " org/M "}, "surrounding whitespace"),
     ],
 )
 def test_invalid_node_list_is_refused(fields, match):

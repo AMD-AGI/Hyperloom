@@ -21,6 +21,8 @@ from enum import Enum
 from typing import Any
 from urllib.parse import urlsplit
 
+from hyperloom_common.contract_fields import ContractFields
+
 from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.frameworks import Framework
 from inference_suite.multinode.query import SERVED_FRONTENDS, PdQuery, RoleAsk
@@ -59,6 +61,9 @@ _MAX_PORT = 65535
 
 class NodeListError(ValueError):
     """The node list is absent or breaks its contract."""
+
+
+_FIELDS = ContractFields(NodeListError)
 
 
 class LaunchMode(str, Enum):
@@ -166,27 +171,22 @@ def _mapping(value: Any, what: str, keys: frozenset[str]) -> Mapping[str, Any]:
     return value
 
 
-def _text(value: Any, what: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise NodeListError(f"{what} must be a non-empty string, got {value!r}")
-    return value.strip()
-
-
 def _integer(value: Any, what: str, maximum: int | None = None) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1 or (maximum and value > maximum):
-        raise NodeListError(f"{what} must be an integer from 1 to {maximum or 'any'}, got {value!r}")
-    return value
+    number = _FIELDS.integer(value, what, minimum=1)
+    if maximum and number > maximum:
+        raise NodeListError(f"{what} must be an integer from 1 to {maximum}, got {value!r}")
+    return number
 
 
 def _url(value: Any, what: str) -> str:
-    text = _text(value, what)
+    text = _FIELDS.text(value, what)
     if not text.startswith(_HTTP) or not urlsplit(text).hostname:
         raise NodeListError(f"{what} must be an http(s) URL, got {text!r}")
     return text
 
 
 def _host(value: Any, what: str) -> str:
-    return _text(_mapping(value, what, _HOST_KEYS).get("host"), f"{what}'s host")
+    return _FIELDS.text(_mapping(value, what, _HOST_KEYS).get("host"), f"{what}'s host")
 
 
 def _hosts(value: Any, role: Role) -> tuple[str, ...]:
@@ -211,22 +211,22 @@ def _host_ports(fields: Mapping[str, Any]) -> dict[str, int]:
 
 def _ssh(value: Any) -> SshAccess:
     fields = _mapping(value, "ssh", _SSH_KEYS)
-    key_file = _text(fields.get("key_file"), "ssh.key_file")
+    key_file = _FIELDS.text(fields.get("key_file"), "ssh.key_file")
     if not key_file.startswith("/"):
         raise NodeListError("ssh.key_file must be an absolute path")
     known_hosts = fields.get("known_hosts_file", "")
-    if known_hosts and not _text(known_hosts, "ssh.known_hosts_file").startswith("/"):
+    if known_hosts and not _FIELDS.text(known_hosts, "ssh.known_hosts_file").startswith("/"):
         raise NodeListError("ssh.known_hosts_file must be an absolute path")
     return SshAccess(
         port=_integer(fields.get("port", 22), "ssh.port", _MAX_PORT),
-        user=_text(fields.get("user", "root"), "ssh.user"),
+        user=_FIELDS.text(fields.get("user", "root"), "ssh.user"),
         key_file=key_file,
         known_hosts_file=str(known_hosts or ""),
     )
 
 
 def _optional_integer(value: Any, what: str) -> int | None:
-    return None if value is None else _integer(value, what)
+    return _FIELDS.optional_integer(value, what, minimum=1)
 
 
 def _role_topology(value: Any, role: Role) -> RoleTopology:
@@ -265,13 +265,6 @@ def _operator(value: Any, mode: PdMode) -> OperatorArgs:
     )
 
 
-def _enum(kind: type[Enum], value: Any, what: str) -> Any:
-    try:
-        return kind(value)
-    except ValueError as error:
-        raise NodeListError(f"{what} must be one of {[member.value for member in kind]}, got {value!r}") from error
-
-
 def _framework(value: Any) -> Framework:
     if value not in _FRAMEWORKS:
         raise NodeListError(f"framework must be one of {sorted(_FRAMEWORKS)}, got {value!r}")
@@ -286,7 +279,7 @@ def _frontend(fields: Mapping[str, Any], framework: Framework) -> FrontendType |
     """The frontend the node list names, refused when ``framework`` does not serve through it."""
     if not fields.get("frontend"):
         return None
-    frontend: FrontendType = _enum(FrontendType, fields["frontend"], "frontend")
+    frontend: FrontendType = _FIELDS.enum(FrontendType, fields["frontend"], "frontend")
     if frontend not in SERVED_FRONTENDS[framework]:
         raise NodeListError(f"framework {framework.value} does not serve through the {frontend.value} frontend")
     return frontend
@@ -330,7 +323,7 @@ def parse_node_list(document: Any) -> NodeList:
             the roles share a host.
     """
     fields = _mapping(document, "the node list", _KEYS)
-    mode = _enum(PdMode, fields.get("mode", PdMode.DISAGGREGATED.value), "mode")
+    mode = _FIELDS.enum(PdMode, fields.get("mode", PdMode.DISAGGREGATED.value), "mode")
     frontend = _frontend(fields, _framework(fields.get("framework"))) if "framework" in fields else None
     required = (*_REQUIRED, *(() if frontend is FrontendType.INFERA else (_ROUTER,)))
     missing = [key for key in (*required, *(role.value for role in MODE_ROLES[mode])) if key not in fields]
@@ -344,7 +337,7 @@ def parse_node_list(document: Any) -> NodeList:
     ports = _host_ports(fields)
     nodes = NodeList(
         framework=framework,
-        model=_text(fields["model"], "model"),
+        model=_FIELDS.text(fields["model"], "model"),
         service_url=_url(fields["service_url"], "service_url"),
         router=router,
         prefill=hosts.get(Role.PREFILL, ()),
@@ -355,11 +348,11 @@ def parse_node_list(document: Any) -> NodeList:
         prefill_url=_optional_url(fields, "prefill_url"),
         decode_url=_optional_url(fields, "decode_url"),
         ssh=replace(ssh, host_ports=ports) if ssh is not None else None,
-        transfer_backend=_text(fields["transfer_backend"], "transfer_backend")
+        transfer_backend=_FIELDS.text(fields["transfer_backend"], "transfer_backend")
         if fields.get("transfer_backend")
         else "",
         topology={Role(key): _role_topology(value, Role(key)) for key, value in topology.items()},
-        launch_mode=_enum(LaunchMode, fields.get("launch_mode", LaunchMode.DIRECT.value), "launch_mode"),
+        launch_mode=_FIELDS.enum(LaunchMode, fields.get("launch_mode", LaunchMode.DIRECT.value), "launch_mode"),
         operator=_operator(fields["config"], mode) if fields.get("config") is not None else OperatorArgs(),
         frontend=frontend,
     )

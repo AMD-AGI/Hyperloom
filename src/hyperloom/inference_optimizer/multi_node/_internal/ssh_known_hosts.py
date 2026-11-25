@@ -2,17 +2,11 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
-from .log import info, warn
+from inference_suite.multinode import SshError, is_host_key_error as _host_key_error, keyscan
 
-_HOST_KEY_ERROR_MARKERS: tuple[str, ...] = (
-    "host key verification failed",
-    "REMOTE HOST IDENTIFICATION HAS CHANGED",
-    "Offending ED25519 key",
-    "Offending RSA key",
-)
+from .log import info, warn
 
 
 def default_known_hosts_path(ssh_dir: Path) -> Path:
@@ -22,8 +16,7 @@ def default_known_hosts_path(ssh_dir: Path) -> Path:
 
 def is_host_key_error(stderr: str | None) -> bool:
     """Return True when SSH stderr indicates a host-key mismatch."""
-    text = (stderr or "").lower()
-    return any(marker.lower() in text for marker in _HOST_KEY_ERROR_MARKERS)
+    return _host_key_error(stderr or "")
 
 
 def refresh_known_hosts(
@@ -48,21 +41,13 @@ def refresh_known_hosts(
         host = (host or "").strip()
         if not host:
             continue
-        proc = subprocess.run(
-            ["ssh-keyscan", "-p", str(int(port)), "-H", host],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if proc.returncode != 0 or not (proc.stdout or "").strip():
-            warn(
-                f"ssh-keyscan failed for {host}:{port} rc={proc.returncode} stderr={(proc.stderr or '').strip()[:200]}"
-            )
+        try:
+            keys = keyscan(host, int(port))
+        except SshError as exc:
+            warn(f"ssh-keyscan failed for {host}:{port}: {exc}")
             continue
         with dest.open("a", encoding="utf-8") as fh:
-            fh.write(proc.stdout)
-            if not proc.stdout.endswith("\n"):
-                fh.write("\n")
+            fh.write(keys)
         scanned += 1
     if scanned == 0 and hosts:
         raise RuntimeError(f"ssh-keyscan produced no keys for hosts={hosts!r}")
