@@ -15,6 +15,7 @@ import pytest
 from hyperloom.orchestrator.conc_sweep import points, runner
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridVariant, VariantResult
+from hyperloom.orchestrator.state import base_launch as state_base_launch
 from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_suite.contracts.base_launch import SourceKind, SourcePointLaunch
 
@@ -100,7 +101,7 @@ def grid(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(runner, "teardown_variant_server", lambda _: [])
     frozen = SimpleNamespace(launch=_base(SourceKind.INFERENCEX, (4, 8, 32)))
     monkeypatch.setattr(runner, "frozen_base", lambda _: frozen)
-    monkeypatch.setattr(runner, "written_base", lambda _: frozen.launch)
+    monkeypatch.setattr(state_base_launch, "frozen_base", lambda _: frozen)
     return SimpleNamespace(calls=calls, failing=failing)
 
 
@@ -326,7 +327,7 @@ def test_the_report_names_the_hardware_the_image_and_the_recipe_and_who_wrote_it
         "tp": 8,
         "ep": 1,
     }
-    assert payload["image"] == "vllm/vllm-openai-rocm:v0.32.0"
+    assert payload["base_image"] == "vllm/vllm-openai-rocm:v0.32.0"
     assert payload["recipe"]["commit"] == "c22b4b2" and payload["recipe"]["locator"] == "recipe.yaml:c16"
     assert payload["pid"] == os.getpid() and payload["host"] and payload["updated_at"]
     header = (session_dir / "reports" / "conc_sweep_raw.csv").read_text().splitlines()[0].split(",")
@@ -338,7 +339,7 @@ def _per_conc_base(monkeypatch: pytest.MonkeyPatch, base_args: str, by_conc: dic
     launches = tuple(SourcePointLaunch(conc, tuple(args.split()), {}) for conc, args in by_conc.items())
     frozen = SimpleNamespace(launch=_base(SourceKind.INFERENCEX, tuple(by_conc), launches, base_args))
     monkeypatch.setattr(runner, "frozen_base", lambda _: frozen)
-    monkeypatch.setattr(runner, "written_base", lambda _: frozen.launch)
+    monkeypatch.setattr(state_base_launch, "frozen_base", lambda _: frozen)
 
 
 _SLOTS = {4: "--max-running-requests 8", 16: "--max-running-requests 32", 32: "--max-running-requests 64"}

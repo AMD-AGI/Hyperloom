@@ -134,12 +134,6 @@ def session_cards(session: Path, tp: int) -> int:
     return tp if frozen is None else frozen.launch.cards
 
 
-def written_base(session: Path) -> BaseLaunch | None:
-    """The base the session at ``session`` froze, as written and unchecked against its state or the client pin: what
-    describes the session, never what a round launches."""
-    return read_base_launch(session)
-
-
 def session_runner_owned(session: Path) -> RunnerOwned:
     """What the runner sets on every round of the session at ``session``, nothing when it froze no base.
 
@@ -169,5 +163,4 @@ __all__ = [
     "session_cards",
     "session_runner_owned",
     "session_server_base",
-    "written_base",
 ]

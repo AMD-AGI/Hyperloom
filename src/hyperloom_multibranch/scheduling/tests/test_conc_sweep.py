@@ -69,7 +69,7 @@ def inferencex_base(monkeypatch: pytest.MonkeyPatch) -> None:
     point = SimpleNamespace(source_concs=(4, 32), source_launches=())
     source = SimpleNamespace(kind=SourceKind.INFERENCEX, repo="InferenceX", commit="c22b4b2", entry="e", locator="l")
     image = SimpleNamespace(run="sglang:v0.5", recipe=None)
-    launch = SimpleNamespace(source=source, point=point, image=image, args=(), env={}, golden_al=None)
+    launch = SimpleNamespace(source=source, point=point, image=image, args=(), env={}, golden_al=None, cards=2)
     monkeypatch.setattr(base_launch, "frozen_base", lambda _toolbox: SimpleNamespace(launch=launch))
 
 
@@ -333,7 +333,7 @@ def _per_conc_base(monkeypatch: pytest.MonkeyPatch, by_conc: dict[int, str]) -> 
     source = SimpleNamespace(kind=SourceKind.INFERENCEX, repo="InferenceX", commit="c22b4b2", entry="e", locator="l")
     image = SimpleNamespace(run="sglang:v0.5", recipe=None)
     args = tuple(by_conc[WORKLOAD.conc].split())
-    launch = SimpleNamespace(source=source, point=point, image=image, args=args, env={}, golden_al=None)
+    launch = SimpleNamespace(source=source, point=point, image=image, args=args, env={}, golden_al=None, cards=2)
     monkeypatch.setattr(base_launch, "frozen_base", lambda _toolbox: SimpleNamespace(launch=launch))
 
 

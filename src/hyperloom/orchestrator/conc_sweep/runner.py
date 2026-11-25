@@ -50,7 +50,7 @@ from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     prepare_grid_benchmark_config,
 )
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
-from hyperloom.orchestrator.state.base_launch import frozen_base, server_base, server_base_at, written_base
+from hyperloom.orchestrator.state.base_launch import frozen_base, server_base, server_base_at
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom_common.coerce import to_str_list
 from hyperloom_common.timeutil import utc_now_compact
@@ -328,7 +328,6 @@ class _Sweep:
 
 
 def _header(state: SharedState, session_dir: Path) -> dict[str, Any]:
-    base = written_base(session_dir)
     return {
         "schema_version": SCHEMA_VERSION,
         "session_id": state.session_id or session_dir.name,
@@ -341,7 +340,7 @@ def _header(state: SharedState, session_dir: Path) -> dict[str, Any]:
         "osl": state.osl,
         "tp": state.tp,
         "ep": state.ep,
-        **run_facts(base),
+        **run_facts(session_dir),
     }
 
 

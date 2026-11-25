@@ -513,10 +513,10 @@ def _hosted_start(host: HostInfo) -> HostedStart:
 
     deadline = grant_deadline(host, datetime.now(timezone.utc))
     spec = campaign_spec(host)
-    require_local_image(spec, os.environ)
-    if spec.flow == FLOW_CONC_SWEEP:  # it launches no agent, so there is none to isolate
-        return _hosted_sweep(host, spec)
     require_hosted_isolation(spec, os.environ)
+    require_local_image(spec, os.environ)
+    if spec.flow == FLOW_CONC_SWEEP:
+        return _hosted_sweep(host, spec)
     earlier = take_over_earlier_session(host.state_dir)
     if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json
         return HostedStart(lambda: EXIT_FAILED)

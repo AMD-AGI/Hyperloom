@@ -31,7 +31,6 @@ from .plot import ConcCurveOptions, render_conc_sweep_curve
 if TYPE_CHECKING:
     from hyperloom.orchestrator.actions.executors.grid._grid_runner import VariantResult
     from hyperloom.orchestrator.state.shared_state import SharedState
-    from inference_suite.contracts.base_launch import BaseLaunch
 
 log = logging.getLogger(__name__)
 
@@ -44,9 +43,17 @@ _ENCODING = "utf-8"
 SETTLED = frozenset({"succeeded", "partial", "skipped"})
 
 
-def run_facts(base: BaseLaunch | None) -> dict[str, Any]:
-    """The report header's provenance: the image and the recipe of the session's frozen ``base``, and the host and
-    process writing the report, with when -- a report still ``in_progress`` whose process is gone was cut short."""
+def run_facts(session: Path) -> dict[str, Any]:
+    """The report header's provenance: the cards, image and recipe of the base the session at ``session`` froze (none
+    where it froze none or its base fails its checks, which a skip reports), and the host and process writing the
+    report, with when -- a report still ``in_progress`` whose process is gone was cut short."""
+    from hyperloom.orchestrator.state import base_launch
+
+    try:
+        frozen = base_launch.frozen_base(session)
+    except base_launch.BaseLaunchMismatch:
+        frozen = None
+    base = None if frozen is None else frozen.launch
     source = None if base is None else base.source
     recipe = None
     if source is not None:
@@ -59,7 +66,7 @@ def run_facts(base: BaseLaunch | None) -> dict[str, Any]:
         }
     return {
         **({} if base is None else {"gpu_count": base.cards}),
-        "image": None if base is None else base.image.run or base.image.recipe,
+        "base_image": None if base is None else base.image.run or base.image.recipe,
         "recipe": recipe,
         "host": socket.gethostname(),
         "pid": os.getpid(),
