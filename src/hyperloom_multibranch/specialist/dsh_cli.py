@@ -23,8 +23,9 @@ writes:
 
 ``--session-id`` names the conversation a fresh launch opens and ``--resume`` the one a launch goes on with, restored
 from the session log an earlier process left in the same ``DSH_HOME``; a conversation that cannot be restored ends the
-process before ``init``, as a Claude CLI ends that cannot resume. The role (``--system-prompt-file``) is the home's
-``AGENTS.md``, which the runtime sends as the conversation's baseline instructions, and the MCP servers of
+process before ``init``, as a Claude CLI ends that cannot resume. The role (``--system-prompt-file``), followed by
+:data:`WAITING_NOTE`, is the home's ``AGENTS.md``, which the runtime sends as the conversation's baseline
+instructions, and the MCP servers of
 ``--mcp-config`` are rows of the patch the runtime boots with, their header values held in variables only the runtime
 sees (:func:`~hyperloom.orchestrator.specialists.dsh_launch.prepare_session_home`). The runtime runs unattended, so the
 tools of its profile that wait for a person or change the runtime itself are off (:data:`UNATTENDED_OFF`).
@@ -87,6 +88,13 @@ SESSION_PROFILE, READING_PROFILE = "sdk", "sdk-minimal"
 #: The rows of :data:`SESSION_PROFILE` an unattended conversation runs without: the tool that asks a person, the one
 #: that installs plugins into the runtime, and the one that schedules reminders for later.
 UNATTENDED_OFF = ("tool-ask-user", "tool-plugin-manager", "tool-schedule")
+#: What a specialist's role is followed by. The profile's row of ``wait_agent`` cannot be switched off without the
+#: tools that message a subagent, and a session sends its CLI a message only once a turn has ended, so a wait of
+#: that tool for one blocks until its timeout, an hour at most, with a result of the branch already landed.
+WAITING_NOTE = """\
+Your harness has a tool named wait_agent. It waits for a subagent you started and for nothing else: results, \
+judgements, briefs and every other message of your session reach you only after your turn has ended. Never call \
+wait_agent to wait for a test or for a message of your session; end your turn instead, and what arrives wakes you."""
 #: Laid over :data:`READING_PROFILE`, whose tree is closed: its shell and its directory tool off, its file tool
 #: reading only, the search tool added, and its file sandbox read-only.
 READING_PATCH = """\
@@ -424,7 +432,8 @@ def _launch(options: Options, home: Path, cwd: Path) -> HarnessLaunch:
             profile = READING_PROFILE
         else:
             env = child_environment(None, FULL_ACCESS)
-            request = DshSessionHome(home, options.model, options.role, options.mcp_config, UNATTENDED_OFF)
+            instructions = f"{options.role.rstrip()}\n\n{WAITING_NOTE}\n" if options.role else ""
+            request = DshSessionHome(home, options.model, instructions, options.mcp_config, UNATTENDED_OFF)
             boot = prepare_session_home(request, env)
             env.update(boot.env_additions)
             patch, profile = boot.patch, SESSION_PROFILE
@@ -605,6 +614,7 @@ __all__ = [
     "PACKAGES",
     "READING_PATCH",
     "UNATTENDED_OFF",
+    "WAITING_NOTE",
     "Bridge",
     "Inbox",
     "Options",

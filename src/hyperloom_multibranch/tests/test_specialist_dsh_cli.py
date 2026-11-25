@@ -15,7 +15,7 @@ from hyperloom_common.llm import deepseek_session
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.specialist import dsh_cli
 from hyperloom_multibranch.specialist.agent_session import TurnLog
-from hyperloom_multibranch.specialist.dsh_cli import PACKAGES, READING_PATCH, UNATTENDED_OFF
+from hyperloom_multibranch.specialist.dsh_cli import PACKAGES, READING_PATCH, UNATTENDED_OFF, WAITING_NOTE
 from hyperloom_multibranch.specialist.dsh_cli import Rows, Turn, prompt_of, result_row
 from hyperloom_multibranch.specialist.llm_usage import launch_usage
 
@@ -345,8 +345,11 @@ def test_a_fresh_conversation_runs_each_message_as_a_turn_until_its_stdin_ends(
         "danger-full-access",
         "DISABLED",
     )
-    # The role is the home's instructions, and the patch keeps the log a killed runtime leaves readable.
-    assert (home / "AGENTS.md").read_text(encoding="utf-8") == "You are a long-running optimization specialist."
+    # The role is the home's instructions, followed by what it cannot say of this harness's own waiting tool, and
+    # the patch keeps the log a killed runtime leaves readable.
+    instructions = (home / "AGENTS.md").read_text(encoding="utf-8")
+    assert instructions == f"You are a long-running optimization specialist.\n\n{WAITING_NOTE}\n"
+    assert "Never call wait_agent to wait for a test" in WAITING_NOTE and "end your turn" in WAITING_NOTE
     patch = {row["id"]: row for row in _patch_rows(Path(kwargs["patches"][-1]).read_text(encoding="utf-8"))}
     assert patch["session-persistence-jsonl"]["config"]["compression"] == "none"
     assert patch["agent-default-model"]["config"]["model"] == MODEL

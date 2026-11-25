@@ -366,6 +366,9 @@ async def test_the_deepseek_harness_lands_a_source_change_through_the_session_s_
     init = rows[0]
     assert (init["type"], init["subtype"], init["harness"]) == ("system", "init", "dsh")
     assert init["mcp_servers"] == [{"name": "hyperloom"}]
+    # The model is told, with its role, that the harness's own waiting tool sees nothing the session sends.
+    sent = json.dumps({name: part for name, part in model.bodies[0].items() if name != "tools"})
+    assert "Never call wait_agent to wait for a test" in sent and "long-running optimization specialist" in sent
     said = [block for row in rows if row["type"] == "assistant" for block in row["message"]["content"]]
     used = [block["name"] for block in said if block["type"] == "tool_use"]
     assert "mcp__hyperloom__submit_test" in used and "bash" in used
