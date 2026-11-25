@@ -194,7 +194,9 @@ read `NUM_PROMPTS` from the environment they start in, and every measured round 
 sends that count, with or without a dataset. Both record it with the session, and a
 resumed leg sends the recorded count whatever its shell or `.env` holds; a session
 started without one keeps the default count.
-A concurrency sweep sets its own count per rung. A session
+The concurrency sweep of `hyperloom optimize` sets its own count per rung; the points
+`hyperloom-multibranch run` generates for its sweep send the session's count at every
+concurrency. A session
 with a dataset serves the model's own context window, as an AgentX session does, in
 place of `ISL` + `OSL` plus headroom, since the prompts carry their own lengths;
 `MAX_MODEL_LEN` still overrides it. A prompt the server answers with a 4xx status, as it
