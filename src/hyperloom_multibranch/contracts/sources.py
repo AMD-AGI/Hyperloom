@@ -3,7 +3,8 @@
 
 """Where a component's editable sources lie: its installed package, the meta trees beside it that its runtime
 compiles (aiter's ``csrc`` and ``hsa``), as the rule pack's component layout names them, and, on a host that builds
-native code, the tree its native build compiles (sgl-kernel's C++), in a checkout of the commit the image installs.
+native code, the tree its native build compiles (sgl-kernel's C++), in a checkout of the commit the image installs. A
+component built from the checkout the session pins (llama.cpp) has no package: its sources are that checkout's trees.
 
 A patch names each file by its path in the component's upstream repository. The specialist's source base lays the
 sources out at those paths, and the experiment repository applies a patch to the tree each path falls in.
@@ -14,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.common.outside_facts.component_layout import META_BASE, LayoutSection
+from hyperloom.common.outside_facts.component_layout import CHECKOUT_BASE, META_BASE, LayoutSection
 from hyperloom.measure.compile import ComponentLayout
 
 
@@ -45,15 +46,28 @@ def meta_sections(layout: ComponentLayout) -> tuple[LayoutSection, ...]:
     return tuple(section for section in layout.spec.sections if section.base == META_BASE)
 
 
-def source_roots(layout: ComponentLayout, package: Path, native: NativeTree | None = None) -> tuple[SourceRoot, ...]:
-    """The package installed at ``package`` first, then each meta tree beside it, in the checkout it is installed
-    from, then ``native``'s tree.
+def laid_sections(layout: ComponentLayout) -> tuple[LayoutSection, ...]:
+    """The layout's sections laid out beside its first: the meta trees beside a package, or every other tree of a
+    checkout."""
+    if layout.spec.source_base == CHECKOUT_BASE:
+        return layout.spec.sections[1:]
+    return meta_sections(layout)
+
+
+def source_roots(layout: ComponentLayout, source: Path, native: NativeTree | None = None) -> tuple[SourceRoot, ...]:
+    """The trees of the component found at ``source`` (:func:`~hyperloom.measure.compile.locate_source`), then
+    ``native``'s tree: the package installed there first, then each meta tree beside it, in the checkout it is
+    installed from; or each tree of the checkout ``source`` a component built from one names.
 
     The native tree may hold the package's upstream path too; a path is in the first root that holds it, so the
     package is read as installed.
     """
-    metas = (SourceRoot(section.prefix, package.parent / section.into) for section in meta_sections(layout))
-    return (SourceRoot(layout.upstream_prefix, package), *metas, *((native.root,) if native else ()))
+    if layout.spec.source_base == CHECKOUT_BASE:
+        laid = tuple(SourceRoot(section.prefix, source / section.into) for section in layout.spec.sections)
+    else:
+        metas = (SourceRoot(section.prefix, source.parent / section.into) for section in meta_sections(layout))
+        laid = (SourceRoot(layout.upstream_prefix, source), *metas)
+    return (*laid, *((native.root,) if native else ()))
 
 
-__all__ = ["NativeTree", "SourceRoot", "meta_sections", "source_roots"]
+__all__ = ["NativeTree", "SourceRoot", "laid_sections", "meta_sections", "source_roots"]
