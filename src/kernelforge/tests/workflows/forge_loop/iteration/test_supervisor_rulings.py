@@ -5,15 +5,14 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
-import json
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.campaign.run_state import PHASE_STALLED, BestRecord, LoopStateStore, RunState
 from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
 from kernelforge.workflows.forge_loop.iteration import locked_run
@@ -89,7 +88,7 @@ def test_intervention_reset_is_persisted_before_agent_runs(tmp_path, monkeypatch
         raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=cancelled_agent, supervisor_fn=supervisor)))
+        asyncio.run(loop.run(lane_agents(cancelled_agent, supervisor_fn=supervisor)))
 
     persisted = LoopStateStore(str(workspace)).load()
     assert loop.run_state.stall.no_improvement_iters == 0
@@ -146,7 +145,7 @@ def test_empty_supervisor_expires_prior_ruling_without_resetting_stall(
         )
 
     monkeypatch.setattr(loop, "run_one_iteration", reverted_iteration)
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent, supervisor_fn=empty_supervisor)))
+    asyncio.run(loop.run(lane_agents(editing_agent, supervisor_fn=empty_supervisor)))
 
     assert loop.monitor.intervention_count == 0
     assert loop.run_state.stall.no_improvement_iters == 3
@@ -157,89 +156,3 @@ def test_empty_supervisor_expires_prior_ruling_without_resetting_stall(
     assert stale_ruling not in histories[1]
     assert loop._supervisor_ruling == ""
     assert not locked_run.latest_supervisor_ruling_path(str(workspace)).exists()
-
-
-def test_free_form_supervisor_ruling_still_creates_fresh_plan_each_iteration(
-    tmp_path,
-    monkeypatch,
-):
-    loop, workspace = _make_loop(
-        tmp_path,
-        monkeypatch,
-        supervise_after=1,
-        session_count=3,
-    )
-    loop.ic.supervise_cooldown = 2
-    loop.config = SimpleNamespace(
-        experiments_dir=workspace / "forge_experiments",
-        gpu_target="gfx942",
-    )
-    orchestration_calls = []
-    histories = []
-    supervisor_evidence = []
-    ruling = (
-        "\n# Supervisor Ruling\n\n"
-        "The memory path still has measured headroom. The earlier lesson's "
-        "hard-floor conclusion is not supported by the recorded attempts.\n"
-    )
-
-    async def orchestration(*, iteration, **_kwargs):
-        orchestration_calls.append(iteration)
-        plan_path = workspace / "forge_experiments" / "orchestration" / f"iter_{iteration:03d}" / "optimization_plan.md"
-        plan_path.parent.mkdir(parents=True)
-        plan_path.write_text(f"# Optimization plan {iteration}\n")
-        loop._latest_optimization_plan_path = str(plan_path)
-        return plan_path, ""
-
-    async def supervisor(**kwargs):
-        supervisor_evidence.append(kwargs["evidence_context"])
-        return ruling
-
-    async def editing_agent(kernel_path, history, session_sink):
-        histories.append(history)
-        session_sink["plan"] = "continue memory path"
-        Path(kernel_path).write_text("def kernel():\n    return 2\n")
-        return "implemented another memory milestone"
-
-    async def reverted_iteration(iteration, plan=""):
-        return IterationResult(
-            iteration=iteration,
-            duration_sec=0.01,
-            validation_passed=True,
-            validation_summary="passed",
-            wall_ms=1.1,
-            mean_case_speedup=0.9,
-            kept=False,
-            bench_detail={"case_times": {"case": 1.1}},
-        )
-
-    monkeypatch.setattr(loop, "_run_orchestration", orchestration)
-    monkeypatch.setattr(loop, "run_one_iteration", reverted_iteration)
-    asyncio.run(
-        loop.run(
-            runner_module.LoopAgents(agent_fn=editing_agent, orchestration_service=object(), supervisor_fn=supervisor)
-        )
-    )
-
-    assert orchestration_calls == [1, 2, 3]
-    assert len(histories) == 3
-    assert "iter_001/optimization_plan.md" in histories[0]
-    assert "iter_002/optimization_plan.md" in histories[1]
-    assert "iter_003/optimization_plan.md" in histories[2]
-    assert "Mode: DIVERSIFY" in histories[1]
-    assert "Latest Supervisor Ruling" in histories[1]
-    assert "hard-floor conclusion is not supported" in histories[1]
-    assert "hard-floor conclusion is not supported" in histories[2]
-    assert len(supervisor_evidence) == 1
-    evidence = json.loads(supervisor_evidence[0])
-    assert evidence["latest_optimization_plan"].endswith("iter_001/optimization_plan.md")
-    assert "orchestration_context" in evidence
-    assert evidence["orchestration_context"]["search_policy"]["mode"] == "EXPLOIT"
-    assert evidence["artifact_paths"]["latest_lesson"].endswith("lessons/iter_001.md")
-    assert "latest_handoff" not in evidence["artifact_paths"]
-
-    supervisor_root = workspace / "forge_experiments" / "supervisor"
-    assert (supervisor_root / "latest.md").read_text() == ruling
-    interaction = (supervisor_root / "intervention_iter_002.md").read_text()
-    assert "source: injected callback" in interaction
-    assert ruling in interaction

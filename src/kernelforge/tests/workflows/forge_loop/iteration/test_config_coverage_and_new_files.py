@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import inspect
 import json
@@ -19,8 +21,7 @@ from kernelforge.workflows.forge_loop.iteration.runner import (
     IterationLoop,
     IterationResult,
 )
-from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, OrchestrationContext
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
+from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, EvidenceContext
 from kernelforge.workflows.forge_loop.campaign.campaign_config import CampaignConfigStore
 from kernelforge.workflows.forge_loop.campaign.campaign_setup import resolve_campaign
 from kernelforge.tests.workflows.forge_loop.campaign._campaign_args import _base_args, _git_workspace
@@ -72,8 +73,8 @@ def _revert(iteration: int, case_times: dict[str, float]) -> IterationResult:
     return replace(_keep(iteration, case_times), kept=False)
 
 
-def _context(workspace: Path, case_ids: tuple[str, ...]) -> OrchestrationContext:
-    return OrchestrationContext(
+def _context(workspace: Path, case_ids: tuple[str, ...]) -> EvidenceContext:
+    return EvidenceContext(
         analysis_commit="abc123",
         workspace=str(workspace),
         gpu_target="gfx942",
@@ -310,11 +311,7 @@ def test_new_file_only_candidate_is_named_and_taken_off_the_tree(tmp_path, monke
     loop.ic = replace(loop.ic, commit_new_paths=["configs/*.json"])
 
     asyncio.run(
-        loop.run(
-            runner_module.LoopAgents(
-                agent_fn=_new_file_agent(workspace, "configs/tuned.json"), supervisor_fn=_unused_supervisor
-            )
-        )
+        loop.run(lane_agents(_new_file_agent(workspace, "configs/tuned.json"), supervisor_fn=_unused_supervisor))
     )
 
     assert not (workspace / "configs" / "tuned.json").exists()
@@ -326,11 +323,7 @@ def test_new_file_only_candidate_is_named_and_taken_off_the_tree(tmp_path, monke
 def test_new_file_only_candidate_outside_the_allowlist_is_still_reported(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
 
-    asyncio.run(
-        loop.run(
-            runner_module.LoopAgents(agent_fn=_new_file_agent(workspace, "notes.txt"), supervisor_fn=_unused_supervisor)
-        )
-    )
+    asyncio.run(loop.run(lane_agents(_new_file_agent(workspace, "notes.txt"), supervisor_fn=_unused_supervisor)))
 
     assert (workspace / "notes.txt").exists()
     assert "notes.txt" in loop._render_uncommittable_new_paths()
@@ -445,7 +438,7 @@ def test_new_file_whose_name_contains_a_newline_is_one_path(tmp_path, monkeypatc
 def _unlistable(loop, monkeypatch):
     """Make new-file enumeration fail the way a broken git repository does."""
 
-    def explode():
+    def explode(_workspace=None):
         raise RuntimeError("could not list new files: git ls-files exited 128")
 
     monkeypatch.setattr(loop, "_list_untracked", explode)
@@ -478,11 +471,7 @@ def test_revert_leaves_an_allowlisted_file_the_candidate_did_not_create(tmp_path
     (workspace / "configs" / "operator.json").write_text('{"kept": true}\n')
 
     asyncio.run(
-        loop.run(
-            runner_module.LoopAgents(
-                agent_fn=_new_file_agent(workspace, "configs/tuned.json"), supervisor_fn=_unused_supervisor
-            )
-        )
+        loop.run(lane_agents(_new_file_agent(workspace, "configs/tuned.json"), supervisor_fn=_unused_supervisor))
     )
 
     assert not (workspace / "configs" / "tuned.json").exists()
@@ -778,12 +767,12 @@ def test_resume_recovery_does_not_delete_an_operators_new_file(tmp_path, monkeyp
 
     monkeypatch.setattr(first, "_git_commit", interrupt_commit)
     with pytest.raises(KeyboardInterrupt):
-        asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
+        asyncio.run(first.run(lane_agents(editing_agent)))
 
     assert (workspace / "forge_experiments" / "pending_keep.json").is_file()
 
     resumed = _campaign_loop(workspace, kernel, driver, tracker, session_count=0, resume=True)
     resumed.ic = replace(resumed.ic, commit_new_paths=["configs/*.json"])
-    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=None)))
+    asyncio.run(resumed.run(lane_agents(None)))
 
     assert operator.read_text() == '{"kept": true}\n'

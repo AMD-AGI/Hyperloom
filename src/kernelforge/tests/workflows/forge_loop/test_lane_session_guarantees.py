@@ -3,16 +3,17 @@
 
 """What protects an Implementer lane, and who is asked to guarantee it.
 
-A lane edits its own copy of the workspace, and its candidate is measured later,
-once, by the loop. The measurement surface still has to survive the session: a
-lane diff that touches the driver, the harness or the oracle is refused at the
-boundary, and the refusal takes the implementation edits in the same diff with
-it -- after the session has already been paid for in full.
+A lane edits its own copy of the workspace, and what it leaves is applied to the
+canonical tree and measured there by the loop. The measurement surface still has
+to survive the session: a lane diff that touches the driver, the harness or the
+oracle is refused at the boundary, and the refusal takes the implementation
+edits in the same diff with it -- after the session has already been paid for in
+full. A hook denies that edit while the agent is still working, which is the
+only point at which the rest of the session can still be saved.
 
-A hook denies that edit while the agent is still working, which is the only
-point at which the rest of the session can still be saved. The lane runs the
-in-session gate for those denials alone: the gate's Stop hook benchmarks, and
-lanes run concurrently while the device measures one thing at a time.
+A round's lanes share one device. A lane's session sees none of its own: every
+command that needs one goes through the lane's runner, which waits its turn, and
+the stop check that measures the lane's candidate waits in the same queue.
 
 That protection, and the private build cache a lane compiles into, are both
 things the provider does on the lane's behalf. Neither is checked by the lane
@@ -28,7 +29,6 @@ from pathlib import Path
 import pytest
 
 import kernelforge.workflows.forge_loop.gate.insession_gate as gate_module
-from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement, GateScope
 import kernelforge.workflows.forge_loop.roles.agent as agent_module
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
@@ -39,8 +39,10 @@ from kernelforge.agent_backends.registry import AgentProvider, register_agent_pr
 from kernelforge.workflows.forge_loop.bootstrap import lanes as cli_lanes
 from kernelforge.workflows.forge_loop.bootstrap.errors import ForgeLoopError
 from kernelforge.config import Config
-from kernelforge.workflows.forge_loop.iteration import fanout
+from kernelforge.utils.device_queue import RUNNER_CONFIG_NAME, RUNNER_NAME
+from kernelforge.workflows.forge_loop.iteration.fanout import LaneAssignment, LaneSeat
 from kernelforge.evaluation.scoring import GateScoring
+from kernelforge.workflows.forge_loop.roles.agent_extras import declared_extras
 
 
 @pytest.fixture(autouse=True)
@@ -113,19 +115,30 @@ def _lane_factory(tmp_path: Path):
     )
 
 
+def _seat(tmp_path: Path, lane_dir: Path) -> LaneSeat:
+    """Where a round seats one lane: its copy, and the runner and queue it reaches the device through."""
+    return LaneSeat(
+        assignment=LaneAssignment("1"),
+        lane_dir=lane_dir,
+        device_runner=lane_dir / RUNNER_NAME,
+        queue_root=tmp_path / "device-queue",
+        usage_log=tmp_path / "device_usage.jsonl",
+        hold_limit_sec=600,
+    )
+
+
 def _run_lane_session(
     tmp_path: Path,
     monkeypatch,
     *,
-    serialized_driver: str | None = None,
     stop_hooks: bool = True,
 ) -> tuple[AgentRunSpec, Path]:
-    """Run one lane session the way a fan-out round runs it."""
+    """Run one lane session the way a round runs it."""
     specs = _record_backend_specs(monkeypatch, stop_hooks=stop_hooks)
     factory = _lane_factory(tmp_path)
     lane_dir = _tree(tmp_path / "lanes" / "1")
 
-    session = factory(str(lane_dir), serialized_driver)
+    session = factory(_seat(tmp_path, lane_dir))
     asyncio.run(session(str(lane_dir / "src" / "kernel.py"), "plan 1"))
 
     assert len(specs) == 1
@@ -168,7 +181,7 @@ def test_every_lane_round_releases_the_backend_it_built(tmp_path, monkeypatch, f
 
     for round_number in (1, 2):
         lane_dir = _tree(tmp_path / f"round{round_number}" / "1")
-        session = factory(str(lane_dir), None)
+        session = factory(_seat(tmp_path, lane_dir))
         if fails:
             with pytest.raises(RuntimeError):
                 asyncio.run(session(str(lane_dir / "src" / "kernel.py"), "plan"))
@@ -191,7 +204,7 @@ def test_a_lane_session_sink_reaches_an_agent_that_declares_it(tmp_path, monkeyp
     """The lesson turn resumes the lane session, so the sink has to reach the agent that names it."""
     _record_backend_specs(monkeypatch)
     lane_dir = _tree(tmp_path / "lanes" / "1")
-    session = _lane_factory(tmp_path)(str(lane_dir), None)
+    session = _lane_factory(tmp_path)(_seat(tmp_path, lane_dir))
     sink: dict = {}
 
     asyncio.run(session(str(lane_dir / "src" / "kernel.py"), "plan 2", session_sink=sink))
@@ -199,6 +212,29 @@ def test_a_lane_session_sink_reaches_an_agent_that_declares_it(tmp_path, monkeyp
     assert sink["session_started"] is True
     assert sink["end_reason"]
     assert "progress_log" in sink
+
+
+def test_a_lane_session_names_what_the_loop_hands_a_session(tmp_path, monkeypatch):
+    """The loop hands a session only the optional arguments it names.
+
+    A lane session that names neither runs without the campaign's scoring state, so its stop check has nothing to
+    score against and blocks every stop, and without the sink, so the round reads no result from it.
+    """
+    specs = _record_backend_specs(monkeypatch)
+    lane_dir = _tree(tmp_path / "lanes" / "1")
+    session = _lane_factory(tmp_path)(_seat(tmp_path, lane_dir))
+    sink: dict = {}
+    scoring = GateScoring({"case": 2.0}, 1.5)
+
+    handed = declared_extras(session, {"gate_scoring": scoring, "session_sink": sink})
+    asyncio.run(session(str(lane_dir / "src" / "kernel.py"), "plan 3", **handed))
+
+    assert handed == {"gate_scoring": scoring, "session_sink": sink}
+    gate = specs[0].hooks.stop[0].callback.__self__
+    assert gate.baseline_case_times == {"case": 2.0}
+    assert gate.best_mean_case_speedup == 1.5
+    assert "Fixed pristine per-case ms: {'case': 2.0}" in specs[0].system_prompt
+    assert sink["end_reason"]
 
 
 def test_a_hookless_provider_is_given_no_hooks_to_drop(tmp_path, monkeypatch):
@@ -231,17 +267,71 @@ def test_a_lane_session_is_given_the_protected_path_hooks(tmp_path, monkeypatch)
     assert spec.hooks.post_tool_use == []
 
 
-def test_a_lane_session_is_not_given_the_benchmarking_stop_hook(tmp_path, monkeypatch):
-    """The Stop hook runs correctness and a benchmark; lanes are concurrent.
+def test_a_lane_session_keeps_the_stop_check_and_queues_it_for_the_device(tmp_path, monkeypatch):
+    """A lane is the same gated session a round's only session is; what differs is that its stop check waits its turn."""
+    spec, lane_dir = _run_lane_session(tmp_path, monkeypatch)
 
-    Lanes overlap in time and the device measures one thing at a time, so a lane
-    that benchmarked at the end of its own session would time its kernel against
-    whatever its siblings were running.
-    """
+    assert len(spec.hooks.stop) == 1
+    gate = spec.hooks.stop[0].callback.__self__
+    assert gate.device.queue_root == str(tmp_path / "device-queue")
+    assert gate.device.runner == str(lane_dir / RUNNER_NAME)
+    assert "ONE self-correcting session" in spec.system_prompt
+
+
+def test_a_lane_is_told_to_reach_the_gpu_through_its_runner(tmp_path, monkeypatch):
+    spec, lane_dir = _run_lane_session(tmp_path, monkeypatch)
+    runner = lane_dir / RUNNER_NAME
+
+    assert "## The GPU is shared: run every command that needs it through the device runner" in spec.system_prompt
+    assert f"python3 {runner} <command> [args...]" in spec.system_prompt
+    # The driver commands the session is shown already go through it.
+    assert f"python3 {runner} python3 forge_driver.py --warmup 3 --iters 20 --bench-mode" in spec.system_prompt
+    # The length it is asked to keep a command to is its own to follow; the runner only stops a command as hung.
+    prompt = " ".join(spec.system_prompt.split())
+    assert "Keep each command under 4 minutes" in prompt
+    assert "still holds the GPU after 10 minutes is taken for hung and stopped" in prompt
+
+
+def test_a_lane_hook_denies_a_command_that_selects_a_device_around_the_queue(tmp_path, monkeypatch):
+    spec, lane_dir = _run_lane_session(tmp_path, monkeypatch)
+    deny_bash = next(hook.callback for hook in spec.hooks.pre_tool_use if hook.matcher == "Bash")
+
+    def decide(command: str) -> dict:
+        return asyncio.run(deny_bash({"tool_name": "Bash", "tool_input": {"command": command}}, None, None))
+
+    denied = decide("HIP_VISIBLE_DEVICES=0 python3 bench.py")
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert str(lane_dir / RUNNER_NAME) in denied["hookSpecificOutput"]["permissionDecisionReason"]
+    assert (
+        decide("export CUDA_VISIBLE_DEVICES=1; python3 bench.py")["hookSpecificOutput"]["permissionDecision"] == "deny"
+    )
+    assert decide(f"python3 {lane_dir / RUNNER_NAME} python3 forge_driver.py --bench-mode") == {}
+
+
+@pytest.mark.parametrize("name", [RUNNER_NAME, RUNNER_CONFIG_NAME])
+def test_a_lane_hook_denies_an_edit_to_the_device_runner(tmp_path, monkeypatch, name):
+    """The runner and its configuration decide which device a command sees, so they are not the session's to change."""
+    spec, lane_dir = _run_lane_session(tmp_path, monkeypatch)
+    deny_edit = next(
+        hook.callback for hook in spec.hooks.pre_tool_use if hook.matcher == gate_module._EDIT_TOOL_MATCHER
+    )
+
+    denied = asyncio.run(
+        deny_edit({"tool_name": "Edit", "tool_input": {"file_path": str(lane_dir / name)}}, None, None)
+    )
+
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_a_lane_is_told_how_its_stop_is_judged(tmp_path, monkeypatch):
+    """A lane runs beside others: it has to be correct, and what it gained is the merge's to use."""
     spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch)
+    gate = spec.hooks.stop[0].callback.__self__
+    prompt = " ".join(spec.system_prompt.split())
 
-    assert spec.hooks is not None
-    assert spec.hooks.stop == []
+    assert gate.gain_required is False
+    assert "Other sessions are working from" in prompt
+    assert "correct but not faster" not in prompt
 
 
 def test_a_lane_hook_denies_an_edit_to_the_lane_driver(tmp_path, monkeypatch):
@@ -324,126 +414,8 @@ def _bash_decision(spec: AgentRunSpec, command: str) -> dict:
     )
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "python3 forge_driver.py",
-        "python3 forge_driver.py --warmup 3 --iters 20 --bench-mode",
-        "python forge_driver.py",
-        "/usr/bin/python3 forge_driver.py",
-        "timeout 600 python3 forge_driver.py --bench-mode",
-        "./forge_driver.py --bench-mode",
-        "cd src && python3 ../forge_driver.py",
-        "bash -c 'python3 forge_driver.py --bench-mode'",
-        "timeout 600 sh -c 'python3 forge_driver.py'",
-        "python3 -W ignore forge_driver.py",
-        "python3 -X dev forge_driver.py --bench-mode",
-        # An interpreter reaches the driver by module too, and -m names it
-        # without the suffix a path carries.
-        "python3 -m forge_driver",
-        "python3 -mforge_driver --bench-mode",
-        "python3 -X dev -m forge_driver",
-        "python3 -m tools.forge_driver",
-        # A shell's -c clusters and attaches like any short option.
-        "bash -lc 'python3 forge_driver.py'",
-        "bash -c'python3 forge_driver.py'",
-        "sh -ic 'python3 forge_driver.py --bench-mode'",
-    ],
-)
-def test_a_lane_hook_refuses_a_driver_run_that_would_skip_the_lock(tmp_path, monkeypatch, command):
-    """A prompt is a preference; the number the round is judged on is not.
-
-    The wrapper is what holds the device lock, so a driver run that goes around
-    it times this lane against whichever sibling is benchmarking at the same
-    moment -- and corrupts that sibling's number too, which is the part no
-    lesson can attribute to anything.
-    """
-    wrapper = str(tmp_path / "lanes" / "1" / fanout.SERIALIZED_DRIVER_NAME)
-    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch, serialized_driver=wrapper)
-
-    decision = _bash_decision(spec, command)["hookSpecificOutput"]
-
-    assert decision["permissionDecision"] == "deny"
-    assert wrapper in decision["permissionDecisionReason"]
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "python3 {wrapper}",
-        "python3 {wrapper} --warmup 3 --iters 20 --bench-mode",
-        "cat forge_driver.py",
-        "grep -n case_ms forge_driver.py",
-        "python3 -c 'import torch; print(torch.__version__)'",
-        "bash -c 'python3 {wrapper} --bench-mode'",
-        # Reading -m must not turn every module run into a driver run.
-        "python3 -m pytest tests/",
-        "python3 -m pip install --no-deps triton",
-        "python3 -m json.tool config.json",
-        "bash -lc 'python3 {wrapper} --bench-mode'",
-    ],
-)
-def test_a_lane_hook_allows_the_locked_run_and_every_read(tmp_path, monkeypatch, command):
-    """Only executing the driver is refused, and only outside its wrapper.
-
-    Reading the driver is how a lane learns what it is being scored on, and the
-    wrapper is the command it was told to measure through.
-    """
-    wrapper = str(tmp_path / "lanes" / "1" / fanout.SERIALIZED_DRIVER_NAME)
-    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch, serialized_driver=wrapper)
-
-    assert _bash_decision(spec, command.format(wrapper=wrapper)) == {}
-
-
-def test_a_session_without_a_wrapper_still_runs_the_driver_itself(tmp_path, monkeypatch):
-    """The refusal belongs to an interposed command, not to the gate at large.
-
-    Every ordinary session runs the driver directly and must keep doing so; the
-    rule exists only where a wrapper was put in front of it.
-    """
-    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch)
-
-    assert _bash_decision(spec, "python3 forge_driver.py --bench-mode") == {}
-
-
-def test_a_lane_is_told_to_run_the_driver_through_its_own_lock(tmp_path, monkeypatch):
-    """The lock lives in the wrapper, so it binds only if the session runs it.
-
-    The wrapper used to reach the lane in a per-invocation note alone, while the
-    factory argument carrying it went unused. A requirement that holds for the
-    whole session belongs in the session's own instructions, which a long run
-    keeps in view long after its first message.
-    """
-    wrapper = str(tmp_path / "lanes" / "1" / fanout.SERIALIZED_DRIVER_NAME)
-
-    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch, serialized_driver=wrapper)
-
-    assert f"python3 {wrapper}" in spec.system_prompt
-    assert "Never `python3 forge_driver.py` directly" in spec.system_prompt
-
-
-def test_a_session_without_a_wrapper_is_told_nothing_about_one(tmp_path, monkeypatch):
-    """No wrapper means no interposition, so the prompt is exactly as it was."""
-    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch)
-
-    assert fanout.SERIALIZED_DRIVER_NAME not in spec.system_prompt
-    assert "Run the driver through this command" not in spec.system_prompt
-
-
-def test_a_lane_keeps_the_prompt_of_the_session_it_actually_runs(tmp_path, monkeypatch):
-    """No Stop hook means no gate to send the agent back, so it is not promised one.
-
-    The self-correcting prompt describes a gate that re-checks correctness and
-    speed and rejects a stop that does not converge. A lane has no such gate.
-    """
-    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch)
-
-    assert "ONE self-correcting session" not in spec.system_prompt
-    assert "Authoritative mean case scoring state" not in spec.system_prompt
-
-
 def test_the_canonical_session_keeps_its_benchmarking_stop_hook(tmp_path, monkeypatch):
-    """Pin the single-session path: it self-corrects against the scoring it was handed, and that has not changed."""
+    """The session of a round's only lane, and of a merge: it self-corrects against the scoring it was handed."""
     specs = _record_backend_specs(monkeypatch)
     workspace = _tree(tmp_path / "workspace")
 
@@ -469,23 +441,12 @@ def test_the_canonical_session_keeps_its_benchmarking_stop_hook(tmp_path, monkey
     gate = spec.hooks.stop[0].callback.__self__
     assert (gate.baseline_case_times, gate.best_mean_case_speedup) == ({"case": 2.0}, 1.25)
     assert "Current best pristine-relative score: 1.25." in spec.system_prompt
-
-
-@pytest.mark.parametrize("stop_check", [True, False])
-def test_both_gate_modes_share_one_protected_path_rule(tmp_path, stop_check):
-    """Neither mode may re-derive what counts as the measurement surface."""
-    workspace = _tree(tmp_path / "workspace")
-    gate = gate_module.InSessionGate(
-        GateMeasurement(driver_script=str(workspace / "forge_driver.py"), snr_threshold=30.0),
-        GateScope(kernel_file=str(workspace / "src" / "kernel.py")),
-    )
-
-    hooks = gate.make_agent_hooks(stop_check=stop_check)
-
-    pre_edit_callbacks = {hook.callback for hook in hooks.pre_tool_use}
-    assert gate._on_pre_edit in pre_edit_callbacks
-    assert gate._on_pre_bash in pre_edit_callbacks
-    assert hooks.post_tool_use == []
+    # It has the device to itself, so it is told nothing about a runner.
+    assert RUNNER_NAME not in spec.system_prompt
+    assert gate.device is None
+    # With no merge to use anything less, its stop has to beat the current best.
+    assert gate.gain_required is True
+    assert "correct but not faster" in " ".join(spec.system_prompt.split())
 
 
 def _register_provider(name: str, **capabilities: bool) -> None:
@@ -572,6 +533,24 @@ def test_a_lane_refusal_names_every_missing_guarantee(capsys):
     assert "stop_hooks" in warning
 
 
+@pytest.mark.parametrize("variables", [("GIT_DIR", "GIT_WORK_TREE"), ("GIT_DIR",)], ids=["both", "the repository"])
+def test_lanes_side_by_side_are_refused_at_startup_on_a_workspace_that_cannot_be_copied(monkeypatch, variables):
+    """Before the baseline and the Analysis are paid for, not at the first round that would copy the workspace."""
+    for name in ("GIT_DIR", "GIT_WORK_TREE"):
+        monkeypatch.delenv(name, raising=False)
+    cli_lanes._require_copyable_workspace(3)
+    for name in variables:
+        monkeypatch.setenv(name, "/elsewhere")
+
+    with pytest.raises(ForgeLoopError) as refusal:
+        cli_lanes._require_copyable_workspace(2)
+
+    assert " and ".join(variables) in str(refusal.value)
+    assert "Re-run with --lanes 1" in str(refusal.value)
+    # One lane works in the workspace itself, which is how such a workspace is run.
+    cli_lanes._require_copyable_workspace(1)
+
+
 def test_lanes_are_refused_rather_than_quietly_reduced():
     """The operator asked for N sessions and gets N or an explanation.
 
@@ -628,24 +607,3 @@ def test_the_builtin_codex_provider_runs_concurrent_lanes(capsys):
     assert "codex" in warning
     assert "stop_hooks" in warning
     assert "WARNING" in warning
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        'pgrep -af "forge_lane_driver.py|forge_driver.py"',
-        'rg -n "forge_driver.py|chunk.py" src/',
-        'grep -E "forge_driver.py|kernel.py" build.log',
-    ],
-)
-def test_a_pipe_inside_one_argument_is_not_a_second_command(tmp_path, monkeypatch, command):
-    """Observed in a live round: a lane's `pgrep` was refused as a driver run.
-
-    The operators that separate commands were found by a regex over the raw
-    text, so a pipe inside a quoted argument cut the string in half and the
-    tail became a command whose verb was a file the session never ran.
-    """
-    wrapper = str(tmp_path / "lanes" / "1" / fanout.SERIALIZED_DRIVER_NAME)
-    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch, serialized_driver=wrapper)
-
-    assert _bash_decision(spec, command) == {}
