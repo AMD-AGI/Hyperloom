@@ -19,44 +19,10 @@ from hyperloom.measure.jit import serve
 from hyperloom.measure.jit.serve import WantRefused
 from hyperloom.measure.jit.store import DirJitStore, Snapshot, StoredFile
 from hyperloom.measure.jit_kinds import AITER_JIT, TRITON
-from hyperloom.sandbox.socket import DirEntry, SandboxGone
+from hyperloom.measure.jit.tests.dir_sandbox import DirSandbox
 
 KEY = "b" * 64
 MODULE = b"\x7fELF a module"
-
-
-class _DirSandbox:
-    """A sandbox whose files are a directory: the file API reads through links, the listing does not."""
-
-    sandbox_id = "sbx"
-
-    def __init__(self, root: Path, *, fail_writes: bool = False) -> None:
-        self.root, self.fail_writes, self.writes = root, fail_writes, []
-
-    def _at(self, path: str) -> Path:
-        return self.root / path.lstrip("/")
-
-    def write_file(self, path: str, data: bytes) -> None:
-        self.writes.append(path)
-        if self.fail_writes and not path.endswith("DONE"):
-            raise SandboxGone("gone")
-        self._at(path).parent.mkdir(parents=True, exist_ok=True)
-        self._at(path).write_bytes(data)
-
-    def read_file(self, path: str) -> bytes:
-        return self._at(path).read_bytes()
-
-    def copy_out(self, path: str, dest: Path) -> int:
-        data = self._at(path).read_bytes()
-        dest.write_bytes(data)
-        return len(data)
-
-    def list_entries(self, path: str) -> list[DirEntry]:
-        found = []
-        for child in sorted(self._at(path).iterdir()):
-            kind = "link" if child.is_symlink() else "dir" if child.is_dir() else "file"
-            found.append(DirEntry(child.name, kind, child.lstat().st_size))
-        return found
 
 
 def _store(tmp_path: Path, files: dict[str, bytes], kind=AITER_JIT, key: str = KEY) -> tuple[DirJitStore, Snapshot]:
@@ -288,10 +254,10 @@ def _asked(tmp_path: Path, wanted) -> tuple[list[str], list[str]]:
     return phases, notes
 
 
-def _sandbox(tmp_path: Path, **kwargs) -> _DirSandbox:
+def _sandbox(tmp_path: Path, **kwargs) -> DirSandbox:
     for directory in ("in", "out"):
         (tmp_path / directory).mkdir(exist_ok=True)
-    return _DirSandbox(tmp_path, **kwargs)
+    return DirSandbox(tmp_path, **kwargs)
 
 
 def test_the_host_serves_what_the_runner_asked_for_and_the_runner_reads_it(tmp_path) -> None:

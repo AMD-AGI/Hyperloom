@@ -15,7 +15,7 @@ import pytest
 from hyperloom.measure.jit import publish
 from hyperloom.measure.jit.store import DirJitStore, Snapshot, StoredFile
 from hyperloom.measure.manifest import JitCacheFacts
-from hyperloom.sandbox.socket import DirEntry
+from hyperloom.measure.jit.tests.dir_sandbox import DirSandbox
 
 _PARENT = "a" * 64
 
@@ -67,33 +67,6 @@ _KEY = "b" * 64
 _MODULE = b"\x7fELF a module"
 
 
-class _DirSandbox:
-    """A sandbox whose files are a directory: the file API reads through links, the listing does not."""
-
-    sandbox_id = "sbx"
-
-    def __init__(self, root: Path) -> None:
-        self.root = root
-
-    def _at(self, path: str) -> Path:
-        return self.root / path.lstrip("/")
-
-    def read_file(self, path: str) -> bytes:
-        return self._at(path).read_bytes()
-
-    def copy_out(self, path: str, dest: Path) -> int:
-        data = self._at(path).read_bytes()
-        dest.write_bytes(data)
-        return len(data)
-
-    def list_entries(self, path: str) -> list[DirEntry]:
-        found = []
-        for child in sorted(self._at(path).iterdir()):
-            kind = "link" if child.is_symlink() else "dir" if child.is_dir() else "file"
-            found.append(DirEntry(child.name, kind, child.lstat().st_size))
-        return found
-
-
 def _staged(tmp_path: Path, data: bytes, *, listed_size: int | None = None, link: bool = False) -> JitCacheFacts:
     staged = tmp_path / "out" / "jit-cache" / "aiter_jit"
     (staged / "blobs").mkdir(parents=True)
@@ -117,7 +90,7 @@ def test_a_staged_blob_that_is_a_link_or_not_its_listed_size_is_not_fetched(tmp_
     store = DirJitStore(tmp_path / "store")
     (tmp_path / "scratch").mkdir()
 
-    assert publish.publish_contributions(store, _DirSandbox(tmp_path), facts, tmp_path / "scratch") == 0
+    assert publish.publish_contributions(store, DirSandbox(tmp_path), facts, tmp_path / "scratch") == 0
     assert not (tmp_path / "store" / "blobs").exists()
 
 
@@ -126,5 +99,5 @@ def test_a_staged_plain_blob_of_its_listed_size_is_published(tmp_path) -> None:
     store = DirJitStore(tmp_path / "store")
     (tmp_path / "scratch").mkdir()
 
-    assert publish.publish_contributions(store, _DirSandbox(tmp_path), facts, tmp_path / "scratch") == 1
+    assert publish.publish_contributions(store, DirSandbox(tmp_path), facts, tmp_path / "scratch") == 1
     assert os.path.isdir(tmp_path / "store" / "blobs")
