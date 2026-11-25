@@ -442,11 +442,22 @@ class WeightPrefetch:
         if not pieces:
             tally.done.set()
         for n in range(tally.running):
-            threading.Thread(target=self._stream, args=(work, tally), name=f"weight-prefetch-{n}", daemon=True).start()
+            try:
+                threading.Thread(
+                    target=self._stream, args=(work, tally), name=f"weight-prefetch-{n}", daemon=True
+                ).start()
+            except RuntimeError:  # a stream that did not start is not waited for, or the pass would never end
+                log.warning("weight prefetch: stream %d did not start", n, exc_info=True)
+                with tally.lock:
+                    tally.running -= 1
+                    if tally.running <= 0:
+                        tally.done.set()
         lost = 0
         try:
             while not tally.done.wait(_POLL_INTERVAL_SEC):
-                lost = lost or watch.dropped()
+                if self._interrupt.is_set():
+                    continue  # ending: no look at the cache while a read blocked on the storage returns
+                lost = watch.dropped()
                 if lost:
                     self._interrupt.set()
         except BaseException:

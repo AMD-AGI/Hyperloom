@@ -668,3 +668,19 @@ def test_an_evicted_file_is_found_uncached_and_read_back_into_the_cache(tmp_path
     assert prefetch.outcome.read_bytes == (size if not visible else sum(end - start for start, end in spans))
     monkeypatch.setattr(wp, "_residency_visible", lambda path, owner: True)
     assert host.uncached(path, size) == [], "the read left the file in the page cache"
+
+
+def test_a_pass_whose_streams_cannot_start_ends(tmp_path, run, monkeypatch) -> None:
+    sizes = _names(1, 4 * GIB)
+    host = FakeHost(sizes)
+
+    class NoStreams(threading.Thread):
+        def start(self) -> None:
+            if self.name.startswith("weight-prefetch-"):
+                raise RuntimeError("can't start new thread")
+            super().start()
+
+    monkeypatch.setattr(wp.threading, "Thread", NoStreams)
+    prefetch = run(_model(tmp_path, sizes), host, max_refills=1)
+
+    assert prefetch.outcome.ended and prefetch.outcome.passes == 1 and not host.reads
