@@ -191,8 +191,9 @@ that sets none sends the round's per-concurrency default, which can cover only p
 of the file: set `NUM_PROMPTS` to the file's line count to send all of it, and pass a
 shorter file to send fewer. Both `hyperloom optimize` and `hyperloom-multibranch run`
 read `NUM_PROMPTS` from the environment they start in, and every measured round then
-sends that count, with or without a dataset. Neither records it with the session, so a
-resumed leg needs the same value exported again and sends the default count without it.
+sends that count, with or without a dataset. Both record it with the session, and a
+resumed leg sends the recorded count whatever its shell or `.env` holds; a session
+started without one keeps the default count.
 A concurrency sweep sets its own count per rung. A session
 with a dataset serves the model's own context window, as an AgentX session does, in
 place of `ISL` + `OSL` plus headroom, since the prompts carry their own lengths;

@@ -13,8 +13,10 @@ canonical measurement configuration, are hashed into ``surface_sha256``, and eve
 * a runner takes the same fields from the YAML it actually executes and signs the hash into its result.
 
 The concurrency level and ``RUN_EVAL`` are decided by the test request, so they stay out of the hash. The number of
-prompts and warmups follow from the concurrency, so they are compared per point against the canonical rule rather
-than hashed.
+warmups follows from the concurrency, and so does the number of prompts unless the session records a ``NUM_PROMPTS``
+exported when it started, which every point then carries. Either way they are compared per point against the canonical
+configuration rendered at that concurrency rather than hashed; the session's record, which every leg puts back in the
+environment, is what keeps the count the same across a resume.
 """
 
 from __future__ import annotations
@@ -57,7 +59,8 @@ SURFACE_ENV_KEYS: tuple[str, ...] = (
 #: The surface field holding the prompt dataset a point sends. Present only on such a point: a field every surface held
 #: would move the hash of every measurement taken on random prompts.
 DATASET_FIELD = f"envs.{DATASET_PATH_ENV}"
-#: Request counts that follow from the concurrency level; compared per point, not hashed.
+#: Request counts: the session's recorded ``NUM_PROMPTS``, else what follows from the concurrency level; compared per
+#: point, not hashed.
 POINT_ENV_KEYS: tuple[str, ...] = (ENV_NUM_PROMPTS, ENV_NUM_WARMUPS)
 #: Decided by the test request; recorded beside the hash, never part of it.
 REQUEST_ENV_KEYS: tuple[str, ...] = (ENV_CONC, ENV_RUN_EVAL)
@@ -150,7 +153,7 @@ def extract_surface(config: Mapping[str, Any]) -> MeasurementSurface:
 
 
 def point_values(config: Mapping[str, Any]) -> dict[str, str | None]:
-    """The request counts of one point, which follow from its concurrency."""
+    """The request counts of one point: the session's recorded count, else what follows from its concurrency."""
 
     envs = BenchmarkPoint.from_document(config).envs
     return {key: _text(envs.get(key)) for key in POINT_ENV_KEYS}

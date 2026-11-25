@@ -32,6 +32,7 @@ from hyperloom.common.outside_facts import (
     ENV_EP,
     ENV_ISL,
     ENV_MAX_MODEL_LEN,
+    ENV_NUM_PROMPTS,
     ENV_OSL,
     ENV_RANDOM_RANGE_RATIO,
     ENV_RUN_EVAL,
@@ -150,8 +151,9 @@ def _reference(canonical: CanonicalMeasurement, pins: Mapping[str, str]) -> dict
 #: The file :func:`default_canonical` renders the canonical measurement to, in its ``out_dir``.
 CANONICAL_FILE = "canonical.yaml"
 #: The round's shape ``run_grid`` takes from the process environment over a point's own ``envs`` (the old flow's CLI
-#: exports them): a runner clears them, or a value left in its process measures every point at that value.
-AMBIENT_SHAPE_ENVS = (ENV_ISL, ENV_OSL, ENV_MAX_MODEL_LEN, ENV_TP, ENV_CONC)
+#: exports them), and the request count the config renderer takes from it: a runner clears them, or a value left in
+#: its process measures every point at that value.
+AMBIENT_SHAPE_ENVS = (ENV_ISL, ENV_OSL, ENV_MAX_MODEL_LEN, ENV_TP, ENV_CONC, ENV_NUM_PROMPTS)
 
 
 def default_canonical(

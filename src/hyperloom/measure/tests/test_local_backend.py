@@ -99,6 +99,7 @@ class _Grid:
                     "INFERENCEX_PATH",
                     "HL_TEST_FLAG",
                     "PROFILE_EXTRA_BODY",
+                    "NUM_PROMPTS",
                 )
             }
         )
@@ -1150,6 +1151,17 @@ def test_a_test_reads_the_prompt_dataset_of_its_point_whatever_the_process_holds
 
     assert grid.datasets and set(grid.datasets) == {read}
     assert os.environ.get("DATASET_PATH") == left, "the process environment is put back after the test"
+
+
+def test_a_test_sends_the_request_count_of_its_point_whatever_the_process_holds(grid, server, tmp_path, monkeypatch):
+    monkeypatch.setenv("NUM_PROMPTS", "7")
+
+    _run(_call(tmp_path, _point(tmp_path, "p", NUM_PROMPTS=20)))
+
+    assert grid.calls and all(seen["NUM_PROMPTS"] is None for seen in grid.env_seen)
+    measured = [call for call in grid.calls if not call["launch"].lifecycle_boot_only]
+    assert {_envs_handed_to_the_round(grid, tmp_path, call)["NUM_PROMPTS"] for call in measured} == {20}
+    assert os.environ.get("NUM_PROMPTS") == "7", "the process environment is put back after the test"
 
 
 def _graded_sweep_answers(grid: _Grid, *levels: int, score: float = 0.64) -> VariantResult:
