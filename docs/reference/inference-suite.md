@@ -190,9 +190,10 @@ cycled, so every arm sends the same requests. That count is `NUM_PROMPTS`; a poi
 that sets none sends the round's per-concurrency default, which can cover only part
 of the file: set `NUM_PROMPTS` to the file's line count to send all of it, and pass a
 shorter file to send fewer. Both `hyperloom optimize` and `hyperloom-multibranch run`
-read `NUM_PROMPTS` from the environment they start in, as they read `DATASET_PATH`, and
-every measured round then sends that count, with or without a dataset. A concurrency
-sweep sets its own count per rung. A session
+read `NUM_PROMPTS` from the environment they start in, and every measured round then
+sends that count, with or without a dataset. Neither records it with the session, so a
+resumed leg needs the same value exported again and sends the default count without it.
+A concurrency sweep sets its own count per rung. A session
 with a dataset serves the model's own context window, as an AgentX session does, in
 place of `ISL` + `OSL` plus headroom, since the prompts carry their own lengths;
 `MAX_MODEL_LEN` still overrides it. A prompt the server answers with a 4xx status, as it
