@@ -77,6 +77,16 @@ A launch that pins `--moe-runner-backend` on a checkpoint that has no runner
 for that backend now fails its round with the server's error, where the round
 was relaunched without the flag. Fix the pin where it was set.
 
+### Required: `session_breakdown.json` drops the held Critic verdict
+
+The schema stays `v6.1`, but a Critic ruling no longer carries `held_to_rule`,
+`effective_verdict` or `failure_reason_code`: not in `critic_review` on a phase
+or framework proposal, not on its `critic_review.variants[]` rows, and
+`critic.iterations[].framework_reviews[]` no longer carries `effective_verdict`
+or `failure_reason_code`. Consumers that read `effective_verdict` read
+`verdict` instead: the loop no longer downgrades a ruling, so `verdict` is the
+one it acted on.
+
 ---
 
 ## Upgrading from 1.1.x
