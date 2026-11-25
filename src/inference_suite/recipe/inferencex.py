@@ -133,7 +133,8 @@ class InferencexPoint:
     kv_offloading: str | None
     kv_offload_backend: Mapping[str, Any] | None
     router: Mapping[str, Any] | None
-    total_cpu_dram_gb: int
+    #: ``None`` where InferenceX sizes the offload DRAM at launch instead (from #4766 on).
+    total_cpu_dram_gb: int | None
     require_power: bool
 
     @property
@@ -169,8 +170,9 @@ class InferencexPoint:
             "REQUIRE_POWER": "1" if self.require_power else "0",
             "ROUTER_METADATA": json.dumps(self.router) if self.router else "",
             "KV_OFFLOAD_BACKEND_METADATA": json.dumps(self.kv_offload_backend) if self.kv_offload_backend else "",
-            "TOTAL_CPU_DRAM_GB": str(self.total_cpu_dram_gb),
         }
+        if self.total_cpu_dram_gb is not None:
+            environment["TOTAL_CPU_DRAM_GB"] = str(self.total_cpu_dram_gb)
         if agentic:
             environment["KV_OFFLOADING"] = str(self.kv_offloading)
         return {
@@ -183,6 +185,7 @@ class InferencexPoint:
             "PCP_SIZE": str(self.pcp),
             "DP_ATTENTION": str(self.dp_attention).lower(),
             "GPU_COUNT": str(self.gpu_count),
+            "IS_MULTINODE": "false",
         }
 
 
@@ -225,8 +228,9 @@ def _concurrencies(benchmark: Mapping[str, Any]) -> list[int]:
 
 def _cpu_dram_gb(
     runner: str, block: Mapping[str, Any], benchmark: Mapping[str, Any], runners: Mapping[str, Any]
-) -> int:
-    """The CPU DRAM in GB an AgentX point offloads KV cache to: its GPUs' share of the node's DRAM, 0 without."""
+) -> int | None:
+    """The CPU DRAM in GB an AgentX point offloads KV cache to: its GPUs' share of the node's DRAM, 0 without, and
+    ``None`` when the block names no ``dram-utilization``: InferenceX then sizes it at launch (#4766)."""
     if benchmark["kv-offloading"] != "dram":
         return 0
     cluster = (
@@ -234,11 +238,13 @@ def _cpu_dram_gb(
     )
     if cluster is None:
         raise RecipeSourceError(f"runner {runner} offloads to CPU DRAM but is no cluster with hardware facts")
-    available = min(cluster["available-cpu-dram-mib"], _MAX_AGENTIC_CPU_DRAM_MIB)
     per_node = cluster["gpus-per-node"]
     gpus = benchmark["tp"] * benchmark.get("pp", 1) * benchmark.get("pcp-size", 1)
     if gpus > per_node:
         raise RecipeSourceError(f"a {gpus}-GPU point of runner {runner} exceeds its {per_node} GPUs per node")
+    if "dram-utilization" not in block:
+        return None
+    available = min(cluster["available-cpu-dram-mib"], _MAX_AGENTIC_CPU_DRAM_MIB)
     share = Decimal(available) * _BYTES_PER_MIB * Decimal(str(block["dram-utilization"])) * gpus / per_node
     return int(share / _BYTES_PER_GB)
 
