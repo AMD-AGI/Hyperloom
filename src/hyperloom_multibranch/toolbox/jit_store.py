@@ -14,9 +14,9 @@ started again into the same refusal. The session runs without publishing instead
 why, and what that session does without it, and records the same in :data:`JIT_STORE_NOTE` of the session directory.
 What it does without it depends on the path (the ``without`` text each toolbox passes):
 
-* hosted (:data:`REFUSED_HOSTED`): the host neither serves the cache to its runners nor publishes to it, so every test
-  builds cold and one that patches aiter's ``csrc`` or ``hsa`` is refused by its runner. The runners never see the store
-  (:mod:`hyperloom.measure.jit.serve`), so it should lie on the host's own disk, where no sandbox can reach it;
+* hosted (:data:`REFUSED_HOSTED`): the host publishes nothing to it. Hosted runners never read the store (every hosted
+  test builds cold, and one that patches aiter's ``csrc`` or ``hsa`` is refused by its runner), so it should lie on the
+  host's own disk, where no sandbox can reach it;
 * local (:data:`REFUSED_LOCAL`): the runners are not told the store, so no test has an aiter JIT directory to build
   touched modules in, and candidates that patch aiter's ``csrc`` or ``hsa`` are refused for the whole session.
 """
@@ -53,13 +53,13 @@ JIT_STORE_NOTE = "jit_store.json"
 
 #: What a hosted session does without a refused store, said in its warning and note.
 REFUSED_HOSTED = (
-    "this host neither serves it to the runners nor publishes to it: every test builds cold, and a candidate that "
-    "patches aiter's csrc or hsa is refused by its runner"
+    "this host publishes nothing to it; hosted runners do not read it in any case: every test builds cold, and a "
+    "candidate that patches aiter's csrc or hsa is refused by its runner"
 )
 #: What a local session does without a refused store, said in its warning and note.
 REFUSED_LOCAL = (
     "the runners are not told it and nothing is published, so no test can build aiter's modules: candidates that patch "
-    "aiter's csrc or hsa are refused for the whole session (unless the runners rebuild every module with AITER_REBUILD)"
+    "aiter's csrc or hsa are refused for the whole session"
 )
 
 log = logging.getLogger(__name__)

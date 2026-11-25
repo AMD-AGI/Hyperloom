@@ -64,7 +64,6 @@ from hyperloom.measure.archive import ResultArchive
 from hyperloom.measure.hosted import FILES_ROOT, HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.hosted_spec import SpecContext
-from hyperloom.measure.jit.key import build_surface
 from hyperloom.measure.live_log import last_output_below
 from hyperloom.measure.local import SUPPORTED_KINDS
 from hyperloom.measure.framework.base import (
@@ -442,9 +441,9 @@ def jit_store_root(options: LocalOptions, environ: Mapping[str, str] | None = No
 def aiter_builds_missing(runner_envs: Mapping[str, str]) -> str | None:
     """Why the tests of runners with ``runner_envs`` cannot build the aiter modules a ``csrc``/``hsa`` patch touches,
     ``None`` when they can: a runner builds them in the test's own aiter JIT directory, which only the shared
-    compiled-code cache gives (the CPU build of touched modules seeds that directory too), unless every module is
-    rebuilt (``AITER_REBUILD``)."""
-    if runner_envs.get(JIT_CACHE_ENV, "").strip() or build_surface((), runner_envs, {}).rebuild:
+    compiled-code cache gives (the CPU build of touched modules seeds that directory too); rebuilding every module
+    (``AITER_REBUILD``) does not, as the runner refuses such a test without that directory first."""
+    if runner_envs.get(JIT_CACHE_ENV, "").strip():
         return None
     return f"no JIT store ({JIT_STORE_ENV}) gives its tests an aiter JIT directory to build the touched modules in"
 

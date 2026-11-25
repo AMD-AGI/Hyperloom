@@ -205,14 +205,25 @@ async def test_a_csrc_patch_on_a_toolbox_whose_tests_cannot_build_its_modules_is
 
 
 async def test_a_csrc_patch_is_accepted_where_its_tests_can_build_the_modules(rig: AiterRig) -> None:
-    for missing, launch in ((None, {}), (NO_JIT_DIR, {"AITER_REBUILD": "1"})):
-        box = build(
-            rig.tmp / f"box-{len(launch)}",
-            repo=FakeRepo(rig.recipe(**launch)),
-            planner=OnCardPlanner(rig),
-            aiter_builds_missing=missing,
-        )
-        assert await box.toolbox.submit_test(req(purpose=Purpose.HEALTH)), (missing, launch)
+    box = build(rig.tmp / "box", repo=FakeRepo(rig.recipe()), planner=OnCardPlanner(rig), aiter_builds_missing=None)
+
+    assert await box.toolbox.submit_test(req(purpose=Purpose.HEALTH))
+
+
+async def test_a_csrc_patch_whose_launch_rebuilds_every_module_is_still_refused_without_a_jit_directory(
+    rig: AiterRig,
+) -> None:
+    """Its runner refuses the test before it looks at ``AITER_REBUILD``: it needs the test's own JIT directory."""
+    box = build(
+        rig.tmp / "box",
+        repo=FakeRepo(rig.recipe(AITER_REBUILD="1")),
+        planner=OnCardPlanner(rig),
+        aiter_builds_missing=NO_JIT_DIR,
+    )
+
+    with pytest.raises(RequestRejected) as refused:
+        await box.toolbox.submit_test(req(purpose=Purpose.HEALTH))
+    assert refused.value.code == "delta_not_applicable"
 
 
 async def test_a_toolbox_with_no_jit_directory_still_takes_a_candidate_that_leaves_aiters_sources(
@@ -223,9 +234,9 @@ async def test_a_toolbox_with_no_jit_directory_still_takes_a_candidate_that_leav
     assert await box.toolbox.submit_test(req(purpose=Purpose.HEALTH))
 
 
-def test_a_runner_with_the_jit_cache_or_a_full_rebuild_can_build_aiters_modules() -> None:
+def test_only_a_runner_with_the_jit_cache_can_build_aiters_modules() -> None:
     assert NO_JIT_DIR is not None and "HYPERLOOM_JIT_STORE" in NO_JIT_DIR
     assert aiter_builds_missing({"HYPERLOOM_JIT_CACHE": " "}) == NO_JIT_DIR, "an empty value names no directory"
     assert aiter_builds_missing({"HYPERLOOM_JIT_CACHE": "/jit"}) is None
-    assert aiter_builds_missing({"AITER_REBUILD": "1"}) is None
+    assert aiter_builds_missing({"AITER_REBUILD": "1"}) == NO_JIT_DIR, "its runner refuses the test before it rebuilds"
     assert aiter_builds_missing({"AITER_REBUILD": "0"}) == NO_JIT_DIR

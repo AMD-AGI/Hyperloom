@@ -10,6 +10,7 @@ which the tests set as the host's stamp of its last use would.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import itertools
 import os
@@ -284,6 +285,31 @@ def test_two_hosts_pruning_at_once_leave_one_consistent_store(store, tmp_path) -
 
     assert first.retired + second.retired == 1
     assert _fetched(store, FRESH_KEY, tmp_path / "f") is not None
+
+
+@pytest.mark.parametrize("failing", ["snapshots/aiter_jit", f"snapshots/aiter_jit/{FRESH_KEY}", "blobs"])
+def test_a_listing_that_fails_stops_the_prune_and_is_never_read_as_empty(store, monkeypatch, caplog, failing) -> None:
+    """A transient error (``ESTALE`` on a network file system) while listing the keys, a key's lists or the blobs: the
+    prune stops and says so, and no blob of a key in use is removed."""
+    before = sorted(path.relative_to(store.root) for path in store.root.rglob("*"))
+    listing = Path.iterdir
+
+    def flaky(directory: Path):
+        if directory == store.root / failing:
+            raise OSError(errno.ESTALE, "Stale file handle")
+        return listing(directory)
+
+    monkeypatch.setattr(Path, "iterdir", flaky)
+    _age(_key_dir(store, OLD_KEY), NOW)  # both keys in use, every blob stored long ago
+
+    with pytest.raises(OSError):
+        prune(store, LIMITS, now=NOW)
+    assert prune_logged(store, LIMITS) is None
+    assert "was not pruned (OSError)" in caplog.text
+
+    monkeypatch.setattr(Path, "iterdir", listing)
+    assert sorted(path.relative_to(store.root) for path in store.root.rglob("*")) == before
+    assert _blob(store, OLD).is_file() and _blob(store, FRESH).is_file() and _blob(store, SHARED).is_file()
 
 
 def test_a_store_that_cannot_be_pruned_is_logged_and_the_session_goes_on(tmp_path, caplog, monkeypatch) -> None:

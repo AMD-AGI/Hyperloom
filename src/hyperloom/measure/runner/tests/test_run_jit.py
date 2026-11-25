@@ -31,8 +31,6 @@ from hyperloom.measure import farm as farm_module
 from hyperloom.measure import local, signing
 from hyperloom.measure.jit.publish import STAGING_PATH, publish_contributions
 from hyperloom.measure.jit.store import DirJitStore
-from hyperloom.measure.jit import serve as jit_serve
-from hyperloom.measure.jit_kinds import KINDS
 from hyperloom.sandbox.socket import DirEntry
 from hyperloom.measure.jit.tests.triton_cache import find_kernel, get_group
 from hyperloom.measure.farm import NativeModule
@@ -304,31 +302,6 @@ def test_the_second_test_hits_the_cache_the_first_filled_and_builds_nothing(rig)
     assert status["message"] == ""
     names = [phase.name for phase in second.timing.phases]
     assert "jit_cache" in names and names.index("jit_cache") < names.index("kernel_tables")
-
-
-def test_a_runner_the_host_serves_asks_for_its_keys_and_hits_what_it_was_served_without_reading_the_store(rig) -> None:
-    """No ``HYPERLOOM_JIT_CACHE``: the host offered the cache, the runner asks for the keys it computed before any server
-    starts, and its session reads only what was served into the sandbox (the host answered ahead here)."""
-    first, _, first_run = rig.run("first", _arm(rig))
-    rig.publish(first_run, first)
-    arm = _arm(rig)
-
-    def served_sheet(run: Path) -> dict:
-        inbox = run / "in" / "jit-cache"
-        inbox.mkdir(parents=True)
-        (inbox / "SERVING").write_bytes(b"")
-        for kind in KINDS:
-            packed = jit_serve.pack(rig.store, kind, _keys(first)[kind.name])
-            (inbox / f"{kind.name}.tar").write_bytes(packed.data)
-        (inbox / "DONE").write_bytes(b"")
-        return arm(run)
-
-    second, status, second_run = rig.run("second", served_sheet, cache=False)
-
-    wanted = jit_serve.parse_want((second_run / "out" / "jit-want.json").read_bytes())
-    assert {kind.name: key for kind, key in wanted} == _keys(first), "it asked for the keys it computed"
-    assert _states(second) == dict.fromkeys(STATES, "hit") and second.jit_cache.builds_seen == 0
-    assert not list((second_run / "in" / "jit-cache").glob("*.tar")), "the served tars are removed once unpacked"
 
 
 def test_a_sandbox_with_a_home_and_a_scratch_directory_of_its_own_finds_the_cache_another_one_filled(rig) -> None:

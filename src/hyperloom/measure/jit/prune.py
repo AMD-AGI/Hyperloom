@@ -35,7 +35,9 @@ WARNING. It always logs one line saying what it did (:func:`prune_logged`).
 
 A test that read a key just before it was retired and publishes after it extends it under the same key again: the files
 it took from the cache are still stored, as the retired list names them. Two hosts may prune one store at once: every
-step is a rename or a removal that the other's finding the name gone leaves correct. Nothing here fails a session; the
+step is a rename or a removal that the other's finding the name gone leaves correct. A directory that cannot be listed
+(for any reason but its not being there) stops the prune: it is never taken as empty, which would remove the blobs of
+the keys it did not see. Nothing here fails a session; the
 host logs what it could not do and the store is pruned at the next start.
 """
 
@@ -47,6 +49,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import time
 import uuid
 from collections.abc import Iterator, Mapping
@@ -406,11 +409,12 @@ def _live_key(root: Path, name: str) -> _Key | None:
     kind_name, key = name.split("/")
     path = root / SNAPSHOTS_DIR / kind_name / key
     try:
-        if not path.is_dir() or path.is_symlink():
-            return None
-        used = path.stat().st_mtime
+        info = path.lstat()
     except FileNotFoundError:
         return None  # another host retired it
+    if not stat.S_ISDIR(info.st_mode):
+        return None
+    used = info.st_mtime
     return _Key(path, used, _listed(path, _KINDS_BY_NAME[kind_name], key))
 
 
@@ -462,7 +466,9 @@ def _retired_name(name: str) -> _RetiredName | None:
 
 
 def _children(directory: Path) -> list[Path]:
+    """What ``directory`` holds; nothing when it is not there. Any other error leaves the prune: a listing that failed is
+    not an empty one, and taking it as one would remove the blobs of keys it did not see."""
     try:
         return sorted(directory.iterdir())
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return []

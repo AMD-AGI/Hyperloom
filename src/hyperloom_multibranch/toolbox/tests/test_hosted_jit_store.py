@@ -4,10 +4,9 @@
 """The shared compiled-code cache of the hosted toolbox: the directory named, the store it publishes accepted tests'
 compiles into, and the prune at the session's start.
 
-No runner reads the directory: the host serves the runners from it (``hyperloom.measure.jit.serve``, proved in the
-measure package). What is proved here is the toolbox's side: which directory it serves and publishes from, that it uses
-none another account could change and goes on, that a verified result's compiles reach it through the hosted executor
-and backend, and that its result records the cache states.
+No hosted runner reads the directory. What is proved here is the host's side: which directory it publishes to, that it
+uses none another account could change and goes on, that a verified result's compiles reach it through the hosted
+executor and backend, and that its result records the cache states.
 """
 
 from __future__ import annotations
@@ -86,11 +85,11 @@ def test_a_store_its_group_or_others_can_write_is_not_published_to_and_the_sessi
 
     toolbox = _toolbox(None, tmp_path)
 
-    assert toolbox.backend._config.jit_store is None, "nothing is served or published"
+    assert toolbox.backend._config.jit_store is None, "nothing is published"
     assert stat.S_IMODE(store.stat().st_mode) == mode and not any(store.iterdir()), "and it is left as it is"
     (warning,) = [record.getMessage() for record in caplog.records if "jit cache" in record.getMessage()]
     assert f"runs without the compiled-code cache {store}" in warning and "only it can write" in warning
-    assert "neither serves it to the runners nor publishes to it" in warning
+    assert "this host publishes nothing to it" in warning
     note = json.loads((tmp_path / "session" / JIT_STORE_NOTE).read_text())
     assert note["store"] == str(store) and note["published"] is False and "only it can write" in note["reason"]
     assert note["without"] == REFUSED_HOSTED
@@ -116,7 +115,7 @@ def test_a_store_that_cannot_be_made_is_refused_like_one_the_check_refuses_and_t
 
     toolbox = _toolbox(None, tmp_path)
 
-    assert toolbox.backend._config.jit_store is None, "nothing is served or published"
+    assert toolbox.backend._config.jit_store is None, "nothing is published"
     (warning,) = [record.getMessage() for record in caplog.records if "jit cache" in record.getMessage()]
     assert f"cannot be made or checked ({error.__name__}" in warning and REFUSED_HOSTED in warning
     note = json.loads((tmp_path / "session" / JIT_STORE_NOTE).read_text())
@@ -191,8 +190,7 @@ async def test_a_hosted_result_given_the_cache_read_only_publishes_nothing(tmp_p
 async def test_a_session_that_published_and_never_found_the_cache_warm_says_so_as_it_closes(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Nothing on the host sees the template's mount: a session whose runners never read what it published may be
-    publishing where they do not look."""
+    """A session whose runners never read what it published is publishing where they do not look."""
     store = DirJitStore(tmp_path / "jit-store")
 
     await _measured(tmp_path, store, fake_jit="true")
