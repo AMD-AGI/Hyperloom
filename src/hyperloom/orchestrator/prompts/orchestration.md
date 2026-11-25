@@ -539,9 +539,9 @@ version well behind head — and not only when configuration search stalls.
 Shape every `delegate{action_name='specialist'}` with these dials (code
 defaults the rest; omitting a dial is safe):
 
-- **`scope`**: `domain` (one known domain + gap anchor), `domains` (≥2 tags,
-  cross-domain Critic rules apply — use sparingly), `freeform` (no domain
-  lock; write the full mandate in natural language). Choose by fit:
+- **`scope`**: `domain` (one known domain + gap anchor), `domains` (≥2 tags),
+  `freeform` (no domain lock; write the full mandate in natural language).
+  Choose by fit:
   - `freeform` — exploratory, cross-cutting, or symptom unclear; also the
     default when no tags are passed.
   - `domain` — specific gap with a named `gap_canonical_id` and owning domain.

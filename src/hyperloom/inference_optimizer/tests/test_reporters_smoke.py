@@ -143,7 +143,6 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
                             "proposal_msg_id": "p1",
                             "arm": "config",
                             "verdict": "approve",
-                            "effective_verdict": "approve",
                             "reasoning": "cheap to try, easy to revert",
                         }
                     ],

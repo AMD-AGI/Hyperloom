@@ -183,7 +183,6 @@ def _review_verdict(item: dict[str, Any], target: str, verdict: str, advice_text
         alternative_action=item.get("alternative_action"),
         advice_text=advice_text,
         notes=item.get("notes") or [],
-        failure_reason_code=str(item.get("failure_reason_code") or ""),
     )
 
 
