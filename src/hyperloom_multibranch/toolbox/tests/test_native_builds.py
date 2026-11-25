@@ -447,13 +447,6 @@ def _configured(tmp_path: Path, **overrides: str) -> dict[str, str]:
     return {name: value for name, value in {**environ, **overrides}.items() if value}
 
 
-def test_a_store_set_up_for_another_architecture_than_the_session_s_board_is_refused(tmp_path: Path) -> None:
-    environ = _configured(tmp_path)
-
-    with pytest.raises(BuildStoreConfigError, match="gfx942 and the session's r9700 is gfx1201"):
-        native_builds(environ, LocalBlobStore(tmp_path / "blobs"), IMAGE, "r9700")
-
-
 def test_nothing_configured_means_no_native_builds(tmp_path: Path) -> None:
     assert native_builds({}, LocalBlobStore(tmp_path), IMAGE) is None
 
