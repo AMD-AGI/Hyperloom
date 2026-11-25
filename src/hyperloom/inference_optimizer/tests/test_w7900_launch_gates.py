@@ -42,8 +42,9 @@ R9700 = GpuAgent("gfx1201", "AMD Radeon AI PRO R9700", "", 64)
 MI300X = GpuAgent("gfx942", "AMD Instinct MI300X", "", 304)
 MI355X = GpuAgent("gfx950", "AMD Instinct MI355X", "", 256)
 
-#: Taken before the autouse fixture stubs it, for the test that counts the launch's real rocminfo runs.
+#: Taken before the fixtures stub them, for the test that counts the launch's real rocminfo runs.
 _REAL_PROBE_GPUS = provenance.probe_gpus
+_REAL_AUTODETECT = gpu_types._autodetect_gpu_type
 _ROCMINFO_4X_W7900 = Path(__file__).parent / "fixtures" / "rocminfo_4x_w7900_dual_slot.txt"
 
 _W7900_IDS = "w7900 (PCI 1002:7448 or 1002:744a)"
@@ -56,7 +57,8 @@ _MASK_HINT = (
 
 
 def _error(gpu_type, agents, *, framework="vllm", resumed=False, remote=False):
-    return product_launch_error(gpu_type, agents, framework=framework, resumed=resumed, remote=remote)
+    probed = None if remote else gpu_types.probed_gpu_type(agents)
+    return product_launch_error(gpu_type, agents, framework=framework, probed=probed, resumed=resumed)
 
 
 # --- the decision ---------------------------------------------------------------------------------------------------
@@ -201,11 +203,6 @@ def test_a_gpu_type_the_nameplate_contradicts_is_refused(gpu_type, agent):
             RX_7800_XT,
             f"{_SESSION} w7900 dispatches to gfx1100, but the visible GPU 'AMD Radeon RX 7800 XT' reports gfx1101",
         ),
-        (
-            "r9700",
-            RX_7900_XTX,
-            f"{_SESSION} r9700 dispatches to gfx1201, but the visible GPU 'AMD Radeon RX 7900 XTX' reports gfx1100",
-        ),
     ],
 )
 def test_a_resumed_session_is_refused_for_its_own_gpu_type_not_a_flag(gpu_type, agent, message):
@@ -215,11 +212,21 @@ def test_a_resumed_session_is_refused_for_its_own_gpu_type_not_a_flag(gpu_type, 
     assert "--gpu-type" not in error
 
 
-@pytest.mark.parametrize("gpu_type", ["mi300x", "radeon8060s"])
-def test_another_board_on_a_bare_gfx1100_is_refused(gpu_type):
-    error = _error(gpu_type, [GpuAgent("gfx1100")])
-    assert error is not None
-    assert "a bare gfx1100 is not product evidence" in error
+@pytest.mark.parametrize(
+    ("gpu_type", "agents"),
+    [
+        ("mi300x", [GpuAgent("gfx1100")]),
+        ("radeon8060s", [GpuAgent("gfx1100")]),
+        ("mi300x", [MI300X, RX_7900_XTX]),
+        (None, [MI300X, RX_7900_XTX]),
+        (None, [R9700, RX_7600]),
+        ("r9700", [R9700, RX_7800_XT]),
+    ],
+    ids=["mi300x-flag", "radeon8060s-flag", "mi300x-rx-7900-flag", "mi300x-rx-7900", "r9700-rx-7600", "r9700-rx-7800"],
+)
+def test_a_launch_on_a_board_off_gfx110x_does_not_judge_an_unregistered_gfx110x_card(gpu_type, agents):
+    """As on ``main``: an MI, R9700 or Strix Halo launch next to a display card it will not use."""
+    assert _error(gpu_type, agents) is None
 
 
 def test_every_visible_card_must_be_the_board():
@@ -232,14 +239,60 @@ def test_every_visible_card_must_be_the_board():
 
 
 @pytest.mark.parametrize(
-    ("gpu_type", "agents"),
-    [("mi300x", [MI300X, RX_7900_XTX]), (None, [MI300X, RX_7900_XTX]), ("r9700", [R9700, RX_7900_XTX])],
+    ("gpu_type", "agents", "message"),
+    [
+        (
+            None,
+            [GpuAgent("gfx942"), RX_7900_XTX],
+            "no supported product was identified; the visible GPU 'AMD Radeon RX 7900 XTX' reports gfx1100",
+        ),
+        (
+            "w7900d",
+            [W7900D, RX_7800_XT],
+            "--gpu-type w7900d dispatches to gfx1100, but the visible GPU 'AMD Radeon RX 7800 XT' reports gfx1101",
+        ),
+    ],
+    ids=["no-board", "gfx110x-board-of-another-isa"],
 )
-def test_a_visible_gfx110x_card_on_a_mixed_host_points_to_rocr_visible_devices(gpu_type, agents):
+def test_a_visible_gfx110x_card_on_a_mixed_host_points_to_rocr_visible_devices(gpu_type, agents, message):
     error = _error(gpu_type, agents)
     assert error is not None
-    assert "a bare gfx1100 is not product evidence" in error
+    assert error.startswith(message)
     assert error.endswith(_MASK_HINT)
+
+
+@pytest.mark.parametrize(
+    ("gpu_type", "agents", "named"),
+    [
+        (None, [W7900D, W7900], "the probed board w7900d"),
+        ("w7900d", [W7900D, W7900_DS], "--gpu-type w7900d"),
+        (None, [MI355X, W7900_DS], "the probed board mi355x"),
+        ("mi300x", [MI300X, W7900_CHIP_ONLY], "--gpu-type mi300x"),
+    ],
+    ids=["w7900d-first", "w7900d-flag", "mi355x-first", "mi300x-flag-chip-only"],
+)
+def test_a_w7900_next_to_the_board_a_launch_runs_as_is_refused(gpu_type, agents, named):
+    """Whichever card rocminfo lists first, a W7900 is never driven as another board's sibling."""
+    error = _error(gpu_type, agents)
+    assert error is not None
+    assert error.endswith(
+        f" is {_W7900_IDS}, which a launch confirms on the card, but {named} is another board. {_MASK_HINT}"
+    )
+
+
+def test_a_w7900_listed_first_confirms_every_card_after_it():
+    error = _error(None, [W7900, W7900D])
+    assert error is not None
+    assert error.startswith(f"the probed board w7900 is {_W7900_IDS}, but the visible GPU is 'AMD Radeon PRO W7900D'")
+
+
+def test_the_board_the_launch_runs_as_is_the_one_whose_frameworks_are_checked():
+    """Probe-wins: the flag only warns, so the probed board's framework list applies, not the flag's."""
+    assert _error("r9700", [MI300X], framework="sglang") is None
+    assert _error("w7900d", [MI355X], framework="sglang") is None
+    assert _error("mi300x", [R9700], framework="sglang") == (
+        "r9700 is currently validated only for llamacpp, vllm; framework 'sglang' has not been validated on it"
+    )
 
 
 @pytest.mark.parametrize("framework", ["sglang", "atom"])
@@ -399,6 +452,13 @@ def _geak_root(parent: Path, identity_helper: str | None) -> Path:
     return root
 
 
+def _use_geak(monkeypatch, root: Path) -> Path:
+    """Point the launch at GEAK checkout ``root`` as install.sh does: GEAK_ROOT and the runner inside it."""
+    monkeypatch.setenv("GEAK_ROOT", str(root))
+    monkeypatch.setenv("GEAK_E2E_RUNNER", str(root / "interface" / "run_e2e.py"))
+    return root
+
+
 def _prints_identity(target: str) -> str:
     """An identity helper that keeps what it read on stdin next to itself and prints ``target`` on gfx1100."""
     return (
@@ -415,9 +475,13 @@ def launch(tmp_path, monkeypatch) -> Launch:
     monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
     for name in ("GPU_TYPE", "TARGET_GPU_TYPE", "FRAMEWORK", "MAX_MODEL_LEN"):
         monkeypatch.delenv(name, raising=False)
-    for name in ("GEAK_E2E_RUNNER", "HYPERLOOM_CACHE_DIR", "KERNEL_OPT_BACKEND_ORDER"):
+    for name in ("HYPERLOOM_CACHE_DIR", "KERNEL_OPT_BACKEND_ORDER"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("GEAK_ROOT", str(_geak_root(tmp_path / "geak-w7900", _prints_identity("w7900"))))
+    _use_geak(monkeypatch, _geak_root(tmp_path / "geak-w7900", _prints_identity("w7900")))
+    # rocm-smi and torch would answer for the host's own GPU; the board comes from the stubbed rocminfo alone.
+    monkeypatch.setattr(
+        gpu_types, "_autodetect_gpu_type", lambda agents=None: gpu_types.probed_gpu_type(agents) or None
+    )
     for name in ("_load_dotenv_fallback", "_load_kernel_agent_env_fallback", "_derive_runtime_paths"):
         monkeypatch.setattr(preflight, name, lambda: None)
     monkeypatch.setattr(preflight, "_normalize_legacy_deepseek_env", dict)
@@ -456,6 +520,8 @@ _W7900_VLLM = [*_FRESH, "--gpu-type", "w7900"]
         ([*_W7900_VLLM, "--no-kernel"], [], "but rocminfo lists no GPU"),
         ([*_W7900_VLLM, "--no-kernel"], [RX_7900_XTX_CHIP_ONLY], "but the visible GPU has PCI ID 1002:744c"),
         ([*_W7900_VLLM, "--no-kernel"], [W7900_DS, RX_7900_XTX], f"'AMD Radeon RX 7900 XTX'. {_MASK_HINT}"),
+        (_FRESH, [W7900D, W7900], "which a launch confirms on the card, but the probed board w7900d is another board"),
+        (_FRESH, [W7900, W7900D], "but the visible GPU is 'AMD Radeon PRO W7900D'"),
     ],
     ids=[
         "bare-isa",
@@ -472,6 +538,8 @@ _W7900_VLLM = [*_FRESH, "--gpu-type", "w7900"]
         "no-gpu",
         "no-nameplate-other-chip",
         "mixed-host",
+        "w7900d-then-w7900",
+        "w7900-then-w7900d",
     ],
 )
 def test_a_refused_fresh_launch_exits_2_before_model_resolution_or_a_session_dir(launch, capsys, argv, agents, message):
@@ -488,6 +556,66 @@ def test_a_refused_fresh_launch_exits_2_before_model_resolution_or_a_session_dir
     assert pending_install_event(launch.args)["ext"]["hard_fail_step_id"] == "check_gpu_product"
 
 
+@pytest.mark.parametrize(
+    ("agents", "seen"), [(None, "could not run"), ([], "lists no GPU")], ids=["no-rocminfo", "no-gpu"]
+)
+def test_a_w7900_only_rocm_smi_names_must_still_be_confirmed(launch, monkeypatch, capsys, agents, seen):
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda agents=None: "w7900")
+    with pytest.raises(SystemExit) as exc:
+        launch.run(_FRESH, agents)
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert err.startswith(
+        f"ERROR: the probed board w7900 is identified by its nameplate or PCI ID, but rocminfo {seen}, "
+    )
+    launch.models.assert_not_called()
+    assert launch.left_no_session()
+
+
+def test_runtime_paths_are_derived_before_the_launch_runs_rocminfo(launch, monkeypatch):
+    """``$ROCM_PATH/bin`` reaches PATH first, so a rocminfo installed only there is found."""
+    order: list[str] = []
+    monkeypatch.setattr(preflight, "_derive_runtime_paths", lambda: order.append("derive_runtime_paths"))
+
+    def probe(env=None):
+        order.append("rocminfo")
+        return provenance.GpuProbe("", [W7900_DS])
+
+    monkeypatch.setattr(provenance, "probe_gpus", probe)
+    args = cli._build_parser().parse_args(["optimize", *_W7900_VLLM, "--no-kernel"])
+    with patch.dict(os.environ), pytest.raises(PreflightReachedCredentials):
+        preflight._preflight(args)
+    assert order.index("derive_runtime_paths") < order.index("rocminfo")
+
+
+@pytest.mark.parametrize(
+    ("argv", "agents", "gpu_type"),
+    [(["--gpu-type", "r9700"], [MI300X], "mi300x"), (["--gpu-type", "w7900d"], [MI355X], "mi355x")],
+    ids=["r9700-flag-on-mi300x", "w7900d-flag-on-mi355x"],
+)
+def test_a_flag_the_probe_overrides_is_checked_as_the_probed_board(monkeypatch, argv, agents, gpu_type):
+    """With the default framework, which the flag's board has not validated and the probed one has."""
+    monkeypatch.setattr(provenance, "probe_gpus", lambda env=None: provenance.GpuProbe("", list(agents)))
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda agents=None: None)
+    monkeypatch.delenv("FRAMEWORK", raising=False)
+    args = cli._build_parser().parse_args(["optimize", "--model", "/m", *argv])
+    assert launch_gpu._check_gpu_product(args)["detail"]["gpu_type"] == gpu_type
+
+
+def test_the_launch_board_is_what_the_masked_rocminfo_run_names_before_rocm_smi(monkeypatch):
+    """rocm-smi lists every card on the host whatever ROCR_VISIBLE_DEVICES says; rocminfo lists the session's."""
+    monkeypatch.setattr(provenance, "probe_gpus", lambda env=None: provenance.GpuProbe("", [W7900D]))
+    rocm_smi = Mock(return_value="w7900")
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", rocm_smi)
+    args = argparse.Namespace(nodes=1)
+    assert launch_gpu.launch_board(args) == "w7900d"
+    rocm_smi.assert_not_called()
+    monkeypatch.setattr(provenance, "probe_gpus", lambda env=None: None)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", f"{os.environ.get('ROCR_VISIBLE_DEVICES', '')}7")
+    assert launch_gpu.launch_board(args) == launch_gpu.launch_board(args) == "w7900"
+    rocm_smi.assert_called_once_with(agents=None)
+
+
 _FIRST_STEPS = ["load_dotenv", "load_kernel_agent_env", "validate_server_args", "check_gpu_product"]
 
 
@@ -502,9 +630,9 @@ def test_the_gate_runs_before_any_install_step(launch):
 # --- the kernel phase: GEAK must name the board it is handed --------------------------------------------------------
 
 
-def _refused_by_geak(launch, capsys, *, agents=(W7900_DS,), rocminfo="") -> str:
+def _refused_by_geak(launch, capsys, *, argv=_W7900_VLLM, agents=(W7900_DS,), rocminfo="") -> str:
     with pytest.raises(SystemExit) as exc:
-        launch.run(_W7900_VLLM, list(agents), rocminfo)
+        launch.run(argv, list(agents), rocminfo)
     assert exc.value.code == 2
     launch.models.assert_not_called()
     preflight._validate_credentials.assert_not_called()
@@ -512,7 +640,9 @@ def _refused_by_geak(launch, capsys, *, agents=(W7900_DS,), rocminfo="") -> str:
     assert pending_install_event(launch.args)["ext"]["hard_fail_step_id"] == "check_geak_target"
     err = capsys.readouterr().err
     assert err.startswith("ERROR: the kernel phase hands w7900 to GEAK, which checks the card at every handoff, but ")
-    assert "Set GEAK_ROOT to a GEAK checkout that identifies w7900" in err and "or pass --no-kernel" in err
+    assert "Re-run install.sh so it fetches a GEAK whose scripts/gpu_identity.py names the card w7900" in err
+    assert "set GEAK_E2E_RUNNER to such a checkout's interface/run_e2e.py (it takes precedence over GEAK_ROOT)" in err
+    assert err.rstrip().endswith("or pass --no-kernel. Refusing to start.")
     return err
 
 
@@ -533,22 +663,37 @@ def _refused_by_geak(launch, capsys, *, agents=(W7900_DS,), rocminfo="") -> str:
 def test_a_kernel_phase_whose_geak_does_not_identify_the_w7900_exits_2(
     launch, tmp_path, monkeypatch, capsys, helper, message
 ):
-    root = _geak_root(tmp_path / "geak-under-test", helper)
-    monkeypatch.setenv("GEAK_ROOT", str(root))
+    _use_geak(monkeypatch, _geak_root(tmp_path / "geak-under-test", helper))
     assert message in _refused_by_geak(launch, capsys)
 
 
 def test_a_kernel_phase_with_no_geak_checkout_exits_2(launch, tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("GEAK_ROOT", str(tmp_path / "absent"))
+    _use_geak(monkeypatch, tmp_path / "absent")
     assert "no GEAK checkout was found (GEAK_E2E_RUNNER, GEAK_ROOT, HYPERLOOM_CACHE_DIR)" in _refused_by_geak(
         launch, capsys
     )
 
 
 def test_a_geak_identity_helper_that_hangs_exits_2(launch, tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("GEAK_ROOT", str(_geak_root(tmp_path / "geak-hangs", "import time\ntime.sleep(30)\n")))
+    _use_geak(monkeypatch, _geak_root(tmp_path / "geak-hangs", "import time\ntime.sleep(30)\n"))
     monkeypatch.setattr(launch_gpu, "_GEAK_IDENTITY_TIMEOUT_SEC", 0.5)
     assert "gpu_identity.py did not finish" in _refused_by_geak(launch, capsys)
+
+
+def test_an_installs_geak_e2e_runner_wins_over_a_newer_geak_root(launch, tmp_path, monkeypatch, capsys):
+    """Exporting GEAK_ROOT alone, as the old refusal said, leaves the install's runner in charge."""
+    stale = _use_geak(monkeypatch, _geak_root(tmp_path / "geak-stale", _prints_identity("unknown")))
+    monkeypatch.setenv("GEAK_ROOT", str(_geak_root(tmp_path / "geak-new", _prints_identity("w7900"))))
+    err = _refused_by_geak(launch, capsys)
+    assert f"GEAK at {stale.resolve()} identifies this GPU as unknown on gfx1100" in err
+
+
+@pytest.mark.parametrize("rocm_smi", [None, "w7900"], ids=["rocminfo-names-it", "rocm-smi-names-it-too"])
+def test_a_w7900_found_without_a_flag_gets_the_geak_check(launch, tmp_path, monkeypatch, capsys, rocm_smi):
+    if rocm_smi:
+        monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda agents=None: rocm_smi)
+    _use_geak(monkeypatch, _geak_root(tmp_path / "geak-unknown", _prints_identity("unknown")))
+    assert "identifies this GPU as unknown on gfx1100" in _refused_by_geak(launch, capsys, argv=_FRESH)
 
 
 def test_geak_reads_the_launchs_own_rocminfo_output(launch, monkeypatch):
@@ -576,7 +721,7 @@ def test_geak_reads_the_launchs_own_rocminfo_output(launch, monkeypatch):
 def test_geak_is_not_asked_when_it_will_not_be_handed_the_card(
     launch, tmp_path, monkeypatch, argv, env, remote, skip_reason
 ):
-    monkeypatch.setenv("GEAK_ROOT", str(_geak_root(tmp_path / "geak-unknown", _prints_identity("unknown"))))
+    _use_geak(monkeypatch, _geak_root(tmp_path / "geak-unknown", _prints_identity("unknown")))
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(launch_gpu, "gpus_are_remote", lambda args: remote)
@@ -588,7 +733,7 @@ def test_geak_is_not_asked_when_it_will_not_be_handed_the_card(
 
 @pytest.mark.parametrize(("gpu_type", "agents"), [("r9700", [R9700]), ("mi300x", [MI300X]), ("w7900d", [W7900D])])
 def test_a_board_geak_does_not_probe_records_no_geak_check(launch, tmp_path, monkeypatch, gpu_type, agents):
-    monkeypatch.setenv("GEAK_ROOT", str(_geak_root(tmp_path / "geak-unknown", _prints_identity("unknown"))))
+    _use_geak(monkeypatch, _geak_root(tmp_path / "geak-unknown", _prints_identity("unknown")))
     launch.preflight([*_FRESH, "--gpu-type", gpu_type], agents)
     assert launch.step("check_geak_target") is None
 
@@ -762,6 +907,18 @@ def test_both_session_paths_publish_the_identity_before_anything_reads_it():
     assert fresh.index("publish_gpu_identity") < fresh.index("write_manifest")
     resumed = cli_call_sequence("_resume_session")
     assert resumed.index("_restore_platform_state") < resumed.index("publish_gpu_identity")
+    assert "launch_gpu_identity" in resumed[resumed.index("_restore_platform_state") :]
+
+
+def test_a_resume_records_the_card_it_now_runs_on_as_the_sessions_gpu_type(monkeypatch):
+    """Not the manifest's record from the first leg, and not the flag a resume ignores."""
+    monkeypatch.setattr(provenance, "probe_gpus", lambda env=None: provenance.GpuProbe("", [W7900]))
+    identity = launch_gpu.launch_gpu_identity(argparse.Namespace(gpu_type="r9700", nodes=1), gpu_type="w7900")
+    assert (identity["product"], identity["marketing_name"], identity["pci_device_id"]) == (
+        "w7900",
+        "AMD Radeon Pro W7900",
+        "1002:7448",
+    )
 
 
 class ManifestReached(Exception):
@@ -781,11 +938,12 @@ def test_a_launch_runs_rocminfo_once(launch, tmp_path, monkeypatch, flags):
             rocminfo_runs.append(list(argv))
             return subprocess.CompletedProcess(argv, 0, listing, "")
         if tool == "rocm-smi" and "--showproductname" in argv:
-            # The host's own GPU must not answer, and a nameplate rocm-smi cannot read leaves the type to rocminfo.
-            return subprocess.CompletedProcess(argv, 0, "GPU[0]\t\t: Card Series: \t\tN/A\n", "")
+            # rocm-smi lists a card the session does not see; the launch's own rocminfo run names the board.
+            return subprocess.CompletedProcess(argv, 0, "GPU[0]\t\t: Card Series: \t\tAMD Radeon PRO W7900D\n", "")
         return real_run(argv, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", _REAL_AUTODETECT)
     monkeypatch.setattr(provenance, "_rocminfo_binary", lambda: "/opt/rocm/bin/rocminfo")
     for name in ("_enforce_expected_framework", "_apply_operator_supplied_paths"):
         monkeypatch.setattr(cli, name, lambda *a, **kw: None)
@@ -812,16 +970,18 @@ def test_a_launch_runs_rocminfo_once(launch, tmp_path, monkeypatch, flags):
 # --- the session's GPU-type resolution ------------------------------------------------------------------------------
 
 
-def _resolve_target_gpu(monkeypatch, argv, probed, *, rocm_smi=None):
+def _resolve_target_gpu(monkeypatch, argv, probed):
+    """``_resolve_target_gpu`` on a host whose probes name ``probed``; they must be asked once."""
     for name in ("GPU_TYPE", "TARGET_GPU_TYPE"):
         monkeypatch.delenv(name, raising=False)
     args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm", *argv])
     configure_benchmark(args)
-    monkeypatch.setattr(cli, "_autodetect_gpu_type", lambda agents=None: probed)
-    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda agents=None: rocm_smi)
+    autodetect = Mock(return_value=probed)
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", autodetect)
     monkeypatch.setattr(cli, "_check_gfx_arch_resolvable", lambda gpu_type, **_kw: None)
     with patch.dict(os.environ):
         cli._resolve_target_gpu(args, "vllm")
+    autodetect.assert_called_once_with(agents=None)
     return args
 
 
@@ -856,9 +1016,41 @@ def test_a_w7900_session_resolves_to_the_w7900(monkeypatch, argv, probed):
     assert _resolve_target_gpu(monkeypatch, argv, probed).gpu_type == "w7900"
 
 
-def test_without_a_gpu_type_the_probe_has_nothing_to_contradict(monkeypatch):
-    """The flag side of the comparison is the flag or env alone, never a second probe that could name another board."""
-    assert _resolve_target_gpu(monkeypatch, [], "w7900", rocm_smi="mi355x").gpu_type == "w7900"
+def test_the_session_settles_on_the_board_the_launch_gate_checked(monkeypatch):
+    """One answer per launch: a second probe could name another board than the one preflight confirmed."""
+    for name in ("GPU_TYPE", "TARGET_GPU_TYPE"):
+        monkeypatch.delenv(name, raising=False)
+    args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
+    configure_benchmark(args)
+    autodetect = Mock(side_effect=["w7900", "mi355x"])
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", autodetect)
+    monkeypatch.setattr(cli, "_check_gfx_arch_resolvable", lambda gpu_type, **_kw: None)
+    assert launch_gpu.launch_board(args) == "w7900"
+    with patch.dict(os.environ):
+        cli._resolve_target_gpu(args, "vllm")
+    assert args.gpu_type == "w7900"
+    autodetect.assert_called_once_with(agents=None)
+
+
+@pytest.mark.parametrize(("flag", "gpu_type", "asked"), [(None, "mi355x", True), ("mi300x", "mi300x", False)])
+def test_a_multi_node_launch_falls_back_to_the_head_node_only_with_nothing_else(
+    monkeypatch, capsys, flag, gpu_type, asked
+):
+    """With no flag and a remote probe that names no board, the head node's GPU names the type, as on ``main``."""
+    from hyperloom.inference_optimizer.multi_node._internal import gpu_probe
+
+    for name in ("GPU_TYPE", "TARGET_GPU_TYPE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(gpu_probe, "remote_autodetect_gpu_type", lambda **_kw: None)
+    head = Mock(return_value="mi355x")
+    monkeypatch.setattr(cli, "_autodetect_gpu_type", head)
+    monkeypatch.setattr(cli, "_check_gfx_arch_resolvable", lambda gpu_type, **_kw: None)
+    args = argparse.Namespace(gpu_type=flag, nodes=2)
+    with patch.dict(os.environ):
+        cli._resolve_target_gpu(args, "vllm")
+    assert args.gpu_type == gpu_type
+    assert head.called is asked
+    assert ("(head node; the remote probe named no board)" in capsys.readouterr().out) is asked
 
 
 @pytest.mark.parametrize(("user", "probed"), [("mi300x", "mi355x"), ("w7900d", "r9700"), ("r9700", "w7900d")])

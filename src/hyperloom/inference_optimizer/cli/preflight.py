@@ -818,8 +818,8 @@ def _normalize_preflight_env(args: argparse.Namespace, install_event: dict[str, 
         category="check",
         action=lambda: _validate_explicit_server_limits(args),
     )
-    check_gpu_launch(args, install_event, run_step=_run_install_step)
     _derive_runtime_paths()
+    check_gpu_launch(args, install_event, run_step=_run_install_step)
     _restore_provider_only_mode(provider_mode, provider_snapshot)
     _run_install_step(
         install_event,

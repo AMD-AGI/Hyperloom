@@ -1230,8 +1230,9 @@ full env-var set, and `docs/reference/session-breakdown.md` for the emitted
 ## GPU Type
 
 Pick the GPU explicitly with `--gpu-type` or `$GPU_TYPE`; without
-either, the optimizer auto-detects via `rocm-smi --showproductname`
-(falling back to the `rocminfo` product name or PCI ID, then
+either, the optimizer auto-detects from the product name or PCI ID of the
+launch's `rocminfo` run, which honours `ROCR_VISIBLE_DEVICES` (falling back to
+`rocm-smi --showproductname`, then
 `torch.cuda.get_device_properties(0).gcnArchName`).
 
 ```bash
@@ -1255,13 +1256,15 @@ exits with code 2 at launch.
 launch: every GPU rocminfo shows must report gfx1100 and the W7900's product
 name or PCI ID (`1002:7448`, `1002:744a`), never a bare gfx1100. A
 `--gpu-type w7900` the probe contradicts, or another `--gpu-type` on a W7900,
-exits with code 2, as do a local launch where rocminfo cannot run or lists no
-GPU and a kernel phase whose GEAK checkout does not identify the card as
-`w7900` (pass `--no-kernel` to skip it). A gfx1100, gfx1101 or gfx1102 GPU that
-names no supported board is refused unless `--gpu-type` names a board on that
-ISA. To leave such a card out, give the container only the W7900's render node,
-or export `ROCR_VISIBLE_DEVICES` in the launching shell; preflight ignores it in
-`.env`. `w7900d` keeps the probe-wins rule.
+exits with code 2, as do a W7900 visible to a launch on another board, a local
+launch where rocminfo cannot run or lists no GPU, and a kernel phase whose GEAK
+checkout does not identify the card as `w7900` (re-run `install.sh` to fetch
+GEAK `main`, point `GEAK_E2E_RUNNER` at a newer checkout, or pass
+`--no-kernel`). On a launch with no board or a gfx110x one, a gfx1100, gfx1101
+or gfx1102 GPU that names no supported board is refused unless the launch's
+board is on that ISA. To leave such a card out, give the container only the
+W7900's render node, or export `ROCR_VISIBLE_DEVICES` in the launching shell;
+preflight ignores it in `.env`. `w7900d` keeps the probe-wins rule.
 
 Do not set `HIP_VISIBLE_DEVICES` on the known ROCm stack unless the user asks;
 it can make `torch.cuda.is_available()` return false. Use

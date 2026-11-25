@@ -263,18 +263,6 @@ def _cumulative_validation_status(summary: dict[str, Any]) -> str:
     return "current"
 
 
-def _summary_stop_reason(state: SharedState) -> str:
-    """The session's stop_reason, or ``time_exhausted`` when it is still blank inside ``closing_phase``.
-
-    The wind-down report is rendered inside closing_phase, before the loop assigns the terminal stop_reason;
-    closing_phase is only entered on the wall-clock deadline, so fall back to time_exhausted rather than blank.
-    """
-    stop_reason = str(getattr(state, "stop_reason", "") or "").strip()
-    if not stop_reason and getattr(state, "closing_phase", False):
-        stop_reason = "time_exhausted"
-    return stop_reason
-
-
 def _build_summary_dict(
     state: SharedState,
     ev_counts: dict[str, int],
@@ -285,7 +273,11 @@ def _build_summary_dict(
 ) -> dict[str, Any]:
     """Assemble the machine-readable session summary dict."""
     graded = resolve_graded_comparison(state, state.current_best, against_baseline=True)
-    stop_reason = _summary_stop_reason(state)
+    # The wind-down report is rendered inside closing_phase, before the loop assigns the terminal stop_reason;
+    # closing_phase is only entered on the wall-clock deadline, so fall back to time_exhausted rather than blank.
+    stop_reason = str(getattr(state, "stop_reason", "") or "").strip()
+    if not stop_reason and getattr(state, "closing_phase", False):
+        stop_reason = "time_exhausted"
     summary: dict[str, Any] = {
         "session_id": state.session_id,
         "model_name": state.model_name,
@@ -327,7 +319,6 @@ def _build_summary_dict(
         "crash_count": state.crash_count,
         "server_boot_failures": _count_server_boot_failures(session_dir),
         "pruned_families": state.pruned_families,
-        "kernel_enabled": bool(getattr(state, "kernel_enabled", True)),
         "platform": _platform_fingerprint(getattr(state, "gpu_type", None)),
         "max_minutes": state.max_minutes,
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
@@ -412,8 +403,6 @@ def _format_run_summary_section(summary: dict[str, Any]) -> list[str]:
     if boot_fail:
         lines.append(f"- server_boot_failures : {boot_fail}  *(warmup_failed variants; excluded from crash_count)*")
     lines.append(f"- pruned_families: {summary['pruned_families'] or '(none)'}")
-    if summary.get("kernel_enabled") is False:
-        lines.append("- kernel phase   : disabled (--no-kernel)")
     plat = summary.get("platform") or {}
     if plat.get("status") != "ok":
         # Always emit the line, with the reason when there is one: a silent absence is indistinguishable from a host

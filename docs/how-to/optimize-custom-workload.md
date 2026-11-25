@@ -272,15 +272,18 @@ the bundle rather than the lever.
 **GPU type.** `--gpu-type` accepts `mi300x`, `mi308x`, `mi325x`, `mi355x`,
 `r9700`, `r9600d`, `w7900`, `w7900d` and `radeon8060s` (Strix Halo). The entrypoint name uses the board as
 given: `mi325x` looks for `custom_mi325x.sh`, not `custom_mi300x.sh`. Without the flag, Hyperloom auto-detects through
-`rocm-smi --showproductname`, then the product name or PCI ID of the launch's one `rocminfo` run.
+the product name or PCI ID of the launch's one `rocminfo` run, which honours `ROCR_VISIBLE_DEVICES`, then
+`rocm-smi --showproductname`.
 
 `w7900` covers the Radeon PRO W7900 and the W7900 Dual Slot (`gfx1100`, 96 CUs), and a launch confirms it on the card:
 every GPU `rocminfo` shows must report `gfx1100` and the W7900's product name or PCI ID (`1002:7448`, `1002:744a`),
 never a bare `gfx1100`. A `--gpu-type w7900` the probe contradicts, or another `--gpu-type` on a W7900, exits with
-code 2, and so does a local launch where `rocminfo` cannot run or lists no GPU. The kernel phase also needs a GEAK
-checkout that identifies the card as `w7900`; pass `--no-kernel` to run without it. A `gfx1100`, `gfx1101` or `gfx1102`
-GPU that names no supported board (a W7800 or an RX 7900, say) is refused unless `--gpu-type` names a board on that
-ISA. To leave such a card out, give the container only the W7900's `/dev/dri` render node, or export
+code 2, and so do a W7900 visible to a launch on another board and a local launch where `rocminfo` cannot run or lists
+no GPU. The kernel phase also needs a GEAK checkout that identifies the card as `w7900`: re-run `install.sh` to fetch
+GEAK `main`, point `GEAK_E2E_RUNNER` (which wins over `GEAK_ROOT`) at a newer checkout's `interface/run_e2e.py`, or
+pass `--no-kernel` to run without it. On a launch with no board or a gfx110x one, a `gfx1100`, `gfx1101` or `gfx1102`
+GPU that names no supported board (a W7800 or an RX 7900, say) is refused unless the launch's board is on that ISA.
+To leave such a card out, give the container only the W7900's `/dev/dri` render node, or export
 `ROCR_VISIBLE_DEVICES` in the shell that launches Hyperloom; preflight ignores it in `.env`. `w7900d` keeps the
 probe-wins rule.
 

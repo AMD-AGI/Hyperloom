@@ -45,6 +45,27 @@ host the CLI defaults to `session/` under the current directory instead. Prefer
 
 ## Upgrading from 1.2.x
 
+### Required: launches on or next to a Radeon PRO W7900 must match the card
+
+A launch now exits with code 2, before any install or LLM call, when:
+
+* `--gpu-type` (or `GPU_TYPE`) and the hardware probe disagree and either one
+  is `w7900`. Pass the type the probe reports, or run on the board you named.
+* it runs as `w7900` on a local host where `rocminfo` cannot run or lists no
+  GPU. Give the session the card's `/dev/kfd` and `/dev/dri` nodes, and
+  `rocminfo` on `PATH` or under `ROCM_PATH`.
+* it runs as `w7900` and a visible GPU is not a W7900, or a visible GPU is a
+  W7900 and the launch runs as another board. Give the container only the
+  render nodes of the GPUs the session should use, or export
+  `ROCR_VISIBLE_DEVICES` in the launching shell.
+* a visible gfx1100, gfx1101 or gfx1102 GPU names no registered board, and the
+  launch runs as no board or as a gfx110x board of another ISA. Pass
+  `--gpu-type` for a board on that ISA, or hide the card as above. Launches
+  that run as an MI, R9700 or Radeon 8060S board are not checked this way.
+* its `w7900` kernel phase finds a GEAK checkout that does not name the card.
+  Re-run `install.sh` so it fetches a newer GEAK, set `GEAK_E2E_RUNNER` to such
+  a checkout's `interface/run_e2e.py`, or pass `--no-kernel`.
+
 ### Required: removed flags
 
 These flags are rejected with `unrecognized arguments`:

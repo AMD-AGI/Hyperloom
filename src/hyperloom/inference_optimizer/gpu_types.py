@@ -194,7 +194,7 @@ def _confirmed_board_error(named: str, board: GpuBoard, agent: GpuAgent) -> str 
 
 
 def probed_gpu_type(agents: Sequence[GpuAgent] | None) -> str:
-    """The board the first rocminfo agent's nameplate or PCI ID names, or ``""``."""
+    """The board named by the first rocminfo agent whose nameplate or PCI ID names one, or ``""``."""
     for agent in agents or ():
         board = board_of_agent(agent)
         if board:
@@ -202,32 +202,58 @@ def probed_gpu_type(agents: Sequence[GpuAgent] | None) -> str:
     return ""
 
 
+def launch_gpu_type(requested: str | None, probed: str | None, *, resumed: bool = False) -> str:
+    """The board a launch runs as: a resume's own GPU type, else the probe over the flag (:func:`_resolve_gpu_type`)."""
+    requested = str(requested or "").strip().lower()
+    return requested if resumed else str(probed or "").strip().lower() or requested
+
+
+def _agent_error(named: str, product: str, agent: GpuAgent) -> str | None:
+    """Why a launch as board ``product`` cannot run with the visible GPU ``agent``, or ``None``."""
+    board = gpu_board(product)
+    agent_board = board_of_agent(agent)
+    # An unregistered gfx110x card is judged only on a launch with no board or on a gfx110x board of another ISA.
+    if agent.gfx in _PRODUCT_REQUIRED_GFX and agent_board is None:
+        if board is None or (board.gfx in _PRODUCT_REQUIRED_GFX and board.gfx != agent.gfx):
+            return _bare_isa_error(named, board, agent)
+    confirmed = _confirmed_board(product)
+    if confirmed:
+        return _confirmed_board_error(named, confirmed, agent)
+    if agent_board and agent_board.product != product and _confirmed_board(agent_board.product):
+        return (
+            f"{_visible_gpu(agent)} is {_confirmed_list(agent_board.product)}, which a launch confirms on the card, "
+            f"but {named} is another board. {_MASK_HINT}"
+        )
+    return None
+
+
 def product_launch_error(
     gpu_type: str | None,
     agents: Sequence[GpuAgent] | None,
     *,
     framework: str,
+    probed: str | None,
     resumed: bool = False,
-    remote: bool = False,
 ) -> str | None:
     """Why this launch cannot run on the board, or ``None``; checked before any install, LLM call or session dir.
 
     ``gpu_type`` is the flag (or env) value, or with ``resumed`` the one the resumed session was created with;
-    ``agents`` is what rocminfo shows the session, or ``None`` when it cannot run. A board a launch confirms on the
-    card is accepted only when every agent shows its ISA and its nameplate or PCI ID, so a local launch that rocminfo
-    shows no GPU for is refused. Other boards, and a ``remote`` launch (the GPUs are on other nodes), check only what
-    rocminfo shows.
+    ``agents`` is what rocminfo shows the session, or ``None`` when it cannot run; ``probed`` is the board the launch's
+    own GPUs name (``""`` when none does), or ``None`` when they are on remote nodes and only the flags are checked.
+    The board judged is the one the launch runs as (:func:`launch_gpu_type`), whichever probe named it. A board a
+    launch confirms on the card is accepted only when every agent shows its ISA and its nameplate or PCI ID, so a local
+    launch that rocminfo shows no GPU for is refused, and no visible GPU may be a confirmed board the launch is not.
     """
     requested = str(gpu_type or "").strip().lower()
-    probed = probed_gpu_type(agents)
+    remote = probed is None
     conflict = gpu_type_conflict(requested, probed, resumed=resumed)
     if conflict:
         return conflict
-    product = requested or probed
+    product = launch_gpu_type(requested, probed, resumed=resumed)
     if resumed:
         named = f"the session's GPU type {product}"
     else:
-        named = f"--gpu-type {product}" if requested else f"the probed board {product}"
+        named = f"--gpu-type {product}" if requested and requested == product else f"the probed board {product}"
     board = gpu_board(product)
     confirmed = _confirmed_board(product)
     if confirmed and not remote and not agents:
@@ -241,10 +267,7 @@ def product_launch_error(
             f"{fix} the session the card's /dev/kfd and /dev/dri nodes."
         )
     for agent in agents or ():
-        bare = agent.gfx in _PRODUCT_REQUIRED_GFX and board_of_agent(agent) is None
-        if bare and not (board and board.gfx == agent.gfx):
-            return _bare_isa_error(named, board, agent)
-        error = _confirmed_board_error(named, confirmed, agent) if confirmed else None
+        error = _agent_error(named, product, agent)
         if error:
             return error
     return _board_framework_error(product, framework) if board else None

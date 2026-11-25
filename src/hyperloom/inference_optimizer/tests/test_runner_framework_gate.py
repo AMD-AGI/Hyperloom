@@ -9,7 +9,7 @@ import os
 import pytest
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
-from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer import cli, gpu_types
 from hyperloom.inference_optimizer.cli import launch_shape
 from hyperloom.inference_optimizer.cli.benchmark_config import configure_benchmark
 from hyperloom.inference_optimizer.cli.parser import _build_parser
@@ -48,7 +48,7 @@ def _seed(tmp_path, monkeypatch, framework: str, gpu_type: str = "r9700", *extra
     launch_shape._resolve_run_topology(args)
     for name in ("_enforce_expected_framework", "_apply_operator_supplied_paths", "_check_gfx_arch_resolvable"):
         monkeypatch.setattr(cli, name, lambda *a, **kw: None)
-    monkeypatch.setattr(cli, "_autodetect_gpu_type", lambda agents=None: None)
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda agents=None: None)
     monkeypatch.setattr(cli, "resolve_framework_version", lambda args: "test-version")
     monkeypatch.setattr(cli, "make_session_dir", lambda **kw: tmp_path)
     monkeypatch.setattr(cli, "_acquire_session_lock_or_exit", lambda path: None)

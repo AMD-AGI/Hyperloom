@@ -242,13 +242,6 @@ def test_report_names_only_what_the_identity_recorded():
     )
 
 
-@pytest.mark.parametrize(("kernel_enabled", "shown"), [(False, True), (True, False), (None, False)])
-def test_report_says_when_the_kernel_phase_was_off(kernel_enabled, shown):
-    extra = {} if kernel_enabled is None else {"kernel_enabled": kernel_enabled}
-    md = rp._format_md(_summary_without_platform(**extra))
-    assert ("- kernel phase   : disabled (--no-kernel)" in md) is shown
-
-
 def test_platform_fingerprint_propagates_a_node_scope_failure(monkeypatch):
     def _boom():
         raise RuntimeError("node scope unreadable")

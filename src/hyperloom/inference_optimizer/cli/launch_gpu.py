@@ -42,7 +42,8 @@ def publish_gpu_power_settings(record: Mapping[str, Any]) -> None:
 def publish_gpu_identity(record: Any) -> None:
     """Expose the GPU's identity to the manifest and the platform fingerprint, the way the power settings are.
 
-    ``record`` is :func:`launch_gpu_identity`'s answer, or on a resume whatever the manifest holds.
+    ``record`` is :func:`launch_gpu_identity`'s answer. A resume publishes its own, so a session moved to another card
+    records the card it now runs on.
     """
     from hyperloom.common.provenance import GPU_IDENTITY_ENV
 
@@ -73,6 +74,16 @@ def gpus_are_remote(args: argparse.Namespace) -> bool:
 _GPU_MASK_ENVS = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 
 
+def _per_mask(args: argparse.Namespace, attr: str, compute: Callable[[], Any]) -> Any:
+    """``compute()``, run once per device mask and kept on ``args`` as ``attr``."""
+    masks = tuple(os.environ.get(name) for name in _GPU_MASK_ENVS)
+    cached = getattr(args, attr, None)
+    if cached is None or cached[0] != masks:
+        cached = (masks, compute())
+        setattr(args, attr, cached)
+    return cached[1]
+
+
 def launch_gpu_probe(args: argparse.Namespace) -> GpuProbe | None:
     """This launch's one rocminfo run, which its GPU checks and the identity it records share.
 
@@ -80,22 +91,37 @@ def launch_gpu_probe(args: argparse.Namespace) -> GpuProbe | None:
     """
     from hyperloom.common.provenance import probe_gpus
 
+    return None if gpus_are_remote(args) else _per_mask(args, "_launch_gpu_probe", probe_gpus)
+
+
+def launch_board(args: argparse.Namespace) -> str:
+    """The board this launch's own GPUs name, which the launch gate checks and ``_resolve_target_gpu`` settles on.
+
+    The first board the launch's rocminfo agents name (rocminfo honours the device mask; rocm-smi lists every card),
+    then rocm-smi, then torch. ``""`` when none names a board or the GPUs are on remote nodes.
+    """
+    from .. import gpu_types
+
     if gpus_are_remote(args):
-        return None
-    masks = tuple(os.environ.get(name) for name in _GPU_MASK_ENVS)
-    cached = getattr(args, "_launch_gpu_probe", None)
-    if cached is None or cached[0] != masks:
-        cached = (masks, probe_gpus())
-        args._launch_gpu_probe = cached
-    return cached[1]
+        return ""
+    probe = launch_gpu_probe(args)
+    agents = probe.agents if probe else None
+    return _per_mask(
+        args,
+        "_launch_board",
+        lambda: gpu_types.probed_gpu_type(agents) or gpu_types._autodetect_gpu_type(agents=agents) or "",
+    )
 
 
-def launch_gpu_identity(args: argparse.Namespace) -> dict[str, Any]:
-    """The identity of the GPU this launch runs on; only the product when the GPUs are on remote nodes."""
+def launch_gpu_identity(args: argparse.Namespace, gpu_type: str | None = None) -> dict[str, Any]:
+    """The identity of the GPU this launch runs on as ``gpu_type`` (else ``args.gpu_type``).
+
+    Only the product when the GPUs are on remote nodes.
+    """
     from hyperloom.common.provenance import detect_gpu_identity
 
     probe = launch_gpu_probe(args)
-    return detect_gpu_identity(getattr(args, "gpu_type", None), probe.agents if probe else None)
+    return detect_gpu_identity(gpu_type or getattr(args, "gpu_type", None), probe.agents if probe else None)
 
 
 def _skipped(reason: str, **fields: Any) -> dict[str, Any]:
@@ -131,7 +157,7 @@ def _check_gpu_product(args: argparse.Namespace) -> dict[str, Any]:
     """
     from hyperloom.inference_optimizer import framework_registry
 
-    from ..gpu_types import _resolve_amd_gpu_type, probed_gpu_type, product_launch_error
+    from ..gpu_types import _resolve_amd_gpu_type, launch_gpu_type, product_launch_error
 
     state = _resumed_session_state(args) or {}
     resumed = bool(str(state.get("gpu_type") or "").strip())
@@ -146,14 +172,17 @@ def _check_gpu_product(args: argparse.Namespace) -> dict[str, Any]:
     probe = launch_gpu_probe(args)
     agents = probe.agents if probe else None
     agent = agents[0] if agents else None
+    probed = launch_board(args)
     detail = {
-        "gpu_type": requested or probed_gpu_type(agents) or None,
+        "gpu_type": launch_gpu_type(requested, probed, resumed=resumed) or None,
         "marketing_name": (agent.marketing_name or None) if agent else None,
         "pci_device_id": (agent.pci_device_id or None) if agent else None,
         "observed_gfx_arch": agent.gfx if agent else None,
         "kernel_enabled": not getattr(args, _NO_KERNEL, False),
     }
-    error = product_launch_error(requested, agents, framework=framework, resumed=resumed, remote=remote)
+    error = product_launch_error(
+        requested, agents, framework=framework, probed=None if remote else probed, resumed=resumed
+    )
     if error:
         print(f"ERROR: {error}", file=sys.stderr)
         raise SystemExit(2)
@@ -225,8 +254,9 @@ def _check_geak_target(args: argparse.Namespace, gpu_type: str) -> dict[str, Any
         reason = f"GEAK at {root} identifies this GPU as {target} on {gfx}"
     print(
         f"ERROR: the kernel phase hands {gpu_type} to GEAK, which checks the card at every handoff, but {reason}. "
-        f"Set GEAK_ROOT to a GEAK checkout that identifies {gpu_type} (its scripts/gpu_identity.py names the card "
-        f"{gpu_type}), or pass --no-kernel. Refusing to start.",
+        f"Re-run install.sh so it fetches a GEAK whose scripts/gpu_identity.py names the card {gpu_type} (GEAK_REF "
+        f"defaults to main, which does), or set GEAK_E2E_RUNNER to such a checkout's interface/run_e2e.py (it takes "
+        f"precedence over GEAK_ROOT), or pass --no-kernel. Refusing to start.",
         file=sys.stderr,
     )
     sys.exit(2)

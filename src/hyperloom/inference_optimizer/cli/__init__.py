@@ -20,7 +20,13 @@ from hyperloom_common.llm import llm_config
 from hyperloom_common.env import EnvValueError, env_bool
 from hyperloom.common import agent_isolation
 from hyperloom.common.gpu_partition import PartitionModel
-from .launch_gpu import launch_gpu_identity, launch_gpu_probe, publish_gpu_identity, publish_gpu_power_settings
+from .launch_gpu import (
+    launch_board,
+    launch_gpu_identity,
+    launch_gpu_probe,
+    publish_gpu_identity,
+    publish_gpu_power_settings,
+)
 from .lineup_banners import print_lineup_banners
 from .kb import (
     _bootstrap_recipe_kb,
@@ -454,9 +460,13 @@ def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
         probed = remote_autodetect_gpu_type() or ""
         if probed:
             print(f"GPU probe       : {probed} (remote {_resolve_mn_backend(args)})")
+        elif not user_specified:
+            # With no flag and no remote answer, the head node's own GPU is the only evidence left.
+            probed = _autodetect_gpu_type() or ""
+            if probed:
+                print(f"GPU probe       : {probed} (head node; the remote probe named no board)")
     else:
-        probe = launch_gpu_probe(args)
-        probed = _autodetect_gpu_type(agents=probe.agents if probe else None) or ""
+        probed = launch_board(args)
     require_gpu_type_agreement(user_specified, probed)
     gpu_type, gpu_warnings = _resolve_gpu_type(user_specified=user_specified, probed=probed)
     for line in gpu_warnings:
@@ -626,7 +636,7 @@ async def _resume_session(args: argparse.Namespace) -> _SessionStart:
     )
     # After the re-export, not before: both read the GPU_TYPE and the framework it put back.
     _restore_platform_state(args, state, session.session_lock)
-    publish_gpu_identity(session.manifest.get("gpu_identity"))
+    publish_gpu_identity(launch_gpu_identity(args, gpu_type=state.gpu_type))
     _restore_phase_toggles(args, state, session_dir)
     _open_next_leg(args, state, session)
     return session
