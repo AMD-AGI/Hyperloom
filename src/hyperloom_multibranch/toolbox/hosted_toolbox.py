@@ -64,7 +64,7 @@ from hyperloom_multibranch.toolbox.leased_toolbox import (
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.resume_guard import MeasuredOn
-from hyperloom_multibranch.toolbox.native_builds import native_builds, with_native_plan
+from hyperloom_multibranch.toolbox.native_builds import base_bins_env, native_builds, with_native_plan
 from hyperloom_multibranch.toolbox.long_context import environment_long_context, sees_runner_cache
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, environment_short_prompts
 from hyperloom_multibranch.toolbox.tools import AsyncTool, tracelens_tool
@@ -95,6 +95,9 @@ _COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _MANIFEST_DIGEST = re.compile(r"[0-9a-f]{64}")
 _GRANT_KEYS = ("max_sandboxes", "max_gpus", "gpu_hours", "max_runtime_sec")
 _REQUIRED_TEXT = ("run_id", "api_url", "sandbox_url", "measurement_key")
+#: Where the base builds of the frameworks built from a pinned checkout are laid, below the session directory the runner
+#: sandboxes read at the same path.
+_BASE_BUILDS = "base-builds"
 
 log = logging.getLogger(__name__)
 
@@ -241,7 +244,10 @@ class HostedOptions:
     every test reads private copies of, snapshotted below ``session_dir/framework`` as the toolbox is built, where the
     runner sandboxes read it at the same path: the image's when omitted, ``""`` for none. The snapshot is named to every
     runner sandbox by ``HYPERLOOM_FRAMEWORK_SNAPSHOT`` and ``HYPERLOOM_FRAMEWORK_SESSION_SHA256``, which the runner
-    template must therefore accept; without it a test that adds tuned rows to a default table is refused.
+    template must therefore accept; without it a test that adds tuned rows to a default table is refused. A session
+    whose framework is built from its pinned checkout lays that base build below ``session_dir`` and names it to every
+    runner sandbox by ``HYPERLOOM_BASE_BINS``, which the template must accept too: a test that does not rebuild the
+    framework runs it, never whatever the sandbox's ``PATH`` finds.
     ``make_before_break`` keeps the sandbox of a finished test until the next test's sandbox runs (:func:`handover_for`)
     where the grant fits at least :data:`~.hosted_leases.HANDOVER_MIN_TESTS` tests; there it costs one test of the
     grant's parallelism (:func:`parallel_tests_for`). ``False`` runs as many tests at once as the grant fits and closes
@@ -587,6 +593,7 @@ def build_hosted_toolbox(
     leases = _leases(provider, inputs, options.lease_tuning) if options.dev_leases else None
     handover = handover_for(grant, inputs.tp, leases) if options.make_before_break else None
     parallel = parallel_tests_for(grant, inputs.tp, handover)
+    base_bins = base_bins_env(native, directory / _BASE_BUILDS)  # built once the inputs are known to run a test
     config = HostedConfig(
         session_dir=directory,
         run_id=inputs.run_id,
@@ -597,6 +604,7 @@ def build_hosted_toolbox(
             **inputs.create_envs(),
             **framework_envs(directory / SESSION_SNAPSHOT_DIR, options.framework_configs),
             **(native.runner_envs if native else {}),
+            **base_bins,
         },
         archive=session_archive(options.archive, directory),
         max_parallel_tests=parallel,

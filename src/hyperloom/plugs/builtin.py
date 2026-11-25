@@ -9,6 +9,7 @@ import importlib
 from typing import Callable
 
 from hyperloom.plugs.events import ProgressEvents
+from hyperloom.plugs.native_builds import NATIVE_BUILDS_SOCKET, NativeBuilds
 from hyperloom.plugs.registry import PlugRegistry
 from hyperloom.plugs.socket import Implementation, PlugContext, Socket
 
@@ -24,6 +25,7 @@ def lazy(target: str) -> Callable[[PlugContext], object]:
 
 
 _EVENTS = "events"
+_SESSION = "session"
 
 #: A socket whose protocol is defined by the change that adds its first implementation uses ``object`` until then.
 _SOCKETS = (
@@ -35,9 +37,13 @@ _SOCKETS = (
     Socket("knowledge", object),
     Socket("gpu_token", object),
     Socket("credentials", object),
+    Socket(NATIVE_BUILDS_SOCKET, NativeBuilds, default=_SESSION),
 )
 
-_IMPLEMENTATIONS = (Implementation(_EVENTS, "local", lazy("hyperloom.plugs.events_local:create")),)
+_IMPLEMENTATIONS = (
+    Implementation(_EVENTS, "local", lazy("hyperloom.plugs.events_local:create")),
+    Implementation(NATIVE_BUILDS_SOCKET, _SESSION, lazy("hyperloom.measure.runner.native.session_plug:create")),
+)
 
 
 def builtin_registry() -> PlugRegistry:

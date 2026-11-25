@@ -167,11 +167,14 @@ def test_a_sheet_with_no_build_leaves_the_key_out_so_its_bytes_and_fingerprint_a
 @pytest.mark.parametrize(
     ("change", "reason"),
     [
-        (lambda d: (_built(d), d["environment"].pop("builds")), "each runtime root needs exactly one build"),
+        (
+            lambda d: (_built(d), d["environment"].pop("builds")),
+            r"each runtime or executable root needs exactly one build, .* \(built roots \['sglang'\], builds \[\]\)",
+        ),
         (lambda d: (_built(d), d["environment"]["builds"][0].update(root_id="nowhere")), "each build names a root"),
         (
             lambda d: (_built(d), d["environment"]["builds"].append(dict(d["environment"]["builds"][0]))),
-            "each runtime root needs exactly one build",
+            "each runtime or executable root needs exactly one build",
         ),
         (lambda d: (_built(d), d["environment"]["builds"][0].update(key="k")), "builds"),
         (lambda d: d["environment"].update(builds=[]), "an empty list"),
@@ -184,6 +187,42 @@ def test_a_build_that_does_not_name_exactly_one_runtime_root_is_refused(change: 
 
     with pytest.raises(DocumentError, match=reason):
         MeasurementSpec.from_document(document)
+
+
+def _executable(d: dict[str, Any]) -> None:
+    _built(d)
+    d["environment"]["roots"][0].update(kind="executable", entries=[])
+
+
+def test_an_executable_root_names_its_ready_build_and_lays_no_file() -> None:
+    document = _edit(_executable)
+    spec = MeasurementSpec.from_document(document)
+
+    assert [(r.kind, r.entries) for r in spec.environment.roots] == [("executable", ())]
+    assert MeasurementSpec.from_bytes(spec.to_bytes()) == spec
+    assert list(VALIDATOR.iter_errors(document)) == []
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (
+            lambda d: (_executable(d), d["environment"].pop("builds")),
+            r"each runtime or executable root needs exactly one build, .* \(built roots \['sglang'\], builds \[\]\)",
+        ),
+        (
+            lambda d: (
+                _executable(d),
+                d["environment"]["roots"][0]["entries"].append({"path": "x.py", "op": "delete"}),
+            ),
+            "an executable root lays no file over a package",
+        ),
+    ],
+    ids=["without-build", "with-entries"],
+)
+def test_an_executable_root_without_its_build_or_with_files_is_refused(change: Any, reason: str) -> None:
+    with pytest.raises(DocumentError, match=reason):
+        MeasurementSpec.from_document(_edit(change))
 
 
 def test_a_package_root_may_name_the_build_of_its_jit_modules() -> None:

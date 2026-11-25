@@ -12,6 +12,10 @@ its key and the SHA-256 of its signed manifest (:class:`BuildRef`, ``environment
 The compiled overlay's roots (:class:`EnvRoot`) and their entries (:class:`EnvEntry`) are defined here, below
 :mod:`hyperloom.measure.compile`, because the builds named here are made from them.
 
+A component whose build makes executables and no package (a server built from a pinned checkout) compiles to an
+``executable`` root instead: nothing is laid over an installed package, and its build's executables are put on the
+server's ``PATH``.
+
 aiter's touched modules are built the same way but stay a package root's: :class:`ModulePlan` says which
 of them a CPU build makes (:class:`ModuleBuild`), and the sheet names that build on aiter's package root.
 """
@@ -20,7 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
 from hyperloom.contracts.recipe import DIGEST_PREFIX, ComponentPatches, Recipe, RecipeError
 
@@ -28,6 +32,10 @@ if TYPE_CHECKING:
     from hyperloom.measure.jit.native.key import BuildInputs
 
 __all__ = [
+    "BUILT_ROOT_KINDS",
+    "EXECUTABLE_ROOT",
+    "PACKAGE_ROOT",
+    "RUNTIME_ROOT",
     "BuildNeed",
     "BuildNotReady",
     "BuildRef",
@@ -40,6 +48,12 @@ __all__ = [
     "RuntimeSourcesConflict",
     "check_runtime_sources",
 ]
+
+PACKAGE_ROOT: Final = "package"
+RUNTIME_ROOT: Final = "runtime"
+EXECUTABLE_ROOT: Final = "executable"
+#: The kinds of root whose files come from a native build, which the sheet names once it is ready.
+BUILT_ROOT_KINDS = frozenset({RUNTIME_ROOT, EXECUTABLE_ROOT})
 
 
 @dataclass(frozen=True)
@@ -60,14 +74,14 @@ class EnvEntry:
 
 @dataclass(frozen=True)
 class EnvRoot:
-    """A package in the image and everything that differs from it."""
+    """A package in the image and everything that differs from it; an ``executable`` root lays no file over one."""
 
     id: str
     import_name: str
     dist_name: str | None
     dist_version: str | None
     entries: tuple[EnvEntry, ...]
-    kind: Literal["package", "runtime"] = "package"
+    kind: Literal["package", "runtime", "executable"] = PACKAGE_ROOT
 
     def to_document(self) -> dict[str, object]:
         return {
@@ -81,11 +95,14 @@ class EnvRoot:
 
 @dataclass(frozen=True)
 class NativeStack:
-    """What a component's stack makes of its native sources: the key of the build that compiles them, and the stack's
-    files inside the installed package (package-relative), which are laid like a package root's."""
+    """What a component's stack makes of its native sources: the key of the build that compiles them, the stack's
+    files inside the installed package (package-relative), which are laid like a package root's, and the kind of root
+    it compiles to: a ``runtime`` root, or an ``executable`` root (which lays no file) for a build that makes
+    executables."""
 
     inputs: BuildInputs
     entries: tuple[EnvEntry, ...]
+    kind: Literal["runtime", "executable"] = RUNTIME_ROOT
 
 
 class NativePlan(Protocol):

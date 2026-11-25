@@ -107,9 +107,35 @@ def test_points_and_their_launcher_environment_match_inferencex_own_matrix():
     points = every_point(_main().bundle)
 
     assert len(points) == 321
-    assert sorted(_point_digest(point.recipe, point.environment()) for point in points) == sorted(
-        _recording("ce35bc935.json.gz")["upstream_points"]
+    # The launcher adds IS_MULTINODE only after ce35bc935, which predates it and ignores it.
+    environments = [
+        {key: value for key, value in point.environment().items() if key != "IS_MULTINODE"} for point in points
+    ]
+    assert sorted(_point_digest(point.recipe, environment) for point, environment in zip(points, environments)) == (
+        sorted(_recording("ce35bc935.json.gz")["upstream_points"])
     )
+
+
+def test_a_point_environment_names_one_single_node_worker_for_inferencex_worker_resources():
+    for point in every_point(_main().bundle):
+        environment = point.environment()
+
+        assert environment["IS_MULTINODE"] == "false", point.key
+        assert environment["GPU_COUNT"] == str(point.tp * point.pp * point.pcp), point.key
+
+
+def test_an_agentic_block_without_dram_utilization_leaves_the_offload_dram_to_inferencex_launch():
+    bundle = _main().bundle
+    master = yaml.safe_load(bundle.text(MASTER))
+    for entry in master.values():
+        for block in entry["scenarios"].get("agentic-coding") or ():
+            block.pop("dram-utilization", None)
+    stripped = replace(bundle, files={**bundle.files, MASTER: yaml.safe_dump(master)})
+    points = [point for point in every_point(stripped) if point.kv_offloading == "dram"]
+
+    assert points
+    assert all("TOTAL_CPU_DRAM_GB" not in point.environment() for point in points)
+    assert all(point.environment()["KV_OFFLOADING"] == "dram" for point in points)
 
 
 def test_every_point_binds_exactly_one_variant_as_recorded():

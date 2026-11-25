@@ -34,17 +34,20 @@ from hyperloom.measure.tests.framework_fixtures import make_framework
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.rule_pack_fixtures import identity_of, other_pack, reading_pack  # noqa: F401
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
+from hyperloom.orchestrator.actions.executors import SERVER_CPUS_ENV
 from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom_common.tests._bwrap_host import usable_bwrap
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
+from hyperloom.measure.farm import BASE_BINS_ENV
 from hyperloom_multibranch.toolbox import local_hosted
 from hyperloom_multibranch.toolbox.local_hosted import (
     LocalHostedToolbox,
     LocalOptions,
     LocalSession,
+    _measured_template,
     _runner_template,
     build_local_toolbox,
     host_tool_repos,
@@ -131,6 +134,32 @@ def test_the_host_hugging_face_settings_reach_the_runner_template(
     template = _runner_template(LocalSession(tmp_path, "run-1", [0]), LocalOptions())
     assert template.envs["HF_HOME"] == "/data/hf"
     assert template.envs["HF_HUB_OFFLINE"] == "1"
+
+
+def test_a_measured_runner_pins_its_server_to_the_cpus_the_host_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local runner starts from an emptied environment, so the CPUs a round pins its server to come from the host."""
+    session = LocalSession(tmp_path, "run-1", [0])
+    template = _runner_template(session, LocalOptions())
+    monkeypatch.setenv(SERVER_CPUS_ENV, "32-47,96-111")
+
+    assert _measured_template(session, template, LocalOptions(), {}).envs[SERVER_CPUS_ENV] == "32-47,96-111"
+    assert SERVER_CPUS_ENV not in template.envs, "a branch's own sandbox runs no measured server"
+    monkeypatch.delenv(SERVER_CPUS_ENV)
+    assert SERVER_CPUS_ENV not in _measured_template(session, template, LocalOptions(), {}).envs
+
+
+def test_a_measured_runner_is_named_the_base_builds_executables(tmp_path: Path) -> None:
+    session = LocalSession(tmp_path, "run-1", [0])
+    template = _runner_template(session, LocalOptions())
+    base = {BASE_BINS_ENV: str(tmp_path / "base-builds" / "k" / "llamacpp" / "bin")}
+
+    measured = _measured_template(session, template, LocalOptions(), {}, base)
+
+    assert measured.envs[BASE_BINS_ENV] == base[BASE_BINS_ENV]
+    assert "PATH" not in measured.envs, "the runner keeps its own PATH behind them"
+    assert BASE_BINS_ENV not in template.envs, "a branch's own sandbox is not a measured runner"
 
 
 def test_only_the_named_tool_repositories_are_taken_from_the_host() -> None:
