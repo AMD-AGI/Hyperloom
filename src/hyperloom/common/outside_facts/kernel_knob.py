@@ -11,7 +11,7 @@ value for one instance before the function decides itself. An instance is one *k
 their order (the weight type and the number of columns of a matrix-vector kernel, say), each key a template instance of
 its own, so the value one key is given changes nothing of another's. ``values`` are what a key may be given, ``archs``
 the GPU architectures the anchored branch is compiled for, and ``bench`` the microbenchmark case that runs one key:
-the operation (one of :data:`_BENCH_PARAMS`) and its parameters, each a template over the axes.
+the parameters of a matrix multiplication (:data:`_BENCH_FIELDS`), each a template over the axes.
 
 Templates use ``${axis}`` and ``${value}`` (:class:`string.Template`), so a C++ brace needs no escaping. The pack pins
 each entry to its examples: every example's ``source`` must hold the anchor once, and the settings it lists, applied
@@ -37,10 +37,9 @@ __all__ = [
 
 #: A value of each of a knob's axes, in their order.
 KnobKey = tuple[str, ...]
-#: The microbenchmark operations a knob's ``bench`` may name, and the parameters each takes.
-_BENCH_PARAMS: Mapping[str, frozenset[str]] = {"MUL_MAT": frozenset({"type_a", "n"})}
+#: What a knob's ``bench`` holds: the weight type and the number of columns of the matrix multiplication a key runs.
+_BENCH_FIELDS = frozenset({"type_a", "n"})
 _VALUE = "value"
-_OP = "op"
 _FIELDS = frozenset({"component", "file", "anchor", "insert", "axes", "values", "archs", "bench"})
 _EXAMPLE_FIELDS = frozenset({"source", "settings", "expected"})
 
@@ -95,7 +94,7 @@ class KernelKnobSpec:
         return Template(self.insert).substitute(self._named(key), **{_VALUE: value})
 
     def bench_case(self, key: KnobKey) -> dict[str, str]:
-        """The microbenchmark case of ``key``: ``op`` and its parameters rendered for the key."""
+        """The microbenchmark case of ``key``: its parameters rendered for the key."""
         named = self._named(key)
         return {name: Template(text).substitute(named) for name, text in self.bench.items()}
 
@@ -158,12 +157,9 @@ def _axes(where: str, raw: Any) -> tuple[tuple[str, tuple[str, ...]], ...]:
 
 
 def _bench(where: str, raw: Any, axes: set[str]) -> dict[str, str]:
-    if not isinstance(raw, dict) or raw.get(_OP) not in _BENCH_PARAMS:
-        raise KnobSpecError(f"{where}: bench must be a mapping whose op is one of {sorted(_BENCH_PARAMS)}")
+    if not isinstance(raw, dict) or set(raw) != _BENCH_FIELDS:
+        raise KnobSpecError(f"{where}: bench must be a mapping of exactly {sorted(_BENCH_FIELDS)}")
     params = {name: _text(where, f"bench.{name}", value) for name, value in raw.items()}
-    wanted = _BENCH_PARAMS[params[_OP]] | {_OP}
-    if set(params) != wanted:
-        raise KnobSpecError(f"{where}: a {params[_OP]} bench holds exactly {sorted(wanted)}, not {sorted(params)}")
     named = set().union(*(_placeholders(text) for text in params.values()))
     if named - axes:
         raise KnobSpecError(f"{where}: bench names {sorted(named - axes)}, which are not axes")
