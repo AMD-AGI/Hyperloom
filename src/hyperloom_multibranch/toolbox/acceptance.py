@@ -4,7 +4,8 @@
 """Acceptance of a test request: the checks that refuse a request before it queues.
 
 Steps: the request validates (done by its constructor, plus the toolbox's own: no preset ``request_id``, a
-``retest_of`` that names an accepted request, a PROFILE that no live profile already covers); the parent recipe is read
+``retest_of`` that names an accepted request, a PROFILE that no live profile already covers, in a session whose
+profiles have not failed for the profiler's sake); the parent recipe is read
 from the experiment repository, and an explore of a specialist branch names that branch's head; the delta applies,
 changes an explore's parent recipe, keeps the weight precision of the session's root recipe, and the environment
 compiles; the measurement surface matches the canonical one, and a test that carries the accuracy evaluation serves a
@@ -58,6 +59,7 @@ CONTEXT_BELOW_EVAL_CODE = "context_below_eval"
 NO_EFFECTIVE_CHANGE_CODE = "no_effective_change"
 DELTA_NOT_APPLICABLE_CODE = "delta_not_applicable"
 PARENT_NOT_HEAD_CODE = "parent_not_head"
+PROFILE_FAILING_CODE = "profile_failing"
 #: The refusal of a candidate that patches aiter's ``csrc`` or ``hsa`` on a toolbox whose tests cannot build the modules
 #: the patch touches; the reason the toolbox gives (``AcceptanceSetup.aiter_builds_missing``) follows it.
 AITER_SOURCES_REASON = "aiter csrc/hsa patches need native builds; this toolbox has none configured"
@@ -216,6 +218,18 @@ def _no_live_profile(request: TestRequest, recipe_digest: str) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class FailedProfile:
+    """A PROFILE whose failure every later profile of the session would repeat: its id and the name of the failure."""
+
+    request_id: str
+    reason: str
+
+
+def _no_failed_profile() -> FailedProfile | None:
+    return None
+
+
 class MeasurementPlanner(Protocol):
     """Compiles the test environment, generates the measurement points and checks the surface (the compile, points and
     surface steps of acceptance).
@@ -294,14 +308,17 @@ class Acceptance:
         *,
         is_accepted: Callable[[str], bool],
         live_profile: Callable[[TestRequest, str], str | None] = _no_live_profile,
+        failed_profile: Callable[[], FailedProfile | None] = _no_failed_profile,
     ) -> None:
         """``live_profile`` answers, for a PROFILE request and the digest of the recipe it measures, the id of a profile
-        of the same recipe that is queued, running or measured, or ``None``; the toolbox reads it from its submit log."""
+        of the same recipe that is queued, running or measured, or ``None``; ``failed_profile`` the profile whose
+        failure every later one would repeat, or ``None``. The toolbox reads both from its submit log."""
         self._repo = setup.repo
         self._planner = setup.planner
         self._image = setup.active_image_digest
         self._is_accepted = is_accepted
         self._live_profile = live_profile
+        self._failed_profile = failed_profile
         self._workload = setup.workload_kind
         self._short_prompts = setup.short_prompts
         blobs = setup.planner.blobs
@@ -345,6 +362,7 @@ class Acceptance:
         digest = candidate.digest()
         if not replay:
             self._check_profile_exists(request, digest)
+            self._check_profile_failing(request)
         self._check_fake_gain(recipe, candidate)
         if not replay:
             _check_explore_changes_the_parent(recipe, candidate, request)
@@ -419,6 +437,24 @@ class Acceptance:
                 "running or measured; wait_test on it, or read the commit's op shares from the blackboard",
                 "profile_exists",
                 existing_request_id=existing,
+            )
+
+    def _check_profile_failing(self, request: TestRequest) -> None:
+        """Refuse a PROFILE once a profile of the session failed in a way every later one repeats, and name that one.
+
+        Each further profile would hold a card through a cold start and its window only to fail the same way. A live
+        profile of the same recipe is named first (:meth:`_check_profile_exists`): waiting on it costs nothing.
+        """
+
+        if request.kind is not TestKind.PROFILE:
+            return
+        failed = self._failed_profile()
+        if failed is not None:
+            raise RequestRejected(
+                f"profiling is unavailable for the rest of this session: profile {failed.request_id} ended "
+                f"{failed.reason}, which every later profile would repeat. Do not profile again; read the code on the "
+                "top operator's path, log its dispatch path or break a flat result down instead",
+                PROFILE_FAILING_CODE,
             )
 
     async def _root_launch(self) -> tuple[str, LaunchConfig]:
