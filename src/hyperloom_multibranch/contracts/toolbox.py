@@ -78,6 +78,7 @@ class TestWithdrawn(ToolboxError):
 REJECTION_CODES = (
     "invalid_request",  # the request breaks the contract of 3.7
     "unknown_parent",  # the parent commit is not in the experiment repository
+    "parent_not_head",  # an explore of a specialist branch names a parent commit that is not the branch's head
     # the delta does not fit the parent recipe, a patch does not apply, or it changes the root's weight precision or
     # makes the launch one the frameworks read in two ways
     "delta_not_applicable",
@@ -179,7 +180,7 @@ _PRIORITIES = range(PRIORITY_HIGHEST, PRIORITY_LOWEST + 1)
 class TestProgress:
     """How far a test that has not finished has got, as the toolbox knows it; a field it cannot tell is ``None``.
 
-    A ``queued`` test has ``queued_ahead``, the waiting tests the queue prefers to it by priority and arrival (a test of
+    A ``queued`` test has ``queued_ahead``, the waiting tests whose turn the queue puts before its own (a test of
     a branch at its K is counted, though it may not start first). A ``running`` test has ``running_seconds`` since it
     left the queue and, when its live output can be read, ``last_output_seconds_ago`` (since its newest server or
     benchmark log was written) and ``last_line`` (that log's last non-empty line, cleaned and shortened). A

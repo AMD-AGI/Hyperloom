@@ -51,6 +51,7 @@ provider-side combinations and what each one enables.
 | `LANGFUSE_HOST`        | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Base URL of your Langfuse deployment (for example, `https://langfuse.<your-domain>`). Used by both the live trace push and the offline `backfill_langfuse` CLI. |
 | `LANGFUSE`<br>`_PUBLIC_KEY`  | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Langfuse project public key (`pk-...`).                                                                                                                  |
 | `LANGFUSE`<br>`_SECRET_KEY`  | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Langfuse project secret key (`sk-...`).                                                                                                                  |
+| `GITHUB_TOKEN`         | No       | —    | GitHub token a multi-branch session's own process asks GitHub with for the specialists' upstream pull-request search (`upstream_pr_search`). Use a token that reads public repositories and nothing else: a fine-grained token with repository access "Public repositories" and no permission, or a classic token with no scope. `GH_TOKEN` is read when it is unset. `hyperloom-multibranch` reads it from its process environment, not from `.env`. It is not in the environment of a specialist's CLI or of a measurement; a dev or agent sandbox that runs without bubblewrap inherits it. Without it the search asks GitHub anonymously and the session logs one WARNING. See [Upstream pull-request search](../how-to/run-multibranch.md#upstream-pull-request-search). |
 
 ---
 
@@ -78,7 +79,6 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `ROCPC_VENV`                               | No                   | `/opt/rocprof-compute-venv` | Private venv that rocprof-compute's analyze mode runs in, created by `install.sh` from the tool's own `requirements.txt` so its exact pins cannot displace the serving image's numpy and pandas. `rocpc_profile.py` derives the same path. Without the venv, analyze degrades and profiling still collects. |
 | `INFERENCE_SUITE_TOOL_CACHE`               | No                   | `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}`<br>`/inference-suite-tools`                                               | Tool cache `install.sh` stages the pinned InferenceX client, GSM8K task and AgentX harness into; every benchmark round reads it and fetches nothing. See [Staging and pins](inference-suite.md#staging-and-pins). |
 | `HYPERLOOM_`<br>`RULE_PACK` | No | Unset (the pack shipped with the package) | Path to the rule pack, the YAML file that states the facts about projects outside this repository (aiter, SGLang, vLLM, PyTorch, the HIP runtime, argparse, Transformers, InferenceX log markers and variable names) that `hyperloom.common.outside_facts` binds for its readers. Read once, at the first import of `hyperloom.common.outside_facts` in each process. An empty or blank value raises `RulePackError`; unset it to read the shipped pack. A path that cannot be read, or a pack that fails validation, fails the import of every reader (`visible_devices`, `failure_signature`, ...) with the file and the entry named; nothing falls back to the shipped pack. A relative path resolves against each process's own working directory. Child processes inherit the variable, so a value that is valid on the host but names a file that is missing in a sandbox or container makes every process there fail at import. |
-| `HYPERLOOM_`<br>`IMAGE_CHECK` | No | `warn` | What `run_image_check` (in `hyperloom.common.outside_facts.image_check`), which checks the rule pack's facts against the environment once before a session measures anything, does with a fact that does not hold there: `warn` logs one warning naming each failing fact, its project and why, and goes on; `strict` also raises `ImageCheckFailed`, so the session stops before it spends anything; `off` checks nothing and asks the environment for nothing. Surrounding space and case are ignored; any other value raises `ValueError` naming the accepted ones. `python -m hyperloom.common.outside_facts.image_check` does not read it: the command line always checks, records `strict` in its report and exits 1 when a fact fails. |
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_SES`<br>`SION_DIR` | No (multi-node) | Unset | Last-resort session root for multi-node crash-log collection. Point it at one session dir, never at `$USER_DATA_PATH`. |
 
 ---
@@ -147,7 +147,7 @@ when `--gpu-type` is omitted.
   `--pd-ib-device`.
 - **Phase toggles:** `--enable-roofline` / `--no-enable-roofline`,
   `--enable-conc-sweep` / `--no-enable-conc-sweep`, `--conc-sweep-concs`,
-  `--conc-sweep-total-budget-sec` (whole-sweep budget), `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`.
+  `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`.
 - **Agent models:** `--claude-model`, `--codex-model`.
 - **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`,
   `--extend-hours`.
@@ -159,12 +159,19 @@ when `--gpu-type` is omitted.
   `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1` (settable by `export` or `--extra-env`;
   needs the pair; any other value than a boolean exits 2) makes FRAMEWORK_AGENT run only that specialist and the
   bench of its proposals and patches, then move on to KERNEL_AGENT when
-  enabled, else SWEEP. All three are persisted in `state.json`; the env on a
+  enabled, else CYCLE_END. All three are persisted in `state.json`; the env on a
   `--resume-from` turns only mode on, never off. Re-pass both flags on
   `--resume-from` only to replace the definition, or pass `--reset-state`
   alone to clear it.
 
 Run `hyperloom optimize --help` for the exhaustive flag list.
+
+The prompts of a fixed workload have no flag; they are read from the environment of `hyperloom optimize` or
+`hyperloom-multibranch run` into every rendered point:
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATASET_PATH` | Unset (InferenceX's random prompts of `ISL` tokens) | Absolute path of a JSONL file of real prompts every fixed round sends instead, each line a `prompt` string or a `turns` list whose first turn is sent. A path that is not absolute refuses the round as `config_invalid`, and so does a file the round cannot read or a line that holds no prompt: the round reads the file before it starts its server. A prompt the server answers with a 4xx status fails the round, naming the prompt's line. A session records the path: a `hyperloom optimize --resume-from` with another value, or none, is refused, and a session with a dataset is kept out of the Recipe KB and the Experience KB's random-prompt identity. A `hyperloom-multibranch run` session records the value exported when it starts, and every leg, a `--resume` too, sends that file or none. A `hyperloom-multibranch run` test whose runner bubblewrap confines reads it only in a tree its sandbox shows, such as the model directory or the Hugging Face hub cache. See [InferenceSuite benchmark rounds](inference-suite.md#launch-layers). |
 
 ---
 
@@ -318,7 +325,7 @@ The following variables control the kernel optimization backend ladder.
 | `HYPERLOOM_GEMM_PAIRED_PAIRS`  | `0` (off)                     | How many interleaved baseline/tuned pairs to re-measure before a GEMM tuning KEEP is reported as confirmed. One end-to-end measurement cannot separate a gain from drift on this fleet: three rounds of a single unchanged configuration spanned 58%, and one controlled repeat moved 16%. Each pair costs two extra benchmark rounds. When `0`, the gain is still promoted — it is the best number available — but recorded as an unpaired block comparison rather than presented as a paired one. |
 | `GEAK_E2E_TIMEOUT_S` | `43200` | GEAK end-to-end timeout in seconds. Used as the fallback when no run deadline is set. A malformed value raises `EnvValueError`. |
 | `GEAK_BUDGET_MARGIN_S` | `300` | Seconds subtracted from the remaining kill budget before passing the runner timeout to GEAK, so the runner self-stops before the hard subprocess kill. A malformed value raises `EnvValueError`. |
-| `GEAK_MIN_RUN_S` | `600` | Minimum GEAK runner seconds required to attempt a run. If the remaining budget is below this, GEAK is skipped and the phase winds down to SWEEP. A malformed value raises `EnvValueError`. |
+| `GEAK_MIN_RUN_S` | `600` | Minimum GEAK runner seconds required to attempt a run. If the remaining budget is below this, GEAK is skipped and the phase winds down to CYCLE_END. A malformed value raises `EnvValueError`. |
 
 ---
 
@@ -354,7 +361,7 @@ Globally, on every backend including the default `geak`:
   model's job.
 
 On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
-`geak` backend hands to SWEEP before reaching any of these):
+`geak` backend hands to CYCLE_END before reaching any of these):
 
 - **Fusion authors one independent sibling patch per confirmed recipe** rather
   than a single combined patch.
@@ -376,13 +383,6 @@ On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
   rather than admitted because the file exists. A partial spec leaves the
   producer on its placeholder driver, which burns the whole budget and then
   exits non-zero.
-
-Two variables adjust the server a kernel integrate re-baselines on:
-
-| Variable | Default | Description |
-|---|---|---|
-| `HL_INTEGRATE_VRAM_GUARD` | on | On vLLM, the re-baseline server starts with `--gpu-memory-utilization` capped at `HL_INTEGRATE_VRAM_UTIL_CAP`, unless the integrate request sets that flag itself. `0` turns the cap off. |
-| `HL_INTEGRATE_VRAM_UTIL_CAP` | `0.90` | The cap, held between `0.10` and `0.99`. |
 
 ---
 
@@ -684,6 +684,14 @@ from these benchmark limits and retain their existing contracts.
 
 ---
 
+## CPU placement on a shared host
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_SERVER_CPUS` | Unset (the round's own CPUs) | CPUs every server a benchmark round starts is pinned to. Only the server is pinned: a build or another job stays off these CPUs only when `hyperloom optimize` itself is confined to the others (`taskset`, a cpuset). A list as `taskset -c` takes it: CPU numbers and ascending `first-last` ranges separated by commas, digits only (`32-63`, `0-15,64-79`, `3`). Any other value (`all`, a space inside the list, a range that runs backwards) fails every round as an invalid configuration before its server starts, with the variable named in the round's error. A list that names a CPU a server cannot run on here, one the host does not have or one outside the cpuset the process is confined to, fails every round the same way, with the lowest such CPU in the error; so does `server.cpus` of a `config.yaml` run with `python -m inference_suite run`. A round that measures a server it does not start (`BENCHMARK_BASE_URL`, multi-node) pins nothing. The process that runs the round reads it from its own environment: `hyperloom optimize` does; a test of `hyperloom-multibranch run` runs in a runner whose environment does not carry it, so its server is not pinned. |
+
+---
+
 ## Checkpoint prefetch
 
 A server that maps its safetensors files reads them by page faults, which on a
@@ -710,17 +718,16 @@ and how many file reads failed.
 
 ## EXPLORE pre-filters
 
-Three opt-in filters can remove variants from an EXPLORE round before any of
-them is benchmarked. All three are off by default; with every switch below
+Two opt-in filters can remove variants from an EXPLORE round before any of
+them is benchmarked. Both are off by default; with every switch below
 unset, a round runs exactly as it did before. They run once, before the first
-variant, in this order: measurement store, screen, projection.
+variant, in this order: measurement store, projection.
 
 A filter only removes variants. It never adds or reorders one, and none of its
 numbers reaches KEEP/REVERT, `current_best`, the journal or the knowledge base:
 every KEEP comes from a measured decision round. A removed variant is recorded
 in the round's `skipped_dup` with a reason (`measured_revert_before`,
-`screen_decisively_slower`, `projection_decisively_slower` or
-`projection_outranked`). It is not journaled or written to the tested ledger,
+`projection_decisively_slower` or `projection_outranked`). It is not journaled or written to the tested ledger,
 so a later round may propose it again.
 
 No filter ever drops a variant in a stack-revalidation round or a config replay
@@ -736,27 +743,6 @@ its default.
 |---|---|---|
 | `HYPERLOOM_MEASUREMENT_STORE` | unset (off) | Directory that records every decision round that REVERTed on performance, across sessions. A later variant whose exact launch REVERTed before is dropped (`measured_revert_before`) instead of measured again. A KEEP, an accuracy REVERT (`accuracy_drop` / `accuracy_unavailable`) and a failed round are never recorded, so they are always measured. The key covers the model, engine, GPU, workload signature, benchmark block, inherited args, warm or cold decision protocol, grading axis, KEEP threshold, image digest, engine / ROCm / aiter versions, the stack, the variant, the launch envs, and the content of every kernel overlay on `PYTHONPATH`. A launch is never keyed, and so always measured, when the image digest or engine version is unknown, a runtime override is in effect, or an overlay cannot be hashed. Safe to share between sessions; writes are atomic. |
 | `HYPERLOOM_MEASUREMENT_MAX_AGE_DAYS` | `14` | Records older than this many days are ignored. Negative values are treated as `0`, which ignores every record. |
-
-### Screen (reduced-GPU probe)
-
-A real engine probe on fewer GPUs, using Infera's vLLM benchmark script. The
-baseline probe is the round's stack, and each variant is probed on that stack,
-with the server args and envs the round would launch it with. It drops a variant only when the probe resolved the same kernels as the deployment
-did, read from both sides' logs; otherwise it returns the round untouched. A
-variant whose probe fails is kept. It needs at least three variants and
-`HYPERLOOM_INFERASIM_ROOT`. On the one grid it was measured against, the order
-did not transfer to fewer GPUs, so validate it on your deployment before relying
-on it.
-
-| Variable | Default | Description |
-|---|---|---|
-| `HYPERLOOM_EXPLORE_SCREEN` | off | Turns the screen on. |
-| `HYPERLOOM_EXPLORE_SCREEN_MARGIN_PCT` | `10` | Drop a variant that probes more than this many percent behind the probed stack (`screen_decisively_slower`). Measured on eight replicas, a gap this wide is one every replica reproduces. A non-positive value falls back to the default. |
-| `HYPERLOOM_EXPLORE_SCREEN_GPUS` | `1` | GPUs the probe runs on, capped at the deployment's TP. |
-| `HYPERLOOM_EXPLORE_SCREEN_MODEL` | the config's model | Model the probe loads, for example a smaller checkpoint of the same architecture. |
-| `HYPERLOOM_EXPLORE_SCREEN_LAYERS` | all | Truncate the probed model to this many hidden layers. |
-| `HYPERLOOM_EXPLORE_SCREEN_ATTENTION_BACKEND` | the deployment's | Attention backend pinned onto the probe. By default it is read from the deployment's `--attention-backend`, else from the kernels the session's own benchmark logged. A variant that sets the backend itself still wins. |
-| `HYPERLOOM_EXPLORE_SCREEN_TIMEOUT_SEC` | `1800` | Wall-clock limit for one probe. A probe that times out is kept. |
 
 ### Projection (InferaSim)
 
@@ -785,7 +771,7 @@ Without it every projection fails, and the round is benchmarked untouched.
 | `HYPERLOOM_EXPLORE_PROJECTION_MARGIN_PCT` | `15` | Simulate mode: drop a variant projected more than this many percent behind the stack (`projection_decisively_slower`). The default sits above the 9.7% median output-throughput error simulate mode scored on held-out AgentX configurations. A non-positive value falls back to the default. |
 | `HYPERLOOM_EXPLORE_PROJECTION_CALIBRATED_MARGIN_PCT` | `5` | The margin when both the stack and the variant are calibrated against an in-regime anchor (regime distance 0); otherwise the simulate margin applies. The default is a placeholder until the gap error between two calibrated configurations has been measured. |
 | `HYPERLOOM_EXPLORE_PROJECTION_TOP_K` | `5` | Of the variants that are not decisively behind, benchmark only the top K by projected gain; the rest are dropped (`projection_outranked`). `0` turns the cap off. On held-out AgentX stack ladders, the DES top 5 contained the best configuration 94% of the time, against 47% for the single top pick. |
-| `HYPERLOOM_INFERASIM_ROOT` | unset | Path to the Infera checkout; it is put first on `sys.path`. Required by the screen and by harvesting, and by the projection unless Infera is installed. |
+| `HYPERLOOM_INFERASIM_ROOT` | unset | Path to the Infera checkout; it is put first on `sys.path`. Required by harvesting, and by the projection unless Infera is installed. |
 | `HYPERLOOM_INFERASIM_MODE` | `auto` | `auto` projects the round in benchmark (calibrated) mode when the anchor store already holds an in-regime anchor for the stack, and in simulate mode otherwise. It is resolved once, on the stack, and never boots a server. `simulate` never reads an anchor. `benchmark` requires an anchor, harvests one on a miss, and fails closed (the variant is benchmarked) when none can be had. Any other value is an error, and the round is benchmarked untouched. |
 | `HYPERLOOM_INFERASIM_ESTIMATOR` | `des` | `des` replays a closed-loop client at the round's concurrency (10 requests per client, between 64 and 4,000). `analytical` selects the closed form, which ranked held-out configurations far worse. Any other value is an error. |
 | `HYPERLOOM_INFERASIM_MODEL` | inferred | InferaSim model preset to project, for example `gpt_oss_120B`. By default it is inferred from the model path: the most specific match wins, and a distilled checkpoint uses its student. With no match and neither this nor `HYPERLOOM_INFERASIM_WORKLOAD` set, the round is benchmarked. |
@@ -817,7 +803,7 @@ recorded do not contradict the candidate's.
 | Variable | Default | Description |
 |---|---|---|
 | `INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC` | `1800` | Total wall-clock limit for each reactor stage, including backend startup, streamed output, retries, backoff, and cleanup. This is independent of backend `*_CALL_TIMEOUT_SEC` settings: for streamed Claude turns those settings bound idle time between SDK messages, and activity resets that idle timer. Reaching this total limit cancels the stage and records a crash; a shorter remaining session bound still ends the stage without recording a crash. A malformed value raises `EnvValueError`; a non-positive or non-finite value falls back to the default. |
-| `INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC` | `1500` | Total wall-clock limit for one Claude Agent SDK call made by the orchestration backend (reactor turns, including the SWEEP cycle-directive handoff), covering every retry and the backoff between them; tearing the CLI down afterwards adds at most 30 s. Unlike the idle bound of `INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`, the CLI's own API-retry messages do not extend it. Past it the call is cancelled, the CLI and every process it started are killed, and the turn fails as a backend error the loop retries on its next tick. |
+| `INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC` | `1500` | Total wall-clock limit for one Claude Agent SDK call made by the orchestration backend (reactor turns, including the CYCLE_END cycle-directive handoff), covering every retry and the backoff between them; tearing the CLI down afterwards adds at most 30 s. Unlike the idle bound of `INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`, the CLI's own API-retry messages do not extend it. Past it the call is cancelled, the CLI and every process it started are killed, and the turn fails as a backend error the loop retries on its next tick. |
 | `INFERENCE_OPTIMIZER_DEEPSEEK_CALL_TIMEOUT_SEC` | `300` | Wall-clock limit for one DeepSeek Harness turn made by the orchestration backend. Past it the harness runtime is closed and the next turn starts a new runtime and a new conversation. |
 
 ## TraceLens analysis route
@@ -1152,7 +1138,7 @@ Primary switch (default **off**) for live Langfuse trace push.
 - **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills calls still missing their token or text half, the recipe-KB, specialist-intel, Forge-step, GEMM-tuning and trajectory logs, and KEEP/REVERT decision Scores.
 - **Local ledger**: `reports/trace/*.jsonl` is always written regardless of this flag. If the SDK is unavailable, live push degrades to a no-op.
 - **Correlation**: the Langfuse trace ID and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session ID for standalone runs. Live push and the offline `backfill_langfuse` CLI collapse onto one trace per Primus-Claw session.
-- **Span layout**: `trace → phase span (PRELUDE/ENABLEMENT/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
+- **Span layout**: `trace → phase span (PRELUDE/ENABLEMENT/FRAMEWORK_AGENT/KERNEL_AGENT/CYCLE_END/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
 - **Recipe-KB spans**: under the `recipe_kb` agent span, local reads/writes and remote KB Store publish attempts are recorded from `runtime/recipe_snapshot/.audit.jsonl`. Read spans use `kb:recipe_snapshot:<method>`; write spans use `kb:recipe_write:<generator>`, where the generator distinguishes normal `close` from `t4_fallback`. Remote rows report `written`, `skipped`, or `error` without recording credentials or payload bodies.
 - **Receipt**: every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting:
   - Whether push was enabled (or the `disabled_reason`)
@@ -1420,8 +1406,8 @@ See [Optimize an AgentX workload](../how-to/optimize.md#optimize-an-agentx-workl
 | `INFERENCE_OPTIMIZER_CYCLE_HOURS` | Optional | `24.0` | Duration of one macro-cycle in hours. Multiplied by 60 to obtain `cycle_minutes` on the first session start. A malformed value raises `EnvValueError`. |
 | `INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD` | Optional | `5` | Consecutive backend errors per agent role before a `backend_unhealthy` event is recorded. A malformed value raises `EnvValueError`. |
 | `INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC` | Optional | `10800` | Absolute minimum remaining session seconds to justify opening a new macro-cycle. For bounded sessions the effective floor is `min(this, max_minutes * 60 * 0.15)` so shorter sessions are not unconditionally blocked. |
-| `INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS` | Optional | `3` | Consecutive no-work KERNEL_AGENT ticks before the phase winds down to SWEEP. Values below `1` are treated as `3`. A malformed value raises `EnvValueError`. |
-| `INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS` | Optional | `600` | Wall-clock seconds a KERNEL idle streak must last before winding down to SWEEP. Values at or below `0` are treated as `600`. A malformed value raises `EnvValueError`. |
+| `INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS` | Optional | `3` | Consecutive no-work KERNEL_AGENT ticks before the phase winds down to CYCLE_END. Values below `1` are treated as `3`. A malformed value raises `EnvValueError`. |
+| `INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS` | Optional | `600` | Wall-clock seconds a KERNEL idle streak must last before winding down to CYCLE_END. Values at or below `0` are treated as `600`. A malformed value raises `EnvValueError`. |
 | `SWEEP_VARIANT_TIMEOUT_SEC` | Optional | `2400` | Per-variant wall-clock timeout in seconds for GEAK-backed SWEEP runs. A malformed value raises `EnvValueError`. |
 
 ---
@@ -1512,6 +1498,7 @@ The image is not required. `scripts/hosted_app_image/build_layer.sh --out <dir> 
 |----------|----------|-------------|
 | `HYPERLOOM_SOURCE_REPO` | Yes | `OWNER/NAME` on GitHub, or a git URL or path, of the Hyperloom source to run. A path or `file://` URL may name a mirror another account owns (in a container that maps one id, the host root's mirror shows as 65534): the fetch from it, and only that fetch, runs with a global git config in `${TMPDIR:-/tmp}` whose `safe.directory` names the mirror's resolved path and its `.git`, nothing else, so no system-wide `safe.directory` is needed. |
 | `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built in a new mode-0700 directory below the container's temporary directory, never on the shared storage, where another account of the group could put a wheel of its own in its place, and only that wheel is installed (`--no-deps --force-reinstall`, so a new commit replaces an old one) into the image's framework Python environment (`/opt/venv` when it exists, else `$PYTHON`, else `python3`, the order `install.sh` uses) when this account can write it, else into `${TMPDIR:-/tmp}/hyperloom-venv` beside it (see above); the Python of that environment runs the entry. The runtime dependencies are resolved there by the `install.sh` the entry runs before `optimize`, as in the legacy flow. That environment records the installed commit in `.hyperloom-install`; a container that already holds it installs nothing, and a new container builds the wheel again (a depth-1 fetch of the commit and a `pip wheel` of it). |
+| `HYPERLOOM_USER_DATA_PATH` | No | A data root the deployment names in place of the `USER_DATA_PATH` the host sets: a host may reserve `USER_DATA_PATH` to itself and point it at the submitting user's directory, while the deployment keeps hosted sessions under one shared root. When it is set and not empty, `app_bootstrap.sh` exports `USER_DATA_PATH` with its value before any check, logging one line on stderr that names both values, so the absolute-path and writability checks, the entry and the multi-branch command all see the new root alone; empty or unset, `USER_DATA_PATH` is used as the host set it. Only the bootstrap reads it: a run started without the bootstrap ignores it. A restarted multi-branch run finds its session through `session.json` in `HYPERLOOM_STATE_DIR` (the session directory an earlier start recorded), not through `USER_DATA_PATH`, so changing this value moves only sessions started afterwards. The legacy `optimize` flow computes its session directory from `USER_DATA_PATH` on every leg (see above), so a run of that flow resumes only while the value stays the same. The root must be writable by every account of the run (the bootstrap and the entry refuse one that is not, naming `USER_DATA_PATH` and the path) and should be a directory of the deployment's group with the setgid bit (`chmod 2775`), so what each leg makes below it takes that group. |
 | `HYPERLOOM_CODE_REVISION` | Set by the script | The commit id, exported before the entry starts: a wheel has no `.git` to read it from. |
 | `HYPERLOOM_HOST_LAYER` | Set by `start.sh` | The layer's own directory. The entry launches agents under bubblewrap only with its `bin/bwrap`, never one on `PATH`; whitespace around the value is ignored, and unset, blank or relative, no launch of the run uses bubblewrap (see [Agent isolation](#agent-isolation)). |
 

@@ -36,7 +36,7 @@ def coord(session_dir, monkeypatch):
                 "PRELUDE": 0.1,
                 "FRAMEWORK_AGENT": 0.1,
                 "KERNEL_AGENT": 0.7,
-                "SWEEP": 0.08,
+                "CYCLE_END": 0.08,
                 "CLOSE": 0.02,
             },
             "baseline_tput": 100.0,
@@ -83,7 +83,7 @@ async def test_expired_allocation_outranks_advisory_operator_hold(coord, hint, p
 
     await coord.phase_machine.advance_phase_if_needed()
 
-    assert coord.shared_state.phase == ("KERNEL_AGENT" if kernel_enabled else "SWEEP")
+    assert coord.shared_state.phase == ("KERNEL_AGENT" if kernel_enabled else "CYCLE_END")
     assert coord.shared_state.phase_history[-1]["reason"] == "optimize_phase_budget_exhausted"
     assert coord.shared_state.pending_escalate_hint == ""
     assert coord.shared_state.stop_reason == ""
@@ -209,6 +209,6 @@ async def test_advisory_handoff_with_available_budget_is_unchanged(coord, hint, 
 
     await coord.phase_machine.advance_phase_if_needed()
 
-    assert coord.shared_state.phase == ("KERNEL_AGENT" if kernel_enabled else "SWEEP")
+    assert coord.shared_state.phase == ("KERNEL_AGENT" if kernel_enabled else "CYCLE_END")
     assert coord.shared_state.phase_history[-1]["reason"] == "optimize_no_more_leverage"
     assert coord.shared_state.stop_reason == ""

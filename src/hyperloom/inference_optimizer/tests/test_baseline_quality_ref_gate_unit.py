@@ -22,7 +22,7 @@ def test_warm_replay_does_not_establish_reference():
 
 def test_other_optimization_kinds_do_not_establish():
     """Explore/sweep/profile-style kinds also compare, never establish."""
-    for kind in ("explore", "sweep", "conc_sweep", "roofline", "profile"):
+    for kind in ("explore", "sweep", "roofline", "profile"):
         assert _should_establish_quality_ref(kind) is False
 
 

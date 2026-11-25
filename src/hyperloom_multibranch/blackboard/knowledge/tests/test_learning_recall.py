@@ -75,6 +75,14 @@ def test_past_learnings_say_which_conditions_differ_and_leave_this_session_out()
     )
 
 
+def test_a_learning_from_random_prompts_differs_in_the_dataset_for_a_session_that_sends_one() -> None:
+    reader = FakeExperienceReader(completed_read(_past("exp-random", SAME)))
+
+    (item,) = read_past_learnings(reader, profile(dataset="/data/prompts.jsonl"), "kv cache", limit=5).items
+
+    assert "dataset differ" in item.render()
+
+
 def test_the_read_context_holds_the_declared_identity_under_identity_and_the_workload_under_workload() -> None:
     reader = FakeExperienceReader(completed_read())
 

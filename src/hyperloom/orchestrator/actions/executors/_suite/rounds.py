@@ -25,6 +25,7 @@ from pathlib import Path
 
 import yaml
 
+from hyperloom_common.cpu_list import cpu_list
 from hyperloom_common.env import env_flag
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.common.ports import pick_server_port
@@ -79,6 +80,9 @@ _KV_METRICS_ENV = "INFERENCE_OPTIMIZER_KV_METRICS"
 TOOL_CACHE_DIR = "inference-suite-tools"
 TOOL_CACHE_ENV = "INFERENCE_SUITE_TOOL_CACHE"
 RUN_DIR_PREFIX = "suite_run_"
+#: The CPUs every server a round starts is pinned to, a list such as ``32-63``; unset, a server runs on the round's
+#: own. Only the server is pinned: other work on the host stays off them only when it is confined to the others.
+SERVER_CPUS_ENV = "HYPERLOOM_SERVER_CPUS"
 
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # The round masks the server's GPUs itself; a host mask inherited beneath it would renumber them.
@@ -268,8 +272,19 @@ def _settings(
         env_inherit=inherited_env_names({k: v for k, v in os.environ.items() if k not in env_drop}),
         deadline_unix=deadline,
         server_url=route.server_url,
+        server_cpus=_server_cpus(),
         boot_budget_sec=boot_budget,
     )
+
+
+def _server_cpus() -> tuple[int, ...]:
+    named = os.environ.get(SERVER_CPUS_ENV, "").strip()
+    if not named:
+        return ()
+    try:
+        return cpu_list(named)
+    except ValueError as exc:
+        raise _refused_at(FailedStep.CONFIG_INVALID, f"{SERVER_CPUS_ENV}: {exc}") from None
 
 
 def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable[[], None]) -> RoundResult:

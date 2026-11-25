@@ -37,7 +37,7 @@ from hyperloom_common.coerce import to_str_list
 from hyperloom_common.io import atomic_write_text
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
-from hyperloom.common.perf_metric import agentx_enabled
+from hyperloom.common.perf_metric import DATASET_PATH_ENV, agentx_enabled
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
@@ -233,11 +233,9 @@ def default_baseline_config() -> Path:
     return asset_root() / "assets" / "configs" / framework_registry.shipped_config_name("baseline", fw)
 
 
-def _finalize_framework_server_args(
-    bench: dict[str, Any], window: _RequestWindow, *, drop_moe_runner_backend: bool = False
-) -> None:
+def _finalize_framework_server_args(bench: dict[str, Any], window: _RequestWindow) -> None:
     """Apply the final framework server-arg guard pipeline in place
-    (context-length/watchdog/attention/MoE/dedup/compact/shell-safe); order is fixed.
+    (context-length/watchdog/attention/dedup/compact/shell-safe); order is fixed.
 
     1. --context-length cap: sglang sizes max_total_tokens off the model's
        max_position_embeddings, so a huge native window balloons the aiter
@@ -247,13 +245,8 @@ def _finalize_framework_server_args(
        first-request aiter JIT compile survives (the 300s default fires
        SIGQUIT mid-warmup on a cold aiter cache).
 
-    Steps 1-4b are sglang-scoped; steps 5 and 6 are vLLM/atom-scoped. The
-    inline comments below carry the per-step rationale.
-
-    ``drop_moe_runner_backend`` turns step 4 into a removal: the args are
-    already merged from every source (task params, ``$INFERENCE_OPTIMIZER_
-    SERVER_ARGS``, the reference recipe, the YAML base), so stripping here is
-    what guarantees a retry launches without the backend that killed it."""
+    Steps 1-3 are sglang-scoped; steps 4 and 5 are vLLM/atom-scoped. The
+    inline comments below carry the per-step rationale."""
     envs = bench["envs"]
     framework_env = server_args_env_name(bench.get("framework"))
     resolved_server_args = str(envs.get(framework_env, "")).strip()
@@ -274,20 +267,14 @@ def _finalize_framework_server_args(
         bench.get("framework"),
         bench.get("model"),
     )
-    # 4. MoE runner backend: left to sglang, whose ``--moe-runner-backend auto``
-    #    (the default) follows SGLANG_USE_AITER on current sglang/ROCm images.
-    #    A baseline retry can still ask to strip an inherited/pinned flag that
-    #    crashed the server.
-    if drop_moe_runner_backend and framework_env == "EXTRA_SGLANG_ARGS":
-        resolved_server_args = remove_moe_runner_backend_arg(resolved_server_args)
-    # 5. vLLM/atom argparse dedup: collapse repeated single-value flags to
+    # 4. vLLM/atom argparse dedup: collapse repeated single-value flags to
     #    last-wins (vLLM crashes EngineCoreProc on a duplicate); no-op for
     #    sglang.
     resolved_server_args = dedup_vllm_server_args(
         resolved_server_args,
         bench.get("framework"),
     )
-    # 6. JSON-valued flags (--speculative-config / --compilation-config /
+    # 5. JSON-valued flags (--speculative-config / --compilation-config /
     #    --hf-overrides ...): $EXTRA_VLLM_ARGS travels unquoted, so
     #    compact each JSON blob to be space-free so it survives as one shell
     #    word. No-op for arg strings with no JSON.
@@ -357,6 +344,9 @@ def _pin_workload_shape_envs(envs: dict[str, Any], *, in_session: bool) -> None:
     r_env = os.environ.get("RANDOM_RANGE_RATIO", "").strip()
     if r_env:
         envs["RANDOM_RANGE_RATIO"] = float(r_env)
+    dataset = os.environ.get(DATASET_PATH_ENV, "").strip()
+    if dataset:
+        envs[DATASET_PATH_ENV] = dataset
     tp_from_yaml = envs.get("TP")
     if tp_from_yaml:
         resolved_tp = int(tp_from_yaml)
@@ -853,7 +843,6 @@ class MaterializeOptions:
 
     out_name: str = "baseline_config.with_envs.yaml"
     establish_quality_ref: bool = False
-    drop_moe_runner_backend: bool = False
     flydsl_source_dirs: bool = False
     agentx_mode: bool | None = None
     grading: Mapping[str, Any] | None = None
@@ -993,7 +982,7 @@ def materialize_config_with_envs(
     _settle_merged_server_args(bench, framework_env)
     _publish_scriptable_wiring(bench, window, options.establish_quality_ref)
     model_basename = _pin_model_launch_workarounds(bench, target.model_path)
-    _finalize_framework_server_args(bench, window, drop_moe_runner_backend=options.drop_moe_runner_backend)
+    _finalize_framework_server_args(bench, window)
     _pin_client_model_access(bench, target.model_path, model_basename)
     _pin_accuracy_eval_envs(envs)
     _pin_runtime_build_envs(bench, target.model_path, target.gpu_type, options.flydsl_source_dirs)

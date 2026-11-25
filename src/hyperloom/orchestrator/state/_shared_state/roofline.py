@@ -360,8 +360,6 @@ class _RooflineStateMixin:
         self.bottleneck_shift = {
             "from": prev_sat.get("direction", ""),
             "to": sat.get("direction", ""),
-            "from_domain": (prev_sat.get("domain_hint") or {}).get("domain", ""),
-            "to_domain": domain_key,
             "prev_cycle": prev_cycle_snapshot.get("macro_cycle"),
             "cycle": latest_cycle,
             "within_delta": _saturation_delta(sat, prev_sat, "within_pct"),

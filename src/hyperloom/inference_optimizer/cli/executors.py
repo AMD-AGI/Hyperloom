@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from hyperloom.orchestrator.actions.executors import (
     TargetAnalysisExecutor,
     baseline_executor,
-    conc_sweep_executor,
     explore_executor,
     report_executor,
     session_breakdown_executor,
@@ -41,9 +40,6 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     # profile: Coordinator-internal; PolicyGate denies LLM-proposed delegate.
     "profile": profile_executor,
     "explore": explore_executor,
-    # conc_sweep: the Coordinator-internal CONC-ladder benchmark, and the only
-    # sweep there is.
-    "conc_sweep": conc_sweep_executor,
     "report": report_executor,
     "session_breakdown": session_breakdown_executor,
 }

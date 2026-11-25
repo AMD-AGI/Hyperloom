@@ -88,6 +88,13 @@ RUNNER_START_TIMEOUT = "runner_start_timeout"
 #: The platform had no room for the sandbox. Retried like any infrastructure failure.
 CAPACITY_UNAVAILABLE = "capacity_unavailable"
 
+#: A listed result file whose every copy out of the sandbox received another byte count than the signed manifest lists
+#: (``hyperloom.measure.hosted_copy``); the detail names the path and both sizes. The platform's file API ended the
+#: transfer early, so neither the candidate nor the node is to blame: ``hyperloom_multibranch.toolbox.attempts`` retries
+#: it in a new sandbox after a wait and does not hold it against the node. A download whose sizes all match and then
+#: fails verification stays a refused result.
+RESULT_DOWNLOAD_INCOMPLETE = "result_download_incomplete"
+
 #: The runner process exited without writing ``status.json`` (it died importing, say): the host stops waiting at once
 #: instead of polling until the test's timeout. Retried like any infrastructure failure.
 RUNNER_EXITED = "runner_exited"
@@ -168,6 +175,7 @@ INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
         CAPACITY_UNAVAILABLE,
         "image_pull_failed",
         "result_read_failed",
+        RESULT_DOWNLOAD_INCOMPLETE,
         "archive_failed",
         # The test went silent before its server was ready (``boot_watch``): a hang a new sandbox does not repeat.
         HUNG_BEFORE_READY,

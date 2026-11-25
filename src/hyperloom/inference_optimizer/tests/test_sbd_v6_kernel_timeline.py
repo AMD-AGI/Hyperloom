@@ -1482,7 +1482,7 @@ def test_the_visits_own_measurements_are_held_by_the_event_that_asked_for_them(t
 
 
 def test_a_measurement_that_lands_after_the_visit_closed_is_still_published(tmp_path):
-    """Stack validation and the integrate drain both measure on SWEEP entry, after the visit closed.
+    """Stack validation and the integrate drain both measure on CYCLE_END entry, after the visit closed.
 
     The verdict they settle republishes the event, and that is what carries the measurement in.
     """

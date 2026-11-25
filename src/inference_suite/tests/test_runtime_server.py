@@ -344,6 +344,28 @@ def test_a_taken_port_is_refused_before_spawning(tmp_path):
     assert not rig.worker_file.exists()
 
 
+def _pinned(config: SuiteConfig, *cpus: int) -> SuiteConfig:
+    return replace(config, server=replace(config.server, cpus=cpus))
+
+
+def test_a_server_runs_on_the_cpus_its_config_names(tmp_path):
+    rig = _Rig(tmp_path)
+    cpu = min(os.sched_getaffinity(0))
+    lifecycle = rig.lifecycle(_pinned(rig.config("r1"), cpu))
+    assert isinstance(lifecycle.acquire(), Server)
+    try:
+        assert os.sched_getaffinity(rig.worker_pid()) == {cpu}
+    finally:
+        lifecycle.release()
+
+
+def test_cpus_the_server_cannot_run_on_are_refused_before_spawning(tmp_path):
+    rig = _Rig(tmp_path)
+    stopped = rig.lifecycle(_pinned(rig.config("r1"), min(os.sched_getaffinity(0)), 100_000)).acquire()
+    assert isinstance(stopped, Stop) and stopped.step is FailedStep.CONFIG_INVALID
+    assert "CPU 100000" in stopped.detail and not rig.worker_file.exists()
+
+
 @pytest.mark.parametrize("mode", [LifecycleMode.OWN, LifecycleMode.BOOT])
 def test_gpus_that_are_not_free_are_refused_before_spawning(tmp_path, monkeypatch, mode):
     rig = _Rig(tmp_path)
