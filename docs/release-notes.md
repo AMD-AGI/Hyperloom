@@ -91,6 +91,14 @@ it.
   created. **Upgrade note:** move from `vllm/vllm-openai-rocm:v0.33.0-rocm100` to
   `v0.34.0-rocm100`; on a ROCm 7.2.x bare-metal host use Docker, a ROCm 10 host, or
   `VLLM_VERSION=0.33.0 VLLM_ROCM_VARIANT=rocm72`.
+- **The EXPLORE screen pre-filter is removed.** The opt-in reduced-GPU probe
+  that 1.2.0 added behind `HYPERLOOM_EXPLORE_SCREEN=1` is gone: on the one grid
+  it was measured against, the order of variants did not transfer to fewer
+  GPUs, and it was off by default. `HYPERLOOM_EXPLORE_SCREEN` and its
+  `_MARGIN_PCT`, `_GPUS`, `_MODEL`, `_LAYERS`, `_ATTENTION_BACKEND` and
+  `_TIMEOUT_SEC` settings are no longer read, and no variant is skipped as
+  `screen_decisively_slower`. The measurement store and the InferaSim
+  projection are unchanged, and so is a run that never set the switch.
 
 ## Hyperloom 1.2.0 release
 

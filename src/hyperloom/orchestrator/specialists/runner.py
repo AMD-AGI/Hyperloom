@@ -398,7 +398,7 @@ class SpecialistRunner:
         """
         params = ctx.task.params or {}
         domain_key = dispatch_domain_key(params)
-        gap = first_text(params.get("gap_canonical_id"), params.get("gap"))
+        gap = first_text(params.get("gap_canonical_id"))
         max_turns = resolve_specialist_max_turns(params.get("max_turns"), default=self.default_max_turns)
         domain = domain_for_tag(domain_key)
         profile = resolve_specialist_profile(params, domain=domain)
