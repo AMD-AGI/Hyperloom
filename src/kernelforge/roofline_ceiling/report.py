@@ -5,7 +5,7 @@
 
 Both files are written by the analyst, not by this module. It names them, reads
 one of them, and renders the attainment block a campaign hands its
-implementer. The planner gets the same standing as structured case evidence,
+implementer. The Supervisor gets the same standing as structured case evidence,
 attached by the loop rather than rendered here.
 """
 

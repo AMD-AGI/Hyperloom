@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A session's native builds: the one assembly the multi-branch toolbox builds through.
+"""A session's native builds: one assembly that the single-branch flow and the multi-branch toolbox both build through.
 
 :func:`open_session` puts together what every build of a session shares: the store and the key its entries are signed
 with, the planner that keys each stack (:class:`~hyperloom.measure.runner.native.planning.NativePlanner`), the plan of

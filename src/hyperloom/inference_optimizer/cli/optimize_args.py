@@ -97,7 +97,8 @@ def add_framework_arguments(opt: argparse.ArgumentParser) -> None:
         help="Checkout of the framework to optimize. Sets FRAMEWORK_REPO_PATH, "
         "which is what puts the tree on PolicyGate's patch allowlist, so a "
         "specialist may only edit source you pointed at. Required for "
-        "--framework custom; for the built-in frameworks it overrides the "
+        "--framework custom and --framework llamacpp (the checkout its server "
+        "is built from); for the other built-in frameworks it overrides the "
         "checkout they would otherwise clone.",
     )
     add_benchmark_argument(opt)

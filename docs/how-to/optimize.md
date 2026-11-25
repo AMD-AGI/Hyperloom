@@ -216,8 +216,8 @@ the recipe does not publish runs the launch of the nearest higher one, else its
 highest. An AgentX point boots a server of its own; a fixed-length workload
 keeps one server across consecutive points that launch alike. A point whose
 launch caps the requests the server runs at once below its concurrency
-(llama.cpp's `-np` / `--parallel`, vLLM's `--max-num-seqs`, SGLang's
-`--max-running-requests`) on both arms is dropped, since the server only queues
+(vLLM's `--max-num-seqs`, SGLang's `--max-running-requests`) on both arms is
+dropped, since the server only queues
 the rest; with none left the sweep is skipped (`concs_exceed_server_slots`).
 
 A multi-branch session runs a concurrency's baseline and optimized point side by
@@ -236,8 +236,9 @@ from, and the host and process writing it with `updated_at`, so a summary still
 (SIGINT or SIGTERM; the measured points stay). Given a deadline (a hosted run's
 grant), a point that would end past it is not started and reads
 `skipped_budget`. A later run measures only the points not yet measured on the
-same launch of each arm. Multi-node and MLPerf sessions are skipped, and so is a
-session whose retained overlay cannot load (`optimized_overlay_unavailable`).
+same launch of each arm. Multi-node and MLPerf sessions are skipped, and so are a
+session whose server is built from its checkout (`checkout_built_server`) and one
+whose retained overlay cannot load (`optimized_overlay_unavailable`).
 The session package is rebuilt after the sweep so it carries the report.
 
 The latency columns follow InferenceX's own reports: for an AgentX workload its

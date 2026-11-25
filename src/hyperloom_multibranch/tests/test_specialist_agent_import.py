@@ -441,7 +441,7 @@ async def _source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Source:
     package.mkdir(parents=True)
     (package / "config.py").write_text("".join(LINES))
     installed = PackageBase("vllm", package, None, None)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     base = SourceBase(tmp_path / "source")
     base.build(["vllm"])
     workspace = base.worktree("b01", tmp_path / "workspace")

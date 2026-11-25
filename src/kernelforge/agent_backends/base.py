@@ -268,7 +268,7 @@ class AgentRunSpec:
     # Appended, like the field above, to keep the positional contract.
     max_reasoning_effort: str = ""
     # What this session is for, in a name a human reading the campaign summary
-    # will recognise: "implementer", "analysis", "orchestration", "fusion
+    # will recognise: "implementer", "analysis", "supervisor", "fusion
     # author". Purely for accounting -- no provider changes behaviour on it --
     # but without it a campaign's spend is one number, and a number that cannot
     # be attributed cannot be argued with. Empty folds into "unattributed" so a

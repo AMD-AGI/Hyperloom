@@ -9,7 +9,6 @@ import logging
 from pathlib import Path
 
 from kernelforge.workflows.forge_loop.campaign.run_state import (
-    CriticRuling,
     apply_supervisor_attempt,
     apply_supervisor_intervention,
     make_event,
@@ -104,39 +103,6 @@ class SupervisorReviewMixin:
                 ),
             )
         )
-
-    def _record_critic_ruling(self, iteration: int, critic) -> None:
-        """Put this round's verdict where the next process can still find it."""
-        ruling = CriticRuling()
-        if critic is not None and not critic.fail_open:
-            ruling = CriticRuling(
-                verdict=critic.verdict,
-                review_path=str((self._orchestration_root(iteration) / "critic_review.md").resolve()),
-            )
-        self.run_state.last_critic = ruling
-
-    def _restore_critic_ruling(self) -> None:
-        """Resume the ruling whose round ended with the process that bought it."""
-        ruling = self.run_state.last_critic
-        if not ruling.verdict or not ruling.review_path:
-            return
-        try:
-            review = Path(ruling.review_path).read_text(encoding="utf-8").strip()
-        except OSError as error:
-            log.warning(
-                "critic review at %s is unreadable (%s); resuming without the %s verdict it carried",
-                ruling.review_path,
-                error,
-                ruling.verdict,
-            )
-            self.run_state.last_critic = CriticRuling()
-            return
-        if not review:
-            self.run_state.last_critic = CriticRuling()
-            return
-        self._last_critic_verdict = ruling.verdict
-        self._last_critic_review = review
-        print(f"  [critic] resuming the {ruling.verdict} verdict an earlier process recorded")
 
     def _expire_supervisor_ruling(self) -> None:
         """Stop injecting a ruling after its stall episode ends."""
