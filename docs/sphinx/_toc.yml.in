@@ -52,6 +52,8 @@ subtrees:
     title: Run a multi-branch session
   - file: how-to/multibranch-review-gate.md
     title: Review the agent map before the agent branches open
+  - file: how-to/framework-from-checkout.md
+    title: Run a session on a framework built from its checkout
 
 - caption: Reference
   entries:

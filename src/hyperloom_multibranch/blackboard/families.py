@@ -76,7 +76,8 @@ COMPONENTS: tuple[tuple[Component, str], ...] = (
     ),
     (
         Component.KV_CACHE,
-        r"kv[-_ ]?cache|kvcache|kv store|kv_layout|page[-_]size|radix|prefix[-_ ]cache|req_to_token|page[-_ ]table",
+        r"kv[-_ ]?cache|kvcache|kv store|kv_layout|page[-_]size|radix|prefix[-_ ]cache|req_to_token|page[-_ ]table"
+        r"|hicache|hierarchical[-_]cache|lmcache|kv[-_ ]?offload|kv[-_]transfer",
     ),
     (Component.SPECULATIVE, r"specul|eagle|\bmtp\b|draft|spec[ _-]verify"),
     (Component.GRAPH, r"cuda[-_ ]?graph|torch[-_]compile|compile|enforce[-_]eager|\bgraph\b"),
