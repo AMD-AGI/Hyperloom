@@ -11,8 +11,8 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
-from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles.claude_requests import ClaudeRequestTracker
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.inference_optimizer.trace import context_events as ce
 from hyperloom.inference_optimizer.trace import trajectory_trace as tt
 from .conftest import seed_pending_critic_proposal

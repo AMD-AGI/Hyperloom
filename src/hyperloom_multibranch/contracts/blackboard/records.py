@@ -894,7 +894,9 @@ class SessionProfile:
     The serving identity is the seven dimensions of a Recipe KB canonical id. A workload without ``isl`` and ``osl`` is
     an AgentX trace replay. ``roofline_ceiling`` is the bound the main flow's roofline model puts on each metric for the
     workload, empty when it models none. ``agentx_objective`` is what an AgentX session is graded on; a profile written
-    before sessions chose one was graded on P50 interactivity.
+    before sessions chose one was graded on P50 interactivity. ``dataset`` is the ``DATASET_PATH`` file the fixed
+    rounds send in place of random prompts, as given, empty when none: ``isl`` and ``osl`` then do not describe the
+    requests.
     """
 
     session_id: str
@@ -912,6 +914,7 @@ class SessionProfile:
     kernel_optimizer: str = ""
     roofline_ceiling: Mapping[str, float] = field(default_factory=dict)
     agentx_objective: AgentXObjective = AgentXObjective.P50_INTERACTIVITY
+    dataset: str = ""
 
 
 @dataclass(frozen=True)

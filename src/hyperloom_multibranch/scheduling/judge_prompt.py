@@ -110,13 +110,23 @@ Each branch has K, the number of tests it may run at once. Within the hard caps 
 how many branches to open, each branch's K (the integration branch included), which specialist branches to stop and
 why, and whether the whole session should stop early.
 You may open branches at any call. opening is true only for the call that sizes the opening batch, which opens from the
-commit EXPLORE started on — the root commit, or the Recipe KB champion PRELUDE replayed onto it — at least one branch
-unless user branches opened already (an agent's branch does not count). A branch opened at a later call starts from the
+commit EXPLORE started on — the root commit, or the Recipe KB champion PRELUDE replayed onto it — at least as many
+branches as tests can run at once (max_parallel_tests, within max_branches), less the user branches opened already (an
+agent's branch does not count), so that no card waits for one branch's next test. A branch opened at a later call
+starts from the
 integration head, briefed on its focus: the op it should speed up. Name the focus of each, or leave it out and the
 branch is briefed on {{default_focus}}. The opening batch is given no focus. A specialist branch's focus is the op it
 was opened on, empty for none; a stopped branch keeps it, so its stopped line says how a branch on that op ended.
 free_branch_slots counts the branches you may open at this call having stopped nothing; a stop frees one more for the
-same answer, and branches beyond the slots left are not opened. {{free_slot}}
+same answer, and branches beyond the slots left are not opened. max_branches and free_branch_slots count specialist
+branches only: the integration branch never takes one. {{free_slot}}
+A branch that opens with no focus, as the opening batch does and a later branch while no op is known, is dealt one of
+the session's directions, the lines of work a session splits among its branches. undealt_directions names the session's
+directions no branch has held yet, the next one dealt first; it is empty once each was held, and while the scheduler
+would open no such branch. While it names any and explore_remaining_seconds is at least min_useful_seconds, the
+scheduler opens one branch with no focus for each of them, within free_branch_slots, whatever you answer, so that every
+direction gets a branch: these are the first branches opened at the call, open counts them, and focus is for the
+branches opened after them. You may open more, and open_k is the K of them all.
 pending lists the shares a mapping branch asked for and the forks and repairs the rule gate asked for, that wait for a
 slot: shares first, then forks and repairs oldest first, with how long each has
 waited: a slot your stops free goes to them first and only the slots left open your branches. You do not admit them; stop a branch that is worth less than a pending one to let it
@@ -164,8 +174,10 @@ starts its first tests wait through, when that is longer. cold_start is the rece
 alone. When explore_remaining_seconds is below min_useful_seconds, a branch opened now is unlikely to show anything.
 toolbox_headroom is how many more tests the toolbox would start at once, less the tests running and queued: under the
 max_parallel_tests cap, and under the tests the measurement cards leave room for, which the sandbox an autonomous
-branch holds takes cards away from. A branch opened now makes progress only while it is above 0, and runs at its full
-K only while it is at least that K.
+branch holds takes cards away from. At 0 the tests running and queued are as many as run at once; below 0, that many
+more wait for a card. It says how long a test submitted now waits, not whether a branch opened now can work: a
+specialist reads source, writes its change and has it built without a card, and its tests take their turn in the queue
+all the branches share. A K above 1 runs that many of a branch's tests at once only while cards are free.
 spend is what the session has used so far. gpu_hours_used is the GPU time of every test of this session that has a
 result, a failed one and the baseline measured on the root commit included, plus the card time any lease holds outside
 the tests (an autonomous branch's sandbox, a dev sandbox, a tool's job, or the dossier pass's cards, charged to the

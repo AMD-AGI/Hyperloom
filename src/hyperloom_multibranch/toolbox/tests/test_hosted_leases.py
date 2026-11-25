@@ -177,7 +177,7 @@ async def test_the_lease_hands_over_a_sandbox_that_runs_commands_and_holds_files
     assert lease.sandbox.run("echo hello").stdout == "hello\n"
     lease.sandbox.write_file(f"{lease.root}/note.txt", b"data")
     assert lease.sandbox.read_file(f"{lease.root}/note.txt") == b"data"
-    assert lease.sandbox.list_dir(str(lease.root)) == ["note.txt"]
+    assert [e.name for e in lease.sandbox.list_entries(str(lease.root))] == ["note.txt"]
     # The file API and the processes agree on the working directory: a process sees the file the API wrote.
     assert lease.sandbox.run(f"cat {lease.root}/note.txt").stdout == "data"
 

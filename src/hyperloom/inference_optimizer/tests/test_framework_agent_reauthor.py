@@ -9,11 +9,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.roles import (
-    Backend,
-    MockBackend,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.roles import Backend
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType

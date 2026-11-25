@@ -252,7 +252,6 @@ def _decision_score_metadata(decision_row: dict[str, Any], dec: dict[str, Any]) 
         "variant_name": dec.get("variant_name"),
         "fingerprint": dec.get("fingerprint"),
         "metrics": dec.get("metrics"),
-        "proposal_scores": dec.get("proposal_scores"),
         "predicted_gain_pct": dec.get("predicted_gain_pct"),
     }
     # Drop keys the decision didn't carry.
@@ -302,18 +301,6 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
             )
         except (TypeError, ValueError):
             pass
-    # Calibration signal: the proposal_scorer's pre-decision rating (mean across raters) as its own NUMERIC score.
-    pred = _mean_proposal_score(dec.get("proposal_scores"))
-    if pred is not None:
-        scores.append(
-            {
-                "name": "proposal_score",
-                "value": pred,
-                "data_type": "NUMERIC",
-                "comment": comment,
-                "metadata": meta,
-            }
-        )
     return scores
 
 
@@ -353,23 +340,6 @@ def recipe_read_span(row: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
         "resolution": row.get("resolution"),
         "hit": bool(row.get("hit")),
     }
-
-
-def _mean_proposal_score(proposal_scores: Any) -> float | None:
-    """Mean of the per-rater ``score`` values in a decision's proposal_scores."""
-    if not isinstance(proposal_scores, list):
-        return None
-    vals: list[float] = []
-    for entry in proposal_scores:
-        if not isinstance(entry, dict):
-            continue
-        try:
-            vals.append(float(entry.get("score")))
-        except (TypeError, ValueError):
-            continue
-    if not vals:
-        return None
-    return round(sum(vals) / len(vals), 3)
 
 
 __all__ = [

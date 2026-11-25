@@ -64,7 +64,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.state.shared_state
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles.agent_role
-    hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.actions.executors.report
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.phases.machine_state
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.policy.gate
@@ -89,7 +88,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.model_gate -> hyperloom.orchestrator.state.shared_state
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.phases.quantization_schemes
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.policy.gate
-    hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
@@ -205,11 +203,9 @@ unmatched_ignore_imports_alerting = none
 name = hyperloom.common imports nothing from the project but hyperloom_common
 type = forbidden
 source_modules = hyperloom.common
+# A wildcard, not a list: a hyperloom package added later is forbidden without an edit here.
 forbidden_modules =
-    hyperloom.cli
-    hyperloom.orchestrator
-    hyperloom.inference_optimizer
-    hyperloom.agents
+    hyperloom.*
     kernelforge
 ignore_imports =
     hyperloom.**.tests.** -> **
@@ -424,7 +420,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.state.shared_state
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles.agent_role
-    hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.actions.executors.report
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.phases.machine_state
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.policy.gate
@@ -449,7 +444,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.model_gate -> hyperloom.orchestrator.state.shared_state
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.phases.quantization_schemes
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.policy.gate
-    hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._benchmark_interpreter

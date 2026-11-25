@@ -279,6 +279,10 @@ breakdown.
 `metadata.grading` — the grading mode this session was started in:
 `benchmark_mode` (`agentx` or `synthetic`), `objective`, and the `tput_guard`
 that rides along with the interactivity objective (`enabled`, `noise_pct`).
+`prompt_dataset: true` is present on a session whose fixed rounds sent a
+`DATASET_PATH` file: `task_config.isl` and `osl` do not describe its requests, so
+it publishes no Experience and reads none, and the Recipe KB neither warm-starts
+it nor takes its recipe.
 
 An AgentX replay is ranked on the median interactivity percentile
 (`e2e_norm_intvty_p50`) with the slow tail (`e2e_norm_intvty_p90`) and total

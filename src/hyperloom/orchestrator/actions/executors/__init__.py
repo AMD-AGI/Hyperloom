@@ -40,6 +40,7 @@ from ._suite.rounds import TOOL_CACHE_ENV, SuiteRoundRefused, external_agentx_co
 from .framework_change._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 from .framework_change._spec_decode_pin import (
     SpeculativeDecodingPinnedError,
+    declared_acceptance_reason,
     refuse_unpinned_speculative_change,
     speculative_pin_reason,
 )
@@ -94,6 +95,7 @@ __all__ = [
     "materialize_benchmark_config",
     "normalize_proposal",
     "read_round_launch",
+    "declared_acceptance_reason",
     "refuse_cacheless_agentx_baseline",
     "refuse_unpinned_speculative_change",
     "report_executor",

@@ -97,6 +97,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     workload_environment,
     workload_rule,
     _agent_spec,
+    _export_workload,
     _lease_area,
     _specialist_role,
     specialist_readable,
@@ -152,6 +153,8 @@ WORKLOAD = Workload(
     "/models/Llama-3-8B", "sglang", 2, 16, "bf16", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 512)
 )
 AGENTX = replace(WORKLOAD, inferencex=None)
+DATASET = "/data/prompts.jsonl"
+ON_A_DATASET = replace(WORKLOAD, inferencex=InferenceXShape(1024, 512, DATASET))
 TOTAL_AGENTX = replace(AGENTX, agentx_objective=AgentXObjective.TOTAL_TOKEN_THROUGHPUT)
 BASE = ServerBase(args="--tp-size 2 --enable-hierarchical-cache --hicache-size 180", env={"SGLANG_X": "true"})
 IMAGE = ActiveImage("registry.example/sglang:v1", "sha256:" + "2" * 64)
@@ -211,6 +214,38 @@ def test_the_workload_reaches_the_renderer_as_hyperloom_optimize_exports_it(monk
         "TARGET_GPU_TYPE": "mi355x",
         "KERNEL_OPT_BACKEND_ORDER": "forge",
     }
+
+
+def test_a_workload_on_a_prompt_dataset_reaches_the_renderer_with_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+
+    assert workload_environment(ON_A_DATASET)["DATASET_PATH"] == DATASET
+    assert "DATASET_PATH" not in workload_environment(WORKLOAD)
+
+
+@pytest.mark.parametrize(
+    ("workload", "exported", "sent"),
+    [
+        (ON_A_DATASET, None, DATASET),
+        (ON_A_DATASET, "/data/other.jsonl", DATASET),
+        (WORKLOAD, "/data/other.jsonl", None),
+    ],
+    ids=["resumed_without_it", "resumed_on_another", "random_prompts_resumed_with_one"],
+)
+def test_a_leg_sends_the_prompts_its_workload_records_whatever_its_shell_exports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, workload: Workload, exported: str | None, sent: str | None
+) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    for name in workload_environment(ON_A_DATASET):
+        monkeypatch.setenv(name, "")
+    if exported is None:
+        monkeypatch.delenv("DATASET_PATH")
+    else:
+        monkeypatch.setenv("DATASET_PATH", exported)
+
+    _export_workload(workload, tmp_path, IMAGE.ref)
+
+    assert os.environ.get("DATASET_PATH") == sent
 
 
 def test_an_inferencex_workload_at_an_ep_reaches_the_renderer_at_that_ep(monkeypatch: pytest.MonkeyPatch) -> None:

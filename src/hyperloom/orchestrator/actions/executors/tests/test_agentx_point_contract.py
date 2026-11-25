@@ -161,10 +161,10 @@ def test_pre_baseline_candidate_carries_operator_server_args(source, tmp_path, m
     assert prepare_grid_benchmark_config(base, tmp_path / "next") == base
 
 
+@pytest.mark.parametrize("option", ["--cuda-graph-max-bs", "-tp"])
 @pytest.mark.parametrize("appended", [True, False])
-def test_grid_ablation_removes_the_option_from_its_owning_layer(source, tmp_path, appended):
+def test_grid_ablation_removes_the_option_from_its_owning_layer(source, tmp_path, appended, option):
     """An option the accepted layer appends is dropped from it; any other is left for the base to remove."""
-    option = "--cuda-graph-max-bs"
     base = materialize_benchmark_config(source, tmp_path / "base")
     candidate = _build_variant_yaml(
         GridRecipe(base_yaml_path=base, base=LaunchLayer(extra_server_args=f"{option}=256" if appended else "")),

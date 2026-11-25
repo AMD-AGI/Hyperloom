@@ -119,6 +119,12 @@ PRELUDE establishes the session baseline:
    `roofline` is the preferred composite path when enabled; it wraps
    profiling, trace analysis, and `analysis.md` snapshot publication.
 
+The `roofline` executor makes no LLM call of its own. It runs the profile and
+the TraceLens analysis, and stores TraceLens's report (`analysis.md`, or
+`analysis.json` when the session analyses traces without an LLM) verbatim with
+the snapshot; Orchestration reads that report through the `show_analysis_md`
+context tool.
+
 `model_class` is supplied by the launcher or derived once from model
 metadata at boot. There is no separate live `classify` action.
 
@@ -534,6 +540,22 @@ One phase, two levers worked in parallel:
   against this lever like an empty round, and explore benches the proposals
   for the configuration lever.
 
+A patch whose context an earlier KEEP moved is merged rather than dropped. On
+a git tree, a patch the strict `git apply` refuses, and that the tree does not
+already hold, is merged onto HEAD, which carries every KEEP so far: first with
+`git apply -3` (strategy `three_way`), then by keeping both sides of every
+conflict region whose merge base is empty (strategy `union_disjoint`). A union
+must keep every line the patch adds and, in a `.py` file, must parse and define
+no module-level name twice unless HEAD already does. A merged patch is
+benchmarked like any other and listed under `patches_merged` in the result,
+with its strategy and merge steps. A region where both sides changed the same
+lines is declined, never resolved: the files the merge touched are restored to
+HEAD and the round ends `apply_failed`, its `error` carrying the strict apply
+error plus the merge steps. A `perf_framework` or `perf_explore` patch is then
+re-authored on the kept stack, within the authored-lane retry cap. A tree that
+is not a git checkout has no merge step: a patch that does not apply ends the
+round `apply_failed`.
+
 `specialist` serves both levers — investigation, patch authoring, and
 candidate discovery are all dispatches of the one specialist action. An
 operator can add one domain of their own, `custom_specialist`, whose focus is
@@ -541,6 +563,24 @@ the text they supply at launch. The Coordinator alone dispatches it, once per
 macro cycle on entering this phase; it and the grid benching its proposals run
 ahead of all other queued work, and a plateau exit waits for both within the
 phase budget.
+
+Under the Claude CLI a specialist runs with
+`--permission-mode bypassPermissions`, because a permission prompt in an
+unattended run would wait without output until the run is reaped as stale. It
+gets every built-in tool except `KillShell` and `SlashCommand`, which
+`--disallowedTools` removes to back the prompt rule against global process
+cleanup; Codex and dsh have no equivalent of that denylist. Only its worktree
+and its task workspace are
+passed as `--add-dir` entries. It loads no user, project or local settings
+(`--setting-sources=`), so the hooks, permissions and env in the operator's
+`~/.claude/settings.json` or a checkout's `.claude/` do not reach it. None of
+these flags is filesystem containment. What the process can read and write is
+decided by the isolation its launch runs under: another account, a bubblewrap
+sandbox, or unconfined where neither works (see
+[Agent isolation](../reference/environment-variables.md#agent-isolation)).
+Whichever applies, the prompt rules send every patch through `integrate_patch`,
+never straight into a source tree, and PolicyGate admits an `integrate_patch`
+of a specialist's patch only on a Critic verdict of `approve` or `advise`.
 
 With a [PrimaTune](../reference/primatune-predictor.md) endpoint configured,
 the phase also asks that predictor for a launch recipe once per decision point:
@@ -659,7 +699,7 @@ a resumed run.
 
 Every Orchestration turn is stateless: the Coordinator composes one
 unconditional full state projection (mission, `SharedState`, gaps,
-warm-start, scores, the tasks in flight with each explore round's grid,
+warm-start, the tasks in flight with each explore round's grid,
 and the inbox events since the last turn), so the turn never depends on
 what an earlier turn happened to remember.
 

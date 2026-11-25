@@ -16,9 +16,9 @@ from hyperloom.orchestrator.actions.executors._proposal_identity import controls
 from hyperloom.orchestrator.loop._untested_backlog import SPECIALIST_UNTESTED_BACKLOG_FULL, untested_backlog_denial
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.proposal_bench import UNTESTED_BACKLOG_CAP, ProposalBench
-from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskSpec
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
 
 @pytest.fixture

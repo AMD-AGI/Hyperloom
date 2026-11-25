@@ -20,10 +20,10 @@ from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.policy.projection import ResourceFacts
-from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
 
 def _warm_replay_dispatch_params(

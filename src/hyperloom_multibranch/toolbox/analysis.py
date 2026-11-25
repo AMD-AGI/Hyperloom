@@ -15,7 +15,7 @@ measured (:mod:`~.tools.baseline_lengths`), which the caller names no more than 
 names a test (``test_request_id``) and gets the directory its output landed in, resolved inside the session, from the
 blackboard's record of it, never from the caller.
 An ``upstream_pr_search`` request is about no commit and no test: it names a repository (one the rule pack lists) and what to
-look for, and the service the search asks is the host's, never the caller's.
+look for.
 """
 
 from __future__ import annotations
@@ -58,8 +58,6 @@ SPLIT_HINT_PARAMS = tuple(key for _, key, _ in WORKLOAD_HINTS)
 _SERVER_OWNED_PARAMS = frozenset(
     {COMMIT_PARAM, PROFILE_REQUEST_PARAM, TRACE_INPUT_PARAM, LANDED_PARAM, *SPLIT_HINT_PARAMS, *MEASURED_LENGTH_KEYS}
 )
-#: The monitor service an upstream PR search may also read: only the host names one.
-PR_MONITOR_PARAM = "pr_monitor_url"
 
 
 class AnalysisStarter(Protocol):
@@ -252,11 +250,6 @@ def _pr_search_request(ask: AnalysisAsk) -> ToolRequest:
     """The ``upstream_pr_search`` request: the caller's search, checked now so a search that can never run is refused."""
     if ask.profile_request_id:
         raise RequestRejected(f"{UPSTREAM_PR_TOOL} reads no profile test: leave profile_request_id out")
-    if PR_MONITOR_PARAM in ask.params:
-        raise RequestRejected(
-            f"{PR_MONITOR_PARAM} in params is not the caller's to name: the host does not ask a service a caller names",
-            CODE_SERVER_OWNED_PARAM,
-        )
     try:
         build_search(ask.params)
     except InvalidRequest as exc:

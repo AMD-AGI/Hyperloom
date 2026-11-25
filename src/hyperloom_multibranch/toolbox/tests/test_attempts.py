@@ -23,6 +23,7 @@ from hyperloom.measure.boot_watch import HUNG_BEFORE_READY
 from hyperloom.measure import hosted
 from hyperloom.measure.failures import (
     FOREIGN_PROCESS_ON_CARD,
+    FRAMEWORK_VERSION_MISMATCH,
     HF_CACHE_PERMISSION,
     HUB_RATE_LIMITED,
     INFRA_ERROR_CLASSES,
@@ -113,7 +114,7 @@ def _job() -> TestJob:
         parent_commit="c0",
         delta=RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256")),
     )
-    return TestJob(request=request, attempt=1, avoid_nodes=(), priority=0, sandbox_priority=0)
+    return TestJob(request=request, attempt=1, avoid_nodes=(), priority=0)
 
 
 def _backoff(time: _FakeTime, latest: float | None = None) -> InfraBackoff:
@@ -215,6 +216,17 @@ async def test_a_dataset_cache_lock_the_sandbox_may_not_take_is_not_retried_and_
     assert reported == [], "the shared cache's permissions, not the node, refused the lock"
 
 
+async def test_a_framework_of_another_version_than_the_patch_was_compiled_against_ends_the_test_at_once() -> None:
+    verdict = classify_test_failure(returncode=1, error_class=FRAMEWORK_VERSION_MISMATCH)
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, FRAMEWORK_VERSION_MISMATCH)
+    result, executor, reported = await _run(FRAMEWORK_VERSION_MISMATCH)
+    assert len(executor.jobs) == 1 and len(result.attempts) == 1, "every sandbox of the image has the same version"
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+    assert result.failure_reason == FRAMEWORK_VERSION_MISMATCH
+    assert reported == [], "the image, not the node, carries the other version"
+    assert executor.clock.waits == []
+
+
 JIT_REASON = f"{JIT_BUILD_TIMEOUT}: [TP0] Scheduler watchdog timeout (self.watchdog_timeout=300)"
 
 
@@ -287,6 +299,7 @@ def test_the_blameless_names_are_the_ones_the_runner_and_the_backend_report() ->
         "hub_rate_limited",
         "sandbox_acquire_timeout",
         "hf_cache_permission",
+        "framework_version_mismatch",
     }
     assert NODE_BLAMELESS_INFRA_REASONS - {HUB_RATE_LIMITED, HF_CACHE_PERMISSION} <= INFRA_ERROR_CLASSES, (
         "the ones a log, not a status, names"

@@ -20,9 +20,7 @@ from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 from hyperloom.orchestrator.loop import _keep_patch_column as keep_patch_column
 from hyperloom.orchestrator.loop import _promote_outcome as promote_outcome
 from hyperloom.orchestrator.loop._keep_patch_column import _is_patch_column_keep
-from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
-    KnowledgeSections,
-)
+from hyperloom.orchestrator.knowledge.remote_recipe.sections import KnowledgeSections
 from hyperloom.orchestrator.knowledge.remote_recipe.values import has_new_keep
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec

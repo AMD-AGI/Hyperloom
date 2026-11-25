@@ -25,7 +25,6 @@ _TAGGED_ENTRY_POINTS = frozenset(
         "aanthropic_messages",
         "anthropic_completion",
         "anthropic_messages",
-        "astream_chat_completion_text",
         "chat_completion",
         "claude_sdk_env_options",
         "CodexSession",

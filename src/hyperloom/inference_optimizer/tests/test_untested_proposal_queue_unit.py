@@ -18,7 +18,8 @@ from hyperloom.orchestrator.phases.machine_state import (
     PHASE_NAMES,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
+from hyperloom.orchestrator.roles import Backend
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 

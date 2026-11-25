@@ -1237,7 +1237,7 @@ def test_the_disproof_marker_survives_a_markdown_list_item():
     [
         ("HELD-FIXED: BLOCK_N=16, num_warps=8", parse_held_fixed, (("BLOCK_N", "16"), ("num_warps", "8"))),
         ("NEGATIVES: none", parse_negatives_marker, False),
-        ("NEGATIVES: split-K=4, BLOCK_N=128", parse_negatives_marker, True),
+        ("NEGATIVES: split-K=4 (m64 0.105 vs 0.091 ms); BLOCK_N=128 (m4096 +7%)", parse_negatives_marker, True),
         (
             "DISPROOF: tested — <what you ran and what it showed>",
             parse_disproof_marker,

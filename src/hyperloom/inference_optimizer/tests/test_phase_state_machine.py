@@ -919,11 +919,8 @@ def test_policy_gate_phase_strict_allows_in_phase_action():
 
 @pytest.fixture
 def coordinator_with_mocks(session_dir):
-    from hyperloom.orchestrator.roles import (
-        MockBackend,
-        MockCriticBackend,
-        ScriptedPlan,
-    )
+    from hyperloom.orchestrator.roles import MockCriticBackend
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     silent = ScriptedPlan(
@@ -1000,7 +997,8 @@ _NO_KERNEL_CLI_BUDGET_PCT = {phase_state.PHASE_FRAMEWORK_AGENT: 0.2}
 @pytest.fixture
 def no_kernel_coordinator(session_dir):
     """A real Coordinator on an unbounded ``--no-kernel`` session, so FRAMEWORK owns a flat share of the cycle."""
-    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+    from hyperloom.orchestrator.roles import MockCriticBackend
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
     from hyperloom.orchestrator.loop.coordinator import Coordinator, CoordinatorSettings
 
     SharedState(

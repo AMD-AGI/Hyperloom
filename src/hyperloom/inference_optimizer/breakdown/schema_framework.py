@@ -82,7 +82,6 @@ class V6FrameworkRun(TypedDict, total=False):
     empty: bool | None
     confidence: float | None
     confidence_avg: float | None
-    ensemble_scores: dict[str, Any]
     produced_ids: list[str]
 
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 import math
 import statistics
 
@@ -80,6 +81,40 @@ def canonical_gate_prompt(kernel_backend: str) -> str:
     return _DRIVER_GATE_PROMPT
 
 
+class CaseAggregate(str, Enum):
+    """How one measurement's per-case speedups combine into the score a KEEP is judged on.
+
+    Every case weighs the same under both. They differ in what a large gain on one case is worth: the arithmetic
+    mean counts it in full, the geometric mean counts its ratio, so there a 2x on one case and a 0.5x on another
+    cancel.
+    """
+
+    ARITHMETIC = "arithmetic"
+    GEOMETRIC = "geometric"
+
+    def combine(self, speedups: Sequence[float]) -> float:
+        """The equal-weight mean of positive per-case ``speedups`` under this aggregate."""
+        if self is CaseAggregate.GEOMETRIC:
+            return math.exp(sum(math.log(speedup) for speedup in speedups) / len(speedups))
+        return sum(speedups) / len(speedups)
+
+    def case_term(self, speedup: float, count: int) -> float:
+        """One case's additive share of a ``count``-case score, in the space where this aggregate is a sum.
+
+        The spread of these terms is what each case contributes to the score's spread. For the geometric mean that
+        space is logarithmic: the variance there is the score's own divided by the score squared, to first order, so
+        the shares between cases and the ratio between two samples, which is all that is read from these terms, are
+        the score's.
+        """
+        return (math.log(speedup) if self is CaseAggregate.GEOMETRIC else speedup) / count
+
+    @property
+    def formula(self) -> str:
+        """The score as an agent is shown it, over the pristine and candidate per-case times."""
+        function = "geomean" if self is CaseAggregate.GEOMETRIC else "mean"
+        return f"{function}(pristine_case_ms / candidate_case_ms)"
+
+
 def measurement_sigma(measurement_scores: Sequence[float]) -> float | None:
     """Return the spread of one candidate's independent pristine-relative scores."""
     if len(measurement_scores) < 2:
@@ -106,6 +141,7 @@ class SigmaAttribution:
 def attribute_sigma(
     case_series: Mapping[str, Sequence[float]],
     baseline_case_times: Mapping[str, float],
+    aggregate: CaseAggregate = CaseAggregate.ARITHMETIC,
 ) -> SigmaAttribution | None:
     """Blame the objective's spread on the cases that produced it."""
     scored = [case_id for case_id in sorted(baseline_case_times) if case_id in case_series]
@@ -126,7 +162,7 @@ def attribute_sigma(
             return None
         if any(not math.isfinite(t) or t <= 0.0 for t in times):
             return None
-        terms = [baseline / t / count for t in times]
+        terms = [aggregate.case_term(baseline / t, count) for t in times]
         case_sigmas[case_id] = statistics.stdev(terms)
         mean_times[case_id] = statistics.fmean(times)
 

@@ -263,7 +263,7 @@ async def coordinator(service, tmp_path, monkeypatch):
     """A real Coordinator in FRAMEWORK whose predictor has queued one row, ``--kv-cache-dtype fp8``."""
     from hyperloom.inference_optimizer.session.paths import make_session_dir
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     silent = ScriptedPlan(turns=[])

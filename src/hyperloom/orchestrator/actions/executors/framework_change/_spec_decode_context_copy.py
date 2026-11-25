@@ -16,7 +16,9 @@ introduces or changes a context-copying draft is refused before it runs:
 * vLLM ``--speculative-config`` ``method`` ``ngram``, ``ngram_gpu`` (prompt lookup) or ``suffix`` (suffix decoding), or a
   ``model`` of ``ngram`` / ``[ngram]`` with no method, which vLLM resolves to ``ngram``; the JSON object and its dotted
   ``--speculative-config.<key>`` flags alike;
-* SGLang ``--speculative-algorithm NGRAM``.
+* SGLang ``--speculative-algorithm NGRAM``;
+* llama-server ``--spec-type`` with an ``ngram-*`` entry in its list, or ``LLAMA_ARG_SPEC_TYPE`` where the argv
+  names no type.
 
 Model-based drafts (MTP, EAGLE, a draft model, DFlash/DSpark) are not affected. Neither is a base that already copies:
 the operator chose it, and a candidate that leaves its speculative settings as they are is graded against a base that
@@ -50,17 +52,26 @@ _VLLM_NGRAM_MODELS = frozenset({_NGRAM, f"[{_NGRAM}]"})
 #: SGLang ``--speculative-algorithm`` values that draft by copying from the context (case-insensitive).
 _SGLANG_COPY_ALGORITHMS = frozenset({"NGRAM"})
 
+#: The prefix of llama-server's ``--spec-type`` entries that draft by copying from the context (``ngram-simple``,
+#: ``ngram-map-k``, ``ngram-mod``, ``ngram-cache``); the value is a comma-separated list of entries.
+_LLAMACPP_COPY_PREFIX = "ngram"
+
 _VLLM_CONFIG_FLAG = "--speculative-config"
 _SGLANG_ALGORITHM_FLAG = "--speculative-algorithm"
+_LLAMACPP_TYPE_FLAG = "--spec-type"
+#: The variable llama-server reads ``--spec-type`` from when its argv does not give it.
+_LLAMACPP_TYPE_ENV = "LLAMA_ARG_SPEC_TYPE"
 #: A ``key: value`` pair inside a ``--speculative-config`` value that is not valid JSON (a shell split strips the quotes).
 _LOOSE_PAIR = re.compile(r"""(?<![\w])["']?(method|model)["']?\s*:\s*["']?([\w\[\]-]+)""")
 
 #: A flag token, and the flags and env names that configure speculative decoding: vLLM ``--speculative-config`` (and
-#: its dotted keys), SGLang ``--speculative-*``, ATOM ``--num-speculative-tokens`` / ``--spec-decode-*``, and any engine
-#: env about speculation.
+#: its dotted keys), SGLang ``--speculative-*``, ATOM ``--num-speculative-tokens`` / ``--spec-decode-*``, llama-server
+#: ``--spec-*``, and any engine env about speculation.
 _FLAG = re.compile(r"--[A-Za-z0-9][\w.-]*")
-_SPEC_FLAG = re.compile(r"^--(?:[\w.-]*speculative|spec-decode)", re.IGNORECASE)
-_SPEC_ENV = re.compile(r"^(?:SGLANG|VLLM|TLLM|TRTLLM|ATOM)_\w*(?:SPEC|MTP|EAGLE|DRAFT|SIMULATE_ACC)", re.IGNORECASE)
+_SPEC_FLAG = re.compile(r"^--(?:[\w.-]*speculative|spec-)", re.IGNORECASE)
+_SPEC_ENV = re.compile(
+    r"^(?:SGLANG|VLLM|TLLM|TRTLLM|ATOM|LLAMA)_\w*(?:SPEC|MTP|EAGLE|DRAFT|SIMULATE_ACC)", re.IGNORECASE
+)
 
 
 def _tokens(text: str) -> list[str]:
@@ -100,6 +111,7 @@ def _method_in(text: str) -> str:
     """The context-copying method one launch argv configures, the last setting of each flag winning like the engine."""
     vllm: dict[str, str] = {}
     sglang = ""
+    llamacpp = ""
     for flag, value in _flag_values(_tokens(text)):
         name = flag.replace("_", "-").lower()
         if name == _VLLM_CONFIG_FLAG:
@@ -110,19 +122,28 @@ def _method_in(text: str) -> str:
                 vllm[key] = value
         elif name == _SGLANG_ALGORITHM_FLAG:
             sglang = value
+        elif name == _LLAMACPP_TYPE_FLAG:
+            llamacpp = value
     method = vllm.get("method", "").strip().lower()
     if method in _VLLM_COPY_METHODS:
         return method
     if not method and vllm.get("model", "").strip().lower() in _VLLM_NGRAM_MODELS:
         return _NGRAM
-    return sglang.strip().upper() if sglang.strip().upper() in _SGLANG_COPY_ALGORITHMS else ""
+    if sglang.strip().upper() in _SGLANG_COPY_ALGORITHMS:
+        return sglang.strip().upper()
+    entries = (entry.strip().lower() for entry in llamacpp.split(","))
+    return next((entry for entry in entries if entry.startswith(_LLAMACPP_COPY_PREFIX)), "")
 
 
 def context_copy_method(argv: str, envs: Mapping[str, Any]) -> str:
     """The context-copying speculative-decoding method a launch configures, or ``""`` when it configures none.
 
     Read from the server argv and from every env value, since a server-args env (``EXTRA_VLLM_ARGS``) carries argv too.
+    llama-server's ``LLAMA_ARG_SPEC_TYPE`` is read as the flag it stands for, ahead of the argv, whose own wins.
     """
+    typed = envs.get(_LLAMACPP_TYPE_ENV)
+    if typed:
+        argv = f"{_LLAMACPP_TYPE_FLAG} {typed} {argv}"
     for text in (argv, *(str(value) for value in envs.values())):
         method = _method_in(str(text or ""))
         if method:

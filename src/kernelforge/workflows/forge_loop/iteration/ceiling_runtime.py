@@ -151,6 +151,7 @@ class CeilingMixin:
             report,
             self._best_case_times or self._baseline_case_times,
             unscored_cases=self._unscored_cases,
+            aggregate=self.ic.case_aggregate,
         )
 
     def _is_roofline_target_met(self) -> bool:
@@ -222,6 +223,7 @@ class CeilingMixin:
             self._best_case_times or self._baseline_case_times,
             target=float(self.ic.roofline_target or 0.0),
             unscored_cases=sorted(self._unscored_cases),
+            aggregate=self.ic.case_aggregate,
         )
 
     def _with_ceiling_standing(self, context):

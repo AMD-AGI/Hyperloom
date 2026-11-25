@@ -75,8 +75,9 @@ class SpecialistLifecycle(Protocol):
 
     async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None: ...
 
-    async def stop(self, branch: str) -> None:
-        """Stop the branch's specialist; returns once no process of it is left."""
+    async def stop(self, branch: str, *, finish_tests: bool = False) -> None:
+        """Stop the branch's specialist; returns once no process of it is left. With ``finish_tests`` the tests the
+        branch has in flight are still judged as they end; a later stop without it ends that judging."""
 
     async def set_k(self, branch: str, k: int) -> None:
         """How many tests the branch's specialist may have running at once."""
@@ -84,6 +85,10 @@ class SpecialistLifecycle(Protocol):
     async def status(self, branch: str) -> SpecialistStatus | None:
         """The state of the branch's specialist; ``None`` for a branch the runtime does not run (never started or
         stopped)."""
+
+    async def undealt_directions(self, start_commit: str) -> tuple[str, ...]:
+        """The names of the session's directions no branch has held yet, in the order branches started at
+        ``start_commit`` on no task of their own would be dealt them; none once each was held or is closed there."""
 
 
 __all__ = ["BranchTask", "SpecialistLifecycle", "SpecialistStatus"]

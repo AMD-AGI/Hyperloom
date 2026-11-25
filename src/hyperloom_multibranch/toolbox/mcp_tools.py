@@ -40,6 +40,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
+from hyperloom.agents.framework.sources.github import MAX_OR_TERMS
 from hyperloom.common.outside_facts import (
     TUNABLEOP_ENABLED_ENV,
     TUNABLEOP_TABLE_ENV,
@@ -243,11 +244,19 @@ _KERNEL_TUNE_GUIDE = (
 
 _UPSTREAM_PR_GUIDE = (
     " upstream_pr_search: reads no commit and no profile test (leave profile_request_id out); params.repo_url is "
-    f"required, the GitHub URL of one of {', '.join(UPSTREAM_PR_REPOS)}; params.keywords (words to look for), "
-    f"params.limit (default {DEFAULT_LIMIT}, at most {MAX_LIMIT}) and params.states (open by default; merged, closed or all "
-    "search pull requests of every state) are optional. The search runs in the toolbox's host process, and its result arrives in poll_inbox: the "
-    "candidate pull requests with ref, title, url and score. A host that cannot reach GitHub fails the job and says why; "
-    "that is not an empty answer."
+    f"required, the GitHub URL of one of {', '.join(UPSTREAM_PR_REPOS)}. A search takes params.keywords, the words or "
+    "phrases to look for in a pull request's title, body and comments, and any one of them matches: a string is split "
+    "at spaces and commas into words, a list keeps each entry whole, so a phrase is an entry of a list. Only the "
+    f"first {MAX_OR_TERMS} are searched for. The search matches words, not parts of one, and not the paths a pull "
+    "request changes. "
+    f"params.limit (default {DEFAULT_LIMIT}, at most {MAX_LIMIT}) and params.states (open by default; merged, closed "
+    "or all search pull requests of every state) are optional. The tool runs in the toolbox's host process and asks "
+    "GitHub. poll_inbox shows you the job's summary: how many candidates the search kept, of how many pull requests "
+    'matched when the limit left some out ("10 of 266"), and the ref and title of the first candidate, the best '
+    "match. The other candidates are in the job's result record, which you are not shown: to see another pull "
+    "request, search again with fewer, more specific words. A GitHub that cannot be asked fails the job and says "
+    "why, which is not an empty answer: a failure that names a wait is a spent rate limit, so ask again after it; "
+    "after a token GitHub refuses or a GitHub that cannot be reached, go on without this tool."
 )
 
 

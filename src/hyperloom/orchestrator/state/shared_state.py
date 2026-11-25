@@ -303,6 +303,10 @@ class SharedState(
     conc_sweep_enabled: bool = False
     # Which benchmark workload this session measures: "agentx" (agentic trace replay) or "synthetic" (ISL/OSL).
     benchmark_mode: str = ""
+    # The DATASET_PATH file the session's fixed rounds send in place of random prompts, as given; empty when none.
+    # The path and not a digest of the file: the file is read where a round runs, which need not be this host.
+    # Compared on resume, and no store keyed on ISL/OSL files a session that records one.
+    prompt_dataset: str = ""
     # Generation of the measurement path this session was measured on; resume refuses one below the build's epoch.
     measurement_epoch: int = 0
     # Which AgentX client measured this session: "inferencex" or "mlperf"; empty outside AgentX. Compared on resume so
@@ -692,8 +696,6 @@ class SharedState(
     # Latest roofline saturation per specialist-domain family and prev->current cycle bottleneck movement.
     saturated_directions: dict[str, dict[str, Any]] = field(default_factory=dict)
     bottleneck_shift: dict[str, Any] = field(default_factory=dict)
-    # Per-cycle advisory focus log; persisted so cycle strategy survives resume.
-    cycle_strategy_log: list[dict[str, Any]] = field(default_factory=list)
 
     # Recipe KB integration fields — Coordinator-only writers.
     recipe_kb_session_id: str = ""

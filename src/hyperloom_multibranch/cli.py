@@ -78,11 +78,7 @@ when unset and publishes the staging into once the session directory exists; the
 ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``; the application's inference_suite tool cache
 must hold a staging of the InferenceX client that verifies; the framework's package must be installed in the image;
 and the agent CLI the specialists run must be installed. A canonical measurement that cannot be taken fails the command
-the same way once the session directory exists. Before PRELUDE the session checks the rule pack's facts about outside
-projects against this environment as ``HYPERLOOM_IMAGE_CHECK`` says: ``warn`` (the default) logs a failing fact,
-``strict`` fails the command the same way before any phase runs, ``off`` checks nothing, and any other value is a usage
-error. The manifest records the check's summary and CLOSE writes the whole report to ``MB-reports/image_check.json``.
-A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
+the same way once the session directory exists. A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
 ``run --measurement hosted`` measures every test in the sandboxes of a grant handed to the session in the environment
 (:data:`HANDED_GRANT`, read by :mod:`hyperloom.hosted.host_info`) instead of this machine's cards: as many tests run at
@@ -134,7 +130,6 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.shared_storage import open_shared_append
-from hyperloom.common.outside_facts.image_check import ImageCheckFailed
 from hyperloom.hosted.campaign import MEASUREMENT_LOCAL, CampaignSpec
 from hyperloom.hosted.host_info import HostGroup, HostInfo, take_host_info
 from hyperloom.hosted.toolbox_inputs import ToolboxInputsError
@@ -491,14 +486,7 @@ def hosted_run() -> int:
     _stop_before_grant_ends(host)
     try:
         returncode = start.run()
-    except (
-        EnvironmentIncomplete,
-        PeersUnavailable,
-        ImageCheckFailed,
-        CacheBuildError,
-        ToolboxInputsError,
-        PermissionError,
-    ) as exc:
+    except (EnvironmentIncomplete, PeersUnavailable, CacheBuildError, ToolboxInputsError, PermissionError) as exc:
         return _not_run(host.state_dir, EXIT_FAILED, exc)
     root = recorded_session(host.state_dir)
     stop_reason = None if root is None else reported_stop_reason(root)
@@ -656,7 +644,7 @@ def main(argv: list[str] | None = None) -> int:
             require_specialist_reach(persisted.layout.branches)
             return resume(persisted, ready.peer_factory, ready.services, deadline, None)
         return _start(settings, grant)
-    except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed, CacheBuildError, ToolboxInputsError) as exc:
+    except (EnvironmentIncomplete, PeersUnavailable, CacheBuildError, ToolboxInputsError) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
         return EXIT_FAILED
 

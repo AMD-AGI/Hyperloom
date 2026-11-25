@@ -124,12 +124,16 @@ def test_a_process_that_dies_without_a_log_leaves_nothing_to_classify(tmp_path):
 
 
 def test_a_blocker_stack_peels_one_wall_per_round_and_then_serves(tmp_path):
-    scenario = LaunchScenario.from_dict({"blockers": ["argv_parse", "import", "engine_init"]})
-    rounds = ScriptedRounds(scenario=scenario, clock=VirtualClock())
+    rounds = _rounds(
+        LaunchAttempt(outcome=STAGE_FAILED, stage="argv_parse"),
+        LaunchAttempt(outcome=STAGE_FAILED, stage="import"),
+        LaunchAttempt(outcome=STAGE_FAILED, stage="engine_init"),
+        LaunchAttempt(outcome=READY),
+    )
 
     reached = [
         _verdict(rounds.run_round(_fixed_config(tmp_path / f"r{index}"))).stage_failed
-        for index in range(len(scenario.attempts))
+        for index in range(len(rounds.scenario.attempts))
     ]
 
     assert reached == [LadderStage.ARGV_PARSE, LadderStage.IMPORT, LadderStage.ENGINE_INIT, None]
@@ -328,6 +332,20 @@ def test_a_round_the_double_does_not_script_is_refused_before_it_plays(tmp_path,
         rounds.run_round(_fixed_config(tmp_path / "run", **changes))
 
     assert not rounds.calls
+
+
+def test_the_virtual_clock_moves_only_when_something_charges_it():
+    clock = VirtualClock()
+    start_monotonic = clock.monotonic()
+    start_wall = clock.wall()
+
+    clock.advance(120.0)
+    clock.advance(-5.0)
+
+    # Both readings move by the same amount, so a watchdog arming on monotonic
+    # time and an artifact stamped with wall time agree about the same step.
+    assert clock.monotonic() - start_monotonic == pytest.approx(120.0)
+    assert clock.wall() - start_wall == pytest.approx(120.0)
 
 
 def test_the_double_takes_the_call_run_round_takes():

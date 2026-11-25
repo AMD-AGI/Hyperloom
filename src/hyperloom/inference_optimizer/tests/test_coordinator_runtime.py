@@ -17,12 +17,8 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors.serving import _multi_node_restart_settings
 from hyperloom.orchestrator.actions.executors import report_executor
-from hyperloom.orchestrator.roles import (
-    Backend,
-    MockBackend,
-    MockTurn,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.roles import Backend
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.loop._baseline_promotion import _BASELINE_FINGERPRINT_KEYS
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
@@ -1117,22 +1113,6 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
             assert "trace_analyze must run first" not in str(m.payload.get("hint") or m.payload.get("reason") or ""), (
                 f"trace_analyze action-layer gate fired for params despite removal: {m.payload!r}"
             )
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_orchestration_prompt_has_no_execution_checklist(session_dir):
-    """The Coordinator no longer injects an enforced next-step checklist."""
-    c = Coordinator(session_dir, backends=_build_backends({}))
-    try:
-        c.shared_state.baseline_tput = 100.0
-        c.shared_state.last_profile_trace = ""
-        c.shared_state.save(session_dir)
-
-        prompt = (await c.conversation.compose_prompt("orchestration")).text
-
-        assert "Execution checklist" not in prompt
     finally:
         await c.stop()
 

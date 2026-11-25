@@ -18,12 +18,9 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
-from hyperloom.orchestrator.roles import (
-    Backend,
-    MockBackend,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.roles import Backend
 from hyperloom.orchestrator.roles.mcp_context_tools import ContextProvider, _make_handler
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.actions.executors.explore import STACK_REVALIDATE_SOURCE
 from hyperloom.orchestrator.loop.coordinator import Coordinator

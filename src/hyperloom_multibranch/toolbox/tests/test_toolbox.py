@@ -410,11 +410,11 @@ async def test_a_quarantined_node_is_passed_to_every_later_test_as_avoided(tmp_p
     assert rig.toolbox.quarantined == {"bad"}
 
 
-async def test_the_sandbox_priority_tier_is_handed_to_the_executor(tmp_path: Path) -> None:
+async def test_the_priority_is_handed_to_the_executor(tmp_path: Path) -> None:
     rig = build(tmp_path)
     await rig.toolbox.submit_test(req(priority=3))
     await rig.toolbox.drain()
-    assert (rig.executor.jobs[0].priority, rig.executor.jobs[0].sandbox_priority) == (3, 1)
+    assert rig.executor.jobs[0].priority == 3
 
 
 # --- cancel ----------------------------------------------------------------------------------------------------------

@@ -50,36 +50,6 @@ def test_a_session_sweeps_after_close_only_when_asked_closed_and_not_stopped_by_
     assert sweeps_after_close(state, stop_reason) is sweeps
 
 
-def test_cli_exposes_no_baseline_double_run_field(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", raising=False)
-    ns = _parse()
-    assert not hasattr(ns, "baseline_double_run")
-
-
-@pytest.mark.parametrize("val", ["1", "true", "yes", "on", "TRUE", "On"])
-def test_cli_ignores_env_var_for_baseline_double_run(
-    monkeypatch: pytest.MonkeyPatch,
-    val: str,
-):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", val)
-    ns = _parse()
-    assert not hasattr(ns, "baseline_double_run")
-
-
-def test_cli_rejects_baseline_double_run_flag(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
-    with pytest.raises(SystemExit) as exc_info:
-        _parse("--baseline-double-run")
-    assert exc_info.value.code == 2
-
-
-def test_cli_rejects_no_baseline_double_run_flag(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1")
-    with pytest.raises(SystemExit) as exc_info:
-        _parse("--no-baseline-double-run")
-    assert exc_info.value.code == 2
-
-
 class TestTheSeededSweep:
     """The session records the switch and the points as given, for a native AgentX workload too."""
 

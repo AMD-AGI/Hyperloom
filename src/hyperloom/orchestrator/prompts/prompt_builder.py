@@ -149,17 +149,13 @@ class PromptCycle:
     Attributes:
         macro_cycle: Current macro-cycle counter; shown in the CYCLE DIRECTIVE section.
         cycle_directive: Optional LLM-authored focus text for this cycle (from
-            ``orchestration_memory.next_cycle_directive``); empty with no ``cycle_strategy`` renders the standing
-            breadth->depth default.
-        cycle_strategy: Optional dict from ``plan_cycle_focus`` with deterministic focus, rationale, saturated
-            directions, and prior-cycle history; rendered in the CYCLE DIRECTIVE section after the LLM directive.
+            ``orchestration_memory.next_cycle_directive``); empty renders the standing breadth->depth default.
         phase: Current pipeline phase; omits the modules whose behaviour it cannot reach. Empty renders every
             module. The Coordinator rebuilds the prompt at each phase seam.
     """
 
     macro_cycle: int = 0
     cycle_directive: str = ""
-    cycle_strategy: Mapping[str, Any] | None = None
     phase: str = ""
 
 
@@ -892,13 +888,11 @@ def _section_cycle_directive(
     *,
     macro_cycle: int = 0,
     cycle_directive: str = "",
-    cycle_strategy: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Build the CYCLE DIRECTIVE section.
 
-    Renders the LLM-authored ``cycle_directive`` when present, the deterministic
-    ``cycle_strategy`` focus/history when provided, or the breadth→depth default
-    when neither is set.
+    Renders the LLM-authored ``cycle_directive`` when present, else the
+    breadth→depth default.
 
     Returns:
         list[str]: Markdown lines for the section.
@@ -915,7 +909,7 @@ def _section_cycle_directive(
     if cycle_directive and cycle_directive.strip():
         lines.append("Focus for this cycle (LLM-authored at prior cycle boundary):")
         lines.append(cycle_directive.strip())
-    elif not cycle_strategy:
+    else:
         lines.extend(
             [
                 "Default arc (no per-cycle directive yet):",
@@ -926,26 +920,6 @@ def _section_cycle_directive(
                 "  work that needs a long measure→edit→measure loop.",
             ]
         )
-    if cycle_strategy:
-        focus = str(cycle_strategy.get("focus") or "").strip()
-        score = cycle_strategy.get("score")
-        rationale = str(cycle_strategy.get("rationale") or "").strip()
-        saturated = cycle_strategy.get("saturated_at_start") or []
-        prior_cycles: list[Any] = list(cycle_strategy.get("prior_cycles") or [])
-        lines.append("")
-        lines.append(f"Deterministic focus: focus={focus} score={score}")
-        if rationale:
-            lines.append(f"rationale: {rationale}")
-        if saturated:
-            lines.append(f"saturated_at_start={list(saturated)}")
-        if prior_cycles:
-            lines.append("previous cycles:")
-            for row in prior_cycles[-5:]:
-                lines.append(
-                    f"  - cycle={row.get('cycle')} focus={row.get('focus')} "
-                    f"gain_delta={row.get('gain_delta')} saturated={row.get('saturated_at_start') or []}"
-                )
-        lines.append("Advisory only: use this as a prior, not a dispatch gate.")
     return lines
 
 
@@ -1068,9 +1042,7 @@ def build_orchestration_prompt(
         ),
         _section_action_catalogue(actions),
         _section_decision_framework(phase=phase_norm, transport=transport),
-        _section_cycle_directive(
-            macro_cycle=cycle.macro_cycle, cycle_directive=cycle.cycle_directive, cycle_strategy=cycle.cycle_strategy
-        ),
+        _section_cycle_directive(macro_cycle=cycle.macro_cycle, cycle_directive=cycle.cycle_directive),
     ]
     if (
         kernel_enabled

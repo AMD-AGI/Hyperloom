@@ -24,6 +24,13 @@ class _FakeOptions:
         self.kwargs = kwargs
 
 
+def _system_prompt_text(system_prompt) -> str:
+    """The system prompt a CLI would start with, whether it was handed over inline or as a file."""
+    if isinstance(system_prompt, dict) and system_prompt.get("type") == "file":
+        return Path(system_prompt["path"]).read_text(encoding="utf-8")
+    return system_prompt or ""
+
+
 def _result_message(session_id="", subtype="success"):
     return SimpleNamespace(
         content=[SimpleNamespace(text="done")],
@@ -51,6 +58,8 @@ def _backend(messages, captured, stream_error=None):
     async def fake_query(prompt, options):
         captured["prompt"] = prompt
         captured["options"] = options
+        # Read while the query runs, as the CLI does: a prompt handed over as a file is gone once the query ends.
+        captured["system_prompt"] = _system_prompt_text(options.kwargs.get("system_prompt"))
         for message in messages:
             yield message
         if stream_error is not None:

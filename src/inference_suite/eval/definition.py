@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom_common.jsonio import read_json
-from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, last_alias_value
 from inference_suite.contracts.base_launch import DIGEST_PREFIX
 from inference_suite.contracts.config import SuiteConfig
 from inference_suite.contracts.launch import EvalInvocation, Launch
@@ -110,8 +109,7 @@ def served_context(launch: Launch, model_dir: Path | None) -> int | None:
     server_flags = framework_facts(Framework(launch.base.framework)).server_flags
     if server_flags is None:
         return None
-    flag = frozenset({canonical_flag_name(server_flags.context_length)})
-    value = last_alias_value(argv_flag_occurrences(launch.argv), flag)
+    value = server_flags.context_length.value(launch.argv)
     if value is not None:
         return int(value) if value.isdigit() and int(value) > 0 else None
     return _native_context(model_dir)

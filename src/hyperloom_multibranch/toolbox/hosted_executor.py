@@ -38,6 +38,7 @@ from hyperloom.contracts.measurement import (
     CARD_UNKNOWN,
     CARD_UNOBSERVABLE,
     AccuracyValue,
+    AgentxCheckpointRuling,
     FailureClass,
     PhaseTiming,
     RoundValue,
@@ -62,7 +63,6 @@ from hyperloom.measure.phases import RESULT_READ, account
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.profile_traces import PROFILE_DIR, has_step_traces, has_traces, is_trace_file
 from hyperloom.measure.repro import REPRO_DIR, VERDICT_FILE, ReproError, read_verdict
-from hyperloom.measure.consistency import SessionNotMeasurable, session_facts
 from hyperloom.measure.socket import (
     MeasurementTimeout,
     RoundOutcome,
@@ -72,9 +72,9 @@ from hyperloom.measure.socket import (
     TestMeta,
     TestOutcome,
 )
-from hyperloom.orchestrator.actions.executors import is_round_folder
+from hyperloom.orchestrator.actions.executors import is_round_folder, staged_tool_cache
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
-from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch
+from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, frozen_base
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.acceptance import backend_kind
@@ -95,12 +95,15 @@ from hyperloom_multibranch.toolbox import long_context
 from hyperloom_multibranch.toolbox.merge_smoke import MERGE_SMOKE, SMOKE_NOT_RUN, MergeSmoke, SmokeNotRun
 from hyperloom_multibranch.toolbox.short_prompts import consistency_of, rederive
 from hyperloom_multibranch.toolbox.table_hits import read_table_hits, runtime_findings
+from inference_suite import StagingError, normalised_manifest
 
 __all__ = [
     "DEFAULT_TEST_TIMEOUT_SEC",
     "HostedExecutor",
     "OUTPUTS_DIR",
+    "SessionNotMeasurable",
     "TEST_SILENCE_TIMEOUT_SEC",
+    "session_facts",
 ]
 
 log = logging.getLogger(__name__)
@@ -132,6 +135,32 @@ PROFILE_WITHOUT_STEPS = (
     "step (the server log says whether 'Profiling starts' followed /start_profile)"
 )
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+class SessionNotMeasurable(ValueError):
+    """The session froze no base launch, or the application's tool cache holds no staging this interpreter can identify."""
+
+
+def session_facts(session: Path) -> SessionFacts:
+    """What every test of the session at ``session`` carries: its frozen base launch, and the normalised manifest of the
+    inference_suite staging the application's tool cache holds. A v2 sheet needs both, so a session missing either is
+    refused before any test.
+
+    Raises:
+        SessionNotMeasurable: The session froze no base, or the tool cache holds no staging this interpreter can
+            identify: none, one that is not what its lock pins, or this interpreter's lm-eval is off the pin.
+        BaseLaunchMismatch: The session's ``base_launch.json`` is not the base it recorded, or its client is off the
+            InferenceX pin.
+    """
+    frozen = frozen_base(session)
+    if frozen is None:
+        raise SessionNotMeasurable(f"the session {session} froze no base launch")
+    tool_cache = staged_tool_cache()
+    try:
+        staging = normalised_manifest(tool_cache)
+    except StagingError as exc:
+        raise SessionNotMeasurable(f"the inference_suite staging in {tool_cache} cannot be identified: {exc}") from exc
+    return SessionFacts(staging=staging, base_launch=frozen.launch)
 
 
 class _Span(NamedTuple):
@@ -198,7 +227,6 @@ class HostedExecutor:
         except subprocess.TimeoutExpired as expired:
             return self._timed_out(request_id, started, expired)
         result = self._result(request, accepted, call, outcome, _Span(started, self._clock()))
-        result = _with_checkpoint(result, call)
         result = await self._with_table_hits(result, accepted, call)
         result = await self._with_short_prompts(result, accepted, call)
         result = await self._with_long_context(result, accepted, call)
@@ -352,6 +380,9 @@ class HostedExecutor:
         rounds, accuracy = _measured_values(request, accepted, outcome) if failure is None else ((), ())
         location = self._profile_location(call) if failure is None and request.kind is TestKind.PROFILE else ""
         verdict = _landed_verdict(call) if failure is None and request.kind is TestKind.REPRO else ""
+        # What the attempt's directory holds counts only when a verified bundle landed it: an attempt that ended without
+        # one holds at most the host's saved copy of its runner's files, which is never a sample, a ruling or a check.
+        landed = Path(call.output_dir) if audit else None
         started = span.started
         gpu_seconds = max(0.0, finished - started) * facts.gpu_count
         return TestResult(
@@ -375,7 +406,9 @@ class HostedExecutor:
             )
             if failure is None
             else (),
-            cold_start_seconds=boot_seconds(call.output_dir),
+            # A landed bundle's stamps are a sample whether the test succeeded or not.
+            cold_start_seconds=boot_seconds(landed) if landed is not None else None,
+            agentx_checkpoint=_ruling(request_id, call, landed),
             **_phase_fields(outcome.phases, span, finished, facts.gpu_count),
             **audit,
         )
@@ -549,18 +582,19 @@ def _unlike_checkpoint(result: TestResult, landed: Path) -> str | None:
     return None if held == recorded else f"agentx_checkpoint: recorded {recorded}, the bundle holds {held}"
 
 
-def _with_checkpoint(result: TestResult, call: TestCall) -> TestResult:
-    """``result`` with the ruling the AgentX checkpoint made on its measured round; a test that carried no checkpoint has
-    none, and one whose window never closed is logged, so the CLOSE report's count of unjudged tests can be traced."""
+def _ruling(request_id: str, call: TestCall, landed: Path | None) -> AgentxCheckpointRuling | None:
+    """The ruling the AgentX checkpoint made on the measured round, read from the verified bundle that ``landed``; a test
+    that carried no checkpoint has none, and one that holds none (its window never closed, or no bundle landed) is
+    logged, so the CLOSE report's count of unjudged tests can be traced."""
     if call.checkpoint is None:
-        return result
+        return None
     try:
-        ruling = read_ruling(Path(call.output_dir))
+        ruling = None if landed is None else read_ruling(landed)
     except (OSError, ValueError) as exc:
         raise MeasurementRefused(f"the AgentX checkpoint's ruling cannot be read: {exc}") from exc
     if ruling is None:
-        log.warning("agentx_checkpoint: %s ran under the checkpoint and it ruled on none", result.request_id)
-    return replace(result, agentx_checkpoint=ruling)
+        log.warning("agentx_checkpoint: %s ran under the checkpoint and it ruled on none", request_id)
+    return ruling
 
 
 def _unlike_consistency(result: TestResult, landed: Path) -> str | None:

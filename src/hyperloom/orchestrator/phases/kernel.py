@@ -35,7 +35,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     LaneRunFields,
 )
 from ..actions.stop_attribution import stopped_by_the_run_class
-from ..state.analysis_failures import analysis_skip_reason, remembered_trace_failure
+from ..state.analysis_failures import analysis_skip_reason, no_gpu_trace_reason, remembered_trace_failure
 from ..state.task_registry import TERMINAL_STATES, TaskNotFound, TaskSpec
 from ..bus.message_bus import Message
 from ..kernel import kernel_decisions
@@ -1091,7 +1091,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
     def _needs_roofline_for_watermark(self) -> bool:
         """True iff projected tput crossed the watermark over ``last_roofline_tput`` (False until PRELUDE roofline ran, or while auto_roofline_pending_task_id is in-flight)."""
         state = self.shared_state
-        if str(state.gpu_trace_unsupported_reason or ""):
+        if no_gpu_trace_reason(state):
             return False
         try:
             last_rl = float(state.last_roofline_tput or 0.0)

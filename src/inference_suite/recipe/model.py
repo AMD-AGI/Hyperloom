@@ -118,6 +118,11 @@ ATOM_ENTRYPOINT = _entrypoint(Framework.ATOM)
 ATOM_RUNNER_OWNED = _runner_owned(Framework.ATOM)
 ATOM_TOPOLOGY = TopologySpelling(tp=("-tp", _TENSOR_PARALLEL_SIZE), ep_switch=("--enable-expert-parallel",))
 
+LLAMACPP_ENTRYPOINT = _entrypoint(Framework.LLAMACPP)
+LLAMACPP_RUNNER_OWNED = _runner_owned(Framework.LLAMACPP)
+#: llama-server spreads one replica's layers over every card it sees and has no TP size, so every launch reads tp 1.
+LLAMACPP_TOPOLOGY = TopologySpelling(tp=())
+
 
 def boards_interchangeable(board: str, other: str) -> bool:
     """Whether a launch tuned on ``other`` runs as tuned on ``board``: the same architecture and HBM capacity."""
@@ -359,6 +364,9 @@ __all__ = [
     "ApiResponse",
     "InferencexSelection",
     "InferencexSnapshot",
+    "LLAMACPP_ENTRYPOINT",
+    "LLAMACPP_RUNNER_OWNED",
+    "LLAMACPP_TOPOLOGY",
     "RecipeSourceError",
     "RepoBundle",
     "SGLANG_ENTRYPOINT",

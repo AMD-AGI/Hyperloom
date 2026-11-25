@@ -11,7 +11,7 @@ import pytest
 
 from hyperloom.orchestrator.collaborator import OrchestrationPrompt
 from hyperloom.orchestrator.phases import machine_state as ps
-from hyperloom.orchestrator.roles import MockBackend, MockTurn, ScriptedPlan
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 
 from .conftest import make_coordinator
 

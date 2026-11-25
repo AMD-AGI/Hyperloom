@@ -330,7 +330,6 @@ _ORCHESTRATION_ADVISORIES = (
     ("=== Current gaps ===", "shared_state", "to_gaps_summary"),
     (None, "conversation", "_specialist_findings_block"),
     ("=== External target gap (advisory) ===", "conversation", "target_gap_advisory_block"),
-    ("=== Specialist proposal scores (advisory) ===", "shared_state", "to_proposal_scores_summary"),
     ("=== Priors-match (advisory ordering) ===", "conversation", "_priors_match_advisory_block"),
     ("=== Intervention mix (telemetry) ===", "shared_state", "to_intervention_mix_summary"),
     ("=== Bottleneck redirect (advisory) ===", "conversation", "_bottleneck_redirect_advisory_block"),

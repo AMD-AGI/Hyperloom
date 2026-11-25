@@ -53,14 +53,6 @@ from hyperloom_common.llm.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
 )
-from hyperloom.common.outside_facts.image_check import (
-    MODE_ENV,
-    FactResult,
-    ImageCheckFailed,
-    ImageCheckMode,
-    ImageCheckReport,
-)
-from hyperloom.common.outside_facts.image_check_eval import Status
 from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, TOTAL_TOKEN_THROUGHPUT
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
@@ -326,6 +318,26 @@ def test_a_manifest_written_before_the_objective_was_recorded_reads_back_on_p50_
     _write(tmp_path / "MB-manifest.json", document)
 
     assert read_manifest(tmp_path / "MB-manifest.json").settings.workload.metric == GRADED_INTVTY_P50
+
+
+def test_a_run_records_the_prompt_dataset_exported_when_it_starts_and_an_agentx_one_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATASET_PATH", " /data/prompts.jsonl ")
+
+    assert _settings().workload.inferencex == InferenceXShape(1024, 512, "/data/prompts.jsonl")
+    assert _settings(workload=AGENTX_ARGS).workload.inferencex is None
+
+
+def test_a_manifest_written_before_the_prompt_dataset_was_recorded_reads_back_on_random_prompts(tmp_path: Path) -> None:
+    settings = _settings()
+    document = encode(
+        SessionManifest(code_version(), dict(rule_pack_identity()), "MB-x", 0.0, 3600.0, settings, "", {})
+    )
+    del document["settings"]["workload"]["inferencex"]["dataset"]
+    _write(tmp_path / "MB-manifest.json", document)
+
+    assert read_manifest(tmp_path / "MB-manifest.json").settings.workload.inferencex == InferenceXShape(1024, 512)
 
 
 def test_run_help_names_the_ep_option(capsys: pytest.CaptureFixture[str]) -> None:
@@ -854,6 +866,7 @@ def eight_cards(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
     monkeypatch.delenv(AGENTX_ENV, raising=False)
     monkeypatch.delenv(BENCHMARK_CONFIG_ENV, raising=False)
+    monkeypatch.delenv("DATASET_PATH", raising=False)
 
 
 @pytest.mark.parametrize(
@@ -1075,40 +1088,6 @@ def test_a_canonical_measurement_that_cannot_be_taken_fails_like_the_other_start
     )
     session_dir = Path(captured.out.strip())
     assert session_dir.is_dir() and tmp_path in session_dir.parents
-
-
-@pytest.mark.usefixtures("ready_environment", "agent_cli")
-def test_a_strict_image_check_that_fails_is_refused_like_the_other_start_up_refusals(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    failing = FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone")
-    report = ImageCheckReport(ImageCheckMode.STRICT, rule_pack_identity(), "", {}, (failing,))
-
-    def session_refused(settings: RunSettings, peer_factory: PeerFactory, services: object, **_: object) -> int:
-        raise ImageCheckFailed(report)
-
-    monkeypatch.setattr(cli, "run_session", session_refused)
-
-    assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
-
-    expected = f"image check failed under {MODE_ENV}=strict: sglang.renamed-flag"
-    assert capsys.readouterr().err == f"{cli_options.PROG}: cannot run a session, {expected}\n"
-
-
-@pytest.mark.usefixtures("ready_environment", "agent_cli")
-def test_an_image_check_mode_that_is_no_mode_exits_two_before_creating_anything(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv(MODE_ENV, "loud")
-
-    with pytest.raises(SystemExit) as exited:
-        cli.main(["run", *WORKLOAD_ARGS])
-
-    assert exited.value.code == cli.EXIT_USAGE
-    assert f"{MODE_ENV}='loud'" in capsys.readouterr().err
-    assert not any(tmp_path.iterdir())
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
@@ -2329,28 +2308,6 @@ def test_a_restart_that_cannot_read_the_earlier_session_ends_the_run_for_good_na
     assert document["error"] == f"[Errno 13] Permission denied: '{report}'"
     logged = [record.exc_info[1] for record in caplog.records if record.exc_info]
     assert [type(exc) for exc in logged] == [PermissionError], "the traceback names where the file was met"
-
-
-@pytest.mark.usefixtures("ready_environment", "agent_cli")
-def test_a_strict_image_check_that_fails_ends_the_hosted_run_for_good_naming_it(
-    host: Host, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    failing = FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone")
-    report = ImageCheckReport(ImageCheckMode.STRICT, rule_pack_identity(), "", {}, (failing,))
-
-    def session_refused(
-        settings: RunSettings, peer_factory: object, services: object, report_root: Callable, *_: object
-    ) -> int:
-        report_root(create_session(host.workspace, settings.workload.model_basename, Clock()).root)
-        raise ImageCheckFailed(report)
-
-    monkeypatch.setattr(cli, "run_session", session_refused)
-
-    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
-
-    document = host.exit_document()
-    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
-    assert f"image check failed under {MODE_ENV}=strict: sglang.renamed-flag" in str(document["error"])
 
 
 @pytest.mark.usefixtures("ready_environment")

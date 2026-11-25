@@ -140,7 +140,7 @@ class _StubTask:
 )
 async def test_dispatch_tells_the_specialist_the_session_model(tmp_path, payload: dict[str, Any]):
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
-    from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 
     state = SharedState(model_name=_NAME, model_path=_PATH, model_info={**_SUMMARY, "mtp_layers": 2})
     state.upsert_gap({"canonical_id": "gap.scout", "domain_hint": "speculative_decoding"})

@@ -10,10 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.roles import (
-    MockBackend,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.actions.executors import report_executor
 from hyperloom.orchestrator.loop import coordinator as coordinator_mod
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions

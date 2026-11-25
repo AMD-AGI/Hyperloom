@@ -195,6 +195,7 @@ class ScoringMixin:
                 baseline_case_times,
                 self._baseline_case_times or baseline_case_times,
                 unscored_cases,
+                aggregate=self.ic.case_aggregate,
             )
         except CaseCoverageError as error:
             print(f"  Baseline bench FAILED: {error}")
@@ -338,6 +339,7 @@ class ScoringMixin:
                 self._best_case_times,
                 self._baseline_case_times,
                 self._unscored_cases,
+                aggregate=self.ic.case_aggregate,
             )
             or 1.0
         )
@@ -366,6 +368,7 @@ class ScoringMixin:
                 bench_result,
                 self._baseline_case_times,
                 expected_measurements=KEEP_MEASUREMENT_COUNT,
+                aggregate=self.ic.case_aggregate,
             )
         except CaseCoverageError as error:
             bench_result["success"] = False
@@ -410,7 +413,7 @@ class ScoringMixin:
             for case_id, times in _measurement_case_times(bench_result).items()
             if case_id in baseline
         }
-        base = attribute_sigma(series, baseline)
+        base = attribute_sigma(series, baseline, self.ic.case_aggregate)
         if base is None:
             return replace(idle, detail="per-case times resolve no spread to attribute")
         if base.dominant_case is None:
@@ -491,7 +494,7 @@ class ScoringMixin:
                 break
             for case_id in series:
                 series[case_id].extend(extra_series[case_id])
-            refreshed = attribute_sigma(series, baseline)
+            refreshed = attribute_sigma(series, baseline, self.ic.case_aggregate)
             if refreshed is None:
                 stopped = "re-measure produced no usable spread"
                 break

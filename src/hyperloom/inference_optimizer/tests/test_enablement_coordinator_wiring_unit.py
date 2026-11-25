@@ -1361,7 +1361,7 @@ def test_read_source_context_empty_on_blank_file(tmp_path):
 
 def _make_coord_with_phase(session_dir) -> "Coordinator":
     """Build a minimal Coordinator for authored-lane tests."""
-    from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
     plan = ScriptedPlan(

@@ -1183,50 +1183,6 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
     assert gain["metadata"]["operation_kind"] == "kernel_opt"
 
 
-def test_flush_emits_proposal_score_calibration(tmp_path, monkeypatch):
-    _enable_env(monkeypatch)
-    client = _FakeClient()
-    _install_fake_sdk(monkeypatch, client)
-    sd = _seed_trace_dir(tmp_path)
-    dtrace = sd / "reports" / "trace" / "decision_trace.jsonl"
-    dtrace.write_text(
-        json.dumps(
-            {
-                "decision_id": "d4",
-                "decision": {
-                    "change": "tp_sweep",
-                    "component": "specialist:perf",
-                    "operation_kind": "param",
-                    "outcome": "KEEP",
-                    "gain_pct": 8.0,
-                    "task_id": "spec-1",
-                    "variant_name": "v1",
-                    "proposal_scores": [
-                        {"rater": "gpt-5.5", "score": 7.0, "reason": "ok"},
-                        {"rater": "claude", "score": 9.0, "reason": "good"},
-                    ],
-                },
-                "phase": "EXPLORE",
-                "tick": 5,
-                "ts": "2026-06-09T16:00:00Z",
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    em = lfe.LangfuseEmitter(sd)
-    # Seed a specialist agent span so the decision step span has a parent.
-    em.record_llm_call(_llm_row(phase="EXPLORE", component="specialist", role="specialist"))
-    em.flush_session()
-    names = sorted(s["name"] for s in client.observation_scores)
-    assert "proposal_score" in names
-    pscore = [s for s in client.observation_scores if s["name"] == "proposal_score"][0]
-    assert pscore["value"] == 8.0  # mean(7, 9)
-    assert pscore["data_type"] == "NUMERIC"
-    # Realized gain emitted alongside for calibration error.
-    assert "gain_pct" in names
-
-
 def test_flush_emits_predicted_gain_calibration(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()
@@ -1797,9 +1753,9 @@ def test_pair_key_matches_token_and_text_halves_of_one_call():
 def test_pair_key_distinguishes_concurrent_models_same_second():
     """Concurrent models land in the same UTC second with identical keys except model -> must not collide (usage of model A pairing with model B's text)."""
     base = {
-        "component": "proposal_scorer",
+        "component": "critic",
         "tick": None,
-        "role": "proposal_scorer",
+        "role": "critic",
         "task_id": None,
         "turn": None,
         "ts": "2026-06-11T10:00:00.300Z",
@@ -1809,11 +1765,11 @@ def test_pair_key_distinguishes_concurrent_models_same_second():
     assert lfmap.pair_key(a) != lfmap.pair_key(b)
 
 
-def test_pair_key_scorer_token_and_text_pair_when_roles_match():
-    """The scorer's token row and conversation row must share role+model so their pair_key matches."""
+def test_pair_key_token_and_text_pair_when_roles_match():
+    """A call's token row and conversation row must share role+model so their pair_key matches."""
     token = {
-        "component": "proposal_scorer",
-        "role": "proposal_scorer",
+        "component": "critic",
+        "role": "critic",
         "model": "qwen-32b",
         "ts": "2026-06-11T10:00:00.100Z",
     }

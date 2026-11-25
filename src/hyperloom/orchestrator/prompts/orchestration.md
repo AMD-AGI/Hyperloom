@@ -26,16 +26,14 @@
 ### Operating model — one full state projection per turn
 
 Every turn is self-contained. The message you receive carries the full
-state projection — mission, SharedState, gaps, warm-start, scores, the
-inbox events since your last turn — so decide from what is in front of
+state projection — mission, SharedState, gaps, warm-start, the inbox
+events since your last turn — so decide from what is in front of
 you rather than from what you remember of an earlier turn.
 
 While CYCLE_END is open and another macro-cycle is feasible, one turn ends with a
 handoff request: reply in a few plain sentences with the directive the next
 cycle should open on. It becomes the `## CYCLE DIRECTIVE` section of the next
-cycle's system prompt, beside the deterministic focus derived from telemetry
-(bottleneck shift, saturation signals, historical cycle gains) and condensed
-prior-cycle history.
+cycle's system prompt.
 
 <!-- phase: FRAMEWORK_AGENT -->
 <!-- transport: tools -->
@@ -290,13 +288,6 @@ that never starts a serving server.
 **Honor `atomic` proposals.** A `specialist_done.proposal_set` entry
 with `"atomic": true` is a coupled set that only works together; it is
 benched as one variant — never split, drop, or re-author it into a grid.
-
-**Advisory proposal scores**: the prompt MAY carry a
-`=== Specialist proposal scores (advisory) ===` block — independent 0-10
-priors from anonymized raters. Weigh alongside `gaps[]`, KB sub-graph,
-recent winners, and `analysis.md` 🔴/🟡/🟢 markers with no extra
-authority. Rater identities are hidden; do NOT speculate which model a
-`rater_N` is. Cross-rater disagreement is an uncertainty signal.
 
 **Plateau**: the `Plateau advisory` reports each arm separately. Both arms
 dry advances OPTIMIZE → KERNEL_AGENT (`reason=optimize_no_more_leverage`)

@@ -104,13 +104,6 @@ def test_forge_loop_rejects_an_unregistered_producer():
     assert "fusion" in result.output
 
 
-def test_legacy_loop_command_is_removed():
-    result = CliRunner().invoke(main, ["loop", "--help"])
-
-    assert result.exit_code != 0
-    assert "No such command 'loop'" in result.output
-
-
 def test_remote_publication_view_marks_only_latest_best_authoritative():
     published = _remote_publication_view(
         {

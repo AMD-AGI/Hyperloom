@@ -35,7 +35,7 @@ from hyperloom.orchestrator.lever import (
     patch_lever_kind,
     patch_owner_phase,
 )
-from ._vendor.kb_store_client import KBStoreError
+from hyperloom_common.kb_store import KBStoreError
 from .models import (
     CONFIG_SECTION,
     KERNEL_SECTION,

@@ -205,7 +205,10 @@ at every concurrency the session's InferenceX recipe publishes for its workload
 (its TP and EP, and its ISL/OSL or agentic scenario), with the session's own
 `--conc` among them. A base from `--reference-script` has no recipe points:
 give them with `--conc-sweep-concs C1,C2,...`. An AgentX point boots a server
-of its own; a fixed-length workload keeps one server per arm.
+of its own; a fixed-length workload keeps one server per arm. When either arm's
+server args cap its request slots (llama.cpp's `-np` / `--parallel`), the points
+above the larger cap are dropped, since the server only queues the rest; with
+none left the sweep is skipped (`concs_exceed_server_slots`).
 
 The sweep logs its estimated length before it starts, rewrites
 `reports/conc_sweep_summary.json` and `reports/conc_sweep_raw.csv` after every
