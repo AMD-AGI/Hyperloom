@@ -66,6 +66,7 @@ from hyperloom.measure.hosted_log import (
 )
 from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
 from hyperloom.measure.jit.prune import note_used
+from hyperloom.measure.jit import serve as jit_serve
 from hyperloom.measure.jit.publish import PublishTally, publish_contributions
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.manifest import ResultManifest
@@ -174,12 +175,13 @@ class HostedConfig:
     ``allow_unsigned`` exists so the option is stated, but is refused when true: no result is ever accepted without a
     signature that verified against the key the platform reported for its sandbox. ``rule_pack_digest`` is the digest
     of the rule pack the session reads: a result whose runner did not read a pack with that digest is rejected
-    (``rule_pack_mismatch``); ``None`` accepts any pack. ``create_envs`` is the environment every authoritative sandbox is
-    created with; the service's sealed runner template must accept those names (``accepted_envs``). ``jit_store`` is the
-    shared compiled-code cache: the compiled files a signed result says its test added are published to it
-    after the result is accepted; ``None`` publishes nothing. ``handover`` keeps the sandbox of a test whose result
-    landed until the next test's sandbox runs (:class:`~.sandboxes.Handover`), so that the cluster's queue does not
-    give its node to another job between two tests; ``None`` closes every sandbox when its test ends.
+    (``rule_pack_mismatch``); ``None`` accepts any pack. ``create_envs`` is the environment every authoritative sandbox
+    is created with; the service's sealed runner template must accept those names (``accepted_envs``). ``jit_store`` is
+    the compiled-code cache on this host, out of every sandbox's reach: runners are served from it before their server
+    starts (:mod:`~hyperloom.measure.jit.serve`) and accepted results publish to it; ``None`` for neither. ``handover``
+    keeps the sandbox of a test whose result landed until the next test's sandbox runs (:class:`~.sandboxes.Handover`),
+    so that the cluster's queue does not give its node to another job between two tests; ``None`` closes every sandbox
+    when its test ends.
     """
 
     session_dir: Path
@@ -277,6 +279,7 @@ class _Attempt:
     stop: threading.Event
     timeline: HostTimeline
     landed: bool = False  # the verified result is in the output directory
+    jit_served: bool = False  # the compiled-code cache was served to the runner (``jit.serve``)
 
 
 def _outcome(
@@ -560,9 +563,11 @@ class HostedMeasurementBackend:
         self._emit("hyperloom.measurement_started", attempt, {})
 
     def _send(self, attempt: _Attempt) -> None:
-        """Blobs, then the sheet, then the marker; every write replaces what is there, so sending again is safe."""
+        """Blobs, the cache offer, the sheet and the marker; each write replaces what is there, so a resend is safe."""
         handle = _handle(attempt.runner)
         self._upload_blobs(handle, attempt.spec)
+        if self._config.jit_store is not None:
+            handle.write_file(jit_serve.SERVING_PATH, b"")
         handle.write_file(SPEC_PATH, attempt.spec_raw)
         handle.write_file(READY_PATH, b"")
         self._append(attempt, STATE_SENT, {"submitted_unix": attempt.started_unix})
@@ -658,7 +663,7 @@ class HostedMeasurementBackend:
                 # none never will.
                 exited = _startup_exit(handle)
                 status = _read_status(handle)
-                last_output = self._report_progress(handle, call, last_output, silence)
+                last_output = self._report_progress(handle, attempt, last_output, silence)
                 unreachable_since = None
             except (SandboxGone, SandboxUnavailable):
                 unreachable_since = unreachable_since or self._clock()
@@ -701,17 +706,20 @@ class HostedMeasurementBackend:
         deadline = call.session_deadline_sec
         return deadline is not None and time.monotonic() >= deadline
 
-    def _report_progress(self, handle: Sandbox, call: TestCall, last_output: float, silence: PreReadySilence) -> float:
+    def _report_progress(self, handle: Sandbox, at: _Attempt, last_output: float, silence: PreReadySilence) -> float:
         try:
             progress = _read_json(handle, PROGRESS_PATH)
         except (ValueError, KeyError):
             return last_output
+        if (progress or {}).get("phase") == jit_serve.WAIT_PHASE and not at.jit_served:
+            at.jit_served = True  # once per attempt; a re-attached one serves again, its writes replace
+            jit_serve.serve(self._config.jit_store, handle, at.request_id)
         silence.observe(progress, self._clock())
-        self._live.note(call.task_id, progress)
-        self._seen.note(call.task_id, progress, self._clock())
+        self._live.note(at.request_id, progress)
+        self._seen.note(at.request_id, progress, self._clock())
         latest = finite_number((progress or {}).get("last_output_unix")) or 0.0
-        if latest > last_output and call.on_output is not None:
-            call.on_output()
+        if latest > last_output and at.call.on_output is not None:
+            at.call.on_output()
         return max(latest, last_output)
 
     def _lost(self, call: TestCall, runner: RunnerSandbox, detail: str) -> TestOutcome:

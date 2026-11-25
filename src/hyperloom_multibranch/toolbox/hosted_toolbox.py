@@ -254,17 +254,16 @@ class HostedOptions:
     whatever ``dev`` key the host gave. A hosted session sets it from its ``dev_leases`` and ``agents``
     (:class:`~hyperloom_multibranch.scheduling.hosted_peers.HostedSandboxes`).
     ``jit_store`` is this host's path of the shared compiled-code cache, else ``HYPERLOOM_JIT_STORE`` of the host
-    environment names it; with neither, nothing is published and the tests read whatever cache their template mounts.
-    Named, this host publishes what each accepted test compiled into it, as the local toolbox does, and prunes it as the
-    session starts (:func:`~.jit_store.session_jit_store`). The runners read it where the ``measurement`` template mounts
-    the same directory, read-only, and names it ``HYPERLOOM_JIT_CACHE``: this host cannot see that mount, so the template
-    and this option must name one directory. The directory must be this account's own, which only it can write (made
-    0700 when missing), as the runners load what it holds as compiled code; a runner reads it as this account or root.
-    A directory that is not (another account's, or below one another account can change), or one that cannot be made or
-    checked, is not refused: the session runs without publishing, logs one warning naming it and why, and records it in
-    ``jit_store.json`` of the session directory (:func:`~.jit_store.session_jit_store`). This host cannot stop the
-    runners reading what the template mounts, so the template must not mount a store this check refuses
-    (:data:`~.jit_store.REFUSED_HOSTED`).
+    environment names it; with neither, nothing is served or published and every test builds cold. Named, this host
+    serves each runner the snapshots it asks for before its server starts (:mod:`hyperloom.measure.jit.serve`),
+    publishes what each accepted test compiled into it, as the local toolbox does, and prunes it as the session starts
+    (:func:`~.jit_store.session_jit_store`). No sandbox reads the directory: it belongs on this host's own disk, where no
+    sandbox can write it (a directory a sandbox can write lets that sandbox's code put snapshots there that later tests
+    load, whatever its mode says), and the ``measurement`` template must not set ``HYPERLOOM_JIT_CACHE``. The directory
+    must be this account's own, which only it can write (made 0700 when missing). A directory that is not (another
+    account's, or below one another account can change), or one that cannot be made or checked, is not refused: the
+    session runs without the cache, logs one warning naming it and why, and records it in ``jit_store.json`` of the
+    session directory (:data:`~.jit_store.REFUSED_HOSTED`).
     """
 
     policy: QueuePolicy | None = None

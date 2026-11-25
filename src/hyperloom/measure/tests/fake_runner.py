@@ -55,7 +55,9 @@ round's slot (the directory above :data:`ROUND_DIR`), where a round the checkpoi
 signs it into the manifest as a test that compiled it would; ``fake_jit_swap: true`` changes the staged list after the
 signing, as something that can write ``/out`` could. ``fake_jit: read_only`` signs the kind as a test given the cache
 read only does (a hit, no contribution) while the same files lie staged, as the code of a test the key does not cover
-could leave them there.
+could leave them there. ``fake_jit_want: true`` asks the host for the aiter kind under :data:`JIT_KEY` as the runner does
+(:func:`hyperloom.measure.jit.serve.ask`) when the host offered the cache, reads what was served as a session does and
+lists, in :data:`JIT_RECEIVED`, whether it was offered, whether the read found a snapshot and the module's bytes.
 """
 
 from __future__ import annotations
@@ -74,8 +76,9 @@ from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure import signing
 from hyperloom.measure.attachments import place_attachments, substitute
 from hyperloom.measure.repro import REPRO_DIR, find_case, run_case
+from hyperloom.measure.jit import serve as jit_serve
 from hyperloom.measure.jit_kinds import AITER_JIT
-from hyperloom.measure.jit.store import Snapshot, StoredFile
+from hyperloom.measure.jit.store import DirJitStore, Snapshot, StoredFile
 from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
 from hyperloom.measure.runner.service import Progress
 from hyperloom.measure.local import TestCallRefused, _validate_checks
@@ -277,6 +280,22 @@ def _stage_jit(out: Path, read_only: bool = False) -> dict[str, Any]:
     return {"kinds": [kind], "builds_seen": 1, "jit_compile_sec": 3.0}
 
 
+JIT_RECEIVED = "jit_received.json"
+
+
+def _receive_jit(root: Path, inbox: Path, out: Path, progress: Progress) -> bytes:
+    """Ask the host for the aiter kind as the runner does, read what came as a session does, and say what that was."""
+    if not jit_serve.offered(inbox):
+        return json.dumps({"offered": False}).encode()
+    served, private = root / "jit-served", root / "jit-private"
+    notes = jit_serve.ask(inbox, out, [(AITER_JIT, JIT_KEY)], served, progress.phase)
+    private.mkdir()
+    fetched = DirJitStore(served).fetch(AITER_JIT, JIT_KEY, private)
+    module = private / "module_fake.so"
+    found = module.read_bytes().decode("latin-1") if module.is_file() else None
+    return json.dumps({"offered": True, "hit": fetched.snapshot is not None, "module": found, "notes": notes}).encode()
+
+
 def _timing(config: dict[str, Any]) -> dict[str, Any]:
     timing: dict[str, Any] = {
         "runner_started_unix": 1.0,
@@ -392,7 +411,13 @@ def _read_prompt_sets(spec: MeasurementSpec, root: Path) -> bytes:
 
 
 def _publish(
-    out: Path, spec: MeasurementSpec, raw: bytes, config: dict[str, Any], mode: str, read: bytes | None = None
+    out: Path,
+    spec: MeasurementSpec,
+    raw: bytes,
+    config: dict[str, Any],
+    mode: str,
+    read: bytes | None = None,
+    received: bytes | None = None,
 ) -> None:
     key = signing.load_private_key(Path(os.environ["HYPERLOOM_SIGNING_KEY_FILE"]))
     files = _write_files(out, config, mode)
@@ -401,6 +426,9 @@ def _publish(
     if read is not None:
         _atomic(out / "files" / PROMPT_SETS_READ, read)
         files[PROMPT_SETS_READ] = read
+    if received is not None:
+        _atomic(out / "files" / JIT_RECEIVED, received)
+        files[JIT_RECEIVED] = received
     if config.get("fake_repro"):
         files.update(_repro_files(spec, Path(os.environ["HYPERLOOM_SANDBOX_ROOT"]), out))
     if config.get("fake_attached_env"):
@@ -470,7 +498,8 @@ def main() -> int:
                 state = {"state": "failed", "error_class": "spec_rejected", "message": str(exc)}
                 _atomic(out / "status.json", json.dumps(state).encode())
                 return 0
-        _publish(out, spec, raw, config, mode, read)
+        received = _receive_jit(root, inbox, out, progress) if config.get("fake_jit_want") else None
+        _publish(out, spec, raw, config, mode, read, received)
     return 0
 
 

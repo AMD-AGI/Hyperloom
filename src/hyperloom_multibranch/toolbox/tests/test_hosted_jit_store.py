@@ -4,11 +4,10 @@
 """The shared compiled-code cache of the hosted toolbox: the directory named, the store it publishes accepted tests'
 compiles into, and the prune at the session's start.
 
-The runners read the same directory where their template mounts it; this host cannot see that mount, so what is proved
-here is the host's side: which directory it publishes to, that it publishes nothing to one another account could change
-and goes on, that a
-verified result's compiles reach it through the hosted executor and backend, and that its result records the cache
-states.
+No runner reads the directory: the host serves the runners from it (``hyperloom.measure.jit.serve``, proved in the
+measure package). What is proved here is the toolbox's side: which directory it serves and publishes from, that it uses
+none another account could change and goes on, that a verified result's compiles reach it through the hosted executor
+and backend, and that its result records the cache states.
 """
 
 from __future__ import annotations
@@ -87,11 +86,11 @@ def test_a_store_its_group_or_others_can_write_is_not_published_to_and_the_sessi
 
     toolbox = _toolbox(None, tmp_path)
 
-    assert toolbox.backend._config.jit_store is None, "nothing is published"
+    assert toolbox.backend._config.jit_store is None, "nothing is served or published"
     assert stat.S_IMODE(store.stat().st_mode) == mode and not any(store.iterdir()), "and it is left as it is"
     (warning,) = [record.getMessage() for record in caplog.records if "jit cache" in record.getMessage()]
     assert f"runs without the compiled-code cache {store}" in warning and "only it can write" in warning
-    assert "the template must not mount a refused store" in warning, "the host cannot stop the runners reading it"
+    assert "neither serves it to the runners nor publishes to it" in warning
     note = json.loads((tmp_path / "session" / JIT_STORE_NOTE).read_text())
     assert note["store"] == str(store) and note["published"] is False and "only it can write" in note["reason"]
     assert note["without"] == REFUSED_HOSTED
@@ -117,7 +116,7 @@ def test_a_store_that_cannot_be_made_is_refused_like_one_the_check_refuses_and_t
 
     toolbox = _toolbox(None, tmp_path)
 
-    assert toolbox.backend._config.jit_store is None, "nothing is published"
+    assert toolbox.backend._config.jit_store is None, "nothing is served or published"
     (warning,) = [record.getMessage() for record in caplog.records if "jit cache" in record.getMessage()]
     assert f"cannot be made or checked ({error.__name__}" in warning and REFUSED_HOSTED in warning
     note = json.loads((tmp_path / "session" / JIT_STORE_NOTE).read_text())

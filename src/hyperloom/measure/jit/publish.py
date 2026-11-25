@@ -7,6 +7,10 @@ The runner stages a contribution under ``/out/jit-cache/<kind>/`` and signs the 
 result. Only the host, after it has verified that signature, brings the staged files over and adds them to the store: the
 process that runs next to the server (and the AI that can reach it) never writes the cache. A contribution that does not
 fetch, or is not the list the result signed, is skipped with a note; publishing never fails a result that was accepted.
+
+What the sandbox left there is untrusted: a staged list or blob is fetched only when the sandbox's listing shows a regular
+file (no link) of the size the signed list allows, and a copy that brings another byte count is refused; the store then
+proves every blob against its hash before it keeps it.
 """
 
 from __future__ import annotations
@@ -20,13 +24,14 @@ from hyperloom.measure.jit_kinds import kind_named
 from hyperloom.measure.jit.store import (
     BLOBS_DIR,
     MANIFEST_NAME,
+    MAX_MANIFEST_BYTES,
     DirJitStore,
     JitStoreError,
     Snapshot,
     read_staged_snapshot,
 )
 from hyperloom.measure.manifest import JitCacheFacts, JitContribution
-from hyperloom.sandbox.socket import Sandbox, SandboxError
+from hyperloom.sandbox.socket import DirEntry, Sandbox, SandboxError
 
 __all__ = ["STAGING_PATH", "PublishTally", "publish_contributions"]
 
@@ -40,8 +45,7 @@ _HIT = "hit"
 
 class PublishTally:
     """How many contributions a session published and how many of its tests found the cache warm, so that a session that
-    only ever published says, as it closes, that its runners may not read the directory it publishes to: nothing on the
-    host can see the template's mount of it."""
+    only ever published says, as it closes, that its runners may not have been served what it publishes."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -61,7 +65,8 @@ class PublishTally:
         if published and not hits:
             log.warning(
                 "jit cache: this session published %d contribution(s) to %s and none of its tests found the cache warm; "
-                "check that the runners' template mounts that directory as their cache and can read it",
+                "check the host's log for what each test was served (a measurement template must not set "
+                "HYPERLOOM_JIT_CACHE: its runners then read that directory instead of asking this host)",
                 published,
                 store.root,
             )
@@ -88,13 +93,43 @@ def _publish_kind(store: DirJitStore, handle: Sandbox, kind: str, signed: JitCon
     staged = Path(tempfile.mkdtemp(prefix=f"{kind}-", dir=scratch))
     source = f"{STAGING_PATH}/{kind}"
     (staged / BLOBS_DIR).mkdir()
-    (staged / MANIFEST_NAME).write_bytes(handle.read_file(f"{source}/{MANIFEST_NAME}"))
+    _sized(handle, source, MANIFEST_NAME, None)
+    raw = handle.read_file(f"{source}/{MANIFEST_NAME}")
+    if len(raw) > MAX_MANIFEST_BYTES:
+        raise JitStoreError("the staged list is larger than a snapshot list may be")
+    (staged / MANIFEST_NAME).write_bytes(raw)
     snapshot = _verified_snapshot(staged, signed.sha256)
     staged_by_runner = _staged_by_runner(store, snapshot)
-    for relative, entry in snapshot.files.items():
-        if relative in staged_by_runner or not store.holds(entry.sha256):
-            handle.copy_out(f"{source}/{BLOBS_DIR}/{entry.sha256}", staged / BLOBS_DIR / entry.sha256)
+    wanted = {
+        entry.sha256: entry.size
+        for relative, entry in snapshot.files.items()
+        if relative in staged_by_runner or not store.holds(entry.sha256)
+    }
+    if wanted:
+        blobs = _listing(handle, f"{source}/{BLOBS_DIR}")
+        for sha256, size in sorted(wanted.items()):
+            _sized_entry(blobs.get(sha256), sha256, size)
+            if handle.copy_out(f"{source}/{BLOBS_DIR}/{sha256}", staged / BLOBS_DIR / sha256) != size:
+                raise JitStoreError(f"the staged blob {sha256[:12]} did not come over as {size} bytes")
     store.publish(staged, signed.sha256)
+
+
+def _listing(handle: Sandbox, directory: str) -> dict[str, DirEntry]:
+    return {entry.name: entry for entry in handle.list_entries(directory)}
+
+
+def _sized(handle: Sandbox, directory: str, name: str, size: int | None) -> None:
+    """Refuse ``name`` below ``directory`` unless the sandbox lists it as a regular file (of ``size`` bytes, when given;
+    else within the bound of a snapshot list)."""
+    _sized_entry(_listing(handle, directory).get(name), name, size)
+
+
+def _sized_entry(entry: DirEntry | None, shown: str, size: int | None) -> None:
+    if entry is None or entry.kind != "file":
+        raise JitStoreError(f"the staged {shown[:12]} is not a regular file")
+    wrong = entry.size > MAX_MANIFEST_BYTES if size is None else entry.size != size
+    if wrong:
+        raise JitStoreError(f"the staged {shown[:12]} is not of the size its list allows")
 
 
 def _staged_by_runner(store: DirJitStore, snapshot: Snapshot) -> frozenset[str]:

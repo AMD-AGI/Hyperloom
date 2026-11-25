@@ -198,6 +198,11 @@ class JitCacheSession:
         given = [seeded.plan.given.names for seeded in self._kinds.values() if seeded.plan.given is not None]
         return self.touched - frozenset().union(*given)
 
+    @property
+    def wanted(self) -> tuple[tuple[CacheKind, str], ...]:
+        """The kind and key of every kind this test reads, as a runner asks its host to serve them."""
+        return tuple((seeded.plan.kind, seeded.plan.key) for seeded in self._kinds.values())
+
     def environment(self) -> dict[str, str]:
         """The variables that point each compiler at this test's own directory for its kind."""
         return {seeded.plan.kind.env_var: str(self._root(seeded.plan.kind)) for seeded in self._kinds.values()}
