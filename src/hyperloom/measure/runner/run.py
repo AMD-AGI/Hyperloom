@@ -76,6 +76,7 @@ from hyperloom.measure.farm import (
 )
 from hyperloom.measure.runner.jit import (
     JIT_CACHE_ENV,
+    KEY_INPUTS_NOTE,
     STAGING_DIR,
     ColdStart,
     Surroundings,
@@ -788,7 +789,8 @@ def run(
             return 1
         finally:
             _drop_compile_dir(ctx)
-        write_status(out_dir, state="succeeded", message=join_notes(ctx.notes))
+        shown = [note for note in ctx.notes if not note.startswith(KEY_INPUTS_NOTE)]
+        write_status(out_dir, state="succeeded", message=join_notes(shown))
     return 0
 
 

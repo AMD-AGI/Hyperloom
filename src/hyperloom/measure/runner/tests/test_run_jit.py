@@ -17,6 +17,7 @@ import dataclasses
 import hashlib
 import io
 import json
+import logging
 import os
 import shutil
 import sys
@@ -530,6 +531,24 @@ def test_a_variable_the_build_reads_changes_the_key_and_one_it_never_reads_does_
 
     assert _keys(unrelated) == _keys(base), "a call-time switch only chooses among modules"
     assert _keys(build)["aiter_jit"] != _keys(base)["aiter_jit"] and _keys(build)["triton"] == _keys(base)["triton"]
+
+
+def test_the_aiter_keys_inputs_are_noted_and_logged_by_name_and_short_hash_never_by_value(
+    rig, caplog, tmp_path
+) -> None:
+    secret = "do-not-print-0"
+    table = tmp_path / "table.csv"
+    table.write_text("M,N,K\n1,2,3\n")
+    with caplog.at_level(logging.WARNING, logger="hyperloom.measure.runner.jit"):
+        manifest, status, _ = rig.run("noted", _arm(rig, envs={"ENABLE_CK": secret, TABLE_VARIABLE: str(table)}))
+
+    [note] = [note for note in manifest.notes if note.startswith("jit cache: aiter key ")]
+    short = hashlib.sha256(secret.encode()).hexdigest()[:12]
+    assert note.startswith(f"jit cache: aiter key {_keys(manifest)['aiter_jit'][:12]} inputs: machine=image:")
+    assert f"ENABLE_CK={short}" in note and f"{TABLE_VARIABLE}=" in note and "tree=" in note and "overlay:" in note
+    assert secret not in note and str(table) not in note
+    assert note in caplog.messages, "the runner's log carries the same line"
+    assert secret not in caplog.text and secret not in status["message"]
 
 
 def test_a_framework_patch_that_can_change_the_build_from_inside_the_server_is_part_of_the_key(rig) -> None:
