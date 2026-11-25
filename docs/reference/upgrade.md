@@ -186,6 +186,15 @@ Both lineages' shapes are in
 * `POST /v1/read` refuses the former `decision` and `context` fields with 400.
   A caller outside Hyperloom sends `signals` instead; see
   [`POST /v1/read`](experience-kb.md#post-v1read).
+* A service behind a `HYPERLOOM_KB_URL` that is not loopback is one Hyperloom
+  does not restart: upgrade it before a client of this version reads from it.
+  A service of an earlier release refuses each such read with 400
+  (`unknown request fields: signals`), and a `hyperloom optimize` session
+  turns its reads off after three refusals and runs without recalled
+  Experiences. The next optimize launch restarts a loopback service itself;
+  a multi-branch launch leaves one that runs other code serving (`ensure --no-restart`),
+  so run an optimize launch or `experience_kb_service ensure` first, or every
+  read of the session is refused.
 
 ---
 
