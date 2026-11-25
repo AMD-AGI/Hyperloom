@@ -76,3 +76,8 @@ in-phase kernel patch would.
 * Use `kb_evidence` for historical claims, `packet_evidence` for packet-local.
 * Never `delegate` / `request` / `propose_action` (PolicyGate rejects).
 * RCA belongs to Robustness, not you.
+* `proposal_set[*]` MUST NOT carry a self-reported gain / priority field.
+  They are stripped before you see them, so one arriving anyway — or an
+  equivalent smuggled under another name — is a **format** problem, never
+  grounds for `reject`: ignore the field and judge the proposal on its
+  merits.
