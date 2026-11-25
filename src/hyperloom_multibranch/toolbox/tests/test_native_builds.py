@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,12 +37,11 @@ from hyperloom.measure.jit.native.trust import Signer, Trust, TrustedKey
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.runner.native.aiter_modules import AiterModules
 from hyperloom.measure.runner.native.builder import BuildMachine
-from hyperloom.measure.runner.native.isolated import BUILD_CPUS_ENV, STAGED_FILE, IsolatedBuilds, Isolation, Unisolated
+from hyperloom.measure.runner.native.isolated import STAGED_FILE, IsolatedBuilds, Isolation, Unisolated
 from hyperloom.measure.runner.native.isolated import staged_record
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
 from hyperloom.measure.runner.native.service import Ensured
 from hyperloom.measure.spec import Environment
-from hyperloom.measure.tests._native_llamacpp import llama_checkout
 from hyperloom.measure.tests._recipes import COMMIT, IMAGE, git_patch, put_patch
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox import native_builds as native_builds_module
@@ -470,21 +468,6 @@ def test_a_configured_store_gives_the_driver_the_plan_and_the_runners_the_store(
     compiler = planner.with_native(native.session.planner, native.session.modules)._compiler.compiler
     assert compiler.native is native.session.planner, "acceptance plans with the session's planner"
     assert isinstance(compiler.modules, AiterModules), "aiter's modules build on CPU"
-
-
-def test_the_build_cpus_are_read_only_where_the_session_builds_a_pinned_checkout(tmp_path: Path) -> None:
-    environ = {**_configured(tmp_path), BUILD_CPUS_ENV: "all"}
-    blobs = LocalBlobStore(tmp_path / "blobs")
-
-    other = native_builds(environ, blobs, IMAGE)
-
-    assert other is not None and other.session.planner.site.build_cpus == "", "not read: its value refuses nothing"
-    pinned = {**environ, "FRAMEWORK_REPO_PATH": str(llama_checkout(tmp_path / "llama.cpp"))}
-    with pytest.raises(BuildStoreConfigError, match="HYPERLOOM_BUILD_CPUS: 'all' is not a CPU list"):
-        native_builds(pinned, blobs, IMAGE)
-    own = str(min(os.sched_getaffinity(0)))
-    native = native_builds({**pinned, BUILD_CPUS_ENV: own}, blobs, IMAGE)
-    assert native is not None and native.session.planner.site.build_cpus == own
 
 
 def test_a_configured_store_checks_the_host_with_what_it_was_given_and_refuses_with_its_answer(

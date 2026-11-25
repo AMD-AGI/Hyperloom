@@ -22,9 +22,8 @@ reads. So it also needs:
 - ``HYPERLOOM_BUILDER_IMAGE`` (the active image when unset): the digest of the image the build runs in;
 - ``HYPERLOOM_BUILD_SGLANG_REF`` (unset when the image names its own): the image's sglang commit, a full commit id, for
   an image that names none (``build_setup --sglang-ref`` records it);
-- ``HYPERLOOM_BUILD_CPUS`` (any when unset): the CPUs a pinned checkout's compile is pinned to, kept apart from the
-  ones the measured servers run on (:func:`~hyperloom.measure.runner.native.isolated.build_cpus`); read only where the
-  session builds a pinned checkout.
+- ``HYPERLOOM_BUILD_CPUS`` (any when unset): the CPUs every compile is pinned to, kept apart from the ones the measured
+  servers run on (:func:`~hyperloom.measure.runner.native.isolated.build_cpus`).
 
 A store and trust given without any of the four required ones refuse the build of the toolbox, naming the variable, and
 so does a host that is not ready for them (:func:`~hyperloom_multibranch.toolbox.build_preflight.build_preflight`;
@@ -59,7 +58,7 @@ from hyperloom.measure.runner.native.aiter_modules import AITER_COMPONENT, aiter
 from hyperloom.measure.runner.native.builder import BUILD_PYTHON_ENV, BuildMachine
 from hyperloom.measure.runner.native.isolated import Isolation, Unisolated, build_cpus, local_isolation
 from hyperloom.measure.runner.native.planning import NativeSite
-from hyperloom.measure.runner.native.recipes import CommitSource, NativeRecipe, native_recipes
+from hyperloom.measure.runner.native.recipes import native_recipes
 from hyperloom.measure.runner.native.session import NativeBuildSession, open_session, pinned_checkouts
 from hyperloom_multibranch.toolbox.build_preflight import (
     FULL_COMMIT,
@@ -160,8 +159,8 @@ def native_builds(
 
     Raises:
         BuildStoreConfigError: The store is half configured, its trust or signing key cannot be read, a variable the
-            service needs is not set, the sglang commit it names is not a full commit id, or the session builds a
-            pinned checkout and the build CPUs it names are not a CPU list.
+            service needs is not set, the sglang commit it names is not a full commit id, or the build CPUs it names are
+            not a CPU list.
     """
     store = store_from_environment(environ)
     if store is None:
@@ -180,22 +179,15 @@ def native_builds(
     runner_envs = {BUILD_STORE_ENV: environ[BUILD_STORE_ENV].strip(), BUILD_TRUST_ENV: environ[BUILD_TRUST_ENV].strip()}
     shared = (Path(runner_envs[BUILD_STORE_ENV]), Path(runner_envs[BUILD_TRUST_ENV]))
     confinement.PRIVATE_PATHS.add(shared[1], "the native build store's trust file")
-    recipes, named = native_recipes(), named_commits(environ)
-    preflight = PreflightSite(*shared, key, sources, image_root, machine.python, named)
+    preflight = PreflightSite(*shared, key, sources, image_root, machine.python, named_commits(environ))
     commits = {up.component: up.ref for up in build_preflight(preflight)}
-    site = NativeSite(machine, recipes, sources, image_root, commits, _build_cpus(environ, recipes, named))
+    recipes = native_recipes()
+    site = NativeSite(machine, recipes, sources, image_root, commits, build_cpus(environ))
     session = open_session(store, signer, site, blobs, isolation)
     built = {**recipes, AITER_COMPONENT: aiter_module_recipe()}
     build_site = BuildSite(built)
     driver = StoreBuildDriver(store, signer, build_site, compiled_needs, session.runner)
     return NativeBuilds(driver, session, runner_envs)
-
-
-def _build_cpus(environ: Mapping[str, str], recipes: Mapping[str, NativeRecipe], named: Mapping[str, str]) -> str:
-    """``HYPERLOOM_BUILD_CPUS`` where the session builds a pinned checkout (one of ``named``); any other session does
-    not read it, so its value neither pins a compile nor refuses the session."""
-    pinned = (recipes[component].commit_source for component in named if component in recipes)
-    return build_cpus(environ) if CommitSource.PINNED_CHECKOUT in pinned else ""
 
 
 def with_native_plan(acceptance: AcceptanceSetup, native: NativeBuilds | None) -> AcceptanceSetup:
