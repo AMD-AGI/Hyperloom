@@ -51,7 +51,7 @@ from .subprocess_ import SpecialistSubprocessConfig, SpecialistSubprocessDispatc
 from .subprocess_types import UNBOUNDED_REAP_CAP_SEC, SpecialistSpawn, SpecialistSubprocessResult
 from .worktrees import link_worktree
 from .patch_claims import grounding_explicit_root, patch_path_within_bases, resolve_claimed_patch, sibling_checkouts
-from . import patch_safety as _patch_safety
+from . import model_dirs, option_reviews, patch_safety as _patch_safety
 from .profile import MODE_PATCH, SpecialistProfile, resolve_specialist_profile
 from .prompt_inputs import SpecialistPromptInputs
 from hyperloom.inference_optimizer.tree_snapshot import snapshot_repository, snapshot_tree
@@ -740,7 +740,7 @@ class SpecialistRunner:
                     gpu_ids=tuple(ctx.extra.get("gpu_ids") or ()),
                     deadline=deadline,
                     progress_cb=ctx.extra.get("specialist_progress_cb"),
-                    readable=(Path(str((ctx.task.params or {}).get("model_path") or "")),),
+                    readable=await asyncio.to_thread(model_dirs.session_reads, self.session_dir, ctx.task.params),
                 )
             )
             call_status, call_attributes = _subprocess_call_outcome(sub_result)
@@ -896,7 +896,7 @@ class SpecialistRunner:
 
         Returns the audit notes the admission leaves for the result.
         """
-        notes: list[str] = []
+        notes = option_reviews.review_notes(self.session_dir, ctx.task, prep.profile.mode, done_payload)
         # Reconcile self-reported ``patches_written`` against the filesystem:
         # keep only claimed paths that exist on disk, then union with the scan.
         # Not when a harvested diff is the whole round, or the worktree was refused.

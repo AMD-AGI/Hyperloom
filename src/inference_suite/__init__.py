@@ -37,6 +37,10 @@ site-packages lie at :data:`CLIENT_SITE_PACKAGES` below a staged root, the corpu
 
 A caller measuring a server outside a round as a fixed round does builds each pass with :func:`client_argv` under
 :func:`fixed_client_env`, the discarded :func:`warmup_pass` before the measured one.
+
+A host reads what a native server takes from the program itself: :func:`native_help` is the ``--help`` of the one a
+launch environment resolves, :func:`native_executable` the file that runs, and :func:`help_options` that text as one
+:class:`HelpOption` per entry; :class:`FrameworkProbeError` is raised when the program is not there or prints none.
 """
 
 from __future__ import annotations
@@ -47,6 +51,8 @@ from inference_suite.client_env import CLIENT_SITE_PACKAGES
 from inference_suite.compose import GPU_MASK_ENV, runner_owned
 from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.contracts.layout import RunDirError
+from inference_suite.framework_probe import FrameworkProbeError, native_executable, native_help
+from inference_suite.parser_check import HelpOption, help_options
 from inference_suite.load.fixed import ClientPass, ClientTarget, ClientTool, client_argv, fixed_client_env, warmup_pass
 from inference_suite.recipe.inferencex import AGENTX_TRACE_ENV
 from inference_suite.recipe.resolve import Miss, SourceSnapshot, resolve_base
@@ -88,8 +94,10 @@ __all__ = [
     "ClientTool",
     "ERROR_OSL_METRIC",
     "EXIT_REFUSED",
+    "FrameworkProbeError",
     "GPU_MASK_ENV",
     "GSM8K_TASK",
+    "HelpOption",
     "INFERENCEX_CLIENT_COMMIT",
     "InferencexCommitRefused",
     "LaunchQuery",
@@ -108,8 +116,11 @@ __all__ = [
     "fixed_client_env",
     "fetch_response",
     "fetch_sources",
+    "help_options",
     "inferencex_root",
     "manifest_sha256",
+    "native_executable",
+    "native_help",
     "normalised_manifest",
     "parse_inferencex_commit",
     "parse_user_file",

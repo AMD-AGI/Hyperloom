@@ -85,6 +85,9 @@ __all__ = [
     "KFD_ROOT",
     "KFD_VRAM_PREFIX",
     "LLAMACPP_BACKEND_OPS",
+    "NATIVE_AUX_MODEL_FLAGS",
+    "NATIVE_SERVING",
+    "NATIVE_TIMING_LINES",
     "PID_NAMESPACE_LINK",
     "PY_IMPORT_ERROR",
     "PY_MODULE_NOT_FOUND_ERROR",
@@ -151,6 +154,42 @@ LLAMACPP_BACKEND_OPS: Mapping[str, str] = MappingProxyType(
         "type_prefix",
         "activation_type",
     )
+)
+
+#: What a server built from its checkout gives a specialist to read, by component and role: where its options are
+#: defined and how one entry starts, the command that prints them, the words of the log lines that time a request and
+#: count its accepted draft tokens, and the host side of its decode loop.
+NATIVE_SERVING: Mapping[str, Mapping[str, str]] = MappingProxyType(
+    {
+        "llamacpp": MappingProxyType(
+            _PACK.names(
+                "native_serving_llamacpp",
+                "option_table",
+                "option_entry",
+                "help_command",
+                "request_timing",
+                "speculative_stats",
+                "host_loop",
+            )
+        )
+    }
+)
+
+#: Every spelling of the launch flag that names an auxiliary model file (a draft model, a speculative head) of a
+#: server built from its checkout, the one its help leads with first, by component.
+NATIVE_AUX_MODEL_FLAGS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {"llamacpp": tuple(_PACK.names("native_serving_llamacpp", "aux_model_flags")["aux_model_flags"].split())}
+)
+
+#: The log lines of ``NATIVE_SERVING``'s ``request_timing`` and ``speculative_stats``, in that order, as the patterns a
+#: reader takes them from a server log by, by component.
+NATIVE_TIMING_LINES: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "llamacpp": (
+            _PACK.pattern("native_request_timing_llamacpp"),
+            _PACK.pattern("native_speculative_stats_llamacpp"),
+        )
+    }
 )
 
 _meta = _PACK.names("aiter_meta_dir", "variable", "wheel_dir", "marker_dir", "install_mode_file", "develop_mode")

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from inference_suite.contracts.launch import Launch, LaunchArg, LayerSource
-from inference_suite.parser_check import RefusedFlag, _help_options, _HelpOption, check
+from inference_suite.parser_check import HelpOption, RefusedFlag, check, help_options
 from inference_suite.tests.test_compose import _llamacpp_compose
 
 _HELP = Path(__file__).parent / "fixtures" / "llamacpp" / "llama-server-help.txt"
@@ -55,15 +55,15 @@ _SMALL_HELP = """\
 
 
 def test_an_entry_is_one_option_with_every_spelling_and_its_wrapped_description_joined():
-    threads, jinja, old = _help_options(_SMALL_HELP)
+    threads, jinja, old = help_options(_SMALL_HELP)
 
-    assert threads == _HelpOption(
+    assert threads == HelpOption(
         spellings=("-t", "--threads"),
         help="N number of CPU threads to use during generation (default: -1) (env: SERVER_ARG_THREADS)",
         removed=False,
     )
     assert jinja.spellings == ("--jinja", "--no-jinja") and not jinja.removed
-    assert old == _HelpOption(("--old-size",), "N the argument has been removed. use --ctx-size", removed=True)
+    assert old == HelpOption(("--old-size",), "N the argument has been removed. use --ctx-size", removed=True)
 
 
 def test_a_launch_of_listed_flags_passes(tmp_path, launch):
