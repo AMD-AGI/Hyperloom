@@ -29,6 +29,7 @@ from hyperloom_multibranch.blackboard.rsi.archive import (
     ARCHIVED,
     SINGLE_HOST,
     SKIPPED,
+    STARTED_WITH_NO_SOURCE_CHANGES,
     WRITE_ONLY_ENV,
     ArchiveResult,
     TreeArchive,
@@ -378,6 +379,18 @@ def test_close_says_why_it_archived_nothing(
     assert archive_session(snapshot, METRIC, blocked).reason == "archive_unwritable"
     renamed = dataclasses.replace(snapshot, profile=dataclasses.replace(snapshot.profile, session_id="../escape"))
     assert archive_session(renamed, METRIC, archive).reason == "session_id_not_a_file_name"
+
+
+def test_a_session_held_to_launch_configuration_is_not_archived(snapshot: BlackboardSnapshot, tmp_path: Path) -> None:
+    """``run --no-source-changes``: the readers of the archive pool trees by workload kind, and such a session's
+    gains and stops are those of settings alone."""
+    archive = TreeArchive(tmp_path / "archive")
+    assert snapshot.profile is not None
+    held = dataclasses.replace(snapshot, profile=dataclasses.replace(snapshot.profile, source_changes=False))
+
+    assert archive_session(held, METRIC, archive) == ArchiveResult(SKIPPED, STARTED_WITH_NO_SOURCE_CHANGES, "sess-1")
+    assert not archive.holds("sess-1")
+    assert archive_session(snapshot, METRIC, archive).status == ARCHIVED
 
 
 def test_the_archive_lives_where_the_deployment_says(tmp_path: Path) -> None:

@@ -229,6 +229,11 @@ no kernel file can be carried along.
   own, and nothing keeps it from spending them on source work that cannot land.
 - **Resume:** the manifest records the setting, so `run --resume` continues the session held to it; `--resume` takes no
   `--no-source-changes` beside it.
+- **RSI archive:** the session reads the archive as any other, and CLOSE leaves nothing of it there: no search tree,
+  playbook trial, lesson, judge decision or playbook proposal, each step reported `skipped` with the reason
+  `started_with_no_source_changes`. The archive's readers pool sessions by workload kind, and such a session's gains,
+  stalls and stops are those of settings alone, so sessions that keep source changes would read it as a peer and a
+  playbook on trial would be scored on it. The Experience KB and the Recipe KB are written as for any session.
 - **Not covered:** a setting whose value names a file (a table path, an entry on `PYTHONPATH`, a template) passes as
   launch configuration. The specialists are told to test none that names a file of their own; nothing refuses one.
 

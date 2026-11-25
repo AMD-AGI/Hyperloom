@@ -29,6 +29,7 @@ from hyperloom_multibranch.blackboard.rsi.archive import (
     ARCHIVED,
     NO_ARCHIVE,
     SKIPPED,
+    STARTED_WITH_NO_SOURCE_CHANGES,
     WRITE_ONLY_ENV,
     TreeArchive,
     archive_session,
@@ -322,6 +323,35 @@ def test_a_session_stopped_before_its_baseline_writes_nothing_beside_the_archive
     assert done.archive == unarchived
     beside = ("lessons", "lesson_standings", "playbook_trial", "scheduling_replay", "specialist_outcomes")
     assert [done.steps()[name] for name in (*beside, "judge_decisions", "regression_cases")] == [unarchived] * 7
+
+
+@pytest.mark.usefixtures("unconfigured")
+def test_a_session_held_to_launch_configuration_leaves_no_tree_trial_or_lesson_in_the_archive(
+    snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
+) -> None:
+    """``run --no-source-changes``: a later session reads nothing of it as a peer's, and no playbook is tried on it."""
+    archive = archived(tmp_path / "archive")
+    assert snapshot.profile is not None
+    played = dataclasses.replace(snapshot.fingerprints[-1], policy_versions={PLAYBOOK_KEY: H0.label})
+    held = dataclasses.replace(
+        snapshot,
+        profile=dataclasses.replace(snapshot.profile, source_changes=False),
+        fingerprints=(*snapshot.fingerprints[:-1], played),
+        learnings=LEARNT,
+    )
+    transcript = tmp_path / "MB-judge.jsonl"
+    transcript.write_text(json.dumps({"at": START, "prompt": "view", "reply": "{}", "error": ""}) + "\n")
+
+    done = close_knowledge(
+        held, METRIC, targets=CloseTargets(receipts=tmp_path / "reports", judge_transcript=transcript)
+    )
+
+    assert not [path for path in archive.root.rglob("*") if path.is_file()]
+    unarchived = CloseStep(SKIPPED, STARTED_WITH_NO_SOURCE_CHANGES)
+    assert done.archive == unarchived
+    beside = ("lessons", "lesson_standings", "playbook_trial", "scheduling_replay", "specialist_outcomes")
+    assert [done.steps()[name] for name in (*beside, "judge_decisions", "regression_cases")] == [unarchived] * 7
+    assert done.stop_audit.status == WRITTEN
 
 
 @pytest.mark.usefixtures("unconfigured")

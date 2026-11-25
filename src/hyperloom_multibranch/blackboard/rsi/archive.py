@@ -633,6 +633,9 @@ class TreeArchive:
 ARCHIVED = "archived"
 SKIPPED = "skipped"
 NO_ARCHIVE = "no_archive_configured"
+#: Why a session held to launch configuration is not archived: the archive's readers pool trees by workload kind, and
+#: its gains, stalls and stops are those of settings alone.
+STARTED_WITH_NO_SOURCE_CHANGES = "started_with_no_source_changes"
 
 
 @dataclass(frozen=True)
@@ -657,13 +660,17 @@ def archive_session(
     ``budget_seconds`` is the session's configured budget; later sessions compare their progress with this one's at
     the same fraction of its budget, so it beats the default, the time the blackboard spans. ``cross_image`` names the
     Recipe KB champions PRELUDE prepared from another image, whose replays the tree marks. Nothing is archived, and the
-    result says why, when no archive is configured, the session lacks its profile or baseline, its id cannot name a
-    file, the archive already holds another tree for it, or the archive cannot be written.
+    result says why, when no archive is configured, the session was started with ``--no-source-changes``
+    (:data:`STARTED_WITH_NO_SOURCE_CHANGES`), it lacks its profile or baseline, its id cannot name a file, the archive
+    already holds another tree for it, or the archive cannot be written.
     """
 
     target = archive if archive is not None else TreeArchive.from_env()
     if target is None:
         return ArchiveResult(SKIPPED, NO_ARCHIVE)
+    profile = snapshot.profile
+    if profile is not None and not profile.source_changes:
+        return ArchiveResult(SKIPPED, STARTED_WITH_NO_SOURCE_CHANGES, profile.session_id)
     try:
         tree = tree_from_snapshot(snapshot, metric, budget_seconds=budget_seconds, cross_image=cross_image)
     except NotRecorded:
@@ -687,6 +694,7 @@ __all__ = [
     "ARCHIVED",
     "AS_OF_ENV",
     "NO_ARCHIVE",
+    "STARTED_WITH_NO_SOURCE_CHANGES",
     "ARCHIVE_ENV",
     "SINGLE_HOST",
     "SKIPPED",
