@@ -38,7 +38,7 @@ from hyperloom.measure.points import default_canonical
 from hyperloom.measure.runner.own_tmp import OWN_TMP_PREFIX
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.orchestrator.actions.executors.workload._workload_envs import default_baseline_config
-from hyperloom_multibranch.toolbox.table_hits import _copied, server_logs
+from hyperloom_multibranch.toolbox.table_hits import _copied, _logs
 from hyperloom_multibranch.toolbox.tests.gpu_session import freeze_gpu_session_base
 from hyperloom_multibranch.toolbox.tests.integration_inputs import IMAGE, baseline_recipe
 from hyperloom_multibranch.toolbox.tests.integration_rig import Specialist, Stack, Variant, build_stack
@@ -116,7 +116,7 @@ def tuned_table() -> str:
 def _lookups(landed: Path) -> list[str]:
     """The tuned-config lookups the test's servers logged, one line each, from the logs the result's table hits are
     counted in: each server's own log once, not a round's copy of a stretch of it."""
-    logs = "\n".join(p.read_text(errors="replace") for p in server_logs(landed) if not _copied(p))
+    logs = "\n".join(p.read_text(errors="replace") for p in _logs(landed) if not _copied(p))
     return [line.strip() for line in logs.splitlines() if LOOKUP.search(line)]
 
 

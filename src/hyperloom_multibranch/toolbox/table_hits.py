@@ -53,7 +53,7 @@ from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
 from hyperloom_common.jsonio import read_json_strict
 from inference_suite.contracts import Report, RunLayout
 
-__all__ = ["describe", "read_table_hits", "runtime_findings", "server_logs"]
+__all__ = ["describe", "read_table_hits", "runtime_findings"]
 
 _HIT = re.compile(AITER_TUNED_HIT)
 _HIT_MARKER = re.compile(AITER_TUNED_HIT_MARKER)
@@ -164,7 +164,7 @@ def read_table_hits(environment: object, points: Sequence[Path], output_dir: Pat
         return tuple(_unobserved(kernel, kernel_load_env(kernel), why) for kernel in environment.recipe.kernels)
     read = [_load(artifact, environment.blob_root) for artifact in environment.recipe.kernels]
     tables = [item for item in read if isinstance(item, _Table)]
-    scan = _scan(server_logs(output_dir) if tables else [], tables, _hit_logging_requested(points))
+    scan = _scan(_logs(output_dir) if tables else [], tables, _hit_logging_requested(points))
     return tuple(_verdict(item, scan) if isinstance(item, _Table) else item for item in read)
 
 
@@ -194,9 +194,7 @@ def _load(artifact: KernelArtifact, blob_root: Path) -> _Table | TableHits:
     return _Table.of(artifact, env, rows)
 
 
-def server_logs(output_dir: Path) -> list[Path]:
-    """The server logs a test landed below ``output_dir``, in the order of their paths; none where it cannot be
-    listed."""
+def _logs(output_dir: Path) -> list[Path]:
     try:
         return sorted(Path(output_dir).rglob(_SERVER_LOGS))
     except OSError:

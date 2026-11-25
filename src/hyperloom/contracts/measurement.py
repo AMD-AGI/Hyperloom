@@ -909,9 +909,6 @@ class TestResult:
     ``agentx_checkpoint`` is the ruling the AgentX checkpoint made on the test's measured round (``None`` for a test it
     did not judge, or whose window never closed); a test it stopped (``stopped``) is the candidate's failure, and its
     ``gain_pct`` covers the first ``at_sec`` of the round only.
-    ``timing_lines`` are the last lines each server log of the test timed its requests with, each led by the log's path
-    below ``output_dir``, for a specialist that cannot open the logs; none for a test whose server logs no such lines,
-    and none in a document written before they existed.
     A document written while the greedy decode pass existed may carry ``decode_outputs`` and ``decode_identity``; they
     mean nothing now and ``from_document`` leaves them out, so such a document still loads.
     """
@@ -948,7 +945,6 @@ class TestResult:
     long_context: LongContextResult | None = None
     builds: tuple[BuildCharge, ...] = ()
     agentx_checkpoint: AgentxCheckpointRuling | None = None
-    timing_lines: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.request_id, "request_id")
@@ -973,7 +969,6 @@ class TestResult:
         self._check_repro_verdict()
         _strings(self.nonfatal_warnings, "nonfatal_warnings")
         _strings(self.runtime_findings, "runtime_findings")
-        _strings(self.timing_lines, "timing_lines")
         if not isinstance(self.table_hits, tuple) or not all(isinstance(t, TableHits) for t in self.table_hits):
             raise MeasurementError(f"table_hits must be a tuple of TableHits, got {self.table_hits!r}")
         if not isinstance(self.request_classes, tuple) or not all(
@@ -1057,8 +1052,6 @@ class TestResult:
             document["builds"] = [value.to_document() for value in self.builds]
         if self.agentx_checkpoint is not None:
             document["agentx_checkpoint"] = self.agentx_checkpoint.to_document()
-        if self.timing_lines:
-            document["timing_lines"] = list(self.timing_lines)
         return document
 
     @classmethod
@@ -1099,7 +1092,6 @@ class TestResult:
             long_context=None if long_context is None else LongContextResult.from_document(long_context),
             builds=tuple(map(BuildCharge.from_document, _items(f.get("builds", ()), "builds"))),
             agentx_checkpoint=None if checkpoint is None else AgentxCheckpointRuling.from_document(checkpoint),
-            timing_lines=tuple(_items(f.get("timing_lines", ()), "timing_lines")),
         )
 
 
