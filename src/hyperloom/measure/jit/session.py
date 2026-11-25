@@ -51,7 +51,9 @@ __all__ = [
     "JitCacheSession",
     "KindPlan",
     "KindReport",
+    "files_below",
     "link_prebuilt",
+    "link_prebuilt_admitted",
 ]
 
 _TMP = ".tmp-"
@@ -127,7 +129,8 @@ class KindReport:
 
 @dataclass(frozen=True)
 class JitCacheReport:
-    """What the test did with the cache: for each kind its state, and how much aiter built while the server ran."""
+    """What the test did with the cache: for each kind its state, what aiter built while the server ran and the seconds
+    spent compiling before it was ready (aiter's builds and the monokernel plugin's FlyDSL build)."""
 
     kinds: tuple[KindReport, ...]
     builds_seen: int
@@ -216,7 +219,9 @@ class JitCacheSession:
             self._seed_kind(seeded, content)
             if seeded.plan.given is not None:
                 self._seed_given(seeded, seeded.plan.given, content)
-            if seeded.plan.prebuilt is not None:
+            if seeded.plan.prebuilt is not None and seeded.plan.kind.nested_prebuilt:
+                link_prebuilt_admitted(seeded.plan.prebuilt, content, seeded.plan.kind)
+            elif seeded.plan.prebuilt is not None:
                 link_prebuilt(seeded.plan.prebuilt, content, seeded.plan.touched)
 
     def _seed_kind(self, seeded: _Seeded, content: Path) -> None:
@@ -347,7 +352,7 @@ class JitCacheSession:
     # -- the report --------------------------------------------------------------------------------------------------
 
     def report(self, built: BuildLog) -> JitCacheReport:
-        """The states, the contributions and what the server's logs say aiter built (``built``)."""
+        """The states, the contributions and what the server's logs say was built (``built``)."""
         kinds = [
             KindReport(
                 seeded.plan.kind.name,
@@ -398,6 +403,33 @@ def link_prebuilt(prebuilt: Path, content: Path, skip: frozenset[str]) -> None:
         source = Path(os.path.realpath(Path(prebuilt) / name))
         if source.is_file() and not (content / name).exists():
             os.symlink(source, content / name)
+
+
+def link_prebuilt_admitted(prebuilt: Path, content: Path, kind: CacheKind) -> None:
+    """Link each file below ``prebuilt`` that ``kind`` admits into the same place below ``content``, unless the cache
+    already gave one there. The directories on the way are made, not linked: a compiler that adds a file beside a prebuilt
+    one (FlyDSL keeps a launch's calls in one directory) adds it to the test's own directory, never to the image's."""
+    for relative in files_below(Path(prebuilt)):
+        if not kind.admits(relative):
+            continue
+        target = content / relative
+        source = Path(os.path.realpath(Path(prebuilt) / relative))
+        if os.path.lexists(target) or not source.is_file():
+            continue
+        try:
+            os.makedirs(target.parent, mode=_DIR_MODE, exist_ok=True)
+            os.symlink(source, target)
+        except OSError:
+            continue
+
+
+def files_below(root: Path) -> list[str]:
+    """The paths of the files below ``root``, relative to it, in a stable order; none when it cannot be read."""
+    found = []
+    for directory, subdirs, names in os.walk(root, followlinks=False):
+        subdirs.sort()
+        found += [(Path(directory) / name).relative_to(root).as_posix() for name in sorted(names)]
+    return found
 
 
 def _candidates(content: Path, kind: CacheKind) -> list[str]:
