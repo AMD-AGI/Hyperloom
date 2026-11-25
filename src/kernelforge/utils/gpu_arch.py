@@ -134,7 +134,7 @@ The backend guidance and the knowledge cards are mostly written for Instinct (CD
 Every concrete number for this chip is in `hardware/rdna3/`. Where another card cites `hardware/mi350_*.md`, read the
 RDNA 3 card for that topic instead (the map in `hardware/rdna3/INDEX.md` pairs them); the MI350 numbers are wrong here."""
 
-#: gfx1100/gfx1201 static wave32: 1536 VGPRs per SIMD, allocation granule 24 and at most 16 waves; LLVM's
+#: gfx1100/gfx1151/gfx1201 static wave32: 1536 VGPRs per SIMD, allocation granule 24 and at most 16 waves; LLVM's
 #: Feature1536VGPRs owns that rule. LDS is 128 KiB per WGP with a 64 KiB work-group cap.
 _RDNA_WAVE32_OCCUPANCY = OccupancyRule(
     vgpr_limit=96,
@@ -144,6 +144,25 @@ _RDNA_WAVE32_OCCUPANCY = OccupancyRule(
     lds_within="fits the 64 KiB work-group cap; 128 KiB per WGP",
     lds_beyond="over the 64 KiB work-group cap: will not launch",
 )
+
+_RDNA35_PROMPT_NOTE = """\
+## Target architecture: gfx1151 (RDNA 3.5, Radeon 8060S, Strix Halo APU) — overrides any Instinct fact in this prompt
+
+The backend guidance and the knowledge cards are mostly written for Instinct (CDNA) GPUs. On this target:
+- Matrix instructions are **WMMA** (`v_wmma_*`, 16x16x16), not MFMA, and there are **no AGPRs**: accumulators live
+  in ordinary VGPRs. HIP and Triton compile it for **wave32**.
+- **No FP8/FP4** matrix path: FP16, BF16, INT8 and INT4 are the WMMA input types.
+- It is an **APU**: 40 CUs share LPDDR5X-8000 on a 256-bit bus (about 256 GB/s) with the CPU, behind a 2 MB L2 and
+  a 32 MB MALL. There is no dedicated VRAM, and bandwidth is a fraction of a discrete GPU's, so decode is
+  bandwidth-bound early.
+- Profile with rocprofv3 kernel tracing; the Analysis Agent stays static, and the implementer self-profiles with
+  rocprofv3 when profiling is requested.
+- The kernel backends that build here are {kernel_backends}. CK does not build for gfx1151 in this image, FlyDSL
+  reports a capability mismatch, and HipKittens and the `gl.amd.cdna3`/`cdna4` Gluon ops are CDNA only.
+- Benchmarks are noisy on this board: prefer changes with a large expected gain, and benchmark cases long enough to
+  time reliably.
+The RDNA 3 cards under `hardware/rdna3/` hold for the ISA (WMMA, wave32, 1536 VGPRs per SIMD); their memory and CU
+figures are the W7900's and do not apply here."""
 
 _RDNA4_PROMPT_NOTE = """\
 ## Target architecture: gfx1201 (RDNA 4, Radeon AI PRO R9700) — overrides any Instinct fact in this prompt
@@ -167,6 +186,14 @@ _ARCH_PROFILES: dict[str, ArchProfile] = {
         kernel_backends=frozenset({"triton", "hip", "hipblaslt", "ck"}),
         occupancy=_RDNA_WAVE32_OCCUPANCY,
         prompt_note=_RDNA3_PROMPT_NOTE,
+    ),
+    "gfx1151": ArchProfile(
+        family="RDNA3.5",
+        hardware_knowledge="hardware/rdna3",
+        profiler=Profiler.ROCPROFV3,
+        kernel_backends=frozenset({"triton", "hip", "hipblaslt"}),
+        occupancy=_RDNA_WAVE32_OCCUPANCY,
+        prompt_note=_RDNA35_PROMPT_NOTE,
     ),
     "gfx1201": ArchProfile(
         family="RDNA4",

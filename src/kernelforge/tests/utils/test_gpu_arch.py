@@ -126,7 +126,7 @@ def test_detect_arch_is_empty_without_rocminfo(monkeypatch):
     assert detect_arch() == ""
 
 
-@pytest.mark.parametrize("gpu_target", ["gfx942", "gfx950", "gfx950:sramecc+:xnack-", "MI355X", "gfx1151", "r9700", ""])
+@pytest.mark.parametrize("gpu_target", ["gfx942", "gfx950", "gfx950:sramecc+:xnack-", "MI355X", "r9700", ""])
 def test_instinct_and_unprofiled_targets_keep_the_instinct_defaults(gpu_target):
     profile = arch_profile(gpu_target)
 
@@ -166,8 +166,32 @@ def test_every_profiled_hardware_pillar_ships_with_its_map():
     from kernelforge.config.resources import resource_path
 
     root = resource_path("local_knowledge")
-    for gpu_target in ("gfx942", "gfx950", "gfx1100", "gfx1201"):
+    for gpu_target in ("gfx942", "gfx950", "gfx1100", "gfx1151", "gfx1201"):
         assert (root / arch_profile(gpu_target).hardware_knowledge / "INDEX.md").is_file(), gpu_target
+
+
+@pytest.mark.parametrize("gpu_target", ["gfx1151", "GFX1151", "radeon8060s"])
+def test_gfx1151_has_the_rdna35_profile(gpu_target):
+    profile = arch_profile(gpu_target)
+
+    assert profile.family == "RDNA3.5"
+    assert profile.hardware_knowledge == "hardware/rdna3"
+    assert profile.profiler is Profiler.ROCPROFV3
+    assert {backend for backend in KERNEL_BACKENDS if profile.supports_kernel_backend(backend)} == {
+        "triton",
+        "hip",
+        "hipblaslt",
+    }
+    assert profile.occupancy.vgpr_limit == 96
+    assert "WMMA" in profile.rendered_prompt_note()
+    assert "LPDDR5X" in profile.rendered_prompt_note()
+
+
+def test_the_rdna35_note_names_exactly_the_backends_its_profile_admits():
+    note = arch_profile("gfx1151").rendered_prompt_note()
+
+    assert "The kernel backends that build here are hip, hipblaslt, triton." in note
+    assert "{" not in note
 
 
 @pytest.mark.parametrize("gpu_target", ["gfx1201", "GFX1201", "gfx1201:sramecc-:xnack-"])
