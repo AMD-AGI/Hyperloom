@@ -31,6 +31,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind
 from hyperloom.measure.failures import PROFILER_DIED, PROFILER_HUNG, PROFILER_SNAPSHOT_FAILED
+from hyperloom.measure.phases import ACCURACY_EVAL, CLIENT_START, MEASURED, WARMUP
 from hyperloom_multibranch.contracts.blackboard.interfaces import (
     ClaimLost,
     ClaimService,
@@ -66,6 +67,7 @@ from hyperloom_multibranch.toolbox.attachments import store_attachment
 from hyperloom_multibranch.toolbox.attempts import (
     DEFAULT_MAX_INFRA_RETRIES,
     INFRA_BACKOFF_SECONDS,
+    MEASUREMENT_REFUSED,
     WAITED_INFRA_REASONS,
     AttemptRunner,
     Executor,
@@ -102,6 +104,9 @@ BUILD_RETRY_SECONDS = 30.0
 #: Failures of a profile that every sandbox of the image repeats, its profiler's and not the candidate's
 #: (``hyperloom.measure.failures``); a profile ends ``profiler_died`` only once its retry died the same way.
 PROFILER_FAILURES: frozenset[str] = frozenset({PROFILER_HUNG, PROFILER_SNAPSHOT_FAILED, PROFILER_DIED})
+#: The phases a round's client work begins with, at the instant its server stamped ready (``measure.round_marks``): a
+#: test whose phases hold none of them never had a server ready.
+_SERVED_PHASES = frozenset({CLIENT_START, WARMUP, MEASURED, ACCURACY_EVAL})
 
 
 def _same_commit_and_delta(entry: LogEntry, request: TestRequest) -> bool:
@@ -113,14 +118,28 @@ def _same_commit_and_delta(entry: LogEntry, request: TestRequest) -> bool:
 
 
 def _profile_failure(entry: LogEntry) -> str:
-    """The name of the failure a logged PROFILE ended with that may be the profiler's, ``""`` for any other entry."""
+    """The name of the failure a logged PROFILE ended with that may be the profiler's, ``""`` for any other entry.
+
+    Besides a failure of the profiler (:data:`PROFILER_FAILURES`) and a measurement the executor refused (a program
+    error, no transient), only one after the server was ready counts: a server that died at boot (a collective that
+    failed to initialise, say) never reached the profiler, and a rerun of it most often boots."""
     if entry.aborted or entry.outcome is None or entry.request.get("kind") != TestKind.PROFILE.value:
         return ""
     result = entry.outcome.get("result")
     if not isinstance(result, Mapping) or result.get("failure_class") in (None, FailureClass.CANDIDATE.value):
         return ""
-    cause = ending_cause(str(result.get("failure_reason") or ""))
-    return "" if cause in WAITED_INFRA_REASONS else cause
+    reason = str(result.get("failure_reason") or "")
+    cause = ending_cause(reason)
+    if cause in WAITED_INFRA_REASONS:
+        return ""
+    refused = reason.startswith(f"{MEASUREMENT_REFUSED}:")
+    return cause if cause in PROFILER_FAILURES or refused or _served(result) else ""
+
+
+def _served(result: Mapping[str, Any]) -> bool:
+    """Whether the logged ``result``'s phases say its server was ready; a result with no phases says it was not."""
+    phases = result.get("phases") or ()
+    return any(isinstance(phase, Mapping) and phase.get("name") in _SERVED_PHASES for phase in phases)
 
 
 @dataclass(frozen=True)
@@ -646,10 +665,10 @@ class RealToolbox:
     def _failed_profile(self) -> FailedProfile | None:
         """The first PROFILE in the submit log whose failure every later profile would repeat, ``None`` while there is
         none: one that ended for a failure of the profiler (:data:`PROFILER_FAILURES`), or one that ended for the same
-        failure as a profile of another recipe did. A failure the candidate caused (class ``candidate``) or a retry
-        waits out (:data:`~.attempts.WAITED_INFRA_REASONS`), and running out of infrastructure retries, say nothing of
-        the profiler. Read from the log, never from a set of its own, so a restarted toolbox answers as the one before
-        it did.
+        failure as a profile of another recipe did after its server was ready. A failure the candidate caused (class
+        ``candidate``) or a retry waits out (:data:`~.attempts.WAITED_INFRA_REASONS`), running out of infrastructure
+        retries, and a failure before the server was ready say nothing of the profiler. Read from the log, never from a
+        set of its own, so a restarted toolbox answers as the one before it did.
         """
 
         recipes: dict[str, str] = {}

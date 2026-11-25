@@ -16,9 +16,10 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import FailureClass, Purpose, TestKind, TestRequest, TestResult
+from hyperloom.contracts.measurement import FailureClass, PhaseTiming, Purpose, TestKind, TestRequest, TestResult
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure.failures import HF_CACHE_PERMISSION, PROFILER_DIED, PROFILER_HUNG, SERVER_STALLED_REASON
+from hyperloom.measure.phases import MEASURED, SERVER_BOOT
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, RequestRejected
 from hyperloom_multibranch.toolbox.acceptance import PROFILE_FAILING_CODE
 from hyperloom_multibranch.toolbox.attempts import TestJob
@@ -30,11 +31,19 @@ def profile(branch: str = "b1", change: RecipeDelta | None = None) -> TestReques
     return replace(request, parent_commit=PARENT)
 
 
-def profiles_fail(failure: FailureClass, reason: str) -> ScriptedExecutor:
-    """Every attempt of a profile fails with ``failure`` and ``reason``; every other test measures."""
+#: The phases of a test whose server booted and then served, and of one whose server died while it booted.
+SERVED = (PhaseTiming(SERVER_BOOT, 1.0, 0.5), PhaseTiming(MEASURED, 1.5, 0.5))
+UNREADY = (PhaseTiming(SERVER_BOOT, 1.0, 1.0),)
+
+
+def profiles_fail(failure: FailureClass, reason: str, phases: tuple[PhaseTiming, ...] = ()) -> ScriptedExecutor:
+    """Every attempt of a profile fails with ``failure`` and ``reason`` after ``phases``; every other test measures."""
 
     def run(job: TestJob) -> TestResult:
-        return failed(job, failure, reason=reason) if job.request.kind is TestKind.PROFILE else ok(job)
+        if job.request.kind is not TestKind.PROFILE:
+            return ok(job)
+        result = failed(job, failure, reason=reason)
+        return replace(result, phases=phases, unaccounted_seconds=0.0) if phases else result
 
     return ScriptedExecutor(script=[run])
 
@@ -102,8 +111,8 @@ async def test_profiles_the_candidate_failed_refuse_nothing(tmp_path: Path) -> N
     await rig.toolbox.close()
 
 
-async def test_profiles_of_two_recipes_failing_the_same_way_refuse_the_next_one(tmp_path: Path) -> None:
-    rig = build(tmp_path, executor=profiles_fail(FailureClass.UNCLEAR, f"{SERVER_STALLED_REASON}: silent"))
+async def test_profiles_of_two_recipes_failing_the_same_way_once_served_refuse_the_next_one(tmp_path: Path) -> None:
+    rig = build(tmp_path, executor=profiles_fail(FailureClass.UNCLEAR, f"{SERVER_STALLED_REASON}: silent", SERVED))
     await ended(rig, profile("b1", delta("--one")))
     assert await rig.toolbox.submit_test(profile("b1", delta("--one"))), "one recipe failing again trips nothing"
     await rig.toolbox.drain()
@@ -112,6 +121,21 @@ async def test_profiles_of_two_recipes_failing_the_same_way_refuse_the_next_one(
 
     rejection = await refused(rig, profile("b3", delta("--three")))
     assert SERVER_STALLED_REASON in rejection.reason
+    await rig.toolbox.close()
+
+
+@pytest.mark.parametrize("phases", [UNREADY, ()], ids=["died_booting", "no_phases"])
+async def test_profiles_whose_server_was_never_ready_refuse_nothing(
+    tmp_path: Path, phases: tuple[PhaseTiming, ...]
+) -> None:
+    """A server that dies at boot (a collective that failed to initialise) never reached the profiler, and its rerun most
+    often boots: the same failure on two recipes says nothing of profiling."""
+    reason = "python_exception: RuntimeError: NCCL error: unhandled cuda error"
+    rig = build(tmp_path, executor=profiles_fail(FailureClass.UNCLEAR, reason, phases))
+    await ended(rig, profile("b1", delta("--one")))
+    await ended(rig, profile("b2", delta("--two")))
+
+    assert await rig.toolbox.submit_test(profile("b3", delta("--three")))
     await rig.toolbox.close()
 
 
