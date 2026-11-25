@@ -484,7 +484,7 @@ async def _enter_close(c, monkeypatch, fake_run_task) -> None:
     monkeypatch.setattr(c.sub, "run_task", fake_run_task)
     monkeypatch.setattr(c.recipe_journal, "finalize_recipe_and_journal", lambda: None)
 
-    await c.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}))
+    await c.phase_close.on_enter_close(Transition(from_phase="CYCLE_END", to_phase="CLOSE", reason="stop", evidence={}))
 
 
 @pytest.mark.asyncio

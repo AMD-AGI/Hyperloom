@@ -1566,7 +1566,7 @@ async def test_a_spent_kernel_budget_waits_for_the_rebench_and_keeps_the_win(coo
         await asyncio.wait_for(entry.atask, timeout=5.0)
     await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
 
-    assert st.phase == ps.PHASE_SWEEP
+    assert st.phase == ps.PHASE_CYCLE_END
     assert st.current_best["action"] == "geak_e2e"
     assert st.current_best["tput"] == pytest.approx(120.0)
     assert st.geak_pending == {}

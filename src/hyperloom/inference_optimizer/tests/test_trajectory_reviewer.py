@@ -56,10 +56,10 @@ def test_exhausted_clusters_ignores_high_gain():
 
 
 def test_skips_are_not_harvested_as_a_dead_end():
-    """Two benign conc_sweep skips per macro-cycle are the ordinary case."""
+    """Repeated benign skips of one change are not a dead end."""
     entries = [
-        _FakeEntry(outcome=OUTCOME_SKIP, kind="other", change="conc_sweep"),
-        _FakeEntry(outcome=OUTCOME_SKIP, kind="other", change="conc_sweep"),
+        _FakeEntry(outcome=OUTCOME_SKIP, kind="other", change="roofline"),
+        _FakeEntry(outcome=OUTCOME_SKIP, kind="other", change="roofline"),
     ]
     assert _exhausted_clusters(entries) == []
 

@@ -84,7 +84,7 @@ class HostedSandboxes:
 
         inputs = self.inputs(setup.layout, setup.workload.tp)
         options = HostedOptions(
-            timeout_sec=attempt_timeout_sec(setup.workload),
+            timeout_sec=attempt_timeout_sec(setup.workload) * setup.test_points,
             boot_budget_sec=setup.workload.boot_budget_sec,
             make_before_break=setup.make_before_break,
             dev_leases=setup.dev_leases > 0 or bool(setup.agents),

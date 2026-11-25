@@ -438,10 +438,10 @@ class RefusingRuntime(SpecialistRuntime):
 
     refusing: frozenset[str] = frozenset()
 
-    async def stop(self, branch: str) -> None:
+    async def stop(self, branch: str, *, finish_tests: bool = False) -> None:
         if branch in self.refusing:
             raise RuntimeError(f"the runtime refused to stop {branch}")
-        await super().stop(branch)
+        await super().stop(branch, finish_tests=finish_tests)
 
 
 class NoForks:

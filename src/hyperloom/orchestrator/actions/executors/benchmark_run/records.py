@@ -285,7 +285,6 @@ class BenchmarkAttempt:
     ctx: RunnerContext
     run_eval_disabled: bool = False
     recorder: Any = None
-    run_index: int = 0
     #: Where the attempt's rounds run on inference_suite; set once the attempt resolved its session's route.
     suite: SuiteRoute | None = None
 

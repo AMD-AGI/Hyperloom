@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Collection, Mapping, NamedTuple
 
 from hyperloom_common.coerce import first_float, recorded_float, to_float, to_int, to_mapping
+from hyperloom.common.perf_metric import prompt_dataset_session
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     ARM_CONFIG,
@@ -776,6 +777,13 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 result_type=_close_out.RESULT_KB_DISABLED,
             )
 
+        if prompt_dataset_session(state):
+            return _finalize_outcome(
+                status="skipped",
+                reason="prompt_dataset_identity_unsupported",
+                backend="none",
+                result_type=_close_out.RESULT_DATASET_BLOCKED,
+            )
         from ..knowledge.config import KnowledgeConfig
 
         try:
@@ -987,7 +995,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         from hyperloom.common.perf_metric import agentx_active
 
         state = self.shared_state
-        if agentx_active(benchmark_mode=state.benchmark_mode):
+        if agentx_active(benchmark_mode=state.benchmark_mode) or prompt_dataset_session(state):
             return
         canonical_id = self.workload_canonical_id()
         identity = _framework_identity(state)

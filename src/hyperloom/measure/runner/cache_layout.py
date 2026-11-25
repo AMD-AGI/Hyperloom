@@ -27,6 +27,11 @@ lists next to it, hashing each as it copies, and writes the requirements pip ins
 of the cache that changes after that check never reaches the runner or pip, whoever can write the cache. An entry whose
 manifest records no ``source.tar`` (an older builder made it) is refused.
 
+Beside the entries, ``<cache>/tools/InferenceX.git`` is the one path of the cache a sandbox writes: the bare repository
+in which :mod:`hyperloom.measure.runner.tools` keeps the InferenceX commits a test fetched, for the later tests of the
+host. In a cache the sandbox mounts read-only it never fills: every test warns that its commit was not kept and
+fetches InferenceX from the network again.
+
 The sandbox installs exactly the wheels the manifest lists, each pinned to the hash the manifest records
 (:func:`requirements_text`). The check the builder and the sandbox share (:func:`_wheels_problems`) passes a manifest
 only when it lists one wheel for each pin of the lock and nothing else, each a file the lock lists for its pin or

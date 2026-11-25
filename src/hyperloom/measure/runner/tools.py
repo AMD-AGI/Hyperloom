@@ -4,15 +4,19 @@
 """The tools a test runs: a clean checkout of InferenceX at the commit the instruction sheet names, and the
 inference_suite staging of this runner's own pins.
 
-The runner never uses the session's checkouts: they are on storage the candidate's author can write. Each commit gets
-its own directory in the runner's cache, fetched by hash and checked out detached, so a directory that exists at the
-right commit is the one that was fetched. The inference_suite staging is never built here: ``cache_build`` publishes it
+The runner never uses the session's checkouts: they are on storage the candidate's author can write. Each test
+checks the commit out into a directory of its own, fetched by hash and checked out detached. The commits a test of the
+host fetched are kept in a git object store below the runner cache (:data:`INFERENCEX_STORE`), which every later test
+fetches from instead of the network. The server under test can write that store, so a test never runs from it: git
+hashes every object it receives, and an object that is not the one the commit names fails the fetch, which then goes to
+the network with a warning. The inference_suite staging is never built here: ``cache_build`` publishes it
 as ``<runner cache>/inference-suite/<staging key>/`` (:func:`inference_suite.staging_key`) on a host with network, and
 the runner only verifies it and compares its normalised manifest with the one the sheet carries.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -30,7 +34,9 @@ from inference_suite import (
 )
 
 __all__ = [
+    "INFERENCEX_STORE",
     "INFERENCE_SUITE_DIR",
+    "TOOL_CHECKOUTS_DIR",
     "StagedSuite",
     "StagingMismatch",
     "ToolError",
@@ -38,15 +44,22 @@ __all__ = [
     "ensure_inferencex",
 ]
 
+log = logging.getLogger(__name__)
+
 INFERENCEX_REPO = "https://github.com/SemiAnalysisAI/InferenceX.git"
 _COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _FETCH_TIMEOUT_SEC = 900
+_SHALLOW_FETCH = ("fetch", "-q", "--depth", "1")
 _FILE_URL = "file://"
 #: The global git configuration a fetch from a repository on this machine runs with, in the new repository's ``.git``
 #: while it lasts (:func:`_trusting`).
 _TRUST_CONFIG = "fetch-trust.gitconfig"
 #: Where the published stagings live below the runner cache, one directory per staging key.
 INFERENCE_SUITE_DIR = "inference-suite"
+#: Where the tool object stores live below the runner cache.
+TOOL_CHECKOUTS_DIR = "tools"
+#: The bare repository below :data:`TOOL_CHECKOUTS_DIR` that keeps every InferenceX commit a test of the host fetched.
+INFERENCEX_STORE = "InferenceX.git"
 #: What marks an InferenceX tree: its benchmark library, at the root or below ``inferencex-e2e/``, or the client
 #: inference_suite stages a sheet's rounds from (the pinned commit has no library).
 _INFERENCEX_MARKERS = (
@@ -54,6 +67,17 @@ _INFERENCEX_MARKERS = (
     Path("inferencex-e2e") / "benchmarks" / "benchmark_lib.sh",
     Path("inferencex-e2e") / CLIENT_FILE,
 )
+
+
+@dataclass(frozen=True)
+class _Tool:
+    """A repository a test checks out: its name and the files that mark its tree."""
+
+    name: str
+    markers: tuple[Path, ...]
+
+
+_INFERENCEX = _Tool("InferenceX", _INFERENCEX_MARKERS)
 
 
 class ToolError(Exception):
@@ -85,22 +109,26 @@ def _has_marker(tree: Path, markers: tuple[Path, ...]) -> bool:
     return any((tree / marker).is_file() for marker in markers)
 
 
-def _checkout(name: str, repo: str, commit: str, cache_dir: Path, markers: tuple[Path, ...]) -> Path:
+def _checkout(tool: _Tool, repo: str, commit: str, cache_dir: Path, store: Path) -> Path:
     if not _COMMIT.fullmatch(commit):
-        raise ToolError(f"{name}: {commit!r} is not a full commit hash")
-    destination = cache_dir / f"{name}-{commit}"
-    if destination.is_dir() and _head(destination) == commit and _has_marker(destination, markers):
+        raise ToolError(f"{tool.name}: {commit!r} is not a full commit hash")
+    destination = cache_dir / f"{tool.name}-{commit}"
+    if destination.is_dir() and _head(destination) == commit and _has_marker(destination, tool.markers):
         return destination
-    scratch = cache_dir / f".{name}-{commit}.{os.getpid()}.tmp"
+    scratch = cache_dir / f".{tool.name}-{commit}.{os.getpid()}.tmp"
     cache_dir.mkdir(parents=True, exist_ok=True)
     try:
-        scratch.mkdir()
-        _git("init", "-q", str(scratch))
-        _fetch(repo, commit, scratch)
+        from_store = _fetch_from_store(scratch, store, commit)
+        if not from_store:
+            _remove(scratch)
+            _new_repository(scratch)
+            _fetch(repo, commit, scratch)
         _git("checkout", "-q", "--detach", "FETCH_HEAD", cwd=scratch)
-        if _head(scratch) != commit or not _has_marker(scratch, markers):
-            expected = " or ".join(str(marker) for marker in markers)
-            raise ToolError(f"{name} at {commit} is not the expected tree (no {expected})")
+        if _head(scratch) != commit or not _has_marker(scratch, tool.markers):
+            expected = " or ".join(str(marker) for marker in tool.markers)
+            raise ToolError(f"{tool.name} at {commit} is not the expected tree (no {expected})")
+        if not from_store:
+            _keep(store, scratch, commit)
         if destination.exists():
             _remove(destination)
         scratch.rename(destination)
@@ -110,17 +138,22 @@ def _checkout(name: str, repo: str, commit: str, cache_dir: Path, markers: tuple
     return destination
 
 
+def _new_repository(scratch: Path) -> None:
+    scratch.mkdir()
+    _git("init", "-q", str(scratch))
+
+
 def _fetch(repo: str, commit: str, scratch: Path) -> None:
     """Fetch ``commit`` from ``repo`` into the new repository ``scratch``; a directory on this machine is fetched from
     by its resolved path, trusted for this fetch alone (:func:`_trusting`)."""
     resolved = _local_directory(repo)
     if resolved is None:
-        _git("fetch", "-q", "--depth", "1", repo, commit, cwd=scratch, timeout=_FETCH_TIMEOUT_SEC)
+        _git(*_SHALLOW_FETCH, repo, commit, cwd=scratch, timeout=_FETCH_TIMEOUT_SEC)
         return
     config = scratch / ".git" / _TRUST_CONFIG
     try:
         env = _trusting(resolved, config, scratch)
-        _git("fetch", "-q", "--depth", "1", resolved, commit, cwd=scratch, timeout=_FETCH_TIMEOUT_SEC, env=env)
+        _git(*_SHALLOW_FETCH, resolved, commit, cwd=scratch, timeout=_FETCH_TIMEOUT_SEC, env=env)
     finally:
         config.unlink(missing_ok=True)
 
@@ -149,15 +182,59 @@ def _trusting(directory: str, config: Path, cwd: Path) -> dict[str, str]:
     return {**os.environ, "GIT_CONFIG_GLOBAL": str(config)}
 
 
+def _fetch_from_store(scratch: Path, store: Path, commit: str) -> bool:
+    """Whether ``commit`` came from ``store`` into a fresh repository at ``scratch``.
+
+    The file:// transport makes git hash every object it receives instead of linking the store's files, so an object
+    the server under test rewrote in the store fails the fetch rather than reaching the checkout. A store that fails
+    the fetch is warned about with git's reason, which tells one that lacks the commit from one that was changed.
+    """
+    if not _is_repository(store):
+        return False
+    _new_repository(scratch)
+    try:
+        _git(*_SHALLOW_FETCH, store.resolve().as_uri(), commit, cwd=scratch)
+    except ToolError as exc:
+        log.warning("%s was not fetched from %s, so it is fetched from the network: %s", commit, store, exc)
+        return False
+    return True
+
+
+def _keep(store: Path, scratch: Path, commit: str) -> None:
+    """Add ``commit`` from the checked ``scratch`` to ``store`` for later tests of the host.
+
+    A store this runner cannot write (a read-only runner cache) or another test updating it at once only means a later
+    test fetches the commit from the network again, which the log says. Hooks are off: the server under test can
+    write the store's config.
+    """
+    try:
+        if not _is_repository(store):
+            store.mkdir(parents=True, exist_ok=True)
+            _git("init", "-q", "--bare", str(store))
+        _git(
+            "-c",
+            "core.hooksPath=/dev/null",
+            f"--git-dir={store}",
+            *_SHALLOW_FETCH,
+            scratch.resolve().as_uri(),
+            f"{commit}:refs/tools/{commit}",
+        )
+    except (OSError, ToolError) as exc:
+        log.warning("%s was not kept in %s, so a later test fetches it from the network again: %s", commit, store, exc)
+
+
+def _is_repository(store: Path) -> bool:
+    return (store / "HEAD").is_file()
+
+
 def _remove(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
-def ensure_inferencex(commit: str, cache_dir: Path) -> Path:
-    """A clean InferenceX checkout at ``commit``; ``INFERENCEX_REPO`` overrides where it is fetched from."""
-    return _checkout(
-        "InferenceX", os.environ.get("INFERENCEX_REPO") or INFERENCEX_REPO, commit, cache_dir, _INFERENCEX_MARKERS
-    )
+def ensure_inferencex(commit: str, cache_dir: Path, store: Path) -> Path:
+    """A clean InferenceX checkout at ``commit`` below ``cache_dir``, this test's own; fetched from ``store`` (the
+    host's :data:`INFERENCEX_STORE`) when it holds the commit intact, else from ``INFERENCEX_REPO`` or upstream."""
+    return _checkout(_INFERENCEX, os.environ.get("INFERENCEX_REPO") or INFERENCEX_REPO, commit, cache_dir, store)
 
 
 @dataclass(frozen=True)

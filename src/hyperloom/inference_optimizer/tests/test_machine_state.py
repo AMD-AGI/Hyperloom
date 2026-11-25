@@ -28,16 +28,16 @@ def test_normalize_budget_pct_defaults_and_filters() -> None:
             ps.PHASE_FRAMEWORK_AGENT: 0.4,
             "BOGUS_PHASE": 0.5,  # unknown phase dropped
             ps.PHASE_KERNEL_AGENT: "bad",  # non-numeric dropped
-            ps.PHASE_SWEEP: 2.0,  # out of (0,1] dropped
+            ps.PHASE_CLOSE: 2.0,  # out of (0,1] dropped
         }
     )
     assert out[ps.PHASE_FRAMEWORK_AGENT] == 0.4
     assert "BOGUS_PHASE" not in out
     # A dropped entry falls back to its default rather than vanishing: a capped phase with no share would run to
-    # whatever it costs. ENABLEMENT carries no default, so it stays absent and uncapped.
+    # whatever it costs. ENABLEMENT and CYCLE_END carry no default, so they stay absent and uncapped.
     assert set(out) == set(ps.DEFAULT_PHASE_BUDGET_PCT)
-    assert ps.PHASE_ENABLEMENT not in out
-    assert out[ps.PHASE_SWEEP] == ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_SWEEP]
+    assert ps.PHASE_ENABLEMENT not in out and ps.PHASE_CYCLE_END not in out
+    assert out[ps.PHASE_CLOSE] == ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_CLOSE]
 
 
 def test_now_unix_injected() -> None:
@@ -169,7 +169,7 @@ def test_an_unarmed_anchor_between_legs_is_not_charged_for_the_idle_gap() -> Non
         (True, False, ps.PHASE_FRAMEWORK_AGENT),
         # --no-framework-agent collapses past the optimisation phase.
         (False, True, ps.PHASE_KERNEL_AGENT),
-        (False, False, ps.PHASE_SWEEP),
+        (False, False, ps.PHASE_CYCLE_END),
     ],
 )
 def test_post_prelude_target(optimize: bool, kernel: bool, target: str) -> None:
