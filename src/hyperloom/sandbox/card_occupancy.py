@@ -33,13 +33,11 @@ in the kernel's list (a process of the test not yet listed), a holder that is no
 :data:`UNACCOUNTED_VRAM_TOLERANCE` of any qualifying file of the test on the card and the test's listed holders can be
 paired with the remaining files: a foreign holder of nearly the same memory as one of the test's files cannot be told
 from the test's own. Where every file's own holder is listed, a foreign holder beside them is counted at any size.
-Pairing by identity (the amdgpu pasid in a DRM file's fdinfo against the kernel's list) is a possible follow-up that
-has not been verified. What the test's processes report on a card's
-render node does not count as holders of that card: a rank of a server with several reports its whole memory on every render node of the
-server, while the kernel lists it on its own card only. A holder with almost no memory (:data:`NEGLIGIBLE_VRAM`) and no queue, such as a launcher that only initialised the
-GPU, is not counted. Memory on a card that no process the container sees
-accounts for is foreign as well (:mod:`hyperloom.sandbox.drm_fdinfo`). Processes that only opened the interface hold
-nothing and are not counted.
+What the test's processes report on a card's render node does not count as holders of that card: a rank of a server with
+several reports its whole memory on every render node of the server, while the kernel lists it on its own card only. A
+holder with almost no memory (:data:`NEGLIGIBLE_VRAM`) and no queue, such as a launcher that only initialised the GPU,
+is not counted. Memory on a card that no process the container sees accounts for is foreign as well
+(:mod:`hyperloom.sandbox.drm_fdinfo`). Processes that only opened the interface hold nothing and are not counted.
 """
 
 from __future__ import annotations

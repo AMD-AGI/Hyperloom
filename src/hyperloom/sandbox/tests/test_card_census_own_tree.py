@@ -487,7 +487,7 @@ def _gib(value: float) -> int:
         ((_gib(1.7), _gib(1.3)), (_gib(1.3), _gib(2.1)), True),
         ((_gib(1.7), _gib(1.2)), (_gib(1.7), _gib(2.8)), False),
     ],
-    ids=["within-bound-of-the-unlisted-file", "within-bound-of-a-listed-file", "beyond-bound-of-every-file"],
+    ids=["within-bound-of-the-listed-childs-file", "within-bound-of-a-listed-file", "beyond-bound-of-every-file"],
 )
 def test_accepted_limitation_a_foreign_holder_near_a_file_of_the_test_reads_as_the_tests_while_one_is_not_listed(
     tmp_path: Path, files: tuple[int, int], listed: tuple[int, int], clean: bool
@@ -516,3 +516,18 @@ def test_accepted_limitation_a_foreign_holder_near_a_file_of_the_test_reads_as_t
         assert _keys(reading, own) == []
     else:
         assert crowded == [("crowded", _SPAWN_CARD)]
+
+
+def test_a_file_of_the_test_with_no_listed_holder_does_not_count_against_the_card(tmp_path: Path) -> None:
+    """A server and two spawn children with files of 1.7, 1.2 and 0.9 GiB, the third child not listed by the kernel yet:
+    the two listed holders (1.7 and 1.2 GiB) pair with two of the files, and the file left over does not count against
+    the card, so it is clean."""
+    tree = _pod(tmp_path)
+    own = _spawning_server(tree, child_owner=1153)
+    tree.process(1337, parent=1153, command=("python3", "-c", "from multiprocessing.spawn import spawn_main"))
+    tree.renders(1337, _SPAWN_CARD, kib=_gib(0.9) >> 10)
+
+    reading = read_holders([_SPAWN_CARD], kfd=tree.kfd, procfs=tree.procfs)
+
+    assert sorted(h.vram for h in reading.holders) == [_CHILD_VRAM, _SERVER_VRAM]
+    assert _keys(reading, own) == []
