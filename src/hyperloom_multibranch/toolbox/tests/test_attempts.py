@@ -346,20 +346,31 @@ class _UnclearOnExecutor(_PlacingExecutor):
         )
 
 
-async def test_an_infrastructure_failure_of_an_unclear_rerun_does_not_send_the_retry_back_to_the_first_node() -> None:
-    """n1 fails every test unclear, the rerun on n2 fails once for a reason held against n2, n3 is healthy: the attempt
-    after the rerun still avoids n1 (and n2, the node just before it), so it runs on n3 and the test succeeds."""
-    executor = _UnclearOnExecutor(("n1", "n2", "n3"), {"n2": [PORT_REASON]}, unclear="n1")
-    reported: list[tuple[str, bool]] = []
+@pytest.mark.parametrize(
+    "reason, third_avoids, node, reported",
+    [
+        (PORT_REASON, ("n1", "n2"), "n3", [("n2", True), ("n1", False)]),
+        (f"{RUNNER_LOST}: the sandbox is gone", ("n1", "n2"), "n3", [("n1", False)]),
+        (FOREIGN_REASON, ("n1",), "n2", [("n1", False)]),
+    ],
+    ids=["port_in_use", "runner_lost", "busy_cards"],
+)
+async def test_an_infrastructure_failure_of_an_unclear_rerun_does_not_send_the_retry_back_to_the_first_node(
+    reason, third_avoids, node, reported
+) -> None:
+    """n1 fails every test unclear, the rerun on n2 fails once for an infrastructure reason, n3 is healthy: the attempt
+    after the rerun still avoids n1, so a second unclear failure on n1 never charges the test to the candidate."""
+    executor = _UnclearOnExecutor(("n1", "n2", "n3"), {"n2": [reason]}, unclear="n1")
+    heard: list[tuple[str, bool]] = []
 
-    async def on_node_failure(node: str, _reason: str, reproduced: bool) -> None:
-        reported.append((node, reproduced))
+    async def on_node_failure(failed: str, _reason: str, reproduced: bool) -> None:
+        heard.append((failed, reproduced))
 
     runner = AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure, backoff=_backoff(executor.clock))
     result = await runner.run(_job())
-    assert [job.avoid_nodes for job in executor.jobs] == [(), ("n1",), ("n1", "n2")]
-    assert result.validity is Validity.SUCCEEDED and result.sandbox.node_name == "n3"
-    assert reported == [("n2", True), ("n1", False)]
+    assert [job.avoid_nodes for job in executor.jobs] == [(), ("n1",), third_avoids]
+    assert result.validity is Validity.SUCCEEDED and result.sandbox.node_name == node
+    assert heard == reported
     assert result.attempts[0].failure_class is FailureClass.INFRA, "the unclear failure did not reproduce"
 
 
