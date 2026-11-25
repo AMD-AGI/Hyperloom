@@ -364,3 +364,19 @@ def test_an_inferencex_sweep_tests_the_launch_group_of_the_sessions_conc_first(
     asyncio.run(_sweep(_layout(tmp_path), _settings(parallel=1, sweep_parallel=1), tests).run(_never()))
 
     assert [r.concurrency for r in tests.requests][:2] == [(16,), (16,)]
+
+
+def test_under_a_deadline_a_test_of_several_points_runs_those_that_fit_and_skips_the_rest(
+    tmp_path: Path, inferencex_base: None, monkeypatch: pytest.MonkeyPatch
+):
+    """One launch serves 4, 16 and 32; each point is priced at 600 s, and a deadline 1300 s out fits two of them."""
+    clock = [1000.0]
+    monkeypatch.setattr(final.time, "time", lambda: clock[0])
+    tests = _Tests()
+    sweep = _sweep(_layout(tmp_path), _settings(sweep_parallel=1), tests, deadline_unix=2300.0)
+
+    payload = asyncio.run(sweep.run(_never()))
+
+    assert len(tests.requests[0].concurrency) == 2
+    baseline = {p["conc"]: p["status"] for p in payload["baseline"]["points"]}
+    assert sorted(baseline.values()).count(final.SKIPPED_BUDGET) == 1

@@ -648,9 +648,14 @@ class ConcSweep:
         async with slots:
             if self.cancel_reason:
                 return
-            if self.deadline_unix is not None and time.time() + self.per_point_sec * len(concs) > self.deadline_unix:
-                self._record([{"arm": arm, "conc": conc, "status": SKIPPED_BUDGET} for conc in concs])
-                logger.warning("conc_sweep: arm=%s concs %s skipped: they would end past the deadline", arm, concs)
+            fit = self._points_that_fit(len(concs))
+            if fit < len(concs):
+                self._record([{"arm": arm, "conc": conc, "status": SKIPPED_BUDGET} for conc in concs[fit:]])
+                logger.warning(
+                    "conc_sweep: arm=%s concs %s skipped: they would end past the deadline", arm, concs[fit:]
+                )
+                concs = concs[:fit]
+            if not concs:
                 return
             request = integration_test_request(TestKind.SWEEP, Purpose.HEALTH, commit, concurrency=concs)
             try:
@@ -661,6 +666,12 @@ class ConcSweep:
                 self._record([{"arm": arm, "conc": conc, "status": "failed", "error": str(exc)} for conc in concs])
                 return
             self._record(points_of(arm, concs, result))
+
+    def _points_that_fit(self, wanted: int) -> int:
+        """How many of ``wanted`` points, each priced at the session's longest root test, end before the deadline."""
+        if self.deadline_unix is None or self.per_point_sec <= 0:
+            return wanted
+        return max(0, min(wanted, int((self.deadline_unix - time.time()) // self.per_point_sec)))
 
     def _record(self, rows: list[dict[str, Any]]) -> None:
         for row in rows:
