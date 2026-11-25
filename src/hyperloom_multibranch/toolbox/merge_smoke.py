@@ -41,7 +41,8 @@ with every GPU hidden.
 Not checked: native and kernel sources (``.cu``, ``.hip``, Triton's JIT), anything that fails only at run time, and the
 modules a top-level import does not reach. A runtime root (a stack whose native build the test waits for) has its
 ``.py`` files compiled but is not imported, since its native outputs are not built yet; and since the other components
-may import what its package adds, an import failure of a stack that holds one is not judged either.
+may import what its package adds, an import failure of a stack that holds one is not judged either. An executable root
+(a server its build makes) has nothing to import and is treated the same way.
 
 ``HYPERLOOM_MERGE_SMOKE=off`` in the toolbox host's environment turns the check off (:func:`merge_smoke_from`).
 """
@@ -65,6 +66,7 @@ import yaml
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_WHEEL_DIR, ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.measure.compile import BlobError, CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.farm import FarmError, build_farm, named_python, prepend_pythonpath, server_environment
+from hyperloom.measure.jit.native.needs import BUILT_ROOT_KINDS
 from hyperloom.measure.spec import EnvRoot as SheetRoot
 
 __all__ = [
@@ -92,7 +94,6 @@ SMOKE_TIMEOUT_SEC = 120.0
 #: runtime-level mask, applied beneath HIP's, so leaving the host's value would keep its cards visible to the runtime.
 SMOKE_HIDDEN_DEVICES = (ROCR_VISIBLE_DEVICES_ENV, "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 _UPSERT = "upsert"
-_RUNTIME = "runtime"
 _DETAIL_CHARS = 400
 _UTF8 = "utf-8"
 
@@ -228,7 +229,7 @@ class MergeSmoke:
         config: Mapping[str, Any],
         work: Path,
     ) -> str | None:
-        roots = [root for root in environment.roots if root.kind != _RUNTIME]
+        roots = [root for root in environment.roots if root.kind not in BUILT_ROOT_KINDS]
         modules = list(dict.fromkeys(root.import_name for root in roots if root.import_name != AITER_META_WHEEL_DIR))
         if not modules:
             return None
@@ -292,7 +293,7 @@ class MergeSmoke:
         if not failed.get("judged"):
             where = failed.get("where") or "no frame"
             return f"the error (at {where}) is not a name or attribute a patched module lacks, which no GPU could cause"
-        native = [root.import_name for root in environment.roots if root.kind == _RUNTIME]
+        native = [root.import_name for root in environment.roots if root.kind in BUILT_ROOT_KINDS]
         if native:
             return f"the native stacks {', '.join(native)} are not laid until their builds are ready"
         image_import = {"modules": [str(failed.get("module"))], "patched": []}
