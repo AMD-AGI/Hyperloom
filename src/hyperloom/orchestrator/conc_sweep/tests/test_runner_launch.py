@@ -217,6 +217,40 @@ def test_each_rung_sends_the_request_window_the_session_measures_with(
     }
 
 
+def _dataset(path: Path, prompts: int = 39) -> str:
+    path.write_text("".join(json.dumps({"prompt": f"question {index}"}) + "\n" for index in range(prompts)))
+    return str(path)
+
+
+def test_each_rung_of_a_dataset_session_sends_the_whole_file(
+    session_dir: Path, rounds: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    _hold_server(monkeypatch, False)
+    dataset = _dataset(session_dir / "prompts.jsonl")
+    _state(session_dir, _sglang_base({}), conc=4, conc_sweep_concs=[1, 64], prompt_dataset=dataset)
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert {name: child["env"]["NUM_PROMPTS"] for name, child in rounds.children.items()} == {
+        f"{arm}_conc{conc}": "39" for arm in ("baseline", "optimized") for conc in (1, 4, 64)
+    }
+
+
+def test_a_sweep_whose_dataset_cannot_be_counted_is_skipped_naming_the_file(
+    session_dir: Path, rounds: SimpleNamespace, caplog: pytest.LogCaptureFixture
+):
+    missing = str(session_dir / "gone.jsonl")
+    _state(session_dir, _sglang_base({}), prompt_dataset=missing)
+
+    with caplog.at_level("WARNING", logger=runner.log.name):
+        payload = asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert (payload["status"], payload["skip_reason"]) == ("skipped", "prompt_dataset_unreadable")
+    assert not rounds.children
+    (record,) = caplog.records
+    assert missing in record.getMessage() and record.exc_info is None
+
+
 class TestTheSweepGradesOnTheAxisTheSessionKeepsOn:
     """A curve drawn on one axis beside promotions decided on another is two answers to one question."""
 
