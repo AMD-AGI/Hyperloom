@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -173,6 +174,31 @@ def test_combined_report_clamps_each_nodes_chunk_and_leaves_the_capture_unchange
     assert _durations(decode_chunk)["index_elementwise_kernel"] == 4.5
     assert _durations(prefill_chunk)["index_elementwise_kernel"] == 4.5
     assert _durations(prefill_trace)["index_elementwise_kernel"] == 533_100.0
+
+
+def test_combined_report_fails_soft_when_a_split_overruns_its_budget(tmp_path: Path, monkeypatch) -> None:
+    trace = tmp_path / "decode" / "1-TP-0.trace.json.gz"
+    trace.parent.mkdir()
+    trace.write_bytes(b"trace")
+
+    def _overrun(cmd, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd, timeout=1)
+
+    monkeypatch.setattr(split_module, "run_command", _overrun)
+
+    result = combined.run_pd_combined_report(
+        {"decode": [str(trace)]},
+        combined.PdReportRun(
+            trace_root=tmp_path,
+            output_dir=tmp_path / "out",
+            platform="MI300X",
+            analysis_mode="inference",
+            tracelens_root=tmp_path,
+        ),
+    )
+
+    assert result["status"] == "failed"
+    assert "timed out" in result["error"]
 
 
 def test_combined_report_fails_soft_when_a_decode_split_has_no_chunk(tmp_path: Path, monkeypatch) -> None:

@@ -17,6 +17,7 @@ import asyncio
 import functools
 import logging
 import os
+import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -169,7 +170,7 @@ def run_pd_combined_report(node_traces: dict[str, list[str]], run: PdReportRun) 
         rc = run_command(cmd, cwd=run.tracelens_root, log_path=log_path, timeout_s=_REPORT_TIMEOUT_S)
         if rc != 0:
             raise RuntimeError(f"perf_report_failed: TraceLens report exited with code {rc}; see {log_path}")
-    except (OSError, RuntimeError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
         result["error"] = str(exc)
         return result
     result.update(
