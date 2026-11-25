@@ -112,6 +112,14 @@ The value `bypass` is no longer written either: `route` is `agent` or
 entry, a trace certificate's `usable_by` names only `tracelens`, and the
 warning code `bypass_graph_under_recorded` is now `graph_under_recorded`.
 
+The loop no longer holds a Critic verdict to an advisory rule, so the keys that
+recorded the hold are removed with the same disposition:
+`critic_review.held_to_rule`, `critic_review.effective_verdict` and
+`critic_review.failure_reason_code` on phase and framework proposals and on
+each of their `critic_review.variants[]` rows, and `effective_verdict` and
+`failure_reason_code` on `critic.iterations[].framework_reviews[]`. Read
+`verdict`: it is the verdict the loop acted on.
+
 Two figures are null instead of a fabricated default when they were not
 measured or not provided. `outcome.validation.attributed_gain_pct` and
 `unattributed_gain_pct` are null when no adoption could be measured, rather than
