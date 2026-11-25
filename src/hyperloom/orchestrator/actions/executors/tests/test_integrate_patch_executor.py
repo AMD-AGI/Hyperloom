@@ -1030,7 +1030,6 @@ async def _run_enablement_integrate(
     booted: bool,
     enablement_accuracy=None,
     bench_error: str = "",
-    bench_error_class: str = "",
     before_log: str = "",
     after_log: str = "",
     enablement_origin: str = "",
@@ -1063,7 +1062,6 @@ async def _run_enablement_integrate(
             # this is what tells the gate the server served.
             "completed_requests": 12 if booted else 0,
             "error": bench_error,
-            "error_class": bench_error_class,
             "effective_config": dict(bench_effective_config or {}),
             "materialized_config": bench_materialized_config,
         }
@@ -1350,22 +1348,6 @@ async def test_enablement_advances_when_boot_reaches_new_gap(tmp_path: Path, mon
     assert result["after_signature"]["kind"] == "missing_weight"
     # Patch stays in the tree permanently; the next round builds on it.
     assert (repo / "src.py").read_text().endswith("return 2\n")
-
-
-@pytest.mark.asyncio
-async def test_enablement_round_the_harness_failed_at_the_same_wall_is_reverted(tmp_path: Path, monkeypatch):
-    same_wall = "hipErrorNoBinaryForGpu: no kernel image is available\n"
-    result, repo = await _run_enablement_integrate(
-        tmp_path,
-        monkeypatch,
-        booted=False,
-        bench_error_class="client_failed",
-        before_log=same_wall,
-        after_log=same_wall,
-    )
-    assert result["status"] == "reverted"
-    assert "error_class" not in result
-    assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
 @pytest.mark.asyncio

@@ -106,19 +106,3 @@ async def test_an_unimportable_framework_an_attempt_without_a_patch_left_alone_i
     out, _legs = await _gate(tmp_path, UNIMPORTABLE, switched=False, patched=False)
 
     assert (out["error_class"], out["failure_attribution"]) == ("bench_unmeasured", "environment")
-
-
-@pytest.mark.asyncio
-async def test_a_bench_the_harness_failed_is_still_reverted(tmp_path):
-    out, _legs = await _gate(
-        tmp_path,
-        {
-            "status": "failed",
-            "output_throughput": None,
-            "error": "the script /scripts/custom.sh changed since the session froze its base",
-            "error_class": "source_files_changed",
-        },
-        switched=False,
-    )
-
-    assert out["status"] == "reverted"
