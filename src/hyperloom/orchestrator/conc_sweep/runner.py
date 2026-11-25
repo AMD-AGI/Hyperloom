@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -22,10 +22,8 @@ from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.overlay import is_safe_path_entry, overlay_is_loadable
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, agentx_replay_session, is_agentx_mode
-from hyperloom.inference_optimizer.framework_registry import is_scriptable, native_component, request_slots
-from hyperloom.inference_optimizer.grid_server_args import compose_server_args
+from hyperloom.inference_optimizer.framework_registry import is_scriptable, native_component
 from hyperloom.inference_optimizer.grading import resolved_grading
-from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
 from hyperloom.orchestrator.actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
@@ -96,32 +94,6 @@ def decline_reason(state: SharedState) -> str | None:
     if is_agentx_mode(state.benchmark_mode) and not agentx_replay_session(state):
         return "mlperf_backend"
     return None
-
-
-def _server_slots(state: SharedState, optimized: Arm) -> int | None:
-    """The most requests either arm's server runs at once, ``None`` when either sets no cap."""
-    base_args = read_baseline_server_args(state)
-    optimized_args = compose_server_args(
-        inherited_args=base_args,
-        variant_extra_args=optimized.args,
-        remove_args=optimized.controls.get("remove_args"),
-        args_mode=str(optimized.controls.get("args_mode") or "append"),
-    )
-    slots = [request_slots(state.framework, args) for args in (base_args, optimized_args)]
-    return None if None in slots else max(slot for slot in slots if slot is not None)
-
-
-def _within_slots(points: SweepPoints, slots: int | None) -> SweepPoints:
-    """``points`` up to the servers' request ``slots``: a server queues the requests past its slots, so a point above
-    them measures the same batch behind a longer queue."""
-    if slots is None or all(conc <= slots for conc in points.concs):
-        return points
-    log.info(
-        "conc_sweep: the servers run at most %d request slots; dropping concs %s",
-        slots,
-        [conc for conc in points.concs if conc > slots],
-    )
-    return replace(points, concs=tuple(conc for conc in points.concs if conc <= slots))
 
 
 @dataclass(frozen=True)
@@ -400,10 +372,6 @@ async def run_conc_sweep(session_dir: Path, *, grant_end_unix: float | None = No
     points = sweep_points(None if frozen is None else frozen.launch, state.conc, state.conc_sweep_concs)
     if points is None:
         return _skipped(state, session_dir, "no_sweep_points")
-    slots = _server_slots(state, optimized)
-    points = _within_slots(points, slots)
-    if not points.concs:
-        return _skipped(state, session_dir, "concs_exceed_server_slots", server_slots=slots)
     setup = _prepare(state, session_dir)
     if isinstance(setup, str):
         return _skipped(state, session_dir, setup)
