@@ -55,8 +55,8 @@ from hyperloom.orchestrator.loop.dispatcher import HeldLeases
 
 
 # The costliest action the catalogue prices, so a short budget cannot fit it.
-_EXPENSIVE_ACTION = "conc_sweep"
-_EXPENSIVE_COST_MIN = 30.0
+_EXPENSIVE_ACTION = "integrate"
+_EXPENSIVE_COST_MIN = 25.0
 # Cheap enough to fit anything but a nearly-spent budget.
 _CHEAP_ACTION = "profile"
 # What the orchestrator may propose in FRAMEWORK_AGENT, priced above a five-minute budget.
@@ -138,11 +138,6 @@ class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
             measured_baseline_sec=10 * 60.0,
         )
         assert cost == pytest.approx(ACTION_CATALOGUE["integrate"].typical_runtime_min)
-
-    def test_a_sweep_is_admitted_on_one_measured_pair(self):
-        """A sweep runs until its grant is spent, so it needs room for two measured rounds, not its catalogue's 30 min."""
-        cost = expected_action_cost_minutes(ACTION_CATALOGUE["conc_sweep"], measured_baseline_sec=10 * 60.0)
-        assert cost == pytest.approx(20.0)
 
     def test_an_action_that_never_benches_keeps_its_own_estimate(self):
         """Writing the report costs what it costs; the model's size is not in it."""
@@ -350,7 +345,7 @@ class TestTheLeaseCoversTheExpectedCost:
 
     def test_the_catalogue_lease_stands_where_it_is_longer(self, coord: Coordinator):
         coord.shared_state.baseline_runtime_sec = 10 * 60.0
-        for kind in ("explore", "conc_sweep", "kernel_agent"):
+        for kind in ("explore", "integrate", "kernel_agent"):
             assert coord.dispatcher.registry_lanes_ttl(kind)[1] == ACTION_CATALOGUE[kind].lease_ttl_sec, kind
 
     @pytest.mark.parametrize("kind", sorted(ACTION_CATALOGUE))
@@ -612,65 +607,6 @@ class TestPreDispatchBackstop:
 
         assert task.task_id in coord.dispatcher._inflight_actions
         await coord.dispatcher.cancel_inflight_actions(reason="test_teardown")
-
-    @pytest.mark.asyncio
-    async def test_a_queued_conc_sweep_the_budget_outlived_is_recorded_as_skipped(
-        self,
-        coord: Coordinator,
-    ):
-        """Cancelling conc_sweep at dispatch must stamp last_conc_sweep so SWEEP can close."""
-        _set_budget(coord, minutes=180)
-        task, _ = await coord.tasks.create_or_return_existing(
-            TaskSpec(
-                kind="conc_sweep",
-                params={},
-                idempotency_key="q-conc-sweep",
-            ),
-        )
-        _set_budget(coord, minutes=180, elapsed_min=166.0)
-
-        await coord.dispatcher._spawn_fitting_queued()
-
-        assert task.task_id not in coord.dispatcher._inflight_actions
-        assert (await coord.tasks.get(task.task_id)).state == "cancelled"
-        assert coord.shared_state.last_conc_sweep["status"] == "skipped"
-        assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
-        assert coord.shared_state.last_conc_sweep["was_skipped"] is True
-        # Verify the sweep exit logic sees the recorded skip as a "done" closeout.
-        from hyperloom.orchestrator.phases.phase_predicates import PhaseFlags, workflow_predicate_inputs
-        from hyperloom.orchestrator.phases.phase_transitions import replay_next_phase
-
-        coord.shared_state.phase = "SWEEP"
-        inputs = workflow_predicate_inputs(coord.shared_state, flags=PhaseFlags(optimize_enabled=False))
-        result = replay_next_phase(inputs)
-        assert result is not None
-        _target, reason, evidence = result
-        assert reason == "sweep_done"
-        assert evidence["sweep_status"] == "skipped"
-
-    @pytest.mark.asyncio
-    async def test_dropping_an_over_budget_conc_sweep_does_not_erase_a_prior_result(
-        self,
-        coord: Coordinator,
-    ):
-        """A later cancel must not overwrite a conc_sweep the session already measured."""
-        _set_budget(coord, minutes=180)
-        coord.shared_state.record_conc_sweep(
-            {"status": "succeeded", "was_skipped": False, "summary": {"successful_pairs": 3}}
-        )
-        task, _ = await coord.tasks.create_or_return_existing(
-            TaskSpec(
-                kind="conc_sweep",
-                params={},
-                idempotency_key="q-conc-sweep-prior",
-            ),
-        )
-        _set_budget(coord, minutes=180, elapsed_min=166.0)
-
-        await coord.dispatcher._spawn_fitting_queued()
-
-        assert (await coord.tasks.get(task.task_id)).state == "cancelled"
-        assert coord.shared_state.last_conc_sweep["status"] == "succeeded"
 
 
 # One of the closing actions, exempt from the budget because the closing reserve is held back so it can run.

@@ -13,12 +13,11 @@ from hyperloom.inference_optimizer import cli
 from hyperloom.orchestrator.loop.coordinator import CoordinatorSettings
 from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PHASE_BUDGET_PCT,
+    PHASE_CYCLE_END,
     PHASE_FRAMEWORK_AGENT,
     PHASE_KERNEL_AGENT,
     PHASE_PRELUDE,
-    PHASE_SWEEP,
     normalize_budget_pct,
-    phase_budget_remaining_seconds,
     redistribute_budget_pct,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -80,8 +79,6 @@ def test_all_phase_budget_pct_spellings_parse() -> None:
         "0.20",
         "--phase-budget-kernel-pct",
         "0.40",
-        "--phase-budget-sweep-pct",
-        "0.15",
         "--phase-budget-close-pct",
         "0.03",
     ]
@@ -90,8 +87,12 @@ def test_all_phase_budget_pct_spellings_parse() -> None:
     assert normalized["PRELUDE"] == pytest.approx(0.05)
     assert normalized[PHASE_FRAMEWORK_AGENT] == pytest.approx(0.20)
     assert normalized[PHASE_KERNEL_AGENT] == pytest.approx(0.40)
-    assert normalized["SWEEP"] == pytest.approx(0.15)
     assert normalized["CLOSE"] == pytest.approx(0.03)
+
+
+def test_cycle_end_has_no_budget_share() -> None:
+    """CYCLE_END only drains and validates on entry, which the session budget alone gates."""
+    assert PHASE_CYCLE_END not in redistribute_budget_pct(normalize_budget_pct({}))
 
 
 def test_qwen3_8b_3h_no_kernel_budget_shape() -> None:
@@ -106,32 +107,24 @@ def test_qwen3_8b_3h_no_kernel_budget_shape() -> None:
             "3",
             "--phase-budget-framework-pct",
             "0.50",
-            "--phase-budget-sweep-pct",
-            "0.01",
             "--no-kernel",
-            "--no-enable-conc-sweep",
         ]
     )
     assert not args.no_framework_agent
     normalized = normalize_budget_pct(cli._build_phase_budget_pct(args))
-    # Every override survived the range check — none fell back to a default.
+    # The override survived the range check — it did not fall back to a default.
     assert normalized[PHASE_FRAMEWORK_AGENT] == pytest.approx(0.50)
-    assert normalized["SWEEP"] == pytest.approx(0.01)
 
     out = redistribute_budget_pct(
         normalized,
         kernel_enabled=not args.no_kernel,
         optimize_enabled=not args.no_framework_agent,
-        sweep_enabled=args.enable_conc_sweep is not False,
     )
     assert out[PHASE_KERNEL_AGENT] == 0.0
-    assert out[PHASE_SWEEP] == 0.0
     assert out["PRELUDE"] == pytest.approx(0.03)
     assert out["CLOSE"] == pytest.approx(0.02)
-    # FRAMEWORK_AGENT is the only work phase left, so it takes both freed shares.
-    assert out[PHASE_FRAMEWORK_AGENT] == pytest.approx(
-        min(1.0, 0.50 + 0.01 + DEFAULT_PHASE_BUDGET_PCT[PHASE_KERNEL_AGENT])
-    )
+    # FRAMEWORK_AGENT takes the freed KERNEL share.
+    assert out[PHASE_FRAMEWORK_AGENT] == pytest.approx(0.50 + DEFAULT_PHASE_BUDGET_PCT[PHASE_KERNEL_AGENT])
     # The redistributed value must survive the downstream re-normalize instead
     # of being dropped back to the default.
     assert normalize_budget_pct(out)[PHASE_FRAMEWORK_AGENT] == pytest.approx(out[PHASE_FRAMEWORK_AGENT])
@@ -152,8 +145,6 @@ def test_redistribute_caps_absorber_at_full_wall_clock() -> None:
             "3",
             "--phase-budget-framework-pct",
             "0.90",
-            "--phase-budget-sweep-pct",
-            "0.01",
             "--no-kernel",
         ]
     )
@@ -187,50 +178,9 @@ def test_redistribute_disabled_phase_share_goes_to_work_phases() -> None:
     assert out[PHASE_KERNEL_AGENT] == 0.0
     assert out["PRELUDE"] == base["PRELUDE"]
     assert out["CLOSE"] == base["CLOSE"]
-    # Freed KERNEL share landed on the enabled work phases.
-    assert out[PHASE_FRAMEWORK_AGENT] > base[PHASE_FRAMEWORK_AGENT]
-    assert out["SWEEP"] > base["SWEEP"]
+    # Freed KERNEL share landed on the enabled work phase.
+    assert out[PHASE_FRAMEWORK_AGENT] == pytest.approx(base[PHASE_FRAMEWORK_AGENT] + base[PHASE_KERNEL_AGENT])
     assert sum(out.values()) == pytest.approx(sum(base.values()))
-
-
-def test_redistribute_hands_a_disabled_sweep_share_to_the_work_phases() -> None:
-    """A run without the concurrency sweep keeps no SWEEP share, and the freed share is not parked back on SWEEP."""
-    base = dict(DEFAULT_PHASE_BUDGET_PCT)
-    out = redistribute_budget_pct(base, kernel_enabled=True, optimize_enabled=True, sweep_enabled=False)
-    assert out[PHASE_SWEEP] == 0.0
-    assert out[PHASE_FRAMEWORK_AGENT] / out[PHASE_KERNEL_AGENT] == pytest.approx(
-        base[PHASE_FRAMEWORK_AGENT] / base[PHASE_KERNEL_AGENT]
-    )
-    assert sum(out.values()) == pytest.approx(sum(base.values()))
-
-    nothing_left = redistribute_budget_pct(base, kernel_enabled=False, optimize_enabled=False, sweep_enabled=False)
-    assert nothing_left[PHASE_SWEEP] == 0.0
-
-
-def test_a_session_without_conc_sweep_gives_its_sweep_share_to_framework(tmp_path) -> None:
-    """AgentX turns the concurrency sweep off, so SWEEP must not keep a share that shrinks FRAMEWORK_AGENT.
-
-    The numbers are a TopCI AgentX session's: kernel off, ``--phase-budget-framework-pct 0.65``,
-    ``--phase-budget-sweep-pct 0.30`` and 614 minutes left when FRAMEWORK_AGENT opened. SWEEP's share used to stay in
-    the charge-back denominator and cut FRAMEWORK_AGENT to about 414 minutes.
-    """
-    _persisted_session(tmp_path, kernel_enabled=False, conc_sweep_enabled=False)
-    coord = make_coordinator(
-        tmp_path,
-        settings=CoordinatorSettings(phase_budget_pct={PHASE_FRAMEWORK_AGENT: 0.65, PHASE_SWEEP: 0.30}),
-    )
-    state = coord.shared_state
-    assert state.phase_budget_pct[PHASE_SWEEP] == 0.0
-    assert state.phase_budget_pct[PHASE_KERNEL_AGENT] == 0.0
-
-    now = 1_800_000_000.0
-    state.max_minutes = 614
-    state.elapsed_charged_sec = 0.0
-    state.leg_anchor_unix = now
-    state.phase = PHASE_FRAMEWORK_AGENT
-    state.phase_started_unix = now
-    remaining_min = phase_budget_remaining_seconds(state, now_unix=now) / 60.0
-    assert remaining_min == pytest.approx(614 * 1.0 / (1.0 + DEFAULT_PHASE_BUDGET_PCT["CLOSE"]))
 
 
 def test_redistribute_all_enabled_is_noop_and_idempotent() -> None:

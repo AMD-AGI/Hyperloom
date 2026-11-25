@@ -346,28 +346,42 @@ class PointAlternative:
 
 @dataclass(frozen=True)
 class LaunchPoint:
-    """The source point the launch was taken from: its concurrency, and whether it is the one the query asked for."""
+    """The source point the launch was taken from: its concurrency, and whether it is the one the query asked for.
+
+    ``source_concs`` are the concurrencies, ascending, the source publishes for the arm the launch was taken from;
+    empty for a source that publishes none.
+    """
 
     conc: int
     exact: bool
     alternatives: tuple[PointAlternative, ...] = ()
+    source_concs: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         _FIELDS.integer(self.conc, "the point's concurrency", minimum=1)
         _FIELDS.boolean(self.exact, "the point's exact")
+        for conc in self.source_concs:
+            _FIELDS.integer(conc, "a source concurrency", minimum=1)
 
     def to_document(self) -> dict[str, object]:
         return {
             "conc": self.conc,
             "exact": self.exact,
             "alternatives": [alternative.to_document() for alternative in self.alternatives],
+            "source_concs": list(self.source_concs),
         }
 
     @classmethod
     def from_document(cls, document: object) -> LaunchPoint:
         fields = _FIELDS.known(document, field_names(cls), "a launch point")
         alternatives = _FIELDS.items(fields.get("alternatives", ()), "the point's alternatives")
-        return cls(fields.get("conc"), fields.get("exact"), tuple(map(PointAlternative.from_document, alternatives)))
+        source_concs = _FIELDS.items(fields.get("source_concs", ()), "the point's source concurrencies")
+        return cls(
+            fields.get("conc"),
+            fields.get("exact"),
+            tuple(map(PointAlternative.from_document, alternatives)),
+            tuple(source_concs),
+        )
 
 
 @dataclass(frozen=True)

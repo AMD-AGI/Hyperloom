@@ -70,7 +70,7 @@ def _session_launch(workload: Workload, reference_script: str, inferencex_commit
         framework=workload.framework,
         board=workload.gpu_type,
         workload=LaunchWorkload.AGENTX if shape is None else LaunchWorkload.FIXED,
-        concurrencies=workload.final_concs,
+        concurrencies=(workload.conc,),
         gpus=workload.tp,
         tp=workload.tp,
         ep=workload.ep,
