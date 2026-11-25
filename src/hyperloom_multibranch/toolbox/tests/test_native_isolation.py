@@ -345,7 +345,9 @@ def test_a_build_under_bubblewrap_runs_its_child_in_the_compile_sandbox_and_give
     assert {"--unshare-net", "--die-with-parent", "--unshare-pid", "--new-session"} <= set(flags)
     assert ["--bind", work, work] == flags[flags.index(work) - 1 : flags.index(work) + 2]
     assert ["--chdir", work] == flags[flags.index("--chdir") : flags.index("--chdir") + 2]
-    assert argv[argv.index("--") + 1 :][1:3] == ["-I", "-c"], "the child's own command line follows"
+    child = argv[argv.index("--") + 1 :]
+    assert (Path(child[0]).name, child[1:3]) == ("nice", ["-n", "19"]), "the compile runs at the lowest priority"
+    assert child[4:6] == ["-I", "-c"], "the child's own command line follows"
     assert stat.S_IMODE(staged.staging.parent.stat().st_mode) == 0o700, "nobody else is let through the scratch"
 
 

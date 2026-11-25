@@ -19,7 +19,7 @@ from hyperloom.measure import signing
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.runner.native.builder import BuildMachine, BuildRequest, compile_tree, plan
 from hyperloom.measure.runner.native.preflight import Preflight
-from hyperloom.measure.runner.native.recipes import CommitSource, NativeRecipe
+from hyperloom.measure.runner.native.recipes import NativeRecipe
 from hyperloom.measure.runner.native.service import Ensured, ensure_build
 from hyperloom.measure.jit.native.store import BuildStore
 from hyperloom.measure.jit.native.trust import Signer, Trust, TrustedKey
@@ -137,12 +137,6 @@ AFFINITY_STEP = ("{python}", "-c", "import os; print('cpus', sorted(os.sched_get
 def affinity_recipe() -> NativeRecipe:
     """The stand-in recipe with :data:`AFFINITY_STEP` before its compile: what a build runner's child imports by name."""
     return replace(fake_recipe(CountingPreflight()), steps=(AFFINITY_STEP, ("{python}", "build.py")))
-
-
-def pinned_affinity_recipe() -> NativeRecipe:
-    """:func:`affinity_recipe` as a build of a checkout the operator pinned (what a build runner's child imports by
-    name)."""
-    return replace(affinity_recipe(), commit_source=CommitSource.PINNED_CHECKOUT)
 
 
 def upstream_tree(root: Path, source: str = BASE_SOURCE) -> Path:
