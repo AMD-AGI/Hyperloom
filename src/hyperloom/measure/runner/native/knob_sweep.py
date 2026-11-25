@@ -53,8 +53,6 @@ __all__ = [
     "SweepPlan",
     "SweepResult",
     "SweepTiming",
-    "Verdict",
-    "knob_patch",
     "plan_sweep",
     "run_sweep",
 ]
