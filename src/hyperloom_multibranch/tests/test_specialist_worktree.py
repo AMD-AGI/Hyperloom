@@ -44,7 +44,7 @@ def installed(tmp_path):
 
 @pytest.fixture
 def base(tmp_path, installed, monkeypatch):
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     base = SourceBase(tmp_path / "source")
     base.build(["vllm"])
     return base
@@ -77,7 +77,7 @@ def test_below_shared_storage_the_base_shares_only_objects_and_refs(tmp_path, in
     paths ``0644`` (read by the next account, written by none), ``info`` and ``hooks`` ``2755``; the objects, refs,
     reflogs and a worktree's admin directory the group's, and the worktree's git runs."""
     session = _shared_session(tmp_path)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     base = SourceBase(session / "source")
     common = base.path / ".git"
     previous = os.umask(mask)
@@ -104,7 +104,7 @@ def test_below_shared_storage_the_base_shares_only_objects_and_refs(tmp_path, in
 
 def test_git_on_a_shared_base_whose_config_the_group_can_write_runs_nothing(tmp_path, installed, monkeypatch):
     session = _shared_session(tmp_path)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     base = SourceBase(session / "source")
     base.build(["vllm"])
     (base.path / ".git" / "config").chmod(0o664)
@@ -123,7 +123,7 @@ def test_below_shared_storage_a_base_not_laid_out_shared_starts_no_git(tmp_path,
     """What another account of the group could put at the base's path below shared storage: a repository whose objects
     are not the group's, or a tree whose ``.git`` names one elsewhere. Neither is the session's base, and no git runs."""
     session = _shared_session(tmp_path)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     base = SourceBase(session / "source")
     base.build(["vllm"])
     base.worktree("s0", session / "s0")
@@ -149,7 +149,7 @@ def test_below_shared_storage_a_base_not_laid_out_shared_starts_no_git(tmp_path,
 def test_off_shared_storage_nothing_in_the_base_is_the_group_s_to_write(tmp_path, installed, monkeypatch):
     """Off shared storage the umask decides, but git's directory is never the group's: under ``002`` the config,
     ``info`` and its ``exclude`` keep group write off."""
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     base = SourceBase(tmp_path / "source")
     previous = os.umask(0o002)
     try:
@@ -235,7 +235,7 @@ def test_a_diff_from_a_commit_holds_new_files_under_a_nested_package_and_leaves_
     (package / "srt").mkdir(parents=True)
     (package / "srt" / "a.py").write_bytes(b"x = 1\n")
     installed = PackageBase("sglang", package, None, None)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     base = SourceBase(tmp_path / "source")
     base.build(["sglang"])
     worktree = base.worktree("s1", tmp_path / "s1")
@@ -275,7 +275,7 @@ def _native_base(tmp_path, monkeypatch):
         (checkout / AOT / path).write_bytes(text)
     tree = NativeTree(SourceRoot(AOT, checkout / AOT), SGLANG, "2" * 40)
     installed = PackageBase("sgl_kernel", package, None, None)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     base = SourceBase(tmp_path / "source", native={"sgl_kernel": tree})
     base.build(["sgl_kernel"])
     return base
@@ -318,7 +318,7 @@ def test_a_native_tree_inside_the_framework_s_tree_is_the_native_component_s_alo
         "sgl_kernel": PackageBase("sgl_kernel", kernel, None, None),
     }
     tree = NativeTree(SourceRoot(AOT, sglang / "kernels" / "aot"), SGLANG, "2" * 40)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda layout: installed[layout.import_name])
+    monkeypatch.setattr(worktree_module, "locate_source", lambda layout: installed[layout.import_name])
     base = SourceBase(tmp_path / "source", native={"sgl_kernel": tree})
     base.build(["sglang", "sgl_kernel"])
     worktree = base.worktree("s1", tmp_path / "s1")
@@ -338,7 +338,7 @@ def test_a_worktree_links_the_installed_package_s_compiled_extensions_without_tr
     (installed.path / "_C.abi3.so").write_bytes(b"\x7fELF ext")
     (installed.path / "attn").mkdir()
     (installed.path / "attn" / "_fa_C.cpython-312-x86_64-linux-gnu.so").write_bytes(b"\x7fELF fa")
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     base = SourceBase(tmp_path / "source")
     base.build(["vllm"])
     worktree = base.worktree("s1", tmp_path / "s1")
@@ -395,7 +395,7 @@ def hostile_home(tmp_path, monkeypatch):
 def test_the_operator_s_git_config_changes_nothing_a_worktree_builds_or_patches(
     tmp_path, installed, monkeypatch, hostile_home
 ):
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     base = SourceBase(tmp_path / "source")
     base.build(["vllm"])
     worktree = base.worktree("s1", tmp_path / "s1")
@@ -419,7 +419,7 @@ def test_a_framework_the_host_does_not_have_installed_has_no_source_change_kept(
     def absent(_layout):
         raise UnsupportedComponentError("package vllm is not installed in this image")
 
-    monkeypatch.setattr(worktree_module, "locate_installed_package", absent)
+    monkeypatch.setattr(worktree_module, "locate_source", absent)
 
     assert "package vllm is not installed in this image" in source_unkept("vllm", replace(ROOT, components=()))
 
@@ -537,7 +537,7 @@ def test_a_wheel_neither_the_image_nor_its_repository_resolves_names_no_upstream
         raise worktree_module.urllib.error.URLError("no route to host")
 
     monkeypatch.setattr(worktree_module.urllib.request, "urlopen", unreachable)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: wheel)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: wheel)
 
     assert installed_upstream(wheel) is None
     assert "names no upstream commit a checkout holds" in source_unkept("vllm", replace(ROOT, components=()))
@@ -547,7 +547,7 @@ def test_the_base_and_each_worktree_are_the_group_s_to_write_whatever_the_umask(
     with open("/proc/self/status", encoding="ascii") as status:
         umask = next(int(line.split()[1], 8) for line in status if line.startswith("Umask:"))
     assert umask & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     tmp_path.chmod(0o2775)  # the session directory: storage set up to be shared
     branches = tmp_path / "MB-branches"
     branches.mkdir()
@@ -723,7 +723,7 @@ def test_a_worktree_another_account_of_the_group_made_is_synced_and_diffed_with_
     tmp_path, installed, monkeypatch
 ):
     tmp_path.chmod(0o2775)  # the session directory: storage set up to be shared, so the base is the group's
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     base = SourceBase(tmp_path / "source")
     base.build(["vllm"])
     worktree = base.worktree("s1", tmp_path / "s1")

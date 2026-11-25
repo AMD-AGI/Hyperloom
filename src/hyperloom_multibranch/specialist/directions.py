@@ -7,9 +7,18 @@ A branch started with no direction of its own and no repair takes the first one 
 yet, so the first four are the ones a four-branch session works on; once each was held, the one the fewest branches
 held, then the one the fewest running branches hold, the earlier one in this order on a tie. A direction on an
 operator chain the model may lack (experts, a recurrent layer) sends a branch on a model without it to another.
+
+A session deals one tuple (:func:`session_directions`): :data:`DIRECTIONS`, written for a framework that runs as its
+image installs it, under a torch profile, with tuned kernel tables; or :data:`CHECKOUT_DIRECTIONS` when its server is
+built from the checkout its worktrees hold, which has no profile and no tables to read, and whose levers are the
+options its launch leaves unset, the upstream's open pull requests, the kernels' launch choices, the auxiliary model
+files beside the served one and the host work between GPU launches. Those name a method and the evidence it asks for,
+never an option, a file or a constant: which one pays is what the branch finds.
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 DIRECTIONS = (
     "Fast path checks: make sure every setting the recipe asks for and every patch really takes its fast path. Read "
@@ -121,21 +130,74 @@ DIRECTIONS = (
     "its result.",
 )
 
+CHECKOUT_DIRECTIONS = (
+    "Server options: account for every option the server takes and the launch leaves unset. Your role says where "
+    "they are listed, the inventory the session wrote from the server's own help where it names one and the option "
+    "table of the checkout otherwise: go through all of them, not the ones you remember. Where your role names "
+    "option_review, record a verdict on each unset option with it before your first test that changes server "
+    "arguments: such a test is refused until none is left. For each option that moves work off the largest line of "
+    "your step budget, or removes it, read the code path it switches on, state the budget line it acts on and the "
+    "observation that would prove it wrong, and test it: an unset option is a code path no test of this session ran. "
+    "For a numeric option the launch already sets, measure the nearest value on each "
+    "side of the launch's value before you call the launch's value best: one distant value says nothing about its "
+    "neighbours.",
+    "Upstream pull requests: before anyone writes a change the upstream repository may already hold, where "
+    "start_analysis lists upstream_pr_search, search its open pull requests with it, once for each large line of "
+    "your step budget, in the words of the mechanism (the operation, the model feature, the backend). A search "
+    "shows you the number and title of its best match, not its diff: search again with more specific words to see "
+    "another. For each hit whose change is on a path this launch runs, check that your worktree lacks the change, "
+    "write it as a source change with any setting that enables it, and test it. Record each pull "
+    "request's verdict with blackboard_learn (already in the checkout, ported, or not on this launch's path) so no "
+    "branch reads it twice.",
+    "GPU backend kernels: the kernels in the directories your role names run on every decode step. Bound what they "
+    "can still gain from the timing lines and the bytes each pass reads. Aim at the kernels that hold the most time "
+    "of a step: where start_analysis lists knob_tune, the time its default build gives a weight type and column count "
+    "at one weight shape of your model, divided by the copies a case multiplies and multiplied by the weights of that "
+    "type and shape the step's passes of that column count read, is that kernel's time per step. Before you write a "
+    "kernel change, where start_analysis lists upstream_pr_search, search the component's open pull requests with it "
+    "in the words this session's "
+    "evidence uses for the GPU backend the server runs and for this card's architecture (the server's log, the "
+    "per-architecture branches of the kernels), not only in those of the model or the feature; when a result says "
+    "its list is cut, search again with fewer, more specific words; and judge a pull request by its diff, not its "
+    "title, which can name another architecture than the code gates. Read how each kernel that this model's "
+    "weight format takes is launched for this card's architecture: the constants and the branches chosen per "
+    "architecture. Where one was chosen for another card or shape than this workload's, measure the alternatives, "
+    "with knob_tune where start_analysis lists it, else as a source change with a one-time log line on the path. Two "
+    "kernels that can be one are the next lever.",
+    "Auxiliary model files: list the directory of every model file the launch names, following symlinks, for other "
+    "builds of an auxiliary file, and test each as the launch's auxiliary "
+    "model. The served model's file never changes. Judge each by the acceptance on the timing lines and by the "
+    "drafts' share of the step, then measure again, on the file that won, the settings that depend on it: the best "
+    "settings move with the file.",
+    "Host work between GPU launches: the part of a step that neither the bandwidth bound nor the kernels' time "
+    "explains is host work while the GPU idles. Read the "
+    "host side of the decode loop (your role names where it is), put one-time timing log lines around its stages in "
+    "a test, and remove or move the largest: first with an option the server already has for that stage, else with a "
+    "source change.",
+)
+
+
+def session_directions(checkouts: Sequence[str]) -> tuple[str, ...]:
+    """The directions a session deals whose worktrees hold ``checkouts``, the components built from their checkout:
+    those of a server built from its checkout when there is one, else those of a framework run as installed."""
+    return CHECKOUT_DIRECTIONS if checkouts else DIRECTIONS
+
 
 def direction_name(direction: str) -> str:
     """The short name a direction opens with, as prompts and notices cite it."""
     return direction.split(":", 1)[0]
 
 
-def session_direction(named: str) -> str | None:
-    """The session direction an exhausted record's ``direction`` names: its name alone, or followed by a qualifier."""
+def session_direction(named: str, directions: Sequence[str]) -> str | None:
+    """The one of the session's ``directions`` an exhausted record's ``direction`` names: its name alone, or followed
+    by a qualifier."""
 
     named = named.strip().lower()
-    for direction in sorted(DIRECTIONS, key=lambda d: -len(direction_name(d))):
+    for direction in sorted(directions, key=lambda d: -len(direction_name(d))):
         name = direction_name(direction).lower()
         if named == name or (named.startswith(name) and not named[len(name)].isalnum()):
             return direction
     return None
 
 
-__all__ = ["DIRECTIONS", "direction_name", "session_direction"]
+__all__ = ["CHECKOUT_DIRECTIONS", "DIRECTIONS", "direction_name", "session_direction", "session_directions"]

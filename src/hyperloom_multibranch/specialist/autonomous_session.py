@@ -65,7 +65,7 @@ from hyperloom.contracts.recipe import (
     RecipeDelta,
     RecipeError,
 )
-from hyperloom.measure.compile import COMPONENT_LAYOUTS, kernel_load_env, locate_installed_package
+from hyperloom.measure.compile import kernel_load_env
 from hyperloom.sandbox import SandboxGone
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_common.shared_storage import make_shared_dirs, write_shared_text
@@ -129,7 +129,7 @@ from hyperloom_multibranch.specialist.start_tables import (
     save_start_tables,
 )
 from hyperloom_multibranch.specialist.tools import sync_to_head
-from hyperloom_multibranch.specialist.worktree import Upstream, WorktreeError, installed_upstream, source_unkept
+from hyperloom_multibranch.specialist.worktree import WorktreeError, component_upstream, source_unkept
 from hyperloom_multibranch.specialist import keep_requeue
 from hyperloom_multibranch.specialist.keep_requeue import Ruling
 from hyperloom.measure.framework.base import image_configs
@@ -181,11 +181,6 @@ LEASE_POLL_SECONDS = MINUTE
 _LANDED = frozenset({Conclusion.COMMITTED, Conclusion.COMMITTED_WITH_REPRO})
 #: The toolbox's refusal of a kernel table put with no target for a variable no table was put for yet.
 TARGET_REQUIRED = "target_required"
-
-
-def installed_component_upstream(component: str) -> Upstream | None:
-    """The repository and commit the image's installed ``component`` was built from, ``None`` when it names none."""
-    return installed_upstream(locate_installed_package(COMPONENT_LAYOUTS[component]))
 
 
 @dataclass(frozen=True)
@@ -894,7 +889,7 @@ class AutonomousSession:
             return delta
         if any(item.component == component for item in recipe.components):
             return delta
-        upstream = await asyncio.to_thread(installed_component_upstream, component)
+        upstream = await asyncio.to_thread(component_upstream, component)
         return delta if upstream is None else added_at(delta, recipe, upstream)
 
     async def _increment(self, head: str, imported: tuple[PatchRef, ...], cumulative: str) -> str:

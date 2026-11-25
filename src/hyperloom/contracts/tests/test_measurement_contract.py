@@ -741,6 +741,15 @@ PAID = BuildCharge("k" * 64, "sgl_kernel", 812.5, BuildPayment.PAID)
 REUSED = BuildCharge("j" * 64, "vllm", 0.0, BuildPayment.REUSED)
 
 
+def test_timing_lines_round_trip_and_a_result_without_them_writes_none() -> None:
+    lines = ("round_1/server.log: eval time = 12621.18 ms / 512 tokens", "round_1/server.log: draft acceptance = 0.4")
+    document = _result(timing_lines=lines).to_document()
+    assert document["timing_lines"] == list(lines)
+    assert TestResult.from_document(document).timing_lines == lines
+    assert "timing_lines" not in _result().to_document(), "a document of a server that logs none stays as it was"
+    assert TestResult.from_document(_result().to_document()).timing_lines == ()
+
+
 def test_build_charges_round_trip_and_a_result_without_builds_writes_none() -> None:
     again = _roundtrip(_result(builds=(PAID, REUSED)))
     assert again.builds == (PAID, REUSED)

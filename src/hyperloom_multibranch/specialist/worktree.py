@@ -3,7 +3,8 @@
 
 """The code a specialist edits: the installed packages, with the source beside them they build from (aiter's csrc) and,
 where the host builds native code, the tree that build compiles (sgl-kernel's C++), as a git repository, one worktree
-per branch.
+per branch. A component built from the checkout the session pins (llama.cpp) is laid out from that checkout's tracked
+files instead of a package.
 
 The toolbox applies a recipe's patches to the packages installed in the image, so a specialist writes its change
 against those same files. The session's source base commits them laid out as their upstream repositories lay them out,
@@ -31,15 +32,16 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from hyperloom.contracts.recipe import Recipe
+from hyperloom.common.outside_facts.component_layout import CHECKOUT_BASE
 from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
     ComponentLayout,
     PackageBase,
     UnsupportedComponentError,
-    locate_installed_package,
+    locate_source,
 )
 from hyperloom.measure.pins import ImagePinError, active_image
-from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
+from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, laid_sections, meta_sections, source_roots
 from hyperloom_common.git_safety import (
     app_git,
     check_session_repository,
@@ -143,6 +145,24 @@ def installed_upstream(package: PackageBase) -> Upstream | None:
     )
 
 
+def source_upstream(layout: ComponentLayout, source: PackageBase) -> Upstream | None:
+    """Where the component of ``layout`` found at ``source`` (:func:`~hyperloom.measure.compile.locate_source`) came
+    from: the pinned checkout's ``HEAD`` and origin for a component built from one, else :func:`installed_upstream`."""
+    if layout.spec.source_base == CHECKOUT_BASE:
+        return _checkout_upstream(source.path, _HEAD)
+    return installed_upstream(source)
+
+
+def component_upstream(component: str) -> Upstream | None:
+    """Where ``component``'s source on this host came from (:func:`source_upstream`).
+
+    Raises:
+        UnsupportedComponentError: :func:`~hyperloom.measure.compile.locate_source` cannot find it.
+    """
+    layout = COMPONENT_LAYOUTS[component]
+    return source_upstream(layout, locate_source(layout))
+
+
 def _checkout_upstream(path: Path, abbreviated: str) -> Upstream | None:
     # The image's checkout may belong to another user, and the system or global config that trusted it is not read.
     trusted = ("-c", "safe.directory=*")
@@ -222,15 +242,17 @@ def _patch_head(url: str) -> str | None:
 
 def source_unkept(component: str, recipe: Recipe) -> str:
     """Why no change to ``component``'s source can land on ``recipe``, ``""`` when one can: a component new on the
-    recipe lands with the upstream commit its installed package was built from, which the rule gate requires."""
+    recipe lands with the upstream commit its source came from (:func:`source_upstream`), which the rule gate
+    requires."""
 
     if any(item.component == component for item in recipe.components):
         return ""
+    layout = COMPONENT_LAYOUTS[component]
     try:
-        package = locate_installed_package(COMPONENT_LAYOUTS[component])
+        package = locate_source(layout)
     except UnsupportedComponentError as error:
         return f"the recipe does not carry {component}, and its upstream commit cannot be read: {error}"
-    if installed_upstream(package) is not None:
+    if source_upstream(layout, package) is not None:
         return ""
     version = package.dist_version or "(no version)"
     return (
@@ -419,9 +441,13 @@ class SourceBase:
 
         Built files stay out of the base and, through ``info/exclude``, out of every worktree's stage.
 
+        A component built from the checkout the session pins is laid out from that checkout alone
+        (:meth:`_lay_checkout`): its trees are its native sources, so no native tree is laid over them.
+
         Raises:
             UnsupportedComponentError: For a component with meta trees whose upstream commit
-                :func:`installed_upstream` cannot resolve.
+                :func:`installed_upstream` cannot resolve, or one :func:`~hyperloom.measure.compile.locate_source`
+                cannot find.
         """
         # Judged before anything is made: below shared storage the run's next leg may be another account of the group,
         # which writes the objects and refs and nothing else. The git directory is made writable by this account alone
@@ -437,7 +463,11 @@ class SourceBase:
         links: list[tuple[str, str]] = []
         for component in components:
             layout = self._layout(component)
-            package, *metas = source_roots(layout, _with_checkout(component, locate_installed_package(layout), layout))
+            source = locate_source(layout)
+            if layout.spec.source_base == CHECKOUT_BASE:
+                self._lay_checkout(source_roots(layout, source.path), source.path)
+                continue
+            package, *metas = source_roots(layout, _with_checkout(component, source, layout))
             target = self.path / package.prefix
             # An earlier component's tree may hold this one's (SGLang's checkout holds sgl-kernel's); the package a test
             # loads is the installed one.
@@ -502,6 +532,21 @@ class SourceBase:
                 error,
             )
             return None
+
+    def _lay_checkout(self, roots: Sequence[SourceRoot], checkout: Path) -> None:
+        """Copy the files ``checkout`` tracks under each of ``roots`` to the root's upstream path: what a build of its
+        ``HEAD`` compiles, which the toolbox refuses to start on when tracked files differ from it. Its ``.git``, its
+        build directories and anything else untracked stay out, as do :data:`SKIPPED`."""
+        skipped = shutil.ignore_patterns(*SKIPPED)
+        for root in roots:
+            inside = root.path.relative_to(checkout).as_posix()
+            for name in filter(None, _git(checkout, "ls-files", "-z", "--", inside).split("\0")):
+                source = checkout / name
+                if skipped(str(source.parent), [source.name]) or not (source.is_file() or source.is_symlink()):
+                    continue
+                target = self.path / root.prefix / PurePosixPath(name).relative_to(inside)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target, follow_symlinks=False)
 
     def _lay_native(self, native: SourceRoot, laid: Sequence[SourceRoot]) -> None:
         """Copy ``native`` to its upstream path, but for what ``laid`` already put there: the package a test loads is
@@ -854,13 +899,13 @@ class BranchWorktree:
         return self._synced() or BASE_BRANCH
 
     def _paths(self, component: str) -> tuple[str, ...]:
-        """``component``'s package, the meta trees the source base laid out beside it, and its native tree, less the
-        trees of other components inside them."""
+        """``component``'s package, the meta trees the source base laid out beside it (or every tree of its checkout),
+        and its native tree, less the trees of other components inside them."""
         layout = COMPONENT_LAYOUTS.get(component)
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout")
         native = self._native.get(component)
-        trees = [section.prefix for section in meta_sections(layout)] + ([native.root.prefix] if native else [])
+        trees = [section.prefix for section in laid_sections(layout)] + ([native.root.prefix] if native else [])
         # A pathspec that names nothing fails the stage, and an install may ship no meta tree.
         held = self._git("ls-tree", "--name-only", BASE_BRANCH, "--", *trees).splitlines() if trees else []
         own = (layout.upstream_prefix, *held)
@@ -886,6 +931,7 @@ __all__ = [
     "SourceBase",
     "Upstream",
     "WorktreeError",
+    "component_upstream",
     "installed_upstream",
     "keep_git_files_own",
     "source_unkept",

@@ -53,6 +53,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
+from hyperloom.measure.runner.native.server_options import OptionInventory, ServerOption, write_inventory
 from hyperloom.measure.versions import socket_versions
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
@@ -1059,6 +1060,16 @@ async def test_a_setting_of_the_run_reaches_the_peers(tmp_path: Path, name: str,
     stage._session()
 
     assert getattr(stage.setup, name) == value
+
+
+async def test_the_integrator_compares_merges_by_the_option_inventory_the_peers_laid(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    inventory = OptionInventory("llama-server", "0" * 64, "-c 4096", (ServerOption(("-c", "--ctx-size"), "", True),))
+    write_inventory(inventory, stage.layout.toolbox)
+
+    session = stage._session()
+
+    assert session._integrator.options == inventory
 
 
 @pytest.mark.parametrize(("review_gate", "handed"), [(True, "host"), (False, "off")])

@@ -6,7 +6,9 @@
 :func:`register_specialist_tools` puts the specialist-scoped tools on a :class:`~hyperloom.hosted.mcp_server.McpServer`
 and :class:`McpSpecialistTokens` issues and revokes the token each specialist gets. Every handler takes the branch from the token and never
 from the arguments, so a specialist submits, cancels, claims, logs and reads its test results for its own branch
-only; the blackboard's search and record reads are shared across branches, as the blackboard contract has them:
+only, but for a profile test, which every branch reads, as it does a baseline test of a session whose server is built
+from its checkout; the blackboard's search and record reads are shared across branches, as the blackboard contract has
+them:
 
 * ``submit_test``, ``test_result``, ``cancel_test`` and ``queue_state`` go through the toolbox interface;
 * ``wait_test`` blocks on one test of the branch until its record says it is over or the wait runs out, and then
@@ -16,6 +18,8 @@ only; the blackboard's search and record reads are shared across branches, as th
   branch's head commit, or on the landed output of the test ``kernel_tune`` names (an
   :class:`~.analysis.AnalysisStarter`, the real toolbox);
 * ``poll_inbox`` reads the branch's inbox, one page at a time (:data:`POLL_INBOX_MAX_ITEMS` items at most);
+* ``option_review``, served where the session laid an option inventory, records the branch's verdicts on the options
+  the launch leaves unset (:class:`~.option_reviews.OptionReviews`) and answers what its review still leaves out;
 * the ``blackboard_*`` tools are the blackboard's own specialist tools (lookup, claim, release, search, record, branch log,
   brief), bound per call to the blackboard handle of the caller's branch.
 
@@ -60,6 +64,7 @@ from hyperloom.hosted.mcp_server import (
     ToolError,
     ToolForbidden,
 )
+from hyperloom.inference_optimizer.native_builds import OptionVerdict
 from hyperloom.measure.compile import LOADABLE_KERNEL_KINDS
 from hyperloom_multibranch.contracts.blackboard.interfaces import Blackboard, BlackboardError, StartupBriefProvider
 from hyperloom_multibranch.contracts.blackboard.records import InboxItem
@@ -74,6 +79,13 @@ from hyperloom_multibranch.contracts.toolbox import (
 )
 from hyperloom_multibranch.blackboard.tools import ERROR, blackboard_tools
 from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, AnalysisStarter
+from hyperloom_multibranch.toolbox.option_reviews import (
+    NOTE_CHARS,
+    OPTIONS_UNREVIEWED_CODE,
+    OptionReviews,
+    ReviewEntry,
+    ReviewRefused,
+)
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
 from hyperloom_multibranch.toolbox.tools.upstream_pr import DEFAULT_LIMIT, MAX_LIMIT, UPSTREAM_PR_TOOL
@@ -184,8 +196,21 @@ _ANALYSIS_BLURBS = {
     KERNEL_TUNE_TOOL: "tune GEMM shapes on one card",
     UPSTREAM_PR_TOOL: "search upstream pull requests",
 }
+#: Whose tests ``test_result`` reads, and ``wait_test`` waits for: as a session of an installed framework is told,
+#: and as one whose server is built from its checkout is, which shares its baseline tests and their timing lines.
+_TEST_RESULT_READS = "The state and result of one test this branch submitted, or of any branch's profile test."
+_TEST_RESULT_READS_NATIVE = (
+    "The state and result of one test this branch submitted, of any branch's profile test, or of a baseline test "
+    "of the session (blackboard_search for baseline names them). timing_lines are the last lines each server log of "
+    "the test timed its requests with, each led by the log's path below output_dir; a server that logs none has "
+    "none."
+)
+_WAIT_TEST_READS = "How to wait for a test of this branch, or for any branch's profile test"
+_WAIT_TEST_READS_NATIVE = (
+    "How to wait for a test of this branch, for any branch's profile test or for a baseline test of the session"
+)
 _TEST_RESULT_GUIDE = (
-    "The state and result of one test this branch submitted, or of any branch's profile test. An AgentX test's "
+    " An AgentX test's "
     "request_classes has an entry for each measured round: how many requests the client marked failed, as "
     "failed_transport (the server did not serve it) and failed_no_content (it answered and the client found nothing in "
     "the answer; failed_empty and failed_short split these by output tokens when the export says, else null with the "
@@ -409,27 +434,39 @@ async def on_home_loop(home: asyncio.AbstractEventLoop | None, call: Awaitable[T
 
 
 async def _own_record(
-    blackboards: BlackboardFor, ctx: CallContext, request_id: str, *, profiles_shared: bool = False
+    blackboards: BlackboardFor,
+    ctx: CallContext,
+    request_id: str,
+    *,
+    profiles_shared: bool = False,
+    baselines_shared: bool = False,
 ) -> Any:
     """The blackboard's record of ``request_id``, when the caller's branch asked for it.
 
     With ``profiles_shared`` a PROFILE test of any branch is also readable: ``submit_test`` refuses a second profile
     of a commit with the id of the first (``profile_exists``), which may be another branch's, and the caller waits on
-    it. Taking a test back stays with its own branch.
+    it. With ``baselines_shared`` so is a BASELINE test, which only the session submits: it measured the root every
+    branch starts from, so its result is what a branch with no test of its own yet has of the server's timing. Taking
+    a test back stays with its own branch.
     """
     try:
         record = await blackboards(ctx.principal.branch).record(request_id)
     except BlackboardError as exc:
         raise ToolError(f"{type(exc).__name__}: {exc}") from exc
-    shared = profiles_shared and record.request.kind is TestKind.PROFILE
+    shared = (profiles_shared and record.request.kind is TestKind.PROFILE) or (
+        baselines_shared and record.request.purpose is Purpose.BASELINE
+    )
     if record.request.branch != ctx.principal.branch and not shared:
         raise ToolForbidden("a specialist reads the tests of its own branch only")
     return record
 
 
 def _submit_test(
-    toolbox: Toolbox, home: asyncio.AbstractEventLoop | None
+    toolbox: Toolbox, home: asyncio.AbstractEventLoop | None, reviews: OptionReviews | None
 ) -> Callable[[dict[str, Any], CallContext], Any]:
+    """The handler of ``submit_test``; with ``reviews``, a test is first held to its branch's option review
+    (:meth:`~.option_reviews.OptionReviews.check`)."""
+
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, str]:
         kind, purpose = arguments["kind"], arguments["purpose"]
         if (kind, purpose) not in _SPECIALIST_PAIR_VALUES:
@@ -441,6 +478,8 @@ def _submit_test(
         except ValueError as exc:  # MeasurementError and RecipeError both are
             raise InvalidParamsError(str(exc)) from exc
         try:
+            if reviews is not None:
+                reviews.check(request)
             return {"request_id": await on_home_loop(home, toolbox.submit_test(request))}
         except RequestRejected as exc:
             raise ToolError(f"rejected ({exc.code}): {exc.reason}") from exc
@@ -516,20 +555,22 @@ def _result_document(request_id: str, record: Any) -> dict[str, Any]:
         state = "withdrawn"
     else:
         state = "in_flight" if record.result is None else "measured"
+    result = jsonable(record.result)
     return {
         "request_id": request_id,
         "state": state,
         "withdrawal_reason": record.withdrawal_reason,
-        "result": jsonable(record.result),
+        "result": result,
         "judgement": jsonable(record.judgement),
         "conclusion": jsonable(record.conclusion),
     }
 
 
-def _test_result(blackboards: BlackboardFor) -> Callable[[dict[str, Any], CallContext], Any]:
+def _test_result(blackboards: BlackboardFor, baselines: bool) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         request_id = arguments["request_id"]
-        return _result_document(request_id, await _own_record(blackboards, ctx, request_id, profiles_shared=True))
+        record = await _own_record(blackboards, ctx, request_id, profiles_shared=True, baselines_shared=baselines)
+        return _result_document(request_id, record)
 
     return handle
 
@@ -571,15 +612,17 @@ def _waiting_document(request_id: str, waited: float, progress: TestProgress | N
 
 
 def _wait_test(
-    toolbox: Toolbox, blackboards: BlackboardFor, home: asyncio.AbstractEventLoop | None, poll_seconds: float
+    toolbox: Toolbox, blackboards: BlackboardFor, home: asyncio.AbstractEventLoop | None, options: SpecialistToolOptions
 ) -> Callable[[dict[str, Any], CallContext], Any]:
+    poll_seconds, baselines = options.wait_poll_seconds, options.native_server
+
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         request_id = arguments["request_id"]
         budget, started = wait_budget(arguments.get("wait_seconds")), time.monotonic()
-        record = await _own_record(blackboards, ctx, request_id, profiles_shared=True)
+        record = await _own_record(blackboards, ctx, request_id, profiles_shared=True, baselines_shared=baselines)
         while not _is_over(record) and (left := budget - (time.monotonic() - started)) > 0:
             await asyncio.sleep(min(poll_seconds, left))
-            record = await _own_record(blackboards, ctx, request_id, profiles_shared=True)
+            record = await _own_record(blackboards, ctx, request_id, profiles_shared=True, baselines_shared=baselines)
         if _is_over(record):
             return _result_document(request_id, record)
         progress = await on_home_loop(home, toolbox.progress(request_id))
@@ -774,6 +817,11 @@ class SpecialistToolOptions:
     with the caller's branch from the token at every ``blackboard_brief``; without it the blackboard's own brief is returned.
     ``analysis`` starts ``start_analysis`` jobs (the real toolbox is one); without it that tool refuses by name.
     ``wait_poll_seconds`` is how often ``wait_test`` reads the record of the test it waits for.
+    ``option_reviews`` keeps each branch's review of the options the session's server takes and its launch leaves
+    unset; with it ``option_review`` is served, and without it (a session that laid no option inventory) it is not.
+    ``native_server`` says the session's server is built from its framework's checkout: every branch then reads the
+    session's baseline tests, whose results carry the server's timing lines, and ``test_result`` and ``wait_test``
+    say so.
     """
 
     claim_ttl_seconds: float = 600.0
@@ -782,6 +830,8 @@ class SpecialistToolOptions:
     briefing_for: BriefingFor | None = None
     analysis: AnalysisStarter | None = None
     wait_poll_seconds: float = WAIT_POLL_SECONDS
+    option_reviews: OptionReviews | None = None
+    native_server: bool = False
 
 
 def register_specialist_tools(
@@ -797,24 +847,34 @@ def register_specialist_tools(
         with contextlib.suppress(RuntimeError):
             toolbox_loop = asyncio.get_running_loop()
     server.attach_reply_annotator(reply_inbox(blackboards))
-    _register_submit_test(server, toolbox, toolbox_loop)
+    _register_submit_test(server, toolbox, toolbox_loop, options.option_reviews)
     _register_put_kernel_artifact(server, toolbox, toolbox_loop)
     _register_test_queries(server, toolbox, blackboards, toolbox_loop, options)
     _register_start_analysis(server, options.analysis, toolbox_loop)
     _register_poll_inbox(server, blackboards)
+    if options.option_reviews is not None:
+        _register_option_review(server, options.option_reviews)
     _register_blackboard_tools(server, blackboards, options)
 
 
-def _register_submit_test(server: McpServer, toolbox: Toolbox, home: asyncio.AbstractEventLoop | None) -> None:
+def _register_submit_test(
+    server: McpServer, toolbox: Toolbox, home: asyncio.AbstractEventLoop | None, reviews: OptionReviews | None
+) -> None:
+    description = (
+        "Submit a test of a recipe change for this branch; returns the request id once accepted. A profile of a "
+        "commit that already has one queued, running or measured is refused as profile_exists and names that "
+        "request: wait_test on it, or read the commit's op shares from the blackboard."
+    )
+    if reviews is not None:
+        description += (
+            f" A test that changes server arguments is refused as {OPTIONS_UNREVIEWED_CODE} while your branch's "
+            f"review ({_OPTION_REVIEW_TOOL}) leaves an option the launch does not set without a verdict."
+        )
     server.register(
         "submit_test",
-        description=(
-            "Submit a test of a recipe change for this branch; returns the request id once accepted. A profile of a "
-            "commit that already has one queued, running or measured is refused as profile_exists and names that "
-            "request: wait_test on it, or read the commit's op shares from the blackboard."
-        ),
+        description=description,
         schema=_SUBMIT_TEST,
-        handler=_submit_test(toolbox, home),
+        handler=_submit_test(toolbox, home, reviews),
         scopes=_SPECIALIST_SCOPES,
     )
 
@@ -829,21 +889,21 @@ def _register_test_queries(
     """Register the tools that read, wait for, cancel or size up the tests: ``test_result`` to ``queue_state``."""
     server.register(
         "test_result",
-        description=_TEST_RESULT_GUIDE,
+        description=(_TEST_RESULT_READS_NATIVE if options.native_server else _TEST_RESULT_READS) + _TEST_RESULT_GUIDE,
         schema=_REQUEST_ID,
-        handler=_test_result(blackboards),
+        handler=_test_result(blackboards, options.native_server),
         scopes=_SPECIALIST_SCOPES,
     )
     server.register(
         "wait_test",
         description=(
-            "How to wait for a test of this branch, or for any branch's profile test: returns as soon as its result "
+            f"{_WAIT_TEST_READS_NATIVE if options.native_server else _WAIT_TEST_READS}: returns as soon as its result "
             "lands, else after wait_seconds with the test's progress; call it again to keep waiting. A test in state "
             "pending_build is waiting for the native builds its change needs (progress.builds, each with its "
             "eta_seconds), not stuck."
         ),
         schema=_WAIT_TEST,
-        handler=_wait_test(toolbox, blackboards, home, options.wait_poll_seconds),
+        handler=_wait_test(toolbox, blackboards, home, options),
         scopes=_SPECIALIST_SCOPES,
     )
     server.register(
@@ -885,6 +945,75 @@ def _register_poll_inbox(server: McpServer, blackboards: BlackboardFor) -> None:
         ),
         schema=_POLL_INBOX,
         handler=_poll_inbox(blackboards),
+        scopes=_SPECIALIST_SCOPES,
+    )
+
+
+_OPTION_REVIEW_TOOL = "option_review"
+#: How many of the options still without a verdict one reply names; the count says how many there are.
+_OPTION_REVIEW_REMAINING_NAMED = 30
+_OPTION_REVIEW: dict[str, Any] = {
+    "type": _OBJECT,
+    "properties": {
+        "entries": {
+            "type": _ARRAY,
+            "items": {
+                "type": _OBJECT,
+                "properties": {
+                    "option": {"type": _STRING, "minLength": 1, "description": "Any spelling the server lists."},
+                    "verdict": {"enum": [verdict.value for verdict in OptionVerdict]},
+                    "note": {"type": _STRING, "description": f"One line, {NOTE_CHARS} characters at most."},
+                },
+                "required": ["option", "verdict", "note"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["entries"],
+    "additionalProperties": False,
+}
+
+
+def _option_review(reviews: OptionReviews) -> Callable[[dict[str, Any], CallContext], Any]:
+    def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, object]:
+        entries = [
+            ReviewEntry(entry["option"], OptionVerdict(entry["verdict"]), entry["note"])
+            for entry in arguments["entries"]
+        ]
+        try:
+            standing = reviews.record(ctx.principal.branch, entries)
+        except ReviewRefused as exc:
+            raise ToolError(f"nothing recorded: {exc}") from exc
+        return {
+            "total": standing.total_unset,
+            "covered": standing.covered,
+            "remaining": len(standing.remaining),
+            "first_remaining": list(standing.remaining[:_OPTION_REVIEW_REMAINING_NAMED]),
+            "complete": standing.complete,
+            "candidates": list(standing.candidates),
+        }
+
+    return handle
+
+
+def _register_option_review(server: McpServer, reviews: OptionReviews) -> None:
+    server.register(
+        _OPTION_REVIEW_TOOL,
+        description=(
+            "Record your verdict on options the session's server takes and the launch leaves unset (the inventory "
+            "file your role names). Each entry names an option by any of its spellings, a verdict (candidate: you "
+            "will test it; no_effect_on_step: it cannot change the time of a decode step of this workload; "
+            "default_already: the launch already gets this behaviour by default, name the default you read in the "
+            "source; changes_workload_or_weights: it would change what is served or measured; not_usable_here: this "
+            "build, card or launch cannot run it) and a note of one line with the evidence, which is that option's "
+            "own: a review in which two options share a note fails the call. Entries accumulate over "
+            "calls, a later verdict on an option replacing your earlier one; the reply lists what is still without "
+            "a verdict, and a call with no entry only reads that. A test that changes server arguments is refused "
+            "until none is. An entry that cannot be taken fails the call, naming it, and nothing of that call is "
+            "recorded."
+        ),
+        schema=_OPTION_REVIEW,
+        handler=_option_review(reviews),
         scopes=_SPECIALIST_SCOPES,
     )
 
