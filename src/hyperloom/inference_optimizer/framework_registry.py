@@ -24,6 +24,9 @@ class FrameworkSpec:
     # The image's default checkout of the framework's source; ``None`` when it has none.
     source_root: str | None
     throughput_unit: str
+    # The native component the session builds the server from out of the framework checkout; ``None`` when the server
+    # is the image's.
+    native_component: str | None = None
 
 
 SERVING = FrameworkKind.SERVING.value
@@ -66,6 +69,7 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         repo_url="https://github.com/ggml-org/llama.cpp.git",
         source_root=None,
         throughput_unit="tok/s",
+        native_component="llamacpp",
     ),
     Framework.CUSTOM.value: FrameworkSpec(
         name=Framework.CUSTOM.value,
@@ -154,6 +158,12 @@ def native_server(framework: str | None) -> FrameworkFacts | None:
     return facts if command is not None and command.native else None
 
 
+def native_component(framework: str) -> str | None:
+    """Return the native component a session of ``framework`` builds its server from, or ``None`` when it builds none."""
+    spec = FRAMEWORKS.get(framework.strip().lower())
+    return None if spec is None else spec.native_component
+
+
 def repo_url(framework: str) -> str:
     """Return ``framework``'s upstream repo URL, or ``""`` when it has none."""
     return _registered_spec(framework).repo_url or ""
@@ -164,13 +174,6 @@ def torch_profiled(framework: str | None) -> bool:
     runs under the torch profiler, which a native server does not."""
     command = _facts(_spec_or_default(framework)).server_command
     return command is None or not command.native
-
-
-def request_slots(framework: str | None, server_args: str) -> int | None:
-    """Return how many requests a ``framework`` server launched with ``server_args`` runs at once, or ``None`` when
-    the args or the framework set no such cap."""
-    flag = _facts(_spec_or_default(framework)).request_slots
-    return None if flag is None else flag.slots(server_args.split())
 
 
 def shipped_config_name(kind: str, framework: str) -> str:

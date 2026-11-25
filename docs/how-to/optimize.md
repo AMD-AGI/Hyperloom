@@ -205,10 +205,7 @@ at every concurrency the session's InferenceX recipe publishes for its workload
 (its TP and EP, and its ISL/OSL or agentic scenario), with the session's own
 `--conc` among them. A base from `--reference-script` has no recipe points:
 give them with `--conc-sweep-concs C1,C2,...`. An AgentX point boots a server
-of its own; a fixed-length workload keeps one server per arm. When either arm's
-server args cap its request slots (llama.cpp's `-np` / `--parallel`), the points
-above the larger cap are dropped, since the server only queues the rest; with
-none left the sweep is skipped (`concs_exceed_server_slots`).
+of its own; a fixed-length workload keeps one server per arm.
 
 The sweep logs its estimated length before it starts, rewrites
 `reports/conc_sweep_summary.json` and `reports/conc_sweep_raw.csv` after every
@@ -217,7 +214,8 @@ throughput per GPU) at the end. Its `status` is `succeeded`, `partial`,
 `failed`, `skipped` (with `skip_reason`) or `cancelled` (SIGINT or SIGTERM;
 the measured points stay). A later run measures only the points not yet
 measured on the same launch of each arm. Multi-node and MLPerf sessions are
-skipped, and so is a session whose retained overlay cannot load
+skipped, and so are a session whose server is built from its checkout
+(`checkout_built_server`) and one whose retained overlay cannot load
 (`optimized_overlay_unavailable`). The session package is rebuilt after the
 sweep so it carries the report.
 
